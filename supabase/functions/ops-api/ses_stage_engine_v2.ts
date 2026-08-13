@@ -72,7 +72,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r16-unsent-pack-before-terminal-claim";
+  "ses-stage-engine.v2-r17-report-done-floor";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -853,14 +853,43 @@ function sesStageCurrentCycleServiceReportSubmitted(
   );
 }
 
+/**
+ * Durable trade-report completion for report paths that do not depend on
+ * Prime. `report_received_at` is stamped only by a real report evidence event
+ * and is cleared when re-attendance opens the next cycle, so it can recover
+ * legacy cards whose current report row is absent without trusting the
+ * synthetic `report.state` presentation output or a substatus claim.
+ */
+function sesStageCurrentCycleTradeReportDone(
+  input: SesStageV2Input,
+): boolean {
+  if (sesStageCurrentCycleServiceReportSubmitted(input)) return true;
+
+  const receivedAt = Date.parse(
+    String(input.detail?.report_received_at || ""),
+  );
+  if (!Number.isFinite(receivedAt)) return false;
+
+  const cycle = Number(input.detail?.cycle_number ?? 1);
+  if (cycle <= 1) return true;
+
+  // Later cycles need an explicit re-attendance boundary. A generic closed-job
+  // reopen can bump cycle_number without clearing the old marker; treating that
+  // timestamp as current would revive prior-cycle evidence.
+  const reattendedAt = Date.parse(
+    String(input.detail?.last_reattend_at || ""),
+  );
+  return Number.isFinite(reattendedAt) && receivedAt >= reattendedAt;
+}
+
 /** Current-cycle submitted report evidence for a physical make-safe. */
 function sesStagePhysicalReportIn(
   input: SesStageV2Input,
 ): { satisfied: boolean; missing: string[] } {
-  const submitted = sesStageCurrentCycleServiceReportSubmitted(input);
+  const submitted = sesStageCurrentCycleTradeReportDone(input);
   return {
     satisfied: submitted,
-    missing: submitted ? [] : ["current-cycle submitted service report"],
+    missing: submitted ? [] : ["current-cycle trade report completion"],
   };
 }
 
@@ -883,7 +912,7 @@ function deriveSesStageEvidence(
     return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
       reportIn,
       reportInReason:
-        "a current-cycle submitted service report proves the trade report is in",
+        "current-cycle durable report evidence proves the trade report is in",
       docsReady: docsReadyResult,
       docsReadyReason,
     });
@@ -894,6 +923,29 @@ function deriveSesStageEvidence(
       reportIn,
       reportInReason:
         "the current-cycle own-template roof report is submitted and its rendered document is attached",
+      docsReady: docsReadyResult,
+      docsReadyReason,
+    });
+  }
+  // Legacy assessment work without any builder portal link follows the same
+  // trade-report handoff as physical work. A real Prime link keeps the portal
+  // recipe below: report_received_at must never bypass its typed, locked
+  // captures. Docs Ready is still governed independently by sesStageDocsReady,
+  // so this floor can advance only to Trade Report In.
+  if (
+    family.family === "assessment_quote" &&
+    externalPortalRoles(input as MakesafeStatusInput).size === 0
+  ) {
+    const reportDone = sesStageCurrentCycleTradeReportDone(input);
+    return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
+      reportIn: {
+        satisfied: reportDone,
+        missing: reportDone
+          ? []
+          : ["current-cycle assessment report completion"],
+      },
+      reportInReason:
+        "a current-cycle non-portal assessment report proves the trade report is in",
       docsReady: docsReadyResult,
       docsReadyReason,
     });

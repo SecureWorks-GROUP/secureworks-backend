@@ -1255,6 +1255,122 @@ Deno.test("portal: an accepted capture revision proves roof report-in", () => {
   assertEquals(r.missing, []);
 });
 
+Deno.test("report-done floor: waiting physical work stays Allocated until report evidence arrives", () => {
+  const waiting = input({
+    detail: { substatus: "waiting_on_trade_report", cycle_number: 1 },
+    evidence: { assignments: [{ id: "a1" }] },
+  });
+  assertEquals(deriveSesStageV2(waiting).stage, "allocated");
+
+  const reportDone = input({
+    detail: {
+      substatus: "waiting_on_trade_report",
+      cycle_number: 1,
+      report_received_at: NOW,
+    },
+    evidence: {
+      assignments: [{ id: "a1" }],
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
+      pack: { status: "drafted" },
+    },
+  });
+  const result = deriveSesStageV2(reportDone);
+  assertEquals(result.stage, "trade_report_in");
+  assert(
+    result.reasons[0].includes("trade report is in"),
+    result.reasons[0],
+  );
+});
+
+Deno.test("report-done floor: a prior-cycle report marker cannot advance reopened work", () => {
+  const stale = input({
+    detail: {
+      substatus: "waiting_on_trade_report",
+      cycle_number: 2,
+      last_reattend_at: NOW,
+      report_received_at: daysAgo(1),
+    },
+    evidence: { assignments: [{ id: "a1" }] },
+  });
+  assertEquals(deriveSesStageV2(stale).stage, "allocated");
+
+  const current = input({
+    detail: {
+      substatus: "waiting_on_trade_report",
+      cycle_number: 2,
+      last_reattend_at: daysAgo(1),
+      report_received_at: NOW,
+    },
+    evidence: { assignments: [{ id: "a1" }] },
+  });
+  assertEquals(deriveSesStageV2(current).stage, "trade_report_in");
+});
+
+Deno.test("report-done floor: an uncorroborated processed claim falls back to TRI, not Allocated", () => {
+  const result = deriveSesStageV2(input({
+    job: {
+      status: "completed",
+      metadata: { makesafe_job_family: "physical_makesafe" },
+    },
+    detail: {
+      substatus: "waiting_on_trade_report",
+      cycle_number: 1,
+      report_received_at: NOW,
+    },
+    evidence: { assignments: [{ id: "a1" }] },
+  }));
+  assertEquals(result.stage, "trade_report_in");
+  assert(result.conflicts.includes("terminal_without_issued_invoice"));
+});
+
+Deno.test("report-done floor: only a non-portal assessment may use the durable report marker", () => {
+  const nonPortal = input({
+    ses_family: "assessment_quote",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    detail: { cycle_number: 1, report_received_at: NOW, external_links: [] },
+    evidence: { assignments: [{ id: "a1" }] },
+  });
+  assertEquals(deriveSesStageV2(nonPortal).stage, "trade_report_in");
+
+  const primeAssessment = input({
+    ses_family: "assessment_quote",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    detail: {
+      cycle_number: 1,
+      report_received_at: NOW,
+      external_links: [{
+        kind: "assessment_report",
+        url: "https://portal.primeeco.tech/s/assessment",
+      }],
+    },
+    evidence: { assignments: [{ id: "a1" }] },
+  });
+  assertEquals(deriveSesStageV2(primeAssessment).stage, "allocated");
+});
+
+Deno.test("report-done floor: Prime roof still requires the validated locked-capture path", () => {
+  const markerOnly = deriveSesStageV2(portalInput([], {
+    detail: { report_received_at: NOW },
+  }));
+  assertEquals(markerOnly.stage, "allocated");
+
+  const locked = deriveSesStageV2(portalInput([ACCEPTED], {
+    detail: { report_received_at: NOW },
+  }));
+  assertEquals(locked.stage, "trade_report_in");
+  assert(
+    locked.reasons[0].includes("submitted and locked"),
+    locked.reasons[0],
+  );
+});
+
 Deno.test("portal: cannot-observe is not not-done", () => {
   // The distinction this release exists for. Neither proves report-in, but the
   // engine must never say the trade has not done the work when the truth is

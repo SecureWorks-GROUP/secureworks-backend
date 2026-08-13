@@ -166,6 +166,13 @@ export interface MakesafeStatusInput {
   detail?: {
     report_type?: string | null;
     cycle_number?: number | null;
+    /**
+     * Durable report-evidence marker. Real report/portal completion events stamp
+     * it, and re-attendance clears it before opening the next cycle.
+     */
+    report_received_at?: string | null;
+    /** Re-attendance boundary used to reject a prior cycle's report marker. */
+    last_reattend_at?: string | null;
     report_sent_at?: string | null;
     invoice_ready_at?: string | null;
     external_links?: any[];
