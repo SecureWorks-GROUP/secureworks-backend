@@ -117,7 +117,7 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "attach_makesafe_document",
   "submit_makesafe_report",
   "update_makesafe_substatus",
-  // Sealed SES local proposal/read surfaces. None can call Xero or Graph.
+  // Sealed SES bounded proposal/read/attach surfaces. No Xero money write or Graph send.
   "makesafe_render_report",
   "makesafe_report_drafts",
   "prepare_ses_invoice_obligation",
@@ -127,6 +127,7 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "prepare_ses_release_revision",
   "query_ses_review_cockpit",
   "query_ses_proof_ledger",
+  "bind_existing_makesafe_invoice_pack",
   "list_draft_notes",
   "rerun_draft_report",
 ]);
@@ -238,6 +239,7 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
       "prepare_ses_release_revision",
       "query_ses_review_cockpit",
       "query_ses_proof_ledger",
+      "bind_existing_makesafe_invoice_pack",
       "list_draft_notes",
       "rerun_draft_report",
     ]
@@ -249,13 +251,14 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
   }
 });
 
-Deno.test("ScopedKey (sealed SES): local prepare/read actions are allow-listed but money and release stay DENIED", () => {
+Deno.test("ScopedKey (sealed SES): bounded prepare/read/attach actions are allowed but money and release stay DENIED", () => {
   assert(!routineDenied("routine", "makesafe_render_report"));
   assert(!routineDenied("routine", "makesafe_report_drafts"));
   assert(!routineDenied("routine", "prepare_ses_invoice_obligation"));
   assert(!routineDenied("routine", "create_ses_invoice_draft"));
   assert(!routineDenied("routine", "prepare_ses_release_revision"));
   assert(!routineDenied("routine", "query_ses_review_cockpit"));
+  assert(!routineDenied("routine", "bind_existing_makesafe_invoice_pack"));
   assert(!routineDenied("routine", "rerun_draft_report"));
   assert(routineDenied("routine", "create_makesafe_draft_invoice"));
   assert(routineDenied("routine", "approve_ses_invoice_revision"));
