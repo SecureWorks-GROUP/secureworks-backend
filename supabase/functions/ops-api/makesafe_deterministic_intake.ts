@@ -43,7 +43,7 @@ import {
 } from "./makesafe_pdf_declared_type.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-08-03.v10";
+  "makesafe-deterministic-intake@2026-08-13.v11";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -444,6 +444,10 @@ const QUOTE_REQUEST_SIGNAL =
 const REPORT_SIGNAL =
   /\b(report|assessment|inspection|quote|quotation|scope\s+of\s+works)\b/i;
 const RAPID_SIGNAL = /\brapid(?:\s+repair(?:s)?)?\b/i;
+// RAPID_SIGNAL also admits genuine rapid-response make-safe traffic. Family
+// routing therefore requires the explicit repair token; bare "rapid" must keep
+// following the ordinary physical make-safe classifier.
+const RAPID_REPAIR_FAMILY_SIGNAL = /\brapid\s+repairs?\b/i;
 const PRIME_SIGNAL =
   /\bprime(?:eco|\s+ecosystem|\s+notification|\s+portal)?\b/i;
 const AJS_SIGNAL = /\b(?:AJBR|AJS)[-\s#]*\d{3,}\b/i;
@@ -944,7 +948,7 @@ function jobFamilyDecision(
 ) {
   const pdfDocuments = extractedPdfDocuments(item);
   const fullPdfText = pdfText(item);
-  return decideMakeSafeJobFamily(item.subject, item.body, null, {
+  const decision = decideMakeSafeJobFamily(item.subject, item.body, null, {
     builder: adapterId,
     pdfScopeText: pdfScopeText(item, adapterId),
     pdfDeclaredType: declaredTypeForSource(item),
@@ -953,6 +957,18 @@ function jobFamilyDecision(
       /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
         .test(fullPdfText),
   });
+  // Captain 2026-08-13: the dispatch label "RAPID REPAIR" is an explicit
+  // repair-shaped work-order signal. Keep the override inside deterministic
+  // intake and only retag the general/ambiguous physical lane so a more specific
+  // declared PDF family still wins. MLB repair headers already resolve through
+  // pdfDeclaredType above; this closes the subject/body-labelled transport gap.
+  if (
+    RAPID_REPAIR_FAMILY_SIGNAL.test(text(item)) &&
+    (decision.family === "general_makesafe" || decision.family === null)
+  ) {
+    return { family: "repair" as const, evidence: "rapid_repair_signal" };
+  }
+  return decision;
 }
 
 function inferDeliverable(
