@@ -72,7 +72,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r15-prime-and-submitted-report-in";
+  "ses-stage-engine.v2-r16-unsent-pack-before-terminal-claim";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -698,6 +698,26 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
   if (["complete", "completed", "closed"].includes(jobStatus)) {
+    // A raw terminal job state must not hide a complete pack that has never
+    // been sent. The pack is still operator work, and the evidence ladder can
+    // prove it is exactly one click from sending. This mirrors the legacy
+    // ladder's drafted-not-sent precedence while preserving every terminal
+    // branch for sent, incomplete, refused, or packless cards.
+    const unsentPack = deriveSesStageEvidence(input, family);
+    if (
+      family.recipe_state === "sealed" && unsentPack.status === "report_ready"
+    ) {
+      return {
+        ...base,
+        stage: unsentPack.status,
+        reasons: [
+          ...unsentPack.reasons,
+          "raw completed/closed job state does not hide an assembled unsent pack",
+        ],
+        missing: unsentPack.missing,
+        conflicts,
+      };
+    }
     // R3 — the raw terminal value is a CLAIM, not proof. It is eligible to
     // close a card only when an issued invoice corroborates it. Uncorroborated,
     // it pre-empts stronger evidence sitting on the card: two live cards carry

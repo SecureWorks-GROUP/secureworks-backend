@@ -11,6 +11,13 @@ export const SES_BIND_EXISTING_INVOICE_STATUSES = [
   "PAID",
 ] as const;
 
+const SES_NAMED_PRIOR_CYCLE_PLACEMENT_STATUSES = new Set([
+  ...SES_BIND_EXISTING_INVOICE_STATUSES,
+  // Xero can advance an already-bound AUTHORISED invoice through SUBMITTED.
+  // That lifecycle change must not erase the Captain's durable adoption.
+  "SUBMITTED",
+]);
+
 export type SesBindExistingInvoiceAuthMode =
   | "api_key"
   | "jwt"
@@ -158,4 +165,49 @@ export function selectExistingInvoiceForPackBind(args: {
     status,
     named_prior_cycle_bind: attendanceCycle === "prior",
   };
+}
+
+/**
+ * Resolve the exact prior-cycle invoice that bind_existing durably adopted.
+ *
+ * The adoption proof is the invoice document written by the bind action. Its
+ * compact snapshot is matched to both pack pointers and the current Xero mirror
+ * row, so an unnamed prior-cycle invoice can never satisfy this path. Pure read
+ * only: this helper does not mint, authorise, send, void, or update anything.
+ */
+export function selectNamedPriorCycleBoundInvoiceForPlacement(args: {
+  job: any;
+  detail: any;
+  pack: any;
+  documents: any[];
+  invoices: any[];
+}): any | null {
+  const jobId = String(args.job?.id || "").trim();
+  const invoiceDocumentId = String(args.pack?.invoice_doc_id || "").trim();
+  const xeroInvoiceId = String(args.pack?.xero_invoice_id || "").trim();
+  if (!jobId || !invoiceDocumentId || !xeroInvoiceId) return null;
+
+  const adoption = (args.documents || []).find((document) =>
+    String(document?.id || "") === invoiceDocumentId &&
+    String(document?.job_id || "") === jobId &&
+    String(document?.type || "").toLowerCase() === "invoice" &&
+    String(document?.bind_source || "") ===
+      "bind_existing_makesafe_invoice_pack" &&
+    document?.bind_only === true &&
+    document?.named_prior_cycle_bind === true &&
+    String(document?.bound_xero_invoice_id || "") === xeroInvoiceId
+  );
+  if (!adoption) return null;
+
+  const exact = (args.invoices || []).filter((invoice) =>
+    String(invoice?.job_id || "") === jobId &&
+    String(invoice?.xero_invoice_id || "") === xeroInvoiceId &&
+    String(invoice?.invoice_type || "").toUpperCase() === "ACCREC" &&
+    makesafeInvoiceAttendanceCycle(args.detail, invoice) === "prior" &&
+    makesafeInvoiceReferenceMatchesCard(args.job, args.detail, invoice) &&
+    SES_NAMED_PRIOR_CYCLE_PLACEMENT_STATUSES.has(
+      String(invoice?.status || "").toUpperCase(),
+    )
+  );
+  return exact.length === 1 ? exact[0] : null;
 }
