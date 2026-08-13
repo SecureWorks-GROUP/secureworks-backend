@@ -1284,6 +1284,7 @@ export function buildCanonicalMakesafeRows(
       ses_family: sesFamily,
       nowIso: computedAt,
     };
+    const reportIn = reportInEvidence(statusInput);
     const stageV2 = deriveSesStageV2(statusInput);
     const derivedStage = String(stageV2.stage || "").toLowerCase();
     // R8 — ATTESTATIONS CAN NEVER BIND. The `decisionKind` test is FIRST and
@@ -1365,7 +1366,10 @@ export function buildCanonicalMakesafeRows(
       presentation_reason: packHonesty.reason,
       legacy_pack_status: packHonesty.legacy_pack_status,
       closeout_documents: {
-        report: base?.has_report_doc === true,
+        // The card tick means the trade report is in, matching job detail.
+        // Keep `documents.report` and `has_report_doc` above as the distinct
+        // later fact that a report document has been attached.
+        report: reportIn.satisfied || base?.has_report_doc === true,
         invoice: base?.has_invoice_doc === true,
         swms: base?.has_swms_doc === true,
       },
@@ -1481,7 +1485,6 @@ export function buildCanonicalMakesafeRows(
       ...statusInput,
       displayedStatus: displayStage,
     });
-    const reportIn = reportInEvidence(statusInput);
     const stageV2Overlay = sesStageV2OverlayCandidate(
       stageV2.stage,
       application,
