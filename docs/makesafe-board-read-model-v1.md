@@ -174,6 +174,13 @@ Every card originates as one canonical job row with:
 
 A stale `company_contact_required` substatus on an already allocated/scheduled job is reported as `stale_company_contact_substatus`. It is not presented as a real client blocker.
 
+A stored `ready_to_invoice` substatus is an operator claim. The board surfaces it
+only when current-cycle report-in evidence backs it
+(`presentMakesafeBoardSubstatus`). Unbacked claims are demoted for presentation
+to `awaiting_portal_completion` (roof/assessment) or `waiting_on_trade_report`
+(physical) and reported as `stale_ready_to_invoice_substatus`. Presentation only:
+placement, `canonical_stage`, and the stored detail row are unchanged.
+
 ### Pack presentation honesty
 
 Pack state is produced once, by `presentSesPackHonesty`
