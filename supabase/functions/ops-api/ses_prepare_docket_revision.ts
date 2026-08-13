@@ -2242,8 +2242,10 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
  * Compose "street, suburb" without doubling the suburb. Job rows regularly
  * store the suburb inside site_address already ("25 Rudwick St, Mosman Park" +
  * site_suburb "Mosman Park" composed to "…, Mosman Park, Mosman Park" on the
- * SWMS-261161 docket). If the suburb already appears in the address as whole
- * words, the address alone is the complete composition.
+ * SWMS-261161 docket). Only a comma-delimited (or whole-string start/end)
+ * suburb component counts as already present: a street merely NAMED like the
+ * suburb ("5 Morley Drive" + "Morley", "Lot 2 Northam-Toodyay Rd" + "Northam")
+ * still gets the suburb appended.
  */
 export function composeSesSiteAddress(
   siteAddress: unknown,
@@ -2255,7 +2257,7 @@ export function composeSesSiteAddress(
   if (!suburb) return address;
   const escaped = suburb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\s+/g, "\\s+");
-  if (new RegExp(`(^|[^A-Za-z])${escaped}([^A-Za-z]|$)`, "i").test(address)) {
+  if (new RegExp(`(^|,)\\s*${escaped}\\s*(,|$)`, "i").test(address)) {
     return address;
   }
   return `${address}, ${suburb}`;

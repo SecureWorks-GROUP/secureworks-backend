@@ -280,7 +280,7 @@ Deno.test("SEND IT refuses a persisted route whose body carries internal annotat
 Deno.test("SEND IT dispatches an MLB release whose persisted bodies are clean", async () => {
   const state: Harness = {
     routes: mlbRoutes(
-      "Please find attached the make-safe report for MLB-27516.\n\nThank you.",
+      "Please find attached the report for MLB-27516.\n\nThank you.",
     ),
     effects: new Map(),
     graphCalls: [],

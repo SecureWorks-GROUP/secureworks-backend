@@ -654,7 +654,7 @@ const LEAKED_ANNOTATION_BODIES = [
 
 const MLB_CLEAN_BODIES: Record<string, string> = {
   report:
-    "Please find attached the make-safe report for MLB-27516.\n\nThank you.",
+    "Please find attached the report for MLB-27516.\n\nThank you.",
   photo: "Please find attached site photos for MLB-27516.\n\nThank you.",
   invoice:
     "Please find attached the invoice and supporting documents for MLB-27516.\n\nThank you.",
@@ -763,7 +763,7 @@ Deno.test("sesBuilderRouteBody produces the pinned plain-English bodies", () => 
   // Missing reference still yields client English, never an empty slot.
   assertEquals(
     sesBuilderRouteBody("report", ""),
-    "Please find attached the make-safe report for this job.\n\nThank you.",
+    "Please find attached the report for this job.\n\nThank you.",
   );
 });
 

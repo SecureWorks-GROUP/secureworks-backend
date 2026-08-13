@@ -1315,6 +1315,20 @@ Deno.test("composeSesSiteAddress never doubles a suburb already inside the addre
     composeSesSiteAddress("4 Northampton Way", "Northam"),
     "4 Northampton Way, Northam",
   );
+  // Comma-delimited components only: a street name equal to the suburb, or a
+  // hyphenated road embedding it, is not the suburb component.
+  assertEquals(
+    composeSesSiteAddress("5 Morley Drive", "Morley"),
+    "5 Morley Drive, Morley",
+  );
+  assertEquals(
+    composeSesSiteAddress("Lot 2 Northam-Toodyay Rd", "Northam"),
+    "Lot 2 Northam-Toodyay Rd, Northam",
+  );
+  assertEquals(
+    composeSesSiteAddress("63 Chidlow St E, Northam, WA 6401", "Northam"),
+    "63 Chidlow St E, Northam, WA 6401",
+  );
   assertEquals(composeSesSiteAddress("", "Northam"), "Northam");
   assertEquals(composeSesSiteAddress("62 Example Street", ""), "62 Example Street");
   assertEquals(

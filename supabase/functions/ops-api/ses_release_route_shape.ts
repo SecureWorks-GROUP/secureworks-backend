@@ -203,7 +203,7 @@ export function sesBuilderRouteBody(
     }
     return `Please find attached the invoice and supporting documents for ${ref}.\n\nThank you.`;
   }
-  return `Please find attached the make-safe report for ${ref}.\n\nThank you.`;
+  return `Please find attached the report for ${ref}.\n\nThank you.`;
 }
 
 /**
