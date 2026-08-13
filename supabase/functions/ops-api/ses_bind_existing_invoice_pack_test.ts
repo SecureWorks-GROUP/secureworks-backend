@@ -6,6 +6,7 @@ import {
 import {
   canBindExistingMakesafeInvoicePack,
   selectExistingInvoiceForPackBind,
+  selectNamedPriorCycleBoundInvoiceForPlacement,
   SesBindExistingInvoiceError,
 } from "./ses_bind_existing_invoice_pack.ts";
 import {
@@ -150,6 +151,79 @@ Deno.test("bind-only still refuses unknown cycle attribution", () => {
     SesBindExistingInvoiceError,
   );
   assertEquals(error.code, "named_invoice_not_current_card_receivable");
+});
+
+Deno.test("placement accepts only the exact durable named prior-cycle adoption", () => {
+  const priorDetail = {
+    ...detail,
+    reattend_count: 4,
+    last_reattend_at: "2026-08-06T00:00:00Z",
+  };
+  const pack = {
+    xero_invoice_id: "xero-1140",
+    invoice_doc_id: "invoice-doc-1140",
+  };
+  const document = {
+    id: "invoice-doc-1140",
+    job_id: JOB_ID,
+    type: "invoice",
+    bind_source: "bind_existing_makesafe_invoice_pack",
+    bind_only: true,
+    named_prior_cycle_bind: true,
+    bound_xero_invoice_id: "xero-1140",
+  };
+  const bound = invoice({
+    xero_invoice_id: "xero-1140",
+    invoice_number: "INV-1140",
+    created_at: "2026-08-05T00:00:00Z",
+  });
+
+  assertEquals(
+    selectNamedPriorCycleBoundInvoiceForPlacement({
+      job,
+      detail: priorDetail,
+      pack,
+      documents: [document],
+      invoices: [bound],
+    })?.invoice_number,
+    "INV-1140",
+  );
+
+  for (
+    const [label, mutation] of [
+      ["unnamed", { named_prior_cycle_bind: false }],
+      ["wrong source", { bind_source: "other" }],
+      ["not bind-only", { bind_only: false }],
+      ["wrong document", { id: "other-doc" }],
+      ["wrong invoice", { bound_xero_invoice_id: "xero-other" }],
+    ] as const
+  ) {
+    assertEquals(
+      selectNamedPriorCycleBoundInvoiceForPlacement({
+        job,
+        detail: priorDetail,
+        pack,
+        documents: [{ ...document, ...mutation }],
+        invoices: [bound],
+      }),
+      null,
+      label,
+    );
+  }
+
+  for (const status of ["VOIDED", "DELETED"]) {
+    assertEquals(
+      selectNamedPriorCycleBoundInvoiceForPlacement({
+        job,
+        detail: priorDetail,
+        pack,
+        documents: [document],
+        invoices: [{ ...bound, status }],
+      }),
+      null,
+      status,
+    );
+  }
 });
 
 Deno.test("bind-only refuses an older named invoice when another row is current", () => {

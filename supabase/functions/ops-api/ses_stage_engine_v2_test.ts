@@ -243,6 +243,45 @@ Deno.test("placement: reviewable pack with a qualifying current DRAFT still reac
   assertEquals(row.derived_stage_v2, "report_ready");
 });
 
+Deno.test("placement: named prior-cycle bind reaches Docs Ready and ticks its invoice", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "job-named-prior-bind",
+      job_number: "SWMS-261025",
+      board_stage: "trade_report_in",
+      report: { status: "submitted", cycle_number: 4 },
+      report_pack: {
+        status: "drafted",
+        review_state: "READY",
+        named_prior_cycle_bind: true,
+        xero_invoice_id: "xero-1140",
+        invoice_status: "DRAFT",
+        report_doc_id: "report-doc",
+        invoice_doc_id: "invoice-doc-1140",
+        swms_doc_id: "swms-doc",
+        sent_at: null,
+      },
+      makesafe_details: { cycle_number: 4 },
+      invoice_raw_status: "DRAFT",
+      invoice_qualifies_as_current_draft: false,
+      invoice_qualifies_as_current_closeout: true,
+      invoice_draft_qualification_reason: "prior_cycle_commercial",
+      has_report_doc: true,
+      has_invoice_doc: true,
+      has_swms_doc: true,
+      pack_sent: false,
+    }),
+  ], { computedAt: NOW });
+
+  assertEquals(row.canonical_stage, "report_ready");
+  assertEquals(row.invoice_qualifies_as_current_draft, false);
+  assertEquals(
+    row.invoice_draft_qualification_reason,
+    "prior_cycle_commercial",
+  );
+  assertEquals(row.pack.closeout_documents.invoice, true);
+});
+
 Deno.test("shadow: the advisory fields never reach the trade projection", () => {
   const rows = buildCanonicalMakesafeRows([baseRow()], { computedAt: NOW });
   const trade = projectTradeMakesafeBoard(rows, {
@@ -506,6 +545,46 @@ Deno.test("clock: the raw terminal shortcut is aged, not waved through", () => {
   });
   assertEquals(deriveSesStageV2(stale).stage, "archive");
   assertEquals(computeMakesafeStatus(stale).status, "completed");
+});
+
+Deno.test("raw complete keeps an assembled unsent bound pack visible in Docs Ready", () => {
+  const completeUnsent = input({
+    job: { status: "complete", completed_at: daysAgo(13) },
+    evidence: {
+      assignments: [{ id: "a1" }],
+      serviceReports: [{ status: "submitted", cycle_number: 1 }],
+      completionPhotoCount: 6,
+      packState: "READY",
+      pack: {
+        status: "drafted",
+        report_doc_id: "report-doc",
+        invoice_doc_id: "invoice-doc-1050",
+        swms_doc_id: "swms-doc",
+      },
+      packSent: false,
+      invoiceStatus: "AUTHORISED",
+      invoiceQualifiesAsCurrentDraft: false,
+      invoiceQualifiesAsCurrentCloseout: true,
+      invoiceDate: daysAgo(13),
+      documents: { report: true, invoice: true, swms: true },
+      swmsRequired: true,
+    },
+  });
+  assertEquals(deriveSesStageV2(completeUnsent).stage, "report_ready");
+
+  const sent = structuredClone(completeUnsent);
+  sent.evidence.packSent = true;
+  assertEquals(deriveSesStageV2(sent).stage, "archive");
+
+  const unnamed = structuredClone(completeUnsent);
+  unnamed.evidence.invoiceQualifiesAsCurrentCloseout = false;
+  assertEquals(deriveSesStageV2(unnamed).stage, "archive");
+
+  const unknownFamily = input({
+    ...structuredClone(completeUnsent),
+    ses_family: "unknown",
+  });
+  assertEquals(deriveSesStageV2(unknownFamily).stage, "archive");
 });
 
 Deno.test("clock: the 168-hour boundary is strict on both terminal paths", () => {

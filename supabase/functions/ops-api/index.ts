@@ -244,6 +244,7 @@ import {
 } from './makesafe_docs_ready_invoice.ts'
 import {
   canBindExistingMakesafeInvoicePack,
+  selectNamedPriorCycleBoundInvoiceForPlacement,
   selectExistingInvoiceForPackBind,
   SesBindExistingInvoiceError,
 } from './ses_bind_existing_invoice_pack.ts'
@@ -15055,6 +15056,10 @@ export interface MakesafeReportPackLike {
   status?: string | null
   report_doc_id?: string | null
   invoice_doc_id?: string | null
+  xero_invoice_id?: string | null
+  invoice_status?: string | null
+  /** Exact prior-cycle adoption proved by the bound invoice document snapshot. */
+  named_prior_cycle_bind?: boolean
   swms_doc_id?: string | null
   cycle_attribution?: string | null
   review_state?: string | null
@@ -15686,7 +15691,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // Without a loaded pack-cycle junction row, reattend never trusts job-global
     // pack/sent as current-cycle readiness (fail closed). First attendance keeps
     // legacy packCycleBound=true so existing sent behaviour is preserved.
-    packCycleBound: !hasReattendBoundary(detail) || pack?.cycle_attribution === 'bound',
+    packCycleBound: !hasReattendBoundary(detail) || pack?.cycle_attribution === 'bound' ||
+      pack?.named_prior_cycle_bind === true,
     attendanceCycleId: detail?.attendance_cycle_id ?? null,
     invoice,
     invoiceQualifiesAsCurrentDraft: invoiceQualifiesForCurrentAttendance,
@@ -15762,11 +15768,16 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // green one.
   const invoiceRaisedForCurrentAttendance = _makesafeInvoiceIsRaised(invoice) &&
     makesafeInvoiceIsCurrentAttendanceReceivable(j, detail, invoice)
+  const namedPriorCycleBind = pack?.named_prior_cycle_bind === true &&
+    !!pack?.invoice_doc_id &&
+    !!pack?.xero_invoice_id &&
+    String(pack.xero_invoice_id) === String(invoice?.xero_invoice_id || '')
   const invoiceQualifiesForCurrentCloseout =
-    invoiceQualifiesForCurrentAttendance || invoiceRaisedForCurrentAttendance
+    invoiceQualifiesForCurrentAttendance || invoiceRaisedForCurrentAttendance ||
+    namedPriorCycleBind
   const invoiceForStage =
     (scoped.allowCloseoutFromEvidence || invoiceQualifiesForCurrentAttendance ||
-        invoiceRaisedForCurrentAttendance)
+        invoiceRaisedForCurrentAttendance || namedPriorCycleBind)
       ? invoice
       : null
   const boardStage = deriveMakesafeBoardStage(
@@ -15932,6 +15943,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     } : null,
     report_pack: scopedPack ? {
       status: scopedPack.status || null,
+      xero_invoice_id: scopedPack.xero_invoice_id || null,
+      invoice_status: scopedPack.invoice_status || null,
+      named_prior_cycle_bind: scopedPack.named_prior_cycle_bind === true,
       report_doc_id: scopedPack.report_doc_id || null,
       invoice_doc_id: scopedPack.invoice_doc_id || null,
       swms_doc_id: scopedPack.swms_doc_id || null,
@@ -17203,6 +17217,7 @@ async function makesafePipeline(
   let detailsMap: Record<string, any> = {}
   let reportMap: Record<string, any> = {}
   let invoiceMap: Record<string, any> = {}
+  let invoiceRows: any[] = []
   // docsMap: per-job array of job_documents rows, used for the close-out gate.
   let docsMap: Record<string, any[]> = {}
   // packMap: the durable makesafe_report_packs row (status + report_doc_id) used
@@ -17290,7 +17305,7 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'job_documents',
-          'job_id, type, file_name',
+          'id, job_id, type, file_name, bind_source:data_snapshot_json->source, bind_only:data_snapshot_json->bind_only, named_prior_cycle_bind:data_snapshot_json->named_prior_cycle_bind, bound_xero_invoice_id:data_snapshot_json->xero_invoice_id',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -17298,7 +17313,7 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'makesafe_report_packs',
-          'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at, failed_step, error_detail',
+          'id, job_id, pack_kind, status, xero_invoice_id, invoice_status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at, failed_step, error_detail',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -17341,6 +17356,7 @@ async function makesafePipeline(
     // the candidate set prevents a retired newest row from exposing an older
     // DRAFT and manufacturing Docs Ready.
     invoiceMap = currentMakesafeReceivableInvoicesByJobId(invoices || [])
+    invoiceRows = invoices || []
     for (const doc of (docs || [])) {
       if (!doc?.job_id) continue
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
@@ -17382,6 +17398,13 @@ async function makesafePipeline(
 
   for (const j of (jobs || [])) {
     const rowPack = packMap[j.id]
+    const namedPriorCycleInvoice = selectNamedPriorCycleBoundInvoiceForPlacement({
+      job: j,
+      detail: detailsMap[j.id] || null,
+      pack: rowPack,
+      documents: docsMap[j.id] || [],
+      invoices: invoiceRows,
+    })
     const detail = detailsMap[j.id] || null
     const packCycle = rowPack?.id
       ? (packCyclesByPackId[rowPack.id] || []).find((pc: any) =>
@@ -17445,6 +17468,7 @@ async function makesafePipeline(
     const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
       ? {
         ...(rowPack || {}),
+        named_prior_cycle_bind: !!namedPriorCycleInvoice,
         status: rowPack?.status || 'drafted',
         review_state: docket.pre_xero_docs_ready
           ? 'READY'
@@ -17458,11 +17482,22 @@ async function makesafePipeline(
       : rowPack
       ? {
         ...rowPack,
+        named_prior_cycle_bind: !!namedPriorCycleInvoice,
         cycle_attribution: packIsCurrent ? 'bound' : null,
         ...packHonestyFields,
       }
       : null
-    const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
+    const invoiceForBoard = namedPriorCycleInvoice || invoiceMap[j.id]
+    const enriched = enrichMakesafeBoardJob(
+      j,
+      detail,
+      assignMap[j.id] || [],
+      reportMap[j.id],
+      invoiceForBoard,
+      docsMap[j.id] || [],
+      packSentMap[j.id] === true,
+      packForBoard,
+    )
     // Additive top-level honesty so a card with no pack row and no docket can
     // still say incomplete/refused without inventing a `report_pack` object.
     // Kind `none` is nothing to say: leaving the key off keeps `pack_status`
