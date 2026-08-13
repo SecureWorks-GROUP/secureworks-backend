@@ -187,7 +187,9 @@ function ajsRoutes(photoHashes: string[]): any[] {
       recipients: ["workorders@ajs.build"],
       cc: AJS_PACK_CC,
       subject: "Report + Invoice",
-      body: "Report and invoice",
+      // Builder-facing wording: the execute body guard refuses annotation
+      // vocabulary, so stub bodies must be as clean as real producer output.
+      body: "Please find attached the report and invoice for AJBR-1.\n\nThank you.",
       body_hash: hash(1),
       attachment_hashes: [hash(11)],
     },
@@ -197,7 +199,7 @@ function ajsRoutes(photoHashes: string[]): any[] {
       recipients: ["workorders@ajs.build"],
       cc: AJS_PACK_CC,
       subject: "Photos",
-      body: "Photo pack",
+      body: "Please find attached site photos for AJBR-1.\n\nThank you.",
       body_hash: hash(2),
       attachment_hashes: photoHashes,
     },

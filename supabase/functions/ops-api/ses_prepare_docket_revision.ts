@@ -2238,6 +2238,29 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
   );
 }
 
+/**
+ * Compose "street, suburb" without doubling the suburb. Job rows regularly
+ * store the suburb inside site_address already ("25 Rudwick St, Mosman Park" +
+ * site_suburb "Mosman Park" composed to "…, Mosman Park, Mosman Park" on the
+ * SWMS-261161 docket). If the suburb already appears in the address as whole
+ * words, the address alone is the complete composition.
+ */
+export function composeSesSiteAddress(
+  siteAddress: unknown,
+  siteSuburb: unknown,
+): string {
+  const address = String(siteAddress || "").trim();
+  const suburb = String(siteSuburb || "").trim();
+  if (!address) return suburb;
+  if (!suburb) return address;
+  const escaped = suburb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  if (new RegExp(`(^|[^A-Za-z])${escaped}([^A-Za-z]|$)`, "i").test(address)) {
+    return address;
+  }
+  return `${address}, ${suburb}`;
+}
+
 function draftEmail(args: {
   to: string;
   cc?: string;
@@ -2267,9 +2290,10 @@ function buildEmailDrafts(
     return {};
   }
   const ref = input.source.builder_reference;
-  const address = [input.source.site_address, input.source.site_suburb]
-    .filter(Boolean)
-    .join(", ");
+  const address = composeSesSiteAddress(
+    input.source.site_address,
+    input.source.site_suburb,
+  );
   const reportTo = input.source.work_order_sender || "";
   const invoiceTo = row.invoice_to || "";
   const invoiceAttachments = [
@@ -4332,9 +4356,10 @@ async function prepareOne(
   const reviewSpec: Record<string, unknown> = {
     version: SES_DOCKET_REVIEW_SPEC_VERSION,
     property_id: input.identity.property_id,
-    address: [input.source.site_address, input.source.site_suburb]
-      .filter(Boolean)
-      .join(", "),
+    address: composeSesSiteAddress(
+      input.source.site_address,
+      input.source.site_suburb,
+    ),
     cards: [
       {
         job_id: input.identity.job_id,

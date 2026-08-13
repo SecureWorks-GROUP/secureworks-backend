@@ -43,6 +43,8 @@ const FACTS = {
     "The MLB physical report or photo route must reply on the work-order intake thread, but no intake_thread_id is available.",
   route_recipient_invalid:
     "A release email route contains text that is not an email recipient.",
+  route_body_internal_annotation:
+    "A persisted release route body still carries internal draft-annotation wording, which must never reach a builder inbox.",
   canonical_recipient_missing:
     "A required email route has no canonical builder mailbox recipient.",
   pricing_evidence_missing:

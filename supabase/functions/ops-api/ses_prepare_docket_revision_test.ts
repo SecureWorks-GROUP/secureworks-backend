@@ -42,6 +42,7 @@ import {
   type SesMaterialsChargeAuthorisation,
 } from "./ses_materials_charge_guard.ts";
 import {
+  composeSesSiteAddress,
   prepare_ses_docket_revision as prepareSesDocketRevision,
   prepareSesDocketRevisionAtHttpBoundary,
   SES_ASSESSMENT_RECIPE_VERSION,
@@ -1294,6 +1295,54 @@ Deno.test("AJS builder-facing email drafts are plain English with job ref (no in
       );
     }
   }
+});
+
+// SWMS-261161 (Mosman Park): jobs rows regularly carry the suburb inside
+// site_address already, so blind "address, suburb" joins composed
+// "25 Rudwick St, Mosman Park, Mosman Park" onto the docket annotation that
+// then leaked builder-visible. One composer, no doubling.
+Deno.test("composeSesSiteAddress never doubles a suburb already inside the address", () => {
+  assertEquals(
+    composeSesSiteAddress("25 Rudwick St, Mosman Park", "Mosman Park"),
+    "25 Rudwick St, Mosman Park",
+  );
+  assertEquals(
+    composeSesSiteAddress("63 Chidlow St E", "Northam"),
+    "63 Chidlow St E, Northam",
+  );
+  // Whole words only: a street NAMED like the suburb still gets the suburb.
+  assertEquals(
+    composeSesSiteAddress("4 Northampton Way", "Northam"),
+    "4 Northampton Way, Northam",
+  );
+  assertEquals(composeSesSiteAddress("", "Northam"), "Northam");
+  assertEquals(composeSesSiteAddress("62 Example Street", ""), "62 Example Street");
+  assertEquals(
+    composeSesSiteAddress("25 RUDWICK ST, MOSMAN PARK", "Mosman Park"),
+    "25 RUDWICK ST, MOSMAN PARK",
+  );
+});
+
+Deno.test("MLB draft annotations compose the site address without a doubled suburb", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const input = fixtureInput(row);
+  input.source.site_address = "25 Rudwick St, Mosman Park";
+  input.source.site_suburb = "Mosman Park";
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const report = String(result.email_drafts.REPORT_EMAIL_DRAFT || "");
+  assertStringIncludes(report, "25 Rudwick St, Mosman Park");
+  assertEquals(
+    report.includes("Mosman Park, Mosman Park"),
+    false,
+    `draft must not double the suburb: ${report}`,
+  );
 });
 
 // The two-email route drops INVOICE_EMAIL_DRAFT entirely, so the invoice-bundle
