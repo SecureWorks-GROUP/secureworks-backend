@@ -243,6 +243,7 @@ import {
   selectCurrentMakesafeReceivableInvoice,
 } from './makesafe_docs_ready_invoice.ts'
 import {
+  canBindExistingMakesafeInvoicePack,
   selectExistingInvoiceForPackBind,
   SesBindExistingInvoiceError,
 } from './ses_bind_existing_invoice_pack.ts'
@@ -4270,6 +4271,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // producer-trust, PNG and server-computed content-hash validation.
       'record_ses_portal_capture_evidence',
       'bind_current_cycle_curated_makesafe_report',
+      // Captain 2026-08-13: bind one explicitly named, already-existing Xero
+      // invoice PDF to an unsent pack. The handler cannot mint, authorise,
+      // void, send, update Xero, or rewrite a contact.
+      'bind_existing_makesafe_invoice_pack',
       'create_intake_draft',
       // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
       // own case, where a routine caller is REDIRECTED to a needs_review draft (it can
@@ -7394,14 +7399,14 @@ if (import.meta.main) serve(async (req: Request) => {
           },
         ))
       case 'bind_existing_makesafe_invoice_pack': {
-        // Privileged, bind-only repair for cards whose existing Xero invoice
-        // predates the SES lineage. It is intentionally absent from the routine
-        // allow-list: the Captain/ops key names the exact invoice to adopt.
-        if (authMode !== 'api_key') {
+        // Bind-only repair for cards whose existing Xero invoice predates the
+        // SES lineage. The privileged ops key or scoped routine key names the
+        // exact invoice to adopt; agent_read and user JWT callers stay refused.
+        if (!canBindExistingMakesafeInvoicePack(authMode)) {
           return json({
             success: false,
             code: 'bind_existing_invoice_requires_ops_privilege',
-            error: 'bind_existing_makesafe_invoice_pack requires the privileged ops key',
+            error: 'bind_existing_makesafe_invoice_pack requires the privileged ops or scoped routine key',
           }, 403)
         }
         await assertNoSyntheticLivefireJobs(

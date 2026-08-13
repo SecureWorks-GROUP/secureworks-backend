@@ -142,6 +142,7 @@ Deno.test("agent_read is default-denied from write and money actions", () => {
   for (
     const action of [
       "create_ses_invoice_draft",
+      "bind_existing_makesafe_invoice_pack",
       "allocate_job",
       "send_invoice_email",
       "approve_invoice",

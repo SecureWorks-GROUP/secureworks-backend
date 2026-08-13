@@ -10,6 +10,19 @@ export const SES_BIND_EXISTING_INVOICE_STATUSES = [
   "PAID",
 ] as const;
 
+export type SesBindExistingInvoiceAuthMode =
+  | "api_key"
+  | "jwt"
+  | "routine"
+  | "agent_read";
+
+/** Keep this local-only repair on server-held credentials, never user JWTs. */
+export function canBindExistingMakesafeInvoicePack(
+  authMode: SesBindExistingInvoiceAuthMode,
+): boolean {
+  return authMode === "api_key" || authMode === "routine";
+}
+
 export class SesBindExistingInvoiceError extends Error {
   constructor(
     readonly status: number,

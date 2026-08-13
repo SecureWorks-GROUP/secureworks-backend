@@ -292,7 +292,7 @@ Deno.test("annotation relinking fences before resolving or linking", () => {
   assertStringIncludes(INDEX, "execute_ses_release_revision");
 });
 
-Deno.test("routine allowlist exposes SES preparation, reads and the byte-bound curation bind only", () => {
+Deno.test("routine allowlist exposes SES preparation, reads, and bounded attach-only binds", () => {
   const start = INDEX.indexOf("const ROUTINE_ALLOWED_ACTIONS");
   const end = INDEX.indexOf("if (authMode === 'routine'", start);
   const allowlist = INDEX.slice(start, end);
@@ -305,6 +305,7 @@ Deno.test("routine allowlist exposes SES preparation, reads and the byte-bound c
       "query_ses_review_cockpit",
       "query_ses_proof_ledger",
       "bind_current_cycle_curated_makesafe_report",
+      "bind_existing_makesafe_invoice_pack",
     ]
   ) {
     assertStringIncludes(allowlist, `'${safe}'`);

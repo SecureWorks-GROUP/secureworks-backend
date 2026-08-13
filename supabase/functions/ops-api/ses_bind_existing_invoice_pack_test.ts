@@ -4,6 +4,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  canBindExistingMakesafeInvoicePack,
   selectExistingInvoiceForPackBind,
   SesBindExistingInvoiceError,
 } from "./ses_bind_existing_invoice_pack.ts";
@@ -23,6 +24,13 @@ const detail = {
   reattend_count: 0,
   last_reattend_at: null,
 };
+
+Deno.test("bind-only route permits privileged ops and scoped routine credentials only", () => {
+  assertEquals(canBindExistingMakesafeInvoicePack("api_key"), true);
+  assertEquals(canBindExistingMakesafeInvoicePack("routine"), true);
+  assertEquals(canBindExistingMakesafeInvoicePack("agent_read"), false);
+  assertEquals(canBindExistingMakesafeInvoicePack("jwt"), false);
+});
 
 function invoice(over: Record<string, unknown> = {}) {
   return {
