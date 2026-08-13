@@ -3533,6 +3533,30 @@ export function _opsApiStaffOperatorRole(role: unknown): boolean {
   return OPS_API_STAFF_OPERATOR_ROLES.has(String(role || '').toLowerCase())
 }
 
+// trade.html boots a lead_installer with managed verticals into the all-jobs
+// dispatcher view (_adminViewAll), whose load path calls exactly these four
+// read actions. Pre-#667 those calls rode the shared browser key as admin, so
+// lead installers always worked; the JWT cutover left the role outside the
+// staff set and every boot call 403'd, locking all lead_installer accounts out
+// of the app (2026-08-13 outage). This restores ONLY those four READ actions
+// for the role. Deliberately NOT membership in OPS_API_STAFF_OPERATOR_ROLES:
+// every write, money, approve, and authorise surface keeps refusing the role
+// exactly as before.
+export const LEAD_INSTALLER_READ_ACTIONS = new Set([
+  'pipeline',
+  'calendar',
+  'ops_summary',
+  'list_users',
+])
+
+export function _opsApiLeadInstallerReadAllowed(
+  role: unknown,
+  action: string | null,
+): boolean {
+  return String(role || '').toLowerCase() === 'lead_installer' &&
+    !!action && LEAD_INSTALLER_READ_ACTIONS.has(action)
+}
+
 export function _opsApiCallerIsStaffOperator(
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
   authUser?: Pick<TradeAuthContext, 'role'> | null,
@@ -3587,7 +3611,10 @@ export function _authorizeOpsApiAction(input: {
   }
 
   if (_opsApiActionNeedsStaffRole(url)) {
-    if (!_opsApiStaffOperatorRole(authUser.role)) {
+    if (
+      !_opsApiStaffOperatorRole(authUser.role) &&
+      !_opsApiLeadInstallerReadAllowed(authUser.role, url.searchParams.get('action'))
+    ) {
       // 403, NOT 401: the caller IS validly signed in, they just lack the staff
       // role. trade.html treats every 401 as an expired session and force-logs
       // the trade out, so a 401 here turned any trade touching a staff route
