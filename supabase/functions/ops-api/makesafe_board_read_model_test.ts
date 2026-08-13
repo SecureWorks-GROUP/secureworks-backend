@@ -713,6 +713,52 @@ Deno.test("parseMakesafeBoardColumnScope defaults to active; full/include_archiv
   );
 });
 
+Deno.test("card report tick is done for a current-cycle submitted service report without a report document", () => {
+  const id = "submitted-report-no-document";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("trade_report_in", id, {
+      report: SUBMITTED_REPORT,
+      has_report_doc: false,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "trade_report_in");
+  assertEquals(card.pack.closeout_documents.report, true);
+});
+
+Deno.test("card report tick stays false without a submitted report or report document", () => {
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", "no-report-evidence", {
+        has_report_doc: false,
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.canonical_stage, "allocated");
+  assertEquals(card.pack.closeout_documents.report, false);
+});
+
+Deno.test("card report tick stays done when a report document is already attached", () => {
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", "report-document-only", {
+        has_report_doc: true,
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.canonical_stage, "allocated");
+  assertEquals(card.pack.closeout_documents.report, true);
+});
+
 Deno.test("active column scope drops archive without moving other cards", () => {
   // R12 cutover: the fixtures now derive their stages from evidence rather than
   // declaring them with `board_stage`, and the overlay anchors on that derived
