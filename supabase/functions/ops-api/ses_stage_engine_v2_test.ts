@@ -1210,6 +1210,40 @@ Deno.test("portal: cannot-observe is not not-done", () => {
   assert(notDone.missing[0] !== unreachable.missing[0]);
 });
 
+Deno.test("portal: a submitted current-cycle service report plus an unobservable portal reaches report-in", () => {
+  const unreachable = {
+    ...ACCEPTED,
+    status: "unreachable",
+    locked: false,
+    screenshot: null,
+    signal: "builder link is expired or no longer active",
+  };
+  const submittedReport = {
+    status: "submitted",
+    cycle_number: 1,
+    submitted_at: NOW,
+  };
+
+  const reportIn = deriveSesStageV2(portalInput([unreachable], {
+    evidence: { serviceReports: [submittedReport] },
+  }));
+  assertEquals(reportIn.stage, "trade_report_in");
+  assertEquals(reportIn.conflicts, []);
+  assert(
+    reportIn.reasons[0].includes("cannot-observe capture"),
+    reportIn.reasons[0],
+  );
+  assertEquals(reportIn.missing, []);
+
+  // Submission alone remains non-portal evidence. With no capture attempt the
+  // same roof stays Allocated; only the measured unavailable result advances.
+  const noCapture = deriveSesStageV2(portalInput([], {
+    evidence: { serviceReports: [submittedReport] },
+  }));
+  assertEquals(noCapture.stage, "allocated");
+  assertEquals(noCapture.conflicts, []);
+});
+
 Deno.test("portal: role observation uses the latest dated capture", () => {
   const olderNotDone = {
     ...ACCEPTED,

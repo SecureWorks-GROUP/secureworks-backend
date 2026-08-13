@@ -446,6 +446,13 @@ Deno.test("draft-invoice guard: NEGATIVE — a re-attend that opens a new cycle 
 });
 
 Deno.test("draft-invoice guard: NEGATIVE — each disqualifying ledger coordinate still refuses", async () => {
+  const tradeShape = {
+    capture_producer: "trade_portal_confirmation/v1",
+    screenshot_object_key: null,
+    screenshot_media_type: null,
+    screenshot_content_hash: null,
+    screenshot_size_bytes: null,
+  };
   const cases: Array<[string, Record<string, unknown>]> = [
     // Producer trust is the sealed seam — an unapproved producer is not evidence.
     ["untrusted producer", { capture_producer: "some_other_tool/v1" }],
@@ -461,9 +468,17 @@ Deno.test("draft-invoice guard: NEGATIVE — each disqualifying ledger coordinat
     // Row status and result must agree — a rejected row is not a done capture.
     ["status disagrees with result", { status: "rejected" }],
     ["status captured on a done result", { status: "captured" }],
-    // The capture must belong to THIS card's builder instruction.
-    ["builder_reference mismatch", { builder_reference: "MLB-99999" }],
-    ["builder_reference empty", { builder_reference: "" }],
+    // The trade producer derives THIS card's legacy builder reference and must
+    // retain it. The deterministic producer is different: its recorder already
+    // validates canonical U4 authority, including a legitimate empty value.
+    ["trade builder_reference mismatch", {
+      ...tradeShape,
+      builder_reference: "MLB-99999",
+    }],
+    ["trade builder_reference empty", {
+      ...tradeShape,
+      builder_reference: "",
+    }],
     // The captured URL must be one of the card's own genuine portal links.
     ["source_url not on the card", {
       source_url:
