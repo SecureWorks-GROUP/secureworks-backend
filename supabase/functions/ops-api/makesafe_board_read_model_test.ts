@@ -396,6 +396,7 @@ Deno.test("F7 board read model consumes one exact-cycle screenshot-backed ledger
     computedAt: NOW,
   });
   assertEquals(row.canonical_stage, "trade_report_in");
+  assertEquals(row.report.state, "submitted");
   assertEquals(row.computed_status, "trade_report_in");
   assertEquals(row.computed_status_evidence.has_current_portal_capture, true);
   assertEquals(row.computed_status_evidence.portal_capture_revisions, [{
@@ -406,6 +407,135 @@ Deno.test("F7 board read model consumes one exact-cycle screenshot-backed ledger
     captured_at: NOW,
     screenshot_available: true,
   }]);
+});
+
+Deno.test("Prime completion is monotonic: a later unreachable result retains the last locked capture and report state", () => {
+  const sourceUrl = "https://www.primeeco.tech/share/locked-then-expired";
+  const source = baseJob("allocated", "locked-then-expired", {
+    external_ref: "MLB-LOCKED-THEN-EXPIRED",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      substatus: "waiting_on_trade_report",
+      report_type: "roof_report",
+      external_ref: "MLB-LOCKED-THEN-EXPIRED",
+      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-current",
+    },
+  });
+  const done = {
+    id: "capture-done",
+    job_id: "locked-then-expired",
+    attendance_cycle_id: "cycle-current",
+    role: "roof_report",
+    status: "verified",
+    makesafe_fact_version: 1,
+    capture_result: "done",
+    source_url: sourceUrl,
+    source_content_hash: `sha256:${"7".repeat(64)}`,
+    builder_reference: "MLB-LOCKED-THEN-EXPIRED",
+    captured_at: "2026-08-02T12:00:00Z",
+    capture_producer: "capture_portal_evidence.py/v1",
+    signal: "form locked/submitted, 21 of 23 answered",
+    screenshot_object_key:
+      "makesafe-docket-artifacts/portal-captures/job/cycle/roof/locked.png",
+    screenshot_media_type: "image/png",
+    screenshot_content_hash: `sha256:${"8".repeat(64)}`,
+    screenshot_size_bytes: 4096,
+  };
+  const unreachable = {
+    ...done,
+    id: "capture-unreachable",
+    status: "rejected",
+    makesafe_fact_version: 2,
+    capture_result: "unreachable",
+    source_content_hash: `sha256:${"9".repeat(64)}`,
+    captured_at: "2026-08-13T07:10:00Z",
+    signal: "Prime link expired or no longer active",
+    screenshot_object_key: null,
+    screenshot_media_type: null,
+    screenshot_content_hash: null,
+    screenshot_size_bytes: null,
+  };
+
+  const [row] = buildCanonicalMakesafeRows([source], {
+    portalCaptureRowsByJobId: {
+      "locked-then-expired": [done, unreachable],
+    },
+    computedAt: NOW,
+  });
+
+  assertEquals(row.canonical_stage, "trade_report_in");
+  assertEquals(row.report.state, "submitted");
+  assertEquals(row.pack.closeout_documents.report, true);
+  assertEquals(row.computed_status_evidence.has_current_portal_capture, true);
+  assertEquals(
+    row.computed_status_evidence.portal_capture_revisions.map((
+      capture: any,
+    ) => [capture.id, capture.status, capture.screenshot_available]),
+    [
+      ["capture-unreachable", "unreachable", false],
+      ["capture-done", "done", true],
+    ],
+  );
+});
+
+Deno.test("Prime completion is monotonic for the screenshot-less trade tick too", () => {
+  const sourceUrl = "https://www.primeeco.tech/share/tick-then-expired";
+  const source = baseJob("allocated", "tick-then-expired", {
+    external_ref: "MLB-TICK-THEN-EXPIRED",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      substatus: "waiting_on_trade_report",
+      report_type: "roof_report",
+      external_ref: "MLB-TICK-THEN-EXPIRED",
+      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-current",
+    },
+  });
+  const tick = {
+    id: "trade-tick-done",
+    job_id: "tick-then-expired",
+    attendance_cycle_id: "cycle-current",
+    role: "roof_report",
+    status: "verified",
+    makesafe_fact_version: 1,
+    capture_result: "done",
+    source_url: sourceUrl,
+    source_content_hash: `sha256:${"a".repeat(64)}`,
+    builder_reference: "MLB-TICK-THEN-EXPIRED",
+    captured_at: "2026-08-02T12:00:00Z",
+    captured_by: "trade-1",
+    capture_producer: "trade_portal_confirmation/v1",
+    signal: "assigned trade confirmed roof report done",
+    screenshot_object_key: null,
+    screenshot_media_type: null,
+    screenshot_content_hash: null,
+    screenshot_size_bytes: null,
+  };
+  const unreachable = {
+    ...tick,
+    id: "reader-unreachable",
+    status: "rejected",
+    makesafe_fact_version: 2,
+    capture_result: "unreachable",
+    source_content_hash: `sha256:${"b".repeat(64)}`,
+    captured_at: "2026-08-13T07:10:00Z",
+    capture_producer: "capture_portal_evidence.py/v1",
+    signal: "Prime link expired or no longer active",
+  };
+
+  const [row] = buildCanonicalMakesafeRows([source], {
+    portalCaptureRowsByJobId: {
+      "tick-then-expired": [tick, unreachable],
+    },
+    computedAt: NOW,
+  });
+
+  assertEquals(row.canonical_stage, "trade_report_in");
+  assertEquals(row.report.state, "submitted");
+  assertEquals(row.pack.closeout_documents.report, true);
 });
 
 Deno.test("F7 newest exact ledger truth suppresses an older embedded detail capture", () => {

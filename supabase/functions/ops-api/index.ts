@@ -244,6 +244,11 @@ import {
   summarizeSesPrepareResponseForHttp,
 } from './ses_assembler_input_adapter.ts'
 import {
+  buildPrimeCaptureSweepItems,
+  type PrimeCaptureSweepCard,
+  type PrimeCaptureSweepRevision,
+} from './ses_prime_capture_sweep.ts'
+import {
   prepareSesDocketRevisionAtHttpBoundary,
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
@@ -3411,6 +3416,7 @@ export const AGENT_READ_ALLOWED_ACTIONS = new Set([
   'makesafe_pipeline_items',
   'makesafe_audit',
   'intake_health',
+  'makesafe_prime_capture_sweep',
 ])
 
 const OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS = new Set([
@@ -4162,6 +4168,8 @@ if (import.meta.main) serve(async (req: Request) => {
           return json(await makesafeAudit(agentReadClient, url.searchParams))
         case 'intake_health':
           return json(await intakeHealth(agentReadClient))
+        case 'makesafe_prime_capture_sweep':
+          return json(await makesafePrimeCaptureSweep(agentReadClient, url.searchParams))
         default:
           return json({ error: 'forbidden: no read-only ops agent action was provided.' }, 403)
       }
@@ -5335,6 +5343,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // never advances substatus, never drafts, never sends.
       case 'makesafe_portal_recheck_queue':
         return json(await makesafePortalRecheckQueue(client, url.searchParams))
+      case 'makesafe_prime_capture_sweep':
+        return json(await makesafePrimeCaptureSweep(client, url.searchParams))
       case 'makesafe_portal_recheck_enqueue':
         return json(await makesafePortalRecheckEnqueue(client, body))
       // Wave 2 — READ-ONLY feed for the report-draft cockpit (informed-approve
@@ -16798,8 +16808,14 @@ const PORTAL_RECHECK_DETAIL_SELECT =
   'portal_verified_at, portal_verified_cycle, portal_verified_signal, ' +
   'portal_recheck_requested_at, portal_recheck_count'
 
-async function scanPortalRecheckCards(client: any): Promise<Array<{
-  detail: any; job: any; currentCycle: number; portalLinks: ReturnType<typeof _extractPortalLinks>
+async function scanPortalRecheckCards(client: any, options: {
+  includeVerified?: boolean
+} = {}): Promise<Array<{
+  detail: any
+  job: any
+  currentCycle: number
+  reportType: string
+  portalLinks: ReturnType<typeof _extractPortalLinks>
 }>> {
   const { data: details, error } = await client.from('makesafe_job_details')
     .select(PORTAL_RECHECK_DETAIL_SELECT)
@@ -16812,7 +16828,13 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
   )
   const jobsById: Record<string, any> = {}
   for (const j of jobs) jobsById[j.id] = j
-  const out: Array<{ detail: any; job: any; currentCycle: number; portalLinks: ReturnType<typeof _extractPortalLinks> }> = []
+  const out: Array<{
+    detail: any
+    job: any
+    currentCycle: number
+    reportType: string
+    portalLinks: ReturnType<typeof _extractPortalLinks>
+  }> = []
   for (const d of rows) {
     const job = jobsById[d.job_id]
     if (!job) continue
@@ -16827,8 +16849,8 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
       isReportType: true,
       externalLinks: d.external_links,
       currentCycle,
-      verifiedAt: d.portal_verified_at ?? null,
-      verifiedCycle: d.portal_verified_cycle ?? null,
+      verifiedAt: options.includeVerified ? null : d.portal_verified_at ?? null,
+      verifiedCycle: options.includeVerified ? null : d.portal_verified_cycle ?? null,
       requiresAssessmentProof: reportType === 'assessment_report' ||
         reportType === 'assessment_report_quote',
       assessmentProofSatisfied: hasStoredAssessmentPortalProof(
@@ -16839,7 +16861,13 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
       ),
     })
     if (!eligible) continue
-    out.push({ detail: d, job, currentCycle, portalLinks: _extractPortalLinks(d.external_links) })
+    out.push({
+      detail: d,
+      job,
+      currentCycle,
+      reportType,
+      portalLinks: _extractPortalLinks(d.external_links),
+    })
   }
   return out
 }
@@ -16870,6 +16898,44 @@ async function makesafePortalRecheckQueue(client: any, params: URLSearchParams) 
   return { ok: true, count: cards.length, returned: queue.length, queue, generated_at: new Date().toISOString() }
 }
 export const _makesafePortalRecheckQueue = makesafePortalRecheckQueue
+
+// READ: privacy-small input feed for the recurring Prime browser sweep. Unlike
+// the historical recheck queue, this deliberately includes cards that already
+// have a successful capture: a later link expiry is a new observation, while
+// the board reader separately preserves the last successful done fact.
+async function makesafePrimeCaptureSweep(client: any, params: URLSearchParams) {
+  const rawLimit = Number(params.get('limit') || '100')
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 100
+  const cards = await scanPortalRecheckCards(client, { includeVerified: true })
+  const candidates: PrimeCaptureSweepCard[] = cards.map(({ detail, job, reportType, portalLinks }) => ({
+    job_id: String(detail.job_id),
+    job_number: job.job_number ? String(job.job_number) : null,
+    report_type: reportType,
+    portal_links: portalLinks.map((link) => ({
+      role: String(link.role || ''),
+      url: String(link.url || ''),
+      label: link.label ? String(link.label) : null,
+    })),
+  }))
+  const jobIds = [...new Set(candidates.map((card) => card.job_id))]
+  const revisions = jobIds.length
+    ? await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_portal_capture_revisions',
+      'id, job_id, attendance_cycle_id, role, capture_result, source_url, capture_producer, captured_at, signal, makesafe_fact_version',
+      jobIds,
+    ) as PrimeCaptureSweepRevision[]
+    : []
+  const items = buildPrimeCaptureSweepItems(candidates, revisions).slice(0, limit)
+  return {
+    ok: true,
+    count: items.length,
+    items,
+    producer: 'capture_portal_evidence.py/v1',
+    generated_at: new Date().toISOString(),
+  }
+}
+export const _makesafePrimeCaptureSweep = makesafePrimeCaptureSweep
 
 // WRITE (cron): stamp a rate-limited recheck marker on eligible cards so the queue
 // carries a durable "recheck due since / how many times" signal even between agent
