@@ -243,6 +243,88 @@ Deno.test("bind-only refuses an older named invoice when another row is current"
   );
 });
 
+Deno.test("bind-only ranks PAID above AUTHORISED above DRAFT before recency", () => {
+  for (
+    const [preferred, lower] of [
+      ["PAID", "AUTHORISED"],
+      ["PAID", "DRAFT"],
+      ["AUTHORISED", "DRAFT"],
+    ] as const
+  ) {
+    const selected = selectExistingInvoiceForPackBind({
+      job,
+      detail,
+      invoices: [
+        invoice({
+          status: preferred,
+          invoice_date: "2026-08-01",
+          created_at: "2026-08-01T00:00:00Z",
+        }),
+        invoice({
+          xero_invoice_id: "xero-newer-lower-priority",
+          invoice_number: "INV-0999",
+          status: lower,
+          invoice_date: "2026-08-12",
+          created_at: "2026-08-12T00:00:00Z",
+        }),
+      ],
+      expected_invoice_number: "INV-0817",
+    });
+    assertEquals(selected.invoice_number, "INV-0817", `${preferred}>${lower}`);
+    assertEquals(selected.status, preferred, `${preferred}>${lower}`);
+  }
+});
+
+Deno.test("bind-only keeps SUBMITTED as a blocker instead of exposing a newer DRAFT", () => {
+  assertEquals(
+    refusalCode([
+      invoice({
+        xero_invoice_id: "xero-submitted",
+        invoice_number: "INV-0817",
+        status: "SUBMITTED",
+        invoice_date: "2026-08-01",
+      }),
+      invoice({
+        xero_invoice_id: "xero-newer-draft",
+        invoice_number: "INV-0999",
+        status: "DRAFT",
+        invoice_date: "2026-08-12",
+      }),
+    ], "INV-0999"),
+    "named_invoice_not_current_receivable",
+  );
+});
+
+Deno.test("bind-only current-cycle selection does not revive known prior-cycle paid money", () => {
+  const selected = selectExistingInvoiceForPackBind({
+    job,
+    detail: {
+      ...detail,
+      reattend_count: 1,
+      last_reattend_at: "2026-08-10T00:00:00Z",
+    },
+    invoices: [
+      invoice({
+        xero_invoice_id: "xero-prior-paid",
+        invoice_number: "INV-0817",
+        status: "PAID",
+        invoice_date: "2026-08-01",
+        created_at: "2026-08-01T00:00:00Z",
+      }),
+      invoice({
+        xero_invoice_id: "xero-current-draft",
+        invoice_number: "INV-0999",
+        status: "DRAFT",
+        invoice_date: "2026-08-12",
+        created_at: "2026-08-12T00:00:00Z",
+      }),
+    ],
+    expected_invoice_number: "INV-0999",
+  });
+  assertEquals(selected.xero_invoice_id, "xero-current-draft");
+  assertEquals(selected.named_prior_cycle_bind, false);
+});
+
 Deno.test("bind-only ignores newer DELETED and VOIDED rows when selecting the named live invoice", () => {
   for (const status of ["DELETED", "VOIDED"]) {
     const selected = selectExistingInvoiceForPackBind({
