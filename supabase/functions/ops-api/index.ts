@@ -168,6 +168,11 @@ import {
   type MakesafeBoardFields,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
+import {
+  isInsuranceRepairFamily,
+  loadInsuranceRepairJobIds,
+  projectInsuranceRepairPipelineRow,
+} from './insurance_repairs_board.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -3670,7 +3675,10 @@ async function makesafeBoardTradeRoute(
     : await loadMakesafeAssignedJobIds(client, profile.id)
   const canonicalRows = await loadCanonicalMakesafeBoard(
     client,
-    restrictToJobIds ? { restrictToJobIds } : undefined,
+    {
+      ...(restrictToJobIds ? { restrictToJobIds } : {}),
+      excludeInsuranceRepairs: true,
+    },
   )
   const parity = checkMakesafeBoardParity(canonicalRows)
   if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
@@ -3813,6 +3821,7 @@ async function makesafeBoardAction(
     const canonicalRows = await loadCanonicalMakesafeBoard(client, {
       fields: 'full',
       columnScope: 'all',
+      excludeInsuranceRepairs: true,
     })
     const generatedAt = options.generatedAt || new Date().toISOString()
     return json(await buildPrivilegedMakesafeV2BoardComparison(
@@ -3829,6 +3838,7 @@ async function makesafeBoardAction(
       columnScope,
       archiveLimit: columnScope === 'archive' ? archiveLimit : null,
       archiveOffset: columnScope === 'archive' ? archiveOffset : 0,
+      excludeInsuranceRepairs: true,
       censusOut,
     }),
     _loadIntakeExceptionProjectionForBoard(client, generatedAt),
@@ -11800,6 +11810,13 @@ async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
+  const repairJobIds = typeFilter === 'repair'
+    ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
+    : null
+
+  if (repairJobIds && repairJobIds.length === 0) {
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+  }
 
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -11819,16 +11836,19 @@ async function pipeline(client: any, params: URLSearchParams) {
         'complete', 'final_payment', 'invoiced', 'get_review', 'archived'
       ])
     }
-    if (typeFilter) scoped = scoped.eq('type', typeFilter)
+    if (typeFilter === 'repair') scoped = scoped.in('id', repairJobIds || [])
+    else if (typeFilter) scoped = scoped.eq('type', typeFilter)
     return scoped
   }
 
   // The projection sits exactly where `pricing_json` used to, so that stripping the
   // aliases below restores the previous key order — the response stays byte-identical.
+  const repairProjection = typeFilter === 'repair' ? ', metadata' : ''
   const query = applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
-      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required'))
+      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required' +
+      repairProjection))
     .order('updated_at', { ascending: false })
 
   let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
@@ -11990,7 +12010,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
     // occupy its slot in the select, so the surviving key order is unchanged.
     const jLite = stripPipelinePricingAliases(j)
-    return {
+    const pipelineRow = {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
       first_scheduled_date: schedDateMap[j.id] || null,
@@ -12010,6 +12030,9 @@ async function pipeline(client: any, params: URLSearchParams) {
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
     }
+    return typeFilter === 'repair'
+      ? projectInsuranceRepairPipelineRow(pipelineRow)
+      : pipelineRow
   }).filter((j: any) => {
     // Filter out test records
     if (isTestRecord(j.client_name)) return false
@@ -12062,6 +12085,8 @@ async function pipeline(client: any, params: URLSearchParams) {
 
   return { columns, total: enriched.length }
 }
+
+export const _pipelineForTest = pipeline
 
 async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
   if (!jobId) throw new Error('jobId required')
@@ -17786,6 +17811,8 @@ async function loadCanonicalMakesafeBoard(
   opts?: {
     restrictToJobIds?: string[]
     fields?: MakesafeBoardFields
+    /** Repairs are a sibling ops pipeline and never belong on MakeSafe. */
+    excludeInsuranceRepairs?: boolean
     /** Ops board only. Internal callers leave this unset (defaults to all). */
     columnScope?: MakesafeBoardColumnScope
     archiveLimit?: number | null
@@ -18128,11 +18155,17 @@ async function loadCanonicalMakesafeBoard(
     terminalSyntheticLivefireJobIds: terminalSyntheticIds,
   }, fields)
 
+  // Keep family authority intact for internal SES readers, but enforce the
+  // product boundary on the two MakeSafe board projections that opt in.
+  const boardRows = opts?.excludeInsuranceRepairs
+    ? built.filter((row) => !isInsuranceRepairFamily(row))
+    : built
+
   // Honest full-board census. Release 12 builds every base row in every scope,
   // so the counts fall straight out of the built rows.
-  const column_counts = countOpsCanonicalStages(built)
+  const column_counts = countOpsCanonicalStages(boardRows)
 
-  const rows = filterCanonicalRowsByColumnScope(built, columnScope, {
+  const rows = filterCanonicalRowsByColumnScope(boardRows, columnScope, {
     limit: opts?.archiveLimit,
     offset: opts?.archiveOffset,
   })
