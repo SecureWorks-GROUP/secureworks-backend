@@ -70,6 +70,13 @@ export interface MakesafePortalCapture {
   revision_id?: string | null;
   captured_at?: string | null;
   /**
+   * Set only after `portalCapturesFromLedger` validates the append-only row
+   * against this card's job, cycle, role, source URL, producer and proof shape.
+   * It lets the report-in reader recover the roof role of historical
+   * `builder_portal` links without trusting free-form detail JSON.
+   */
+  validated_ledger_capture?: true;
+  /**
    * Set ONLY by `portalCapturesFromLedger` against a validated append-only
    * revision written by the approved trade-attestation producer (captain,
    * 2026-08-02). It is what lets a screenshot-less capture count as done: the
@@ -286,16 +293,33 @@ export function donePortalRoles(input: MakesafeStatusInput): Set<string> {
 }
 
 export function externalPortalRoles(input: MakesafeStatusInput): Set<string> {
+  const cycle = Number(input.detail?.cycle_number ?? 1);
+  const hasValidatedRoofLedgerCapture =
+    classifyMakesafeJobType(input.detail, input.job) === "roof_report" &&
+    (input.evidence?.portalCaptures || []).some((capture) =>
+      capture.validated_ledger_capture === true &&
+      captureRole(capture) === "roof_report" &&
+      (capture.cycle_number == null || Number(capture.cycle_number) === cycle)
+    );
   return new Set(
     (Array.isArray(input.detail?.external_links)
       ? input.detail.external_links
       : [])
-      .map((link: any) =>
-        captureRole({
+      .map((link: any) => {
+        const role = captureRole({
           role: link?.role,
           kind: link?.kind,
-        })
-      )
+        });
+        // Many historical roof cards carry their one genuine Prime share URL
+        // as generic `builder_portal`. Do not infer from that label alone. A
+        // validated current-cycle roof revision has already proved the same
+        // URL/role identity at the board boundary, so it is safe to recover the
+        // missing link type here. Assessment stays fail-closed: a generic link
+        // never stands in for any member of its three-role contract.
+        return role === "builder_portal" && hasValidatedRoofLedgerCapture
+          ? "roof_report"
+          : role;
+      })
       .filter(Boolean),
   );
 }

@@ -184,7 +184,9 @@ function makeCanonicalLoaderClient(failTable?: string) {
       job_id: "loader-job",
       external_ref: "MLB-LOADER-1",
       report_type: "roof_report",
-      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      // Historical roof cards use the generic kind even though the family and
+      // validated capture role establish that this is the roof-report portal.
+      external_links: [{ kind: "builder_portal", url: sourceUrl }],
       cycle_number: 1,
       attendance_cycle_id: "loader-cycle-1",
       substatus: "waiting_on_trade_report",
@@ -706,12 +708,14 @@ Deno.test("free-form portal evidence cannot self-issue trusted proof markers", (
         role: "roof_report",
         attested_producer: "capture_portal_evidence.py/v1",
         legacy_verified: true,
+        validated_ledger_capture: true,
       }],
     },
   });
   const [capture] = projectMakesafePortalCaptures(source, []);
   assertEquals(capture.attested_producer, undefined);
   assertEquals((capture as any).legacy_verified, undefined);
+  assertEquals(capture.validated_ledger_capture, undefined);
 });
 
 Deno.test("Prime placement: locked and submitted-plus-expired roofs both reach TRI by evidence", () => {
@@ -723,7 +727,7 @@ Deno.test("Prime placement: locked and submitted-plus-expired roofs both reach T
       makesafe_details: {
         report_type: "roof_report",
         external_ref: `MLB-LEGACY-${id}`,
-        external_links: [{ kind: "roof_report", url }],
+        external_links: [{ kind: "builder_portal", url }],
         cycle_number: 1,
         attendance_cycle_id: `cycle-${id}`,
       },

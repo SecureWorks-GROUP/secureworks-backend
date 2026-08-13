@@ -324,22 +324,22 @@ Deno.test("a trade attestation counts as current-cycle roof evidence without a s
   assertEquals(published[0].screenshot_available, false);
 });
 
-Deno.test("KNOWN GAP: a generically-typed builder_portal link records evidence but does not satisfy M1 report-in", () => {
-  // `externalPortalRoles` in `makesafe_computed_status.ts` types a card's links
-  // by their declared `kind`, and a `builder_portal` kind is not a roof role
-  // there — so M1's roof report-in predicate is unsatisfiable on such a card
-  // whatever evidence exists. That is PRE-EXISTING and identical for the
-  // deterministic reader's screenshot capture; it is not introduced here, and
-  // widening the link typing would move M1 output on live cards, which is a
-  // separate counted change. The tick still records evidence and the control
-  // still behaves correctly, which is what this delivery is scoped to.
+Deno.test("a generically-typed roof portal binds verified capture evidence into report-in", () => {
+  const before = buildCanonicalMakesafeRows([roofCard()], {
+    portalCaptureRowsByJobId: {},
+  })[0];
+  assertEquals(before.canonical_stage, "allocated");
+  assertEquals(before.report.state, "waiting_on_trade_report");
+
   const row = buildCanonicalMakesafeRows([roofCard()], {
     portalCaptureRowsByJobId: { [JOB_ID]: [attestationRow()] },
   })[0];
   assertEquals(row.roof_report_confirmation.confirmed, true);
-  assertEquals(row.computed_status_evidence.has_current_portal_capture, false);
-  // The identical reader capture behaves the same way, which is what makes this
-  // a link-typing gap rather than an attestation gap.
+  assertEquals(row.computed_status_evidence.has_current_portal_capture, true);
+  assertEquals(row.canonical_stage, "trade_report_in");
+  assertEquals(row.report.state, "submitted");
+
+  // The deterministic reader proves the same report-in fact with a screenshot.
   const readerRow = buildCanonicalMakesafeRows([roofCard()], {
     portalCaptureRowsByJobId: {
       [JOB_ID]: [attestationRow({
@@ -355,8 +355,30 @@ Deno.test("KNOWN GAP: a generically-typed builder_portal link records evidence b
   })[0];
   assertEquals(
     readerRow.computed_status_evidence.has_current_portal_capture,
-    false,
+    true,
   );
+  assertEquals(readerRow.canonical_stage, "trade_report_in");
+  assertEquals(readerRow.report.state, "submitted");
+
+  // A qualifying current draft and READY unsent pack promote the same captured
+  // roof to Docs Ready instead of stopping at TRI.
+  const docsReady = buildCanonicalMakesafeRows([roofCard({
+    report_pack: {
+      status: "drafted",
+      review_state: "READY",
+      invoice_doc_id: "invoice-doc",
+      docket_revision_id: "docket-ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    invoice_status: "draft",
+    invoice_qualifies_as_current_draft: true,
+    has_invoice_doc: true,
+  })], {
+    portalCaptureRowsByJobId: { [JOB_ID]: [attestationRow()] },
+  })[0];
+  assertEquals(docsReady.canonical_stage, "report_ready");
+  assertEquals(docsReady.report.state, "submitted");
 });
 
 Deno.test("a card-derived capture cannot forge the attestation marker", () => {

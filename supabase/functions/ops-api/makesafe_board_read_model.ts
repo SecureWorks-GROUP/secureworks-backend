@@ -811,6 +811,10 @@ export function portalCapturesFromLedger(
       // Additive provenance for the canonical row. M1 ignores these keys.
       revision_id: row?.id || null,
       captured_at: row?.captured_at || null,
+      // Trusted only because every ledger guard above passed. The status engine
+      // uses this marker solely to recover the roof role of historical generic
+      // `builder_portal` links; free-form detail captures are stripped below.
+      validated_ledger_capture: true,
       // Set ONLY here, ONLY from a validated ledger row. Nothing derived from
       // free-form card content may carry it — see `portalCapturesFromDetail`.
       ...(attested
@@ -1129,6 +1133,7 @@ function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
         const {
           attested_producer: _dropped,
           legacy_verified: _legacyDropped,
+          validated_ledger_capture: _validatedLedgerDropped,
           ...rest
         } = item as Record<
           string,
