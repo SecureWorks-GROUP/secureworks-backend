@@ -1011,6 +1011,51 @@ Deno.test("card report tick stays done when a report document is already attache
   assertEquals(card.pack.closeout_documents.report, true);
 });
 
+Deno.test("canonical placement floors durable ready/processed report states at TRI without inventing Docs Ready", () => {
+  const readyId = "legacy-ready-report";
+  const processedId = "legacy-processed-report";
+  const rows = buildCanonicalMakesafeRows([
+    baseJob("allocated", readyId, {
+      report_status: "ready_for_reporting_skill",
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+        report_received_at: NOW,
+      },
+      report_pack: { status: "drafted", report_doc_id: null },
+      invoice_raw_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: false,
+    }),
+    baseJob("allocated", processedId, {
+      status: "completed",
+      report_status: "processed",
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+        report_received_at: NOW,
+      },
+      report_pack: { status: "drafted", report_doc_id: null },
+      invoice_raw_status: null,
+      has_report_doc: false,
+    }),
+  ], { computedAt: NOW });
+
+  assertEquals(rows.map((row) => row.declared_stage), [
+    "allocated",
+    "allocated",
+  ]);
+  assertEquals(rows.map((row) => row.canonical_stage), [
+    "trade_report_in",
+    "trade_report_in",
+  ]);
+  assertEquals(rows.map((row) => row.report.state), [
+    "ready_for_reporting_skill",
+    "processed",
+  ]);
+  assert(rows.every((row) => row.canonical_stage !== "report_ready"));
+});
+
 Deno.test("captain lock: MLB physical cards without SWMS stay Trade Report In", () => {
   for (const jobNumber of ["SWMS-261190", "SWMS-261179", "SWMS-261175"]) {
     const id = `missing-swms-${jobNumber}`;
