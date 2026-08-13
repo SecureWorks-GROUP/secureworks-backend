@@ -639,10 +639,12 @@ Deno.test("F7 writer: a partial capture the reader would trust is refused at the
     "positive control: the persisted reader row must reach the projection",
   );
 
-  // Each single missing element independently makes the reader drop the row.
+  // Each reader-owned element independently makes the reader drop the row.
+  // builder_reference is deliberately absent from this list: the deterministic
+  // writer validates canonical U4 authority before commit, and canonical U4 can
+  // legitimately be empty even when the legacy card reference is populated.
   for (
     const broken of [
-      { builder_reference: "" },
       { screenshot_object_key: null },
       { source_content_hash: "not-a-hash" },
       { attendance_cycle_id: "another-cycle" },
@@ -654,6 +656,14 @@ Deno.test("F7 writer: a partial capture the reader would trust is refused at the
       [],
     );
   }
+  assertEquals(
+    portalCapturesFromLedger(boardCard(), [{
+      ...stored,
+      builder_reference: "",
+    }]).length,
+    1,
+    "the reader must preserve the deterministic writer's canonical U4 authority",
+  );
 
   // Producer trust needs its own producer-shaped control. Changing the reader
   // producer alone would also violate the screenshot rule, so begin with a
@@ -670,6 +680,14 @@ Deno.test("F7 writer: a partial capture the reader would trust is refused at the
     portalCapturesFromLedger(boardCard(), [tradeAttestation]).length,
     1,
     "positive control: an approved trade attestation must reach the projection",
+  );
+  assertEquals(
+    portalCapturesFromLedger(boardCard(), [{
+      ...tradeAttestation,
+      builder_reference: "",
+    }]),
+    [],
+    "the trade producer still owns a non-empty legacy reference contract",
   );
   assertEquals(
     portalCapturesFromLedger(boardCard(), [{

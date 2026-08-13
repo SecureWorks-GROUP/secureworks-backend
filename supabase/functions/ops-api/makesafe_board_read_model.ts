@@ -24,6 +24,7 @@ import {
   canonicalSesPortalSourceUrl,
   isSesSha256,
   isTrustedSesPortalCaptureProducer,
+  SES_PORTAL_CAPTURE_PRODUCER,
   SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
   SES_TRADE_PORTAL_CONFIRMATION_QUESTION,
   sesPortalCaptureProducerHasScreenshot,
@@ -687,18 +688,21 @@ function portalCaptureIdentity(capture: MakesafePortalCapture): string | null {
 
 /**
  * Project only exact current-cycle portal revisions that still bind to the
- * card's typed source URL and carry the non-empty builder reference enforced
- * by the U4 record endpoint. When the base card also exposes that reference it
- * must match. The projection does not derive or move the canonical stage; it
- * supplies existing evidence to M1.
+ * card's typed source URL. Builder-reference authority is producer-specific:
+ * the deterministic writer already validates its value against canonical U4
+ * input before commit (where empty is legitimate), while the trade producer
+ * derives and records the card's non-empty legacy reference server-side. The
+ * board must not re-check a canonical U4 value against a different legacy
+ * field. The projection supplies existing evidence to the placing engine.
  *
  * Both approved producers land here (captain, 2026-08-02). They are gated
- * identically on job, cycle, role, source URL and builder reference; they
- * differ only in what proves the observation. The deterministic reader must
- * still carry a valid stored screenshot. A trade attestation carries no image —
- * its proof is the authenticated `captured_by` — so it is admitted only for the
- * one role the ruling names (roof) and is stamped `attested_producer`, which is
- * the ONLY thing that lets a screenshot-less capture count downstream.
+ * identically on job, cycle, role and source URL, with the producer-specific
+ * reference rule above. They differ only in what proves the observation. The
+ * deterministic reader must still carry a valid stored screenshot. A trade
+ * attestation carries no image — its proof is the authenticated `captured_by` —
+ * so it is admitted only for the one role the ruling names (roof) and is
+ * stamped `attested_producer`, which is the ONLY thing that lets a
+ * screenshot-less capture count downstream.
  */
 export function portalCapturesFromLedger(
   base: any,
@@ -755,7 +759,11 @@ export function portalCapturesFromLedger(
     const rowBuilderReference = String(row?.builder_reference ?? "").trim();
     const identityKey = role && url ? `${role}\n${url}` : "";
     const producer = row?.capture_producer;
+    const deterministic = producer === SES_PORTAL_CAPTURE_PRODUCER;
     const attested = producer === SES_TRADE_PORTAL_CONFIRMATION_PRODUCER;
+    const builderReferenceValid = deterministic ||
+      (attested && !!rowBuilderReference &&
+        rowBuilderReference === builderReference);
     const screenshotOk = sesPortalCaptureProducerHasScreenshot(producer)
       ? (result === "unreachable" || validLedgerScreenshot(row))
       // An attestation is roof-only, done-only, and never carries an image.
@@ -765,8 +773,7 @@ export function portalCapturesFromLedger(
       !role || !url || !expectedStatus || seen.has(identityKey) ||
       String(row?.job_id || "") !== jobId ||
       String(row?.attendance_cycle_id || "") !== attendanceCycleId ||
-      !rowBuilderReference ||
-      (builderReference && rowBuilderReference !== builderReference) ||
+      !builderReferenceValid ||
       !isTrustedSesPortalCaptureProducer(row?.capture_producer) ||
       String(row?.status || "").toLowerCase() !== expectedStatus ||
       !isSesSha256(row?.source_content_hash) ||

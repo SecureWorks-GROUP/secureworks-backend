@@ -72,7 +72,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r14-submitted-report-closeout-ready";
+  "ses-stage-engine.v2-r15-prime-and-submitted-report-in";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -784,6 +784,33 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
 
+  // A submitted SecureWorks service report is not Prime completion evidence.
+  // When a current-cycle observer revision also proves the builder delivery
+  // surface cannot be read, however, the card is no longer ordinary unfinished
+  // trade work: the report has arrived and the portal outcome cannot be
+  // recovered. That exact pair is an alternative Report In rule. It cannot fire
+  // from substatus alone or without a current-cycle portal observation.
+  if (
+    SES_PORTAL_REQUIRED_ROLES[family.family] &&
+    sesStageCurrentCycleServiceReportSubmitted(input)
+  ) {
+    const portal = sesStagePortalReportIn(input, family.family);
+    if (
+      !portal.satisfied &&
+      Object.values(portal.observations).includes("cannot_observe")
+    ) {
+      return {
+        ...base,
+        stage: "trade_report_in",
+        reasons: [
+          "current-cycle SecureWorks report submitted and the required builder portal has a current cannot-observe capture",
+        ],
+        missing: [],
+        conflicts,
+      };
+    }
+  }
+
   const evidence = deriveSesStageEvidence(input, family);
   return {
     ...base,
@@ -794,17 +821,23 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
   };
 }
 
-/** Current-cycle submitted report evidence for a physical make-safe. */
-function sesStagePhysicalReportIn(
+function sesStageCurrentCycleServiceReportSubmitted(
   input: SesStageV2Input,
-): { satisfied: boolean; missing: string[] } {
+): boolean {
   const cycle = Number(input.detail?.cycle_number ?? 1);
-  const submitted = (input.evidence?.serviceReports || []).some((report) =>
+  return (input.evidence?.serviceReports || []).some((report) =>
     Number(report?.cycle_number ?? 1) === cycle &&
     ["submitted", "approved"].includes(
       String(report?.status || "").toLowerCase(),
     )
   );
+}
+
+/** Current-cycle submitted report evidence for a physical make-safe. */
+function sesStagePhysicalReportIn(
+  input: SesStageV2Input,
+): { satisfied: boolean; missing: string[] } {
+  const submitted = sesStageCurrentCycleServiceReportSubmitted(input);
   return {
     satisfied: submitted,
     missing: submitted ? [] : ["current-cycle submitted service report"],

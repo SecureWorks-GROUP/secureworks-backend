@@ -464,7 +464,7 @@ Deno.test("F7 newest exact ledger truth suppresses an older embedded detail capt
   );
 });
 
-Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing reference, and missing screenshot", () => {
+Deno.test("F7 board capture projection follows producer-owned reference authority and still rejects bad evidence", () => {
   const sourceUrl = "https://www.primeeco.tech/share/portal-fixture";
   const source = baseJob("allocated", "portal-invalid", {
     external_ref: "MLB-PORTAL-2",
@@ -524,10 +524,37 @@ Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing r
     portalCapturesFromLedger(sourceWithoutReference, [validShape]).length,
     1,
   );
+  // The deterministic writer validates builder_reference against the canonical
+  // U4 input before committing. That value can differ from the card's legacy
+  // makesafe_job_details.external_ref (Gwelup) or legitimately be empty
+  // (Kardinya). The board must not re-validate it against a different authority.
   assertEquals(
-    portalCapturesFromLedger(sourceWithoutReference, [{
+    portalCapturesFromLedger(source, [{
+      ...validShape,
+      builder_reference: "MLB-CANONICAL-U4",
+    }]).length,
+    1,
+  );
+  assertEquals(
+    portalCapturesFromLedger(source, [{
       ...validShape,
       builder_reference: "",
+    }]).length,
+    1,
+  );
+  // The trade producer derives the legacy card reference server-side and must
+  // still bind to it exactly; only the deterministic U4 writer owns the
+  // canonical/empty-reference exception.
+  assertEquals(
+    portalCapturesFromLedger(source, [{
+      ...validShape,
+      builder_reference: "MLB-WRONG-TRADE-REF",
+      capture_producer: "trade_portal_confirmation/v1",
+      captured_by: "trade-1",
+      screenshot_object_key: null,
+      screenshot_media_type: null,
+      screenshot_content_hash: null,
+      screenshot_size_bytes: null,
     }]),
     [],
   );
@@ -538,6 +565,77 @@ Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing r
     }]),
     [],
   );
+});
+
+Deno.test("Prime placement: locked and submitted-plus-expired roofs both reach TRI by evidence", () => {
+  const lockedUrl = "https://www.primeeco.tech/share/locked-roof";
+  const expiredUrl = "https://www.primeeco.tech/share/expired-roof";
+  const roof = (id: string, url: string) =>
+    baseJob("allocated", id, {
+      metadata: { makesafe_job_family: "roof_report" },
+      makesafe_details: {
+        report_type: "roof_report",
+        external_ref: `MLB-LEGACY-${id}`,
+        external_links: [{ kind: "roof_report", url }],
+        cycle_number: 1,
+        attendance_cycle_id: `cycle-${id}`,
+      },
+      attendance_cycle_id: `cycle-${id}`,
+      report: SUBMITTED_REPORT,
+    });
+  const capture = (
+    id: string,
+    url: string,
+    result: "done" | "unreachable",
+  ) => ({
+    id: `capture-${id}`,
+    job_id: id,
+    attendance_cycle_id: `cycle-${id}`,
+    role: "roof_report",
+    status: result === "done" ? "verified" : "rejected",
+    makesafe_fact_version: 1,
+    capture_result: result,
+    source_url: url,
+    source_content_hash: `sha256:${"7".repeat(64)}`,
+    // Canonical U4 authority deliberately differs from the legacy detail ref;
+    // the expired card models U4's legitimate empty-reference shape.
+    builder_reference: result === "done" ? "MLB-CANONICAL" : "",
+    captured_at: NOW,
+    captured_by: "capture-runner",
+    capture_producer: "capture_portal_evidence.py/v1",
+    signal: result === "done"
+      ? "form locked/submitted"
+      : "builder link is expired or no longer active",
+    screenshot_object_key: result === "done"
+      ? "makesafe-docket-artifacts/portal-captures/locked.png"
+      : null,
+    screenshot_media_type: result === "done" ? "image/png" : null,
+    screenshot_content_hash: result === "done"
+      ? `sha256:${"8".repeat(64)}`
+      : null,
+    screenshot_size_bytes: result === "done" ? 4096 : null,
+  });
+
+  const rows = buildCanonicalMakesafeRows([
+    roof("locked-roof", lockedUrl),
+    roof("expired-roof", expiredUrl),
+  ], {
+    portalCaptureRowsByJobId: {
+      "locked-roof": [capture("locked-roof", lockedUrl, "done")],
+      "expired-roof": [capture(
+        "expired-roof",
+        expiredUrl,
+        "unreachable",
+      )],
+    },
+    computedAt: NOW,
+  });
+
+  assertEquals(rows.map((row) => row.canonical_stage), [
+    "trade_report_in",
+    "trade_report_in",
+  ]);
+  assertEquals(rows[1].derived_stage_v2_conflicts, []);
 });
 
 Deno.test("F7 canonical board loader executes the capture-ledger handoff", async () => {
