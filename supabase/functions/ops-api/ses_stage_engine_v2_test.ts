@@ -1583,6 +1583,43 @@ Deno.test("docs ready: only the qualifying DRAFT path is reviewable", () => {
   }
 });
 
+Deno.test("docs ready: a bound current AUTHORISED invoice is reviewable without a second mint", () => {
+  const evidence = {
+    packState: "READY",
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: true },
+    swmsRequired: true,
+    invoiceStatus: "AUTHORISED",
+    invoiceQualifiesAsCurrentDraft: false,
+    invoiceQualifiesAsCurrentCloseout: true,
+    packSent: false,
+    pack: {
+      status: "drafted",
+      report_doc_id: "report-doc",
+      invoice_doc_id: "invoice-doc-existing",
+      swms_doc_id: "swms-doc",
+    },
+  };
+
+  assertEquals(
+    deriveSesStageV2(input({ evidence })).stage,
+    "report_ready",
+  );
+
+  assert(
+    deriveSesStageV2(input({
+      evidence: {
+        ...evidence,
+        documents: { ...evidence.documents, invoice: false },
+        pack: { ...evidence.pack, invoice_doc_id: null },
+      },
+    })).stage !== "report_ready",
+    "a raised invoice without its bound PDF is not one click from sending",
+  );
+});
+
 Deno.test("docs ready: qualifying DRAFT preserves every physical safety fence", () => {
   const complete = {
     assignments: [{ id: "a1" }],

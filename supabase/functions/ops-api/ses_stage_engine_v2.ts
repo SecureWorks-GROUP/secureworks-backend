@@ -931,14 +931,14 @@ export interface SesStageV2OverlayCandidate {
  * predicate exactly — same terminal-display guard, same terminal-job-state
  * guard, same strict source equality — because the point of the measurement is
  * to expose which captain decisions would unbind, not to make more of them bind.
- * Relaxing any of these guards (including the report_ready draft-invoice
+ * Relaxing any of these guards (including the report_ready invoice-closeout
  * prerequisite) would understate that risk.
  */
 export function sesStageV2OverlayCandidate(
   derivedStage: SesStageV2Stage,
   application: SesStageOverlayApplication | null | undefined,
   rawJobState: unknown,
-  invoiceQualifiesAsCurrentDraft = false,
+  invoiceCloseoutSatisfied = false,
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
   const decisionKind = sesOverlayDecisionKind(application);
@@ -948,7 +948,7 @@ export function sesStageV2OverlayCandidate(
     !!application &&
     String(application.source_status || "").toLowerCase() === stage &&
     (String(application.after_status || "").toLowerCase() !== "report_ready" ||
-      invoiceQualifiesAsCurrentDraft);
+      invoiceCloseoutSatisfied);
   return {
     stage: binds
       ? String(application?.after_status || stage).toLowerCase()

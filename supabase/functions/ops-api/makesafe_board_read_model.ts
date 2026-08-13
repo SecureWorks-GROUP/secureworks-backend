@@ -1242,6 +1242,12 @@ export function buildCanonicalMakesafeRows(
     const application = extras.statusApplicationsByJobId?.[base?.id] || null;
     const invoiceQualifiesAsCurrentDraft =
       base?.invoice_qualifies_as_current_draft === true;
+    const invoiceQualifiesAsCurrentCloseout =
+      base?.invoice_qualifies_as_current_closeout === true ||
+      invoiceQualifiesAsCurrentDraft;
+    const invoiceCloseoutSatisfied = invoiceQualifiesAsCurrentDraft ||
+      (invoiceQualifiesAsCurrentCloseout &&
+        (base?.has_invoice_doc === true || !!pack?.invoice_doc_id));
     // R8 — an overlay row declares what it is allowed to do. A row with no
     // `decision_kind` is a legacy display override, which is every row in the
     // ledger today, so this reads as `display_override` and the binding below
@@ -1271,6 +1277,7 @@ export function buildCanonicalMakesafeRows(
         pack,
         invoiceStatus,
         invoiceQualifiesAsCurrentDraft,
+        invoiceQualifiesAsCurrentCloseout,
         invoiceDate: base?.invoice_date || null,
         invoiceCreatedAt: base?.invoice_created_at || null,
         packSent,
@@ -1311,7 +1318,7 @@ export function buildCanonicalMakesafeRows(
       String(application.source_status || "").toLowerCase() === derivedStage &&
       (String(application.after_status || "").toLowerCase() !==
           "report_ready" ||
-        invoiceQualifiesAsCurrentDraft);
+        invoiceCloseoutSatisfied);
     // An attestation attaches PROVENANCE only, and only when it genuinely
     // describes where the card already is. It never changes `displayStage`.
     const attestationAttaches = decisionKind === "stage_attestation" &&
@@ -1385,8 +1392,7 @@ export function buildCanonicalMakesafeRows(
         // later fact that a report document has been attached.
         report: reportIn.satisfied || base?.has_report_doc === true ||
           !!pack?.report_doc_id,
-        invoice: invoiceQualifiesAsCurrentDraft ||
-          base?.has_invoice_doc === true || !!pack?.invoice_doc_id,
+        invoice: invoiceCloseoutSatisfied,
         swms: base?.has_swms_doc === true || !!pack?.swms_doc_id,
       },
     };
@@ -1505,7 +1511,7 @@ export function buildCanonicalMakesafeRows(
       stageV2.stage,
       application,
       base?.status,
-      invoiceQualifiesAsCurrentDraft,
+      invoiceCloseoutSatisfied,
     );
     const roofEligibility = sesRoofConfirmationEligibility(
       base,

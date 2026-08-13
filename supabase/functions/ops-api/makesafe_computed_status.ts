@@ -105,6 +105,11 @@ export interface MakesafeStatusEvidence {
   invoiceStatus?: string | null;
   /** Shared exact-job/type/status/reference prerequisite from the board loader. */
   invoiceQualifiesAsCurrentDraft?: boolean;
+  /**
+   * Exact-card/current-cycle invoice identity for any non-void lifecycle.
+   * Raised invoices only satisfy Docs Ready when their PDF is also bound.
+   */
+  invoiceQualifiesAsCurrentCloseout?: boolean;
   invoiceDate?: string | null;
   invoiceCreatedAt?: string | null;
   packSent?: boolean;
@@ -385,7 +390,10 @@ export function docsReady(input: MakesafeStatusInput): boolean {
   ];
   const qualifiesDraft =
     input.evidence?.invoiceQualifiesAsCurrentDraft === true;
-  if (!qualifiesDraft) return false;
+  const qualifiesBoundExistingInvoice =
+    input.evidence?.invoiceQualifiesAsCurrentCloseout === true &&
+    input.evidence?.documents?.invoice === true;
+  if (!qualifiesDraft && !qualifiesBoundExistingInvoice) return false;
 
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
