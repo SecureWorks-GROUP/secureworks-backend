@@ -151,6 +151,9 @@ vault_sync_sw_api_key # probe=source-only
 # draft revision, so deploy recognition stays source-only; the documented
 # production canary always supplies dry_run=true.
 prepare_ses_docket_revision # probe=source-only
+# Skill-facing current-cycle SWMS generator/attach. A valid call writes the
+# typed document and main-pack pointer, so deploy recognition is source-only.
+generate_attach_makesafe_swms # probe=source-only
 bind_current_cycle_curated_makesafe_report # probe=source-only
 list_ses_docs_ready_reviews # probe=source-only
 get_ses_reviewable_pack # probe=source-only

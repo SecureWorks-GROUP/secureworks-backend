@@ -244,6 +244,11 @@ import {
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
 import {
+  generateAttachMakesafeSwms,
+  normalizeSesSwmsAttachRequest,
+  SesSwmsAttachError,
+} from './ses_swms_attach_action.ts'
+import {
   notifySesDocsReadySms,
   SES_DOCS_READY_SMS_DEFAULT_TO,
 } from './ses_docs_ready_sms.ts'
@@ -4182,6 +4187,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // docket revision/artifact ledger when dry_run=false; it cannot create,
       // authorise or send an invoice and cannot mutate job/board state.
       'prepare_ses_docket_revision',
+      // Skill-facing SWMS generation/attach seam. Reuses the sealed U4
+      // planner/renderer, writes one typed current-cycle document and binds the
+      // main pack. It has no invoice, board-stage, email or SMS capability.
+      'generate_attach_makesafe_swms',
       // Screenshot-backed, append-only portal evidence. The handler preserves
       // producer-trust, PNG and server-computed content-hash validation.
       'record_ses_portal_capture_evidence',
@@ -5870,6 +5879,77 @@ if (import.meta.main) serve(async (req: Request) => {
         } catch (error) {
           if (error instanceof SesAssemblerAdapterError) {
             return json({ error: error.message, code: error.code }, error.status)
+          }
+          throw error
+        }
+      }
+      case 'generate_attach_makesafe_swms': {
+        const swmsIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!swmsIsPrivileged) {
+          return json({
+            error: 'forbidden: generate_attach_makesafe_swms requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'generate_attach_makesafe_swms requires POST' }, 405)
+        }
+        try {
+          const actor = authMode === 'routine'
+            ? 'makesafe-reporting-routine'
+            : authUser?.email || `ops-api:${authMode}`
+          const runtime = createSesAssemblerRuntimeDependencies(client, {
+            org_id: DEFAULT_ORG_ID,
+            created_by: actor,
+          })
+          return json(await generateAttachMakesafeSwms(
+            normalizeSesSwmsAttachRequest(body),
+            {
+              resolveInput: runtime.resolveInput,
+              renderSwms: runtime.renderSwmsArtifact,
+              attachDocument: (document, trustedFacts) =>
+                attachMakesafeDocument(client, document, trustedFacts),
+              ensurePack: (jobId, packKind) =>
+                _ensurePackRowStrict(client, jobId, packKind),
+              bindPackSwms: (jobId, packKind, documentId) =>
+                _patchPackStrict(client, jobId, packKind, {
+                  swms_doc_id: documentId,
+                }),
+              readBack: async (jobId, packKind, documentId) => {
+                const [documentResult, packResult] = await Promise.all([
+                  client.from('job_documents')
+                    .select('id,type,attendance_cycle_id,cycle_attribution')
+                    .eq('id', documentId).eq('job_id', jobId).maybeSingle(),
+                  client.from('makesafe_report_packs')
+                    .select('swms_doc_id,status')
+                    .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle(),
+                ])
+                if (documentResult.error) {
+                  throw new ApiError('generated SWMS document read-back failed: ' + documentResult.error.message, 500)
+                }
+                if (packResult.error) {
+                  throw new ApiError('generated SWMS pack read-back failed: ' + packResult.error.message, 500)
+                }
+                return {
+                  document_id: documentResult.data?.id || null,
+                  document_type: documentResult.data?.type || null,
+                  attendance_cycle_id: documentResult.data?.attendance_cycle_id || null,
+                  cycle_attribution: documentResult.data?.cycle_attribution || null,
+                  pack_swms_doc_id: packResult.data?.swms_doc_id || null,
+                  pack_status: packResult.data?.status || null,
+                }
+              },
+              actor,
+            },
+          ))
+        } catch (error) {
+          if (error instanceof SesSwmsAttachError) {
+            return json({
+              error: error.message,
+              code: error.code,
+              facts: error.facts,
+            }, error.status)
           }
           throw error
         }
