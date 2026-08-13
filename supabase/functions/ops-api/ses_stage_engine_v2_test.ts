@@ -1612,6 +1612,8 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
       assignments: [{ id: "a1" }],
       portalCaptures: [ACCEPTED],
       packState: "READY",
+      pack: { status: "drafted", invoice_doc_id: "invoice-doc" },
+      documents: { invoice: true },
       invoiceStatus: "DRAFT",
       invoiceQualifiesAsCurrentDraft: true,
     },
@@ -1628,6 +1630,31 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
     },
   });
   assert(deriveSesStageV2(unproved).stage !== "report_ready");
+});
+
+Deno.test("docs ready: a WO-only roof stub is not a sendable pack", () => {
+  // The portal report is complete and the invoice lifecycle qualifies, but the
+  // READY pack contains no invoice document. The roof release is invoice-only,
+  // so this shape cannot be sent by the Docs Ready button.
+  const workOrderOnly = portalInput([ACCEPTED], {
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: [ACCEPTED],
+      packState: "READY",
+      pack: { status: "drafted", invoice_doc_id: null },
+      documents: { invoice: false },
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
+    },
+  });
+
+  const gate = sesStageDocsReady(
+    workOrderOnly,
+    resolveSesStageV2Family(workOrderOnly),
+  );
+  assertEquals(gate.satisfied, false);
+  assert(gate.missing.includes("the invoice document"));
+  assert(deriveSesStageV2(workOrderOnly).stage !== "report_ready");
 });
 
 Deno.test("docs ready: an already-sent pack is not one click from sending", () => {
