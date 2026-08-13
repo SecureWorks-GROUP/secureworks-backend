@@ -3053,6 +3053,20 @@ different sender pass an allowlisted override explicitly — e.g. make-safe
 notifies pass +61489267776 Ops via makesafe_notify_settings.from_number. Tests:
 _shared/sms_from_number_test.ts, ghl-proxy/sms_sender_default_test.ts.
 
+## ops-api Role Gates: One Staff Predicate, 401 vs 403
+
+Signed-in browser callers are classified by ONE staff-operator predicate:
+_opsApiCallerIsStaffOperator / _opsApiStaffOperatorRole in
+supabase/functions/ops-api/index.ts (admin/owner/ops_manager — the exact set
+the front-door gate admits). Any per-action operator check must reuse it; a
+hand-rolled admin-only literal re-classifies an admitted operator as a trade
+deeper in the dispatch (the SWF-261098 add_note lockout). Deliberately-strict
+admin/owner gates (money, comms, credential, recovery, batch surfaces) stay
+literal on purpose — the audit table lives in PR #680/#681. Status codes:
+401 is reserved for user_jwt_required (no/invalid session — trade.html
+force-logs-out on any 401); a role refusal must be 403 operator_access_required.
+Tests: ops_api_operator_auth_test.ts.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
