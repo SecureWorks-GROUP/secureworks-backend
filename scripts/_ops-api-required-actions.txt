@@ -213,6 +213,9 @@ mark_makesafe_portal_report_done
 confirm_roof_report_done      # probe=jwt-fail-closed
 # W2-C portal-truth honest fallback (this PR):
 makesafe_portal_recheck_queue
+# Recurring Prime sweep feed. Production probing needs OPS_AGENT_SERVER_KEY;
+# the deploy smoke intentionally carries neither that key nor a user session.
+makesafe_prime_capture_sweep # probe=source-only
 # Bare call stamps a recheck marker on up to 200 makesafe_job_details rows.
 makesafe_portal_recheck_enqueue # probe=source-only
 

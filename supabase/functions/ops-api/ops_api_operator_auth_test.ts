@@ -188,13 +188,14 @@ Deno.test("unset or colliding OPS_AGENT_SERVER_KEY never grants agent_read", () 
   }
 });
 
-Deno.test("agent read allow-list contains only the five reviewed read actions", () => {
+Deno.test("agent read allow-list contains only the six reviewed read actions", () => {
   assertEquals([...AGENT_READ_ALLOWED_ACTIONS], [
     "makesafe_board",
     "makesafe_pipeline",
     "makesafe_pipeline_items",
     "makesafe_audit",
     "intake_health",
+    "makesafe_prime_capture_sweep",
   ]);
 });
 
