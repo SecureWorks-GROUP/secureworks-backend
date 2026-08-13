@@ -358,6 +358,19 @@ export function reportInEvidence(input: MakesafeStatusInput): {
   return { satisfied: missing.length === 0, missing };
 }
 
+/**
+ * Physical Docs Ready accepts the canonical current-cycle report predicate as
+ * a legacy fallback when a fully drafted pack missed its report_doc_id bind.
+ * A real typed/bound report document remains sufficient on its own.
+ */
+export function physicalReportCloseoutSatisfied(
+  input: MakesafeStatusInput,
+): boolean {
+  return !!input.evidence?.pack?.report_doc_id ||
+    input.evidence?.documents?.report === true ||
+    reportInEvidence(input).satisfied;
+}
+
 export function docsReady(input: MakesafeStatusInput): boolean {
   // Docs Ready is the pre-authorisation review queue. A qualifying current
   // Xero DRAFT is the money-side prerequisite; an AUTHORISED/SUBMITTED/PAID
@@ -387,7 +400,10 @@ export function docsReady(input: MakesafeStatusInput): boolean {
   // it. The DRAFT itself is the invoice closeout fact; it need not also be
   // duplicated into job_documents before the card can be reviewed.
   if (!pack || packSentStatuses.includes(packStatus)) return false;
-  if (kind === "physical_makesafe" && !pack.report_doc_id) return false;
+  if (
+    kind === "physical_makesafe" &&
+    !physicalReportCloseoutSatisfied(input)
+  ) return false;
   if (input.evidence?.swmsRequired && !pack.swms_doc_id) return false;
   // A legacy pack row is accepted only when the underlying report evidence also
   // satisfies the approved job-type predicate. A malformed artifact row cannot

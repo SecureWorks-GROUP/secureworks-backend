@@ -344,15 +344,26 @@ Deno.test("named-branch preservation: every pre-existing physical Docs Ready con
   } as any;
   assertEquals(deriveSesStageV2(complete).stage, "report_ready");
 
+  const submittedReportWithoutBoundDocument = structuredClone(complete);
+  submittedReportWithoutBoundDocument.evidence.packState = null;
+  submittedReportWithoutBoundDocument.evidence.pack.report_doc_id = null;
+  submittedReportWithoutBoundDocument.evidence.documents.report = false;
+  assertEquals(docsReady(submittedReportWithoutBoundDocument), true);
+  assertEquals(
+    deriveSesStageV2(submittedReportWithoutBoundDocument).stage,
+    "report_ready",
+  );
+
   const mutations: Array<[string, (input: any) => void]> = [
     ["qualifying current DRAFT", (input) => {
       input.evidence.invoiceQualifiesAsCurrentDraft = false;
     }],
     ["READY pack state", (input) => input.evidence.packState = "U4_BLOCKED"],
     ["unsent pack", (input) => input.evidence.pack.status = "sent"],
-    ["report document", (input) => {
+    ["submitted report", (input) => {
       input.evidence.pack.report_doc_id = null;
       input.evidence.documents.report = false;
+      input.evidence.serviceReports = [];
     }],
     ["required SWMS", (input) => {
       input.evidence.pack.swms_doc_id = null;

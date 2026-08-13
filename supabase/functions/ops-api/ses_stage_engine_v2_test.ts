@@ -1430,13 +1430,24 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     "report_ready",
   );
   // The current Xero DRAFT is the invoice fact; it does not also need a
-  // duplicated job_documents invoice row. Report and required SWMS remain
-  // independent physical artifacts.
-  for (const drop of ["report", "swms"]) {
-    const documents = { ...base.documents, [drop]: false };
-    const r = deriveSesStageV2(input({ evidence: { ...base, documents } }));
-    assert(r.stage !== "report_ready", `${drop} must be required`);
-  }
+  // duplicated job_documents invoice row. A submitted current-cycle report
+  // with the photo floor is the canonical report fallback; required SWMS stays
+  // independent.
+  const missingReport = deriveSesStageV2(input({
+    evidence: {
+      ...base,
+      serviceReports: [],
+      documents: { ...base.documents, report: false },
+    },
+  }));
+  assert(missingReport.stage !== "report_ready", "report must be required");
+  const missingSwms = deriveSesStageV2(input({
+    evidence: {
+      ...base,
+      documents: { ...base.documents, swms: false },
+    },
+  }));
+  assert(missingSwms.stage !== "report_ready", "swms must be required");
   assertEquals(
     deriveSesStageV2(input({
       evidence: {
@@ -1586,10 +1597,11 @@ Deno.test("docs ready: qualifying DRAFT preserves every physical safety fence", 
       packSent: true,
       pack: { ...readyPack, status: "sent" },
     }],
-    ["missing report document", {
+    ["missing submitted report", {
       ...readyIssued,
       documents: { ...complete.documents, report: false },
       pack: { ...readyPack, report_doc_id: null },
+      serviceReports: [],
     }],
     ["missing required SWMS", {
       ...readyIssued,
