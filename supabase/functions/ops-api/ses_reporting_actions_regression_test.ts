@@ -14,6 +14,7 @@ import {
   querySesReviewCockpitAction,
   resolveDocketRoutes,
   SesActionError,
+  sesDocketReleaseCaveats,
   signOffSesDocketAction,
 } from "./ses_reporting_actions.ts";
 import {
@@ -27,6 +28,36 @@ import {
   MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER,
   makesafeRendererAuthorityVersion,
 } from "./makesafe_report_renderer_authority.ts";
+
+Deno.test("persisted named-card caveats remain release holds outside the hard blocker column", () => {
+  const caveats = sesDocketReleaseCaveats({
+    blockers: [],
+    review_spec: {
+      cards: [{
+        review_assumption_codes: [
+          "canonical_draft_pack_output_missing",
+          "canonical_draft_pack_output_incomplete",
+          "curated_source_missing",
+          "independent_source_kind_missing",
+        ],
+        review_assumptions: [
+          "No Maverick DraftPack was supplied.",
+          "The Maverick DraftPack is incomplete.",
+          "No independent curated source is bound.",
+          "The persisted artifact has no independent source kind.",
+        ],
+      }],
+    },
+  });
+
+  assertEquals(caveats.map((caveat) => caveat.code), [
+    "canonical_draft_pack_output_missing",
+    "canonical_draft_pack_output_incomplete",
+    "curated_source_missing",
+    "independent_source_kind_missing",
+  ]);
+  assertEquals(caveats.every((caveat) => caveat.state === "refused"), true);
+});
 
 async function rawSha256(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
@@ -1064,6 +1095,9 @@ Deno.test(
 function roofPortalCockpitClient(
   draftBuilderReportEmailState: string,
   extraRows: Record<string, unknown> = {},
+  reviewSpec: Record<string, unknown> = {
+    cards: [{ family: "ordinary_roof_portal" }],
+  },
 ): any {
   const rows: Record<string, unknown> = {
     ...extraRows,
@@ -1092,7 +1126,7 @@ function roofPortalCockpitClient(
         },
       },
       blockers: [],
-      review_spec: { cards: [{ family: "ordinary_roof_portal" }] },
+      review_spec: reviewSpec,
       email_drafts: {
         INVOICE_EMAIL_DRAFT:
           "To: makesafes@builder.example\nSubject: Invoice\nAttachments: invoice-hash\n\nBody",
@@ -1184,6 +1218,36 @@ Deno.test("cockpit still demands the report email when the manifest does not dec
   );
   assertEquals(Boolean(held), true);
   assertEquals(cockpit.status, "HOLD");
+});
+
+Deno.test("named-card review caveats keep SEND IT held after Docs Ready persistence", async () => {
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient(
+      "not_applicable",
+      {},
+      {
+        cards: [{
+          family: "ordinary_roof_portal",
+          review_assumption_codes: [
+            "canonical_draft_pack_output_missing",
+          ],
+          review_assumptions: [
+            "No Maverick DraftPack was supplied for this card.",
+          ],
+        }],
+      },
+    ),
+    "job-fixture",
+  );
+
+  assertEquals(cockpit.status, "HOLD");
+  assertEquals(cockpit.controls.send_it.enabled, false);
+  assertEquals(
+    cockpit.verdict.blockers.some((blocker) =>
+      blocker.code === "canonical_draft_pack_output_missing"
+    ),
+    true,
+  );
 });
 
 Deno.test("cockpit response converts missing independent report proof into a visible HOLD", async () => {
