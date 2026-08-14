@@ -2579,13 +2579,17 @@ export async function listSesDocsReadyReviewsAction(
   };
 }
 
+export interface SesReviewablePackDeps {
+  fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
+  /** Test/composition seam only; HTTP production always uses the strict gate. */
+  assertWorkflowContract?: SesWorkflowReleaseContractGate;
+}
+
 export async function getSesReviewablePackAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
   docketRevisionId: string,
-  deps: {
-    fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
-  } = {},
+  deps: SesReviewablePackDeps = {},
 ) {
   await requireSesDocsReadyViewer(client, auth);
   if (!docketRevisionId) {
@@ -2618,6 +2622,9 @@ export async function getSesReviewablePackAction(
       ),
     );
   }
+  await workflowReleaseContractGate(deps.assertWorkflowContract)([
+    sesWorkflowContractDocketFromPersistedRevision(docket),
+  ]);
   const reviewManifest = object(object(docket.envelope).v2);
   const reviewFamily = String(
     object(reviewManifest.classification).family || "",
@@ -2908,6 +2915,7 @@ export async function signOffSesDocketAction(
     docket_revision_id: string;
     expected_output_content_hash: string;
   },
+  deps: SesReviewablePackDeps = {},
 ) {
   await requireSesDocsReadySigner(client, auth);
   if (
@@ -2944,6 +2952,7 @@ export async function signOffSesDocketAction(
     client,
     auth,
     args.docket_revision_id,
+    deps,
   );
   const sourceRefusal = displayedPack.blockers.find((blocker) =>
     blocker.code === "curated_source_missing"
@@ -5640,6 +5649,37 @@ function workflowReleaseContractGate(
   return override || assertSesWorkflowReleaseContractForDockets;
 }
 
+/**
+ * Normalize the persisted envelope coordinate once for every inspect/approval
+ * gate. Generic artifact or WO presence is never promoted here; only the
+ * typed deliverables persisted into the exact docket count as active.
+ */
+export function sesWorkflowContractDocketFromPersistedRevision(
+  docket: Record<string, any>,
+): SesCockpitDocket {
+  const manifest = object(object(docket.envelope).v2);
+  const classification = object(manifest.classification);
+  const workflowContract = object(classification.workflow_contract);
+  const requiredDeliverableIds = Array.isArray(
+      classification.required_deliverable_ids,
+    )
+    ? classification.required_deliverable_ids
+    : [];
+  return {
+    job_id: String(docket.job_id || ""),
+    clean_input: {
+      family: String(classification.family || ""),
+      builder_key: String(classification.builder_key || "").trim() || null,
+      routing_rule: String(classification.routing_rule || "").trim() || null,
+      workflow_contract_variant_id:
+        String(workflowContract.variant_id || "").trim() || null,
+      workflow_contract_hash:
+        String(workflowContract.canonical_contract_hash || "").trim() || null,
+      deliverable_active: requiredDeliverableIds.length > 0,
+    } as SesCleanInput,
+  } as SesCockpitDocket;
+}
+
 async function loadSesWorkflowContractDockets(
   client: SesSupabaseClient,
   members: Array<Record<string, any>>,
@@ -5652,28 +5692,10 @@ async function loadSesWorkflowContractDockets(
         .maybeSingle(),
       "A release member's exact workflow-contract docket no longer exists.",
     );
-    const manifest = object(object(docket.envelope).v2);
-    const classification = object(manifest.classification);
-    const workflowContract = object(classification.workflow_contract);
-    const requiredDeliverableIds = Array.isArray(
-        classification.required_deliverable_ids,
-      )
-      ? classification.required_deliverable_ids
-      : [];
-    return {
-      job_id: String(member.job_id || ""),
-      clean_input: {
-        family: String(classification.family || ""),
-        builder_key: String(classification.builder_key || "").trim() || null,
-        routing_rule: String(classification.routing_rule || "").trim() || null,
-        workflow_contract_variant_id:
-          String(workflowContract.variant_id || "").trim() || null,
-        workflow_contract_hash:
-          String(workflowContract.canonical_contract_hash || "").trim() ||
-          null,
-        deliverable_active: requiredDeliverableIds.length > 0,
-      } as SesCleanInput,
-    } as SesCockpitDocket;
+    return sesWorkflowContractDocketFromPersistedRevision({
+      ...docket,
+      job_id: String(member.job_id || docket.job_id || ""),
+    });
   }));
 }
 

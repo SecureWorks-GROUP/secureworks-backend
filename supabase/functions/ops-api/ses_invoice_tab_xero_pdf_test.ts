@@ -8,13 +8,25 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  getSesReviewablePackAction,
+  getSesReviewablePackAction as getSesReviewablePackActionStrict,
   querySesReviewCockpitAction,
   resetSesDraftPdfFetchBackoff,
   resolveSesBoundDraftInvoicePdfArtifact,
   storeSesXeroInvoicePdfBytes,
 } from "./ses_reporting_actions.ts";
 import { sesSha256Bytes } from "./ses_docket_envelope.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
+
+function getSesReviewablePackAction(
+  ...args: Parameters<typeof getSesReviewablePackActionStrict>
+) {
+  const [client, auth, docketRevisionId, deps] = args;
+  return getSesReviewablePackActionStrict(client, auth, docketRevisionId, {
+    ...deps,
+    assertWorkflowContract: deps?.assertWorkflowContract ||
+      (async () => SES_WORKFLOW_CONTRACT_CANONICAL_HASH),
+  });
+}
 
 const JOB_ID = "00000000-0000-4000-8000-0000000000b1";
 const DOCKET_ID = "00000000-0000-4000-8000-0000000000d1";
