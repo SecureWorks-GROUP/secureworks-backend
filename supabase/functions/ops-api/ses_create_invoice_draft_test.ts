@@ -11,6 +11,7 @@ import {
 import {
   createSesInvoiceDraftAction as createSesInvoiceDraftActionRaw,
   executeSesInvoiceRevisionAction as executeSesInvoiceRevisionActionRaw,
+  loadSesCockpitDocket,
   SesActionError,
   type SesXeroGateway,
 } from "./ses_reporting_actions.ts";
@@ -19,6 +20,7 @@ import { resolveExistingInvoice } from "./makesafe_send_pack.ts";
 const ORG_ID = "00000000-0000-4000-8000-000000000099";
 const JOB_ID = "00000000-0000-4000-8000-000000000001";
 const OBLIGATION_ID = "00000000-0000-4000-8000-0000000000aa";
+const DOCKET_ID = "00000000-0000-4000-8000-0000000000dd";
 const TEST_WORKFLOW_HASH = `sha256:${"f".repeat(64)}`;
 const createSesInvoiceDraftAction: typeof createSesInvoiceDraftActionRaw = (
   client,
@@ -29,6 +31,11 @@ const createSesInvoiceDraftAction: typeof createSesInvoiceDraftActionRaw = (
 ) =>
   createSesInvoiceDraftActionRaw(client, auth, args, gateway, {
     ...deps,
+    loadWorkflowDocketByRevision: deps.loadWorkflowDocketByRevision ||
+      (async (_client, jobId, docketRevisionId) => ({
+        job_id: jobId,
+        id: docketRevisionId,
+      } as never)),
     assertWorkflowReleaseContract: async () => TEST_WORKFLOW_HASH,
   });
 const executeSesInvoiceRevisionAction:
@@ -78,6 +85,7 @@ function revisionRow(overrides: Record<string, unknown> = {}) {
     id: OBLIGATION_ID,
     obligation_id: "obligation-1",
     job_id: JOB_ID,
+    docket_revision_id: DOCKET_ID,
     state: "proposed",
     pricing_disposition: "priced_from_canon",
     blockers: [],
@@ -284,6 +292,104 @@ Deno.test("A: create_ses_invoice_draft mints DRAFT with api_key and no approval"
     String(result.draft_pdf?.object_key || ""),
     "xero-invoice-pdfs/",
   );
+});
+
+Deno.test("AC19: DRAFT mint gates the obligation's exact docket coordinate", async () => {
+  const exactDocketRevisionId = "docket-obligation-exact";
+  const loaded: Array<{ job_id: string; docket_revision_id: string }> = [];
+  const gateway = draftGateway();
+  const client = mintClient({
+    revision: revisionRow({ docket_revision_id: exactDocketRevisionId }),
+  });
+
+  await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "skill@test",
+    },
+    gateway,
+    {
+      loadWorkflowDocketByRevision: async (
+        _client,
+        jobId,
+        docketRevisionId,
+      ) => {
+        loaded.push({ job_id: jobId, docket_revision_id: docketRevisionId });
+        return { job_id: jobId, id: docketRevisionId } as never;
+      },
+      fetchAllAccrecInvoices: async () => [],
+    },
+  );
+
+  assertEquals(loaded, [{
+    job_id: JOB_ID,
+    docket_revision_id: exactDocketRevisionId,
+  }]);
+  assertEquals(gateway.createCalls, 1);
+});
+
+Deno.test("AC19: an obligation without an exact docket refuses before Xero", async () => {
+  const gateway = draftGateway();
+  const client = mintClient({
+    revision: revisionRow({ docket_revision_id: null }),
+  });
+  const error = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        client as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+        },
+        gateway,
+        { fetchAllAccrecInvoices: async () => [] },
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    ((error as SesActionError).refusal as any).code,
+    "family_contract_incomplete",
+  );
+  assertEquals(gateway.createCalls, 0);
+});
+
+Deno.test("AC19: exact docket loader never substitutes the current projection", async () => {
+  const reads: Array<{ table: string; field: string; value: string }> = [];
+  const client = {
+    from(table: string) {
+      const builder: any = {
+        select: () => builder,
+        eq: (field: string, value: string) => {
+          reads.push({ table, field, value });
+          return builder;
+        },
+        maybeSingle: async () => ({ data: null, error: null }),
+      };
+      return builder;
+    },
+  };
+  const error = await assertRejects(
+    () =>
+      loadSesCockpitDocket(client as any, JOB_ID, {
+        docket_revision_id: DOCKET_ID,
+      }),
+    SesActionError,
+  );
+  assertEquals(
+    ((error as SesActionError).refusal as any).code,
+    "family_contract_incomplete",
+  );
+  assertEquals(reads, [
+    { table: "makesafe_docket_revisions", field: "job_id", value: JOB_ID },
+    { table: "makesafe_docket_revisions", field: "id", value: DOCKET_ID },
+  ]);
 });
 
 Deno.test("F29: a proposed materials line mints as DRAFT without authorise or send", async () => {

@@ -15,6 +15,7 @@ import {
   requiredSesRouteKinds,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
+  SES_WORKFLOW_SEND_EXECUTION_POLICY,
   SES_WORKFLOW_SEND_RULE_VERSION,
   sesAjsBuilderRouteBody,
   sesAjsReportInvoiceSubject,
@@ -62,6 +63,10 @@ Deno.test("typed send profiles own the exact executable route semantics", () => 
   )!;
   const profile = sesWorkflowSendProfile(ajsRow);
   assertEquals(profile.send_rule_version, SES_WORKFLOW_SEND_RULE_VERSION);
+  assertEquals(
+    profile.executable_semantics.execution_policy,
+    SES_WORKFLOW_SEND_EXECUTION_POLICY,
+  );
   assertEquals(profile.route_order, ["report_invoice", "photo"]);
   assertEquals(profile.executable_semantics.recipient_constants, [
     AJS_WORK_ORDERS_MAILBOX,

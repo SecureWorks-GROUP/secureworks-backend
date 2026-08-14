@@ -65,22 +65,16 @@ import {
 import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
   ajsPackCc,
-  ajsPackRecipients,
   isAjsBuilderKey,
-  mlbPhysicalRouteRecipients,
-  mlbPrimeMailerRouteCarriesInvoice,
-  sesAjsBuilderRouteBody,
-  sesAjsReportInvoiceSubject,
+  resolveSesWorkflowRoutes,
   sesBodyCarriesInternalAnnotation,
-  sesBuilderRouteBody,
-  sesInvoiceRouteSubject,
+  sesRouteArtifactPackRelativePath,
+  sesRouteXeroBinding,
   sesStoredReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
   applyMlbThreadReplyToRoute,
-  isMlbPhysicalReleaseShape,
   mlbOrdinaryMailSendEffectPayloadFields,
-  mlbPhysicalUsesOrdinaryMailSendFallback,
   routingIntakeThread,
 } from "./ses_mlb_thread_reply.ts";
 import {
@@ -548,22 +542,7 @@ export function resolveSesRouteXeroBinding(
   docket: Record<string, any>,
   obligation: Record<string, any> | null,
 ): Record<string, unknown> {
-  const docketXero = object(docket.xero_binding);
-  if (String(docketXero.xero_invoice_id || "").trim()) return docketXero;
-  const obligationXero = object(obligation?.xero_binding);
-  if (String(obligationXero.xero_invoice_id || "").trim()) {
-    return obligationXero;
-  }
-  return {};
-}
-
-function docketBuilderKey(docket: Record<string, any>): string {
-  const classification = object(object(docket.envelope).v2).classification;
-  return String(
-    object(classification).builder_key ||
-      object(docket.review_spec).builder_key ||
-      "",
-  ).trim();
+  return sesRouteXeroBinding(docket, obligation);
 }
 
 /**
@@ -583,24 +562,11 @@ export function docketArtifactPackRelativePath(
   docketRevisionId: string,
   basedOnRevisionId?: string | null,
 ): string {
-  const key = String(objectKey || "");
-  if (!key) return "";
-  const markers: string[] = [];
-  const current = String(docketRevisionId || "").trim();
-  if (current) markers.push(`/${current}/`);
-  const basedOn = String(basedOnRevisionId || "").trim();
-  if (basedOn && basedOn !== current) markers.push(`/${basedOn}/`);
-  for (const marker of markers) {
-    const idx = key.indexOf(marker);
-    if (idx >= 0) return key.slice(idx + marker.length);
-  }
-  for (const root of ["ARTIFACTS/", "SOURCE/", "DRAFTS/"]) {
-    const withSlash = `/${root}`;
-    const idx = key.indexOf(withSlash);
-    if (idx >= 0) return key.slice(idx + 1);
-    if (key.startsWith(root)) return key;
-  }
-  return key.split("/").filter(Boolean).slice(-2).join("/");
+  return sesRouteArtifactPackRelativePath(
+    objectKey,
+    docketRevisionId,
+    basedOnRevisionId,
+  );
 }
 
 export function resolveDocketRoutes(
@@ -609,336 +575,13 @@ export function resolveDocketRoutes(
   obligation: Record<string, any> | null,
   options?: { mlbOrdinaryMailSendFallback?: boolean },
 ): SesReviewRoute[] {
-  const byPath = new Map<string, Record<string, any>>();
-  const basedOnRevisionId = String(docket.based_on_revision_id || "").trim();
-  for (const artifact of artifacts) {
-    const path = docketArtifactPackRelativePath(
-      String(artifact.object_key || ""),
-      String(docket.id || ""),
-      basedOnRevisionId,
-    );
-    if (path) byPath.set(path, artifact);
-  }
-  const xero = resolveSesRouteXeroBinding(docket, obligation);
-  const boundInvoiceId = String(xero.xero_invoice_id || "");
-  const boundInvoiceNumber = String(xero.invoice_number || "");
-  const xeroStatus = String(xero.status || "").toUpperCase();
-  const draftInvoicePdfHash = xeroStatus === "DRAFT"
-    ? String(xero.pdf_content_hash || "").trim()
-    : "";
-  const invoicePdfs = artifacts.filter((artifact) =>
-    artifact.role === "xero_invoice_pdf" &&
-    artifact.media_type === "application/pdf"
-  );
-  const invoicePdf = invoicePdfs.length === 1 &&
-      object(invoicePdfs[0].metadata).xero_invoice_id === boundInvoiceId &&
-      object(invoicePdfs[0].metadata).invoice_number === boundInvoiceNumber
-    ? invoicePdfs[0]
-    : null;
-  const noAdditionalCharge =
-    obligation?.pricing_disposition === "no_additional_charge";
-  const builderKey = docketBuilderKey(docket);
-  const ajs = isAjsBuilderKey(builderKey);
-  const routing = object(object(object(docket.envelope).v2).routing);
-  const workOrderSender = String(
-    routing.report_to || routing.photo_to || "",
-  ).trim();
-  const builderReference = String(
-    object(docket.local_invoice_proposal).builder_reference || "",
-  ).trim();
-
-  const resolvedRoutes = draftRoutes(docket).map((route) => {
-    const referenced = route.attachment_hashes.map((path) => byPath.get(path));
-    const resolved = referenced
-      .filter((artifact): artifact is Record<string, any> => !!artifact)
-      .map((artifact) => String(artifact.content_hash));
-    if (route.route_kind !== "invoice") {
-      return {
-        ...route,
-        // Builder-facing body is SET here, never inherited from the stored
-        // draft: `email_drafts` bodies are operator annotations for the docket
-        // display and shipped verbatim to the builder on the MLB physical and
-        // universal shapes (SWMS-261161 / SWMS-261158 live leak). The AJS
-        // branch below overrides with its own pinned wording.
-        body: sesBuilderRouteBody(
-          route.route_kind === "photo" ? "photo" : "report",
-          builderReference,
-        ),
-        attachment_hashes: resolved,
-        ready: route.ready &&
-          resolved.length === route.attachment_hashes.length,
-      };
-    }
-
-    // Builder-facing invoice routes may carry only approved PDF support.
-    // The local invoice proposal remains an internal pre-Xero artifact and
-    // legacy draft references to it are deliberately ignored.
-    const approvedSupport = referenced.filter((artifact) =>
-      artifact &&
-      (artifact.role === "supporting_report_pdf" ||
-        artifact.role === "swms_artifact") &&
-      artifact.media_type === "application/pdf"
-    ) as Array<Record<string, any>>;
-    const unsupportedReference = referenced.some((artifact) =>
-      !artifact || (artifact.role !== "invoice_proposal" &&
-        !approvedSupport.includes(artifact))
-    );
-    const supportHashes = approvedSupport.map((artifact) =>
-      String(artifact.content_hash)
-    );
-    const reference = String(
-      object(docket.local_invoice_proposal).builder_reference || "",
-    );
-
-    if (noAdditionalCharge) {
-      return {
-        ...route,
-        subject: sesInvoiceRouteSubject({
-          jobRef: reference,
-          noAdditionalCharge: true,
-        }),
-        body: sesBuilderRouteBody("invoice", builderReference, {
-          noAdditionalCharge: true,
-        }),
-        attachment_hashes: [...new Set(supportHashes)],
-        ready: route.ready && !unsupportedReference,
-      };
-    }
-
-    // Live Xero DRAFT bound to the current obligation (Option B mint). The
-    // docket may still be pre_xero and the authorised PDF attaches later at
-    // approve time — readiness must not claim the draft is missing, and the
-    // email body must not say "No Xero invoice exists".
-    if (boundInvoiceId && xeroStatus === "DRAFT") {
-      const invoiceNumber = boundInvoiceNumber || "pending-number";
-      return {
-        ...route,
-        subject: sesInvoiceRouteSubject({
-          jobRef: reference,
-          xeroStatus,
-          invoiceNumber,
-        }),
-        // Builder-facing wording even while pre-authorise: the route is what
-        // execute sends, so its body can never carry bind-state annotations.
-        // The subject and readiness still say this is a Xero draft.
-        body: sesBuilderRouteBody("invoice", builderReference),
-        // This proposed preview release is never executable while the invoice
-        // is DRAFT, but its hash must still freeze the exact PDF the operator
-        // reviewed. The post-authorisation release replaces only this hash
-        // after the deterministic-derivative check.
-        attachment_hashes: [
-          ...new Set([
-            ...(draftInvoicePdfHash ? [draftInvoicePdfHash] : []),
-            ...supportHashes,
-          ]),
-        ],
-        ready: route.ready && !!draftInvoicePdfHash && !unsupportedReference,
-      };
-    }
-
-    if (docket.stage !== "invoice_bound" || xeroStatus !== "AUTHORISED") {
-      return {
-        ...route,
-        body: sesBuilderRouteBody("invoice", builderReference),
-        attachment_hashes: [...new Set(supportHashes)],
-        // Support PDFs are not an invoice. Until a live Xero draft is bound
-        // (above) or an authorised Xero PDF is bound (below), the
-        // builder-facing invoice route must remain non-sendable.
-        ready: false,
-      };
-    }
-    const invoiceAttachments = [...supportHashes];
-    if (invoicePdf?.content_hash) {
-      invoiceAttachments.unshift(String(invoicePdf.content_hash));
-    }
-    const invoiceNumber = boundInvoiceNumber;
-    return {
-      ...route,
-      subject: sesInvoiceRouteSubject({
-        jobRef: reference,
-        xeroStatus,
-        invoiceNumber,
-      }),
-      body: sesBuilderRouteBody("invoice", builderReference),
-      attachment_hashes: [...new Set(invoiceAttachments)],
-      ready: route.ready && !!invoicePdf?.content_hash &&
-        xeroStatus === "AUTHORISED" && !unsupportedReference,
-    };
-  });
-
-  if (!ajs) {
-    // MLB physical (Captain 2026-08-05 locked shape): report + photo reply on
-    // the intake thread; invoice is ordinary makesafes@ billing pack.
-    // TEMPORARY exception (MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1): report
-    // and photo also use ordinary Mail.Send because conversationThread:reply
-    // is Application: Not supported. applyMlbThreadReplyToRoute stamps the
-    // exception transport visibly; restore by flipping that flag.
-    //
-    // Under ordinary Mail.Send, report/photo subjects use the EXACT original
-    // work-order email subject from routing.intake_email_subject when present
-    // (emails.subject preferred at prepare). That is inbox grouping only —
-    // not real threading. Missing subject falls back to the generated draft
-    // subject and still sends (subject_source: generated_fallback).
-    const classification = object(
-      object(object(docket.envelope).v2).classification,
-    );
-    const family = String(
-      classification.family || object(docket.review_spec).family || "",
-    );
-    const shape = { builder_key: builderKey, family };
-    if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
-    const thread = routingIntakeThread(routing);
-    // Captain 2026-08-06: the three destinations are SET here, not inherited
-    // from the stored draft's To: header. mlbPhysicalRouteRecipients is the one
-    // producer (prepare writes the same values into the draft), so the cockpit
-    // tab, the persisted release route and the send can never disagree — and a
-    // revision drafted before this ruling resolves to the correct addresses
-    // without a re-prepare. The billing mailbox stays the sealed matrix value
-    // that the envelope already declares (Perth makesafes@ / south-west bunbury@).
-    const billingMailbox = String(routing.invoice_to || "").trim();
-    const invoicePdfHash = String(
-      invoicePdf?.content_hash || draftInvoicePdfHash || "",
-    ).trim() || null;
-    const ordinaryMailSend = options?.mlbOrdinaryMailSendFallback ??
-      mlbPhysicalUsesOrdinaryMailSendFallback();
-    const originalSubject = String(
-      (routing as any).intake_email_subject || "",
-    ).trim() || null;
-    const originalSubjectSourceRaw = String(
-      (routing as any).intake_email_subject_source || "",
-    ).trim();
-    // Unrecognised or absent provenance stays null — never claim the strongest
-    // store for a subject whose origin the envelope does not actually name.
-    const originalSubjectSource =
-      originalSubjectSourceRaw === "emails_subject" ||
-        originalSubjectSourceRaw === "intake_draft_subject" ||
-        originalSubjectSourceRaw === "job_metadata_builder_email_subject"
-        ? originalSubjectSourceRaw
-        : null;
-    return resolvedRoutes.map((route) => {
-      const declared = mlbPhysicalRouteRecipients(
-        route.route_kind,
-        billingMailbox,
-      );
-      // A legacy envelope that declares no billing mailbox keeps whatever the
-      // draft addressed the invoice to: emptying a money route is worse than
-      // leaving it as prepared, and assertSesRouteRecipients still guards it.
-      const recipients = declared.length > 0 ? declared : route.recipients;
-      const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
-        routeKind: route.route_kind,
-        attachmentHashes: route.attachment_hashes,
-        invoicePdfContentHash: invoicePdfHash,
-      });
-      return applyMlbThreadReplyToRoute(
-        {
-          ...route,
-          recipients,
-          // The Captain's boundary is absolute, so a Prime mailer route holding
-          // the invoice PDF is refused rather than silently stripped.
-          ready: route.ready && recipients.length > 0 && !invoiceOnMailerRoute,
-        },
-        shape,
-        thread,
-        ordinaryMailSend,
-        ordinaryMailSend
-          ? {
-            originalSubject,
-            originalSubjectSource,
-          }
-          : null,
-      );
-    });
-  }
-
-  // AJS/AJBR two-email shape (skill backend release contract / Captain 2026-08-04):
-  //   route_kind report_invoice = report PDF + real Xero invoice PDF
-  //   route_kind photo = labelled images follow-up
-  // Separate invoice route is dropped so SEND IT only releases two emails.
-  // Builder-facing body is set here (not inherited from internal draft jargon):
-  // what is attached, job ref, thanks. No draft/docket/pack/route/cycle/revision.
-  const byKind = new Map(
-    resolvedRoutes.map((route) => [route.route_kind, route]),
-  );
-  const report = byKind.get("report");
-  const photo = byKind.get("photo");
-  const invoice = byKind.get("invoice");
-  // Explicit invoice_to bind: workorders@ajs.build first — never silent inherit
-  // of work-order sender alone without the processing mailbox.
-  const recipients = ajsPackRecipients({ workOrderSender });
-  const cc = ajsPackCc();
-  const out: SesReviewRoute[] = [];
-  const reference = String(
-    object(docket.local_invoice_proposal).builder_reference || "",
-  );
-  const jobRef = reference || "this job";
-  const ajsReportInvoiceBody = sesAjsBuilderRouteBody(
-    "report_invoice",
-    jobRef,
-  );
-  const ajsPhotoBody = sesAjsBuilderRouteBody("photo", jobRef);
-  const ajsNoChargeBody = sesAjsBuilderRouteBody(
-    "report_invoice",
-    jobRef,
-    { noAdditionalCharge: true },
-  );
-
-  if (report || invoice) {
-    const reportHashes = report?.attachment_hashes || [];
-    const invoiceHashes = (invoice?.attachment_hashes || []).filter((hash) => {
-      return !!hash;
-    });
-    const combinedHashes = [
-      ...new Set([
-        ...(invoicePdf?.content_hash
-          ? [String(invoicePdf.content_hash)]
-          : (draftInvoicePdfHash ? [draftInvoicePdfHash] : [])),
-        ...reportHashes,
-        ...invoiceHashes,
-      ]),
-    ];
-    const invoiceNumber = boundInvoiceNumber;
-    const authorised = xeroStatus === "AUTHORISED" &&
-      !!invoicePdf?.content_hash;
-    const combined: SesReviewRoute = {
-      route_kind: "report_invoice",
-      recipients,
-      cc,
-      subject: sesAjsReportInvoiceSubject({
-        jobRef: reference,
-        xeroStatus,
-        invoiceNumber,
-        boundInvoiceId,
-        preparedReportSubject: report?.subject,
-      }),
-      body: ajsReportInvoiceBody,
-      attachment_hashes: combinedHashes,
-      ready: !!report?.ready && authorised && recipients.length > 0,
-    };
-    if (noAdditionalCharge && report) {
-      combined.subject = sesAjsReportInvoiceSubject({
-        jobRef: reference,
-        noAdditionalCharge: true,
-      });
-      combined.body = ajsNoChargeBody;
-      combined.attachment_hashes = [...new Set(reportHashes)];
-      combined.ready = report.ready && recipients.length > 0;
-    }
-    out.push(combined);
-  }
-
-  if (photo) {
-    out.push({
-      ...photo,
-      route_kind: "photo",
-      body: ajsPhotoBody,
-      recipients: recipients.length ? recipients : photo.recipients,
-      cc,
-      ready: photo.ready &&
-        (recipients.length > 0 || photo.recipients.length > 0),
-    });
-  }
-
-  return out;
+  return resolveSesWorkflowRoutes({
+    docket,
+    artifacts,
+    obligation,
+    stored_routes: draftRoutes(docket),
+    mlb_ordinary_mail_send_fallback: options?.mlbOrdinaryMailSendFallback,
+  }) as SesReviewRoute[];
 }
 
 function cleanInputFromRows(args: {
@@ -1103,13 +746,46 @@ export async function loadSesCockpitDocket(
   jobId: string,
   deps: {
     fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
+    /**
+     * Exact historical coordinate for money/release gates. Ordinary cockpit
+     * reads omit it and continue to load the current docket projection.
+     */
+    docket_revision_id?: string;
   } = {},
 ): Promise<SesCockpitDocket> {
-  const docketResponse = await client.from("makesafe_docket_revisions_current")
-    .select("*").eq("job_id", jobId).maybeSingle();
+  const exactDocketRevisionId = String(deps.docket_revision_id || "").trim();
+  const docketQuery = client.from(
+    exactDocketRevisionId
+      ? "makesafe_docket_revisions"
+      : "makesafe_docket_revisions_current",
+  ).select("*").eq("job_id", jobId);
+  const docketResponse = exactDocketRevisionId
+    ? await docketQuery.eq("id", exactDocketRevisionId).maybeSingle()
+    : await docketQuery.maybeSingle();
+  if (exactDocketRevisionId && (docketResponse.error || !docketResponse.data)) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "family_contract_incomplete",
+        "Prepare a new exact docket and invoice obligation under the typed workflow contract before minting or release.",
+        {
+          fact:
+            "The invoice obligation's exact SES docket revision no longer exists for this job, so its workflow contract cannot be checked.",
+          evidence: {
+            docket_revision_id: exactDocketRevisionId,
+            ...(docketResponse.error?.message
+              ? { read_error: docketResponse.error.message }
+              : {}),
+          },
+        },
+      ),
+    );
+  }
   const docket = requireValue(
     docketResponse,
-    "No current SES docket revision exists for this job.",
+    exactDocketRevisionId
+      ? "The invoice obligation's exact SES docket revision no longer exists for this job."
+      : "No current SES docket revision exists for this job.",
   );
   const readinessResponse = await client.from("makesafe_readiness_current_v2")
     .select("*").eq("job_id", jobId).maybeSingle();
@@ -2055,6 +1731,12 @@ export async function createSesInvoiceDraftAction(
   deps: {
     /** Synthetic-test seam; production callers always use the strict gate. */
     assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
+    /** Synthetic-test seam; production loads the obligation's exact docket. */
+    loadWorkflowDocketByRevision?: (
+      client: SesSupabaseClient,
+      jobId: string,
+      docketRevisionId: string,
+    ) => Promise<SesCockpitDocket>;
     fetchAllAccrecInvoices?: (
       client: SesSupabaseClient,
     ) => Promise<any[]>;
@@ -2072,12 +1754,6 @@ export async function createSesInvoiceDraftAction(
   // Mint is agent/api_key/routine-safe; a browser session must still be an
   // identified Captain or admin-owner. Authorise remains JWT-gated on execute.
   await requireSesInvoiceMintAuthority(client, auth);
-  const workflowDockets = deps.assertWorkflowReleaseContract
-    ? []
-    : [await loadSesCockpitDocket(client, args.job_id)];
-  await workflowReleaseContractGate(deps.assertWorkflowReleaseContract)(
-    workflowDockets,
-  );
   const revisionQuery = client.from("makesafe_invoice_obligation_revisions")
     .select("*")
     .eq("job_id", args.job_id);
@@ -2094,6 +1770,38 @@ export async function createSesInvoiceDraftAction(
     revisionResponse,
     "No invoice obligation revision exists to mint a Xero DRAFT for.",
   );
+  const obligationDocketRevisionId = String(
+    revision.docket_revision_id || "",
+  ).trim();
+  if (!obligationDocketRevisionId) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "family_contract_incomplete",
+        "Prepare a new exact docket and invoice obligation under the typed workflow contract before minting.",
+        {
+          fact:
+            "The selected invoice obligation is not bound to an exact SES docket revision, so its workflow contract cannot authorize money.",
+          evidence: {
+            invoice_obligation_revision_id: String(revision.id || ""),
+          },
+        },
+      ),
+    );
+  }
+  const loadWorkflowDocket = deps.loadWorkflowDocketByRevision ||
+    ((gateClient, jobId, docketRevisionId) =>
+      loadSesCockpitDocket(gateClient, jobId, {
+        docket_revision_id: docketRevisionId,
+      }));
+  const workflowDocket = await loadWorkflowDocket(
+    client,
+    args.job_id,
+    obligationDocketRevisionId,
+  );
+  await workflowReleaseContractGate(deps.assertWorkflowReleaseContract)([
+    workflowDocket,
+  ]);
   if (revision.pricing_disposition === "no_additional_charge") {
     throw new SesActionError(409, {
       state: "refused",

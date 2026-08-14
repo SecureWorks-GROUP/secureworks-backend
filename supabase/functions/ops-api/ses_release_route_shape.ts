@@ -31,7 +31,13 @@ import {
   MLB_PRIME_MAILER,
   SES_RELEASE_CC,
 } from "./ses_graph_mail_gateway.ts";
-import { isMlbBuilderKey } from "./ses_mlb_thread_reply.ts";
+import {
+  applyMlbThreadReplyToRoute,
+  isMlbBuilderKey,
+  isMlbPhysicalReleaseShape,
+  mlbPhysicalUsesOrdinaryMailSendFallback,
+  routingIntakeThread,
+} from "./ses_mlb_thread_reply.ts";
 
 export {
   AJS_MANDI_CC,
@@ -45,7 +51,7 @@ export {
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;
 export type SesRouteKind = "report" | "photo" | "invoice" | "report_invoice";
 
-export const SES_WORKFLOW_SEND_RULE_VERSION = "ses-workflow-send/2026-08-14.1";
+export const SES_WORKFLOW_SEND_RULE_VERSION = "ses-workflow-send/2026-08-14.2";
 
 export const SES_UNIVERSAL_ROUTE_ORDER: SesRouteKind[] = [
   "report",
@@ -67,6 +73,78 @@ export const SES_MLB_PHYSICAL_ROUTE_ORDER: SesRouteKind[] = [
   ...SES_UNIVERSAL_ROUTE_ORDER,
 ];
 
+/**
+ * Machine-readable program consumed by the route resolver below and exported
+ * into the canonical workflow hash. These are executable branch operands, not
+ * prose labels: changing an admitted role, state, transform, or route shape
+ * changes both runtime behavior and the contract hash input.
+ */
+export const SES_WORKFLOW_SEND_EXECUTION_POLICY = Object.freeze({
+  schema_version: "secureworks.ses-send-execution-policy/v1",
+  stored_route_order: Object.freeze([...SES_UNIVERSAL_ROUTE_ORDER]),
+  artifact_path_resolution: Object.freeze({
+    revision_precedence: Object.freeze([
+      "current_docket_revision",
+      "based_on_docket_revision",
+    ]),
+    admitted_roots: Object.freeze(["ARTIFACTS/", "SOURCE/", "DRAFTS/"]),
+    terminal_fallback_segments: 2,
+  }),
+  artifact_roles: Object.freeze({
+    xero_invoice_pdf: "xero_invoice_pdf",
+    internal_invoice_proposal: "invoice_proposal",
+    approved_invoice_support: Object.freeze([
+      "supporting_report_pdf",
+      "swms_artifact",
+    ]),
+  }),
+  media_types: Object.freeze({ pdf: "application/pdf" }),
+  pricing_dispositions: Object.freeze({
+    no_additional_charge: "no_additional_charge",
+  }),
+  xero: Object.freeze({
+    draft_status: "DRAFT",
+    authorised_status: "AUTHORISED",
+    authorised_docket_stage: "invoice_bound",
+    binding_precedence: Object.freeze(["docket", "obligation"]),
+  }),
+  attachment_transforms: Object.freeze({
+    stored_paths: "resolve_all_declared_paths_or_not_ready",
+    invoice_support:
+      "drop_internal_proposal_refuse_unknown_keep_pdf_report_and_swms",
+    draft_invoice: "bind_exact_draft_pdf_then_support_dedupe_preserving_first",
+    authorised_invoice:
+      "bind_exact_authorised_pdf_then_support_dedupe_preserving_first",
+    no_charge: "support_only_dedupe_preserving_first",
+    ajs_combined:
+      "invoice_pdf_then_report_then_invoice_support_dedupe_preserving_first",
+    mlb_prime_invoice_guard: "hard_not_ready_never_strip",
+  }),
+  route_shapes: Object.freeze({
+    ajs_physical: Object.freeze([...SES_AJS_ROUTE_ORDER]),
+    mlb_physical: Object.freeze([...SES_MLB_PHYSICAL_ROUTE_ORDER]),
+    universal_physical: Object.freeze([...SES_UNIVERSAL_ROUTE_ORDER]),
+    report_only: Object.freeze(["invoice"] as const),
+  }),
+  readiness: Object.freeze({
+    missing_declared_artifact: "not_ready",
+    unknown_invoice_attachment: "not_ready",
+    empty_required_recipient_set: "not_ready",
+    draft_requires_bound_pdf_hash: true,
+    authorised_requires_exact_invoice_pdf: true,
+  }),
+});
+
+export interface SesWorkflowResolvedRoute {
+  route_kind: SesRouteKind;
+  recipients: string[];
+  cc?: string[];
+  subject: string;
+  body: string;
+  attachment_hashes: string[];
+  ready: boolean;
+}
+
 export type SesWorkflowSendProfileId =
   | "send.ajs.physical.v1"
   | "send.mlb.physical.v1"
@@ -85,6 +163,7 @@ export interface SesWorkflowSendProfileDescriptor {
   route_order: readonly SesRouteKind[];
   send_rule_version: typeof SES_WORKFLOW_SEND_RULE_VERSION;
   executable_semantics: {
+    execution_policy: typeof SES_WORKFLOW_SEND_EXECUTION_POLICY;
     route_requirement_policy: string;
     recipient_policy: string;
     recipient_constants: readonly string[];
@@ -110,7 +189,8 @@ function sesWorkflowPhysicalSendProfileForBuilder(
     atomic_release_gate: "required_before_live_release" as const,
     seal_state: "sealed" as const,
     unsealed_reason_code: null,
-    send_rule_version: "ses-workflow-send/2026-08-14.1" as const,
+    send_rule_version:
+      SES_WORKFLOW_SEND_RULE_VERSION as typeof SES_WORKFLOW_SEND_RULE_VERSION,
   };
   if (isAjsBuilderKey(builderKey)) {
     return Object.freeze({
@@ -119,6 +199,7 @@ function sesWorkflowPhysicalSendProfileForBuilder(
       executable_send_recipe_id: "send.ajs.physical.v1",
       route_order: Object.freeze([...SES_AJS_ROUTE_ORDER]),
       executable_semantics: Object.freeze({
+        execution_policy: SES_WORKFLOW_SEND_EXECUTION_POLICY,
         route_requirement_policy: "ajs-report-invoice-then-photo",
         recipient_policy: "ajs-workorders-plus-intake-participants",
         recipient_constants: Object.freeze([AJS_WORK_ORDERS_MAILBOX]),
@@ -161,6 +242,7 @@ function sesWorkflowPhysicalSendProfileForBuilder(
       executable_send_recipe_id: "send.mlb.physical.v1",
       route_order: Object.freeze([...SES_MLB_PHYSICAL_ROUTE_ORDER]),
       executable_semantics: Object.freeze({
+        execution_policy: SES_WORKFLOW_SEND_EXECUTION_POLICY,
         route_requirement_policy: "physical-report-photo-invoice",
         recipient_policy: "mlb-prime-report-photo-and-matrix-billing-invoice",
         recipient_constants: Object.freeze([MLB_PRIME_MAILER]),
@@ -201,6 +283,7 @@ function sesWorkflowPhysicalSendProfileForBuilder(
     executable_send_recipe_id: "send.western.physical.v1",
     route_order: Object.freeze([...SES_UNIVERSAL_ROUTE_ORDER]),
     executable_semantics: Object.freeze({
+      execution_policy: SES_WORKFLOW_SEND_EXECUTION_POLICY,
       route_requirement_policy: "physical-report-photo-invoice",
       recipient_policy: "sealed-matrix-route-recipients",
       recipient_constants: Object.freeze([]),
@@ -248,7 +331,8 @@ export function sesWorkflowSendProfile(
   const base = {
     live_effects_enabled: false as const,
     atomic_release_gate: "required_before_live_release" as const,
-    send_rule_version: "ses-workflow-send/2026-08-14.1" as const,
+    send_rule_version:
+      SES_WORKFLOW_SEND_RULE_VERSION as typeof SES_WORKFLOW_SEND_RULE_VERSION,
   };
   if (row.builder_key === "SYNTHETIC") {
     return Object.freeze({
@@ -259,6 +343,7 @@ export function sesWorkflowSendProfile(
       executable_send_recipe_id: null,
       route_order: Object.freeze([]),
       executable_semantics: Object.freeze({
+        execution_policy: SES_WORKFLOW_SEND_EXECUTION_POLICY,
         route_requirement_policy: "no-routes",
         recipient_policy: "none",
         recipient_constants: Object.freeze([]),
@@ -285,6 +370,7 @@ export function sesWorkflowSendProfile(
       executable_send_recipe_id: null,
       route_order: Object.freeze(["invoice"] as SesRouteKind[]),
       executable_semantics: Object.freeze({
+        execution_policy: SES_WORKFLOW_SEND_EXECUTION_POLICY,
         route_requirement_policy: "report-family-invoice-only-current-ruling",
         recipient_policy: "sealed-matrix-invoice-recipient",
         recipient_constants: Object.freeze([]),
@@ -559,6 +645,346 @@ export function sesAjsBuilderRouteBody(
     return `Please find attached the report for ${ref}. There is no additional charge for this attendance.\n\nThank you.`;
   }
   return `Please find attached the report and invoice for ${ref}.\n\nThank you.`;
+}
+
+function routeObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function dedupeRouteValues(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => String(value || "")))].filter(
+    Boolean,
+  );
+}
+
+/** Exact artifact-path program owned and hashed with the send contract. */
+export function sesRouteArtifactPackRelativePath(
+  objectKey: string,
+  docketRevisionId: string,
+  basedOnRevisionId?: string | null,
+): string {
+  const key = String(objectKey || "");
+  if (!key) return "";
+  const markers: string[] = [];
+  const current = String(docketRevisionId || "").trim();
+  if (current) markers.push(`/${current}/`);
+  const basedOn = String(basedOnRevisionId || "").trim();
+  if (basedOn && basedOn !== current) markers.push(`/${basedOn}/`);
+  for (const marker of markers) {
+    const index = key.indexOf(marker);
+    if (index >= 0) return key.slice(index + marker.length);
+  }
+  for (
+    const root of SES_WORKFLOW_SEND_EXECUTION_POLICY.artifact_path_resolution
+      .admitted_roots
+  ) {
+    const withSlash = `/${root}`;
+    const index = key.indexOf(withSlash);
+    if (index >= 0) return key.slice(index + 1);
+    if (key.startsWith(root)) return key;
+  }
+  return key.split("/").filter(Boolean).slice(
+    -SES_WORKFLOW_SEND_EXECUTION_POLICY.artifact_path_resolution
+      .terminal_fallback_segments,
+  ).join("/");
+}
+
+/** Docket binding outranks obligation binding, as declared in the policy. */
+export function sesRouteXeroBinding(
+  docket: Record<string, unknown>,
+  obligation: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const docketXero = routeObject(docket.xero_binding);
+  if (String(docketXero.xero_invoice_id || "").trim()) return docketXero;
+  const obligationXero = routeObject(obligation?.xero_binding);
+  if (String(obligationXero.xero_invoice_id || "").trim()) {
+    return obligationXero;
+  }
+  return {};
+}
+
+function routeBuilderKey(docket: Record<string, unknown>): string {
+  const classification = routeObject(
+    routeObject(routeObject(docket.envelope).v2).classification,
+  );
+  return String(
+    classification.builder_key ||
+      routeObject(docket.review_spec).builder_key ||
+      "",
+  ).trim();
+}
+
+/**
+ * The only executable SES route/envelope selector. Reporting actions adapt
+ * stored drafts into typed routes, then delegate every recipient, attachment,
+ * Xero-state, AJS-combine, and MLB transform here.
+ */
+export function resolveSesWorkflowRoutes(args: {
+  docket: Record<string, unknown>;
+  artifacts: Array<Record<string, unknown>>;
+  obligation: Record<string, unknown> | null;
+  stored_routes: SesWorkflowResolvedRoute[];
+  mlb_ordinary_mail_send_fallback?: boolean;
+}): SesWorkflowResolvedRoute[] {
+  const { docket, artifacts, obligation } = args;
+  const policy = SES_WORKFLOW_SEND_EXECUTION_POLICY;
+  const byPath = new Map<string, Record<string, unknown>>();
+  const basedOnRevisionId = String(docket.based_on_revision_id || "").trim();
+  for (const artifact of artifacts) {
+    const path = sesRouteArtifactPackRelativePath(
+      String(artifact.object_key || ""),
+      String(docket.id || ""),
+      basedOnRevisionId,
+    );
+    if (path) byPath.set(path, artifact);
+  }
+  const xero = sesRouteXeroBinding(docket, obligation);
+  const boundInvoiceId = String(xero.xero_invoice_id || "");
+  const boundInvoiceNumber = String(xero.invoice_number || "");
+  const xeroStatus = String(xero.status || "").toUpperCase();
+  const draftInvoicePdfHash = xeroStatus === policy.xero.draft_status
+    ? String(xero.pdf_content_hash || "").trim()
+    : "";
+  const invoicePdfs = artifacts.filter((artifact) =>
+    artifact.role === policy.artifact_roles.xero_invoice_pdf &&
+    artifact.media_type === policy.media_types.pdf
+  );
+  const invoicePdf = invoicePdfs.length === 1 &&
+      routeObject(invoicePdfs[0].metadata).xero_invoice_id === boundInvoiceId &&
+      routeObject(invoicePdfs[0].metadata).invoice_number === boundInvoiceNumber
+    ? invoicePdfs[0]
+    : null;
+  const noAdditionalCharge = obligation?.pricing_disposition ===
+    policy.pricing_dispositions.no_additional_charge;
+  const builderKey = routeBuilderKey(docket);
+  const ajs = isAjsBuilderKey(builderKey);
+  const manifest = routeObject(routeObject(docket.envelope).v2);
+  const routing = routeObject(manifest.routing);
+  const workOrderSender = String(
+    routing.report_to || routing.photo_to || "",
+  ).trim();
+  const localInvoiceProposal = routeObject(docket.local_invoice_proposal);
+  const builderReference = String(
+    localInvoiceProposal.builder_reference || "",
+  ).trim();
+
+  const resolvedRoutes = args.stored_routes.map((route) => {
+    const referenced = route.attachment_hashes.map((path) => byPath.get(path));
+    const resolved = referenced.filter(
+      (artifact): artifact is Record<string, unknown> => !!artifact,
+    ).map((artifact) => String(artifact.content_hash));
+    if (route.route_kind !== "invoice") {
+      return {
+        ...route,
+        body: sesBuilderRouteBody(
+          route.route_kind === "photo" ? "photo" : "report",
+          builderReference,
+        ),
+        attachment_hashes: resolved,
+        ready: route.ready &&
+          resolved.length === route.attachment_hashes.length,
+      };
+    }
+
+    const approvedSupport = referenced.filter((artifact) =>
+      artifact &&
+      policy.artifact_roles.approved_invoice_support.includes(
+        String(artifact.role) as
+          | "supporting_report_pdf"
+          | "swms_artifact",
+      ) && artifact.media_type === policy.media_types.pdf
+    ) as Array<Record<string, unknown>>;
+    const unsupportedReference = referenced.some((artifact) =>
+      !artifact ||
+      (artifact.role !== policy.artifact_roles.internal_invoice_proposal &&
+        !approvedSupport.includes(artifact))
+    );
+    const supportHashes = approvedSupport.map((artifact) =>
+      String(artifact.content_hash)
+    );
+    const reference = String(localInvoiceProposal.builder_reference || "");
+
+    if (noAdditionalCharge) {
+      return {
+        ...route,
+        subject: sesInvoiceRouteSubject({
+          jobRef: reference,
+          noAdditionalCharge: true,
+        }),
+        body: sesBuilderRouteBody("invoice", builderReference, {
+          noAdditionalCharge: true,
+        }),
+        attachment_hashes: dedupeRouteValues(supportHashes),
+        ready: route.ready && !unsupportedReference,
+      };
+    }
+
+    if (boundInvoiceId && xeroStatus === policy.xero.draft_status) {
+      const invoiceNumber = boundInvoiceNumber || "pending-number";
+      return {
+        ...route,
+        subject: sesInvoiceRouteSubject({
+          jobRef: reference,
+          xeroStatus,
+          invoiceNumber,
+        }),
+        body: sesBuilderRouteBody("invoice", builderReference),
+        attachment_hashes: dedupeRouteValues([
+          ...(draftInvoicePdfHash ? [draftInvoicePdfHash] : []),
+          ...supportHashes,
+        ]),
+        ready: route.ready && !!draftInvoicePdfHash && !unsupportedReference,
+      };
+    }
+
+    if (
+      docket.stage !== policy.xero.authorised_docket_stage ||
+      xeroStatus !== policy.xero.authorised_status
+    ) {
+      return {
+        ...route,
+        body: sesBuilderRouteBody("invoice", builderReference),
+        attachment_hashes: dedupeRouteValues(supportHashes),
+        ready: false,
+      };
+    }
+    const invoiceAttachments = [...supportHashes];
+    if (invoicePdf?.content_hash) {
+      invoiceAttachments.unshift(String(invoicePdf.content_hash));
+    }
+    return {
+      ...route,
+      subject: sesInvoiceRouteSubject({
+        jobRef: reference,
+        xeroStatus,
+        invoiceNumber: boundInvoiceNumber,
+      }),
+      body: sesBuilderRouteBody("invoice", builderReference),
+      attachment_hashes: dedupeRouteValues(invoiceAttachments),
+      ready: route.ready && !!invoicePdf?.content_hash &&
+        xeroStatus === policy.xero.authorised_status && !unsupportedReference,
+    };
+  });
+
+  if (!ajs) {
+    const classification = routeObject(manifest.classification);
+    const family = String(
+      classification.family || routeObject(docket.review_spec).family || "",
+    );
+    const shape = { builder_key: builderKey, family };
+    if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
+    const thread = routingIntakeThread(routing);
+    const billingMailbox = String(routing.invoice_to || "").trim();
+    const invoicePdfHash = String(
+      invoicePdf?.content_hash || draftInvoicePdfHash || "",
+    ).trim() || null;
+    const ordinaryMailSend = args.mlb_ordinary_mail_send_fallback ??
+      mlbPhysicalUsesOrdinaryMailSendFallback();
+    const originalSubject = String(
+      routing.intake_email_subject || "",
+    ).trim() || null;
+    const originalSubjectSourceRaw = String(
+      routing.intake_email_subject_source || "",
+    ).trim();
+    const originalSubjectSource =
+      originalSubjectSourceRaw === "emails_subject" ||
+        originalSubjectSourceRaw === "intake_draft_subject" ||
+        originalSubjectSourceRaw === "job_metadata_builder_email_subject"
+        ? originalSubjectSourceRaw
+        : null;
+    return resolvedRoutes.map((route) => {
+      const declared = mlbPhysicalRouteRecipients(
+        route.route_kind,
+        billingMailbox,
+      );
+      const recipients = declared.length > 0 ? declared : route.recipients;
+      const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
+        routeKind: route.route_kind,
+        attachmentHashes: route.attachment_hashes,
+        invoicePdfContentHash: invoicePdfHash,
+      });
+      return applyMlbThreadReplyToRoute(
+        {
+          ...route,
+          recipients,
+          ready: route.ready && recipients.length > 0 &&
+            !invoiceOnMailerRoute,
+        },
+        shape,
+        thread,
+        ordinaryMailSend,
+        ordinaryMailSend ? { originalSubject, originalSubjectSource } : null,
+      );
+    });
+  }
+
+  const byKind = new Map(
+    resolvedRoutes.map((route) => [route.route_kind, route]),
+  );
+  const report = byKind.get("report");
+  const photo = byKind.get("photo");
+  const invoice = byKind.get("invoice");
+  const recipients = ajsPackRecipients({ workOrderSender });
+  const cc = ajsPackCc();
+  const out: SesWorkflowResolvedRoute[] = [];
+  const reference = String(localInvoiceProposal.builder_reference || "");
+  const jobRef = reference || "this job";
+
+  if (report || invoice) {
+    const reportHashes = report?.attachment_hashes || [];
+    const invoiceHashes = (invoice?.attachment_hashes || []).filter(Boolean);
+    const combinedHashes = dedupeRouteValues([
+      ...(invoicePdf?.content_hash
+        ? [String(invoicePdf.content_hash)]
+        : (draftInvoicePdfHash ? [draftInvoicePdfHash] : [])),
+      ...reportHashes,
+      ...invoiceHashes,
+    ]);
+    const authorised = xeroStatus === policy.xero.authorised_status &&
+      !!invoicePdf?.content_hash;
+    const combined: SesWorkflowResolvedRoute = {
+      route_kind: "report_invoice",
+      recipients,
+      cc,
+      subject: sesAjsReportInvoiceSubject({
+        jobRef: reference,
+        xeroStatus,
+        invoiceNumber: boundInvoiceNumber,
+        boundInvoiceId,
+        preparedReportSubject: report?.subject,
+      }),
+      body: sesAjsBuilderRouteBody("report_invoice", jobRef),
+      attachment_hashes: combinedHashes,
+      ready: !!report?.ready && authorised && recipients.length > 0,
+    };
+    if (noAdditionalCharge && report) {
+      combined.subject = sesAjsReportInvoiceSubject({
+        jobRef: reference,
+        noAdditionalCharge: true,
+      });
+      combined.body = sesAjsBuilderRouteBody("report_invoice", jobRef, {
+        noAdditionalCharge: true,
+      });
+      combined.attachment_hashes = dedupeRouteValues(reportHashes);
+      combined.ready = report.ready && recipients.length > 0;
+    }
+    out.push(combined);
+  }
+
+  if (photo) {
+    out.push({
+      ...photo,
+      route_kind: "photo",
+      body: sesAjsBuilderRouteBody("photo", jobRef),
+      recipients: recipients.length ? recipients : photo.recipients,
+      cc,
+      ready: photo.ready &&
+        (recipients.length > 0 || photo.recipients.length > 0),
+    });
+  }
+  return out;
 }
 
 /**

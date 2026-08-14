@@ -38,7 +38,7 @@ import {
 export const SES_WORKFLOW_CONTRACT_SCHEMA_VERSION =
   "secureworks.ses-workflow-contract/v1";
 export const SES_WORKFLOW_CONTRACT_CANON_REVISION =
-  "ses-workflow-contract/2026-08-14.4";
+  "ses-workflow-contract/2026-08-14.5";
 export const SES_WORKFLOW_RELEASE_CONTRACT_VERSION =
   "ses-release-contract/v1-preflight-only";
 export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
@@ -50,7 +50,7 @@ export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
  * review-visible rather than silently moving the drift-test coordinate.
  */
 export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 =
-  "sha256:4b20a684cab7fa31af8fb7575b6f11caad5e02abf8d7569fe20afedeb7af3eee";
+  "sha256:a592f133206f33573295f9153fcf8afa0f5028d6a8a7d7dc87c53987bb22b766";
 
 export const SES_WORKFLOW_PUBLIC_FAMILIES = [
   "physical_makesafe",
@@ -153,7 +153,10 @@ export interface SesWorkflowEffectiveVariant {
   stage_profile_id: SesStageWorkflowProfileId;
   pack_profile_id: SesWorkflowPackProfileId;
   pricing_profile_id: SesWorkflowPricingProfile["profile_id"];
-  send_profile_id: SesWorkflowSendProfileId;
+  /** Executable release pointer. Section 6.3 requires null while unsealed. */
+  send_recipe_id: SesWorkflowSendProfileId | null;
+  /** Non-executable diagnostic expectation used to complete/inspect the chain. */
+  expected_send_profile_id: SesWorkflowSendProfileId;
   release_contract_version: string;
   backend_policy_seal_state: SesWorkflowSealState;
   seal_state: SesWorkflowSealState;
@@ -405,7 +408,8 @@ function buildRawManifest(): RawManifest {
       stage_profile_id: stageDescriptor.profile_id,
       pack_profile_id: packDescriptor.pack_profile_id,
       pricing_profile_id: pricingDescriptor.profile_id,
-      send_profile_id: sendDescriptor.profile_id,
+      send_recipe_id: null,
+      expected_send_profile_id: sendDescriptor.profile_id,
       release_contract_version: SES_WORKFLOW_RELEASE_CONTRACT_VERSION,
       backend_policy_seal_state: sendDescriptor.seal_state,
       seal_state: "unsealed",
@@ -668,7 +672,7 @@ export async function validateSesWorkflowContractManifest(
       variant.stage_profile_id,
       variant.pack_profile_id,
       variant.pricing_profile_id,
-      variant.send_profile_id,
+      variant.expected_send_profile_id,
     ];
     const resolved = requiredProfileIds.map((profileId) =>
       profiles.get(profileId)
@@ -709,7 +713,7 @@ export async function validateSesWorkflowContractManifest(
       profile.profile_id === variant.pricing_profile_id
     );
     const sendProfile = manifest.profiles.send.find((profile) =>
-      profile.profile_id === variant.send_profile_id
+      profile.profile_id === variant.expected_send_profile_id
     );
     if (
       familyProfile && familyProfile.family_id !== variant.family_id ||
@@ -798,7 +802,8 @@ export async function validateSesWorkflowContractManifest(
     }
     if (variant.seal_state === "sealed") {
       if (
-        variant.send_profile_id !== sendProfile?.profile_id ||
+        variant.send_recipe_id !== sendProfile?.executable_send_recipe_id ||
+        variant.send_recipe_id !== variant.expected_send_profile_id ||
         !backendProfilesSealed ||
         !variant.release_prerequisites.release_contract_enabled ||
         !variant.release_prerequisites.wiki_backend_hash_agreed ||
@@ -812,7 +817,8 @@ export async function validateSesWorkflowContractManifest(
         });
       }
     } else if (
-      !variant.unsealed_reason_code || variant.live_release_enabled
+      !variant.unsealed_reason_code || variant.live_release_enabled ||
+      variant.send_recipe_id !== null
     ) {
       errors.push({
         code: "unsealed_variant_invalid",
@@ -1028,7 +1034,11 @@ export async function prepareSesWorkflowBackendPolicyContract(
     ["stage", variant.stage_profile_id, manifest.profiles.stage] as const,
     ["pack", variant.pack_profile_id, manifest.profiles.pack] as const,
     ["pricing", variant.pricing_profile_id, manifest.profiles.pricing] as const,
-    ["send", variant.send_profile_id, manifest.profiles.send] as const,
+    [
+      "send",
+      variant.expected_send_profile_id,
+      manifest.profiles.send,
+    ] as const,
   ];
   const selected: Record<string, SesWorkflowProfileBase> = {};
   for (const [kind, profileId, collection] of references) {
@@ -1080,7 +1090,7 @@ export async function prepareSesWorkflowBackendPolicyContract(
       variant.unsealed_reason_code ||
         "The effective workflow profile chain is not sealed.",
       variant.variant_id,
-      variant.send_profile_id,
+      variant.expected_send_profile_id,
     );
   }
 
@@ -1123,7 +1133,7 @@ export async function prepareSesWorkflowReleaseContract(
       prepared.variant.unsealed_reason_code ||
         "The effective release contract prerequisites are not sealed.",
       prepared.variant.variant_id,
-      prepared.variant.send_profile_id,
+      prepared.variant.expected_send_profile_id,
     );
   }
   return {

@@ -3337,7 +3337,7 @@ async function prepareOne(
               [],
               {
                 variant_id: workflowVariant.variant_id,
-                profile_id: workflowVariant.send_profile_id,
+                profile_id: workflowVariant.expected_send_profile_id,
               },
               "identity_safety_hard",
             ),

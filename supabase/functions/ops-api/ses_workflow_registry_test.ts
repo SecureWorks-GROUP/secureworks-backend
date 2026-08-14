@@ -72,7 +72,7 @@ Deno.test("SES workflow registry exports exactly six families and every effectiv
         variant.stage_profile_id,
         variant.pack_profile_id,
         variant.pricing_profile_id,
-        variant.send_profile_id,
+        variant.expected_send_profile_id,
       ]
     ) {
       assert(profileIds.has(profileId), `${variant.variant_id}: ${profileId}`);
@@ -81,9 +81,10 @@ Deno.test("SES workflow registry exports exactly six families and every effectiv
     assertEquals(variant.live_release_enabled, false);
     assertEquals(variant.seal_state, "unsealed");
     assert(variant.unsealed_reason_code);
+    assertEquals(variant.send_recipe_id, null);
     assert(
       manifest.profiles.send.some((profile) =>
-        profile.profile_id === variant.send_profile_id
+        profile.profile_id === variant.expected_send_profile_id
       ),
     );
     assertEquals(variant.release_prerequisites, {
@@ -124,6 +125,32 @@ Deno.test("SES workflow contract hash is deterministic, semantic, and pinned", a
   };
   assertNotEquals(
     await hashSesWorkflowContractSemanticContent(pricingChanged),
+    SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  );
+
+  const sendProgramChanged = cloneManifest(first);
+  const sendProfile = sendProgramChanged.profiles.send.find((profile) =>
+    profile.profile_id === "send.mlb.physical.v1"
+  );
+  assert(sendProfile);
+  const executionPolicy = sendProfile.executable_semantics
+    .execution_policy as Record<string, unknown>;
+  const artifactRoles = executionPolicy.artifact_roles as Record<
+    string,
+    unknown
+  >;
+  sendProfile.executable_semantics = {
+    ...sendProfile.executable_semantics,
+    execution_policy: {
+      ...executionPolicy,
+      artifact_roles: {
+        ...artifactRoles,
+        approved_invoice_support: ["supporting_report_pdf"],
+      },
+    },
+  };
+  assertNotEquals(
+    await hashSesWorkflowContractSemanticContent(sendProgramChanged),
     SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
   );
 });
@@ -201,7 +228,7 @@ Deno.test("sealed-or-refuse rejects each missing profile and divergent hashes be
     stage: variant.stage_profile_id,
     pack: variant.pack_profile_id,
     pricing: variant.pricing_profile_id,
-    send: variant.send_profile_id,
+    send: variant.expected_send_profile_id,
   };
 
   for (const collection of profileCollections) {
@@ -253,6 +280,23 @@ Deno.test("registry validation rejects internally inconsistent profile chains", 
     validation.errors.some((error) =>
       error.code === "variant_profile_invalid" &&
       error.variant_id === "physical_makesafe.standard.mlb.perth"
+    ),
+  );
+
+  const executableWhileUnsealed = cloneManifest(base);
+  const variant = executableWhileUnsealed.variants.find((candidate) =>
+    candidate.variant_id === "physical_makesafe.standard.mlb.perth"
+  );
+  assert(variant);
+  variant.send_recipe_id = variant.expected_send_profile_id;
+  const executableValidation = await validateSesWorkflowContractManifest(
+    executableWhileUnsealed,
+  );
+  assertEquals(executableValidation.valid, false);
+  assert(
+    executableValidation.errors.some((error) =>
+      error.code === "unsealed_variant_invalid" &&
+      error.variant_id === variant.variant_id
     ),
   );
 });
