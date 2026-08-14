@@ -32988,7 +32988,43 @@ export async function searchAllJobs(
   }
 }
 
-export function _groupTradeAssignmentsForTest(assignments: any[], today: string, weekEnd: string) {
+type TradeTodayMakesafeEvidence = Record<string, {
+  detail?: any
+  hasSubmittedReport?: boolean
+}>
+
+function shouldOmitTradeTodayRecent(
+  assignment: any,
+  makesafeEvidence: TradeTodayMakesafeEvidence,
+): boolean {
+  const job = assignment?.jobs || {}
+  const jobStatus = String(job.status || '').toLowerCase()
+  if (
+    job.archived === true ||
+    (_MAKESAFE_POOL_EXCLUDED_STATUSES as readonly string[]).includes(jobStatus)
+  ) return true
+
+  const assignmentComplete = String(assignment?.status || '').toLowerCase() === 'complete'
+  const jobId = String(job.id || '')
+  const evidence = jobId ? makesafeEvidence[jobId] : undefined
+  const isMakesafe = isMakesafeAccessJob(job) || !!evidence || !!job.makesafe_details
+  if (!isMakesafe) return assignmentComplete
+
+  const detail = evidence?.detail ?? job.makesafe_details
+  if (evidence?.hasSubmittedReport || !isOpenTradeMakesafeDetail(detail)) return true
+
+  // A completed field visit is not a dead leftover while its live make-safe is
+  // still waiting on the trade's current-cycle report.
+  return false
+}
+
+export function _groupTradeAssignmentsForTest(
+  assignments: any[],
+  today: string,
+  weekEnd: string,
+  makesafeEvidence: TradeTodayMakesafeEvidence = {},
+  filterTradeTodayRecent = true,
+) {
   const grouped: any = {
     today: [] as any[],
     thisWeek: [] as any[],
@@ -33013,7 +33049,12 @@ export function _groupTradeAssignmentsForTest(assignments: any[], today: string,
       grouped.unscheduled.push(a)
       continue
     }
-    if (d < today) grouped.recent.push(a)
+    if (d < today) {
+      if (
+        !filterTradeTodayRecent ||
+        !shouldOmitTradeTodayRecent(a, makesafeEvidence)
+      ) grouped.recent.push(a)
+    }
     else if (d === today) grouped.today.push(a)
     else if (d <= weekEnd) grouped.thisWeek.push(a)
     else grouped.upcoming.push(a)
@@ -33452,7 +33493,7 @@ export async function myJobs(
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name ),
         jobs:job_id (
-          id, type, status, client_name, client_phone, client_email,
+          id, type, status, archived, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number
         )
       `
@@ -33460,7 +33501,7 @@ export async function myJobs(
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id (
-          id, type, status, client_name, client_phone, client_email,
+          id, type, status, archived, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number
         )
       `
@@ -33626,7 +33667,7 @@ export async function myJobs(
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id!inner (
-          id, type, status, client_name, client_phone, client_email,
+          id, type, status, archived, client_name, client_phone, client_email,
           site_address, site_suburb, notes, job_number
         )
       `
@@ -34130,7 +34171,81 @@ export async function myJobs(
     }
   }
 
-  const grouped: any = _groupTradeAssignmentsForTest(assignments || [], today, weekEnd)
+  // Trade Today `recent` is an action queue, not assignment history. Load the
+  // current make-safe cycle's report evidence for past cards so completed visits
+  // remain only while that trade genuinely still owes the report. The shared
+  // chunked reader keeps the personal lens URL-safe, paginated and bounded.
+  const filterTradeTodayRecent = !showAll && managerScope.length === 0
+  const tradeTodayMakesafeEvidence: TradeTodayMakesafeEvidence = {}
+  // Query every past personal-card job id so a legacy make-safe identified only
+  // by its makesafe_job_details row gets the same honest result as a normalized
+  // type/SWMS card. Report rows are accepted below only for those two make-safe
+  // shapes, so ordinary service reports cannot reclassify another vertical.
+  const recentJobIds = filterTradeTodayRecent
+    ? collectUniqueStringIds((assignments || [])
+      .filter((assignment: any) => {
+        const scheduledDate = String(assignment?.scheduled_date || '')
+        return scheduledDate && scheduledDate < today
+      })
+      .map((assignment: any) => assignment?.jobs?.id))
+    : []
+  const shapedMakesafeJobIds = new Set<string>((assignments || [])
+    .filter((assignment: any) => isMakesafeAccessJob(assignment?.jobs))
+    .map((assignment: any) => String(assignment?.jobs?.id || ''))
+    .filter(Boolean))
+  if (recentJobIds.length > 0) {
+    try {
+      const [details, reports] = await Promise.all([
+        _fetchAllByJobIdChunked(
+          client,
+          'makesafe_job_details',
+          'job_id, substatus, report_received_at, report_sent_at, invoice_ready_at, cycle_number',
+          recentJobIds,
+        ),
+        _fetchAllByJobIdChunked(
+          client,
+          'job_service_reports',
+          'id, job_id, status, cycle_number',
+          recentJobIds,
+        ),
+      ])
+      for (const detail of details) {
+        const jobId = String(detail?.job_id || '')
+        if (jobId) tradeTodayMakesafeEvidence[jobId] = { detail }
+      }
+      for (const report of reports) {
+        const jobId = String(report?.job_id || '')
+        if (!jobId) continue
+        if (!shapedMakesafeJobIds.has(jobId) && !tradeTodayMakesafeEvidence[jobId]?.detail) continue
+        const reportStatus = String(report?.status || '').toLowerCase()
+        if (!['submitted', 'approved', 'sent'].includes(reportStatus)) continue
+        const currentCycle = Number(tradeTodayMakesafeEvidence[jobId]?.detail?.cycle_number ?? 1)
+        const reportCycle = Number(report?.cycle_number ?? 1)
+        if (reportCycle !== currentCycle) continue
+        const evidence = tradeTodayMakesafeEvidence[jobId] || {}
+        evidence.hasSubmittedReport = true
+        tradeTodayMakesafeEvidence[jobId] = evidence
+      }
+    } catch (e: any) {
+      // Evidence read failure keeps a live make-safe visible rather than hiding
+      // work the trade may still owe; terminal job/assignment filters still run.
+      console.log('[ops-api] myJobs Trade Today report evidence skipped:', e?.message)
+    }
+  }
+
+  const grouped: any = _groupTradeAssignmentsForTest(
+    assignments || [],
+    today,
+    weekEnd,
+    tradeTodayMakesafeEvidence,
+    filterTradeTodayRecent,
+  )
+
+  // `archived` is transient grouping evidence. Remove it again so widening the
+  // job select does not change the my_jobs payload (including Everyone/history).
+  for (const assignment of (assignments || [])) {
+    if (assignment?.jobs) delete assignment.jobs.archived
+  }
 
   // Flag so frontend knows this is admin/all-jobs view
   if (showAll) grouped._adminView = true
