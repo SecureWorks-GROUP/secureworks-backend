@@ -119,7 +119,7 @@ Deno.test("the distinct existing service-role secret still authorizes protected 
   );
 });
 
-Deno.test("OPS_AGENT_SERVER_KEY resolves from x-api-key or Bearer and reads makesafe_board", () => {
+Deno.test("OPS_AGENT_SERVER_KEY is a full inside pass from x-api-key or Bearer", () => {
   for (
     const headers of [
       { xApiKey: "agent-server-secret", bearerToken: null },
@@ -134,12 +134,34 @@ Deno.test("OPS_AGENT_SERVER_KEY resolves from x-api-key or Bearer and reads make
       agentServerKey: "agent-server-secret",
       preferBearerOverApiKey: true,
     });
-    assertEquals(authMode, "agent_read");
-    assertEquals(scopedDispatchStatus("makesafe_board", authMode), 200);
+    assertEquals(authMode, "api_key");
+    const serverSecretPresented = _opsApiServerSecretPresented({
+      ...headers,
+      sharedKey: "browser-shared-key",
+      serviceKey: "service-role-secret",
+      agentServerKey: "agent-server-secret",
+      routineKey: "routine-secret",
+    });
+    assertEquals(serverSecretPresented, true);
+    for (
+      const action of [
+        "makesafe_board",
+        "job_detail",
+        "bind_existing_makesafe_invoice_pack",
+        "create_ses_invoice_draft",
+        "allocate_job",
+      ]
+    ) {
+      assertEquals(
+        authorizationStatus({ action, authMode, serverSecretPresented }),
+        200,
+        action,
+      );
+    }
   }
 });
 
-Deno.test("agent_read is default-denied from write and money actions", () => {
+Deno.test("leftover agent_read dispatch still cannot reach write and money actions", () => {
   for (
     const action of [
       "create_ses_invoice_draft",

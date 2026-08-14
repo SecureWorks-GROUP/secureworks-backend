@@ -169,14 +169,20 @@ serve(async (req: Request) => {
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const agentServerKeyEnv = Deno.env.get('OPS_AGENT_SERVER_KEY')
+  const agentServerKey = agentServerKeyEnv &&
+      agentServerKeyEnv !== validKey &&
+      agentServerKeyEnv !== serviceKey
+    ? agentServerKeyEnv
+    : null
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
   let isAuthed = false
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
+  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey || (agentServerKey && xApiKey === agentServerKey))) {
     isAuthed = true
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
+  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey || (agentServerKey && bearerToken === agentServerKey))) {
     isAuthed = true
   } else if (bearerToken) {
     try {

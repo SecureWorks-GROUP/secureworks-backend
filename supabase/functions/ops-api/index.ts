@@ -3400,9 +3400,10 @@ export function _resolveOpsApiAuthIntent(input: {
   // ahead of browser Bearer preference so an agent request cannot be downgraded
   // when an unrelated Authorization header is also present.
   if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey)) return 'api_key'
-  // The headless agent credential is read-only and must remain distinct from
-  // every existing credential class. A collision is configuration failure, not
-  // an opportunity to inherit agent-read access.
+  // Captain 2026-08-14: the distinct helper pass is a full inside pass, not
+  // look-only. Classify it as the server api_key class so existing operator
+  // handlers run. Collision with the public, routine, or service secret is
+  // configuration failure — do not inherit access from a colliding value.
   const agentServerKeyIsDistinct = !!agentServerKey &&
     agentServerKey !== validKey &&
     agentServerKey !== routineKey &&
@@ -3410,7 +3411,7 @@ export function _resolveOpsApiAuthIntent(input: {
   if (
     agentServerKeyIsDistinct &&
     (xApiKey === agentServerKey || bearerToken === agentServerKey)
-  ) return 'agent_read'
+  ) return 'api_key'
   if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) return 'routine'
   if (bearerToken && bearerToken === validKey) return 'api_key'
   // A user Bearer is the caller identity when the route opts into browser JWT
@@ -3570,12 +3571,19 @@ export function _opsApiServerSecretPresented(input: {
   bearerToken: string | null
   sharedKey?: string | null
   serviceKey?: string | null
+  agentServerKey?: string | null
+  routineKey?: string | null
 }): boolean {
-  const { xApiKey, bearerToken, sharedKey, serviceKey } = input
-  // Fail closed if an environment is accidentally configured with the same
-  // value for the public/shared and server-only credentials.
-  return !!serviceKey && serviceKey !== sharedKey &&
-    (xApiKey === serviceKey || bearerToken === serviceKey)
+  const { xApiKey, bearerToken, sharedKey, serviceKey, agentServerKey, routineKey } = input
+  const matches = (secret?: string | null) =>
+    !!secret &&
+    secret !== sharedKey &&
+    secret !== routineKey &&
+    (xApiKey === secret || bearerToken === secret)
+  // Fail closed if the public/shared key and a server-only credential collide.
+  if (matches(serviceKey)) return true
+  if (matches(agentServerKey) && agentServerKey !== serviceKey) return true
+  return false
 }
 
 export function _authorizeOpsApiAction(input: {
@@ -4067,9 +4075,10 @@ if (import.meta.main) serve(async (req: Request) => {
   //              May read/create drafts and trigger the DB-allowlisted deterministic
   //              scanner; rejected by direct approve/authorise and cannot set or widen
   //              rollout authority. Forced-to-draft on direct live-job creation.
-  //   agent_read — the distinct OPS_AGENT_SERVER_KEY held only by headless
-  //                agents. It reaches the small read-only allow-list below and
-  //                is default-denied from every other action.
+  //   agent_read — leftover look-only dispatch. Captain 2026-08-14 classifies
+  //                a distinct OPS_AGENT_SERVER_KEY as api_key + server secret
+  //                (full helper pass). This branch is only reached if something
+  //                still sets authMode='agent_read' explicitly.
   // The routine key is a DISTINCT secret from SW_API_KEY; the routine env carries the
   // routine key ONLY, never SW_API_KEY (morning provisioning discipline). The env var
   // may be UNSET until provisioned, so we only ever match it when it is non-empty;
@@ -4104,6 +4113,8 @@ if (import.meta.main) serve(async (req: Request) => {
     bearerToken,
     sharedKey: validKey,
     serviceKey,
+    agentServerKey,
+    routineKey,
   })
 
   if (authIntent === 'routine') {
