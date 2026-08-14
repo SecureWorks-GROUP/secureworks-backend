@@ -198,6 +198,9 @@ import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
+  type MakesafeStatusInput,
+  physicalReportCloseoutSatisfied,
+  requiresBoundBuilderReportPdf,
 } from './makesafe_computed_status.ts'
 import {
   evaluateMakesafeSubstatusGate,
@@ -15281,7 +15284,14 @@ export function _deriveMakesafeSurfacing(
 // the lifecycle status the boundary is applied to widens, from DRAFT to
 // DRAFT-or-raised. Prior-cycle commercial evidence is still refused. Closeout
 // still requires the doc gate, `verifiedSent` and the 7-day clock.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v7-reattend-current-raised-visible'
+// v8-bound-report-pdf-floor — both pre-Xero `report_ready` positives now honour
+// the PR #707 bound-builder-report-PDF floor (`requiresBoundBuilderReportPdf` +
+// `physicalReportCloseoutSatisfied`). A physical / temp-fence / repair /
+// restoration card with a submitted trade report and a DRAFT invoice but no
+// bound report PDF is Trade Report In, not Docs Ready — so makesafe_pipeline
+// stops advertising a Docs Ready set the canonical board (v2 + M1) already
+// excludes. Roof / assessment stay portal-honest (the floor is false for them).
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v8-bound-report-pdf-floor'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -15324,6 +15334,29 @@ export function _deriveMakesafeBoardStage(
   const invoiceDone = _makesafeInvoiceIsRaised(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
 
   const surf = _deriveMakesafeSurfacing(job, detail, report, invoice, docs, packSent, pack)
+
+  // Bound-report-PDF floor (PR #707, finished for the legacy pipeline ladder).
+  // Physical / temp-fence / repair / restoration Docs Ready requires a bound
+  // builder-facing report PDF — a submitted trade checklist is Trade Report In
+  // only, never Docs Ready. Roof / assessment honestly have no local make-safe
+  // report and stay on the portal floor (requiresBoundBuilderReportPdf is false
+  // for them). This is the SAME rule the canonical board (v2 sesStageDocsReady)
+  // and M1 (docsReady) already apply, so makesafe_pipeline and makesafe_board
+  // stop advertising different Docs Ready sets for the invoice-without-report
+  // class. The ladder has no `ses_family`, so requiresBoundBuilderReportPdf
+  // falls back to `classifyMakesafeJobType` — which exempts the same roof /
+  // assessment report-type/family tokens and treats every other family as
+  // physical, matching the family-aware answer on that exemption.
+  const reportFloorInput: MakesafeStatusInput = {
+    job,
+    detail,
+    evidence: {
+      pack: pack ? { report_doc_id: pack.report_doc_id ?? null } : null,
+      documents: { report: docs?.has_report_doc === true },
+    },
+  }
+  const reportPdfFloorBlocks = requiresBoundBuilderReportPdf(reportFloorInput) &&
+    !physicalReportCloseoutSatisfied(reportFloorInput)
 
   // A job is "verified sent" when the reporting skill has written the
   // MAKESAFE_PACK_SENT | main marker note AND the invoice is actually
@@ -15369,7 +15402,12 @@ export function _deriveMakesafeBoardStage(
   // before — we never re-surface a sent pack.
   if (!surf.sentClosed) {
     // a drafted-not-sent pack (rendered report + DRAFT invoice) awaiting send.
-    if (surf.readyForReview) return 'report_ready'
+    // A family that owes a bound builder report PDF but has none is held out of
+    // Docs Ready — a pre_xero_docs_ready docket (u4DocsReady) is not a substitute
+    // for the report PDF. Blocked cards fall through to the report-evidence
+    // branch below (Trade Report In), the same honest destination the canonical
+    // board gives them.
+    if (surf.readyForReview && !reportPdfFloorBlocks) return 'report_ready'
     // report received but NOT yet drafted -> Trade Report In.
     if (surf.tradeReportIn) return 'trade_report_in'
   }
@@ -15402,7 +15440,13 @@ export function _deriveMakesafeBoardStage(
   // `ready_to_invoice`/report fallback. It now consumes the same qualifier as
   // U4 and the artifact path. A DRAFT satisfies only this invoice prerequisite;
   // every pre-existing report/substatus condition remains independently true.
-  if (hasSubmittedReport && surf.invoiceIsDraft) return 'report_ready'
+  // The historic ready_to_invoice/report fallback also honours the bound-report
+  // PDF floor: a physical / temp-fence card with a submitted trade report and a
+  // DRAFT invoice but no bound builder report PDF is Trade Report In, never Docs
+  // Ready (the invoice-without-report class). Roof / assessment are exempt.
+  if (hasSubmittedReport && surf.invoiceIsDraft && !reportPdfFloorBlocks) {
+    return 'report_ready'
+  }
   if (hasActualReportEvidence) return 'trade_report_in'
   if (jobStatus === 'complete' && !closeoutBlockedByDocs) {
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'

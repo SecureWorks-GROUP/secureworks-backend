@@ -35,6 +35,7 @@ import {
 import {
   _deriveMakesafeBoardStage,
   _deriveMakesafeSurfacing,
+  _enrichMakesafeBoardJobForTest,
   _makesafeInvoiceIsRaised,
   MAKESAFE_STAGE_LADDER_VERSION,
 } from "./index.ts";
@@ -306,6 +307,200 @@ Deno.test("a drafted-not-sent pack with a DRAFT invoice still surfaces in Docs R
   );
 });
 
+// ── 3b. The bound-report-PDF floor: invoice-without-report is NOT Docs Ready ─
+//
+// The 19-vs-27 class. The canonical board (v2 `sesStageDocsReady` + M1
+// `docsReady`, PR #707) already holds a physical / temp-fence card with a
+// submitted trade report and a DRAFT invoice but NO bound builder report PDF out
+// of Docs Ready. The legacy pipeline ladder did not, so `makesafe_pipeline`
+// advertised a larger Docs Ready set than `makesafe_board` — nine physical
+// invoice-without-report cards sat in the pipeline's Ready column and off the
+// board's. Both `report_ready` positives now honour the same floor.
+
+/** A physical card mid-flight: allocated, trade report in, awaiting the pack. */
+function physicalCard(substatus = "admin_to_send_report") {
+  return {
+    job: {
+      id: "job-1",
+      job_number: "SWMS-TEST-1",
+      status: "processing",
+      type: "makesafe",
+      metadata: { makesafe_job_family: "physical_makesafe" },
+    },
+    detail: {
+      substatus,
+      external_ref: "MLB-TEST-1",
+      cycle_number: 1,
+      report_received_at: RECENT,
+    },
+  };
+}
+
+/** A ready U4 docket with no bound report PDF (pre_xero_docs_ready, no doc id). */
+const U4_READY_NO_REPORT = {
+  id: "p1",
+  status: "drafted",
+  report_doc_id: null,
+  pre_xero_docs_ready: true,
+};
+/** The same docket once the builder report PDF is bound. */
+const U4_READY_WITH_REPORT = {
+  id: "p1",
+  status: "drafted",
+  report_doc_id: "doc-report",
+  pre_xero_docs_ready: true,
+};
+
+Deno.test(
+  "physical DRAFT-invoice card with a ready U4 docket but no report PDF is Trade Report In",
+  () => {
+    // readyForReview fires on the u4DocsReady term (pre_xero_docs_ready) even
+    // with no bound report PDF. The floor blocks the Docs Ready return, and the
+    // card falls to the report-evidence branch — Trade Report In — the same
+    // column the canonical board gives it.
+    assertEquals(
+      stage(physicalCard(), invoice("DRAFT"), DOCS_WITHOUT_INVOICE, {
+        report: { id: "r1", status: "submitted" },
+        pack: U4_READY_NO_REPORT,
+      }),
+      "trade_report_in",
+    );
+    // A pre_xero_docs_ready docket is NOT a substitute for the report PDF here.
+    const surf = _deriveMakesafeSurfacing(
+      physicalCard().job,
+      physicalCard().detail,
+      { id: "r1", status: "submitted" },
+      invoice("DRAFT"),
+      DOCS_WITHOUT_INVOICE,
+      undefined,
+      U4_READY_NO_REPORT,
+    );
+    assert(
+      surf.readyForReview,
+      "the surfacing still reads readyForReview; the floor is what holds the card",
+    );
+  },
+);
+
+Deno.test(
+  "binding the builder report PDF restores the physical card to Docs Ready",
+  () => {
+    // The contrast case. Same card, same DRAFT invoice; a bound report PDF
+    // satisfies the floor, so the card surfaces in Docs Ready as before.
+    assertEquals(
+      stage(physicalCard(), invoice("DRAFT"), DOCS_WITHOUT_INVOICE, {
+        report: { id: "r1", status: "submitted" },
+        pack: U4_READY_WITH_REPORT,
+      }),
+      "report_ready",
+    );
+    // The typed job_documents report row is equally sufficient (filename/bind
+    // equivalent) even without a pack report_doc_id.
+    assertEquals(
+      stage(physicalCard(), invoice("DRAFT"), {
+        has_invoice_doc: false,
+        has_report_doc: true,
+        has_swms_doc: false,
+      }, {
+        report: { id: "r1", status: "submitted" },
+        pack: U4_READY_NO_REPORT,
+      }),
+      "report_ready",
+    );
+  },
+);
+
+Deno.test(
+  "physical fallback: submitted report + DRAFT invoice with no report PDF is held",
+  () => {
+    // The second Docs Ready positive (`hasSubmittedReport && invoiceIsDraft`) is
+    // reached on a non-admin_to_send_report substatus, where `tradeReportIn` does
+    // not pre-empt it. It honours the floor too, so an invoice-without-report
+    // card falls to Trade Report In rather than Docs Ready.
+    assertEquals(
+      stage(physicalCard("ready_to_invoice"), invoice("DRAFT"), {
+        has_invoice_doc: false,
+        has_report_doc: false,
+        has_swms_doc: false,
+      }, { report: { id: "r1", status: "submitted" } }),
+      "trade_report_in",
+    );
+    // Same card, once the report PDF is bound, reaches Docs Ready via the fallback.
+    assertEquals(
+      stage(physicalCard("ready_to_invoice"), invoice("DRAFT"), {
+        has_invoice_doc: false,
+        has_report_doc: true,
+        has_swms_doc: false,
+      }, { report: { id: "r1", status: "submitted" } }),
+      "report_ready",
+    );
+  },
+);
+
+Deno.test(
+  "roof / assessment stay portal-honest: the physical report-PDF floor never holds them",
+  () => {
+    // Report-only families have no local make-safe report PDF by design, so the
+    // floor is a no-op for them: a ready U4 docket + DRAFT invoice still surfaces
+    // in Docs Ready with no bound report PDF (portal capture is their evidence).
+    const roof = {
+      job: {
+        id: "job-1",
+        job_number: "SWMS-TEST-1",
+        status: "processing",
+        metadata: { makesafe_job_family: "roof_report" },
+      },
+      detail: {
+        substatus: "admin_to_send_report",
+        external_ref: "MLB-TEST-1",
+        report_type: "roof_report",
+        cycle_number: 1,
+      },
+    };
+    assertEquals(
+      stage(roof, invoice("DRAFT"), DOCS_WITHOUT_INVOICE, {
+        report: { id: "r1", status: "submitted" },
+        pack: U4_READY_NO_REPORT,
+      }),
+      "report_ready",
+    );
+  },
+);
+
+Deno.test(
+  "the pipeline feed (enrich) buckets the invoice-without-report card off Docs Ready",
+  () => {
+    // makesafePipeline buckets on `enrichMakesafeBoardJob(...).board_stage`. Prove
+    // the pipeline agrees with the board: a physical DRAFT-invoice card with a
+    // ready U4 docket and no bound report PDF enriches to `trade_report_in`, not
+    // `report_ready`.
+    const card = physicalCard();
+    const heldOut = _enrichMakesafeBoardJobForTest(
+      card.job,
+      card.detail,
+      ASSIGNMENT,
+      { id: "r1", status: "submitted", cycle_number: 1 },
+      invoice("DRAFT"),
+      [], // no job_documents report row
+      false,
+      U4_READY_NO_REPORT,
+    );
+    assertEquals(heldOut.board_stage, "trade_report_in");
+    // With the report PDF bound (typed job_documents row), it reaches Docs Ready.
+    const readyRow = _enrichMakesafeBoardJobForTest(
+      card.job,
+      card.detail,
+      ASSIGNMENT,
+      { id: "r1", status: "submitted", cycle_number: 1 },
+      invoice("DRAFT"),
+      [{ type: "makesafe_report", file_name: "make safe report.pdf" }],
+      false,
+      U4_READY_NO_REPORT,
+    );
+    assertEquals(readyRow.board_stage, "report_ready");
+  },
+);
+
 // ── 4. The two terms deliberately NOT changed ──────────────────────────────
 
 Deno.test("operator closure claims still close only with complete docs", () => {
@@ -471,7 +666,7 @@ Deno.test("the visible ladder's version is pinned and published", () => {
   // derivation that produced it, exactly as `SES_STAGE_ENGINE_V2_VERSION` does.
   assertEquals(
     MAKESAFE_STAGE_LADDER_VERSION,
-    "makesafe-stage-ladder.v7-reattend-current-raised-visible",
+    "makesafe-stage-ladder.v8-bound-report-pdf-floor",
   );
   // The read model republishes whatever enrich stamped, and null when a caller
   // built the base row without it — never a silent default that would attribute

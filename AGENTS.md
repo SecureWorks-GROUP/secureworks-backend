@@ -2531,6 +2531,21 @@ floor. `physicalReportCloseoutSatisfied` / `requiresBoundBuilderReportPdf` in
 `makesafe_computed_status.ts` are the one producer; Heathridge SWMS-261174
 (AJBR-70781, 2026-08-14) is the named miss.
 
+All THREE Docs Ready derivations consume that one producer so `makesafe_board`
+and `makesafe_pipeline` never advertise different Docs Ready sets: the canonical
+board (v2 `sesStageDocsReady`), M1 (`docsReady`), AND the legacy pipeline ladder
+(`_deriveMakesafeBoardStage`, ladder v8-bound-report-pdf-floor). The ladder gates
+BOTH its pre-Xero `report_ready` positives — the `readyForReview` path (a
+`pre_xero_docs_ready` docket / `u4DocsReady` is NOT a substitute for the report
+PDF) and the `hasSubmittedReport && invoiceIsDraft` fallback. Before v8 the
+pipeline placed a physical DRAFT-invoice card with a ready docket but no bound
+report PDF in Report Ready while the board (v2) already held it in Trade Report
+In — the 19-vs-27 invoice-without-report gap. The ladder has no `ses_family`, so
+`requiresBoundBuilderReportPdf` falls back to `classifyMakesafeJobType`, which
+exempts the same roof / assessment report-type/family tokens and treats every
+other family as physical; the answer matches the family-aware board on that
+exemption. Tests: `makesafe_draft_invoice_stage_test.ts` (section 3b).
+
 ## Portal Truth Has Two Stores, And `portal_verified_at` Is Only One Of Them
 
 `makesafe_job_details.portal_verified_at` / `.portal_verified_cycle` have exactly

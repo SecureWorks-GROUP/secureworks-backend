@@ -398,6 +398,12 @@ Deno.test("a first-attendance card behaves exactly as before", () => {
     invoice_date: "2026-08-06",
     created_at: "2026-08-06T01:40:11.160+00:00",
   };
+  // This is a physical card (no roof/assessment report_type), so the ladder v8
+  // bound-report-PDF floor applies: a submitted trade report + DRAFT invoice is
+  // Docs Ready only with a bound builder report PDF. Bind one (a typed
+  // makesafe_report job_documents row) so the card legitimately reaches Docs
+  // Ready and this test isolates the reattend-suppression control it exists for,
+  // not the report-PDF floor.
   const row = _enrichMakesafeBoardJobForTest(
     job,
     detail,
@@ -408,7 +414,7 @@ Deno.test("a first-attendance card behaves exactly as before", () => {
       submitted_at: "2026-08-05T12:08:49.473+00:00",
     },
     inv,
-    [],
+    [{ type: "makesafe_report", file_name: "make safe report.pdf" }],
     false,
     READY_PACK,
   );
