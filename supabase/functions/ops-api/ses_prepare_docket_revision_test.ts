@@ -5728,3 +5728,218 @@ Deno.test("Phase One keeps business findings visible under the named-card gate p
     "pricing_evidence_missing",
   );
 });
+
+// ---------------------------------------------------------------------------
+// F26: caveat-mode persistence for operator-selected proof cards.
+//
+// A serve-time integrity refusal (sibling-evidence unrecoverable,
+// spine_missing_source) holds its report/photo tile ON HOLD and pushes no
+// served bytes. Before F26 that refusal ALSO blocked the whole docket persist
+// for every non-normalNamedCard (synthetic proof cards, batch), so the visible
+// ON-HOLD review pack could never be recorded. F26 lets an operator-selected
+// active card — named OR synthetic — persist its ON-HOLD pack, exactly as F25
+// already did for named cards, without neutralising any hard stop, masking any
+// report, or serving any wrong bytes. Batch stays untouched.
+// ---------------------------------------------------------------------------
+
+function syntheticPhysicalSiblingUnrecoverableInput(): SesAssemblerInputV1 {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "SYNTHETIC" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  // Route to the synthetic internal mailbox so routing is not the blocker.
+  input.source.work_order_sender = "marnin@secureworkswa.com.au";
+  input.routing_seed.report_to = "marnin@secureworkswa.com.au";
+  input.routing_seed.invoice_to = "marnin@secureworkswa.com.au";
+  // Force the accepted-sibling-bundle report path, then make its report
+  // artifact unrecoverable (serve-time integrity refusal -> persistenceRefused).
+  input.cycle_facts.trade_report = null;
+  input.cycle_facts.photos = [];
+  input.sibling_bundle_evidence = {
+    status: "accepted",
+    bundle_id: "1cd35292-1eb7-438f-bf6e-8dbcdf3fb135",
+    claiming_binding: {
+      revision_id: "7dcf8954-5f8c-412b-898e-bc92987e44fc",
+      recorded_by: "ses-sibling-evidence-v1",
+      recorded_via: "reviewed_migration:20260728730000",
+      provenance: { source: "ses-u7-whole-board-sweep-v1" },
+    },
+    reverse_binding: {
+      revision_id: "a2ebb22e-6f46-463d-87c8-7e7ec71cd399",
+      recorded_by: "ses-sibling-evidence-v1",
+      recorded_via: "reviewed_migration:20260728730000",
+      provenance: { source: "ses-u7-whole-board-sweep-v1" },
+    },
+    sibling: {
+      job_id: "02f614a4-09a7-422e-9381-c89a44aceccd",
+      job_number: "SWMS-26837",
+    },
+    coverage: {
+      invoice: {
+        invoice_id: "3be46700-4d5d-4b91-b96e-8baf43ac9d7c",
+        invoice_number: "INV-0835",
+        line_item_id: "edcaa56c-84d5-4a12-be0d-032bd1d422f3",
+        scope_phrase: "Hardie panel stacking",
+      },
+      delivery: {
+        email_post_id: "mail-0835",
+        content_sha256:
+          "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
+        scope_phrase: "displaced Hardie panels stacked safely",
+      },
+      photo: {
+        email_post_id: "mail-0835",
+        content_sha256:
+          "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
+        scope_phrase: "displaced Hardie panels stacked safely",
+        media_id: "photo-26837",
+        content_hash:
+          "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
+      },
+      report_document_id: "513cb62a-4f9f-4fd5-ae5c-66b0ce053448",
+      swms_document_id: "878641fc-99ba-4f5f-a0a6-d64708394b6a",
+    },
+  };
+  return input;
+}
+
+Deno.test("F26 positive: a synthetic proof card persists its ON-HOLD pack when a serve-time integrity refusal fires", async () => {
+  const input = syntheticPhysicalSiblingUnrecoverableInput();
+  const ledger = new Map<string, DocketLedgerRow>();
+  const { client, rpcCalls } = docketLedgerClient(ledger);
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      // The accepted bundle's independent report artifact cannot be recovered.
+      resolveBundledPhysicalReportProof: async () => null,
+      persist: createSesDocketPersistenceAdapter({
+        client,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        created_by: "ses-f26-test",
+      }),
+    }),
+  )).results[0];
+
+  // The docket is now RECORDED (persistenceRefused blocked this before F26).
+  assertEquals(result.persisted, true);
+  assertEquals(
+    blockerCodes(result).includes("sibling_evidence_artifact_unrecoverable"),
+    true,
+  );
+  // Serve safety intact: the curated report tile stays ON HOLD and no trusted
+  // report bytes were produced or served.
+  assertEquals(
+    result.envelope.v2.items.supporting_report_pdf.state,
+    "blocked",
+  );
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    ),
+    false,
+  );
+  // Synthetic stays permanently release-blocked; no money/send is approved.
+  assertEquals(
+    blockerCodes(result).includes("synthetic_livefire_release_forbidden"),
+    true,
+  );
+  assertEquals(result.envelope.invoice_create_approved, false);
+  assertEquals(result.envelope.client_send_approved, false);
+  // The persisted record keeps the FULL, unneutralised blocker set (synthetic
+  // is not normalNamedCard, so no hard stop is downgraded away).
+  const commit = rpcCalls.find((call) =>
+    call.name === "commit_makesafe_docket_revision_v1"
+  );
+  assert(commit, "expected the real persistence adapter to commit the docket");
+  const persistedRevision = commit.args.p_revision as Record<string, unknown>;
+  const persistedCodes = Array.isArray(persistedRevision.blockers)
+    ? (persistedRevision.blockers as Array<{ reason_code: string }>).map((b) =>
+      b.reason_code
+    )
+    : [];
+  assert(
+    persistedCodes.includes("sibling_evidence_artifact_unrecoverable"),
+    `expected the ON-HOLD refusal recorded on the persisted pack; got ${
+      persistedCodes.join(", ")
+    }`,
+  );
+});
+
+Deno.test("F26 negative: a batch card with the same serve-time refusal still does NOT persist (caveat mode is not a universal bypass)", async () => {
+  const input = syntheticPhysicalSiblingUnrecoverableInput();
+  const prepareRequest = request(input.identity.job_id, false);
+  prepareRequest.selection = { mode: "board_batch", limit: 1 };
+  // board_batch may not carry a draft_pack_output (guarded selection).
+  delete prepareRequest.draft_pack_output;
+  let persistCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    prepareRequest,
+    dependencies(input, {
+      listBoardJobs: async () => [{
+        mode: "job_id",
+        job_id: input.identity.job_id,
+      }],
+      resolveBundledPhysicalReportProof: async () => null,
+      persist: async () => {
+        persistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+
+  // The board-batch lane is NOT an operator-selected exact card, so the
+  // persistenceRefused fence still holds and nothing is committed.
+  assertEquals(persistCalls, 0);
+  assertEquals(result.persisted, false);
+  assertEquals(
+    blockerCodes(result).includes("sibling_evidence_artifact_unrecoverable"),
+    true,
+  );
+});
+
+Deno.test("F26 negative: a persisted curated_source_missing pack serves no trusted report and keeps money/send fenced", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "SYNTHETIC" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.source.work_order_sender = "marnin@secureworkswa.com.au";
+  input.routing_seed.report_to = "marnin@secureworkswa.com.au";
+  input.routing_seed.invoice_to = "marnin@secureworkswa.com.au";
+  let persistCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      // No independent durable curated report source can be proved.
+      resolvePhysicalReportProof: async () => null,
+      persist: async () => {
+        persistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+
+  // The visible caveat pack is recorded, but the curated-content refusal is
+  // never punched through: no trusted report artifact is served.
+  assertEquals(persistCalls, 1);
+  assertEquals(result.persisted, true);
+  assertEquals(
+    blockerCodes(result).includes("curated_source_missing"),
+    true,
+  );
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    ),
+    false,
+  );
+  // The money/send fence is unaffected by caveat-mode persistence.
+  assertEquals(result.envelope.invoice_create_approved, false);
+  assertEquals(result.envelope.client_send_approved, false);
+  assertDraftZeroInvoice(result);
+  assertEquals(
+    blockerCodes(result).includes("synthetic_livefire_release_forbidden"),
+    true,
+  );
+});

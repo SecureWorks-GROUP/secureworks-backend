@@ -2733,19 +2733,39 @@ function suppliedDraftPackOutput(
 }
 
 /**
+ * An operator-selected active card is the thin transport boundary for a card
+ * an operator named exactly (not a board_batch sweep). This is the superset
+ * used for caveat-mode PERSISTENCE only: it includes synthetic proof cards so
+ * the live-fire lab can record the same ON-HOLD review pack a real card would.
+ * It grants no release, no hard-stop neutralisation, and no report masking.
+ */
+function isExactSelectedActiveCardPrepare(
+  operatorSelectedExactCard: boolean,
+  input: SesAssemblerInputV1,
+  row: SesFamilyMatrixRow | null,
+): boolean {
+  return operatorSelectedExactCard && row !== null &&
+    input.classification.workflow === "active";
+}
+
+/**
  * A named-card prepare is the thin transport boundary for an operator-selected
  * card. Semantic/evidence findings remain visible on the persisted pack, but
  * they may only hold release: they do not refuse attachment, Docs Ready
  * placement, or the invoice-obligation handoff. Batch preparation keeps its
- * existing classification because no operator selected an exact card.
+ * existing classification because no operator selected an exact card. Synthetic
+ * cards are excluded (they must stay fully validated and release-blocked).
  */
 function isNormalNamedCardPrepare(
   operatorSelectedExactCard: boolean,
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow | null,
 ): boolean {
-  return operatorSelectedExactCard && row !== null &&
-    input.classification.workflow === "active" &&
+  return isExactSelectedActiveCardPrepare(
+    operatorSelectedExactCard,
+    input,
+    row,
+  ) &&
     input.classification.builder_key !== "SYNTHETIC";
 }
 
@@ -2938,6 +2958,19 @@ async function prepareOne(
   }
   const row = matrix.ok ? matrix.row : null;
   const normalNamedCard = isNormalNamedCardPrepare(
+    operatorSelectedExactCard,
+    input,
+    row,
+  );
+  // F26: an operator-selected active card — named OR synthetic proof card — may
+  // persist its review pack even when a serve-time integrity refusal fired.
+  // A refusal (sibling-evidence unrecoverable, spine_missing_source) already
+  // holds its report/photo tile ON HOLD and pushes no served bytes, so blocking
+  // the whole docket persist only hides the visible caveat pack. Synthetic proof
+  // cards keep their FULL blocker set (they are not normalNamedCard, so no hard
+  // stop is neutralised and no incomplete report is masked) and stay
+  // release-blocked; this only lets the ON-HOLD pack be recorded.
+  const exactSelectedActiveCard = isExactSelectedActiveCardPrepare(
     operatorSelectedExactCard,
     input,
     row,
@@ -4654,7 +4687,7 @@ async function prepareOne(
   let committedAt = now().toISOString();
   if (!request.dry_run) {
     if (
-      deps.persist && (!persistenceRefused || normalNamedCard) &&
+      deps.persist && (!persistenceRefused || exactSelectedActiveCard) &&
       (!request.require_ready_for_persistence || baseRevision.state === "ready")
     ) {
       const persistedResult = await measure("T11", () =>
