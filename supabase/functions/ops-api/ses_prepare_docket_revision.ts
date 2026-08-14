@@ -28,11 +28,11 @@ import {
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_FAMILY_MATRIX_VERSION,
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  SES_WORKFLOW_SWMS_REQUIREMENT,
   type SesFamilyId,
-  sesFamilyIncludesSwms,
   type SesFamilyMatrixRow,
-  sesFamilyRequiresSwms,
   type SesInvoiceBasis,
+  type SesWorkflowSwmsRequirement,
 } from "./ses_family_matrix.ts";
 import {
   ajsPackCc,
@@ -246,50 +246,77 @@ const SES_WORKFLOW_BIND_ORDER = Object.freeze(
 );
 
 function workflowPackProfile(
-  descriptor: Omit<
-    SesWorkflowPackProfileDescriptor,
-    "detect_before_mint" | "bind_order" | "swms_generation"
-  >,
+  descriptor: SesWorkflowPackProfileSeed,
+  swmsRequirement: SesWorkflowSwmsRequirement,
 ): SesWorkflowPackProfileDescriptor {
+  const includedArtifacts = Object.freeze([
+    ...descriptor.included_artifacts.filter((role) =>
+      role !== "scope_correct_swms"
+    ),
+    "scope_correct_swms" as const,
+  ]);
+  const hardRequiredArtifacts = Object.freeze([
+    ...descriptor.hard_required_artifacts.filter((role) =>
+      role !== "scope_correct_swms"
+    ),
+    ...(swmsRequirement === "hard_required"
+      ? ["scope_correct_swms" as const]
+      : []),
+  ]);
+  const swmsRuleId = swmsRequirement === "hard_required"
+    ? "pack.swms.generated-scope-correct.v1"
+    : "pack.swms.include-until-accuracy-gate.v1";
   return Object.freeze({
     ...descriptor,
+    included_artifacts: includedArtifacts,
+    hard_required_artifacts: hardRequiredArtifacts,
     swms_generation: "generated_scope_correct",
+    swms_requirement: swmsRequirement,
     detect_before_mint: true,
     bind_order: SES_WORKFLOW_BIND_ORDER,
+    source_rule_ids: Object.freeze([
+      ...descriptor.source_rule_ids.filter((ruleId) =>
+        !ruleId.startsWith("pack.swms.")
+      ),
+      swmsRuleId,
+    ]),
   });
 }
 
-const PHYSICAL_WORKFLOW_PACK_PROFILE = workflowPackProfile({
+type SesWorkflowPackProfileSeed = Omit<
+  SesWorkflowPackProfileDescriptor,
+  | "detect_before_mint"
+  | "bind_order"
+  | "swms_generation"
+  | "swms_requirement"
+>;
+
+const PHYSICAL_WORKFLOW_PACK_PROFILE: SesWorkflowPackProfileSeed = {
   pack_profile_id: "pack.physical.v1",
   artifact_profile_id: "artifacts.physical.v1",
   included_artifacts: Object.freeze([
     "physical_report",
     "photos",
-    "scope_correct_swms",
     "invoice",
   ]),
   hard_required_artifacts: Object.freeze([
     "physical_report",
     "photos",
-    "scope_correct_swms",
     "invoice",
   ]),
   forbidden_artifacts: Object.freeze([]),
-  swms_requirement: "hard_required",
   source_rule_ids: Object.freeze([
     "pack.physical.current-cycle-report.v1",
     "pack.physical.photos.v1",
-    "pack.swms.generated-scope-correct.v1",
     "pack.invoice.bound-draft.v1",
   ]),
-});
+};
 
-const ROOF_PORTAL_WORKFLOW_PACK_PROFILE = workflowPackProfile({
+const ROOF_PORTAL_WORKFLOW_PACK_PROFILE: SesWorkflowPackProfileSeed = {
   pack_profile_id: "pack.roof.portal.v1",
   artifact_profile_id: "artifacts.roof.portal.v1",
   included_artifacts: Object.freeze([
     "roof_portal_capture",
-    "scope_correct_swms",
     "invoice",
   ]),
   hard_required_artifacts: Object.freeze([
@@ -297,39 +324,33 @@ const ROOF_PORTAL_WORKFLOW_PACK_PROFILE = workflowPackProfile({
     "invoice",
   ]),
   forbidden_artifacts: Object.freeze(["physical_report"]),
-  swms_requirement: "include_not_required_until_accuracy_gate",
   source_rule_ids: Object.freeze([
     "pack.roof.portal-current-cycle.v1",
-    "pack.swms.include-until-accuracy-gate.v1",
     "pack.invoice.bound-draft.v1",
   ]),
-});
+};
 
-const ROOF_OWN_DOCUMENT_WORKFLOW_PACK_PROFILE = workflowPackProfile({
+const ROOF_OWN_DOCUMENT_WORKFLOW_PACK_PROFILE: SesWorkflowPackProfileSeed = {
   pack_profile_id: "pack.roof.own_document.v1",
   artifact_profile_id: "artifacts.roof.own_document.v1",
   included_artifacts: Object.freeze([
     "own_roof_report",
-    "scope_correct_swms",
     "invoice",
   ]),
   hard_required_artifacts: Object.freeze(["own_roof_report", "invoice"]),
   forbidden_artifacts: Object.freeze(["physical_report"]),
-  swms_requirement: "include_not_required_until_accuracy_gate",
   source_rule_ids: Object.freeze([
     "pack.roof.own-document-current-cycle.v1",
-    "pack.swms.include-until-accuracy-gate.v1",
     "pack.invoice.bound-draft.v1",
   ]),
-});
+};
 
-const ASSESSMENT_WORKFLOW_PACK_PROFILE = workflowPackProfile({
+const ASSESSMENT_WORKFLOW_PACK_PROFILE: SesWorkflowPackProfileSeed = {
   pack_profile_id: "pack.assessment.v1",
   artifact_profile_id: "artifacts.assessment.v1",
   included_artifacts: Object.freeze([
     ...((SES_PORTAL_REQUIRED_ROLES.assessment_quote ||
       []) as SesWorkflowArtifactRole[]),
-    "scope_correct_swms",
     "invoice",
   ]),
   hard_required_artifacts: Object.freeze([
@@ -338,37 +359,61 @@ const ASSESSMENT_WORKFLOW_PACK_PROFILE = workflowPackProfile({
     "invoice",
   ]),
   forbidden_artifacts: Object.freeze(["physical_report"]),
-  swms_requirement: "include_not_required_until_accuracy_gate",
   source_rule_ids: Object.freeze([
     "pack.assessment-triad.v1",
-    "pack.swms.include-until-accuracy-gate.v1",
     "pack.invoice.bound-draft.v1",
   ]),
-});
+};
 
-/** Stable pack/artifact profile view consumed by the aggregate registry. */
-export function sesWorkflowPackProfile(
-  family: SesFamilyId,
-): SesWorkflowPackProfileDescriptor | null {
+/**
+ * Derive the hashed pack profile from the exact executable SWMS operand.
+ * The explicit operand exists for mutation tests; runtime callers use
+ * `sesWorkflowPackProfile`, which reads the family matrix's sole policy map.
+ */
+export function sesWorkflowPackProfileForSwmsRequirement(
+  family: Exclude<SesFamilyId, "unknown">,
+  swmsRequirement: SesWorkflowSwmsRequirement,
+): SesWorkflowPackProfileDescriptor {
   switch (family) {
     case "physical_makesafe":
     case "temporary_fencing":
     case "repair":
     case "restoration":
-      return PHYSICAL_WORKFLOW_PACK_PROFILE;
+      return workflowPackProfile(
+        PHYSICAL_WORKFLOW_PACK_PROFILE,
+        swmsRequirement,
+      );
     case "ordinary_roof_portal":
-      return ROOF_PORTAL_WORKFLOW_PACK_PROFILE;
+      return workflowPackProfile(
+        ROOF_PORTAL_WORKFLOW_PACK_PROFILE,
+        swmsRequirement,
+      );
     case "own_template_roof":
-      return ROOF_OWN_DOCUMENT_WORKFLOW_PACK_PROFILE;
+      return workflowPackProfile(
+        ROOF_OWN_DOCUMENT_WORKFLOW_PACK_PROFILE,
+        swmsRequirement,
+      );
     case "assessment_quote":
-      return ASSESSMENT_WORKFLOW_PACK_PROFILE;
-    case "unknown":
-      return null;
+      return workflowPackProfile(
+        ASSESSMENT_WORKFLOW_PACK_PROFILE,
+        swmsRequirement,
+      );
     default: {
       const exhaustive: never = family;
       throw new Error(`unhandled SES family: ${String(exhaustive)}`);
     }
   }
+}
+
+/** Stable pack/artifact profile view consumed by the aggregate registry. */
+export function sesWorkflowPackProfile(
+  family: SesFamilyId,
+): SesWorkflowPackProfileDescriptor | null {
+  if (family === "unknown") return null;
+  return sesWorkflowPackProfileForSwmsRequirement(
+    family,
+    SES_WORKFLOW_SWMS_REQUIREMENT[family],
+  );
 }
 
 export const SES_WORKFLOW_PRICING_RULE_VERSION =
@@ -1252,8 +1297,13 @@ export function sesSwmsDecision(
   requirementEvidence: string;
   naRule: string | null;
 } {
-  const included = sesFamilyIncludesSwms(row.family);
-  const required = sesFamilyRequiresSwms(row.builder_key, row.family);
+  const packProfile = sesWorkflowPackProfile(row.family);
+  const included = packProfile?.included_artifacts.includes(
+    "scope_correct_swms",
+  ) === true;
+  const required = packProfile?.hard_required_artifacts.includes(
+    "scope_correct_swms",
+  ) === true;
   if (required) {
     return {
       included,

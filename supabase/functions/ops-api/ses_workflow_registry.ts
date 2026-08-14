@@ -227,6 +227,21 @@ function codePointCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function setConsistentProfile<T extends { profile_id: string }>(
+  profiles: Map<string, T>,
+  profile: T,
+): void {
+  const existing = profiles.get(profile.profile_id);
+  if (
+    existing && canonicalSesJson(existing) !== canonicalSesJson(profile)
+  ) {
+    throw new Error(
+      `workflow profile ${profile.profile_id} resolves to divergent executable operands`,
+    );
+  }
+  profiles.set(profile.profile_id, profile);
+}
+
 function publicFamilyId(row: SesFamilyMatrixRow): SesWorkflowFamilyId {
   switch (row.family) {
     case "physical_makesafe":
@@ -332,14 +347,14 @@ function buildRawManifest(): RawManifest {
     }
     const familyId = publicFamilyId(row);
     const familyDescriptor = familyProfile(familyId);
-    family.set(familyDescriptor.profile_id, familyDescriptor);
+    setConsistentProfile(family, familyDescriptor);
 
     const packDescriptor = sesWorkflowPackProfile(row.family);
     const stageDescriptor = sesStageWorkflowProfile(row.family);
     if (!packDescriptor || !stageDescriptor) {
       throw new Error(`known SES family ${row.family} has no workflow profile`);
     }
-    artifact.set(packDescriptor.artifact_profile_id, {
+    setConsistentProfile(artifact, {
       profile_id: packDescriptor.artifact_profile_id,
       included_artifacts: sortedStrings(packDescriptor.included_artifacts),
       hard_required_artifacts: sortedStrings(
@@ -352,7 +367,7 @@ function buildRawManifest(): RawManifest {
       unsealed_reason_code: null,
       source_rule_ids: sortedStrings(packDescriptor.source_rule_ids),
     });
-    pack.set(packDescriptor.pack_profile_id, {
+    setConsistentProfile(pack, {
       profile_id: packDescriptor.pack_profile_id,
       artifact_profile_id: packDescriptor.artifact_profile_id,
       assembler_version: SES_ASSEMBLER_VERSION,
@@ -366,7 +381,7 @@ function buildRawManifest(): RawManifest {
       unsealed_reason_code: null,
       source_rule_ids: sortedStrings(packDescriptor.source_rule_ids),
     });
-    stage.set(stageDescriptor.profile_id, {
+    setConsistentProfile(stage, {
       profile_id: stageDescriptor.profile_id,
       stage_engine_version: SES_STAGE_ENGINE_V2_VERSION,
       evidence_kind: stageDescriptor.evidence_kind,
@@ -381,9 +396,9 @@ function buildRawManifest(): RawManifest {
     });
 
     const pricingDescriptor = pricingProfile(row.invoice_basis);
-    pricing.set(pricingDescriptor.profile_id, pricingDescriptor);
+    setConsistentProfile(pricing, pricingDescriptor);
     const sendDescriptor = sesWorkflowSendProfile(row);
-    send.set(sendDescriptor.profile_id, {
+    setConsistentProfile(send, {
       profile_id: sendDescriptor.profile_id,
       executable_send_recipe_id: sendDescriptor.executable_send_recipe_id,
       route_order: [...sendDescriptor.route_order],
@@ -1013,17 +1028,6 @@ export async function prepareSesWorkflowBackendPolicyContract(
       "The resolved matrix row has no workflow-registry variant.",
     );
   }
-  if (
-    (variant.family_id === "repair" || variant.family_id === "restoration") &&
-    input.deliverable_active !== true
-  ) {
-    return refusal(
-      "deliverable_not_active",
-      `${variant.family_id} has no active SES reporting deliverable.`,
-      variant.variant_id,
-    );
-  }
-
   const references = [
     ["family", variant.family_profile_id, manifest.profiles.family] as const,
     [
@@ -1054,6 +1058,18 @@ export async function prepareSesWorkflowBackendPolicyContract(
       );
     }
     selected[kind] = profile;
+  }
+  const selectedFamily = selected.family as SesWorkflowFamilyProfile;
+  if (
+    selectedFamily.active_deliverable_required &&
+    input.deliverable_active !== true
+  ) {
+    return refusal(
+      "deliverable_not_active",
+      `${variant.family_id} has no active SES reporting deliverable.`,
+      variant.variant_id,
+      selectedFamily.profile_id,
+    );
   }
 
   const recomputedHash = await hashSesWorkflowContractSemanticContent(manifest);

@@ -6,6 +6,10 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { canonicalSesJson } from "./ses_docket_envelope.ts";
+import {
+  sesWorkflowPackProfile,
+  sesWorkflowPackProfileForSwmsRequirement,
+} from "./ses_prepare_docket_revision.ts";
 import { SES_PORTAL_REQUIRED_ROLES } from "./ses_stage_engine_v2.ts";
 import {
   exportSesContractSnapshot,
@@ -151,6 +155,43 @@ Deno.test("SES workflow contract hash is deterministic, semantic, and pinned", a
   };
   assertNotEquals(
     await hashSesWorkflowContractSemanticContent(sendProgramChanged),
+    SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  );
+});
+
+Deno.test("mutating the executable assessment SWMS operand changes the canonical contract hash", async () => {
+  const base = await exportSesContractSnapshot();
+  const runtimeProfile = sesWorkflowPackProfile("assessment_quote");
+  const mutatedProfile = sesWorkflowPackProfileForSwmsRequirement(
+    "assessment_quote",
+    "hard_required",
+  );
+  assert(runtimeProfile);
+  assertEquals(
+    runtimeProfile.swms_requirement,
+    "include_not_required_until_accuracy_gate",
+  );
+  assertEquals(mutatedProfile.swms_requirement, "hard_required");
+  assertEquals(
+    mutatedProfile.hard_required_artifacts.includes("scope_correct_swms"),
+    true,
+  );
+
+  const mutated = cloneManifest(base);
+  const assessment = mutated.profiles.artifact.find((profile) =>
+    profile.profile_id === mutatedProfile.artifact_profile_id
+  );
+  assert(assessment);
+  assessment.included_artifacts = [...mutatedProfile.included_artifacts];
+  assessment.hard_required_artifacts = [
+    ...mutatedProfile.hard_required_artifacts,
+  ];
+  assessment.forbidden_artifacts = [...mutatedProfile.forbidden_artifacts];
+  assessment.swms_generation = mutatedProfile.swms_generation;
+  assessment.swms_requirement = mutatedProfile.swms_requirement;
+  assessment.source_rule_ids = [...mutatedProfile.source_rule_ids];
+  assertNotEquals(
+    await hashSesWorkflowContractSemanticContent(mutated),
     SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
   );
 });
