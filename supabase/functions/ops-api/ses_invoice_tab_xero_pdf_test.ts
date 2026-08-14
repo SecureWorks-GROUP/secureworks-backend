@@ -14,6 +14,7 @@ import {
   resolveSesBoundDraftInvoicePdfArtifact,
   storeSesXeroInvoicePdfBytes,
 } from "./ses_reporting_actions.ts";
+import { sesSha256Bytes } from "./ses_docket_envelope.ts";
 
 const JOB_ID = "00000000-0000-4000-8000-0000000000b1";
 const DOCKET_ID = "00000000-0000-4000-8000-0000000000d1";
@@ -501,9 +502,9 @@ Deno.test("get_ses_reviewable_pack injects bound DRAFT Xero PDF and drops non-ma
   );
 });
 
-Deno.test("cockpit pdf_available agrees with the pack projection, not with a stored hash", async () => {
-  // A DRAFT bound before mint-time storage existed carries no pointer at all,
-  // so pdf_content_hash cannot be the availability signal either way.
+Deno.test("cockpit freezes the live DRAFT PDF hash while availability follows the pack projection", async () => {
+  // A legacy DRAFT binding may carry no stored pointer, but once its live PDF
+  // is fetched the cockpit must expose the exact reviewed hash for Option B.
   resetSesDraftPdfFetchBackoff();
   const reachable = packClient();
   const shown = await querySesReviewCockpitAction(
@@ -515,7 +516,7 @@ Deno.test("cockpit pdf_available agrees with the pack projection, not with a sto
   );
   const shownBound = (shown.sections.money as any).bound_invoice;
   assertEquals(shownBound.xero_invoice_id, XERO_ID);
-  assertEquals(shownBound.pdf_content_hash, null);
+  assertEquals(shownBound.pdf_content_hash, await sesSha256Bytes(pdfBytes()));
   assertEquals(shownBound.pdf_available, true);
   const shownPack = await getSesReviewablePackAction(
     reachable.client,

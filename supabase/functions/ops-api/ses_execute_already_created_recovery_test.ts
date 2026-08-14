@@ -29,7 +29,7 @@ import {
   type SesXeroGateway,
   writeSesMoneyChainRefusalAudit,
 } from "./ses_reporting_actions.ts";
-import { sesSha256 } from "./ses_docket_envelope.ts";
+import { sesSha256, sesSha256Bytes } from "./ses_docket_envelope.ts";
 
 const ORG_ID = "00000000-0000-4000-8000-000000000001";
 const JOB_ID = "b7abfb20-6ab3-41fb-b5af-d65491bca38c";
@@ -47,16 +47,48 @@ const READINESS_REV: string | null = null;
 // create-effect token the send path recomputes — that mismatch is the bug.
 const CONFIRMED_MINT_TOKEN = "SES-1caed8c7-9bf3-50a8-8576-1c452c7ca1c5";
 
-const PDF_BYTES = new Uint8Array([
-  0x25,
-  0x50,
-  0x44,
-  0x46,
-  0x2d,
-  0x31,
-  0x2e,
-  0x34,
-]); // %PDF-1.4
+const encode = (value: string) => new TextEncoder().encode(value);
+
+function invoicePdf(status: "DRAFT" | "AUTHORISED"): Uint8Array {
+  const lines = [
+    `Invoice Number ${INVOICE_NUMBER}`,
+    `Invoice Status ${status}`,
+    `Reference ${REFERENCE}`,
+    "Customer Major Loss Builders",
+    "Description Emergency make-safe attendance",
+    "Line one attendance labour quantity 1 unit price 250.00",
+    "Subtotal 250.00 GST 25.00 Total AUD 275.00",
+  ];
+  const content = `BT /F1 10 Tf 72 760 Td ${
+    lines.map((line) => `(${line}) Tj 0 -14 Td`).join(" ")
+  } ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${encode(content).length} >>\nstream\n${content}\nendstream`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let index = 0; index < objects.length; index++) {
+    offsets.push(encode(pdf).length);
+    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+  const xref = encode(pdf).length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${
+    objects.length + 1
+  } /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return encode(pdf);
+}
+
+const DRAFT_PDF_BYTES = invoicePdf("DRAFT");
+const AUTHORISED_PDF_BYTES = invoicePdf("AUTHORISED");
+const PDF_CONTENT_HASH = await sesSha256Bytes(DRAFT_PDF_BYTES);
 
 async function approvalContentHash(
   includesAuthorise: boolean,
@@ -69,6 +101,7 @@ async function approvalContentHash(
     readiness_revision: READINESS_REV,
     dependency_generation: DEP_GEN,
     includes_authorise: includesAuthorise,
+    draft_pdf_content_hash: PDF_CONTENT_HASH,
   }, "SecureWorks:ses-approval-content:v1\n");
 }
 
@@ -93,8 +126,7 @@ function obligationRow() {
       bound_at: "2026-08-07T06:43:51.099Z",
       pdf_object_key:
         `makesafe-docket-artifacts/${JOB_ID}/xero-invoice-pdfs/${XERO_ID}/INV-1161.pdf`,
-      pdf_content_hash:
-        "sha256:01abba60b37f24f70f6bfa513c14a62d9820a6c3837089dfdf762db9e73c3ba6",
+      pdf_content_hash: PDF_CONTENT_HASH,
       pdf_size_bytes: 52014,
       pdf_stored_at: "2026-08-14T05:18:08.864Z",
     },
@@ -335,7 +367,7 @@ function gateway(state: { authorised: boolean }, track: {
     },
     async fetchAuthorisedPdf() {
       track.pdfFetches += 1;
-      return PDF_BYTES;
+      return state.authorised ? AUTHORISED_PDF_BYTES : DRAFT_PDF_BYTES;
     },
   };
 }

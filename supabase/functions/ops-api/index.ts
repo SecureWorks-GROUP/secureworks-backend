@@ -547,6 +547,13 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
+// T12 Harden SES v1: ONE shared inspect read so both front doors show identical
+// pack truth (pointer ids + exact revision/hash + frozen release manifest +
+// audit) instead of composing four feeds.
+import { inspectSesPackAction } from './ses_inspect_pack.ts'
+// T11 Harden SES v1: ONE unified authorise+send orchestration over the existing
+// guarded invoice/release execute primitives and the exact-once effect ledger.
+import { unifiedSesReleaseAction } from './ses_unified_release.ts'
 // Second way to satisfy the identified-operator approval gate: a server-issued
 // echo code bound to one request, enrolled sender and exact message. The gate
 // itself is untouched; the exact trust statement is in the implementation.
@@ -4351,6 +4358,10 @@ if (import.meta.main) serve(async (req: Request) => {
       'prepare_ses_release_revision',
       'query_ses_review_cockpit',
       'query_ses_proof_ledger',
+      // T12 Harden SES v1: read-only shared inspect (pack pointers + exact
+      // revision/hash + frozen release manifest + audit). Read-only; composes the
+      // existing routine-allowed readers, writes nothing.
+      'inspect_ses_pack',
       // Review & Send Revise Pack loop — notes and draft-refresh requests only.
       'list_draft_notes',
       // add_draft_note is intentionally privileged-human only: the routine may
@@ -7526,6 +7537,27 @@ if (import.meta.main) serve(async (req: Request) => {
           },
         ))
       }
+      // T12 (Harden SES v1, AC2): ONE shared read so both doors show identical
+      // truth. Returns the literal main-pack pointer ids (report_doc_id /
+      // invoice_doc_id / swms_doc_id — the board payload hides report_doc_id and
+      // no other read exposes it), the exact current docket revision id +
+      // output/content hash + invoice obligation, the invoice + send-recipe
+      // context, the frozen release manifest identity + delivery proofs, and the
+      // approval/audit state. Read-only; composes the existing canonical readers.
+      case 'inspect_ses_pack': {
+        const inspectJobId = url.searchParams.get('job_id') || body.job_id
+        if (!inspectJobId) throw new ApiError('job_id required', 400)
+        const inspectGateway = makeSesXeroGateway(client)
+        return json(await inspectSesPackAction(
+          client,
+          inspectJobId,
+          url.searchParams.get('release_revision_id') || body.release_revision_id,
+          {
+            fetchInvoicePdfBytes: (invoiceId: string) =>
+              inspectGateway.fetchAuthorisedPdf(invoiceId),
+          },
+        ))
+      }
       case 'sign_off_ses_docket':
         if (req.method !== 'POST') {
           return json({ error: 'sign_off_ses_docket requires POST' }, 405)
@@ -7590,6 +7622,10 @@ if (import.meta.main) serve(async (req: Request) => {
             message_text: body.message_text,
             message_sent_at: body.message_sent_at,
             request_id: body.request_id,
+            expected_docket_revision_id: body.expected_docket_revision_id,
+            expected_invoice_obligation_revision_id:
+              body.expected_invoice_obligation_revision_id,
+            expected_output_content_hash: body.expected_output_content_hash,
           },
           {
             env: readSesChannelApprovalEnv(),
@@ -7623,12 +7659,33 @@ if (import.meta.main) serve(async (req: Request) => {
           sesActionAuth(authMode, authUser),
           readSesChannelApprovalEnv(),
         ))
-      case 'approve_ses_invoice_revision':
+      case 'approve_ses_invoice_revision': {
         await assertNoSyntheticLivefireJobs(
           client,
           body.job_id ? [body.job_id] : [],
           'approve_ses_invoice_revision',
         )
+        // T8 (Harden SES v1, AC7): the primary approve door REQUIRES the caller
+        // to echo the exact review coordinates it inspected (T12) so a stale
+        // cockpit cannot approve a newer server-current revision. The action
+        // compares them against the live docket and refuses drift before writing
+        // anything. The channel-approval transport keeps its own binding and is
+        // handled at `submit_ses_channel_approval`, not here.
+        const expectedDocketRevisionId = body.expected_docket_revision_id
+        const expectedObligationRevisionId =
+          body.expected_invoice_obligation_revision_id
+        const expectedOutputContentHash = body.expected_output_content_hash
+        if (
+          !expectedDocketRevisionId || !expectedObligationRevisionId ||
+          !expectedOutputContentHash
+        ) {
+          return json({
+            state: 'refused',
+            code: 'exact_review_coordinates_required',
+            fact:
+              'approve_ses_invoice_revision requires the echoed review coordinates expected_docket_revision_id, expected_invoice_obligation_revision_id and expected_output_content_hash from the inspected pack (action=inspect_ses_pack).',
+          }, 400)
+        }
         return json(await approveSesInvoiceRevisionAction(
           client,
           sesActionAuth(authMode, authUser),
@@ -7637,8 +7694,14 @@ if (import.meta.main) serve(async (req: Request) => {
             job_id: body.job_id,
             includes_authorise: body.includes_authorise === true,
             evidence_refs: body.evidence_refs || [],
+            expected_docket_revision_id: expectedDocketRevisionId,
+            expected_invoice_obligation_revision_id: expectedObligationRevisionId,
+            expected_output_content_hash: expectedOutputContentHash,
+            expected_draft_pdf_content_hash:
+              body.expected_draft_pdf_content_hash,
           },
         ))
+      }
       case 'execute_ses_invoice_revision':
         await assertNoSyntheticLivefireJobs(
           client,
@@ -7702,11 +7765,15 @@ if (import.meta.main) serve(async (req: Request) => {
           body.job_ids || (body.job_id ? [body.job_id] : []),
           'prepare_ses_release_revision',
         )
+        const releaseXeroGateway = makeSesXeroGateway(client)
         return json(await prepareSesReleaseRevisionAction(client, {
           org_id: body.org_id || DEFAULT_ORG_ID,
           job_ids: body.job_ids || (body.job_id ? [body.job_id] : []),
           routes: body.routes,
           created_by: authUser?.email || body.created_by || 'ses-release-preparer',
+        }, {
+          fetchInvoicePdfBytes: (invoiceId) =>
+            releaseXeroGateway.fetchAuthorisedPdf(invoiceId),
         }))
       case 'approve_ses_release_revision':
         await assertNoSyntheticLivefireReleaseRevision(
@@ -7739,6 +7806,42 @@ if (import.meta.main) serve(async (req: Request) => {
           },
           makeSesGraphMailGateway(client),
           makeSesReleaseXeroReader(client),
+        ))
+      // T11 (Harden SES v1, AC5/AC6/AC7): ONE unified authorise+send action.
+      // A human-approved DRAFT pack may authorise, bind and verify its
+      // deterministic AUTHORISED derivative, then mint/approve/dispatch the final
+      // release. Already-approved final releases remain recoverable through the
+      // same exact-once route ledger. Routine keys are denied, all calls require
+      // the caller's exact inspected release hash, and any stale/drifted revision
+      // or non-deterministic derivative hard-refuses before send.
+      case 'execute_ses_unified_release':
+        await assertNoSyntheticLivefireReleaseRevision(
+          client,
+          body.release_revision_id,
+          'execute_ses_unified_release',
+        )
+        if (!String(body.expected_release_content_hash || '').trim()) {
+          return json({
+            state: 'refused',
+            code: 'release_content_hash_required',
+            fact:
+              'execute_ses_unified_release requires expected_release_content_hash from the exact inspected release.',
+          }, 400)
+        }
+        return json(await unifiedSesReleaseAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            release_revision_id: body.release_revision_id,
+            expected_release_content_hash: body.expected_release_content_hash,
+            actor: authUser?.email || body.actor || 'ses-unified-release-executor',
+          },
+          {
+            xeroGateway: makeSesXeroGateway(client),
+            mailGateway: makeSesGraphMailGateway(client),
+            releaseXeroReader: makeSesReleaseXeroReader(client),
+          },
         ))
       // Ops-visibility ordinary Mail.Send to the work-order mailer (Captain
       // 2026-08-05). One job_id + kind (report|photo) per call so card one can

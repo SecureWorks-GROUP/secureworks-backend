@@ -10,7 +10,10 @@ import {
   submitSesEchoCodeApprovalAction,
 } from "./ses_echo_code_approval.ts";
 import { sesChannelSenderFingerprint } from "./ses_channel_approval.ts";
-import { SesActionError } from "./ses_reporting_actions.ts";
+import {
+  approveSesInvoiceRevisionAction,
+  SesActionError,
+} from "./ses_reporting_actions.ts";
 
 const USER = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const JOB = "cccccccc-3333-4333-8333-cccccccccccc";
@@ -21,6 +24,9 @@ const OTHER_SENDER = "test-sender-token-beta";
 const SECOND_ENROLLED_SENDER = "test-sender-token-gamma";
 const ROOT = "echo-code-test-root";
 const NOW = Date.UTC(2026, 7, 8, 3, 0, 0);
+const DOCKET = "docket-reviewed";
+const OBLIGATION = "obligation-reviewed";
+const OUTPUT_HASH = "sha256:reviewed-output";
 
 type RequestRow = {
   request_id: string;
@@ -57,11 +63,29 @@ function makeClient(jobNumber = "SWMS-260000") {
   const client: any = {
     requests,
     lock,
+    coordinates: {
+      docket_revision_id: DOCKET,
+      invoice_obligation_revision_id: OBLIGATION,
+      output_content_hash: OUTPUT_HASH,
+    },
     from(table: string) {
       const rows: Record<string, string>[] = table === "jobs"
         ? [{ id: JOB, job_number: jobNumber }]
         : table === "users"
         ? [{ id: USER, email: "operator-account", role: "admin" }]
+        : table === "makesafe_docket_revisions_current"
+        ? [{
+          id: client.coordinates.docket_revision_id,
+          job_id: JOB,
+          output_content_hash: client.coordinates.output_content_hash,
+          invoice_obligation_revision_id:
+            client.coordinates.invoice_obligation_revision_id,
+        }]
+        : table === "makesafe_invoice_obligation_revisions"
+        ? [{
+          id: client.coordinates.invoice_obligation_revision_id,
+          job_id: JOB,
+        }]
         : [];
       const builder: any = {
         select: () => builder,
@@ -190,6 +214,10 @@ async function submit(
     message_text: issued.echo_code.message_text,
     message_sent_at: new Date(NOW).toISOString(),
     request_id: issued.echo_code.request_id,
+    expected_docket_revision_id: issued.echo_code.expected_docket_revision_id,
+    expected_invoice_obligation_revision_id:
+      issued.echo_code.expected_invoice_obligation_revision_id,
+    expected_output_content_hash: issued.echo_code.expected_output_content_hash,
     ...overrides,
   }, {
     env: { bindings_raw: await bindingJson(), root_secret: ROOT },
@@ -220,7 +248,55 @@ Deno.test("issue is server-minted and returns the code only in the transport env
   const second: any = await issue(client);
   assert(first.echo_code.message_text !== second.echo_code.message_text);
   assertStringIncludes(first.echo_code.message_text, "APPROVE SWMS-260000");
+  assertEquals(first.echo_code.expected_docket_revision_id, DOCKET);
+  assertEquals(
+    first.echo_code.expected_invoice_obligation_revision_id,
+    OBLIGATION,
+  );
+  assertEquals(first.echo_code.expected_output_content_hash, OUTPUT_HASH);
   assert(!JSON.stringify(client.requests).includes("operator-account"));
+});
+
+Deno.test("channel approval refuses when the current docket changes after issue", async () => {
+  const client = makeClient();
+  const issued: any = await issue(client);
+  const currentDocket: any = {
+    docket_revision_id: "docket-corrected-after-issue",
+    invoice_obligation_revision_id: OBLIGATION,
+    docket_output_content_hash: "sha256:corrected-output",
+    clean_input: { pricing_disposition: "priced_from_canon" },
+  };
+  const bindingsRaw = await bindingJson();
+  const error = await assertRejects(
+    () =>
+      submitSesEchoCodeApprovalAction(client, auth, {
+        org_id: ORG,
+        channel: "whatsapp",
+        sender_id: SENDER,
+        message_id: `message-${issued.echo_code.request_id}`,
+        message_text: issued.echo_code.message_text,
+        message_sent_at: new Date(NOW).toISOString(),
+        request_id: issued.echo_code.request_id,
+        expected_docket_revision_id:
+          issued.echo_code.expected_docket_revision_id,
+        expected_invoice_obligation_revision_id:
+          issued.echo_code.expected_invoice_obligation_revision_id,
+        expected_output_content_hash:
+          issued.echo_code.expected_output_content_hash,
+      }, {
+        env: { bindings_raw: bindingsRaw, root_secret: ROOT },
+        now: () => NOW,
+        approveInvoice: (operator, args) =>
+          approveSesInvoiceRevisionAction(client, operator, args, {
+            loadDocket: async () => currentDocket,
+          }),
+        executeSendIt: async () => {
+          throw new Error("SEND IT must not be coupled");
+        },
+      }),
+    SesActionError,
+  ) as SesActionError;
+  assertEquals((error.refusal as any).code, "stale_review");
 });
 
 Deno.test("issuance refuses a card whose reference the verifier cannot read back", async () => {

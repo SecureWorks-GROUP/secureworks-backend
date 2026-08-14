@@ -204,7 +204,10 @@ Deno.test("reporting auto-match preserves explicit SES binding refusal", () => {
     "plan.invoice.invoice_obligation_revision_id",
     start,
   );
-  const token = REPORTING.indexOf("plan.invoice.ses_external_token", obligation);
+  const token = REPORTING.indexOf(
+    "plan.invoice.ses_external_token",
+    obligation,
+  );
   const refusal = REPORTING.indexOf(
     "sealedSesMoneyRefusal('reporting-api/match_invoices'",
     token,
@@ -427,7 +430,10 @@ Deno.test("SES operation token stays off builder-facing subject/body/reference",
     new URL("./ses_graph_mail_gateway.ts", import.meta.url),
   );
   // Non-visible Graph header is the mail proof carrier.
-  assertStringIncludes(GATEWAY, 'SES_OPERATION_HEADER = "x-secureworks-ses-operation"');
+  assertStringIncludes(
+    GATEWAY,
+    'SES_OPERATION_HEADER = "x-secureworks-ses-operation"',
+  );
   assertStringIncludes(GATEWAY, "internetMessageHeaders");
   // Subject must not re-inject `[${token}]`.
   assert(
@@ -447,8 +453,12 @@ Deno.test("SES operation token stays off builder-facing subject/body/reference",
 Deno.test("external effects reconcile the exact provider token before dispatch", () => {
   const transition = EFFECTS.indexOf('"dispatching",');
   const reconcile = EFFECTS.indexOf("preDispatchMatches", transition);
-  const dispatch = EFFECTS.indexOf("args.adapter.dispatch", transition);
+  const dispatch = EFFECTS.indexOf(
+    "return await dispatchFrom(dispatching)",
+    reconcile,
+  );
   assert(transition >= 0 && reconcile > transition && dispatch > reconcile);
+  assertStringIncludes(EFFECTS, "await args.adapter.dispatch(args.payload");
   assertStringIncludes(INDEX, "readSesXeroInvoicesByToken");
   assertStringIncludes(ACTIONS, "reconcileCreate");
 });
@@ -532,7 +542,7 @@ Deno.test("dispatch and reconciliation both persist the exact Xero mirror", () =
   assertEquals(
     (ACTIONS.match(/await bindSesDraftInvoiceToRevision\(client, \{/g) || [])
       .length,
-    2,
-    "draft mint and its idempotent repair both bind mirror and revision together",
+    1,
+    "draft mint and idempotent reconciliation share one binding path",
   );
 });

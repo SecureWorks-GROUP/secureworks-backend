@@ -1,6 +1,8 @@
 import {
+  loadSesInvoiceApprovalCoordinates,
   type SesActionAuth,
   SesActionError,
+  type SesInvoiceApprovalCoordinates,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
 import type {
@@ -19,12 +21,35 @@ import {
   sesChannelSenderFingerprint,
 } from "./ses_channel_approval.ts";
 
-export const SES_ECHO_CODE_CONTRACT_VERSION = "ses-echo-code/v1";
+export const SES_ECHO_CODE_CONTRACT_VERSION = "ses-echo-code/v2";
 export const SES_ECHO_CODE_EXPIRY_MS = 10 * 60_000;
 export const SES_ECHO_CODE_LOCKOUT_THRESHOLD = 3;
 export const SES_ECHO_CODE_LOCKOUT_WINDOW_MS = 15 * 60_000;
 
 type EchoRequest = { org_id: string; job_id: string; channel: unknown };
+
+type EchoedApprovalCoordinates = {
+  expected_docket_revision_id: string;
+  expected_invoice_obligation_revision_id: string;
+  expected_output_content_hash: string;
+};
+
+type SesEchoCodeApprovalDeps =
+  & Omit<
+    SesChannelApprovalDeps,
+    "approveInvoice"
+  >
+  & {
+    approveInvoice: (
+      auth: SesActionAuth,
+      args: {
+        org_id: string;
+        job_id: string;
+        includes_authorise: boolean;
+        evidence_refs: unknown[];
+      } & EchoedApprovalCoordinates,
+    ) => Promise<unknown>;
+  };
 
 function refuse(
   status: number,
@@ -68,6 +93,59 @@ async function hmacCode(rootSecret: string, code: string): Promise<string> {
   return [...new Uint8Array(signature)].map((byte) =>
     byte.toString(16).padStart(2, "0")
   ).join("");
+}
+
+async function boundApprovalMessageHash(
+  messageText: string,
+  coordinates: EchoedApprovalCoordinates,
+): Promise<string> {
+  return `sha256:${await sha256(JSON.stringify([
+    SES_ECHO_CODE_CONTRACT_VERSION,
+    messageText,
+    coordinates.expected_docket_revision_id,
+    coordinates.expected_invoice_obligation_revision_id,
+    coordinates.expected_output_content_hash,
+  ]))}`;
+}
+
+function requireApprovalCoordinates(
+  coordinates: Partial<EchoedApprovalCoordinates>,
+): EchoedApprovalCoordinates {
+  const exact = {
+    expected_docket_revision_id: String(
+      coordinates.expected_docket_revision_id || "",
+    ).trim(),
+    expected_invoice_obligation_revision_id: String(
+      coordinates.expected_invoice_obligation_revision_id || "",
+    ).trim(),
+    expected_output_content_hash: String(
+      coordinates.expected_output_content_hash || "",
+    ).trim(),
+  };
+  if (
+    !exact.expected_docket_revision_id ||
+    !exact.expected_invoice_obligation_revision_id ||
+    !exact.expected_output_content_hash
+  ) {
+    refuse(
+      400,
+      "exact_review_coordinates_required",
+      "The channel approval transport is missing the exact inspected docket, obligation, or output-hash coordinate.",
+      "Issue a fresh approval request from the current inspected pack and transport all three coordinates unchanged.",
+    );
+  }
+  return exact;
+}
+
+function approvalCoordinatesFromRead(
+  coordinates: SesInvoiceApprovalCoordinates,
+): EchoedApprovalCoordinates {
+  return requireApprovalCoordinates({
+    expected_docket_revision_id: coordinates.docket_revision_id || "",
+    expected_invoice_obligation_revision_id:
+      coordinates.invoice_obligation_revision_id || "",
+    expected_output_content_hash: coordinates.output_content_hash || "",
+  });
 }
 
 function secureCode(): string {
@@ -117,6 +195,12 @@ export async function issueSesChannelApprovalAction(
   auth: SesActionAuth,
   request: EchoRequest,
   env: SesChannelApprovalEnv,
+  deps: {
+    loadApprovalCoordinates?: (
+      client: SesSupabaseClient,
+      jobId: string,
+    ) => Promise<SesInvoiceApprovalCoordinates>;
+  } = {},
 ) {
   requireCaptainSession(auth);
   const channel = String(request.channel ?? "").toLowerCase();
@@ -153,6 +237,11 @@ export async function issueSesChannelApprovalAction(
   }
   const code = secureCode();
   const messageText = `APPROVE ${String(job.data.job_number)} ${code}`;
+  const loadCoordinates = deps.loadApprovalCoordinates ??
+    loadSesInvoiceApprovalCoordinates;
+  const approvalCoordinates = approvalCoordinatesFromRead(
+    await loadCoordinates(client, request.job_id),
+  );
   // Issue only a message the verifier can actually read back. A card number
   // outside the verifier's reference grammar would mint a request and transport
   // a code that could never verify.
@@ -178,7 +267,10 @@ export async function issueSesChannelApprovalAction(
     p_channel: channel,
     p_sender_fingerprint: binding.sender_fingerprint,
     p_request_id: requestId,
-    p_message_hash: `sha256:${await sha256(messageText)}`,
+    p_message_hash: await boundApprovalMessageHash(
+      messageText,
+      approvalCoordinates,
+    ),
     p_code_hash: `sha256:${await hmacCode(rootSecret, code)}`,
     p_issued_at: now.toISOString(),
     p_expires_at: expiresAt.toISOString(),
@@ -209,6 +301,7 @@ export async function issueSesChannelApprovalAction(
       channel,
       message_text: messageText,
       expires_at: String(row.expires_at),
+      ...approvalCoordinates,
     },
   };
 }
@@ -216,8 +309,13 @@ export async function issueSesChannelApprovalAction(
 export async function submitSesEchoCodeApprovalAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
-  request: SesChannelApprovalRequest & { request_id?: unknown },
-  deps: SesChannelApprovalDeps,
+  request: SesChannelApprovalRequest & {
+    request_id?: unknown;
+    expected_docket_revision_id?: unknown;
+    expected_invoice_obligation_revision_id?: unknown;
+    expected_output_content_hash?: unknown;
+  },
+  deps: SesEchoCodeApprovalDeps,
 ) {
   requireRelay(auth);
   const bindings = parseSesChannelOperatorBindings(deps.env.bindings_raw);
@@ -250,6 +348,17 @@ export async function submitSesEchoCodeApprovalAction(
     );
   }
   const messageText = String(request.message_text ?? "");
+  const approvalCoordinates = requireApprovalCoordinates({
+    expected_docket_revision_id: String(
+      request.expected_docket_revision_id || "",
+    ),
+    expected_invoice_obligation_revision_id: String(
+      request.expected_invoice_obligation_revision_id || "",
+    ),
+    expected_output_content_hash: String(
+      request.expected_output_content_hash || "",
+    ),
+  });
   const intent = parseSesChannelApprovalMessage(messageText);
   // Text SEND IT is retired, and its refusal is named rather than folded into
   // the generic message refusal: a recognised send word must be answerable as
@@ -289,7 +398,10 @@ export async function submitSesEchoCodeApprovalAction(
     p_request_id: requestId,
     p_channel: channel,
     p_sender_fingerprint: senderFingerprint,
-    p_message_hash: `sha256:${await sha256(messageText)}`,
+    p_message_hash: await boundApprovalMessageHash(
+      messageText,
+      approvalCoordinates,
+    ),
     p_code_hash: `sha256:${await hmacCode(rootSecret, intent.totp_code)}`,
     p_now: new Date(deps.now()).toISOString(),
     p_lockout_threshold: SES_ECHO_CODE_LOCKOUT_THRESHOLD,
@@ -382,12 +494,14 @@ export async function submitSesEchoCodeApprovalAction(
     operator_label: binding.label,
     act: "approve_invoice",
     card_reference: intent.card_references[0]!,
+    ...approvalCoordinates,
   };
   const approval = await deps.approveInvoice(operatorAuth, {
     org_id: issuedOrgId,
     job_id: issuedJobId,
     includes_authorise: false,
     evidence_refs: [operatorAct],
+    ...approvalCoordinates,
   });
   return {
     echo_code_approval: {

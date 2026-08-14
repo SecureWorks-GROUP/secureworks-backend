@@ -35,6 +35,10 @@ export interface SesExternalEffect {
   payload_hash: string;
   external_token: string;
   state: SesEffectState;
+  /** Claim lease returned by claim_ses_external_effect_v1. */
+  lease_owner?: string | null;
+  /** Claim lease returned by claim_ses_external_effect_v1. */
+  lease_expires_at?: string | null;
   external_id?: string | null;
   provider_digest?: Record<string, unknown>;
 }
@@ -58,6 +62,16 @@ export interface SesExternalEffectStore {
     detail: Record<string, unknown>,
     actor: string,
   ): Promise<SesExternalEffect>;
+  /**
+   * Atomically lease an exact-token-absent route for redispatch. Implemented
+   * by the real store as a conditional unknown|failed -> dispatching update;
+   * a concurrent loser receives null and is structurally unable to send.
+   */
+  claimRedispatch?(
+    effect: SesExternalEffect,
+    leaseOwner: string,
+    actor: string,
+  ): Promise<SesExternalEffect | null>;
 }
 
 export interface SesExternalAdapter<TPayload, TResult> {
@@ -155,7 +169,7 @@ function unknownRefusal(
       "graph_outcome_unknown",
       kind === "mailer_ops_send"
         ? "Reconcile admin@ Sent Items by the exact SES operation token; do not redispatch this mailer ops send."
-        : "Reconcile Drafts and Sent Items by the exact SES operation token; do not press SEND IT again.",
+        : "Retry the same frozen release. The exact SES operation token is reconciled before any missing route is redispatched, and a confirmed route is never sent again.",
       {
         ...(evidence ? { evidence } : {}),
         ...(detail
@@ -182,9 +196,13 @@ function unknownRefusal(
 }
 
 /**
- * Exact-once execution. Only a newly inserted reservation can dispatch. Every
- * later call reconciles the original token and is structurally unable to call
- * dispatch again.
+ * Exact-once execution. Every attempt first reconciles the immutable external
+ * token. A confirmed effect is structurally unable to dispatch again. A
+ * route_send whose prior outcome is still unconfirmed may redispatch only
+ * after exact-token reconciliation proves no Draft or Sent Item exists and a
+ * SQL-valid state transition wins the per-operation compare-and-set race.
+ * Money effects and ordinary mailer sends remain reconcile-only after their
+ * first dispatch attempt.
  */
 export async function executeSesExternalEffect<TPayload, TResult>(args: {
   store: SesExternalEffectStore;
@@ -193,6 +211,80 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   adapter: SesExternalAdapter<TPayload, TResult>;
   actor: string;
 }): Promise<SesExecuteEffectResult<TResult>> {
+  const dispatchFrom = async (
+    active: SesExternalEffect,
+  ): Promise<SesExecuteEffectResult<TResult>> => {
+    const uncertaintyState: SesEffectState = active.state === "unknown"
+      ? "failed"
+      : "unknown";
+    try {
+      await args.adapter.dispatch(args.payload, {
+        external_token: active.external_token,
+        operation_key: active.operation_key,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const unknown = await args.store.transition(
+        active.operation_key,
+        active.state,
+        uncertaintyState,
+        "dispatch_outcome_unknown",
+        {
+          failure: { message },
+        },
+        args.actor,
+      );
+      return {
+        state: "refused",
+        effect: { ...unknown, failure: { message } } as SesExternalEffect,
+        refusal: unknownRefusal(unknown.effect_kind, message),
+        dispatched: true,
+      };
+    }
+
+    const matches = await args.adapter.reconcile({
+      external_token: active.external_token,
+      operation_key: active.operation_key,
+    });
+    if (matches.length !== 1) {
+      const unknown = await args.store.transition(
+        active.operation_key,
+        active.state,
+        uncertaintyState,
+        "post_dispatch_reconcile_failed",
+        { match_count: matches.length },
+        args.actor,
+      );
+      return {
+        state: "refused",
+        effect: unknown,
+        refusal: unknownRefusal(
+          unknown.effect_kind,
+          `post_dispatch_reconcile match_count=${matches.length}`,
+        ),
+        dispatched: true,
+      };
+    }
+    const result = matches[0];
+    const confirmed = await args.store.transition(
+      active.operation_key,
+      active.state,
+      "confirmed",
+      "provider_confirmed",
+      {
+        external_id: args.adapter.identify(result),
+        provider_digest: args.adapter.digest(result),
+      },
+      args.actor,
+    );
+    return {
+      state: "confirmed",
+      effect: confirmed,
+      result,
+      dispatched: true,
+    };
+  };
+
   const claim = await args.store.claim(args.effect, args.actor);
   if (claim.claim_mode === "confirmed") {
     return {
@@ -209,9 +301,19 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     });
     if (matches.length === 1) {
       const result = matches[0];
+      const confirmable = claim.effect.state === "reserved"
+        ? await args.store.transition(
+          claim.effect.operation_key,
+          "reserved",
+          "dispatching",
+          "reconcile_reserved_effect",
+          {},
+          args.actor,
+        )
+        : claim.effect;
       const effect = await args.store.transition(
-        claim.effect.operation_key,
-        claim.effect.state,
+        confirmable.operation_key,
+        confirmable.state,
         "confirmed",
         "reconciled",
         {
@@ -221,6 +323,38 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
         args.actor,
       );
       return { state: "confirmed", effect, result, dispatched: false };
+    }
+    const redispatchableRoute = claim.effect.effect_kind === "route_send" &&
+      (claim.effect.state === "unknown" || claim.effect.state === "failed");
+    if (matches.length === 0 && redispatchableRoute) {
+      // Reconciliation alone does not lease an existing uncertainty row. The
+      // old unknown<->failed toggle left the winning row publicly claimable
+      // throughout Graph I/O, so two retries could toggle in opposite
+      // directions and both send. The real store now performs one conditional
+      // unknown|failed -> dispatching update over the immutable coordinates.
+      // Only its returned row owns permission to call the provider.
+      if (!args.store.claimRedispatch) {
+        return {
+          state: "refused",
+          effect: claim.effect,
+          refusal: unknownRefusal(claim.effect.effect_kind),
+          dispatched: false,
+        };
+      }
+      const retry = await args.store.claimRedispatch(
+        claim.effect,
+        `${args.actor}:${crypto.randomUUID()}`,
+        args.actor,
+      );
+      if (!retry) {
+        return {
+          state: "refused",
+          effect: claim.effect,
+          refusal: unknownRefusal(claim.effect.effect_kind),
+          dispatched: false,
+        };
+      }
+      return await dispatchFrom(retry);
     }
     return {
       state: "refused",
@@ -278,70 +412,5 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       dispatched: false,
     };
   }
-  try {
-    await args.adapter.dispatch(args.payload, {
-      external_token: dispatching.external_token,
-      operation_key: dispatching.operation_key,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const unknown = await args.store.transition(
-      dispatching.operation_key,
-      "dispatching",
-      "unknown",
-      "dispatch_outcome_unknown",
-      {
-        failure: { message },
-      },
-      args.actor,
-    );
-    return {
-      state: "refused",
-      effect: { ...unknown, failure: { message } } as SesExternalEffect,
-      refusal: unknownRefusal(unknown.effect_kind, message),
-      dispatched: true,
-    };
-  }
-
-  const matches = await args.adapter.reconcile({
-    external_token: dispatching.external_token,
-    operation_key: dispatching.operation_key,
-  });
-  if (matches.length !== 1) {
-    const unknown = await args.store.transition(
-      dispatching.operation_key,
-      "dispatching",
-      "unknown",
-      "post_dispatch_reconcile_failed",
-      { match_count: matches.length },
-      args.actor,
-    );
-    return {
-      state: "refused",
-      effect: unknown,
-      refusal: unknownRefusal(
-        unknown.effect_kind,
-        `post_dispatch_reconcile match_count=${matches.length}`,
-      ),
-      dispatched: true,
-    };
-  }
-  const result = matches[0];
-  const confirmed = await args.store.transition(
-    dispatching.operation_key,
-    "dispatching",
-    "confirmed",
-    "provider_confirmed",
-    {
-      external_id: args.adapter.identify(result),
-      provider_digest: args.adapter.digest(result),
-    },
-    args.actor,
-  );
-  return {
-    state: "confirmed",
-    effect: confirmed,
-    result,
-    dispatched: true,
-  };
+  return await dispatchFrom(dispatching);
 }

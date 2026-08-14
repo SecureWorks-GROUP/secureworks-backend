@@ -2103,6 +2103,44 @@ concurrent mint chains trip it. **Mint sequentially, never fanned out.**
 (`xero_post_rate_limit_retry_test.ts`): keyed writes collapse a repeat, and the
 un-keyed `POST /Invoices/{id}/Email` must never repeat.
 
+## The Harden SES v1 Shared Workflow Spine (T8 / T11 / T12)
+
+Three thin actions over the EXISTING guarded primitives so both front doors
+(website cockpit + terminal/MCP) drive one backend. They add NO new money/send
+engine and preserve every existing guard.
+
+- **T12 `inspect_ses_pack`** (`ses_inspect_pack.ts`) — the ONE shared read.
+  Composes the canonical readers (`loadSesCockpitDocket` + thin pack/release/
+  proof/approval reads) into one object: the literal main-pack pointer ids
+  (`report_doc_id`/`invoice_doc_id`/`swms_doc_id` — the `makesafe_board` payload
+  HIDES `report_doc_id` and only `makesafe_pipeline` exposed it), exact docket
+  revision + `output_content_hash` + invoice obligation, invoice + send-recipe
+  context, frozen release manifest identity, route proofs, and approvals.
+  Read-only, routine-allowlisted. Pure assembler `assembleSesPackInspection`;
+  reader takes an injectable `loadDocket`. Tests: `ses_inspect_pack_test.ts`.
+- **T8 echoed approval** — `approve_ses_invoice_revision` now REQUIRES the caller
+  to echo `expected_docket_revision_id` / `expected_invoice_obligation_revision_id`
+  / `expected_output_content_hash` (400 if absent, enforced at the index.ts
+  dispatch). `approveSesInvoiceRevisionAction` refuses drift (`stale_review`)
+  against the live docket BEFORE recording approval via the pure
+  `sesInvoiceApprovalCoordinateDrift`. The human-JWT-only gate
+  (`canRecordSesApproval`) is untouched; the channel path
+  (`submit_ses_channel_approval`) keeps its own message binding and passes no
+  echo. Tests: `ses_invoice_approval_coordinate_echo_test.ts`.
+- **T11 `execute_ses_unified_release`** (`ses_unified_release.ts`) — atomic
+  authorise+send for ONE explicitly-approved exact release revision: validate the
+  frozen fingerprint (echo `expected_release_content_hash`) -> authorise each
+  priced member's DRAFT via `execute_ses_invoice_revision` -> dispatch the frozen
+  release via `execute_ses_release_revision` (exact-once `ses_external_effects`
+  ledger records proofs). Invoice-auth fail -> send nothing (AC5). Partial
+  delivery -> release RETAINED as Approved (CAS `dispatching`->`approved`), retry
+  re-runs ONLY missing routes, confirmed never resent (AC6). Drift/stale/
+  unapproved -> hard refuse (AC7). Routine denied centrally + locally. Thin
+  orchestration `runUnifiedSesRelease` over injected deps (real wiring
+  `unifiedSesReleaseAction`); pure classifier `classifyUnifiedReleaseFailure`.
+  Tests: `ses_unified_release_test.ts`. Contract: backend action-chain audit
+  `data/ses-workflow-action-chain-audit-v1/report.md` (stock kun-agent-workspace).
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

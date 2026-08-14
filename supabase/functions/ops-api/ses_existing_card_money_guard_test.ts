@@ -30,6 +30,7 @@ import { buildSesCockpitView } from "./ses_review_cockpit.ts";
 const ORG_ID = "00000000-0000-4000-8000-000000000099";
 const JOB_ID = "208450c0-7161-4b30-9514-66226b054609";
 const DOCKET_ID = "6a55da20-0000-4000-8000-000000000002";
+const DOCKET_HASH = "sha256:current-docket";
 const OBLIGATION_ID = "68e5432f-0000-4000-8000-000000000001";
 const RELEASE_ID = "7c0f0000-0000-4000-8000-000000000003";
 const USER = { id: "user-1", role: "admin", email: "captain@example.test" };
@@ -72,12 +73,16 @@ function fixtureClient(opts: Fixture = {}) {
     id: DOCKET_ID,
     job_id: JOB_ID,
     stage: "pre_xero",
+    output_content_hash: DOCKET_HASH,
     invoice_obligation_revision_id: OBLIGATION_ID,
     attendance_cycle_ids: ["cycle-1"],
     pre_xero_docs_ready: true,
     envelope: {
       v2: {
-        classification: { family: "own_template_roof", job_number: "SWMS-26841" },
+        classification: {
+          family: "own_template_roof",
+          job_number: "SWMS-26841",
+        },
         items: {},
       },
     },
@@ -121,7 +126,8 @@ function fixtureClient(opts: Fixture = {}) {
       case "makesafe_release_revisions":
         return [{
           id: RELEASE_ID,
-          state: "prepared",
+          state: "proposed",
+          created_at: "2026-08-14T00:00:00.000Z",
           readiness_bindings: [{
             job_id: JOB_ID,
             readiness_revision: "ready-1",
@@ -201,6 +207,9 @@ function approveInvoice(client: any, auth: any = jwtAuth) {
     org_id: ORG_ID,
     job_id: JOB_ID,
     includes_authorise: false,
+    expected_docket_revision_id: DOCKET_ID,
+    expected_invoice_obligation_revision_id: OBLIGATION_ID,
+    expected_output_content_hash: DOCKET_HASH,
   });
 }
 
@@ -344,7 +353,9 @@ Deno.test("APPROVE INVOICE refuses a no-charge card on the DISPOSITION, not the 
   // Named for what actually fires. Asserting only "something refused" here
   // would pass with the money guard deleted, which is no proof at all.
   const refusal = await refusalFrom(() =>
-    approveInvoice(fixtureClient({ pricingDisposition: "no_additional_charge" }))
+    approveInvoice(
+      fixtureClient({ pricingDisposition: "no_additional_charge" }),
+    )
   );
   assertEquals(refusal?.code, undefined);
   assertStringIncludes(refusal.fact, "no additional charge");
