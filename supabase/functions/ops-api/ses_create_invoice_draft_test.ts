@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix no-explicit-any
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 /**
  * Option B create_ses_invoice_draft acceptance: mint DRAFT without human click,
  * full ACCREC dup guard first, authorise/send still blocked, PO-sibling allow.
@@ -9,8 +9,8 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  createSesInvoiceDraftAction,
-  executeSesInvoiceRevisionAction,
+  createSesInvoiceDraftAction as createSesInvoiceDraftActionRaw,
+  executeSesInvoiceRevisionAction as executeSesInvoiceRevisionActionRaw,
   SesActionError,
   type SesXeroGateway,
 } from "./ses_reporting_actions.ts";
@@ -19,6 +19,30 @@ import { resolveExistingInvoice } from "./makesafe_send_pack.ts";
 const ORG_ID = "00000000-0000-4000-8000-000000000099";
 const JOB_ID = "00000000-0000-4000-8000-000000000001";
 const OBLIGATION_ID = "00000000-0000-4000-8000-0000000000aa";
+const TEST_WORKFLOW_HASH = `sha256:${"f".repeat(64)}`;
+const createSesInvoiceDraftAction: typeof createSesInvoiceDraftActionRaw = (
+  client,
+  auth,
+  args,
+  gateway,
+  deps = {},
+) =>
+  createSesInvoiceDraftActionRaw(client, auth, args, gateway, {
+    ...deps,
+    assertWorkflowReleaseContract: async () => TEST_WORKFLOW_HASH,
+  });
+const executeSesInvoiceRevisionAction:
+  typeof executeSesInvoiceRevisionActionRaw = (
+    client,
+    auth,
+    args,
+    gateway,
+    deps = {},
+  ) =>
+    executeSesInvoiceRevisionActionRaw(client, auth, args, gateway, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => TEST_WORKFLOW_HASH,
+    });
 
 const proposal = {
   schema: "secureworks.makesafe.invoice-proposal/v1" as const,

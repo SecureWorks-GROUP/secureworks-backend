@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix no-explicit-any
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 /**
  * The existing-money guard AT THE TWO APPROVE ACTIONS.
  *
@@ -20,7 +20,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  approveSesInvoiceRevisionAction,
+  approveSesInvoiceRevisionAction as approveSesInvoiceRevisionActionRaw,
   approveSesReleaseRevisionAction,
   loadSesCockpitDocket,
   SesActionError,
@@ -33,6 +33,12 @@ const DOCKET_ID = "6a55da20-0000-4000-8000-000000000002";
 const DOCKET_HASH = "sha256:current-docket";
 const OBLIGATION_ID = "68e5432f-0000-4000-8000-000000000001";
 const RELEASE_ID = "7c0f0000-0000-4000-8000-000000000003";
+const approveSesInvoiceRevisionAction:
+  typeof approveSesInvoiceRevisionActionRaw = (client, auth, args, deps = {}) =>
+    approveSesInvoiceRevisionActionRaw(client, auth, args, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+    });
 const USER = { id: "user-1", role: "admin", email: "captain@example.test" };
 
 const PAID_INVOICE = {
@@ -191,6 +197,9 @@ function fixtureClient(opts: Fixture = {}) {
 }
 
 const jwtAuth = { mode: "jwt" as const, user: USER };
+const sealedWorkflowContractFixture = {
+  assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+};
 
 async function refusalFrom(run: () => Promise<unknown>): Promise<any> {
   try {
@@ -217,7 +226,7 @@ function approveRelease(client: any, auth: any = jwtAuth) {
   return approveSesReleaseRevisionAction(client as any, auth, {
     org_id: ORG_ID,
     release_revision_id: RELEASE_ID,
-  });
+  }, sealedWorkflowContractFixture);
 }
 
 Deno.test("APPROVE INVOICE refuses a card whose money already exists, and names it", async () => {

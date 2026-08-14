@@ -315,37 +315,10 @@ export function resolveSesStageV2Family(
     report_delivery: input.job?.metadata?.report_delivery ??
       input.detail?.report_delivery,
   });
-
-  switch (family) {
-    case "physical_makesafe":
-      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
-    case "ordinary_roof_portal":
-      return { family, kind: "roof_report", recipe_state: "sealed" };
-    case "own_template_roof":
-      // The roof evidence path today. Release 5 adds the own-template
-      // submitted-draft reader; there are 0 such cards at this snapshot.
-      return { family, kind: "roof_report", recipe_state: "sealed" };
-    case "assessment_quote":
-      return {
-        family,
-        kind: "assessment_report_quote",
-        recipe_state: "sealed",
-      };
-    case "temporary_fencing":
-      // Delegates its stage evidence to physical, keeps its own identity.
-      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
-    case "repair":
-    case "restoration":
-      // Captain-sealed 2026-08-02: both behave as the standard job does.
-      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
-    case "unknown":
-      // No evidence path. Refused for advancement below; never read as physical.
-      return { family, kind: null, recipe_state: "unknown" };
-    default: {
-      const exhaustive: never = family;
-      throw new Error(`unhandled SES family: ${String(exhaustive)}`);
-    }
-  }
+  const profile = sesStageWorkflowProfile(family);
+  return profile
+    ? { family, kind: profile.evidence_kind, recipe_state: "sealed" }
+    : { family, kind: null, recipe_state: "unknown" };
 }
 
 /**
@@ -434,6 +407,91 @@ export const SES_PORTAL_REQUIRED_ROLES: Partial<
   ordinary_roof_portal: ["roof_report"],
   assessment_quote: ["assessment_report", "photos", "quote"],
 };
+
+export type SesStageWorkflowProfileId =
+  | "stage.physical.v1"
+  | "stage.roof.portal.v1"
+  | "stage.roof.own_document.v1"
+  | "stage.assessment.v1";
+
+export interface SesStageWorkflowProfileDescriptor {
+  profile_id: SesStageWorkflowProfileId;
+  evidence_kind: MakesafeJobKind;
+  required_portal_roles: readonly string[];
+  own_document_evidence_required: boolean;
+  source_rule_ids: readonly string[];
+}
+
+const SES_PHYSICAL_STAGE_PROFILE: SesStageWorkflowProfileDescriptor = Object
+  .freeze({
+    profile_id: "stage.physical.v1",
+    evidence_kind: "physical_makesafe",
+    required_portal_roles: Object.freeze([]),
+    own_document_evidence_required: false,
+    source_rule_ids: Object.freeze([
+      "stage.current-cycle-physical-evidence.v1",
+      "stage.docs-ready-canonical-read-model.v1",
+    ]),
+  });
+
+/**
+ * Stable stage-profile view over the canonical stage engine. The workflow
+ * registry exports these descriptors instead of restating stage rules.
+ */
+export function sesStageWorkflowProfile(
+  family: SesFamilyId,
+): SesStageWorkflowProfileDescriptor | null {
+  switch (family) {
+    case "physical_makesafe":
+    case "temporary_fencing":
+    case "repair":
+    case "restoration":
+      return SES_PHYSICAL_STAGE_PROFILE;
+    case "ordinary_roof_portal":
+      return Object.freeze({
+        profile_id: "stage.roof.portal.v1",
+        evidence_kind: "roof_report",
+        required_portal_roles: Object.freeze([
+          ...(SES_PORTAL_REQUIRED_ROLES.ordinary_roof_portal || []),
+        ]),
+        own_document_evidence_required: false,
+        source_rule_ids: Object.freeze([
+          "stage.roof-portal-current-cycle-capture.v1",
+          "stage.docs-ready-canonical-read-model.v1",
+        ]),
+      });
+    case "own_template_roof":
+      return Object.freeze({
+        profile_id: "stage.roof.own_document.v1",
+        evidence_kind: "roof_report",
+        required_portal_roles: Object.freeze([]),
+        own_document_evidence_required: true,
+        source_rule_ids: Object.freeze([
+          "stage.roof-own-document-current-cycle.v1",
+          "stage.docs-ready-canonical-read-model.v1",
+        ]),
+      });
+    case "assessment_quote":
+      return Object.freeze({
+        profile_id: "stage.assessment.v1",
+        evidence_kind: "assessment_report_quote",
+        required_portal_roles: Object.freeze([
+          ...(SES_PORTAL_REQUIRED_ROLES.assessment_quote || []),
+        ]),
+        own_document_evidence_required: false,
+        source_rule_ids: Object.freeze([
+          "stage.assessment-triad-current-cycle.v1",
+          "stage.docs-ready-canonical-read-model.v1",
+        ]),
+      });
+    case "unknown":
+      return null;
+    default: {
+      const exhaustive: never = family;
+      throw new Error(`unhandled SES family: ${String(exhaustive)}`);
+    }
+  }
+}
 
 export function sesStagePortalRoleObservation(
   input: SesStageV2Input,

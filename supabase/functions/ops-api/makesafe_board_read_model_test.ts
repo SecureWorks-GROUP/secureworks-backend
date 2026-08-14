@@ -1212,7 +1212,7 @@ Deno.test("card ticks consume the same drafted-pack artifacts as placement", () 
   });
 });
 
-Deno.test("AJS physical Docs Ready never blocks on a missing SWMS", () => {
+Deno.test("AJS physical stays Trade Report In until its generated SWMS exists", () => {
   const id = "ajs-physical-no-swms";
   const [card] = buildCanonicalMakesafeRows([
     baseJob("report_ready", id, {
@@ -1232,7 +1232,7 @@ Deno.test("AJS physical Docs Ready never blocks on a missing SWMS", () => {
     computedAt: NOW,
   }, "card");
 
-  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.canonical_stage, "trade_report_in");
   assertEquals(card.pack.closeout_documents.swms, false);
 });
 

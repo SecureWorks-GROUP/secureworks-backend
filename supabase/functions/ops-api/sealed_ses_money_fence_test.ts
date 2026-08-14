@@ -21,7 +21,7 @@ import {
   _makeSesXeroGatewayForTest,
 } from "./index.ts";
 import {
-  executeSesInvoiceRevisionAction,
+  executeSesInvoiceRevisionAction as executeSesInvoiceRevisionActionRaw,
   SesActionError,
   type SesXeroGateway,
 } from "./ses_reporting_actions.ts";
@@ -31,6 +31,18 @@ const JOB_ID = "10000000-0000-4000-8000-000000000001";
 const OBLIGATION_ID = "20000000-0000-4000-8000-000000000002";
 const DOCKET_ID = "30000000-0000-4000-8000-000000000003";
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
+const executeSesInvoiceRevisionAction:
+  typeof executeSesInvoiceRevisionActionRaw = (
+    client,
+    auth,
+    args,
+    gateway,
+    deps = {},
+  ) =>
+    executeSesInvoiceRevisionActionRaw(client, auth, args, gateway, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+    });
 
 function fluentResponse(response: { data: any; error: any }) {
   const builder: any = {

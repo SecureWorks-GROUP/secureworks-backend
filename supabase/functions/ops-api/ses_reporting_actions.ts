@@ -69,9 +69,12 @@ import {
   isAjsBuilderKey,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
+  sesAjsBuilderRouteBody,
+  sesAjsReportInvoiceSubject,
   sesBodyCarriesInternalAnnotation,
   sesBuilderRouteBody,
-  sesReleaseRouteOrder,
+  sesInvoiceRouteSubject,
+  sesStoredReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
   applyMlbThreadReplyToRoute,
@@ -90,7 +93,18 @@ import {
   type SesAuthorisedDerivativeProof,
   verifySesAuthorisedDerivative,
 } from "./ses_authorised_derivative.ts";
-import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
+import {
+  isSesPhysicalShapedFamily,
+  SES_FAMILY_MATRIX_VERSION,
+  type SesBuilderKey,
+  type SesFamilyId,
+  type SesFamilyMatrixRow,
+} from "./ses_family_matrix.ts";
+import {
+  exportSesContractSnapshot,
+  prepareSesWorkflowBackendPolicyContract,
+  prepareSesWorkflowReleaseContract,
+} from "./ses_workflow_registry.ts";
 import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
@@ -679,7 +693,10 @@ export function resolveDocketRoutes(
     if (noAdditionalCharge) {
       return {
         ...route,
-        subject: `${reference || "Make-safe"} - no additional charge`,
+        subject: sesInvoiceRouteSubject({
+          jobRef: reference,
+          noAdditionalCharge: true,
+        }),
         body: sesBuilderRouteBody("invoice", builderReference, {
           noAdditionalCharge: true,
         }),
@@ -696,8 +713,11 @@ export function resolveDocketRoutes(
       const invoiceNumber = boundInvoiceNumber || "pending-number";
       return {
         ...route,
-        subject: `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`
-          .trim(),
+        subject: sesInvoiceRouteSubject({
+          jobRef: reference,
+          xeroStatus,
+          invoiceNumber,
+        }),
         // Builder-facing wording even while pre-authorise: the route is what
         // execute sends, so its body can never carry bind-state annotations.
         // The subject and readiness still say this is a Xero draft.
@@ -734,8 +754,11 @@ export function resolveDocketRoutes(
     const invoiceNumber = boundInvoiceNumber;
     return {
       ...route,
-      subject: `${reference || "Make-safe"} - Xero invoice ${invoiceNumber}`
-        .trim(),
+      subject: sesInvoiceRouteSubject({
+        jobRef: reference,
+        xeroStatus,
+        invoiceNumber,
+      }),
       body: sesBuilderRouteBody("invoice", builderReference),
       attachment_hashes: [...new Set(invoiceAttachments)],
       ready: route.ready && !!invoicePdf?.content_hash &&
@@ -848,12 +871,16 @@ export function resolveDocketRoutes(
     object(docket.local_invoice_proposal).builder_reference || "",
   );
   const jobRef = reference || "this job";
-  const ajsReportInvoiceBody =
-    `Please find attached the report and invoice for ${jobRef}.\n\nThank you.`;
-  const ajsPhotoBody =
-    `Please find attached site photos for ${jobRef}.\n\nThank you.`;
-  const ajsNoChargeBody =
-    `Please find attached the report for ${jobRef}. There is no additional charge for this attendance.\n\nThank you.`;
+  const ajsReportInvoiceBody = sesAjsBuilderRouteBody(
+    "report_invoice",
+    jobRef,
+  );
+  const ajsPhotoBody = sesAjsBuilderRouteBody("photo", jobRef);
+  const ajsNoChargeBody = sesAjsBuilderRouteBody(
+    "report_invoice",
+    jobRef,
+    { noAdditionalCharge: true },
+  );
 
   if (report || invoice) {
     const reportHashes = report?.attachment_hashes || [];
@@ -876,26 +903,22 @@ export function resolveDocketRoutes(
       route_kind: "report_invoice",
       recipients,
       cc,
-      subject: authorised
-        ? `${
-          reference || "Make-safe"
-        } - report and Xero invoice ${invoiceNumber}`
-          .trim()
-        : (xeroStatus === "DRAFT" && boundInvoiceId
-          ? `${reference || "Make-safe"} - report and Xero draft ${
-            invoiceNumber || "pending-number"
-          }`
-            .trim()
-          : (report?.subject ||
-            `${reference || "Make-safe"} - report and invoice`).trim()),
+      subject: sesAjsReportInvoiceSubject({
+        jobRef: reference,
+        xeroStatus,
+        invoiceNumber,
+        boundInvoiceId,
+        preparedReportSubject: report?.subject,
+      }),
       body: ajsReportInvoiceBody,
       attachment_hashes: combinedHashes,
       ready: !!report?.ready && authorised && recipients.length > 0,
     };
     if (noAdditionalCharge && report) {
-      combined.subject = `${
-        reference || "Make-safe"
-      } - report (no additional charge)`;
+      combined.subject = sesAjsReportInvoiceSubject({
+        jobRef: reference,
+        noAdditionalCharge: true,
+      });
       combined.body = ajsNoChargeBody;
       combined.attachment_hashes = [...new Set(reportHashes)];
       combined.ready = report.ready && recipients.length > 0;
@@ -950,12 +973,18 @@ function cleanInputFromRows(args: {
     ? args.obligation.blockers.map(refusalFromStored)
     : [];
   const family = String(card.family || classification.family || "");
-  const physical = family === "physical_makesafe" ||
+  const physical = isSesPhysicalShapedFamily(family) ||
     family === "temporary_fencing";
   const pricingDisposition = String(
     args.obligation?.pricing_disposition || "money_review_required",
   ) as SesPricingDisposition;
   const duplicate = object(args.obligation?.duplicate_probe);
+  const workflowContract = object(classification.workflow_contract);
+  const requiredDeliverableIds = Array.isArray(
+      classification.required_deliverable_ids,
+    )
+    ? classification.required_deliverable_ids
+    : [];
   return {
     pre_xero_docs_ready: args.docket.pre_xero_docs_ready === true,
     readiness_ready: args.readiness.ready === true,
@@ -1032,6 +1061,12 @@ function cleanInputFromRows(args: {
       object(items.supporting_report_pdf).state === "ready",
     report_only: classification.report_only === true,
     builder_key: String(classification.builder_key || "").trim() || null,
+    routing_rule: String(classification.routing_rule || "").trim() || null,
+    workflow_contract_variant_id:
+      String(workflowContract.variant_id || "").trim() || null,
+    workflow_contract_hash:
+      String(workflowContract.canonical_contract_hash || "").trim() || null,
+    deliverable_active: requiredDeliverableIds.length > 0,
   };
 }
 
@@ -1110,7 +1145,7 @@ export async function loadSesCockpitDocket(
   }
   const manifest = object(object(docket.envelope).v2);
   const family = String(object(manifest.classification).family || "");
-  const physical = family === "physical_makesafe" ||
+  const physical = isSesPhysicalShapedFamily(family) ||
     family === "temporary_fencing";
   let cockpitArtifacts = artifactsResponse.data || [];
   let sourceRefusal: SesRefusal | null = null;
@@ -2018,6 +2053,8 @@ export async function createSesInvoiceDraftAction(
   },
   gateway: SesXeroGateway,
   deps: {
+    /** Synthetic-test seam; production callers always use the strict gate. */
+    assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
     fetchAllAccrecInvoices?: (
       client: SesSupabaseClient,
     ) => Promise<any[]>;
@@ -2035,6 +2072,12 @@ export async function createSesInvoiceDraftAction(
   // Mint is agent/api_key/routine-safe; a browser session must still be an
   // identified Captain or admin-owner. Authorise remains JWT-gated on execute.
   await requireSesInvoiceMintAuthority(client, auth);
+  const workflowDockets = deps.assertWorkflowReleaseContract
+    ? []
+    : [await loadSesCockpitDocket(client, args.job_id)];
+  await workflowReleaseContractGate(deps.assertWorkflowReleaseContract)(
+    workflowDockets,
+  );
   const revisionQuery = client.from("makesafe_invoice_obligation_revisions")
     .select("*")
     .eq("job_id", args.job_id);
@@ -3648,6 +3691,8 @@ export async function approveSesInvoiceRevisionAction(
       client: SesSupabaseClient,
       jobId: string,
     ) => Promise<SesCockpitDocket>;
+    /** Synthetic-test seam; production callers always use the strict gate. */
+    assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
   } = {},
 ) {
   if (
@@ -3666,6 +3711,9 @@ export async function approveSesInvoiceRevisionAction(
   }
   const loadDocket = deps.loadDocket ?? loadSesCockpitDocket;
   const docket = await loadDocket(client, args.job_id);
+  await workflowReleaseContractGate(deps.assertWorkflowReleaseContract)([
+    docket,
+  ]);
   if (
     docket.clean_input.pricing_disposition === "no_additional_charge"
   ) {
@@ -4968,6 +5016,10 @@ export async function executeSesInvoiceRevisionAction(
     actor: string;
   },
   gateway: SesXeroGateway,
+  deps: {
+    /** Synthetic-test seam; production callers always use the strict gate. */
+    assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
+  } = {},
 ) {
   if (auth.mode === "routine") {
     throw new SesActionError(403, {
@@ -4981,6 +5033,12 @@ export async function executeSesInvoiceRevisionAction(
       .eq("id", args.invoice_obligation_revision_id)
       .eq("job_id", args.job_id).maybeSingle(),
     "The approved invoice obligation revision no longer exists.",
+  );
+  const workflowDocket = deps.assertWorkflowReleaseContract
+    ? null
+    : await loadSesCockpitDocket(client, args.job_id);
+  await workflowReleaseContractGate(deps.assertWorkflowReleaseContract)(
+    workflowDocket ? [workflowDocket] : [],
   );
   // Already-authorised recovery: the human decision happened; only the docket
   // PDF pointer was lost (typically a re-prepare after approve). Bind the same
@@ -5024,7 +5082,8 @@ export async function executeSesInvoiceRevisionAction(
     throw new SesActionError(409, blocker);
   }
   const approval = await currentInvoiceApproval(client, revision.id);
-  const cockpit = await loadSesCockpitDocket(client, args.job_id);
+  const cockpit = workflowDocket ??
+    await loadSesCockpitDocket(client, args.job_id);
   if (
     cockpit.readiness_revision !== approval.readiness_revision ||
     cockpit.dependency_generation !==
@@ -5759,6 +5818,169 @@ export async function assertSesReleaseRevisionIsCurrent(
   }
 }
 
+/**
+ * Fail-closed adapter from persisted docket bytes to the backend-owned policy
+ * registry. It first proves the exact docket hash, then requires the effective
+ * release seal. In slice 1 the settled release contract, wiki-hash agreement
+ * and database-atomic lease prerequisites remain false, so this adapter cannot
+ * reach approval rows, lease acquisition, invoice effects or mail.
+ */
+export async function assertSesWorkflowReleaseContractForDockets(
+  dockets: SesCockpitDocket[],
+): Promise<string> {
+  const manifest = await exportSesContractSnapshot();
+  for (const docket of dockets) {
+    const builderKey = String(docket.clean_input.builder_key || "").trim();
+    const family = String(docket.clean_input.family || "").trim();
+    const routingRule = String(docket.clean_input.routing_rule || "").trim();
+    const storedVariantId = String(
+      docket.clean_input.workflow_contract_variant_id || "",
+    ).trim();
+    const storedHash = String(
+      docket.clean_input.workflow_contract_hash || "",
+    ).trim();
+    if (
+      !builderKey || !family || !routingRule || !storedVariantId || !storedHash
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "family_contract_incomplete",
+          "Prepare a new docket revision under the typed SES workflow registry before release.",
+          {
+            fact:
+              "The exact docket does not carry a complete workflow variant and canonical contract-hash binding.",
+          },
+        ),
+      );
+    }
+    const prepared = await prepareSesWorkflowBackendPolicyContract(
+      {
+        builder_key: builderKey as SesBuilderKey,
+        runtime_family_id: family as SesFamilyId,
+        routing_rule: routingRule as SesFamilyMatrixRow["routing_rule"],
+        deliverable_active: docket.clean_input.deliverable_active === true,
+      },
+      manifest,
+    );
+    if (!prepared.ok) {
+      throw new SesActionError(
+        409,
+        sesRefusal(prepared.code, prepared.reason, {
+          evidence: {
+            variant_id: prepared.variant_id,
+            profile_id: prepared.profile_id,
+          },
+        }),
+      );
+    }
+    if (
+      storedVariantId !== prepared.variant.variant_id ||
+      storedHash !== prepared.canonical_contract_hash
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "family_contract_divergent",
+          "Prepare and review a new docket revision under the current typed workflow contract.",
+          {
+            fact:
+              "The exact docket's workflow variant or canonical contract hash differs from the current executable registry.",
+            evidence: {
+              stored_variant_id: storedVariantId,
+              current_variant_id: prepared.variant.variant_id,
+              stored_contract_hash: storedHash,
+              current_contract_hash: prepared.canonical_contract_hash,
+            },
+          },
+        ),
+      );
+    }
+    const release = await prepareSesWorkflowReleaseContract(
+      {
+        builder_key: builderKey as SesBuilderKey,
+        runtime_family_id: family as SesFamilyId,
+        routing_rule: routingRule as SesFamilyMatrixRow["routing_rule"],
+        deliverable_active: docket.clean_input.deliverable_active === true,
+      },
+      manifest,
+    );
+    if (!release.ok) {
+      throw new SesActionError(
+        409,
+        sesRefusal(release.code, release.reason, {
+          evidence: {
+            variant_id: release.variant_id,
+            profile_id: release.profile_id,
+          },
+        }),
+      );
+    }
+  }
+  return manifest.canonical_contract_hash;
+}
+
+export type SesWorkflowReleaseContractGate = (
+  dockets: SesCockpitDocket[],
+) => Promise<string>;
+
+// Test/composition seam only. The HTTP action wiring never accepts this gate
+// from request input, so production always executes the strict registry check.
+function workflowReleaseContractGate(
+  override?: SesWorkflowReleaseContractGate,
+): SesWorkflowReleaseContractGate {
+  return override || assertSesWorkflowReleaseContractForDockets;
+}
+
+async function loadSesWorkflowContractDockets(
+  client: SesSupabaseClient,
+  members: Array<Record<string, any>>,
+): Promise<SesCockpitDocket[]> {
+  return await Promise.all(members.map(async (member) => {
+    const docket = requireValue(
+      await client.from("makesafe_docket_revisions")
+        .select("id,envelope")
+        .eq("id", member.docket_revision_id)
+        .maybeSingle(),
+      "A release member's exact workflow-contract docket no longer exists.",
+    );
+    const manifest = object(object(docket.envelope).v2);
+    const classification = object(manifest.classification);
+    const workflowContract = object(classification.workflow_contract);
+    const requiredDeliverableIds = Array.isArray(
+        classification.required_deliverable_ids,
+      )
+      ? classification.required_deliverable_ids
+      : [];
+    return {
+      job_id: String(member.job_id || ""),
+      clean_input: {
+        family: String(classification.family || ""),
+        builder_key: String(classification.builder_key || "").trim() || null,
+        routing_rule: String(classification.routing_rule || "").trim() || null,
+        workflow_contract_variant_id:
+          String(workflowContract.variant_id || "").trim() || null,
+        workflow_contract_hash:
+          String(workflowContract.canonical_contract_hash || "").trim() ||
+          null,
+        deliverable_active: requiredDeliverableIds.length > 0,
+      } as SesCleanInput,
+    } as SesCockpitDocket;
+  }));
+}
+
+/** Exact-member gate shared by release and unified money/send orchestration. */
+export async function assertSesWorkflowReleaseContractForMembers(
+  client: SesSupabaseClient,
+  members: Array<Record<string, any>>,
+  override?: SesWorkflowReleaseContractGate,
+): Promise<string> {
+  const dockets = override
+    ? []
+    : await loadSesWorkflowContractDockets(client, members);
+  return await workflowReleaseContractGate(override)(dockets);
+}
+
 export async function prepareSesReleaseRevisionAction(
   client: SesSupabaseClient,
   args: {
@@ -5769,6 +5991,7 @@ export async function prepareSesReleaseRevisionAction(
   },
   deps: {
     fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
+    assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
   } = {},
 ) {
   const dockets = await Promise.all(
@@ -5785,6 +6008,7 @@ export async function prepareSesReleaseRevisionAction(
     dockets,
     routes,
     created_by: args.created_by,
+    assertWorkflowReleaseContract: deps.assertWorkflowReleaseContract,
   });
   return await commitSesReleaseRevisionPlanAction(client, plan);
 }
@@ -5893,8 +6117,12 @@ export async function buildSesReleaseRevisionPlanForDockets(args: {
   dockets: SesCockpitDocket[];
   routes: SesReviewRoute[];
   created_by: string;
+  assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
 }) {
   const { dockets, routes } = args;
+  const workflowContractHash = await workflowReleaseContractGate(
+    args.assertWorkflowReleaseContract,
+  )(dockets);
   // Composite multi-job releases keep the universal three-route order unless
   // every member is AJS/AJBR (Captain carve-out is AJS/AJBR only).
   const builderKeys = dockets.map((docket) =>
@@ -5939,6 +6167,7 @@ export async function buildSesReleaseRevisionPlanForDockets(args: {
     family,
     photo_route_applicable: photoRouteApplicable,
     report_route_applicable: reportRouteApplicable,
+    workflow_contract_hash: workflowContractHash,
   });
   return plan;
 }
@@ -6001,6 +6230,9 @@ export async function approveSesReleaseRevisionAction(
     release_revision_id: string;
     evidence_refs?: unknown[];
   },
+  deps: {
+    assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
+  } = {},
 ) {
   const release = requireValue(
     await client.from("makesafe_release_revisions").select("*")
@@ -6043,6 +6275,12 @@ export async function approveSesReleaseRevisionAction(
       fact: "The displayed release revision has no complete member docket set.",
     });
   }
+  const dockets = await Promise.all(
+    members.map((member: any) => loadSesCockpitDocket(client, member.job_id)),
+  );
+  await workflowReleaseContractGate(deps.assertWorkflowReleaseContract)(
+    dockets,
+  );
   const operatorAuth = await loadOperatorAuth(client, auth);
   if (operatorAuth.mode !== "jwt" || !auth.user) {
     throw new SesActionError(403, {
@@ -6052,8 +6290,9 @@ export async function approveSesReleaseRevisionAction(
     });
   }
   const approvals = [];
-  for (const member of members) {
-    const docket = await loadSesCockpitDocket(client, member.job_id);
+  for (let memberIndex = 0; memberIndex < members.length; memberIndex++) {
+    const member = members[memberIndex];
+    const docket = dockets[memberIndex];
     if (docket.clean_input.pricing_disposition !== "no_additional_charge") {
       refuseWhenCardMoneyExists(docket);
     }
@@ -6338,6 +6577,9 @@ export async function executeSesReleaseRevisionAction(
   },
   mailGateway: SesMailGateway,
   xeroReader: SesReleaseXeroReader,
+  deps: {
+    assertWorkflowReleaseContract?: SesWorkflowReleaseContractGate;
+  } = {},
 ) {
   if (auth.mode === "routine") {
     throw new SesActionError(403, {
@@ -6367,35 +6609,15 @@ export async function executeSesReleaseRevisionAction(
         "The approved release does not contain the exact member set and required routes.",
     });
   }
-  // Infer shape from the release's own route set (not live job state):
-  //   AJS: report_invoice + photo (or legacy report+photo half-match)
-  //   ruled roof-report (Captain 2026-08-06): invoice alone
-  //   universal: report + photo + invoice
-  // The invoice-only shape can only exist because prepare built it through
-  // requiredSesRouteKinds under the ruling, and the stored route set is pinned
-  // by the release content hash the approval signed — refusing it here would
-  // reject at SEND IT the exact release the Captain already approved, after
-  // money is AUTHORISED.
   const routeKinds = routes.map((route: any) => String(route.route_kind || ""));
-  const isAjsRelease = routeKinds.length === 2 &&
-    routeKinds.includes("photo") &&
-    !routeKinds.includes("invoice") &&
-    (routeKinds.includes("report_invoice") || routeKinds.includes("report"));
-  const isInvoiceOnlyRelease = routeKinds.length === 1 &&
-    routeKinds[0] === "invoice";
-  const requiredOrder = isAjsRelease
-    ? (routeKinds.includes("report_invoice")
-      ? sesReleaseRouteOrder("AJS")
-      : (["report", "photo"] as typeof SES_ROUTE_ORDER))
-    : isInvoiceOnlyRelease
-    ? (["invoice"] as typeof SES_ROUTE_ORDER)
-    : SES_ROUTE_ORDER;
-  if (routes.length !== requiredOrder.length) {
+  const requiredOrder = sesStoredReleaseRouteOrder(routeKinds);
+  const isAjsRelease = requiredOrder?.length === 2 &&
+    requiredOrder.includes("photo");
+  if (!requiredOrder || routes.length !== requiredOrder.length) {
     throw new SesActionError(409, {
       state: "refused",
-      fact: isAjsRelease
-        ? "The approved AJS release does not contain the exact report_invoice and photo routes."
-        : "The approved release does not contain the exact member set and all three required routes.",
+      fact:
+        "The approved release does not contain the exact member set and all three required routes owned by the typed send contract.",
     });
   }
   for (const route of routes) {
@@ -6414,6 +6636,11 @@ export async function executeSesReleaseRevisionAction(
       );
     }
   }
+  await assertSesWorkflowReleaseContractForMembers(
+    client,
+    members,
+    deps.assertWorkflowReleaseContract,
+  );
   await assertSesDocketsSignedOffForSend(
     client,
     members.map((member: any) => String(member.docket_revision_id || "")),

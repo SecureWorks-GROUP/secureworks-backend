@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix no-explicit-any
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 /**
  * Authorised-invoice PDF recovery seam.
  *
@@ -14,7 +14,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   bindAuthorisedInvoicePdfToDocket,
-  executeSesInvoiceRevisionAction,
+  executeSesInvoiceRevisionAction as executeSesInvoiceRevisionActionRaw,
   isSesInvoiceBoundDocketDuplicateKeyError,
   recoverAuthorisedInvoicePdfBind,
   SesActionError,
@@ -29,8 +29,29 @@ const PRE_XERO_DOCKET_ID = "6a55da20-0000-4000-8000-000000000002";
 const XERO_ID = "xero-inv-1102";
 const INVOICE_NUMBER = "INV-1102";
 const TOTAL = 825;
+const executeSesInvoiceRevisionAction:
+  typeof executeSesInvoiceRevisionActionRaw = (
+    client,
+    auth,
+    args,
+    gateway,
+    deps = {},
+  ) =>
+    executeSesInvoiceRevisionActionRaw(client, auth, args, gateway, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+    });
 
-const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]); // %PDF-1.4
+const PDF_BYTES = new Uint8Array([
+  0x25,
+  0x50,
+  0x44,
+  0x46,
+  0x2d,
+  0x31,
+  0x2e,
+  0x34,
+]); // %PDF-1.4
 
 const ASSEMBLER_VERSION = "ses-assembler-v1";
 const FAMILY_MATRIX_VERSION = "ses-family-matrix-v1";
@@ -93,7 +114,12 @@ function recoveryClient(opts: {
   commitReturns?: Record<string, any> | null;
   /** Simulate live 23505 unique key collision on commit. */
   commitDuplicateKey?: boolean;
-  track?: { commits: number; uploads: number; authorises: number; creates: number };
+  track?: {
+    commits: number;
+    uploads: number;
+    authorises: number;
+    creates: number;
+  };
 }) {
   const track = opts.track || {
     commits: 0,
@@ -162,7 +188,9 @@ function recoveryClient(opts: {
       };
     }
     if (table === "makesafe_docket_artifacts") {
-      if (lastArtifactRevisionId && artifactsByRevision[lastArtifactRevisionId]) {
+      if (
+        lastArtifactRevisionId && artifactsByRevision[lastArtifactRevisionId]
+      ) {
         return artifactsByRevision[lastArtifactRevisionId];
       }
       if (
@@ -312,7 +340,8 @@ function recoveryClient(opts: {
           id: binding.id,
           job_id: binding.job_id,
           stage: "invoice_bound",
-          invoice_obligation_revision_id: binding.invoice_obligation_revision_id,
+          invoice_obligation_revision_id:
+            binding.invoice_obligation_revision_id,
           based_on_revision_id: binding.based_on_revision_id,
           output_content_hash: binding.output_content_hash,
           xero_binding: binding.xero_binding,
@@ -361,7 +390,10 @@ function recoveryClient(opts: {
           return { data: { path: "ok" }, error: null };
         },
         download: async () => ({ data: null, error: { message: "unused" } }),
-        createSignedUrl: async () => ({ data: null, error: { message: "unused" } }),
+        createSignedUrl: async () => ({
+          data: null,
+          error: { message: "unused" },
+        }),
       }),
     },
   };
@@ -713,7 +745,8 @@ Deno.test("isSesInvoiceBoundDocketDuplicateKeyError recognises live constraint n
   );
   assert(
     !isSesInvoiceBoundDocketDuplicateKeyError({
-      message: "the AUTHORISED Xero invoice is not confirmed by the exact effect ledger",
+      message:
+        "the AUTHORISED Xero invoice is not confirmed by the exact effect ledger",
     }),
   );
 });
@@ -733,7 +766,8 @@ Deno.test("bind adopts an existing same-INV, same-base docket (true replay, no s
       invoice_number: INVOICE_NUMBER,
       status: "AUTHORISED",
       total: TOTAL,
-      pdf_content_hash: "sha256:existingpdfhash000000000000000000000000000000000000000000000000",
+      pdf_content_hash:
+        "sha256:existingpdfhash000000000000000000000000000000000000000000000000",
     },
   };
   const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
@@ -893,7 +927,8 @@ Deno.test("recovery adopts the existing INV-1102 bind when it is the current pac
       invoice_number: INVOICE_NUMBER,
       status: "AUTHORISED",
       total: TOTAL,
-      pdf_content_hash: "sha256:adoptedpdf0000000000000000000000000000000000000000000000000000",
+      pdf_content_hash:
+        "sha256:adoptedpdf0000000000000000000000000000000000000000000000000000",
     },
   };
   const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
@@ -1012,7 +1047,10 @@ Deno.test("bind refuses to adopt a different invoice number on duplicate key", a
   assertStringIncludes(err.message, "could not be bound");
 });
 
-function assert(condition: unknown, message = "assert failed"): asserts condition {
+function assert(
+  condition: unknown,
+  message = "assert failed",
+): asserts condition {
   if (!condition) throw new Error(message);
 }
 

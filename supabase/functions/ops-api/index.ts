@@ -15180,7 +15180,7 @@ export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
 
 // Close-out doc gate. A make-safe may only resolve to completed/archive once its
 // invoice + report PDFs are attached. SWMS is additionally required when
-// _requiresMakesafeSwms resolves the MLB physical MakeSafe rule.
+// _requiresMakesafeSwms resolves the workflow-registry family SWMS rule.
 // Returns the set of docs that are still missing (empty => gate satisfied).
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,

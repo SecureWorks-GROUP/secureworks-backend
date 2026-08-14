@@ -182,6 +182,15 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
         const effect = {
           ...rpcArgs.p_effect,
           state: alreadyConfirmed ? "confirmed" : "reserved",
+          ...(alreadyConfirmed
+            ? {
+              provider_digest: {
+                message_id: `graph-message-prior-${routeKind}`,
+                internet_message_id: `<prior-${routeKind}@graph>`,
+                operation_token: String(rpcArgs.p_effect?.external_token || ""),
+              },
+            }
+            : {}),
         };
         harness.effects.set(String(effect.operation_key), effect);
         if (alreadyConfirmed) {
@@ -265,6 +274,9 @@ function mailGatewayStub(harness: Harness): any {
 }
 
 const xeroReader = { readAuthorised: async () => ({ id: "xero-invoice-1" }) };
+const sealedWorkflowContractFixture = {
+  assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+};
 
 function harness(overrides: Partial<Harness> = {}): Harness {
   return {
@@ -285,6 +297,7 @@ async function execute(state: Harness) {
     { org_id: "org-1", release_revision_id: RELEASE_ID, actor: "captain" },
     mailGatewayStub(state),
     xeroReader as any,
+    sealedWorkflowContractFixture,
   );
 }
 

@@ -142,7 +142,7 @@ Deno.test("MLB physical generates, attaches current-cycle SWMS, then binds and r
   assertEquals(result.board_stage_changed, false);
 });
 
-Deno.test("AJS physical without HRCW and MLB roof both refuse before render or writes", async () => {
+Deno.test("AJS physical and MLB roof both generate the included scope-correct SWMS", async () => {
   for (
     const live of [
       input("AJS", "physical_makesafe"),
@@ -150,21 +150,16 @@ Deno.test("AJS physical without HRCW and MLB roof both refuse before render or w
     ]
   ) {
     const calls: string[] = [];
-    const error = await assertRejects(
-      () =>
-        generateAttachMakesafeSwms(
-          { selection: { mode: "job_number", job_number: "SWMS-1" } },
-          dependencies(live, calls),
-        ),
-      SesSwmsAttachError,
-      "does not require",
+    const result = await generateAttachMakesafeSwms(
+      { selection: { mode: "job_number", job_number: "SWMS-1" } },
+      dependencies(live, calls),
     );
-    assertEquals(error.code, "swms_not_required");
-    assertEquals(calls, []);
+    assertEquals(result.document_id, "doc-swms");
+    assertEquals(calls, ["attach", "ensure-pack", "bind-pack", "read-back"]);
   }
 });
 
-Deno.test("AJS HRCW remains independently SWMS-required", async () => {
+Deno.test("AJS physical HRCW uses the same generated SWMS path", async () => {
   const calls: string[] = [];
   await generateAttachMakesafeSwms(
     { selection: { mode: "job_number", job_number: "AJBR-1" } },

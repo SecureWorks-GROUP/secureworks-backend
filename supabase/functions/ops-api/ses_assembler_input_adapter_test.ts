@@ -39,7 +39,7 @@ import {
 import { buildSesSwmsGenerationPlan } from "./ses_swms_template.ts";
 import { renderSesSwmsPdf, sesSwmsRenderHash } from "./ses_swms_render.ts";
 import {
-  prepare_ses_docket_revision,
+  prepare_ses_docket_revision as prepareSesDocketRevisionRaw,
   SES_ASSESSMENT_RECIPE_VERSION,
 } from "./ses_prepare_docket_revision.ts";
 import {
@@ -53,6 +53,17 @@ import {
   PACK_PHOTO_ORDER_EXPECTED_IDS,
   PACK_PHOTO_ORDER_MEDIA,
 } from "./ses_pack_photo_order_test_fixture.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
+
+const prepare_ses_docket_revision: typeof prepareSesDocketRevisionRaw = (
+  request,
+  dependencies,
+) =>
+  prepareSesDocketRevisionRaw(request, {
+    ...dependencies,
+    assertWorkflowReleaseContract: async () =>
+      SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  });
 
 function snapshot(): SesAssemblerLiveSnapshot {
   const { captured_from: _capturedFrom, ...liveSnapshot } = structuredClone(
@@ -2702,6 +2713,7 @@ Deno.test(
     // ordinary evidence gap review-visible without destroying the typed fixed
     // price; it may persist to Docs Ready but can never cross the send fence.
     assertEquals(roofResult.blockers.map((blocker) => blocker.reason_code), [
+      "optional_swms_missing",
       "capability_portal_degraded",
     ]);
     assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 300);
@@ -3745,6 +3757,7 @@ Deno.test(
           "spine_missing_source",
           "spine_missing_deliverables",
           "canonical_draft_pack_output_missing",
+          "optional_swms_missing",
           "capability_portal_degraded",
           "invoice_reference_missing",
         ],
@@ -3807,7 +3820,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-08-13.1",
+      "ses-builder-family-matrix/2026-08-14.1",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],

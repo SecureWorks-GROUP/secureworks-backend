@@ -1,5 +1,6 @@
+// deno-lint-ignore-file no-explicit-any
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-08-13.1";
+  "ses-builder-family-matrix/2026-08-14.1";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
 /** Captain 2026-08-02: repair and restoration match the physical pack path. */
@@ -71,8 +72,31 @@ export type SesManifestJobType =
 
 export type SesSwmsPolicy =
   | "always"
-  | "hrcw_only"
-  | "builder_waiver_unless_hrcw";
+  | "include_not_required_until_accuracy_gate";
+
+export type SesWorkflowSwmsRequirement =
+  | "hard_required"
+  | "include_not_required_until_accuracy_gate";
+
+/**
+ * AC18/AC19 family-owned SWMS policy.
+ *
+ * This is deliberately family-scoped rather than builder-scoped: every
+ * admitted builder uses the same generated, scope-correct SWMS rule for the
+ * same family. Roof and assessment include the generated artifact now, but it
+ * cannot block release until the separately governed accuracy gate is passed.
+ */
+export const SES_WORKFLOW_SWMS_REQUIREMENT: Readonly<
+  Record<Exclude<SesFamilyId, "unknown">, SesWorkflowSwmsRequirement>
+> = Object.freeze({
+  physical_makesafe: "hard_required",
+  ordinary_roof_portal: "include_not_required_until_accuracy_gate",
+  own_template_roof: "include_not_required_until_accuracy_gate",
+  assessment_quote: "include_not_required_until_accuracy_gate",
+  temporary_fencing: "hard_required",
+  repair: "hard_required",
+  restoration: "hard_required",
+});
 
 export type SesInvoiceBasis =
   | "ajs_labour_materials"
@@ -217,6 +241,7 @@ export function canonicalSesFamilyFromCard(args: {
     case "own_template_roof":
       return "own_template_roof";
     case "ordinary_roof_portal":
+    case "roof":
     case "roof_report":
       return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
     default:
@@ -249,32 +274,37 @@ export function isMakesafeMlbCompany(detail: any, job: any): boolean {
 }
 
 /**
- * Captain lock: only an MLB physical MakeSafe requires SWMS for Docs Ready.
- * Roof/report-only, AJS/AJBR, repair, restoration and temporary-fence families
- * do not inherit the requirement from an artifact or a broad physical shape.
- * Unknown legacy MLB cards retain the fail-closed physical fallback until the
- * canonical family stamp is restored.
+ * Canonical Docs Ready SWMS requirement. Every physical-shaped family and
+ * temporary fencing hard-require the generated scope-correct SWMS for every
+ * admitted builder. Roof and assessment include it without making it a stage
+ * blocker until the separately governed accuracy gate is passed. Unknown
+ * legacy non-report cards retain the fail-closed fallback until their family
+ * stamp is restored.
  */
 export function requiresMakesafeSwms(detail: any, job: any): boolean {
-  if (!isMakesafeMlbCompany(detail, job) || !!detail?.report_type) return false;
-
   const metadata = job?.metadata || {};
   const family = canonicalSesFamilyFromCard({
-    makesafe_job_family: metadata.makesafe_job_family ?? job?.ses_family,
+    makesafe_job_family: metadata.makesafe_job_family ?? job?.ses_family ??
+      detail?.report_type,
     insurance_job_type: metadata.insurance_job_type,
     own_template_requested: metadata.own_template_requested,
     strata: metadata.strata,
     report_delivery: metadata.report_delivery,
   });
-  if (family === "unknown") return true;
-  return sesFamilyRequiresSwms("MLB", family);
+  if (family === "unknown") return isMakesafeMlbCompany(detail, job);
+  return sesFamilyRequiresSwms("UNKNOWN", family);
 }
 
 export function sesFamilyRequiresSwms(
-  builderKey: SesBuilderKey,
+  _builderKey: SesBuilderKey,
   family: SesFamilyId,
 ): boolean {
-  return builderKey === "MLB" && family === "physical_makesafe";
+  return family !== "unknown" &&
+    SES_WORKFLOW_SWMS_REQUIREMENT[family] === "hard_required";
+}
+
+export function sesFamilyIncludesSwms(family: SesFamilyId): boolean {
+  return family !== "unknown" && family in SES_WORKFLOW_SWMS_REQUIREMENT;
 }
 
 export function sesFamilyLabel(family: SesFamilyId): string {
@@ -310,12 +340,8 @@ function physicalRow(
     subtype: null,
     report_only: false,
     report_delivery: null,
-    // Captain 2026-08-13: AJS/AJBR defaults to no SWMS. HRCW remains an
-    // independent requirement in swmsDecision, so this waiver can never hide
-    // genuinely high-risk work. Other physical builders keep the standing
-    // always-required policy.
-    swms_policy: ajs ? "builder_waiver_unless_hrcw" : "always",
-    swms_waiver_rule: ajs ? "ajs-default-no-swms-unless-hrcw" : null,
+    swms_policy: "always",
+    swms_waiver_rule: null,
     invoice_basis: ajs ? "ajs_labour_materials" : "standard_labour_materials",
     routing_rule: ajs
       ? "ajs-routing"
@@ -412,8 +438,8 @@ function mlbReportRow(
       : ownDocument
       ? "own_document"
       : "portal",
-    swms_policy: "hrcw_only",
-    swms_waiver_rule: "mlb-report-only-card-carries-no-swms",
+    swms_policy: "include_not_required_until_accuracy_gate",
+    swms_waiver_rule: "swms-included-not-required-until-accuracy-gate",
     invoice_basis: assessment ? "assessment_fixed" : "roof_storey_fixed",
     routing_rule: southWest ? "mlb-south-west-routing" : "mlb-perth-routing",
     invoice_to: southWest ? MLB_BUNBURY : MLB_MAKESAFES,
@@ -472,8 +498,12 @@ function syntheticRow(
     subtype: temporaryFence ? "temporary_fencing" : null,
     report_only: reportOnly,
     report_delivery: roof ? "portal" : null,
-    swms_policy: "builder_waiver_unless_hrcw",
-    swms_waiver_rule: "synthetic-livefire-is-internal-only-and-cannot-release",
+    swms_policy: reportOnly
+      ? "include_not_required_until_accuracy_gate"
+      : "always",
+    swms_waiver_rule: reportOnly
+      ? "swms-included-not-required-until-accuracy-gate"
+      : null,
     invoice_basis: assessment
       ? "assessment_fixed"
       : roof

@@ -28,6 +28,7 @@ import {
   MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER,
   makesafeRendererAuthorityVersion,
 } from "./makesafe_report_renderer_authority.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
 
 Deno.test("persisted named-card findings stay visible caveats outside the hard blocker column", () => {
   const caveats = sesDocketReleaseCaveats({
@@ -1821,6 +1822,12 @@ function releaseExecuteClient(routes: Array<Record<string, unknown>>): any {
                       builder_key: "MLB",
                       family: "ordinary_roof_portal",
                       report_only: true,
+                      routing_rule: "mlb-perth-routing",
+                      workflow_contract: {
+                        variant_id: "roof.portal.mlb.perth",
+                        canonical_contract_hash:
+                          SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+                      },
                     },
                     routing: {},
                   },
@@ -1934,21 +1941,26 @@ function releaseExecuteMailGateway(sentSubjects: string[]): any {
   };
 }
 
-Deno.test("SEND IT executes a sealed one-route invoice-only release", async () => {
+Deno.test("SEND IT refuses the typed-unsealed report-only release before mail", async () => {
   const sentSubjects: string[] = [];
-  const result: any = await executeSesReleaseRevisionAction(
-    releaseExecuteClient([INVOICE_ONLY_ROUTE]),
-    { mode: "api_key", user: null },
-    {
-      org_id: "org-1",
-      release_revision_id: "release-fixture",
-      actor: "captain",
-    },
-    releaseExecuteMailGateway(sentSubjects),
-    { readAuthorised: () => Promise.resolve(true) } as any,
+  const error = await assertRejects(
+    () =>
+      executeSesReleaseRevisionAction(
+        releaseExecuteClient([INVOICE_ONLY_ROUTE]),
+        { mode: "api_key", user: null },
+        {
+          org_id: "org-1",
+          release_revision_id: "release-fixture",
+          actor: "captain",
+        },
+        releaseExecuteMailGateway(sentSubjects),
+        { readAuthorised: () => Promise.resolve(true) } as any,
+      ),
+    SesActionError,
   );
-  assertEquals(result.state, "released");
-  assertEquals(sentSubjects, ["Invoice"]);
+  assertEquals(error.status, 409);
+  assertEquals((error.refusal as any).code, "family_contract_unsealed");
+  assertEquals(sentSubjects, []);
 });
 
 Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", async () => {

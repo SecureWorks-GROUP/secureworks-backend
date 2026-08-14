@@ -23,7 +23,7 @@
 //   3. TO mlb.mailer@primeeco.tech    — all the photos
 //   No invoice on either Prime mailer route. Producer: mlbPhysicalRouteRecipients().
 
-import type { SesRouteKind } from "./ses_review_cockpit.ts";
+import type { SesFamilyMatrixRow } from "./ses_family_matrix.ts";
 import {
   AJS_MANDI_CC,
   AJS_VANESSA_CC,
@@ -43,6 +43,9 @@ export {
 };
 
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;
+export type SesRouteKind = "report" | "photo" | "invoice" | "report_invoice";
+
+export const SES_WORKFLOW_SEND_RULE_VERSION = "ses-workflow-send/2026-08-14.1";
 
 export const SES_UNIVERSAL_ROUTE_ORDER: SesRouteKind[] = [
   "report",
@@ -64,6 +67,257 @@ export const SES_MLB_PHYSICAL_ROUTE_ORDER: SesRouteKind[] = [
   ...SES_UNIVERSAL_ROUTE_ORDER,
 ];
 
+export type SesWorkflowSendProfileId =
+  | "send.ajs.physical.v1"
+  | "send.mlb.physical.v1"
+  | "send.western.physical.v1"
+  | "send.report_only.unsettled.v1"
+  | "send.synthetic.disabled.v1";
+
+export interface SesWorkflowSendProfileDescriptor {
+  profile_id: SesWorkflowSendProfileId;
+  seal_state: "sealed" | "unsealed";
+  unsealed_reason_code:
+    | "report_only_envelope_unsettled"
+    | "synthetic_release_forbidden"
+    | null;
+  executable_send_recipe_id: SesWorkflowSendProfileId | null;
+  route_order: readonly SesRouteKind[];
+  send_rule_version: typeof SES_WORKFLOW_SEND_RULE_VERSION;
+  executable_semantics: {
+    route_requirement_policy: string;
+    recipient_policy: string;
+    recipient_constants: readonly string[];
+    cc_policy: string;
+    cc_constants: readonly string[];
+    subject_policy: string;
+    subject_templates: Readonly<Record<string, string>>;
+    body_templates: Readonly<Record<string, string>>;
+    attachment_policy: string;
+    transformation_policy: string;
+    stored_route_shape_policy: string;
+  };
+  live_effects_enabled: false;
+  atomic_release_gate: "required_before_live_release";
+  source_rule_ids: readonly string[];
+}
+
+function sesWorkflowPhysicalSendProfileForBuilder(
+  builderKey: unknown,
+): SesWorkflowSendProfileDescriptor {
+  const base = {
+    live_effects_enabled: false as const,
+    atomic_release_gate: "required_before_live_release" as const,
+    seal_state: "sealed" as const,
+    unsealed_reason_code: null,
+    send_rule_version: "ses-workflow-send/2026-08-14.1" as const,
+  };
+  if (isAjsBuilderKey(builderKey)) {
+    return Object.freeze({
+      ...base,
+      profile_id: "send.ajs.physical.v1",
+      executable_send_recipe_id: "send.ajs.physical.v1",
+      route_order: Object.freeze([...SES_AJS_ROUTE_ORDER]),
+      executable_semantics: Object.freeze({
+        route_requirement_policy: "ajs-report-invoice-then-photo",
+        recipient_policy: "ajs-workorders-plus-intake-participants",
+        recipient_constants: Object.freeze([AJS_WORK_ORDERS_MAILBOX]),
+        cc_policy: "ajs-permanent-builder-and-proof-cc",
+        cc_constants: Object.freeze(ajsPackCc()),
+        subject_policy: "ajs-bound-xero-state-and-job-reference",
+        subject_templates: Object.freeze({
+          authorised: "{job_ref} - report and Xero invoice {invoice_number}",
+          draft: "{job_ref} - report and Xero draft {invoice_number}",
+          no_additional_charge: "{job_ref} - report (no additional charge)",
+          fallback: "{prepared_report_subject_or_job_ref} - report and invoice",
+        }),
+        body_templates: Object.freeze({
+          report_invoice: sesAjsBuilderRouteBody(
+            "report_invoice",
+            "{job_ref}",
+          ),
+          report_no_additional_charge: sesAjsBuilderRouteBody(
+            "report_invoice",
+            "{job_ref}",
+            { noAdditionalCharge: true },
+          ),
+          photo: sesAjsBuilderRouteBody("photo", "{job_ref}"),
+        }),
+        attachment_policy:
+          "combined-report-authorised-invoice-support-then-photo-only",
+        transformation_policy:
+          "resolve-stored-paths-to-content-hashes-and-bind-xero-pdf",
+        stored_route_shape_policy: "exact-report_invoice-photo",
+      }),
+      source_rule_ids: Object.freeze([
+        "send.ajs.report-invoice-plus-photos.v1",
+      ]),
+    });
+  }
+  if (isMlbBuilderKey(builderKey)) {
+    return Object.freeze({
+      ...base,
+      profile_id: "send.mlb.physical.v1",
+      executable_send_recipe_id: "send.mlb.physical.v1",
+      route_order: Object.freeze([...SES_MLB_PHYSICAL_ROUTE_ORDER]),
+      executable_semantics: Object.freeze({
+        route_requirement_policy: "physical-report-photo-invoice",
+        recipient_policy: "mlb-prime-report-photo-and-matrix-billing-invoice",
+        recipient_constants: Object.freeze([MLB_PRIME_MAILER]),
+        cc_policy: "none",
+        cc_constants: Object.freeze([]),
+        subject_policy:
+          "verbatim-intake-subject-for-prime-routes-and-bound-xero-state-for-invoice",
+        subject_templates: Object.freeze({
+          report_photo: "{verbatim_intake_subject_or_prepared_subject}",
+          invoice_authorised: "{job_ref} - Xero invoice {invoice_number}",
+          invoice_draft: "{job_ref} - Xero draft {invoice_number}",
+          invoice_no_additional_charge: "{job_ref} - no additional charge",
+        }),
+        body_templates: Object.freeze({
+          report: sesBuilderRouteBody("report", "{job_ref}"),
+          photo: sesBuilderRouteBody("photo", "{job_ref}"),
+          invoice: sesBuilderRouteBody("invoice", "{job_ref}"),
+          invoice_no_additional_charge: sesBuilderRouteBody(
+            "invoice",
+            "{job_ref}",
+            { noAdditionalCharge: true },
+          ),
+        }),
+        attachment_policy:
+          "report-only-to-prime-photo-only-to-prime-authorised-invoice-report-swms-to-billing",
+        transformation_policy:
+          "resolve-stored-paths-to-content-hashes-bind-xero-pdf-and-refuse-invoice-on-prime",
+        stored_route_shape_policy: "exact-report-photo-invoice",
+      }),
+      source_rule_ids: Object.freeze([
+        "send.mlb.report-photo-invoice.v1",
+      ]),
+    });
+  }
+  return Object.freeze({
+    ...base,
+    profile_id: "send.western.physical.v1",
+    executable_send_recipe_id: "send.western.physical.v1",
+    route_order: Object.freeze([...SES_UNIVERSAL_ROUTE_ORDER]),
+    executable_semantics: Object.freeze({
+      route_requirement_policy: "physical-report-photo-invoice",
+      recipient_policy: "sealed-matrix-route-recipients",
+      recipient_constants: Object.freeze([]),
+      cc_policy: "none",
+      cc_constants: Object.freeze([]),
+      subject_policy: "job-reference-and-bound-xero-state",
+      subject_templates: Object.freeze({
+        authorised: "{job_ref} - Xero invoice {invoice_number}",
+        draft: "{job_ref} - Xero draft {invoice_number}",
+        no_additional_charge: "{job_ref} - no additional charge",
+      }),
+      body_templates: Object.freeze({
+        report: sesBuilderRouteBody("report", "{job_ref}"),
+        photo: sesBuilderRouteBody("photo", "{job_ref}"),
+        invoice: sesBuilderRouteBody("invoice", "{job_ref}"),
+        invoice_no_additional_charge: sesBuilderRouteBody(
+          "invoice",
+          "{job_ref}",
+          { noAdditionalCharge: true },
+        ),
+      }),
+      attachment_policy:
+        "report-only-photo-only-authorised-invoice-with-approved-support",
+      transformation_policy:
+        "resolve-stored-paths-to-content-hashes-and-bind-xero-pdf",
+      stored_route_shape_policy: "exact-report-photo-invoice",
+    }),
+    source_rule_ids: Object.freeze([
+      "send.western.report-photo-invoice.v1",
+    ]),
+  });
+}
+
+/**
+ * Family-aware send-profile selector for the contract registry.
+ *
+ * This describes route shape only. It deliberately cannot enable an effect:
+ * live release remains behind the separate atomic lease/claim, exact-revision,
+ * approval, money and effect-ledger guards. Report-only remains explicitly
+ * unsealed until its owner-envelope mismatch is resolved.
+ */
+export function sesWorkflowSendProfile(
+  row: SesFamilyMatrixRow,
+): SesWorkflowSendProfileDescriptor {
+  const base = {
+    live_effects_enabled: false as const,
+    atomic_release_gate: "required_before_live_release" as const,
+    send_rule_version: "ses-workflow-send/2026-08-14.1" as const,
+  };
+  if (row.builder_key === "SYNTHETIC") {
+    return Object.freeze({
+      ...base,
+      profile_id: "send.synthetic.disabled.v1",
+      seal_state: "unsealed",
+      unsealed_reason_code: "synthetic_release_forbidden",
+      executable_send_recipe_id: null,
+      route_order: Object.freeze([]),
+      executable_semantics: Object.freeze({
+        route_requirement_policy: "no-routes",
+        recipient_policy: "none",
+        recipient_constants: Object.freeze([]),
+        cc_policy: "none",
+        cc_constants: Object.freeze([]),
+        subject_policy: "none",
+        subject_templates: Object.freeze({}),
+        body_templates: Object.freeze({}),
+        attachment_policy: "none",
+        transformation_policy: "none",
+        stored_route_shape_policy: "release-forbidden",
+      }),
+      source_rule_ids: Object.freeze([
+        "send.synthetic.release-forbidden.v1",
+      ]),
+    });
+  }
+  if (row.report_only) {
+    return Object.freeze({
+      ...base,
+      profile_id: "send.report_only.unsettled.v1",
+      seal_state: "unsealed",
+      unsealed_reason_code: "report_only_envelope_unsettled",
+      executable_send_recipe_id: null,
+      route_order: Object.freeze(["invoice"] as SesRouteKind[]),
+      executable_semantics: Object.freeze({
+        route_requirement_policy: "report-family-invoice-only-current-ruling",
+        recipient_policy: "sealed-matrix-invoice-recipient",
+        recipient_constants: Object.freeze([]),
+        cc_policy: "none",
+        cc_constants: Object.freeze([]),
+        subject_policy: "job-reference-and-bound-xero-state",
+        subject_templates: Object.freeze({
+          authorised: "{job_ref} - Xero invoice {invoice_number}",
+          draft: "{job_ref} - Xero draft {invoice_number}",
+          no_additional_charge: "{job_ref} - no additional charge",
+        }),
+        body_templates: Object.freeze({
+          invoice: sesBuilderRouteBody("invoice", "{job_ref}"),
+          invoice_no_additional_charge: sesBuilderRouteBody(
+            "invoice",
+            "{job_ref}",
+            { noAdditionalCharge: true },
+          ),
+        }),
+        attachment_policy:
+          "authorised-invoice-with-family-report-and-included-swms-when-present",
+        transformation_policy:
+          "resolve-stored-paths-to-content-hashes-and-bind-xero-pdf",
+        stored_route_shape_policy: "exact-invoice-only",
+      }),
+      source_rule_ids: Object.freeze([
+        "send.report-only-envelope-decision-open.v1",
+      ]),
+    });
+  }
+  return sesWorkflowPhysicalSendProfileForBuilder(row.builder_key);
+}
+
 export function isAjsBuilderKey(builderKey: unknown): boolean {
   const key = String(builderKey || "").trim().toUpperCase();
   return key === "AJS" || key === "AJBR";
@@ -72,9 +326,53 @@ export function isAjsBuilderKey(builderKey: unknown): boolean {
 export function sesReleaseRouteOrder(
   builderKey: unknown,
 ): SesRouteKind[] {
-  return isAjsBuilderKey(builderKey)
-    ? [...SES_AJS_ROUTE_ORDER]
-    : [...SES_UNIVERSAL_ROUTE_ORDER];
+  return [...sesWorkflowPhysicalSendProfileForBuilder(builderKey).route_order];
+}
+
+/**
+ * Family-owned route obligation selector consumed by both review and release.
+ * Applicability defaults strict: an older producer can only require too much,
+ * never silently omit a route.
+ */
+export function requiredSesRouteKinds(
+  family: string,
+  photoRouteApplicable: boolean,
+  builderKey?: string | null,
+  reportRouteApplicable = true,
+): SesRouteKind[] {
+  if (family === "assessment_quote") return ["invoice"];
+  return sesReleaseRouteOrder(builderKey).filter((kind) =>
+    (kind !== "photo" || photoRouteApplicable) &&
+    (kind !== "report" || reportRouteApplicable)
+  );
+}
+
+/** Resolve the only stored route sets the executable send contract admits. */
+export function sesStoredReleaseRouteOrder(
+  routeKinds: readonly string[],
+): SesRouteKind[] | null {
+  const unique = [...new Set(routeKinds.map((kind) => String(kind || "")))]
+    .filter(Boolean);
+  if (
+    unique.length === 2 && unique.includes("photo") &&
+    unique.includes("report_invoice")
+  ) {
+    return [...SES_AJS_ROUTE_ORDER];
+  }
+  if (
+    unique.length === 2 && unique.includes("photo") &&
+    unique.includes("report")
+  ) {
+    return ["report", "photo"];
+  }
+  if (unique.length === 1 && unique[0] === "invoice") return ["invoice"];
+  if (
+    unique.length === SES_UNIVERSAL_ROUTE_ORDER.length &&
+    SES_UNIVERSAL_ROUTE_ORDER.every((kind) => unique.includes(kind))
+  ) {
+    return [...SES_UNIVERSAL_ROUTE_ORDER];
+  }
+  return null;
 }
 
 export function uniqueEmails(values: unknown[]): string[] {
@@ -204,6 +502,63 @@ export function sesBuilderRouteBody(
     return `Please find attached the invoice and supporting documents for ${ref}.\n\nThank you.`;
   }
   return `Please find attached the report for ${ref}.\n\nThank you.`;
+}
+
+export function sesInvoiceRouteSubject(args: {
+  jobRef?: string | null;
+  xeroStatus?: string | null;
+  invoiceNumber?: string | null;
+  noAdditionalCharge?: boolean;
+}): string {
+  const ref = String(args.jobRef || "").trim() || "Make-safe";
+  if (args.noAdditionalCharge) return `${ref} - no additional charge`;
+  const status = String(args.xeroStatus || "").trim().toUpperCase();
+  const invoiceNumber = String(args.invoiceNumber || "").trim();
+  if (status === "DRAFT") {
+    return `${ref} - Xero draft ${invoiceNumber || "pending-number"}`;
+  }
+  return `${ref} - Xero invoice ${invoiceNumber}`.trim();
+}
+
+export function sesAjsReportInvoiceSubject(args: {
+  jobRef?: string | null;
+  xeroStatus?: string | null;
+  invoiceNumber?: string | null;
+  boundInvoiceId?: string | null;
+  noAdditionalCharge?: boolean;
+  preparedReportSubject?: string | null;
+}): string {
+  const ref = String(args.jobRef || "").trim() || "Make-safe";
+  if (args.noAdditionalCharge) {
+    return `${ref} - report (no additional charge)`;
+  }
+  const invoiceNumber = String(args.invoiceNumber || "").trim();
+  const status = String(args.xeroStatus || "").trim().toUpperCase();
+  if (status === "AUTHORISED") {
+    return `${ref} - report and Xero invoice ${invoiceNumber}`.trim();
+  }
+  if (status === "DRAFT" && String(args.boundInvoiceId || "").trim()) {
+    return `${ref} - report and Xero draft ${invoiceNumber || "pending-number"}`
+      .trim();
+  }
+  return String(args.preparedReportSubject || "").trim() ||
+    `${ref} - report and invoice`;
+}
+
+/** Exact AJS/AJBR two-route builder copy, owned beside its send profile. */
+export function sesAjsBuilderRouteBody(
+  routeKind: "report_invoice" | "photo",
+  jobRef: string | null | undefined,
+  options?: { noAdditionalCharge?: boolean },
+): string {
+  const ref = String(jobRef || "").trim() || "this job";
+  if (routeKind === "photo") {
+    return `Please find attached site photos for ${ref}.\n\nThank you.`;
+  }
+  if (options?.noAdditionalCharge) {
+    return `Please find attached the report for ${ref}. There is no additional charge for this attendance.\n\nThank you.`;
+  }
+  return `Please find attached the report and invoice for ${ref}.\n\nThank you.`;
 }
 
 /**

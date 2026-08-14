@@ -57,6 +57,7 @@ import {
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
 
 const FIXED_HASH =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
@@ -346,6 +347,8 @@ function dependencies(
       bytes: new Uint8Array([37, 80, 68, 70, 3]),
       render_hash: "swms-render-v1",
     }),
+    assertWorkflowReleaseContract: async () =>
+      SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
     now: () => FIXED_TIME,
     ...overrides,
   };
@@ -570,6 +573,37 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
   }
 });
 
+Deno.test("unsealed workflow contract produces a blocked non-sendable pack", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const input = fixtureInput(row);
+  const strictDependencies = dependencies(input);
+  delete strictDependencies.assertWorkflowReleaseContract;
+
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    strictDependencies,
+  )).results[0];
+
+  assertEquals(result.state, "blocked");
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
+  assert(
+    blockerCodes(result).includes("family_contract_unsealed"),
+    "expected the effective release contract to hard-refuse pack readiness",
+  );
+  assertEquals(result.email_drafts, {});
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.path.startsWith("DRAFTS/") ||
+      artifact.role.endsWith("email_draft")
+    ),
+    false,
+  );
+});
+
 Deno.test(
   "persisted physical docket serves curated PDF bytes while review spec preserves raw trade evidence",
   async () => {
@@ -709,7 +743,7 @@ Deno.test("raw PDF SHA-256 mismatch stays visible in a persisted review pack", a
   assertEquals(result.persisted, true);
 });
 
-Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and optional-SWMS caveats", async () => {
+Deno.test("named AJS card persists to Docs Ready with generated SWMS and remaining review caveats", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJBR" &&
     candidate.family === "physical_makesafe"
@@ -736,14 +770,14 @@ Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and opt
     true,
   );
   assertEquals(blockerCodes(result).includes("curated_source_missing"), true);
-  assertEquals(blockerCodes(result).includes("optional_swms_missing"), true);
-  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+  assertEquals(blockerCodes(result).includes("optional_swms_missing"), false);
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "ready");
   assertEquals(
     result.artifacts.some((artifact) =>
       artifact.role === "swms_artifact" ||
       artifact.role === "swms_generation_plan"
     ),
-    false,
+    true,
   );
   assertEquals(
     result.artifacts.some((artifact) =>
@@ -768,7 +802,7 @@ Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and opt
       caveatCodes.includes(
         "curated_source_missing",
       ) &&
-      caveatCodes.includes("optional_swms_missing"),
+      !caveatCodes.includes("optional_swms_missing"),
   );
   const commit = rpcCalls.find((call) =>
     call.name === "commit_makesafe_docket_revision_v1"
@@ -1113,6 +1147,7 @@ Deno.test("synthetic matrix rows are internal-only and always release-blocked af
         portal_evidence: result.portal_evidence,
         review_assumption_codes: [
           "synthetic_livefire_release_forbidden",
+          ...(row.report_only ? ["optional_swms_missing"] : []),
         ],
       },
       row.family,
@@ -1382,7 +1417,7 @@ Deno.test("the AJS/AJBR two-email shape reaches pre-Xero Docs Ready without a th
     assertEquals(result.envelope.pre_xero_docs_ready, true, builderKey);
     assertEquals(
       result.blockers.map((item) => item.reason_code),
-      ["optional_swms_missing"],
+      [],
       builderKey,
     );
     assertEquals(Object.keys(result.email_drafts).sort(), [
@@ -2133,9 +2168,13 @@ Deno.test("assessment triad produces an invoice-only draft at the sealed price",
   assertEquals(result.invoice_proposal?.total_inc_gst, 165);
   assertEquals(result.envelope.v2.items.swms_requirement, {
     state: "ready",
-    evidence: "rule:swms-required-only-for-mlb-physical-makesafe",
+    evidence: "rule:swms-included-not-required-until-accuracy-gate",
   });
-  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "blocked");
+  assertEquals(
+    blockerCodes(result).includes("optional_swms_missing"),
+    true,
+  );
 
   const fenceOnly = fixtureInput(row);
   fenceOnly.cycle_facts.hours_and_materials = { fence_only: true };
@@ -3146,9 +3185,7 @@ Deno.test("Bertram AJS existing-fence pickets price through the sealed docket pr
     [],
   );
   assertEquals(result.state, "ready");
-  assertEquals(result.blockers.map((item) => item.reason_code), [
-    "optional_swms_missing",
-  ]);
+  assertEquals(result.blockers.map((item) => item.reason_code), []);
   // AJBR uses the combined report+invoice draft (Captain 2026-08-04).
   assertEquals(Object.keys(result.email_drafts).sort(), [
     "PHOTO_EMAIL_DRAFT",
@@ -3214,7 +3251,7 @@ Deno.test("AJS/AJBR repair and restoration price the existing-fence pickets like
       });
       assertEquals(
         result.blockers.map((item) => item.reason_code),
-        ["optional_swms_missing"],
+        [],
         label,
       );
       const proposal = result.invoice_proposal as Record<string, unknown>;
@@ -3696,31 +3733,48 @@ Deno.test("roof pricing blocks only when the work order states no storey classif
   assert(!blocker.recovery_action.includes("storeys"));
 });
 
-Deno.test("non-required report-only family does not plan or generate a SWMS", async () => {
+Deno.test("report-only family attempts its included SWMS before the accuracy gate", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "MLB" &&
     candidate.family === "assessment_quote"
   )!;
   const input = fixtureInput(row);
+  input.cycle_facts.trade_report = {
+    id: "assessment-trade-report",
+    submitted_at: "2026-07-27T01:00:00.000Z",
+    checklist_json: {
+      works_completed: "Assessment completed safely.",
+      attendance_date: "2026-07-27",
+      arrival_time: "08:30",
+      crew_name: "Field crew",
+      site_contact: "Site representative",
+    },
+  };
   let generated = 0;
   const result = (await prepareSesDocketRevision(
-    request(input.identity.job_id),
+    request(input.identity.job_id, false),
     dependencies(input, {
       renderSwmsArtifact: async () => {
         generated++;
-        throw new Error("report-only family must not generate a SWMS");
+        return {
+          file_name: "SWMS - assessment.pdf",
+          media_type: "application/pdf",
+          bytes: new TextEncoder().encode("assessment swms"),
+          render_hash: "render-assessment-swms",
+        };
       },
     }),
   )).results[0];
 
-  assertEquals(generated, 0);
-  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+  assertEquals(generated, 1);
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "ready");
   assertEquals(
-    result.artifacts.some((artifact) =>
-      artifact.role === "swms_artifact" ||
-      artifact.role === "swms_generation_plan"
-    ),
+    blockerCodes(result).includes("optional_swms_missing"),
     false,
+  );
+  assertEquals(
+    result.artifacts.some((artifact) => artifact.role === "swms_artifact"),
+    true,
   );
 });
 
@@ -3751,7 +3805,7 @@ Deno.test("missing trade report blocks SWMS generation without instructing staff
   );
 });
 
-Deno.test("AJS HRCW does not turn missing SWMS into a Docs Ready blocker", async () => {
+Deno.test("AJS physical never waives unsupported SWMS scope", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
@@ -3779,22 +3833,22 @@ Deno.test("AJS HRCW does not turn missing SWMS into a Docs Ready blocker", async
     blockerCodes(response.results[0]).includes(
       "swms_generation_template_unavailable",
     ),
-    false,
+    true,
   );
   assertEquals(
     response.results[0].envelope.v2.items.swms_requirement,
     {
       state: "ready",
-      evidence: "rule:swms-required-only-for-mlb-physical-makesafe",
+      evidence: "rule:physical-family-requires-swms",
     },
   );
   assertEquals(
     response.results[0].envelope.v2.items.swms_artifact.state,
-    "not_applicable",
+    "blocked",
   );
   assertEquals(
     blockerCodes(response.results[0]).includes("optional_swms_missing"),
-    true,
+    false,
   );
   assertInvoiceHandoffCallable(response.results[0]);
 });
@@ -4566,7 +4620,6 @@ Deno.test("draft-only wall exposes no money/send dependency and emits an inert r
     authorise_invoice: false,
     close_job: false,
     portal_evidence: [],
-    review_assumption_codes: ["optional_swms_missing"],
   });
   // AJS emits one combined report+invoice draft, in plain builder-facing copy.
   assertStringIncludes(

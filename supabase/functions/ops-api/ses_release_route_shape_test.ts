@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   AJS_MANDI_CC,
@@ -11,12 +12,20 @@ import {
   MLB_PRIME_MAILER,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
+  requiredSesRouteKinds,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
+  SES_WORKFLOW_SEND_RULE_VERSION,
+  sesAjsBuilderRouteBody,
+  sesAjsReportInvoiceSubject,
   sesBodyCarriesInternalAnnotation,
   sesBuilderRouteBody,
+  sesInvoiceRouteSubject,
   sesReleaseRouteOrder,
+  sesStoredReleaseRouteOrder,
+  sesWorkflowSendProfile,
 } from "./ses_release_route_shape.ts";
+import { SES_FAMILY_MATRIX } from "./ses_family_matrix.ts";
 import {
   AJS_INVOICE_TO,
   checkMlbInvoiceClientSendGate,
@@ -45,6 +54,60 @@ Deno.test("AJS builder keys select report_invoice + photo only", () => {
   assertEquals(sesReleaseRouteOrder("AJS"), SES_AJS_ROUTE_ORDER);
   assertEquals(sesReleaseRouteOrder("MLB"), SES_UNIVERSAL_ROUTE_ORDER);
   assertEquals(sesReleaseRouteOrder("AJS"), ["report_invoice", "photo"]);
+});
+
+Deno.test("typed send profiles own the exact executable route semantics", () => {
+  const ajsRow = SES_FAMILY_MATRIX.find((row) =>
+    row.builder_key === "AJS" && row.family === "physical_makesafe"
+  )!;
+  const profile = sesWorkflowSendProfile(ajsRow);
+  assertEquals(profile.send_rule_version, SES_WORKFLOW_SEND_RULE_VERSION);
+  assertEquals(profile.route_order, ["report_invoice", "photo"]);
+  assertEquals(profile.executable_semantics.recipient_constants, [
+    AJS_WORK_ORDERS_MAILBOX,
+  ]);
+  assertEquals(profile.executable_semantics.cc_constants, AJS_PACK_CC);
+  assertEquals(
+    profile.executable_semantics.body_templates.report_invoice,
+    sesAjsBuilderRouteBody("report_invoice", "{job_ref}"),
+  );
+  assertEquals(
+    profile.executable_semantics.stored_route_shape_policy,
+    "exact-report_invoice-photo",
+  );
+  assertEquals(
+    sesAjsReportInvoiceSubject({
+      jobRef: "{job_ref}",
+      xeroStatus: "AUTHORISED",
+      invoiceNumber: "{invoice_number}",
+    }),
+    profile.executable_semantics.subject_templates.authorised,
+  );
+  assertEquals(
+    sesInvoiceRouteSubject({
+      jobRef: "{job_ref}",
+      xeroStatus: "DRAFT",
+      invoiceNumber: "{invoice_number}",
+    }),
+    "{job_ref} - Xero draft {invoice_number}",
+  );
+});
+
+Deno.test("review and execute route requirements resolve through one send owner", () => {
+  assertEquals(
+    requiredSesRouteKinds("physical_makesafe", true, "AJS", true),
+    ["report_invoice", "photo"],
+  );
+  assertEquals(
+    sesStoredReleaseRouteOrder(["photo", "report_invoice"]),
+    ["report_invoice", "photo"],
+  );
+  assertEquals(sesStoredReleaseRouteOrder(["invoice"]), ["invoice"]);
+  assertEquals(
+    sesStoredReleaseRouteOrder(["report", "photo", "invoice"]),
+    ["report", "photo", "invoice"],
+  );
+  assertEquals(sesStoredReleaseRouteOrder(["report", "invoice"]), null);
 });
 
 Deno.test("AJS pack recipients always include workorders@ and permanent CCs", () => {

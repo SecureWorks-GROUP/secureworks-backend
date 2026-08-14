@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 import {
   assert,
   assertEquals,
@@ -11,7 +12,7 @@ import {
 } from "./ses_echo_code_approval.ts";
 import { sesChannelSenderFingerprint } from "./ses_channel_approval.ts";
 import {
-  approveSesInvoiceRevisionAction,
+  approveSesInvoiceRevisionAction as approveSesInvoiceRevisionActionRaw,
   SesActionError,
 } from "./ses_reporting_actions.ts";
 
@@ -27,6 +28,12 @@ const NOW = Date.UTC(2026, 7, 8, 3, 0, 0);
 const DOCKET = "docket-reviewed";
 const OBLIGATION = "obligation-reviewed";
 const OUTPUT_HASH = "sha256:reviewed-output";
+const approveSesInvoiceRevisionAction:
+  typeof approveSesInvoiceRevisionActionRaw = (client, auth, args, deps = {}) =>
+    approveSesInvoiceRevisionActionRaw(client, auth, args, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+    });
 
 type RequestRow = {
   request_id: string;

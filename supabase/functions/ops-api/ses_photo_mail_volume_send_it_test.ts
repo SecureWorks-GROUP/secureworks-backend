@@ -229,6 +229,9 @@ function mailGatewayStub(calls: any[]): any {
 }
 
 const xeroReader = { readAuthorised: async () => ({ id: "xero-invoice-1" }) };
+const sealedWorkflowContractFixture = {
+  assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+};
 
 Deno.test("SEND IT refuses an oversized photo route with a named 409 and no Graph call", async () => {
   const photoHashes = [hash(21), hash(22), hash(23)];
@@ -261,6 +264,7 @@ Deno.test("SEND IT refuses an oversized photo route with a named 409 and no Grap
       { org_id: "org-1", release_revision_id: RELEASE_ID, actor: "captain" },
       mailGatewayStub(calls),
       xeroReader as any,
+      sealedWorkflowContractFixture,
     );
   } catch (err) {
     error = err as SesActionError;
@@ -326,6 +330,7 @@ Deno.test("SEND IT dispatches the same photo route once it fits under the ceilin
     { org_id: "org-1", release_revision_id: RELEASE_ID, actor: "captain" },
     mailGatewayStub(calls),
     xeroReader as any,
+    sealedWorkflowContractFixture,
   );
   assertEquals(calls.map((call) => call.subject), [
     "Report + Invoice",

@@ -89,6 +89,18 @@ const FACTS = {
     "The invoice has no explicit SES obligation or external-effect binding.",
   photo_mail_volume_exceeds_graph_limit:
     "The photo pack exceeds the documented Microsoft Graph / Exchange mail size ceiling for a single message, so the builder photo email is refused before any Graph call. Photos are never culled or downscaled to fit.",
+  unsupported_family_variant:
+    "The selected builder and SES family do not resolve to an executable typed workflow variant.",
+  deliverable_not_active:
+    "The repair or restoration card has no active SES reporting deliverable.",
+  family_contract_incomplete:
+    "The exact SES workflow profile chain is incomplete.",
+  family_contract_divergent:
+    "The exact SES workflow profile chain does not share the current canonical contract hash.",
+  family_contract_invalid:
+    "The typed SES workflow contract failed internal validation.",
+  family_contract_unsealed:
+    "The selected SES workflow variant is known but not sealed for this operation.",
 } as const;
 
 export type SesRefusalCode = keyof typeof FACTS;

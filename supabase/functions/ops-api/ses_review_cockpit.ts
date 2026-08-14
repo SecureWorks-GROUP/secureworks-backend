@@ -2,7 +2,14 @@ import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
-import { sesReleaseRouteOrder } from "./ses_release_route_shape.ts";
+import {
+  requiredSesRouteKinds,
+  type SesRouteKind,
+} from "./ses_release_route_shape.ts";
+export {
+  requiredSesRouteKinds,
+  type SesRouteKind,
+} from "./ses_release_route_shape.ts";
 import {
   describeExistingCardMoney,
   type SesExistingCardMoney,
@@ -20,7 +27,6 @@ export const SES_REVIEW_SECTION_ORDER = [
   "decision_controls",
 ] as const;
 
-export type SesRouteKind = "report" | "photo" | "invoice" | "report_invoice";
 /** Universal three-route order (MLB and non-AJS builders). */
 export const SES_ROUTE_ORDER: SesRouteKind[] = ["report", "photo", "invoice"];
 
@@ -123,6 +129,12 @@ export interface SesCleanInput {
   report_only: boolean;
   /** Builder key from the family matrix / docket classification (AJS, AJBR, MLB, …). */
   builder_key?: string | null;
+  /** Exact matrix route coordinate stamped into the prepared docket. */
+  routing_rule?: string | null;
+  /** Backend workflow variant and hash bound into the docket output bytes. */
+  workflow_contract_variant_id?: string | null;
+  workflow_contract_hash?: string | null;
+  deliverable_active?: boolean;
 }
 
 export interface SesCleanCheck {
@@ -195,31 +207,6 @@ export function describeSesSendItPlan(routes: SesReviewRoute[]): string {
   return `Send the approved ${
     joinRouteKinds(kinds)
   } ${noun} (${kinds.length}) for this exact release revision, then write route proofs and closeout.`;
-}
-
-export function requiredSesRouteKinds(
-  family: string,
-  photoRouteApplicable: boolean,
-  builderKey?: string | null,
-  reportRouteApplicable = true,
-): SesRouteKind[] {
-  if (family === "assessment_quote") return ["invoice"];
-  // AJS/AJBR: report_invoice then photo. Everyone else: report/photo/invoice.
-  // photo_route_applicable still drops the photo email on report-only families
-  // so the cockpit does not invent an unsatisfiable HOLD (PR 563 honesty).
-  // report_route_applicable is the same argument for the report email, ruled by
-  // the Captain on 2026-08-06: a roof-report card sends ONE email, to the group
-  // inbox, carrying the invoice. The portal holds the report and no empty report
-  // email is fabricated to satisfy this checklist.
-  //
-  // Both defaults are STRICT — an unstated applicability means the route is
-  // required — so a producer that has not been taught either field can only be
-  // stricter than the matrix, never looser. Physical make-safe declares a real
-  // report email and is untouched: it still owes all three destinations.
-  return sesReleaseRouteOrder(builderKey).filter((kind) =>
-    (kind !== "photo" || photoRouteApplicable) &&
-    (kind !== "report" || reportRouteApplicable)
-  );
 }
 
 /**
@@ -1154,6 +1141,8 @@ export async function buildSesReleaseRevision(args: {
   family?: string | null;
   photo_route_applicable?: boolean;
   report_route_applicable?: boolean;
+  /** Canonical SES workflow hash included in the release content identity. */
+  workflow_contract_hash?: string;
 }): Promise<SesReleaseRevisionPlan> {
   if (args.members.length === 0) {
     throw new TypeError("release members required");
@@ -1219,6 +1208,9 @@ export async function buildSesReleaseRevision(args: {
     });
   }
   const releaseContent = {
+    ...(args.workflow_contract_hash
+      ? { workflow_contract_hash: args.workflow_contract_hash }
+      : {}),
     docket_revision_ids: members.map((member) => member.docket_revision_id),
     obligation_revision_ids: members.map((member) =>
       member.invoice_obligation_revision_id
