@@ -9,13 +9,17 @@ import {
 import { canonicalSesJson } from "./ses_docket_envelope.ts";
 import {
   SES_FAMILY_MATRIX,
+  SES_FAMILY_MATRIX_EXECUTABLE_POLICY,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
 import {
+  SES_PACK_PREPARATION_EXECUTABLE_POLICY,
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
   sesWorkflowPackProfile,
   sesWorkflowPackProfileForSwmsRequirement,
 } from "./ses_prepare_docket_revision.ts";
 import { SES_PORTAL_REQUIRED_ROLES } from "./ses_stage_engine_v2.ts";
+import { SES_WORKFLOW_SEND_EXECUTION_POLICY } from "./ses_release_route_shape.ts";
 import {
   SES_STAGE_EXECUTABLE_POLICY,
   sesDeliverableAuthorityRequiresPersistedCase,
@@ -28,7 +32,9 @@ import {
   prepareSesWorkflowBackendPolicyContract,
   prepareSesWorkflowReleaseContract,
   resolveSesWorkflowStageContractCoordinate,
+  SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256,
   SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  SES_WORKFLOW_EXECUTABLE_OPERAND_IDS,
   SES_WORKFLOW_PUBLIC_FAMILIES,
   type SesWorkflowContractManifest,
   validateSesWorkflowContractManifest,
@@ -78,6 +84,16 @@ function mutateJsonLeaf(root: unknown, path: readonly string[]): void {
     : typeof current === "number"
     ? current + 1
     : `${String(current)}__mutated`;
+}
+
+async function sha256SourceFile(name: string): Promise<`sha256:${string}`> {
+  const source = await Deno.readFile(new URL(`./${name}`, import.meta.url));
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", source),
+  );
+  return `sha256:${
+    [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")
+  }`;
 }
 
 Deno.test("SES workflow registry exports exactly six families and every effective matrix variant", async () => {
@@ -305,6 +321,157 @@ Deno.test("every stage executable-policy operand is fingerprinted and fails clos
     );
     const validation = await validateSesWorkflowContractManifest(mutated);
     assertEquals(validation.valid, false, path.join("."));
+  }
+});
+
+Deno.test("adding DRAFT to the issued-invoice operand moves the hash and fails closed", async () => {
+  const base = await exportSesContractSnapshot();
+  const mutated = cloneManifest(base);
+  const globalStagePolicy = mutated
+    .executable_policy["stage.global_policy"] as {
+      issued_invoice_statuses: string[];
+    };
+  globalStagePolicy.issued_invoice_statuses.push("DRAFT");
+  for (const profile of mutated.profiles.stage) {
+    (profile.executable_stage_policy as unknown as {
+      issued_invoice_statuses: string[];
+    }).issued_invoice_statuses.push("DRAFT");
+  }
+
+  assertNotEquals(
+    await hashSesWorkflowContractSemanticContent(mutated),
+    base.canonical_contract_hash,
+  );
+  const validation = await validateSesWorkflowContractManifest(mutated);
+  assertEquals(validation.valid, false);
+  assert(
+    validation.errors.some((error) =>
+      error.code === "canonical_contract_hash_mismatch" ||
+      error.code === "runtime_registry_mismatch"
+    ),
+  );
+});
+
+Deno.test("the executable operand registry is structurally complete and every owned leaf moves the hash", async () => {
+  const base = await exportSesContractSnapshot();
+  assertEquals(
+    Object.keys(base.executable_policy).sort(),
+    [...SES_WORKFLOW_EXECUTABLE_OPERAND_IDS].sort(),
+  );
+  const owners = {
+    "family.selection_policy": SES_FAMILY_MATRIX_EXECUTABLE_POLICY,
+    "stage.global_policy": SES_STAGE_EXECUTABLE_POLICY,
+    "pack.global_policy": SES_PACK_PREPARATION_EXECUTABLE_POLICY,
+    "pricing.global_policy": SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
+    "send.global_policy": SES_WORKFLOW_SEND_EXECUTION_POLICY,
+  } as const;
+
+  for (const [operandId, owner] of Object.entries(owners)) {
+    assertEquals(
+      canonicalSesJson(
+        base.executable_policy[operandId as keyof typeof owners],
+      ),
+      canonicalSesJson(owner),
+      operandId,
+    );
+    for (const path of jsonLeafPaths(owner)) {
+      const mutated = cloneManifest(base);
+      mutateJsonLeaf(
+        mutated.executable_policy[operandId as keyof typeof owners],
+        path,
+      );
+      assertNotEquals(
+        await hashSesWorkflowContractSemanticContent(mutated),
+        base.canonical_contract_hash,
+        `${operandId}.${path.join(".")}`,
+      );
+    }
+  }
+
+  for (const operandId of SES_WORKFLOW_EXECUTABLE_OPERAND_IDS) {
+    const mutated = cloneManifest(base);
+    const path = jsonLeafPaths(mutated.executable_policy[operandId])[0];
+    assert(path, operandId);
+    mutateJsonLeaf(mutated.executable_policy[operandId], path);
+    const validation = await validateSesWorkflowContractManifest(mutated);
+    assertEquals(validation.valid, false, operandId);
+    assert(
+      validation.errors.some((error) =>
+        error.code === "canonical_contract_hash_mismatch" ||
+        error.code === "runtime_registry_mismatch"
+      ),
+      operandId,
+    );
+  }
+});
+
+Deno.test("audited executable source surfaces match the fingerprinted source guard", async () => {
+  const actual = Object.fromEntries(
+    await Promise.all(
+      Object.keys(SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256).map(
+        async (name) => [name, await sha256SourceFile(name)] as const,
+      ),
+    ),
+  );
+  assertEquals(actual, SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256);
+});
+
+Deno.test("audited executable surfaces contain no known shadow operands", async () => {
+  const stageSource = await Deno.readTextFile(
+    new URL("./ses_stage_engine_v2.ts", import.meta.url),
+  );
+  const familySource = await Deno.readTextFile(
+    new URL("./ses_family_matrix.ts", import.meta.url),
+  );
+  const prepareSource = await Deno.readTextFile(
+    new URL("./ses_prepare_docket_revision.ts", import.meta.url),
+  );
+  const sendSource = await Deno.readTextFile(
+    new URL("./ses_release_route_shape.ts", import.meta.url),
+  );
+
+  for (
+    const [label, source, forbidden] of [
+      [
+        "stage",
+        stageSource,
+        [
+          '["complete", "completed", "closed"].includes',
+          '["cancelled", "canceled"].includes',
+          '["submitted", "approved"].includes',
+        ],
+      ],
+      [
+        "family",
+        familySource,
+        [
+          'new Set<SesBuilderKey>(["AJS", "AJBR"])',
+          "/\\bMLB[-\\s]?\\d/.test(ref)",
+        ],
+      ],
+      [
+        "pricing",
+        prepareSource,
+        [
+          "/\\b(?:temporary|temp)[ -]*fenc(?:e|ing) panels?\\b|\\bfence panels?\\b/i",
+          "/\\bcable ties?\\b|\\bclips?\\b|\\bfixings?\\b|\\bsmall consumables?\\b/i",
+          'row.invoice_basis === "ajs_labour_materials"',
+        ],
+      ],
+      [
+        "send",
+        sendSource,
+        [
+          'status === "DRAFT"',
+          'status === "AUTHORISED"',
+          "/\\b(?:drafts?|dockets?|packs?|routes?|cycles?|revisions?",
+        ],
+      ],
+    ] as const
+  ) {
+    for (const fragment of forbidden) {
+      assertEquals(source.includes(fragment), false, `${label}: ${fragment}`);
+    }
   }
 });
 

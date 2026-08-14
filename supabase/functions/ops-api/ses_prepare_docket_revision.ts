@@ -194,6 +194,18 @@ const MANIFEST_ITEMS = [
   "email_drafts_presented",
 ] as const;
 
+const SPINE_MANIFEST_ITEMS = [
+  "source_work_order_retrieval",
+  "source_work_order_identity",
+  "source_work_order_attachment",
+  "instruction_deliverables",
+  "lineage_review",
+  "case_story_recovery",
+  "exception_disposition",
+  "hrcw_assessment",
+  "swms_requirement",
+] as const satisfies readonly (typeof MANIFEST_ITEMS)[number][];
+
 export type SesWorkflowArtifactRole =
   | "physical_report"
   | "photos"
@@ -244,6 +256,36 @@ const SES_WORKFLOW_BIND_ORDER = Object.freeze(
     "persist_readback",
   ] as const,
 );
+
+/** Global pack-preparation operands shared by identity, manifest and readiness. */
+export const SES_PACK_PREPARATION_EXECUTABLE_POLICY = Object.freeze({
+  prepare_timeout_ms: SES_FIVE_MINUTES_MS,
+  review_spec_version: SES_DOCKET_REVIEW_SPEC_VERSION,
+  output_identity: Object.freeze({
+    current_hash_version: SES_DOCKET_OUTPUT_HASH_VERSION,
+    legacy_hash_version: SES_DOCKET_LEGACY_OUTPUT_HASH_VERSION,
+    current_hash_domain: SES_DOCKET_OUTPUT_HASH_DOMAIN,
+    legacy_hash_domain: SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
+    revision_identity_domain: SES_DOCKET_REVISION_IDENTITY_DOMAIN,
+  }),
+  recipe_versions: Object.freeze({
+    assessment: SES_ASSESSMENT_RECIPE_VERSION,
+    physical: SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  }),
+  manifest_items: Object.freeze([...MANIFEST_ITEMS]),
+  spine_manifest_items: Object.freeze([...SPINE_MANIFEST_ITEMS]),
+  bind_order: SES_WORKFLOW_BIND_ORDER,
+  pre_xero_readiness: Object.freeze({
+    required_artifact_roles: Object.freeze(
+      [
+        "invoice_proposal",
+        "review_html",
+      ] as const,
+    ),
+    review_materials_version: "ses-review-pack-materials/v1" as const,
+    complete_report_state: "complete" as const,
+  }),
+});
 
 function workflowPackProfile(
   descriptor: SesWorkflowPackProfileSeed,
@@ -419,7 +461,7 @@ export function sesWorkflowPackProfile(
 }
 
 export const SES_WORKFLOW_PRICING_RULE_VERSION =
-  "ses-workflow-pricing/2026-08-14.1" as const;
+  "ses-workflow-pricing/2026-08-15.2" as const;
 
 const SES_ASSESSMENT_PRICING = Object.freeze({
   general_ex_gst: 150,
@@ -442,6 +484,61 @@ const SES_LABOUR_PRICING = Object.freeze({
   ajs_existing_fence_star_picket_rate_ex_gst:
     AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST,
 });
+
+/** Branch selectors, grammars and arithmetic shared by every pricing profile. */
+export const SES_WORKFLOW_PRICING_EXECUTABLE_POLICY = Object.freeze({
+  invoice_bases: Object.freeze({
+    roof_fixed: "roof_storey_fixed" as const,
+    assessment_fixed: "assessment_fixed" as const,
+    standard_materials_charge: "standard_labour_materials" as const,
+    ajs_labour: Object.freeze(
+      [
+        "ajs_labour_materials",
+        "ajs_temporary_fence_labour_only",
+      ] as const,
+    ),
+    ajs_typed_materials: "ajs_labour_materials" as const,
+    ajs_temporary_fence_labour_only: "ajs_temporary_fence_labour_only" as const,
+    temporary_fence_hire: Object.freeze(
+      [
+        "mlb_temporary_fence_hire",
+        "western_temporary_fence_hire",
+      ] as const,
+    ),
+  }),
+  family_branches: Object.freeze({
+    temporary_fencing: "temporary_fencing" as const,
+  }),
+  material_patterns: Object.freeze({
+    temporary_fence_panel_source: String
+      .raw`\b(?:temporary|temp)[ -]*fenc(?:e|ing) panels?\b|\bfence panels?\b`,
+    star_picket_source: String.raw`\bstar(?:[\W_]+)?pickets?\b`,
+    ajs_non_billable_source: String
+      .raw`\bcable ties?\b|\bclips?\b|\bfixings?\b|\bsmall consumables?\b`,
+    flags: "i" as const,
+  }),
+  arithmetic: Object.freeze({
+    line_amount_minor_unit: 100,
+    subtotal_minor_unit: 100,
+    gst_percent: 10,
+    total_inc_gst_percent: 110,
+  }),
+});
+
+const SES_TEMPORARY_FENCE_PANEL_RE = new RegExp(
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.material_patterns
+    .temporary_fence_panel_source,
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.material_patterns.flags,
+);
+const SES_STAR_PICKET_RE = new RegExp(
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.material_patterns.star_picket_source,
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.material_patterns.flags,
+);
+const SES_AJS_NON_BILLABLE_MATERIAL_RE = new RegExp(
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.material_patterns
+    .ajs_non_billable_source,
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.material_patterns.flags,
+);
 
 export interface SesWorkflowPricingProfileDescriptor {
   profile_id: `pricing.${SesInvoiceBasis}.v1`;
@@ -468,6 +565,7 @@ export function sesWorkflowPricingProfile(
     return Object.freeze({
       ...base,
       executable_semantics: Object.freeze({
+        execution_policy: SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
         fixed_storey_prices: ROOF_REPORT_PRICING,
       }),
       source_rule_ids: Object.freeze([
@@ -478,7 +576,10 @@ export function sesWorkflowPricingProfile(
   if (invoiceBasis === "assessment_fixed") {
     return Object.freeze({
       ...base,
-      executable_semantics: SES_ASSESSMENT_PRICING,
+      executable_semantics: Object.freeze({
+        execution_policy: SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
+        ...SES_ASSESSMENT_PRICING,
+      }),
       source_rule_ids: Object.freeze([
         "pricing.assessment.fixed.v1",
       ]),
@@ -487,6 +588,7 @@ export function sesWorkflowPricingProfile(
   return Object.freeze({
     ...base,
     executable_semantics: Object.freeze({
+      execution_policy: SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
       ...SES_LABOUR_PRICING,
       materials_rate_card: readSesMaterialsRateCard(),
       materials_rate_card_path: SES_MATERIALS_RATE_CARD_PATH,
@@ -1340,7 +1442,12 @@ function lineItem(
     description,
     quantity,
     unit_price_ex_gst: unitPriceExGst,
-    amount_ex_gst: Math.round(quantity * unitPriceExGst * 100) / 100,
+    amount_ex_gst: Math.round(
+      quantity * unitPriceExGst *
+        SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic
+          .line_amount_minor_unit,
+    ) /
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic.line_amount_minor_unit,
   };
 }
 
@@ -1432,7 +1539,9 @@ function localInvoiceProposal(
   // reaches this.
   if (
     materialsChargeDecision &&
-    row.invoice_basis !== "standard_labour_materials"
+    row.invoice_basis !==
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .standard_materials_charge
   ) {
     const charged = materialsChargeDecision.decision === "charge";
     return {
@@ -1461,7 +1570,10 @@ function localInvoiceProposal(
       ),
     };
   }
-  if (row.invoice_basis === "roof_storey_fixed") {
+  if (
+    row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases.roof_fixed
+  ) {
     const storey = facts.storeys ??
       input.cycle_facts.roof_report_fields?.storeys;
     try {
@@ -1501,7 +1613,10 @@ function localInvoiceProposal(
       };
     }
   }
-  if (row.invoice_basis === "assessment_fixed") {
+  if (
+    row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases.assessment_fixed
+  ) {
     const assessmentPricing = pricingProfile.executable_semantics as {
       general_ex_gst: number;
       fence_only_ex_gst: number;
@@ -1558,11 +1673,17 @@ function localInvoiceProposal(
   const reportedHoursPerTrade = positiveNumber(facts.hours_per_trade);
   const labourPricing = pricingProfile
     .executable_semantics as typeof SES_LABOUR_PRICING;
-  const canonicalRate = row.invoice_basis === "ajs_labour_materials" ||
-      row.invoice_basis === "ajs_temporary_fence_labour_only"
+  const canonicalRate = SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+      .ajs_labour.includes(
+        row.invoice_basis as
+          | "ajs_labour_materials"
+          | "ajs_temporary_fence_labour_only",
+      )
     ? labourPricing.ajs_rate_ex_gst
     : labourPricing.standard_rate_ex_gst;
-  const minimum = row.family === "temporary_fencing" && trades === 1
+  const minimum = row.family ===
+        SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.family_branches
+          .temporary_fencing && trades === 1
     ? labourPricing.temporary_fence_single_trade_minimum_hours
     : canonicalRate === labourPricing.ajs_rate_ex_gst
     ? labourPricing.ajs_minimum_hours_per_trade
@@ -1629,7 +1750,9 @@ function localInvoiceProposal(
   const priceNeeded: Array<Record<string, unknown>> = [];
   const materialsReviewAssumptions: SesBlocker[] = [];
   if (
-    row.invoice_basis === "ajs_labour_materials" &&
+    row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .ajs_typed_materials &&
     text(facts.existing_fence_star_picket_refusal)
   ) {
     const refusal = text(facts.existing_fence_star_picket_refusal);
@@ -1651,7 +1774,10 @@ function localInvoiceProposal(
       ),
     };
   }
-  if (row.invoice_basis === "ajs_labour_materials") {
+  if (
+    row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases.ajs_typed_materials
+  ) {
     existingFencePickets = nonNegativeInteger(
       facts.existing_fence_star_picket_count,
     );
@@ -1686,8 +1812,12 @@ function localInvoiceProposal(
   // temporary fencing is labour-only because the builder supplies the kit, so
   // panel/base quantities cannot decide its price and must never gate it.
   if (
-    row.family === "temporary_fencing" &&
-    row.invoice_basis !== "ajs_temporary_fence_labour_only"
+    row.family ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.family_branches
+        .temporary_fencing &&
+    row.invoice_basis !==
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .ajs_temporary_fence_labour_only
   ) {
     const reportMaterialFacts = extractSesRateCardMaterialFacts(
       recordedMaterialsFact(input),
@@ -1701,15 +1831,17 @@ function localInvoiceProposal(
         : null;
     };
     const panelCount = nonNegativeInteger(facts.panel_count) ??
-      reportedQuantity(
-        /\b(?:temporary|temp)[ -]*fenc(?:e|ing) panels?\b|\bfence panels?\b/i,
-      );
+      reportedQuantity(SES_TEMPORARY_FENCE_PANEL_RE);
     if (
-      row.invoice_basis === "mlb_temporary_fence_hire" ||
-      row.invoice_basis === "western_temporary_fence_hire"
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .temporary_fence_hire.includes(
+          row.invoice_basis as
+            | "mlb_temporary_fence_hire"
+            | "western_temporary_fence_hire",
+        )
     ) {
       const pickets = nonNegativeInteger(facts.star_picket_count) ??
-        reportedQuantity(/\bstar(?:[\W_]+)?pickets?\b/i);
+        reportedQuantity(SES_STAR_PICKET_RE);
       lines.push(
         lineItem(
           `${ref} - Temporary fencing retrieval, collection and loading allowance - ${labourPricing.temporary_fence_retrieval_hours} hours`,
@@ -1785,10 +1917,13 @@ function localInvoiceProposal(
         });
         continue;
       }
-      if (row.invoice_basis === "ajs_labour_materials") {
+      if (
+        row.invoice_basis ===
+          SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+            .ajs_typed_materials
+      ) {
         if (
-          /\bcable ties?\b|\bclips?\b|\bfixings?\b|\bsmall consumables?\b/i
-            .test(description)
+          SES_AJS_NON_BILLABLE_MATERIAL_RE.test(description)
         ) {
           return {
             proposal: null,
@@ -1803,7 +1938,9 @@ function localInvoiceProposal(
             ),
           };
         }
-        if (/\bstar(?:[\W_]+)?pickets?\b/i.test(description)) {
+        if (
+          SES_STAR_PICKET_RE.test(description)
+        ) {
           if (
             existingFencePickets === null ||
             quantity !== existingFencePickets ||
@@ -1856,7 +1993,9 @@ function localInvoiceProposal(
     );
   }
   if (
-    row.invoice_basis === "standard_labour_materials" && !priceNeeded.length
+    row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .standard_materials_charge && !priceNeeded.length
   ) {
     const materialsDecision = decideStandardLabourMaterialsCharge({
       materials_used: recordedMaterialsFact(input),
@@ -1966,8 +2105,8 @@ function localInvoiceProposal(
 
   const subtotal = Math.round(
     lines.reduce((sum, line) => sum + Number(line.amount_ex_gst || 0), 0) *
-      100,
-  ) / 100;
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic.subtotal_minor_unit,
+  ) / SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic.subtotal_minor_unit;
   return {
     proposal: {
       version: "ses-local-invoice-proposal/v1",
@@ -1982,8 +2121,15 @@ function localInvoiceProposal(
       billable_hours_raised_to_floor: hoursPerTrade > reportedHoursPerTrade,
       line_items: lines,
       subtotal_ex_gst: subtotal,
-      gst: Math.round(subtotal * 10) / 100,
-      total_inc_gst: Math.round(subtotal * 110) / 100,
+      gst: Math.round(
+        subtotal *
+          SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic.gst_percent,
+      ) / SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic.subtotal_minor_unit,
+      total_inc_gst: Math.round(
+        subtotal *
+          SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic
+            .total_inc_gst_percent,
+      ) / SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.arithmetic.subtotal_minor_unit,
       xero_identity: null,
       ...(priceNeeded.length ? { price_needed: priceNeeded } : {}),
       ...(invoiceGate ? { invoice_gates: [invoiceGate.reason_code] } : {}),
@@ -2047,7 +2193,7 @@ function genericExceptionReview(
 
 function initialManifestItems(): Record<ManifestItem, SesObligationState> {
   return Object.fromEntries(
-    MANIFEST_ITEMS.map((item) => [
+    SES_PACK_PREPARATION_EXECUTABLE_POLICY.manifest_items.map((item) => [
       item,
       blocked(
         "recovery-not-run",
@@ -2057,18 +2203,6 @@ function initialManifestItems(): Record<ManifestItem, SesObligationState> {
     ]),
   ) as Record<ManifestItem, SesObligationState>;
 }
-
-const SPINE_MANIFEST_ITEMS = [
-  "source_work_order_retrieval",
-  "source_work_order_identity",
-  "source_work_order_attachment",
-  "instruction_deliverables",
-  "lineage_review",
-  "case_story_recovery",
-  "exception_disposition",
-  "hrcw_assessment",
-  "swms_requirement",
-] as const satisfies readonly ManifestItem[];
 
 /**
  * Declared destination for an MLB physical report/photo route, or null when the
@@ -2851,7 +2985,13 @@ function validatePreXero(
   allowPackCaveats = false,
 ): boolean {
   if (!proposal) return false;
-  if (!artifacts.some((artifact) => artifact.role === "invoice_proposal")) {
+  if (
+    !artifacts.some((artifact) =>
+      artifact.role ===
+        SES_PACK_PREPARATION_EXECUTABLE_POLICY.pre_xero_readiness
+          .required_artifact_roles[0]
+    )
+  ) {
     return false;
   }
   const cards = Array.isArray(reviewSpec.cards) ? reviewSpec.cards : [];
@@ -2865,12 +3005,20 @@ function validatePreXero(
     : {};
   const report = reportMaterials.make_safe_report;
   if (
-    reportMaterials.version !== "ses-review-pack-materials/v1" ||
+    reportMaterials.version !==
+      SES_PACK_PREPARATION_EXECUTABLE_POLICY.pre_xero_readiness
+        .review_materials_version ||
     !report || typeof report !== "object" ||
     (!allowPackCaveats &&
-      ((report as Record<string, unknown>).state !== "complete" ||
+      ((report as Record<string, unknown>).state !==
+          SES_PACK_PREPARATION_EXECUTABLE_POLICY.pre_xero_readiness
+            .complete_report_state ||
         !(report as Record<string, unknown>).report)) ||
-    !artifacts.some((artifact) => artifact.role === "review_html")
+    !artifacts.some((artifact) =>
+      artifact.role ===
+        SES_PACK_PREPARATION_EXECUTABLE_POLICY.pre_xero_readiness
+          .required_artifact_roles[1]
+    )
   ) {
     return false;
   }
@@ -3159,7 +3307,9 @@ async function prepareOne(
   if (
     !materialsChargeDecision &&
     matrix.ok &&
-    matrix.row.invoice_basis === "standard_labour_materials" &&
+    matrix.row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .standard_materials_charge &&
     deps.resolvePriorMaterialsCharge &&
     recordedMaterialsUsed(recordedMaterialsFact(input)).length > 0
   ) {
@@ -3186,7 +3336,9 @@ async function prepareOne(
   let releasedCycleEvidence: SesReleasedCycleEvidence | null = null;
   if (
     matrix.ok &&
-    matrix.row.invoice_basis === "standard_labour_materials" &&
+    matrix.row.invoice_basis ===
+      SES_WORKFLOW_PRICING_EXECUTABLE_POLICY.invoice_bases
+        .standard_materials_charge &&
     deps.resolveMaterialsAnswerEvidence &&
     recordedMaterialsUsed(recordedMaterialsFact(input)).length > 0 &&
     !typedMaterialFactsPresent(input)

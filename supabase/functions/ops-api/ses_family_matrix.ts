@@ -5,7 +5,7 @@ import {
 } from "./ses_workflow_executable_policy.ts";
 
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-08-14.1";
+  "ses-builder-family-matrix/2026-08-15.2";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
 /** Captain 2026-08-02: repair and restoration match the physical pack path. */
@@ -189,6 +189,84 @@ export const MLB_SOUTH_WEST_SUBURBS = Object.freeze(
 );
 const MLB_SOUTH_WEST_SUBURB_SET = new Set<string>(MLB_SOUTH_WEST_SUBURBS);
 
+/**
+ * Closed classifier and matrix-selection operands consumed before a row exists.
+ * The aggregate workflow registry fingerprints this exact object in addition to
+ * every resolved matrix row, so changing which row a card selects cannot leave
+ * the canonical contract coordinate unchanged.
+ */
+export const SES_FAMILY_MATRIX_EXECUTABLE_POLICY = Object.freeze({
+  emergency_service_families: Object.freeze([
+    ...SES_EMERGENCY_SERVICE_FAMILIES,
+  ]),
+  physical_shaped_families: Object.freeze([
+    ...SES_PHYSICAL_SHAPED_FAMILIES,
+  ]),
+  swms_requirement: SES_WORKFLOW_SWMS_REQUIREMENT,
+  family_classifier: Object.freeze({
+    insurance_restoration_aliases: Object.freeze(
+      [
+        "restoration",
+        "restoration_work",
+      ] as const,
+    ),
+    explicit_aliases: Object.freeze(
+      {
+        restoration: "restoration",
+        restoration_work: "restoration",
+        insurance_restoration: "restoration",
+        repair: "repair",
+        general_makesafe: "physical_makesafe",
+        physical_makesafe: "physical_makesafe",
+        temp_fence_makesafe: "temporary_fencing",
+        temporary_fencing: "temporary_fencing",
+        temp_fence: "temporary_fencing",
+        assessment_report_quote: "assessment_quote",
+        assessment_report: "assessment_quote",
+        assessment_quote: "assessment_quote",
+        assessment: "assessment_quote",
+        own_template_roof: "own_template_roof",
+      } as const,
+    ),
+    roof_aliases: Object.freeze(
+      [
+        "ordinary_roof_portal",
+        "roof",
+        "roof_report",
+      ] as const,
+    ),
+    own_document_delivery_aliases: Object.freeze(["own_document"] as const),
+  }),
+  mlb_identity: Object.freeze({
+    slug_fragments: Object.freeze(
+      [
+        "mlb",
+        "ml-builders",
+        "major-loss",
+      ] as const,
+    ),
+    name_fragments: Object.freeze(["ml builders", "major loss"] as const),
+    reference_pattern_source: String.raw`\bMLB[-\s]?\d`,
+  }),
+  region_routing: Object.freeze({
+    mlb_south_west_suburbs: MLB_SOUTH_WEST_SUBURBS,
+    mlb_builder_key: "MLB" as const,
+    south_west_routing_rule: "mlb-south-west-routing" as const,
+  }),
+  applicability: Object.freeze({
+    ajs_builder_keys: Object.freeze(["AJS", "AJBR"] as const),
+    ajs_forbidden_report_families: Object.freeze(
+      [
+        "ordinary_roof_portal",
+        "own_template_roof",
+        "assessment_quote",
+      ] as const,
+    ),
+    unknown_builder_key: "UNKNOWN" as const,
+    unknown_family: "unknown" as const,
+  }),
+});
+
 function canonicalSuburb(value: unknown): string {
   return typeof value === "string"
     ? value.trim().toLowerCase().replace(/\s+/g, " ")
@@ -210,46 +288,33 @@ export function canonicalSesFamilyFromCard(args: {
 }): SesFamilyId {
   const insuranceType = canonicalToken(args.insurance_job_type);
   if (
-    insuranceType === "restoration" ||
-    insuranceType === "restoration_work"
+    SES_FAMILY_MATRIX_EXECUTABLE_POLICY.family_classifier
+      .insurance_restoration_aliases.includes(
+        insuranceType as "restoration" | "restoration_work",
+      )
   ) {
     return "restoration";
   }
   const explicit = canonicalToken(args.makesafe_job_family);
   const ownTemplate = args.own_template_requested === true ||
     args.strata === true ||
-    canonicalToken(args.report_delivery) === "own_document";
-  switch (explicit) {
-    case "restoration":
-    case "restoration_work":
-    case "insurance_restoration":
-      return "restoration";
-    case "repair":
-      // Charter v1.1 (Ruling 15): repair is its own non-urgent family.
-      // Pack recipe sealed 2026-08-04 on the Captain's 2026-08-02 ruling:
-      // match the physical labour/materials system while keeping family id.
-      return "repair";
-    case "general_makesafe":
-    case "physical_makesafe":
-      return "physical_makesafe";
-    case "temp_fence_makesafe":
-    case "temporary_fencing":
-    case "temp_fence":
-      return "temporary_fencing";
-    case "assessment_report_quote":
-    case "assessment_report":
-    case "assessment_quote":
-    case "assessment":
-      return "assessment_quote";
-    case "own_template_roof":
-      return "own_template_roof";
-    case "ordinary_roof_portal":
-    case "roof":
-    case "roof_report":
-      return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
-    default:
-      return "unknown";
+    SES_FAMILY_MATRIX_EXECUTABLE_POLICY.family_classifier
+      .own_document_delivery_aliases.includes(
+        canonicalToken(args.report_delivery) as "own_document",
+      );
+  const explicitFamily = SES_FAMILY_MATRIX_EXECUTABLE_POLICY.family_classifier
+    .explicit_aliases[
+      explicit as keyof typeof SES_FAMILY_MATRIX_EXECUTABLE_POLICY.family_classifier.explicit_aliases
+    ];
+  if (explicitFamily) return explicitFamily;
+  if (
+    SES_FAMILY_MATRIX_EXECUTABLE_POLICY.family_classifier.roof_aliases.includes(
+      explicit as "ordinary_roof_portal" | "roof" | "roof_report",
+    )
+  ) {
+    return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
   }
+  return "unknown";
 }
 
 /**
@@ -271,9 +336,10 @@ export function isMakesafeMlbCompany(detail: any, job: any): boolean {
     detail?.external_ref || job?.external_ref || job?.metadata?.external_ref ||
       "",
   ).toUpperCase();
-  return slug.includes("mlb") || slug.includes("ml-builders") ||
-    slug.includes("major-loss") || name.includes("ml builders") ||
-    name.includes("major loss") || /\bMLB[-\s]?\d/.test(ref);
+  const mlb = SES_FAMILY_MATRIX_EXECUTABLE_POLICY.mlb_identity;
+  return mlb.slug_fragments.some((fragment) => slug.includes(fragment)) ||
+    mlb.name_fragments.some((fragment) => name.includes(fragment)) ||
+    new RegExp(mlb.reference_pattern_source).test(ref);
 }
 
 /**
@@ -584,12 +650,13 @@ export const SES_FAMILY_MATRIX: readonly SesFamilyMatrixRow[] = Object.freeze([
   syntheticRow("assessment_quote"),
 ]);
 
-const AJS_KEYS = new Set<SesBuilderKey>(["AJS", "AJBR"]);
-const AJS_FORBIDDEN_REPORT_FAMILIES = new Set<SesFamilyId>([
-  "ordinary_roof_portal",
-  "own_template_roof",
-  "assessment_quote",
-]);
+const AJS_KEYS = new Set<SesBuilderKey>(
+  SES_FAMILY_MATRIX_EXECUTABLE_POLICY.applicability.ajs_builder_keys,
+);
+const AJS_FORBIDDEN_REPORT_FAMILIES = new Set<SesFamilyId>(
+  SES_FAMILY_MATRIX_EXECUTABLE_POLICY.applicability
+    .ajs_forbidden_report_families,
+);
 
 export function resolveSesFamilyMatrixRow(args: {
   builder_key: SesBuilderKey;
@@ -598,7 +665,10 @@ export function resolveSesFamilyMatrixRow(args: {
   own_template_requested?: boolean;
   site_suburb?: unknown;
 }): SesFamilyMatrixResolution {
-  if (args.family === "unknown") {
+  if (
+    args.family ===
+      SES_FAMILY_MATRIX_EXECUTABLE_POLICY.applicability.unknown_family
+  ) {
     return {
       ok: false,
       failure: {
@@ -624,7 +694,10 @@ export function resolveSesFamilyMatrixRow(args: {
       },
     };
   }
-  if (args.builder_key === "UNKNOWN") {
+  if (
+    args.builder_key ===
+      SES_FAMILY_MATRIX_EXECUTABLE_POLICY.applicability.unknown_builder_key
+  ) {
     return {
       ok: false,
       failure: {
@@ -635,12 +708,15 @@ export function resolveSesFamilyMatrixRow(args: {
       },
     };
   }
-  const southWest = args.builder_key === "MLB" &&
+  const southWest = args.builder_key ===
+      SES_FAMILY_MATRIX_EXECUTABLE_POLICY.region_routing.mlb_builder_key &&
     MLB_SOUTH_WEST_SUBURB_SET.has(canonicalSuburb(args.site_suburb));
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === args.builder_key &&
     candidate.family === args.family &&
-    (candidate.routing_rule === "mlb-south-west-routing") === southWest
+    (candidate.routing_rule ===
+        SES_FAMILY_MATRIX_EXECUTABLE_POLICY.region_routing
+          .south_west_routing_rule) === southWest
   );
   if (!row) {
     return {

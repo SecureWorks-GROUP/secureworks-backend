@@ -51,7 +51,7 @@ export {
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;
 export type SesRouteKind = "report" | "photo" | "invoice" | "report_invoice";
 
-export const SES_WORKFLOW_SEND_RULE_VERSION = "ses-workflow-send/2026-08-14.2";
+export const SES_WORKFLOW_SEND_RULE_VERSION = "ses-workflow-send/2026-08-15.3";
 
 export const SES_UNIVERSAL_ROUTE_ORDER: SesRouteKind[] = [
   "report",
@@ -124,7 +124,34 @@ export const SES_WORKFLOW_SEND_EXECUTION_POLICY = Object.freeze({
     ajs_physical: Object.freeze([...SES_AJS_ROUTE_ORDER]),
     mlb_physical: Object.freeze([...SES_MLB_PHYSICAL_ROUTE_ORDER]),
     universal_physical: Object.freeze([...SES_UNIVERSAL_ROUTE_ORDER]),
+    report_photo: Object.freeze(["report", "photo"] as const),
     report_only: Object.freeze(["invoice"] as const),
+  }),
+  route_requirements: Object.freeze({
+    assessment_family: "assessment_quote" as const,
+    assessment_route_order: Object.freeze(["invoice"] as const),
+  }),
+  mlb_prime_route_kinds: Object.freeze(["report", "photo"] as const),
+  subjects: Object.freeze({
+    draft_status: "DRAFT" as const,
+    authorised_status: "AUTHORISED" as const,
+    pending_invoice_number: "pending-number" as const,
+  }),
+  internal_body_annotation: Object.freeze({
+    pattern_source: String
+      .raw`\b(?:drafts?|dockets?|packs?|routes?|cycles?|revisions?|threads?|threading|authorised|authorized)\b|mail\.send`,
+    flags: "i" as const,
+  }),
+  client_send_gates: Object.freeze({
+    by_route: Object.freeze(
+      {
+        report_invoice: "report_invoice",
+        report: "report",
+        photo: "photo",
+        invoice: "invoice",
+      } as const,
+    ),
+    ajs_legacy_report_gate: "report_invoice" as const,
   }),
   readiness: Object.freeze({
     missing_declared_artifact: "not_ready",
@@ -426,11 +453,27 @@ export function requiredSesRouteKinds(
   builderKey?: string | null,
   reportRouteApplicable = true,
 ): SesRouteKind[] {
-  if (family === "assessment_quote") return ["invoice"];
+  if (
+    family ===
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.route_requirements.assessment_family
+  ) {
+    return [
+      ...SES_WORKFLOW_SEND_EXECUTION_POLICY.route_requirements
+        .assessment_route_order,
+    ];
+  }
   return sesReleaseRouteOrder(builderKey).filter((kind) =>
     (kind !== "photo" || photoRouteApplicable) &&
     (kind !== "report" || reportRouteApplicable)
   );
+}
+
+function canonicalSesRouteKindSetEquals(
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean {
+  return actual.length === expected.length &&
+    expected.every((kind) => actual.includes(kind));
 }
 
 /** Resolve the only stored route sets the executable send contract admits. */
@@ -440,21 +483,34 @@ export function sesStoredReleaseRouteOrder(
   const unique = [...new Set(routeKinds.map((kind) => String(kind || "")))]
     .filter(Boolean);
   if (
-    unique.length === 2 && unique.includes("photo") &&
-    unique.includes("report_invoice")
+    canonicalSesRouteKindSetEquals(
+      unique,
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.ajs_physical,
+    )
   ) {
-    return [...SES_AJS_ROUTE_ORDER];
+    return [...SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.ajs_physical];
   }
   if (
-    unique.length === 2 && unique.includes("photo") &&
-    unique.includes("report")
+    canonicalSesRouteKindSetEquals(
+      unique,
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.report_photo,
+    )
   ) {
-    return ["report", "photo"];
+    return [...SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.report_photo];
   }
-  if (unique.length === 1 && unique[0] === "invoice") return ["invoice"];
   if (
-    unique.length === SES_UNIVERSAL_ROUTE_ORDER.length &&
-    SES_UNIVERSAL_ROUTE_ORDER.every((kind) => unique.includes(kind))
+    canonicalSesRouteKindSetEquals(
+      unique,
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.report_only,
+    )
+  ) {
+    return [...SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.report_only];
+  }
+  if (
+    canonicalSesRouteKindSetEquals(
+      unique,
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.route_shapes.universal_physical,
+    )
   ) {
     return [...SES_UNIVERSAL_ROUTE_ORDER];
   }
@@ -537,7 +593,9 @@ export function mlbPhysicalRouteRecipients(
 
 /** True when this route is one of the two MLB Prime mailer routes. */
 export function isMlbPrimeMailerRouteKind(routeKind: SesRouteKind): boolean {
-  return routeKind === "report" || routeKind === "photo";
+  return SES_WORKFLOW_SEND_EXECUTION_POLICY.mlb_prime_route_kinds.includes(
+    routeKind as "report" | "photo",
+  );
 }
 
 /**
@@ -600,8 +658,11 @@ export function sesInvoiceRouteSubject(args: {
   if (args.noAdditionalCharge) return `${ref} - no additional charge`;
   const status = String(args.xeroStatus || "").trim().toUpperCase();
   const invoiceNumber = String(args.invoiceNumber || "").trim();
-  if (status === "DRAFT") {
-    return `${ref} - Xero draft ${invoiceNumber || "pending-number"}`;
+  if (status === SES_WORKFLOW_SEND_EXECUTION_POLICY.subjects.draft_status) {
+    return `${ref} - Xero draft ${
+      invoiceNumber ||
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.subjects.pending_invoice_number
+    }`;
   }
   return `${ref} - Xero invoice ${invoiceNumber}`.trim();
 }
@@ -620,11 +681,19 @@ export function sesAjsReportInvoiceSubject(args: {
   }
   const invoiceNumber = String(args.invoiceNumber || "").trim();
   const status = String(args.xeroStatus || "").trim().toUpperCase();
-  if (status === "AUTHORISED") {
+  if (
+    status === SES_WORKFLOW_SEND_EXECUTION_POLICY.subjects.authorised_status
+  ) {
     return `${ref} - report and Xero invoice ${invoiceNumber}`.trim();
   }
-  if (status === "DRAFT" && String(args.boundInvoiceId || "").trim()) {
-    return `${ref} - report and Xero draft ${invoiceNumber || "pending-number"}`
+  if (
+    status === SES_WORKFLOW_SEND_EXECUTION_POLICY.subjects.draft_status &&
+    String(args.boundInvoiceId || "").trim()
+  ) {
+    return `${ref} - report and Xero draft ${
+      invoiceNumber ||
+      SES_WORKFLOW_SEND_EXECUTION_POLICY.subjects.pending_invoice_number
+    }`
       .trim();
   }
   return String(args.preparedReportSubject || "").trim() ||
@@ -997,8 +1066,10 @@ export function resolveSesWorkflowRoutes(args: {
  * sesBuilderRouteBody / the pinned AJS wording never contain these terms, so a
  * refusal always means a stale or hand-rolled body, not a producer bug.
  */
-const SES_INTERNAL_BODY_ANNOTATION_RE =
-  /\b(?:drafts?|dockets?|packs?|routes?|cycles?|revisions?|threads?|threading|authorised|authorized)\b|mail\.send/i;
+const SES_INTERNAL_BODY_ANNOTATION_RE = new RegExp(
+  SES_WORKFLOW_SEND_EXECUTION_POLICY.internal_body_annotation.pattern_source,
+  SES_WORKFLOW_SEND_EXECUTION_POLICY.internal_body_annotation.flags,
+);
 
 export function sesBodyCarriesInternalAnnotation(body: unknown): boolean {
   return SES_INTERNAL_BODY_ANNOTATION_RE.test(String(body || ""));
@@ -1021,12 +1092,13 @@ export function clientSendGateKindForRoute(args: {
   routeKind: SesRouteKind;
   builderKey?: unknown;
 }): SesClientSendGateKind {
-  if (args.routeKind === "report_invoice") return "report_invoice";
+  const gates = SES_WORKFLOW_SEND_EXECUTION_POLICY.client_send_gates;
+  if (args.routeKind === "report_invoice") {
+    return gates.by_route.report_invoice;
+  }
   // Legacy half-match: AJS stored as route_kind report still means combined.
   if (args.routeKind === "report" && isAjsBuilderKey(args.builderKey)) {
-    return "report_invoice";
+    return gates.ajs_legacy_report_gate;
   }
-  if (args.routeKind === "report") return "report";
-  if (args.routeKind === "photo") return "photo";
-  return "invoice";
+  return gates.by_route[args.routeKind];
 }

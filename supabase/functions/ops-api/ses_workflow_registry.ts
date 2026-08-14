@@ -9,6 +9,7 @@ import {
 import {
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX,
+  SES_FAMILY_MATRIX_EXECUTABLE_POLICY,
   SES_FAMILY_MATRIX_VERSION,
   type SesBuilderKey,
   type SesFamilyId,
@@ -17,6 +18,8 @@ import {
 } from "./ses_family_matrix.ts";
 import {
   SES_DOCKET_REVIEW_SPEC_VERSION,
+  SES_PACK_PREPARATION_EXECUTABLE_POLICY,
+  SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
   SES_WORKFLOW_PRICING_RULE_VERSION,
   type SesWorkflowArtifactProfileId,
   type SesWorkflowArtifactRole,
@@ -25,6 +28,7 @@ import {
   sesWorkflowPricingProfile,
 } from "./ses_prepare_docket_revision.ts";
 import {
+  SES_WORKFLOW_SEND_EXECUTION_POLICY,
   SES_WORKFLOW_SEND_RULE_VERSION,
   sesWorkflowSendProfile,
   type SesWorkflowSendProfileId,
@@ -36,6 +40,7 @@ import {
 } from "./ses_stage_engine_v2.ts";
 import {
   SES_STAGE_EXECUTABLE_POLICY,
+  SES_WORKFLOW_EXECUTABLE_FAMILY_POLICY,
   SES_WORKFLOW_EXECUTABLE_POLICY_VERSION,
   type SesDeliverableAuthorityPolicy,
   sesDeliverableAuthorityRequiresPersistedCase,
@@ -49,7 +54,7 @@ import {
 export const SES_WORKFLOW_CONTRACT_SCHEMA_VERSION =
   "secureworks.ses-workflow-contract/v1";
 export const SES_WORKFLOW_CONTRACT_CANON_REVISION =
-  "ses-workflow-contract/2026-08-15.2";
+  "ses-workflow-contract/2026-08-15.4";
 export const SES_WORKFLOW_RELEASE_CONTRACT_VERSION =
   "ses-release-contract/v1-preflight-only";
 export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
@@ -61,7 +66,31 @@ export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
  * review-visible rather than silently moving the drift-test coordinate.
  */
 export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 =
-  "sha256:0f70157c3d514466b5e83ef54f74cc69f54ea9b5b4a399ab99570c9065950181";
+  "sha256:3b2b8b4774e772fe164aaff06c7e8e3067ae93760ff545cdc214b6a33c054b4b";
+
+/**
+ * Conservative structural guard for the audited executable surfaces. The
+ * registry fingerprints these digests and the focused test recomputes them
+ * from source. A future executable branch or literal therefore cannot enter
+ * one of these surfaces without invalidating both validation and the pinned
+ * canonical coordinate, even before it is promoted to a named typed operand.
+ */
+export const SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256 = Object.freeze(
+  {
+    "ses_workflow_executable_policy.ts":
+      "sha256:1d02965eff6112b5b6866b2bcab86b20d9a2c1eab195b6b4c88be962c485dc8c",
+    "ses_assembler_input_adapter.ts":
+      "sha256:ed1bb471469b1d89fd96e69b030a0995f2b080db358d05fc9d501e8e83ae74d8",
+    "ses_family_matrix.ts":
+      "sha256:b1abe92b3934c33c28f847a65e0752c1db87a98f973608eecf29399488820145",
+    "ses_stage_engine_v2.ts":
+      "sha256:102f5b35377fccd9da0962197d23142f75bcb9525602849a539ddf2f03d77342",
+    "ses_prepare_docket_revision.ts":
+      "sha256:de5c05689f5b2c689ce66105e2dab120327ec73d74b9ae80fcd0b885a01535d2",
+    "ses_release_route_shape.ts":
+      "sha256:0b36a4274afc7f904f552d9b6ffa37bb2d36b7ead40f0955ca2660e0a819dac5",
+  } satisfies Record<string, SesSha256>,
+);
 
 export const SES_WORKFLOW_PUBLIC_FAMILIES = [
   "physical_makesafe",
@@ -86,6 +115,28 @@ export type SesWorkflowUnsealedReason =
   | "report_only_envelope_unsettled"
   | "synthetic_release_forbidden"
   | "release_contract_preflight_only";
+
+export const SES_WORKFLOW_EXECUTABLE_OPERAND_IDS = [
+  "source.audited_surface_sha256",
+  "family.matrix_rows",
+  "family.selection_policy",
+  "family.runtime_policy",
+  "stage.global_policy",
+  "stage.family_profiles",
+  "pack.global_policy",
+  "pack.family_profiles",
+  "pricing.global_policy",
+  "pricing.basis_profiles",
+  "send.global_policy",
+  "send.variant_profiles",
+] as const;
+
+export type SesWorkflowExecutableOperandId =
+  (typeof SES_WORKFLOW_EXECUTABLE_OPERAND_IDS)[number];
+
+export type SesWorkflowExecutableOperandRegistry = Readonly<
+  Record<SesWorkflowExecutableOperandId, unknown>
+>;
 
 interface SesWorkflowProfileBase {
   profile_id: string;
@@ -202,6 +253,7 @@ export interface SesWorkflowContractManifest {
     send_rules: string;
     executable_policy: string;
   };
+  executable_policy: SesWorkflowExecutableOperandRegistry;
   profiles: {
     family: readonly SesWorkflowFamilyProfile[];
     artifact: readonly SesWorkflowArtifactProfile[];
@@ -416,6 +468,52 @@ function pricingProfile(
   };
 }
 
+function buildExecutableOperandRegistry(): SesWorkflowExecutableOperandRegistry {
+  const runtimeFamilies = Object.keys(
+    SES_WORKFLOW_EXECUTABLE_FAMILY_POLICY,
+  ) as Array<Exclude<SesFamilyId, "unknown">>;
+  const invoiceBases = [
+    ...new Set(SES_FAMILY_MATRIX.map((row) => row.invoice_basis)),
+  ].sort(codePointCompare);
+  const sendProfiles = SES_FAMILY_MATRIX.map((row) => ({
+    builder_key: row.builder_key,
+    family: row.family,
+    routing_rule: row.routing_rule,
+    profile: sesWorkflowSendProfile(row),
+  })).sort((left, right) =>
+    codePointCompare(
+      `${left.builder_key}.${left.family}.${left.routing_rule}`,
+      `${right.builder_key}.${right.family}.${right.routing_rule}`,
+    )
+  );
+  return Object.freeze(
+    {
+      "source.audited_surface_sha256":
+        SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256,
+      "family.matrix_rows": SES_FAMILY_MATRIX.map(executableMatrixRow),
+      "family.selection_policy": SES_FAMILY_MATRIX_EXECUTABLE_POLICY,
+      "family.runtime_policy": SES_WORKFLOW_EXECUTABLE_FAMILY_POLICY,
+      "stage.global_policy": SES_STAGE_EXECUTABLE_POLICY,
+      "stage.family_profiles": runtimeFamilies.map((family) => ({
+        family,
+        profile: sesStageWorkflowProfile(family),
+      })),
+      "pack.global_policy": SES_PACK_PREPARATION_EXECUTABLE_POLICY,
+      "pack.family_profiles": runtimeFamilies.map((family) => ({
+        family,
+        profile: sesWorkflowPackProfile(family),
+      })),
+      "pricing.global_policy": SES_WORKFLOW_PRICING_EXECUTABLE_POLICY,
+      "pricing.basis_profiles": invoiceBases.map((invoiceBasis) => ({
+        invoice_basis: invoiceBasis,
+        profile: sesWorkflowPricingProfile(invoiceBasis),
+      })),
+      "send.global_policy": SES_WORKFLOW_SEND_EXECUTION_POLICY,
+      "send.variant_profiles": sendProfiles,
+    } satisfies Record<SesWorkflowExecutableOperandId, unknown>,
+  );
+}
+
 function buildRawManifest(): RawManifest {
   const family = new Map<string, RawProfile<SesWorkflowFamilyProfile>>();
   const artifact = new Map<string, RawProfile<SesWorkflowArtifactProfile>>();
@@ -541,6 +639,7 @@ function buildRawManifest(): RawManifest {
       send_rules: SES_WORKFLOW_SEND_RULE_VERSION,
       executable_policy: SES_WORKFLOW_EXECUTABLE_POLICY_VERSION,
     },
+    executable_policy: buildExecutableOperandRegistry(),
     profiles: {
       family: sortedProfiles([...family.values()]),
       artifact: sortedProfiles([...artifact.values()]),
@@ -640,6 +739,7 @@ function rawManifestFromExport(
     canon_revision: manifest.canon_revision,
     release_contract_version: manifest.release_contract_version,
     source_versions: { ...manifest.source_versions },
+    executable_policy: structuredClone(manifest.executable_policy),
     profiles: {
       family: sortedProfiles(manifest.profiles.family.map(withoutHash)),
       artifact: sortedProfiles(manifest.profiles.artifact.map(withoutHash)),
