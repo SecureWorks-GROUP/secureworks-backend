@@ -71,6 +71,8 @@ const FACTS = {
     "The invoice approval and Xero binding records could not be read, so the invoice decision cannot be proven either way.",
   route_send_proof_unreadable:
     "The release send effect ledger could not be read, so whether this release has already dispatched a route to the builder cannot be proven either way.",
+  external_effect_payload_drift:
+    "The caller payload differs from the immutable payload already reserved for this exact external-effect operation.",
   graph_outcome_unknown:
     "Microsoft Graph accepted or may have accepted the message, but its exact sent outcome is not yet proven.",
   xero_outcome_unknown:

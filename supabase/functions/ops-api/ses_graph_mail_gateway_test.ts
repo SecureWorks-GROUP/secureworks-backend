@@ -185,6 +185,12 @@ Deno.test("reconcileSent finds message by header when subject is clean", async (
     if (method === "GET" && url.includes("drafts")) {
       return { value: [headerRow] };
     }
+    if (
+      method === "GET" &&
+      url.includes("/messages/draft-9/attachments?")
+    ) {
+      return { value: [] };
+    }
     if (method === "POST" && url.endsWith("/send")) {
       phase = "sent";
       return null;
@@ -203,6 +209,238 @@ Deno.test("reconcileSent finds message by header when subject is clean", async (
   assertEquals(rows.length, 1);
   assertEquals(rows[0].message_id, "sent-9");
 });
+
+Deno.test(
+  "reconcileSent completes a checkpointed draft's missing frozen attachments before send",
+  async () => {
+    const token = "SES-partial-attachment-recovery";
+    const frozen = [{
+      hash: "hash-report",
+      name: "report.pdf",
+      contentType: "application/pdf",
+      bytes: new Uint8Array([1, 2, 3]),
+    }, {
+      hash: "hash-invoice",
+      name: "invoice.pdf",
+      contentType: "application/pdf",
+      bytes: new Uint8Array([4, 5, 6, 7]),
+    }];
+    const uploaded: typeof frozen = [];
+    const checkpoints: Array<{ operationKey: string; draftId: string }> = [];
+    let draftCreated = false;
+    let failInvoiceUploadOnce = true;
+    let sent = false;
+    let sends = 0;
+    const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+    const graphJson = async (url: string, init: RequestInit) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (
+        method === "POST" && url.endsWith("/messages") &&
+        !url.includes("/send")
+      ) {
+        draftCreated = true;
+        return { id: "draft-partial" };
+      }
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        return sent
+          ? {
+            value: [{
+              id: "sent-complete",
+              subject: "Frozen pack",
+              internetMessageHeaders: [{
+                name: SES_OPERATION_HEADER,
+                value: token,
+              }],
+            }],
+          }
+          : { value: [] };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return {
+          value: draftCreated && !sent
+            ? [{
+              id: "draft-partial",
+              subject: "Frozen pack",
+              internetMessageHeaders: [{
+                name: SES_OPERATION_HEADER,
+                value: token,
+              }],
+            }]
+            : [],
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/messages/draft-partial/attachments?")
+      ) {
+        return {
+          value: uploaded.map((attachment, index) => ({
+            id: `attachment-${index}`,
+            name: attachment.name,
+            contentType: attachment.contentType,
+            size: attachment.bytes.byteLength,
+            isInline: false,
+          })),
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/messages/draft-partial/attachments/attachment-")
+      ) {
+        const index = Number(
+          url.match(/attachments\/attachment-(\d+)/)?.[1] || "-1",
+        );
+        const attachment = uploaded[index];
+        return {
+          id: `attachment-${index}`,
+          name: attachment.name,
+          contentType: attachment.contentType,
+          size: attachment.bytes.byteLength,
+          isInline: false,
+          contentBytes: encode(attachment.bytes),
+        };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        assertEquals(uploaded.map((item) => item.hash), [
+          "hash-report",
+          "hash-invoice",
+        ]);
+        sends++;
+        sent = true;
+        return null;
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const gateway = createSesGraphMailGateway({
+      graphJson: graphJson as any,
+      loadAttachments: async (hashes) =>
+        hashes.map((hash) => frozen.find((item) => item.hash === hash)!),
+      checkpointDraft: async (operationKey, draftId) => {
+        checkpoints.push({ operationKey, draftId });
+      },
+      uploadAttachment: async (_mailbox, messageId, attachment) => {
+        assertEquals(messageId, "draft-partial");
+        const exact = frozen.find((item) => item.name === attachment.name);
+        assert(exact);
+        if (exact.hash === "hash-invoice" && failInvoiceUploadOnce) {
+          failInvoiceUploadOnce = false;
+          throw new Error("synthetic second attachment upload failure");
+        }
+        uploaded.push(exact);
+      },
+      sentPollAttempts: 1,
+    });
+
+    const route = {
+      subject: "Frozen pack",
+      body: "Approved body",
+      recipients: ["builder@example.test"],
+      cc: ["ses@secureworkswa.com.au"],
+      attachment_hashes: ["hash-report", "hash-invoice"],
+    };
+    const first = await assertRejects(
+      () =>
+        gateway.createDraftAndSend(route, {
+          external_token: token,
+          operation_key: "operation-partial",
+        }),
+      Error,
+    );
+    assertStringIncludes(first.message, "second attachment upload failure");
+    assertEquals(checkpoints, [{
+      operationKey: "operation-partial",
+      draftId: "draft-partial",
+    }]);
+    assertEquals(uploaded.map((item) => item.hash), ["hash-report"]);
+    assertEquals(sends, 0);
+
+    const rows = await gateway.reconcileSent(token, route);
+    assertEquals(rows.map((row) => row.message_id), ["sent-complete"]);
+    assertEquals(sends, 1);
+    assertEquals(uploaded.length, 2);
+  },
+);
+
+Deno.test(
+  "reconcileSent hard-refuses a recovered draft carrying non-frozen attachment bytes",
+  async () => {
+    const token = "SES-foreign-attachment";
+    let sends = 0;
+    const graphJson = async (url: string, init: RequestInit) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        return { value: [] };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return {
+          value: [{
+            id: "draft-foreign",
+            subject: "Frozen pack",
+            internetMessageHeaders: [{
+              name: SES_OPERATION_HEADER,
+              value: token,
+            }],
+          }],
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/messages/draft-foreign/attachments?")
+      ) {
+        return {
+          value: [{
+            id: "attachment-foreign",
+            name: "report.pdf",
+            contentType: "application/pdf",
+            size: 3,
+            isInline: false,
+          }],
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/attachments/attachment-foreign?")
+      ) {
+        return {
+          id: "attachment-foreign",
+          name: "report.pdf",
+          contentType: "application/pdf",
+          size: 3,
+          isInline: false,
+          contentBytes: btoa(String.fromCharCode(9, 9, 9)),
+        };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        sends++;
+        return null;
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const gateway = createSesGraphMailGateway({
+      graphJson: graphJson as any,
+      loadAttachments: async () => [{
+        name: "report.pdf",
+        contentType: "application/pdf",
+        bytes: new Uint8Array([1, 2, 3]),
+      }],
+      checkpointDraft: async () => {},
+      uploadAttachment: async () => {
+        throw new Error("foreign draft must never be mutated");
+      },
+      sentPollAttempts: 1,
+    });
+
+    const error = await assertRejects(
+      () =>
+        gateway.reconcileSent(token, {
+          attachment_hashes: ["hash-report"],
+        }),
+      Error,
+    );
+    assertStringIncludes(error.message, "differs from the frozen route");
+    assertEquals(sends, 0);
+  },
+);
 
 Deno.test("reconcileSent refuses ambiguous exact-token drafts instead of reporting absence", async () => {
   const token = "SES-ambiguous-draft-token";
