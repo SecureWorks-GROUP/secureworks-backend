@@ -539,6 +539,7 @@ import {
   SesActionError,
   sesActionErrorResponse,
   signOffSesDocketAction,
+  writeSesMoneyChainRefusalAudit,
   type SesActionAuth,
   type SesMailGateway,
   type SesReleaseXeroReader,
@@ -4176,9 +4177,14 @@ if (import.meta.main) serve(async (req: Request) => {
     })
   }
 
+  // Hoisted so the outer catch can audit a refused SES money-chain press: consts
+  // declared inside the try are not in scope in its catch (defect 2).
+  let auditAction: string | null = null
+  let auditBody: any = {}
   try {
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
+    auditAction = action
     console.log(`[ops-api] action=${action} method=${req.method}`)
 
     if (authMode === 'agent_read') {
@@ -4361,6 +4367,7 @@ if (import.meta.main) serve(async (req: Request) => {
     if (req.method === 'POST') {
       try { body = await req.json() } catch { body = {} }
     }
+    auditBody = body
 
     const client = sb()
 
@@ -10276,6 +10283,16 @@ if (import.meta.main) serve(async (req: Request) => {
   } catch (err) {
     const sesError = sesActionErrorResponse(err)
     if (sesError) {
+      // Defect 2 (2026-08-14): a refused SES money-chain press must leave a
+      // job_events trace. Best-effort and non-blocking — the refusal response
+      // is unchanged whether or not the audit write succeeds.
+      await writeSesMoneyChainRefusalAudit(sb(), {
+        action: auditAction || '',
+        body: auditBody,
+        status: sesError.status,
+        refusal: (sesError.body as { refusal?: any }).refusal,
+        actor_user_id: authUser?.id ?? null,
+      })
       return json(sesError.body, sesError.status)
     }
     if (err instanceof ApiError) {

@@ -4588,41 +4588,103 @@ export async function executeSesInvoiceRevisionAction(
 
   const proposal = revision.proposal as SesInvoiceProposalV1;
   const store = createSupabaseSesEffectStore(client);
-  const createEffect = await buildSesEffect({
-    org_id: args.org_id,
-    job_id: args.job_id,
-    effect_kind: "invoice_create",
-    invoice_obligation_revision_id: revision.id,
-    payload: proposal,
-  });
-  const createAdapter: SesExternalAdapter<
-    SesInvoiceProposalV1,
-    SesXeroInvoiceResult
-  > = {
-    dispatch: (payload, context) => gateway.createDraft(payload, context),
-    reconcile: (context) => gateway.reconcileCreate(context.external_token),
-    identify: (result) => result.xero_invoice_id,
-    digest: (result) => ({
-      invoice_number: result.invoice_number,
-      status: result.status,
-      reference: result.reference,
-      total: result.total,
-    }),
-  };
-  const created = await executeSesExternalEffect({
-    store,
-    effect: createEffect,
-    payload: proposal,
-    adapter: createAdapter,
-    actor: args.actor,
-  });
-  if (created.state !== "confirmed") {
-    throw new SesActionError(409, created.refusal!);
+
+  // Already-created send recovery. The obligation may already carry a confirmed
+  // Xero DRAFT — commonly minted under a RETRY-keyed create effect whose
+  // confirmed identity (an extra artifact_hash) differs from the PRIMARY
+  // create-effect identity recomputed on this send path. When a first mint
+  // stranded that primary effect at state=unknown (e.g. it tripped the
+  // portal-truth guard before any invoice existed) and a retry then succeeded
+  // under a new operation key, this send path would forever reconcile the
+  // primary effect's external token — which no live invoice carries — and
+  // refuse xero_outcome_unknown on every press. The card cannot be sent at all.
+  //
+  // So when the obligation is already create_executed with a bound Xero invoice
+  // id, adopt that exact invoice and go straight to authorise. This never mints
+  // a second invoice: the create effect is skipped, not re-run. The authorise
+  // effect below is a separate, non-stranded effect and stays the money-safety
+  // gate — it dispatches the real Xero authorise exactly once (or reconciles an
+  // already-authorised invoice) and is the only step that moves money.
+  const existingBinding = object(revision.xero_binding);
+  const boundDraftInvoiceId = String(existingBinding.xero_invoice_id || "")
+    .trim();
+  const adoptExistingDraft = revision.state === "create_executed" &&
+    !!boundDraftInvoiceId;
+
+  let createdInvoice: SesXeroInvoiceResult | undefined;
+  let createExternalToken: string;
+  let createDispatched: boolean;
+
+  if (adoptExistingDraft) {
+    const mirrorResponse = await client.from("xero_invoices")
+      .select(
+        "xero_invoice_id,invoice_number,status,total,reference,ses_external_token",
+      )
+      .eq("org_id", args.org_id)
+      .eq("xero_invoice_id", boundDraftInvoiceId)
+      .maybeSingle();
+    const mirror = object(mirrorResponse.data);
+    // Preserve the create effect's original token (the one the confirmed mint
+    // wrote onto the mirror); only synthesise a fallback if the mirror row is
+    // gone, so the downstream mirror upsert never overwrites a good token.
+    createExternalToken = String(mirror.ses_external_token || "").trim() ||
+      (await buildSesEffect({
+        org_id: args.org_id,
+        job_id: args.job_id,
+        effect_kind: "invoice_create",
+        invoice_obligation_revision_id: revision.id,
+        payload: proposal,
+      })).external_token;
+    const adoptedTotal = Number(mirror.total ?? existingBinding.total);
+    createdInvoice = {
+      xero_invoice_id: boundDraftInvoiceId,
+      invoice_number: String(
+        mirror.invoice_number || existingBinding.invoice_number || "",
+      ),
+      status: String(mirror.status || existingBinding.status || "DRAFT"),
+      reference: String(mirror.reference || proposal.reference || ""),
+      total: Number.isFinite(adoptedTotal) ? adoptedTotal : 0,
+    };
+    createDispatched = false;
+  } else {
+    const createEffect = await buildSesEffect({
+      org_id: args.org_id,
+      job_id: args.job_id,
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: revision.id,
+      payload: proposal,
+    });
+    const createAdapter: SesExternalAdapter<
+      SesInvoiceProposalV1,
+      SesXeroInvoiceResult
+    > = {
+      dispatch: (payload, context) => gateway.createDraft(payload, context),
+      reconcile: (context) => gateway.reconcileCreate(context.external_token),
+      identify: (result) => result.xero_invoice_id,
+      digest: (result) => ({
+        invoice_number: result.invoice_number,
+        status: result.status,
+        reference: result.reference,
+        total: result.total,
+      }),
+    };
+    const created = await executeSesExternalEffect({
+      store,
+      effect: createEffect,
+      payload: proposal,
+      adapter: createAdapter,
+      actor: args.actor,
+    });
+    if (created.state !== "confirmed") {
+      throw new SesActionError(409, created.refusal!);
+    }
+    createdInvoice = created.result ||
+      await gateway.reconcileCreate(createEffect.external_token).then((rows) =>
+        rows[0]
+      );
+    createExternalToken = createEffect.external_token;
+    createDispatched = created.dispatched;
   }
-  const createdInvoice = created.result ||
-    await gateway.reconcileCreate(createEffect.external_token).then((rows) =>
-      rows[0]
-    );
   if (!createdInvoice) {
     throw new SesActionError(
       409,
@@ -4636,10 +4698,17 @@ export async function executeSesInvoiceRevisionAction(
     org_id: args.org_id,
     job_id: args.job_id,
     invoice_obligation_revision_id: revision.id,
-    external_token: createEffect.external_token,
+    external_token: createExternalToken,
     invoice: createdInvoice,
   });
-  if (!["authorised", "released"].includes(revision.state)) {
+  // A freshly minted DRAFT records its binding here. An adopted existing draft
+  // already carries a correct create_executed binding (including its stored PDF
+  // pointer), so it must NOT be rewritten — that would strip the pdf_* fields
+  // and leave the card worse off if the authorise below then fails.
+  if (
+    !adoptExistingDraft &&
+    !["authorised", "released"].includes(revision.state)
+  ) {
     const bindingUpdate = await client.from(
       "makesafe_invoice_obligation_revisions",
     ).update({
@@ -4669,7 +4738,7 @@ export async function executeSesInvoiceRevisionAction(
     return {
       state: "xero_draft_created",
       invoice: createdInvoice,
-      invoice_create_dispatched: created.dispatched,
+      invoice_create_dispatched: createDispatched,
       send_dispatched: false,
     };
   }
@@ -4725,7 +4794,7 @@ export async function executeSesInvoiceRevisionAction(
     org_id: args.org_id,
     job_id: args.job_id,
     invoice_obligation_revision_id: revision.id,
-    external_token: createEffect.external_token,
+    external_token: createExternalToken,
     invoice: authorisedInvoice,
   });
   const bound = await bindAuthorisedInvoicePdfToDocket(
@@ -4744,7 +4813,7 @@ export async function executeSesInvoiceRevisionAction(
     state: "authorised_invoice_bound",
     invoice: authorisedInvoice,
     docket_revision: bound.docket_revision,
-    invoice_create_dispatched: created.dispatched,
+    invoice_create_dispatched: createDispatched,
     invoice_authorise_dispatched: authorised.dispatched,
     send_dispatched: false,
   };
@@ -5838,4 +5907,122 @@ export function sesActionErrorResponse(error: unknown): {
     };
   }
   return null;
+}
+
+/** job_events event_type for a refused SES money-chain press (defect 2). */
+export const SES_MONEY_ACTION_REFUSED_EVENT_TYPE = "ses_money_action_refused";
+
+/**
+ * The SES money chain — approve/execute the invoice, then prepare/approve/
+ * execute its release. A refusal on any of these is a money decision the record
+ * must keep; before this, a refused press wrote nothing to `job_events` and its
+ * reason died with the HTTP response the browser threw away.
+ */
+const SES_MONEY_CHAIN_AUDITED_ACTIONS = new Set<string>([
+  "approve_ses_invoice_revision",
+  "execute_ses_invoice_revision",
+  "prepare_ses_release_revision",
+  "approve_ses_release_revision",
+  "execute_ses_release_revision",
+]);
+
+/** The jobs a refused money-chain press touched, for the job-scoped audit. */
+async function resolveSesMoneyChainAuditJobIds(
+  client: SesSupabaseClient,
+  action: string,
+  body: Record<string, any>,
+): Promise<string[]> {
+  const direct = String(body?.job_id || "").trim();
+  if (
+    action === "approve_ses_invoice_revision" ||
+    action === "execute_ses_invoice_revision"
+  ) {
+    return direct ? [direct] : [];
+  }
+  if (action === "prepare_ses_release_revision") {
+    const ids = Array.isArray(body?.job_ids)
+      ? body.job_ids.map((value: unknown) => String(value || "").trim())
+        .filter(Boolean)
+      : [];
+    if (ids.length > 0) return [...new Set(ids)];
+    return direct ? [direct] : [];
+  }
+  // approve/execute release carry a release_revision_id, not a job_id: land the
+  // refusal on each member card.
+  const releaseId = String(body?.release_revision_id || "").trim();
+  if (!releaseId) return [];
+  const response = await client.from("makesafe_release_revision_members")
+    .select("job_id").eq("release_revision_id", releaseId);
+  if (response.error || !response.data) return [];
+  return [
+    ...new Set(
+      (response.data as Array<Record<string, any>>)
+        .map((row) => String(row.job_id || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/**
+ * Append one `job_events` row per affected job when a SES money-chain action is
+ * refused, carrying only the refusal code and fact (never the request body or a
+ * secret). Best-effort and non-blocking: it runs after the refusal is decided
+ * and a failure to audit never changes the response. Additive audit, matching
+ * the existing `job_events` convention (event_type + detail_json, no stage,
+ * substatus, or status field). Non-chain actions are ignored.
+ */
+export async function writeSesMoneyChainRefusalAudit(
+  client: SesSupabaseClient,
+  args: {
+    action: string;
+    body: Record<string, any>;
+    status: number;
+    refusal: SesRefusal | { state: "refused"; fact: string };
+    actor_user_id?: string | null;
+  },
+): Promise<void> {
+  try {
+    if (!SES_MONEY_CHAIN_AUDITED_ACTIONS.has(args.action)) return;
+    const jobIds = await resolveSesMoneyChainAuditJobIds(
+      client,
+      args.action,
+      args.body || {},
+    );
+    if (jobIds.length === 0) return;
+    const refusal = args.refusal as Record<string, any>;
+    const code = String(refusal?.code || "").trim() || null;
+    const fact = String(refusal?.fact || "").slice(0, 1000);
+    const obligationRef = String(
+      args.body?.invoice_obligation_revision_id || "",
+    ).trim();
+    const releaseRef = String(args.body?.release_revision_id || "").trim();
+    const rows = jobIds.map((jobId) => ({
+      job_id: jobId,
+      user_id: args.actor_user_id || null,
+      event_type: SES_MONEY_ACTION_REFUSED_EVENT_TYPE,
+      detail_json: {
+        producer: "ops-api:ses-money-chain",
+        action: args.action,
+        http_status: args.status,
+        refusal_code: code,
+        refusal_fact: fact,
+        ...(obligationRef
+          ? { invoice_obligation_revision_id: obligationRef }
+          : {}),
+        ...(releaseRef ? { release_revision_id: releaseRef } : {}),
+      },
+    }));
+    const inserted = await client.from("job_events").insert(rows);
+    if (inserted?.error) {
+      console.error(
+        "[ses] money-chain refusal audit insert failed:",
+        inserted.error.message || inserted.error,
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[ses] money-chain refusal audit could not be written:",
+      (error as Error)?.message || error,
+    );
+  }
 }
