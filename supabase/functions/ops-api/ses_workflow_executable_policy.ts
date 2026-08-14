@@ -7,7 +7,96 @@
  * canon whose behavior can drift without moving the workflow contract hash.
  */
 export const SES_WORKFLOW_EXECUTABLE_POLICY_VERSION =
-  "ses-workflow-executable-policy/2026-08-15.1";
+  "ses-workflow-executable-policy/2026-08-15.2";
+
+export const SES_STAGE_TRUSTED_COMPLETION_SOURCE_IDS = [
+  "terminal_proof.proven_at",
+  "pack.sent_at",
+  "invoice.invoice_date",
+  "invoice.created_at",
+  "jobs.completed_at",
+  "detail.report_sent_at",
+] as const;
+
+export type SesStageTrustedCompletionSourceId =
+  (typeof SES_STAGE_TRUSTED_COMPLETION_SOURCE_IDS)[number];
+
+/**
+ * Every closed stage-engine vocabulary and threshold that can move a card.
+ *
+ * The stage engine consumes this object directly and the workflow registry
+ * fingerprints the same object. A status, threshold, precedence list or
+ * decision vocabulary therefore cannot change independently of the canonical
+ * workflow coordinate.
+ */
+export const SES_STAGE_EXECUTABLE_POLICY = Object.freeze({
+  completed_window_ms: 7 * 86_400_000,
+  trusted_completion_source_order: Object.freeze([
+    ...SES_STAGE_TRUSTED_COMPLETION_SOURCE_IDS,
+  ]),
+  issued_invoice_statuses: Object.freeze(
+    [
+      "AUTHORISED",
+      "SUBMITTED",
+      "PAID",
+    ] as const,
+  ),
+  contract_states: Object.freeze(
+    [
+      "sealed",
+      "known_unsealed",
+      "unsupported",
+    ] as const,
+  ),
+  cancelled_job_statuses: Object.freeze(["cancelled", "canceled"] as const),
+  archived_job_statuses: Object.freeze(["archived"] as const),
+  claimed_terminal_job_statuses: Object.freeze(
+    [
+      "complete",
+      "completed",
+      "closed",
+    ] as const,
+  ),
+  own_document_submitted_statuses: Object.freeze(["submitted"] as const),
+  service_report_submitted_statuses: Object.freeze(
+    [
+      "submitted",
+      "approved",
+    ] as const,
+  ),
+  docs_ready: Object.freeze({
+    recorded_ready_states: Object.freeze(["READY"] as const),
+    legacy_recorded_states: Object.freeze(["", "DRAFTED"] as const),
+    legacy_pack_statuses: Object.freeze(["drafted"] as const),
+    already_sent_pack_statuses: Object.freeze(
+      [
+        "sent",
+        "sent_marker_failed",
+        "sent_not_closed",
+        "close_failed",
+      ] as const,
+    ),
+  }),
+  portal: Object.freeze({
+    capture_not_done_statuses: Object.freeze(["not_done"] as const),
+    capture_unreachable_statuses: Object.freeze(["unreachable"] as const),
+    cannot_observe_outcome: "cannot_observe" as const,
+  }),
+  evidence_stage: Object.freeze({
+    unsent_pack_ready: "report_ready" as const,
+    empty: "new" as const,
+  }),
+  overlay: Object.freeze({
+    default_decision_kind: "display_override" as const,
+    admitted_decision_kinds: Object.freeze(
+      [
+        "display_override",
+        "stage_attestation",
+      ] as const,
+    ),
+    report_ready_status: "report_ready" as const,
+  }),
+});
 
 export type SesExecutableFamilyId =
   | "physical_makesafe"

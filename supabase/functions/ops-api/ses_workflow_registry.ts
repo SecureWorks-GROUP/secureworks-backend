@@ -35,6 +35,7 @@ import {
   type SesStageWorkflowProfileId,
 } from "./ses_stage_engine_v2.ts";
 import {
+  SES_STAGE_EXECUTABLE_POLICY,
   SES_WORKFLOW_EXECUTABLE_POLICY_VERSION,
   type SesDeliverableAuthorityPolicy,
   sesDeliverableAuthorityRequiresPersistedCase,
@@ -48,7 +49,7 @@ import {
 export const SES_WORKFLOW_CONTRACT_SCHEMA_VERSION =
   "secureworks.ses-workflow-contract/v1";
 export const SES_WORKFLOW_CONTRACT_CANON_REVISION =
-  "ses-workflow-contract/2026-08-15.1";
+  "ses-workflow-contract/2026-08-15.2";
 export const SES_WORKFLOW_RELEASE_CONTRACT_VERSION =
   "ses-release-contract/v1-preflight-only";
 export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
@@ -60,7 +61,7 @@ export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
  * review-visible rather than silently moving the drift-test coordinate.
  */
 export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 =
-  "sha256:71d341d3c1c5732f17452b5859fede50e7fe229edf1def224e64262dccade0d4";
+  "sha256:0f70157c3d514466b5e83ef54f74cc69f54ea9b5b4a399ab99570c9065950181";
 
 export const SES_WORKFLOW_PUBLIC_FAMILIES = [
   "physical_makesafe",
@@ -118,6 +119,7 @@ export interface SesWorkflowStageProfile extends SesWorkflowProfileBase {
   evidence_kind: string;
   required_portal_roles: readonly string[];
   own_document_evidence_required: boolean;
+  executable_stage_policy: typeof SES_STAGE_EXECUTABLE_POLICY;
 }
 
 export interface SesWorkflowPackProfile extends SesWorkflowProfileBase {
@@ -472,6 +474,7 @@ function buildRawManifest(): RawManifest {
       ),
       own_document_evidence_required:
         stageDescriptor.own_document_evidence_required,
+      executable_stage_policy: SES_STAGE_EXECUTABLE_POLICY,
       seal_state: "sealed",
       unsealed_reason_code: null,
       source_rule_ids: sortedStrings(stageDescriptor.source_rule_ids),

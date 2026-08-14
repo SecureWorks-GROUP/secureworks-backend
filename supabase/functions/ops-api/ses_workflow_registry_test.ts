@@ -17,6 +17,7 @@ import {
 } from "./ses_prepare_docket_revision.ts";
 import { SES_PORTAL_REQUIRED_ROLES } from "./ses_stage_engine_v2.ts";
 import {
+  SES_STAGE_EXECUTABLE_POLICY,
   sesDeliverableAuthorityRequiresPersistedCase,
   sesWorkflowExecutableFamilyPolicy,
 } from "./ses_workflow_executable_policy.ts";
@@ -48,6 +49,35 @@ function cloneManifest(
   manifest: SesWorkflowContractManifest,
 ): SesWorkflowContractManifest {
   return structuredClone(manifest);
+}
+
+function jsonLeafPaths(value: unknown, path: string[] = []): string[][] {
+  if (value === null || typeof value !== "object") return [path];
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) =>
+      jsonLeafPaths(item, [...path, String(index)])
+    );
+  }
+  return Object.keys(value as Record<string, unknown>).sort().flatMap((key) =>
+    jsonLeafPaths((value as Record<string, unknown>)[key], [...path, key])
+  );
+}
+
+function mutateJsonLeaf(root: unknown, path: readonly string[]): void {
+  let owner = root as Record<string, unknown> | unknown[];
+  for (const segment of path.slice(0, -1)) {
+    owner = (owner as Record<string, unknown>)[segment] as
+      | Record<string, unknown>
+      | unknown[];
+  }
+  const leaf = path.at(-1);
+  assert(leaf !== undefined);
+  const current = (owner as Record<string, unknown>)[leaf];
+  (owner as Record<string, unknown>)[leaf] = typeof current === "boolean"
+    ? !current
+    : typeof current === "number"
+    ? current + 1
+    : `${String(current)}__mutated`;
 }
 
 Deno.test("SES workflow registry exports exactly six families and every effective matrix variant", async () => {
@@ -241,6 +271,41 @@ Deno.test("mutating the executable deliverable-authority operand changes the can
     await hashSesWorkflowContractSemanticContent(mutated),
     base.canonical_contract_hash,
   );
+});
+
+Deno.test("every stage executable-policy operand is fingerprinted and fails closed when mutated", async () => {
+  const base = await exportSesContractSnapshot();
+  assertEquals(
+    base.profiles.stage.length > 0,
+    true,
+  );
+  for (const profile of base.profiles.stage) {
+    assertEquals(
+      canonicalSesJson(profile.executable_stage_policy),
+      canonicalSesJson(SES_STAGE_EXECUTABLE_POLICY),
+      profile.profile_id,
+    );
+  }
+
+  const leafPaths = jsonLeafPaths(SES_STAGE_EXECUTABLE_POLICY);
+  assert(leafPaths.length > 0);
+  assert(
+    leafPaths.some((path) => path.join(".") === "issued_invoice_statuses.0"),
+  );
+  for (const path of leafPaths) {
+    const mutated = cloneManifest(base);
+    mutateJsonLeaf(
+      mutated.profiles.stage[0].executable_stage_policy,
+      path,
+    );
+    assertNotEquals(
+      await hashSesWorkflowContractSemanticContent(mutated),
+      base.canonical_contract_hash,
+      path.join("."),
+    );
+    const validation = await validateSesWorkflowContractManifest(mutated);
+    assertEquals(validation.valid, false, path.join("."));
+  }
 });
 
 Deno.test("every executable family-matrix row is fingerprinted and portal-role drift fails closed", async () => {
