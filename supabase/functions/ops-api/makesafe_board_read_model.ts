@@ -4,11 +4,11 @@
 import {
   classifyMakesafeJobType,
   computeMakesafeStatus,
-  requiresBoundBuilderReportPdf,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
   type MakesafePortalCapture,
   type MakesafeStatusHold,
   reportInEvidence,
+  requiresBoundBuilderReportPdf,
 } from "./makesafe_computed_status.ts";
 import {
   isMakesafeTerminalDisplayStatus,
@@ -255,6 +255,9 @@ export function projectOpsMakesafeCardRow(row: any) {
     contact: slimContactForCard(row?.contact),
     assignments: slimAssignmentsForCard(row?.assignments || []),
     report: row?.report || null,
+    report_doc_id: row?.report_doc_id || null,
+    has_report_doc: row?.has_report_doc === true,
+    invoice_id: row?.invoice_id || null,
     pack: row?.pack
       ? {
         state: row.pack.state || null,
@@ -1585,6 +1588,12 @@ export function buildCanonicalMakesafeRows(
         external_ref: base?.external_ref || null,
       },
       report: reportPayload,
+      // Direct, current-card coordinates for headless board consumers. These
+      // are aliases of evidence already loaded and cycle-scoped by the board;
+      // they do not query, bind, build, approve, or send anything.
+      report_doc_id: pack?.report_doc_id || null,
+      has_report_doc: base?.has_report_doc === true || !!pack?.report_doc_id,
+      invoice_id: base?.invoice_id || null,
       pack: packPayload,
       age: ageFacts(base),
       blockers: blockerFacts(base, assignments, presentedSubstatus),

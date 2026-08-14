@@ -7538,9 +7538,9 @@ if (import.meta.main) serve(async (req: Request) => {
         ))
       }
       // T12 (Harden SES v1, AC2): ONE shared read so both doors show identical
-      // truth. Returns the literal main-pack pointer ids (report_doc_id /
-      // invoice_doc_id / swms_doc_id — the board payload hides report_doc_id and
-      // no other read exposes it), the exact current docket revision id +
+      // truth. Returns every literal main-pack pointer id (report_doc_id /
+      // invoice_doc_id / swms_doc_id — the board card exposes only the report
+      // shortcut), the exact current docket revision id +
       // output/content hash + invoice obligation, the invoice + send-recipe
       // context, the frozen release manifest identity + delivery proofs, and the
       // approval/audit state. Read-only; composes the existing canonical readers.
@@ -16074,6 +16074,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // suppresses prior-cycle commercial evidence, but a current-cycle DRAFT the
     // shared qualifier has already certified is presented rather than blanked.
     // Neither trade nor ops payloads expose raw invoice records.
+    invoice_id: invoiceForStage?.id || null,
     invoice_raw_status: invoiceForStage?.status || null,
     invoice_date: invoiceForStage?.invoice_date || null,
     invoice_created_at: invoiceForStage?.created_at || null,
