@@ -3468,6 +3468,82 @@ Deno.test(
   },
 );
 
+Deno.test("repair with only a WO and legacy identity refuses deliverable_not_active", async () => {
+  const live = snapshot();
+  live.detail!.report_type = null;
+  live.job.metadata.makesafe_job_family = "repair";
+  live.cases = [];
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: `legacy-job:${live.job.id}`,
+    source_version: 1,
+    source_content_hash: `sha256:${"b".repeat(64)}`,
+    lineage_id: live.job.id,
+    effective_case_id: null,
+  };
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "repair");
+  assertEquals(input.source.attachment_pointers.length > 0, true);
+  assertEquals(input.source.deliverables, []);
+
+  const result = (await prepareSesDocketRevisionRaw(
+    {
+      selection: { mode: "job_id", job_id: input.identity.job_id },
+      idempotency_key: "repair-wo-only-deliverable-refusal",
+      assembler_version: SES_ASSEMBLER_VERSION,
+      dry_run: true,
+      force_refresh: true,
+    },
+    {
+      resolveInput: async () => input,
+      resolveSourceArtifacts: async () => sourceResolver(input),
+      now: () => new Date("2026-08-15T00:00:00Z"),
+    },
+  )).results[0];
+  assertEquals(result.state, "blocked");
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
+  assert(blockerCodes(result).includes("deliverable_not_active"));
+});
+
+Deno.test("repair and restoration admit only the effective persisted reporting deliverable coordinate", () => {
+  for (const family of ["repair", "restoration"] as const) {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = family;
+    const caseId = `case-${family}`;
+    const deliverableId = `REPORTING-${family.toUpperCase()}`;
+    live.cases = [{
+      id: caseId,
+      state: "confirmed_live_job",
+      job_id: live.job.id,
+      target_job_id: null,
+      instruction_key: `instruction-${family}`,
+      lineage_id: `lineage-${family}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"c".repeat(64)}`,
+      builder_wo_canonical: `WO-${family}`,
+      builder_po_canonical: null,
+      external_ref_canonical: `REF-${family}`,
+      deliverable_ref_canonical: deliverableId,
+    }];
+    live.identity_revision = {
+      authority_kind: "effective_intake_case",
+      effective_case_id: caseId,
+      source_instruction_id: `instruction-${family}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"c".repeat(64)}`,
+      lineage_id: `lineage-${family}`,
+    };
+
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.family, family);
+    assertEquals(input.source.deliverables, [{
+      id: deliverableId,
+      kind: family,
+    }]);
+  }
+});
+
 Deno.test(
   "unsupported persisted report delivery fails closed with field evidence",
   () => {
@@ -3579,13 +3655,19 @@ Deno.test(
     live.cycles = [];
     live.reports = [];
     live.media = [];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(
+      input.source.deliverables,
+      [],
+      "a legacy WO is not an active restoration reporting deliverable",
+    );
 
     const client = liveSnapshotClient(live);
     const deps = createSesAssemblerRuntimeDependencies(client, {
       org_id: "org-test",
       created_by: "user-test",
     });
-    const response = await prepare_ses_docket_revision(
+    const response = await prepareSesDocketRevisionRaw(
       {
         selection: { mode: "job_number", job_number: "SWMS-26936" },
         idempotency_key: "restoration-real-card-proof-20260728",
@@ -3614,10 +3696,9 @@ Deno.test(
     assertEquals(result.envelope.v2.classification.recipe_selected, true);
     assert(!codes.includes("restoration_recipe_unsealed"));
     assert(!codes.includes("family_unknown"));
-    // No trade report / photos on this fixture — physical evidence remains in
-    // the complete review pack without suppressing Docs Ready.
-    assertEquals(result.state, "ready");
-    assertEquals(result.envelope.pre_xero_docs_ready, true);
+    assertEquals(result.state, "blocked");
+    assertEquals(result.envelope.pre_xero_docs_ready, false);
+    assert(codes.includes("deliverable_not_active"));
     assert(
       codes.some((code) =>
         code === "trade_evidence_missing" ||
