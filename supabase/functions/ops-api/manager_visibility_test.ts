@@ -1,3 +1,4 @@
+// deno-lint-ignore no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _groupTradeAssignmentsForTest,
@@ -114,9 +115,45 @@ Deno.test("open-pool cards (makesafe + fencing + patio) all land in the pool lan
     { id: "pat-open", scheduled_date: "2026-07-05", assignment_type: "patio_open", role: "patio_open" },
     { id: "today-job", scheduled_date: "2026-07-05", assignment_type: "install", role: "lead" },
     { id: "week-job", scheduled_date: "2026-07-08", assignment_type: "install", role: "lead" },
+    { id: "upcoming-job", scheduled_date: "2026-07-14", assignment_type: "install", role: "lead" },
   ], "2026-07-05", "2026-07-11");
 
-  assertEquals(grouped.makesafePool.map((a: any) => a.id), ["ms-open", "fen-open", "pat-open"]);
-  assertEquals(grouped.today.map((a: any) => a.id), ["today-job"]);
-  assertEquals(grouped.thisWeek.map((a: any) => a.id), ["week-job"]);
+  assertEquals(grouped.makesafePool.map((a: { id: string }) => a.id), ["ms-open", "fen-open", "pat-open"]);
+  assertEquals(grouped.today.map((a: { id: string }) => a.id), ["today-job"]);
+  assertEquals(grouped.thisWeek.map((a: { id: string }) => a.id), ["week-job"]);
+  assertEquals(grouped.upcoming.map((a: { id: string }) => a.id), ["upcoming-job"]);
+});
+
+Deno.test("Trade Today recent omits archived, finished, completed, and already-reported leftovers", () => {
+  const grouped = _groupTradeAssignmentsForTest([
+    { id: "archived-flag", scheduled_date: "2026-08-01", status: "scheduled", jobs: { id: "job-archived-flag", type: "fencing", status: "in_progress", archived: true } },
+    { id: "finished-job", scheduled_date: "2026-08-02", status: "scheduled", jobs: { id: "job-finished", type: "fencing", status: "invoiced", archived: false } },
+    { id: "completed-assignment", scheduled_date: "2026-08-03", status: "complete", jobs: { id: "job-completed-assignment", type: "fencing", status: "in_progress", archived: false } },
+    { id: "reported-makesafe", scheduled_date: "2026-08-04", status: "complete", jobs: { id: "job-reported-makesafe", type: "makesafe", status: "accepted", archived: false } },
+    { id: "report-in-makesafe", scheduled_date: "2026-08-05", status: "scheduled", jobs: { id: "job-report-in-makesafe", type: "makesafe", status: "accepted", archived: false } },
+  ], "2026-08-14", "2026-08-16", {
+    "job-reported-makesafe": {
+      detail: { substatus: "waiting_on_trade_report", cycle_number: 1 },
+      hasSubmittedReport: true,
+    },
+    "job-report-in-makesafe": {
+      detail: { substatus: "admin_to_send_report", cycle_number: 1 },
+      hasSubmittedReport: false,
+    },
+  });
+
+  assertEquals(grouped.recent, []);
+});
+
+Deno.test("Trade Today recent keeps a completed live make-safe while its current report is still owed", () => {
+  const grouped = _groupTradeAssignmentsForTest([
+    { id: "live-makesafe-needs-report", scheduled_date: "2026-08-13", status: "complete", jobs: { id: "job-live-makesafe", type: "makesafe", status: "accepted", archived: false } },
+  ], "2026-08-14", "2026-08-16", {
+    "job-live-makesafe": {
+      detail: { substatus: "waiting_on_trade_report", cycle_number: 2 },
+      hasSubmittedReport: false,
+    },
+  });
+
+  assertEquals(grouped.recent.map((a: { id: string }) => a.id), ["live-makesafe-needs-report"]);
 });
