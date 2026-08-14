@@ -735,6 +735,105 @@ Deno.test(
 );
 
 Deno.test(
+  "real RPC store keeps recovered-draft acknowledgement lag outcome-unknown without a fresh send",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const route = {
+      subject: "Frozen recovered pack",
+      body: "Approved body",
+      recipients: ["builder@example.test"],
+      cc: ["ses@secureworkswa.com.au"],
+      attachment_hashes: [],
+    };
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000008",
+      route_kind: "report",
+      payload: route,
+    });
+    harness.seed({
+      ...effect,
+      state: "unknown",
+      lease_owner: "interrupted-worker",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    });
+    let recoveredDraftSends = 0;
+    let freshDispatches = 0;
+    const graphJson = async (url: string, init: RequestInit) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        return { value: [] };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return {
+          value: [{
+            id: "draft-accepted-unproven",
+            subject: route.subject,
+            internetMessageHeaders: [{
+              name: SES_OPERATION_HEADER,
+              value: effect.external_token,
+            }],
+          }],
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/messages/draft-accepted-unproven/attachments?")
+      ) {
+        return { value: [] };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        recoveredDraftSends++;
+        return null;
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const gateway = createSesGraphMailGateway({
+      graphJson,
+      loadAttachments: async () => [],
+      checkpointDraft: async () => {},
+      uploadAttachment: async () => {},
+      sentPollAttempts: 1,
+    });
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: route,
+      adapter: {
+        async dispatch() {
+          freshDispatches++;
+          return {
+            message_id: "fresh-send-must-not-run",
+            state: "sent" as const,
+            operation_token: effect.external_token,
+          };
+        },
+        reconcile: (context) =>
+          gateway.reconcileSent(context.external_token, route),
+        identify: (sent) => sent.message_id,
+        digest: (sent) => sent,
+      },
+      actor: "operator-retry",
+    });
+
+    assertEquals(result.state, "refused");
+    assertEquals(result.refusal?.code, "graph_outcome_unknown");
+    assertEquals(result.dispatched, true);
+    assertEquals(recoveredDraftSends, 1);
+    assertEquals(freshDispatches, 0);
+    assertEquals(harness.row()?.state, "unknown");
+    assertEquals(
+      harness.transitions.map((transition) => transition.event_kind),
+      [
+        "exact_token_absent_redispatch_claimed",
+        "redispatch_reconcile_outcome_unknown",
+      ],
+    );
+  },
+);
+
+Deno.test(
   "real RPC store refuses a concurrent redispatch while the first route claim lease is live",
   async () => {
     const harness = createRpcEffectHarness();

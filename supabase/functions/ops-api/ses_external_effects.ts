@@ -94,6 +94,19 @@ export interface SesExecuteEffectResult<TResult> {
   dispatched: boolean;
 }
 
+/**
+ * A provider mutation was accepted, but the provider's read surface has not
+ * exposed the exact operation proof yet. Callers must retain the operation as
+ * outcome-unknown; treating this as an empty reconciliation result would allow
+ * a second dispatch under the same frozen operation.
+ */
+export class SesExternalOutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SesExternalOutcomeUnknownError";
+  }
+}
+
 export async function buildSesEffect(args: {
   org_id: string;
   job_id?: string | null;
@@ -210,6 +223,33 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   adapter: SesExternalAdapter<TPayload, TResult>;
   actor: string;
 }): Promise<SesExecuteEffectResult<TResult>> {
+  const retainOutcomeUnknown = async (
+    active: SesExternalEffect,
+    error: SesExternalOutcomeUnknownError,
+    eventKind: string,
+  ): Promise<SesExecuteEffectResult<TResult>> => {
+    const message = String(error.message || "provider outcome unknown")
+      .trim()
+      .slice(0, 500);
+    const nextState: SesEffectState = active.state === "unknown"
+      ? "failed"
+      : "unknown";
+    const unknown = await args.store.transition(
+      active.operation_key,
+      active.state,
+      nextState,
+      eventKind,
+      { failure: { message } },
+      args.actor,
+    );
+    return {
+      state: "refused",
+      effect: { ...unknown, failure: { message } } as SesExternalEffect,
+      refusal: unknownRefusal(unknown.effect_kind, message),
+      dispatched: true,
+    };
+  };
+
   const dispatchFrom = async (
     active: SesExternalEffect,
   ): Promise<SesExecuteEffectResult<TResult>> => {
@@ -241,10 +281,22 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       };
     }
 
-    const matches = await args.adapter.reconcile({
-      external_token: active.external_token,
-      operation_key: active.operation_key,
-    });
+    let matches: TResult[];
+    try {
+      matches = await args.adapter.reconcile({
+        external_token: active.external_token,
+        operation_key: active.operation_key,
+      });
+    } catch (error) {
+      if (error instanceof SesExternalOutcomeUnknownError) {
+        return await retainOutcomeUnknown(
+          active,
+          error,
+          "post_dispatch_outcome_unknown",
+        );
+      }
+      throw error;
+    }
     if (matches.length !== 1) {
       const unknown = await args.store.transition(
         active.operation_key,
@@ -343,10 +395,22 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
           dispatched: false,
         };
       }
-      const matches = await args.adapter.reconcile({
-        external_token: retry.external_token,
-        operation_key: retry.operation_key,
-      });
+      let matches: TResult[];
+      try {
+        matches = await args.adapter.reconcile({
+          external_token: retry.external_token,
+          operation_key: retry.operation_key,
+        });
+      } catch (error) {
+        if (error instanceof SesExternalOutcomeUnknownError) {
+          return await retainOutcomeUnknown(
+            retry,
+            error,
+            "redispatch_reconcile_outcome_unknown",
+          );
+        }
+        throw error;
+      }
       if (matches.length === 1) {
         const result = matches[0];
         const effect = await args.store.transition(
@@ -443,10 +507,22 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     {},
     args.actor,
   );
-  const preDispatchMatches = await args.adapter.reconcile({
-    external_token: dispatching.external_token,
-    operation_key: dispatching.operation_key,
-  });
+  let preDispatchMatches: TResult[];
+  try {
+    preDispatchMatches = await args.adapter.reconcile({
+      external_token: dispatching.external_token,
+      operation_key: dispatching.operation_key,
+    });
+  } catch (error) {
+    if (error instanceof SesExternalOutcomeUnknownError) {
+      return await retainOutcomeUnknown(
+        dispatching,
+        error,
+        "pre_dispatch_reconcile_outcome_unknown",
+      );
+    }
+    throw error;
+  }
   if (preDispatchMatches.length === 1) {
     const result = preDispatchMatches[0];
     const confirmed = await args.store.transition(

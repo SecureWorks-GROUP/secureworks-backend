@@ -7,6 +7,7 @@ import {
 import {
   assertSesReleaseRevisionIsCurrent,
   commitSesReleaseRevisionPlanAction,
+  executeSesReleaseRevisionAction,
   loadSesCockpitDocket,
   prepareSesReleaseRevisionAction,
   SesActionError,
@@ -860,6 +861,58 @@ Deno.test("T11 Option B real actions: DRAFT approval authorises, binds, mints, a
   );
   assert(bindIndex >= 0 && releaseApprovalIndex > bindIndex);
 });
+
+Deno.test(
+  "AC6 confirmed route effect closes from ledger proof with zero provider calls",
+  async () => {
+    const h = optionBHarness();
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const first = await unifiedSesReleaseAction(h.client, auth, {
+      org_id: ORG_ID,
+      release_revision_id: String(preview.release.id),
+      expected_release_content_hash: String(preview.release.content_hash),
+      actor: USER.email,
+    }, {
+      xeroGateway: h.xeroGateway,
+      mailGateway: h.mailGateway,
+      releaseXeroReader: h.releaseXeroReader,
+    });
+    assertEquals(first.state, "released");
+    if (first.state !== "released") throw new Error("expected released result");
+    assertEquals(h.sends.length, 1);
+
+    let providerCalls = 0;
+    h.mailGateway.createDraftAndSend = async () => {
+      providerCalls++;
+      throw new Error("confirmed effect must not open or send a Graph draft");
+    };
+    h.mailGateway.reconcileSent = async () => {
+      providerCalls++;
+      throw new Error("confirmed effect must not call mutating reconciliation");
+    };
+
+    const replay = await executeSesReleaseRevisionAction(
+      h.client,
+      auth,
+      {
+        org_id: ORG_ID,
+        release_revision_id: first.release_revision_id,
+        actor: USER.email,
+      },
+      h.mailGateway,
+      h.releaseXeroReader,
+    );
+    assertEquals(replay.state, "released");
+    assertEquals(providerCalls, 0);
+    assertEquals(h.sends.length, 1);
+  },
+);
 
 Deno.test(
   "T11 Option B recovery: post-authorise ratify failure resumes without second money action",

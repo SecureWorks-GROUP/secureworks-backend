@@ -14,6 +14,7 @@ import {
   assertSesPhotoMailVolumeFits,
   resolveSesMailTransport,
 } from "./ses_photo_mail_volume_guard.ts";
+import { SesExternalOutcomeUnknownError } from "./ses_external_effects.ts";
 
 export interface SesRouteSendResult {
   message_id: string;
@@ -885,7 +886,13 @@ export function createSesGraphMailGateway(
         { method: "POST" },
         [202],
       );
-      return await waitForSent(externalToken);
+      const sent = await waitForSent(externalToken);
+      if (sent.length === 0) {
+        throw new SesExternalOutcomeUnknownError(
+          `Graph accepted recovered draft ${draftId} for token ${externalToken}, but Sent Items proof is not visible yet.`,
+        );
+      }
+      return sent;
     },
   };
 }

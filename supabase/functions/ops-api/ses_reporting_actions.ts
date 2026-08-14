@@ -6237,6 +6237,26 @@ export interface SesMailGateway {
   ): Promise<SesRouteSendResult[]>;
 }
 
+function confirmedRouteResultFromLedger(
+  effect: SesExternalEffect,
+): SesRouteSendResult | null {
+  if (effect.state !== "confirmed") return null;
+  const digest = object(effect.provider_digest);
+  const messageId = String(digest.message_id || effect.external_id || "")
+    .trim();
+  const operationToken = String(
+    digest.operation_token || effect.external_token || "",
+  ).trim();
+  if (!messageId || operationToken !== effect.external_token) return null;
+  const internetMessageId = String(digest.internet_message_id || "").trim();
+  return {
+    message_id: messageId,
+    ...(internetMessageId ? { internet_message_id: internetMessageId } : {}),
+    state: "sent",
+    operation_token: operationToken,
+  };
+}
+
 export interface SesReleaseXeroReader {
   readAuthorised(invoiceId: string): Promise<boolean>;
 }
@@ -6788,10 +6808,12 @@ export async function executeSesReleaseRevisionAction(
         },
       });
     }
-    const result = sent.result ||
-      await mailGateway.reconcileSent(effect.external_token, sendRoute).then(
-        (rows) => rows[0],
-      );
+    // A confirmed exact-once row is the durable provider proof. Never route a
+    // confirmed effect through reconcileSent: that helper may complete and
+    // send a residual Graph draft, which would mutate the provider outside any
+    // redispatch lease. Missing ledger proof is an honest refusal, not licence
+    // to touch Graph again.
+    const result = sent.result || confirmedRouteResultFromLedger(sent.effect);
     if (!result) {
       throw new SesActionError(
         409,
