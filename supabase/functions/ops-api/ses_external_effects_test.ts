@@ -15,6 +15,10 @@ import {
   createSupabaseSesEffectStore,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
+import {
+  createSesGraphMailGateway,
+  SES_OPERATION_HEADER,
+} from "./ses_graph_mail_gateway.ts";
 
 class MemoryEffectStore implements SesExternalEffectStore {
   row: SesExternalEffect | null = null;
@@ -152,7 +156,7 @@ function createRpcEffectHarness() {
           return builder;
         },
         async maybeSingle() {
-          if (table !== "ses_external_effects" || !updatePayload || !row) {
+          if (table !== "ses_external_effects" || !row) {
             return { data: null, error: null };
           }
           const current = row;
@@ -160,7 +164,9 @@ function createRpcEffectHarness() {
             String(effectField(current, column) ?? "") === String(value ?? "")
           );
           if (!matches) return { data: null, error: null };
-          row = { ...row, ...updatePayload } as SesExternalEffect;
+          if (updatePayload) {
+            row = { ...row, ...updatePayload } as SesExternalEffect;
+          }
           return { data: { ...row }, error: null };
         },
         async insert(payload: Record<string, unknown>) {
@@ -487,6 +493,359 @@ Deno.test(
 );
 
 Deno.test(
+  "real RPC store hard-refuses changed payload bytes under an unknown route key",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const stored = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000006",
+      route_kind: "report",
+      payload: {
+        recipients: ["frozen@example.test"],
+        subject: "Frozen subject A",
+      },
+    });
+    const changed = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000006",
+      route_kind: "report",
+      payload: {
+        recipients: ["changed@example.test"],
+        subject: "Changed subject B",
+      },
+    });
+    assertEquals(changed.operation_key, stored.operation_key);
+    assert(changed.payload_hash !== stored.payload_hash);
+    harness.seed({
+      ...stored,
+      state: "unknown",
+      lease_owner: "prior-worker",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    });
+    let reconciles = 0;
+    let dispatches = 0;
+
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect: changed,
+      payload: {
+        recipients: ["changed@example.test"],
+        subject: "Changed subject B",
+      },
+      adapter: {
+        dispatch() {
+          dispatches++;
+          return Promise.resolve({ message_id: "must-not-send" });
+        },
+        reconcile() {
+          reconciles++;
+          return Promise.resolve([] as Array<{ message_id: string }>);
+        },
+        identify(result: { message_id: string }) {
+          return result.message_id;
+        },
+        digest(result: { message_id: string }) {
+          return result;
+        },
+      },
+      actor: "retry-operator",
+    });
+
+    assertEquals(result.state, "refused");
+    assertEquals(result.refusal?.code, "external_effect_payload_drift");
+    assertEquals(result.dispatched, false);
+    assertEquals(reconciles, 0);
+    assertEquals(dispatches, 0);
+    assertEquals(harness.row()?.state, "unknown");
+    assertEquals(harness.transitions, []);
+  },
+);
+
+Deno.test(
+  "real RPC store leases Graph draft recovery, completes missing attachments, and confirms once",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const route = {
+      subject: "Frozen pack",
+      body: "Approved body",
+      recipients: ["builder@example.test"],
+      cc: ["ses@secureworkswa.com.au"],
+      attachment_hashes: ["hash-report", "hash-invoice"],
+    };
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000007",
+      route_kind: "report_invoice",
+      payload: route,
+    });
+    const frozen = [{
+      hash: "hash-report",
+      name: "report.pdf",
+      contentType: "application/pdf",
+      bytes: new Uint8Array([1, 2, 3]),
+    }, {
+      hash: "hash-invoice",
+      name: "invoice.pdf",
+      contentType: "application/pdf",
+      bytes: new Uint8Array([4, 5, 6, 7]),
+    }];
+    const uploaded: typeof frozen = [];
+    let draftCreated = false;
+    let failInvoiceOnce = true;
+    let sent = false;
+    let sends = 0;
+    const graphJson = async (url: string, init: RequestInit) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (
+        method === "POST" && url.endsWith("/messages") &&
+        !url.endsWith("/send")
+      ) {
+        draftCreated = true;
+        return { id: "draft-ledger-recovery" };
+      }
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        return sent
+          ? {
+            value: [{
+              id: "sent-ledger-recovery",
+              subject: route.subject,
+              internetMessageHeaders: [{
+                name: SES_OPERATION_HEADER,
+                value: effect.external_token,
+              }],
+            }],
+          }
+          : { value: [] };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return {
+          value: draftCreated && !sent
+            ? [{
+              id: "draft-ledger-recovery",
+              subject: route.subject,
+              internetMessageHeaders: [{
+                name: SES_OPERATION_HEADER,
+                value: effect.external_token,
+              }],
+            }]
+            : [],
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/messages/draft-ledger-recovery/attachments?")
+      ) {
+        return {
+          value: uploaded.map((attachment, index) => ({
+            id: `attachment-${index}`,
+            name: attachment.name,
+            contentType: attachment.contentType,
+            size: attachment.bytes.byteLength,
+            isInline: false,
+          })),
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/draft-ledger-recovery/attachments/attachment-")
+      ) {
+        const index = Number(
+          url.match(/attachments\/attachment-(\d+)/)?.[1] || "-1",
+        );
+        const attachment = uploaded[index];
+        return {
+          id: `attachment-${index}`,
+          name: attachment.name,
+          contentType: attachment.contentType,
+          size: attachment.bytes.byteLength,
+          isInline: false,
+          contentBytes: btoa(String.fromCharCode(...attachment.bytes)),
+        };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        sends++;
+        sent = true;
+        return null;
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const gateway = createSesGraphMailGateway({
+      graphJson,
+      loadAttachments: async (hashes) =>
+        hashes.map((hash) => frozen.find((item) => item.hash === hash)!),
+      checkpointDraft: async () => {},
+      uploadAttachment: async (_mailbox, _draftId, attachment) => {
+        const exact = frozen.find((item) => item.name === attachment.name)!;
+        if (exact.hash === "hash-invoice" && failInvoiceOnce) {
+          failInvoiceOnce = false;
+          throw new Error("synthetic invoice attachment upload failure");
+        }
+        uploaded.push(exact);
+      },
+      sentPollAttempts: 1,
+    });
+    const adapter = {
+      dispatch: (
+        payload: typeof route,
+        context: { external_token: string; operation_key: string },
+      ) => gateway.createDraftAndSend(payload, context),
+      reconcile: (context: { external_token: string }) =>
+        gateway.reconcileSent(context.external_token, route),
+      identify: (result: { message_id: string }) => result.message_id,
+      digest: (result: { message_id: string }) => result,
+    };
+
+    const first = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: route,
+      adapter,
+      actor: "operator-first",
+    });
+    assertEquals(first.state, "refused");
+    assertEquals(first.effect.state, "unknown");
+    assertEquals(uploaded.map((item) => item.hash), ["hash-report"]);
+    assertEquals(sends, 0);
+
+    const recovered = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: route,
+      adapter,
+      actor: "operator-retry",
+    });
+    assertEquals(recovered.state, "confirmed");
+    assertEquals(recovered.dispatched, false);
+    assertEquals(uploaded.map((item) => item.hash), [
+      "hash-report",
+      "hash-invoice",
+    ]);
+    assertEquals(sends, 1);
+    assertEquals(harness.row()?.state, "confirmed");
+    assertEquals(
+      harness.transitions.some((transition) =>
+        transition.event_kind === "exact_token_absent_redispatch_claimed"
+      ),
+      true,
+    );
+  },
+);
+
+Deno.test(
+  "real RPC store durably fences recovered-draft acknowledgement lag across retries",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const route = {
+      subject: "Frozen recovered pack",
+      body: "Approved body",
+      recipients: ["builder@example.test"],
+      cc: ["ses@secureworkswa.com.au"],
+      attachment_hashes: [],
+    };
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000008",
+      route_kind: "report",
+      payload: route,
+    });
+    harness.seed({
+      ...effect,
+      state: "unknown",
+      lease_owner: "interrupted-worker",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    });
+    let recoveredDraftSends = 0;
+    let freshDispatches = 0;
+    let draftVisible = true;
+    const graphJson = async (url: string, init: RequestInit) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        return { value: [] };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return {
+          value: draftVisible
+            ? [{
+              id: "draft-accepted-unproven",
+              subject: route.subject,
+              internetMessageHeaders: [{
+                name: SES_OPERATION_HEADER,
+                value: effect.external_token,
+              }],
+            }]
+            : [],
+        };
+      }
+      if (
+        method === "GET" &&
+        url.includes("/messages/draft-accepted-unproven/attachments?")
+      ) {
+        return { value: [] };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        recoveredDraftSends++;
+        draftVisible = false;
+        return null;
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const gateway = createSesGraphMailGateway({
+      graphJson,
+      loadAttachments: async () => [],
+      checkpointDraft: async () => {},
+      uploadAttachment: async () => {},
+      sentPollAttempts: 1,
+    });
+    const adapter = {
+      async dispatch() {
+        freshDispatches++;
+        return {
+          message_id: "fresh-send-must-not-run",
+          state: "sent" as const,
+          operation_token: effect.external_token,
+        };
+      },
+      reconcile: (context: { external_token: string }) =>
+        gateway.reconcileSent(context.external_token, route),
+      identify: (sent: { message_id: string }) => sent.message_id,
+      digest: (sent: { message_id: string }) => sent,
+    };
+    const first = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: route,
+      adapter,
+      actor: "operator-retry",
+    });
+    const second = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: route,
+      adapter,
+      actor: "operator-second-retry",
+    });
+
+    assertEquals(first.state, "refused");
+    assertEquals(first.refusal?.code, "graph_outcome_unknown");
+    assertEquals(first.dispatched, true);
+    assertEquals(second.state, "refused");
+    assertEquals(second.refusal?.code, "graph_outcome_unknown");
+    assertEquals(second.dispatched, false);
+    assertEquals(recoveredDraftSends, 1);
+    assertEquals(freshDispatches, 0);
+    assertEquals(harness.row()?.state, "dispatching");
+    assertEquals(
+      harness.transitions.map((transition) => transition.event_kind),
+      ["exact_token_absent_redispatch_claimed"],
+    );
+  },
+);
+
+Deno.test(
   "real RPC store refuses a concurrent redispatch while the first route claim lease is live",
   async () => {
     const harness = createRpcEffectHarness();
@@ -539,7 +898,9 @@ Deno.test(
     });
     await dispatchStarted;
     assertEquals(harness.row()?.state, "dispatching");
-    assertEquals(harness.row()?.lease_owner, "operator-first");
+    assert(
+      String(harness.row()?.lease_owner || "").startsWith("operator-first:"),
+    );
 
     const concurrent = await executeSesExternalEffect({
       store: harness.store,
@@ -578,10 +939,14 @@ Deno.test(
       lease_owner: "failed-worker",
       lease_expires_at: "2000-01-01T00:00:00.000Z",
     };
-    let initialReconciles = 0;
-    let releaseInitialReconciles!: () => void;
-    const initialBarrier = new Promise<void>((resolve) => {
-      releaseInitialReconciles = resolve;
+    let reconciles = 0;
+    let markFirstReconcileStarted!: () => void;
+    let releaseFirstReconcile!: () => void;
+    const firstReconcileStarted = new Promise<void>((resolve) => {
+      markFirstReconcileStarted = resolve;
+    });
+    const firstReconcileRelease = new Promise<void>((resolve) => {
+      releaseFirstReconcile = resolve;
     });
     let dispatches = 0;
     let provider: Array<{ message_id: string }> = [];
@@ -592,10 +957,10 @@ Deno.test(
         return provider[0];
       },
       async reconcile() {
+        reconciles++;
         if (provider.length === 0) {
-          initialReconciles++;
-          if (initialReconciles === 2) releaseInitialReconciles();
-          await initialBarrier;
+          markFirstReconcileStarted();
+          await firstReconcileRelease;
         }
         return provider;
       },
@@ -606,28 +971,31 @@ Deno.test(
         return result;
       },
     };
-    const attempts = await Promise.all([
-      executeSesExternalEffect({
-        store,
-        effect,
-        payload: { subject: "same frozen route" },
-        adapter,
-        actor: "operator-a",
-      }),
-      executeSesExternalEffect({
-        store,
-        effect,
-        payload: { subject: "same frozen route" },
-        adapter,
-        actor: "operator-b",
-      }),
-    ]);
+    const first = executeSesExternalEffect({
+      store,
+      effect,
+      payload: { subject: "same frozen route" },
+      adapter,
+      actor: "operator-a",
+    });
+    await firstReconcileStarted;
+    assertEquals(store.row?.state, "dispatching");
+    const concurrent = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { subject: "same frozen route" },
+      adapter,
+      actor: "operator-b",
+    });
+    assertEquals(concurrent.state, "refused");
+    assertEquals(concurrent.dispatched, false);
+    assertEquals(reconciles, 1, "the lease loser makes no provider call");
+    assertEquals(dispatches, 0);
+    releaseFirstReconcile();
+    const completed = await first;
     assertEquals(dispatches, 1);
     assertEquals(store.row?.state, "confirmed");
-    assertEquals(
-      attempts.filter((attempt) => attempt.dispatched).length,
-      1,
-    );
+    assertEquals(completed.dispatched, true);
   },
 );
 

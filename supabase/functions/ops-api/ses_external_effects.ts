@@ -94,6 +94,19 @@ export interface SesExecuteEffectResult<TResult> {
   dispatched: boolean;
 }
 
+/**
+ * A provider mutation was accepted, but the provider's read surface has not
+ * exposed the exact operation proof yet. Callers must retain the operation as
+ * outcome-unknown; treating this as an empty reconciliation result would allow
+ * a second dispatch under the same frozen operation.
+ */
+export class SesExternalOutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SesExternalOutcomeUnknownError";
+  }
+}
+
 export async function buildSesEffect(args: {
   org_id: string;
   job_id?: string | null;
@@ -196,13 +209,12 @@ function unknownRefusal(
 }
 
 /**
- * Exact-once execution. Every attempt first reconciles the immutable external
- * token. A confirmed effect is structurally unable to dispatch again. A
- * route_send whose prior outcome is still unconfirmed may redispatch only
- * after exact-token reconciliation proves no Draft or Sent Item exists and a
- * SQL-valid state transition wins the per-operation compare-and-set race.
- * Money effects and ordinary mailer sends remain reconcile-only after their
- * first dispatch attempt.
+ * Exact-once execution. A confirmed effect is structurally unable to dispatch
+ * again. An uncertain route_send first wins an atomic per-operation lease,
+ * because exact-token reconciliation may itself finish and send a checkpointed
+ * Graph Draft; only that owner may reconcile or redispatch. Changed payload
+ * hashes hard-refuse before either path. Money effects and ordinary mailer
+ * sends remain read-only reconcile after their first dispatch attempt.
  */
 export async function executeSesExternalEffect<TPayload, TResult>(args: {
   store: SesExternalEffectStore;
@@ -211,6 +223,29 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   adapter: SesExternalAdapter<TPayload, TResult>;
   actor: string;
 }): Promise<SesExecuteEffectResult<TResult>> {
+  const retainOutcomeUnknown = (
+    active: SesExternalEffect,
+    error: SesExternalOutcomeUnknownError,
+  ): SesExecuteEffectResult<TResult> => {
+    const message = String(error.message || "provider outcome unknown")
+      .trim()
+      .slice(0, 500);
+
+    // SesExternalOutcomeUnknownError means Graph accepted a recovered Draft's
+    // /send, but Sent Items has not exposed proof yet. Keep the already-durable
+    // dispatching lease as the fence: unknown/failed are the redispatch entry
+    // states, so transitioning there would let a later request fresh-send when
+    // both Drafts and Sent Items are temporarily empty. A future
+    // generation-safe reconciler may settle this lease; application retries
+    // must remain read-only/refusing until then.
+    return {
+      state: "refused",
+      effect: { ...active, failure: { message } } as SesExternalEffect,
+      refusal: unknownRefusal(active.effect_kind, message),
+      dispatched: true,
+    };
+  };
+
   const dispatchFrom = async (
     active: SesExternalEffect,
   ): Promise<SesExecuteEffectResult<TResult>> => {
@@ -242,10 +277,18 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       };
     }
 
-    const matches = await args.adapter.reconcile({
-      external_token: active.external_token,
-      operation_key: active.operation_key,
-    });
+    let matches: TResult[];
+    try {
+      matches = await args.adapter.reconcile({
+        external_token: active.external_token,
+        operation_key: active.operation_key,
+      });
+    } catch (error) {
+      if (error instanceof SesExternalOutcomeUnknownError) {
+        return retainOutcomeUnknown(active, error);
+      }
+      throw error;
+    }
     if (matches.length !== 1) {
       const unknown = await args.store.transition(
         active.operation_key,
@@ -285,7 +328,28 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     };
   };
 
-  const claim = await args.store.claim(args.effect, args.actor);
+  const claim = await args.store.claim(
+    args.effect,
+    `${args.actor}:${crypto.randomUUID()}`,
+  );
+  if (claim.effect.payload_hash !== args.effect.payload_hash) {
+    return {
+      state: "refused",
+      effect: claim.effect,
+      refusal: sesRefusal(
+        "external_effect_payload_drift",
+        "Reload the exact frozen operation payload and reconcile that stored operation; never dispatch changed caller bytes under its idempotency key.",
+        {
+          evidence: {
+            operation_key: claim.effect.operation_key,
+            stored_payload_hash: claim.effect.payload_hash,
+            caller_payload_hash: args.effect.payload_hash,
+          },
+        },
+      ),
+      dispatched: false,
+    };
+  }
   if (claim.claim_mode === "confirmed") {
     return {
       state: "confirmed",
@@ -295,6 +359,97 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   }
 
   if (claim.claim_mode === "reconcile") {
+    const redispatchableRoute = claim.effect.effect_kind === "route_send" &&
+      (claim.effect.state === "unknown" || claim.effect.state === "failed");
+    if (redispatchableRoute) {
+      // Graph reconciliation may finish a checkpointed Draft by uploading its
+      // missing frozen attachments and sending it. It is therefore an external
+      // dispatch, not a read-only probe, and must sit behind the same atomic
+      // unknown|failed -> dispatching lease as a token-absent redispatch.
+      if (!args.store.claimRedispatch) {
+        return {
+          state: "refused",
+          effect: claim.effect,
+          refusal: unknownRefusal(claim.effect.effect_kind),
+          dispatched: false,
+        };
+      }
+      const retry = await args.store.claimRedispatch(
+        claim.effect,
+        `${args.actor}:${crypto.randomUUID()}`,
+        args.actor,
+      );
+      if (!retry) {
+        return {
+          state: "refused",
+          effect: claim.effect,
+          refusal: unknownRefusal(claim.effect.effect_kind),
+          dispatched: false,
+        };
+      }
+      let matches: TResult[];
+      try {
+        matches = await args.adapter.reconcile({
+          external_token: retry.external_token,
+          operation_key: retry.operation_key,
+        });
+      } catch (error) {
+        if (error instanceof SesExternalOutcomeUnknownError) {
+          return retainOutcomeUnknown(retry, error);
+        }
+        throw error;
+      }
+      if (matches.length === 1) {
+        const result = matches[0];
+        const effect = await args.store.transition(
+          retry.operation_key,
+          "dispatching",
+          "confirmed",
+          "reconciled_under_redispatch_lease",
+          {
+            external_id: args.adapter.identify(result),
+            provider_digest: args.adapter.digest(result),
+          },
+          args.actor,
+        );
+        return { state: "confirmed", effect, result, dispatched: false };
+      }
+      if (matches.length > 1) {
+        const unknown = await args.store.transition(
+          retry.operation_key,
+          "dispatching",
+          "unknown",
+          "redispatch_reconcile_ambiguous",
+          { match_count: matches.length },
+          args.actor,
+        );
+        return {
+          state: "refused",
+          effect: unknown,
+          refusal: unknownRefusal(
+            unknown.effect_kind,
+            `redispatch reconcile match_count=${matches.length}`,
+          ),
+          dispatched: false,
+        };
+      }
+      return await dispatchFrom(retry);
+    }
+
+    // A route already carrying a dispatching lease belongs to another active
+    // or crashed worker. Reconciliation can send a checkpointed Graph draft,
+    // so a non-owner must make no provider call. Unknown/failed is the only
+    // application-level redispatch entry and acquires a fresh atomic lease
+    // above; confirmed was handled before this branch.
+    if (claim.effect.effect_kind === "route_send") {
+      return {
+        state: "refused",
+        effect: claim.effect,
+        refusal: unknownRefusal(claim.effect.effect_kind),
+        dispatched: false,
+      };
+    }
+
     const matches = await args.adapter.reconcile({
       external_token: claim.effect.external_token,
       operation_key: claim.effect.operation_key,
@@ -324,38 +479,6 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       );
       return { state: "confirmed", effect, result, dispatched: false };
     }
-    const redispatchableRoute = claim.effect.effect_kind === "route_send" &&
-      (claim.effect.state === "unknown" || claim.effect.state === "failed");
-    if (matches.length === 0 && redispatchableRoute) {
-      // Reconciliation alone does not lease an existing uncertainty row. The
-      // old unknown<->failed toggle left the winning row publicly claimable
-      // throughout Graph I/O, so two retries could toggle in opposite
-      // directions and both send. The real store now performs one conditional
-      // unknown|failed -> dispatching update over the immutable coordinates.
-      // Only its returned row owns permission to call the provider.
-      if (!args.store.claimRedispatch) {
-        return {
-          state: "refused",
-          effect: claim.effect,
-          refusal: unknownRefusal(claim.effect.effect_kind),
-          dispatched: false,
-        };
-      }
-      const retry = await args.store.claimRedispatch(
-        claim.effect,
-        `${args.actor}:${crypto.randomUUID()}`,
-        args.actor,
-      );
-      if (!retry) {
-        return {
-          state: "refused",
-          effect: claim.effect,
-          refusal: unknownRefusal(claim.effect.effect_kind),
-          dispatched: false,
-        };
-      }
-      return await dispatchFrom(retry);
-    }
     return {
       state: "refused",
       effect: claim.effect,
@@ -372,10 +495,18 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     {},
     args.actor,
   );
-  const preDispatchMatches = await args.adapter.reconcile({
-    external_token: dispatching.external_token,
-    operation_key: dispatching.operation_key,
-  });
+  let preDispatchMatches: TResult[];
+  try {
+    preDispatchMatches = await args.adapter.reconcile({
+      external_token: dispatching.external_token,
+      operation_key: dispatching.operation_key,
+    });
+  } catch (error) {
+    if (error instanceof SesExternalOutcomeUnknownError) {
+      return retainOutcomeUnknown(dispatching, error);
+    }
+    throw error;
+  }
   if (preDispatchMatches.length === 1) {
     const result = preDispatchMatches[0];
     const confirmed = await args.store.transition(

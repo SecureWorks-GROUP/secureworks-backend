@@ -14,6 +14,7 @@ import {
   assertSesPhotoMailVolumeFits,
   resolveSesMailTransport,
 } from "./ses_photo_mail_volume_guard.ts";
+import { SesExternalOutcomeUnknownError } from "./ses_external_effects.ts";
 
 export interface SesRouteSendResult {
   message_id: string;
@@ -382,6 +383,32 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function base64ToBytes(value: unknown): Uint8Array {
+  const binary = atob(String(value || "").replace(/\s+/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function attachmentFingerprint(
+  attachment: SesRouteAttachment,
+): Promise<string> {
+  const exactBytes = new Uint8Array(attachment.bytes.byteLength);
+  exactBytes.set(attachment.bytes);
+  const digest = await crypto.subtle.digest("SHA-256", exactBytes.buffer);
+  const hash = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return JSON.stringify([
+    String(attachment.name || ""),
+    String(attachment.contentType || "application/octet-stream")
+      .trim()
+      .toLowerCase(),
+    attachment.bytes.byteLength,
+    hash,
+  ]);
+}
+
 async function resolveSesIntakeGroupId(
   graphJson: SesGraphJson,
 ): Promise<string> {
@@ -467,6 +494,138 @@ export function createSesGraphMailGateway(
       externalToken,
     );
     return filterMessagesByOperationToken(drafts, externalToken);
+  };
+
+  const readDraftAttachments = async (
+    draftId: string,
+  ): Promise<SesRouteAttachment[]> => {
+    const base = `https://graph.microsoft.com/v1.0/users/${
+      encodeURIComponent(mailbox)
+    }/messages/${encodeURIComponent(draftId)}`;
+    const listed: Array<Record<string, unknown>> = [];
+    let nextUrl =
+      `${base}/attachments?$select=id,name,contentType,size,isInline`;
+    const seenPages = new Set<string>();
+    for (let page = 0; nextUrl; page++) {
+      if (page >= 20 || seenPages.has(nextUrl)) {
+        throw new Error(
+          "Recovered Graph draft attachment pagination did not terminate; refusing send.",
+        );
+      }
+      seenPages.add(nextUrl);
+      const response = await deps.graphJson(
+        nextUrl,
+        { method: "GET" },
+        [200],
+      );
+      listed.push(
+        ...(Array.isArray(response?.value) ? response.value : []),
+      );
+      nextUrl = String(response?.["@odata.nextLink"] || "").trim();
+    }
+
+    const attachments: SesRouteAttachment[] = [];
+    for (const row of listed) {
+      const id = String(row.id || "").trim();
+      if (!id || row.isInline === true) {
+        throw new Error(
+          "Recovered Graph draft carries an unidentifiable or inline attachment; refusing send.",
+        );
+      }
+      const detail = await deps.graphJson(
+        `${base}/attachments/${
+          encodeURIComponent(id)
+        }?$select=id,name,contentType,size,isInline,contentBytes`,
+        { method: "GET" },
+        [200],
+      );
+      if (detail?.isInline === true || !String(detail?.contentBytes || "")) {
+        throw new Error(
+          `Recovered Graph draft attachment ${id} has no exact file bytes; refusing send.`,
+        );
+      }
+      const bytes = base64ToBytes(detail.contentBytes);
+      const declaredSize = Number(detail.size ?? row.size);
+      if (Number.isFinite(declaredSize) && declaredSize !== bytes.byteLength) {
+        throw new Error(
+          `Recovered Graph draft attachment ${id} size differs from its exact bytes; refusing send.`,
+        );
+      }
+      attachments.push({
+        name: String(detail.name || row.name || ""),
+        contentType: String(
+          detail.contentType || row.contentType || "application/octet-stream",
+        ),
+        bytes,
+      });
+    }
+    return attachments;
+  };
+
+  const compareDraftAttachmentManifest = async (
+    expected: SesRouteAttachment[],
+    actual: SesRouteAttachment[],
+  ): Promise<{ missing: SesRouteAttachment[]; unexpected: string[] }> => {
+    const remaining = await Promise.all(expected.map(async (attachment) => ({
+      attachment,
+      fingerprint: await attachmentFingerprint(attachment),
+    })));
+    const unexpected: string[] = [];
+    for (const attachment of actual) {
+      const fingerprint = await attachmentFingerprint(attachment);
+      const index = remaining.findIndex((item) =>
+        item.fingerprint === fingerprint
+      );
+      if (index < 0) {
+        unexpected.push(String(attachment.name || "unnamed attachment"));
+      } else {
+        remaining.splice(index, 1);
+      }
+    }
+    return {
+      missing: remaining.map((item) => item.attachment),
+      unexpected,
+    };
+  };
+
+  const completeRecoveredDraftAttachments = async (
+    draftId: string,
+    route: Record<string, any>,
+  ): Promise<void> => {
+    const hashes = [
+      ...new Set<string>(
+        (Array.isArray(route.attachment_hashes) ? route.attachment_hashes : [])
+          .map((hash: unknown) => String(hash || "").trim())
+          .filter(Boolean),
+      ),
+    ];
+    const expected = await deps.loadAttachments(hashes);
+    if (expected.length !== hashes.length) {
+      throw new Error(
+        "The frozen route attachment manifest could not be loaded exactly; refusing recovered draft send.",
+      );
+    }
+    const current = await readDraftAttachments(draftId);
+    const before = await compareDraftAttachmentManifest(expected, current);
+    if (before.unexpected.length > 0) {
+      throw new Error(
+        `Recovered Graph draft attachment manifest differs from the frozen route (${
+          before.unexpected.join(", ")
+        }); refusing send.`,
+      );
+    }
+    for (const attachment of before.missing) {
+      await deps.uploadAttachment(mailbox, draftId, attachment);
+    }
+    if (before.missing.length === 0) return;
+
+    const completed = await readDraftAttachments(draftId);
+    const after = await compareDraftAttachmentManifest(expected, completed);
+    if (after.missing.length > 0 || after.unexpected.length > 0) {
+      throw new Error(
+        "Recovered Graph draft attachment manifest is still incomplete after deterministic upload; refusing send.",
+      );
+    }
   };
 
   const reconcileGroupThread = async (
@@ -719,6 +878,7 @@ export function createSesGraphMailGateway(
       if (drafts.length === 0) return [];
       const draftId = String(drafts[0].id || "");
       if (!draftId) return [];
+      await completeRecoveredDraftAttachments(draftId, route || {});
       await deps.graphJson(
         `https://graph.microsoft.com/v1.0/users/${
           encodeURIComponent(mailbox)
@@ -726,7 +886,13 @@ export function createSesGraphMailGateway(
         { method: "POST" },
         [202],
       );
-      return await waitForSent(externalToken);
+      const sent = await waitForSent(externalToken);
+      if (sent.length === 0) {
+        throw new SesExternalOutcomeUnknownError(
+          `Graph accepted recovered draft ${draftId} for token ${externalToken}, but Sent Items proof is not visible yet.`,
+        );
+      }
+      return sent;
     },
   };
 }
