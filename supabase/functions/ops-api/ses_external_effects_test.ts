@@ -735,7 +735,7 @@ Deno.test(
 );
 
 Deno.test(
-  "real RPC store keeps recovered-draft acknowledgement lag outcome-unknown without a fresh send",
+  "real RPC store durably fences recovered-draft acknowledgement lag across retries",
   async () => {
     const harness = createRpcEffectHarness();
     const route = {
@@ -760,6 +760,7 @@ Deno.test(
     });
     let recoveredDraftSends = 0;
     let freshDispatches = 0;
+    let draftVisible = true;
     const graphJson = async (url: string, init: RequestInit) => {
       const method = String(init.method || "GET").toUpperCase();
       if (method === "GET" && url.includes("mailFolders/sentitems")) {
@@ -767,14 +768,16 @@ Deno.test(
       }
       if (method === "GET" && url.includes("mailFolders/drafts")) {
         return {
-          value: [{
-            id: "draft-accepted-unproven",
-            subject: route.subject,
-            internetMessageHeaders: [{
-              name: SES_OPERATION_HEADER,
-              value: effect.external_token,
-            }],
-          }],
+          value: draftVisible
+            ? [{
+              id: "draft-accepted-unproven",
+              subject: route.subject,
+              internetMessageHeaders: [{
+                name: SES_OPERATION_HEADER,
+                value: effect.external_token,
+              }],
+            }]
+            : [],
         };
       }
       if (
@@ -785,6 +788,7 @@ Deno.test(
       }
       if (method === "POST" && url.endsWith("/send")) {
         recoveredDraftSends++;
+        draftVisible = false;
         return null;
       }
       throw new Error(`unexpected ${method} ${url}`);
@@ -796,39 +800,47 @@ Deno.test(
       uploadAttachment: async () => {},
       sentPollAttempts: 1,
     });
-    const result = await executeSesExternalEffect({
+    const adapter = {
+      async dispatch() {
+        freshDispatches++;
+        return {
+          message_id: "fresh-send-must-not-run",
+          state: "sent" as const,
+          operation_token: effect.external_token,
+        };
+      },
+      reconcile: (context: { external_token: string }) =>
+        gateway.reconcileSent(context.external_token, route),
+      identify: (sent: { message_id: string }) => sent.message_id,
+      digest: (sent: { message_id: string }) => sent,
+    };
+    const first = await executeSesExternalEffect({
       store: harness.store,
       effect,
       payload: route,
-      adapter: {
-        async dispatch() {
-          freshDispatches++;
-          return {
-            message_id: "fresh-send-must-not-run",
-            state: "sent" as const,
-            operation_token: effect.external_token,
-          };
-        },
-        reconcile: (context) =>
-          gateway.reconcileSent(context.external_token, route),
-        identify: (sent) => sent.message_id,
-        digest: (sent) => sent,
-      },
+      adapter,
       actor: "operator-retry",
     });
+    const second = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: route,
+      adapter,
+      actor: "operator-second-retry",
+    });
 
-    assertEquals(result.state, "refused");
-    assertEquals(result.refusal?.code, "graph_outcome_unknown");
-    assertEquals(result.dispatched, true);
+    assertEquals(first.state, "refused");
+    assertEquals(first.refusal?.code, "graph_outcome_unknown");
+    assertEquals(first.dispatched, true);
+    assertEquals(second.state, "refused");
+    assertEquals(second.refusal?.code, "graph_outcome_unknown");
+    assertEquals(second.dispatched, false);
     assertEquals(recoveredDraftSends, 1);
     assertEquals(freshDispatches, 0);
-    assertEquals(harness.row()?.state, "unknown");
+    assertEquals(harness.row()?.state, "dispatching");
     assertEquals(
       harness.transitions.map((transition) => transition.event_kind),
-      [
-        "exact_token_absent_redispatch_claimed",
-        "redispatch_reconcile_outcome_unknown",
-      ],
+      ["exact_token_absent_redispatch_claimed"],
     );
   },
 );

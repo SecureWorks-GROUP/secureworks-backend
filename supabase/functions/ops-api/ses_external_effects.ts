@@ -223,29 +223,25 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   adapter: SesExternalAdapter<TPayload, TResult>;
   actor: string;
 }): Promise<SesExecuteEffectResult<TResult>> {
-  const retainOutcomeUnknown = async (
+  const retainOutcomeUnknown = (
     active: SesExternalEffect,
     error: SesExternalOutcomeUnknownError,
-    eventKind: string,
-  ): Promise<SesExecuteEffectResult<TResult>> => {
+  ): SesExecuteEffectResult<TResult> => {
     const message = String(error.message || "provider outcome unknown")
       .trim()
       .slice(0, 500);
-    const nextState: SesEffectState = active.state === "unknown"
-      ? "failed"
-      : "unknown";
-    const unknown = await args.store.transition(
-      active.operation_key,
-      active.state,
-      nextState,
-      eventKind,
-      { failure: { message } },
-      args.actor,
-    );
+
+    // SesExternalOutcomeUnknownError means Graph accepted a recovered Draft's
+    // /send, but Sent Items has not exposed proof yet. Keep the already-durable
+    // dispatching lease as the fence: unknown/failed are the redispatch entry
+    // states, so transitioning there would let a later request fresh-send when
+    // both Drafts and Sent Items are temporarily empty. A future
+    // generation-safe reconciler may settle this lease; application retries
+    // must remain read-only/refusing until then.
     return {
       state: "refused",
-      effect: { ...unknown, failure: { message } } as SesExternalEffect,
-      refusal: unknownRefusal(unknown.effect_kind, message),
+      effect: { ...active, failure: { message } } as SesExternalEffect,
+      refusal: unknownRefusal(active.effect_kind, message),
       dispatched: true,
     };
   };
@@ -289,11 +285,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       });
     } catch (error) {
       if (error instanceof SesExternalOutcomeUnknownError) {
-        return await retainOutcomeUnknown(
-          active,
-          error,
-          "post_dispatch_outcome_unknown",
-        );
+        return retainOutcomeUnknown(active, error);
       }
       throw error;
     }
@@ -403,11 +395,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
         });
       } catch (error) {
         if (error instanceof SesExternalOutcomeUnknownError) {
-          return await retainOutcomeUnknown(
-            retry,
-            error,
-            "redispatch_reconcile_outcome_unknown",
-          );
+          return retainOutcomeUnknown(retry, error);
         }
         throw error;
       }
@@ -515,11 +503,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     });
   } catch (error) {
     if (error instanceof SesExternalOutcomeUnknownError) {
-      return await retainOutcomeUnknown(
-        dispatching,
-        error,
-        "pre_dispatch_reconcile_outcome_unknown",
-      );
+      return retainOutcomeUnknown(dispatching, error);
     }
     throw error;
   }
