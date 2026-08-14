@@ -62,6 +62,16 @@ export interface SesExternalEffectStore {
     detail: Record<string, unknown>,
     actor: string,
   ): Promise<SesExternalEffect>;
+  /**
+   * Atomically lease an exact-token-absent route for redispatch. Implemented
+   * by the real store as a conditional unknown|failed -> dispatching update;
+   * a concurrent loser receives null and is structurally unable to send.
+   */
+  claimRedispatch?(
+    effect: SesExternalEffect,
+    leaseOwner: string,
+    actor: string,
+  ): Promise<SesExternalEffect | null>;
 }
 
 export interface SesExternalAdapter<TPayload, TResult> {
@@ -82,11 +92,6 @@ export interface SesExecuteEffectResult<TResult> {
   result?: TResult;
   refusal?: SesRefusal;
   dispatched: boolean;
-}
-
-function effectClaimLeaseExpired(effect: SesExternalEffect): boolean {
-  const expiresAt = Date.parse(String(effect.lease_expires_at || ""));
-  return Number.isFinite(expiresAt) && expiresAt <= Date.now();
 }
 
 export async function buildSesEffect(args: {
@@ -320,30 +325,35 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       return { state: "confirmed", effect, result, dispatched: false };
     }
     const redispatchableRoute = claim.effect.effect_kind === "route_send" &&
-      (
-        claim.effect.state === "unknown" ||
-        claim.effect.state === "failed" ||
-        (claim.effect.state === "dispatching" &&
-          effectClaimLeaseExpired(claim.effect))
-      );
+      (claim.effect.state === "unknown" || claim.effect.state === "failed");
     if (matches.length === 0 && redispatchableRoute) {
-      // The deployed transition function has no unknown/failed -> dispatching
-      // edge. Toggle through an existing legal uncertainty edge to acquire the
-      // same per-operation CAS before redispatch. A live dispatching lease is
-      // never eligible: its original worker may still be sending. Concurrent
-      // retries cannot both win this transition, while the immutable operation
-      // key/token is kept.
-      const retryState: SesEffectState = claim.effect.state === "failed"
-        ? "unknown"
-        : "failed";
-      const retry = await args.store.transition(
-        claim.effect.operation_key,
-        claim.effect.state,
-        retryState,
-        "exact_token_absent_retry_started",
-        { reconciled_match_count: 0 },
+      // Reconciliation alone does not lease an existing uncertainty row. The
+      // old unknown<->failed toggle left the winning row publicly claimable
+      // throughout Graph I/O, so two retries could toggle in opposite
+      // directions and both send. The real store now performs one conditional
+      // unknown|failed -> dispatching update over the immutable coordinates.
+      // Only its returned row owns permission to call the provider.
+      if (!args.store.claimRedispatch) {
+        return {
+          state: "refused",
+          effect: claim.effect,
+          refusal: unknownRefusal(claim.effect.effect_kind),
+          dispatched: false,
+        };
+      }
+      const retry = await args.store.claimRedispatch(
+        claim.effect,
+        `${args.actor}:${crypto.randomUUID()}`,
         args.actor,
       );
+      if (!retry) {
+        return {
+          state: "refused",
+          effect: claim.effect,
+          refusal: unknownRefusal(claim.effect.effect_kind),
+          dispatched: false,
+        };
+      }
       return await dispatchFrom(retry);
     }
     return {

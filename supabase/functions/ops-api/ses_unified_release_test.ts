@@ -41,6 +41,34 @@ import {
 const HASH =
   "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
+interface EffectLedgerBuilder {
+  update(payload: Record<string, unknown>): EffectLedgerBuilder;
+  eq(column: string, value: unknown): EffectLedgerBuilder;
+  select(): EffectLedgerBuilder;
+  maybeSingle(): Promise<{
+    data: SesExternalEffect | null;
+    error: { message: string } | null;
+  }>;
+  insert(): Promise<{
+    data: Record<string, unknown> | null;
+    error: { message: string } | null;
+  }>;
+}
+
+interface RetainApprovedBuilder {
+  update(value: Record<string, unknown>): RetainApprovedBuilder;
+  select(): RetainApprovedBuilder;
+  eq(): RetainApprovedBuilder;
+  maybeSingle(): Promise<{
+    data: Record<string, unknown> | null;
+    error: { message: string } | null;
+  }>;
+}
+
+function effectField(row: SesExternalEffect, column: string): unknown {
+  return (row as unknown as Record<string, unknown>)[column];
+}
+
 // ── Pure classifier ──
 
 Deno.test("T11 classify: some-but-not-all routes confirmed is a partial delivery", () => {
@@ -199,13 +227,49 @@ function makeSim(opts: SimOptions = {}) {
 class RealRpcEffectLedger {
   rows = new Map<string, SesExternalEffect>();
   client = {
-    rpc: async (name: string, args: Record<string, any>) => {
+    from: (table: string) => {
+      let updatePayload: Record<string, unknown> | null = null;
+      const filters: Array<[string, unknown]> = [];
+      const builder = {} as EffectLedgerBuilder;
+      Object.assign(builder, {
+        update: (payload: Record<string, unknown>) => {
+          updatePayload = payload;
+          return builder;
+        },
+        eq: (column: string, value: unknown) => {
+          filters.push([column, value]);
+          return builder;
+        },
+        select: () => builder,
+        maybeSingle: async () => {
+          if (table !== "ses_external_effects" || !updatePayload) {
+            return { data: null, error: null };
+          }
+          const current = [...this.rows.values()].find((row) =>
+            filters.every(([column, value]) =>
+              String(effectField(row, column) ?? "") === String(value ?? "")
+            )
+          );
+          if (!current) return { data: null, error: null };
+          const next = { ...current, ...updatePayload } as SesExternalEffect;
+          this.rows.set(next.operation_key, next);
+          return { data: { ...next }, error: null };
+        },
+        insert: async () =>
+          table === "ses_external_effect_events"
+            ? { data: {}, error: null }
+            : { data: null, error: { message: `unexpected insert ${table}` } },
+      });
+      return builder;
+    },
+    rpc: async (name: string, args: Record<string, unknown>) => {
       if (name === "claim_ses_external_effect_v1") {
         const effect = args.p_effect as Omit<SesExternalEffect, "state">;
         const current = this.rows.get(effect.operation_key);
         if (!current) {
           const reserved: SesExternalEffect = {
             ...effect,
+            id: effect.operation_key,
             state: "reserved",
             lease_owner: String(args.p_lease_owner || ""),
             lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
@@ -278,13 +342,15 @@ class RealRpcEffectLedger {
           },
         };
       }
-      const detail = args.p_detail || {};
+      const detail = (args.p_detail || {}) as Record<string, unknown>;
       const next: SesExternalEffect = {
         ...current,
         state: to,
         external_id: String(detail.external_id || current.external_id || "") ||
           null,
-        provider_digest: detail.provider_digest || current.provider_digest,
+        provider_digest:
+          (detail.provider_digest as Record<string, unknown> | undefined) ||
+          current.provider_digest,
       };
       this.rows.set(operationKey, next);
       return { data: { ...next }, error: null };
@@ -304,7 +370,11 @@ class RealRpcEffectLedger {
 async function makeRealLedgerRetrySim() {
   const required = ["report", "photo", "invoice"] as const;
   const ledger = new RealRpcEffectLedger();
-  const store = createSupabaseSesEffectStore(ledger.client as any);
+  const store = createSupabaseSesEffectStore(
+    ledger.client as unknown as Parameters<
+      typeof createSupabaseSesEffectStore
+    >[0],
+  );
   const dispatchLog: string[] = [];
   const providerByToken = new Map<string, { message_id: string }>();
   let invoiceFaultPending = true;
@@ -698,15 +768,87 @@ Deno.test("T11 AC6: a generic dispatch error is mapped only after release state 
   );
 });
 
+Deno.test(
+  "T11 AC6: unreadable post-failure route proofs retain Approved and never invent pending routes",
+  async () => {
+    let proofReads = 0;
+    let retainCount = 0;
+    const error = await assertRejects(
+      () =>
+        runUnifiedSesRelease(
+          {
+            mode: "jwt",
+            user: {
+              id: "operator-proof",
+              email: "operator@example.test",
+              role: "admin",
+            },
+          },
+          {
+            release_revision_id: "r-proof",
+            expected_release_content_hash: HASH,
+          },
+          {
+            loadRelease: async () => ({
+              release_revision_id: "r-proof",
+              content_hash: HASH,
+              state: "approved",
+              members: [{
+                job_id: "job-proof",
+                docket_revision_id: "d-proof",
+                invoice_obligation_revision_id: null,
+                pricing_disposition: "no_additional_charge",
+              }],
+              required_route_kinds: ["report", "invoice"],
+            }),
+            authoriseMemberInvoice: async () => ({
+              ok: true as const,
+              result: {},
+            }),
+            executeRelease: async () => ({
+              kind: "failed" as const,
+              status: 409,
+              refusal: sesRefusal(
+                "graph_outcome_unknown",
+                "Reconcile then retry.",
+              ),
+            }),
+            readConfirmedRouteKinds: async () => {
+              proofReads++;
+              if (proofReads === 1) return [];
+              throw new SesActionError(
+                503,
+                sesRefusal(
+                  "route_send_proof_unreadable",
+                  "Retry when route proofs are readable.",
+                ),
+              );
+            },
+            retainApproved: async () => {
+              retainCount++;
+            },
+          },
+        ),
+      SesActionError,
+    );
+    assertEquals(
+      ((error as SesActionError).refusal as { code?: string }).code,
+      "route_send_proof_unreadable",
+    );
+    assertEquals(retainCount, 1);
+  },
+);
+
 Deno.test("T11 AC6: a transient failed retainApproved is retried and cannot leave dispatching", async () => {
   let retainCount = 0;
   let releaseState = "approved";
-  const retainClient: any = {
+  const retainClient = {
     from(table: string) {
       assertEquals(table, "makesafe_release_revisions");
-      let updateValue: any = null;
-      const builder: any = {
-        update: (value: any) => {
+      let updateValue: Record<string, unknown> | null = null;
+      const builder = {} as RetainApprovedBuilder;
+      Object.assign(builder, {
+        update: (value: Record<string, unknown>) => {
           updateValue = value;
           return builder;
         },
@@ -721,27 +863,34 @@ Deno.test("T11 AC6: a transient failed retainApproved is retried and cannot leav
                 error: { message: "transient PostgREST update failed" },
               };
             }
-            releaseState = updateValue.state;
+            releaseState = String(updateValue.state || "");
           }
           return {
             data: { id: "r1", state: releaseState },
             error: null,
           };
         },
-      };
+      });
       return builder;
     },
   };
-  const realDeps = createSupabaseUnifiedReleaseDeps(retainClient, {
-    mode: "api_key",
-    user: null,
-  }, {
-    org_id: "org-1",
-    actor: "operator-1",
-    xeroGateway: {} as any,
-    mailGateway: {} as any,
-    releaseXeroReader: {} as any,
-  });
+  type FactoryContext = Parameters<typeof createSupabaseUnifiedReleaseDeps>[2];
+  const realDeps = createSupabaseUnifiedReleaseDeps(
+    retainClient as unknown as Parameters<
+      typeof createSupabaseUnifiedReleaseDeps
+    >[0],
+    {
+      mode: "api_key",
+      user: null,
+    },
+    {
+      org_id: "org-1",
+      actor: "operator-1",
+      xeroGateway: {} as FactoryContext["xeroGateway"],
+      mailGateway: {} as FactoryContext["mailGateway"],
+      releaseXeroReader: {} as FactoryContext["releaseXeroReader"],
+    },
+  );
   const sim = makeSim();
   const deps: UnifiedReleaseDeps = {
     ...sim.deps,

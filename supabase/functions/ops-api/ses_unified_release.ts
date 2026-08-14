@@ -40,10 +40,13 @@ import {
   approveSesInvoiceRevisionAction,
   approveSesReleaseRevisionAction,
   assertSesReleaseRevisionIsCurrent,
+  bindAuthorisedInvoicePdfToDocket,
+  buildSesReleaseRevisionPlanForDockets,
+  commitSesReleaseRevisionPlanAction,
   executeSesInvoiceRevisionAction,
   executeSesReleaseRevisionAction,
   loadSesCockpitDocket,
-  prepareSesReleaseRevisionAction,
+  loadStoredSesXeroInvoicePdfBytes,
   ratifySesAuthorisedDerivativeDocketAction,
   SesActionError,
   type SesXeroInvoiceResult,
@@ -63,6 +66,8 @@ export interface UnifiedReleaseMember {
   docket_revision_id: string;
   /** `no_additional_charge` members have no invoice to authorise. */
   pricing_disposition: string | null;
+  readiness_revision?: string;
+  dependency_generation?: number;
 }
 
 export interface UnifiedReleaseSnapshot {
@@ -222,7 +227,11 @@ export async function runUnifiedSesRelease(
       ),
     );
   }
-  if (String(release.state || "").toLowerCase() === "superseded") {
+  const selectedState = String(release.state || "").toLowerCase();
+  const canAttemptSupersededOptionBRecovery = selectedState === "superseded" &&
+    auth.mode === "jwt" && !!auth.user &&
+    !!deps.materializeAuthorisedDerivative;
+  if (selectedState === "superseded" && !canAttemptSupersededOptionBRecovery) {
     throw new SesActionError(
       409,
       sesRefusal(
@@ -240,7 +249,7 @@ export async function runUnifiedSesRelease(
   let sourceReleaseRevisionId: string | undefined;
   let invoiceAuthorisations: Array<{ job_id: string; result: unknown }> = [];
   const releaseState = String(release.state || "").toLowerCase();
-  if (releaseState === "proposed") {
+  if (releaseState === "proposed" || canAttemptSupersededOptionBRecovery) {
     if (auth.mode !== "jwt" || !auth.user) {
       throw new SesActionError(403, {
         state: "refused",
@@ -440,8 +449,91 @@ interface AuthorisedRouteSubstitution {
   authorised_pdf_content_hash: string;
 }
 
+const OPTION_B_RECOVERY_CONTRACT = "ses-unified-option-b-recovery/v1" as const;
+
+interface OptionBRecoveryCapsule {
+  kind: typeof OPTION_B_RECOVERY_CONTRACT;
+  source_release_revision_id: string;
+  source_release_content_hash: string;
+  job_id: string;
+  source_docket_revision_id: string;
+  invoice_obligation_revision_id: string;
+  draft_invoice: SesXeroInvoiceResult;
+  draft_pdf: {
+    pdf_object_key: string;
+    pdf_content_hash: string;
+    pdf_size_bytes: number;
+  };
+}
+
+type BoundAuthorisedInvoiceResult = Awaited<
+  ReturnType<typeof bindAuthorisedInvoicePdfToDocket>
+>;
+
+interface OptionBAuthorisedMemberResult {
+  state: string;
+  invoice: SesXeroInvoiceResult;
+  docket_revision: Record<string, unknown>;
+  draft_pdf_content_hash: string | null;
+  authorised_pdf_content_hash: string;
+  authorised_derivative:
+    | BoundAuthorisedInvoiceResult["authorised_derivative"]
+    | null;
+  invoice_create_dispatched: boolean;
+  invoice_authorise_dispatched: boolean;
+  send_dispatched: boolean;
+  recovery?: boolean;
+}
+
+function optionBRecoveryCapsule(value: unknown): OptionBRecoveryCapsule | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const invoice = candidate.draft_invoice &&
+      typeof candidate.draft_invoice === "object" &&
+      !Array.isArray(candidate.draft_invoice)
+    ? candidate.draft_invoice as Record<string, unknown>
+    : null;
+  const pdf = candidate.draft_pdf && typeof candidate.draft_pdf === "object" &&
+      !Array.isArray(candidate.draft_pdf)
+    ? candidate.draft_pdf as Record<string, unknown>
+    : null;
+  if (
+    candidate.kind !== OPTION_B_RECOVERY_CONTRACT ||
+    !str(candidate.source_release_revision_id) ||
+    !str(candidate.source_release_content_hash) ||
+    !str(candidate.job_id) ||
+    !str(candidate.source_docket_revision_id) ||
+    !str(candidate.invoice_obligation_revision_id) ||
+    !invoice ||
+    String(invoice.status || "").toUpperCase() !== "DRAFT" ||
+    !str(invoice.xero_invoice_id) ||
+    !str(invoice.invoice_number) ||
+    !str(invoice.reference) ||
+    !Number.isFinite(Number(invoice.total)) ||
+    !pdf ||
+    !str(pdf.pdf_object_key) ||
+    !/^sha256:[0-9a-f]{64}$/.test(String(pdf.pdf_content_hash || "")) ||
+    !Number.isFinite(Number(pdf.pdf_size_bytes)) ||
+    Number(pdf.pdf_size_bytes) <= 0
+  ) {
+    return null;
+  }
+  return candidate as unknown as OptionBRecoveryCapsule;
+}
+
 function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+          .map(([key, child]) => [key, canonical(child)]),
+      );
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
 /**
@@ -581,16 +673,26 @@ export function createSupabaseUnifiedReleaseDeps(
   const loadReleaseSnapshot = async (
     releaseRevisionId: string,
   ): Promise<UnifiedReleaseSnapshot | null> => {
-    try {
-      await assertSesReleaseRevisionIsCurrent(client, releaseRevisionId);
-    } catch (error) {
-      if (error instanceof SesActionError && error.status === 404) return null;
-      throw error;
-    }
     const releaseResp = await client.from("makesafe_release_revisions")
-      .select("id,content_hash,state").eq("id", releaseRevisionId)
+      .select("id,content_hash,state,readiness_bindings")
+      .eq("id", releaseRevisionId)
       .maybeSingle();
     if (releaseResp.error || !releaseResp.data) return null;
+    // A superseded row is normally non-executable, but a proposed Option B
+    // source can be superseded by a partly-prepared multi-member derivative
+    // that shares a no-charge member. Return its immutable snapshot so the
+    // unified layer can attempt the narrowly proven already-bound recovery.
+    // Every other state still passes the ordinary currentness guard here.
+    if (String(releaseResp.data.state || "").toLowerCase() !== "superseded") {
+      try {
+        await assertSesReleaseRevisionIsCurrent(client, releaseRevisionId);
+      } catch (error) {
+        if (error instanceof SesActionError && error.status === 404) {
+          return null;
+        }
+        throw error;
+      }
+    }
     const [membersResp, routesResp] = await Promise.all([
       client.from("makesafe_release_revision_members")
         .select(
@@ -613,6 +715,20 @@ export function createSupabaseUnifiedReleaseDeps(
       ),
     ];
     const dispositionById = new Map<string, string>();
+    const readinessByJobId = new Map<string, {
+      readiness_revision: string;
+      dependency_generation: number;
+    }>();
+    for (
+      const binding of Array.isArray(releaseResp.data.readiness_bindings)
+        ? releaseResp.data.readiness_bindings
+        : []
+    ) {
+      readinessByJobId.set(String(binding.job_id || ""), {
+        readiness_revision: String(binding.readiness_revision || ""),
+        dependency_generation: Number(binding.dependency_generation),
+      });
+    }
     if (obligationIds.length > 0) {
       const oblResp = await client.from(
         "makesafe_invoice_obligation_revisions",
@@ -631,6 +747,7 @@ export function createSupabaseUnifiedReleaseDeps(
       state: String(releaseResp.data.state || ""),
       members: members.map((row: Record<string, unknown>) => {
         const obligationId = str(row.invoice_obligation_revision_id);
+        const readiness = readinessByJobId.get(String(row.job_id || ""));
         return {
           job_id: String(row.job_id || ""),
           invoice_obligation_revision_id: obligationId,
@@ -638,12 +755,332 @@ export function createSupabaseUnifiedReleaseDeps(
           pricing_disposition: obligationId
             ? dispositionById.get(obligationId) ?? null
             : null,
+          readiness_revision: readiness?.readiness_revision || "",
+          dependency_generation: readiness?.dependency_generation,
         };
       }),
       required_route_kinds: (routesResp.data || [])
         .filter((row: Record<string, unknown>) => row.required !== false)
         .map((row: Record<string, unknown>) => String(row.route_kind || ""))
         .filter((kind: string) => kind.length > 0),
+    };
+  };
+
+  const requireExistingCurrentDerivative = async (
+    plan: Awaited<
+      ReturnType<typeof buildSesReleaseRevisionPlanForDockets>
+    >,
+  ): Promise<void> => {
+    const expectedId = String(plan.release.id || "");
+    const [releaseResp, membersResp, routesResp] = await Promise.all([
+      client.from("makesafe_release_revisions")
+        .select(
+          "id,content_hash,state,dependency_generation,readiness_bindings",
+        )
+        .eq("id", expectedId).maybeSingle(),
+      client.from("makesafe_release_revision_members")
+        .select(
+          "ordinal,job_id,docket_revision_id,invoice_obligation_revision_id,attendance_cycle_ids",
+        )
+        .eq("release_revision_id", expectedId).order("ordinal"),
+      client.from("makesafe_release_revision_routes")
+        .select(
+          "ordinal,route_kind,recipients,cc,subject,body,body_hash,attachment_hashes,envelope_hash,required",
+        )
+        .eq("release_revision_id", expectedId).order("ordinal"),
+    ]);
+    const release = releaseResp.data as Record<string, unknown> | null;
+    const expectedRelease = {
+      id: expectedId,
+      content_hash: String(plan.release.content_hash || ""),
+      dependency_generation: Number(plan.release.dependency_generation),
+      readiness_bindings: plan.release.readiness_bindings,
+    };
+    const actualRelease = release
+      ? {
+        id: String(release.id || ""),
+        content_hash: String(release.content_hash || ""),
+        dependency_generation: Number(release.dependency_generation),
+        readiness_bindings: release.readiness_bindings,
+      }
+      : null;
+    const actualMembers = (membersResp.data || []).map(
+      (row: Record<string, unknown>) => ({
+        ordinal: Number(row.ordinal),
+        job_id: String(row.job_id || ""),
+        docket_revision_id: String(row.docket_revision_id || ""),
+        invoice_obligation_revision_id: row.invoice_obligation_revision_id ||
+          null,
+        attendance_cycle_ids: row.attendance_cycle_ids || [],
+      }),
+    );
+    const actualRoutes = (routesResp.data || []).map(
+      (row: Record<string, unknown>) => ({
+        ordinal: Number(row.ordinal),
+        route_kind: row.route_kind,
+        recipients: row.recipients || [],
+        cc: row.cc || [],
+        subject: row.subject,
+        body_hash: row.body_hash,
+        attachment_hashes: row.attachment_hashes || [],
+        body: row.body,
+        envelope_hash: row.envelope_hash,
+        required: row.required,
+      }),
+    );
+    const releaseMatches = sameJson(actualRelease, expectedRelease);
+    const membersMatch = sameJson(actualMembers, plan.members);
+    const routesMatch = sameJson(actualRoutes, plan.routes);
+    if (
+      releaseResp.error || membersResp.error || routesResp.error ||
+      !release || !["proposed", "approved"].includes(String(release.state)) ||
+      !releaseMatches || !membersMatch || !routesMatch
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "stale_review",
+          "Open the current release. A superseded DRAFT source may resume only the exact derivative that was already prepared before interruption; it can never mint or replace a release.",
+          {
+            fact:
+              `The expected interrupted derivative is absent, non-current, or differs from its persisted coordinates (release=${releaseMatches}, members=${membersMatch}, routes=${routesMatch}).`,
+            evidence: {
+              expected_release_revision_id: expectedId,
+              release_matches: releaseMatches,
+              members_match: membersMatch,
+              routes_match: routesMatch,
+            },
+          },
+        ),
+      );
+    }
+    await assertSesReleaseRevisionIsCurrent(client, expectedId);
+  };
+
+  const assertNoCompetingReleaseForPlan = async (
+    plan: Awaited<
+      ReturnType<typeof buildSesReleaseRevisionPlanForDockets>
+    >,
+    allowedReleaseRevisionIds: string[],
+  ): Promise<void> => {
+    const expectedId = String(plan.release.id || "");
+    const docketRevisionIds = plan.members.map((member) =>
+      String(member.docket_revision_id || "")
+    );
+    const overlaps = await client.from("makesafe_release_revision_members")
+      .select("release_revision_id,docket_revision_id")
+      .in("docket_revision_id", docketRevisionIds);
+    if (overlaps.error) {
+      throw new SesActionError(503, {
+        state: "refused",
+        fact:
+          "Current AUTHORISED-docket releases could not be read, so the derived release is not committed.",
+      });
+    }
+    const allowedIds = new Set([
+      expectedId,
+      ...allowedReleaseRevisionIds.map((id) => String(id || "")),
+    ]);
+    const competingIds = [
+      ...new Set<string>(
+        (overlaps.data || []).map((row: Record<string, unknown>) =>
+          String(row.release_revision_id || "")
+        ).filter((id: string) => id && !allowedIds.has(id)),
+      ),
+    ];
+    if (competingIds.length === 0) return;
+    const active = await client.from("makesafe_release_revisions")
+      .select("id,state")
+      .in("id", competingIds)
+      .in("state", ["proposed", "approved", "dispatching", "released"]);
+    if (active.error) {
+      throw new SesActionError(503, {
+        state: "refused",
+        fact:
+          "Competing AUTHORISED-docket release states could not be read, so the derived release is not committed.",
+      });
+    }
+    const activeIds = (active.data || []).map((row: Record<string, unknown>) =>
+      String(row.id || "")
+    ).filter(Boolean);
+    if (activeIds.length > 0) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "stale_review",
+          "Open the current release. An independent correction was prepared from the AUTHORISED docket, so the older DRAFT source routes cannot replace it.",
+          { evidence: { current_release_revision_ids: activeIds } },
+        ),
+      );
+    }
+  };
+
+  const loadOptionBRecoveryCapsule = async (
+    sourceRelease: UnifiedReleaseSnapshot,
+    member: UnifiedReleaseMember,
+  ): Promise<OptionBRecoveryCapsule> => {
+    const approvals = await client.from("makesafe_revision_approvals")
+      .select("id,evidence_refs")
+      .eq("action", "invoice")
+      .eq("decision", "approved")
+      .eq("includes_authorise", true)
+      .eq("job_id", member.job_id)
+      .eq("docket_revision_id", member.docket_revision_id)
+      .eq(
+        "invoice_obligation_revision_id",
+        member.invoice_obligation_revision_id,
+      );
+    if (approvals.error) {
+      throw new SesActionError(503, {
+        state: "refused",
+        fact:
+          "The pre-money Option B recovery coordinates could not be read, so the AUTHORISED derivative is not resumed.",
+      });
+    }
+    const capsules = (approvals.data || []).flatMap(
+      (row: Record<string, unknown>) =>
+        (Array.isArray(row.evidence_refs) ? row.evidence_refs : [])
+          .map((value: unknown) => optionBRecoveryCapsule(value))
+          .filter((
+            capsule: OptionBRecoveryCapsule | null,
+          ): capsule is OptionBRecoveryCapsule => !!capsule),
+    ).filter((capsule: OptionBRecoveryCapsule) =>
+      capsule.source_release_revision_id ===
+        sourceRelease.release_revision_id &&
+      capsule.source_release_content_hash === sourceRelease.content_hash &&
+      capsule.job_id === member.job_id &&
+      capsule.source_docket_revision_id === member.docket_revision_id &&
+      capsule.invoice_obligation_revision_id ===
+        member.invoice_obligation_revision_id
+    );
+    const uniqueCapsules = [
+      ...new Map<string, OptionBRecoveryCapsule>(
+        capsules.map((capsule: OptionBRecoveryCapsule) => [
+          JSON.stringify(capsule),
+          capsule,
+        ]),
+      ).values(),
+    ];
+    if (uniqueCapsules.length !== 1) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "authorised_derivative_mismatch",
+          "Do not send. The already-AUTHORISED member has no single exact pre-money recovery capsule for this frozen DRAFT release.",
+        ),
+      );
+    }
+    return uniqueCapsules[0];
+  };
+
+  const recoverOptionBBoundMember = async (
+    sourceRelease: UnifiedReleaseSnapshot,
+    member: UnifiedReleaseMember,
+    currentDocketRevisionId: string,
+  ): Promise<OptionBAuthorisedMemberResult> => {
+    const [docketResp, obligationResp] = await Promise.all([
+      client.from("makesafe_docket_revisions")
+        .select(
+          "id,job_id,based_on_revision_id,stage,output_content_hash,invoice_obligation_revision_id,xero_binding",
+        )
+        .eq("id", currentDocketRevisionId).maybeSingle(),
+      client.from("makesafe_invoice_obligation_revisions")
+        .select("id,job_id,xero_binding")
+        .eq("id", member.invoice_obligation_revision_id).maybeSingle(),
+    ]);
+    const docket = docketResp.data as Record<string, unknown> | null;
+    const obligation = obligationResp.data as Record<string, unknown> | null;
+    const xero = obligation?.xero_binding as
+      | Record<string, unknown>
+      | undefined;
+    if (
+      docketResp.error || obligationResp.error || !docket || !obligation ||
+      docket.stage !== "invoice_bound" ||
+      String(docket.job_id || "") !== member.job_id ||
+      String(docket.based_on_revision_id || "") !==
+        member.docket_revision_id ||
+      String(docket.invoice_obligation_revision_id || "") !==
+        member.invoice_obligation_revision_id ||
+      String(obligation.job_id || "") !== member.job_id ||
+      String(xero?.status || "").toUpperCase() !== "AUTHORISED"
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "stale_review",
+          "Re-open the exact DRAFT release. The current docket is not its proven AUTHORISED child, so recovery is refused.",
+        ),
+      );
+    }
+    const capsule = await loadOptionBRecoveryCapsule(sourceRelease, member);
+    const draftPdf = await loadStoredSesXeroInvoicePdfBytes(
+      client,
+      capsule.draft_pdf,
+    );
+    const authorisedInvoice: SesXeroInvoiceResult = {
+      xero_invoice_id: String(xero!.xero_invoice_id || ""),
+      invoice_number: String(xero!.invoice_number || ""),
+      status: String(xero!.status || ""),
+      reference: String(xero!.reference || ""),
+      total: Number(xero!.total),
+    };
+    if (
+      authorisedInvoice.xero_invoice_id !==
+        capsule.draft_invoice.xero_invoice_id ||
+      authorisedInvoice.reference !== capsule.draft_invoice.reference ||
+      !Number.isFinite(authorisedInvoice.total) ||
+      Math.round(authorisedInvoice.total * 100) !==
+        Math.round(Number(capsule.draft_invoice.total) * 100)
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "authorised_derivative_mismatch",
+          "Do not send. The current AUTHORISED invoice identity differs from the approved DRAFT recovery coordinates.",
+        ),
+      );
+    }
+    const rebound = await bindAuthorisedInvoicePdfToDocket(
+      client,
+      {
+        org_id: ctx.org_id,
+        job_id: member.job_id,
+        invoice_obligation_revision_id: member.invoice_obligation_revision_id ||
+          "",
+        based_on_revision_id: member.docket_revision_id,
+        actor: ctx.actor,
+        invoice: authorisedInvoice,
+        authorised_derivative: {
+          draft_invoice: capsule.draft_invoice,
+          draft_pdf: draftPdf,
+        },
+        existing_only: true,
+      },
+      ctx.xeroGateway,
+    );
+    if (
+      String(rebound.docket_revision.id || "") !== currentDocketRevisionId ||
+      !rebound.authorised_derivative
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "authorised_derivative_mismatch",
+          "Do not send. Recovery did not re-prove the exact current AUTHORISED docket.",
+        ),
+      );
+    }
+    return {
+      state: "authorised_invoice_already_bound",
+      invoice: authorisedInvoice,
+      docket_revision: rebound.docket_revision,
+      draft_pdf_content_hash: capsule.draft_pdf.pdf_content_hash,
+      authorised_pdf_content_hash: rebound.pdf_content_hash,
+      authorised_derivative: rebound.authorised_derivative,
+      invoice_create_dispatched: false,
+      invoice_authorise_dispatched: false,
+      send_dispatched: false,
+      recovery: true,
     };
   };
   return {
@@ -673,7 +1110,85 @@ export function createSupabaseUnifiedReleaseDeps(
         String(member.pricing_disposition || "").toLowerCase() !==
           "no_additional_charge"
       );
+      const noChargeMembers = sourceRelease.members.filter((member) =>
+        String(member.pricing_disposition || "").toLowerCase() ===
+          "no_additional_charge"
+      );
+      const recoveringSupersededSource = String(sourceRelease.state || "")
+        .toLowerCase() === "superseded";
+      // Validate every unchanged member before the first money side effect.
+      // A mixed release must never authorise its priced member and then bind
+      // old frozen routes to a newer no-charge docket selected by job ID.
+      const reviewedByJobId = new Map(
+        await Promise.all(sourceRelease.members.map(async (member) => {
+          const reviewed = await loadSesCockpitDocket(client, member.job_id, {
+            fetchInvoicePdfBytes: (invoiceId) =>
+              ctx.xeroGateway.fetchAuthorisedPdf(invoiceId),
+          });
+          return [member.job_id, reviewed] as const;
+        })),
+      );
+      const assertMemberCoordinates = (
+        members: UnifiedReleaseMember[],
+        currentByJobId: typeof reviewedByJobId,
+        expectedDocketByJobId: Map<string, string>,
+        compareSourceReadiness = true,
+      ) => {
+        for (const member of members) {
+          const reviewed = currentByJobId.get(member.job_id)!;
+          const expectedReadiness = String(member.readiness_revision || "");
+          const expectedGeneration = Number(member.dependency_generation);
+          const expectedDocket = expectedDocketByJobId.get(member.job_id) ||
+            member.docket_revision_id;
+          if (
+            !reviewed || !expectedReadiness ||
+            !Number.isFinite(expectedGeneration) ||
+            reviewed.docket_revision_id !== expectedDocket ||
+            reviewed.invoice_obligation_revision_id !==
+              member.invoice_obligation_revision_id ||
+            (compareSourceReadiness &&
+              (reviewed.readiness_revision !== expectedReadiness ||
+                reviewed.dependency_generation !== expectedGeneration))
+          ) {
+            throw new SesActionError(
+              409,
+              sesRefusal(
+                "stale_review",
+                "Re-open the exact release. A member changed after review, so its old frozen routes cannot be combined with the current docket.",
+                {
+                  evidence: {
+                    job_id: member.job_id,
+                    reviewed_docket_revision_id: expectedDocket,
+                    current_docket_revision_id: reviewed?.docket_revision_id ||
+                      null,
+                  },
+                },
+              ),
+            );
+          }
+        }
+      };
+      const sourceDocketByJobId = new Map(
+        sourceRelease.members.map((member) => [
+          member.job_id,
+          member.docket_revision_id,
+        ]),
+      );
+      assertMemberCoordinates(
+        noChargeMembers,
+        reviewedByJobId,
+        sourceDocketByJobId,
+      );
       if (pricedMembers.length === 0) {
+        if (recoveringSupersededSource) {
+          throw new SesActionError(
+            409,
+            sesRefusal(
+              "stale_review",
+              "Open the current release. A superseded document-only release is never an Option B recovery source.",
+            ),
+          );
+        }
         await approveSesReleaseRevisionAction(client, auth, {
           org_id: ctx.org_id,
           release_revision_id: sourceRelease.release_revision_id,
@@ -738,66 +1253,120 @@ export function createSupabaseUnifiedReleaseDeps(
         result: unknown;
       }> = [];
       const substitutions: AuthorisedRouteSubstitution[] = [];
+      const boundDocketByJobId = new Map<string, string>();
       for (const member of pricedMembers) {
-        const reviewed = await loadSesCockpitDocket(client, member.job_id, {
-          fetchInvoicePdfBytes: (invoiceId) =>
-            ctx.xeroGateway.fetchAuthorisedPdf(invoiceId),
-        });
+        const reviewed = reviewedByJobId.get(member.job_id)!;
+        let authorised: OptionBAuthorisedMemberResult;
         if (
-          reviewed.docket_revision_id !== member.docket_revision_id ||
-          reviewed.invoice_obligation_revision_id !==
+          reviewed.docket_revision_id === member.docket_revision_id &&
+          reviewed.invoice_obligation_revision_id ===
             member.invoice_obligation_revision_id
         ) {
-          throw new SesActionError(
-            409,
-            sesRefusal(
-              "stale_review",
-              "Re-open the current DRAFT release; its docket or invoice obligation changed after inspection.",
-            ),
-          );
-        }
-        const draftBinding = reviewed.xero_binding;
-        if (
-          !draftBinding ||
-          String(draftBinding.status || "").toUpperCase() !== "DRAFT" ||
-          !draftBinding.pdf_content_hash
-        ) {
-          throw new SesActionError(
-            409,
-            sesRefusal(
-              "xero_not_authorised",
-              "Reload the real Xero DRAFT PDF before APPROVE & SEND; no frozen DRAFT derivative coordinate is available.",
-            ),
-          );
-        }
-        await approveSesInvoiceRevisionAction(client, auth, {
-          org_id: ctx.org_id,
-          job_id: member.job_id,
-          includes_authorise: true,
-          expected_docket_revision_id: reviewed.docket_revision_id,
-          expected_invoice_obligation_revision_id:
-            reviewed.invoice_obligation_revision_id || "",
-          expected_output_content_hash: reviewed.docket_output_content_hash ||
-            "",
-          expected_draft_pdf_content_hash: draftBinding.pdf_content_hash,
-          evidence_refs: [{
-            kind: "unified_approve_send_draft_release",
-            release_revision_id: sourceRelease.release_revision_id,
-            release_content_hash: sourceRelease.content_hash,
-          }],
-        });
-        const authorised = await executeSesInvoiceRevisionAction(
-          client,
-          auth,
-          {
-            org_id: ctx.org_id,
+          if (recoveringSupersededSource) {
+            throw new SesActionError(
+              409,
+              sesRefusal(
+                "stale_review",
+                "Open the current release. A superseded DRAFT source may resume only an already-bound exact AUTHORISED child; it can never authorise money.",
+              ),
+            );
+          }
+          const draftBinding = reviewed.xero_binding;
+          if (
+            !draftBinding ||
+            String(draftBinding.status || "").toUpperCase() !== "DRAFT" ||
+            !draftBinding.pdf_content_hash ||
+            !draftBinding.pdf_object_key ||
+            !Number.isFinite(Number(draftBinding.pdf_size_bytes))
+          ) {
+            throw new SesActionError(
+              409,
+              sesRefusal(
+                "xero_not_authorised",
+                "Reload the real Xero DRAFT PDF before APPROVE & SEND; no frozen DRAFT derivative recovery coordinate is available.",
+              ),
+            );
+          }
+          const draftRevision = await client.from(
+            "makesafe_invoice_obligation_revisions",
+          ).select("id,job_id,xero_binding")
+            .eq("id", member.invoice_obligation_revision_id).maybeSingle();
+          const draftInvoice = draftRevision.data?.xero_binding as
+            | SesXeroInvoiceResult
+            | undefined;
+          if (
+            draftRevision.error || !draftRevision.data || !draftInvoice ||
+            String(draftRevision.data.job_id || "") !== member.job_id ||
+            String(draftInvoice.status || "").toUpperCase() !== "DRAFT" ||
+            draftInvoice.xero_invoice_id !== draftBinding.xero_invoice_id ||
+            draftInvoice.invoice_number !== draftBinding.invoice_number ||
+            !String(draftInvoice.reference || "").trim() ||
+            !Number.isFinite(Number(draftInvoice.total))
+          ) {
+            throw new SesActionError(
+              409,
+              sesRefusal(
+                "authorised_derivative_mismatch",
+                "Do not authorise. The stored DRAFT invoice identity is incomplete or differs from the exact PDF on screen.",
+              ),
+            );
+          }
+          const recoveryCapsule: OptionBRecoveryCapsule = {
+            kind: OPTION_B_RECOVERY_CONTRACT,
+            source_release_revision_id: sourceRelease.release_revision_id,
+            source_release_content_hash: sourceRelease.content_hash,
             job_id: member.job_id,
+            source_docket_revision_id: member.docket_revision_id,
             invoice_obligation_revision_id:
               member.invoice_obligation_revision_id || "",
-            actor: ctx.actor,
-          },
-          ctx.xeroGateway,
-        ) as Record<string, any>;
+            draft_invoice: {
+              xero_invoice_id: draftInvoice.xero_invoice_id,
+              invoice_number: draftInvoice.invoice_number,
+              status: "DRAFT",
+              reference: draftInvoice.reference,
+              total: Number(draftInvoice.total),
+            },
+            draft_pdf: {
+              pdf_object_key: draftBinding.pdf_object_key,
+              pdf_content_hash: draftBinding.pdf_content_hash,
+              pdf_size_bytes: Number(draftBinding.pdf_size_bytes),
+            },
+          };
+          await approveSesInvoiceRevisionAction(client, auth, {
+            org_id: ctx.org_id,
+            job_id: member.job_id,
+            includes_authorise: true,
+            expected_docket_revision_id: reviewed.docket_revision_id,
+            expected_invoice_obligation_revision_id:
+              reviewed.invoice_obligation_revision_id || "",
+            expected_output_content_hash: reviewed.docket_output_content_hash ||
+              "",
+            expected_draft_pdf_content_hash: draftBinding.pdf_content_hash,
+            evidence_refs: [{
+              kind: "unified_approve_send_draft_release",
+              release_revision_id: sourceRelease.release_revision_id,
+              release_content_hash: sourceRelease.content_hash,
+            }, recoveryCapsule],
+          });
+          authorised = await executeSesInvoiceRevisionAction(
+            client,
+            auth,
+            {
+              org_id: ctx.org_id,
+              job_id: member.job_id,
+              invoice_obligation_revision_id:
+                member.invoice_obligation_revision_id || "",
+              actor: ctx.actor,
+            },
+            ctx.xeroGateway,
+          ) as OptionBAuthorisedMemberResult;
+        } else {
+          authorised = await recoverOptionBBoundMember(
+            sourceRelease,
+            member,
+            reviewed.docket_revision_id,
+          );
+        }
         const derivative = authorised.authorised_derivative;
         const authorisedInvoice = authorised.invoice as SesXeroInvoiceResult;
         if (
@@ -816,11 +1385,11 @@ export function createSupabaseUnifiedReleaseDeps(
         }
         substitutions.push({
           draft_invoice: {
-            xero_invoice_id: draftBinding.xero_invoice_id,
-            invoice_number: draftBinding.invoice_number,
+            xero_invoice_id: derivative.xero_invoice_id,
+            invoice_number: derivative.draft_invoice_number,
             status: "DRAFT",
-            reference: authorisedInvoice.reference,
-            total: Number(draftBinding.total),
+            reference: derivative.reference,
+            total: Number(derivative.total),
           },
           authorised_invoice: authorisedInvoice,
           draft_pdf_content_hash: String(authorised.draft_pdf_content_hash),
@@ -828,18 +1397,24 @@ export function createSupabaseUnifiedReleaseDeps(
             authorised.authorised_pdf_content_hash,
           ),
         });
-        const boundDocket = authorised.docket_revision as Record<string, any>;
-        await ratifySesAuthorisedDerivativeDocketAction(client, auth, {
-          based_on_docket_revision_id: member.docket_revision_id,
-          docket_revision_id: String(boundDocket.id || ""),
-          expected_output_content_hash: String(
-            boundDocket.output_content_hash || "",
-          ),
-          bound_pdf_content_hash: String(
-            authorised.authorised_pdf_content_hash,
-          ),
-          derivative,
-        });
+        const boundDocket = authorised.docket_revision;
+        if (!recoveringSupersededSource) {
+          await ratifySesAuthorisedDerivativeDocketAction(client, auth, {
+            based_on_docket_revision_id: member.docket_revision_id,
+            docket_revision_id: String(boundDocket.id || ""),
+            expected_output_content_hash: String(
+              boundDocket.output_content_hash || "",
+            ),
+            bound_pdf_content_hash: String(
+              authorised.authorised_pdf_content_hash,
+            ),
+            derivative,
+          });
+        }
+        boundDocketByJobId.set(
+          member.job_id,
+          String(boundDocket.id || ""),
+        );
         invoiceAuthorisations.push({
           job_id: member.job_id,
           result: authorised,
@@ -850,15 +1425,88 @@ export function createSupabaseUnifiedReleaseDeps(
         (sourceRoutesResp.data || []) as StoredUnifiedRoute[],
         substitutions,
       );
-      const finalPlan = await prepareSesReleaseRevisionAction(client, {
+      // Re-read after every provider/network operation and prove the exact
+      // coordinates that will be committed. This closes the check-then-use
+      // window where a no-charge/current-readiness docket could advance while
+      // Xero was authorising the priced member.
+      const currentDockets = await Promise.all(
+        sourceRelease.members.map((member) =>
+          loadSesCockpitDocket(client, member.job_id, {
+            fetchInvoicePdfBytes: (invoiceId) =>
+              ctx.xeroGateway.fetchAuthorisedPdf(invoiceId),
+          })
+        ),
+      );
+      const currentByJobId = new Map(
+        currentDockets.map((docket) => [docket.job_id, docket]),
+      );
+      assertMemberCoordinates(
+        noChargeMembers,
+        currentByJobId,
+        sourceDocketByJobId,
+      );
+      // Binding an AUTHORISED invoice deliberately invalidates readiness and
+      // creates a new dependency generation. Prove the exact bound docket and
+      // obligation here, then freeze the new readiness coordinates into the
+      // final plan below. Comparing these members to the source DRAFT
+      // generation would make the real Option B path authorise money and then
+      // always stale-refuse.
+      assertMemberCoordinates(
+        pricedMembers,
+        currentByJobId,
+        boundDocketByJobId,
+        false,
+      );
+      const exactPlan = await buildSesReleaseRevisionPlanForDockets({
         org_id: ctx.org_id,
-        job_ids: sourceRelease.members.map((member) => member.job_id),
-        ...(sourceRelease.members.length > 1 ? { routes: expectedRoutes } : {}),
+        dockets: currentDockets,
+        routes: expectedRoutes,
         created_by: ctx.actor,
-      }, {
-        fetchInvoicePdfBytes: (invoiceId) =>
-          ctx.xeroGateway.fetchAuthorisedPdf(invoiceId),
       });
+      const finalPlan = recoveringSupersededSource
+        ? await (async () => {
+          // A superseded source is only a retry handle for a derivative whose
+          // prepare already committed before interruption. Require that exact
+          // persisted release to remain current; never commit or supersede.
+          await requireExistingCurrentDerivative(exactPlan);
+          return exactPlan;
+        })()
+        : await (async () => {
+          // Provider calls and the AUTHORISED bind are outside the release
+          // transaction. Re-prove the immutable source immediately before
+          // committing its derivative so a corrected release minted during
+          // Xero authorisation cannot be overwritten by stale source routes.
+          await assertNoCompetingReleaseForPlan(exactPlan, [
+            sourceRelease.release_revision_id,
+          ]);
+          const sourceReread = await client.from(
+            "makesafe_release_revisions",
+          ).select("id,content_hash,state")
+            .eq("id", sourceRelease.release_revision_id).maybeSingle();
+          if (
+            sourceReread.error || !sourceReread.data ||
+            String(sourceReread.data.content_hash || "") !==
+              sourceRelease.content_hash ||
+            String(sourceReread.data.state || "") !== "proposed"
+          ) {
+            throw new SesActionError(
+              409,
+              sesRefusal(
+                "stale_review",
+                "Open the current release. The reviewed DRAFT source changed while its AUTHORISED derivative was being materialised, so stale frozen routes cannot be committed.",
+              ),
+            );
+          }
+          await assertSesReleaseRevisionIsCurrent(
+            client,
+            sourceRelease.release_revision_id,
+          );
+          return await commitSesReleaseRevisionPlanAction(client, exactPlan, {
+            allowed_superseded_release_revision_ids: [
+              sourceRelease.release_revision_id,
+            ],
+          });
+        })();
       assertSesAuthorisedReleaseRouteDerivative(
         expectedRoutes,
         finalPlan.routes,
@@ -879,23 +1527,10 @@ export function createSupabaseUnifiedReleaseDeps(
           })),
         }],
       });
-      const sourceSuperseded = await client.from("makesafe_release_revisions")
-        .update({ state: "superseded", updated_at: new Date().toISOString() })
-        .eq("id", sourceRelease.release_revision_id)
-        .eq("state", "proposed")
-        .select("id,state").maybeSingle();
-      if (
-        sourceSuperseded.error ||
-        String(sourceSuperseded.data?.state || "") !== "superseded"
-      ) {
-        throw new SesActionError(
-          409,
-          sesRefusal(
-            "stale_review",
-            "Reload the release state. The verified AUTHORISED derivative was approved, but the DRAFT preview could not be retired safely.",
-          ),
-        );
-      }
+      // Re-read the exact approved derivative before retiring the DRAFT retry
+      // handle. After the source CAS succeeds there are no further fallible
+      // materialisation reads, so a transient final-read failure cannot strand
+      // an already-AUTHORISED invoice behind a superseded source.
       const finalRelease = await loadReleaseSnapshot(finalReleaseRevisionId);
       if (!finalRelease || finalRelease.state !== "approved") {
         throw new SesActionError(409, {
@@ -903,6 +1538,27 @@ export function createSupabaseUnifiedReleaseDeps(
           fact:
             "The verified AUTHORISED derivative release approval could not be re-read; nothing was sent.",
         });
+      }
+      const sourceSuperseded = await client.from("makesafe_release_revisions")
+        .update({ state: "superseded", updated_at: new Date().toISOString() })
+        .eq("id", sourceRelease.release_revision_id)
+        .eq("state", "proposed")
+        .select("id,state").maybeSingle();
+      let sourceState = String(sourceSuperseded.data?.state || "");
+      if (sourceSuperseded.error || sourceState !== "superseded") {
+        const sourceReread = await client.from("makesafe_release_revisions")
+          .select("id,state")
+          .eq("id", sourceRelease.release_revision_id).maybeSingle();
+        sourceState = String(sourceReread.data?.state || "");
+        if (sourceReread.error || sourceState !== "superseded") {
+          throw new SesActionError(
+            409,
+            sesRefusal(
+              "stale_review",
+              "Reload the release state. The verified AUTHORISED derivative was approved, but the DRAFT preview could not be retired safely.",
+            ),
+          );
+        }
       }
       return {
         release: finalRelease,
@@ -970,7 +1626,19 @@ export function createSupabaseUnifiedReleaseDeps(
     async readConfirmedRouteKinds(releaseRevisionId): Promise<string[]> {
       const resp = await client.from("ses_release_route_proofs")
         .select("route_kind").eq("release_revision_id", releaseRevisionId);
-      if (resp.error) return [];
+      if (resp.error) {
+        throw new SesActionError(
+          503,
+          sesRefusal(
+            "route_send_proof_unreadable",
+            "Retry the same frozen release after its exact route-proof ledger is readable; no confirmed route will be sent again.",
+            {
+              fact:
+                "Confirmed route proofs could not be read, so the operator recovery state cannot honestly label routes pending.",
+            },
+          ),
+        );
+      }
       const kinds: string[] = (resp.data || [])
         .map((row: Record<string, unknown>) => String(row.route_kind || ""))
         .filter((kind: string) => kind.length > 0);

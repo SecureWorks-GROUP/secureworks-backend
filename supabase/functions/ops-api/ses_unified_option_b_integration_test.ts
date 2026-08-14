@@ -5,6 +5,9 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  assertSesReleaseRevisionIsCurrent,
+  commitSesReleaseRevisionPlanAction,
+  loadSesCockpitDocket,
   prepareSesReleaseRevisionAction,
   SesActionError,
   type SesMailGateway,
@@ -25,6 +28,10 @@ const ORG_ID = "00000000-0000-4000-8000-000000000001";
 const JOB_ID = "10000000-0000-4000-8000-000000000001";
 const DOCKET_ID = "20000000-0000-4000-8000-000000000001";
 const OBLIGATION_ID = "30000000-0000-4000-8000-000000000001";
+const NO_CHARGE_JOB_ID = "10000000-0000-4000-8000-000000000002";
+const NO_CHARGE_DOCKET_ID = "20000000-0000-4000-8000-000000000002";
+const NO_CHARGE_OBLIGATION_ID = "30000000-0000-4000-8000-000000000002";
+const CHANGED_NO_CHARGE_DOCKET_ID = "20000000-0000-4000-8000-000000000003";
 const USER = {
   id: "40000000-0000-4000-8000-000000000001",
   role: "admin",
@@ -89,7 +96,35 @@ function invoicePdf(
   ]);
 }
 
-function optionBHarness(alteredAuthorisedPdf = false) {
+function optionBHarness(
+  options: boolean | {
+    alteredAuthorisedPdf?: boolean;
+    failRatifyOnce?: boolean;
+    failReleaseApprovalOnce?: boolean;
+    mixedNoCharge?: boolean;
+    advanceNoChargeDuringAuthorise?: boolean;
+    supersedeSourceDuringAuthorise?: boolean;
+    prepareCorrectionAfterBind?: boolean;
+    prepareCorrectionDuringFinalCommit?: boolean;
+  } = false,
+) {
+  const alteredAuthorisedPdf = typeof options === "boolean"
+    ? options
+    : options.alteredAuthorisedPdf === true;
+  let failRatifyOnce = typeof options === "object" &&
+    options.failRatifyOnce === true;
+  let failReleaseApprovalOnce = typeof options === "object" &&
+    options.failReleaseApprovalOnce === true;
+  const mixedNoCharge = typeof options === "object" &&
+    options.mixedNoCharge === true;
+  const advanceNoChargeDuringAuthorise = typeof options === "object" &&
+    options.advanceNoChargeDuringAuthorise === true;
+  const supersedeSourceDuringAuthorise = typeof options === "object" &&
+    options.supersedeSourceDuringAuthorise === true;
+  const prepareCorrectionAfterBind = typeof options === "object" &&
+    options.prepareCorrectionAfterBind === true;
+  const prepareCorrectionDuringFinalCommit = typeof options === "object" &&
+    options.prepareCorrectionDuringFinalCommit === true;
   const draftInvoice = {
     xero_invoice_id: "xero-synthetic-4477",
     invoice_number: "DRAFT-4477",
@@ -109,7 +144,11 @@ function optionBHarness(alteredAuthorisedPdf = false) {
     alteredAuthorisedPdf,
   );
   let xeroAuthorised = false;
-  let currentDocketId = DOCKET_ID;
+  let xeroAuthoriseDispatches = 0;
+  const currentDocketByJobId = new Map<string, string>([[JOB_ID, DOCKET_ID]]);
+  if (mixedNoCharge) {
+    currentDocketByJobId.set(NO_CHARGE_JOB_ID, NO_CHARGE_DOCKET_ID);
+  }
   let clock = 0;
   const order: string[] = [];
   const sends: string[] = [];
@@ -155,6 +194,26 @@ function optionBHarness(alteredAuthorisedPdf = false) {
     },
     committed_at: "2026-08-14T00:00:00.000Z",
   }];
+  if (mixedNoCharge) {
+    dockets.push({
+      ...dockets[0],
+      id: NO_CHARGE_DOCKET_ID,
+      job_id: NO_CHARGE_JOB_ID,
+      output_content_hash:
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      invoice_obligation_revision_id: NO_CHARGE_OBLIGATION_ID,
+      attendance_cycle_ids: ["cycle-no-charge"],
+      local_invoice_proposal: null,
+    });
+    reviews.set(NO_CHARGE_DOCKET_ID, {
+      docket_revision_id: NO_CHARGE_DOCKET_ID,
+      docket_output_content_hash:
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      assembler_version: "ses-assembler-v1",
+      family_matrix_version: "ses-builder-family-matrix/2026-08-13.1",
+      review_state: "signed_off",
+    });
+  }
   const obligation: any = {
     id: OBLIGATION_ID,
     job_id: JOB_ID,
@@ -175,6 +234,16 @@ function optionBHarness(alteredAuthorisedPdf = false) {
     blockers: [],
     xero_binding: { ...draftInvoice },
   };
+  const noChargeObligation: any = {
+    id: NO_CHARGE_OBLIGATION_ID,
+    job_id: NO_CHARGE_JOB_ID,
+    state: "proposed",
+    pricing_disposition: "no_additional_charge",
+    proposal: null,
+    duplicate_probe: { allows_create: false, ambiguity: "none" },
+    blockers: [],
+    xero_binding: null,
+  };
   const xeroRows: any[] = [{
     id: "xero-row-1",
     org_id: ORG_ID,
@@ -184,24 +253,58 @@ function optionBHarness(alteredAuthorisedPdf = false) {
     reference_normalized: "sessynthetic4477",
     ...draftInvoice,
   }];
+  const readinessRows: any[] = [
+    {
+      job_id: JOB_ID,
+      readiness_revision: "ready-synthetic",
+      dependency_generation: 1,
+      ready: true,
+      blockers: [],
+    },
+    ...(mixedNoCharge
+      ? [{
+        job_id: NO_CHARGE_JOB_ID,
+        readiness_revision: "ready-no-charge",
+        dependency_generation: 1,
+        ready: true,
+        blockers: [],
+      }]
+      : []),
+  ];
+  let correctedDuringAuthoriseId: string | null = null;
+  let correctedAfterBindId: string | null = null;
+  let correctedDuringFinalCommitId: string | null = null;
+  let injectingFinalCommitCorrection = false;
+  let failNextReleaseMemberOverlapRead = false;
+  let approveNewestReleaseOnOverlapFailure = false;
+  const advanceNoChargeDocket = () => {
+    const current = dockets.find((row) => row.id === NO_CHARGE_DOCKET_ID)!;
+    dockets.push({
+      ...current,
+      id: CHANGED_NO_CHARGE_DOCKET_ID,
+      output_content_hash:
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      committed_at: new Date().toISOString(),
+    });
+    currentDocketByJobId.set(
+      NO_CHARGE_JOB_ID,
+      CHANGED_NO_CHARGE_DOCKET_ID,
+    );
+  };
 
   const tableRows = (table: string): any[] => {
     switch (table) {
       case "makesafe_docket_revisions_current":
-        return dockets.filter((row) => row.id === currentDocketId);
+        return dockets.filter((row) =>
+          currentDocketByJobId.get(row.job_id) === row.id
+        );
       case "makesafe_docket_revisions":
         return dockets;
       case "makesafe_readiness_current_v2":
-        return [{
-          job_id: JOB_ID,
-          readiness_revision: "ready-synthetic",
-          dependency_generation: 1,
-          ready: true,
-          blockers: [],
-        }];
+        return readinessRows;
       case "makesafe_invoice_obligation_revisions":
       case "makesafe_invoice_obligation_revisions_current":
-        return [obligation];
+        return [obligation, ...(mixedNoCharge ? [noChargeObligation] : [])];
       case "makesafe_docket_artifacts":
         return artifacts;
       case "job_assignments":
@@ -291,11 +394,42 @@ function optionBHarness(alteredAuthorisedPdf = false) {
         },
         maybeSingle: async () => ({ data: result()[0] ?? null, error: null }),
         single: async () => ({ data: result()[0] ?? null, error: null }),
-        then: (resolve: any, reject: any) =>
-          Promise.resolve({ data: result(), error: null }).then(
+        then: (resolve: any, reject: any) => {
+          if (
+            table === "makesafe_release_revision_members" &&
+            Array.isArray(ins.docket_revision_id) &&
+            failNextReleaseMemberOverlapRead
+          ) {
+            failNextReleaseMemberOverlapRead = false;
+            if (approveNewestReleaseOnOverlapFailure) {
+              approveNewestReleaseOnOverlapFailure = false;
+              const newest = releases[releases.length - 1];
+              newest.state = "approved";
+              const operationKey = `ses:route_send:${newest.id}:invoice`;
+              effects.set(operationKey, {
+                operation_key: operationKey,
+                org_id: ORG_ID,
+                job_id: JOB_ID,
+                effect_kind: "route_send",
+                release_revision_id: newest.id,
+                docket_revision_id: DOCKET_ID,
+                route_kind: "invoice",
+                payload_hash:
+                  "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                external_token: "synthetic-concurrent-partial-token",
+                state: "unknown",
+              });
+            }
+            return Promise.resolve({
+              data: null,
+              error: { message: "synthetic overlap read unavailable once" },
+            }).then(resolve, reject);
+          }
+          return Promise.resolve({ data: result(), error: null }).then(
             resolve,
             reject,
-          ),
+          );
+        },
       };
       return builder;
     },
@@ -306,11 +440,24 @@ function optionBHarness(alteredAuthorisedPdf = false) {
           data: { signedUrl: `https://synthetic.invalid/${path}` },
           error: null,
         }),
+        download: async () => ({
+          data: new Blob([draftPdf.slice().buffer as ArrayBuffer]),
+          error: null,
+        }),
       }),
     },
     async rpc(name: string, args: any) {
       order.push(name);
       if (name === "record_ses_revision_approval_v1") {
+        if (
+          args.p_approval.action === "release" && failReleaseApprovalOnce
+        ) {
+          failReleaseApprovalOnce = false;
+          return {
+            data: null,
+            error: { message: "synthetic release approval unavailable once" },
+          };
+        }
         const row = {
           id: `approval-${approvals.length + 1}`,
           decision: "approved",
@@ -404,7 +551,14 @@ function optionBHarness(alteredAuthorisedPdf = false) {
           committed_at: new Date().toISOString(),
         };
         dockets.push(bound);
-        currentDocketId = bound.id;
+        currentDocketByJobId.set(bound.job_id, bound.id);
+        const readiness = readinessRows.find((row) =>
+          row.job_id === bound.job_id
+        )!;
+        Object.assign(readiness, {
+          readiness_revision: "ready-authorised-synthetic",
+          dependency_generation: 2,
+        });
         artifacts.push({
           id: "artifact-authorised",
           revision_id: bound.id,
@@ -414,6 +568,13 @@ function optionBHarness(alteredAuthorisedPdf = false) {
         return { data: bound, error: null };
       }
       if (name === "record_ses_docket_review_state_v1") {
+        if (args.p_event.event_kind === "signed_off" && failRatifyOnce) {
+          failRatifyOnce = false;
+          return {
+            data: null,
+            error: { message: "synthetic ratify write unavailable once" },
+          };
+        }
         const docket = dockets.find((row) =>
           row.id === args.p_event.docket_revision_id
         )!;
@@ -427,9 +588,56 @@ function optionBHarness(alteredAuthorisedPdf = false) {
             : "needs_review",
         };
         reviews.set(docket.id, review);
+        if (
+          args.p_event.event_kind === "signed_off" &&
+          prepareCorrectionAfterBind && !correctedAfterBindId
+        ) {
+          const current = await loadSesCockpitDocket(client, JOB_ID, {
+            fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+          });
+          const corrected = await prepareSesReleaseRevisionAction(client, {
+            org_id: ORG_ID,
+            job_ids: [JOB_ID],
+            routes: current.routes.map((route) => ({
+              ...route,
+              subject: `${route.subject} — corrected after bind`,
+            })),
+            created_by: USER.email,
+          }, {
+            fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+          });
+          correctedAfterBindId = String(corrected.release.id);
+        }
         return { data: review, error: null };
       }
       if (name === "commit_ses_release_revision_v1") {
+        const source = releases[0];
+        if (
+          prepareCorrectionDuringFinalCommit && xeroAuthorised && source &&
+          args.p_release.id !== source.id &&
+          !correctedDuringFinalCommitId && !injectingFinalCommitCorrection
+        ) {
+          injectingFinalCommitCorrection = true;
+          try {
+            const current = await loadSesCockpitDocket(client, JOB_ID, {
+              fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+            });
+            const corrected = await prepareSesReleaseRevisionAction(client, {
+              org_id: ORG_ID,
+              job_ids: [JOB_ID],
+              routes: current.routes.map((route) => ({
+                ...route,
+                subject: `${route.subject} — corrected during final commit`,
+              })),
+              created_by: USER.email,
+            }, {
+              fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+            });
+            correctedDuringFinalCommitId = String(corrected.release.id);
+          } finally {
+            injectingFinalCommitCorrection = false;
+          }
+        }
         let release = releases.find((row) => row.id === args.p_release.id);
         if (!release) {
           release = {
@@ -452,7 +660,7 @@ function optionBHarness(alteredAuthorisedPdf = false) {
             })
           );
         }
-        return { data: release, error: null };
+        return { data: { ...release }, error: null };
       }
       if (name === "assert_ses_dockets_signed_off_v1") {
         const ok = args.p_docket_revision_ids.every((id: string) =>
@@ -504,9 +712,38 @@ function optionBHarness(alteredAuthorisedPdf = false) {
       return [xeroAuthorised ? authorisedInvoice : draftInvoice];
     },
     async authorise() {
+      xeroAuthoriseDispatches++;
+      if (supersedeSourceDuringAuthorise) {
+        const source = releases.find((row) => row.state === "proposed")!;
+        const sourceJobIds = releaseMembers
+          .filter((row) => row.release_revision_id === source.id)
+          .map((row) => row.job_id);
+        const sourceRoutes = releaseRoutes
+          .filter((row) => row.release_revision_id === source.id)
+          .map((row) => ({
+            route_kind: row.route_kind,
+            recipients: row.recipients,
+            cc: row.cc,
+            subject: `${row.subject} — corrected during authorise`,
+            body: row.body,
+            attachment_hashes: row.attachment_hashes,
+            required: row.required,
+            ready: true,
+          }));
+        const corrected = await prepareSesReleaseRevisionAction(client, {
+          org_id: ORG_ID,
+          job_ids: sourceJobIds,
+          routes: sourceRoutes,
+          created_by: USER.email,
+        }, {
+          fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+        });
+        correctedDuringAuthoriseId = String(corrected.release.id);
+      }
       xeroAuthorised = true;
       Object.assign(obligation.xero_binding, authorisedInvoice);
       Object.assign(xeroRows[0], authorisedInvoice);
+      if (advanceNoChargeDuringAuthorise) advanceNoChargeDocket();
       return authorisedInvoice;
     },
     async reconcileAuthorise() {
@@ -546,10 +783,40 @@ function optionBHarness(alteredAuthorisedPdf = false) {
     order,
     sends,
     approvals,
+    effects,
     releases,
     releaseRoutes,
     dockets,
+    releaseMembers,
+    xeroAuthoriseDispatches: () => xeroAuthoriseDispatches,
+    correctedDuringAuthoriseId: () => correctedDuringAuthoriseId,
+    correctedAfterBindId: () => correctedAfterBindId,
+    correctedDuringFinalCommitId: () => correctedDuringFinalCommitId,
+    failNextReleaseMemberOverlapRead: () => {
+      failNextReleaseMemberOverlapRead = true;
+    },
+    approveNewestReleaseOnNextOverlapFailure: () => {
+      failNextReleaseMemberOverlapRead = true;
+      approveNewestReleaseOnOverlapFailure = true;
+    },
+    advanceNoChargeDocket,
   };
+}
+
+async function prepareMixedOptionBPreview(
+  h: ReturnType<typeof optionBHarness>,
+) {
+  const priced = await loadSesCockpitDocket(h.client, JOB_ID, {
+    fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+  });
+  return await prepareSesReleaseRevisionAction(h.client, {
+    org_id: ORG_ID,
+    job_ids: [JOB_ID, NO_CHARGE_JOB_ID],
+    routes: priced.routes,
+    created_by: USER.email,
+  }, {
+    fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+  });
 }
 
 Deno.test("T11 Option B real actions: DRAFT approval authorises, binds, mints, approves, then sends", async () => {
@@ -594,6 +861,451 @@ Deno.test("T11 Option B real actions: DRAFT approval authorises, binds, mints, a
   assert(bindIndex >= 0 && releaseApprovalIndex > bindIndex);
 });
 
+Deno.test(
+  "T11 Option B recovery: post-authorise ratify failure resumes without second money action",
+  async () => {
+    const h = optionBHarness({ failRatifyOnce: true });
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const sourceId = String(preview.release.id);
+    await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+    assertEquals(
+      h.releases.find((row) => row.id === sourceId)?.state,
+      "proposed",
+    );
+    const recovered = await unifiedSesReleaseAction(h.client, auth, {
+      org_id: ORG_ID,
+      release_revision_id: sourceId,
+      expected_release_content_hash: String(preview.release.content_hash),
+      actor: USER.email,
+    }, {
+      xeroGateway: h.xeroGateway,
+      mailGateway: h.mailGateway,
+      releaseXeroReader: h.releaseXeroReader,
+    });
+    assertEquals(recovered.state, "released");
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends.length, 1);
+  },
+);
+
+Deno.test(
+  "T11 Option B recovery: final approval failure reuses the exact prepared derivative",
+  async () => {
+    const h = optionBHarness({ failReleaseApprovalOnce: true });
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const sourceId = String(preview.release.id);
+    await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    const preparedFinalIds = h.releases
+      .filter((row) => row.id !== sourceId)
+      .map((row) => row.id);
+    assertEquals(preparedFinalIds.length, 1);
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+
+    const recovered = await unifiedSesReleaseAction(h.client, auth, {
+      org_id: ORG_ID,
+      release_revision_id: sourceId,
+      expected_release_content_hash: String(preview.release.content_hash),
+      actor: USER.email,
+    }, {
+      xeroGateway: h.xeroGateway,
+      mailGateway: h.mailGateway,
+      releaseXeroReader: h.releaseXeroReader,
+    });
+    assertEquals(recovered.state, "released");
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends.length, 1);
+    assertEquals(
+      h.releases.filter((row) => row.id !== sourceId).map((row) => row.id),
+      preparedFinalIds,
+    );
+  },
+);
+
+Deno.test(
+  "T11 Option B mixed recovery resumes only the already-prepared current derivative",
+  async () => {
+    const h = optionBHarness({
+      mixedNoCharge: true,
+      failReleaseApprovalOnce: true,
+    });
+    const preview = await prepareMixedOptionBPreview(h);
+    const sourceId = String(preview.release.id);
+    await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+    assertEquals(
+      h.releases.find((row) => row.id === sourceId)?.state,
+      "superseded",
+    );
+    const bindWritesBeforeRetry =
+      h.order.filter((name) => name === "commit_ses_invoice_bound_docket_v1")
+        .length;
+    const reviewWritesBeforeRetry =
+      h.order.filter((name) => name === "record_ses_docket_review_state_v1")
+        .length;
+
+    const recovered = await unifiedSesReleaseAction(h.client, auth, {
+      org_id: ORG_ID,
+      release_revision_id: sourceId,
+      expected_release_content_hash: String(preview.release.content_hash),
+      actor: USER.email,
+    }, {
+      xeroGateway: h.xeroGateway,
+      mailGateway: h.mailGateway,
+      releaseXeroReader: h.releaseXeroReader,
+    });
+    assertEquals(recovered.state, "released");
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends.length, 1);
+    assertEquals(
+      h.order.filter((name) => name === "commit_ses_invoice_bound_docket_v1")
+        .length,
+      bindWritesBeforeRetry,
+      "superseded-source recovery must not rebind a docket",
+    );
+    assertEquals(
+      h.order.filter((name) => name === "record_ses_docket_review_state_v1")
+        .length,
+      reviewWritesBeforeRetry,
+      "superseded-source recovery must not write a fresh signoff",
+    );
+  },
+);
+
+Deno.test(
+  "T11 Option B mixed recovery refuses a changed no-charge docket before send",
+  async () => {
+    const h = optionBHarness({
+      mixedNoCharge: true,
+      failReleaseApprovalOnce: true,
+    });
+    const preview = await prepareMixedOptionBPreview(h);
+    const sourceId = String(preview.release.id);
+    await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    h.advanceNoChargeDocket();
+
+    const error = await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    assertEquals((error.refusal as any).code, "stale_review");
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+  },
+);
+
+Deno.test(
+  "T11 Option B refuses no-charge drift that lands during Xero authorisation",
+  async () => {
+    const h = optionBHarness({
+      mixedNoCharge: true,
+      advanceNoChargeDuringAuthorise: true,
+    });
+    const preview = await prepareMixedOptionBPreview(h);
+    const sourceId = String(preview.release.id);
+    const error = await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    assertEquals((error.refusal as any).code, "stale_review");
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+    assertEquals(h.releases.length, 1, "no final release was committed");
+  },
+);
+
+Deno.test(
+  "T11 Option B refuses a corrected release minted during Xero authorisation",
+  async () => {
+    const h = optionBHarness({ supersedeSourceDuringAuthorise: true });
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const sourceId = String(preview.release.id);
+    const error = await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    const correctedId = h.correctedDuringAuthoriseId();
+    assert(correctedId);
+    assertEquals((error.refusal as any).code, "stale_review");
+    assertEquals(
+      h.releases.find((row) => row.id === sourceId)?.state,
+      "superseded",
+    );
+    assertEquals(
+      h.releases.find((row) => row.id === correctedId)?.state,
+      "proposed",
+    );
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+    assertEquals(h.releases.length, 2, "no stale derivative was committed");
+  },
+);
+
+Deno.test(
+  "T11 Option B refuses a correction prepared from the AUTHORISED child before final commit",
+  async () => {
+    const h = optionBHarness({ prepareCorrectionAfterBind: true });
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const sourceId = String(preview.release.id);
+    const error = await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    const correctedId = h.correctedAfterBindId();
+    assert(correctedId);
+    assertEquals((error.refusal as any).code, "stale_review");
+    assertEquals(
+      h.releases.find((row) => row.id === sourceId)?.state,
+      "proposed",
+    );
+    assertEquals(
+      h.releases.find((row) => row.id === correctedId)?.state,
+      "proposed",
+    );
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+    assertEquals(
+      h.releases.length,
+      2,
+      "the stale derivative must not be committed",
+    );
+  },
+);
+
+Deno.test(
+  "T11 Option B protected commit cannot retire a correction that wins the final read race",
+  async () => {
+    const h = optionBHarness({ prepareCorrectionDuringFinalCommit: true });
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const sourceId = String(preview.release.id);
+    const error = await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    const correctedId = h.correctedDuringFinalCommitId();
+    assert(correctedId);
+    assertEquals((error.refusal as any).code, "stale_review");
+    assertEquals(
+      h.releases.find((row) => row.id === correctedId)?.state,
+      "proposed",
+      "the independent correction remains current",
+    );
+    const rejectedDerivatives = h.releases.filter((row) =>
+      row.id !== sourceId && row.id !== correctedId
+    );
+    assertEquals(rejectedDerivatives.length, 1);
+    assertEquals(
+      rejectedDerivatives[0].state,
+      "superseded",
+      "the durably committed stale candidate is retired before refusal",
+    );
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+  },
+);
+
+Deno.test(
+  "T11 superseded source cannot replace a later corrected current release",
+  async () => {
+    const h = optionBHarness({
+      mixedNoCharge: true,
+      failReleaseApprovalOnce: true,
+    });
+    const preview = await prepareMixedOptionBPreview(h);
+    const sourceId = String(preview.release.id);
+    await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    const current = await loadSesCockpitDocket(h.client, JOB_ID, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const corrected = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID, NO_CHARGE_JOB_ID],
+      routes: current.routes.map((route) => ({
+        ...route,
+        subject: `${route.subject} — corrected`,
+      })),
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const correctedId = String(corrected.release.id);
+    assertEquals(
+      h.releases.find((row) => row.id === correctedId)?.state,
+      "proposed",
+    );
+
+    const error = await assertRejects(
+      () =>
+        unifiedSesReleaseAction(h.client, auth, {
+          org_id: ORG_ID,
+          release_revision_id: sourceId,
+          expected_release_content_hash: String(preview.release.content_hash),
+          actor: USER.email,
+        }, {
+          xeroGateway: h.xeroGateway,
+          mailGateway: h.mailGateway,
+          releaseXeroReader: h.releaseXeroReader,
+        }),
+      SesActionError,
+    );
+    assertEquals((error.refusal as any).code, "stale_review");
+    assertEquals(
+      h.releases.find((row) => row.id === correctedId)?.state,
+      "proposed",
+    );
+    assertEquals(h.xeroAuthoriseDispatches(), 1);
+    assertEquals(h.sends, []);
+  },
+);
+
 Deno.test("T11 Option B real actions: altered AUTHORISED artifact hard-refuses before bind or send", async () => {
   const h = optionBHarness(true);
   const preview = await prepareSesReleaseRevisionAction(h.client, {
@@ -625,6 +1337,83 @@ Deno.test("T11 Option B real actions: altered AUTHORISED artifact hard-refuses b
   assertEquals(h.order.includes("commit_ses_invoice_bound_docket_v1"), false);
   assertEquals(h.approvals.map((row) => row.action), ["invoice"]);
 });
+
+Deno.test(
+  "AC6 idempotent commit never retires an existing approved partial release after an overlap read failure",
+  async () => {
+    const h = optionBHarness();
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const releaseId = String(preview.release.id);
+    const existing = h.releases.find((row) => row.id === releaseId)!;
+    existing.state = "approved";
+    const operationKey = `ses:route_send:${releaseId}:invoice`;
+    h.effects.set(operationKey, {
+      operation_key: operationKey,
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      effect_kind: "route_send",
+      release_revision_id: releaseId,
+      docket_revision_id: DOCKET_ID,
+      route_kind: "invoice",
+      payload_hash:
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      external_token: "synthetic-partial-release-token",
+      state: "unknown",
+    });
+    h.failNextReleaseMemberOverlapRead();
+
+    const error = await assertRejects(
+      () => commitSesReleaseRevisionPlanAction(h.client, preview),
+      SesActionError,
+    );
+    assertEquals(error.status, 503);
+    assertEquals(existing.state, "approved");
+    assertEquals(h.effects.get(operationKey)?.state, "unknown");
+    assertEquals(h.releases.length, 1);
+    assertEquals(h.sends, []);
+    await assertSesReleaseRevisionIsCurrent(h.client, releaseId);
+  },
+);
+
+Deno.test(
+  "AC6 compensation cannot retire an exact release approved after the RPC snapshot",
+  async () => {
+    const h = optionBHarness();
+    const preview = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const releaseId = String(preview.release.id);
+    h.releases.splice(0);
+    h.releaseMembers.splice(0);
+    h.releaseRoutes.splice(0);
+    h.approveNewestReleaseOnNextOverlapFailure();
+
+    const error = await assertRejects(
+      () => commitSesReleaseRevisionPlanAction(h.client, preview),
+      SesActionError,
+    );
+    const concurrent = h.releases.find((row) => row.id === releaseId)!;
+    const effect = [...h.effects.values()].find((row) =>
+      row.release_revision_id === releaseId
+    );
+    assertEquals(error.status, 503);
+    assertEquals(concurrent.state, "approved");
+    assertEquals(effect?.state, "unknown");
+    assertEquals(h.releases.length, 1);
+    assertEquals(h.sends, []);
+    await assertSesReleaseRevisionIsCurrent(h.client, releaseId);
+  },
+);
 
 Deno.test("AC7 real actions: minting corrected release B supersedes approved A and A hard-refuses", async () => {
   const h = optionBHarness();
@@ -691,3 +1480,64 @@ Deno.test("AC7 real actions: minting corrected release B supersedes approved A a
   );
   assertEquals(h.sends, []);
 });
+
+Deno.test(
+  "AC6 real ledger: a correction attempt cannot strand or replace a partial release",
+  async () => {
+    const h = optionBHarness();
+    const releaseA = await prepareSesReleaseRevisionAction(h.client, {
+      org_id: ORG_ID,
+      job_ids: [JOB_ID],
+      created_by: USER.email,
+    }, {
+      fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    });
+    const releaseAId = String(releaseA.release.id);
+    const releaseARow = h.releases.find((row) => row.id === releaseAId)!;
+    releaseARow.state = "approved";
+    h.effects.set("partial-route-effect", {
+      id: "effect-partial-a",
+      operation_key: "ses:route_send:partial-a",
+      org_id: ORG_ID,
+      effect_kind: "route_send",
+      release_revision_id: releaseAId,
+      route_kind: "invoice",
+      payload_hash: "sha256:partial-a",
+      external_token: "SES-PARTIAL-A",
+      state: "confirmed",
+    });
+    const correctedRoutes = releaseA.routes.map((route: any) => ({
+      ...route,
+      subject: `${route.subject} - corrected`,
+      ready: true,
+    }));
+    const refusal = await assertRejects(
+      () =>
+        prepareSesReleaseRevisionAction(h.client, {
+          org_id: ORG_ID,
+          job_ids: [JOB_ID],
+          routes: correctedRoutes,
+          created_by: USER.email,
+        }, {
+          fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+        }),
+      SesActionError,
+    );
+    assertEquals(
+      ((refusal as SesActionError).refusal as { code?: string }).code,
+      "release_in_flight",
+    );
+    const releaseB = h.releases.find((row) => row.id !== releaseAId)!;
+    assertEquals(releaseARow.state, "approved");
+    assertEquals(releaseB.state, "superseded");
+    await assertSesReleaseRevisionIsCurrent(h.client, releaseAId);
+    const staleB = await assertRejects(
+      () => assertSesReleaseRevisionIsCurrent(h.client, releaseB.id),
+      SesActionError,
+    );
+    assertEquals(
+      ((staleB as SesActionError).refusal as { code?: string }).code,
+      "stale_review",
+    );
+  },
+);

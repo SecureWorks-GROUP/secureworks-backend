@@ -57,6 +57,7 @@ import {
   type SesApprovalAuth,
   type SesCleanInput,
   type SesCockpitDocket,
+  type SesReleaseRevisionPlan,
   type SesReviewCaveat,
   type SesReviewRoute,
   sesVerdictWithExistingMoney,
@@ -2634,6 +2635,68 @@ export function createSupabaseSesEffectStore(
         "The exact external-effect ledger could not record its next state.",
       );
     },
+    async claimRedispatch(effect, leaseOwner, actor) {
+      if (
+        effect.effect_kind !== "route_send" ||
+        !["unknown", "failed"].includes(effect.state)
+      ) {
+        return null;
+      }
+      const priorState = effect.state;
+      const leaseExpiresAt = new Date(Date.now() + 120_000).toISOString();
+      const claimed = await client.from("ses_external_effects").update({
+        state: "dispatching",
+        lease_owner: leaseOwner,
+        lease_expires_at: leaseExpiresAt,
+        updated_at: new Date().toISOString(),
+      }).eq("operation_key", effect.operation_key)
+        .eq("effect_kind", "route_send")
+        .eq("payload_hash", effect.payload_hash)
+        .eq("external_token", effect.external_token)
+        .eq("state", priorState)
+        .select(SES_EFFECT_CLAIM_COLUMNS)
+        .maybeSingle();
+      if (claimed.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            "The exact-token-absent route could not acquire its exclusive redispatch lease.",
+        });
+      }
+      if (!claimed.data) return null;
+      const active = claimed.data as SesExternalEffect;
+      const event = await client.from("ses_external_effect_events").insert({
+        effect_id: active.id,
+        from_state: priorState,
+        to_state: "dispatching",
+        event_kind: "exact_token_absent_redispatch_claimed",
+        detail: {
+          reconciled_match_count: 0,
+          lease_owner: leaseOwner,
+          lease_expires_at: leaseExpiresAt,
+        },
+        actor,
+      });
+      if (!event.error) return active;
+
+      // The audit append is required before external I/O. If it fails, return
+      // the lease to its exact prior uncertainty state by owner-scoped CAS and
+      // send nothing. A failed compensation stays safely dispatching: callers
+      // still refuse and no second worker can claim it.
+      await client.from("ses_external_effects").update({
+        state: priorState,
+        lease_owner: null,
+        lease_expires_at: null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", active.id)
+        .eq("state", "dispatching")
+        .eq("lease_owner", leaseOwner);
+      throw new SesActionError(503, {
+        state: "refused",
+        fact:
+          "The exclusive redispatch lease could not be audit-recorded, so the route was not sent.",
+      });
+    },
   };
 }
 
@@ -3842,6 +3905,53 @@ export async function storeSesXeroInvoicePdfBytes(
   };
 }
 
+/**
+ * Recover an approval-bound Xero PDF from the private docket bucket and prove
+ * its immutable pointer before reusing it in Option B recovery. This performs
+ * no Xero call and no write.
+ */
+export async function loadStoredSesXeroInvoicePdfBytes(
+  client: SesSupabaseClient,
+  binding: Pick<
+    SesDraftInvoicePdfBinding,
+    "pdf_object_key" | "pdf_content_hash" | "pdf_size_bytes"
+  >,
+): Promise<Uint8Array> {
+  const prefix = `${SES_DOCKET_BUCKET}/`;
+  const objectKey = String(binding.pdf_object_key || "");
+  if (!objectKey.startsWith(prefix)) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The approved DRAFT PDF recovery pointer is outside the private SES docket bucket.",
+    });
+  }
+  const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+    .download(objectKey.slice(prefix.length));
+  if (recovered.error || !recovered.data) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        "The exact approved DRAFT PDF bytes could not be recovered from the private SES docket bucket.",
+    });
+  }
+  const bytes = new Uint8Array(await recovered.data.arrayBuffer());
+  if (
+    bytes.byteLength !== Number(binding.pdf_size_bytes) ||
+    new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-" ||
+    await sesSha256Bytes(bytes) !== binding.pdf_content_hash
+  ) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "authorised_derivative_mismatch",
+        "Do not send. The recovered approved DRAFT PDF does not match its pre-money content hash.",
+      ),
+    );
+  }
+  return bytes;
+}
+
 async function signSesDocketObjectUrl(
   client: SesSupabaseClient,
   objectKey: string,
@@ -4292,6 +4402,8 @@ export async function bindAuthorisedInvoicePdfToDocket(
       draft_invoice: SesXeroInvoiceResult;
       draft_pdf: Uint8Array;
     };
+    /** Recovery fence: verify/adopt an exact existing bind, never write one. */
+    existing_only?: boolean;
   },
   gateway: Pick<SesXeroGateway, "fetchAuthorisedPdf">,
 ): Promise<{
@@ -4389,6 +4501,15 @@ export async function bindAuthorisedInvoicePdfToDocket(
       adopted_existing: true,
     };
   }
+  if (args.existing_only) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "authorised_derivative_mismatch",
+        "Do not send. The exact existing AUTHORISED docket could not be adopted read-only, so recovery cannot bind or replace it.",
+      ),
+    );
+  }
   const docketHash = await sesSha256({
     based_on_revision_id: args.based_on_revision_id,
     invoice_obligation_revision_id: args.invoice_obligation_revision_id,
@@ -4427,6 +4548,7 @@ export async function bindAuthorisedInvoicePdfToDocket(
         xero_invoice_id: args.invoice.xero_invoice_id,
         invoice_number: args.invoice.invoice_number,
         status: args.invoice.status,
+        reference: args.invoice.reference,
         total: Number.isFinite(Number(args.invoice.total))
           ? Number(args.invoice.total)
           : null,
@@ -5296,6 +5418,13 @@ export async function supersedeOverlappingSesReleaseRevisions(
   args: {
     next_release_revision_id: string;
     docket_revision_ids: string[];
+    /**
+     * When present, this commit is a derivative of specific reviewed source
+     * releases, not a new operator correction. It may retire only those known
+     * sources. Any other overlapping active release is an independent current
+     * decision and must make this derivative fail closed.
+     */
+    allowed_superseded_release_revision_ids?: string[];
   },
 ): Promise<string[]> {
   const docketRevisionIds = [
@@ -5363,6 +5492,36 @@ export async function supersedeOverlappingSesReleaseRevisions(
     if (rowCreated !== nextCreated) return rowCreated < nextCreated;
     return row.id < next.id;
   };
+  if (args.allowed_superseded_release_revision_ids) {
+    const allowedIds = new Set(
+      args.allowed_superseded_release_revision_ids.map((id) =>
+        String(id || "").trim()
+      ).filter(Boolean),
+    );
+    const protectedIds = states
+      .filter((row) =>
+        row.id !== args.next_release_revision_id &&
+        ["proposed", "approved", "dispatching", "released"].includes(
+          row.state,
+        ) && !allowedIds.has(row.id)
+      )
+      .map((row) => row.id);
+    if (protectedIds.length > 0) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "stale_review",
+          "Open the current release. This derivative cannot supersede an independent operator correction prepared from the same exact docket.",
+          {
+            evidence: {
+              protected_release_revision_ids: protectedIds,
+              rejected_release_revision_id: args.next_release_revision_id,
+            },
+          },
+        ),
+      );
+    }
+  }
   const dispatching = states.find((row) => row.state === "dispatching");
   if (dispatching) {
     throw new SesActionError(
@@ -5520,6 +5679,51 @@ export async function assertSesReleaseRevisionIsCurrent(
     ),
   ];
   if (overlapIds.length === 0) return;
+  // Once any overlapping release has a route-effect row, that exact release
+  // owns the only operation-key set allowed to continue. Created-at ordering
+  // must not let a later correction proposal strand the partial release or
+  // mint fresh keys that can resend an already-confirmed route. This read also
+  // fences the crash window after a corrected release commit but before its
+  // prepare caller retires the rejected proposal.
+  const effectOwners = await client.from("ses_external_effects")
+    .select("release_revision_id,state,route_kind")
+    .eq("effect_kind", "route_send")
+    .in("release_revision_id", [releaseRevisionId, ...overlapIds]);
+  if (effectOwners.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        "Overlapping route effects could not be read, so current-release execution is refused.",
+    });
+  }
+  const effectReleaseIds = [
+    ...new Set<string>(
+      (effectOwners.data || []).map((row: Record<string, unknown>) =>
+        String(row.release_revision_id || "")
+      ).filter(Boolean),
+    ),
+  ];
+  if (effectReleaseIds.length > 0) {
+    if (
+      effectReleaseIds.length === 1 &&
+      effectReleaseIds[0] === releaseRevisionId
+    ) {
+      return;
+    }
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "release_in_flight",
+        "Reconcile the exact release that already owns route effects; do not approve or execute a corrected release with fresh send keys.",
+        {
+          evidence: {
+            selected_release_revision_id: releaseRevisionId,
+            route_effect_release_revision_ids: effectReleaseIds,
+          },
+        },
+      ),
+    );
+  }
   const releases = await client.from("makesafe_release_revisions")
     .select("id,state,created_at")
     .in("id", overlapIds)
@@ -5577,6 +5781,121 @@ export async function prepareSesReleaseRevisionAction(
   );
   const routes = args.routes ||
     (dockets.length === 1 ? dockets[0].routes : []);
+  const plan = await buildSesReleaseRevisionPlanForDockets({
+    org_id: args.org_id,
+    dockets,
+    routes,
+    created_by: args.created_by,
+  });
+  return await commitSesReleaseRevisionPlanAction(client, plan);
+}
+
+/** Commit and supersede from one already-fenced content-addressed plan. */
+export async function commitSesReleaseRevisionPlanAction(
+  client: SesSupabaseClient,
+  plan: SesReleaseRevisionPlan,
+  options: {
+    allowed_superseded_release_revision_ids?: string[];
+  } = {},
+) {
+  const expectedId = String(plan.release.id || "");
+  const existingBeforeCommit = await client.from(
+    "makesafe_release_revisions",
+  ).select("id,content_hash,state").eq("id", expectedId).maybeSingle();
+  if (existingBeforeCommit.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        "The exact release revision could not be checked before its idempotent commit, so no release state is changed.",
+    });
+  }
+  const committed = await client.rpc("commit_ses_release_revision_v1", {
+    p_release: plan.release,
+    p_members: plan.members,
+    p_routes: plan.routes,
+  });
+  const commit = requireValue(
+    committed,
+    "The content-addressed release revision could not be committed.",
+  );
+  let supersededReleaseRevisionIds: string[];
+  try {
+    supersededReleaseRevisionIds =
+      await supersedeOverlappingSesReleaseRevisions(client, {
+        next_release_revision_id: String(plan.release.id || ""),
+        docket_revision_ids: plan.members.map((member) =>
+          String(member.docket_revision_id || "")
+        ),
+        allowed_superseded_release_revision_ids:
+          options.allowed_superseded_release_revision_ids,
+      });
+  } catch (error) {
+    // commit_ses_release_revision_v1 is durable. If the subsequent overlap
+    // guard refuses (most importantly because an older release owns route
+    // effects), leaving this new row proposed would make it look current and
+    // give it fresh operation keys. Retire the rejected candidate before
+    // returning the original refusal. Execution currentness independently
+    // fences this crash window by preferring the exact route-effect owner.
+    // The RPC is idempotent and may return an already-approved or partially
+    // delivered exact release. A later overlap-read failure must never retire
+    // that recovery owner. Compensate only when this invocation observed no
+    // pre-existing row and the RPC returned a still-proposed candidate.
+    if (
+      existingBeforeCommit.data || String(commit.state || "") !== "proposed"
+    ) {
+      throw error;
+    }
+    const rejectedId = expectedId;
+    const retired = await client.from("makesafe_release_revisions").update({
+      state: "superseded",
+      updated_at: new Date().toISOString(),
+    }).eq("id", rejectedId).eq("state", "proposed")
+      .select("id,state").maybeSingle();
+    let retiredState = String(retired.data?.state || "");
+    if (retired.error || retiredState !== "superseded") {
+      const reread = await client.from("makesafe_release_revisions")
+        .select("id,state").eq("id", rejectedId).maybeSingle();
+      retiredState = String(reread.data?.state || "");
+      if (
+        !reread.error &&
+        ["approved", "dispatching", "released"].includes(retiredState)
+      ) {
+        // Another worker advanced the exact deterministic release after this
+        // invocation's RPC snapshot. It now owns approval/effects and must
+        // remain the retry authority; surface the original overlap failure.
+        throw error;
+      }
+      if (reread.error || retiredState !== "superseded") {
+        throw new SesActionError(500, {
+          state: "refused",
+          fact:
+            "The corrected release was refused, but its rejected proposal could not be retired safely; all overlapping release execution remains hard-refused.",
+        });
+      }
+    }
+    throw error;
+  }
+  return {
+    ...plan,
+    commit,
+    superseded_release_revision_ids: supersededReleaseRevisionIds,
+    external_mutations: { xero: 0, email: 0 },
+  };
+}
+
+/**
+ * Pure content-addressed release planning from already-loaded current dockets.
+ * Recovery uses this to prove an interrupted final release ID without
+ * committing or superseding anything; ordinary prepare uses the same planner
+ * before its explicit commit.
+ */
+export async function buildSesReleaseRevisionPlanForDockets(args: {
+  org_id: string;
+  dockets: SesCockpitDocket[];
+  routes: SesReviewRoute[];
+  created_by: string;
+}) {
+  const { dockets, routes } = args;
   // Composite multi-job releases keep the universal three-route order unless
   // every member is AJS/AJBR (Captain carve-out is AJS/AJBR only).
   const builderKeys = dockets.map((docket) =>
@@ -5622,28 +5941,7 @@ export async function prepareSesReleaseRevisionAction(
     photo_route_applicable: photoRouteApplicable,
     report_route_applicable: reportRouteApplicable,
   });
-  const committed = await client.rpc("commit_ses_release_revision_v1", {
-    p_release: plan.release,
-    p_members: plan.members,
-    p_routes: plan.routes,
-  });
-  const commit = requireValue(
-    committed,
-    "The content-addressed release revision could not be committed.",
-  );
-  const supersededReleaseRevisionIds =
-    await supersedeOverlappingSesReleaseRevisions(client, {
-      next_release_revision_id: String(plan.release.id || ""),
-      docket_revision_ids: plan.members.map((member) =>
-        String(member.docket_revision_id || "")
-      ),
-    });
-  return {
-    ...plan,
-    commit,
-    superseded_release_revision_ids: supersededReleaseRevisionIds,
-    external_mutations: { xero: 0, email: 0 },
-  };
+  return plan;
 }
 
 /**

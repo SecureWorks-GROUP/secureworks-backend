@@ -84,6 +84,46 @@ class MemoryEffectStore implements SesExternalEffectStore {
     };
     return Promise.resolve({ ...this.row });
   }
+
+  claimRedispatch(
+    effect: SesExternalEffect,
+    leaseOwner: string,
+    _actor: string,
+  ): Promise<SesExternalEffect | null> {
+    if (
+      !this.row ||
+      this.row.operation_key !== effect.operation_key ||
+      this.row.state !== effect.state ||
+      !["unknown", "failed"].includes(effect.state)
+    ) {
+      return Promise.resolve(null);
+    }
+    this.row = {
+      ...this.row,
+      state: "dispatching",
+      lease_owner: leaseOwner,
+      lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
+    };
+    return Promise.resolve({ ...this.row });
+  }
+}
+
+interface EffectTableBuilder {
+  update(payload: Record<string, unknown>): EffectTableBuilder;
+  eq(column: string, value: unknown): EffectTableBuilder;
+  select(): EffectTableBuilder;
+  maybeSingle(): Promise<{
+    data: SesExternalEffect | null;
+    error: { message: string } | null;
+  }>;
+  insert(payload: Record<string, unknown>): Promise<{
+    data: Record<string, unknown> | null;
+    error: { message: string } | null;
+  }>;
+}
+
+function effectField(row: SesExternalEffect, column: string): unknown {
+  return (row as unknown as Record<string, unknown>)[column];
 }
 
 function createRpcEffectHarness() {
@@ -95,12 +135,58 @@ function createRpcEffectHarness() {
   }> = [];
 
   const client = {
+    from(table: string) {
+      let updatePayload: Record<string, unknown> | null = null;
+      const filters: Array<[string, unknown]> = [];
+      const builder = {} as EffectTableBuilder;
+      Object.assign(builder, {
+        update(payload: Record<string, unknown>) {
+          updatePayload = payload;
+          return builder;
+        },
+        eq(column: string, value: unknown) {
+          filters.push([column, value]);
+          return builder;
+        },
+        select() {
+          return builder;
+        },
+        async maybeSingle() {
+          if (table !== "ses_external_effects" || !updatePayload || !row) {
+            return { data: null, error: null };
+          }
+          const current = row;
+          const matches = filters.every(([column, value]) =>
+            String(effectField(current, column) ?? "") === String(value ?? "")
+          );
+          if (!matches) return { data: null, error: null };
+          row = { ...row, ...updatePayload } as SesExternalEffect;
+          return { data: { ...row }, error: null };
+        },
+        async insert(payload: Record<string, unknown>) {
+          if (table !== "ses_external_effect_events") {
+            return {
+              data: null,
+              error: { message: `unexpected insert ${table}` },
+            };
+          }
+          transitions.push({
+            from: String(payload.from_state || "") as SesEffectState,
+            to: String(payload.to_state || "") as SesEffectState,
+            event_kind: String(payload.event_kind || ""),
+          });
+          return { data: payload, error: null };
+        },
+      });
+      return builder;
+    },
     async rpc(name: string, args: Record<string, unknown>) {
       if (name === "claim_ses_external_effect_v1") {
         const effect = args.p_effect as Omit<SesExternalEffect, "state">;
         if (!row) {
           row = {
             ...effect,
+            id: "effect-row-1",
             state: "reserved",
             lease_owner: String(args.p_lease_owner || ""),
             lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
@@ -208,7 +294,7 @@ function createRpcEffectHarness() {
     transitions,
     row: () => row ? { ...row } : null,
     seed(effect: SesExternalEffect) {
-      row = { ...effect };
+      row = { id: effect.id || "effect-row-1", ...effect };
     },
   };
 }
@@ -476,14 +562,84 @@ Deno.test(
 );
 
 Deno.test(
-  "real RPC store redispatches expired dispatching and unknown routes with the same token",
+  "two uncertainty retries can acquire only one redispatch lease",
   async () => {
-    for (const initialState of ["dispatching", "unknown"] as const) {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000005",
+      route_kind: "report",
+      payload: { subject: "same frozen route" },
+    });
+    store.row = {
+      ...effect,
+      state: "unknown",
+      lease_owner: "failed-worker",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    };
+    let initialReconciles = 0;
+    let releaseInitialReconciles!: () => void;
+    const initialBarrier = new Promise<void>((resolve) => {
+      releaseInitialReconciles = resolve;
+    });
+    let dispatches = 0;
+    let provider: Array<{ message_id: string }> = [];
+    const adapter = {
+      async dispatch() {
+        dispatches++;
+        provider = [{ message_id: "one-send" }];
+        return provider[0];
+      },
+      async reconcile() {
+        if (provider.length === 0) {
+          initialReconciles++;
+          if (initialReconciles === 2) releaseInitialReconciles();
+          await initialBarrier;
+        }
+        return provider;
+      },
+      identify(result: { message_id: string }) {
+        return result.message_id;
+      },
+      digest(result: { message_id: string }) {
+        return result;
+      },
+    };
+    const attempts = await Promise.all([
+      executeSesExternalEffect({
+        store,
+        effect,
+        payload: { subject: "same frozen route" },
+        adapter,
+        actor: "operator-a",
+      }),
+      executeSesExternalEffect({
+        store,
+        effect,
+        payload: { subject: "same frozen route" },
+        adapter,
+        actor: "operator-b",
+      }),
+    ]);
+    assertEquals(dispatches, 1);
+    assertEquals(store.row?.state, "confirmed");
+    assertEquals(
+      attempts.filter((attempt) => attempt.dispatched).length,
+      1,
+    );
+  },
+);
+
+Deno.test(
+  "real RPC store exclusively leases unknown and failed routes for same-token redispatch",
+  async () => {
+    for (const initialState of ["unknown", "failed"] as const) {
       const harness = createRpcEffectHarness();
       const effect = await buildSesEffect({
         org_id: "00000000-0000-4000-8000-000000000001",
         effect_kind: "route_send",
-        release_revision_id: initialState === "dispatching"
+        release_revision_id: initialState === "failed"
           ? "40000000-0000-4000-8000-000000000002"
           : "40000000-0000-4000-8000-000000000003",
         route_kind: "report",
@@ -493,9 +649,7 @@ Deno.test(
         ...effect,
         state: initialState,
         lease_owner: "dead-worker",
-        lease_expires_at: initialState === "dispatching"
-          ? "2000-01-01T00:00:00.000Z"
-          : new Date(Date.now() + 120_000).toISOString(),
+        lease_expires_at: "2000-01-01T00:00:00.000Z",
       });
       let dispatches = 0;
       let provider: Array<{ message_id: string }> = [];
@@ -534,8 +688,8 @@ Deno.test(
       assertEquals(dispatches, 1);
       assertEquals(harness.transitions[0], {
         from: initialState,
-        to: "failed",
-        event_kind: "exact_token_absent_retry_started",
+        to: "dispatching",
+        event_kind: "exact_token_absent_redispatch_claimed",
       });
 
       const confirmed = await executeSesExternalEffect({
@@ -549,6 +703,52 @@ Deno.test(
       assertEquals(confirmed.dispatched, false);
       assertEquals(dispatches, 1, "confirmed route must never resend");
     }
+  },
+);
+
+Deno.test(
+  "real RPC store never steals an expired dispatching route lease",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000004",
+      route_kind: "report",
+      payload: { subject: "expired but possibly paused" },
+    });
+    harness.seed({
+      ...effect,
+      state: "dispatching",
+      lease_owner: "paused-worker",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    });
+    let dispatches = 0;
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: { subject: "expired but possibly paused" },
+      adapter: {
+        dispatch() {
+          dispatches++;
+          return Promise.resolve({ message_id: "must-not-send" });
+        },
+        reconcile() {
+          return Promise.resolve([] as Array<{ message_id: string }>);
+        },
+        identify(result: { message_id: string }) {
+          return result.message_id;
+        },
+        digest(result: { message_id: string }) {
+          return result;
+        },
+      },
+      actor: "retry-operator",
+    });
+    assertEquals(result.state, "refused");
+    assertEquals(result.dispatched, false);
+    assertEquals(dispatches, 0);
+    assertEquals(harness.transitions, []);
   },
 );
 
