@@ -2556,12 +2556,11 @@ const SES_EFFECT_CLAIM_COLUMNS = [
  * release whose route already reached `unknown` recomputes a different
  * payload_hash for the SAME operation_key and can never reach reconcile.
  *
- * Resolution is reconcile-only and never redispatch: re-read the stored row and
- * return the ORIGINAL effect (original external_token, payload_hash and state),
- * which is exactly the claim the SQL would have returned had the payload not
- * drifted. Dispatch stays structurally unreachable here — only a freshly
- * INSERTED reservation ever claims `dispatch`, and a new release_revision_id
- * mints a new operation_key rather than reusing this one.
+ * Re-read and return the ORIGINAL effect (original external_token,
+ * payload_hash and state). The executor compares that immutable stored hash to
+ * the caller hash before reconcile or redispatch and hard-refuses on drift.
+ * Returning the stored row is therefore evidence for the refusal, never
+ * permission to send changed caller bytes under the original operation key.
  *
  * Identity drift must still refuse. effect_kind and external_token are derived
  * from the same identity hash as operation_key, so a stored row disagreeing on
