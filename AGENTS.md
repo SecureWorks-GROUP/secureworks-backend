@@ -1179,6 +1179,30 @@ and report evidence that is not yet sent must stay in Docs Ready
 (`authorisedAwaitingSend` / ladder v4) — never regress to `trade_report_in`
 after money is committed.
 
+A second recovery on the same action (2026-08-14): an obligation already
+`create_executed` with a bound Xero invoice id ADOPTS that exact invoice and
+goes straight to authorise — the create effect is skipped, never re-run, so no
+second invoice can be minted, and the authorise effect stays the one money
+gate. It exists because the primary create-effect identity omits the retry
+`artifact_hash`: a card whose first mint was refused pre-Xero (primary effect
+stranded at `unknown`) but whose RETRY-keyed mint succeeded would otherwise
+reconcile a token no live invoice carries and refuse `xero_outcome_unknown` on
+every press (SWMS-261116 class). Adoption preserves the mirror's
+`ses_external_token` and never rewrites the `create_executed` binding (that
+would strip the stored `pdf_*` pointers); a mirror read fault refuses
+`invoice_mirror_unreadable` and a VOIDED/DELETED bound invoice refuses
+`bound_invoice_not_live`. The `stale_review` and duplicate gates run BEFORE the
+adopt branch, so a genuinely stale review still refuses. Tests:
+`ses_execute_already_created_recovery_test.ts`.
+
+Every refusal on the SES money chain (approve/execute invoice,
+prepare/approve/execute release) also writes a best-effort `job_events` row —
+`ses_money_action_refused` via `writeSesMoneyChainRefusalAudit`
+(`ses_reporting_actions.ts`) — carrying the refusal code and fact only, never
+the request body or a secret; an audit-write failure never changes the refusal
+response. Diagnose a historical refused press from there rather than assuming
+the reason died with the HTTP response.
+
 The same shape applies at SEND IT: `approveSesReleaseRevisionAction` looks for a
 human APPROVE INVOICE row against `boundDocket.based_on_revision_id`. After a
 re-prepare that row can be orphaned even though money already authorised.
