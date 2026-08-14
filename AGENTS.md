@@ -2521,6 +2521,16 @@ placement promise, and both gaps have already cost a run:
 Worked run, with the PO-grain reference screen that keeps a sibling's money from
 refusing a mintable card: `docs/evidence/ses-draft-mint-run-2026-08-07.md`.
 
+Physical make-safe and temp-fence Docs Ready also require a bound builder-facing
+report PDF (`pack.report_doc_id` or a live `job_documents` `makesafe_report`
+row). A submitted trade service report is Trade Report In only — never the
+report tile and never placement. Soft-assuming `canonical_draft_pack_output_missing`
+/ `curated_source_missing` must not keep the card in Docs Ready. Roof and
+assessment honestly have no local make-safe report and stay on the portal
+floor. `physicalReportCloseoutSatisfied` / `requiresBoundBuilderReportPdf` in
+`makesafe_computed_status.ts` are the one producer; Heathridge SWMS-261174
+(AJBR-70781, 2026-08-14) is the named miss.
+
 ## Portal Truth Has Two Stores, And `portal_verified_at` Is Only One Of Them
 
 `makesafe_job_details.portal_verified_at` / `.portal_verified_cycle` have exactly

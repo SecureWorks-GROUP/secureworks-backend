@@ -396,10 +396,10 @@ Deno.test("named-branch preservation: every pre-existing physical Docs Ready con
   submittedReportWithoutBoundDocument.evidence.packState = null;
   submittedReportWithoutBoundDocument.evidence.pack.report_doc_id = null;
   submittedReportWithoutBoundDocument.evidence.documents.report = false;
-  assertEquals(docsReady(submittedReportWithoutBoundDocument), true);
+  assertEquals(docsReady(submittedReportWithoutBoundDocument), false);
   assertEquals(
     deriveSesStageV2(submittedReportWithoutBoundDocument).stage,
-    "report_ready",
+    "trade_report_in",
   );
 
   const mutations: Array<[string, (input: any) => void]> = [
