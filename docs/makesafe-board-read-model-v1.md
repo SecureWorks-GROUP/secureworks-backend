@@ -23,6 +23,10 @@ plus `placement_engine_version`), crew,
 pack/report chips, age, blockers, and the small presentation keys
 (`has_wo`, `invoice_status`, `site_suburb`, `requesting_company_slug`, …) that
 previously required a second `makesafe_pipeline?history=all` dual-fetch.
+Every card also carries the direct current-card coordinates `report_doc_id`,
+`has_report_doc`, and `invoice_id` (the exact invoice row already selected for
+the card); absent evidence is represented as `null`, `false`, and `null` rather
+than by omitting the keys.
 
 Card shape deliberately omits:
 
