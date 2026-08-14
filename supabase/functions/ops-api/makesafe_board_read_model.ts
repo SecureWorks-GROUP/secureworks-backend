@@ -4,6 +4,7 @@
 import {
   classifyMakesafeJobType,
   computeMakesafeStatus,
+  requiresBoundBuilderReportPdf,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
   type MakesafePortalCapture,
   type MakesafeStatusHold,
@@ -1479,11 +1480,14 @@ export function buildCanonicalMakesafeRows(
       presentation_reason: packHonesty.reason,
       legacy_pack_status: packHonesty.legacy_pack_status,
       closeout_documents: {
-        // The card tick means the trade report is in, matching job detail.
-        // Keep `documents.report` and `has_report_doc` above as the distinct
-        // later fact that a report document has been attached.
-        report: reportIn.satisfied || base?.has_report_doc === true ||
-          !!pack?.report_doc_id,
+        // Physical / temp-fence: the report tile is the builder-facing PDF.
+        // A submitted trade checklist is Trade Report In, never this tick.
+        // Roof / assessment honestly have no local make-safe report, so the
+        // portal/own-template report-in predicate remains the tile.
+        report: requiresBoundBuilderReportPdf(statusInput)
+          ? (base?.has_report_doc === true || !!pack?.report_doc_id)
+          : (reportIn.satisfied || base?.has_report_doc === true ||
+            !!pack?.report_doc_id),
         invoice: invoiceCloseoutSatisfied,
         swms: base?.has_swms_doc === true || !!pack?.swms_doc_id,
       },

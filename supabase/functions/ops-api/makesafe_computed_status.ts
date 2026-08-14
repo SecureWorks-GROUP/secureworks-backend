@@ -228,6 +228,46 @@ export function classifyMakesafeJobType(
   return "physical_makesafe";
 }
 
+/** Roof / assessment honestly have no local make-safe report PDF. */
+export function isReportOnlyMakesafeJob(
+  detail: MakesafeStatusInput["detail"],
+  job?: MakesafeStatusInput["job"],
+  sesFamily?: SesFamilyId | null,
+): boolean {
+  if (
+    sesFamily === "ordinary_roof_portal" ||
+    sesFamily === "own_template_roof" ||
+    sesFamily === "assessment_quote"
+  ) return true;
+  const token = normalizedToken(detail?.report_type) ||
+    normalizedToken(job?.metadata?.makesafe_job_family);
+  return token === "roof" || token === "roof_report" ||
+    token === "ordinary_roof_portal" || token === "own_template_roof" ||
+    token === "assessment" || token === "assessment_report" ||
+    token === "assessment_quote" || token === "assessment_report_quote";
+}
+
+/**
+ * Physical make-safe and temp-fence Docs Ready require a bound builder-facing
+ * report PDF. Repair is not a make-safe report-only family; it matches the
+ * same honest physical pack path. Roof / assessment never belong here.
+ */
+export function requiresBoundBuilderReportPdf(
+  input: MakesafeStatusInput,
+): boolean {
+  if (isReportOnlyMakesafeJob(input.detail, input.job, input.ses_family)) {
+    return false;
+  }
+  if (
+    input.ses_family === "physical_makesafe" ||
+    input.ses_family === "temporary_fencing" ||
+    input.ses_family === "restoration" ||
+    input.ses_family === "repair"
+  ) return true;
+  return classifyMakesafeJobType(input.detail, input.job) ===
+    "physical_makesafe";
+}
+
 function currentCycleReports(input: MakesafeStatusInput): any[] {
   const cycle = Number(input.detail?.cycle_number ?? 1);
   return (input.evidence?.serviceReports || []).filter((report) =>
@@ -395,16 +435,17 @@ export function reportInEvidence(input: MakesafeStatusInput): {
 }
 
 /**
- * Physical Docs Ready accepts the canonical current-cycle report predicate as
- * a legacy fallback when a fully drafted pack missed its report_doc_id bind.
- * A real typed/bound report document remains sufficient on its own.
+ * Physical / temp-fence Docs Ready requires a bound builder-facing report PDF.
+ * A submitted trade service report is Trade Report In evidence only — it must
+ * never promote a card into the review queue. `documents.report` is the typed
+ * `job_documents` equivalent (`makesafe_report` or the filename fallback);
+ * `pack.report_doc_id` is the pack bind. Roof / assessment never call this.
  */
 export function physicalReportCloseoutSatisfied(
   input: MakesafeStatusInput,
 ): boolean {
   return !!input.evidence?.pack?.report_doc_id ||
-    input.evidence?.documents?.report === true ||
-    reportInEvidence(input).satisfied;
+    input.evidence?.documents?.report === true;
 }
 
 export function docsReady(input: MakesafeStatusInput): boolean {
@@ -429,6 +470,10 @@ export function docsReady(input: MakesafeStatusInput): boolean {
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
   if (["READY", "READY_TO_BUILD"].includes(recorded)) {
+    if (
+      requiresBoundBuilderReportPdf(input) &&
+      !physicalReportCloseoutSatisfied(input)
+    ) return false;
     return kind !== "assessment_report_quote" ||
       reportInEvidence(input).satisfied;
   }
@@ -440,7 +485,7 @@ export function docsReady(input: MakesafeStatusInput): boolean {
   // duplicated into job_documents before the card can be reviewed.
   if (!pack || packSentStatuses.includes(packStatus)) return false;
   if (
-    kind === "physical_makesafe" &&
+    requiresBoundBuilderReportPdf(input) &&
     !physicalReportCloseoutSatisfied(input)
   ) return false;
   if (input.evidence?.swmsRequired && !pack.swms_doc_id) return false;

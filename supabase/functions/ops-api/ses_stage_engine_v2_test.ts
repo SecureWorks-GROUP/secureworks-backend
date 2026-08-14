@@ -1659,9 +1659,9 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     "report_ready",
   );
   // The current Xero DRAFT is the invoice fact; it does not also need a
-  // duplicated job_documents invoice row. A submitted current-cycle report
-  // with the photo floor is the canonical report fallback; required SWMS stays
-  // independent.
+  // duplicated job_documents invoice row. A bound builder-facing report PDF
+  // is the report fact; a submitted trade checklist is Trade Report In only.
+  // Required SWMS stays independent.
   const missingReport = deriveSesStageV2(input({
     evidence: {
       ...base,
@@ -1670,6 +1670,14 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     },
   }));
   assert(missingReport.stage !== "report_ready", "report must be required");
+  const tradeReportIsNotThePdf = deriveSesStageV2(input({
+    evidence: {
+      ...base,
+      documents: { ...base.documents, report: false },
+      pack: { status: "drafted", report_doc_id: null },
+    },
+  }));
+  assertEquals(tradeReportIsNotThePdf.stage, "trade_report_in");
   const missingSwms = deriveSesStageV2(input({
     evidence: {
       ...base,
@@ -2007,6 +2015,55 @@ Deno.test("docs ready: the corrected rule is never LOOSER than the existing one"
   }
 });
 
+Deno.test("docs ready: a report-only roof with no local make-safe PDF still uses the portal floor", () => {
+  const roof = portalInput([ACCEPTED], {
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: [ACCEPTED],
+      packState: "READY",
+      pack: { status: "drafted", report_doc_id: null, invoice_doc_id: null },
+      documents: { report: false, invoice: false },
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
+    },
+  });
+  assertEquals(docsReady(roof), true);
+  assertEquals(deriveSesStageV2(roof).stage, "report_ready");
+});
+
+Deno.test("docs ready: Heathridge temp-fence with a trade report and no bound PDF stays Trade Report In", () => {
+  const heathridge = input({
+    ses_family: "temporary_fencing",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "temp_fence_makesafe" },
+    },
+    evidence: {
+      packState: "READY",
+      assignments: [{ id: "a1" }],
+      serviceReports: [{ status: "submitted", cycle_number: 1 }],
+      completionPhotoCount: 13,
+      documents: { report: false, invoice: true, swms: false },
+      swmsRequired: false,
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
+      pack: {
+        status: "drafted",
+        report_doc_id: null,
+        invoice_doc_id: "invoice-1205",
+        pre_xero_docs_ready: true,
+        blockers: [
+          { code: "canonical_draft_pack_output_missing" },
+          { code: "curated_source_missing" },
+        ],
+      },
+    },
+  });
+  assertEquals(docsReady(heathridge), false);
+  assertEquals(deriveSesStageV2(heathridge).stage, "trade_report_in");
+  assertEquals(deriveSesStageV2(heathridge).ses_family, "temporary_fencing");
+});
+
 Deno.test("docs ready: repair and restoration take the standard path", () => {
   // Captain-sealed: repair matches the existing system, restoration behaves
   // exactly like any other job. Neither gets a bespoke Docs Ready contract.
@@ -2041,6 +2098,20 @@ Deno.test("docs ready: M1 consumes the shared DRAFT prerequisite without becomin
         evidence: {
           packState: "READY",
           invoiceQualifiesAsCurrentDraft: true,
+        },
+      }),
+      displayedStatus: "allocated",
+    }).status,
+    "new",
+  );
+  assertEquals(
+    computeMakesafeStatus({
+      ...input({
+        evidence: {
+          packState: "READY",
+          invoiceQualifiesAsCurrentDraft: true,
+          documents: { report: true },
+          pack: { status: "drafted", report_doc_id: "report-doc" },
         },
       }),
       displayedStatus: "allocated",

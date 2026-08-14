@@ -52,6 +52,7 @@ import {
   type MakesafeStatusHold,
   type MakesafeStatusInput,
   physicalReportCloseoutSatisfied,
+  requiresBoundBuilderReportPdf,
 } from "./makesafe_computed_status.ts";
 import {
   isMakesafeTerminalDisplayStatus,
@@ -72,7 +73,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r17-report-done-floor";
+  "ses-stage-engine.v2-r18-bound-report-pdf-floor";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -600,10 +601,13 @@ export function sesStageDocsReady(
   }
 
   if (family.kind === "physical_makesafe") {
-    // Physical closeout consumes the same current-cycle submitted-report
-    // predicate as docsReady(), with a typed/bound report document as stronger
-    // evidence when present. Required SWMS remains an independent artifact.
-    if (!physicalReportCloseoutSatisfied(input)) {
+    // Physical / temp-fence Docs Ready is a bound builder-facing report PDF,
+    // never a submitted trade checklist. Report-only families skip this
+    // floor. Required SWMS stays independent.
+    if (
+      requiresBoundBuilderReportPdf(input) &&
+      !physicalReportCloseoutSatisfied(input)
+    ) {
       missing.push("the make-safe report");
     }
     if (

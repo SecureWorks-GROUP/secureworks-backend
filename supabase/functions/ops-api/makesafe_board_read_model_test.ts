@@ -965,7 +965,7 @@ Deno.test("parseMakesafeBoardColumnScope defaults to active; full/include_archiv
   );
 });
 
-Deno.test("card report tick is done for a current-cycle submitted service report without a report document", () => {
+Deno.test("card report tick stays false for a current-cycle submitted service report without a report document", () => {
   const id = "submitted-report-no-document";
   const [card] = buildCanonicalMakesafeRows([
     baseJob("trade_report_in", id, {
@@ -978,7 +978,7 @@ Deno.test("card report tick is done for a current-cycle submitted service report
   }, "card");
 
   assertEquals(card.canonical_stage, "trade_report_in");
-  assertEquals(card.pack.closeout_documents.report, true);
+  assertEquals(card.pack.closeout_documents.report, false);
 });
 
 Deno.test("card report tick stays false without a submitted report or report document", () => {
@@ -993,6 +993,82 @@ Deno.test("card report tick stays false without a submitted report or report doc
   );
 
   assertEquals(card.canonical_stage, "allocated");
+  assertEquals(card.pack.closeout_documents.report, false);
+});
+
+Deno.test("Heathridge SWMS-261174: temp-fence trade report + DRAFT invoice is not Docs Ready without a bound report PDF", () => {
+  // Live 2026-08-14: AJBR-70781 / temp_fence_makesafe. Trade submitted a
+  // service report (13 photos). Pack drafted, INV-1205 DRAFT bound,
+  // invoice_doc_id set, pack.report_doc_id NULL, no makesafe_report row.
+  // The board still placed the card in Docs Ready and greened the report
+  // tile off trade-report-in. A submitted checklist is TRI, never Docs Ready.
+  const id = "heathridge-261174";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      job_number: "SWMS-261174",
+      external_ref: "AJBR-70781",
+      site_suburb: "Heathridge",
+      metadata: {
+        builder_claim_ref: "AJBR-70781",
+        builder_po_number: "PO-70781",
+        makesafe_job_family: "temp_fence_makesafe",
+      },
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        id: "26dab9d2-63eb-419f-9d90-58dae19c7f39",
+        status: "drafted",
+        review_state: "READY",
+        report_doc_id: null,
+        invoice_doc_id: "invoice-1205",
+        pre_xero_docs_ready: true,
+        blockers: [
+          { code: "canonical_draft_pack_output_missing" },
+          { code: "curated_source_missing" },
+        ],
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: false,
+      has_invoice_doc: true,
+      has_swms_doc: false,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.ses_family, "temporary_fencing");
+  assertEquals(card.canonical_stage, "trade_report_in");
+  assertEquals(card.pack.closeout_documents.report, false);
+  assertEquals(card.pack.closeout_documents.invoice, true);
+});
+
+Deno.test("repair cards do not inherit a make-safe Docs Ready floor from a trade report alone", () => {
+  const id = "repair-trade-report-only";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      metadata: {
+        builder_claim_ref: "MLB-REPAIR",
+        builder_po_number: "PO-REPAIR",
+        makesafe_job_family: "repair",
+      },
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        report_doc_id: null,
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: false,
+      has_invoice_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.ses_family, "repair");
+  assertEquals(card.canonical_stage, "trade_report_in");
   assertEquals(card.pack.closeout_documents.report, false);
 });
 
@@ -1092,11 +1168,10 @@ Deno.test("captain lock: MLB physical cards without SWMS stay Trade Report In", 
         report_pack: {
           ...READY_UNSENT_PACK,
           review_state: null,
-          report_doc_id: null,
         },
         invoice_status: "DRAFT",
         invoice_qualifies_as_current_draft: true,
-        has_report_doc: false,
+        has_report_doc: true,
         has_invoice_doc: false,
         has_swms_doc: true,
       }),
