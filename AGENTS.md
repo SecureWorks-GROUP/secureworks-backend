@@ -901,6 +901,23 @@ embedded in a single report PDF (bind still accounts every current-cycle
 bound what the docket hashes, uploads or lists, and reducing either to save
 memory is forbidden.
 
+**Send path too, not just prepare (2026-08-14):** the same
+`String.fromCharCode`-per-byte base64 pattern also lived in
+`uploadSesGraphAttachment`'s `_bytesToBase64` (index.ts) — the function every
+SES Graph attachment upload calls, one photo at a time. It was the trigger for
+production HTTP 546s on `execute_ses_release_revision` (the SEND IT action
+itself), not just `prepare_ses_docket_revision`. Fixed by delegating to the
+already-chunked `bytesToBase64` defined earlier in the same file rather than
+writing yet another independent encoder. `grep -n "String.fromCharCode(bytes"
+supabase/functions/ops-api/*.ts` still turns up at least one more (a
+single-PDF Xero-invoice-fetch base64 at index.ts ~29060) — lower risk because
+it runs once per call rather than 40-70 times in one invocation, so it was
+left alone rather than fixed speculatively, but it is the same bug shape and
+the next person touching that code should not re-derive that from scratch.
+If a future 546 shows up anywhere in the SES pipeline, grep for this pattern
+before assuming a new cause. See
+`docs/evidence/ses-makesafe-photo-route-546-2026-08-14.md`.
+
 ## Portal Completion Has Two Producers
 
 The trade roof-report confirmation contract, including its producer boundaries,
