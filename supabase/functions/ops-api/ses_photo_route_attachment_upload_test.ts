@@ -40,7 +40,11 @@ function decodeBase64(b64: string): Uint8Array {
 // arrays (multiple seconds at MB scale) that has nothing to do with
 // bytesToBase64's own cost, so it would corrupt these timing-sensitive
 // assertions. Use a fast manual comparison for the large-buffer checks.
-function assertBytesEqual(actual: Uint8Array, expected: Uint8Array, msg: string) {
+function assertBytesEqual(
+  actual: Uint8Array,
+  expected: Uint8Array,
+  msg: string,
+) {
   assertEquals(actual.length, expected.length, msg);
   for (let i = 0; i < expected.length; i++) {
     if (actual[i] !== expected[i]) {
@@ -124,12 +128,21 @@ Deno.test("photo route: createDraftAndSend completes a realistic 43-attachment p
   ) => {
     const encoded = _bytesToBase64(attachment.bytes);
     assert(encoded.length > 0);
-    uploaded.push({ name: attachment.name, bytes: attachment.bytes.byteLength });
+    uploaded.push({
+      name: attachment.name,
+      bytes: attachment.bytes.byteLength,
+    });
   };
 
-  const graphJson = async (url: string, init: RequestInit, expected: number[]) => {
+  const graphJson = async (
+    url: string,
+    init: RequestInit,
+    expected: number[],
+  ) => {
     const method = String(init.method || "GET").toUpperCase();
-    if (method === "POST" && url.endsWith("/messages") && !url.includes("/send")) {
+    if (
+      method === "POST" && url.endsWith("/messages") && !url.includes("/send")
+    ) {
       assert(expected.includes(201));
       return { id: "draft-photo-1" };
     }
@@ -145,7 +158,10 @@ Deno.test("photo route: createDraftAndSend completes a realistic 43-attachment p
           id: "sent-photo-1",
           internetMessageId: "<photo-pack@example>",
           subject: "Photo Evidence",
-          internetMessageHeaders: [{ name: "x-secureworks-ses-operation", value: token }],
+          internetMessageHeaders: [{
+            name: "x-secureworks-ses-operation",
+            value: token,
+          }],
         }],
       };
     }
