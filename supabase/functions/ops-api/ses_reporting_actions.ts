@@ -3326,6 +3326,46 @@ function refuseWhenCardMoneyExists(docket: SesCockpitDocket): void {
   if (blocker) throw new SesActionError(409, blocker);
 }
 
+/**
+ * The exact review coordinates the operator saw when they pressed APPROVE
+ * INVOICE. T8 (Harden SES v1, trace T8 / AC7): a stale cockpit request must not
+ * silently approve a NEWER server-current revision than the one on screen, so
+ * the caller echoes the inspected docket revision id, invoice obligation
+ * revision id, and docket output/content hash, and the action refuses drift
+ * BEFORE recording approval. This mirrors the stronger explicit-revision shape
+ * `approveSesReleaseRevisionAction` already has (release approval binds the exact
+ * `release_revision_id` + per-member docket/readiness coordinates).
+ */
+export interface SesInvoiceApprovalCoordinates {
+  docket_revision_id: string | null;
+  invoice_obligation_revision_id: string | null;
+  output_content_hash: string | null;
+}
+
+/**
+ * Compare the caller-echoed review coordinates against the server-current
+ * docket coordinates. Only the fields the caller actually supplied are
+ * compared, so an absent field never manufactures a false drift; every supplied
+ * field must match exactly. Pure so it can be unit-tested without a database.
+ */
+export function sesInvoiceApprovalCoordinateDrift(
+  expected: Partial<SesInvoiceApprovalCoordinates>,
+  actual: SesInvoiceApprovalCoordinates,
+): { drifted: boolean; fields: string[] } {
+  const fields: string[] = [];
+  const check = (
+    key: keyof SesInvoiceApprovalCoordinates,
+  ): void => {
+    const want = expected[key];
+    if (want === undefined || want === null) return;
+    if (String(want) !== String(actual[key] ?? "")) fields.push(key);
+  };
+  check("docket_revision_id");
+  check("invoice_obligation_revision_id");
+  check("output_content_hash");
+  return { drifted: fields.length > 0, fields };
+}
+
 export async function approveSesInvoiceRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -3334,9 +3374,28 @@ export async function approveSesInvoiceRevisionAction(
     job_id: string;
     includes_authorise: boolean;
     evidence_refs?: unknown[];
+    /**
+     * T8 echoed exact review coordinates. When supplied they are compared
+     * against the server-current docket BEFORE approval is recorded (drift ->
+     * `stale_review`). The primary `approve_ses_invoice_revision` HTTP door
+     * REQUIRES all three; the separately-secured channel-approval transport
+     * (`submit_ses_channel_approval`, single-use code + sender + message hash)
+     * calls without them and keeps its own binding.
+     */
+    expected_docket_revision_id?: string | null;
+    expected_invoice_obligation_revision_id?: string | null;
+    expected_output_content_hash?: string | null;
   },
+  deps: {
+    /** Docket reader, defaulting to the canonical loader. Injectable for tests. */
+    loadDocket?: (
+      client: SesSupabaseClient,
+      jobId: string,
+    ) => Promise<SesCockpitDocket>;
+  } = {},
 ) {
-  const docket = await loadSesCockpitDocket(client, args.job_id);
+  const loadDocket = deps.loadDocket ?? loadSesCockpitDocket;
+  const docket = await loadDocket(client, args.job_id);
   if (
     docket.clean_input.pricing_disposition === "no_additional_charge"
   ) {
@@ -3345,6 +3404,36 @@ export async function approveSesInvoiceRevisionAction(
       fact:
         "This later attendance is explicitly no additional charge, so there is no Xero invoice action to approve; review the document-only routes and use SEND IT.",
     });
+  }
+  // T8: refuse drift against the exact inspected revision BEFORE recording
+  // approval. Nothing has been written yet, so a stale request cannot attach to
+  // a newer current revision than the operator reviewed.
+  const echo = sesInvoiceApprovalCoordinateDrift(
+    {
+      docket_revision_id: args.expected_docket_revision_id,
+      invoice_obligation_revision_id:
+        args.expected_invoice_obligation_revision_id,
+      output_content_hash: args.expected_output_content_hash,
+    },
+    {
+      docket_revision_id: docket.docket_revision_id,
+      invoice_obligation_revision_id: docket.invoice_obligation_revision_id,
+      output_content_hash: docket.docket_output_content_hash ?? null,
+    },
+  );
+  if (echo.drifted) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Re-open the current invoice review and approve the exact revision on screen; the docket changed since it was inspected.",
+        {
+          fact:
+            "The echoed review coordinates do not match the current server docket.",
+          evidence: { drifted_fields: echo.fields },
+        },
+      ),
+    );
   }
   refuseWhenCardMoneyExists(docket);
   const verdict = sesVerdictWithExistingMoney(
