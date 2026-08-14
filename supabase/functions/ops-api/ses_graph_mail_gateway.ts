@@ -27,7 +27,10 @@ export interface SesMailGateway {
     route: Record<string, any>,
     context: { external_token: string; operation_key: string },
   ): Promise<SesRouteSendResult>;
-  reconcileSent(externalToken: string): Promise<SesRouteSendResult[]>;
+  reconcileSent(
+    externalToken: string,
+    route?: Record<string, any>,
+  ): Promise<SesRouteSendResult[]>;
 }
 
 export const SES_RELEASE_MAILBOX = "admin@secureworkswa.com.au";
@@ -55,6 +58,10 @@ export const SES_INTAKE_GROUP_MAIL = "ses@secureworkswa.com.au";
 
 /** Non-visible carrier for crash-safe Sent Items / Drafts reconciliation. */
 export const SES_OPERATION_HEADER = "x-secureworks-ses-operation";
+/** Exact non-visible operation coordinate on an M365 group-thread post. */
+export const SES_OPERATION_EXTENSION_NAME = "com.secureworks.sesOperation";
+export const SES_OPERATION_EXTENSION_ID =
+  `Microsoft.OutlookServices.OpenTypeExtension.${SES_OPERATION_EXTENSION_NAME}`;
 
 /** Maverick / admin@ HTML signature (matches send-outlook-email admin branch). */
 export const SES_ADMIN_HTML_SIGNATURE = `
@@ -462,14 +469,42 @@ export function createSesGraphMailGateway(
     return filterMessagesByOperationToken(drafts, externalToken);
   };
 
+  const reconcileGroupThread = async (
+    externalToken: string,
+    threadId: string,
+  ): Promise<SesRouteSendResult[]> => {
+    const groupId = await resolveGroupId(deps.graphJson);
+    const listed = await deps.graphJson(
+      `https://graph.microsoft.com/v1.0/groups/${
+        encodeURIComponent(groupId)
+      }/threads/${
+        encodeURIComponent(threadId)
+      }/posts?$select=id,createdDateTime&$expand=extensions&$orderby=createdDateTime desc&$top=50`,
+      { method: "GET" },
+      [200],
+    );
+    const matches = (Array.isArray(listed?.value) ? listed.value : []).filter(
+      (post: any) =>
+        (Array.isArray(post?.extensions) ? post.extensions : []).some(
+          (extension: any) =>
+            String(extension?.id || "") === SES_OPERATION_EXTENSION_ID &&
+            String(extension?.externalToken || "") === externalToken,
+        ),
+    );
+    return matches.map((post: any) => ({
+      message_id: String(post.id || ""),
+      state: "sent" as const,
+      operation_token: externalToken,
+    })).filter((result: SesRouteSendResult) => !!result.message_id);
+  };
+
   /**
    * Reply on the ses@ group work-order intake thread.
-   * Proof: list newest posts on the thread and match the exact HTML body we
-   * sent (operation token is not placed in builder-facing body; body identity
-   * is the proof coordinate).
+   * Proof: the reply atomically carries an open extension with the exact SES
+   * operation token, then reconciliation reads that non-visible coordinate.
+   * Builder-facing subject/body never carry the token.
    */
   const sendGroupThreadReply = async (
-    route: Record<string, any>,
     context: { external_token: string; operation_key: string },
     threadId: string,
     attachments: SesRouteAttachment[],
@@ -499,30 +534,32 @@ export function createSesGraphMailGateway(
           post: {
             body: { contentType: "HTML", content: html },
             ...(postAttachments.length ? { attachments: postAttachments } : {}),
+            extensions: [{
+              "@odata.type": "microsoft.graph.openTypeExtension",
+              extensionName: SES_OPERATION_EXTENSION_NAME,
+              externalToken: context.external_token,
+              operationKey: context.operation_key,
+            }],
           },
         }),
       },
       [202],
     );
-    // Prove the post landed on the thread by exact body match.
+    // Prove the post landed by the exact non-visible operation token. This is
+    // the same reconciliation path a later worker uses after a crash.
     let matchedPostId = "";
     for (let attempt = 0; attempt < pollAttempts; attempt++) {
-      const listed = await deps.graphJson(
-        `https://graph.microsoft.com/v1.0/groups/${
-          encodeURIComponent(groupId)
-        }/threads/${
-          encodeURIComponent(threadId)
-        }/posts?$select=id,body,createdDateTime&$orderby=createdDateTime desc&$top=10`,
-        { method: "GET" },
-        [200],
+      const matches = await reconcileGroupThread(
+        context.external_token,
+        threadId,
       );
-      const posts = Array.isArray(listed?.value) ? listed.value : [];
-      const match = posts.find((post: any) => {
-        const content = String(post?.body?.content || "");
-        return content === html || content.includes(html.slice(0, 120));
-      });
-      if (match?.id) {
-        matchedPostId = String(match.id);
+      if (matches.length > 1) {
+        throw new Error(
+          `Graph reconciliation found ${matches.length} group posts for exact SES token ${context.external_token}; refusing automatic redispatch`,
+        );
+      }
+      if (matches[0]?.message_id) {
+        matchedPostId = matches[0].message_id;
         break;
       }
       if (attempt + 1 < pollAttempts) await sleep(pollDelayMs);
@@ -581,7 +618,6 @@ export function createSesGraphMailGateway(
       if (usesGroupThreadReply) {
         // MLB physical report/photo: reply on the ses@ group intake thread.
         return await sendGroupThreadReply(
-          route,
           context,
           threadId,
           attachments,
@@ -656,11 +692,31 @@ export function createSesGraphMailGateway(
       return sent;
     },
 
-    async reconcileSent(externalToken) {
+    async reconcileSent(externalToken, route) {
+      const threadId = String(route?.reply_to_thread_id || "").trim();
+      if (route?.requires_thread_reply === true) {
+        if (!threadId) {
+          throw new Error(
+            "requires_thread_reply is true but no intake thread id is bound; refusing to reconcile or open a new thread",
+          );
+        }
+        const posts = await reconcileGroupThread(externalToken, threadId);
+        if (posts.length > 1) {
+          throw new Error(
+            `Graph reconciliation found ${posts.length} group posts for exact SES token ${externalToken}; refusing automatic redispatch`,
+          );
+        }
+        return posts;
+      }
       const existingSent = await reconcileSentOnly(externalToken);
       if (existingSent.length) return existingSent;
       const drafts = await findDrafts(externalToken);
-      if (drafts.length !== 1) return [];
+      if (drafts.length > 1) {
+        throw new Error(
+          `Graph reconciliation found ${drafts.length} drafts for exact SES token ${externalToken}; refusing automatic redispatch`,
+        );
+      }
+      if (drafts.length === 0) return [];
       const draftId = String(drafts[0].id || "");
       if (!draftId) return [];
       await deps.graphJson(

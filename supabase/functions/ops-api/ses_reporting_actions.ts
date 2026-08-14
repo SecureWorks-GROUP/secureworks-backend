@@ -84,6 +84,11 @@ import {
   sesSha256Bytes,
   stableUuidFromSha256,
 } from "./ses_docket_envelope.ts";
+import {
+  SesAuthorisedDerivativeError,
+  type SesAuthorisedDerivativeProof,
+  verifySesAuthorisedDerivative,
+} from "./ses_authorised_derivative.ts";
 import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
 import {
   inspectSesSupportingReportProof,
@@ -603,6 +608,9 @@ export function resolveDocketRoutes(
   const boundInvoiceId = String(xero.xero_invoice_id || "");
   const boundInvoiceNumber = String(xero.invoice_number || "");
   const xeroStatus = String(xero.status || "").toUpperCase();
+  const draftInvoicePdfHash = xeroStatus === "DRAFT"
+    ? String(xero.pdf_content_hash || "").trim()
+    : "";
   const invoicePdfs = artifacts.filter((artifact) =>
     artifact.role === "xero_invoice_pdf" &&
     artifact.media_type === "application/pdf"
@@ -693,8 +701,17 @@ export function resolveDocketRoutes(
         // execute sends, so its body can never carry bind-state annotations.
         // The subject and readiness still say this is a Xero draft.
         body: sesBuilderRouteBody("invoice", builderReference),
-        attachment_hashes: [...new Set(supportHashes)],
-        ready: route.ready && !unsupportedReference,
+        // This proposed preview release is never executable while the invoice
+        // is DRAFT, but its hash must still freeze the exact PDF the operator
+        // reviewed. The post-authorisation release replaces only this hash
+        // after the deterministic-derivative check.
+        attachment_hashes: [
+          ...new Set([
+            ...(draftInvoicePdfHash ? [draftInvoicePdfHash] : []),
+            ...supportHashes,
+          ]),
+        ],
+        ready: route.ready && !!draftInvoicePdfHash && !unsupportedReference,
       };
     }
 
@@ -755,8 +772,9 @@ export function resolveDocketRoutes(
     // without a re-prepare. The billing mailbox stays the sealed matrix value
     // that the envelope already declares (Perth makesafes@ / south-west bunbury@).
     const billingMailbox = String(routing.invoice_to || "").trim();
-    const invoicePdfHash = String(invoicePdf?.content_hash || "").trim() ||
-      null;
+    const invoicePdfHash = String(
+      invoicePdf?.content_hash || draftInvoicePdfHash || "",
+    ).trim() || null;
     const ordinaryMailSend = options?.mlbOrdinaryMailSendFallback ??
       mlbPhysicalUsesOrdinaryMailSendFallback();
     const originalSubject = String(
@@ -843,7 +861,9 @@ export function resolveDocketRoutes(
     });
     const combinedHashes = [
       ...new Set([
-        ...(invoicePdf?.content_hash ? [String(invoicePdf.content_hash)] : []),
+        ...(invoicePdf?.content_hash
+          ? [String(invoicePdf.content_hash)]
+          : (draftInvoicePdfHash ? [draftInvoicePdfHash] : [])),
         ...reportHashes,
         ...invoiceHashes,
       ]),
@@ -860,8 +880,13 @@ export function resolveDocketRoutes(
           reference || "Make-safe"
         } - report and Xero invoice ${invoiceNumber}`
           .trim()
-        : (report?.subject ||
-          `${reference || "Make-safe"} - report and invoice`).trim(),
+        : (xeroStatus === "DRAFT" && boundInvoiceId
+          ? `${reference || "Make-safe"} - report and Xero draft ${
+            invoiceNumber || "pending-number"
+          }`
+            .trim()
+          : (report?.subject ||
+            `${reference || "Make-safe"} - report and invoice`).trim()),
       body: ajsReportInvoiceBody,
       attachment_hashes: combinedHashes,
       ready: !!report?.ready && authorised && recipients.length > 0,
@@ -1140,21 +1165,6 @@ export async function loadSesCockpitDocket(
       }).`,
     });
   }
-  const routes = resolveDocketRoutes(
-    docket,
-    cockpitArtifacts,
-    obligation,
-  );
-  const cleanInput = cleanInputFromRows({
-    docket,
-    readiness,
-    obligation,
-    routes,
-  });
-  if (sourceRefusal) {
-    cleanInput.readiness_blockers.push(sourceRefusal);
-    cleanInput.money_blocker_codes.push(sourceRefusal.code);
-  }
   const rawBinding = resolveSesRouteXeroBinding(docket, obligation);
   type CockpitXeroBinding = {
     xero_invoice_id: string;
@@ -1232,6 +1242,18 @@ export async function loadSesCockpitDocket(
         });
         xeroInvoicePdfAvailable = projected.source === "live_fetch" &&
           !!projected.artifact.signed_url;
+        if (projected.binding_pdf && obligation) {
+          obligation.xero_binding = {
+            ...object(obligation.xero_binding),
+            ...projected.binding_pdf,
+          };
+          xeroBinding = {
+            ...xeroBinding,
+            pdf_content_hash: projected.binding_pdf.pdf_content_hash,
+            pdf_object_key: projected.binding_pdf.pdf_object_key,
+            pdf_size_bytes: projected.binding_pdf.pdf_size_bytes,
+          };
+        }
       }
     } else {
       const boundArtifact = matchingXeroInvoicePdfArtifact(
@@ -1241,6 +1263,25 @@ export async function loadSesCockpitDocket(
       xeroInvoicePdfAvailable = !!String(boundArtifact?.object_key || "")
         .trim();
     }
+  }
+  // Route hashes are resolved only after the live DRAFT PDF refresh above.
+  // That makes a proposed preview release content-address the exact invoice
+  // document the operator saw, while the send action still refuses every DRAFT
+  // and later mints a distinct AUTHORISED release.
+  const routes = resolveDocketRoutes(
+    docket,
+    cockpitArtifacts,
+    obligation,
+  );
+  const cleanInput = cleanInputFromRows({
+    docket,
+    readiness,
+    obligation,
+    routes,
+  });
+  if (sourceRefusal) {
+    cleanInput.readiness_blockers.push(sourceRefusal);
+    cleanInput.money_blocker_codes.push(sourceRefusal.code);
   }
   const releaseSendProgress = await loadSesReleaseSendProgressForJob(
     client,
@@ -2501,6 +2542,8 @@ const SES_EFFECT_CLAIM_COLUMNS = [
   "state",
   "external_id",
   "provider_digest",
+  "lease_owner",
+  "lease_expires_at",
 ].join(",");
 
 /**
@@ -3116,6 +3159,118 @@ export async function signOffSesDocketAction(
   };
 }
 
+/**
+ * Option B's hard safety net: the one human DRAFT approval pre-ratifies only
+ * the verified deterministic AUTHORISED derivative. This records the distinct
+ * Docs Ready decision on the post-bind docket without falsely claiming the
+ * operator displayed a second PDF. It is intentionally not exposed as an HTTP
+ * action; only the unified server workflow calls it after verification.
+ */
+export async function ratifySesAuthorisedDerivativeDocketAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  args: {
+    based_on_docket_revision_id: string;
+    docket_revision_id: string;
+    expected_output_content_hash: string;
+    bound_pdf_content_hash: string;
+    derivative: SesAuthorisedDerivativeProof;
+  },
+) {
+  await requireSesDocsReadySigner(client, auth);
+  if (
+    !String(args.based_on_docket_revision_id || "").trim() ||
+    !String(args.docket_revision_id || "").trim() ||
+    !/^sha256:[0-9a-f]{64}$/.test(args.expected_output_content_hash) ||
+    !/^sha256:[0-9a-f]{64}$/.test(args.bound_pdf_content_hash)
+  ) {
+    throw new SesActionError(400, {
+      state: "refused",
+      fact:
+        "The exact source docket, AUTHORISED docket, output hash, and bound PDF hash are required for derivative ratification.",
+    });
+  }
+  const [reviewResponse, docketResponse, artifactsResponse] = await Promise.all(
+    [
+      client.from("ses_docket_review_current").select(
+        "docket_revision_id,docket_output_content_hash,review_state",
+      ).eq("docket_revision_id", args.docket_revision_id).maybeSingle(),
+      client.from("makesafe_docket_revisions").select(
+        "id,based_on_revision_id,stage,xero_binding,invoice_obligation_revision_id",
+      ).eq("id", args.docket_revision_id).maybeSingle(),
+      client.from("makesafe_docket_artifacts").select(
+        "role,content_hash,metadata",
+      ).eq("revision_id", args.docket_revision_id)
+        .eq("role", "xero_invoice_pdf"),
+    ],
+  );
+  const review = requireValue(
+    reviewResponse,
+    "The AUTHORISED derivative is not the current reviewable docket.",
+  );
+  const docket = requireValue(
+    docketResponse,
+    "The AUTHORISED derivative docket no longer exists.",
+  );
+  const xero = object(docket.xero_binding);
+  const matchingArtifact = (artifactsResponse.data || []).find((
+    artifact: any,
+  ) =>
+    artifact.role === "xero_invoice_pdf" &&
+    artifact.content_hash === args.bound_pdf_content_hash &&
+    String(object(artifact.metadata).xero_invoice_id || "") ===
+      args.derivative.xero_invoice_id &&
+    String(object(artifact.metadata).invoice_number || "") ===
+      args.derivative.authorised_invoice_number
+  );
+  const valid = !artifactsResponse.error &&
+    review.docket_output_content_hash === args.expected_output_content_hash &&
+    String(docket.based_on_revision_id || "") ===
+      args.based_on_docket_revision_id &&
+    docket.stage === "invoice_bound" &&
+    String(xero.status || "").toUpperCase() === "AUTHORISED" &&
+    String(xero.xero_invoice_id || "") === args.derivative.xero_invoice_id &&
+    String(xero.invoice_number || "") ===
+      args.derivative.authorised_invoice_number &&
+    moneyTotalsMatch(xero.total, args.derivative.total) &&
+    String(xero.pdf_content_hash || "") === args.bound_pdf_content_hash &&
+    !!matchingArtifact;
+  if (!valid) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "authorised_derivative_mismatch",
+        "Do not send. The bound AUTHORISED docket does not match the verified derivative proof from the approved DRAFT.",
+      ),
+    );
+  }
+  if (review.review_state !== "signed_off") {
+    nextSesDocsReadyState(review.review_state, "signed_off");
+  }
+  const recorded = await client.rpc("record_ses_docket_review_state_v1", {
+    p_event: {
+      docket_revision_id: args.docket_revision_id,
+      event_kind: "signed_off",
+      expected_output_content_hash: args.expected_output_content_hash,
+      actor_user_id: auth.user!.id,
+      actor_identity: auth.user!.email || auth.user!.id,
+      reason:
+        "The operator approved the exact DRAFT and pre-ratified only this verified deterministic AUTHORISED derivative.",
+      evidence: {
+        based_on_docket_revision_id: args.based_on_docket_revision_id,
+        derivative: args.derivative,
+        bound_pdf_content_hash: args.bound_pdf_content_hash,
+      },
+    },
+  });
+  return {
+    review: requireValue(
+      recorded,
+      "The verified AUTHORISED derivative signoff could not be recorded.",
+    ),
+  };
+}
+
 export async function revokeSesDocketSignoffAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -3343,6 +3498,44 @@ export interface SesInvoiceApprovalCoordinates {
 }
 
 /**
+ * Lightweight canonical coordinate read used by non-cockpit transports. It
+ * deliberately mirrors `loadSesCockpitDocket`'s obligation fallback so the
+ * channel door binds the exact same three T8 coordinates as T12/HTTP without
+ * duplicating approval policy or loading the full review pack.
+ */
+export async function loadSesInvoiceApprovalCoordinates(
+  client: SesSupabaseClient,
+  jobId: string,
+): Promise<SesInvoiceApprovalCoordinates> {
+  const docket = requireValue(
+    await client.from("makesafe_docket_revisions_current")
+      .select("id,output_content_hash,invoice_obligation_revision_id")
+      .eq("job_id", jobId).maybeSingle(),
+    "No current SES docket revision exists for this invoice approval.",
+  );
+  const obligation = await readSesObligationForDocket(client, {
+    job_id: jobId,
+    invoice_obligation_revision_id: docket.invoice_obligation_revision_id,
+    columns: "id",
+  });
+  if (obligation.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The exact invoice obligation coordinate could not be read (${
+        obligation.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  return {
+    docket_revision_id: String(docket.id || "").trim() || null,
+    invoice_obligation_revision_id: String(obligation.data?.id || "").trim() ||
+      null,
+    output_content_hash: String(docket.output_content_hash || "").trim() ||
+      null,
+  };
+}
+
+/**
  * Compare the caller-echoed review coordinates against the server-current
  * docket coordinates. Only the fields the caller actually supplied are
  * compared, so an absent field never manufactures a false drift; every supplied
@@ -3378,13 +3571,14 @@ export async function approveSesInvoiceRevisionAction(
      * T8 echoed exact review coordinates. When supplied they are compared
      * against the server-current docket BEFORE approval is recorded (drift ->
      * `stale_review`). The primary `approve_ses_invoice_revision` HTTP door
-     * REQUIRES all three; the separately-secured channel-approval transport
-     * (`submit_ses_channel_approval`, single-use code + sender + message hash)
-     * calls without them and keeps its own binding.
+     * REQUIRES all three. The separately-secured channel transport carries the
+     * same coordinates inside its single-use sender/message binding and passes
+     * all three here, so neither front door can approve a newer current docket.
      */
-    expected_docket_revision_id?: string | null;
-    expected_invoice_obligation_revision_id?: string | null;
-    expected_output_content_hash?: string | null;
+    expected_docket_revision_id: string;
+    expected_invoice_obligation_revision_id: string;
+    expected_output_content_hash: string;
+    expected_draft_pdf_content_hash?: string;
   },
   deps: {
     /** Docket reader, defaulting to the canonical loader. Injectable for tests. */
@@ -3394,6 +3588,20 @@ export async function approveSesInvoiceRevisionAction(
     ) => Promise<SesCockpitDocket>;
   } = {},
 ) {
+  if (
+    !String(args.expected_docket_revision_id || "").trim() ||
+    !String(args.expected_invoice_obligation_revision_id || "").trim() ||
+    !String(args.expected_output_content_hash || "").trim()
+  ) {
+    throw new SesActionError(400, {
+      state: "refused",
+      code: "exact_review_coordinates_required",
+      fact:
+        "Invoice approval requires the exact inspected docket revision, invoice obligation revision, and output content hash.",
+      recovery_action:
+        "Inspect the current pack and echo all three T8 approval coordinates.",
+    } as SesRefusal);
+  }
   const loadDocket = deps.loadDocket ?? loadSesCockpitDocket;
   const docket = await loadDocket(client, args.job_id);
   if (
@@ -3465,6 +3673,33 @@ export async function approveSesInvoiceRevisionAction(
       );
     throw new SesActionError(409, blocker);
   }
+  const draftPdfHash = String(
+    String(docket.xero_binding?.status || "").toUpperCase() === "DRAFT"
+      ? docket.xero_binding?.pdf_content_hash || ""
+      : "",
+  ).trim();
+  if (args.includes_authorise && draftPdfHash) {
+    const expectedDraftPdfHash = String(
+      args.expected_draft_pdf_content_hash || "",
+    ).trim();
+    if (!expectedDraftPdfHash || expectedDraftPdfHash !== draftPdfHash) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "stale_review",
+          "Reload the current DRAFT invoice PDF and approve and send its exact bytes.",
+          {
+            fact:
+              "The approved DRAFT PDF hash is missing or does not match the current bound Xero DRAFT.",
+            evidence: {
+              expected_draft_pdf_content_hash: expectedDraftPdfHash || null,
+              current_draft_pdf_content_hash: draftPdfHash,
+            },
+          },
+        ),
+      );
+    }
+  }
   const contentHash = await sesSha256({
     action: "invoice",
     docket_revision_id: docket.docket_revision_id,
@@ -3472,6 +3707,7 @@ export async function approveSesInvoiceRevisionAction(
     readiness_revision: docket.readiness_revision,
     dependency_generation: docket.dependency_generation,
     includes_authorise: args.includes_authorise,
+    ...(draftPdfHash ? { draft_pdf_content_hash: draftPdfHash } : {}),
   }, "SecureWorks:ses-approval-content:v1\n");
   const approved = await client.rpc("record_ses_revision_approval_v1", {
     p_approval: {
@@ -4052,6 +4288,10 @@ export async function bindAuthorisedInvoicePdfToDocket(
     based_on_revision_id: string;
     actor: string;
     invoice: SesXeroInvoiceResult;
+    authorised_derivative?: {
+      draft_invoice: SesXeroInvoiceResult;
+      draft_pdf: Uint8Array;
+    };
   },
   gateway: Pick<SesXeroGateway, "fetchAuthorisedPdf">,
 ): Promise<{
@@ -4059,6 +4299,7 @@ export async function bindAuthorisedInvoicePdfToDocket(
   invoice: SesXeroInvoiceResult;
   docket_revision: Record<string, any>;
   pdf_content_hash: string;
+  authorised_derivative?: SesAuthorisedDerivativeProof | null;
   recovery: boolean;
   adopted_existing: boolean;
 }> {
@@ -4079,27 +4320,81 @@ export async function bindAuthorisedInvoicePdfToDocket(
     invoice: args.invoice,
     based_on_revision_id: args.based_on_revision_id,
   });
-  if (preExisting.adoptable?.pdf_content_hash) {
+  if (
+    preExisting.adoptable?.pdf_content_hash && !args.authorised_derivative
+  ) {
     return {
       state: "authorised_invoice_already_bound",
       invoice: args.invoice,
       docket_revision: preExisting.adoptable.docket,
       pdf_content_hash: preExisting.adoptable.pdf_content_hash,
+      authorised_derivative: null,
       recovery: false,
       adopted_existing: true,
     };
   }
 
   const pdf = await gateway.fetchAuthorisedPdf(args.invoice.xero_invoice_id);
+  let derivativeProof: SesAuthorisedDerivativeProof | null = null;
+  if (args.authorised_derivative) {
+    try {
+      derivativeProof = await verifySesAuthorisedDerivative({
+        draft_invoice: args.authorised_derivative.draft_invoice,
+        authorised_invoice: args.invoice,
+        draft_pdf: args.authorised_derivative.draft_pdf,
+        authorised_pdf: pdf,
+      });
+    } catch (error) {
+      if (error instanceof SesAuthorisedDerivativeError) {
+        throw new SesActionError(
+          409,
+          sesRefusal(
+            "authorised_derivative_mismatch",
+            "Do not send. Re-open the AUTHORISED invoice and the approved DRAFT, correct the mismatch, then prepare a fresh pack.",
+            {
+              fact: error.message,
+              evidence: { mismatch_reason: error.reason },
+            },
+          ),
+        );
+      }
+      throw error;
+    }
+  }
   const pdfHash = await sesSha256(
     Array.from(pdf),
     "SecureWorks:ses-docket-artifact-bytes:v1\n",
   );
+  if (preExisting.adoptable?.pdf_content_hash) {
+    if (preExisting.adoptable.pdf_content_hash !== pdfHash) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "authorised_derivative_mismatch",
+          "Do not send. Reconcile the already-bound AUTHORISED artifact against the exact approved DRAFT.",
+          {
+            fact:
+              "The already-bound AUTHORISED PDF hash differs from the verified current AUTHORISED derivative.",
+          },
+        ),
+      );
+    }
+    return {
+      state: "authorised_invoice_already_bound",
+      invoice: args.invoice,
+      docket_revision: preExisting.adoptable.docket,
+      pdf_content_hash: pdfHash,
+      authorised_derivative: derivativeProof,
+      recovery: false,
+      adopted_existing: true,
+    };
+  }
   const docketHash = await sesSha256({
     based_on_revision_id: args.based_on_revision_id,
     invoice_obligation_revision_id: args.invoice_obligation_revision_id,
     xero_invoice_id: args.invoice.xero_invoice_id,
     pdf_content_hash: pdfHash,
+    ...(derivativeProof ? { authorised_derivative: derivativeProof } : {}),
   }, "SecureWorks:ses-invoice-bound-docket:v1\n");
   const boundDocketId = stableUuidFromSha256(docketHash);
   const storagePath =
@@ -4165,6 +4460,7 @@ export async function bindAuthorisedInvoicePdfToDocket(
         invoice: args.invoice,
         docket_revision: adopted.adoptable.docket,
         pdf_content_hash: adopted.adoptable.pdf_content_hash,
+        authorised_derivative: derivativeProof,
         recovery: false,
         adopted_existing: true,
       };
@@ -4206,6 +4502,7 @@ export async function bindAuthorisedInvoicePdfToDocket(
     invoice: args.invoice,
     docket_revision: boundDocket,
     pdf_content_hash: pdfHash,
+    authorised_derivative: derivativeProof,
     recovery: false,
     adopted_existing: false,
   };
@@ -4628,6 +4925,14 @@ export async function executeSesInvoiceRevisionAction(
     readiness_revision: cockpit.readiness_revision,
     dependency_generation: cockpit.dependency_generation,
     includes_authorise: approval.includes_authorise === true,
+    ...(String(cockpit.xero_binding?.status || "").toUpperCase() === "DRAFT" &&
+        cockpit.xero_binding?.pdf_content_hash
+      ? {
+        draft_pdf_content_hash: String(
+          cockpit.xero_binding.pdf_content_hash,
+        ),
+      }
+      : {}),
   }, "SecureWorks:ses-approval-content:v1\n");
   if (approval.approval_content_hash !== approvalContentHash) {
     throw new SesActionError(
@@ -4637,6 +4942,37 @@ export async function executeSesInvoiceRevisionAction(
         "Review the exact current invoice action and record a fresh APPROVE INVOICE decision.",
       ),
     );
+  }
+  let approvedDraftPdf: Uint8Array | null = null;
+  const approvedDraftBinding = cockpit.xero_binding;
+  if (
+    approval.includes_authorise === true &&
+    String(approvedDraftBinding?.status || "").toUpperCase() === "DRAFT" &&
+    approvedDraftBinding?.xero_invoice_id &&
+    approvedDraftBinding?.pdf_content_hash
+  ) {
+    approvedDraftPdf = await gateway.fetchAuthorisedPdf(
+      approvedDraftBinding.xero_invoice_id,
+    );
+    const liveDraftHash = await sesSha256Bytes(approvedDraftPdf);
+    if (liveDraftHash !== approvedDraftBinding.pdf_content_hash) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "stale_review",
+          "Reload and approve the current live Xero DRAFT PDF before authorising it.",
+          {
+            fact:
+              "The live Xero DRAFT PDF changed after the operator approved its exact hash.",
+            evidence: {
+              approved_draft_pdf_content_hash:
+                approvedDraftBinding.pdf_content_hash,
+              live_draft_pdf_content_hash: liveDraftHash,
+            },
+          },
+        ),
+      );
+    }
   }
   requireValue(
     await client.rpc("begin_ses_invoice_execution_v1", {
@@ -4826,6 +5162,14 @@ export async function executeSesInvoiceRevisionAction(
       based_on_revision_id: cockpit.docket_revision_id,
       actor: args.actor,
       invoice: authorisedInvoice,
+      ...(approvedDraftPdf
+        ? {
+          authorised_derivative: {
+            draft_invoice: createdInvoice,
+            draft_pdf: approvedDraftPdf,
+          },
+        }
+        : {}),
     },
     gateway,
   );
@@ -4833,10 +5177,289 @@ export async function executeSesInvoiceRevisionAction(
     state: "authorised_invoice_bound",
     invoice: authorisedInvoice,
     docket_revision: bound.docket_revision,
+    draft_pdf_content_hash: approvedDraftBinding?.pdf_content_hash || null,
+    authorised_pdf_content_hash: bound.pdf_content_hash,
+    authorised_derivative: bound.authorised_derivative || null,
     invoice_create_dispatched: created.dispatched,
     invoice_authorise_dispatched: authorised.dispatched,
     send_dispatched: false,
   };
+}
+
+/**
+ * A newly-minted release for any exact docket supersedes every older release
+ * that has not started dispatch. This is the server-owned current-release
+ * pointer without adding a second table or mutable content pointer: the
+ * existing `superseded` state is the authority, and both approval/execution
+ * already refuse states outside their closed allow-lists.
+ *
+ * A release with any route effect is in-flight even when T11 has retained its
+ * row as `approved` after a partial failure. Such a release must be reconciled,
+ * never superseded into a fresh operation-key set that could re-mail a route.
+ */
+export async function supersedeOverlappingSesReleaseRevisions(
+  client: SesSupabaseClient,
+  args: {
+    next_release_revision_id: string;
+    docket_revision_ids: string[];
+  },
+): Promise<string[]> {
+  const docketRevisionIds = [
+    ...new Set(
+      args.docket_revision_ids.map((id) => String(id || "").trim()).filter(
+        Boolean,
+      ),
+    ),
+  ];
+  if (docketRevisionIds.length === 0) return [];
+
+  const overlapRead = await client.from("makesafe_release_revision_members")
+    .select("release_revision_id,docket_revision_id")
+    .in("docket_revision_id", docketRevisionIds);
+  if (overlapRead.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        `Existing release membership could not be read before minting the corrected release (${
+          overlapRead.error.message || "unknown database error"
+        }).`,
+    });
+  }
+  const candidateIds = [
+    ...new Set<string>(
+      (overlapRead.data || [])
+        .map((row: Record<string, unknown>) =>
+          String(row.release_revision_id || "").trim()
+        )
+        .filter((id: string) =>
+          id.length > 0 && id !== args.next_release_revision_id
+        ),
+    ),
+  ];
+  if (candidateIds.length === 0) return [];
+
+  const releasesRead = await client.from("makesafe_release_revisions")
+    .select("id,state,created_at")
+    .in("id", [...candidateIds, args.next_release_revision_id]);
+  if (releasesRead.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        `Existing release states could not be read before minting the corrected release (${
+          releasesRead.error.message || "unknown database error"
+        }).`,
+    });
+  }
+  const states = (releasesRead.data || []) as Array<{
+    id: string;
+    state: string;
+    created_at?: string | null;
+  }>;
+  const next = states.find((row) => row.id === args.next_release_revision_id);
+  if (!next) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        "The corrected release was committed but could not be re-read to establish current-release ordering.",
+    });
+  }
+  const isOlderThanNext = (row: { id: string; created_at?: string | null }) => {
+    const rowCreated = String(row.created_at || "");
+    const nextCreated = String(next.created_at || "");
+    if (rowCreated !== nextCreated) return rowCreated < nextCreated;
+    return row.id < next.id;
+  };
+  const dispatching = states.find((row) => row.state === "dispatching");
+  if (dispatching) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "release_in_flight",
+        "Reconcile the in-flight release before preparing corrected recipients or content.",
+        {
+          fact:
+            "A release containing this exact docket is currently dispatching and cannot be superseded safely.",
+          evidence: { release_revision_id: dispatching.id },
+        },
+      ),
+    );
+  }
+
+  const mutableIds = states
+    .filter((row) =>
+      row.id !== args.next_release_revision_id &&
+      ["proposed", "approved"].includes(row.state) &&
+      isOlderThanNext(row)
+    )
+    .map((row) => row.id);
+  if (mutableIds.length === 0) return [];
+
+  const effectsRead = await client.from("ses_external_effects")
+    .select("release_revision_id,state,route_kind")
+    .eq("effect_kind", "route_send")
+    .in("release_revision_id", mutableIds)
+    .limit(1);
+  if (effectsRead.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        `Existing route effects could not be read before superseding the old release (${
+          effectsRead.error.message || "unknown database error"
+        }).`,
+    });
+  }
+  if ((effectsRead.data || []).length > 0) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "release_in_flight",
+        "Reconcile the existing partial release before preparing a corrected release.",
+        {
+          fact:
+            "An older release containing this exact docket already has a route-effect ledger row, so a fresh release could duplicate a prior route.",
+          evidence: {
+            release_revision_id: String(
+              effectsRead.data?.[0]?.release_revision_id || "",
+            ),
+          },
+        },
+      ),
+    );
+  }
+
+  const superseded = await client.from("makesafe_release_revisions").update({
+    state: "superseded",
+    updated_at: new Date().toISOString(),
+  }).in("id", mutableIds).in("state", ["proposed", "approved"])
+    .select("id,state");
+  if (superseded.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        `The corrected release was not minted because the older release could not be superseded (${
+          superseded.error.message || "unknown database error"
+        }).`,
+    });
+  }
+  const updatedIds = new Set<string>(
+    (superseded.data || []).map((row: Record<string, unknown>) =>
+      String(row.id || "")
+    ),
+  );
+  if (mutableIds.some((id) => !updatedIds.has(id))) {
+    const reread = await client.from("makesafe_release_revisions")
+      .select("id,state").in("id", mutableIds);
+    const safe = !reread.error && (reread.data || []).every(
+      (row: Record<string, unknown>) =>
+        ["superseded", "released"].includes(String(row.state || "")),
+    );
+    if (!safe) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "release_in_flight",
+          "Reload the release state before preparing corrected content; the prior release changed concurrently.",
+        ),
+      );
+    }
+  }
+  return mutableIds;
+}
+
+/**
+ * Execution-time currentness guard. Supersession is advisory bookkeeping; this
+ * read is the fail-closed authority that also covers a committed release whose
+ * prepare caller crashed before it could supersede the older row.
+ */
+export async function assertSesReleaseRevisionIsCurrent(
+  client: SesSupabaseClient,
+  releaseRevisionId: string,
+): Promise<void> {
+  const selected = requireValue(
+    await client.from("makesafe_release_revisions")
+      .select("id,state,created_at")
+      .eq("id", releaseRevisionId).maybeSingle(),
+    "The selected release revision no longer exists.",
+  );
+  if (String(selected.state || "") === "superseded") {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Open and approve the newest release revision; this selected release is superseded.",
+        { evidence: { selected_release_revision_id: releaseRevisionId } },
+      ),
+    );
+  }
+  const members = await client.from("makesafe_release_revision_members")
+    .select("docket_revision_id")
+    .eq("release_revision_id", releaseRevisionId);
+  if (members.error || !(members.data || []).length) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The selected release has no readable exact docket membership, so currentness cannot be proven.",
+    });
+  }
+  const docketIds = [
+    ...new Set(
+      (members.data || []).map((row: Record<string, unknown>) =>
+        String(row.docket_revision_id || "")
+      ).filter(Boolean),
+    ),
+  ];
+  const overlaps = await client.from("makesafe_release_revision_members")
+    .select("release_revision_id")
+    .in("docket_revision_id", docketIds);
+  if (overlaps.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        "Overlapping release revisions could not be read, so stale release execution is refused.",
+    });
+  }
+  const overlapIds = [
+    ...new Set(
+      (overlaps.data || []).map((row: Record<string, unknown>) =>
+        String(row.release_revision_id || "")
+      ).filter((id: string) => id && id !== releaseRevisionId),
+    ),
+  ];
+  if (overlapIds.length === 0) return;
+  const releases = await client.from("makesafe_release_revisions")
+    .select("id,state,created_at")
+    .in("id", overlapIds)
+    .in("state", ["proposed", "approved", "dispatching", "released"]);
+  if (releases.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact:
+        "Overlapping release states could not be read, so stale release execution is refused.",
+    });
+  }
+  const selectedCreated = String(selected.created_at || "");
+  const newer = (releases.data || []).find((row: Record<string, unknown>) => {
+    const created = String(row.created_at || "");
+    return created > selectedCreated ||
+      (created === selectedCreated && String(row.id || "") > releaseRevisionId);
+  });
+  if (newer) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Open and approve the newest release revision for this exact docket.",
+        {
+          fact:
+            "A newer non-superseded release exists for one or more exact docket members.",
+          evidence: {
+            selected_release_revision_id: releaseRevisionId,
+            current_release_revision_id: String(newer.id || ""),
+          },
+        },
+      ),
+    );
+  }
 }
 
 export async function prepareSesReleaseRevisionAction(
@@ -4847,9 +5470,16 @@ export async function prepareSesReleaseRevisionAction(
     routes?: SesReviewRoute[];
     created_by: string;
   },
+  deps: {
+    fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
+  } = {},
 ) {
   const dockets = await Promise.all(
-    args.job_ids.map((jobId) => loadSesCockpitDocket(client, jobId)),
+    args.job_ids.map((jobId) =>
+      loadSesCockpitDocket(client, jobId, {
+        fetchInvoicePdfBytes: deps.fetchInvoicePdfBytes,
+      })
+    ),
   );
   const routes = args.routes ||
     (dockets.length === 1 ? dockets[0].routes : []);
@@ -4903,12 +5533,21 @@ export async function prepareSesReleaseRevisionAction(
     p_members: plan.members,
     p_routes: plan.routes,
   });
+  const commit = requireValue(
+    committed,
+    "The content-addressed release revision could not be committed.",
+  );
+  const supersededReleaseRevisionIds =
+    await supersedeOverlappingSesReleaseRevisions(client, {
+      next_release_revision_id: String(plan.release.id || ""),
+      docket_revision_ids: plan.members.map((member) =>
+        String(member.docket_revision_id || "")
+      ),
+    });
   return {
     ...plan,
-    commit: requireValue(
-      committed,
-      "The content-addressed release revision could not be committed.",
-    ),
+    commit,
+    superseded_release_revision_ids: supersededReleaseRevisionIds,
     external_mutations: { xero: 0, email: 0 },
   };
 }
@@ -4977,6 +5616,32 @@ export async function approveSesReleaseRevisionAction(
       .eq("id", args.release_revision_id).maybeSingle(),
     "The displayed release revision no longer exists.",
   );
+  if (String(release.state || "") === "superseded") {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Open and approve the current release revision; this older release was superseded by corrected content.",
+        {
+          evidence: { release_revision_id: args.release_revision_id },
+        },
+      ),
+    );
+  }
+  if (!["proposed", "approved"].includes(String(release.state || ""))) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "release_approval_missing",
+        "Open the current proposed release revision before recording SEND IT approval.",
+        {
+          fact:
+            `The selected release is in state '${release.state}', not a reviewable state.`,
+        },
+      ),
+    );
+  }
+  await assertSesReleaseRevisionIsCurrent(client, args.release_revision_id);
   const membersResponse = await client.from("makesafe_release_revision_members")
     .select("*").eq("release_revision_id", args.release_revision_id)
     .order("ordinal");
@@ -5175,7 +5840,10 @@ export interface SesMailGateway {
     route: Record<string, any>,
     context: { external_token: string; operation_key: string },
   ): Promise<SesRouteSendResult>;
-  reconcileSent(externalToken: string): Promise<SesRouteSendResult[]>;
+  reconcileSent(
+    externalToken: string,
+    route?: Record<string, any>,
+  ): Promise<SesRouteSendResult[]>;
 }
 
 export interface SesReleaseXeroReader {
@@ -5272,6 +5940,7 @@ export async function executeSesReleaseRevisionAction(
       .eq("id", args.release_revision_id).maybeSingle(),
     "The approved release revision no longer exists.",
   );
+  await assertSesReleaseRevisionIsCurrent(client, args.release_revision_id);
   const membersResponse = await client.from("makesafe_release_revision_members")
     .select("*").eq("release_revision_id", args.release_revision_id)
     .order("ordinal");
@@ -5669,7 +6338,8 @@ export async function executeSesReleaseRevisionAction(
     > = {
       dispatch: (payload, context) =>
         mailGateway.createDraftAndSend(payload, context),
-      reconcile: (context) => mailGateway.reconcileSent(context.external_token),
+      reconcile: (context) =>
+        mailGateway.reconcileSent(context.external_token, sendRoute),
       identify: (result) => result.message_id,
       digest: (result) => ({
         message_id: result.message_id,
@@ -5728,8 +6398,8 @@ export async function executeSesReleaseRevisionAction(
       });
     }
     const result = sent.result ||
-      await mailGateway.reconcileSent(effect.external_token).then((rows) =>
-        rows[0]
+      await mailGateway.reconcileSent(effect.external_token, sendRoute).then(
+        (rows) => rows[0],
       );
     if (!result) {
       throw new SesActionError(

@@ -23,6 +23,7 @@ import {
   loadSesCockpitDocket,
   SesActionError,
 } from "./ses_reporting_actions.ts";
+import { sesRefusal } from "./ses_reporting_refusals.ts";
 import type {
   SesCockpitDocket,
   SesReleaseSendProgress,
@@ -123,6 +124,45 @@ export interface SesInspectApproval {
   decided_at: string | null;
 }
 
+/** Canonical current review state for the exact docket displayed by T12. */
+export interface SesInspectDocketReview {
+  org_id: string | null;
+  job_id: string;
+  docket_revision_id: string;
+  docket_output_content_hash: string;
+  assembler_version: string;
+  family_matrix_version: string;
+  docket_stage: string;
+  docket_committed_at: string | null;
+  review_event_id: string;
+  review_event_sequence: number;
+  review_state: string;
+  event_kind: string;
+  actor_user_id: string | null;
+  actor_identity: string | null;
+  reason: string | null;
+  signed_off_at: string | null;
+  review_state_changed_at: string | null;
+  invalidated_signoff_event_id: string | null;
+}
+
+/** One append-only docket review event, ordered by event_sequence ascending. */
+export interface SesInspectDocketReviewEvent {
+  id: string;
+  event_sequence: number;
+  review_state: string;
+  event_kind: string;
+  actor_user_id: string | null;
+  actor_identity: string | null;
+  reason: string | null;
+  signed_off_at: string | null;
+  created_at: string | null;
+  docket_output_content_hash: string;
+  assembler_version: string;
+  family_matrix_version: string;
+  invalidated_signoff_event_id: string | null;
+}
+
 export interface SesPackInspection {
   schema: "secureworks.makesafe.ses-pack-inspection/v1";
   job_id: string;
@@ -136,6 +176,8 @@ export interface SesPackInspection {
   release_send_progress: SesReleaseSendProgress;
   route_proofs: SesInspectRouteProof[];
   approvals: SesInspectApproval[];
+  review: SesInspectDocketReview | null;
+  audit_trail: SesInspectDocketReviewEvent[];
 }
 
 function str(value: unknown): string | null {
@@ -169,6 +211,8 @@ export function assembleSesPackInspection(input: {
   route_rows: Array<Record<string, unknown>>;
   proof_rows: Array<Record<string, unknown>>;
   approval_rows: Array<Record<string, unknown>>;
+  review_row: Record<string, unknown> | null;
+  audit_rows: Array<Record<string, unknown>>;
 }): SesPackInspection {
   const pack: SesPackPointers = input.pack_row
     ? {
@@ -271,6 +315,59 @@ export function assembleSesPackInspection(input: {
     decided_at: str(row.decided_at),
   }));
 
+  const review: SesInspectDocketReview | null = input.review_row
+    ? {
+      org_id: str(input.review_row.org_id),
+      job_id: String(input.review_row.job_id ?? ""),
+      docket_revision_id: String(input.review_row.docket_revision_id ?? ""),
+      docket_output_content_hash: String(
+        input.review_row.docket_output_content_hash ?? "",
+      ),
+      assembler_version: String(input.review_row.assembler_version ?? ""),
+      family_matrix_version: String(
+        input.review_row.family_matrix_version ?? "",
+      ),
+      docket_stage: String(input.review_row.docket_stage ?? ""),
+      docket_committed_at: str(input.review_row.docket_committed_at),
+      review_event_id: String(input.review_row.review_event_id ?? ""),
+      review_event_sequence: Number(
+        input.review_row.review_event_sequence ?? 0,
+      ),
+      review_state: String(input.review_row.review_state ?? ""),
+      event_kind: String(input.review_row.event_kind ?? ""),
+      actor_user_id: str(input.review_row.actor_user_id),
+      actor_identity: str(input.review_row.actor_identity),
+      reason: str(input.review_row.reason),
+      signed_off_at: str(input.review_row.signed_off_at),
+      review_state_changed_at: str(input.review_row.review_state_changed_at),
+      invalidated_signoff_event_id: str(
+        input.review_row.invalidated_signoff_event_id,
+      ),
+    }
+    : null;
+
+  const audit_trail: SesInspectDocketReviewEvent[] = [...input.audit_rows]
+    .sort((a, b) =>
+      Number(a.event_sequence ?? 0) - Number(b.event_sequence ?? 0)
+    )
+    .map((row) => ({
+      id: String(row.id ?? ""),
+      event_sequence: Number(row.event_sequence ?? 0),
+      review_state: String(row.review_state ?? ""),
+      event_kind: String(row.event_kind ?? ""),
+      actor_user_id: str(row.actor_user_id),
+      actor_identity: str(row.actor_identity),
+      reason: str(row.reason),
+      signed_off_at: str(row.signed_off_at),
+      created_at: str(row.created_at),
+      docket_output_content_hash: String(
+        row.docket_output_content_hash ?? "",
+      ),
+      assembler_version: String(row.assembler_version ?? ""),
+      family_matrix_version: String(row.family_matrix_version ?? ""),
+      invalidated_signoff_event_id: str(row.invalidated_signoff_event_id),
+    }));
+
   return {
     schema: "secureworks.makesafe.ses-pack-inspection/v1",
     job_id: input.job_id,
@@ -284,6 +381,8 @@ export function assembleSesPackInspection(input: {
     release_send_progress: input.release_send_progress,
     route_proofs,
     approvals,
+    review,
+    audit_trail,
   };
 }
 
@@ -300,6 +399,20 @@ export interface InspectSesPackDeps {
     jobId: string,
     deps: { fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array> },
   ) => Promise<SesCockpitDocket>;
+}
+
+function staleReleaseInspection(
+  fact: string,
+  evidence: Record<string, unknown>,
+): SesActionError {
+  return new SesActionError(
+    409,
+    sesRefusal(
+      "stale_review",
+      "Reload the shared SES pack inspection and select the release bound to the exact current docket and invoice obligation.",
+      { fact, evidence },
+    ),
+  );
 }
 
 export async function inspectSesPackAction(
@@ -378,22 +491,90 @@ export async function inspectSesPackAction(
         }).`,
       });
     }
-    releaseRow = releaseResp.data || null;
+    if (!releaseResp.data) {
+      throw staleReleaseInspection(
+        "The selected frozen release revision no longer exists.",
+        {
+          reason: "release_revision_missing",
+          release_revision_id: releaseRevisionId,
+          job_id: jobId,
+        },
+      );
+    }
+    releaseRow = releaseResp.data;
     memberRows = membersResp.data || [];
     routeRows = routesResp.data || [];
     proofRows = proofsResp.data || [];
+
+    const requestedMember = memberRows.find((row) =>
+      String(row.job_id ?? "") === jobId
+    );
+    if (!requestedMember) {
+      throw staleReleaseInspection(
+        "The selected frozen release does not contain the requested job.",
+        {
+          reason: "release_job_membership_mismatch",
+          release_revision_id: releaseRevisionId,
+          job_id: jobId,
+        },
+      );
+    }
+    const currentDocketRevisionId = String(docket.docket_revision_id ?? "");
+    const memberDocketRevisionId = String(
+      requestedMember.docket_revision_id ?? "",
+    );
+    const currentObligationRevisionId = str(
+      docket.invoice_obligation_revision_id,
+    );
+    const memberObligationRevisionId = str(
+      requestedMember.invoice_obligation_revision_id,
+    );
+    if (
+      memberDocketRevisionId !== currentDocketRevisionId ||
+      memberObligationRevisionId !== currentObligationRevisionId
+    ) {
+      throw staleReleaseInspection(
+        "The selected frozen release is not bound to the exact current docket and invoice obligation.",
+        {
+          reason: "release_member_coordinates_stale",
+          release_revision_id: releaseRevisionId,
+          job_id: jobId,
+          expected_docket_revision_id: currentDocketRevisionId,
+          actual_docket_revision_id: memberDocketRevisionId,
+          expected_invoice_obligation_revision_id: currentObligationRevisionId,
+          actual_invoice_obligation_revision_id: memberObligationRevisionId,
+        },
+      );
+    }
   }
 
-  const approvalsResp = await client.from(
-    "makesafe_revision_approvals_current_v2",
-  ).select(
-    "action,decision,docket_revision_id,invoice_obligation_revision_id,release_revision_id,approval_content_hash,includes_authorise,decided_by,decided_at",
-  ).eq("job_id", jobId).order("decided_at", { ascending: false });
+  const [approvalsResp, reviewResp, auditResp] = await Promise.all([
+    client.from("makesafe_revision_approvals_current_v2").select(
+      "action,decision,docket_revision_id,invoice_obligation_revision_id,release_revision_id,approval_content_hash,includes_authorise,decided_by,decided_at",
+    ).eq("job_id", jobId).order("decided_at", { ascending: false }),
+    client.from("ses_docket_review_current").select(
+      "org_id,job_id,docket_revision_id,docket_output_content_hash,assembler_version,family_matrix_version,docket_stage,docket_committed_at,review_event_id,review_event_sequence,review_state,event_kind,actor_user_id,actor_identity,reason,signed_off_at,review_state_changed_at,invalidated_signoff_event_id",
+    ).eq("job_id", jobId).eq("docket_revision_id", docket.docket_revision_id)
+      .maybeSingle(),
+    client.from("ses_docket_review_events").select(
+      "id,event_sequence,review_state,event_kind,actor_user_id,actor_identity,reason,signed_off_at,created_at,docket_output_content_hash,assembler_version,family_matrix_version,invalidated_signoff_event_id",
+    ).eq("job_id", jobId).eq("docket_revision_id", docket.docket_revision_id)
+      .order("event_sequence", { ascending: true }),
+  ]);
   if (approvalsResp.error) {
     throw new SesActionError(503, {
       state: "refused",
       fact: `The approval ledger could not be read (${
         approvalsResp.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  if (reviewResp.error || auditResp.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The docket review state and audit trail could not be read (${
+        reviewResp.error?.message || auditResp.error?.message ||
+        "unknown database error"
       }).`,
     });
   }
@@ -421,5 +602,7 @@ export async function inspectSesPackAction(
     route_rows: routeRows,
     proof_rows: proofRows,
     approval_rows: approvalsResp.data || [],
+    review_row: reviewResp.data || null,
+    audit_rows: auditResp.data || [],
   });
 }

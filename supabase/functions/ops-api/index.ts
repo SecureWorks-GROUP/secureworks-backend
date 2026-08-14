@@ -7615,6 +7615,10 @@ if (import.meta.main) serve(async (req: Request) => {
             message_text: body.message_text,
             message_sent_at: body.message_sent_at,
             request_id: body.request_id,
+            expected_docket_revision_id: body.expected_docket_revision_id,
+            expected_invoice_obligation_revision_id:
+              body.expected_invoice_obligation_revision_id,
+            expected_output_content_hash: body.expected_output_content_hash,
           },
           {
             env: readSesChannelApprovalEnv(),
@@ -7686,6 +7690,8 @@ if (import.meta.main) serve(async (req: Request) => {
             expected_docket_revision_id: expectedDocketRevisionId,
             expected_invoice_obligation_revision_id: expectedObligationRevisionId,
             expected_output_content_hash: expectedOutputContentHash,
+            expected_draft_pdf_content_hash:
+              body.expected_draft_pdf_content_hash,
           },
         ))
       }
@@ -7752,11 +7758,15 @@ if (import.meta.main) serve(async (req: Request) => {
           body.job_ids || (body.job_id ? [body.job_id] : []),
           'prepare_ses_release_revision',
         )
+        const releaseXeroGateway = makeSesXeroGateway(client)
         return json(await prepareSesReleaseRevisionAction(client, {
           org_id: body.org_id || DEFAULT_ORG_ID,
           job_ids: body.job_ids || (body.job_id ? [body.job_id] : []),
           routes: body.routes,
           created_by: authUser?.email || body.created_by || 'ses-release-preparer',
+        }, {
+          fetchInvoicePdfBytes: (invoiceId) =>
+            releaseXeroGateway.fetchAuthorisedPdf(invoiceId),
         }))
       case 'approve_ses_release_revision':
         await assertNoSyntheticLivefireReleaseRevision(
@@ -7790,23 +7800,27 @@ if (import.meta.main) serve(async (req: Request) => {
           makeSesGraphMailGateway(client),
           makeSesReleaseXeroReader(client),
         ))
-      // T11 (Harden SES v1, AC5/AC6/AC7): ONE unified authorise+send over the
-      // EXISTING guarded primitives for a single explicitly-approved exact
-      // release revision. Validates the frozen fingerprint, authorises each
-      // priced member's DRAFT invoice via execute_ses_invoice_revision, then
-      // dispatches the frozen release via execute_ses_release_revision, recording
-      // per-route effects through the exact-once ledger. Invoice-auth fail -> send
-      // nothing; partial delivery -> release retained Approved (never left
-      // dispatching) + retry only the missing routes; drift/stale/unapproved ->
-      // hard refuse. Routine is denied centrally (absent from the allow-list) and
-      // again inside runUnifiedSesRelease; server api_key / staff JWT may execute
-      // an already-approved release exactly as the two separate execute actions do.
+      // T11 (Harden SES v1, AC5/AC6/AC7): ONE unified authorise+send action.
+      // A human-approved DRAFT pack may authorise, bind and verify its
+      // deterministic AUTHORISED derivative, then mint/approve/dispatch the final
+      // release. Already-approved final releases remain recoverable through the
+      // same exact-once route ledger. Routine keys are denied, all calls require
+      // the caller's exact inspected release hash, and any stale/drifted revision
+      // or non-deterministic derivative hard-refuses before send.
       case 'execute_ses_unified_release':
         await assertNoSyntheticLivefireReleaseRevision(
           client,
           body.release_revision_id,
           'execute_ses_unified_release',
         )
+        if (!String(body.expected_release_content_hash || '').trim()) {
+          return json({
+            state: 'refused',
+            code: 'release_content_hash_required',
+            fact:
+              'execute_ses_unified_release requires expected_release_content_hash from the exact inspected release.',
+          }, 400)
+        }
         return json(await unifiedSesReleaseAction(
           client,
           sesActionAuth(authMode, authUser),

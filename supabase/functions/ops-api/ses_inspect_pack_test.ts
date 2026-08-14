@@ -15,7 +15,10 @@ import {
   assembleSesPackInspection,
   inspectSesPackAction,
 } from "./ses_inspect_pack.ts";
-import type { SesSupabaseClient } from "./ses_reporting_actions.ts";
+import {
+  SesActionError,
+  type SesSupabaseClient,
+} from "./ses_reporting_actions.ts";
 import type { SesCockpitDocket } from "./ses_review_cockpit.ts";
 
 const RELEASE_HASH =
@@ -76,6 +79,8 @@ function assembleInput(overrides: Record<string, unknown> = {}) {
     route_rows: [],
     proof_rows: [],
     approval_rows: [],
+    review_row: null,
+    audit_rows: [],
     ...overrides,
   };
 }
@@ -304,6 +309,38 @@ function fakeClient(tables: Record<string, TableRows>): SesSupabaseClient {
   } as unknown as SesSupabaseClient;
 }
 
+async function expectSesActionError(
+  action: () => Promise<unknown>,
+): Promise<SesActionError> {
+  try {
+    await action();
+  } catch (error) {
+    if (error instanceof SesActionError) return error;
+    throw error;
+  }
+  throw new Error("expected SesActionError");
+}
+
+function releaseInspectClient(
+  memberRows: Array<Record<string, unknown>>,
+  releaseRow: Record<string, unknown> | null = {
+    id: "release-1",
+    content_hash: RELEASE_HASH,
+    state: "approved",
+  },
+): SesSupabaseClient {
+  return fakeClient({
+    makesafe_report_packs: () => ({ data: null, error: null }),
+    makesafe_release_revisions: () => ({ data: releaseRow, error: null }),
+    makesafe_release_revision_members: () => ({
+      data: memberRows,
+      error: null,
+    }),
+    makesafe_release_revision_routes: () => ({ data: [], error: null }),
+    ses_release_route_proofs: () => ({ data: [], error: null }),
+  });
+}
+
 Deno.test("T12 inspect action assembles a prepared pack from the canonical readers", async () => {
   const client = fakeClient({
     makesafe_report_packs: () => ({
@@ -410,4 +447,167 @@ Deno.test("T12 inspect action surfaces a NULL report_doc_id on an unbound prepar
   assertEquals(result.pack.exists, true);
   assertEquals(result.release, null);
   assertEquals(result.release_send_progress.kind, "none");
+});
+
+Deno.test("T12 inspect action refuses a missing release override", async () => {
+  const error = await expectSesActionError(() =>
+    inspectSesPackAction(
+      releaseInspectClient([], null),
+      "job-1",
+      "release-missing",
+      { loadDocket: async () => fakeDocket() },
+    )
+  );
+  const refusal = error.refusal as {
+    code?: string;
+    evidence?: Record<string, unknown>;
+  };
+  assertEquals(error.status, 409);
+  assertEquals(refusal.code, "stale_review");
+  assertEquals(refusal.evidence?.reason, "release_revision_missing");
+});
+
+Deno.test("T12 inspect action refuses a foreign release override", async () => {
+  const error = await expectSesActionError(() =>
+    inspectSesPackAction(
+      releaseInspectClient([{
+        job_id: "job-foreign",
+        docket_revision_id: "docket-foreign",
+        invoice_obligation_revision_id: "obl-foreign",
+        ordinal: 0,
+      }]),
+      "job-1",
+      "release-1",
+      { loadDocket: async () => fakeDocket() },
+    )
+  );
+  const refusal = error.refusal as {
+    code?: string;
+    evidence?: Record<string, unknown>;
+  };
+  assertEquals(error.status, 409);
+  assertEquals(refusal.code, "stale_review");
+  assertEquals(refusal.evidence?.reason, "release_job_membership_mismatch");
+});
+
+Deno.test("T12 inspect action refuses stale release member coordinates", async () => {
+  for (
+    const member of [
+      {
+        job_id: "job-1",
+        docket_revision_id: "docket-stale",
+        invoice_obligation_revision_id: "obl-1",
+        ordinal: 0,
+      },
+      {
+        job_id: "job-1",
+        docket_revision_id: "docket-rev-1",
+        invoice_obligation_revision_id: "obl-stale",
+        ordinal: 0,
+      },
+    ]
+  ) {
+    const error = await expectSesActionError(() =>
+      inspectSesPackAction(
+        releaseInspectClient([member]),
+        "job-1",
+        "release-1",
+        { loadDocket: async () => fakeDocket() },
+      )
+    );
+    const refusal = error.refusal as {
+      code?: string;
+      evidence?: Record<string, unknown>;
+    };
+    assertEquals(error.status, 409);
+    assertEquals(refusal.code, "stale_review");
+    assertEquals(refusal.evidence?.reason, "release_member_coordinates_stale");
+  }
+});
+
+Deno.test("T12 inspect action returns canonical docket signoff and ordered audit parity", async () => {
+  const reviewRow = {
+    org_id: "org-1",
+    job_id: "job-1",
+    docket_revision_id: "docket-rev-1",
+    docket_output_content_hash: OUTPUT_HASH,
+    assembler_version: "assembler-v1",
+    family_matrix_version: "family-v1",
+    docket_stage: "pre_xero",
+    docket_committed_at: "2026-08-14T00:00:00Z",
+    review_event_id: "review-2",
+    review_event_sequence: 2,
+    review_state: "signed_off",
+    event_kind: "signed_off",
+    actor_user_id: "captain-1",
+    actor_identity: "captain@example",
+    reason: null,
+    signed_off_at: "2026-08-14T00:02:00Z",
+    review_state_changed_at: "2026-08-14T00:02:00Z",
+    invalidated_signoff_event_id: null,
+  };
+  const preparedEvent = {
+    id: "review-1",
+    event_sequence: 1,
+    review_state: "needs_review",
+    event_kind: "prepared",
+    actor_user_id: null,
+    actor_identity: "system",
+    reason: null,
+    signed_off_at: null,
+    created_at: "2026-08-14T00:01:00Z",
+    docket_output_content_hash: OUTPUT_HASH,
+    assembler_version: "assembler-v1",
+    family_matrix_version: "family-v1",
+    invalidated_signoff_event_id: null,
+  };
+  const signoffEvent = {
+    id: "review-2",
+    event_sequence: 2,
+    review_state: "signed_off",
+    event_kind: "signed_off",
+    actor_user_id: "captain-1",
+    actor_identity: "captain@example",
+    reason: null,
+    signed_off_at: "2026-08-14T00:02:00Z",
+    created_at: "2026-08-14T00:02:00Z",
+    docket_output_content_hash: OUTPUT_HASH,
+    assembler_version: "assembler-v1",
+    family_matrix_version: "family-v1",
+    invalidated_signoff_event_id: null,
+  };
+  const client = fakeClient({
+    makesafe_report_packs: () => ({ data: null, error: null }),
+    makesafe_revision_approvals_current_v2: () => ({
+      data: [],
+      error: null,
+    }),
+    ses_docket_review_current: () => ({ data: reviewRow, error: null }),
+    // Deliberately reversed: the T12 contract guarantees canonical event order.
+    ses_docket_review_events: () => ({
+      data: [signoffEvent, preparedEvent],
+      error: null,
+    }),
+  });
+
+  const result = await inspectSesPackAction(client, "job-1", null, {
+    loadDocket: async () =>
+      fakeDocket({ release_send_progress: { kind: "none" } }),
+  });
+
+  assertEquals(result.review?.review_state, "signed_off");
+  assertEquals(result.review?.review_event_id, "review-2");
+  assertEquals(result.review?.docket_revision_id, "docket-rev-1");
+  assertEquals(
+    result.audit_trail.map((event) => [
+      event.event_sequence,
+      event.event_kind,
+      event.review_state,
+    ]),
+    [
+      [1, "prepared", "needs_review"],
+      [2, "signed_off", "signed_off"],
+    ],
+  );
+  assertEquals(result.audit_trail[1].actor_identity, "captain@example");
 });

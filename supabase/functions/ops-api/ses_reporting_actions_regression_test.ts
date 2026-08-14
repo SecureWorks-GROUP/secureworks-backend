@@ -1549,7 +1549,7 @@ Deno.test("invoice-bound route requires the authorised Xero PDF and keeps approv
 });
 
 Deno.test(
-  "bound Xero DRAFT makes invoice route ready without PDF and stops claiming no invoice",
+  "bound Xero DRAFT requires its exact PDF hash and stops claiming no invoice",
   () => {
     const attachments = [
       "ARTIFACTS/invoice_proposal.json",
@@ -1558,6 +1558,21 @@ Deno.test(
     ];
     // Option B mint binds the DRAFT on the obligation while the docket stays
     // pre_xero with a stored draft that still says "No Xero invoice exists".
+    const missingPdf = resolveDocketRoutes(
+      invoiceDocket("pre_xero", attachments, null),
+      ROUTE_ARTIFACTS,
+      {
+        pricing_disposition: "priced_from_canon",
+        xero_binding: {
+          status: "DRAFT",
+          xero_invoice_id: "xero-invoice-test-1",
+          invoice_number: "INV-TEST-1",
+          total: 737,
+        },
+      },
+    )[0];
+    assertEquals(missingPdf.ready, false);
+
     const draft = resolveDocketRoutes(
       invoiceDocket("pre_xero", attachments, null),
       ROUTE_ARTIFACTS,
@@ -1568,6 +1583,7 @@ Deno.test(
           xero_invoice_id: "xero-invoice-test-1",
           invoice_number: "INV-TEST-1",
           total: 737,
+          pdf_content_hash: "draft-pdf-hash",
         },
       },
     )[0];
@@ -1582,7 +1598,11 @@ Deno.test(
     );
     assertEquals(draft.body.includes("No Xero invoice exists"), false);
     assertEquals(draft.body.includes("DRAFT"), false);
-    assertEquals(draft.attachment_hashes, ["report-hash", "swms-hash"]);
+    assertEquals(draft.attachment_hashes, [
+      "draft-pdf-hash",
+      "report-hash",
+      "swms-hash",
+    ]);
 
     // Same truth when the DRAFT is already on the docket binding.
     const onDocket = resolveDocketRoutes(
@@ -1590,6 +1610,7 @@ Deno.test(
         status: "DRAFT",
         xero_invoice_id: "xero-invoice-test-1",
         invoice_number: "INV-TEST-1",
+        pdf_content_hash: "draft-pdf-hash",
       }),
       ROUTE_ARTIFACTS,
       null,

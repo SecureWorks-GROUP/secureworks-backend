@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
@@ -10,6 +11,8 @@ import {
   headersHaveOperationToken,
   messageHasOperationToken,
   SES_ADMIN_HTML_SIGNATURE,
+  SES_OPERATION_EXTENSION_ID,
+  SES_OPERATION_EXTENSION_NAME,
   SES_OPERATION_HEADER,
   SES_RELEASE_MAILBOX,
   sesOperationInternetMessageHeaders,
@@ -72,7 +75,10 @@ Deno.test("token match prefers header; legacy subject still matches for cutover"
     ),
     ["1", "2"],
   );
-  assertEquals(toSesRouteSendResults([headerMsg, legacyMsg, other], TOKEN).length, 2);
+  assertEquals(
+    toSesRouteSendResults([headerMsg, legacyMsg, other], TOKEN).length,
+    2,
+  );
 });
 
 Deno.test("createDraftAndSend stamps header only, not subject/body, and proves via Sent Items", async () => {
@@ -87,7 +93,9 @@ Deno.test("createDraftAndSend stamps header only, not subject/body, and proves v
     const method = String(init.method || "GET").toUpperCase();
     const parsedBody = init.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, method, body: parsedBody });
-    if (method === "POST" && url.endsWith("/messages") && !url.includes("/send")) {
+    if (
+      method === "POST" && url.endsWith("/messages") && !url.includes("/send")
+    ) {
       assert(expected.includes(201));
       const body = parsedBody;
       assertEquals(body.body.contentType, "HTML");
@@ -196,6 +204,39 @@ Deno.test("reconcileSent finds message by header when subject is clean", async (
   assertEquals(rows[0].message_id, "sent-9");
 });
 
+Deno.test("reconcileSent refuses ambiguous exact-token drafts instead of reporting absence", async () => {
+  const token = "SES-ambiguous-draft-token";
+  const matchingDraft = (id: string) => ({
+    id,
+    subject: "Clean subject",
+    internetMessageHeaders: [{ name: SES_OPERATION_HEADER, value: token }],
+  });
+  const graphJson = async (url: string, init: RequestInit) => {
+    const method = String(init.method || "GET").toUpperCase();
+    if (method === "GET" && url.includes("mailFolders/sentitems")) {
+      return { value: [] };
+    }
+    if (method === "GET" && url.includes("mailFolders/drafts")) {
+      return { value: [matchingDraft("draft-1"), matchingDraft("draft-2")] };
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  const gateway = createSesGraphMailGateway({
+    graphJson: graphJson as any,
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {},
+    sentPollAttempts: 1,
+    sentPollDelayMs: 1,
+  });
+  const error = await assertRejects(
+    () => gateway.reconcileSent(token),
+    Error,
+  );
+  assertStringIncludes(error.message, "2 drafts");
+  assertStringIncludes(error.message, "refusing automatic redispatch");
+});
+
 Deno.test("reconcileSent hydrates headers when list omits internetMessageHeaders", async () => {
   const token = "SES-hydrate-token";
   const graphJson = async (url: string, init: RequestInit) => {
@@ -272,7 +313,6 @@ Deno.test("group thread reply posts on intake thread and never opens a new messa
   const token = "SES-thread-token";
   const calls: Array<{ url: string; method: string; body?: any }> = [];
   let replied = false;
-  const htmlProbe = sesReleaseHtmlBody("Report on thread");
   const graphJson = async (
     url: string,
     init: RequestInit,
@@ -289,6 +329,12 @@ Deno.test("group thread reply posts on intake thread and never opens a new messa
         String(parsedBody.post.body.content).includes(token),
         false,
       );
+      assertEquals(parsedBody.post.extensions, [{
+        "@odata.type": "microsoft.graph.openTypeExtension",
+        extensionName: SES_OPERATION_EXTENSION_NAME,
+        externalToken: token,
+        operationKey: "op-thread-1",
+      }]);
       replied = true;
       return null;
     }
@@ -297,8 +343,11 @@ Deno.test("group thread reply posts on intake thread and never opens a new messa
       return {
         value: [{
           id: "post-reply-1",
-          body: { contentType: "HTML", content: htmlProbe },
           createdDateTime: "2026-08-05T00:00:00Z",
+          extensions: [{
+            id: SES_OPERATION_EXTENSION_ID,
+            externalToken: token,
+          }],
         }],
       };
     }
@@ -350,6 +399,47 @@ Deno.test("group thread reply posts on intake thread and never opens a new messa
   );
 });
 
+Deno.test("group-thread reconciliation proves an unknown send by exact open-extension token", async () => {
+  const token = "SES-thread-reconcile-token";
+  const gateway = createSesGraphMailGateway({
+    graphJson: async (url: string, init: RequestInit) => {
+      assertEquals(String(init.method || "GET").toUpperCase(), "GET");
+      assertStringIncludes(url, "/threads/thread-unknown/posts");
+      assertStringIncludes(url, "$expand=extensions");
+      return {
+        value: [{
+          id: "post-exact",
+          extensions: [{
+            id: SES_OPERATION_EXTENSION_ID,
+            externalToken: token,
+          }],
+        }, {
+          id: "post-other",
+          extensions: [{
+            id: SES_OPERATION_EXTENSION_ID,
+            externalToken: "SES-other-token",
+          }],
+        }],
+      };
+    },
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {},
+    resolveIntakeGroupId: async () => "group-1",
+    sentPollAttempts: 1,
+  });
+
+  const rows = await gateway.reconcileSent(token, {
+    reply_to_thread_id: "thread-unknown",
+    requires_thread_reply: true,
+  });
+  assertEquals(rows, [{
+    message_id: "post-exact",
+    state: "sent",
+    operation_token: token,
+  }]);
+});
+
 Deno.test("requires_thread_reply without thread id refuses rather than new thread", async () => {
   let called = false;
   const gateway = createSesGraphMailGateway({
@@ -375,7 +465,10 @@ Deno.test("requires_thread_reply without thread id refuses rather than new threa
     );
   } catch (err) {
     failed = true;
-    assertStringIncludes(String((err as Error).message), "refusing to open a new thread");
+    assertStringIncludes(
+      String((err as Error).message),
+      "refusing to open a new thread",
+    );
   }
   assertEquals(failed, true);
   assertEquals(called, false);
@@ -406,8 +499,7 @@ Deno.test(
         assert(expected.includes(201));
         assertEquals(
           parsedBody.internetMessageHeaders.some(
-            (h: any) =>
-              h.name === SES_OPERATION_HEADER && h.value === token,
+            (h: any) => h.name === SES_OPERATION_HEADER && h.value === token,
           ),
           true,
         );
@@ -482,7 +574,9 @@ Deno.test(
       ),
     );
     assertEquals(
-      calls.some((c) => c.url.includes("/threads/") && c.url.includes("/reply")),
+      calls.some((c) =>
+        c.url.includes("/threads/") && c.url.includes("/reply")
+      ),
       false,
     );
   },

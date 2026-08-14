@@ -37,6 +37,8 @@ const FACTS = {
     "The completion report lacks an independently byte-bound current-cycle curated source, so it is hidden from the trusted pack.",
   xero_not_authorised:
     "The current Xero invoice is not AUTHORISED, so its real invoice PDF cannot be released.",
+  authorised_derivative_mismatch:
+    "The AUTHORISED Xero invoice or PDF differs from the exact approved DRAFT outside the permitted status and invoice-number changes.",
   route_draft_missing:
     "A required builder email draft is missing from the current docket revision.",
   intake_thread_reply_unavailable:
@@ -59,6 +61,8 @@ const FACTS = {
     "Released work has a later attendance, but no human billing disposition has been recorded.",
   release_approval_missing:
     "No current human SEND IT approval exists for this exact release revision.",
+  release_in_flight:
+    "An older release containing this exact docket has started dispatch and must be reconciled before corrected content can be minted.",
   docs_ready_signoff_missing:
     "No current Captain Docs Ready signoff exists for the exact docket bytes.",
   invoice_approval_missing:
