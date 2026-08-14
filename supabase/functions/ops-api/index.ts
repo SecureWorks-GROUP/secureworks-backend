@@ -539,6 +539,7 @@ import {
   SesActionError,
   sesActionErrorResponse,
   signOffSesDocketAction,
+  writeSesMoneyChainRefusalAudit,
   type SesActionAuth,
   type SesMailGateway,
   type SesReleaseXeroReader,
@@ -4183,9 +4184,14 @@ if (import.meta.main) serve(async (req: Request) => {
     })
   }
 
+  // Hoisted so the outer catch can audit a refused SES money-chain press: consts
+  // declared inside the try are not in scope in its catch (defect 2).
+  let auditAction: string | null = null
+  let auditBody: any = {}
   try {
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
+    auditAction = action
     console.log(`[ops-api] action=${action} method=${req.method}`)
 
     if (authMode === 'agent_read') {
@@ -4372,6 +4378,7 @@ if (import.meta.main) serve(async (req: Request) => {
     if (req.method === 'POST') {
       try { body = await req.json() } catch { body = {} }
     }
+    auditBody = body
 
     const client = sb()
 
@@ -10379,6 +10386,16 @@ if (import.meta.main) serve(async (req: Request) => {
   } catch (err) {
     const sesError = sesActionErrorResponse(err)
     if (sesError) {
+      // Defect 2 (2026-08-14): a refused SES money-chain press must leave a
+      // job_events trace. Best-effort and non-blocking — the refusal response
+      // is unchanged whether or not the audit write succeeds.
+      await writeSesMoneyChainRefusalAudit(sb(), {
+        action: auditAction || '',
+        body: auditBody,
+        status: sesError.status,
+        refusal: (sesError.body as { refusal?: any }).refusal,
+        actor_user_id: authUser?.id ?? null,
+      })
       return json(sesError.body, sesError.status)
     }
     if (err instanceof ApiError) {
@@ -22957,7 +22974,7 @@ async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?
 // the whole array is spread into one fromCharCode call; chunking keeps each spread
 // bounded. Mirrors the chunked-btoa pattern already used for quote-PDF email
 // attachments elsewhere in this file.
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   const chunkSize = 8192
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -39729,11 +39746,17 @@ async function draftMakesafeReportPack(
 }
 export const _draftMakesafeReportPackForTest = draftMakesafeReportPack
 
-// Convert a Xero PDF arrayBuffer to base64 (mirrors getInvoicePdf / send-invoice).
-function _bytesToBase64(bytes: Uint8Array): string {
-  let bin = ''
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
-  return btoa(bin)
+// Convert bytes to base64 (Xero PDFs, and every SES Graph attachment upload
+// incl. uploadSesGraphAttachment). Delegates to the chunked bytesToBase64
+// above: the old per-byte String.fromCharCode + string-concat loop here was
+// the SES photo-route trigger for HTTP 546 (worker resource limit) — a
+// 40-70-photo pack calls this once per photo, sequentially, inside one edge
+// isolate, and the naive O(n) single-character loop burns enough CPU/memory
+// across that many calls to hit the isolate's ceiling even when every photo
+// is comfortably under Graph's size limits. See
+// docs/evidence/ses-makesafe-photo-route-546-2026-08-14.md.
+export function _bytesToBase64(bytes: Uint8Array): string {
+  return bytesToBase64(bytes)
 }
 
 // Fetch the Xero-rendered invoice PDF (Accept: application/pdf). Works for
