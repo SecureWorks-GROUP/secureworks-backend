@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any no-import-prefix
+// deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 /**
  * Invoice tab must present the real Xero DRAFT PDF, never a local HTML
  * tax-invoice invention, when a DRAFT is bound.

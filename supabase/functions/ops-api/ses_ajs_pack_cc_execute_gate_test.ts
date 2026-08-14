@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any require-await
+// deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 /**
  * SEND IT envelope gate for the permanent AJS/AJBR pack CCs (Captain
  * 2026-08-06). The producer is proved in ses_release_route_shape_test.ts; this

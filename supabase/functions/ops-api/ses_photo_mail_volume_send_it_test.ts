@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any require-await
+// deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 /**
  * SEND IT (execute_ses_release_revision) wiring proof for the photo-mail volume
  * guard. The pure guard and the mail-gateway assert are covered in

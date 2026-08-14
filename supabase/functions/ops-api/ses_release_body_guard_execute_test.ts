@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any require-await
+// deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 /**
  * SEND IT body guard: a persisted release route whose BODY still carries
  * internal draft-annotation vocabulary must refuse before any Graph dispatch,
