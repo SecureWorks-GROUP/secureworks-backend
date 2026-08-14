@@ -71,6 +71,10 @@ const FACTS = {
     "Microsoft Graph accepted or may have accepted the message, but its exact sent outcome is not yet proven.",
   xero_outcome_unknown:
     "Xero accepted or may have accepted the invoice operation, but its exact outcome is not yet proven.",
+  invoice_mirror_unreadable:
+    "The bound Xero invoice's local mirror could not be read, so the confirmed mint's SES token linkage cannot be proven and must not be rewritten.",
+  bound_invoice_not_live:
+    "The obligation's bound Xero invoice is VOIDED or DELETED, so it cannot be adopted for send or authorise.",
   ses_invoice_void_status_forbidden:
     "The invoice status cannot be changed through the SES-native void workflow.",
   ses_invoice_void_requires_accrec:
