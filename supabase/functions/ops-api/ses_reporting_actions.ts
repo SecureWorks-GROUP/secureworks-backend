@@ -4623,7 +4623,32 @@ export async function executeSesInvoiceRevisionAction(
       .eq("org_id", args.org_id)
       .eq("xero_invoice_id", boundDraftInvoiceId)
       .maybeSingle();
+    if (mirrorResponse.error) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "invoice_mirror_unreadable",
+          "Retry once the Xero invoice mirror reads cleanly; a mirror read fault must never rewrite the confirmed mint's SES token.",
+          {
+            fact:
+              `The bound Xero invoice's local mirror could not be read, so the confirmed mint's SES token linkage cannot be proven and must not be rewritten. (${mirrorResponse.error.message})`,
+          },
+        ),
+      );
+    }
     const mirror = object(mirrorResponse.data);
+    const adoptedStatus = String(
+      mirror.status || existingBinding.status || "DRAFT",
+    );
+    if (["VOIDED", "DELETED"].includes(adoptedStatus.toUpperCase())) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "bound_invoice_not_live",
+          "Prepare a fresh invoice obligation revision to mint a new draft; a voided invoice can never be authorised.",
+        ),
+      );
+    }
     // Preserve the create effect's original token (the one the confirmed mint
     // wrote onto the mirror); only synthesise a fallback if the mirror row is
     // gone, so the downstream mirror upsert never overwrites a good token.
@@ -4641,7 +4666,7 @@ export async function executeSesInvoiceRevisionAction(
       invoice_number: String(
         mirror.invoice_number || existingBinding.invoice_number || "",
       ),
-      status: String(mirror.status || existingBinding.status || "DRAFT"),
+      status: adoptedStatus,
       reference: String(mirror.reference || proposal.reference || ""),
       total: Number.isFinite(adoptedTotal) ? adoptedTotal : 0,
     };

@@ -142,10 +142,14 @@ function makeClient(opts: {
   docket?: Record<string, any>;
   gatewayState: { authorised: boolean };
   jobEvents: any[];
+  mirrorStatus?: string;
+  mirrorReadError?: boolean;
+  mirrorUpserts?: any[];
 }) {
   const docket = opts.docket || docketRow();
   const obligation = obligationRow();
   const mirror = mirrorRow();
+  if (opts.mirrorStatus) mirror.status = opts.mirrorStatus;
   const effectsByKey = new Map<string, any>();
 
   function singleFor(table: string) {
@@ -194,8 +198,13 @@ function makeClient(opts: {
           mutated = true;
           return builder;
         },
-        upsert: () => {
+        upsert: (rows: any) => {
           mutated = true;
+          if (table === "xero_invoices" && opts.mirrorUpserts) {
+            for (const row of Array.isArray(rows) ? rows : [rows]) {
+              opts.mirrorUpserts.push(row);
+            }
+          }
           return builder;
         },
         insert: (rows: any) => {
@@ -208,6 +217,9 @@ function makeClient(opts: {
         },
         maybeSingle: async () => {
           if (mutated) return { data: { id: `${table}-written` }, error: null };
+          if (table === "xero_invoices" && opts.mirrorReadError) {
+            return { data: null, error: { message: "mirror read timeout" } };
+          }
           return { data: singleFor(table), error: null };
         },
         single: async () => {
@@ -332,6 +344,7 @@ Deno.test("adopt: create_executed DRAFT + includes_authorise sends without a sec
   const gatewayState = { authorised: false };
   const track = { creates: 0, authorises: 0, pdfFetches: 0 };
   const jobEvents: any[] = [];
+  const mirrorUpserts: any[] = [];
   const client = makeClient({
     approval: {
       action: "invoice",
@@ -344,6 +357,7 @@ Deno.test("adopt: create_executed DRAFT + includes_authorise sends without a sec
     },
     gatewayState,
     jobEvents,
+    mirrorUpserts,
   });
 
   const result = await executeSesInvoiceRevisionAction(
@@ -365,6 +379,106 @@ Deno.test("adopt: create_executed DRAFT + includes_authorise sends without a sec
   assertEquals((result as any).invoice.xero_invoice_id, XERO_ID);
   assertEquals((result as any).invoice.status, "AUTHORISED");
   assertEquals((result as any).invoice_create_dispatched, false);
+  // Every mirror write keeps the confirmed mint's token — the primary
+  // create-effect token is never recomputed over a readable mirror row.
+  assertEquals(mirrorUpserts.length > 0, true);
+  for (const row of mirrorUpserts) {
+    assertEquals(row.xero_invoice_id, XERO_ID);
+    assertEquals(row.ses_external_token, CONFIRMED_MINT_TOKEN);
+  }
+});
+
+Deno.test("adopt: a mirror read fault refuses and never rewrites the confirmed token", async () => {
+  const gatewayState = { authorised: false };
+  const track = { creates: 0, authorises: 0, pdfFetches: 0 };
+  const jobEvents: any[] = [];
+  const mirrorUpserts: any[] = [];
+  const client = makeClient({
+    approval: {
+      action: "invoice",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      docket_revision_id: DOCKET_ID,
+      readiness_revision: READINESS_REV,
+      dependency_generation: DEP_GEN,
+      approval_content_hash: await approvalContentHash(true),
+      includes_authorise: true,
+    },
+    gatewayState,
+    jobEvents,
+    mirrorUpserts,
+    mirrorReadError: true,
+  });
+
+  const error = await assertRejects(
+    () =>
+      executeSesInvoiceRevisionAction(
+        client as any,
+        { mode: "jwt", user: { id: "op-1", email: "shaun@x", role: "owner" } },
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "shaun@x",
+        },
+        gateway(gatewayState, track),
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertEquals(
+    (error.refusal as { code?: string }).code,
+    "invoice_mirror_unreadable",
+  );
+  // No money touched, no mirror write with a synthesised primary token.
+  assertEquals(track.creates, 0);
+  assertEquals(track.authorises, 0);
+  assertEquals(mirrorUpserts.length, 0);
+});
+
+Deno.test("adopt: a VOIDED bound invoice refuses before any authorise dispatch", async () => {
+  const gatewayState = { authorised: false };
+  const track = { creates: 0, authorises: 0, pdfFetches: 0 };
+  const jobEvents: any[] = [];
+  const mirrorUpserts: any[] = [];
+  const client = makeClient({
+    approval: {
+      action: "invoice",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      docket_revision_id: DOCKET_ID,
+      readiness_revision: READINESS_REV,
+      dependency_generation: DEP_GEN,
+      approval_content_hash: await approvalContentHash(true),
+      includes_authorise: true,
+    },
+    gatewayState,
+    jobEvents,
+    mirrorUpserts,
+    mirrorStatus: "VOIDED",
+  });
+
+  const error = await assertRejects(
+    () =>
+      executeSesInvoiceRevisionAction(
+        client as any,
+        { mode: "jwt", user: { id: "op-1", email: "shaun@x", role: "owner" } },
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "shaun@x",
+        },
+        gateway(gatewayState, track),
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertEquals(
+    (error.refusal as { code?: string }).code,
+    "bound_invoice_not_live",
+  );
+  assertEquals(track.creates, 0);
+  assertEquals(track.authorises, 0);
+  assertEquals(mirrorUpserts.length, 0);
 });
 
 Deno.test("adopt: DRAFT-only approval returns the existing draft, still no second mint", async () => {
