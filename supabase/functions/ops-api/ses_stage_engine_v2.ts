@@ -64,6 +64,7 @@ import {
   canonicalSesFamilyFromCard,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import { sesStagePortalRoles } from "./ses_workflow_executable_policy.ts";
 import {
   bindingMakesafeTerminalProof,
   type MakesafeTerminalProofFact,
@@ -413,8 +414,8 @@ export type SesPortalRoleObservation =
 export const SES_PORTAL_REQUIRED_ROLES: Partial<
   Record<SesFamilyId, readonly string[]>
 > = {
-  ordinary_roof_portal: ["roof_report"],
-  assessment_quote: ["assessment_report", "photos", "quote"],
+  ordinary_roof_portal: sesStagePortalRoles("ordinary_roof_portal"),
+  assessment_quote: sesStagePortalRoles("assessment_quote"),
 };
 
 export type SesStageWorkflowProfileId =

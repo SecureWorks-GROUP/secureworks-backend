@@ -26,6 +26,7 @@ import {
   type SesBuilderKey,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import { sesFamilyRequiresPersistedDeliverableAuthority } from "./ses_workflow_executable_policy.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
   materialsChargeDecisionFromRevision,
@@ -1525,9 +1526,9 @@ export function buildSesAssemblerInput(
     draftSubjects: snapshot.approved_draft_subjects || [],
     jobMetadataSubject: firstText(metadata.builder_email_subject) || null,
   });
-  const reportingDeliverableRequiresPersistedAuthority = familyId ===
-      "repair" ||
-    familyId === "restoration";
+  const reportingDeliverableRequiresPersistedAuthority =
+    familyId !== "unknown" &&
+    sesFamilyRequiresPersistedDeliverableAuthority(familyId);
   const effectiveReportingDeliverable =
     reportingDeliverableRequiresPersistedAuthority &&
       intakeCase &&

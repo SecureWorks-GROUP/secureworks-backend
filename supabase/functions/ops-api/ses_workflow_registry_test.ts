@@ -4,14 +4,24 @@ import {
   assertEquals,
   assertNotEquals,
   assertRejects,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { canonicalSesJson } from "./ses_docket_envelope.ts";
+import {
+  SES_FAMILY_MATRIX,
+  type SesFamilyMatrixRow,
+} from "./ses_family_matrix.ts";
 import {
   sesWorkflowPackProfile,
   sesWorkflowPackProfileForSwmsRequirement,
 } from "./ses_prepare_docket_revision.ts";
 import { SES_PORTAL_REQUIRED_ROLES } from "./ses_stage_engine_v2.ts";
 import {
+  sesDeliverableAuthorityRequiresPersistedCase,
+  sesWorkflowExecutableFamilyPolicy,
+} from "./ses_workflow_executable_policy.ts";
+import {
+  assertSesWorkflowExecutablePolicyConsistency,
   exportSesContractSnapshot,
   hashSesWorkflowContractSemanticContent,
   prepareSesWorkflowBackendPolicyContract,
@@ -194,6 +204,99 @@ Deno.test("mutating the executable assessment SWMS operand changes the canonical
   assertNotEquals(
     await hashSesWorkflowContractSemanticContent(mutated),
     SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  );
+});
+
+Deno.test("mutating the executable deliverable-authority operand changes the canonical contract hash", async () => {
+  const base = await exportSesContractSnapshot();
+  const runtimePolicy = sesWorkflowExecutableFamilyPolicy("repair")
+    .deliverable_authority;
+  const mutatedPolicy = "legacy_instruction_or_case" as const;
+  assertEquals(runtimePolicy, "persisted_effective_case_required");
+  assertEquals(
+    sesDeliverableAuthorityRequiresPersistedCase(runtimePolicy),
+    true,
+  );
+  assertEquals(
+    sesDeliverableAuthorityRequiresPersistedCase(mutatedPolicy),
+    false,
+  );
+
+  const mutated = cloneManifest(base);
+  const repair = mutated.profiles.family.find((profile) =>
+    profile.family_id === "repair"
+  );
+  assert(repair);
+  repair.deliverable_authority_policy = mutatedPolicy;
+  repair.active_deliverable_required =
+    sesDeliverableAuthorityRequiresPersistedCase(mutatedPolicy);
+  for (
+    const variant of mutated.variants.filter((candidate) =>
+      candidate.runtime_family_id === "repair"
+    )
+  ) {
+    variant.executable_family_policy.deliverable_authority = mutatedPolicy;
+  }
+  assertNotEquals(
+    await hashSesWorkflowContractSemanticContent(mutated),
+    base.canonical_contract_hash,
+  );
+});
+
+Deno.test("every executable family-matrix row is fingerprinted and portal-role drift fails closed", async () => {
+  const base = await exportSesContractSnapshot();
+  for (const row of SES_FAMILY_MATRIX) {
+    const variant = base.variants.find((candidate) =>
+      candidate.runtime_family_id === row.family &&
+      candidate.builder_key === row.builder_key &&
+      candidate.routing_rule === row.routing_rule
+    );
+    assert(
+      variant,
+      `${row.builder_key}/${row.family}/${row.routing_rule}`,
+    );
+    assertEquals(
+      canonicalSesJson(variant.executable_matrix_row),
+      canonicalSesJson(row),
+    );
+    if (row.family === "unknown") throw new Error("unexpected unknown family");
+    assertEquals(
+      canonicalSesJson(variant.executable_family_policy),
+      canonicalSesJson(sesWorkflowExecutableFamilyPolicy(row.family)),
+    );
+    assertSesWorkflowExecutablePolicyConsistency(row);
+  }
+
+  const assessment = SES_FAMILY_MATRIX.find((row) =>
+    row.builder_key === "MLB" && row.family === "assessment_quote" &&
+    row.routing_rule === "mlb-perth-routing"
+  );
+  assert(assessment);
+  const mutatedRow: SesFamilyMatrixRow = {
+    ...assessment,
+    required_portal_roles: assessment.required_portal_roles.filter((role) =>
+      role !== "scope"
+    ),
+    named_na_rules: [...assessment.named_na_rules],
+  };
+  assertThrows(
+    () => assertSesWorkflowExecutablePolicyConsistency(mutatedRow),
+    Error,
+    "portal roles diverge from the executable portal-role owner",
+  );
+
+  const mutated = cloneManifest(base);
+  const variant = mutated.variants.find((candidate) =>
+    candidate.variant_id === "assessment.portal.mlb.perth"
+  );
+  assert(variant);
+  variant.executable_matrix_row.required_portal_roles = variant
+    .executable_matrix_row.required_portal_roles.filter((role) =>
+      role !== "scope"
+    );
+  assertNotEquals(
+    await hashSesWorkflowContractSemanticContent(mutated),
+    base.canonical_contract_hash,
   );
 });
 

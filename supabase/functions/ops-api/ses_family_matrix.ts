@@ -1,4 +1,9 @@
 // deno-lint-ignore-file no-explicit-any
+import {
+  type SesPreparePortalRole,
+  sesPreparePortalRoles,
+} from "./ses_workflow_executable_policy.ts";
+
 export const SES_FAMILY_MATRIX_VERSION =
   "ses-builder-family-matrix/2026-08-14.1";
 export const SES_ASSESSMENT_RECIPE_VERSION =
@@ -127,9 +132,7 @@ export interface SesFamilyMatrixRow {
   report_route: "work_order_sender";
   photo_route: "work_order_sender" | "not_applicable";
   invoice_route: "matrix_invoice_mailbox";
-  required_portal_roles: Array<
-    "roof_report" | "assessment" | "photos" | "scope"
-  >;
+  required_portal_roles: SesPreparePortalRole[];
   named_na_rules: string[];
 }
 
@@ -360,7 +363,7 @@ function physicalRow(
     report_route: "work_order_sender",
     photo_route: "work_order_sender",
     invoice_route: "matrix_invoice_mailbox",
-    required_portal_roles: [],
+    required_portal_roles: [...sesPreparePortalRoles("physical_makesafe")],
     named_na_rules: [
       "physical-work-has-no-portal-deliverable",
       "not-a-roof-report",
@@ -379,6 +382,9 @@ function temporaryFenceRow(
     ...base,
     family: "temporary_fencing",
     subtype: "temporary_fencing",
+    required_portal_roles: [
+      ...sesPreparePortalRoles("temporary_fencing"),
+    ],
     invoice_basis: ajs
       ? "ajs_temporary_fence_labour_only"
       : builder_key === "WESTERN"
@@ -410,6 +416,7 @@ function physicalShapedFamilyRow(
   return {
     ...base,
     family,
+    required_portal_roles: [...sesPreparePortalRoles(family)],
     named_na_rules: [
       "physical-work-has-no-portal-deliverable",
       "not-a-roof-report",
@@ -446,11 +453,7 @@ function mlbReportRow(
     report_route: "work_order_sender",
     photo_route: "not_applicable",
     invoice_route: "matrix_invoice_mailbox",
-    required_portal_roles: assessment
-      ? ["assessment", "photos", "scope"]
-      : ownDocument
-      ? []
-      : ["roof_report"],
+    required_portal_roles: [...sesPreparePortalRoles(family)],
     named_na_rules: assessment
       ? [
         "not-a-roof-report",
@@ -516,11 +519,7 @@ function syntheticRow(
     report_route: "work_order_sender",
     photo_route: reportOnly ? "not_applicable" : "work_order_sender",
     invoice_route: "matrix_invoice_mailbox",
-    required_portal_roles: assessment
-      ? ["assessment", "photos", "scope"]
-      : roof
-      ? ["roof_report"]
-      : [],
+    required_portal_roles: [...sesPreparePortalRoles(family)],
     named_na_rules: assessment
       ? [
         "not-a-roof-report",

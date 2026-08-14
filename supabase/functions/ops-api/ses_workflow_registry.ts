@@ -34,11 +34,21 @@ import {
   sesStageWorkflowProfile,
   type SesStageWorkflowProfileId,
 } from "./ses_stage_engine_v2.ts";
+import {
+  SES_WORKFLOW_EXECUTABLE_POLICY_VERSION,
+  type SesDeliverableAuthorityPolicy,
+  sesDeliverableAuthorityRequiresPersistedCase,
+  sesPortalArtifactRoles,
+  sesPreparePortalRoles,
+  sesStagePortalRoles,
+  type SesWorkflowExecutableFamilyPolicy,
+  sesWorkflowExecutableFamilyPolicy,
+} from "./ses_workflow_executable_policy.ts";
 
 export const SES_WORKFLOW_CONTRACT_SCHEMA_VERSION =
   "secureworks.ses-workflow-contract/v1";
 export const SES_WORKFLOW_CONTRACT_CANON_REVISION =
-  "ses-workflow-contract/2026-08-14.5";
+  "ses-workflow-contract/2026-08-15.1";
 export const SES_WORKFLOW_RELEASE_CONTRACT_VERSION =
   "ses-release-contract/v1-preflight-only";
 export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
@@ -50,7 +60,7 @@ export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
  * review-visible rather than silently moving the drift-test coordinate.
  */
 export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 =
-  "sha256:f1d6a268a38bf46ed2aceaa8069cab8c17901cf9a21ad458db1559d3a02af5cb";
+  "sha256:71d341d3c1c5732f17452b5859fede50e7fe229edf1def224e64262dccade0d4";
 
 export const SES_WORKFLOW_PUBLIC_FAMILIES = [
   "physical_makesafe",
@@ -87,6 +97,7 @@ interface SesWorkflowProfileBase {
 export interface SesWorkflowFamilyProfile extends SesWorkflowProfileBase {
   profile_id: `family.${SesWorkflowFamilyId}.v1`;
   family_id: SesWorkflowFamilyId;
+  deliverable_authority_policy: SesDeliverableAuthorityPolicy;
   active_deliverable_required: boolean;
 }
 
@@ -148,6 +159,10 @@ export interface SesWorkflowEffectiveVariant {
   delivery_variant: SesWorkflowDeliveryVariant;
   region_qualifier: SesWorkflowRegionQualifier;
   routing_rule: SesFamilyMatrixRow["routing_rule"];
+  /** Exact executable matrix row consumed by adapter, prepare, pricing and send. */
+  executable_matrix_row: SesFamilyMatrixRow;
+  /** Complete low-level family operand consumed across adapter/prepare/stage. */
+  executable_family_policy: SesWorkflowExecutableFamilyPolicy;
   family_profile_id: SesWorkflowFamilyProfile["profile_id"];
   artifact_profile_id: SesWorkflowArtifactProfileId;
   stage_profile_id: SesStageWorkflowProfileId;
@@ -183,6 +198,7 @@ export interface SesWorkflowContractManifest {
     review_spec: string;
     pricing_rules: string;
     send_rules: string;
+    executable_policy: string;
   };
   profiles: {
     family: readonly SesWorkflowFamilyProfile[];
@@ -297,12 +313,18 @@ function effectiveVariantId(row: SesFamilyMatrixRow): string {
 
 function familyProfile(
   familyId: SesWorkflowFamilyId,
+  runtimeFamilyId: Exclude<SesFamilyId, "unknown">,
 ): RawProfile<SesWorkflowFamilyProfile> {
+  const deliverableAuthority = sesWorkflowExecutableFamilyPolicy(
+    runtimeFamilyId,
+  ).deliverable_authority;
   return {
     profile_id: `family.${familyId}.v1`,
     family_id: familyId,
-    active_deliverable_required: familyId === "repair" ||
-      familyId === "restoration",
+    deliverable_authority_policy: deliverableAuthority,
+    active_deliverable_required: sesDeliverableAuthorityRequiresPersistedCase(
+      deliverableAuthority,
+    ),
     seal_state: "sealed",
     unsealed_reason_code: null,
     source_rule_ids: sortedStrings([
@@ -310,6 +332,66 @@ function familyProfile(
       `family.matrix.${SES_FAMILY_MATRIX_VERSION}`,
     ]),
   };
+}
+
+function executableMatrixRow(row: SesFamilyMatrixRow): SesFamilyMatrixRow {
+  return {
+    ...row,
+    required_portal_roles: [...row.required_portal_roles],
+    named_na_rules: [...row.named_na_rules],
+  };
+}
+
+function executableFamilyPolicy(
+  family: Exclude<SesFamilyId, "unknown">,
+): SesWorkflowExecutableFamilyPolicy {
+  const policy = sesWorkflowExecutableFamilyPolicy(family);
+  return {
+    ...policy,
+    portal_roles: policy.portal_roles.map((role) => ({ ...role })),
+  };
+}
+
+export function assertSesWorkflowExecutablePolicyConsistency(
+  row: SesFamilyMatrixRow,
+): void {
+  if (row.family === "unknown") {
+    throw new Error("unknown SES family cannot enter executable policy checks");
+  }
+  const packDescriptor = sesWorkflowPackProfile(row.family);
+  const stageDescriptor = sesStageWorkflowProfile(row.family);
+  if (!packDescriptor || !stageDescriptor) {
+    throw new Error(`known SES family ${row.family} has no workflow profile`);
+  }
+  const prepareRoles = sesPreparePortalRoles(row.family);
+  const stageRoles = sesStagePortalRoles(row.family);
+  const artifactRoles = sesPortalArtifactRoles(row.family);
+  if (
+    canonicalSesJson(row.required_portal_roles) !==
+      canonicalSesJson(prepareRoles)
+  ) {
+    throw new Error(
+      `family matrix ${row.builder_key}/${row.family}/${row.routing_rule} portal roles diverge from the executable portal-role owner`,
+    );
+  }
+  if (
+    canonicalSesJson(stageDescriptor.required_portal_roles) !==
+      canonicalSesJson(stageRoles)
+  ) {
+    throw new Error(
+      `stage profile ${stageDescriptor.profile_id} portal roles diverge from the executable portal-role owner`,
+    );
+  }
+  if (
+    artifactRoles.some((role) =>
+      !packDescriptor.included_artifacts.includes(role) ||
+      !packDescriptor.hard_required_artifacts.includes(role)
+    )
+  ) {
+    throw new Error(
+      `pack profile ${packDescriptor.pack_profile_id} portal artifacts diverge from the executable portal-role owner`,
+    );
+  }
 }
 
 function pricingProfile(
@@ -346,14 +428,14 @@ function buildRawManifest(): RawManifest {
       throw new Error("unknown SES family cannot enter the workflow registry");
     }
     const familyId = publicFamilyId(row);
-    const familyDescriptor = familyProfile(familyId);
-    setConsistentProfile(family, familyDescriptor);
-
     const packDescriptor = sesWorkflowPackProfile(row.family);
     const stageDescriptor = sesStageWorkflowProfile(row.family);
     if (!packDescriptor || !stageDescriptor) {
       throw new Error(`known SES family ${row.family} has no workflow profile`);
     }
+    assertSesWorkflowExecutablePolicyConsistency(row);
+    const familyDescriptor = familyProfile(familyId, row.family);
+    setConsistentProfile(family, familyDescriptor);
     setConsistentProfile(artifact, {
       profile_id: packDescriptor.artifact_profile_id,
       included_artifacts: sortedStrings(packDescriptor.included_artifacts),
@@ -418,6 +500,8 @@ function buildRawManifest(): RawManifest {
       delivery_variant: deliveryVariant(row),
       region_qualifier: regionQualifier(row),
       routing_rule: row.routing_rule,
+      executable_matrix_row: executableMatrixRow(row),
+      executable_family_policy: executableFamilyPolicy(row.family),
       family_profile_id: familyDescriptor.profile_id,
       artifact_profile_id: packDescriptor.artifact_profile_id,
       stage_profile_id: stageDescriptor.profile_id,
@@ -452,6 +536,7 @@ function buildRawManifest(): RawManifest {
       review_spec: SES_DOCKET_REVIEW_SPEC_VERSION,
       pricing_rules: SES_WORKFLOW_PRICING_RULE_VERSION,
       send_rules: SES_WORKFLOW_SEND_RULE_VERSION,
+      executable_policy: SES_WORKFLOW_EXECUTABLE_POLICY_VERSION,
     },
     profiles: {
       family: sortedProfiles([...family.values()]),

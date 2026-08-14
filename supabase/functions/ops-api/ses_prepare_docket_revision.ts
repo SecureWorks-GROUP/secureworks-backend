@@ -42,7 +42,7 @@ import {
   sesAjsBuilderRouteBody,
   sesAjsReportInvoiceSubject,
 } from "./ses_release_route_shape.ts";
-import { SES_PORTAL_REQUIRED_ROLES } from "./ses_stage_engine_v2.ts";
+import { sesPortalArtifactRoles } from "./ses_workflow_executable_policy.ts";
 import {
   evaluateSesPhotoMailVolume,
   resolveSesMailTransportForPrepare,
@@ -349,13 +349,15 @@ const ASSESSMENT_WORKFLOW_PACK_PROFILE: SesWorkflowPackProfileSeed = {
   pack_profile_id: "pack.assessment.v1",
   artifact_profile_id: "artifacts.assessment.v1",
   included_artifacts: Object.freeze([
-    ...((SES_PORTAL_REQUIRED_ROLES.assessment_quote ||
-      []) as SesWorkflowArtifactRole[]),
+    ...(sesPortalArtifactRoles(
+      "assessment_quote",
+    ) as SesWorkflowArtifactRole[]),
     "invoice",
   ]),
   hard_required_artifacts: Object.freeze([
-    ...((SES_PORTAL_REQUIRED_ROLES.assessment_quote ||
-      []) as SesWorkflowArtifactRole[]),
+    ...(sesPortalArtifactRoles(
+      "assessment_quote",
+    ) as SesWorkflowArtifactRole[]),
     "invoice",
   ]),
   forbidden_artifacts: Object.freeze(["physical_report"]),
