@@ -4,11 +4,11 @@
 import {
   classifyMakesafeJobType,
   computeMakesafeStatus,
-  requiresBoundBuilderReportPdf,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
   type MakesafePortalCapture,
   type MakesafeStatusHold,
   reportInEvidence,
+  requiresBoundBuilderReportPdf,
 } from "./makesafe_computed_status.ts";
 import {
   isMakesafeTerminalDisplayStatus,
@@ -45,6 +45,7 @@ import {
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
+import { resolveSesWorkflowStageContractCoordinate } from "./ses_workflow_registry.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 
@@ -239,6 +240,9 @@ export function projectOpsMakesafeCardRow(row: any) {
     ses_family: row?.ses_family || null,
     ses_family_label: row?.ses_family_label || null,
     ses_recipe_state: row?.ses_recipe_state || null,
+    ses_contract_state: row?.ses_contract_state || "unsupported",
+    ses_contract_reason_code: row?.ses_contract_reason_code || null,
+    ses_contract_variant_id: row?.ses_contract_variant_id || null,
     job_state: row?.job_state || null,
     substatus: row?.substatus || null,
     declared_stage: row?.declared_stage || null,
@@ -1341,6 +1345,12 @@ export function buildCanonicalMakesafeRows(
     const invoiceCloseoutSatisfied = invoiceQualifiesAsCurrentDraft ||
       (invoiceQualifiesAsCurrentCloseout &&
         (base?.has_invoice_doc === true || !!pack?.invoice_doc_id));
+    const sesContract = resolveSesWorkflowStageContractCoordinate({
+      runtime_family_id: pack?.workflow_runtime_family_id,
+      variant_id: pack?.workflow_contract_variant_id,
+      canonical_contract_hash: pack?.workflow_contract_hash,
+      stored_seal_state: pack?.workflow_contract_seal_state,
+    });
     // R8 — an overlay row declares what it is allowed to do. A row with no
     // `decision_kind` is a legacy display override, which is every row in the
     // ledger today, so this reads as `display_override` and the binding below
@@ -1396,6 +1406,8 @@ export function buildCanonicalMakesafeRows(
           detail?.attendance_cycle_id ?? null,
       },
       ses_family: sesFamily,
+      ses_contract_state: sesContract.state,
+      ses_contract_reason_code: sesContract.reason_code,
       nowIso: computedAt,
     };
     const reportIn = reportInEvidence(statusInput);
@@ -1411,7 +1423,7 @@ export function buildCanonicalMakesafeRows(
       String(application.source_status || "").toLowerCase() === derivedStage &&
       (String(application.after_status || "").toLowerCase() !==
           "report_ready" ||
-        invoiceCloseoutSatisfied);
+        (invoiceCloseoutSatisfied && sesContract.state === "sealed"));
     // An attestation attaches PROVENANCE only, and only when it genuinely
     // describes where the card already is. It never changes `displayStage`.
     const attestationAttaches = decisionKind === "stage_attestation" &&
@@ -1544,6 +1556,9 @@ export function buildCanonicalMakesafeRows(
       // Captain 2026-08-02 sealed repair + restoration on the physical pack path;
       // only `unknown` has no recipe.
       ses_recipe_state: sesFamily === "unknown" ? "unknown" : "sealed",
+      ses_contract_state: sesContract.state,
+      ses_contract_reason_code: sesContract.reason_code,
+      ses_contract_variant_id: sesContract.variant_id,
       job_state: base?.status || null,
       // Evidence-backed presentation: unbacked ready_to_invoice is demoted.
       substatus: presentedSubstatus.substatus,
@@ -1625,6 +1640,7 @@ export function buildCanonicalMakesafeRows(
       application,
       base?.status,
       invoiceCloseoutSatisfied,
+      sesContract.state,
     );
     const roofEligibility = sesRoofConfirmationEligibility(
       base,
@@ -1855,6 +1871,9 @@ function tradeSafe(row: any, viewer: MakesafeBoardViewer, all: boolean) {
     ses_family: row?.ses_family,
     ses_family_label: row?.ses_family_label,
     ses_recipe_state: row?.ses_recipe_state,
+    ses_contract_state: row?.ses_contract_state,
+    ses_contract_reason_code: row?.ses_contract_reason_code,
+    ses_contract_variant_id: row?.ses_contract_variant_id,
     column: mapped.column,
     canonical_stage: row?.canonical_stage,
     projection_warning: mapped.mapped

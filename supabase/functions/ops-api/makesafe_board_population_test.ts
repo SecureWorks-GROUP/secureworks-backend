@@ -6,12 +6,18 @@ import {
 import { _makesafePipelineForTest } from "./index.ts";
 import { CHUNK_FETCH_CONCURRENCY } from "./makesafe_compact_reads.ts";
 
-function makeQueryClient(resultsByTable: Record<string, any[]>) {
+function makeQueryClient(
+  resultsByTable: Record<string, any[]>,
+  onSelect?: (table: string, columns: string) => void,
+) {
   function builder(table: string) {
     const rows = (resultsByTable[table] || []).slice();
     const predicates: Array<(row: any) => boolean> = [];
     const query: any = {
-      select: () => query,
+      select: (columns: string) => {
+        onSelect?.(table, columns);
+        return query;
+      },
       eq: (column: string, value: any) => {
         predicates.push((row) => row?.[column] === value);
         return query;
@@ -48,6 +54,52 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
   }
   return { from: (table: string) => builder(table) };
 }
+
+Deno.test("board population projects the persisted workflow contract coordinate from the current docket", async () => {
+  const selects: Array<{ table: string; columns: string }> = [];
+  const client = makeQueryClient({
+    jobs: [{
+      id: "job-contract-coordinate",
+      job_number: "SWMS-CONTRACT",
+      type: "makesafe",
+      status: "accepted",
+      metadata: { makesafe_job_family: "physical_makesafe" },
+      created_at: "2026-07-08T00:00:00Z",
+      updated_at: "2026-07-08T00:00:00Z",
+    }],
+    makesafe_job_details: [{
+      job_id: "job-contract-coordinate",
+      external_ref: "MLB-CONTRACT",
+      requesting_company_name: "Major Loss Builders",
+      substatus: "company_contact_required",
+    }],
+    job_service_reports: [],
+    xero_invoices: [],
+    job_documents: [],
+    makesafe_report_packs: [],
+    makesafe_report_pack_cycles: [],
+    makesafe_docket_revisions_current: [],
+    makesafe_board_attention_current: [],
+    job_assignments: [],
+    job_events: [],
+  }, (table, columns) => selects.push({ table, columns }));
+
+  await _makesafePipelineForTest(client, new URLSearchParams());
+  const docketSelect =
+    selects.find((entry) => entry.table === "makesafe_docket_revisions_current")
+      ?.columns || "";
+  for (
+    const projection of [
+      "workflow_runtime_family_id:envelope->v2->classification->>family",
+      "workflow_contract_variant_id:envelope->v2->classification->workflow_contract->>variant_id",
+      "workflow_contract_hash:envelope->v2->classification->workflow_contract->>canonical_contract_hash",
+      "workflow_contract_seal_state:envelope->v2->classification->workflow_contract->>seal_state",
+      "workflow_contract_unsealed_reason_code:envelope->v2->classification->workflow_contract->>unsealed_reason_code",
+    ]
+  ) {
+    assert(docketSelect.includes(projection), projection);
+  }
+});
 
 Deno.test("board population includes detail-authority legacy jobs exactly once", async () => {
   const client = makeQueryClient({

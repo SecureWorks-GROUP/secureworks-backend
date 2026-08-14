@@ -16,6 +16,7 @@ import {
   hashSesWorkflowContractSemanticContent,
   prepareSesWorkflowBackendPolicyContract,
   prepareSesWorkflowReleaseContract,
+  resolveSesWorkflowStageContractCoordinate,
   SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
   SES_WORKFLOW_PUBLIC_FAMILIES,
   type SesWorkflowContractManifest,
@@ -365,6 +366,72 @@ Deno.test("every backend-policy-sealed builder and family variant resolves to it
     assertEquals(result.approval_allowed, false);
     assertEquals(result.external_effects_allowed, false);
   }
+});
+
+Deno.test("persisted workflow coordinates resolve fail-closed for stage placement", async () => {
+  const manifest = await exportSesContractSnapshot();
+  const variant = manifest.variants.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.runtime_family_id === "physical_makesafe"
+  );
+  if (!variant) throw new Error("missing MLB physical variant");
+
+  assertEquals(
+    resolveSesWorkflowStageContractCoordinate({
+      runtime_family_id: variant.runtime_family_id,
+      variant_id: variant.variant_id,
+      canonical_contract_hash: manifest.canonical_contract_hash,
+      stored_seal_state: variant.seal_state,
+    }),
+    {
+      state: "known_unsealed",
+      reason_code: variant.unsealed_reason_code,
+      variant_id: variant.variant_id,
+    },
+  );
+  assertEquals(
+    resolveSesWorkflowStageContractCoordinate({}),
+    {
+      state: "unsupported",
+      reason_code: "family_contract_incomplete",
+      variant_id: null,
+    },
+  );
+  assertEquals(
+    resolveSesWorkflowStageContractCoordinate({
+      runtime_family_id: variant.runtime_family_id,
+      variant_id: variant.variant_id,
+      canonical_contract_hash: manifest.canonical_contract_hash,
+    }).reason_code,
+    "family_contract_incomplete",
+  );
+  assertEquals(
+    resolveSesWorkflowStageContractCoordinate({
+      runtime_family_id: variant.runtime_family_id,
+      variant_id: variant.variant_id,
+      canonical_contract_hash: "sha256:divergent",
+      stored_seal_state: variant.seal_state,
+    }).reason_code,
+    "family_contract_divergent",
+  );
+  assertEquals(
+    resolveSesWorkflowStageContractCoordinate({
+      runtime_family_id: "assessment_quote",
+      variant_id: variant.variant_id,
+      canonical_contract_hash: manifest.canonical_contract_hash,
+      stored_seal_state: variant.seal_state,
+    }).reason_code,
+    "unsupported_family_variant",
+  );
+  assertEquals(
+    resolveSesWorkflowStageContractCoordinate({
+      runtime_family_id: variant.runtime_family_id,
+      variant_id: variant.variant_id,
+      canonical_contract_hash: manifest.canonical_contract_hash,
+      stored_seal_state: "sealed",
+    }).reason_code,
+    "family_contract_divergent",
+  );
 });
 
 Deno.test("roof and assessment remain typed-unsealed with no executable send recipe", async () => {

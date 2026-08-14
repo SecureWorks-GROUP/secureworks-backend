@@ -388,6 +388,7 @@ Deno.test("named-branch preservation: every pre-existing physical Docs Ready con
       completionPhotoCount: 6,
     },
     ses_family: "physical_makesafe",
+    ses_contract_state: "sealed",
     nowIso: SNAPSHOT_NOW,
   } as any;
   assertEquals(deriveSesStageV2(complete).stage, "report_ready");

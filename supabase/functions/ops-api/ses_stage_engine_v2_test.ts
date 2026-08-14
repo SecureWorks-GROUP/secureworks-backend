@@ -26,6 +26,7 @@ import {
   sesStagePortalRoleObservation,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
 
 const NOW = "2026-08-02T00:00:00.000Z";
 const daysAgo = (days: number) =>
@@ -53,6 +54,11 @@ function input(over: Record<string, any> = {}): any {
     // R4 — present only when a case explicitly supplies it, so the "derive the
     // family from the card" path stays reachable in these fixtures.
     ...(over.ses_family === undefined ? {} : { ses_family: over.ses_family }),
+    // Direct engine fixtures describe a hypothetical fully sealed contract
+    // unless a refusal case explicitly overrides it. Board/read-model tests
+    // exercise persisted current coordinates separately.
+    ses_contract_state: over.ses_contract_state ?? "sealed",
+    ses_contract_reason_code: over.ses_contract_reason_code ?? null,
     nowIso: over.nowIso ?? NOW,
   };
 }
@@ -218,7 +224,7 @@ Deno.test("placement: allocated card waiting on a trade report stays Allocated",
   ]);
 });
 
-Deno.test("placement: reviewable pack with a qualifying current DRAFT still reaches Docs Ready", () => {
+Deno.test("placement: current unsealed workflow refuses a reviewable DRAFT pack", () => {
   const [row] = buildCanonicalMakesafeRows([
     baseRow({
       id: "job-reviewable-pack",
@@ -231,6 +237,10 @@ Deno.test("placement: reviewable pack with a qualifying current DRAFT still reac
         invoice_doc_id: "invoice-doc",
         swms_doc_id: "swms-doc",
         sent_at: null,
+        workflow_runtime_family_id: "physical_makesafe",
+        workflow_contract_variant_id: "physical_makesafe.standard.mlb.perth",
+        workflow_contract_hash: SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+        workflow_contract_seal_state: "unsealed",
       },
       invoice_raw_status: "DRAFT",
       invoice_qualifies_as_current_draft: true,
@@ -241,11 +251,12 @@ Deno.test("placement: reviewable pack with a qualifying current DRAFT still reac
     }),
   ], { computedAt: NOW });
 
-  assertEquals(row.canonical_stage, "report_ready");
-  assertEquals(row.derived_stage_v2, "report_ready");
+  assertEquals(row.canonical_stage, "decision_required");
+  assertEquals(row.derived_stage_v2, "decision_required");
+  assertEquals(row.ses_contract_state, "known_unsealed");
 });
 
-Deno.test("placement: named prior-cycle bind reaches Docs Ready and ticks its invoice", () => {
+Deno.test("placement: named prior-cycle bind still refuses a current unsealed workflow", () => {
   const [row] = buildCanonicalMakesafeRows([
     baseRow({
       id: "job-named-prior-bind",
@@ -262,6 +273,10 @@ Deno.test("placement: named prior-cycle bind reaches Docs Ready and ticks its in
         invoice_doc_id: "invoice-doc-1140",
         swms_doc_id: "swms-doc",
         sent_at: null,
+        workflow_runtime_family_id: "physical_makesafe",
+        workflow_contract_variant_id: "physical_makesafe.standard.mlb.perth",
+        workflow_contract_hash: SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+        workflow_contract_seal_state: "unsealed",
       },
       makesafe_details: { cycle_number: 4 },
       invoice_raw_status: "DRAFT",
@@ -275,7 +290,8 @@ Deno.test("placement: named prior-cycle bind reaches Docs Ready and ticks its in
     }),
   ], { computedAt: NOW });
 
-  assertEquals(row.canonical_stage, "report_ready");
+  assertEquals(row.canonical_stage, "decision_required");
+  assertEquals(row.ses_contract_state, "known_unsealed");
   assertEquals(row.invoice_qualifies_as_current_draft, false);
   assertEquals(
     row.invoice_draft_qualification_reason,
@@ -463,8 +479,19 @@ Deno.test("overlay candidate: report_ready target requires the qualifying draft 
       decision,
       "in_progress",
       true,
+      "sealed",
     ),
     { stage: "report_ready", binds: true },
+  );
+  assertEquals(
+    sesStageV2OverlayCandidate(
+      "trade_report_in",
+      decision,
+      "in_progress",
+      true,
+      "known_unsealed",
+    ),
+    { stage: "trade_report_in", binds: false },
   );
 });
 
@@ -587,6 +614,70 @@ Deno.test("raw complete keeps an assembled unsent bound pack visible in Docs Rea
     ses_family: "unknown",
   });
   assertEquals(deriveSesStageV2(unknownFamily).stage, "archive");
+});
+
+Deno.test("known-unsealed workflow contracts refuse only the Docs Ready transition", () => {
+  const ready = input({
+    ses_contract_state: "known_unsealed",
+    ses_contract_reason_code: "release_contract_preflight_only",
+    evidence: {
+      assignments: [{ id: "a1" }],
+      serviceReports: [{ status: "submitted", cycle_number: 1 }],
+      completionPhotoCount: 6,
+      packState: "READY",
+      pack: {
+        status: "drafted",
+        report_doc_id: "report-doc",
+        invoice_doc_id: "invoice-doc",
+        swms_doc_id: "swms-doc",
+      },
+      packSent: false,
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
+      documents: { report: true, invoice: true, swms: true },
+      swmsRequired: true,
+    },
+  });
+  const refused = deriveSesStageV2(ready);
+  assertEquals(refused.stage, "decision_required");
+  assertEquals(refused.ses_contract_state, "known_unsealed");
+  assertEquals(
+    refused.ses_contract_reason_code,
+    "release_contract_preflight_only",
+  );
+  assert(refused.conflicts.includes("family_contract_unsealed"));
+
+  const unsupported = deriveSesStageV2({
+    ...ready,
+    ses_contract_state: "unsupported",
+    ses_contract_reason_code: "family_contract_divergent",
+  });
+  assertEquals(unsupported.stage, "decision_required");
+  assert(unsupported.conflicts.includes("family_contract_unsupported"));
+
+  assertEquals(
+    deriveSesStageV2(input({
+      ses_contract_state: "known_unsealed",
+      evidence: { assignments: [{ id: "a1" }] },
+    })).stage,
+    "allocated",
+  );
+  assertEquals(
+    deriveSesStageV2(input({
+      ses_contract_state: "known_unsealed",
+      job: { status: "cancelled" },
+      evidence: ready.evidence,
+    })).stage,
+    "cancelled",
+  );
+  assertEquals(
+    deriveSesStageV2(input({
+      ses_contract_state: "known_unsealed",
+      job: { status: "archived" },
+      evidence: ready.evidence,
+    })).stage,
+    "archive",
+  );
 });
 
 Deno.test("clock: the 168-hour boundary is strict on both terminal paths", () => {

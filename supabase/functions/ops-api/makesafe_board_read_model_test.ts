@@ -36,6 +36,7 @@ import {
   TRADE_MAKESAFE_COLUMNS,
 } from "./makesafe_board_read_model.ts";
 import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "./makesafe_computed_status.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
 import { observerPopulationForJobStatus } from "../../../scripts/ses-f7-prime-portal-observer.ts";
 
 const NOW = "2026-07-20T12:00:00Z";
@@ -106,6 +107,10 @@ const READY_UNSENT_PACK = {
   docket_revision_id: "rev-ready",
   pre_xero_docs_ready: true,
   blockers: [],
+  workflow_runtime_family_id: "physical_makesafe",
+  workflow_contract_variant_id: "physical_makesafe.standard.mlb.perth",
+  workflow_contract_hash: SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  workflow_contract_seal_state: "unsealed",
 };
 
 /** Base-row overrides that make the corrected engine derive `stage`. */
@@ -287,25 +292,28 @@ function makeCanonicalLoaderClient(failTable?: string) {
   };
 }
 
-Deno.test("parity: every ops stage maps exactly once to the captain's four trade columns", () => {
+Deno.test("parity: every currently reachable ops stage maps exactly once to the captain's four trade columns", () => {
   // R12 cutover: this used to declare each stage with `board_stage`. Placement
   // now follows the corrected engine, so every fixture carries the evidence for
   // its own stage — and the guarantee is unchanged: one card, exactly one ops
   // column, exactly one trade column. It now also covers `decision_required`,
   // which R12 promoted from a cutover-stopper to a real rendered column.
-  const ids = OPS_MAKESAFE_STAGES.map((stage) => `job-${stage}`);
+  const currentlyReachableStages = OPS_MAKESAFE_STAGES.filter((stage) =>
+    stage !== "report_ready"
+  );
+  const ids = currentlyReachableStages.map((stage) => `job-${stage}`);
   const rows = buildCanonicalMakesafeRows(
-    OPS_MAKESAFE_STAGES.map((stage) =>
+    currentlyReachableStages.map((stage) =>
       baseJob(stage, `job-${stage}`, evidenceFor(stage))
     ),
     { photoCountByJobId: photoFloorFor(...ids), computedAt: NOW },
   );
   // The fixtures really do derive the stage they are named for; without this
   // the column assertions below could pass on a board that placed nothing.
-  assertEquals(rows.map((r) => r.canonical_stage), [...OPS_MAKESAFE_STAGES]);
+  assertEquals(rows.map((r) => r.canonical_stage), currentlyReachableStages);
   const parity = checkMakesafeBoardParity(rows);
   assertEquals(parity.ok, true);
-  assertEquals(parity.checked, OPS_MAKESAFE_STAGES.length);
+  assertEquals(parity.checked, currentlyReachableStages.length);
   assertEquals(parity.errors, []);
   assertEquals(parity.unmapped_stage_job_ids, []);
 
@@ -327,7 +335,7 @@ Deno.test("parity: every ops stage maps exactly once to the captain's four trade
   ]);
   assertEquals(
     trade.columns.Complete.map((r) => r.canonical_stage),
-    ["trade_report_in", "report_ready"],
+    ["trade_report_in"],
   );
   // R12: `decision_required` joins the captain's Archive lane — a captain
   // question is not trade work, so it stays off the trade's active columns.
@@ -1180,7 +1188,8 @@ Deno.test("captain lock: MLB physical cards without SWMS stay Trade Report In", 
       computedAt: NOW,
     }, "card");
 
-    assertEquals(readyCard.canonical_stage, "report_ready", jobNumber);
+    assertEquals(readyCard.canonical_stage, "decision_required", jobNumber);
+    assertEquals(readyCard.ses_contract_state, "known_unsealed", jobNumber);
     assertEquals(readyCard.pack.closeout_documents, {
       report: true,
       invoice: true,
@@ -1189,7 +1198,7 @@ Deno.test("captain lock: MLB physical cards without SWMS stay Trade Report In", 
   }
 });
 
-Deno.test("card ticks consume the same drafted-pack artifacts as placement", () => {
+Deno.test("card ticks survive a workflow-contract Docs Ready refusal", () => {
   const id = "mlb-physical-with-swms";
   const [card] = buildCanonicalMakesafeRows([
     baseJob("report_ready", id, {
@@ -1203,13 +1212,34 @@ Deno.test("card ticks consume the same drafted-pack artifacts as placement", () 
     computedAt: NOW,
   }, "card");
 
-  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.canonical_stage, "decision_required");
+  assertEquals(card.ses_contract_state, "known_unsealed");
   assertEquals(card.pack.drafted, true);
   assertEquals(card.pack.closeout_documents, {
     report: true,
     invoice: true,
     swms: true,
   });
+});
+
+Deno.test("divergent persisted workflow hash is unsupported and cannot reach Docs Ready", () => {
+  const id = "divergent-workflow-contract";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      ...evidenceFor("report_ready"),
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        workflow_contract_hash: "sha256:divergent",
+      },
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "decision_required");
+  assertEquals(card.ses_contract_state, "unsupported");
+  assertEquals(card.ses_contract_reason_code, "family_contract_divergent");
 });
 
 Deno.test("AJS physical stays Trade Report In until its generated SWMS exists", () => {
@@ -1243,23 +1273,20 @@ Deno.test("active column scope drops archive without moving other cards", () => 
   const full = buildCanonicalMakesafeRows([
     baseJob("new", "job-new", evidenceFor("new")),
     baseJob("allocated", "job-alloc", evidenceFor("allocated")),
-    baseJob("report_ready", "job-ready", {
-      ...evidenceFor("report_ready"),
-      has_wo: true,
-    }),
+    baseJob("allocated", "job-ready", evidenceFor("allocated")),
     baseJob("archive", "job-arch", evidenceFor("archive")),
     baseJob("cancelled", "job-cancel", evidenceFor("cancelled")),
   ], {
     photoCountByJobId: photoFloorFor("job-ready"),
     computedAt: NOW,
     statusApplicationsByJobId: {
-      // Overlay parks a Docs Ready card into archive — active scope must drop it,
+      // Overlay parks an Allocated card into archive — active scope must drop it,
       // and the census must still count it under archive. Its `source_status`
       // now has to match the DERIVED stage, which the evidence supplies.
       "job-ready": {
         run_key: "cap-arch",
-        source_status: "report_ready",
-        before_status: "report_ready",
+        source_status: "allocated",
+        before_status: "allocated",
         after_status: "archive",
         evidence_ref: "captain",
         applied_by: "captain",
@@ -1338,16 +1365,17 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   // evidence and the same extras — including the photo floor, which card mode
   // previously never even loaded.
   const source = () =>
-    baseJob("report_ready", "job-card", {
-      ...evidenceFor("report_ready"),
+    baseJob("allocated", "job-card", {
+      ...evidenceFor("allocated"),
       has_wo: true,
+      invoice_status: "draft",
       site_suburb: "Bertram",
       requesting_company_slug: "mlb",
     });
   const application = {
     run_key: "cap-1",
-    source_status: "report_ready",
-    before_status: "report_ready",
+    source_status: "allocated",
+    before_status: "allocated",
     after_status: "archive",
     evidence_ref: "captain",
     applied_by: "captain",

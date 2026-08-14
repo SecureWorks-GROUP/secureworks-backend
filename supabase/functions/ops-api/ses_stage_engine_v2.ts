@@ -59,6 +59,7 @@ import {
   isMakesafeTerminalJobState,
   MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS,
 } from "./makesafe_status_apply.ts";
+import type { SesWorkflowStageContractState } from "./ses_workflow_registry.ts";
 import {
   canonicalSesFamilyFromCard,
   type SesFamilyId,
@@ -73,7 +74,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r18-bound-report-pdf-floor";
+  "ses-stage-engine.v2-r19-workflow-contract-seal";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -105,7 +106,13 @@ export type SesStageV2Stage =
  * Structurally denies this engine the displayed stage. A caller that tries to
  * pass one is a type error, not a silent regression to the circular path.
  */
-export type SesStageV2Input = Omit<MakesafeStatusInput, "displayedStatus">;
+export type SesStageContractState = SesWorkflowStageContractState;
+
+export type SesStageV2Input = Omit<MakesafeStatusInput, "displayedStatus"> & {
+  /** Effective persisted family/variant contract, resolved by the read model. */
+  ses_contract_state?: SesStageContractState;
+  ses_contract_reason_code?: string | null;
+};
 
 /**
  * R4 — how a canonical family resolves for stage purposes.
@@ -138,6 +145,8 @@ export interface SesStageV2Result {
   /** The evidence path the family delegates to; null when none is defined. */
   family_kind: MakesafeJobKind | null;
   family_recipe_state: "sealed" | "unknown";
+  ses_contract_state: SesStageContractState;
+  ses_contract_reason_code: string | null;
   reasons: string[];
   /** Evidence the card is short of, from the shared evidence definition. */
   missing: string[];
@@ -616,7 +625,11 @@ export function sesStagePortalReportIn(
 export function sesStageDocsReady(
   input: SesStageV2Input,
   family: SesStageV2FamilyResolution,
-): { satisfied: boolean; missing: string[] } {
+): {
+  satisfied: boolean;
+  missing: string[];
+  refusal_code?: "family_contract_unsealed" | "family_contract_unsupported";
+} {
   // The minimum negative rule, unchanged and first. Everything below can only
   // subtract from this, never add to it, so no card can reach Docs Ready here
   // that the existing rule would refuse.
@@ -684,6 +697,25 @@ export function sesStageDocsReady(
     if (!reportIn.satisfied) missing.push(...reportIn.missing);
   }
 
+  if (missing.length === 0 && input.ses_contract_state !== "sealed") {
+    const knownUnsealed = input.ses_contract_state === "known_unsealed";
+    const reasonCode = String(input.ses_contract_reason_code || "").trim() ||
+      (knownUnsealed
+        ? "family_contract_unsealed"
+        : "family_contract_incomplete");
+    return {
+      satisfied: false,
+      missing: [
+        knownUnsealed
+          ? `the effective workflow contract is known unsealed (${reasonCode})`
+          : `the effective workflow contract is unsupported (${reasonCode})`,
+      ],
+      refusal_code: knownUnsealed
+        ? "family_contract_unsealed"
+        : "family_contract_unsupported",
+    };
+  }
+
   return { satisfied: missing.length === 0, missing };
 }
 
@@ -705,11 +737,23 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
   const kind = family.kind ?? classifyMakesafeJobType(input.detail, input.job);
   const hold = input.evidence?.hold || null;
   const conflicts: string[] = [];
+  const contractState: SesStageContractState = [
+      "sealed",
+      "known_unsealed",
+      "unsupported",
+    ].includes(String(input.ses_contract_state || ""))
+    ? input.ses_contract_state as SesStageContractState
+    : "unsupported";
+  const contractReasonCode = String(input.ses_contract_reason_code || "")
+    .trim() ||
+    (contractState === "unsupported" ? "family_contract_incomplete" : null);
   const base = {
     job_type: kind,
     ses_family: family.family,
     family_kind: family.kind,
     family_recipe_state: family.recipe_state,
+    ses_contract_state: contractState,
+    ses_contract_reason_code: contractReasonCode,
     hold,
     engine_version: SES_STAGE_ENGINE_V2_VERSION,
   };
@@ -765,6 +809,7 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     // prove it is exactly one click from sending. This mirrors the legacy
     // ladder's drafted-not-sent precedence while preserving every terminal
     // branch for sent, incomplete, refused, or packless cards.
+    const docsReadyContract = sesStageDocsReady(input, family);
     const unsentPack = deriveSesStageEvidence(input, family);
     if (
       family.recipe_state === "sealed" && unsentPack.status === "report_ready"
@@ -802,6 +847,18 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
         reasons: terminal.reasons,
         missing: [],
         conflicts: [...conflicts, ...terminal.conflicts],
+      };
+    }
+    if (docsReadyContract.refusal_code) {
+      conflicts.push(docsReadyContract.refusal_code);
+      return {
+        ...base,
+        stage: SES_STAGE_DECISION_REQUIRED,
+        reasons: [
+          `${docsReadyContract.refusal_code}: an otherwise review-ready pack cannot enter Docs Ready under this workflow contract`,
+        ],
+        missing: docsReadyContract.missing,
+        conflicts,
       };
     }
     conflicts.push("terminal_without_issued_invoice");
@@ -862,6 +919,20 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
         "the card's SES family cannot be identified, so no evidence recipe defines what would advance it",
       ],
       missing: [],
+      conflicts,
+    };
+  }
+
+  const docsReadyContract = sesStageDocsReady(input, family);
+  if (docsReadyContract.refusal_code) {
+    conflicts.push(docsReadyContract.refusal_code);
+    return {
+      ...base,
+      stage: SES_STAGE_DECISION_REQUIRED,
+      reasons: [
+        `${docsReadyContract.refusal_code}: an otherwise review-ready pack cannot enter Docs Ready under this workflow contract`,
+      ],
+      missing: docsReadyContract.missing,
       conflicts,
     };
   }
@@ -1073,6 +1144,7 @@ export function sesStageV2OverlayCandidate(
   application: SesStageOverlayApplication | null | undefined,
   rawJobState: unknown,
   invoiceCloseoutSatisfied = false,
+  contractState: SesStageContractState = "unsupported",
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
   const decisionKind = sesOverlayDecisionKind(application);
@@ -1082,7 +1154,7 @@ export function sesStageV2OverlayCandidate(
     !!application &&
     String(application.source_status || "").toLowerCase() === stage &&
     (String(application.after_status || "").toLowerCase() !== "report_ready" ||
-      invoiceCloseoutSatisfied);
+      (invoiceCloseoutSatisfied && contractState === "sealed"));
   return {
     stage: binds
       ? String(application?.after_status || stage).toLowerCase()

@@ -50,7 +50,7 @@ export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
  * review-visible rather than silently moving the drift-test coordinate.
  */
 export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 =
-  "sha256:a592f133206f33573295f9153fcf8afa0f5028d6a8a7d7dc87c53987bb22b766";
+  "sha256:f1d6a268a38bf46ed2aceaa8069cab8c17901cf9a21ad458db1559d3a02af5cb";
 
 export const SES_WORKFLOW_PUBLIC_FAMILIES = [
   "physical_makesafe",
@@ -465,6 +465,76 @@ function buildRawManifest(): RawManifest {
       codePointCompare(a.variant_id, b.variant_id)
     ),
   };
+}
+
+export type SesWorkflowStageContractState =
+  | "sealed"
+  | "known_unsealed"
+  | "unsupported";
+
+export interface SesWorkflowStageContractResolution {
+  state: SesWorkflowStageContractState;
+  reason_code: string | null;
+  variant_id: string | null;
+}
+
+let stageContractVariantsById: Map<string, RawVariant> | null = null;
+
+/**
+ * Resolve the persisted docket coordinate against the current executable
+ * registry without trusting its stored seal label alone. The canonical stage
+ * engine stays pure/synchronous; CI separately proves the pinned hash still
+ * matches the runtime export.
+ */
+export function resolveSesWorkflowStageContractCoordinate(input: {
+  runtime_family_id?: unknown;
+  variant_id?: unknown;
+  canonical_contract_hash?: unknown;
+  stored_seal_state?: unknown;
+}): SesWorkflowStageContractResolution {
+  const runtimeFamilyId = String(input.runtime_family_id || "").trim();
+  const variantId = String(input.variant_id || "").trim();
+  const contractHash = String(input.canonical_contract_hash || "").trim();
+  const storedSealState = String(input.stored_seal_state || "").trim();
+  if (!runtimeFamilyId || !variantId || !contractHash || !storedSealState) {
+    return {
+      state: "unsupported",
+      reason_code: "family_contract_incomplete",
+      variant_id: variantId || null,
+    };
+  }
+  if (contractHash !== SES_WORKFLOW_CONTRACT_CANONICAL_HASH) {
+    return {
+      state: "unsupported",
+      reason_code: "family_contract_divergent",
+      variant_id: variantId,
+    };
+  }
+  stageContractVariantsById ??= new Map(
+    buildRawManifest().variants.map((variant) => [variant.variant_id, variant]),
+  );
+  const variant = stageContractVariantsById.get(variantId);
+  if (!variant || variant.runtime_family_id !== runtimeFamilyId) {
+    return {
+      state: "unsupported",
+      reason_code: "unsupported_family_variant",
+      variant_id: variantId,
+    };
+  }
+  if (storedSealState !== variant.seal_state) {
+    return {
+      state: "unsupported",
+      reason_code: "family_contract_divergent",
+      variant_id: variantId,
+    };
+  }
+  return variant.seal_state === "sealed"
+    ? { state: "sealed", reason_code: null, variant_id: variantId }
+    : {
+      state: "known_unsealed",
+      reason_code: variant.unsealed_reason_code || "family_contract_unsealed",
+      variant_id: variantId,
+    };
 }
 
 function withoutHash<T extends SesWorkflowProfileBase>(
