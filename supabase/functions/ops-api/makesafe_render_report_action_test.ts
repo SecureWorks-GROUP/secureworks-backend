@@ -138,10 +138,17 @@ function bindClient(
     serviceReport?: Record<string, unknown> | null;
     media?: Array<Record<string, unknown>>;
     eventInsertError?: Record<string, unknown>;
+    pack?: Record<string, unknown> | null;
+    packReadError?: Record<string, unknown>;
   } = {},
 ) {
   const mutations: Array<{ table: string; values: Record<string, unknown> }> =
     [];
+  // Mutable main pack row. `undefined` means "not modelled" (fixtures that do
+  // not exercise the pointer path); an explicit `null` means "no main pack";
+  // an object is the current pack the CAS reads and may fill.
+  const pack: Record<string, unknown> | null =
+    options.pack === undefined ? null : options.pack;
   const document = {
     id: "document-fixture",
     job_id: options.documentJobId || "job-fixture",
@@ -198,10 +205,20 @@ function bindClient(
       let mutation: Record<string, unknown> | null = null;
       let responseError: Record<string, unknown> | null = null;
       const filters: Record<string, unknown> = {};
+      const isFilters: Record<string, unknown> = {};
+      const inFilters: Record<string, unknown[]> = {};
       const query: any = {
         select: () => query,
         eq: (column: string, value: unknown) => {
           filters[column] = value;
+          return query;
+        },
+        is: (column: string, value: unknown) => {
+          isFilters[column] = value;
+          return query;
+        },
+        in: (column: string, value: unknown[]) => {
+          inFilters[column] = value;
           return query;
         },
         order: () => query,
@@ -210,6 +227,12 @@ function bindClient(
             return Promise.resolve({
               data: document.id === filters.id ? document : null,
               error: null,
+            });
+          }
+          if (table === "makesafe_report_packs") {
+            return Promise.resolve({
+              data: pack,
+              error: options.packReadError || null,
             });
           }
           return Promise.resolve({ data: rows[table] || null, error: null });
@@ -283,6 +306,32 @@ function bindClient(
               resolve,
             );
           }
+          if (table === "makesafe_report_packs" && mutation) {
+            // Compare-and-swap: fill report_doc_id only when the pack still
+            // matches every guard (null pointer, unsent, no send started, and a
+            // bindable status). Mirrors the atomic pack UPDATE in the handler.
+            const statuses = inFilters["status"] || [];
+            const matches = pack != null &&
+              filters.id === pack.id &&
+              filters.pack_kind === "main" &&
+              ("report_doc_id" in isFilters
+                ? (pack.report_doc_id ?? null) === isFilters.report_doc_id
+                : true) &&
+              ("sent_at" in isFilters
+                ? (pack.sent_at ?? null) === isFilters.sent_at
+                : true) &&
+              ("send_started_at" in isFilters
+                ? (pack.send_started_at ?? null) === isFilters.send_started_at
+                : true) &&
+              (statuses.length ? statuses.includes(pack.status) : true);
+            if (matches && pack != null) {
+              pack.report_doc_id = (mutation as Record<string, unknown>)
+                .report_doc_id;
+              return Promise.resolve({ data: [{ id: pack.id }], error: null })
+                .then(resolve);
+            }
+            return Promise.resolve({ data: [], error: null }).then(resolve);
+          }
           return Promise.resolve({ data: null, error: responseError }).then(
             resolve,
           );
@@ -291,7 +340,7 @@ function bindClient(
       return query;
     },
   } as any;
-  return { client, document, mutations, bytes };
+  return { client, document, mutations, bytes, pack };
 }
 
 async function bindBody(bytes: Uint8Array) {
@@ -321,7 +370,16 @@ async function withStoredPdf<T>(bytes: Uint8Array, run: () => Promise<T>) {
 async function expectedSuccessShape(
   bytes: Uint8Array,
   reportJob: Record<string, unknown>,
-  opts: { skipped: boolean; writes: number; documentVersion: number },
+  opts: {
+    skipped: boolean;
+    writes: number;
+    documentVersion: number;
+    packPointer?: {
+      pack_report_doc_id: string | null;
+      pack_pointer_written: boolean;
+      pack_pointer_reason: string;
+    };
+  },
 ) {
   return {
     success: true,
@@ -343,6 +401,13 @@ async function expectedSuccessShape(
       `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
     renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
     writes: opts.writes,
+    // Pack pointer bind result. Defaults to the benign skip a fixture with no
+    // modelled main pack produces.
+    ...(opts.packPointer ?? {
+      pack_report_doc_id: null,
+      pack_pointer_written: false,
+      pack_pointer_reason: "no_main_pack",
+    }),
   };
 }
 
@@ -399,6 +464,196 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
   assertEquals(replay.skipped, true);
   assertEquals(replay.writes, 0);
   assertEquals(mutations.length, 2);
+});
+
+function draftedPack(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "pack-fixture",
+    pack_kind: "main",
+    status: "drafted",
+    report_doc_id: null,
+    sent_at: null,
+    send_started_at: null,
+    ...overrides,
+  };
+}
+
+Deno.test("first bind fills a null main-pack report_doc_id after every evidence gate", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\npointer first-bind fixture");
+  const { client, mutations, pack } = bindClient(bytes, {
+    pack: draftedPack(),
+  });
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+  );
+  assertEquals(result.writes, 2);
+  assertEquals(result.pack_pointer_written, true);
+  assertEquals(result.pack_pointer_reason, "bound");
+  assertEquals(result.pack_report_doc_id, "document-fixture");
+  // The pack pointer was actually swapped.
+  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  // Exactly one pack write, after the document/audit writes.
+  assertEquals(mutations.map((item) => item.table), [
+    "job_events",
+    "job_documents",
+    "makesafe_report_packs",
+  ]);
+});
+
+Deno.test("idempotent-exact document re-bind still fills a null pack pointer (the five-card gap)", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\npointer idempotent fixture");
+  const { client, pack } = bindClient(bytes, { pack: draftedPack() });
+  const body = await bindBody(bytes);
+  // First bind: document is written and the pack pointer is filled.
+  await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+  );
+  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  // Simulate the historical gap: the document is bound but the pack pointer was
+  // never set. The idempotent-exact document branch must still fill it.
+  (pack as Record<string, unknown>).report_doc_id = null;
+  const replay = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+  );
+  assertEquals(replay.skipped, true);
+  assertEquals(replay.writes, 0);
+  assertEquals(replay.pack_pointer_written, true);
+  assertEquals(replay.pack_pointer_reason, "bound");
+  assertEquals(replay.pack_report_doc_id, "document-fixture");
+  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+});
+
+Deno.test("re-bind with the pack already pointing at this document is a no-op success", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\npointer already-bound fixture");
+  const { client, mutations, pack } = bindClient(bytes, {
+    pack: draftedPack({ report_doc_id: "document-fixture" }),
+  });
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+  );
+  assertEquals(result.writes, 2);
+  assertEquals(result.pack_pointer_written, false);
+  assertEquals(result.pack_pointer_reason, "already_bound");
+  assertEquals(result.pack_report_doc_id, "document-fixture");
+  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  // No pack UPDATE was issued for an already-equal pointer.
+  assertEquals(
+    mutations.filter((item) => item.table === "makesafe_report_packs").length,
+    0,
+  );
+});
+
+Deno.test("a different existing pack pointer is refused, never overwritten", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\npointer conflict fixture");
+  const { client, mutations, pack } = bindClient(bytes, {
+    pack: draftedPack({ report_doc_id: "other-report-document" }),
+  });
+  const body = await bindBody(bytes);
+  const error = await withStoredPdf(
+    bytes,
+    () =>
+      assertRejects(
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+        ApiError,
+        "already binds a different report document",
+      ),
+  );
+  assertEquals((error as ApiError).status, 409);
+  assertEquals(
+    ((error as ApiError).body as Record<string, unknown>).code,
+    "curated_bind_report_pointer_conflict",
+  );
+  // The conflicting pointer is untouched and no pack UPDATE was issued.
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "other-report-document",
+  );
+  assertEquals(
+    mutations.filter((item) => item.table === "makesafe_report_packs").length,
+    0,
+  );
+});
+
+Deno.test("a sent / send-started pack refuses the report pointer write", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\npointer sent-pack fixture");
+  const { client, mutations, pack } = bindClient(bytes, {
+    pack: draftedPack({ send_started_at: "2026-08-01T00:00:00Z" }),
+  });
+  const body = await bindBody(bytes);
+  const error = await withStoredPdf(
+    bytes,
+    () =>
+      assertRejects(
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+        ApiError,
+        "started or completed a send",
+      ),
+  );
+  assertEquals((error as ApiError).status, 409);
+  assertEquals(
+    ((error as ApiError).body as Record<string, unknown>).code,
+    "curated_bind_report_pointer_pack_not_bindable",
+  );
+  assertEquals((pack as Record<string, unknown>).report_doc_id, null);
+  assertEquals(
+    mutations.filter((item) => item.table === "makesafe_report_packs").length,
+    0,
+  );
+});
+
+Deno.test("a failed evidence gate refuses before any pack pointer write", async () => {
+  // Non-eligible family fails at gate 3; the pointer path must never run, so a
+  // bindable pack is left untouched. Proves the pointer fill cannot bypass or
+  // mask an evidence check.
+  const bytes = new TextEncoder().encode("%PDF-1.7\npointer gate fixture");
+  const { client, mutations, pack } = bindClient(bytes, {
+    jobType: "patio",
+    pack: draftedPack(),
+  });
+  const body = await bindBody(bytes);
+  const error = await withStoredPdf(
+    bytes,
+    () =>
+      assertRejects(
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+        ApiError,
+        "only a physical make-safe job",
+      ),
+  );
+  assertEquals(
+    ((error as ApiError).body as Record<string, unknown>).code,
+    "curated_bind_family_not_eligible",
+  );
+  assertEquals((pack as Record<string, unknown>).report_doc_id, null);
+  assertEquals(
+    mutations.filter((item) => item.table === "makesafe_report_packs").length,
+    0,
+  );
 });
 
 Deno.test("poisoned stopped-sweep snapshot is superseded after full evidence gates pass", async () => {

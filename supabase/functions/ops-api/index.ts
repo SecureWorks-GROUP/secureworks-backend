@@ -37545,6 +37545,123 @@ async function assertBertramProtectedReportRepairCas(
   }
 }
 
+type CuratedReportPackPointerResult = {
+  pack_report_doc_id: string | null
+  pack_pointer_written: boolean
+  pack_pointer_reason:
+    | 'bound'
+    | 'already_bound'
+    | 'no_main_pack'
+}
+
+/**
+ * Compare-and-swap `makesafe_report_packs.report_doc_id` for the job's main
+ * pack after every curated-report evidence gate has already passed.
+ *
+ * This is the pointer half of the curated report "bind": the handler validates
+ * and stamps provenance/cycle on the `job_documents` row but historically never
+ * wrote the pack pointer, leaving physical Report Ready cards with a typed
+ * report and a null `report_doc_id`. This fill mirrors the invoice pointer bind
+ * (`bindExistingInvoicePackStrict`): the same unsent / no-send-started state
+ * guard (`BIND_EXISTING_INVOICE_PACK_STATUSES` + `sent_at`/`send_started_at`
+ * null), an atomic CAS on a null pointer, idempotent acceptance of an
+ * already-equal pointer, and a hard refusal of a different existing pointer.
+ *
+ * It writes nothing but the pointer: no invoice, no status, no send, no board
+ * or job-stage field, and it never creates pack/board state (a card with no
+ * main pack is a benign skip, not a refusal). The duplicate-invoice / money
+ * fences are untouched.
+ */
+async function ensureCuratedReportPackPointer(
+  client: any,
+  jobId: string,
+  documentId: string,
+): Promise<CuratedReportPackPointerResult> {
+  const packRead = await client.from('makesafe_report_packs')
+    .select('id,status,report_doc_id,sent_at,send_started_at')
+    .eq('job_id', jobId).eq('pack_kind', 'main')
+    .maybeSingle()
+  if (packRead.error) {
+    throw curatedBindError(
+      'curated_bind_report_pointer_pack_unreadable',
+      'main pack could not be read for report pointer binding',
+      503,
+    )
+  }
+  const pack = packRead.data
+  if (!pack) {
+    // No main pack yet: the bound document is the source of truth and this
+    // action never mints pack/board state. Leave the pointer for a later
+    // pack-producing step and report the benign skip.
+    return {
+      pack_report_doc_id: null,
+      pack_pointer_written: false,
+      pack_pointer_reason: 'no_main_pack',
+    }
+  }
+  const existingPointer = String(pack.report_doc_id || '').trim()
+  if (existingPointer) {
+    if (existingPointer !== documentId) {
+      // A different bound report on the pack is never overwritten by a bind.
+      throw curatedBindError(
+        'curated_bind_report_pointer_conflict',
+        'main pack already binds a different report document',
+        409,
+      )
+    }
+    // Idempotent: the pack already points at this document. Even on a
+    // sent pack this is a no-op success; the pointer is unchanged.
+    return {
+      pack_report_doc_id: documentId,
+      pack_pointer_written: false,
+      pack_pointer_reason: 'already_bound',
+    }
+  }
+  const sendStarted = pack.sent_at != null || pack.send_started_at != null
+  const bindableStatus = (BIND_EXISTING_INVOICE_PACK_STATUSES as readonly string[])
+    .includes(String(pack.status || ''))
+  if (sendStarted || !bindableStatus) {
+    // Null pointer but the pack has started/finished a send (or is otherwise
+    // not in a bindable unsent state): refuse rather than touch a sent pack.
+    throw curatedBindError(
+      'curated_bind_report_pointer_pack_not_bindable',
+      'main pack has started or completed a send and cannot bind a report pointer',
+      409,
+    )
+  }
+  // Atomic compare-and-swap: only a null pointer on an unsent / no-send-started
+  // bindable main pack is filled. No invoice, status, send, or board field is
+  // written; the money/send fences are untouched.
+  const cas = await client.from('makesafe_report_packs')
+    .update({ report_doc_id: documentId, updated_at: new Date().toISOString() })
+    .eq('id', pack.id)
+    .eq('pack_kind', 'main')
+    .is('report_doc_id', null)
+    .is('sent_at', null)
+    .is('send_started_at', null)
+    .in('status', [...BIND_EXISTING_INVOICE_PACK_STATUSES])
+    .select('id')
+  if (cas.error) {
+    throw curatedBindError(
+      'curated_bind_report_pointer_write_failed',
+      'main pack report pointer write failed',
+      503,
+    )
+  }
+  if (!Array.isArray(cas.data) || cas.data.length !== 1) {
+    throw curatedBindError(
+      'curated_bind_report_pointer_cas_drift',
+      'main pack changed or entered a send state before the report pointer could be written',
+      409,
+    )
+  }
+  return {
+    pack_report_doc_id: documentId,
+    pack_pointer_written: true,
+    pack_pointer_reason: 'bound',
+  }
+}
+
 /**
  * POST ops-api?action=bind_current_cycle_curated_makesafe_report
  *
@@ -37849,6 +37966,14 @@ async function bindCurrentCycleCuratedMakesafeReport(
     document.cycle_attribution === 'bound'
   const currentVersion = Number(document.version)
   if (sameSnapshot && cycleAlreadyBound) {
+    // The document is already exactly bound, but the pack pointer may still be
+    // null (the historical five-card gap). Ensure it here too, after every
+    // evidence gate has passed, so an idempotent re-bind fills the pointer.
+    const packPointer = await ensureCuratedReportPackPointer(
+      client,
+      jobId,
+      documentId,
+    )
     return {
       success: true,
       skipped: true,
@@ -37868,6 +37993,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
         `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
       renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
       writes: 0,
+      ...packPointer,
     }
   }
   // Trusted snapshot already exact, but cycle columns drifted: allow a
@@ -37890,6 +38016,11 @@ async function bindCurrentCycleCuratedMakesafeReport(
         'curated source provenance drifted before it could be written',
       )
     }
+    const packPointer = await ensureCuratedReportPackPointer(
+      client,
+      jobId,
+      documentId,
+    )
     return {
       success: true,
       skipped: false,
@@ -37910,6 +38041,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
       renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
       writes: 1,
       cycle_repair: true,
+      ...packPointer,
     }
   }
   // A document that already carries a durable curated identity may only be
@@ -38047,6 +38179,11 @@ async function bindCurrentCycleCuratedMakesafeReport(
       'curated source provenance drifted before it could be written',
     )
   }
+  const packPointer = await ensureCuratedReportPackPointer(
+    client,
+    jobId,
+    documentId,
+  )
   return {
     success: true,
     skipped: false,
@@ -38067,6 +38204,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
     renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
     writes: 2,
     ...(isTrustedContentSupersession ? { supersedes_prior_bind: true } : {}),
+    ...packPointer,
   }
 }
 
