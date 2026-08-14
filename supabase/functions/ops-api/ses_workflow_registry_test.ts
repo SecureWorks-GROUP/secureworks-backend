@@ -32,13 +32,19 @@ import {
   prepareSesWorkflowBackendPolicyContract,
   prepareSesWorkflowReleaseContract,
   resolveSesWorkflowStageContractCoordinate,
-  SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256,
   SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
   SES_WORKFLOW_EXECUTABLE_OPERAND_IDS,
   SES_WORKFLOW_PUBLIC_FAMILIES,
   type SesWorkflowContractManifest,
   validateSesWorkflowContractManifest,
 } from "./ses_workflow_registry.ts";
+import {
+  computeSesWorkflowExecutableSourceClosure,
+  SES_WORKFLOW_EXECUTABLE_ENTRY_POINTS,
+  type SesWorkflowExecutableSourceClosure,
+  sesWorkflowSourceClosureModuleName,
+  type SesWorkflowSourceReader,
+} from "./ses_workflow_source_closure.ts";
 import {
   approveSesInvoiceRevisionAction,
   buildSesReleaseRevisionPlanForDockets,
@@ -50,6 +56,9 @@ const MLB_PHYSICAL = {
   runtime_family_id: "physical_makesafe" as const,
   site_suburb: "Perth",
 };
+const OPS_API_TEST_ROOT = new URL("./", import.meta.url);
+const sourceTextDecoder = new TextDecoder();
+const sourceTextEncoder = new TextEncoder();
 
 function cloneManifest(
   manifest: SesWorkflowContractManifest,
@@ -86,14 +95,99 @@ function mutateJsonLeaf(root: unknown, path: readonly string[]): void {
     : `${String(current)}__mutated`;
 }
 
-async function sha256SourceFile(name: string): Promise<`sha256:${string}`> {
-  const source = await Deno.readFile(new URL(`./${name}`, import.meta.url));
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", source),
+function overlaySourceReader(
+  overlays: Readonly<Record<string, string>>,
+): SesWorkflowSourceReader {
+  return async (url) => {
+    const moduleName = sesWorkflowSourceClosureModuleName(
+      url,
+      OPS_API_TEST_ROOT,
+    );
+    const overlay = moduleName ? overlays[moduleName] : undefined;
+    return overlay === undefined
+      ? await Deno.readFile(url)
+      : sourceTextEncoder.encode(overlay);
+  };
+}
+
+async function sourceText(name: string): Promise<string> {
+  return sourceTextDecoder.decode(
+    await Deno.readFile(new URL(name, OPS_API_TEST_ROOT)),
   );
-  return `sha256:${
-    [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")
-  }`;
+}
+
+async function canonicalHashWithSourceClosure(
+  manifest: SesWorkflowContractManifest,
+  sourceClosure: SesWorkflowExecutableSourceClosure,
+) {
+  const mutated = cloneManifest(manifest);
+  (mutated.executable_policy as Record<string, unknown>)[
+    "source.transitive_module_closure"
+  ] = sourceClosure;
+  return await hashSesWorkflowContractSemanticContent(mutated);
+}
+
+interface DenoInfoResolution {
+  specifier: string;
+}
+
+interface DenoInfoModule {
+  specifier: string;
+  dependencies?: Array<{
+    code?: DenoInfoResolution;
+    type?: DenoInfoResolution;
+  }>;
+}
+
+async function denoInfoExecutableSourceClosure(): Promise<string[]> {
+  const modules = new Map<string, DenoInfoModule>();
+  for (const entryPoint of SES_WORKFLOW_EXECUTABLE_ENTRY_POINTS) {
+    const output = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "info",
+        "--json",
+        new URL(entryPoint.module, OPS_API_TEST_ROOT).href,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+      env: { NO_COLOR: "1" },
+    }).output();
+    assert(
+      output.success,
+      sourceTextDecoder.decode(output.stderr),
+    );
+    const graph = JSON.parse(sourceTextDecoder.decode(output.stdout)) as {
+      version: number;
+      roots: string[];
+      modules: DenoInfoModule[];
+    };
+    assertEquals(graph.version, 1, "unexpected deno info graph schema");
+    assert(Array.isArray(graph.roots));
+    assert(Array.isArray(graph.modules));
+    for (const module of graph.modules) modules.set(module.specifier, module);
+  }
+
+  const closure = new Set<string>();
+  const pending = SES_WORKFLOW_EXECUTABLE_ENTRY_POINTS.map((entryPoint) =>
+    new URL(entryPoint.module, OPS_API_TEST_ROOT).href
+  );
+  while (pending.length) {
+    const specifier = pending.pop() as string;
+    const moduleName = sesWorkflowSourceClosureModuleName(
+      new URL(specifier),
+      OPS_API_TEST_ROOT,
+    );
+    if (!moduleName || closure.has(moduleName)) continue;
+    closure.add(moduleName);
+    const module = modules.get(specifier);
+    assert(module, `Deno graph omitted ${specifier}`);
+    for (const dependency of module.dependencies ?? []) {
+      for (const resolution of [dependency.code, dependency.type]) {
+        if (resolution?.specifier) pending.push(resolution.specifier);
+      }
+    }
+  }
+  return [...closure].sort();
 }
 
 Deno.test("SES workflow registry exports exactly six families and every effective matrix variant", async () => {
@@ -405,15 +499,126 @@ Deno.test("the executable operand registry is structurally complete and every ow
   }
 });
 
-Deno.test("audited executable source surfaces match the fingerprinted source guard", async () => {
-  const actual = Object.fromEntries(
-    await Promise.all(
-      Object.keys(SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256).map(
-        async (name) => [name, await sha256SourceFile(name)] as const,
-      ),
-    ),
+Deno.test({
+  name:
+    "the executable source digest input set equals Deno's transitive local module closure",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const sourceClosure = await computeSesWorkflowExecutableSourceClosure();
+    const denoClosure = await denoInfoExecutableSourceClosure();
+    assertEquals(Object.keys(sourceClosure.modules), denoClosure);
+    assertEquals(sourceClosure.module_count, denoClosure.length);
+    assert(denoClosure.includes("ses_materials_rate_card.ts"));
+    assert(denoClosure.includes("ses_unified_release.ts"));
+    assert(denoClosure.includes("ses_workflow_registry.ts"));
+    assert(denoClosure.includes("ses_workflow_source_closure.ts"));
+  },
+});
+
+Deno.test("every named executable entry-point symbol resolves from its declared module", async () => {
+  for (const entryPoint of SES_WORKFLOW_EXECUTABLE_ENTRY_POINTS) {
+    const module = await import(
+      new URL(entryPoint.module, OPS_API_TEST_ROOT).href
+    ) as Record<string, unknown>;
+    for (const symbol of entryPoint.symbols) {
+      assert(
+        symbol in module,
+        `${entryPoint.surface}:${entryPoint.module} does not export ${symbol}`,
+      );
+    }
+  }
+});
+
+Deno.test("ops-api deployment bundles the complete local TypeScript source boundary", async () => {
+  const config = await Deno.readTextFile(
+    new URL("../../config.toml", import.meta.url),
   );
-  assertEquals(actual, SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256);
+  assert(
+    config.includes('"./functions/ops-api/*.ts"'),
+    "functions.ops-api.static_files must bundle every local TS module for runtime source attestation",
+  );
+});
+
+Deno.test("mutating the pricing recognizer moves the canonical contract hash", async () => {
+  const manifest = await exportSesContractSnapshot();
+  const baseline = await computeSesWorkflowExecutableSourceClosure();
+  const rateCardSource = await sourceText("ses_materials_rate_card.ts");
+  const recognizer = "(?:sikaflex|silicone)";
+  assert(rateCardSource.includes(recognizer));
+  const mutated = await computeSesWorkflowExecutableSourceClosure({
+    readSource: overlaySourceReader({
+      "ses_materials_rate_card.ts": rateCardSource.replace(
+        recognizer,
+        "(?:sikaflexx|silicone)",
+      ),
+    }),
+  });
+
+  assertNotEquals(mutated.closure_sha256, baseline.closure_sha256);
+  assertNotEquals(
+    mutated.modules["ses_materials_rate_card.ts"],
+    baseline.modules["ses_materials_rate_card.ts"],
+  );
+  assertNotEquals(
+    await canonicalHashWithSourceClosure(manifest, mutated),
+    manifest.canonical_contract_hash,
+  );
+});
+
+Deno.test("mutating a transitive module outside the former allowlist moves the canonical contract hash", async () => {
+  const manifest = await exportSesContractSnapshot();
+  const baseline = await computeSesWorkflowExecutableSourceClosure();
+  const guardSource = await sourceText("ses_materials_charge_guard.ts");
+  const executableBranch = 'action: "rate_card_proposal"';
+  assert(guardSource.includes(executableBranch));
+  const mutated = await computeSesWorkflowExecutableSourceClosure({
+    readSource: overlaySourceReader({
+      "ses_materials_charge_guard.ts": guardSource.replace(
+        executableBranch,
+        'action: "rate_card_proposal_mutated"',
+      ),
+    }),
+  });
+
+  assertNotEquals(mutated.closure_sha256, baseline.closure_sha256);
+  assertNotEquals(
+    mutated.modules["ses_materials_charge_guard.ts"],
+    baseline.modules["ses_materials_charge_guard.ts"],
+  );
+  assertNotEquals(
+    await canonicalHashWithSourceClosure(manifest, mutated),
+    manifest.canonical_contract_hash,
+  );
+});
+
+Deno.test("a new entry-point import expands the closure and canonical digest input set", async () => {
+  const manifest = await exportSesContractSnapshot();
+  const baseline = await computeSesWorkflowExecutableSourceClosure();
+  const rateCardSource = await sourceText("ses_materials_rate_card.ts");
+  const fixtureName = "ses_workflow_source_closure_fixture.ts";
+  const expanded = await computeSesWorkflowExecutableSourceClosure({
+    readSource: overlaySourceReader({
+      "ses_materials_rate_card.ts":
+        `import "./${fixtureName}";\n${rateCardSource}`,
+      [fixtureName]: "export const syntheticExecutableOperand = true;\n",
+    }),
+  });
+
+  assertEquals(expanded.module_count, baseline.module_count + 1);
+  assertEquals(
+    Object.keys(expanded.modules),
+    [
+      ...Object.keys(baseline.modules),
+      fixtureName,
+    ].sort(),
+  );
+  assert(expanded.modules[fixtureName]);
+  assertNotEquals(expanded.closure_sha256, baseline.closure_sha256);
+  assertNotEquals(
+    await canonicalHashWithSourceClosure(manifest, expanded),
+    manifest.canonical_contract_hash,
+  );
 });
 
 Deno.test("audited executable surfaces contain no known shadow operands", async () => {

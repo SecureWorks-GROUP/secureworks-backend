@@ -50,11 +50,20 @@ import {
   type SesWorkflowExecutableFamilyPolicy,
   sesWorkflowExecutableFamilyPolicy,
 } from "./ses_workflow_executable_policy.ts";
+import {
+  SES_WORKFLOW_EXECUTABLE_ENTRY_POINTS,
+  SES_WORKFLOW_SOURCE_CLOSURE_BOUNDARY_VERSION,
+  type SesWorkflowExecutableSourceClosure,
+  sesWorkflowExecutableSourceClosure,
+} from "./ses_workflow_source_closure.ts";
+import contractLock from "./ses_workflow_contract_lock.json" with {
+  type: "json",
+};
 
 export const SES_WORKFLOW_CONTRACT_SCHEMA_VERSION =
   "secureworks.ses-workflow-contract/v1";
 export const SES_WORKFLOW_CONTRACT_CANON_REVISION =
-  "ses-workflow-contract/2026-08-15.4";
+  "ses-workflow-contract/2026-08-15.5";
 export const SES_WORKFLOW_RELEASE_CONTRACT_VERSION =
   "ses-release-contract/v1-preflight-only";
 export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
@@ -65,32 +74,8 @@ export const SES_WORKFLOW_CONTRACT_HASH_DOMAIN =
  * the executable registry, so a contract change must be deliberate and
  * review-visible rather than silently moving the drift-test coordinate.
  */
-export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 =
-  "sha256:3b2b8b4774e772fe164aaff06c7e8e3067ae93760ff545cdc214b6a33c054b4b";
-
-/**
- * Conservative structural guard for the audited executable surfaces. The
- * registry fingerprints these digests and the focused test recomputes them
- * from source. A future executable branch or literal therefore cannot enter
- * one of these surfaces without invalidating both validation and the pinned
- * canonical coordinate, even before it is promoted to a named typed operand.
- */
-export const SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256 = Object.freeze(
-  {
-    "ses_workflow_executable_policy.ts":
-      "sha256:1d02965eff6112b5b6866b2bcab86b20d9a2c1eab195b6b4c88be962c485dc8c",
-    "ses_assembler_input_adapter.ts":
-      "sha256:ed1bb471469b1d89fd96e69b030a0995f2b080db358d05fc9d501e8e83ae74d8",
-    "ses_family_matrix.ts":
-      "sha256:b1abe92b3934c33c28f847a65e0752c1db87a98f973608eecf29399488820145",
-    "ses_stage_engine_v2.ts":
-      "sha256:102f5b35377fccd9da0962197d23142f75bcb9525602849a539ddf2f03d77342",
-    "ses_prepare_docket_revision.ts":
-      "sha256:de5c05689f5b2c689ce66105e2dab120327ec73d74b9ae80fcd0b885a01535d2",
-    "ses_release_route_shape.ts":
-      "sha256:0b36a4274afc7f904f552d9b6ffa37bb2d36b7ead40f0955ca2660e0a819dac5",
-  } satisfies Record<string, SesSha256>,
-);
+export const SES_WORKFLOW_CONTRACT_CANONICAL_HASH: SesSha256 = contractLock
+  .canonical_contract_hash as SesSha256;
 
 export const SES_WORKFLOW_PUBLIC_FAMILIES = [
   "physical_makesafe",
@@ -117,7 +102,7 @@ export type SesWorkflowUnsealedReason =
   | "release_contract_preflight_only";
 
 export const SES_WORKFLOW_EXECUTABLE_OPERAND_IDS = [
-  "source.audited_surface_sha256",
+  "source.transitive_module_closure",
   "family.matrix_rows",
   "family.selection_policy",
   "family.runtime_policy",
@@ -284,6 +269,14 @@ type RawManifest =
     };
     variants: readonly RawVariant[];
   };
+
+const SES_WORKFLOW_VARIANT_SHAPE_SOURCE_CLOSURE = Object.freeze({
+  boundary_version: SES_WORKFLOW_SOURCE_CLOSURE_BOUNDARY_VERSION,
+  entry_points: SES_WORKFLOW_EXECUTABLE_ENTRY_POINTS,
+  module_count: 0,
+  modules: Object.freeze({}),
+  closure_sha256: `sha256:${"0".repeat(64)}` as SesSha256,
+}) satisfies SesWorkflowExecutableSourceClosure;
 
 function sortedStrings<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort(codePointCompare);
@@ -468,7 +461,9 @@ function pricingProfile(
   };
 }
 
-function buildExecutableOperandRegistry(): SesWorkflowExecutableOperandRegistry {
+function buildExecutableOperandRegistry(
+  sourceClosure: SesWorkflowExecutableSourceClosure,
+): SesWorkflowExecutableOperandRegistry {
   const runtimeFamilies = Object.keys(
     SES_WORKFLOW_EXECUTABLE_FAMILY_POLICY,
   ) as Array<Exclude<SesFamilyId, "unknown">>;
@@ -488,8 +483,7 @@ function buildExecutableOperandRegistry(): SesWorkflowExecutableOperandRegistry 
   );
   return Object.freeze(
     {
-      "source.audited_surface_sha256":
-        SES_WORKFLOW_AUDITED_EXECUTABLE_SURFACE_SHA256,
+      "source.transitive_module_closure": sourceClosure,
       "family.matrix_rows": SES_FAMILY_MATRIX.map(executableMatrixRow),
       "family.selection_policy": SES_FAMILY_MATRIX_EXECUTABLE_POLICY,
       "family.runtime_policy": SES_WORKFLOW_EXECUTABLE_FAMILY_POLICY,
@@ -514,7 +508,9 @@ function buildExecutableOperandRegistry(): SesWorkflowExecutableOperandRegistry 
   );
 }
 
-function buildRawManifest(): RawManifest {
+function buildRawManifest(
+  sourceClosure: SesWorkflowExecutableSourceClosure,
+): RawManifest {
   const family = new Map<string, RawProfile<SesWorkflowFamilyProfile>>();
   const artifact = new Map<string, RawProfile<SesWorkflowArtifactProfile>>();
   const stage = new Map<string, RawProfile<SesWorkflowStageProfile>>();
@@ -639,7 +635,7 @@ function buildRawManifest(): RawManifest {
       send_rules: SES_WORKFLOW_SEND_RULE_VERSION,
       executable_policy: SES_WORKFLOW_EXECUTABLE_POLICY_VERSION,
     },
-    executable_policy: buildExecutableOperandRegistry(),
+    executable_policy: buildExecutableOperandRegistry(sourceClosure),
     profiles: {
       family: sortedProfiles([...family.values()]),
       artifact: sortedProfiles([...artifact.values()]),
@@ -698,7 +694,9 @@ export function resolveSesWorkflowStageContractCoordinate(input: {
     };
   }
   stageContractVariantsById ??= new Map(
-    buildRawManifest().variants.map((variant) => [variant.variant_id, variant]),
+    buildRawManifest(SES_WORKFLOW_VARIANT_SHAPE_SOURCE_CLOSURE).variants.map(
+      (variant) => [variant.variant_id, variant],
+    ),
   );
   const variant = stageContractVariantsById.get(variantId);
   if (!variant || variant.runtime_family_id !== runtimeFamilyId) {
@@ -768,7 +766,7 @@ export async function hashSesWorkflowContractSemanticContent(
 export async function exportSesContractSnapshot(): Promise<
   SesWorkflowContractManifest
 > {
-  const raw = buildRawManifest();
+  const raw = buildRawManifest(await sesWorkflowExecutableSourceClosure());
   const contractHash = await sesSha256(
     raw,
     SES_WORKFLOW_CONTRACT_HASH_DOMAIN,
@@ -832,6 +830,7 @@ export async function validateSesWorkflowContractManifest(
   manifest: SesWorkflowContractManifest,
 ): Promise<SesWorkflowContractValidationResult> {
   const errors: SesWorkflowContractValidationError[] = [];
+  const expected = buildRawManifest(await sesWorkflowExecutableSourceClosure());
   const recomputedHash = await hashSesWorkflowContractSemanticContent(manifest);
   if (recomputedHash !== manifest.canonical_contract_hash) {
     errors.push({
@@ -851,7 +850,7 @@ export async function validateSesWorkflowContractManifest(
   }
   if (
     canonicalSesJson(rawManifestFromExport(manifest)) !==
-      canonicalSesJson(buildRawManifest())
+      canonicalSesJson(expected)
   ) {
     errors.push({
       code: "runtime_registry_mismatch",
@@ -912,7 +911,6 @@ export async function validateSesWorkflowContractManifest(
       detail: "registry does not expose exactly the six public SES families",
     });
   }
-  const expected = buildRawManifest();
   if (
     !equalStringSet(
       manifest.variants.map((variant) => variant.variant_id),

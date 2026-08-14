@@ -362,7 +362,10 @@ inspector_port = 8083
 deno_version = 2
 
 [functions.ops-api]
-static_files = ["./functions/ops-api/references/materials-rate-card.md"]
+static_files = [
+  "./functions/ops-api/*.ts",
+  "./functions/ops-api/references/materials-rate-card.md",
+]
 
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
