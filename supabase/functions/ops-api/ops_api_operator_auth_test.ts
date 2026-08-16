@@ -15,6 +15,7 @@ import {
   _preferBearerForOpsApiAction,
   _resolveOpsApiAuthIntent,
   AGENT_READ_ALLOWED_ACTIONS,
+  assertAssignmentMutationAuthz,
   LEAD_INSTALLER_READ_ACTIONS,
   OPS_API_STAFF_OPERATOR_ROLES,
 } from "./index.ts";
@@ -665,5 +666,165 @@ Deno.test("deliberately-strict admin/owner gates still reject an ops_manager JWT
       "const approveIsPrivileged = _opsApiCallerIsStaffOperator(authMode, authUser)",
     ),
     true,
+  );
+});
+
+// ── set_job_lead front door (Henry / SWF-26091, Captain ruling 2026-08-17) ──
+//
+// set_job_lead was shipped in #513 with the same in-route gate as allocate_job
+// (assertAssignmentMutationAuthz: api_key, dispatcher, or a manager of that
+// job's vertical). #667 made the front door default-deny and left it off the
+// profile-scoped list, so a lead_installer vertical manager received the
+// staff-role 403 before the route gate ever ran. This pins the two-layer
+// contract end to end: the front door lets a signed-in trade through, and the
+// route gate still decides on the vertical alone.
+
+function makeAssignmentAuthzClient(
+  job: { id: string; type: string; job_number: string },
+) {
+  return {
+    from(table: string) {
+      const builder: {
+        select: () => typeof builder;
+        eq: () => typeof builder;
+        maybeSingle: () => Promise<{ data: unknown; error: null }>;
+      } = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: () =>
+          Promise.resolve({ data: table === "jobs" ? job : null, error: null }),
+      };
+      return builder;
+    },
+  };
+}
+
+const FENCING_JOB = {
+  id: "job-swf-26091",
+  type: "fencing",
+  job_number: "SWF-26091",
+};
+
+async function setJobLeadOutcome(
+  authUser: { id: string; role: string; managedVerticals?: unknown },
+): Promise<"allowed" | "front_door_403" | "route_403"> {
+  const front = _authorizeOpsApiAction({
+    url: actionUrl("set_job_lead"),
+    authMode: "jwt",
+    authUser,
+  });
+  if (!front.ok) return front.status === 403 ? "front_door_403" : "allowed";
+  try {
+    await assertAssignmentMutationAuthz(
+      makeAssignmentAuthzClient(FENCING_JOB),
+      "jwt",
+      authUser,
+      { jobId: FENCING_JOB.id, assignmentId: "asg-1" },
+    );
+    return "allowed";
+  } catch (e) {
+    assertEquals((e as { status?: number }).status, 403);
+    return "route_403";
+  }
+}
+
+Deno.test("Henry: a lead_installer managing fencing reaches set_job_lead on a fencing job", async () => {
+  assertEquals(_opsApiActionNeedsSignedCaller(actionUrl("set_job_lead")), true);
+  assertEquals(_opsApiActionNeedsStaffRole(actionUrl("set_job_lead")), false);
+  const decision = _authorizeOpsApiAction({
+    url: actionUrl("set_job_lead"),
+    authMode: "jwt",
+    authUser: { role: "lead_installer" },
+  });
+  assertEquals(decision, { ok: true });
+  assertEquals(
+    await setJobLeadOutcome({
+      id: "henry",
+      role: "lead_installer",
+      managedVerticals: ["fencing"],
+    }),
+    "allowed",
+  );
+});
+
+Deno.test("set_job_lead: the same lead_installer managing only patios is refused by the route gate on a fencing job", async () => {
+  assertEquals(
+    await setJobLeadOutcome({
+      id: "henry",
+      role: "lead_installer",
+      managedVerticals: ["patio"],
+    }),
+    "route_403",
+  );
+});
+
+Deno.test("set_job_lead: a signed-in caller with no managed vertical is refused by the route gate", async () => {
+  assertEquals(
+    await setJobLeadOutcome({ id: "crew", role: "installer" }),
+    "route_403",
+  );
+  assertEquals(
+    await setJobLeadOutcome({
+      id: "crew2",
+      role: "lead_installer",
+      managedVerticals: [],
+    }),
+    "route_403",
+  );
+});
+
+Deno.test("set_job_lead: a missing session still gets 401 and the staff-role set is untouched", () => {
+  assertEquals(
+    authorizationStatus({ action: "set_job_lead", authMode: "none" }),
+    401,
+  );
+  assertEquals(
+    authorizationStatus({ action: "set_job_lead", authMode: "api_key" }),
+    401,
+  );
+  assertEquals(
+    authorizationStatus({
+      action: "set_job_lead",
+      authMode: "api_key",
+      serverSecretPresented: true,
+    }),
+    200,
+  );
+  assertEquals([...OPS_API_STAFF_OPERATOR_ROLES].sort(), [
+    "admin",
+    "ops_manager",
+    "owner",
+  ]);
+  assertEquals(LEAD_INSTALLER_READ_ACTIONS.has("set_job_lead"), false);
+});
+
+Deno.test("allocate_job behaviour is unchanged beside set_job_lead", async () => {
+  assertEquals(_opsApiActionNeedsStaffRole(actionUrl("allocate_job")), false);
+  assertEquals(
+    authorizationStatus({
+      action: "allocate_job",
+      authMode: "jwt",
+      role: "lead_installer",
+    }),
+    200,
+  );
+  assertEquals(
+    authorizationStatus({ action: "allocate_job", authMode: "api_key" }),
+    401,
+  );
+  // The route gate answers identically for both actions: vertical, not role.
+  await assertAssignmentMutationAuthz(
+    makeAssignmentAuthzClient(FENCING_JOB),
+    "jwt",
+    { id: "henry", role: "lead_installer", managedVerticals: ["fencing"] },
+    { jobId: FENCING_JOB.id },
+  );
+  await assertRejects(() =>
+    assertAssignmentMutationAuthz(
+      makeAssignmentAuthzClient(FENCING_JOB),
+      "jwt",
+      { id: "crew", role: "installer" },
+      { jobId: FENCING_JOB.id },
+    )
   );
 });
