@@ -42653,7 +42653,8 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
   // ── Standard photo path (unchanged behaviour) ──
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
-  // Verify user is assigned, or this is a MakeSafe field-report job.
+  // Verify user is assigned, manages the job's vertical, or this is a MakeSafe
+  // field-report job.
   await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin, access)
   const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, jId)
 

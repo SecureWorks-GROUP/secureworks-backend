@@ -2681,7 +2681,11 @@ Deno.test("Captain 2026-08-17: a fencing-vertical lead on Everyone sees EVERY sa
     .map((j) => j.id);
   const expected = [...liveAssignedFencing, ...openFencing].sort();
   const seen = [...new Set([...assignedJobIds(g), ...poolJobIds(g)])].sort();
-  assertEquals(seen, expected, "Everyone lens = every fencing job, none missing");
+  assertEquals(
+    seen,
+    expected,
+    "Everyone lens = every fencing job, none missing",
+  );
   // And nothing that is not fencing.
   for (const id of seen) {
     const job = fx.jobs.find((j) => j.id === id)!;
@@ -2705,10 +2709,22 @@ Deno.test("Captain 2026-08-17 CONTROL: a person with NO fencing vertical sees no
     alyx.isDispatcher,
     alyx.isMakesafeManager,
     alyx.poolVerticals,
-    _managerBoardVerticals({ isDispatcher: false, mode: "all", managedVerticals: [] }),
+    _managerBoardVerticals({
+      isDispatcher: false,
+      mode: "all",
+      managedVerticals: [],
+    }),
   );
-  assertEquals(assignedJobIds(gAlyx), [], "no assigned fencing card for an unrelated installer");
-  assertEquals(poolJobIds(gAlyx), [], "no fencing pool card for an unrelated installer");
+  assertEquals(
+    assignedJobIds(gAlyx),
+    [],
+    "no assigned fencing card for an unrelated installer",
+  );
+  assertEquals(
+    poolJobIds(gAlyx),
+    [],
+    "no fencing pool card for an unrelated installer",
+  );
 
   // Nithin: manages PATIO only. Everyone lens gives him patio, never fencing.
   const nithin = _resolveManagerVisibility({
@@ -2722,9 +2738,21 @@ Deno.test("Captain 2026-08-17 CONTROL: a person with NO fencing vertical sees no
     nithin.isDispatcher,
     nithin.isMakesafeManager,
     nithin.poolVerticals,
-    _managerBoardVerticals({ isDispatcher: false, mode: "all", managedVerticals: ["patio"] }),
+    _managerBoardVerticals({
+      isDispatcher: false,
+      mode: "all",
+      managedVerticals: ["patio"],
+    }),
   );
   const nithinSeen = [...assignedJobIds(gNithin), ...poolJobIds(gNithin)];
-  assertEquals(nithinSeen.some((id) => id.startsWith("job-f")), false, "a patio manager sees no fencing job");
-  assertEquals(nithinSeen.includes("job-p1"), true, "…but does see the patio work he manages");
+  assertEquals(
+    nithinSeen.some((id) => id.startsWith("job-f")),
+    false,
+    "a patio manager sees no fencing job",
+  );
+  assertEquals(
+    nithinSeen.includes("job-p1"),
+    true,
+    "…but does see the patio work he manages",
+  );
 });

@@ -46,15 +46,44 @@ type Tables = Record<string, any[]>;
 function fixtures(): Tables {
   return {
     jobs: [
-      { id: "job-fence", org_id: ORG_A, type: "fencing", job_number: "SWF-26091", status: "scheduled" },
-      { id: "job-patio", org_id: ORG_A, type: "patio", job_number: "SWP-26100", status: "scheduled" },
-      { id: "job-ms", org_id: ORG_A, type: "makesafe", job_number: "SWMS-26900", status: "in_progress" },
-      { id: "job-fence-b", org_id: ORG_B, type: "fencing", job_number: "SWF-99001", status: "scheduled" },
+      {
+        id: "job-fence",
+        org_id: ORG_A,
+        type: "fencing",
+        job_number: "SWF-26091",
+        status: "scheduled",
+      },
+      {
+        id: "job-patio",
+        org_id: ORG_A,
+        type: "patio",
+        job_number: "SWP-26100",
+        status: "scheduled",
+      },
+      {
+        id: "job-ms",
+        org_id: ORG_A,
+        type: "makesafe",
+        job_number: "SWMS-26900",
+        status: "in_progress",
+      },
+      {
+        id: "job-fence-b",
+        org_id: ORG_B,
+        type: "fencing",
+        job_number: "SWF-99001",
+        status: "scheduled",
+      },
     ],
     // Henry is NOT on job-fence. Alyx is.
     job_assignments: [
       { id: "a1", job_id: "job-fence", user_id: "u-alyx", status: "scheduled" },
-      { id: "a2", job_id: "job-patio", user_id: "u-nithin", status: "scheduled" },
+      {
+        id: "a2",
+        job_id: "job-patio",
+        user_id: "u-nithin",
+        status: "scheduled",
+      },
     ],
     makesafe_job_details: [],
     job_service_reports: [],
@@ -89,8 +118,10 @@ function makeClient(tables: Tables) {
         limitN = n;
         return api;
       },
-      single: () => Promise.resolve({ data: run().data[0] ?? null, error: null }),
-      maybeSingle: () => Promise.resolve({ data: run().data[0] ?? null, error: null }),
+      single: () =>
+        Promise.resolve({ data: run().data[0] ?? null, error: null }),
+      maybeSingle: () =>
+        Promise.resolve({ data: run().data[0] ?? null, error: null }),
       then: (res: any, rej: any) => Promise.resolve(run()).then(res, rej),
       insert: () => {
         throw new Error(PAST_GATE);
@@ -125,7 +156,9 @@ function access(v: { orgId: string; managedVerticals: string[] }) {
   return { orgId: v.orgId, managedVerticals: v.managedVerticals };
 }
 
-async function outcome(p: Promise<unknown>): Promise<"passed" | "refused" | string> {
+async function outcome(
+  p: Promise<unknown>,
+): Promise<"passed" | "refused" | string> {
   try {
     await p;
     return "passed";
@@ -205,13 +238,21 @@ Deno.test("add_note CONTROL: another tenant's fencing job refuses a fencing lead
 Deno.test("upload_photo: a fencing lead not on the crew may upload to a fencing job; refused on patio", async () => {
   const ok = await outcome(_uploadPhotoForTest(
     makeClient(fixtures()),
-    { jobId: "job-fence", userId: HENRY.id, dataUrl: "data:image/jpeg;base64,AAAA" },
+    {
+      jobId: "job-fence",
+      userId: HENRY.id,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+    },
     access(HENRY),
   ));
   assertEquals(ok, "passed");
   const no = await outcome(_uploadPhotoForTest(
     makeClient(fixtures()),
-    { jobId: "job-patio", userId: HENRY.id, dataUrl: "data:image/jpeg;base64,AAAA" },
+    {
+      jobId: "job-patio",
+      userId: HENRY.id,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+    },
     access(HENRY),
   ));
   assertEquals(no, "refused");
@@ -220,7 +261,11 @@ Deno.test("upload_photo: a fencing lead not on the crew may upload to a fencing 
 Deno.test("upload_photo CONTROL: an unassigned installer is still refused", async () => {
   const r = await outcome(_uploadPhotoForTest(
     makeClient(fixtures()),
-    { jobId: "job-fence", userId: SONNY.id, dataUrl: "data:image/jpeg;base64,AAAA" },
+    {
+      jobId: "job-fence",
+      userId: SONNY.id,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+    },
     access(SONNY),
   ));
   assertEquals(r, "refused");
@@ -294,7 +339,11 @@ Deno.test("confirm_upload CONTROL: an unassigned installer is still refused; an 
   assertEquals(no, "refused");
   const receipt = await outcome(_confirmUploadForTest(
     makeClient(fixtures()),
-    { path: "org/2026/08/r.jpg", publicUrl: "https://cdn.example/r.jpg", purpose: "expense_receipt" },
+    {
+      path: "org/2026/08/r.jpg",
+      publicUrl: "https://cdn.example/r.jpg",
+      purpose: "expense_receipt",
+    },
     SONNY.id,
     false,
     access(SONNY),
