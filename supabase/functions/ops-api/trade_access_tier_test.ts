@@ -231,11 +231,11 @@ const viewer = (id: string, role: string, managedVerticals: string[] = []) => ({
   managedVerticals,
 });
 
-const office = (id: string, role: string) =>
+const office = (role: string) =>
   _resolveManagerVisibility({ role, managedVerticals: [] }).isDispatcher;
 
 async function detail(t: Tables, v: ReturnType<typeof viewer>) {
-  const isOffice = office(v.id, v.role);
+  const isOffice = office(v.role);
   return await _tradeJobDetailForTest(
     makeClient(t),
     new URLSearchParams({ jobId: JOB_FENCE }),
