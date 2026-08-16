@@ -129,7 +129,7 @@ others), compared with the ops_manager proven path:
 |---|---|---|---|
 | `trade_job_detail` (WO, scope, files, photos, log, crew) | 200, full | 200, **byte-identical** payload — `assertAssignedOrMakesafeAccess` receives `{orgId, managedVerticals}` and admits the vertical (#377) | none withheld |
 | `add_note` (Log write) | 200 | **refused** "You are not assigned to this job" — call site passed no access context | server refusal |
-| `upload_photo`, `get_upload_url` (Photos write) | 200 (admin) | **refused** — same omission | server refusal |
+| `upload_photo`, `get_upload_url`, `confirm_upload` (Photos write) | 200 (admin) | **refused** — same omission | server refusal |
 | `get_service_report` (report read) | refused unless assigned (isAdmin not threaded) | **refused** — same omission | server refusal |
 | `my_work_orders` (WO tab cost breakdown) | own only (client sends no `mode`) | own only → "No invoiceable work order found" | client (request shape) |
 | Comms tab | rendered | **not rendered**: `isForeignCrewJob()` → `viewOnly` hides the tab and the note/photo controls | client not rendering |
@@ -137,9 +137,9 @@ others), compared with the ops_manager proven path:
 | `job.metadata`, PO pricing | stripped | stripped | intentional, left withheld |
 
 So on the read side the assigner already sees everything the trade payload
-carries; the divergence is that **three sibling per-job doors ran the same
-predicate without the context** (`addNote`, `uploadPhoto` / `getUploadUrl`,
-`getServiceReport`) while `tradeJobDetail` and `submitServiceReport` (#526)
+carries; the divergence is that **the sibling per-job doors ran the same
+predicate without the context** (`addNote`, `uploadPhoto` / `getUploadUrl` /
+`confirmUpload`, `getServiceReport`) while `tradeJobDetail` and `submitServiceReport` (#526)
 passed it. Earliest divergence: the call sites, not the predicate.
 
 ### Backend change (this PR)
@@ -150,8 +150,8 @@ every door: an assigner of the job's vertical now writes to its log, uploads to
 its photos and reads its report; a patio-only manager, an unassigned installer
 and another tenant are still refused; the MakeSafe field-report exception is
 unchanged; staff callers keep their unchanged bypass and gain no extra read.
-Regression + controls: `trade_manager_job_access_test.ts` (13 tests; the four
-widening tests go red when the old call sites are restored, the nine controls
+Regression + controls: `trade_manager_job_access_test.ts` (15 tests; the five
+widening tests go red when the old call sites are restored, the ten controls
 are green on both shapes).
 
 No front-door set changed. `_opsApiActionNeedsSignedCaller`,

@@ -8299,8 +8299,8 @@ if (import.meta.main) serve(async (req: Request) => {
         // ONE per-job access context for every trade job surface. trade_job_detail
         // and submit_service_report already honoured it (tenant + managed
         // verticals, PR #377 / #526); the note, photo and service-report reads
-        // below did not, so a vertical manager could open a job they may
-        // allocate but was refused its log/photos. Same predicate, every door.
+        // and confirm below did not, so a vertical manager could open a job they
+        // may allocate but was refused its log/photos. Same predicate, every door.
         const tradeJobAccess: TradeJobAccessContext = {
           orgId: tradeUser.orgId,
           managedVerticals: tradeUser.managedVerticals,
@@ -8330,12 +8330,12 @@ if (import.meta.main) serve(async (req: Request) => {
             return json(await tradeJobDetail(client, url.searchParams, tradeUser, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }, tradeJobAccess))
           case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin, tradeJobAccess))
-          case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
+          case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin, tradeJobAccess))
           case 'submit_service_report':
             return json(await submitServiceReport(
               client,
               { ...body, userId: tradeUser.id },
-              { orgId: tradeUser.orgId, managedVerticals: tradeUser.managedVerticals },
+              tradeJobAccess,
             ))
           case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess))
           // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
@@ -42576,7 +42576,7 @@ async function getUploadUrl(client: any, body: any, userId: string, isAdmin = fa
 }
 
 // ── Confirm upload (create media record after direct upload) ──
-async function confirmUpload(client: any, body: any, userId: string, isAdmin = false) {
+async function confirmUpload(client: any, body: any, userId: string, isAdmin = false, access?: TradeJobAccessContext) {
   const { jobId, job_id, publicUrl, path, label, phase, po_id, purpose, bucket } = body
   const jId = jobId || job_id
 
@@ -42654,7 +42654,7 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
   // Verify user is assigned, or this is a MakeSafe field-report job.
-  await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin)
+  await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin, access)
   const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, jId)
 
   const insertData: any = {

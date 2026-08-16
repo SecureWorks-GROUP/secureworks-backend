@@ -6,10 +6,10 @@
 // office roles by name, then role-agnostic `users.managed_verticals` containing
 // the job's vertical. trade_job_detail already honours that same managed
 // vertical (TradeJobAccessContext, PR #377) — so an assigner already SEES the
-// full detail payload. But three sibling per-job surfaces the trade job tabs
+// full detail payload. But the sibling per-job surfaces the trade job tabs
 // call still ran the access predicate WITHOUT the context: add_note (Log tab
-// write), upload_photo / get_upload_url (Photos tab write) and
-// get_service_report (report read). A vertical manager could open the job and
+// write), upload_photo / get_upload_url / confirm_upload (Photos tab write)
+// and get_service_report (report read). A vertical manager could open the job and
 // then be refused on those tabs as "not assigned".
 //
 // This suite drives the REAL handlers against a stub client and proves:
@@ -31,6 +31,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _addNoteForTest,
+  _confirmUploadForTest,
   _getServiceReportForTest,
   _getUploadUrlForTest,
   _uploadPhotoForTest,
@@ -256,6 +257,44 @@ Deno.test("get_upload_url CONTROL: an unassigned installer is still refused; an 
   const receipt = await outcome(_getUploadUrlForTest(
     makeClient(fixtures()),
     { fileName: "receipt.jpg", purpose: "expense_receipt" },
+    SONNY.id,
+    false,
+    access(SONNY),
+  ));
+  assertEquals(receipt, "passed");
+});
+
+Deno.test("confirm_upload: a fencing lead not on the crew may record the uploaded photo; refused on patio", async () => {
+  const ok = await outcome(_confirmUploadForTest(
+    makeClient(fixtures()),
+    { jobId: "job-fence", publicUrl: "https://cdn.example/site.jpg" },
+    HENRY.id,
+    false,
+    access(HENRY),
+  ));
+  assertEquals(ok, "passed");
+  const no = await outcome(_confirmUploadForTest(
+    makeClient(fixtures()),
+    { jobId: "job-patio", publicUrl: "https://cdn.example/site.jpg" },
+    HENRY.id,
+    false,
+    access(HENRY),
+  ));
+  assertEquals(no, "refused");
+});
+
+Deno.test("confirm_upload CONTROL: an unassigned installer is still refused; an expense receipt never touches the job gate", async () => {
+  const no = await outcome(_confirmUploadForTest(
+    makeClient(fixtures()),
+    { jobId: "job-fence", publicUrl: "https://cdn.example/site.jpg" },
+    SONNY.id,
+    false,
+    access(SONNY),
+  ));
+  assertEquals(no, "refused");
+  const receipt = await outcome(_confirmUploadForTest(
+    makeClient(fixtures()),
+    { path: "org/2026/08/r.jpg", publicUrl: "https://cdn.example/r.jpg", purpose: "expense_receipt" },
     SONNY.id,
     false,
     access(SONNY),
