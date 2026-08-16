@@ -2304,25 +2304,31 @@ narrowing, diagnosis, and deployment caveats are owned by
 `docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before
 changing `trade_job_detail`, `set_job_lead`, or the lead/schema gate.
 
-Seven per-job Trade doors run ONE access predicate with ONE context —
-`trade_job_detail`, `submit_service_report`, `add_note`, `upload_photo`,
-`get_upload_url`, `confirm_upload`, `get_service_report`:
-`assertAssignedOrMakesafeAccess(client, jobId, userId, isAdmin, access)` where
-`access = { orgId, managedVerticals }` comes from the server-owned profile
+The Trade app is a THREE-TIER model (Captain 2026-08-17): office
+(`admin/owner/ops_manager`, everything), division manager
+(`users.managed_verticals` contains the job's vertical, everything in that
+trade incl. the quote, allocates, sets the lead), allocated trade
+(`job_assignments` row, `is_lead` true OR false with NO visibility difference,
+everything except the quote). `resolveTradeJobAccessTier` in `ops-api/index.ts`
+is the one decision and `tradeQuoteVisibleForTier` the one quote rule; every
+per-job Trade door reaches them through
+`assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)` with
+`access = { orgId, managedVerticals }` from the server-owned profile
 (`tradeJobAccess` in the trade dispatch; `noteAccess` for non-staff `add_note`).
-A caller who may allocate a job (`_resolveAllocationAuthz`, managed vertical)
-therefore sees and writes the same job surfaces `trade_job_detail` already
-admitted them to (notes, photos, service report). Never add a new per-job trade
-action that calls the predicate without the context, and never widen the
-predicate itself. `trade_labour_budget` is the known remaining per-job door: it
-still calls the narrower `assertAssigned` (own assignment only, no vertical or
-MakeSafe fallback), so a vertical manager who can write that job's log and
-photos is still refused its labour budget. Pre-existing and deliberately
-unchanged by the 2026-08-17 slice. A fencing-vertical caller's Everyone list (`my_jobs`
-`mode=all`) is the whole fencing vertical + crew-ready pool; anyone without the
-vertical sees only their own rows. Both directions and the diagnosis:
-`trade_manager_job_access_test.ts`, the "Captain 2026-08-17" pair in
-`myjobs_manager_scope_test.ts`, `docs/evidence/trade-fencing-visibility-2026-08-17.md`.
+Never add a per-job trade action that calls the predicate without the context,
+never widen the predicate, and never read `job_assignments.role` as a lead or
+authority signal (it defaults to `lead_installer` on every insert; the lead-only
+surfaces read `is_lead` via `tradeLeadJobIds` / `tradeIsDesignatedLead`).
+`trade_job_detail` redacts the quote server-side for non-quote tiers
+(`redactTradeScopeQuote` over `scope_json`, `_tradeDocumentsForAllocatedTrade`
+over documents) — never ship raw `scope_json` or a `quote`/`invoice` document to
+an allocated trade, and never re-derive the tier per route. The personal
+`my_jobs` lane is window-overlap recent (`_myJobsPersonalRecencyFilter`), not a
+start-date floor. Gap table, the live-report diagnosis, the restrictively
+resolved ambiguities and the front-end half:
+`docs/evidence/trade-access-model-2026-08-17.md`; tests
+`trade_access_tier_test.ts`, `trade_manager_job_access_test.ts`,
+`docs/evidence/trade-fencing-visibility-2026-08-17.md`.
 
 Trade multi-person allocation must preserve one assignment row per crew member:
 when the representative row is reassigned to a person already on that job/date,
@@ -3237,9 +3243,11 @@ supabase/functions/ops-api/index.ts (admin/owner/ops_manager — the exact set
 the front-door gate admits as staff). Any per-action operator check must reuse
 it; a hand-rolled admin-only literal re-classifies an admitted operator as a
 trade deeper in the dispatch (the SWF-261098 add_note lockout). The front door
-passes ONE role-scoped exception beside the staff set:
-LEAD_INSTALLER_READ_ACTIONS (pipeline/calendar/ops_summary/list_users — the
-reads trade.html's lead_installer dispatcher view boots on). It is
+passes ONE scoped exception beside the staff set: LEAD_INSTALLER_READ_ACTIONS
+(calendar/list_users — the reads trade.html's manager view boots on), granted
+only to a lead_installer WITH managed verticals (a division manager), and the
+`calendar` payload is bounded to those verticals at the dispatch. `pipeline`
+(quoted `value` on every job) and `ops_summary` were removed 2026-08-17. It is
 deliberately NOT staff-set membership, so inner operator checks and every
 write/money surface still refuse the role; do not widen it. Deliberately-strict
 admin/owner gates (money, comms, credential, recovery, batch surfaces) stay

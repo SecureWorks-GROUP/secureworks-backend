@@ -3565,19 +3565,56 @@ export function _opsApiStaffOperatorRole(role: unknown): boolean {
 // for the role. Deliberately NOT membership in OPS_API_STAFF_OPERATOR_ROLES:
 // every write, money, approve, and authorise surface keeps refusing the role
 // exactly as before.
+//
+// Captain 2026-08-17 (three-tier model): this exception is for a DIVISION
+// MANAGER (a lead_installer whose users.managed_verticals is non-empty), not for
+// the role name alone — a plain lead installer with no managed vertical is an
+// allocated trade and gets none of these. `pipeline` and `ops_summary` are
+// gone from the list: pipeline publishes every job's quoted `value` across
+// every vertical (the one hard exclusion, and cross-vertical reach), ops_summary
+// is a cross-vertical money aggregate, and the served trade.html (secureworks-ux
+// main, checked 2026-08-17) calls neither — its manager boot path calls
+// `calendar` and `list_users` only. `calendar` rows are additionally scoped to
+// the caller's managed verticals at the dispatch (_scopeCalendarPayloadToVerticals).
 export const LEAD_INSTALLER_READ_ACTIONS = new Set([
-  'pipeline',
   'calendar',
-  'ops_summary',
   'list_users',
 ])
 
 export function _opsApiLeadInstallerReadAllowed(
   role: unknown,
   action: string | null,
+  managedVerticals?: unknown,
 ): boolean {
   return String(role || '').toLowerCase() === 'lead_installer' &&
+    _normalizeManagedVerticals(managedVerticals).length > 0 &&
     !!action && LEAD_INSTALLER_READ_ACTIONS.has(action)
+}
+
+// A division manager reaching the office `calendar` read sees only their own
+// trade(s): events whose job vertical is one they manage, plus the readiness /
+// deliveries keyed to those jobs. Pure; the dispatch applies it for a non-staff
+// JWT caller only. Everything else in the payload is passed through untouched.
+export function _scopeCalendarPayloadToVerticals(payload: any, managedVerticals: unknown): any {
+  const verticals = _normalizeManagedVerticals(managedVerticals)
+  if (!payload || typeof payload !== 'object') return payload
+  const events = Array.isArray(payload.events) ? payload.events : []
+  const kept = events.filter((e: any) =>
+    verticals.includes(_jobVertical({ type: e?.job_type, job_number: e?.job_number })),
+  )
+  const keptJobIds = new Set(kept.map((e: any) => String(e?.job_id || '')).filter(Boolean))
+  const out: any = { ...payload, events: kept }
+  if (Array.isArray(payload.deliveries)) {
+    out.deliveries = payload.deliveries.filter((d: any) => keptJobIds.has(String(d?.job_id || '')))
+  }
+  if (payload.readiness && typeof payload.readiness === 'object' && !Array.isArray(payload.readiness)) {
+    const readiness: Record<string, any> = {}
+    for (const [jobId, value] of Object.entries(payload.readiness)) {
+      if (keptJobIds.has(String(jobId))) readiness[jobId] = value
+    }
+    out.readiness = readiness
+  }
+  return out
 }
 
 export function _opsApiCallerIsStaffOperator(
@@ -3611,7 +3648,7 @@ export function _opsApiServerSecretPresented(input: {
 export function _authorizeOpsApiAction(input: {
   url: URL
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none'
-  authUser?: Pick<TradeAuthContext, 'role'> | null
+  authUser?: (Pick<TradeAuthContext, 'role'> & { managedVerticals?: unknown }) | null
   serverSecretPresented?: boolean
 }): { ok: true } | { ok: false; status: 401 | 403; code: string; error: string } {
   const { url, authMode, authUser, serverSecretPresented = false } = input
@@ -3643,7 +3680,7 @@ export function _authorizeOpsApiAction(input: {
   if (_opsApiActionNeedsStaffRole(url)) {
     if (
       !_opsApiStaffOperatorRole(authUser.role) &&
-      !_opsApiLeadInstallerReadAllowed(authUser.role, url.searchParams.get('action'))
+      !_opsApiLeadInstallerReadAllowed(authUser.role, url.searchParams.get('action'), authUser.managedVerticals)
     ) {
       // 403, NOT 401: the caller IS validly signed in, they just lack the staff
       // role. trade.html treats every 401 as an expired session and force-logs
@@ -4427,7 +4464,15 @@ if (import.meta.main) serve(async (req: Request) => {
 
       // ── Ops Dashboard Read ──
       case 'ops_summary': return json(await opsSummary(client))
-      case 'calendar': return json(await calendarEvents(client, url.searchParams))
+      case 'calendar': {
+        const calendarPayload = await calendarEvents(client, url.searchParams)
+        // A non-staff JWT caller can only be here through the division-manager
+        // read exception; bound the payload to their own trade(s).
+        if (authMode === 'jwt' && !_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json(_scopeCalendarPayloadToVerticals(calendarPayload, authUser?.managedVerticals))
+        }
+        return json(calendarPayload)
+      }
       case 'pipeline': return json(await pipeline(client, url.searchParams))
       case 'makesafe_board': {
         // Outer JWT / projection gates live in makesafeBoardAction so the trade
@@ -8386,8 +8431,10 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'trade_job_detail':
             return json(await tradeJobDetail(client, url.searchParams, tradeUser, isDispatcher))
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }, tradeJobAccess))
-          case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin, tradeJobAccess))
-          case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin, tradeJobAccess))
+          // Office tier bypass is isDispatcher (admin / owner / ops_manager), not the
+          // admin-only isAdmin: an ops_manager is office everywhere.
+          case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isDispatcher, tradeJobAccess))
+          case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isDispatcher, tradeJobAccess))
           case 'submit_service_report':
             return json(await submitServiceReport(
               client,
@@ -8455,12 +8502,9 @@ if (import.meta.main) serve(async (req: Request) => {
             return json(await searchAllJobs(client, url.searchParams, tradeUser, isDispatcher))
           case 'crew_charges_on_my_jobs': {
             const ccWeekStart = url.searchParams.get('week_start') || body?.week_start
-            // Find jobs where this user is lead
-            const { data: leadJobs } = await client.from('job_assignments')
-              .select('job_id')
-              .eq('user_id', tradeUser.id)
-              .in('role', ['lead', 'lead_installer'])
-            const leadJobIds = [...new Set((leadJobs || []).map((a: any) => a.job_id).filter(Boolean))]
+            // Find jobs where this user is the DESIGNATED lead (is_lead), never
+            // via job_assignments.role — see tradeLeadJobIds.
+            const leadJobIds = await tradeLeadJobIds(client, tradeUser.id)
             if (leadJobIds.length === 0) return json({ charges: [] })
 
             // Get other trades' invoice lines on those jobs
@@ -8495,16 +8539,11 @@ if (import.meta.main) serve(async (req: Request) => {
             if (!line_id) throw new ApiError('line_id required', 400)
             if (!['approve', 'adjust', 'reject'].includes(reviewAction)) throw new ApiError('action must be approve, adjust, or reject', 400)
 
-            // Verify user is lead on this job
+            // Verify user is the DESIGNATED lead on this job (is_lead), never
+            // via job_assignments.role — see tradeLeadJobIds.
             const { data: lineData } = await client.from('trade_invoice_lines').select('job_id').eq('id', line_id).single()
             if (!lineData) throw new ApiError('Line not found', 404)
-            const { data: isLead } = await client.from('job_assignments')
-              .select('id')
-              .eq('user_id', tradeUser.id)
-              .eq('job_id', lineData.job_id)
-              .in('role', ['lead', 'lead_installer'])
-              .limit(1)
-              .maybeSingle()
+            const isLead = await tradeIsDesignatedLead(client, tradeUser.id, lineData.job_id)
             if (!isLead) throw new ApiError('Not authorised — you are not lead on this job', 403)
 
             const updates: any = {
@@ -8960,7 +8999,7 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({ success: true })
           }
           case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
-          case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id))
+          case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id, isDispatcher, tradeJobAccess))
           case 'update_job_phase': return json(await updateJobPhase(client, body, tradeUser.id))
           case 'list_pending_verifications': return json(await listPendingVerifications(client, tradeUser.id, url.searchParams))
           case 'verify_hours': return json(await verifyHours(client, tradeUser.id, body))
@@ -33155,35 +33194,124 @@ export type TradeJobAccessContext = {
   managedVerticals?: unknown
 }
 
+// ── Trade job access tier (Captain ruling 2026-08-17) ────────────────────────
+// The ONE named decision for "what does this signed-in caller get on this job":
+//   office           admin / owner / ops_manager (or a privileged server key):
+//                    everything, everywhere.
+//   division_manager users.managed_verticals contains the job's vertical
+//                    (_jobVertical): everything on that job, quote included,
+//                    exactly like office WITHIN that trade.
+//   allocated        a non-cancelled job_assignments row for this user on this
+//                    job — lead (is_lead=true) or crew (is_lead=false), NO
+//                    difference: everything about the job EXCEPT the quote.
+//   makesafe_open    the pre-existing MakeSafe field-report exception: any
+//                    logged-in trade may open/report an open MakeSafe before a
+//                    named assignment exists. Treated as an allocated trade for
+//                    quote purposes (never sees the quote).
+//   none             refused. A trade with no managed vertical and no
+//                    allocation sees nothing on the job; another tenant is
+//                    refused before any other question is asked.
+// job_assignments.role is NEVER read here (it defaults to 'lead_installer' on
+// every insert and carries no authority); is_lead is display only and does not
+// change the tier. Every per-job trade door resolves through this so the tier
+// decision exists once. tradeQuoteVisibleForTier() is the ONE quote rule.
+export type TradeJobAccessTier =
+  | 'office'
+  | 'division_manager'
+  | 'allocated'
+  | 'makesafe_open'
+  | 'none'
+
+export type TradeJobAccessDecision = {
+  tier: TradeJobAccessTier
+  quoteVisible: boolean
+  reason:
+    | 'office'
+    | 'vertical_manager'
+    | 'assigned'
+    | 'makesafe_open'
+    | 'tenant_mismatch'
+    | 'not_assigned'
+  job: any | null
+}
+
+// Office and division managers see the quote. Never an allocated trade, lead
+// or crew, and never the MakeSafe open-pool exception.
+export function tradeQuoteVisibleForTier(tier: TradeJobAccessTier): boolean {
+  return tier === 'office' || tier === 'division_manager'
+}
+
+export async function resolveTradeJobAccessTier(
+  client: any,
+  jobId: string,
+  userId: string,
+  opts: { isOffice?: boolean; access?: TradeJobAccessContext } = {},
+): Promise<TradeJobAccessDecision> {
+  const { isOffice = false, access } = opts
+  let job: any = null
+  // Tenant is a boundary and is asked FIRST, before office/manager/assignment,
+  // when the caller carries an org — same order the previous predicate used.
+  if (access?.orgId) {
+    job = await getTradeJobForAccess(client, jobId)
+    if (String(job.org_id || '') !== access.orgId) {
+      return { tier: 'none', quoteVisible: false, reason: 'tenant_mismatch', job }
+    }
+  }
+  if (isOffice) {
+    return { tier: 'office', quoteVisible: true, reason: 'office', job }
+  }
+  // Division manager outranks allocation: a manager who is also on the crew
+  // must still get the manager tier (Henry sees the quote on his own jobs).
+  const managedVerticals = _normalizeManagedVerticals(access?.managedVerticals)
+  if (managedVerticals.length > 0) {
+    if (!job) job = await getTradeJobForAccess(client, jobId)
+    if (managedVerticals.includes(_jobVertical(job))) {
+      return { tier: 'division_manager', quoteVisible: true, reason: 'vertical_manager', job }
+    }
+  }
+  const { data: assigned } = await client
+    .from('job_assignments')
+    .select('id')
+    .eq('job_id', jobId)
+    .eq('user_id', userId)
+    .neq('status', 'cancelled')
+    .limit(1)
+    .maybeSingle()
+  if (assigned) {
+    return { tier: 'allocated', quoteVisible: false, reason: 'assigned', job }
+  }
+  if (!job) job = await getTradeJobForAccess(client, jobId)
+  // MakeSafe report fallback: any logged-in trade may open/report an open
+  // MakeSafe even before ops has created a named assignment. This keeps the
+  // field-report flow moving when the board/admin upload step is behind, while
+  // ordinary patio/fencing/decking jobs remain allocation-gated.
+  if (await isMakesafeAccessJobForClient(client, job)) {
+    return { tier: 'makesafe_open', quoteVisible: false, reason: 'makesafe_open', job }
+  }
+  return { tier: 'none', quoteVisible: false, reason: 'not_assigned', job }
+}
+
+export function tradeJobAccessRefusal(decision: TradeJobAccessDecision): Error | null {
+  if (decision.tier !== 'none') return null
+  return decision.reason === 'tenant_mismatch'
+    ? new Error('You are not authorized to access this job')
+    : new Error('You are not assigned to this job')
+}
+
+// Every existing door keeps calling this; it is now a thin throw-on-refuse
+// wrapper over resolveTradeJobAccessTier so the tier decision cannot drift
+// between surfaces.
 async function assertAssignedOrMakesafeAccess(
   client: any,
   jobId: string,
   userId: string,
   isAdmin = false,
   access?: TradeJobAccessContext,
-) {
-  let job: any = null
-  if (access?.orgId) {
-    job = await getTradeJobForAccess(client, jobId)
-    if (String(job.org_id || '') !== access.orgId) {
-      throw new Error('You are not authorized to access this job')
-    }
-  }
-  if (isAdmin) return
-  try {
-    await assertAssigned(client, jobId, userId, isAdmin)
-    return
-  } catch (err) {
-    if (!job) job = await getTradeJobForAccess(client, jobId)
-    const managedVerticals = _normalizeManagedVerticals(access?.managedVerticals)
-    if (managedVerticals.includes(_jobVertical(job))) return
-    // MakeSafe report fallback: any logged-in trade may open/report an open
-    // MakeSafe even before ops has created a named assignment. This keeps the
-    // field-report flow moving when the board/admin upload step is behind, while
-    // ordinary patio/fencing/decking jobs remain allocation-gated below.
-    if (await isMakesafeAccessJobForClient(client, job)) return
-    throw err
-  }
+): Promise<TradeJobAccessDecision> {
+  const decision = await resolveTradeJobAccessTier(client, jobId, userId, { isOffice: isAdmin, access })
+  const refusal = tradeJobAccessRefusal(decision)
+  if (refusal) throw refusal
+  return decision
 }
 export const _assertAssignedOrMakesafeAccessForTest = assertAssignedOrMakesafeAccess
 
@@ -33530,6 +33658,14 @@ function shouldOmitTradeTodayRecent(
   return false
 }
 
+// Personal-lens recency for my_jobs: an assignment is current when it ENDS on
+// or after the floor (multi-day span still on site), or has no end and STARTS
+// on or after the floor, or has no date at all (allocated, not yet scheduled —
+// the office lens shows those, so the crew must see them too). Pure and pinned.
+export function _myJobsPersonalRecencyFilter(floorDate: string): string {
+  return `scheduled_end.gte.${floorDate},and(scheduled_end.is.null,scheduled_date.gte.${floorDate}),scheduled_date.is.null`
+}
+
 export function _groupTradeAssignmentsForTest(
   assignments: any[],
   today: string,
@@ -33657,7 +33793,11 @@ export function _resolveManagerVisibility(
 } {
   const role = String(input?.role || '').toLowerCase()
   const isAdmin = role === 'admin'
-  const isDispatcher = isAdmin || role === 'ops_manager'
+  // Office tier (Captain 2026-08-17): admin / owner / ops_manager see everything
+  // everywhere. The SAME set the front door and _resolveAllocationAuthz admit;
+  // `owner` was missing here, so the owner's Trade lens was narrower than an
+  // ops_manager's.
+  const isDispatcher = _opsApiStaffOperatorRole(role)
   const managedVerticals = _normalizeManagedVerticals(input?.managedVerticals)
   const isMakesafeManager = managedVerticals.includes('makesafe')
   const canSeeMakesafePool = isDispatcher || isMakesafeManager
@@ -34150,13 +34290,23 @@ export async function myJobs(
     // Ghost rows carry the requesting ops manager's own user_id, so this is the
     // one path where a ghost row targets the caller directly (see GHOST ROWS
     // note). It gets the same rule: a watcher row is not the caller's field work.
+    //
+    // Recency is WINDOW OVERLAP, not start-date containment (Captain 2026-08-17,
+    // allocated fencing crew could not see their jobs). The office lens and the
+    // manager's fencing lane are full-range, but this lane carried a plain
+    // `scheduled_date >= today-30d` floor: a multi-day allocation that STARTED
+    // more than 30 days ago and is still on site (scheduled_end in the window),
+    // and any allocation with no date at all, were visible to the office and to
+    // Henry and invisible to the crew allocated to them. Same overlap predicate
+    // trade_calendar / calendarEvents already use; the ruled model is that an
+    // allocated installer sees the job they are allocated to.
     const res = await client
       .from('job_assignments')
       .select(ASSIGNMENT_SELECT_USER)
       .eq('user_id', userId)
       .neq('status', 'cancelled')
       .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
-      .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
+      .or(_myJobsPersonalRecencyFilter(thirtyDaysAgo.toISOString().slice(0, 10)))
       .order('scheduled_date', { ascending: true })
     assignments = res.data
     error = res.error
@@ -34974,6 +35124,92 @@ export function _tradeVisibleDocuments(docs: any[]): any[] {
   return (docs || []).filter((d: any) => d?.visible_to_trades === true)
 }
 
+// Document types that carry the client's quoted price. `quote` is the quote
+// itself; `invoice` is the client invoice, which restates the quoted amount, so
+// the restrictive reading of "never the quote" covers it too. `supplier_quote`
+// (a supplier's price TO us, on ops's default-visible list) is deliberately not
+// here: it is not the client's quote. Widening this list is a Captain call.
+export const TRADE_QUOTE_DOCUMENT_TYPES = new Set(['quote', 'invoice'])
+
+// What an ALLOCATED trade (lead or crew, no difference) or the MakeSafe
+// open-pool exception may see of a job's documents: the ops-flagged rows,
+// minus anything quote-bearing regardless of the flag. Office / division
+// manager tiers do not use this — they get the office document set.
+export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
+  return _tradeVisibleDocuments(docs)
+    .filter((d: any) => !TRADE_QUOTE_DOCUMENT_TYPES.has(String(d?.type || '').toLowerCase()))
+    .map((d: any) => {
+      // quote_number is a quote coordinate; nothing an installer needs.
+      const { quote_number: _qn, ...rest } = d || {}
+      return rest
+    })
+}
+
+// ── scope_json quote redaction (allocated-trade tiers) ──────────────────────
+// The scoping tools write the QUOTE into jobs.scope_json: `_pricing_json` (the
+// full quote blob — totals, margin, sell), `pricing` (addon/extras sell rows,
+// labour sell), `notes.pricingNotes` / `notes.noteQuote`, nested per patio /
+// option (`scope_json.patios[].options[]`, `scope_json.job`). trade_job_detail
+// used to ship the raw blob and rely on trade.html not rendering the price.
+// This strips it server-side at every depth. What survives is what the trade
+// app already deliberately shows an installer: `pricing.labour.{trades,days,
+// dayRate}` (their own days/day-rate, not the customer's price) — `sell` under
+// labour goes too. Keys are matched exactly (case-sensitive) so a structural
+// key like `totalMetres` is untouched; the pure helper is exported and pinned.
+export const TRADE_SCOPE_QUOTE_KEYS = new Set([
+  '_pricing_json',
+  'pricing_json',
+  'pricing_json_public',
+  'pricingNotes',
+  'noteQuote',
+  'quote',
+  'quotes',
+  'quoteTotal',
+  'quote_total',
+  'totalSell',
+  'sell',
+  'sellPrice',
+  'sell_price',
+  'margin',
+  'marginPct',
+  'totalIncGST',
+  'totalExGST',
+  'subtotal',
+])
+export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'dayRate', 'labourers'])
+
+export function redactTradeScopeQuote(scope: any): any {
+  const walk = (node: any, depth: number): any => {
+    if (depth > 12 || node == null) return node
+    if (Array.isArray(node)) return node.map((v) => walk(v, depth + 1))
+    if (typeof node !== 'object') return node
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(node)) {
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key)) continue
+      if (key === 'pricing') {
+        // Keep only the installer's own labour budget inputs.
+        const labour = value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as any).labour
+          : null
+        const keptLabour: Record<string, any> = {}
+        if (labour && typeof labour === 'object' && !Array.isArray(labour)) {
+          for (const [lk, lv] of Object.entries(labour)) {
+            if (TRADE_SCOPE_LABOUR_KEEP_KEYS.has(lk)) keptLabour[lk] = lv
+          }
+        }
+        out.pricing = Object.keys(keptLabour).length > 0 ? { labour: keptLabour } : {}
+        continue
+      }
+      out[key] = walk(value, depth + 1)
+    }
+    return out
+  }
+  if (typeof scope === 'string') {
+    try { return walk(JSON.parse(scope), 0) } catch { return null }
+  }
+  return walk(scope, 0)
+}
+
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
 // helper ops already uses for invoice descriptions — no second scope grammar.
 //
@@ -35011,6 +35247,37 @@ export function _tradeCrewRoster(assignments: any[]): any[] {
 // job that existed before the designation feature shipped.
 // Keep worker phone numbers on crew rows only; the narrower privacy reading
 // avoids duplicating them on leadInstaller without removing existing access.
+// The lead-only surfaces (crew charge review, hours verification) read the lead
+// from `job_assignments.is_lead` — the explicit, database-unique designation set
+// by set_job_lead. They used to read `role in ('lead','lead_installer')`, which
+// is NOT a lead signal: role defaults to 'lead_installer' on every insert
+// (112 of 133 live rows on 2026-08-03), so nearly every crew member "was lead"
+// and could review every other trade's invoice lines on their jobs. Lead vs
+// crew changes NOTHING about job visibility (Captain 2026-08-17); it only gates
+// these lead-management functions.
+export async function tradeLeadJobIds(client: any, userId: string): Promise<string[]> {
+  const { data, error } = await client.from('job_assignments')
+    .select('job_id')
+    .eq('user_id', userId)
+    .eq('is_lead', true)
+    .neq('status', 'cancelled')
+  if (error) throw new Error('Failed to resolve lead jobs: ' + error.message)
+  return collectUniqueStringIds((data || []).map((a: any) => a?.job_id))
+}
+
+export async function tradeIsDesignatedLead(client: any, userId: string, jobId: string): Promise<boolean> {
+  const { data, error } = await client.from('job_assignments')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('job_id', jobId)
+    .eq('is_lead', true)
+    .neq('status', 'cancelled')
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error('Failed to resolve lead designation: ' + error.message)
+  return !!data
+}
+
 export function _tradeLeadInstaller(crew: any[]): any | null {
   const lead = (crew || []).find((c: any) => c?.is_lead === true)
   if (!lead) return null
@@ -35030,13 +35297,14 @@ async function tradeJobDetail(
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
-  // Verify the job belongs to the viewer's tenant, then allow an assignment,
-  // dispatcher access, the existing MakeSafe exception, or explicit
-  // managed-vertical authority.
-  await assertAssignedOrMakesafeAccess(client, jobId, viewer.id, isAdmin, {
+  // Verify the job belongs to the viewer's tenant, then resolve the ONE access
+  // tier (office / division_manager / allocated / makesafe_open) or refuse.
+  // The tier decides the quote fence below; nothing else does.
+  const accessDecision = await assertAssignedOrMakesafeAccess(client, jobId, viewer.id, isAdmin, {
     orgId: viewer.orgId,
     managedVerticals: viewer.managedVerticals,
   })
+  const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes] = await Promise.all([
     client.from('jobs')
@@ -35196,11 +35464,28 @@ async function tradeJobDetail(
   }
 
   const tradeCrew = _tradeCrewRoster(crewRes.data || [])
-  const visibleDocuments = _tradeVisibleDocuments(docsRes.data || [])
+  // Documents: office and a division manager get the office document set
+  // (everything, quotes included — "sees everything, can do whatever he
+  // wants"). An allocated trade (lead or crew) and the MakeSafe open-pool
+  // exception get only ops-flagged visible_to_trades rows AND never a quote-type
+  // document, whatever the flag says (Captain's one hard exclusion).
+  const visibleDocuments = quoteVisible
+    ? (docsRes.data || [])
+    : _tradeDocumentsForAllocatedTrade(docsRes.data || [])
   const workOrders = woRes.data || []
+  // scope_json carries the scoping tools' quote (pricing, _pricing_json, sell
+  // rows, quote notes). It is redacted server-side for every non-quote tier;
+  // the labour days/rate the app already shows installers survives.
+  if (!quoteVisible && tradeSafeJob && 'scope_json' in tradeSafeJob) {
+    tradeSafeJob.scope_json = redactTradeScopeQuote(tradeSafeJob.scope_json)
+  }
 
   return {
     job: tradeSafeJob,
+    // Additive: the resolved tier and the quote fence, so the app can render the
+    // right controls without re-deriving authority client-side.
+    access_tier: accessDecision.tier,
+    quote_visible: quoteVisible,
     job_identity: _projectMakesafeJobIdentity({
       builder_claim_ref: _tradeJobMetadata?.builder_claim_ref,
       builder_work_order_number: _tradeJobMetadata?.builder_work_order_number,
@@ -43934,10 +44219,19 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
 }
 
 // ── trade_labour_budget: labour budget view for lead installer ──
-async function tradeLabourBudget(client: any, params: URLSearchParams, userId: string) {
+async function tradeLabourBudget(
+  client: any,
+  params: URLSearchParams,
+  userId: string,
+  isOffice = false,
+  access?: TradeJobAccessContext,
+) {
   const jobId = params.get('jobId') || params.get('job_id')
   if (!jobId) throw new Error('jobId required')
-  await assertAssigned(client, jobId, userId)
+  // Same tier decision as every other per-job trade door: office and a manager
+  // of the job's vertical pass, an allocated trade passes, nobody else does.
+  const accessDecision = await assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)
+  const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   // Get PO total for this job (material + labour)
   const { data: pos } = await client.from('purchase_orders')
@@ -43961,8 +44255,11 @@ async function tradeLabourBudget(client: any, params: URLSearchParams, userId: s
     .select('job_number, pricing_json')
     .eq('id', jobId).single()
 
+  // pricing_json.labourTotal is the QUOTED labour figure — a component of the
+  // client's quote. It may only fund the budget for a tier that sees the quote;
+  // an allocated trade's budget stays PO-derived (what we pay), never the quote.
   const pricingJson = job?.pricing_json || {}
-  const quotedLabour = pricingJson.labourTotal || pricingJson.labour_total || 0
+  const quotedLabour = quoteVisible ? (pricingJson.labourTotal || pricingJson.labour_total || 0) : 0
   if (labourBudget === 0 && quotedLabour > 0) labourBudget = quotedLabour
 
   // Get all trade hours for this job
@@ -44005,6 +44302,7 @@ async function tradeLabourBudget(client: any, params: URLSearchParams, userId: s
     trades,
   }
 }
+export const _tradeLabourBudgetForTest = tradeLabourBudget
 
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE
@@ -50723,19 +51021,13 @@ async function checkJobDurations(client: any) {
 // ══════════════════════════════════════════════════════════════
 
 async function listPendingVerifications(client: any, leadUserId: string, params: URLSearchParams) {
-  // Find jobs where this user is the work order lead (lead_installer on the assignment)
-  // Then find other assignments on those jobs that are status='submitted' and not yet verified
-  const { data: leadAssignments } = await client
-    .from('job_assignments')
-    .select('job_id')
-    .eq('user_id', leadUserId)
-    .in('role', ['lead', 'lead_installer'])
-
-  if (!leadAssignments || leadAssignments.length === 0) {
+  // Find jobs where this user is the DESIGNATED lead (is_lead) — never via
+  // job_assignments.role, see tradeLeadJobIds. Then find other assignments on
+  // those jobs that are status='submitted' and not yet verified.
+  const jobIds = await tradeLeadJobIds(client, leadUserId)
+  if (jobIds.length === 0) {
     return { verifications: [] }
   }
-
-  const jobIds = leadAssignments.map((a: any) => a.job_id)
 
   const { data: pending } = await client
     .from('job_assignments')

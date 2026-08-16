@@ -29,12 +29,15 @@ function authorizationStatus(input: {
   query?: string;
   authMode: "api_key" | "jwt" | "routine" | "agent_read" | "none";
   role?: string;
+  managedVerticals?: string[];
   serverSecretPresented?: boolean;
 }): number {
   const decision = _authorizeOpsApiAction({
     url: actionUrl(input.action, input.query),
     authMode: input.authMode,
-    authUser: input.role ? { role: input.role } : null,
+    authUser: input.role
+      ? { role: input.role, managedVerticals: input.managedVerticals }
+      : null,
     serverSecretPresented: input.serverSecretPresented,
   });
   return decision.ok ? 200 : decision.status;
@@ -509,10 +512,13 @@ Deno.test("#681: a signed-in trade on a staff-only action gets 403 operator_acce
 
 // ── 2026-08-13 trade-app outage: lead_installer dispatcher-view reads ──
 
-Deno.test("lead installer read entitlement is exactly the four dispatcher-view actions", () => {
+Deno.test("lead installer read entitlement is exactly the two division-manager boot reads", () => {
+  // Captain 2026-08-17 three-tier model: `pipeline` (every job's quoted value,
+  // every vertical) and `ops_summary` (cross-vertical money aggregate) are gone;
+  // the served trade.html manager boot path calls only calendar + list_users.
   assertEquals(
     [...LEAD_INSTALLER_READ_ACTIONS].sort(),
-    ["calendar", "list_users", "ops_summary", "pipeline"].sort(),
+    ["calendar", "list_users"].sort(),
   );
   // The entitlement must never grow into staff-role membership.
   assertEquals(_opsApiStaffOperatorRole("lead_installer"), false);
@@ -522,13 +528,45 @@ Deno.test("lead installer read entitlement is exactly the four dispatcher-view a
   );
 });
 
-Deno.test("outage fix: a lead_installer JWT passes the front door on the four dispatcher-view reads", () => {
+Deno.test("outage fix: a lead_installer JWT WITH a managed vertical passes the front door on the manager boot reads", () => {
   for (const action of LEAD_INSTALLER_READ_ACTIONS) {
     assertEquals(
-      authorizationStatus({ action, authMode: "jwt", role: "lead_installer" }),
+      authorizationStatus({
+        action,
+        authMode: "jwt",
+        role: "lead_installer",
+        managedVerticals: ["fencing"],
+      }),
       200,
       action,
     );
+  }
+});
+
+Deno.test("three-tier: a lead_installer with NO managed vertical is an allocated trade and gets none of the office reads (403, not 401)", () => {
+  for (const action of [...LEAD_INSTALLER_READ_ACTIONS, "pipeline", "ops_summary"]) {
+    const decision = _authorizeOpsApiAction({
+      url: actionUrl(action),
+      authMode: "jwt",
+      authUser: { role: "lead_installer", managedVerticals: [] },
+    });
+    assertEquals(decision.ok, false, action);
+    if (!decision.ok) {
+      assertEquals(decision.status, 403, action);
+      assertEquals(decision.code, "operator_access_required", action);
+    }
+  }
+});
+
+Deno.test("three-tier: pipeline / ops_summary are refused even for a division manager (quoted value + cross-vertical aggregate)", () => {
+  for (const action of ["pipeline", "ops_summary"]) {
+    const decision = _authorizeOpsApiAction({
+      url: actionUrl(action),
+      authMode: "jwt",
+      authUser: { role: "lead_installer", managedVerticals: ["fencing"] },
+    });
+    assertEquals(decision.ok, false, action);
+    if (!decision.ok) assertEquals(decision.status, 403, action);
   }
 });
 

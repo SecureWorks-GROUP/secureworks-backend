@@ -45,6 +45,7 @@ type Assignment = {
   user_name?: string;
   status: string;
   scheduled_date: string | null;
+  scheduled_end?: string | null;
   job_id: string;
 };
 type Detail = {
@@ -111,6 +112,26 @@ function matchOr(row: Record<string, unknown>, orStr: string): boolean {
   });
 }
 
+// The personal my_jobs lane filters recency with ONE plain or() (window overlap:
+// scheduled_end / scheduled_date / unscheduled), produced by
+// _myJobsPersonalRecencyFilter. The stub evaluates exactly that grammar and
+// refuses anything else, so a query-shape change here fails loudly.
+function matchAssignmentRecencyOr(
+  a: { scheduled_date?: string | null; scheduled_end?: string | null },
+  orStr: string,
+): boolean {
+  const m = orStr.match(
+    /^scheduled_end\.gte\.([^,]+),and\(scheduled_end\.is\.null,scheduled_date\.gte\.([^)]+)\),scheduled_date\.is\.null$/,
+  );
+  if (!m) throw new Error("unrecognised plain or() on job_assignments: " + orStr);
+  const floor = m[1];
+  const end = a.scheduled_end ?? null;
+  const start = a.scheduled_date ?? null;
+  return (end != null && end >= floor) ||
+    (end == null && start != null && start >= floor) ||
+    start == null;
+}
+
 function parseNotInSet(filterStr: string): Set<string> {
   const out = new Set<string>();
   for (const m of filterStr.matchAll(/"([^"]+)"/g)) out.add(m[1]);
@@ -148,6 +169,9 @@ function resolve(
       rows = rows.filter((a) =>
         a.scheduled_date != null && a.scheduled_date < st.lt.scheduled_date
       );
+    }
+    for (const plainOr of st.ors.filter((o) => o.referencedTable == null)) {
+      rows = rows.filter((a) => matchAssignmentRecencyOr(a, plainOr.str));
     }
     // Inner join on jobs; a referenced-table or() constrains the parent rows.
     let joined = rows
@@ -723,9 +747,11 @@ Deno.test("regression: an ordinary installer is untouched — own-only, still wi
   const primary = recorded.find((q) => q.table === "job_assignments");
   assertEquals(primary?.eq.user_id, "u-alyx");
   assertEquals(
-    typeof primary?.gte.scheduled_date,
-    "string",
-    "the personal feed keeps its 30-day window",
+    primary?.ors.some((o) =>
+      o.referencedTable == null && o.str.startsWith("scheduled_end.gte.")
+    ),
+    true,
+    "the personal feed keeps its 30-day recency window (overlap form)",
   );
   assertEquals(primary?.range, null, "and stays a single unpaged read");
 });
@@ -1618,5 +1644,56 @@ Deno.test("All tab: a bad page_size or offset is refused, not silently coerced",
       true,
       `${JSON.stringify(params)} must be refused`,
     );
+  }
+});
+
+// ── Captain live report 2026-08-17: allocated fencing crew could not see their
+// jobs. The personal lane carried a plain start-date floor while the office and
+// manager lenses are full-range, so a multi-day allocation that STARTED more than
+// 30 days ago and is still on site was invisible to the crew allocated to it,
+// and visible to Henry and the office. Recency is now window overlap. ─────────
+function isoOffsetDays(delta: number): string {
+  const d = new Date(Date.now() + delta * 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
+Deno.test("allocated crew (lead AND crew) see a still-on-site allocation that started 45 days ago; a dead 45-day-old row stays out", async () => {
+  const fx = (): Fixtures => ({
+    assignments: [
+      // Started 45 days ago, ends next week: ON SITE. Lead and crew rows.
+      { id: "a-lead", user_id: "u-lead", status: "scheduled", scheduled_date: isoOffsetDays(-45), scheduled_end: isoOffsetDays(7), job_id: "job-long" },
+      { id: "a-crew", user_id: "u-crew", status: "scheduled", scheduled_date: isoOffsetDays(-45), scheduled_end: isoOffsetDays(7), job_id: "job-long" },
+      // Allocated with no date yet: the office sees it, so must the crew.
+      { id: "a-undated", user_id: "u-crew", status: "scheduled", scheduled_date: null, job_id: "job-undated" },
+      // Control: a 45-day-old one-day row with no end is stale and stays outside.
+      { id: "a-stale", user_id: "u-crew", status: "scheduled", scheduled_date: isoOffsetDays(-45), job_id: "job-stale" },
+    ],
+    jobs: [
+      { id: "job-long", type: "fencing", status: "in_progress" },
+      { id: "job-undated", type: "fencing", status: "scheduled" },
+      { id: "job-stale", type: "fencing", status: "in_progress" },
+    ],
+  });
+  for (const who of ["u-lead", "u-crew"]) {
+    const g = await myJobs(
+      makeClient(fx()),
+      who,
+      false,
+      ALYX.isDispatcher,
+      ALYX.isMakesafeManager,
+      ALYX.poolVerticals,
+      [],
+    );
+    const ids = assignedJobIds(g);
+    assertEquals(ids.includes("job-long"), true, `${who} sees the on-site allocation`);
+    assertEquals(ids.includes("job-stale"), false, `${who}: stale row stays windowed out`);
+    if (who === "u-crew") {
+      assertEquals(
+        (g.unscheduled || []).map((a: any) => a.jobs?.id),
+        ["job-undated"],
+        "an undated allocation lands in the unscheduled bucket",
+      );
+    }
+    assertEquals(poolJobIds(g), [], "no pool is opened for a crew member");
   }
 });
