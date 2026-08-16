@@ -2637,3 +2637,94 @@ Deno.test("fencing manager Everyone pages the complete range without duplicates"
     .map((query) => query.range);
   assertEquals(primaryPages, [[0, 999], [1000, 1999]]);
 });
+
+// ── Captain 2026-08-17: "henry should see all fencing jobs" ─────────────────
+// Both directions of the ruling, driven end to end through the REAL myJobs with
+// the exact arguments the trade dispatch computes for each caller. The lever is
+// the existing one — `users.managed_verticals` containing 'fencing' plus the
+// Everyone lens (mode:'all') — no new permission concept.
+//
+// Denominator: every same-tenant fencing job in the fixture that carries a live
+// (non-cancelled) assignment, plus every crew-ready fencing job nobody holds.
+// Pre-schedule pipeline (quoted / awaiting_deposit / order_materials) is
+// deliberately NOT part of "fencing jobs" for the trade list — that exclusion is
+// the M3b ruling and is unchanged here.
+Deno.test("Captain 2026-08-17: a fencing-vertical lead on Everyone sees EVERY same-tenant fencing job — assigned to anyone, or open", async () => {
+  const fx = fencingFixtures();
+  const managerScope = _managerBoardVerticals({
+    isDispatcher: HENRY.isDispatcher,
+    mode: "all",
+    managedVerticals: ["fencing"],
+  });
+  const g = await myJobs(
+    makeClient(fx, []),
+    "u-henry",
+    false,
+    HENRY.isDispatcher,
+    HENRY.isMakesafeManager,
+    HENRY.poolVerticals,
+    managerScope,
+  );
+  const liveAssignedFencing = new Set(
+    fx.assignments
+      .filter((a) => a.status !== "cancelled")
+      .map((a) => fx.jobs.find((j) => j.id === a.job_id))
+      .filter((j) => j && j.type === "fencing" && jobOrg(j) === TENANT_A)
+      .map((j) => j!.id),
+  );
+  const openFencing = fx.jobs
+    .filter((j) =>
+      j.type === "fencing" && jobOrg(j) === TENANT_A &&
+      ["order_confirmed", "schedule_install", "scheduled"].includes(j.status) &&
+      !liveAssignedFencing.has(j.id)
+    )
+    .map((j) => j.id);
+  const expected = [...liveAssignedFencing, ...openFencing].sort();
+  const seen = [...new Set([...assignedJobIds(g), ...poolJobIds(g)])].sort();
+  assertEquals(seen, expected, "Everyone lens = every fencing job, none missing");
+  // And nothing that is not fencing.
+  for (const id of seen) {
+    const job = fx.jobs.find((j) => j.id === id)!;
+    assertEquals(job.type, "fencing", `${id} is fencing`);
+    assertEquals(jobOrg(job), TENANT_A, `${id} is same-tenant`);
+  }
+});
+
+Deno.test("Captain 2026-08-17 CONTROL: a person with NO fencing vertical sees none of the other crews' fencing jobs", async () => {
+  // Alyx: ordinary installer, no managed vertical, assigned to nothing in the
+  // fixture. mode:'all' is a no-op for her (dispatch computes managerScope=[]
+  // and poolVerticals=[]).
+  const alyx = _resolveManagerVisibility({
+    role: "installer",
+    managedVerticals: [],
+  });
+  const gAlyx = await myJobs(
+    makeClient(fencingFixtures(), []),
+    "u-alyx",
+    false,
+    alyx.isDispatcher,
+    alyx.isMakesafeManager,
+    alyx.poolVerticals,
+    _managerBoardVerticals({ isDispatcher: false, mode: "all", managedVerticals: [] }),
+  );
+  assertEquals(assignedJobIds(gAlyx), [], "no assigned fencing card for an unrelated installer");
+  assertEquals(poolJobIds(gAlyx), [], "no fencing pool card for an unrelated installer");
+
+  // Nithin: manages PATIO only. Everyone lens gives him patio, never fencing.
+  const nithin = _resolveManagerVisibility({
+    role: "lead_installer",
+    managedVerticals: ["patio"],
+  });
+  const gNithin = await myJobs(
+    makeClient(fencingFixtures(), []),
+    "u-nithin",
+    false,
+    nithin.isDispatcher,
+    nithin.isMakesafeManager,
+    nithin.poolVerticals,
+    _managerBoardVerticals({ isDispatcher: false, mode: "all", managedVerticals: ["patio"] }),
+  );
+  const nithinSeen = [...assignedJobIds(gNithin), ...poolJobIds(gNithin)];
+  assertEquals(nithinSeen.some((id) => id.startsWith("job-f")), false, "a patio manager sees no fencing job");
+  assertEquals(nithinSeen.includes("job-p1"), true, "…but does see the patio work he manages");
+});
