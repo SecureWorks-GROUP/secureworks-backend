@@ -3507,6 +3507,12 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // These mixed ops/Trade actions already enforce dispatcher, vertical-manager,
   // relationship, or job-scoped authority inside the route.
   'allocate_job',
+  // Same footing as allocate_job (Captain ruling 2026-08-17): set_job_lead is
+  // gated inside the route by assertAssignmentMutationAuthz (api_key,
+  // dispatcher, or manager of the job's vertical; plain installers refused).
+  // #667 left it off this list, so a lead_installer vertical manager hit the
+  // staff-role 403 before that gate ran (Henry / SWF-26091 "Make lead").
+  'set_job_lead',
   'reattend_makesafe',
   'confirm_roof_report_done',
   'cancel_makesafe',
