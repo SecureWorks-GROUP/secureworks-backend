@@ -180,13 +180,19 @@ office-role sets are untouched.
   `update_assignment` carries a vertical-manager check inside. They are
   assignment WRITES, adjacent to the concurrent `trade-lead-assign` slice
   (`set_job_lead`), and outside these two asks; noted, not fixed.
+- `trade_labour_budget` still calls the narrower `assertAssigned` (own
+  assignment only, no vertical or MakeSafe fallback), so a vertical manager is
+  still refused that read. Pre-existing, outside these two asks; noted, not
+  fixed.
 - Latent trap, unchanged: the client accepts any `managed_verticals` string,
   the server whitelists four.
 
 ## 3. Guards, before and after
 
 For every caller class the reachable set is equal or smaller except the one
-named widening (managed-vertical caller, in-vertical job, three per-job doors),
-which is scoped by the same vertical predicate `_resolveAllocationAuthz` uses to
-let that caller assign the job in the first place. Passing `orgId` also adds a
-tenant check those three doors did not previously run.
+named widening (managed-vertical caller, in-vertical job, four per-job write
+doors — `add_note`, `upload_photo`, `get_upload_url`, `confirm_upload` — plus
+the `get_service_report` read), which is scoped by the same vertical predicate
+`_resolveAllocationAuthz` uses to let that caller assign the job in the first
+place. Passing `orgId` also adds a tenant check those five doors did not
+previously run.
