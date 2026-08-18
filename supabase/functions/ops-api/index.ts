@@ -15297,6 +15297,22 @@ export function _makesafeSentToBuilder(
   return packSent === true || MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
 }
 
+// Pack-surface invoice status must agree with the live Xero mirror the board
+// already publishes as invoice_raw_status. makesafe_report_packs.invoice_status
+// is stamped at mint and is not always rewritten when SES authorises, so the
+// pack/review surface can say DRAFT over an already-AUTHORISED INV (SWMS-261237
+// / INV-1240). Live status wins when present; the pack stamp is fallback only.
+// Presentation overlay — never a money gate, never a write.
+export function presentMakesafePackInvoiceStatus(
+  packInvoiceStatus: string | null | undefined,
+  liveInvoiceStatus: string | null | undefined,
+): string | null {
+  const live = String(liveInvoiceStatus || '').trim()
+  if (live) return live
+  const stamped = String(packInvoiceStatus || '').trim()
+  return stamped || null
+}
+
 export function _deriveMakesafeSurfacing(
   job: any,
   detail: any,
@@ -16125,7 +16141,10 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     report_pack: scopedPack ? {
       status: scopedPack.status || null,
       xero_invoice_id: scopedPack.xero_invoice_id || null,
-      invoice_status: scopedPack.invoice_status || null,
+      invoice_status: presentMakesafePackInvoiceStatus(
+        scopedPack.invoice_status,
+        invoiceForStage?.status,
+      ),
       named_prior_cycle_bind: scopedPack.named_prior_cycle_bind === true,
       report_doc_id: scopedPack.report_doc_id || null,
       invoice_doc_id: scopedPack.invoice_doc_id || null,
@@ -36653,7 +36672,10 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       default_html_body: htmlBody,
       pack_status: pack ? {
         status: pack.status || null,
-        invoice_status: pack.invoice_status || null,
+        invoice_status: presentMakesafePackInvoiceStatus(
+          pack.invoice_status,
+          liveInvoice?.status,
+        ),
         sent_at: pack.sent_at || null,
         // P-1: the hard-crash 'sending' window. in_flight_stale is true when the
         // pack is 'sending' and send_started_at is older than ~2 minutes -> the

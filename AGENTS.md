@@ -1166,6 +1166,16 @@ or after deploy: `scripts/ses-reattend-invoice-presentation-verify.ts`
 (`--mode=served` reports the live defect population, which must be empty;
 `--mode=derive` runs real production rows through the working tree).
 
+`report_pack.invoice_status` (and the legacy review `pack_status.invoice_status`)
+must follow the same live binding via `presentMakesafePackInvoiceStatus`: live
+`xero_invoices.status` wins, pack-row stamp is fallback only.
+`makesafe_report_packs.invoice_status` is stamped at mint and is not always
+rewritten when SES authorises, so trusting the stamp alone published DRAFT over
+AUTHORISED INV-1240 on SWMS-261237 while board top-level already said
+AUTHORISED — inviting Approve on money already authorised. Overlay is
+presentation only; do not loosen money gates. Regression:
+`makesafe_pack_invoice_status_lie_test.ts`.
+
 `MAKESAFE_STAGE_LADDER_VERSION` versions the visible ladder (published as
 `declared_stage_engine_version`, advisory, ops payload only) so a measurement
 can name the derivation that produced it. Bump it whenever the ladder's output
