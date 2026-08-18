@@ -199,7 +199,8 @@ rule). A physical-shaped family with no `pack.report_doc_id`, a required SWMS
 with no `pack.swms_doc_id`, or a report-only (roof/assessment) card without
 family report-in evidence presents `incomplete` with a reason, even when the
 docket stamp says docs-ready. The published `pack.pre_xero_docs_ready` is gated
-the same way: it is `true` only when the presentation kind is `ready`, and the
+the same way: it is `true` only when the presentation kind is `ready` AND the
+raw U4 docket stamp is true, and the
 `closeout_documents.report` / `.swms` ticks on bind-required families follow
 the pack pointer alone, never `has_report_doc` / `has_swms_doc`.
 
@@ -218,14 +219,22 @@ Ops rows publish it as:
   packless New/Allocated card is unchanged
 
 Consumers read pack state from those keys rather than re-deriving it from the
-legacy status. It is presentation only: placement, `canonical_stage`, and the
-raw pack status / review state / blocker list that feed derivation are
-unchanged, and AGENTS.md ("Previously Committed PDF Is Restorable, Not
-Complete") owns the rule keeping it out of every derivation input. The
-`pack_presentation` object on the internal `makesafe_pipeline` row is that
-stamp's carrier; the board reads it, and re-derives only when there is no stamp
-or when a stale stamp claims `ready` while the live bind pointers / report-in
-evidence refuse it — a stamped ready can never outrank the bind floor.
+legacy status. The internal `makesafe_pipeline` row applies the same honesty
+gate to its operator-facing `pre_xero_docs_ready` / `review_state`
+(presentation kind `ready` AND the raw U4 docket stamp), preserving the raw
+stamp on `docket_pre_xero_docs_ready`. Presentation still never places a card:
+placement `packState` for the evidence engine and the legacy ladder's
+docs-ready term are reconstructed from that preserved raw stamp — never from
+the honesty-gated values — falling back to `review_state` /
+`pre_xero_docs_ready` only on legacy rows that never carried the split field.
+AGENTS.md ("Previously Committed PDF Is Restorable, Not Complete") owns the
+seam. The `pack_presentation` object on the internal `makesafe_pipeline` row
+is that stamp's carrier; the board reads it for physical packs, and re-derives
+when there is no stamp, when a stale stamp claims `ready` while the live bind
+pointers refuse it, or always for report-only (roof/assessment) cards — the
+pipeline cannot see portal captures and fails closed without them, so this
+read model, which loads the capture ledger, is the honesty authority there. A
+stamped ready can never outrank the bind floor.
 
 ### U2-S1 cycle-scoped evidence (board + audit)
 

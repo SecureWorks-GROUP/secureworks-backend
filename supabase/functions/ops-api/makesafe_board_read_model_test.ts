@@ -1211,6 +1211,253 @@ Deno.test("SWMS-261243 assessment pack cannot look ready without family report e
   assertEquals(card.pack.report_doc_id, null);
 });
 
+Deno.test("pipeline fail-closed assessment stamp stays incomplete without portal evidence", () => {
+  // After the pipeline honesty gate, report_pack carries gated pre_xero=false
+  // plus the preserved raw docket stamp. Without portal captures the board
+  // must still refuse ready (SWMS-261243 class).
+  const id = "assess-pipeline-fail-closed";
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("new", id, {
+        job_number: "SWMS-261243",
+        metadata: { makesafe_job_family: "assessment_quote" },
+        makesafe_details: {
+          substatus: "company_contact_required",
+          report_type: "assessment_report",
+          cycle_number: 1,
+          external_links: [],
+        },
+        assignments: [],
+        report_pack: {
+          status: "drafted",
+          review_state: "U4_BLOCKED",
+          report_doc_id: null,
+          invoice_doc_id: null,
+          swms_doc_id: null,
+          docket_revision_id: "rev-assess-ready-stamp",
+          pre_xero_docs_ready: false,
+          docket_pre_xero_docs_ready: true,
+          presentation_kind: "incomplete",
+          presentation_reason: "family report evidence is not complete",
+          blockers: [],
+        },
+        pack_presentation: {
+          kind: "incomplete",
+          state: "drafted",
+          reason: "family report evidence is not complete",
+        },
+        has_report_doc: false,
+        has_wo: false,
+        invoice_status: "not_ready",
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+});
+
+Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence is present", () => {
+  // Pipeline cannot see portal captures, so it fails closed. The board has the
+  // capture evidence and must re-derive to ready (uses preserved docket stamp).
+  const id = "roof-pipeline-upgrade";
+  const sourceUrl = "https://www.primeeco.tech/share/roof-upgrade";
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", id, {
+        job_number: "SWMS-ROOF-UPGRADE",
+        metadata: { makesafe_job_family: "roof_report" },
+        makesafe_details: {
+          substatus: "admin_to_send_report",
+          report_type: "roof_report",
+          cycle_number: 1,
+          attendance_cycle_id: "cycle-current",
+          external_ref: "SAMPLE-ROOF-1",
+          external_links: [{ kind: "roof_report", url: sourceUrl }],
+          portal_captures: [{
+            status: "done",
+            role: "roof_report",
+            url: sourceUrl,
+            locked: true,
+            screenshot: "roof-upgrade.png",
+            cycle_number: 1,
+          }],
+        },
+        assignments: [],
+        report_pack: {
+          status: "drafted",
+          // Operator-facing honesty gate (pipeline fail-closed).
+          review_state: "U4_BLOCKED",
+          report_doc_id: null,
+          invoice_doc_id: "doc-invoice",
+          swms_doc_id: null,
+          docket_revision_id: "rev-roof-upgrade",
+          pre_xero_docs_ready: false,
+          // Raw stamp preserved for placement packState.
+          docket_pre_xero_docs_ready: true,
+          presentation_kind: "incomplete",
+          presentation_reason: "family report evidence is not complete",
+          blockers: [],
+        },
+        pack_presentation: {
+          kind: "incomplete",
+          state: "drafted",
+          reason: "family report evidence is not complete",
+        },
+        has_report_doc: false,
+        has_invoice_doc: true,
+        has_wo: false,
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.pack.presentation_kind, "ready");
+  assertEquals(card.pack.pre_xero_docs_ready, true);
+  // Placement must not inherit the honesty-gated U4_BLOCKED review_state —
+  // portal-proven report-only with a qualifying DRAFT stays Docs Ready.
+  assertEquals(card.canonical_stage, "report_ready");
+});
+
+Deno.test("legacySent report-only re-derive keeps the carried current docket", () => {
+  // authorised_not_sent pack row + ready current docket + portal evidence:
+  // the docket coordinate rides the honesty_* keys, so the board re-derive
+  // must present ready/awaiting-send, never the false "no current SES docket
+  // revision is assembled" reason. Placement stays off the carried stamp.
+  const id = "roof-ans-carried-docket";
+  const sourceUrl = "https://www.primeeco.tech/share/roof-ans";
+  const detail = {
+    substatus: "admin_to_send_report",
+    report_type: "roof_report",
+    cycle_number: 1,
+    attendance_cycle_id: "cycle-current",
+    external_ref: "SAMPLE-ROOF-ANS",
+    external_links: [{ kind: "roof_report", url: sourceUrl }],
+    portal_captures: [{
+      status: "done",
+      role: "roof_report",
+      url: sourceUrl,
+      locked: true,
+      screenshot: "roof-ans.png",
+      cycle_number: 1,
+    }],
+  };
+  const enriched = _enrichMakesafeBoardJobForTest(
+    baseJob("trade_report_in", id, {
+      metadata: { makesafe_job_family: "roof_report" },
+    }),
+    detail,
+    [],
+    null,
+    null,
+    [],
+    false,
+    {
+      status: "authorised_not_sent",
+      report_doc_id: null,
+      invoice_doc_id: "doc-invoice-ans",
+      swms_doc_id: null,
+      sent_at: null,
+      honesty_docket_revision_id: "rev-ans-ready",
+      honesty_docket_pre_xero_docs_ready: true,
+      honesty_docket_blockers: [],
+      presentation_kind: "incomplete",
+      presentation_reason: "family report evidence is not complete",
+      legacy_pack_status: "authorised_not_sent",
+    },
+  );
+  assertEquals(
+    enriched.report_pack.honesty_docket_revision_id,
+    "rev-ans-ready",
+  );
+  assertEquals(enriched.report_pack.honesty_docket_pre_xero_docs_ready, true);
+  assertEquals(enriched.report_pack.docket_revision_id, null);
+
+  const [card] = buildCanonicalMakesafeRows(
+    [enriched],
+    { computedAt: NOW },
+    "card",
+  );
+  assertEquals(card.pack.presentation_kind, "ready");
+  assertEquals(card.pack.state, "authorised_not_sent");
+  assert(String(card.pack.presentation_reason || "").includes("awaiting send"));
+  // The carried coordinate is presentation input only.
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+  assertEquals(card.pack.docket_revision_id, null);
+  assert(card.canonical_stage !== "report_ready");
+});
+
+Deno.test("failed legacy pack refusal still names its fact after enrichment", () => {
+  const id = "roof-failed-fact";
+  const enriched = _enrichMakesafeBoardJobForTest(
+    baseJob("allocated", id, {
+      metadata: { makesafe_job_family: "roof_report" },
+    }),
+    {
+      substatus: "waiting_on_trade_report",
+      report_type: "roof_report",
+      cycle_number: 1,
+    },
+    [],
+    null,
+    null,
+    [],
+    false,
+    {
+      status: "failed",
+      failed_step: "render_report",
+      error_detail: { message: "renderer exploded" },
+      report_doc_id: null,
+      invoice_doc_id: null,
+      swms_doc_id: null,
+    },
+  );
+  assertEquals(enriched.report_pack.failed_step, "render_report");
+
+  const [card] = buildCanonicalMakesafeRows(
+    [enriched],
+    { computedAt: NOW },
+    "card",
+  );
+  assertEquals(card.pack.presentation_kind, "refused");
+  assertEquals(card.pack.presentation_reason, "renderer exploded");
+});
+
+Deno.test("SWMS-261241 physical bound pack stays ready under honesty gate", () => {
+  const id = "phys-261241";
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("report_ready", id, {
+        job_number: "SWMS-261241",
+        ...evidenceFor("report_ready"),
+        report_pack: {
+          ...READY_UNSENT_PACK,
+          pre_xero_docs_ready: true,
+          docket_pre_xero_docs_ready: true,
+          presentation_kind: "ready",
+        },
+        pack_presentation: { kind: "ready", state: "drafted" },
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
+      }),
+    ],
+    {
+      photoCountByJobId: photoFloorFor(id),
+      computedAt: NOW,
+    },
+    "card",
+  );
+
+  assertEquals(card.pack.presentation_kind, "ready");
+  assertEquals(card.pack.pre_xero_docs_ready, true);
+  assertEquals(card.pack.report_doc_id, "doc-report");
+});
+
 Deno.test("canonical placement floors durable ready/processed report states at TRI without inventing Docs Ready", () => {
   const readyId = "legacy-ready-report";
   const processedId = "legacy-processed-report";

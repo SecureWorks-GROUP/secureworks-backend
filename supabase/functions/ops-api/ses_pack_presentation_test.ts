@@ -279,4 +279,34 @@ Deno.test("assessment ready stamp without family report evidence is not send-rea
   assertEquals(p.kind, "incomplete");
   assertEquals(p.pre_xero_docs_ready, false);
   assertStringIncludes(p.reason || "", "family report evidence");
+  // Pipeline surface gate: honesty ready AND docket stamp — both false here.
+  assertEquals(p.review_state, "U4_BLOCKED");
+  assertEquals(
+    p.kind === "ready" && p.pre_xero_docs_ready === true,
+    false,
+  );
+});
+
+Deno.test("physical bound pack stays honesty-ready for pipeline pre_xero gate (261241 class)", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-phys-bound",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    requires_bound_report_doc: true,
+    swms_doc_id: "doc-swms",
+    requires_bound_swms: true,
+    family_report_evidence_satisfied: true,
+  });
+  assertEquals(p.kind, "ready");
+  assertEquals(p.pre_xero_docs_ready, true);
+  assertEquals(p.review_state, "READY");
+  // Pipeline operator gate: kind ready AND docket stamp (pre_xero on honesty).
+  assertEquals(
+    p.kind === "ready" && p.pre_xero_docs_ready === true,
+    true,
+  );
 });

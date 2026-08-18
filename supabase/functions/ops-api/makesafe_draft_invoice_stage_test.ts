@@ -308,6 +308,75 @@ Deno.test("a drafted-not-sent pack with a DRAFT invoice still surfaces in Docs R
   );
 });
 
+Deno.test("the ladder reads the raw docket stamp, never the honesty-gated operator value", () => {
+  // Pipeline honesty gates operator-facing pre_xero_docs_ready on portal
+  // evidence it cannot load, so a portal-proven report-only card ships
+  // pre_xero_docs_ready: false with the raw U4 stamp preserved on
+  // docket_pre_xero_docs_ready. u4DocsReady must follow the raw stamp or the
+  // card falls out of Docs Ready on the makesafe_pipeline fallback surface.
+  const card = {
+    job: {
+      id: "job-1",
+      job_number: "SWMS-TEST-1",
+      status: "processing",
+      metadata: { makesafe_job_family: "roof_report" },
+    },
+    detail: {
+      substatus: "admin_to_send_report",
+      external_ref: "MLB-TEST-1",
+      report_type: "roof_report",
+      cycle_number: 1,
+      report_received_at: RECENT,
+    },
+  };
+  const gatedPack = {
+    id: "p1",
+    status: "drafted",
+    review_state: "U4_BLOCKED",
+    report_doc_id: null,
+    pre_xero_docs_ready: false,
+    docket_pre_xero_docs_ready: true,
+  };
+  assertEquals(
+    stage(card, invoice("DRAFT"), DOCS_WITHOUT_INVOICE, {
+      report: { id: "r1", status: "submitted" },
+      pack: gatedPack,
+    }),
+    "report_ready",
+  );
+  // Legacy packs never carried the split field: the raw stamp still lives on
+  // pre_xero_docs_ready and must keep satisfying the ladder unchanged.
+  const legacyPack = {
+    id: "p1",
+    status: "drafted",
+    report_doc_id: null,
+    pre_xero_docs_ready: true,
+  };
+  assertEquals(
+    stage(card, invoice("DRAFT"), DOCS_WITHOUT_INVOICE, {
+      report: { id: "r1", status: "submitted" },
+      pack: legacyPack,
+    }),
+    "report_ready",
+  );
+  // A genuinely blocked docket (raw stamp false on both fields) still holds
+  // the card in Trade Report In — the gate widens nothing.
+  const blockedPack = {
+    id: "p1",
+    status: "drafted",
+    report_doc_id: null,
+    pre_xero_docs_ready: false,
+    docket_pre_xero_docs_ready: false,
+  };
+  assertEquals(
+    stage(card, invoice("DRAFT"), DOCS_WITHOUT_INVOICE, {
+      report: { id: "r1", status: "submitted" },
+      pack: blockedPack,
+    }),
+    "trade_report_in",
+  );
+});
+
 // ── 4. The two terms deliberately NOT changed ──────────────────────────────
 
 Deno.test("operator closure claims still close only with complete docs", () => {
@@ -473,7 +542,7 @@ Deno.test("the visible ladder's version is pinned and published", () => {
   // derivation that produced it, exactly as `SES_STAGE_ENGINE_V2_VERSION` does.
   assertEquals(
     MAKESAFE_STAGE_LADDER_VERSION,
-    "makesafe-stage-ladder.v7-reattend-current-raised-visible",
+    "makesafe-stage-ladder.v8-raw-docket-stamp",
   );
   // The read model republishes whatever enrich stamped, and null when a caller
   // built the base row without it — never a silent default that would attribute
