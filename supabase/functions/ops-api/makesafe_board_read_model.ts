@@ -1462,6 +1462,8 @@ export function buildCanonicalMakesafeRows(
       has_report_doc: base?.has_report_doc === true,
       report_doc_id: pack?.report_doc_id || null,
       requires_bound_report_doc: needsBoundReportPdf,
+      swms_doc_id: pack?.swms_doc_id || null,
+      requires_bound_swms: swmsRequired,
       // Report-only: ready presentation still needs portal/own-template proof.
       family_report_evidence_satisfied: needsBoundReportPdf
         ? true
@@ -1472,6 +1474,7 @@ export function buildCanonicalMakesafeRows(
     // re-derive when the stamp would green a card the live binds refuse.
     const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
       (needsBoundReportPdf && !String(pack?.report_doc_id || "").trim()) ||
+      (swmsRequired && !String(pack?.swms_doc_id || "").trim()) ||
       (!needsBoundReportPdf && !reportIn.satisfied)
     );
     const derived = (!stamped || stampedReadyDishonest)

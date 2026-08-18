@@ -174,6 +174,14 @@ export function presentSesPackHonesty(input: {
    */
   requires_bound_report_doc?: boolean | null;
   /**
+   * Pack bind pointer for the required SWMS. Same rule as the report: when
+   * `requires_bound_swms` is true, an attached SWMS document alone cannot
+   * present as ready / READY TO SEND.
+   */
+  swms_doc_id?: string | null;
+  /** Family requires SWMS (MLB physical make-safe). */
+  requires_bound_swms?: boolean | null;
+  /**
    * Report-only families: a ready stamp still needs portal / own-template
    * report-in evidence. An assessment with no Prime capture must not look
    * send-ready (SWMS-261243 class).
@@ -198,6 +206,8 @@ export function presentSesPackHonesty(input: {
   const docketState = lower(docket?.state);
   const boundReportDocId = txt(input.report_doc_id);
   const requiresBoundReport = input.requires_bound_report_doc === true;
+  const boundSwmsDocId = txt(input.swms_doc_id);
+  const requiresBoundSwms = input.requires_bound_swms === true;
   const familyReportEvidenceOk = input.family_report_evidence_satisfied !== false;
 
   if (packSent) {
@@ -249,6 +259,20 @@ export function presentSesPackHonesty(input: {
           drafted: true,
           reason:
             "The SES docket is stamped ready, but the pack has no bound report_doc_id — an attached document alone is not a bind.",
+          blockers: [],
+          legacy_pack_status: legacyPackStatus,
+        };
+      }
+      if (requiresBoundSwms && !boundSwmsDocId) {
+        return {
+          kind: "incomplete",
+          state: "drafted",
+          review_state: "U4_BLOCKED",
+          pre_xero_docs_ready: false,
+          docket_revision_id: docketId,
+          drafted: true,
+          reason:
+            "The SES docket is stamped ready, but the pack has no bound swms_doc_id — an attached SWMS alone is not a bind.",
           blockers: [],
           legacy_pack_status: legacyPackStatus,
         };

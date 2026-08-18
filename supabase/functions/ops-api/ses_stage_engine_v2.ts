@@ -73,7 +73,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r18-bound-report-pdf-floor";
+  "ses-stage-engine.v2-r19-attach-tick-not-a-bind";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —

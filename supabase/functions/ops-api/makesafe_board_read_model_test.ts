@@ -1140,6 +1140,37 @@ Deno.test("Docs Ready refuses has_report_doc without pack.report_doc_id (attach 
   assertEquals(card.pack.presentation_kind === "ready", false);
 });
 
+Deno.test("Docs Ready refuses has_swms_doc without pack.swms_doc_id (attach ≠ bind)", () => {
+  // MLB physical requires SWMS; an attached SWMS document without the pack
+  // pointer must not present ready or place Docs Ready.
+  const id = "attach-not-bind-swms";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        swms_doc_id: null,
+      },
+      // Stale pipeline stamp claiming ready must be re-derived off live binds.
+      pack_presentation: { kind: "ready", state: "drafted" },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "trade_report_in");
+  assertEquals(card.pack.swms_doc_id, null);
+  assertEquals(card.pack.closeout_documents.swms, false);
+  assertEquals(card.pack.presentation_kind === "ready", false);
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+});
+
 Deno.test("SWMS-261243 assessment pack cannot look ready without family report evidence", () => {
   const id = "assess-261243";
   const [card] = buildCanonicalMakesafeRows([
@@ -1985,6 +2016,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
         status: "drafted",
         review_state: "READY",
         report_doc_id: "doc-report",
+        swms_doc_id: "doc-swms",
         docket_revision_id: "revision-ready",
         pre_xero_docs_ready: true,
         blockers: [],
@@ -2040,6 +2072,7 @@ Deno.test("legacy failed pack over a ready docket presents ready, not failed", (
         status: "failed",
         review_state: "READY",
         report_doc_id: "doc-report",
+        swms_doc_id: "doc-swms",
         docket_revision_id: "revision-live",
         pre_xero_docs_ready: true,
         blockers: [],

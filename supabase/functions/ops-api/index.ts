@@ -17674,6 +17674,8 @@ async function makesafePipeline(
       has_trade_report: !!reportMap[j.id],
       report_doc_id: rowPack?.report_doc_id || null,
       requires_bound_report_doc: needsBoundReportPdf,
+      swms_doc_id: rowPack?.swms_doc_id || null,
+      requires_bound_swms: _requiresMakesafeSwms(detail, j),
     })
     // `report_pack` stays exactly the derivation shape it has always been: the
     // status/review_state/blockers the ladder, the SENT chip and M1 consume are

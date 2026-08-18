@@ -1201,10 +1201,13 @@ exact stored Xero identity, `fetchAuthorisedPdf`, and
 `commit_ses_invoice_bound_docket_v1` against the **current** docket. Never mint,
 re-authorise, void, or send. Identity mismatch (invoice number / Xero id /
 total) refuses. Idempotent on replay. Do **not** generalise this into a
-`stale_review` bypass for unauthorised revisions. A card with a raised invoice
-and report evidence that is not yet sent must stay in Docs Ready
-(`authorisedAwaitingSend` / ladder v4) — never regress to `trade_report_in`
-after money is committed.
+`stale_review` bypass for unauthorised revisions. The #684 Captain lock retired
+`authorisedAwaitingSend` from the ladder: an AUTHORISED-unsent invoice is NOT a
+pre-Xero Docs Ready positive on its own. Such a card sits in Docs Ready only
+when a qualifying current DRAFT places it, or when the current-cycle bound
+invoice backs a complete Docs Ready pack (the adoption path); otherwise it
+derives `trade_report_in` until a proved send closes it out. The recovery above
+never demands re-approval, but it does not park the card in Docs Ready either.
 
 A second recovery on the same action (2026-08-14): an obligation already
 `create_executed` with a bound Xero invoice id ADOPTS that exact invoice and

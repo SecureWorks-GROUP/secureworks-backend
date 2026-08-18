@@ -225,6 +225,43 @@ Deno.test("physical ready stamp with bound report_doc_id stays ready", () => {
   assertEquals(p.pre_xero_docs_ready, true);
 });
 
+Deno.test("required-SWMS ready stamp without swms_doc_id is incomplete — attach is not a bind", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-no-swms-bind",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    requires_bound_report_doc: true,
+    swms_doc_id: null,
+    requires_bound_swms: true,
+  });
+  assertEquals(p.kind, "incomplete");
+  assertEquals(p.review_state, "U4_BLOCKED");
+  assertEquals(p.pre_xero_docs_ready, false);
+  assertStringIncludes(p.reason || "", "swms_doc_id");
+});
+
+Deno.test("required-SWMS ready stamp with bound swms_doc_id stays ready", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-swms-bound",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    requires_bound_report_doc: true,
+    swms_doc_id: "doc-swms",
+    requires_bound_swms: true,
+  });
+  assertEquals(p.kind, "ready");
+  assertEquals(p.review_state, "READY");
+  assertEquals(p.pre_xero_docs_ready, true);
+});
+
 Deno.test("assessment ready stamp without family report evidence is not send-ready", () => {
   // SWMS-261243 class: docket pre_xero_docs_ready with no portal/report proof.
   const p = presentSesPackHonesty({
