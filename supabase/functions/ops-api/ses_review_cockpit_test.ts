@@ -281,6 +281,58 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
   assert(sendReady.controls.send_it.enabled);
 });
 
+Deno.test("AJS DRAFT with unready report_invoice still lights APPROVE, not HOLD", () => {
+  const hash =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const input = cleanInput({
+    builder_key: "AJS",
+    family: "temporary_fencing",
+    routes: [
+      {
+        route_kind: "report_invoice",
+        recipients: ["workorders@ajs.build"],
+        subject: "report and Xero draft INV-1",
+        body: "Please find attached the report and invoice.",
+        attachment_hashes: [hash],
+        ready: false,
+      },
+      {
+        route_kind: "photo",
+        recipients: ["workorders@ajs.build"],
+        subject: "photos",
+        body: "Please find attached site photos.",
+        attachment_hashes: [hash],
+        ready: true,
+      },
+    ],
+  });
+  const view = buildSesCockpitView({
+    job_id: "job-ajs-draft",
+    job_number: "SWMS-261237",
+    docket_revision_id: "docket-ajs-draft",
+    readiness_revision: hash,
+    dependency_generation: 3,
+    invoice_obligation_revision_id: "obligation-revision-1",
+    attendance_cycle_ids: ["cycle-1"],
+    xero_binding: {
+      xero_invoice_id: "xero-draft-1",
+      invoice_number: "INV-1240",
+      status: "DRAFT",
+      total: 352,
+    },
+    local_invoice_proposal: { total: 352 },
+    work_order: { state: "ready" },
+    family_evidence: {},
+    swms: {},
+    routes: input.routes,
+    crew_and_trade_visits: [],
+    clean_input: input,
+  });
+  assert(view.controls.approve_invoice.enabled);
+  assertEquals(view.controls.send_it.enabled, false);
+  assertEquals(view.status, "INVOICE_CREATE_READY");
+});
+
 Deno.test("stale readiness disables both controls", () => {
   const input = cleanInput();
   const view = buildSesCockpitView({

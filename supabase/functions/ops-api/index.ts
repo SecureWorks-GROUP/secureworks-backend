@@ -3507,6 +3507,12 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // These mixed ops/Trade actions already enforce dispatcher, vertical-manager,
   // relationship, or job-scoped authority inside the route.
   'allocate_job',
+  // Same footing as allocate_job (Captain ruling 2026-08-17): set_job_lead is
+  // gated inside the route by assertAssignmentMutationAuthz (api_key,
+  // dispatcher, or manager of the job's vertical; plain installers refused).
+  // #667 left it off this list, so a lead_installer vertical manager hit the
+  // staff-role 403 before that gate ran (Henry / SWF-26091 "Make lead").
+  'set_job_lead',
   'reattend_makesafe',
   'confirm_roof_report_done',
   'cancel_makesafe',
@@ -6637,7 +6643,14 @@ if (import.meta.main) serve(async (req: Request) => {
         // they were not a listed trade on (SWF-261098, 13 Aug 2026, post-#667 cutover).
         const noteUserId = authMode === 'jwt' ? authUser!.id : (body.userId || body.user_id || null)
         const noteIsAdmin = _opsApiCallerIsStaffOperator(authMode, authUser)
-        return json(await addNote(client, { ...body, userId: noteUserId }, noteIsAdmin))
+        // A non-staff JWT caller carries the SAME per-job access context that
+        // trade_job_detail already honours (tenant + managed verticals), so a
+        // vertical manager who can allocate a job can also write to its log.
+        // Staff callers keep the unchanged isAdmin bypass and no extra job read.
+        const noteAccess = authMode === 'jwt' && !noteIsAdmin
+          ? { orgId: authUser!.orgId, managedVerticals: authUser!.managedVerticals }
+          : undefined
+        return json(await addNote(client, { ...body, userId: noteUserId }, noteIsAdmin, noteAccess))
       }
       case 'delete_note': {
         const eventId = body.event_id || body.eventId
@@ -7538,9 +7551,9 @@ if (import.meta.main) serve(async (req: Request) => {
         ))
       }
       // T12 (Harden SES v1, AC2): ONE shared read so both doors show identical
-      // truth. Returns the literal main-pack pointer ids (report_doc_id /
-      // invoice_doc_id / swms_doc_id — the board payload hides report_doc_id and
-      // no other read exposes it), the exact current docket revision id +
+      // truth. Returns every literal main-pack pointer id (report_doc_id /
+      // invoice_doc_id / swms_doc_id — the board card exposes only the report
+      // shortcut), the exact current docket revision id +
       // output/content hash + invoice obligation, the invoice + send-recipe
       // context, the frozen release manifest identity + delivery proofs, and the
       // approval/audit state. Read-only; composes the existing canonical readers.
@@ -8283,6 +8296,15 @@ if (import.meta.main) serve(async (req: Request) => {
           role: tradeUser.role,
           managedVerticals: tradeUser.managedVerticals,
         })
+        // ONE per-job access context for every trade job surface. trade_job_detail
+        // and submit_service_report already honoured it (tenant + managed
+        // verticals, PR #377 / #526); the note, photo and service-report reads
+        // and confirm below did not, so a vertical manager could open a job they
+        // may allocate but was refused its log/photos. Same predicate, every door.
+        const tradeJobAccess: TradeJobAccessContext = {
+          orgId: tradeUser.orgId,
+          managedVerticals: tradeUser.managedVerticals,
+        }
         switch (action) {
           case 'my_jobs': {
             const mode = url.searchParams.get('mode') // 'all' for dispatcher view, 'mine' for personal
@@ -8306,16 +8328,16 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'trade_job_detail':
             return json(await tradeJobDetail(client, url.searchParams, tradeUser, isDispatcher))
-          case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
-          case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin))
-          case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
+          case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }, tradeJobAccess))
+          case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin, tradeJobAccess))
+          case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin, tradeJobAccess))
           case 'submit_service_report':
             return json(await submitServiceReport(
               client,
               { ...body, userId: tradeUser.id },
-              { orgId: tradeUser.orgId, managedVerticals: tradeUser.managedVerticals },
+              tradeJobAccess,
             ))
-          case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id))
+          case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess))
           // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
           case 'roof_report_template':
             return json(await getRoofReportTemplateForJob(client, url.searchParams.get('job_id') || url.searchParams.get('jobId') || body?.job_id || body?.jobId))
@@ -16080,6 +16102,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // suppresses prior-cycle commercial evidence, but a current-cycle DRAFT the
     // shared qualifier has already certified is presented rather than blanked.
     // Neither trade nor ops payloads expose raw invoice records.
+    invoice_id: invoiceForStage?.id || null,
     invoice_raw_status: invoiceForStage?.status || null,
     invoice_date: invoiceForStage?.invoice_date || null,
     invoice_created_at: invoiceForStage?.created_at || null,
@@ -34899,16 +34922,23 @@ async function tradeJobDetail(
 // precisely the failure this suite exists to catch.
 export const _tradeJobDetailForTest = tradeJobDetail
 export const _setJobLeadForTest = setJobLead
+// The other per-job trade surfaces, exported so the visibility suite can prove
+// they share trade_job_detail's access predicate rather than a narrower copy.
+export const _addNoteForTest = addNote
+export const _uploadPhotoForTest = uploadPhoto
+export const _getServiceReportForTest = getServiceReport
+export const _getUploadUrlForTest = getUploadUrl
 
-async function addNote(client: any, body: any, isAdmin = false) {
+async function addNote(client: any, body: any, isAdmin = false, access?: TradeJobAccessContext) {
   const { jobId, job_id, userId, user_id, text, sync_to_ghl, visibility, from_ops } = body
   const jId = jobId || job_id
   const uId = userId || user_id
   if (!jId || !text) throw new Error('jobId and text required')
 
-  // Verify user is assigned to this job (admins bypass). Open MakeSafe field-report jobs
-  // may receive trade admin notes before a named assignment exists.
-  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, isAdmin)
+  // Verify user is assigned to this job (admins bypass), or manages the job's
+  // vertical (same access context trade_job_detail honours). Open MakeSafe
+  // field-report jobs may receive trade admin notes before a named assignment exists.
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, isAdmin, access)
 
   // Sales cockpit notes are staff-only by default. GHL contact notes are CRM
   // notes, not customer messages; when explicitly requested, mirror there too
@@ -35160,14 +35190,15 @@ async function ingestTranscript(
   }
 }
 
-async function uploadPhoto(client: any, body: any) {
+async function uploadPhoto(client: any, body: any, access?: TradeJobAccessContext) {
   const { jobId, job_id, dataUrl, label, phase, userId, user_id, po_id } = body
   const jId = jobId || job_id
   const uId = userId || user_id
   if (!jId || !dataUrl) throw new Error('jobId and dataUrl required')
 
-  // Verify user is assigned, or this is a MakeSafe field-report job.
-  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId)
+  // Verify user is assigned, manages the job's vertical, or this is a MakeSafe
+  // field-report job.
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, false, access)
   const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, jId)
 
   const base64 = dataUrl.split(',')[1]
@@ -35438,12 +35469,13 @@ async function submitServiceReport(
 }
 export const _submitServiceReportForTest = submitServiceReport
 
-async function getServiceReport(client: any, params: URLSearchParams, userId: string) {
+async function getServiceReport(client: any, params: URLSearchParams, userId: string, access?: TradeJobAccessContext) {
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
-  // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
-  await assertAssignedOrMakesafeAccess(client, jobId, userId)
+  // Verify user is assigned, manages the job's vertical, or this is a
+  // MakeSafe/SWMS field-report job.
+  await assertAssignedOrMakesafeAccess(client, jobId, userId, false, access)
 
   const { data: report } = await client
     .from('job_service_reports')
@@ -42522,7 +42554,7 @@ async function sendCommsMessageAction(client: any, body: any) {
 }
 
 // ── Signed upload URL (trade uploads photo directly to Storage) ──
-async function getUploadUrl(client: any, body: any, userId: string, isAdmin = false) {
+async function getUploadUrl(client: any, body: any, userId: string, isAdmin = false, access?: TradeJobAccessContext) {
   const { jobId, job_id, fileName, contentType, purpose } = body
   const jId = jobId || job_id
 
@@ -42534,7 +42566,7 @@ async function getUploadUrl(client: any, body: any, userId: string, isAdmin = fa
   if (!isExpenseReceipt && !jId) throw new Error('jobId required')
 
   if (jId && !isExpenseReceipt) {
-    await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin)
+    await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin, access)
   }
 
   const ext = (fileName.split('.').pop() || 'jpg').toLowerCase()
@@ -42578,7 +42610,7 @@ async function getUploadUrl(client: any, body: any, userId: string, isAdmin = fa
 }
 
 // ── Confirm upload (create media record after direct upload) ──
-async function confirmUpload(client: any, body: any, userId: string, isAdmin = false) {
+async function confirmUpload(client: any, body: any, userId: string, isAdmin = false, access?: TradeJobAccessContext) {
   const { jobId, job_id, publicUrl, path, label, phase, po_id, purpose, bucket } = body
   const jId = jobId || job_id
 
@@ -42655,8 +42687,9 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
   // ── Standard photo path (unchanged behaviour) ──
   if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
 
-  // Verify user is assigned, or this is a MakeSafe field-report job.
-  await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin)
+  // Verify user is assigned, manages the job's vertical, or this is a MakeSafe
+  // field-report job.
+  await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin, access)
   const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, jId)
 
   const insertData: any = {

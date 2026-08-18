@@ -259,6 +259,9 @@ export function projectOpsMakesafeCardRow(row: any) {
     contact: slimContactForCard(row?.contact),
     assignments: slimAssignmentsForCard(row?.assignments || []),
     report: row?.report || null,
+    report_doc_id: row?.report_doc_id || null,
+    has_report_doc: row?.has_report_doc === true,
+    invoice_id: row?.invoice_id || null,
     pack: row?.pack
       ? {
         state: row.pack.state || null,
@@ -270,6 +273,9 @@ export function projectOpsMakesafeCardRow(row: any) {
         presentation_kind: row.pack.presentation_kind || null,
         presentation_reason: row.pack.presentation_reason || null,
         legacy_pack_status: row.pack.legacy_pack_status || null,
+        report_doc_id: row.pack.report_doc_id || null,
+        invoice_doc_id: row.pack.invoice_doc_id || null,
+        swms_doc_id: row.pack.swms_doc_id || null,
         closeout_documents: row.pack.closeout_documents || {
           report: false,
           invoice: false,
@@ -1491,6 +1497,9 @@ export function buildCanonicalMakesafeRows(
       presentation_kind: packHonesty.kind,
       presentation_reason: packHonesty.reason,
       legacy_pack_status: packHonesty.legacy_pack_status,
+      report_doc_id: pack?.report_doc_id || null,
+      invoice_doc_id: pack?.invoice_doc_id || null,
+      swms_doc_id: pack?.swms_doc_id || null,
       closeout_documents: {
         // Physical / temp-fence: the report tile is the builder-facing PDF.
         // A submitted trade checklist is Trade Report In, never this tick.
@@ -1600,6 +1609,12 @@ export function buildCanonicalMakesafeRows(
         external_ref: base?.external_ref || null,
       },
       report: reportPayload,
+      // Direct, current-card coordinates for headless board consumers. These
+      // are aliases of evidence already loaded and cycle-scoped by the board;
+      // they do not query, bind, build, approve, or send anything.
+      report_doc_id: pack?.report_doc_id || null,
+      has_report_doc: base?.has_report_doc === true || !!pack?.report_doc_id,
+      invoice_id: base?.invoice_id || null,
       pack: packPayload,
       age: ageFacts(base),
       blockers: blockerFacts(base, assignments, presentedSubstatus),

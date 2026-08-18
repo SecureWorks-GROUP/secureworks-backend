@@ -41,6 +41,7 @@ import {
   MAKESAFE_FINANCE_CC,
 } from "./makesafe_send_pack.ts";
 import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
+import { SES_SAMPLE_DESTINATION_ENV } from "./ses_sample_destination.ts";
 
 const MAVERICK_HTML =
   '<p>Body</p><div data-secureworks-signature="maverick">Maverick</div>';
@@ -456,6 +457,66 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(routes[1].cc, AJS_PACK_CC);
   assertEquals(routes[1].attachment_hashes, ["photo-hash-1"]);
   assertEquals(routes[1].ready, true);
+});
+
+Deno.test("AJS DRAFT report_invoice is review-ready when the draft PDF hash is present", () => {
+  const draftArtifacts = AJS_ARTIFACTS.filter((a) =>
+    a.role !== "xero_invoice_pdf"
+  );
+  const routes = resolveDocketRoutes(
+    ajsDocket("invoice_bound", {
+      status: "DRAFT",
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1",
+      pdf_content_hash: "draft-pdf-hash",
+    }),
+    draftArtifacts,
+    null,
+  );
+  const pack = routes[0];
+  assertEquals(pack.route_kind, "report_invoice");
+  assertEquals(pack.ready, true);
+  assertEquals(pack.attachment_hashes.includes("draft-pdf-hash"), true);
+  assertEquals(pack.attachment_hashes.includes("report-hash"), true);
+  assertEquals(pack.subject.includes("Xero draft INV-1"), true);
+});
+
+Deno.test("AJS DRAFT report_invoice stays unready without a draft PDF", () => {
+  const draftArtifacts = AJS_ARTIFACTS.filter((a) =>
+    a.role !== "xero_invoice_pdf"
+  );
+  const routes = resolveDocketRoutes(
+    ajsDocket("invoice_bound", {
+      status: "DRAFT",
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1",
+    }),
+    draftArtifacts,
+    null,
+  );
+  assertEquals(routes[0].route_kind, "report_invoice");
+  assertEquals(routes[0].ready, false);
+});
+
+Deno.test("SAMPLE AJS resolve blanks builder mailboxes when override env is unset", () => {
+  const previous = Deno.env.get(SES_SAMPLE_DESTINATION_ENV);
+  Deno.env.delete(SES_SAMPLE_DESTINATION_ENV);
+  try {
+    const docket = {
+      ...ajsDocket("invoice_bound", {
+        status: "AUTHORISED",
+        xero_invoice_id: "xero-1",
+        invoice_number: "INV-1",
+      }),
+      job_number: "SAMPLE-AJS-0001",
+    };
+    const routes = resolveDocketRoutes(docket, AJS_ARTIFACTS, null);
+    assertEquals(routes.map((r) => r.recipients), [[], []]);
+    assertEquals(routes.every((r) => r.ready === false), true);
+  } finally {
+    if (previous === undefined) Deno.env.delete(SES_SAMPLE_DESTINATION_ENV);
+    else Deno.env.set(SES_SAMPLE_DESTINATION_ENV, previous);
+  }
 });
 
 /** Builder-facing AJS bodies: what is attached, job ref, thanks. No internal jargon. */

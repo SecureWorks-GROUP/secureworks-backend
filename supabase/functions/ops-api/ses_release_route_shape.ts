@@ -38,6 +38,7 @@ import {
   mlbPhysicalUsesOrdinaryMailSendFallback,
   routingIntakeThread,
 } from "./ses_mlb_thread_reply.ts";
+import { applySesSampleDestinationOverride } from "./ses_sample_destination.ts";
 
 export {
   AJS_MANDI_CC,
@@ -943,7 +944,9 @@ export function resolveSesWorkflowRoutes(args: {
       classification.family || routeObject(docket.review_spec).family || "",
     );
     const shape = { builder_key: builderKey, family };
-    if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
+    if (!isMlbPhysicalReleaseShape(shape)) {
+      return applySesSampleDestinationOverride(docket, resolvedRoutes);
+    }
     const thread = routingIntakeThread(routing);
     const billingMailbox = String(routing.invoice_to || "").trim();
     const invoicePdfHash = String(
@@ -963,30 +966,33 @@ export function resolveSesWorkflowRoutes(args: {
         originalSubjectSourceRaw === "job_metadata_builder_email_subject"
         ? originalSubjectSourceRaw
         : null;
-    return resolvedRoutes.map((route) => {
-      const declared = mlbPhysicalRouteRecipients(
-        route.route_kind,
-        billingMailbox,
-      );
-      const recipients = declared.length > 0 ? declared : route.recipients;
-      const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
-        routeKind: route.route_kind,
-        attachmentHashes: route.attachment_hashes,
-        invoicePdfContentHash: invoicePdfHash,
-      });
-      return applyMlbThreadReplyToRoute(
-        {
-          ...route,
-          recipients,
-          ready: route.ready && recipients.length > 0 &&
-            !invoiceOnMailerRoute,
-        },
-        shape,
-        thread,
-        ordinaryMailSend,
-        ordinaryMailSend ? { originalSubject, originalSubjectSource } : null,
-      );
-    });
+    return applySesSampleDestinationOverride(
+      docket,
+      resolvedRoutes.map((route) => {
+        const declared = mlbPhysicalRouteRecipients(
+          route.route_kind,
+          billingMailbox,
+        );
+        const recipients = declared.length > 0 ? declared : route.recipients;
+        const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
+          routeKind: route.route_kind,
+          attachmentHashes: route.attachment_hashes,
+          invoicePdfContentHash: invoicePdfHash,
+        });
+        return applyMlbThreadReplyToRoute(
+          {
+            ...route,
+            recipients,
+            ready: route.ready && recipients.length > 0 &&
+              !invoiceOnMailerRoute,
+          },
+          shape,
+          thread,
+          ordinaryMailSend,
+          ordinaryMailSend ? { originalSubject, originalSubjectSource } : null,
+        );
+      }),
+    );
   }
 
   const byKind = new Map(
@@ -1013,6 +1019,12 @@ export function resolveSesWorkflowRoutes(args: {
     ]);
     const authorised = xeroStatus === policy.xero.authorised_status &&
       !!invoicePdf?.content_hash;
+    // Review-ready on DRAFT when the operator can see the exact draft PDF.
+    // SEND IT stays gated on AUTHORISED in the cockpit. Requiring authorised
+    // here made C11 HOLD the card and hid APPROVE INVOICE (SWMS-261237).
+    const draftPreviewReady = xeroStatus === policy.xero.draft_status &&
+      !!boundInvoiceId &&
+      !!(invoicePdf?.content_hash || draftInvoicePdfHash);
     const combined: SesWorkflowResolvedRoute = {
       route_kind: "report_invoice",
       recipients,
@@ -1026,7 +1038,8 @@ export function resolveSesWorkflowRoutes(args: {
       }),
       body: sesAjsBuilderRouteBody("report_invoice", jobRef),
       attachment_hashes: combinedHashes,
-      ready: !!report?.ready && authorised && recipients.length > 0,
+      ready: !!report?.ready && recipients.length > 0 &&
+        (authorised || draftPreviewReady),
     };
     if (noAdditionalCharge && report) {
       combined.subject = sesAjsReportInvoiceSubject({
@@ -1053,7 +1066,7 @@ export function resolveSesWorkflowRoutes(args: {
         (recipients.length > 0 || photo.recipients.length > 0),
     });
   }
-  return out;
+  return applySesSampleDestinationOverride(docket, out);
 }
 
 /**

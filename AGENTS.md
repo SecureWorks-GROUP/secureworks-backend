@@ -2291,6 +2291,26 @@ narrowing, diagnosis, and deployment caveats are owned by
 `docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before
 changing `trade_job_detail`, `set_job_lead`, or the lead/schema gate.
 
+Seven per-job Trade doors run ONE access predicate with ONE context —
+`trade_job_detail`, `submit_service_report`, `add_note`, `upload_photo`,
+`get_upload_url`, `confirm_upload`, `get_service_report`:
+`assertAssignedOrMakesafeAccess(client, jobId, userId, isAdmin, access)` where
+`access = { orgId, managedVerticals }` comes from the server-owned profile
+(`tradeJobAccess` in the trade dispatch; `noteAccess` for non-staff `add_note`).
+A caller who may allocate a job (`_resolveAllocationAuthz`, managed vertical)
+therefore sees and writes the same job surfaces `trade_job_detail` already
+admitted them to (notes, photos, service report). Never add a new per-job trade
+action that calls the predicate without the context, and never widen the
+predicate itself. `trade_labour_budget` is the known remaining per-job door: it
+still calls the narrower `assertAssigned` (own assignment only, no vertical or
+MakeSafe fallback), so a vertical manager who can write that job's log and
+photos is still refused its labour budget. Pre-existing and deliberately
+unchanged by the 2026-08-17 slice. A fencing-vertical caller's Everyone list (`my_jobs`
+`mode=all`) is the whole fencing vertical + crew-ready pool; anyone without the
+vertical sees only their own rows. Both directions and the diagnosis:
+`trade_manager_job_access_test.ts`, the "Captain 2026-08-17" pair in
+`myjobs_manager_scope_test.ts`, `docs/evidence/trade-fencing-visibility-2026-08-17.md`.
+
 Trade multi-person allocation must preserve one assignment row per crew member:
 when the representative row is reassigned to a person already on that job/date,
 return the existing target row idempotently rather than collapsing the crew or

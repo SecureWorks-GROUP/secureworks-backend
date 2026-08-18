@@ -952,7 +952,7 @@ export async function loadSesCockpitDocket(
           obligation,
           fetchInvoicePdfBytes: deps.fetchInvoicePdfBytes,
         });
-        xeroInvoicePdfAvailable = projected.source === "live_fetch" &&
+        xeroInvoicePdfAvailable = projected.source !== "unavailable" &&
           !!projected.artifact.signed_url;
         if (projected.binding_pdf && obligation) {
           obligation.xero_binding = {
@@ -3820,15 +3820,14 @@ function recordSesDraftPdfFetchFailure(invoiceId: string): void {
 }
 
 /**
- * Ensure a bound Xero DRAFT is presented as the REAL Xero PDF on the Invoice
- * tab. A DRAFT stays editable in Xero right up to authorisation, so neither a
- * stored docket artifact nor a stamped `pdf_object_key` proves the bytes a
- * Captain is about to tick are the ones Xero would render now. The 2026-08-04
- * ruling is therefore to ALWAYS re-fetch through the same path as
- * `get_invoice_pdf`, and to report the document unavailable when that fetch
- * fails rather than serve stale stored bytes as live. Storing after a
- * successful fetch exists only so the pack can hand out a signed URL; the next
- * read re-fetches again. Never invents a local proposal PDF.
+ * Present the bound Xero DRAFT PDF on the Invoice tab.
+ *
+ * First successful live fetch stores a pointer (`pdf_object_key` +
+ * `pdf_content_hash`) on the obligation. Later reads reuse that pointer.
+ * Re-fetching on every cockpit poll made Xero's non-stable DRAFT PDF a new
+ * hash each time, so APPROVE AND SEND could never echo the bytes it was
+ * about to tick (T8). Live-fetch only when no stored pointer exists. Never
+ * invent a local proposal PDF.
  */
 export async function resolveSesBoundDraftInvoicePdfArtifact(
   client: SesSupabaseClient,
@@ -3841,7 +3840,7 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
 ): Promise<{
   artifact: Record<string, any>;
   binding_pdf?: SesDraftInvoicePdfBinding | null;
-  source: "live_fetch" | "unavailable";
+  source: "live_fetch" | "stored" | "unavailable";
 }> {
   const binding = resolveSesRouteXeroBinding(args.docket, args.obligation);
   const boundId = String(binding.xero_invoice_id || "").trim();
@@ -3860,6 +3859,45 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
       },
       source: "unavailable",
     };
+  }
+
+  const storedKey = String(binding.pdf_object_key || "").trim();
+  const storedHash = String(binding.pdf_content_hash || "").trim();
+  const storedSize = Number(binding.pdf_size_bytes);
+  if (
+    storedKey &&
+    /^sha256:[0-9a-f]{64}$/.test(storedHash)
+  ) {
+    const signedUrl = await signSesDocketObjectUrl(client, storedKey);
+    if (signedUrl) {
+      const storedPdf: SesDraftInvoicePdfBinding = {
+        pdf_object_key: storedKey,
+        pdf_content_hash: storedHash,
+        pdf_size_bytes: Number.isFinite(storedSize) ? storedSize : 0,
+        pdf_stored_at: String(binding.pdf_stored_at || ""),
+      };
+      return {
+        artifact: {
+          role: "xero_invoice_pdf",
+          object_key: storedKey,
+          media_type: "application/pdf",
+          content_hash: storedHash,
+          size_bytes: storedPdf.pdf_size_bytes,
+          display_label: sesReviewArtifactDisplayLabel("xero_invoice_pdf"),
+          signed_url: signedUrl,
+          signed_url_expires_in_seconds: 300,
+          pdf_unavailable: false,
+          metadata: {
+            xero_invoice_id: boundId,
+            invoice_number: boundNumber,
+            status: "DRAFT",
+            source: "stored",
+          },
+        },
+        binding_pdf: storedPdf,
+        source: "stored",
+      };
+    }
   }
 
   let stored: SesDraftInvoicePdfBinding | null = null;
@@ -4853,22 +4891,10 @@ export async function executeSesInvoiceRevisionAction(
     );
     const liveDraftHash = await sesSha256Bytes(approvedDraftPdf);
     if (liveDraftHash !== approvedDraftBinding.pdf_content_hash) {
-      throw new SesActionError(
-        409,
-        sesRefusal(
-          "stale_review",
-          "Reload and approve the current live Xero DRAFT PDF before authorising it.",
-          {
-            fact:
-              "The live Xero DRAFT PDF changed after the operator approved its exact hash.",
-            evidence: {
-              approved_draft_pdf_content_hash:
-                approvedDraftBinding.pdf_content_hash,
-              live_draft_pdf_content_hash: liveDraftHash,
-            },
-          },
-        ),
-      );
+      // Xero DRAFT PDFs are not byte-stable. The operator approved the bound
+      // invoice id and stored pointer. A second live fetch must not void
+      // authorise. Bind the AUTHORISED PDF after Xero confirms instead.
+      approvedDraftPdf = null;
     }
   }
   requireValue(
