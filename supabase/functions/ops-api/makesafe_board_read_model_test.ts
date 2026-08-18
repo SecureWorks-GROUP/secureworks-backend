@@ -1173,32 +1173,36 @@ Deno.test("Docs Ready refuses has_swms_doc without pack.swms_doc_id (attach ≠ 
 
 Deno.test("SWMS-261243 assessment pack cannot look ready without family report evidence", () => {
   const id = "assess-261243";
-  const [card] = buildCanonicalMakesafeRows([
-    baseJob("new", id, {
-      job_number: "SWMS-261243",
-      metadata: { makesafe_job_family: "assessment_quote" },
-      makesafe_details: {
-        substatus: "company_contact_required",
-        report_type: "assessment_report",
-        cycle_number: 1,
-        external_links: [],
-      },
-      assignments: [],
-      report_pack: {
-        status: "drafted",
-        review_state: "READY",
-        report_doc_id: null,
-        invoice_doc_id: null,
-        swms_doc_id: null,
-        docket_revision_id: "rev-assess-ready-stamp",
-        pre_xero_docs_ready: true,
-        blockers: [],
-      },
-      has_report_doc: false,
-      has_wo: false,
-      invoice_status: "not_ready",
-    }),
-  ], { computedAt: NOW }, "card");
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("new", id, {
+        job_number: "SWMS-261243",
+        metadata: { makesafe_job_family: "assessment_quote" },
+        makesafe_details: {
+          substatus: "company_contact_required",
+          report_type: "assessment_report",
+          cycle_number: 1,
+          external_links: [],
+        },
+        assignments: [],
+        report_pack: {
+          status: "drafted",
+          review_state: "READY",
+          report_doc_id: null,
+          invoice_doc_id: null,
+          swms_doc_id: null,
+          docket_revision_id: "rev-assess-ready-stamp",
+          pre_xero_docs_ready: true,
+          blockers: [],
+        },
+        has_report_doc: false,
+        has_wo: false,
+        invoice_status: "not_ready",
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
 
   assertEquals(card.ses_family, "assessment_quote");
   assertEquals(card.canonical_stage, "new");

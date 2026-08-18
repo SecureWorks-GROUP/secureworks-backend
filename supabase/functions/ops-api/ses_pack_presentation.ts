@@ -208,7 +208,8 @@ export function presentSesPackHonesty(input: {
   const requiresBoundReport = input.requires_bound_report_doc === true;
   const boundSwmsDocId = txt(input.swms_doc_id);
   const requiresBoundSwms = input.requires_bound_swms === true;
-  const familyReportEvidenceOk = input.family_report_evidence_satisfied !== false;
+  const familyReportEvidenceOk =
+    input.family_report_evidence_satisfied !== false;
 
   if (packSent) {
     return {

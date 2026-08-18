@@ -611,7 +611,9 @@ export function sesStageDocsReady(
       missing.push("the make-safe report");
     }
     // Attach tick is not a bind — required SWMS must be the pack pointer.
-    if (input.evidence?.swmsRequired && !String(pack?.swms_doc_id || "").trim()) {
+    if (
+      input.evidence?.swmsRequired && !String(pack?.swms_doc_id || "").trim()
+    ) {
       missing.push("the SWMS this docket requires");
     }
   } else {
