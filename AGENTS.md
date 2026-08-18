@@ -2842,21 +2842,26 @@ of Docs Ready because the pipeline failed closed). A card with ZERO pack rows an
 to its legacy `!pack` branch and invents a second, non-existent blocker — which
 happened on SWMS-261109 before it was caught.
 
-Pack HONESTY is the operator-facing ready signal on both `makesafe_pipeline` and
-`makesafe_board`. `presentSesPackHonesty` (`ses_pack_presentation.ts`) is the
-one producer, and its kinds are **ready / refused / incomplete / sent / none** —
-never collapse them; a refusal names its fact (an honest stop, not a green tick
-and not a send-pipeline failure). Its output rides on `pack_presentation`
-(additive, top-level) plus `report_pack.presentation_kind` /
-`presentation_reason` / `legacy_pack_status` / gated `pre_xero_docs_ready` /
-`review_state`, and `get_ses_reviewable_pack` returns it under its own
-`presentation` key. It must NEVER be written into `report_pack.status` or
-`blockers`: those stay the raw legacy + docket values the stage ladder, the SENT
-chip and M1 read. Likewise never mint a `report_pack` object for a card with no
-pack row and no docket — M1's `!pack` short-circuit is load-bearing, and kind
-`none` stamps nothing at all so `pack_status` stays null on every packless
-New/Allocated card. Board `pack_status` stays a STRING; changing its type needs
-a `MAKESAFE_BOARD_CONTRACT_VERSION` bump. The current docket is always an input
+Pack HONESTY is the operator-facing ready signal on `makesafe_pipeline`,
+`makesafe_board`, and `get_ses_reviewable_pack`. `presentSesPackHonesty`
+(`ses_pack_presentation.ts`) is the one producer, and its kinds are **ready /
+refused / incomplete / sent / none** — never collapse them; a refusal names its
+fact (an honest stop, not a green tick and not a send-pipeline failure). Its
+output rides on `pack_presentation` (additive, top-level) plus
+`report_pack.presentation_kind` / `presentation_reason` /
+`legacy_pack_status` / gated `pre_xero_docs_ready` / `review_state`, and
+`get_ses_reviewable_pack` returns it under its own `presentation` key. Every
+caller must pass the bind-floor inputs (`report_doc_id`,
+`requires_bound_report_doc`, `swms_doc_id`, `requires_bound_swms`,
+`family_report_evidence_satisfied`) — defaults are permissive, so omitting them
+greens a ready-stamped physical docket with no pack bind (SWMS-261015 class).
+It must NEVER be written into `report_pack.status` or `blockers`: those stay the
+raw legacy + docket values the stage ladder, the SENT chip and M1 read. Likewise
+never mint a `report_pack` object for a card with no pack row and no docket —
+M1's `!pack` short-circuit is load-bearing, and kind `none` stamps nothing at
+all so `pack_status` stays null on every packless New/Allocated card. Board
+`pack_status` stays a STRING; changing its type needs a
+`MAKESAFE_BOARD_CONTRACT_VERSION` bump. The current docket is always an input
 to the presentation even when the legacy row is sent/authorised-not-sent.
 
 ## Curated Bind Materials Are A Subset Of The Service Report, Never A Super-Set
