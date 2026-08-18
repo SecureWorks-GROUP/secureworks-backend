@@ -173,6 +173,7 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
   const preXeroStory = preXero.sections.job_story as Record<string, unknown>;
   assertEquals(preXeroStory.docket_revision_id, "docket-1");
   assertEquals(preXeroStory.docket_output_content_hash, null);
+  assertEquals(preXeroStory.invoice_obligation_revision_id, "obligation-revision-1");
   // Option B: no Xero DRAFT yet → APPROVE INVOICE disabled (mint is separate).
   assertEquals(preXero.controls.approve_invoice.enabled, false);
   assertEquals(preXero.controls.send_it.enabled, false);

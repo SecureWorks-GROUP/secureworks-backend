@@ -1041,6 +1041,8 @@ export function buildSesCockpitView(
         // current.
         docket_revision_id: docket.docket_revision_id,
         docket_output_content_hash: docket.docket_output_content_hash ?? null,
+        invoice_obligation_revision_id: docket.invoice_obligation_revision_id ??
+          null,
       },
       status: {
         status,
