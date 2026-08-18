@@ -1355,6 +1355,17 @@ export function buildCanonicalMakesafeRows(
     // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
     const invoiceStatus = rawInvoiceStatus(base);
     const packSent = base?.pack_sent === true;
+    // Placement packState must follow the raw U4 docket stamp, not the
+    // operator-facing honesty-gated review_state. Pipeline fails closed on
+    // report-only (no portal captures), so a gated U4_BLOCKED must not pull a
+    // portal-proven card out of Docs Ready — v2 still applies bind floors and
+    // report-in itself. Legacy rows without docket_pre_xero_docs_ready keep
+    // review_state (historically the raw stamp).
+    const placementPackState = pack?.docket_pre_xero_docs_ready === true
+      ? "READY"
+      : pack?.docket_pre_xero_docs_ready === false
+      ? "U4_BLOCKED"
+      : (pack?.review_state || null);
 
     // ── RELEASE 12: the corrected evidence engine PLACES the card. ──────────
     // Captain-approved 2026-08-06 (Rescue SES mission, wiki
@@ -1372,7 +1383,7 @@ export function buildCanonicalMakesafeRows(
         serviceReports: report ? [report] : [],
         completionPhotoCount: photoCount,
         portalCaptures,
-        packState: pack?.review_state || null,
+        packState: placementPackState,
         pack,
         invoiceStatus,
         invoiceQualifiesAsCurrentDraft,
@@ -1467,6 +1478,7 @@ export function buildCanonicalMakesafeRows(
         : null,
       pack_sent: packSent || base?.sent_to_builder === true,
       has_report_doc: base?.has_report_doc === true,
+      has_trade_report: !!report,
       report_doc_id: pack?.report_doc_id || null,
       requires_bound_report_doc: needsBoundReportPdf,
       swms_doc_id: pack?.swms_doc_id || null,

@@ -279,10 +279,12 @@ Deno.test("assessment ready stamp without family report evidence is not send-rea
   assertEquals(p.kind, "incomplete");
   assertEquals(p.pre_xero_docs_ready, false);
   assertStringIncludes(p.reason || "", "family report evidence");
-  // Pipeline surface gate (same as board): honesty ready AND docket stamp.
-  // 261243 must not publish operator-facing pre_xero/review READY.
-  assertEquals(p.kind === "ready" && true, false);
+  // Pipeline surface gate: honesty ready AND docket stamp — both false here.
   assertEquals(p.review_state, "U4_BLOCKED");
+  assertEquals(
+    p.kind === "ready" && p.pre_xero_docs_ready === true,
+    false,
+  );
 });
 
 Deno.test("physical bound pack stays honesty-ready for pipeline pre_xero gate (261241 class)", () => {
@@ -302,6 +304,9 @@ Deno.test("physical bound pack stays honesty-ready for pipeline pre_xero gate (2
   assertEquals(p.kind, "ready");
   assertEquals(p.pre_xero_docs_ready, true);
   assertEquals(p.review_state, "READY");
-  // Same operator gate the pipeline now publishes.
-  assertEquals(p.kind === "ready" && true, true);
+  // Pipeline operator gate: kind ready AND docket stamp (pre_xero on honesty).
+  assertEquals(
+    p.kind === "ready" && p.pre_xero_docs_ready === true,
+    true,
+  );
 });

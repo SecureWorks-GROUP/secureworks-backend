@@ -2833,8 +2833,11 @@ number drifts every release). Operator-facing `pre_xero_docs_ready` and
 (`presentation.kind === 'ready'` AND the raw U4 docket stamp) — a stamped-ready
 docket with missing binds or report-only family evidence must not read ready on
 `makesafe_pipeline` either (SWMS-261243 class). The raw stamp is preserved on
-`docket_pre_xero_docs_ready` so the board can re-derive with portal captures the
-pipeline does not load. A card with ZERO pack rows and no docket still has no
+`docket_pre_xero_docs_ready` so the board can re-derive presentation with portal
+captures the pipeline does not load, and so placement `packState` for
+`deriveSesStageV2` is reconstructed from that preserved stamp — never from the
+honesty-gated `review_state` (a portal-proven report-only card must not fall out
+of Docs Ready because the pipeline failed closed). A card with ZERO pack rows and no docket still has no
 `report_pack` object. Treating the absent key as null makes `docsReady()` fall
 to its legacy `!pack` branch and invents a second, non-existent blocker — which
 happened on SWMS-261109 before it was caught.

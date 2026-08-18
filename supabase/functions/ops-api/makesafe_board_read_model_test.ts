@@ -1270,7 +1270,7 @@ Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence 
         job_number: "SWMS-ROOF-UPGRADE",
         metadata: { makesafe_job_family: "roof_report" },
         makesafe_details: {
-          substatus: "waiting_on_trade_report",
+          substatus: "admin_to_send_report",
           report_type: "roof_report",
           cycle_number: 1,
           attendance_cycle_id: "cycle-current",
@@ -1288,12 +1288,14 @@ Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence 
         assignments: [],
         report_pack: {
           status: "drafted",
+          // Operator-facing honesty gate (pipeline fail-closed).
           review_state: "U4_BLOCKED",
           report_doc_id: null,
-          invoice_doc_id: null,
+          invoice_doc_id: "doc-invoice",
           swms_doc_id: null,
           docket_revision_id: "rev-roof-upgrade",
           pre_xero_docs_ready: false,
+          // Raw stamp preserved for placement packState.
           docket_pre_xero_docs_ready: true,
           presentation_kind: "incomplete",
           presentation_reason: "family report evidence is not complete",
@@ -1305,8 +1307,10 @@ Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence 
           reason: "family report evidence is not complete",
         },
         has_report_doc: false,
+        has_invoice_doc: true,
         has_wo: false,
-        invoice_status: "not_ready",
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
       }),
     ],
     { computedAt: NOW },
@@ -1315,6 +1319,9 @@ Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence 
 
   assertEquals(card.pack.presentation_kind, "ready");
   assertEquals(card.pack.pre_xero_docs_ready, true);
+  // Placement must not inherit the honesty-gated U4_BLOCKED review_state —
+  // portal-proven report-only with a qualifying DRAFT stays Docs Ready.
+  assertEquals(card.canonical_stage, "report_ready");
 });
 
 Deno.test("SWMS-261241 physical bound pack stays ready under honesty gate", () => {
