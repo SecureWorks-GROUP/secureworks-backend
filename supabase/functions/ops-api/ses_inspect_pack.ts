@@ -20,8 +20,10 @@
  */
 import type { SesSupabaseClient } from "./ses_reporting_actions.ts";
 import {
+  assertSesWorkflowReleaseContractForDockets,
   loadSesCockpitDocket,
   SesActionError,
+  type SesWorkflowReleaseContractGate,
 } from "./ses_reporting_actions.ts";
 import { sesRefusal } from "./ses_reporting_refusals.ts";
 import type {
@@ -399,6 +401,8 @@ export interface InspectSesPackDeps {
     jobId: string,
     deps: { fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array> },
   ) => Promise<SesCockpitDocket>;
+  /** Test/composition seam only; HTTP production always uses the strict gate. */
+  assertWorkflowContract?: SesWorkflowReleaseContractGate;
 }
 
 function staleReleaseInspection(
@@ -431,6 +435,8 @@ export async function inspectSesPackAction(
   const docket = await loadDocket(client, jobId, {
     fetchInvoicePdfBytes: deps.fetchInvoicePdfBytes,
   });
+  await (deps.assertWorkflowContract ||
+    assertSesWorkflowReleaseContractForDockets)([docket]);
 
   const packRead = await client.from("makesafe_report_packs")
     .select(

@@ -59,10 +59,16 @@ import {
   isMakesafeTerminalJobState,
   MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS,
 } from "./makesafe_status_apply.ts";
+import type { SesWorkflowStageContractState } from "./ses_workflow_registry.ts";
 import {
   canonicalSesFamilyFromCard,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import {
+  SES_STAGE_EXECUTABLE_POLICY,
+  sesStagePortalRoles,
+  type SesStageTrustedCompletionSourceId,
+} from "./ses_workflow_executable_policy.ts";
 import {
   bindingMakesafeTerminalProof,
   type MakesafeTerminalProofFact,
@@ -73,7 +79,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r18-bound-report-pdf-floor";
+  "ses-stage-engine.v2-r19-workflow-contract-seal";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -81,13 +87,12 @@ export const SES_STAGE_ENGINE_V2_VERSION =
  * take payment at all.
  */
 export const SES_STAGE_ISSUED_INVOICE_STATUSES = [
-  "AUTHORISED",
-  "SUBMITTED",
-  "PAID",
+  ...SES_STAGE_EXECUTABLE_POLICY.issued_invoice_statuses,
 ] as const;
 
 /** 168 hours. Completed rolls into Archive at exactly seven days, not after. */
-export const SES_STAGE_COMPLETED_WINDOW_MS = 7 * 86_400_000;
+export const SES_STAGE_COMPLETED_WINDOW_MS =
+  SES_STAGE_EXECUTABLE_POLICY.completed_window_ms;
 
 /**
  * A card whose column is not PROVED by the evidence on it. The engine says so
@@ -105,7 +110,13 @@ export type SesStageV2Stage =
  * Structurally denies this engine the displayed stage. A caller that tries to
  * pass one is a type error, not a silent regression to the circular path.
  */
-export type SesStageV2Input = Omit<MakesafeStatusInput, "displayedStatus">;
+export type SesStageContractState = SesWorkflowStageContractState;
+
+export type SesStageV2Input = Omit<MakesafeStatusInput, "displayedStatus"> & {
+  /** Effective persisted family/variant contract, resolved by the read model. */
+  ses_contract_state?: SesStageContractState;
+  ses_contract_reason_code?: string | null;
+};
 
 /**
  * R4 — how a canonical family resolves for stage purposes.
@@ -138,6 +149,8 @@ export interface SesStageV2Result {
   /** The evidence path the family delegates to; null when none is defined. */
   family_kind: MakesafeJobKind | null;
   family_recipe_state: "sealed" | "unknown";
+  ses_contract_state: SesStageContractState;
+  ses_contract_reason_code: string | null;
   reasons: string[];
   /** Evidence the card is short of, from the shared evidence definition. */
   missing: string[];
@@ -166,24 +179,30 @@ export interface SesStageV2Result {
  * `makesafe_computed_status.ts`'s `completedAt`, so the two are readable side
  * by side rather than one quietly editing the other.
  */
-const TRUSTED_COMPLETION_SOURCES: ReadonlyArray<
-  { source: string; read: (input: SesStageV2Input) => unknown }
-> = [
+const TRUSTED_COMPLETION_SOURCE_READERS: Readonly<
+  Record<
+    SesStageTrustedCompletionSourceId,
+    (input: SesStageV2Input) => unknown
+  >
+> = Object.freeze({
   // R7 — a bound terminal proof states when the work was proved finished, and
   // it outranks the rest because it is the only source recorded FOR that
   // purpose. Every other entry is a timestamp on some other record that the
   // engine is willing to read as a completion time. On a card with no proof
   // this reads null and the list behaves exactly as it did before.
-  {
-    source: "terminal_proof.proven_at",
-    read: (i) => sesStageBindingTerminalProof(i)?.proven_at,
-  },
-  { source: "pack.sent_at", read: (i) => i.evidence?.pack?.sent_at },
-  { source: "invoice.invoice_date", read: (i) => i.evidence?.invoiceDate },
-  { source: "invoice.created_at", read: (i) => i.evidence?.invoiceCreatedAt },
-  { source: "jobs.completed_at", read: (i) => i.job?.completed_at },
-  { source: "detail.report_sent_at", read: (i) => i.detail?.report_sent_at },
-];
+  "terminal_proof.proven_at": (i) => sesStageBindingTerminalProof(i)?.proven_at,
+  "pack.sent_at": (i) => i.evidence?.pack?.sent_at,
+  "invoice.invoice_date": (i) => i.evidence?.invoiceDate,
+  "invoice.created_at": (i) => i.evidence?.invoiceCreatedAt,
+  "jobs.completed_at": (i) => i.job?.completed_at,
+  "detail.report_sent_at": (i) => i.detail?.report_sent_at,
+});
+
+const TRUSTED_COMPLETION_SOURCES = SES_STAGE_EXECUTABLE_POLICY
+  .trusted_completion_source_order.map((source) => ({
+    source,
+    read: TRUSTED_COMPLETION_SOURCE_READERS[source],
+  }));
 
 /**
  * R7 — the `makesafe_terminal_proofs` row that covers this card, or null.
@@ -315,37 +334,10 @@ export function resolveSesStageV2Family(
     report_delivery: input.job?.metadata?.report_delivery ??
       input.detail?.report_delivery,
   });
-
-  switch (family) {
-    case "physical_makesafe":
-      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
-    case "ordinary_roof_portal":
-      return { family, kind: "roof_report", recipe_state: "sealed" };
-    case "own_template_roof":
-      // The roof evidence path today. Release 5 adds the own-template
-      // submitted-draft reader; there are 0 such cards at this snapshot.
-      return { family, kind: "roof_report", recipe_state: "sealed" };
-    case "assessment_quote":
-      return {
-        family,
-        kind: "assessment_report_quote",
-        recipe_state: "sealed",
-      };
-    case "temporary_fencing":
-      // Delegates its stage evidence to physical, keeps its own identity.
-      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
-    case "repair":
-    case "restoration":
-      // Captain-sealed 2026-08-02: both behave as the standard job does.
-      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
-    case "unknown":
-      // No evidence path. Refused for advancement below; never read as physical.
-      return { family, kind: null, recipe_state: "unknown" };
-    default: {
-      const exhaustive: never = family;
-      throw new Error(`unhandled SES family: ${String(exhaustive)}`);
-    }
-  }
+  const profile = sesStageWorkflowProfile(family);
+  return profile
+    ? { family, kind: profile.evidence_kind, recipe_state: "sealed" }
+    : { family, kind: null, recipe_state: "unknown" };
 }
 
 /**
@@ -378,7 +370,11 @@ export function sesStageOwnRoofReportIn(
     missing.push("a current-cycle own-template roof report draft");
     return { satisfied: false, missing };
   }
-  if (String(draft.status || "").toLowerCase() !== "submitted") {
+  if (
+    !SES_STAGE_EXECUTABLE_POLICY.own_document_submitted_statuses.includes(
+      String(draft.status || "").toLowerCase() as "submitted",
+    )
+  ) {
     missing.push(
       "the own-template roof report to be submitted, not left in draft",
     );
@@ -431,9 +427,94 @@ export type SesPortalRoleObservation =
 export const SES_PORTAL_REQUIRED_ROLES: Partial<
   Record<SesFamilyId, readonly string[]>
 > = {
-  ordinary_roof_portal: ["roof_report"],
-  assessment_quote: ["assessment_report", "photos", "quote"],
+  ordinary_roof_portal: sesStagePortalRoles("ordinary_roof_portal"),
+  assessment_quote: sesStagePortalRoles("assessment_quote"),
 };
+
+export type SesStageWorkflowProfileId =
+  | "stage.physical.v1"
+  | "stage.roof.portal.v1"
+  | "stage.roof.own_document.v1"
+  | "stage.assessment.v1";
+
+export interface SesStageWorkflowProfileDescriptor {
+  profile_id: SesStageWorkflowProfileId;
+  evidence_kind: MakesafeJobKind;
+  required_portal_roles: readonly string[];
+  own_document_evidence_required: boolean;
+  source_rule_ids: readonly string[];
+}
+
+const SES_PHYSICAL_STAGE_PROFILE: SesStageWorkflowProfileDescriptor = Object
+  .freeze({
+    profile_id: "stage.physical.v1",
+    evidence_kind: "physical_makesafe",
+    required_portal_roles: Object.freeze([]),
+    own_document_evidence_required: false,
+    source_rule_ids: Object.freeze([
+      "stage.current-cycle-physical-evidence.v1",
+      "stage.docs-ready-canonical-read-model.v1",
+    ]),
+  });
+
+/**
+ * Stable stage-profile view over the canonical stage engine. The workflow
+ * registry exports these descriptors instead of restating stage rules.
+ */
+export function sesStageWorkflowProfile(
+  family: SesFamilyId,
+): SesStageWorkflowProfileDescriptor | null {
+  switch (family) {
+    case "physical_makesafe":
+    case "temporary_fencing":
+    case "repair":
+    case "restoration":
+      return SES_PHYSICAL_STAGE_PROFILE;
+    case "ordinary_roof_portal":
+      return Object.freeze({
+        profile_id: "stage.roof.portal.v1",
+        evidence_kind: "roof_report",
+        required_portal_roles: Object.freeze([
+          ...(SES_PORTAL_REQUIRED_ROLES.ordinary_roof_portal || []),
+        ]),
+        own_document_evidence_required: false,
+        source_rule_ids: Object.freeze([
+          "stage.roof-portal-current-cycle-capture.v1",
+          "stage.docs-ready-canonical-read-model.v1",
+        ]),
+      });
+    case "own_template_roof":
+      return Object.freeze({
+        profile_id: "stage.roof.own_document.v1",
+        evidence_kind: "roof_report",
+        required_portal_roles: Object.freeze([]),
+        own_document_evidence_required: true,
+        source_rule_ids: Object.freeze([
+          "stage.roof-own-document-current-cycle.v1",
+          "stage.docs-ready-canonical-read-model.v1",
+        ]),
+      });
+    case "assessment_quote":
+      return Object.freeze({
+        profile_id: "stage.assessment.v1",
+        evidence_kind: "assessment_report_quote",
+        required_portal_roles: Object.freeze([
+          ...(SES_PORTAL_REQUIRED_ROLES.assessment_quote || []),
+        ]),
+        own_document_evidence_required: false,
+        source_rule_ids: Object.freeze([
+          "stage.assessment-triad-current-cycle.v1",
+          "stage.docs-ready-canonical-read-model.v1",
+        ]),
+      });
+    case "unknown":
+      return null;
+    default: {
+      const exhaustive: never = family;
+      throw new Error(`unhandled SES family: ${String(exhaustive)}`);
+    }
+  }
+}
 
 export function sesStagePortalRoleObservation(
   input: SesStageV2Input,
@@ -468,12 +549,20 @@ export function sesStagePortalRoleObservation(
         : latest;
     });
   const status = String(capture?.status || "").toLowerCase();
-  if (status === "not_done") return "observed_not_done";
+  if (
+    SES_STAGE_EXECUTABLE_POLICY.portal.capture_not_done_statuses.includes(
+      status as "not_done",
+    )
+  ) return "observed_not_done";
   // `unreachable` is the reader telling us it could not see the portal. The
   // newer engine funnels it into the same "still needs a capture" sentence as
   // never-attempted unless an expiry phrase happens to appear in the signal,
   // which conflates a failed observation with an unfinished job.
-  if (status === "unreachable") return "cannot_observe";
+  if (
+    SES_STAGE_EXECUTABLE_POLICY.portal.capture_unreachable_statuses.includes(
+      status as "unreachable",
+    )
+  ) return SES_STAGE_EXECUTABLE_POLICY.portal.cannot_observe_outcome;
   return "no_capture";
 }
 
@@ -558,7 +647,11 @@ export function sesStagePortalReportIn(
 export function sesStageDocsReady(
   input: SesStageV2Input,
   family: SesStageV2FamilyResolution,
-): { satisfied: boolean; missing: string[] } {
+): {
+  satisfied: boolean;
+  missing: string[];
+  refusal_code?: "family_contract_unsealed" | "family_contract_unsupported";
+} {
   // The minimum negative rule, unchanged and first. Everything below can only
   // subtract from this, never add to it, so no card can reach Docs Ready here
   // that the existing rule would refuse.
@@ -571,14 +664,21 @@ export function sesStageDocsReady(
 
   const recordedPackState = String(input.evidence?.packState || "")
     .toUpperCase();
-  const legacyDraftedPack = ["", "DRAFTED"].includes(recordedPackState) &&
-    String(input.evidence?.pack?.status || "").toLowerCase() === "drafted";
+  const legacyDraftedPack = SES_STAGE_EXECUTABLE_POLICY.docs_ready
+    .legacy_recorded_states.includes(recordedPackState as "" | "DRAFTED") &&
+    SES_STAGE_EXECUTABLE_POLICY.docs_ready.legacy_pack_statuses.includes(
+      String(input.evidence?.pack?.status || "").toLowerCase() as "drafted",
+    );
   // Current U4 rows still require READY. Legacy durable rows predate that
   // review_state stamp and persist only status=drafted; docsReady() above has
   // already proved the qualifying DRAFT, report evidence, required SWMS and
   // unsent pack, so that complete legacy shape is equally reviewable. Named
   // refusal states such as U4_BLOCKED and READY_TO_BUILD remain excluded.
-  if (recordedPackState !== "READY" && !legacyDraftedPack) {
+  if (
+    !SES_STAGE_EXECUTABLE_POLICY.docs_ready.recorded_ready_states.includes(
+      recordedPackState as "READY",
+    ) && !legacyDraftedPack
+  ) {
     return {
       satisfied: false,
       missing: ["a current-cycle READY draft pack"],
@@ -593,8 +693,12 @@ export function sesStageDocsReady(
   if (
     input.evidence?.packSent === true ||
     pack?.sent_at ||
-    ["sent", "sent_marker_failed", "sent_not_closed", "close_failed"].includes(
-      packStatus,
+    SES_STAGE_EXECUTABLE_POLICY.docs_ready.already_sent_pack_statuses.includes(
+      packStatus as
+        | "sent"
+        | "sent_marker_failed"
+        | "sent_not_closed"
+        | "close_failed",
     )
   ) {
     missing.push("an unsent pack - this one has already been sent");
@@ -626,6 +730,25 @@ export function sesStageDocsReady(
     if (!reportIn.satisfied) missing.push(...reportIn.missing);
   }
 
+  if (missing.length === 0 && input.ses_contract_state !== "sealed") {
+    const knownUnsealed = input.ses_contract_state === "known_unsealed";
+    const reasonCode = String(input.ses_contract_reason_code || "").trim() ||
+      (knownUnsealed
+        ? "family_contract_unsealed"
+        : "family_contract_incomplete");
+    return {
+      satisfied: false,
+      missing: [
+        knownUnsealed
+          ? `the effective workflow contract is known unsealed (${reasonCode})`
+          : `the effective workflow contract is unsupported (${reasonCode})`,
+      ],
+      refusal_code: knownUnsealed
+        ? "family_contract_unsealed"
+        : "family_contract_unsupported",
+    };
+  }
+
   return { satisfied: missing.length === 0, missing };
 }
 
@@ -647,16 +770,31 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
   const kind = family.kind ?? classifyMakesafeJobType(input.detail, input.job);
   const hold = input.evidence?.hold || null;
   const conflicts: string[] = [];
+  const contractState: SesStageContractState =
+    SES_STAGE_EXECUTABLE_POLICY.contract_states.includes(
+        String(input.ses_contract_state || "") as SesStageContractState,
+      )
+      ? input.ses_contract_state as SesStageContractState
+      : "unsupported";
+  const contractReasonCode = String(input.ses_contract_reason_code || "")
+    .trim() ||
+    (contractState === "unsupported" ? "family_contract_incomplete" : null);
   const base = {
     job_type: kind,
     ses_family: family.family,
     family_kind: family.kind,
     family_recipe_state: family.recipe_state,
+    ses_contract_state: contractState,
+    ses_contract_reason_code: contractReasonCode,
     hold,
     engine_version: SES_STAGE_ENGINE_V2_VERSION,
   };
 
-  if (["cancelled", "canceled"].includes(jobStatus)) {
+  if (
+    SES_STAGE_EXECUTABLE_POLICY.cancelled_job_statuses.includes(
+      jobStatus as "cancelled" | "canceled",
+    )
+  ) {
     return {
       ...base,
       stage: "cancelled",
@@ -665,7 +803,11 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
       conflicts,
     };
   }
-  if (jobStatus === "archived") {
+  if (
+    SES_STAGE_EXECUTABLE_POLICY.archived_job_statuses.includes(
+      jobStatus as "archived",
+    )
+  ) {
     return {
       ...base,
       stage: "archive",
@@ -701,15 +843,22 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
       conflicts: [...conflicts, ...terminal.conflicts],
     };
   }
-  if (["complete", "completed", "closed"].includes(jobStatus)) {
+  if (
+    SES_STAGE_EXECUTABLE_POLICY.claimed_terminal_job_statuses.includes(
+      jobStatus as "complete" | "completed" | "closed",
+    )
+  ) {
     // A raw terminal job state must not hide a complete pack that has never
     // been sent. The pack is still operator work, and the evidence ladder can
     // prove it is exactly one click from sending. This mirrors the legacy
     // ladder's drafted-not-sent precedence while preserving every terminal
     // branch for sent, incomplete, refused, or packless cards.
+    const docsReadyContract = sesStageDocsReady(input, family);
     const unsentPack = deriveSesStageEvidence(input, family);
     if (
-      family.recipe_state === "sealed" && unsentPack.status === "report_ready"
+      family.recipe_state === "sealed" &&
+      unsentPack.status ===
+        SES_STAGE_EXECUTABLE_POLICY.evidence_stage.unsent_pack_ready
     ) {
       return {
         ...base,
@@ -746,13 +895,25 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
         conflicts: [...conflicts, ...terminal.conflicts],
       };
     }
+    if (docsReadyContract.refusal_code) {
+      conflicts.push(docsReadyContract.refusal_code);
+      return {
+        ...base,
+        stage: SES_STAGE_DECISION_REQUIRED,
+        reasons: [
+          `${docsReadyContract.refusal_code}: an otherwise review-ready pack cannot enter Docs Ready under this workflow contract`,
+        ],
+        missing: docsReadyContract.missing,
+        conflicts,
+      };
+    }
     conflicts.push("terminal_without_issued_invoice");
     const evidence = deriveSesStageEvidence(input, family);
     // A mechanical fall-through to New is NOT evidence that the job is new. If
     // the card carries no later-stage evidence at all, the raw terminal claim
     // and the empty evidence contradict each other and NOTHING is proved. The
     // engine says so and stops a cutover rather than inventing a column.
-    if (evidence.status === "new") {
+    if (evidence.status === SES_STAGE_EXECUTABLE_POLICY.evidence_stage.empty) {
       conflicts.push("terminal_without_supporting_evidence");
       return {
         ...base,
@@ -808,6 +969,20 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
 
+  const docsReadyContract = sesStageDocsReady(input, family);
+  if (docsReadyContract.refusal_code) {
+    conflicts.push(docsReadyContract.refusal_code);
+    return {
+      ...base,
+      stage: SES_STAGE_DECISION_REQUIRED,
+      reasons: [
+        `${docsReadyContract.refusal_code}: an otherwise review-ready pack cannot enter Docs Ready under this workflow contract`,
+      ],
+      missing: docsReadyContract.missing,
+      conflicts,
+    };
+  }
+
   // A submitted SecureWorks service report is not Prime completion evidence.
   // When a current-cycle observer revision also proves the builder delivery
   // surface cannot be read, however, the card is no longer ordinary unfinished
@@ -821,7 +996,9 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     const portal = sesStagePortalReportIn(input, family.family);
     if (
       !portal.satisfied &&
-      Object.values(portal.observations).includes("cannot_observe")
+      Object.values(portal.observations).includes(
+        SES_STAGE_EXECUTABLE_POLICY.portal.cannot_observe_outcome,
+      )
     ) {
       return {
         ...base,
@@ -851,8 +1028,8 @@ function sesStageCurrentCycleServiceReportSubmitted(
   const cycle = Number(input.detail?.cycle_number ?? 1);
   return (input.evidence?.serviceReports || []).some((report) =>
     Number(report?.cycle_number ?? 1) === cycle &&
-    ["submitted", "approved"].includes(
-      String(report?.status || "").toLowerCase(),
+    SES_STAGE_EXECUTABLE_POLICY.service_report_submitted_statuses.includes(
+      String(report?.status || "").toLowerCase() as "submitted" | "approved",
     )
   );
 }
@@ -984,13 +1161,13 @@ export function sesOverlayDecisionKind(
 ): SesOverlayDecisionKind | null {
   const raw = application?.decision_kind;
   if (raw === undefined || raw === null || String(raw).trim() === "") {
-    return "display_override";
+    return SES_STAGE_EXECUTABLE_POLICY.overlay.default_decision_kind;
   }
   const normalized = String(raw).toLowerCase();
-  return normalized === "stage_attestation"
-    ? "stage_attestation"
-    : normalized === "display_override"
-    ? "display_override"
+  return SES_STAGE_EXECUTABLE_POLICY.overlay.admitted_decision_kinds.includes(
+      normalized as SesOverlayDecisionKind,
+    )
+    ? normalized as SesOverlayDecisionKind
     : null;
 }
 
@@ -1015,16 +1192,19 @@ export function sesStageV2OverlayCandidate(
   application: SesStageOverlayApplication | null | undefined,
   rawJobState: unknown,
   invoiceCloseoutSatisfied = false,
+  contractState: SesStageContractState = "unsupported",
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
   const decisionKind = sesOverlayDecisionKind(application);
-  const binds = decisionKind === "display_override" &&
+  const binds = decisionKind ===
+      SES_STAGE_EXECUTABLE_POLICY.overlay.default_decision_kind &&
     !isMakesafeTerminalDisplayStatus(stage) &&
     !isMakesafeTerminalJobState(rawJobState) &&
     !!application &&
     String(application.source_status || "").toLowerCase() === stage &&
-    (String(application.after_status || "").toLowerCase() !== "report_ready" ||
-      invoiceCloseoutSatisfied);
+    (String(application.after_status || "").toLowerCase() !==
+        SES_STAGE_EXECUTABLE_POLICY.overlay.report_ready_status ||
+      (invoiceCloseoutSatisfied && contractState === "sealed"));
   return {
     stage: binds
       ? String(application?.after_status || stage).toLowerCase()

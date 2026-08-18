@@ -15202,7 +15202,7 @@ export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
 
 // Close-out doc gate. A make-safe may only resolve to completed/archive once its
 // invoice + report PDFs are attached. SWMS is additionally required when
-// _requiresMakesafeSwms resolves the MLB physical MakeSafe rule.
+// _requiresMakesafeSwms resolves the workflow-registry family SWMS rule.
 // Returns the set of docs that are still missing (empty => gate satisfied).
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
@@ -15253,6 +15253,12 @@ export interface MakesafeReportPackLike {
   presentation_reason?: string | null
   /** Raw legacy pack status; not presentation authority when a docket exists */
   legacy_pack_status?: string | null
+  /** Persisted SES workflow-contract coordinate copied from the current docket. */
+  workflow_runtime_family_id?: string | null
+  workflow_contract_variant_id?: string | null
+  workflow_contract_hash?: string | null
+  workflow_contract_seal_state?: string | null
+  workflow_contract_unsealed_reason_code?: string | null
   failed_step?: string | null
   error_detail?: unknown
 }
@@ -16138,6 +16144,15 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       presentation_kind: scopedPack.presentation_kind || null,
       presentation_reason: scopedPack.presentation_reason || null,
       legacy_pack_status: scopedPack.legacy_pack_status || null,
+      workflow_runtime_family_id:
+        scopedPack.workflow_runtime_family_id || null,
+      workflow_contract_variant_id:
+        scopedPack.workflow_contract_variant_id || null,
+      workflow_contract_hash: scopedPack.workflow_contract_hash || null,
+      workflow_contract_seal_state:
+        scopedPack.workflow_contract_seal_state || null,
+      workflow_contract_unsealed_reason_code:
+        scopedPack.workflow_contract_unsealed_reason_code || null,
     } : null,
     ...(scopedDocFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
@@ -17510,7 +17525,7 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'makesafe_docket_revisions_current',
-          'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, committed_at',
+          'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, committed_at, workflow_runtime_family_id:envelope->v2->classification->>family, workflow_contract_variant_id:envelope->v2->classification->workflow_contract->>variant_id, workflow_contract_hash:envelope->v2->classification->workflow_contract->>canonical_contract_hash, workflow_contract_seal_state:envelope->v2->classification->workflow_contract->>seal_state, workflow_contract_unsealed_reason_code:envelope->v2->classification->workflow_contract->>unsealed_reason_code',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -17658,6 +17673,15 @@ async function makesafePipeline(
         pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
         blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
         cycle_attribution: docketIsCurrent ? 'bound' : null,
+        workflow_runtime_family_id:
+          docket.workflow_runtime_family_id || null,
+        workflow_contract_variant_id:
+          docket.workflow_contract_variant_id || null,
+        workflow_contract_hash: docket.workflow_contract_hash || null,
+        workflow_contract_seal_state:
+          docket.workflow_contract_seal_state || null,
+        workflow_contract_unsealed_reason_code:
+          docket.workflow_contract_unsealed_reason_code || null,
         ...packHonestyFields,
       }
       : rowPack
@@ -17665,6 +17689,15 @@ async function makesafePipeline(
         ...rowPack,
         named_prior_cycle_bind: !!namedPriorCycleInvoice,
         cycle_attribution: packIsCurrent ? 'bound' : null,
+        workflow_runtime_family_id:
+          docket?.workflow_runtime_family_id || null,
+        workflow_contract_variant_id:
+          docket?.workflow_contract_variant_id || null,
+        workflow_contract_hash: docket?.workflow_contract_hash || null,
+        workflow_contract_seal_state:
+          docket?.workflow_contract_seal_state || null,
+        workflow_contract_unsealed_reason_code:
+          docket?.workflow_contract_unsealed_reason_code || null,
         ...packHonestyFields,
       }
       : null

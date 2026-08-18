@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any no-import-prefix
+// deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 import {
   assertEquals,
   assertRejects,
@@ -8,14 +8,14 @@ import {
   _parseSesDraftForTest,
   docketArtifactPackRelativePath,
   executeSesReleaseRevisionAction,
-  getSesReviewablePackAction,
+  getSesReviewablePackAction as getSesReviewablePackActionStrict,
   inspectSesSupportingReportProof,
   listSesDocsReadyReviewsAction,
   querySesReviewCockpitAction,
   resolveDocketRoutes,
   SesActionError,
   sesDocketReleaseCaveats,
-  signOffSesDocketAction,
+  signOffSesDocketAction as signOffSesDocketActionStrict,
 } from "./ses_reporting_actions.ts";
 import {
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
@@ -28,6 +28,29 @@ import {
   MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER,
   makesafeRendererAuthorityVersion,
 } from "./makesafe_report_renderer_authority.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
+
+function getSesReviewablePackAction(
+  ...args: Parameters<typeof getSesReviewablePackActionStrict>
+) {
+  const [client, auth, docketRevisionId, deps] = args;
+  return getSesReviewablePackActionStrict(client, auth, docketRevisionId, {
+    ...deps,
+    assertWorkflowContract: deps?.assertWorkflowContract ||
+      (async () => SES_WORKFLOW_CONTRACT_CANONICAL_HASH),
+  });
+}
+
+function signOffSesDocketAction(
+  ...args: Parameters<typeof signOffSesDocketActionStrict>
+) {
+  const [client, auth, actionArgs, deps] = args;
+  return signOffSesDocketActionStrict(client, auth, actionArgs, {
+    ...deps,
+    assertWorkflowContract: deps?.assertWorkflowContract ||
+      (async () => SES_WORKFLOW_CONTRACT_CANONICAL_HASH),
+  });
+}
 
 Deno.test("persisted named-card findings stay visible caveats outside the hard blocker column", () => {
   const caveats = sesDocketReleaseCaveats({
@@ -83,6 +106,7 @@ function reviewPackClient(
     boundDocument?: Record<string, unknown> | null;
     /** Envelope-level docs-ready flag, as `prepare_ses_docket_revision` writes it. */
     preXeroDocsReady?: boolean;
+    workflowClassification?: Record<string, unknown>;
   } = {},
 ) {
   const signedPaths: string[] = [];
@@ -117,7 +141,11 @@ function reviewPackClient(
     stage: "pre_xero",
     committed_at: "2026-08-04T00:00:00.000Z",
     envelope: {
-      v2: { classification: { family: "physical_makesafe" } },
+      v2: {
+        classification: options.workflowClassification || {
+          family: "physical_makesafe",
+        },
+      },
       pre_xero_docs_ready: options.preXeroDocsReady === true,
     },
     blockers: [],
@@ -230,6 +258,81 @@ function reviewPackClient(
   } as any;
   return { client, signedPaths, rpcCalls, review };
 }
+
+Deno.test("Docs Ready signoff refuses incomplete, divergent, and unsealed workflow contracts before approval RPCs", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nworkflow-gate");
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: await sesSha256Bytes(bytes),
+    size_bytes: bytes.byteLength,
+    metadata: {},
+  };
+  const cases = [
+    {
+      expected: "family_contract_incomplete",
+      classification: { family: "physical_makesafe" },
+    },
+    {
+      expected: "family_contract_divergent",
+      classification: {
+        family: "physical_makesafe",
+        builder_key: "MLB",
+        routing_rule: "mlb-perth-routing",
+        workflow_contract: {
+          variant_id: "physical_makesafe.standard.mlb.perth",
+          canonical_contract_hash: `sha256:${"0".repeat(64)}`,
+        },
+      },
+    },
+    {
+      expected: "family_contract_unsealed",
+      classification: {
+        family: "physical_makesafe",
+        builder_key: "MLB",
+        routing_rule: "mlb-perth-routing",
+        workflow_contract: {
+          variant_id: "physical_makesafe.standard.mlb.perth",
+          canonical_contract_hash: SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+        },
+      },
+    },
+  ];
+  for (const fixture of cases) {
+    const { client, signedPaths, rpcCalls, review } = reviewPackClient(
+      artifact,
+      bytes,
+      { workflowClassification: fixture.classification },
+    );
+    const error = await assertRejects(
+      () =>
+        signOffSesDocketActionStrict(
+          client,
+          {
+            mode: "jwt",
+            user: {
+              id: "captain-fixture",
+              email: "captain@example.test",
+              role: "owner",
+            },
+          },
+          {
+            docket_revision_id: "docket-fixture",
+            expected_output_content_hash: review.docket_output_content_hash,
+          },
+        ),
+      SesActionError,
+    );
+    assertEquals(error.status, 409, fixture.expected);
+    assertEquals(
+      (error.refusal as { code?: string }).code,
+      fixture.expected,
+    );
+    assertEquals(signedPaths, [], fixture.expected);
+    assertEquals(rpcCalls, [], fixture.expected);
+  }
+});
 
 const SUPERSEDED_RAW = `sha256:${"1".repeat(64)}`;
 const CORRECTED_RAW = `sha256:${"2".repeat(64)}`;
@@ -1821,6 +1924,12 @@ function releaseExecuteClient(routes: Array<Record<string, unknown>>): any {
                       builder_key: "MLB",
                       family: "ordinary_roof_portal",
                       report_only: true,
+                      routing_rule: "mlb-perth-routing",
+                      workflow_contract: {
+                        variant_id: "roof.portal.mlb.perth",
+                        canonical_contract_hash:
+                          SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+                      },
                     },
                     routing: {},
                   },
@@ -1934,21 +2043,26 @@ function releaseExecuteMailGateway(sentSubjects: string[]): any {
   };
 }
 
-Deno.test("SEND IT executes a sealed one-route invoice-only release", async () => {
+Deno.test("SEND IT refuses the typed-unsealed report-only release before mail", async () => {
   const sentSubjects: string[] = [];
-  const result: any = await executeSesReleaseRevisionAction(
-    releaseExecuteClient([INVOICE_ONLY_ROUTE]),
-    { mode: "api_key", user: null },
-    {
-      org_id: "org-1",
-      release_revision_id: "release-fixture",
-      actor: "captain",
-    },
-    releaseExecuteMailGateway(sentSubjects),
-    { readAuthorised: () => Promise.resolve(true) } as any,
+  const error = await assertRejects(
+    () =>
+      executeSesReleaseRevisionAction(
+        releaseExecuteClient([INVOICE_ONLY_ROUTE]),
+        { mode: "api_key", user: null },
+        {
+          org_id: "org-1",
+          release_revision_id: "release-fixture",
+          actor: "captain",
+        },
+        releaseExecuteMailGateway(sentSubjects),
+        { readAuthorised: () => Promise.resolve(true) } as any,
+      ),
+    SesActionError,
   );
-  assertEquals(result.state, "released");
-  assertEquals(sentSubjects, ["Invoice"]);
+  assertEquals(error.status, 409);
+  assertEquals((error.refusal as any).code, "family_contract_unsealed");
+  assertEquals(sentSubjects, []);
 });
 
 Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", async () => {

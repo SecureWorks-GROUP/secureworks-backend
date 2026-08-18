@@ -167,10 +167,10 @@ function resolveRequiredMatrixRow(
     );
   }
   const decision = sesSwmsDecision(input, matrix.row);
-  if (!decision.required) {
+  if (!decision.included) {
     throw new SesSwmsAttachError(
       "swms_not_required",
-      "The sealed family recipe does not require a SWMS for this card.",
+      "The sealed family recipe does not include a SWMS for this card.",
       409,
       {
         builder_key: matrix.row.builder_key,

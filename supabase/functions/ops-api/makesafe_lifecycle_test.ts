@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 // Tests for the MakeSafe lifecycle gate:
 //  - makesafePipeline surfaces per-job close-out doc booleans (has_*),
 //  - an issued job without a current DRAFT stays below Docs Ready rather than
@@ -253,20 +254,20 @@ Deno.test("makesafePipeline lets an invoiced job with both docs reach completed"
   assertEquals(job.docs_missing, false);
 });
 
-// ── Gate unit coverage: MLB requires SWMS, non-MLB does not ─────────────────
-Deno.test("close-out gate requires SWMS only for MLB jobs", () => {
+// ── Gate unit coverage: consume the resolved family SWMS requirement ────────
+Deno.test("close-out gate obeys the resolved SWMS requirement", () => {
   const docs = {
     has_invoice_doc: true,
     has_report_doc: true,
     has_swms_doc: false,
   };
-  // Non-MLB: invoice + report is enough.
+  // Report-only transitional policy: invoice + report is enough.
   assertEquals(_makesafeMissingCloseoutDocs(docs, false), []);
-  // MLB: SWMS additionally required.
+  // Physical-family policy: SWMS is additionally required.
   assertEquals(_makesafeMissingCloseoutDocs(docs, true), ["swms"]);
 });
 
-Deno.test("SWMS requirement follows the sealed MLB physical-family rule", () => {
+Deno.test("SWMS hard requirement follows the sealed physical-family rule for every builder", () => {
   const physical = { metadata: { makesafe_job_family: "physical_makesafe" } };
   const roof = { metadata: { makesafe_job_family: "roof_report" } };
   const assessment = {
@@ -287,16 +288,24 @@ Deno.test("SWMS requirement follows the sealed MLB physical-family rule", () => 
     false,
   );
   assertEquals(
-    _requiresMakesafeSwms({ requesting_company_slug: "builderwest" }, physical),
+    _requiresMakesafeSwms({ report_type: "roof" }, { metadata: {} }),
     false,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ report_type: "assessment" }, { metadata: {} }),
+    false,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_slug: "builderwest" }, physical),
+    true,
   );
   assertEquals(
     _requiresMakesafeSwms({ requesting_company_name: "AJS" }, physical),
-    false,
+    true,
   );
   assertEquals(
     _requiresMakesafeSwms({ requesting_company_slug: "mlb" }, repair),
-    false,
+    true,
   );
 });
 
@@ -357,7 +366,7 @@ Deno.test("MLB physical job with AUTHORISED invoice but no DRAFT stays allocated
   assertEquals(stage, "allocated");
 });
 
-Deno.test("MLB report-only and non-MLB jobs are not held for missing SWMS", () => {
+Deno.test("report-only is not held for SWMS while every physical builder is", () => {
   const completeDocsWithoutSwms = {
     has_invoice_doc: true,
     has_report_doc: true,
@@ -415,7 +424,7 @@ Deno.test("MLB report-only and non-MLB jobs are not held for missing SWMS", () =
 
   assertEquals(mlbRoof, "completed");
   assertEquals(mlbAssessment, "completed");
-  assertEquals(nonMlb, "completed");
+  assertEquals(nonMlb, "allocated");
 });
 
 // ── (c) 7-day completed-vs-archive boundary ─────────────────────────────────

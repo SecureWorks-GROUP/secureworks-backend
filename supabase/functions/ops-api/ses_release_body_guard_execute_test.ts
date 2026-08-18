@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any require-await
+// deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 /**
  * SEND IT body guard: a persisted release route whose BODY still carries
  * internal draft-annotation vocabulary must refuse before any Graph dispatch,
@@ -245,6 +245,9 @@ function mailGatewayStub(harness: Harness): any {
 }
 
 const xeroReader = { readAuthorised: async () => ({ id: "xero-invoice-1" }) };
+const sealedWorkflowContractFixture = {
+  assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+};
 
 async function execute(state: Harness) {
   return await executeSesReleaseRevisionAction(
@@ -253,6 +256,7 @@ async function execute(state: Harness) {
     { org_id: "org-1", release_revision_id: RELEASE_ID, actor: "captain" },
     mailGatewayStub(state),
     xeroReader as any,
+    sealedWorkflowContractFixture,
   );
 }
 

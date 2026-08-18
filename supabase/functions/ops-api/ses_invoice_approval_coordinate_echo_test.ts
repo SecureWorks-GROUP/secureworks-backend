@@ -13,7 +13,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  approveSesInvoiceRevisionAction,
+  approveSesInvoiceRevisionAction as approveSesInvoiceRevisionActionRaw,
   SesActionError,
   sesInvoiceApprovalCoordinateDrift,
 } from "./ses_reporting_actions.ts";
@@ -22,6 +22,12 @@ import type { SesCleanInput, SesCockpitDocket } from "./ses_review_cockpit.ts";
 
 const OUTPUT_HASH =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const approveSesInvoiceRevisionAction:
+  typeof approveSesInvoiceRevisionActionRaw = (client, auth, args, deps = {}) =>
+    approveSesInvoiceRevisionActionRaw(client, auth, args, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+    });
 
 // ── Pure drift helper ──
 

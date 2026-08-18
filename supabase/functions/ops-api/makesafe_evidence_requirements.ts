@@ -51,16 +51,12 @@
 //     and `Q_RESTORATION_RECIPE.resolution`, and in
 //     `data/decisions/2026-08-02-docs-ready-repair-restoration.md`.
 //
-// Deliberately NOT encoded here (2026-08-01 SWMS ruling, "SWMS required only for
-// MLB make-safes"): the ruler's cells are family x stage and carry no builder
-// identity, so an MLB-only rule cannot be expressed in this table at all. The
-// builder-aware rule already lives, sealed, in `ses_family_matrix.ts` (MLB ->
-// `always`, AJS -> `builder_waiver_unless_hrcw`, everyone else -> `hrcw_only`),
-// which is exactly the plan-v2 C.11 reading "MLB always; everyone else only when
-// the work is genuinely high-risk". `Q_REPORT_ONLY_SWMS` therefore stays OPEN
-// pending C.11: flattening the high-risk-construction-work trigger to N-A by
-// builder identity is a safety call, not a paperwork one, and it is not this
-// batch's to make.
+// SWMS policy is intentionally not duplicated here. The builder-family matrix
+// and typed workflow registry own it: physical, temp-fence, repair and
+// restoration hard-require a generated scope-correct SWMS for every builder;
+// roof and assessment include one now but do not hard-require it until the
+// accuracy gate is sealed. Keep this stage ruler builder-agnostic and consume
+// the shared family policy at the stage/pack boundary.
 
 import {
   MAKESAFE_COMPUTED_STATUSES,

@@ -26,6 +26,7 @@ import {
   type SesBuilderKey,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import { sesFamilyRequiresPersistedDeliverableAuthority } from "./ses_workflow_executable_policy.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
   materialsChargeDecisionFromRevision,
@@ -1525,6 +1526,29 @@ export function buildSesAssemblerInput(
     draftSubjects: snapshot.approved_draft_subjects || [],
     jobMetadataSubject: firstText(metadata.builder_email_subject) || null,
   });
+  const reportingDeliverableRequiresPersistedAuthority =
+    familyId !== "unknown" &&
+    sesFamilyRequiresPersistedDeliverableAuthority(familyId);
+  const effectiveReportingDeliverable =
+    reportingDeliverableRequiresPersistedAuthority &&
+      intakeCase &&
+      text(identityRevision?.authority_kind) === "effective_intake_case" &&
+      text(identityRevision?.effective_case_id) === text(intakeCase.id) &&
+      text(intakeCase.deliverable_ref_canonical)
+      ? {
+        id: text(intakeCase.deliverable_ref_canonical),
+        kind: familyId,
+      }
+      : null;
+  const legacyInstructionDeliverable =
+    !reportingDeliverableRequiresPersistedAuthority
+      ? firstText(
+        intakeCase?.deliverable_ref_canonical,
+        identityRevision && workOrders.length
+          ? `job_document:${text(workOrders[0].id)}`
+          : null,
+      )
+      : null;
 
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
@@ -1589,17 +1613,11 @@ export function buildSesAssemblerInput(
         intakeCase?.raw_identity_json?.instruction_text,
         intakeCase?.raw_identity_json?.scope,
       ) || null,
-      deliverables: [
-        {
-          id: firstText(
-            intakeCase?.deliverable_ref_canonical,
-            identityRevision && workOrders.length
-              ? `job_document:${text(workOrders[0].id)}`
-              : null,
-          ),
-          kind: familyId,
-        },
-      ].filter((item) => item.id),
+      deliverables: effectiveReportingDeliverable
+        ? [effectiveReportingDeliverable]
+        : legacyInstructionDeliverable
+        ? [{ id: legacyInstructionDeliverable, kind: familyId }]
+        : [],
       attachment_pointers: workOrders
         .map((item) => `job_document:${text(item.id)}`)
         .filter((item) => !item.endsWith(":"))

@@ -13,13 +13,15 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   assembleSesPackInspection,
-  inspectSesPackAction,
+  inspectSesPackAction as inspectSesPackActionStrict,
+  type InspectSesPackDeps,
 } from "./ses_inspect_pack.ts";
 import {
   SesActionError,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
 import type { SesCockpitDocket } from "./ses_review_cockpit.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
 
 const RELEASE_HASH =
   "sha256:1111111111111111111111111111111111111111111111111111111111111111";
@@ -31,6 +33,19 @@ const PROOF_HASH =
   "sha256:4444444444444444444444444444444444444444444444444444444444444444";
 const OUTPUT_HASH =
   "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+
+function inspectSesPackAction(
+  client: SesSupabaseClient,
+  jobId: string,
+  releaseRevisionIdOverride?: string | null,
+  deps: InspectSesPackDeps = {},
+) {
+  return inspectSesPackActionStrict(client, jobId, releaseRevisionIdOverride, {
+    ...deps,
+    assertWorkflowContract: deps.assertWorkflowContract ||
+      (async () => OUTPUT_HASH),
+  });
+}
 
 function assembleInput(overrides: Record<string, unknown> = {}) {
   return {
@@ -320,6 +335,56 @@ async function expectSesActionError(
   }
   throw new Error("expected SesActionError");
 }
+
+Deno.test("T12 inspect refuses incomplete, divergent, and unsealed workflow contracts before any pack or approval read", async () => {
+  const cases = [
+    {
+      expected: "family_contract_incomplete",
+      clean_input: {},
+    },
+    {
+      expected: "family_contract_divergent",
+      clean_input: {
+        builder_key: "MLB",
+        family: "physical_makesafe",
+        routing_rule: "mlb-perth-routing",
+        workflow_contract_variant_id: "physical_makesafe.standard.mlb.perth",
+        workflow_contract_hash: `sha256:${"0".repeat(64)}`,
+      },
+    },
+    {
+      expected: "family_contract_unsealed",
+      clean_input: {
+        builder_key: "MLB",
+        family: "physical_makesafe",
+        routing_rule: "mlb-perth-routing",
+        workflow_contract_variant_id: "physical_makesafe.standard.mlb.perth",
+        workflow_contract_hash: SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+      },
+    },
+  ];
+  for (const fixture of cases) {
+    let postDocketReads = 0;
+    const client = {
+      from() {
+        postDocketReads += 1;
+        throw new Error("workflow refusal must precede persisted pack reads");
+      },
+    } as unknown as SesSupabaseClient;
+    const error = await expectSesActionError(() =>
+      inspectSesPackActionStrict(client, "job-1", null, {
+        loadDocket: async () =>
+          fakeDocket({ clean_input: fixture.clean_input as never }),
+      })
+    );
+    assertEquals(error.status, 409, fixture.expected);
+    assertEquals(
+      (error.refusal as { code?: string }).code,
+      fixture.expected,
+    );
+    assertEquals(postDocketReads, 0, fixture.expected);
+  }
+});
 
 function releaseInspectClient(
   memberRows: Array<Record<string, unknown>>,

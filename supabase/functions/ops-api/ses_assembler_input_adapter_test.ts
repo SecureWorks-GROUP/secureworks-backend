@@ -39,7 +39,7 @@ import {
 import { buildSesSwmsGenerationPlan } from "./ses_swms_template.ts";
 import { renderSesSwmsPdf, sesSwmsRenderHash } from "./ses_swms_render.ts";
 import {
-  prepare_ses_docket_revision,
+  prepare_ses_docket_revision as prepareSesDocketRevisionRaw,
   SES_ASSESSMENT_RECIPE_VERSION,
 } from "./ses_prepare_docket_revision.ts";
 import {
@@ -53,6 +53,17 @@ import {
   PACK_PHOTO_ORDER_EXPECTED_IDS,
   PACK_PHOTO_ORDER_MEDIA,
 } from "./ses_pack_photo_order_test_fixture.ts";
+import { SES_WORKFLOW_CONTRACT_CANONICAL_HASH } from "./ses_workflow_registry.ts";
+
+const prepare_ses_docket_revision: typeof prepareSesDocketRevisionRaw = (
+  request,
+  dependencies,
+) =>
+  prepareSesDocketRevisionRaw(request, {
+    ...dependencies,
+    assertWorkflowReleaseContract: async () =>
+      SES_WORKFLOW_CONTRACT_CANONICAL_HASH,
+  });
 
 function snapshot(): SesAssemblerLiveSnapshot {
   const { captured_from: _capturedFrom, ...liveSnapshot } = structuredClone(
@@ -2702,6 +2713,7 @@ Deno.test(
     // ordinary evidence gap review-visible without destroying the typed fixed
     // price; it may persist to Docs Ready but can never cross the send fence.
     assertEquals(roofResult.blockers.map((blocker) => blocker.reason_code), [
+      "optional_swms_missing",
       "capability_portal_degraded",
     ]);
     assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 300);
@@ -3456,6 +3468,82 @@ Deno.test(
   },
 );
 
+Deno.test("repair with only a WO and legacy identity refuses deliverable_not_active", async () => {
+  const live = snapshot();
+  live.detail!.report_type = null;
+  live.job.metadata.makesafe_job_family = "repair";
+  live.cases = [];
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: `legacy-job:${live.job.id}`,
+    source_version: 1,
+    source_content_hash: `sha256:${"b".repeat(64)}`,
+    lineage_id: live.job.id,
+    effective_case_id: null,
+  };
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "repair");
+  assertEquals(input.source.attachment_pointers.length > 0, true);
+  assertEquals(input.source.deliverables, []);
+
+  const result = (await prepareSesDocketRevisionRaw(
+    {
+      selection: { mode: "job_id", job_id: input.identity.job_id },
+      idempotency_key: "repair-wo-only-deliverable-refusal",
+      assembler_version: SES_ASSEMBLER_VERSION,
+      dry_run: true,
+      force_refresh: true,
+    },
+    {
+      resolveInput: async () => input,
+      resolveSourceArtifacts: async () => sourceResolver(input),
+      now: () => new Date("2026-08-15T00:00:00Z"),
+    },
+  )).results[0];
+  assertEquals(result.state, "blocked");
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
+  assert(blockerCodes(result).includes("deliverable_not_active"));
+});
+
+Deno.test("repair and restoration admit only the effective persisted reporting deliverable coordinate", () => {
+  for (const family of ["repair", "restoration"] as const) {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = family;
+    const caseId = `case-${family}`;
+    const deliverableId = `REPORTING-${family.toUpperCase()}`;
+    live.cases = [{
+      id: caseId,
+      state: "confirmed_live_job",
+      job_id: live.job.id,
+      target_job_id: null,
+      instruction_key: `instruction-${family}`,
+      lineage_id: `lineage-${family}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"c".repeat(64)}`,
+      builder_wo_canonical: `WO-${family}`,
+      builder_po_canonical: null,
+      external_ref_canonical: `REF-${family}`,
+      deliverable_ref_canonical: deliverableId,
+    }];
+    live.identity_revision = {
+      authority_kind: "effective_intake_case",
+      effective_case_id: caseId,
+      source_instruction_id: `instruction-${family}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"c".repeat(64)}`,
+      lineage_id: `lineage-${family}`,
+    };
+
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.family, family);
+    assertEquals(input.source.deliverables, [{
+      id: deliverableId,
+      kind: family,
+    }]);
+  }
+});
+
 Deno.test(
   "unsupported persisted report delivery fails closed with field evidence",
   () => {
@@ -3567,13 +3655,19 @@ Deno.test(
     live.cycles = [];
     live.reports = [];
     live.media = [];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(
+      input.source.deliverables,
+      [],
+      "a legacy WO is not an active restoration reporting deliverable",
+    );
 
     const client = liveSnapshotClient(live);
     const deps = createSesAssemblerRuntimeDependencies(client, {
       org_id: "org-test",
       created_by: "user-test",
     });
-    const response = await prepare_ses_docket_revision(
+    const response = await prepareSesDocketRevisionRaw(
       {
         selection: { mode: "job_number", job_number: "SWMS-26936" },
         idempotency_key: "restoration-real-card-proof-20260728",
@@ -3602,10 +3696,9 @@ Deno.test(
     assertEquals(result.envelope.v2.classification.recipe_selected, true);
     assert(!codes.includes("restoration_recipe_unsealed"));
     assert(!codes.includes("family_unknown"));
-    // No trade report / photos on this fixture — physical evidence remains in
-    // the complete review pack without suppressing Docs Ready.
-    assertEquals(result.state, "ready");
-    assertEquals(result.envelope.pre_xero_docs_ready, true);
+    assertEquals(result.state, "blocked");
+    assertEquals(result.envelope.pre_xero_docs_ready, false);
+    assert(codes.includes("deliverable_not_active"));
     assert(
       codes.some((code) =>
         code === "trade_evidence_missing" ||
@@ -3745,6 +3838,7 @@ Deno.test(
           "spine_missing_source",
           "spine_missing_deliverables",
           "canonical_draft_pack_output_missing",
+          "optional_swms_missing",
           "capability_portal_degraded",
           "invoice_reference_missing",
         ],
@@ -3807,7 +3901,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-08-13.1",
+      "ses-builder-family-matrix/2026-08-15.2",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],

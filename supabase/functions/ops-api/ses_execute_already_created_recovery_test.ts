@@ -23,7 +23,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  executeSesInvoiceRevisionAction,
+  executeSesInvoiceRevisionAction as executeSesInvoiceRevisionActionRaw,
   SES_MONEY_ACTION_REFUSED_EVENT_TYPE,
   SesActionError,
   type SesXeroGateway,
@@ -40,6 +40,18 @@ const INVOICE_NUMBER = "INV-1161";
 const REFERENCE = "MLB-27387PO-57525";
 const TOTAL = 275;
 const DEP_GEN = 18;
+const executeSesInvoiceRevisionAction:
+  typeof executeSesInvoiceRevisionActionRaw = (
+    client,
+    auth,
+    args,
+    gateway,
+    deps = {},
+  ) =>
+    executeSesInvoiceRevisionActionRaw(client, auth, args, gateway, {
+      ...deps,
+      assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+    });
 // The live card: readiness_revision is NULL on both the approval and the
 // readiness view, so the stale-review comparison must not fire on it.
 const READINESS_REV: string | null = null;

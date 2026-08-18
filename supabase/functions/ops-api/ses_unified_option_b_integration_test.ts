@@ -26,6 +26,9 @@ import type {
 } from "./ses_external_effects.ts";
 
 const ORG_ID = "00000000-0000-4000-8000-000000000001";
+const sealedWorkflowContractFixture = {
+  assertWorkflowReleaseContract: async () => `sha256:${"f".repeat(64)}`,
+};
 const JOB_ID = "10000000-0000-4000-8000-000000000001";
 const DOCKET_ID = "20000000-0000-4000-8000-000000000001";
 const OBLIGATION_ID = "30000000-0000-4000-8000-000000000001";
@@ -606,6 +609,8 @@ function optionBHarness(
             created_by: USER.email,
           }, {
             fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+            assertWorkflowReleaseContract:
+              sealedWorkflowContractFixture.assertWorkflowReleaseContract,
           });
           correctedAfterBindId = String(corrected.release.id);
         }
@@ -633,6 +638,8 @@ function optionBHarness(
               created_by: USER.email,
             }, {
               fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+              assertWorkflowReleaseContract:
+                sealedWorkflowContractFixture.assertWorkflowReleaseContract,
             });
             correctedDuringFinalCommitId = String(corrected.release.id);
           } finally {
@@ -738,6 +745,8 @@ function optionBHarness(
           created_by: USER.email,
         }, {
           fetchInvoicePdfBytes: (id) => xeroGateway.fetchAuthorisedPdf(id),
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         });
         correctedDuringAuthoriseId = String(corrected.release.id);
       }
@@ -817,6 +826,8 @@ async function prepareMixedOptionBPreview(
     created_by: USER.email,
   }, {
     fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
   });
 }
 
@@ -828,6 +839,8 @@ Deno.test("T11 Option B real actions: DRAFT approval authorises, binds, mints, a
     created_by: USER.email,
   }, {
     fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
   });
   const sourceId = String(preview.release.id);
   const result = await unifiedSesReleaseAction(h.client, auth, {
@@ -839,6 +852,8 @@ Deno.test("T11 Option B real actions: DRAFT approval authorises, binds, mints, a
     xeroGateway: h.xeroGateway,
     mailGateway: h.mailGateway,
     releaseXeroReader: h.releaseXeroReader,
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
   });
 
   assertEquals(result.state, "released");
@@ -862,6 +877,40 @@ Deno.test("T11 Option B real actions: DRAFT approval authorises, binds, mints, a
   assert(bindIndex >= 0 && releaseApprovalIndex > bindIndex);
 });
 
+Deno.test("unified production-default gate refuses before approval, Xero, or Graph", async () => {
+  const h = optionBHarness();
+  const preview = await prepareSesReleaseRevisionAction(h.client, {
+    org_id: ORG_ID,
+    job_ids: [JOB_ID],
+    created_by: USER.email,
+  }, {
+    fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
+  });
+  const approvalCount = h.approvals.length;
+  const error = await assertRejects(
+    () =>
+      unifiedSesReleaseAction(h.client, auth, {
+        org_id: ORG_ID,
+        release_revision_id: String(preview.release.id),
+        expected_release_content_hash: String(preview.release.content_hash),
+        actor: USER.email,
+      }, {
+        xeroGateway: h.xeroGateway,
+        mailGateway: h.mailGateway,
+        releaseXeroReader: h.releaseXeroReader,
+      }),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertEquals(h.approvals.length, approvalCount);
+  assertEquals(h.xeroAuthoriseDispatches(), 0);
+  assertEquals(h.sends, []);
+  assertEquals(h.order.includes("xero_authorise"), false);
+  assertEquals(h.order.includes("mail_send"), false);
+});
+
 Deno.test(
   "AC6 confirmed route effect closes from ledger proof with zero provider calls",
   async () => {
@@ -872,6 +921,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const first = await unifiedSesReleaseAction(h.client, auth, {
       org_id: ORG_ID,
@@ -882,6 +933,8 @@ Deno.test(
       xeroGateway: h.xeroGateway,
       mailGateway: h.mailGateway,
       releaseXeroReader: h.releaseXeroReader,
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     assertEquals(first.state, "released");
     if (first.state !== "released") throw new Error("expected released result");
@@ -907,6 +960,7 @@ Deno.test(
       },
       h.mailGateway,
       h.releaseXeroReader,
+      sealedWorkflowContractFixture,
     );
     assertEquals(replay.state, "released");
     assertEquals(providerCalls, 0);
@@ -924,6 +978,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const sourceId = String(preview.release.id);
     await assertRejects(
@@ -937,6 +993,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -955,6 +1013,8 @@ Deno.test(
       xeroGateway: h.xeroGateway,
       mailGateway: h.mailGateway,
       releaseXeroReader: h.releaseXeroReader,
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     assertEquals(recovered.state, "released");
     assertEquals(h.xeroAuthoriseDispatches(), 1);
@@ -972,6 +1032,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const sourceId = String(preview.release.id);
     await assertRejects(
@@ -985,6 +1047,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1004,6 +1068,8 @@ Deno.test(
       xeroGateway: h.xeroGateway,
       mailGateway: h.mailGateway,
       releaseXeroReader: h.releaseXeroReader,
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     assertEquals(recovered.state, "released");
     assertEquals(h.xeroAuthoriseDispatches(), 1);
@@ -1035,6 +1101,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1060,6 +1128,8 @@ Deno.test(
       xeroGateway: h.xeroGateway,
       mailGateway: h.mailGateway,
       releaseXeroReader: h.releaseXeroReader,
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     assertEquals(recovered.state, "released");
     assertEquals(h.xeroAuthoriseDispatches(), 1);
@@ -1099,6 +1169,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1115,6 +1187,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1144,6 +1218,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1164,6 +1240,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const sourceId = String(preview.release.id);
     const error = await assertRejects(
@@ -1177,6 +1255,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1207,6 +1287,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const sourceId = String(preview.release.id);
     const error = await assertRejects(
@@ -1220,6 +1302,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1254,6 +1338,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const sourceId = String(preview.release.id);
     const error = await assertRejects(
@@ -1267,6 +1353,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1312,6 +1400,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1328,6 +1418,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const correctedId = String(corrected.release.id);
     assertEquals(
@@ -1346,6 +1438,8 @@ Deno.test(
           xeroGateway: h.xeroGateway,
           mailGateway: h.mailGateway,
           releaseXeroReader: h.releaseXeroReader,
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );
@@ -1367,6 +1461,8 @@ Deno.test("T11 Option B real actions: altered AUTHORISED artifact hard-refuses b
     created_by: USER.email,
   }, {
     fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
   });
   const error = await assertRejects(
     () =>
@@ -1379,6 +1475,8 @@ Deno.test("T11 Option B real actions: altered AUTHORISED artifact hard-refuses b
         xeroGateway: h.xeroGateway,
         mailGateway: h.mailGateway,
         releaseXeroReader: h.releaseXeroReader,
+        assertWorkflowReleaseContract:
+          sealedWorkflowContractFixture.assertWorkflowReleaseContract,
       }),
     SesActionError,
   );
@@ -1401,6 +1499,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const releaseId = String(preview.release.id);
     const existing = h.releases.find((row) => row.id === releaseId)!;
@@ -1444,6 +1544,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const releaseId = String(preview.release.id);
     h.releases.splice(0);
@@ -1476,6 +1578,8 @@ Deno.test("AC7 real actions: minting corrected release B supersedes approved A a
     created_by: USER.email,
   }, {
     fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
   });
   const deps = createSupabaseUnifiedReleaseDeps(h.client, auth, {
     org_id: ORG_ID,
@@ -1483,6 +1587,8 @@ Deno.test("AC7 real actions: minting corrected release B supersedes approved A a
     xeroGateway: h.xeroGateway,
     mailGateway: h.mailGateway,
     releaseXeroReader: h.releaseXeroReader,
+    assertWorkflowReleaseContract:
+      sealedWorkflowContractFixture.assertWorkflowReleaseContract,
   });
   const source = await deps.loadRelease(String(preview.release.id));
   assert(source);
@@ -1506,7 +1612,7 @@ Deno.test("AC7 real actions: minting corrected release B supersedes approved A a
       ready: true,
     }],
     created_by: USER.email,
-  });
+  }, sealedWorkflowContractFixture);
   assert(String(correctedB.release.id) !== approvedA.release_revision_id);
   assertEquals(
     h.releases.find((row) => row.id === approvedA.release_revision_id)?.state,
@@ -1524,6 +1630,8 @@ Deno.test("AC7 real actions: minting corrected release B supersedes approved A a
         xeroGateway: h.xeroGateway,
         mailGateway: h.mailGateway,
         releaseXeroReader: h.releaseXeroReader,
+        assertWorkflowReleaseContract:
+          sealedWorkflowContractFixture.assertWorkflowReleaseContract,
       }),
     SesActionError,
   );
@@ -1544,6 +1652,8 @@ Deno.test(
       created_by: USER.email,
     }, {
       fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+      assertWorkflowReleaseContract:
+        sealedWorkflowContractFixture.assertWorkflowReleaseContract,
     });
     const releaseAId = String(releaseA.release.id);
     const releaseARow = h.releases.find((row) => row.id === releaseAId)!;
@@ -1573,6 +1683,8 @@ Deno.test(
           created_by: USER.email,
         }, {
           fetchInvoicePdfBytes: (id) => h.xeroGateway.fetchAuthorisedPdf(id),
+          assertWorkflowReleaseContract:
+            sealedWorkflowContractFixture.assertWorkflowReleaseContract,
         }),
       SesActionError,
     );

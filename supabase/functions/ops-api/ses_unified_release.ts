@@ -40,6 +40,7 @@ import {
   approveSesInvoiceRevisionAction,
   approveSesReleaseRevisionAction,
   assertSesReleaseRevisionIsCurrent,
+  assertSesWorkflowReleaseContractForMembers,
   bindAuthorisedInvoicePdfToDocket,
   buildSesReleaseRevisionPlanForDockets,
   commitSesReleaseRevisionPlanAction,
@@ -51,7 +52,7 @@ import {
   SesActionError,
   type SesXeroInvoiceResult,
 } from "./ses_reporting_actions.ts";
-import type { SesReviewRoute } from "./ses_review_cockpit.ts";
+import type { SesCockpitDocket, SesReviewRoute } from "./ses_review_cockpit.ts";
 import {
   isSesRefusal,
   type SesRefusal,
@@ -654,6 +655,9 @@ export function createSupabaseUnifiedReleaseDeps(
     xeroGateway: SesXeroGateway;
     mailGateway: SesMailGateway;
     releaseXeroReader: SesReleaseXeroReader;
+    assertWorkflowReleaseContract?: (
+      dockets: SesCockpitDocket[],
+    ) => Promise<string>;
   },
 ): UnifiedReleaseDeps {
   const failureFromError = (
@@ -705,6 +709,11 @@ export function createSupabaseUnifiedReleaseDeps(
     ]);
     if (membersResp.error || routesResp.error) return null;
     const members = membersResp.data || [];
+    await assertSesWorkflowReleaseContractForMembers(
+      client,
+      members,
+      ctx.assertWorkflowReleaseContract,
+    );
     const obligationIds = [
       ...new Set(
         members
@@ -1197,6 +1206,8 @@ export function createSupabaseUnifiedReleaseDeps(
             source_release_revision_id: sourceRelease.release_revision_id,
             source_release_content_hash: sourceRelease.content_hash,
           }],
+        }, {
+          assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
         });
         const approved = await loadReleaseSnapshot(
           sourceRelease.release_revision_id,
@@ -1347,6 +1358,8 @@ export function createSupabaseUnifiedReleaseDeps(
               release_revision_id: sourceRelease.release_revision_id,
               release_content_hash: sourceRelease.content_hash,
             }, recoveryCapsule],
+          }, {
+            assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
           });
           authorised = await executeSesInvoiceRevisionAction(
             client,
@@ -1359,6 +1372,9 @@ export function createSupabaseUnifiedReleaseDeps(
               actor: ctx.actor,
             },
             ctx.xeroGateway,
+            {
+              assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
+            },
           ) as OptionBAuthorisedMemberResult;
         } else {
           authorised = await recoverOptionBBoundMember(
@@ -1462,6 +1478,7 @@ export function createSupabaseUnifiedReleaseDeps(
         dockets: currentDockets,
         routes: expectedRoutes,
         created_by: ctx.actor,
+        assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
       });
       const finalPlan = recoveringSupersededSource
         ? await (async () => {
@@ -1526,6 +1543,8 @@ export function createSupabaseUnifiedReleaseDeps(
             authorised_invoice_number: item.authorised_invoice.invoice_number,
           })),
         }],
+      }, {
+        assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
       });
       // Re-read the exact approved derivative before retiring the DRAFT retry
       // handle. After the source CAS succeeds there are no further fallible
@@ -1594,6 +1613,9 @@ export function createSupabaseUnifiedReleaseDeps(
             actor: ctx.actor,
           },
           ctx.xeroGateway,
+          {
+            assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
+          },
         );
         return { ok: true, result };
       } catch (error) {
@@ -1612,6 +1634,9 @@ export function createSupabaseUnifiedReleaseDeps(
           },
           ctx.mailGateway,
           ctx.releaseXeroReader,
+          {
+            assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
+          },
         );
         return { kind: "released", result };
       } catch (error) {
@@ -1693,6 +1718,9 @@ export async function unifiedSesReleaseAction(
     xeroGateway: SesXeroGateway;
     mailGateway: SesMailGateway;
     releaseXeroReader: SesReleaseXeroReader;
+    assertWorkflowReleaseContract?: (
+      dockets: SesCockpitDocket[],
+    ) => Promise<string>;
   },
 ): Promise<UnifiedReleaseOutcome> {
   const deps = createSupabaseUnifiedReleaseDeps(client, auth, {
@@ -1701,6 +1729,7 @@ export async function unifiedSesReleaseAction(
     xeroGateway: ctx.xeroGateway,
     mailGateway: ctx.mailGateway,
     releaseXeroReader: ctx.releaseXeroReader,
+    assertWorkflowReleaseContract: ctx.assertWorkflowReleaseContract,
   });
   return await runUnifiedSesRelease(
     auth,

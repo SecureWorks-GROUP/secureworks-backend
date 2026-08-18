@@ -391,17 +391,16 @@ Deno.test("a card with no builder work order fails at completed and archive", ()
   }
 });
 
-Deno.test("SWMS is untouched: the MLB rule is builder-scoped and lives elsewhere", () => {
-  // The 2026-08-01 SWMS ruling ("required only for MLB make-safes") cannot be
-  // expressed in a family x stage table — it turns on builder identity, which
-  // this ruler never sees. The builder-aware rule is sealed in
-  // `ses_family_matrix.ts`; `report_only_swms` stays OPEN pending plan-v2 C.11,
-  // because flattening the high-risk-construction-work trigger to N-A by
-  // builder identity is a safety call, not a paperwork one.
+Deno.test("SWMS stays outside the independent family x stage evidence ruler", () => {
+  // The typed workflow registry and `ses_family_matrix.ts` now own SWMS policy.
+  // This independent evidence ruler stays observational: making it a second
+  // executable requirement table would recreate the drift AC18 removes.
+  // `report_only_swms` remains open because the roof/assessment accuracy gate
+  // has not yet promoted include-now into a hard release requirement.
   assert(SES_CAPTAIN_QUESTIONS.some((row) => row.id === "report_only_swms"));
   assertEquals(sesCaptainQuestion("report_only_swms").resolution, undefined);
   for (const stage of SES_EVIDENCE_STAGES) {
-    // Physical and fencing SWMS stay OPTIONAL: never a gate, always observed.
+    // This ruler observes physical and fencing SWMS without becoming its gate.
     assertEquals(
       sesEvidenceRequirement("physical_makesafe", stage, "swms").level,
       stage === "report_ready" || stage === "completed" ||
@@ -410,7 +409,7 @@ Deno.test("SWMS is untouched: the MLB rule is builder-scoped and lives elsewhere
         : "optional",
       `physical_makesafe/${stage}`,
     );
-    // No SWMS cell anywhere is REQUIRED, in any family, at any stage.
+    // No SWMS cell is REQUIRED here; the workflow registry owns that decision.
     for (const family of SES_EVIDENCE_FAMILIES) {
       assert(
         sesEvidenceRequirement(family, stage, "swms").level !== "required",
