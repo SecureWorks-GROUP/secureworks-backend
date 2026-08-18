@@ -193,6 +193,16 @@ Pack state is produced once, by `presentSesPackHonesty`
 distinct on the ops card: a refusal is an honest stop naming its fact, never a
 green tick and never the legacy send-pipeline `failed`.
 
+Kind `ready` additionally requires the pack bind pointers — attach ticks are
+not binds (AGENTS.md "Docs Ready Is A Queue, Not A Board Column" owns the
+rule). A physical-shaped family with no `pack.report_doc_id`, a required SWMS
+with no `pack.swms_doc_id`, or a report-only (roof/assessment) card without
+family report-in evidence presents `incomplete` with a reason, even when the
+docket stamp says docs-ready. The published `pack.pre_xero_docs_ready` is gated
+the same way: it is `true` only when the presentation kind is `ready`, and the
+`closeout_documents.report` / `.swms` ticks on bind-required families follow
+the pack pointer alone, never `has_report_doc` / `has_swms_doc`.
+
 Ops rows publish it as:
 
 - `pack.presentation_kind`, `pack.presentation_reason` (plain-English reason for
@@ -213,7 +223,9 @@ raw pack status / review state / blocker list that feed derivation are
 unchanged, and AGENTS.md ("Previously Committed PDF Is Restorable, Not
 Complete") owns the rule keeping it out of every derivation input. The
 `pack_presentation` object on the internal `makesafe_pipeline` row is that
-stamp's carrier; the board reads it and never re-derives one.
+stamp's carrier; the board reads it, and re-derives only when there is no stamp
+or when a stale stamp claims `ready` while the live bind pointers / report-in
+evidence refuse it — a stamped ready can never outrank the bind floor.
 
 ### U2-S1 cycle-scoped evidence (board + audit)
 

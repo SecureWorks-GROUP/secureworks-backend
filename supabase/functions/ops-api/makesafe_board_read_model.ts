@@ -1442,8 +1442,8 @@ export function buildCanonicalMakesafeRows(
     // authority; re-derive only when a caller injected `report_pack` directly
     // (tests, the parity harness) so both paths agree. `drafted` always comes
     // from the presentation, never from reading a presentation state string.
-    const stamped = stampedPackPresentation(base);
-    const derived = stamped ? null : presentSesPackHonesty({
+    const needsBoundReportPdf = requiresBoundBuilderReportPdf(statusInput);
+    const honestyInput = {
       docket: pack?.docket_revision_id
         ? {
           id: pack.docket_revision_id,
@@ -1460,15 +1460,35 @@ export function buildCanonicalMakesafeRows(
         : null,
       pack_sent: packSent || base?.sent_to_builder === true,
       has_report_doc: base?.has_report_doc === true,
-    });
+      report_doc_id: pack?.report_doc_id || null,
+      requires_bound_report_doc: needsBoundReportPdf,
+      swms_doc_id: pack?.swms_doc_id || null,
+      requires_bound_swms: swmsRequired,
+      // Report-only: ready presentation still needs portal/own-template proof.
+      family_report_evidence_satisfied: needsBoundReportPdf
+        ? true
+        : reportIn.satisfied,
+    };
+    const stamped = stampedPackPresentation(base);
+    // A stale pipeline stamp can still claim ready without bind pointers —
+    // re-derive when the stamp would green a card the live binds refuse.
+    const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
+      (needsBoundReportPdf && !String(pack?.report_doc_id || "").trim()) ||
+      (swmsRequired && !String(pack?.swms_doc_id || "").trim()) ||
+      (!needsBoundReportPdf && !reportIn.satisfied)
+    );
+    const derived = (!stamped || stampedReadyDishonest)
+      ? presentSesPackHonesty(honestyInput)
+      : null;
+    const packHonestySource = stampedReadyDishonest
+      ? derived
+      : (stamped ?? derived);
     const packHonesty = {
-      kind: String(stamped?.kind ?? derived?.kind ?? "none"),
-      state: String(stamped?.state ?? derived?.state ?? "not_started"),
-      reason: stamped?.reason ?? derived?.reason ?? null,
-      drafted: (stamped?.drafted ?? derived?.drafted) === true ||
-        !!pack?.report_doc_id,
-      legacy_pack_status: stamped?.legacy_pack_status ??
-        derived?.legacy_pack_status ?? null,
+      kind: String(packHonestySource?.kind ?? "none"),
+      state: String(packHonestySource?.state ?? "not_started"),
+      reason: packHonestySource?.reason ?? null,
+      drafted: packHonestySource?.drafted === true || !!pack?.report_doc_id,
+      legacy_pack_status: packHonestySource?.legacy_pack_status ?? null,
     };
     const packPayload = {
       // Honest state: never a stale legacy `failed` over a ready docket.
@@ -1480,7 +1500,10 @@ export function buildCanonicalMakesafeRows(
         : null,
       drafted: packHonesty.drafted === true,
       docket_revision_id: pack?.docket_revision_id || null,
-      pre_xero_docs_ready: pack?.pre_xero_docs_ready === true,
+      // Presentation honesty outranks a stale docket stamp: missing binds
+      // cannot publish pre_xero_docs_ready as an operator-facing ready signal.
+      pre_xero_docs_ready: packHonesty.kind === "ready" &&
+        pack?.pre_xero_docs_ready === true,
       // Refusal / incomplete / ready distinction for the operator surface.
       presentation_kind: packHonesty.kind,
       presentation_reason: packHonesty.reason,
@@ -1489,16 +1512,19 @@ export function buildCanonicalMakesafeRows(
       invoice_doc_id: pack?.invoice_doc_id || null,
       swms_doc_id: pack?.swms_doc_id || null,
       closeout_documents: {
-        // Physical / temp-fence: the report tile is the builder-facing PDF.
-        // A submitted trade checklist is Trade Report In, never this tick.
+        // Physical / temp-fence: the report tile is the pack bind only.
+        // Attach tick (`has_report_doc`) is not a bind.
         // Roof / assessment honestly have no local make-safe report, so the
         // portal/own-template report-in predicate remains the tile.
-        report: requiresBoundBuilderReportPdf(statusInput)
-          ? (base?.has_report_doc === true || !!pack?.report_doc_id)
+        report: needsBoundReportPdf
+          ? !!String(pack?.report_doc_id || "").trim()
           : (reportIn.satisfied || base?.has_report_doc === true ||
             !!pack?.report_doc_id),
         invoice: invoiceCloseoutSatisfied,
-        swms: base?.has_swms_doc === true || !!pack?.swms_doc_id,
+        // Required SWMS closeout tick is the pack pointer; attach alone is not.
+        swms: swmsRequired
+          ? !!String(pack?.swms_doc_id || "").trim()
+          : (base?.has_swms_doc === true || !!pack?.swms_doc_id),
       },
     };
     const rawReportState = String(

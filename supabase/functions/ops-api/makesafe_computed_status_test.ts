@@ -211,6 +211,23 @@ Deno.test("computed status: Docs Ready reads durable draft-pack records", () => 
   assertEquals(result.status, "report_ready");
 });
 
+Deno.test("computed status: attach tick without report_doc_id is not Docs Ready", () => {
+  const result = computeMakesafeStatus(physical({
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 8,
+    invoiceStatus: "DRAFT",
+    invoiceQualifiesAsCurrentDraft: true,
+    packState: "READY",
+    documents: { report: true, invoice: true },
+    pack: {
+      status: "drafted",
+      report_doc_id: null,
+      invoice_doc_id: "invoice-doc",
+    },
+  }));
+  assertEquals(result.status, "trade_report_in");
+});
+
 Deno.test("computed status: AUTHORISED not-sent stays Docs Ready (no post-authorise regression)", () => {
   const result = computeMakesafeStatus(physical({
     serviceReports: [{ status: "submitted", cycle_number: 1 }],

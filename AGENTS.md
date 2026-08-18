@@ -1201,10 +1201,13 @@ exact stored Xero identity, `fetchAuthorisedPdf`, and
 `commit_ses_invoice_bound_docket_v1` against the **current** docket. Never mint,
 re-authorise, void, or send. Identity mismatch (invoice number / Xero id /
 total) refuses. Idempotent on replay. Do **not** generalise this into a
-`stale_review` bypass for unauthorised revisions. A card with a raised invoice
-and report evidence that is not yet sent must stay in Docs Ready
-(`authorisedAwaitingSend` / ladder v4) — never regress to `trade_report_in`
-after money is committed.
+`stale_review` bypass for unauthorised revisions. The #684 Captain lock retired
+`authorisedAwaitingSend` from the ladder: an AUTHORISED-unsent invoice is NOT a
+pre-Xero Docs Ready positive on its own. Such a card sits in Docs Ready only
+when a qualifying current DRAFT places it, or when the current-cycle bound
+invoice backs a complete Docs Ready pack (the adoption path); otherwise it
+derives `trade_report_in` until a proved send closes it out. The recovery above
+never demands re-approval, but it does not park the card in Docs Ready either.
 
 A second recovery on the same action (2026-08-14): an obligation already
 `create_executed` with a bound Xero invoice id ADOPTS that exact invoice and
@@ -2630,13 +2633,17 @@ placement promise, and both gaps have already cost a run:
 Worked run, with the PO-grain reference screen that keeps a sibling's money from
 refusing a mintable card: `docs/evidence/ses-draft-mint-run-2026-08-07.md`.
 
-Physical make-safe and temp-fence Docs Ready also require a bound builder-facing
-report PDF (`pack.report_doc_id` or a live `job_documents` `makesafe_report`
-row). A submitted trade service report is Trade Report In only — never the
-report tile and never placement. Soft-assuming `canonical_draft_pack_output_missing`
-/ `curated_source_missing` must not keep the card in Docs Ready. Roof and
-assessment honestly have no local make-safe report and stay on the portal
-floor. `physicalReportCloseoutSatisfied` / `requiresBoundBuilderReportPdf` in
+Physical make-safe and temp-fence Docs Ready require a bound builder-facing
+report PDF via `pack.report_doc_id` only. Attach tick (`has_report_doc` /
+`documents.report`) is not a bind — a typed `job_documents` row alone must not
+place Docs Ready or green pack presentation / the report closeout tile. A
+submitted trade service report is Trade Report In only. Required SWMS likewise
+needs `pack.swms_doc_id`, not an attach tick. Soft-assuming
+`canonical_draft_pack_output_missing` / `curated_source_missing` must not keep
+the card in Docs Ready. Roof and assessment honestly have no local make-safe
+report and stay on the portal floor; their pack presentation still needs
+family report-in evidence before looking send-ready (SWMS-261243 class).
+`physicalReportCloseoutSatisfied` / `requiresBoundBuilderReportPdf` in
 `makesafe_computed_status.ts` are the one producer; Heathridge SWMS-261174
 (AJBR-70781, 2026-08-14) is the named miss.
 

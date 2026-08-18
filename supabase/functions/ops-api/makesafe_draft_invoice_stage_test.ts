@@ -193,13 +193,15 @@ Deno.test(
       }),
       "completed",
     );
-    // Without packSent, authorised + report still docs-ready (not completed).
+    // Without packSent, AUTHORISED is not a pre-Xero Docs Ready positive — the
+    // card stays Trade Report In until a qualifying current DRAFT or a proved
+    // send softens close-out. (Attach/report alone cannot invent Docs Ready.)
     assertEquals(
       stage(card, invoice("AUTHORISED", RECENT), docsMissingInvoice, {
         packSent: false,
         report: { id: "report-1" },
       }),
-      "report_ready",
+      "trade_report_in",
     );
   },
 );
