@@ -433,11 +433,196 @@ Deno.test("SWMS-26740 bind-only action attaches INV-0817 and dispatches no money
   );
   assertEquals(calls, { attach: 1, ensure: 1, bind: 1 });
   assertEquals(result.state, "existing_invoice_pack_bound");
+  assertEquals(result.dry_run, false);
+  assertEquals(result.persisted, true);
+  assertEquals(result.would_do, null);
+  assertEquals(result.would_refuse, null);
   assertEquals(result.lineage_required, false);
   assertEquals(result.invoice_create_dispatched, false);
   assertEquals(result.invoice_authorise_dispatched, false);
   assertEquals(result.send_dispatched, false);
   assertEquals(result.external_mutations, { xero: 0, email: 0 });
+});
+
+Deno.test("dry_run previews bind without document, pack, or event writes", async () => {
+  const calls = { attach: 0, ensure: 0, bind: 0, pdf: 0 };
+  const jobEvents: any[] = [];
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient({}, {
+      reattend_count: 4,
+      last_reattend_at: "2026-08-06T00:00:00Z",
+    }, jobEvents) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-1140",
+      actor: "captain@test",
+      dry_run: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice({
+        xero_invoice_id: "xero-1140",
+        invoice_number: "INV-1140",
+        created_at: "2026-08-05T00:00:00Z",
+      })],
+      fetchInvoicePdfBytes: async () => {
+        calls.pdf++;
+        return new Uint8Array([37, 80, 68, 70]);
+      },
+      attachDocument: async () => {
+        calls.attach++;
+        return {
+          success: true,
+          document_id: "unexpected",
+          type: "invoice",
+          url: "https://example.test/unexpected.pdf",
+        };
+      },
+      ensurePack: async () => {
+        calls.ensure++;
+      },
+      bindPack: async () => {
+        calls.bind++;
+      },
+    },
+  );
+
+  assertEquals(calls, { attach: 0, ensure: 0, bind: 0, pdf: 1 });
+  assertEquals(jobEvents, []);
+  assertEquals(result.success, true);
+  assertEquals(result.dry_run, true);
+  assertEquals(result.persisted, false);
+  assertEquals(result.state, "would_bind_existing_invoice_pack");
+  assertEquals(result.would_refuse, null);
+  assertEquals(result.would_do, {
+    attach_invoice_document: {
+      type: "invoice",
+      file_name: "Xero Invoice - INV-1140.pdf",
+      xero_invoice_id: "xero-1140",
+      invoice_number: "INV-1140",
+      invoice_status: "DRAFT",
+      named_prior_cycle_bind: true,
+    },
+    ensure_main_pack: true,
+    bind_pack: {
+      xero_invoice_id: "xero-1140",
+      invoice_status: "DRAFT",
+    },
+    audit_named_prior_cycle_bind: true,
+  });
+  assertEquals(result.invoice.document_id, null);
+  assertEquals(result.invoice.pdf_bytes, 4);
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
+});
+
+Deno.test("dry_run returns would_refuse for pack send-state without writes", async () => {
+  const writes: string[] = [];
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient({
+      status: "failed",
+      failed_step: "money_review_gate",
+    }) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-0817",
+      actor: "captain@test",
+      dry_run: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => {
+        writes.push("accrec");
+        return [invoice()];
+      },
+      attachDocument: async () => {
+        writes.push("attach");
+        return { document_id: "unexpected" } as any;
+      },
+    },
+  );
+
+  assertEquals(writes, []);
+  assertEquals(result.success, false);
+  assertEquals(result.dry_run, true);
+  assertEquals(result.persisted, false);
+  assertEquals(result.state, "would_refuse");
+  assertEquals(result.would_do, null);
+  assertEquals(result.would_refuse.code, "pack_send_state_blocks_bind");
+  assertEquals(result.would_refuse.status, 409);
+  assertEquals(
+    String(result.would_refuse.message).includes(
+      "refuses pack status 'failed'",
+    ),
+    true,
+  );
+});
+
+Deno.test("dry_run returns would_refuse for named-invoice selection failures", async () => {
+  const writes: string[] = [];
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient() as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-9999",
+      actor: "captain@test",
+      dry_run: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice()],
+      fetchInvoicePdfBytes: async () => {
+        writes.push("pdf");
+        return new Uint8Array([37, 80, 68, 70]);
+      },
+      attachDocument: async () => {
+        writes.push("attach");
+        return { document_id: "unexpected" } as any;
+      },
+    },
+  );
+
+  assertEquals(writes, []);
+  assertEquals(result.success, false);
+  assertEquals(result.dry_run, true);
+  assertEquals(result.persisted, false);
+  assertEquals(result.state, "would_refuse");
+  assertEquals(result.would_refuse.code, "named_invoice_not_found");
+});
+
+Deno.test("dry_run already-bound path reports persisted:false and no writes", async () => {
+  const writes: string[] = [];
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient({
+      xero_invoice_id: "xero-0817",
+      invoice_doc_id: "invoice-doc-0817",
+    }) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-0817",
+      actor: "captain@test",
+      dry_run: true,
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice()],
+      fetchInvoicePdfBytes: async () => {
+        writes.push("pdf");
+        return new Uint8Array();
+      },
+      attachDocument: async () => {
+        writes.push("attach");
+        return { document_id: "unexpected" } as any;
+      },
+    },
+  );
+
+  assertEquals(writes, []);
+  assertEquals(result.success, true);
+  assertEquals(result.dry_run, true);
+  assertEquals(result.persisted, false);
+  assertEquals(result.state, "existing_invoice_pack_already_bound");
+  assertEquals(result.would_do, null);
+  assertEquals(result.would_refuse, null);
+  assertEquals(result.invoice.document_id, "invoice-doc-0817");
 });
 
 Deno.test("named prior-cycle bind records the exception without minting or sending", async () => {
