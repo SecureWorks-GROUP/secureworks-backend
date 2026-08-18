@@ -93,7 +93,16 @@ import {
   type SesAuthorisedDerivativeProof,
   verifySesAuthorisedDerivative,
 } from "./ses_authorised_derivative.ts";
-import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
+import {
+  requiresMakesafeSwms,
+  SES_FAMILY_MATRIX_VERSION,
+  type SesFamilyId,
+} from "./ses_family_matrix.ts";
+import {
+  reportInEvidence,
+  requiresBoundBuilderReportPdf,
+} from "./makesafe_computed_status.ts";
+import { projectMakesafePortalCaptures } from "./makesafe_board_read_model.ts";
 import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
@@ -3092,9 +3101,106 @@ export async function getSesReviewablePackAction(
     ...sourceCaveats,
   ]);
   const envelope = object(docket.envelope);
+  // Bind-floor honesty inputs — same set board/pipeline pass to
+  // presentSesPackHonesty. Omitting them left defaults permissive so a
+  // ready-stamped physical docket with no report_doc_id greened the review
+  // pack (SWMS-261015) while the board correctly read incomplete.
+  const jobId = String(docket.job_id || "");
+  const [packRead, jobRead, detailRead] = await Promise.all([
+    client.from("makesafe_report_packs")
+      .select(
+        "id,pack_kind,status,report_doc_id,invoice_doc_id,swms_doc_id,sent_at",
+      )
+      .eq("job_id", jobId).eq("pack_kind", "main").maybeSingle(),
+    client.from("jobs")
+      .select("id,type,status,metadata")
+      .eq("id", jobId).maybeSingle(),
+    client.from("makesafe_job_details")
+      .select(
+        "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,portal_verified_at,portal_verified_cycle,portal_verified_signal,requesting_company_slug,requesting_company_name,requesting_company_id",
+      )
+      .eq("job_id", jobId).maybeSingle(),
+  ]);
+  if (packRead.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The pack pointers could not be read (${
+        packRead.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  if (jobRead.error || detailRead.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The job identity for pack honesty could not be read (${
+        jobRead.error?.message || detailRead.error?.message ||
+        "unknown database error"
+      }).`,
+    });
+  }
+  const packRow = packRead.data || null;
+  const jobRow = jobRead.data || null;
+  const detailRow = detailRead.data || null;
+  const sesFamily = (reviewFamily || null) as SesFamilyId | null;
+  const honestyStatusInput = {
+    job: jobRow,
+    detail: detailRow,
+    evidence: {
+      pack: packRow
+        ? {
+          report_doc_id: packRow.report_doc_id ?? null,
+          swms_doc_id: packRow.swms_doc_id ?? null,
+        }
+        : null,
+      documents: {
+        report: !!String(packRow?.report_doc_id || "").trim(),
+      },
+      serviceReports: [] as unknown[],
+      portalCaptures: [] as ReturnType<typeof projectMakesafePortalCaptures>,
+    },
+    ses_family: sesFamily,
+  };
+  const needsBoundReportPdf = requiresBoundBuilderReportPdf(honestyStatusInput);
+  // Report-only: project portal captures (validated ledger rows plus the
+  // card's own detail-derived captures) so family evidence matches the board
+  // projection. Physical cards skip this — the bind floor is the gate.
+  if (!needsBoundReportPdf && detailRow) {
+    const cycleId = String(detailRow.attendance_cycle_id || "").trim();
+    let ledgerRows: Record<string, unknown>[] = [];
+    if (cycleId) {
+      const portalRead = await client.from("makesafe_portal_capture_revisions")
+        .select(
+          "id,job_id,attendance_cycle_id,role,source_url,capture_result,status,capture_producer,captured_by,captured_at,builder_reference,source_content_hash,signal,screenshot_object_key,screenshot_media_type,screenshot_content_hash,screenshot_size_bytes,makesafe_fact_version",
+        )
+        .eq("job_id", jobId)
+        .eq("attendance_cycle_id", cycleId);
+      if (portalRead.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact: `Portal capture evidence for pack honesty could not be read (${
+            portalRead.error.message || "unknown database error"
+          }).`,
+        });
+      }
+      ledgerRows = portalRead.data || [];
+    }
+    honestyStatusInput.evidence.portalCaptures = projectMakesafePortalCaptures(
+      {
+        id: jobId,
+        metadata: jobRow?.metadata || {},
+        makesafe_details: detailRow,
+        cycle_number: detailRow.cycle_number,
+      },
+      ledgerRows,
+    );
+  }
+  const familyReportEvidenceSatisfied = needsBoundReportPdf
+    ? true
+    : reportInEvidence(honestyStatusInput).satisfied;
+  const swmsRequired = requiresMakesafeSwms(detailRow, jobRow);
   // Presentation honesty: actual identity/byte drift remains a refusal, while
   // review-source caveats remain visible without turning a drafted pack into a
-  // false U4_BLOCKED state.
+  // false U4_BLOCKED state. Bind pointers and family evidence must still fire.
   const presentation = presentSesPackHonesty({
     docket: {
       id: docket.id,
@@ -3104,6 +3210,11 @@ export async function getSesReviewablePackAction(
       blockers: storedBlockers,
     },
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
+    report_doc_id: packRow?.report_doc_id || null,
+    requires_bound_report_doc: needsBoundReportPdf,
+    swms_doc_id: packRow?.swms_doc_id || null,
+    requires_bound_swms: swmsRequired,
+    family_report_evidence_satisfied: familyReportEvidenceSatisfied,
   });
   // Enrich the ORIGINAL refusal objects rather than rebuilding them from the
   // normalized shape: `evidence` and `decision_key` are the only things telling
