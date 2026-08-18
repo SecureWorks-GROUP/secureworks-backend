@@ -102,7 +102,7 @@ import {
   reportInEvidence,
   requiresBoundBuilderReportPdf,
 } from "./makesafe_computed_status.ts";
-import { portalCapturesFromLedger } from "./makesafe_board_read_model.ts";
+import { projectMakesafePortalCaptures } from "./makesafe_board_read_model.ts";
 import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
@@ -3117,7 +3117,7 @@ export async function getSesReviewablePackAction(
       .eq("id", jobId).maybeSingle(),
     client.from("makesafe_job_details")
       .select(
-        "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,requesting_company_slug,requesting_company_name,requesting_company_id",
+        "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,portal_verified_at,portal_verified_cycle,portal_verified_signal,requesting_company_slug,requesting_company_name,requesting_company_id",
       )
       .eq("job_id", jobId).maybeSingle(),
   ]);
@@ -3156,19 +3156,21 @@ export async function getSesReviewablePackAction(
         report: !!String(packRow?.report_doc_id || "").trim(),
       },
       serviceReports: [] as unknown[],
-      portalCaptures: [] as ReturnType<typeof portalCapturesFromLedger>,
+      portalCaptures: [] as ReturnType<typeof projectMakesafePortalCaptures>,
     },
     ses_family: sesFamily,
   };
   const needsBoundReportPdf = requiresBoundBuilderReportPdf(honestyStatusInput);
-  // Report-only: load portal ledger captures so family evidence matches the
-  // board projection. Physical cards skip this — the bind floor is the gate.
+  // Report-only: project portal captures (validated ledger rows plus the
+  // card's own detail-derived captures) so family evidence matches the board
+  // projection. Physical cards skip this — the bind floor is the gate.
   if (!needsBoundReportPdf && detailRow) {
     const cycleId = String(detailRow.attendance_cycle_id || "").trim();
+    let ledgerRows: Record<string, unknown>[] = [];
     if (cycleId) {
       const portalRead = await client.from("makesafe_portal_capture_revisions")
         .select(
-          "id,job_id,attendance_cycle_id,role,source_url,capture_result,status,capture_producer,captured_by,captured_at,builder_reference,source_content_hash,screenshot_object_key,makesafe_fact_version",
+          "id,job_id,attendance_cycle_id,role,source_url,capture_result,status,capture_producer,captured_by,captured_at,builder_reference,source_content_hash,signal,screenshot_object_key,screenshot_media_type,screenshot_content_hash,screenshot_size_bytes,makesafe_fact_version",
         )
         .eq("job_id", jobId)
         .eq("attendance_cycle_id", cycleId);
@@ -3180,16 +3182,17 @@ export async function getSesReviewablePackAction(
           }).`,
         });
       }
-      honestyStatusInput.evidence.portalCaptures = portalCapturesFromLedger(
-        {
-          id: jobId,
-          metadata: jobRow?.metadata || {},
-          makesafe_details: detailRow,
-          cycle_number: detailRow.cycle_number,
-        },
-        portalRead.data || [],
-      );
+      ledgerRows = portalRead.data || [];
     }
+    honestyStatusInput.evidence.portalCaptures = projectMakesafePortalCaptures(
+      {
+        id: jobId,
+        metadata: jobRow?.metadata || {},
+        makesafe_details: detailRow,
+        cycle_number: detailRow.cycle_number,
+      },
+      ledgerRows,
+    );
   }
   const familyReportEvidenceSatisfied = needsBoundReportPdf
     ? true

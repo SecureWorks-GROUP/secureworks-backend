@@ -213,9 +213,11 @@ function reviewPackClient(
       let single = false;
       let columns = "";
       const project = (value: unknown) => {
-        // The artifact read is column-projected in production, so a column the
+        // These reads are column-projected in production, so a column the
         // caller forgets to select is genuinely absent here too.
-        if (table !== "makesafe_docket_artifacts" || !columns) return value;
+        const projected = table === "makesafe_docket_artifacts" ||
+          table === "makesafe_portal_capture_revisions";
+        if (!projected || !columns) return value;
         const keys = columns.split(",").map((key) => key.trim());
         return (value as Array<Record<string, unknown>>).map((row) =>
           Object.fromEntries(
@@ -603,6 +605,143 @@ Deno.test("get_ses_reviewable_pack: physical pack with bound report_doc_id stays
   assertEquals(bound.presentation.pre_xero_docs_ready, true);
   assertEquals(bound.presentation.review_state, "READY");
   assertEquals(bound.presentation.reason, null);
+});
+
+Deno.test("get_ses_reviewable_pack: roof card with deterministic done portal capture is ready", async () => {
+  // A screenshot-bearing ledger capture must satisfy the report-only family
+  // floor here exactly as it does on the board (validLedgerScreenshot reads
+  // signal + screenshot_media_type/_content_hash/_size_bytes off the select).
+  const bytes = new TextEncoder().encode("%PDF-1.7\nroof-capture");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const mark = supersessionEvent();
+  mark.detail_json.expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const portalUrl = "https://portal.primeeco.tech/share/roof-261234";
+  const result = await getSesReviewablePackAction(
+    reviewPackClient(artifact, bytes, {
+      jobEvents: [mark],
+      preXeroDocsReady: true,
+      family: "ordinary_roof_portal",
+      packRow: {
+        id: "pack-roof",
+        job_id: "job-fixture",
+        pack_kind: "main",
+        status: "drafted",
+        report_doc_id: null,
+        invoice_doc_id: null,
+        swms_doc_id: null,
+        sent_at: null,
+      },
+      detailRow: {
+        job_id: "job-fixture",
+        report_type: "roof_report",
+        substatus: "allocated",
+        external_ref: "MLB-26000",
+        external_links: [{ url: portalUrl, kind: "roof_report" }],
+        attendance_cycle_id: "cycle-1",
+        cycle_number: 1,
+        portal_verified_at: null,
+        portal_verified_cycle: null,
+        portal_verified_signal: null,
+        requesting_company_slug: "mlb",
+        requesting_company_name: "MLB",
+      },
+      portalCaptures: [{
+        id: "capture-roof-done",
+        job_id: "job-fixture",
+        attendance_cycle_id: "cycle-1",
+        role: "roof_report",
+        source_url: portalUrl,
+        capture_result: "done",
+        status: "verified",
+        capture_producer: "capture_portal_evidence.py/v1",
+        captured_by: "portal-observer",
+        captured_at: "2026-08-04T00:30:00.000Z",
+        builder_reference: "",
+        source_content_hash: `sha256:${"5".repeat(64)}`,
+        signal: "form locked/submitted",
+        screenshot_object_key:
+          "makesafe-docket-artifacts/portal-captures/job-fixture/cycle-1/roof_report/abc.png",
+        screenshot_media_type: "image/png",
+        screenshot_content_hash: `sha256:${"6".repeat(64)}`,
+        screenshot_size_bytes: 4096,
+        makesafe_fact_version: 1,
+      }],
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(result.presentation.kind, "ready");
+  assertEquals(result.presentation.pre_xero_docs_ready, true);
+  assertEquals(result.presentation.review_state, "READY");
+});
+
+Deno.test("get_ses_reviewable_pack: roof card with detail-signal portal proof matches the board (ready)", async () => {
+  // Legacy report-only cards carry their proof in portal_verified_signal JSON
+  // (skill-recorded captures with screenshot paths) rather than the ledger.
+  // The board projects those via projectMakesafePortalCaptures; this surface
+  // must agree even when the card has no attendance_cycle_id to read the
+  // ledger with.
+  const bytes = new TextEncoder().encode("%PDF-1.7\nroof-signal");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const mark = supersessionEvent();
+  mark.detail_json.expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const portalUrl = "https://portal.primeeco.tech/share/roof-260900";
+  const result = await getSesReviewablePackAction(
+    reviewPackClient(artifact, bytes, {
+      jobEvents: [mark],
+      preXeroDocsReady: true,
+      family: "ordinary_roof_portal",
+      packRow: {
+        id: "pack-roof-signal",
+        job_id: "job-fixture",
+        pack_kind: "main",
+        status: "drafted",
+        report_doc_id: null,
+        invoice_doc_id: null,
+        swms_doc_id: null,
+        sent_at: null,
+      },
+      detailRow: {
+        job_id: "job-fixture",
+        report_type: "roof_report",
+        substatus: "allocated",
+        external_ref: "MLB-26001",
+        external_links: [{ url: portalUrl, kind: "roof_report" }],
+        attendance_cycle_id: null,
+        cycle_number: 1,
+        portal_verified_at: "2026-08-01T02:00:00.000Z",
+        portal_verified_cycle: 1,
+        portal_verified_signal: JSON.stringify([{
+          status: "done",
+          role: "roof_report",
+          cycle_number: 1,
+          url: portalUrl,
+          locked: true,
+          screenshot: "portal-captures/legacy-roof.png",
+        }]),
+        requesting_company_slug: "mlb",
+        requesting_company_name: "MLB",
+      },
+      portalCaptures: [],
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(result.presentation.kind, "ready");
+  assertEquals(result.presentation.pre_xero_docs_ready, true);
+  assertEquals(result.presentation.review_state, "READY");
 });
 
 Deno.test("retired commercial and self-consistent raw provenance remain untrusted without job-specific code", () => {
