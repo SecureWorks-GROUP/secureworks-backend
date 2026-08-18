@@ -391,6 +391,45 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(routes[1].ready, true);
 });
 
+Deno.test("AJS DRAFT report_invoice is review-ready when the draft PDF hash is present", () => {
+  const draftArtifacts = AJS_ARTIFACTS.filter((a) =>
+    a.role !== "xero_invoice_pdf"
+  );
+  const routes = resolveDocketRoutes(
+    ajsDocket("invoice_bound", {
+      status: "DRAFT",
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1",
+      pdf_content_hash: "draft-pdf-hash",
+    }),
+    draftArtifacts,
+    null,
+  );
+  const pack = routes[0];
+  assertEquals(pack.route_kind, "report_invoice");
+  assertEquals(pack.ready, true);
+  assertEquals(pack.attachment_hashes.includes("draft-pdf-hash"), true);
+  assertEquals(pack.attachment_hashes.includes("report-hash"), true);
+  assertEquals(pack.subject.includes("Xero draft INV-1"), true);
+});
+
+Deno.test("AJS DRAFT report_invoice stays unready without a draft PDF", () => {
+  const draftArtifacts = AJS_ARTIFACTS.filter((a) =>
+    a.role !== "xero_invoice_pdf"
+  );
+  const routes = resolveDocketRoutes(
+    ajsDocket("invoice_bound", {
+      status: "DRAFT",
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1",
+    }),
+    draftArtifacts,
+    null,
+  );
+  assertEquals(routes[0].route_kind, "report_invoice");
+  assertEquals(routes[0].ready, false);
+});
+
 Deno.test("SAMPLE AJS resolve blanks builder mailboxes when override env is unset", () => {
   const previous = Deno.env.get(SES_SAMPLE_DESTINATION_ENV);
   Deno.env.delete(SES_SAMPLE_DESTINATION_ENV);

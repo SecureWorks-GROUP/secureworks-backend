@@ -1003,12 +1003,16 @@ export function buildSesCockpitView(
     status = "CLOSEOUT_PENDING";
   } else if (releaseProgress.kind === "partially_released") {
     status = "PARTIALLY_RELEASED";
-  } else if (stale || verdict.blockers.length > 0) {
+  } else if (stale) {
     status = "HOLD";
+  } else if (approveInvoice) {
+    // Next stamp wins over send-route C11. APPROVE INVOICE already excludes
+    // C11, but HOLD status hid the button in the cockpit (SWMS-261237).
+    status = "INVOICE_CREATE_READY";
   } else if (sendIt) {
     status = "SEND_READY";
-  } else if (approveInvoice) {
-    status = "INVOICE_CREATE_READY";
+  } else if (verdict.blockers.length > 0) {
+    status = "HOLD";
   } else {
     status = "PRE_XERO_DOCS_READY";
   }

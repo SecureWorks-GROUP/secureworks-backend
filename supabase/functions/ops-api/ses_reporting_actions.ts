@@ -880,6 +880,11 @@ export function resolveDocketRoutes(
     const invoiceNumber = boundInvoiceNumber;
     const authorised = xeroStatus === "AUTHORISED" &&
       !!invoicePdf?.content_hash;
+    // Review-ready on DRAFT when the operator can see the exact draft PDF.
+    // SEND IT stays gated on AUTHORISED in the cockpit. Requiring authorised
+    // here made C11 HOLD the card and hid APPROVE INVOICE (SWMS-261237).
+    const draftPreviewReady = xeroStatus === "DRAFT" && !!boundInvoiceId &&
+      !!(invoicePdf?.content_hash || draftInvoicePdfHash);
     const combined: SesReviewRoute = {
       route_kind: "report_invoice",
       recipients,
@@ -898,7 +903,8 @@ export function resolveDocketRoutes(
             `${reference || "Make-safe"} - report and invoice`).trim()),
       body: ajsReportInvoiceBody,
       attachment_hashes: combinedHashes,
-      ready: !!report?.ready && authorised && recipients.length > 0,
+      ready: !!report?.ready && recipients.length > 0 &&
+        (authorised || draftPreviewReady),
     };
     if (noAdditionalCharge && report) {
       combined.subject = `${
