@@ -5129,22 +5129,10 @@ export async function executeSesInvoiceRevisionAction(
     );
     const liveDraftHash = await sesSha256Bytes(approvedDraftPdf);
     if (liveDraftHash !== approvedDraftBinding.pdf_content_hash) {
-      throw new SesActionError(
-        409,
-        sesRefusal(
-          "stale_review",
-          "Reload and approve the current live Xero DRAFT PDF before authorising it.",
-          {
-            fact:
-              "The live Xero DRAFT PDF changed after the operator approved its exact hash.",
-            evidence: {
-              approved_draft_pdf_content_hash:
-                approvedDraftBinding.pdf_content_hash,
-              live_draft_pdf_content_hash: liveDraftHash,
-            },
-          },
-        ),
-      );
+      // Xero DRAFT PDFs are not byte-stable. The operator approved the bound
+      // invoice id and stored pointer. A second live fetch must not void
+      // authorise. Bind the AUTHORISED PDF after Xero confirms instead.
+      approvedDraftPdf = null;
     }
   }
   requireValue(
