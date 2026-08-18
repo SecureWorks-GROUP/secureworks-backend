@@ -15380,7 +15380,14 @@ export function _deriveMakesafeSurfacing(
   // input, not the sole authority; the held P6 ruling is unchanged. A blocked
   // U4 revision never satisfies this predicate, and a READY U4 revision cannot
   // bypass the independently required current DRAFT.
-  const u4DocsReady = pack?.pre_xero_docs_ready === true
+  // The raw U4 docket stamp, never the honesty-gated operator-facing value:
+  // the pipeline gates `pre_xero_docs_ready` on portal evidence it cannot
+  // load, so reading the gated value here would pull a portal-proven
+  // report-only card out of readyForReview. Legacy packs without the split
+  // field only ever carried the raw stamp on `pre_xero_docs_ready`.
+  const u4DocsReady = pack?.docket_pre_xero_docs_ready === true ||
+    (pack?.docket_pre_xero_docs_ready == null &&
+      pack?.pre_xero_docs_ready === true)
   const readyForReview = !sentClosed &&
     normalizedSub === 'admin_to_send_report' &&
     hasSubmittedReport &&
@@ -15450,7 +15457,12 @@ export function _deriveMakesafeSurfacing(
 // the lifecycle status the boundary is applied to widens, from DRAFT to
 // DRAFT-or-raised. Prior-cycle commercial evidence is still refused. Closeout
 // still requires the doc gate, `verifiedSent` and the 7-day clock.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v7-reattend-current-raised-visible'
+// v8-raw-docket-stamp — `u4DocsReady` reads the preserved raw U4 stamp
+// (`docket_pre_xero_docs_ready`), falling back to `pre_xero_docs_ready` on
+// packs that never carried the split field, so the pipeline's honesty-gated
+// operator-facing value never feeds the ladder. For pipeline-produced packs
+// the derivation output matches v7 against the pre-gate stamp.
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v8-raw-docket-stamp'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -17712,9 +17724,11 @@ async function makesafePipeline(
       presentation_kind: packPresentation.kind,
       presentation_reason: packPresentation.reason,
       legacy_pack_status: packPresentation.legacy_pack_status,
-      // Raw U4 stamp for board re-derive (portal evidence lives there).
-      docket_pre_xero_docs_ready: docket ? docketPreXero : undefined,
     }
+    // The raw U4 stamp rides only on the derivation branch below: on a
+    // legacySent pack the board placement packState has always been null, and
+    // stamping the raw docket value there would let an authorised-unsent card
+    // reach Docs Ready against the #684 lock.
     const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
       ? {
         ...(rowPack || {}),
@@ -17723,6 +17737,8 @@ async function makesafePipeline(
         review_state: honestyReady ? 'READY' : 'U4_BLOCKED',
         docket_revision_id: docket.id,
         pre_xero_docs_ready: honestyReady,
+        // Raw U4 stamp for board re-derive (portal evidence lives there).
+        docket_pre_xero_docs_ready: docketPreXero,
         blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
         cycle_attribution: docketIsCurrent ? 'bound' : null,
         ...packHonestyFields,
