@@ -9,6 +9,7 @@ import {
   _assertNoSyntheticLivefireJobsForTest,
   _assertNoSyntheticLivefireReleaseRevisionForTest,
   _deriveMakesafeBoardStage,
+  _enrichMakesafeBoardJobForTest,
   _loadCanonicalMakesafeBoardForTest,
 } from "./index.ts";
 import {
@@ -126,6 +127,7 @@ function evidenceFor(stage: string): Record<string, unknown> {
       return {
         report: SUBMITTED_REPORT,
         report_pack: READY_UNSENT_PACK,
+        invoice_id: "invoice-row-ready",
         invoice_status: "draft",
         invoice_qualifies_as_current_draft: true,
         has_report_doc: true,
@@ -1397,12 +1399,24 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   assertEquals(card[0].site_suburb, "Bertram");
   assertEquals(card[0].requesting_company_slug, "mlb");
   assertEquals(card[0].invoice_status, "draft");
+  assertEquals(card[0].report_doc_id, "doc-report");
+  assertEquals(card[0].has_report_doc, true);
+  assertEquals(card[0].invoice_id, "invoice-row-ready");
+  assertEquals(full[0].report_doc_id, "doc-report");
+  assertEquals(full[0].has_report_doc, true);
+  assertEquals(full[0].invoice_id, "invoice-row-ready");
 
   const opsCard = projectOpsMakesafeBoard(card, { fields: "card" });
   assertEquals(opsCard.shape, "card");
   assertEquals(opsCard.rows, undefined);
   assertEquals(opsCard.columns.archive.length, 1);
   assertEquals(opsCard.columns.archive[0].id, "job-card");
+  assertEquals(opsCard.columns.archive[0].report_doc_id, "doc-report");
+  assertEquals(opsCard.columns.archive[0].has_report_doc, true);
+  assertEquals(opsCard.columns.archive[0].invoice_id, "invoice-row-ready");
+  assertEquals(opsCard.columns.archive[0].pack.report_doc_id, "doc-report");
+  assertEquals(opsCard.columns.archive[0].pack.invoice_doc_id, "doc-invoice");
+  assertEquals(opsCard.columns.archive[0].pack.swms_doc_id, "doc-swms");
   assertEquals(opsCard.row_count, 1);
 
   // Stripping a full row through projectOpsMakesafeCardRow never moves stage
@@ -1415,6 +1429,92 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   );
   assertEquals(stripped.computed_status_evidence, undefined);
   assertEquals(stripped.notes, undefined);
+  assertEquals(stripped.report_doc_id, "doc-report");
+  assertEquals(stripped.has_report_doc, true);
+  assertEquals(stripped.invoice_id, "invoice-row-ready");
+});
+
+Deno.test("card JSON always includes report and invoice coordinates", () => {
+  const enriched = _enrichMakesafeBoardJobForTest(
+    baseJob("report_ready", "job-direct-coordinates"),
+    { substatus: "waiting_on_trade_report", cycle_number: 1 },
+    [],
+    SUBMITTED_REPORT,
+    {
+      id: "invoice-row-direct",
+      xero_invoice_id: "xero-direct",
+      job_id: "job-direct-coordinates",
+      invoice_type: "ACCREC",
+      status: "DRAFT",
+      reference: "SWMS-job-direct-coordinates",
+    },
+    [{ id: "doc-report-direct", type: "makesafe_report" }],
+    false,
+    {
+      ...READY_UNSENT_PACK,
+      report_doc_id: "doc-report-direct",
+    },
+  );
+  const [withEvidence] = buildCanonicalMakesafeRows([enriched], {}, "card");
+  assertEquals(withEvidence.report_doc_id, "doc-report-direct");
+  assertEquals(withEvidence.has_report_doc, true);
+  assertEquals(withEvidence.invoice_id, "invoice-row-direct");
+  assertEquals(withEvidence.pack.report_doc_id, "doc-report-direct");
+  assertEquals(withEvidence.pack.invoice_doc_id, "doc-invoice");
+
+  const [withoutEvidence] = buildCanonicalMakesafeRows(
+    [baseJob("new", "job-empty-coordinates", { assignments: [] })],
+    {},
+    "card",
+  );
+  for (const key of ["report_doc_id", "has_report_doc", "invoice_id"]) {
+    assert(key in withoutEvidence, `${key} must be present on every card`);
+  }
+  assertEquals(withoutEvidence.report_doc_id, null);
+  assertEquals(withoutEvidence.has_report_doc, false);
+  assertEquals(withoutEvidence.invoice_id, null);
+
+  const staleReattend = _enrichMakesafeBoardJobForTest(
+    baseJob("trade_report_in", "job-stale-coordinates"),
+    {
+      substatus: "admin_to_send_report",
+      external_ref: "MLB-OLD",
+      reattend_count: 1,
+      last_reattend_at: "2026-07-19T12:00:00Z",
+      attendance_cycle_id: "cycle-2",
+      cycle_number: 2,
+    },
+    [],
+    {
+      ...SUBMITTED_REPORT,
+      attendance_cycle_id: "cycle-2",
+      cycle_number: 2,
+    },
+    {
+      id: "invoice-prior-cycle",
+      xero_invoice_id: "xero-prior-cycle",
+      job_id: "job-stale-coordinates",
+      invoice_type: "ACCREC",
+      status: "DRAFT",
+      reference: "MLB-OLD",
+      created_at: "2026-07-18T12:00:00Z",
+    },
+    [{ id: "doc-prior-cycle", type: "makesafe_report" }],
+    false,
+    {
+      ...READY_UNSENT_PACK,
+      report_doc_id: "doc-prior-cycle",
+      cycle_attribution: null,
+    },
+  );
+  const [staleCard] = buildCanonicalMakesafeRows(
+    [staleReattend],
+    {},
+    "card",
+  );
+  assertEquals(staleCard.report_doc_id, null);
+  assertEquals(staleCard.has_report_doc, false);
+  assertEquals(staleCard.invoice_id, null);
 });
 
 Deno.test("cancelled detail block keys on the derived stage, not a stale board_stage", () => {
