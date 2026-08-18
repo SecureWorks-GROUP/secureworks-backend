@@ -551,7 +551,9 @@ Deno.test("dry_run returns would_refuse for pack send-state without writes", asy
   assertEquals(result.would_refuse.code, "pack_send_state_blocks_bind");
   assertEquals(result.would_refuse.status, 409);
   assertEquals(
-    String(result.would_refuse.message).includes("refuses pack status 'failed'"),
+    String(result.would_refuse.message).includes(
+      "refuses pack status 'failed'",
+    ),
     true,
   );
 });
