@@ -7491,6 +7491,7 @@ if (import.meta.main) serve(async (req: Request) => {
           job_id: body.job_id,
           invoice_number: body.invoice_number,
           actor: authUser?.email || body.actor || 'captain-bind-existing-invoice',
+          dry_run: body.dry_run === true || body.dryRun === true,
         }))
       }
       case 'resolve_ses_invoice_duplicates':
@@ -18775,6 +18776,43 @@ async function bindExistingInvoicePackStrict(
 }
 
 /**
+ * Dry-run refusal envelope for bind_existing_makesafe_invoice_pack.
+ * Live calls still throw ApiError; dry_run returns this instead so an agent can
+ * preview without attaching a document or binding the pack.
+ */
+function bindExistingMakesafeInvoicePackDryRefuse(args: {
+  code: string
+  message: string
+  status: number
+  job_id?: string | null
+  job_number?: string | null
+  scanned_accrec?: number
+  invoice?: Record<string, unknown> | null
+}) {
+  return {
+    success: false,
+    dry_run: true,
+    persisted: false,
+    state: 'would_refuse',
+    would_do: null,
+    would_refuse: {
+      code: args.code,
+      message: args.message,
+      status: args.status,
+    },
+    job_id: args.job_id ?? null,
+    job_number: args.job_number ?? null,
+    invoice: args.invoice ?? null,
+    scanned_accrec: args.scanned_accrec ?? null,
+    lineage_required: false,
+    invoice_create_dispatched: false,
+    invoice_authorise_dispatched: false,
+    send_dispatched: false,
+    external_mutations: { xero: 0, email: 0 },
+  }
+}
+
+/**
  * Bind a Captain-named, already-existing Xero invoice PDF into the main pack.
  *
  * This recovery deliberately does not read or create a SES lineage: older
@@ -18783,6 +18821,10 @@ async function bindExistingInvoicePackStrict(
  * only local document/pack pointers are written. There is no Xero create,
  * update, authorise, void, payment, email, SMS, or board-stage write in this
  * function.
+ *
+ * dry_run:true runs the same guards (including the Xero PDF fetch) and returns
+ * would_do / would_refuse with persisted:false. It never attaches a document,
+ * binds the pack, or writes job_events.
  */
 async function bindExistingMakesafeInvoicePack(
   client: any,
@@ -18790,9 +18832,11 @@ async function bindExistingMakesafeInvoicePack(
     job_id: string
     invoice_number: string
     actor: string
+    dry_run?: boolean
   },
   deps: BindExistingMakesafeInvoicePackDeps = {},
-) {
+): Promise<Record<string, any>> {
+  const dryRun = args.dry_run === true
   const jobId = String(args.job_id || '').trim()
   const invoiceNumber = String(args.invoice_number || '').trim()
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -18829,10 +18873,18 @@ async function bindExistingMakesafeInvoicePack(
     packResponse.data.sent_at || packResponse.data.send_started_at ||
     !(BIND_EXISTING_INVOICE_PACK_STATUSES as readonly string[]).includes(packStatus)
   )) {
-    throw new ApiError(
-      `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because send state already exists`,
-      409,
-    )
+    const message =
+      `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because send state already exists`
+    if (dryRun) {
+      return bindExistingMakesafeInvoicePackDryRefuse({
+        code: 'pack_send_state_blocks_bind',
+        message,
+        status: 409,
+        job_id: jobId,
+        job_number: jobResponse.data.job_number || null,
+      })
+    }
+    throw new ApiError(message, 409)
   }
 
   const fetchAll = deps.fetchAllAccrecInvoices || _fetchAllAccrecInvoices
@@ -18855,6 +18907,16 @@ async function bindExistingMakesafeInvoicePack(
     })
   } catch (error) {
     if (error instanceof SesBindExistingInvoiceError) {
+      if (dryRun) {
+        return bindExistingMakesafeInvoicePackDryRefuse({
+          code: error.code,
+          message: error.message,
+          status: error.status,
+          job_id: jobId,
+          job_number: jobResponse.data.job_number || null,
+          scanned_accrec: invoices.length,
+        })
+      }
       throw new ApiError(error.message, error.status, {
         success: false,
         code: error.code,
@@ -18871,10 +18933,24 @@ async function bindExistingMakesafeInvoicePack(
     existingPackInvoiceId &&
     existingPackInvoiceId !== String(invoice.xero_invoice_id || '').trim()
   ) {
-    throw new ApiError(
-      `bind-only invoice recovery refuses to replace pack invoice ${existingPackInvoiceId} with ${invoice.xero_invoice_id}`,
-      409,
-    )
+    const message =
+      `bind-only invoice recovery refuses to replace pack invoice ${existingPackInvoiceId} with ${invoice.xero_invoice_id}`
+    if (dryRun) {
+      return bindExistingMakesafeInvoicePackDryRefuse({
+        code: 'pack_invoice_divergence',
+        message,
+        status: 409,
+        job_id: jobId,
+        job_number: jobResponse.data.job_number || null,
+        scanned_accrec: invoices.length,
+        invoice: {
+          xero_invoice_id: invoice.xero_invoice_id,
+          invoice_number: invoice.invoice_number,
+          status: invoice.status,
+        },
+      })
+    }
+    throw new ApiError(message, 409)
   }
   if (
     existingPackInvoiceId === String(invoice.xero_invoice_id || '').trim() &&
@@ -18882,7 +18958,11 @@ async function bindExistingMakesafeInvoicePack(
   ) {
     return {
       success: true,
+      dry_run: dryRun,
+      persisted: false,
       state: 'existing_invoice_pack_already_bound',
+      would_do: null,
+      would_refuse: null,
       job_id: jobId,
       job_number: jobResponse.data.job_number || null,
       invoice: {
@@ -18908,8 +18988,25 @@ async function bindExistingMakesafeInvoicePack(
   try {
     pdf = await fetchPdf(client, invoice.xero_invoice_id)
   } catch (error) {
+    const message =
+      `Existing invoice ${invoice.invoice_number} was preserved, but its exact Xero PDF could not be fetched: ${(error as Error)?.message || 'unknown error'}`
+    if (dryRun) {
+      return bindExistingMakesafeInvoicePackDryRefuse({
+        code: 'existing_invoice_pdf_unavailable',
+        message,
+        status: 503,
+        job_id: jobId,
+        job_number: jobResponse.data.job_number || null,
+        scanned_accrec: invoices.length,
+        invoice: {
+          xero_invoice_id: invoice.xero_invoice_id,
+          invoice_number: invoice.invoice_number,
+          status: invoice.status,
+        },
+      })
+    }
     throw new ApiError(
-      `Existing invoice ${invoice.invoice_number} was preserved, but its exact Xero PDF could not be fetched: ${(error as Error)?.message || 'unknown error'}`,
+      message,
       503,
       {
         success: false,
@@ -18921,13 +19018,57 @@ async function bindExistingMakesafeInvoicePack(
     )
   }
 
+  const invoiceFileName = `Xero Invoice - ${invoice.invoice_number}.pdf`
+  const namedPriorCycleBind = invoice.named_prior_cycle_bind === true
+  if (dryRun) {
+    return {
+      success: true,
+      dry_run: true,
+      persisted: false,
+      state: 'would_bind_existing_invoice_pack',
+      would_do: {
+        attach_invoice_document: {
+          type: 'invoice',
+          file_name: invoiceFileName,
+          xero_invoice_id: invoice.xero_invoice_id,
+          invoice_number: invoice.invoice_number,
+          invoice_status: invoice.status,
+          named_prior_cycle_bind: namedPriorCycleBind,
+        },
+        ensure_main_pack: true,
+        bind_pack: {
+          xero_invoice_id: invoice.xero_invoice_id,
+          invoice_status: invoice.status,
+        },
+        audit_named_prior_cycle_bind: namedPriorCycleBind,
+      },
+      would_refuse: null,
+      job_id: jobId,
+      job_number: jobResponse.data.job_number || null,
+      invoice: {
+        xero_invoice_id: invoice.xero_invoice_id,
+        invoice_number: invoice.invoice_number,
+        status: invoice.status,
+        document_id: null,
+        pdf_bytes: pdf.byteLength,
+      },
+      scanned_accrec: invoices.length,
+      lineage_required: false,
+      named_prior_cycle_bind: namedPriorCycleBind,
+      invoice_create_dispatched: false,
+      invoice_authorise_dispatched: false,
+      send_dispatched: false,
+      external_mutations: { xero: 0, email: 0 },
+    }
+  }
+
   const attachDocument = deps.attachDocument || attachMakesafeDocument
   const attached = await attachDocument(
     client,
     {
       job_id: jobId,
       type: 'invoice',
-      file_name: `Xero Invoice - ${invoice.invoice_number}.pdf`,
+      file_name: invoiceFileName,
       pdf_base64: _bytesToBase64(pdf),
       operator_email: args.actor,
     },
@@ -18940,7 +19081,7 @@ async function bindExistingMakesafeInvoicePack(
         invoice_number: invoice.invoice_number,
         invoice_status: invoice.status,
         bind_only: true,
-        named_prior_cycle_bind: invoice.named_prior_cycle_bind === true,
+        named_prior_cycle_bind: namedPriorCycleBind,
       },
     },
   )
@@ -18953,7 +19094,7 @@ async function bindExistingMakesafeInvoicePack(
   await ensurePack(client, jobId, 'main')
   await bindPack(client, jobId, invoice, attached.document_id)
 
-  if (invoice.named_prior_cycle_bind === true) {
+  if (namedPriorCycleBind) {
     try {
       const { error: auditError } = await client.from('job_events').insert({
         job_id: jobId,
@@ -18978,7 +19119,11 @@ async function bindExistingMakesafeInvoicePack(
 
   return {
     success: true,
+    dry_run: false,
+    persisted: true,
     state: 'existing_invoice_pack_bound',
+    would_do: null,
+    would_refuse: null,
     job_id: jobId,
     job_number: jobResponse.data.job_number || null,
     invoice: {
@@ -18989,7 +19134,7 @@ async function bindExistingMakesafeInvoicePack(
     },
     scanned_accrec: invoices.length,
     lineage_required: false,
-    named_prior_cycle_bind: invoice.named_prior_cycle_bind === true,
+    named_prior_cycle_bind: namedPriorCycleBind,
     invoice_create_dispatched: false,
     invoice_authorise_dispatched: false,
     send_dispatched: false,
