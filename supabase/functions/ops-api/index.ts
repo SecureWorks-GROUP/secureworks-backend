@@ -198,6 +198,8 @@ import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
+  requiresBoundBuilderReportPdf,
+  type MakesafeStatusInput,
 } from './makesafe_computed_status.ts'
 import {
   evaluateMakesafeSubstatusGate,
@@ -17627,7 +17629,24 @@ async function makesafePipeline(
     // `failed`, and a refused docket names its reason instead of green-ticking.
     // Strictly additive — every derivation input below (status, review_state,
     // blockers) keeps the value the board ladder, chip truth and M1 already read.
+    // Attach tick is not a bind: physical families need report_doc_id, and
+    // report-only families still need report-in evidence before looking ready.
     const hasReportDoc = makesafeDocBooleans(docsMap[j.id]).has_report_doc
+    const honestyStatusInput: MakesafeStatusInput = {
+      job: j,
+      detail,
+      evidence: {
+        pack: rowPack
+          ? { report_doc_id: rowPack.report_doc_id ?? null }
+          : null,
+        documents: { report: hasReportDoc },
+      },
+    }
+    // Physical bind floor only here — report-only family report-in needs portal
+    // captures, which the board read model owns. Leaving
+    // family_report_evidence_satisfied unset keeps roof/assessment presentation
+    // unchanged on this pipeline stamp; board projection re-checks.
+    const needsBoundReportPdf = requiresBoundBuilderReportPdf(honestyStatusInput)
     const packPresentation = presentSesPackHonesty({
       // The current docket is fed in whenever one exists. `legacySent` gates
       // DERIVATION only: withholding the docket here would tell an
@@ -17653,13 +17672,17 @@ async function makesafePipeline(
       pack_sent: packSentMap[j.id] === true,
       has_report_doc: hasReportDoc,
       has_trade_report: !!reportMap[j.id],
+      report_doc_id: rowPack?.report_doc_id || null,
+      requires_bound_report_doc: needsBoundReportPdf,
     })
     // `report_pack` stays exactly the derivation shape it has always been: the
     // status/review_state/blockers the ladder, the SENT chip and M1 consume are
     // the raw legacy + docket values, never the presentation state. A synthetic
     // pack block is never minted for a card with no row and no docket, so M1's
     // `!pack` short-circuit keeps firing. Honesty rides alongside, on the
-    // `presentation_*` keys only.
+    // `presentation_*` keys only. review_state READY still follows the docket
+    // stamp so M1/docsReady can apply the bind floor themselves; presentation
+    // kind is what the operator surface reads as send-ready.
     const packHonestyFields = {
       presentation_kind: packPresentation.kind,
       presentation_reason: packPresentation.reason,

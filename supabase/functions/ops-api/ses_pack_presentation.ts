@@ -162,6 +162,23 @@ export function presentSesPackHonesty(input: {
   has_report_doc?: boolean | null;
   /** Trade service report submitted (even if no curated PDF yet). */
   has_trade_report?: boolean | null;
+  /**
+   * Pack bind pointer for the builder-facing report. Attach ticks are not
+   * binds — when `requires_bound_report_doc` is true, a null pointer cannot
+   * present as ready / READY TO SEND.
+   */
+  report_doc_id?: string | null;
+  /**
+   * Physical / temp-fence / repair / restoration: Docs Ready presentation
+   * requires `report_doc_id`. Roof / assessment leave this false.
+   */
+  requires_bound_report_doc?: boolean | null;
+  /**
+   * Report-only families: a ready stamp still needs portal / own-template
+   * report-in evidence. An assessment with no Prime capture must not look
+   * send-ready (SWMS-261243 class).
+   */
+  family_report_evidence_satisfied?: boolean | null;
 }): SesPackPresentation {
   const legacyStatus = lower(input.legacy_pack?.status);
   const legacyPackStatus = txt(input.legacy_pack?.status) || null;
@@ -179,6 +196,9 @@ export function presentSesPackHonesty(input: {
   const allBlockers = [...docketBlockers, ...reviewBlockers];
   const preXero = docket?.pre_xero_docs_ready === true;
   const docketState = lower(docket?.state);
+  const boundReportDocId = txt(input.report_doc_id);
+  const requiresBoundReport = input.requires_bound_report_doc === true;
+  const familyReportEvidenceOk = input.family_report_evidence_satisfied !== false;
 
   if (packSent) {
     return {
@@ -216,8 +236,37 @@ export function presentSesPackHonesty(input: {
         legacy_pack_status: legacyPackStatus,
       };
     }
-    // Ready: docket proves docs ready and no refusal blockers.
+    // Ready: docket proves docs ready and no refusal blockers — but attach is
+    // not a bind, and a report-only card still needs family report evidence.
     if (preXero) {
+      if (requiresBoundReport && !boundReportDocId) {
+        return {
+          kind: "incomplete",
+          state: "drafted",
+          review_state: "U4_BLOCKED",
+          pre_xero_docs_ready: false,
+          docket_revision_id: docketId,
+          drafted: true,
+          reason:
+            "The SES docket is stamped ready, but the pack has no bound report_doc_id — an attached document alone is not a bind.",
+          blockers: [],
+          legacy_pack_status: legacyPackStatus,
+        };
+      }
+      if (!familyReportEvidenceOk) {
+        return {
+          kind: "incomplete",
+          state: "drafted",
+          review_state: "U4_BLOCKED",
+          pre_xero_docs_ready: false,
+          docket_revision_id: docketId,
+          drafted: true,
+          reason:
+            "The SES docket is stamped ready, but family report evidence is not complete — the pack is not ready to send.",
+          blockers: [],
+          legacy_pack_status: legacyPackStatus,
+        };
+      }
       const awaitingSend = RESUME_SEND_STATUSES.has(legacyStatus);
       return {
         kind: "ready",

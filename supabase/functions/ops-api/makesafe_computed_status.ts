@@ -437,15 +437,14 @@ export function reportInEvidence(input: MakesafeStatusInput): {
 /**
  * Physical / temp-fence Docs Ready requires a bound builder-facing report PDF.
  * A submitted trade service report is Trade Report In evidence only — it must
- * never promote a card into the review queue. `documents.report` is the typed
- * `job_documents` equivalent (`makesafe_report` or the filename fallback);
- * `pack.report_doc_id` is the pack bind. Roof / assessment never call this.
+ * never promote a card into the review queue. Attach tick (`documents.report` /
+ * `has_report_doc`) is NOT a bind: only `pack.report_doc_id` satisfies this
+ * floor. Roof / assessment never call this.
  */
 export function physicalReportCloseoutSatisfied(
   input: MakesafeStatusInput,
 ): boolean {
-  return !!input.evidence?.pack?.report_doc_id ||
-    input.evidence?.documents?.report === true;
+  return !!String(input.evidence?.pack?.report_doc_id || "").trim();
 }
 
 export function docsReady(input: MakesafeStatusInput): boolean {

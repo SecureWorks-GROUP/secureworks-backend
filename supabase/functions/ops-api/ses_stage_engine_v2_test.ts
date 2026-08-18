@@ -1649,6 +1649,12 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     assignments: [{ id: "a1" }],
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
     completionPhotoCount: 6,
+    // Attach ticks are not binds — Docs Ready needs pack pointers.
+    pack: {
+      status: "drafted",
+      report_doc_id: "report-doc",
+      swms_doc_id: "swms-doc",
+    },
     documents: { report: true, invoice: true, swms: true },
     swmsRequired: true,
     invoiceStatus: "DRAFT",
@@ -1666,6 +1672,7 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     evidence: {
       ...base,
       serviceReports: [],
+      pack: { ...base.pack, report_doc_id: null },
       documents: { ...base.documents, report: false },
     },
   }));
@@ -1674,17 +1681,36 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     evidence: {
       ...base,
       documents: { ...base.documents, report: false },
-      pack: { status: "drafted", report_doc_id: null },
+      pack: { status: "drafted", report_doc_id: null, swms_doc_id: "swms-doc" },
     },
   }));
   assertEquals(tradeReportIsNotThePdf.stage, "trade_report_in");
+  // Attach tick alone must not green Docs Ready.
+  const attachIsNotBind = deriveSesStageV2(input({
+    evidence: {
+      ...base,
+      pack: { status: "drafted", report_doc_id: null, swms_doc_id: "swms-doc" },
+      documents: { report: true, invoice: true, swms: true },
+    },
+  }));
+  assertEquals(attachIsNotBind.stage, "trade_report_in");
   const missingSwms = deriveSesStageV2(input({
     evidence: {
       ...base,
+      pack: { ...base.pack, swms_doc_id: null },
       documents: { ...base.documents, swms: false },
     },
   }));
   assert(missingSwms.stage !== "report_ready", "swms must be required");
+  // SWMS attach tick alone is also not a bind.
+  const swmsAttachIsNotBind = deriveSesStageV2(input({
+    evidence: {
+      ...base,
+      pack: { ...base.pack, swms_doc_id: null },
+      documents: { ...base.documents, swms: true },
+    },
+  }));
+  assertEquals(swmsAttachIsNotBind.stage, "trade_report_in");
   assertEquals(
     deriveSesStageV2(input({
       evidence: {
@@ -1699,6 +1725,7 @@ Deno.test("docs ready: a physical card needs report, required SWMS, and a qualif
     evidence: {
       ...base,
       swmsRequired: false,
+      pack: { status: "drafted", report_doc_id: "report-doc" },
       documents: { report: true, invoice: true, swms: false },
     },
   }));
@@ -1710,6 +1737,7 @@ Deno.test("docs ready: READY_TO_BUILD is not a sendable pack", () => {
     assignments: [{ id: "a1" }],
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
     completionPhotoCount: 6,
+    pack: { status: "drafted", report_doc_id: "report-doc" },
     documents: { report: true, invoice: true, swms: false },
     swmsRequired: false,
     invoiceStatus: "DRAFT",
@@ -1734,10 +1762,10 @@ Deno.test("docs ready: only the qualifying DRAFT path is reviewable", () => {
     assignments: [{ id: "a1" }],
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
     completionPhotoCount: 6,
+    pack: { status: "drafted", report_doc_id: "report-doc" },
     documents: { report: true, invoice: true, swms: false },
     swmsRequired: false,
     packSent: false,
-    pack: { status: "drafted" },
   };
 
   // SWMS-261157-class control: pre-authorisation still requires the shared
@@ -1960,7 +1988,10 @@ Deno.test("docs ready: an already-sent pack is not one click from sending", () =
     invoiceQualifiesAsCurrentDraft: true,
   };
   const positive = input({
-    evidence: { ...baseEvidence, pack: { status: "draft" } },
+    evidence: {
+      ...baseEvidence,
+      pack: { status: "draft", report_doc_id: "report-doc" },
+    },
   });
   assertEquals(deriveSesStageV2(positive).stage, "report_ready");
 
@@ -1973,7 +2004,10 @@ Deno.test("docs ready: an already-sent pack is not one click from sending", () =
     ]
   ) {
     const sent = input({
-      evidence: { ...baseEvidence, pack: { status } },
+      evidence: {
+        ...baseEvidence,
+        pack: { status, report_doc_id: "report-doc" },
+      },
     });
     assert(
       deriveSesStageV2(sent).stage !== "report_ready",
@@ -2075,6 +2109,7 @@ Deno.test("docs ready: repair and restoration take the standard path", () => {
         assignments: [{ id: "a1" }],
         serviceReports: [{ status: "submitted", cycle_number: 1 }],
         completionPhotoCount: 6,
+        pack: { status: "drafted", report_doc_id: "report-doc" },
         documents: { report: true, invoice: true, swms: false },
         swmsRequired: false,
         invoiceStatus: "DRAFT",

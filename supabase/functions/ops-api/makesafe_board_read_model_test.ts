@@ -1074,7 +1074,9 @@ Deno.test("repair cards do not inherit a make-safe Docs Ready floor from a trade
   assertEquals(card.pack.closeout_documents.report, false);
 });
 
-Deno.test("card report tick stays done when a report document is already attached", () => {
+Deno.test("card report tick stays off for an attach without pack.report_doc_id", () => {
+  // Attach tick is not a bind — physical closeout report requires the pack
+  // pointer. has_report_doc alone must not green the tile.
   const [card] = buildCanonicalMakesafeRows(
     [
       baseJob("allocated", "report-document-only", {
@@ -1086,7 +1088,92 @@ Deno.test("card report tick stays done when a report document is already attache
   );
 
   assertEquals(card.canonical_stage, "allocated");
+  assertEquals(card.pack.closeout_documents.report, false);
+});
+
+Deno.test("card report tick is done only when pack.report_doc_id is bound", () => {
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", "report-bound", {
+        has_report_doc: true,
+        report_pack: {
+          status: "drafted",
+          report_doc_id: "doc-report-bound",
+        },
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.canonical_stage, "allocated");
   assertEquals(card.pack.closeout_documents.report, true);
+  assertEquals(card.pack.report_doc_id, "doc-report-bound");
+});
+
+Deno.test("Docs Ready refuses has_report_doc without pack.report_doc_id (attach ≠ bind)", () => {
+  // Live honesty class: 7 of 15 report_ready cards had null report_doc_id
+  // while has_report_doc was true. Placement must stay Trade Report In.
+  const id = "attach-not-bind-docs-ready";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        report_doc_id: null,
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "trade_report_in");
+  assertEquals(card.pack.report_doc_id, null);
+  assertEquals(card.has_report_doc, true);
+  assertEquals(card.pack.closeout_documents.report, false);
+  assertEquals(card.pack.presentation_kind === "ready", false);
+});
+
+Deno.test("SWMS-261243 assessment pack cannot look ready without family report evidence", () => {
+  const id = "assess-261243";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("new", id, {
+      job_number: "SWMS-261243",
+      metadata: { makesafe_job_family: "assessment_quote" },
+      makesafe_details: {
+        substatus: "company_contact_required",
+        report_type: "assessment_report",
+        cycle_number: 1,
+        external_links: [],
+      },
+      assignments: [],
+      report_pack: {
+        status: "drafted",
+        review_state: "READY",
+        report_doc_id: null,
+        invoice_doc_id: null,
+        swms_doc_id: null,
+        docket_revision_id: "rev-assess-ready-stamp",
+        pre_xero_docs_ready: true,
+        blockers: [],
+      },
+      has_report_doc: false,
+      has_wo: false,
+      invoice_status: "not_ready",
+    }),
+  ], { computedAt: NOW }, "card");
+
+  assertEquals(card.ses_family, "assessment_quote");
+  assertEquals(card.canonical_stage, "new");
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+  assertEquals(card.pack.report_doc_id, null);
 });
 
 Deno.test("canonical placement floors durable ready/processed report states at TRI without inventing Docs Ready", () => {
@@ -1897,6 +1984,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
       report_pack: {
         status: "drafted",
         review_state: "READY",
+        report_doc_id: "doc-report",
         docket_revision_id: "revision-ready",
         pre_xero_docs_ready: true,
         blockers: [],
@@ -1951,6 +2039,7 @@ Deno.test("legacy failed pack over a ready docket presents ready, not failed", (
         // Stale legacy status that used to green-tick or red-lie on the board.
         status: "failed",
         review_state: "READY",
+        report_doc_id: "doc-report",
         docket_revision_id: "revision-live",
         pre_xero_docs_ready: true,
         blockers: [],
