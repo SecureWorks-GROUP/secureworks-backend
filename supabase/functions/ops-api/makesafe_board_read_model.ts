@@ -1461,12 +1461,22 @@ export function buildCanonicalMakesafeRows(
     const docketPreXeroStamp = pack?.docket_pre_xero_docs_ready === true ||
       (pack?.docket_pre_xero_docs_ready == null &&
         pack?.pre_xero_docs_ready === true);
+    // A legacySent pack carries the current docket under honesty_* keys only
+    // (presentation input; never placement), so the re-derive still sees the
+    // assembled revision instead of claiming none exists.
     const honestyInput = {
       docket: pack?.docket_revision_id
         ? {
           id: pack.docket_revision_id,
           pre_xero_docs_ready: docketPreXeroStamp,
           blockers: pack.blockers,
+        }
+        : pack?.honesty_docket_revision_id
+        ? {
+          id: pack.honesty_docket_revision_id,
+          pre_xero_docs_ready:
+            pack.honesty_docket_pre_xero_docs_ready === true,
+          blockers: pack.honesty_docket_blockers,
         }
         : null,
       legacy_pack: pack

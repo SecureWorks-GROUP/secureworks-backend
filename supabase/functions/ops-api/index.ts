@@ -15257,6 +15257,15 @@ export interface MakesafeReportPackLike {
    * `pre_xero_docs_ready`.
    */
   docket_pre_xero_docs_ready?: boolean
+  /**
+   * Current-docket coordinate carried on a legacySent pack so the board's
+   * honesty re-derive keeps the docket input. Presentation only: never read by
+   * placement packState or the ladder's u4DocsReady, so the #684 lock on
+   * legacySent placement holds.
+   */
+  honesty_docket_revision_id?: string | null
+  honesty_docket_pre_xero_docs_ready?: boolean
+  honesty_docket_blockers?: Array<Record<string, unknown>> | null
   blockers?: Array<Record<string, unknown>> | null
   /** Honest presentation kind: ready | refused | incomplete | sent | none */
   presentation_kind?: string | null
@@ -16182,6 +16191,16 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
             scopedPack.docket_pre_xero_docs_ready === true,
         }
         : {}),
+      ...(scopedPack.honesty_docket_revision_id
+        ? {
+          honesty_docket_revision_id: scopedPack.honesty_docket_revision_id,
+          honesty_docket_pre_xero_docs_ready:
+            scopedPack.honesty_docket_pre_xero_docs_ready === true,
+          honesty_docket_blockers: scopedPack.honesty_docket_blockers || [],
+        }
+        : {}),
+      failed_step: scopedPack.failed_step || null,
+      error_detail: scopedPack.error_detail ?? null,
       blockers: scopedPack.blockers || [],
       presentation_kind: scopedPack.presentation_kind || null,
       presentation_reason: scopedPack.presentation_reason || null,
@@ -17728,7 +17747,11 @@ async function makesafePipeline(
     // The raw U4 stamp rides only on the derivation branch below: on a
     // legacySent pack the board placement packState has always been null, and
     // stamping the raw docket value there would let an authorised-unsent card
-    // reach Docs Ready against the #684 lock.
+    // reach Docs Ready against the #684 lock. The legacySent branch still
+    // carries the current docket coordinate under honesty_* keys — which
+    // neither placement packState nor the ladder reads — so the board's
+    // report-only honesty re-derive keeps the docket input instead of falsely
+    // reporting that no revision is assembled.
     const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
       ? {
         ...(rowPack || {}),
@@ -17748,6 +17771,15 @@ async function makesafePipeline(
         ...rowPack,
         named_prior_cycle_bind: !!namedPriorCycleInvoice,
         cycle_attribution: packIsCurrent ? 'bound' : null,
+        ...(docket
+          ? {
+            honesty_docket_revision_id: docket.id,
+            honesty_docket_pre_xero_docs_ready: docketPreXero,
+            honesty_docket_blockers: Array.isArray(docket.blockers)
+              ? docket.blockers
+              : [],
+          }
+          : {}),
         ...packHonestyFields,
       }
       : null
