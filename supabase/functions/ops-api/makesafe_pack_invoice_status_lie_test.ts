@@ -1,12 +1,10 @@
-// deno-lint-ignore-file no-import-prefix no-explicit-any
+// deno-lint-ignore-file no-import-prefix
 /**
  * SWMS-261237 / INV-1240 class: pack/review surface must not say DRAFT when
  * the live Xero mirror (and board top-level invoice_raw_status) already say
  * AUTHORISED. The pack row stamp is fallback only.
  */
-import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _enrichMakesafeBoardJobForTest as enrich,
   presentMakesafePackInvoiceStatus,
