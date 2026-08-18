@@ -205,7 +205,7 @@ Deno.test("storeSesXeroInvoicePdfBytes refuses non-PDF concoctions", async () =>
   assertEquals(failed, true);
 });
 
-Deno.test("a stored binding PDF is re-fetched, never served as current", async () => {
+Deno.test("a stored binding PDF is reused, not re-fetched", async () => {
   resetSesDraftPdfFetchBackoff();
   const staleBytes = new TextEncoder().encode("%PDF-1.4 yesterday's draft");
   const stored = await storeSesXeroInvoicePdfBytes(packClient().client, {
@@ -236,17 +236,14 @@ Deno.test("a stored binding PDF is re-fetched, never served as current", async (
       return Promise.resolve(pdfBytes());
     },
   });
-  // A DRAFT is editable in Xero until it is authorised, so the stored pointer
-  // is re-proved against Xero on every read rather than trusted as current.
-  assertEquals(fetchCalls, 1);
-  assertEquals(resolved.source, "live_fetch");
+  // T8: the stamp echoes this hash. A second Xero DRAFT fetch is a new hash
+  // and voids APPROVE AND SEND. The stored pointer is the identity.
+  assertEquals(fetchCalls, 0);
+  assertEquals(resolved.source, "stored");
   assertEquals(resolved.artifact.role, "xero_invoice_pdf");
   assertEquals(resolved.artifact.pdf_unavailable, false);
-  assertEquals(
-    resolved.artifact.content_hash !== stored.pdf_content_hash,
-    true,
-  );
-  assertEquals(uploads.length, 1);
+  assertEquals(resolved.artifact.content_hash, stored.pdf_content_hash);
+  assertEquals(uploads.length, 0);
   assertStringIncludes(
     String(resolved.artifact.signed_url),
     "signed.example.test",
@@ -256,7 +253,7 @@ Deno.test("a stored binding PDF is re-fetched, never served as current", async (
   assertEquals(signedPaths.length >= 1, true);
 });
 
-Deno.test("a stored binding PDF is withheld when the live re-fetch fails", async () => {
+Deno.test("a stored binding PDF is still served when a live re-fetch would fail", async () => {
   resetSesDraftPdfFetchBackoff();
   const stored = await storeSesXeroInvoicePdfBytes(packClient().client, {
     job_id: JOB_ID,
@@ -268,6 +265,7 @@ Deno.test("a stored binding PDF is withheld when the live re-fetch fails", async
     pdf: pdfBytes(),
   });
   const { client, signedPaths } = packClient({ binding: stored });
+  let fetchCalls = 0;
   const resolved = await resolveSesBoundDraftInvoicePdfArtifact(client, {
     job_id: JOB_ID,
     docket: { id: DOCKET_ID, stage: "pre_xero", xero_binding: null },
@@ -281,15 +279,15 @@ Deno.test("a stored binding PDF is withheld when the live re-fetch fails", async
       },
     },
     fetchInvoicePdfBytes: () => {
+      fetchCalls++;
       throw new Error("Xero PDF temporarily unavailable");
     },
   });
-  // Honest unavailable beats serving stored bytes as though they were live.
-  assertEquals(resolved.source, "unavailable");
-  assertEquals(resolved.artifact.pdf_unavailable, true);
-  assertEquals(resolved.artifact.signed_url, null);
-  assertEquals(resolved.artifact.object_key, undefined);
-  assertEquals(signedPaths.length, 0);
+  assertEquals(fetchCalls, 0);
+  assertEquals(resolved.source, "stored");
+  assertEquals(resolved.artifact.pdf_unavailable, false);
+  assertEquals(resolved.artifact.content_hash, stored.pdf_content_hash);
+  assertEquals(signedPaths.length >= 1, true);
   resetSesDraftPdfFetchBackoff();
 });
 
