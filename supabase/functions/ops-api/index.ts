@@ -198,6 +198,7 @@ import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
+  reportInEvidence,
   requiresBoundBuilderReportPdf,
   type MakesafeStatusInput,
 } from './makesafe_computed_status.ts'
@@ -15247,7 +15248,15 @@ export interface MakesafeReportPackLike {
   review_state?: string | null
   sent_at?: string | null
   docket_revision_id?: string | null
+  /** Operator-facing: honesty ready AND docket stamp (see presentSesPackHonesty). */
   pre_xero_docs_ready?: boolean
+  /**
+   * Raw U4 docket `pre_xero_docs_ready` stamp. Preserved so the board can
+   * re-derive honesty with portal-capture evidence the pipeline does not load.
+   * Absent on legacy rows that only carried the ungated stamp on
+   * `pre_xero_docs_ready`.
+   */
+  docket_pre_xero_docs_ready?: boolean
   blockers?: Array<Record<string, unknown>> | null
   /** Honest presentation kind: ready | refused | incomplete | sent | none */
   presentation_kind?: string | null
@@ -16155,6 +16164,12 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       sent_at: scopedPack.sent_at || null,
       docket_revision_id: scopedPack.docket_revision_id || null,
       pre_xero_docs_ready: scopedPack.pre_xero_docs_ready === true,
+      ...(scopedPack.docket_pre_xero_docs_ready !== undefined
+        ? {
+          docket_pre_xero_docs_ready:
+            scopedPack.docket_pre_xero_docs_ready === true,
+        }
+        : {}),
       blockers: scopedPack.blockers || [],
       presentation_kind: scopedPack.presentation_kind || null,
       presentation_reason: scopedPack.presentation_reason || null,
@@ -17627,26 +17642,36 @@ async function makesafePipeline(
       legacyStatus === 'authorised_not_sent'
     // Pack presentation honesty: a ready U4 docket never publishes stale legacy
     // `failed`, and a refused docket names its reason instead of green-ticking.
-    // Strictly additive — every derivation input below (status, review_state,
-    // blockers) keeps the value the board ladder, chip truth and M1 already read.
     // Attach tick is not a bind: physical families need report_doc_id, and
     // report-only families still need report-in evidence before looking ready.
+    // Operator-facing pre_xero_docs_ready / review_state follow the same honesty
+    // gate as the board projection (kind === ready AND docket stamp). The raw
+    // docket stamp is preserved on docket_pre_xero_docs_ready so the board can
+    // re-derive with portal captures the pipeline does not load.
     const hasReportDoc = makesafeDocBooleans(docsMap[j.id]).has_report_doc
     const honestyStatusInput: MakesafeStatusInput = {
       job: j,
       detail,
       evidence: {
         pack: rowPack
-          ? { report_doc_id: rowPack.report_doc_id ?? null }
+          ? {
+            report_doc_id: rowPack.report_doc_id ?? null,
+            swms_doc_id: rowPack.swms_doc_id ?? null,
+          }
           : null,
         documents: { report: hasReportDoc },
+        serviceReports: reportMap[j.id] ? [reportMap[j.id]] : [],
       },
     }
-    // Physical bind floor only here — report-only family report-in needs portal
-    // captures, which the board read model owns. Leaving
-    // family_report_evidence_satisfied unset keeps roof/assessment presentation
-    // unchanged on this pipeline stamp; board projection re-checks.
     const needsBoundReportPdf = requiresBoundBuilderReportPdf(honestyStatusInput)
+    // Pipeline does not load portal-capture revisions. Report-only cards
+    // therefore fail closed here (family evidence unsatisfied) unless a later
+    // board re-derive with the ledger upgrades them. Physical cards skip this
+    // term — the bind floor is the honesty gate.
+    const familyReportEvidenceSatisfied = needsBoundReportPdf
+      ? true
+      : reportInEvidence(honestyStatusInput).satisfied
+    const docketPreXero = docket?.pre_xero_docs_ready === true
     const packPresentation = presentSesPackHonesty({
       // The current docket is fed in whenever one exists. `legacySent` gates
       // DERIVATION only: withholding the docket here would tell an
@@ -17655,7 +17680,7 @@ async function makesafePipeline(
         ? {
           id: docket.id,
           state: docket.state,
-          pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
+          pre_xero_docs_ready: docketPreXero,
           blockers: docket.blockers,
         }
         : null,
@@ -17676,30 +17701,28 @@ async function makesafePipeline(
       requires_bound_report_doc: needsBoundReportPdf,
       swms_doc_id: rowPack?.swms_doc_id || null,
       requires_bound_swms: _requiresMakesafeSwms(detail, j),
+      family_report_evidence_satisfied: familyReportEvidenceSatisfied,
     })
-    // `report_pack` stays exactly the derivation shape it has always been: the
-    // status/review_state/blockers the ladder, the SENT chip and M1 consume are
-    // the raw legacy + docket values, never the presentation state. A synthetic
-    // pack block is never minted for a card with no row and no docket, so M1's
-    // `!pack` short-circuit keeps firing. Honesty rides alongside, on the
-    // `presentation_*` keys only. review_state READY still follows the docket
-    // stamp so M1/docsReady can apply the bind floor themselves; presentation
-    // kind is what the operator surface reads as send-ready.
+    // Honesty gate matches the board projection: missing binds / family
+    // evidence cannot publish pre_xero_docs_ready or review_state READY.
+    // A synthetic pack block is never minted for a card with no row and no
+    // docket, so M1's `!pack` short-circuit keeps firing.
+    const honestyReady = packPresentation.kind === 'ready' && docketPreXero
     const packHonestyFields = {
       presentation_kind: packPresentation.kind,
       presentation_reason: packPresentation.reason,
       legacy_pack_status: packPresentation.legacy_pack_status,
+      // Raw U4 stamp for board re-derive (portal evidence lives there).
+      docket_pre_xero_docs_ready: docket ? docketPreXero : undefined,
     }
     const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
       ? {
         ...(rowPack || {}),
         named_prior_cycle_bind: !!namedPriorCycleInvoice,
         status: rowPack?.status || 'drafted',
-        review_state: docket.pre_xero_docs_ready
-          ? 'READY'
-          : 'U4_BLOCKED',
+        review_state: honestyReady ? 'READY' : 'U4_BLOCKED',
         docket_revision_id: docket.id,
-        pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
+        pre_xero_docs_ready: honestyReady,
         blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
         cycle_attribution: docketIsCurrent ? 'bound' : null,
         ...packHonestyFields,

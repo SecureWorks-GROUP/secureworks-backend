@@ -1439,15 +1439,22 @@ export function buildCanonicalMakesafeRows(
       cardMode ? null : extras.intakeCaseByJobId?.[base?.id],
     );
     // The pipeline's own `pack_presentation` stamp is the single presentation
-    // authority; re-derive only when a caller injected `report_pack` directly
-    // (tests, the parity harness) so both paths agree. `drafted` always comes
-    // from the presentation, never from reading a presentation state string.
+    // authority for physical packs; re-derive when the stamp is dishonest or
+    // when the card is report-only (pipeline fails closed without portal
+    // captures; this read model has them). `drafted` always comes from the
+    // presentation, never from reading a presentation state string.
     const needsBoundReportPdf = requiresBoundBuilderReportPdf(statusInput);
+    // Prefer the preserved raw U4 stamp when the pipeline already gated
+    // operator-facing pre_xero_docs_ready. Legacy rows only carried the stamp
+    // on pre_xero_docs_ready itself.
+    const docketPreXeroStamp = pack?.docket_pre_xero_docs_ready === true ||
+      (pack?.docket_pre_xero_docs_ready == null &&
+        pack?.pre_xero_docs_ready === true);
     const honestyInput = {
       docket: pack?.docket_revision_id
         ? {
           id: pack.docket_revision_id,
-          pre_xero_docs_ready: pack.pre_xero_docs_ready === true,
+          pre_xero_docs_ready: docketPreXeroStamp,
           blockers: pack.blockers,
         }
         : null,
@@ -1472,15 +1479,20 @@ export function buildCanonicalMakesafeRows(
     const stamped = stampedPackPresentation(base);
     // A stale pipeline stamp can still claim ready without bind pointers —
     // re-derive when the stamp would green a card the live binds refuse.
+    // Report-only always re-derives: the pipeline cannot see portal captures.
     const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
       (needsBoundReportPdf && !String(pack?.report_doc_id || "").trim()) ||
       (swmsRequired && !String(pack?.swms_doc_id || "").trim()) ||
       (!needsBoundReportPdf && !reportIn.satisfied)
     );
-    const derived = (!stamped || stampedReadyDishonest)
+    const reportOnlyNeedsLiveHonesty = !needsBoundReportPdf;
+    const shouldDeriveHonesty = !stamped || stampedReadyDishonest ||
+      reportOnlyNeedsLiveHonesty;
+    const derived = shouldDeriveHonesty
       ? presentSesPackHonesty(honestyInput)
       : null;
-    const packHonestySource = stampedReadyDishonest
+    const packHonestySource = (stampedReadyDishonest ||
+        reportOnlyNeedsLiveHonesty)
       ? derived
       : (stamped ?? derived);
     const packHonesty = {
@@ -1502,8 +1514,7 @@ export function buildCanonicalMakesafeRows(
       docket_revision_id: pack?.docket_revision_id || null,
       // Presentation honesty outranks a stale docket stamp: missing binds
       // cannot publish pre_xero_docs_ready as an operator-facing ready signal.
-      pre_xero_docs_ready: packHonesty.kind === "ready" &&
-        pack?.pre_xero_docs_ready === true,
+      pre_xero_docs_ready: packHonesty.kind === "ready" && docketPreXeroStamp,
       // Refusal / incomplete / ready distinction for the operator surface.
       presentation_kind: packHonesty.kind,
       presentation_reason: packHonesty.reason,
