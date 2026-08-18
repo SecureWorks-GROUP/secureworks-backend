@@ -269,6 +269,9 @@ export function projectOpsMakesafeCardRow(row: any) {
         presentation_kind: row.pack.presentation_kind || null,
         presentation_reason: row.pack.presentation_reason || null,
         legacy_pack_status: row.pack.legacy_pack_status || null,
+        report_doc_id: row.pack.report_doc_id || null,
+        invoice_doc_id: row.pack.invoice_doc_id || null,
+        swms_doc_id: row.pack.swms_doc_id || null,
         closeout_documents: row.pack.closeout_documents || {
           report: false,
           invoice: false,
@@ -1482,6 +1485,9 @@ export function buildCanonicalMakesafeRows(
       presentation_kind: packHonesty.kind,
       presentation_reason: packHonesty.reason,
       legacy_pack_status: packHonesty.legacy_pack_status,
+      report_doc_id: pack?.report_doc_id || null,
+      invoice_doc_id: pack?.invoice_doc_id || null,
+      swms_doc_id: pack?.swms_doc_id || null,
       closeout_documents: {
         // Physical / temp-fence: the report tile is the builder-facing PDF.
         // A submitted trade checklist is Trade Report In, never this tick.

@@ -1414,6 +1414,9 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   assertEquals(opsCard.columns.archive[0].report_doc_id, "doc-report");
   assertEquals(opsCard.columns.archive[0].has_report_doc, true);
   assertEquals(opsCard.columns.archive[0].invoice_id, "invoice-row-ready");
+  assertEquals(opsCard.columns.archive[0].pack.report_doc_id, "doc-report");
+  assertEquals(opsCard.columns.archive[0].pack.invoice_doc_id, "doc-invoice");
+  assertEquals(opsCard.columns.archive[0].pack.swms_doc_id, "doc-swms");
   assertEquals(opsCard.row_count, 1);
 
   // Stripping a full row through projectOpsMakesafeCardRow never moves stage
@@ -1456,6 +1459,8 @@ Deno.test("card JSON always includes report and invoice coordinates", () => {
   assertEquals(withEvidence.report_doc_id, "doc-report-direct");
   assertEquals(withEvidence.has_report_doc, true);
   assertEquals(withEvidence.invoice_id, "invoice-row-direct");
+  assertEquals(withEvidence.pack.report_doc_id, "doc-report-direct");
+  assertEquals(withEvidence.pack.invoice_doc_id, "doc-invoice");
 
   const [withoutEvidence] = buildCanonicalMakesafeRows(
     [baseJob("new", "job-empty-coordinates", { assignments: [] })],

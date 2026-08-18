@@ -31,6 +31,7 @@ import {
   MAKESAFE_FINANCE_CC,
 } from "./makesafe_send_pack.ts";
 import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
+import { SES_SAMPLE_DESTINATION_ENV } from "./ses_sample_destination.ts";
 
 const MAVERICK_HTML =
   '<p>Body</p><div data-secureworks-signature="maverick">Maverick</div>';
@@ -388,6 +389,27 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(routes[1].cc, AJS_PACK_CC);
   assertEquals(routes[1].attachment_hashes, ["photo-hash-1"]);
   assertEquals(routes[1].ready, true);
+});
+
+Deno.test("SAMPLE AJS resolve blanks builder mailboxes when override env is unset", () => {
+  const previous = Deno.env.get(SES_SAMPLE_DESTINATION_ENV);
+  Deno.env.delete(SES_SAMPLE_DESTINATION_ENV);
+  try {
+    const docket = {
+      ...ajsDocket("invoice_bound", {
+        status: "AUTHORISED",
+        xero_invoice_id: "xero-1",
+        invoice_number: "INV-1",
+      }),
+      job_number: "SAMPLE-AJS-0001",
+    };
+    const routes = resolveDocketRoutes(docket, AJS_ARTIFACTS, null);
+    assertEquals(routes.map((r) => r.recipients), [[], []]);
+    assertEquals(routes.every((r) => r.ready === false), true);
+  } finally {
+    if (previous === undefined) Deno.env.delete(SES_SAMPLE_DESTINATION_ENV);
+    else Deno.env.set(SES_SAMPLE_DESTINATION_ENV, previous);
+  }
 });
 
 /** Builder-facing AJS bodies: what is attached, job ref, thanks. No internal jargon. */

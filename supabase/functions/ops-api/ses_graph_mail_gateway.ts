@@ -15,6 +15,7 @@ import {
   resolveSesMailTransport,
 } from "./ses_photo_mail_volume_guard.ts";
 import { SesExternalOutcomeUnknownError } from "./ses_external_effects.ts";
+import { assertSesSampleSendAllowed } from "./ses_sample_destination.ts";
 
 export interface SesRouteSendResult {
   message_id: string;
@@ -737,6 +738,7 @@ export function createSesGraphMailGateway(
 
   return {
     async createDraftAndSend(route, context) {
+      assertSesSampleSendAllowed(route);
       const attachments = await deps.loadAttachments(
         Array.isArray(route.attachment_hashes) ? route.attachment_hashes : [],
       );

@@ -64,6 +64,9 @@ import {
 } from "./ses_review_cockpit.ts";
 import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
+  applySesSampleDestinationOverride,
+} from "./ses_sample_destination.ts";
+import {
   ajsPackCc,
   ajsPackRecipients,
   isAjsBuilderKey,
@@ -763,7 +766,9 @@ export function resolveDocketRoutes(
       classification.family || object(docket.review_spec).family || "",
     );
     const shape = { builder_key: builderKey, family };
-    if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
+    if (!isMlbPhysicalReleaseShape(shape)) {
+      return applySesSampleDestinationOverride(docket, resolvedRoutes);
+    }
     const thread = routingIntakeThread(routing);
     // Captain 2026-08-06: the three destinations are SET here, not inherited
     // from the stored draft's To: header. mlbPhysicalRouteRecipients is the one
@@ -792,7 +797,9 @@ export function resolveDocketRoutes(
         originalSubjectSourceRaw === "job_metadata_builder_email_subject"
         ? originalSubjectSourceRaw
         : null;
-    return resolvedRoutes.map((route) => {
+    return applySesSampleDestinationOverride(
+      docket,
+      resolvedRoutes.map((route) => {
       const declared = mlbPhysicalRouteRecipients(
         route.route_kind,
         billingMailbox,
@@ -824,7 +831,8 @@ export function resolveDocketRoutes(
           }
           : null,
       );
-    });
+    }),
+    );
   }
 
   // AJS/AJBR two-email shape (skill backend release contract / Captain 2026-08-04):
@@ -915,7 +923,7 @@ export function resolveDocketRoutes(
     });
   }
 
-  return out;
+  return applySesSampleDestinationOverride(docket, out);
 }
 
 function cleanInputFromRows(args: {
