@@ -1371,11 +1371,18 @@ Deno.test("legacySent report-only re-derive keeps the carried current docket", (
       legacy_pack_status: "authorised_not_sent",
     },
   );
-  assertEquals(enriched.report_pack.honesty_docket_revision_id, "rev-ans-ready");
+  assertEquals(
+    enriched.report_pack.honesty_docket_revision_id,
+    "rev-ans-ready",
+  );
   assertEquals(enriched.report_pack.honesty_docket_pre_xero_docs_ready, true);
   assertEquals(enriched.report_pack.docket_revision_id, null);
 
-  const [card] = buildCanonicalMakesafeRows([enriched], { computedAt: NOW }, "card");
+  const [card] = buildCanonicalMakesafeRows(
+    [enriched],
+    { computedAt: NOW },
+    "card",
+  );
   assertEquals(card.pack.presentation_kind, "ready");
   assertEquals(card.pack.state, "authorised_not_sent");
   assert(String(card.pack.presentation_reason || "").includes("awaiting send"));
@@ -1412,7 +1419,11 @@ Deno.test("failed legacy pack refusal still names its fact after enrichment", ()
   );
   assertEquals(enriched.report_pack.failed_step, "render_report");
 
-  const [card] = buildCanonicalMakesafeRows([enriched], { computedAt: NOW }, "card");
+  const [card] = buildCanonicalMakesafeRows(
+    [enriched],
+    { computedAt: NOW },
+    "card",
+  );
   assertEquals(card.pack.presentation_kind, "refused");
   assertEquals(card.pack.presentation_reason, "renderer exploded");
 });

@@ -1474,8 +1474,7 @@ export function buildCanonicalMakesafeRows(
         : pack?.honesty_docket_revision_id
         ? {
           id: pack.honesty_docket_revision_id,
-          pre_xero_docs_ready:
-            pack.honesty_docket_pre_xero_docs_ready === true,
+          pre_xero_docs_ready: pack.honesty_docket_pre_xero_docs_ready === true,
           blockers: pack.honesty_docket_blockers,
         }
         : null,
