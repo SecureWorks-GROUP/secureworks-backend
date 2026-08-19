@@ -33241,6 +33241,19 @@ export function tradeQuoteVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager'
 }
 
+// Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
+// derived from them — is a narrower question than the quote, and the open-pool
+// tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
+// admits ANY signed-in trade to ANY make-safe job before a named assignment
+// exists (isMakesafeAccessJobForClient asks only whether the job is a make-safe,
+// never whether it is open to this caller). That is the right trade for filing a
+// field report and the wrong one for a payroll read, so it is refused wherever a
+// response carries another trade's rate. Office, division manager of the job's
+// vertical, and an allocated crew member on the job all pass.
+export function tradeLabourCostVisibleForTier(tier: TradeJobAccessTier): boolean {
+  return tier === 'office' || tier === 'division_manager' || tier === 'allocated'
+}
+
 export async function resolveTradeJobAccessTier(
   client: any,
   jobId: string,
@@ -33658,6 +33671,26 @@ function shouldOmitTradeTodayRecent(
   return false
 }
 
+// Job statuses that must never surface in "My recent completed". The bucket is
+// fed from the same omit branch that hides dead cards from "Needs Report", and
+// that branch's FIRST test fires on archived / cancelled / lost / deleted /
+// duplicate / void — long before any completion reasoning — so a complete
+// assignment on a cancelled or duplicated job would otherwise be presented to
+// the crew as work they finished. The rest of _MAKESAFE_POOL_EXCLUDED_STATUSES
+// (complete / completed / invoiced / paid / closed) is exactly what the bucket
+// is FOR and stays in.
+export const _TRADE_RECENT_COMPLETED_EXCLUDED_STATUSES = [
+  'cancelled', 'lost', 'deleted', 'duplicate', 'duplicated', 'void', 'voided',
+] as const
+
+export function _tradeRecentCompletedEligible(assignment: any): boolean {
+  if (String(assignment?.status || '').toLowerCase() !== 'complete') return false
+  const job = assignment?.jobs || {}
+  if (job.archived === true) return false
+  const jobStatus = String(job.status || '').toLowerCase()
+  return !(_TRADE_RECENT_COMPLETED_EXCLUDED_STATUSES as readonly string[]).includes(jobStatus)
+}
+
 // Personal-lens recency for my_jobs: an assignment is current when it ENDS on
 // or after the floor (multi-day span still on site), or has no end and STARTS
 // on or after the floor, or has no date at all (allocated, not yet scheduled —
@@ -33707,7 +33740,7 @@ export function _groupTradeAssignmentsForTest(
         !shouldOmitTradeTodayRecent(a, makesafeEvidence)
       ) {
         grouped.recent.push(a)
-      } else if (String(a?.status || '').toLowerCase() === 'complete') {
+      } else if (_tradeRecentCompletedEligible(a)) {
         grouped.recentCompleted.push(a)
       }
     }
@@ -35164,6 +35197,17 @@ export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
 // dayRate}` (their own days/day-rate, not the customer's price) — `sell` under
 // labour goes too. Keys are matched exactly (case-sensitive) so a structural
 // key like `totalMetres` is untouched; the pure helper is exported and pinned.
+//
+// The blob's shape is owned by the scoping tools, so the list is grounded in the
+// production key audit in
+// `supabase/functions/_shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md` §2
+// (sampled 2026-05-01, 204 fencing / 199 patio scope rows) rather than on
+// intuition. Two money keys that audit names were missed on the first pass and
+// are load-bearing: fencing carries `scope_json.job.pricePerMetre`, which with
+// the surviving `job.runs[].length` reconstructs the quoted total outright, and
+// patio carries a top-level `scope_json.job_costs`. When the scoping tools add a
+// new money key, add it HERE and re-check that audit — a key absent from this
+// set ships to an allocated crew member's phone.
 export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   '_pricing_json',
   'pricing_json',
@@ -35180,16 +35224,35 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   'sell_price',
   'margin',
   'marginPct',
+  'margin_pct',
   'totalIncGST',
   'totalExGST',
   'subtotal',
+  'pricePerMetre',
+  'price_per_metre',
+  'job_costs',
+  'jobCosts',
+  'totalCostEstimate',
+  'labourCostEstimate',
+  'materialCostEstimate',
+  'commissionCostEstimate',
 ])
 export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'dayRate', 'labourers'])
 
+// The recursion cap is a guard against a pathological blob, not a licence to
+// stop redacting: past it the branch is DROPPED, never returned verbatim. A
+// redaction fence that fails open at its own limit is the one failure mode it
+// exists to prevent, and it would be silent. JSON carries no `undefined`, so
+// using it as the drop marker cannot collide with real scope data.
+export const TRADE_SCOPE_REDACTION_MAX_DEPTH = 12
+
 export function redactTradeScopeQuote(scope: any): any {
   const walk = (node: any, depth: number): any => {
-    if (depth > 12 || node == null) return node
-    if (Array.isArray(node)) return node.map((v) => walk(v, depth + 1))
+    if (node == null) return node
+    if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
+    if (Array.isArray(node)) {
+      return node.map((v) => walk(v, depth + 1)).filter((v) => v !== undefined)
+    }
     if (typeof node !== 'object') return node
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
@@ -35208,7 +35271,9 @@ export function redactTradeScopeQuote(scope: any): any {
         out.pricing = Object.keys(keptLabour).length > 0 ? { labour: keptLabour } : {}
         continue
       }
-      out[key] = walk(value, depth + 1)
+      const walked = walk(value, depth + 1)
+      if (walked === undefined) continue
+      out[key] = walked
     }
     return out
   }
@@ -44239,6 +44304,13 @@ async function tradeLabourBudget(
   // Same tier decision as every other per-job trade door: office and a manager
   // of the job's vertical pass, an allocated trade passes, nobody else does.
   const accessDecision = await assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)
+  // This response names every assigned crew member and their hourly rate, so the
+  // open-pool exception the shared predicate grants on make-safe jobs does not
+  // reach it. Refused at this door rather than in the predicate: the open-pool
+  // tier is correct for the report/photo doors that depend on it.
+  if (!tradeLabourCostVisibleForTier(accessDecision.tier)) {
+    throw new Error('You are not assigned to this job')
+  }
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   // Get PO total for this job (material + labour)

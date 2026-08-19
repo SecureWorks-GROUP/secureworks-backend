@@ -2322,7 +2322,18 @@ surfaces read `is_lead` via `tradeLeadJobIds` / `tradeIsDesignatedLead`).
 `trade_job_detail` redacts the quote server-side for non-quote tiers
 (`redactTradeScopeQuote` over `scope_json`, `_tradeDocumentsForAllocatedTrade`
 over documents) — never ship raw `scope_json` or a `quote`/`invoice` document to
-an allocated trade, and never re-derive the tier per route. The personal
+an allocated trade, and never re-derive the tier per route.
+`TRADE_SCOPE_QUOTE_KEYS` is an exact-name denylist over a blob the SCOPING TOOLS
+own, so it is grounded in the production key audit in
+`_shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md` §2, not on intuition —
+`job.pricePerMetre` (x the surviving `job.runs[].length` = the quoted total) and
+patio `job_costs` were both missed on the first pass. Add a new money key there
+and re-check that audit; the redactor drops a branch past its depth cap rather
+than returning it verbatim. `makesafe_open` is a REPORT door, never a payroll
+one: it admits ANY signed-in trade to ANY make-safe job, so
+`trade_labour_budget` (every crew member's `trade_rates.hourly_rate` and cost)
+refuses that tier via `tradeLabourCostVisibleForTier` at the door, not in the
+shared predicate. The personal
 `my_jobs` lane is window-overlap recent (`_myJobsPersonalRecencyFilter`), not a
 start-date floor. Gap table, the live-report diagnosis, the restrictively
 resolved ambiguities and the front-end half:

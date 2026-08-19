@@ -163,3 +163,28 @@ Deno.test("Trade Today recent keeps a completed live make-safe while its current
 
   assertEquals(grouped.recent.map((a: { id: string }) => a.id), ["live-makesafe-needs-report"]);
 });
+
+// A cancelled / lost / deleted / duplicated job is not "work I completed". The
+// omit branch that feeds recentCompleted fires on those statuses BEFORE any
+// completion reasoning, so without an explicit exclusion a complete assignment
+// on a dead job is presented to the crew as finished work.
+Deno.test("My recent completed excludes cancelled/lost/deleted/duplicate/void and archived jobs", () => {
+  const grouped = _groupTradeAssignmentsForTest([
+    { id: "on-cancelled", scheduled_date: "2026-08-01", status: "complete", jobs: { id: "j-cancelled", type: "fencing", status: "cancelled", archived: false } },
+    { id: "on-lost", scheduled_date: "2026-08-01", status: "complete", jobs: { id: "j-lost", type: "fencing", status: "lost", archived: false } },
+    { id: "on-deleted", scheduled_date: "2026-08-01", status: "complete", jobs: { id: "j-deleted", type: "fencing", status: "deleted", archived: false } },
+    { id: "on-duplicate", scheduled_date: "2026-08-01", status: "complete", jobs: { id: "j-duplicate", type: "fencing", status: "duplicate", archived: false } },
+    { id: "on-void", scheduled_date: "2026-08-01", status: "complete", jobs: { id: "j-void", type: "fencing", status: "voided", archived: false } },
+    { id: "on-archived", scheduled_date: "2026-08-01", status: "complete", jobs: { id: "j-archived", type: "fencing", status: "in_progress", archived: true } },
+    // The bucket's real subjects survive: a finished/invoiced job and a plain
+    // complete allocation on a live job.
+    { id: "on-invoiced", scheduled_date: "2026-08-02", status: "complete", jobs: { id: "j-invoiced", type: "fencing", status: "invoiced", archived: false } },
+    { id: "on-live", scheduled_date: "2026-08-03", status: "complete", jobs: { id: "j-live", type: "fencing", status: "in_progress", archived: false } },
+  ], "2026-08-14", "2026-08-16");
+
+  assertEquals(grouped.recent, []);
+  assertEquals(
+    grouped.recentCompleted.map((a: { id: string }) => a.id),
+    ["on-invoiced", "on-live"],
+  );
+});

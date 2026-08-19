@@ -28,6 +28,7 @@ import {
   _tradeJobDetailForTest,
   _tradeLabourBudgetForTest,
   redactTradeScopeQuote,
+  tradeLabourCostVisibleForTier,
   resolveTradeJobAccessTier,
   TRADE_QUOTE_DOCUMENT_TYPES,
   tradeIsDesignatedLead,
@@ -149,7 +150,12 @@ const QUOTE_SCOPE = {
       _pricing_json: { totalIncGST: 6600 },
     }],
   }],
-  job: { _pricing_json: { totalExGST: 5000 }, runs: [{ length: 10 }] },
+  // Real production keys from the scope_json audit in
+  // _shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md §2: fencing writes
+  // job.pricePerMetre (x runs[].length = the quoted total), patio writes a
+  // top-level job_costs.
+  job_costs: { labour: 2400, materials: 3100, total: 5500 },
+  job: { _pricing_json: { totalExGST: 5000 }, pricePerMetre: 125, runs: [{ length: 10 }] },
 };
 
 function seed(): Tables {
@@ -358,7 +364,27 @@ Deno.test("quote rule: exactly office and division_manager see the quote", () =>
 function quoteLeakProbe(payload: any): string[] {
   const leaks: string[] = [];
   const text = JSON.stringify(payload);
-  for (const needle of ["_pricing_json", "totalIncGST", "totalExGST", "marginPct", "pricingNotes", "noteQuote", "\"sell\"", "Q-1", "Q-2", "quote.pdf", "inv.pdf", "8800", "8000"]) {
+  for (
+    const needle of [
+      "_pricing_json",
+      "totalIncGST",
+      "totalExGST",
+      "marginPct",
+      "pricingNotes",
+      "noteQuote",
+      "\"sell\"",
+      "Q-1",
+      "Q-2",
+      "quote.pdf",
+      "inv.pdf",
+      "8800",
+      "8000",
+      // Audited production money keys (LOOP2_DRYRUN_REPORT.md §2).
+      "pricePerMetre",
+      "job_costs",
+      "5500",
+    ]
+  ) {
     if (text.includes(needle)) leaks.push(needle);
   }
   return leaks;
@@ -452,6 +478,35 @@ Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the r
   assertEquals(quoteLeakProbe(r), []);
 });
 
+Deno.test("redactTradeScopeQuote strips the audited production money keys: fencing pricePerMetre and patio job_costs", () => {
+  const r = redactTradeScopeQuote(structuredClone(QUOTE_SCOPE));
+  // pricePerMetre x the surviving runs[].length reconstructs the quoted total
+  // outright, so it has to go while the construction key length stays.
+  assertEquals(r.job.pricePerMetre, undefined);
+  assertEquals(r.job.runs, [{ length: 10 }]);
+  assertEquals(r.job_costs, undefined);
+  assertEquals(quoteLeakProbe(r), []);
+});
+
+Deno.test("redactTradeScopeQuote fails CLOSED at the recursion cap: a branch past the limit is dropped, never returned raw", () => {
+  let deep: any = { sell: 9999, totalIncGST: 8800, pricePerMetre: 125 };
+  for (let i = 0; i < 20; i++) deep = { level: deep };
+  const r = redactTradeScopeQuote({ config: { totalMetres: 42 }, deep });
+  // Everything inside the cap is still redacted normally...
+  assertEquals(r.config, { totalMetres: 42 });
+  // ...and nothing past it survives verbatim.
+  assertEquals(quoteLeakProbe(r), []);
+  assertEquals(JSON.stringify(r).includes("9999"), false);
+});
+
+Deno.test("redactTradeScopeQuote: an over-deep entry inside an ARRAY is dropped, not left as a hole", () => {
+  let deep: any = { sell: 9999 };
+  for (let i = 0; i < 20; i++) deep = [deep];
+  const r = redactTradeScopeQuote({ rows: deep });
+  assertEquals(quoteLeakProbe(r), []);
+  assertEquals(JSON.stringify(r).includes("null"), false);
+});
+
 Deno.test("redactTradeScopeQuote: a pricing block with no labour becomes empty, a string blob is parsed, null stays null", () => {
   assertEquals(redactTradeScopeQuote({ pricing: { addonRows: [{ sell: 1 }] } }), { pricing: {} });
   assertEquals(redactTradeScopeQuote(JSON.stringify({ a: 1, _pricing_json: {} })), { a: 1 });
@@ -503,6 +558,74 @@ Deno.test("trade_labour_budget: the division manager passes (was refused by the 
     managedVerticals: ["fencing"],
   });
   assertEquals(p.labour_budget, 3200);
+});
+
+// The shared tier predicate grants `makesafe_open` to ANY signed-in trade on ANY
+// make-safe job (it asks whether the job is a make-safe, never whether it is
+// open to this caller). That is right for the field-report doors and wrong here:
+// this response names every assigned crew member, their hours, their
+// trade_rates.hourly_rate and the cost derived from it.
+Deno.test("trade_labour_budget: the MakeSafe open-pool tier is refused — another trade's pay is not a report-door read", async () => {
+  const t = seed();
+  t.job_assignments.push({
+    id: "a-ms-lead",
+    job_id: JOB_MS,
+    user_id: LEAD,
+    status: "complete",
+    is_lead: true,
+    role: "lead_installer",
+    started_at: "2026-08-01T00:00:00Z",
+    completed_at: "2026-08-01T06:00:00Z",
+  });
+  t.trade_rates = [{ user_id: LEAD, hourly_rate: 95, effective_from: "2026-01-01", effective_to: null }];
+  t.users = [{ id: LEAD, name: "Lead Installer" }];
+
+  // Control: the tier IS makesafe_open, so the refusal is the door's doing.
+  const tier = await resolveTradeJobAccessTier(makeClient(t), JOB_MS, STRANGER, {
+    access: { orgId: ORG_A, managedVerticals: [] },
+  });
+  assertEquals(tier.tier, "makesafe_open");
+
+  await assertRejects(
+    () =>
+      _tradeLabourBudgetForTest(makeClient(t), new URLSearchParams({ jobId: JOB_MS }), STRANGER, false, {
+        orgId: ORG_A,
+        managedVerticals: [],
+      }),
+    Error,
+    "not assigned",
+  );
+});
+
+Deno.test("trade_labour_budget: an allocated crew member on that same make-safe still gets the crew costs", async () => {
+  const t = seed();
+  t.job_assignments.push({
+    id: "a-ms-lead",
+    job_id: JOB_MS,
+    user_id: LEAD,
+    status: "complete",
+    is_lead: true,
+    role: "lead_installer",
+    started_at: "2026-08-01T00:00:00Z",
+    completed_at: "2026-08-01T06:00:00Z",
+  });
+  t.trade_rates = [{ user_id: LEAD, hourly_rate: 95, effective_from: "2026-01-01", effective_to: null }];
+  t.users = [{ id: LEAD, name: "Lead Installer" }];
+
+  const p = await _tradeLabourBudgetForTest(makeClient(t), new URLSearchParams({ jobId: JOB_MS }), LEAD, false, {
+    orgId: ORG_A,
+    managedVerticals: [],
+  });
+  assertEquals(p.trades.length, 1);
+  assertEquals(p.trades[0].rate, 95);
+});
+
+Deno.test("labour-cost rule: office, division manager and allocated pass; the open-pool exception and a stranger do not", () => {
+  assertEquals(tradeLabourCostVisibleForTier("office"), true);
+  assertEquals(tradeLabourCostVisibleForTier("division_manager"), true);
+  assertEquals(tradeLabourCostVisibleForTier("allocated"), true);
+  assertEquals(tradeLabourCostVisibleForTier("makesafe_open"), false);
+  assertEquals(tradeLabourCostVisibleForTier("none"), false);
 });
 
 Deno.test("trade_labour_budget: an unallocated, unmanaged trade is refused", async () => {
