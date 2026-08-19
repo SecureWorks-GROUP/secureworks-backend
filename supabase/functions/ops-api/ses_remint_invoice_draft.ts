@@ -55,7 +55,7 @@ export type RemintSesInvoiceDraftDeps = {
   ) => Promise<void>;
   deactivateObligationCycles: (
     client: any,
-    obligationRevisionId: string,
+    jobId: string,
   ) => Promise<void>;
   markObligationVoidLinked: (
     client: any,
@@ -104,12 +104,13 @@ async function closePreviousObligation(
   deps: RemintSesInvoiceDraftDeps,
   client: any,
   leftover: SesLeftoverObligation | null,
+  jobId: string,
   revisionId?: string | null,
 ) {
+  await deps.deactivateObligationCycles(client, jobId);
   const closedRevision = String(revisionId || leftover?.revision_id || "")
     .trim();
   if (closedRevision) {
-    await deps.deactivateObligationCycles(client, closedRevision);
     await deps.markObligationVoidLinked(client, closedRevision);
   }
   const obligationId = String(leftover?.obligation_id || "").trim();
@@ -186,6 +187,7 @@ export async function remintSesInvoiceDraftAction(
     deps,
     client,
     leftover,
+    jobId,
     live?.invoice_obligation_revision_id,
   );
 
@@ -286,19 +288,27 @@ export function makeDefaultRemintDeps(
         .select("id,status")
         .eq("job_id", jobId)
         .in("status", ["open", "reserved", "xero_bound"]);
-      const rows = Array.isArray(res.data) ? res.data : [];
-      const parent = rows[0];
-      if (!parent) return null;
-      const rev = await client.from("makesafe_invoice_obligation_revisions")
-        .select("id")
-        .eq("obligation_id", parent.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const parent = (Array.isArray(res.data) ? res.data : [])[0];
+      const cycles = await client.from("makesafe_invoice_obligation_cycles")
+        .select("obligation_id,obligation_revision_id")
+        .eq("job_id", jobId)
+        .eq("active", true);
+      const cycle = (Array.isArray(cycles.data) ? cycles.data : [])[0];
+      if (!parent && !cycle) return null;
+      let revisionId = cycle?.obligation_revision_id || null;
+      if (parent && !revisionId) {
+        const rev = await client.from("makesafe_invoice_obligation_revisions")
+          .select("id")
+          .eq("obligation_id", parent.id)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        revisionId = rev?.data?.id || null;
+      }
       return {
-        obligation_id: String(parent.id),
-        status: String(parent.status || ""),
-        revision_id: rev?.data?.id || null,
+        obligation_id: String(parent?.id || cycle?.obligation_id || ""),
+        status: String(parent?.status || "cycle_only"),
+        revision_id: revisionId,
       };
     },
     deleteDraft: async (_client, invoice, actor) =>
@@ -308,10 +318,11 @@ export function makeDefaultRemintDeps(
         .update({ status: "DELETED" })
         .eq("xero_invoice_id", xeroInvoiceId);
     },
-    async deactivateObligationCycles(client, obligationRevisionId) {
+    async deactivateObligationCycles(client, jobId) {
       await client.from("makesafe_invoice_obligation_cycles")
         .update({ active: false })
-        .eq("invoice_obligation_revision_id", obligationRevisionId);
+        .eq("job_id", jobId)
+        .eq("active", true);
     },
     async markObligationVoidLinked(client, obligationRevisionId) {
       const revision = await client.from("makesafe_invoice_obligation_revisions")
