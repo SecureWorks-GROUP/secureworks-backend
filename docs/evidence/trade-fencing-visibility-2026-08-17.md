@@ -183,7 +183,9 @@ office-role sets are untouched.
 - `trade_labour_budget` still calls the narrower `assertAssigned` (own
   assignment only, no vertical or MakeSafe fallback), so a vertical manager is
   still refused that read. Pre-existing, outside these two asks; noted, not
-  fixed.
+  fixed. **Superseded 2026-08-17**: it now resolves the shared tier predicate
+  (and refuses the make-safe open-pool tier at the door, because the response
+  carries crew pay) — `docs/evidence/trade-access-model-2026-08-17.md`.
 - Latent trap, unchanged: the client accepts any `managed_verticals` string,
   the server whitelists four.
 

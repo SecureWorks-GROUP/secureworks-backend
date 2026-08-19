@@ -110,6 +110,26 @@ function matchOr(job: Record<string, unknown>, orStr: string): boolean {
   });
 }
 
+// The personal my_jobs lane filters recency with ONE plain or() (window overlap:
+// scheduled_end / scheduled_date / unscheduled), produced by
+// _myJobsPersonalRecencyFilter. The stub evaluates exactly that grammar and
+// refuses anything else, so a query-shape change here fails loudly.
+function matchAssignmentRecencyOr(
+  a: { scheduled_date?: string | null; scheduled_end?: string | null },
+  orStr: string,
+): boolean {
+  const m = orStr.match(
+    /^scheduled_end\.gte\.([^,]+),and\(scheduled_end\.is\.null,scheduled_date\.gte\.([^)]+)\),scheduled_date\.is\.null$/,
+  );
+  if (!m) throw new Error("unrecognised plain or() on job_assignments: " + orStr);
+  const floor = m[1];
+  const end = a.scheduled_end ?? null;
+  const start = a.scheduled_date ?? null;
+  return (end != null && end >= floor) ||
+    (end == null && start != null && start >= floor) ||
+    start == null;
+}
+
 function parseNotInSet(filterStr: string): Set<string> {
   const out = new Set<string>();
   for (const m of filterStr.matchAll(/"([^"]+)"/g)) out.add(m[1]);
@@ -141,6 +161,9 @@ function resolveQuery(
       rows = rows.filter((a) =>
         a.scheduled_date != null && a.scheduled_date < st.lt!
       );
+    }
+    if (st.refOr && st.refOr.referencedTable == null) {
+      rows = rows.filter((a) => matchAssignmentRecencyOr(a, st.refOr!.str));
     }
     // Inner join to jobs (drop job-less rows) + referenced-table or() constrains parent.
     let joined = rows
@@ -321,6 +344,7 @@ function nonPool(g: any): any[] {
     ...g.thisWeek,
     ...g.upcoming,
     ...g.recent,
+    ...(g.recentCompleted || []),
     ...(g.unscheduled || []),
   ];
 }
@@ -583,7 +607,11 @@ Deno.test("U2b-1: fencing manager mode:'all' now sees ANOTHER crew's fencing ass
     "u-henry",
     "old path's assignment query is own-only",
   );
-  assertEquals(primaryOld?.refOr, null, "old path issues no vertical widening");
+  assertEquals(
+    primaryOld?.refOr?.referencedTable,
+    null,
+    "old path issues no vertical widening (its only or() is the recency window)",
+  );
   const oldAssigned = assignedJobIds(gOld);
   assertEquals(
     oldAssigned.includes("job-f2"),
@@ -1002,7 +1030,14 @@ Deno.test("U2b-3 (regression): an installer is unaffected — mode:'all' and mod
     q.table === "job_assignments" && q.lt == null
   );
   assertEquals(primary?.eq.user_id, "u-inst");
-  assertEquals(primary?.refOr, null);
+  // The only or() on the personal lane is the recency window, never a vertical
+  // widening (referencedTable stays null).
+  assertEquals(primary?.refOr?.referencedTable, null);
+  assertEquals(
+    primary?.refOr?.str.startsWith("scheduled_end.gte."),
+    true,
+    "personal lane recency filter",
+  );
 });
 
 // ── 4. dispatcher see-all is untouched, except that it stops at the tenant ──
