@@ -64,6 +64,20 @@ export interface SesCommercialLabourRateOverride {
   reason: string;
 }
 
+/**
+ * Who proposed the commercial figure (Captain 2026-08-19 pack system).
+ * Default `staff_lock` preserves pre-mission remint payloads.
+ * `ai_proposal` always surfaces as a commercial_review caveat for Captain eyes;
+ * `captain_lock` is an identified Captain instruction.
+ */
+export type SesCommercialAuthorityKind =
+  | "ai_proposal"
+  | "staff_lock"
+  | "captain_lock";
+
+export const SES_COMMERCIAL_AUTHORITY_KINDS: readonly SesCommercialAuthorityKind[] =
+  ["ai_proposal", "staff_lock", "captain_lock"] as const;
+
 export interface SesCommercialQuantityOverrideInput {
   schema: typeof SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA;
   /** Staff member who authorised the commercial figure. */
@@ -90,6 +104,13 @@ export interface SesCommercialQuantityOverrideInput {
    * Absent → non-sealed labour rate refuses (no quiet rate fakery).
    */
   labour_rate_override?: SesCommercialLabourRateOverride;
+  /**
+   * Optional. Defaults to `staff_lock` for back-compat. Matrix id+version may
+   * ride in `proposal_source` when authority_kind is `ai_proposal`.
+   */
+  authority_kind?: SesCommercialAuthorityKind;
+  /** Optional matrix/source coordinate (e.g. `labour-by-builder@ses-matrices/v1`). */
+  proposal_source?: string | null;
 }
 
 export interface SesCommercialQuantityOverrideBuildArgs {
@@ -195,6 +216,22 @@ export function parseSesCommercialQuantityOverride(
     );
   }
   const labour_rate_override = parseLabourRateOverride(o.labour_rate_override);
+  let authority_kind: SesCommercialAuthorityKind = "staff_lock";
+  if (o.authority_kind != null && text(o.authority_kind)) {
+    const kind = text(o.authority_kind) as SesCommercialAuthorityKind;
+    if (!(SES_COMMERCIAL_AUTHORITY_KINDS as readonly string[]).includes(kind)) {
+      throw new SesCommercialQuantityOverrideError(
+        400,
+        `commercial_quantity_override.authority_kind must be one of ${
+          SES_COMMERCIAL_AUTHORITY_KINDS.join(", ")
+        } (default staff_lock).`,
+      );
+    }
+    authority_kind = kind;
+  }
+  const proposal_source = o.proposal_source == null
+    ? null
+    : text(o.proposal_source) || null;
   const lines: SesCommercialQuantityOverrideLineInput[] = [];
   let labourCount = 0;
   for (const rawLine of o.lines) {
@@ -258,6 +295,8 @@ export function parseSesCommercialQuantityOverride(
     trade_reported_hours_per_trade: trade_reported,
     sealed_billable_hours_floor: sealed_floor,
     lines,
+    authority_kind,
+    proposal_source,
     ...(labour_rate_override ? { labour_rate_override } : {}),
   };
 }

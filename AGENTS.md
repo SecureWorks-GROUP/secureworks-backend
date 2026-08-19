@@ -2927,6 +2927,15 @@ step is `prepare_ses_docket_revision` (`dry_run`, then `dry_run: false`) plus a
 fresh signoff. Pure logic and both regression directions:
 `ses_supporting_report_trust.ts`, `ses_reporting_actions_regression_test.ts`.
 
+## Commercial Taste Is A Caveat, Not A Draft Mint Wall
+
+Captain 2026-08-19 (`data/ses-pack-system-plan-v1/CAPTAIN-DIRECTION-2026-08-19-no-backend-commercial-refuse.md`): hours / rates / materials figure judgment may **flag** for Captain review; it must not 409 the draft path that lands Docs Ready.
+
+- Issue class `commercial_review` in `ses_docket_envelope.ts` / `ses_preparation_issue_policy.ts` buckets separately from `invoice_gate` and `identity_safety_hard`.
+- `localInvoiceProposal` proposes sealed-floor / sealed-rate / labour-only fallbacks with a caveat instead of nulling the proposal for commercial taste.
+- `prepareSesInvoiceObligationAction` no longer 409s on legacy `invoice_gate_codes` or `commercial_review_codes`. Identity `exception_review_codes`, true `price_unresolved` draft-zero, and `docket_pricing_stale` stay hard.
+- Keep send seals, AUTHORISED remint refuse, and auth fences hard.
+
 ## An SES Labour Line Is A Floor; Commercial Quantity Is A Separate Seam
 
 Default path: `prepare_ses_invoice_obligation` copies lines VERBATIM from

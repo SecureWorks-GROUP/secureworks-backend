@@ -233,7 +233,9 @@ Deno.test("missing pricing without a locked figure still refuses before money", 
     SesActionError,
   );
   assertEquals(error.status, 409);
-  assertStringIncludes(error.message, "unresolved invoice gates");
+  // Commercial taste flags no longer wall mint; a true draft-zero
+  // (price_unresolved / no amount) still refuses before money.
+  assertStringIncludes(error.message, "no amount");
   assertEquals(fixture.committedRevision(), null);
 });
 
@@ -505,4 +507,17 @@ Deno.test("prepare_ses_invoice_obligation applies commercial override without to
     (result.proposal.lines[0].evidence as any).override_kind,
     "commercial_quantity_not_rate",
   );
+});
+
+
+Deno.test("authority_kind defaults to staff_lock and accepts ai_proposal", () => {
+  const parsed = parseSesCommercialQuantityOverride(AJBR_70488);
+  assertEquals(parsed.authority_kind, "staff_lock");
+  const ai = parseSesCommercialQuantityOverride({
+    ...AJBR_70488,
+    authority_kind: "ai_proposal",
+    proposal_source: "labour-by-builder@ses-matrices/v1",
+  });
+  assertEquals(ai.authority_kind, "ai_proposal");
+  assertEquals(ai.proposal_source, "labour-by-builder@ses-matrices/v1");
 });

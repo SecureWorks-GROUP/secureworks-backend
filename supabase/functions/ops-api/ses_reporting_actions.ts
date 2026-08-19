@@ -1683,25 +1683,25 @@ export async function prepareSesInvoiceObligationAction(
       ),
     );
   }
+  // Captain 2026-08-19: commercial taste (hours / rates / materials figure)
+  // is a Docs Ready caveat, not a mint 409. Legacy `invoice_gate_codes` and
+  // current `commercial_review_codes` both surface as flags; identity /
+  // integrity exception_review_codes above stay hard. A true draft-zero
+  // (`price_unresolved`) still refuses because there is no amount to mint.
   const invoiceGateCodes = Array.isArray(reviewCard.invoice_gate_codes)
     ? reviewCard.invoice_gate_codes.map((code) => String(code || "")).filter(
       Boolean,
     )
     : [];
-  if (invoiceGateCodes.length > 0 && !hasLockedFigureOverride) {
-    throw new SesActionError(
-      409,
-      sesRefusal(
-        "pricing_evidence_missing",
-        "Invoice creation is held by an explicit invoice gate in the review pack; resolve the price or duplicate-money fact before any Xero action.",
-        {
-          fact:
-            "The review pack contains unresolved invoice gates, so the stored proposal cannot create Xero money.",
-          evidence: { invoice_gate_codes: invoiceGateCodes },
-        },
-      ),
-    );
-  }
+  const commercialReviewCodes = Array.isArray(
+      reviewCard.commercial_review_codes,
+    )
+    ? reviewCard.commercial_review_codes.map((code) => String(code || ""))
+      .filter(Boolean)
+    : [];
+  const commercialCaveatCodes = [
+    ...new Set([...invoiceGateCodes, ...commercialReviewCodes]),
+  ];
   const localReviewProposal = object(docket.local_invoice_proposal);
   if (
     localReviewProposal.state === "price_unresolved" &&
@@ -1719,6 +1719,7 @@ export async function prepareSesInvoiceObligationAction(
             invoice_gate_codes: Array.isArray(localReviewProposal.invoice_gates)
               ? localReviewProposal.invoice_gates
               : [],
+            commercial_review_codes: commercialCaveatCodes,
           },
         },
       ),
@@ -1974,6 +1975,9 @@ export async function prepareSesInvoiceObligationAction(
     (prepared.proposal as any).commercial_quantity_override =
       commercialProvenance;
   }
+  if (commercialCaveatCodes.length) {
+    (prepared.proposal as any).commercial_review_codes = commercialCaveatCodes;
+  }
   (prepared.revision as any).proposal = prepared.proposal;
   const committed = await client.rpc(
     "commit_ses_invoice_obligation_revision_v1",
@@ -1985,6 +1989,9 @@ export async function prepareSesInvoiceObligationAction(
   return {
     ...prepared,
     commercial_quantity_override: commercialProvenance,
+    ...(commercialCaveatCodes.length
+      ? { commercial_review_codes: commercialCaveatCodes }
+      : {}),
     commit: requireValue(
       committed,
       "The invoice obligation revision could not be committed.",
