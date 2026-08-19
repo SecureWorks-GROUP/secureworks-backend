@@ -3,8 +3,12 @@
  * Captain-locked DRAFT remint (ruling 2026-08-19).
  *
  * Validate the lock first. Delete the DRAFT in Xero and on the local mirror.
- * Then prepare + mint + bind. AUTHORISED refuses. If mint fails after delete,
- * the refusal says so — do not pretend the old DRAFT still exists.
+ * Close the parent obligation (the mutable-job unique index lives there, not
+ * on the revision). Then prepare + mint + bind. AUTHORISED refuses.
+ *
+ * If the previous remint already deleted the Xero DRAFT but left the parent
+ * open, remint continues from that leftover — it does not require a live
+ * invoice. If mint fails after delete, the refusal says so.
  */
 import {
   parseSesCommercialQuantityOverride,
@@ -24,12 +28,22 @@ export type SesLiveInvoice = {
   invoice_obligation_revision_id?: string | null;
 };
 
+export type SesLeftoverObligation = {
+  obligation_id: string;
+  status: string;
+  revision_id?: string | null;
+};
+
 export type RemintSesInvoiceDraftDeps = {
   requireMintAuthority: (
     client: any,
     auth: SesActionAuth,
   ) => Promise<void>;
   loadLiveInvoice: (client: any, jobId: string) => Promise<SesLiveInvoice | null>;
+  loadLeftoverMutableObligation: (
+    client: any,
+    jobId: string,
+  ) => Promise<SesLeftoverObligation | null>;
   deleteDraft: (
     client: any,
     invoice: SesLiveInvoice,
@@ -46,6 +60,10 @@ export type RemintSesInvoiceDraftDeps = {
   markObligationVoidLinked: (
     client: any,
     obligationRevisionId: string,
+  ) => Promise<void>;
+  markParentObligationVoidLinked: (
+    client: any,
+    obligationId: string,
   ) => Promise<void>;
   prepareOverride: (
     client: any,
@@ -82,6 +100,24 @@ function mintedInvoiceNumber(minted: Record<string, unknown>): string {
   return String(inv?.invoice_number || inv?.InvoiceNumber || "").trim();
 }
 
+async function closePreviousObligation(
+  deps: RemintSesInvoiceDraftDeps,
+  client: any,
+  leftover: SesLeftoverObligation | null,
+  revisionId?: string | null,
+) {
+  const closedRevision = String(revisionId || leftover?.revision_id || "")
+    .trim();
+  if (closedRevision) {
+    await deps.deactivateObligationCycles(client, closedRevision);
+    await deps.markObligationVoidLinked(client, closedRevision);
+  }
+  const obligationId = String(leftover?.obligation_id || "").trim();
+  if (obligationId) {
+    await deps.markParentObligationVoidLinked(client, obligationId);
+  }
+}
+
 export async function remintSesInvoiceDraftAction(
   client: any,
   auth: SesActionAuth,
@@ -115,33 +151,43 @@ export async function remintSesInvoiceDraftAction(
   }
 
   const live = await deps.loadLiveInvoice(client, jobId);
-  if (!live) {
-    throw new SesActionError(409, {
-      state: "refused",
-      fact:
-        `${REMINT_REQUIRES_LIVE_INVOICE}: there is no live invoice to remint; use create_ses_invoice_draft.`,
-    });
-  }
-  if (liveStatus(live.status) !== "DRAFT") {
+  const leftover = await deps.loadLeftoverMutableObligation(client, jobId);
+  if (live && liveStatus(live.status) !== "DRAFT") {
     throw new SesActionError(409, {
       state: "refused",
       fact:
         `${REMINT_REQUIRES_DRAFT}: only a DRAFT can be reminted this way (saw ${liveStatus(live.status)} on ${live.invoice_number}). AUTHORISED money stays on the void path.`,
     });
   }
-
-  const deleted = await deps.deleteDraft(client, live, args.actor);
-  await deps.markLocalInvoiceDeleted(client, live.xero_invoice_id);
-  if (live.invoice_obligation_revision_id) {
-    await deps.deactivateObligationCycles(
-      client,
-      live.invoice_obligation_revision_id,
-    );
-    await deps.markObligationVoidLinked(
-      client,
-      live.invoice_obligation_revision_id,
-    );
+  if (!live && !leftover) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `${REMINT_REQUIRES_LIVE_INVOICE}: there is no live invoice to remint; use create_ses_invoice_draft.`,
+    });
   }
+
+  let previousInvoice = {
+    xero_invoice_id: live?.xero_invoice_id || "",
+    invoice_number: live?.invoice_number || "already-deleted",
+    status: "DELETED",
+  };
+  if (live) {
+    const deleted = await deps.deleteDraft(client, live, args.actor);
+    await deps.markLocalInvoiceDeleted(client, live.xero_invoice_id);
+    previousInvoice = {
+      xero_invoice_id: live.xero_invoice_id,
+      invoice_number: live.invoice_number,
+      status: deleted.status || "DELETED",
+    };
+  }
+
+  await closePreviousObligation(
+    deps,
+    client,
+    leftover,
+    live?.invoice_obligation_revision_id,
+  );
 
   let minted: Record<string, unknown>;
   try {
@@ -167,7 +213,7 @@ export async function remintSesInvoiceDraftAction(
     throw new SesActionError(409, {
       state: "refused",
       fact:
-        `${REMINT_DRAFT_DELETED_MINT_FAILED}: ${live.invoice_number} is DELETED in Xero but the new DRAFT was not minted (${fact}). Retry remint is wrong — call create_ses_invoice_draft with the same lock.`,
+        `${REMINT_DRAFT_DELETED_MINT_FAILED}: ${previousInvoice.invoice_number} is DELETED in Xero but the new DRAFT was not minted (${fact}). The parent obligation is closed; retry remint or call create_ses_invoice_draft with the same lock.`,
     });
   }
 
@@ -190,11 +236,7 @@ export async function remintSesInvoiceDraftAction(
 
   return {
     state: "xero_draft_reminted",
-    previous_invoice: {
-      xero_invoice_id: live.xero_invoice_id,
-      invoice_number: live.invoice_number,
-      status: deleted.status || "DELETED",
-    },
+    previous_invoice: previousInvoice,
     invoice: (minted as any).invoice || minted,
     obligation_revision_id: (minted as any)._obligation_revision_id || null,
     pack_bind: packBind,
@@ -239,6 +281,26 @@ export function makeDefaultRemintDeps(
         }
         : null;
     },
+    async loadLeftoverMutableObligation(client, jobId) {
+      const res = await client.from("makesafe_invoice_obligations")
+        .select("id,status")
+        .eq("job_id", jobId)
+        .in("status", ["open", "reserved", "xero_bound"]);
+      const rows = Array.isArray(res.data) ? res.data : [];
+      const parent = rows[0];
+      if (!parent) return null;
+      const rev = await client.from("makesafe_invoice_obligation_revisions")
+        .select("id")
+        .eq("obligation_id", parent.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      return {
+        obligation_id: String(parent.id),
+        status: String(parent.status || ""),
+        revision_id: rev?.data?.id || null,
+      };
+    },
     deleteDraft: async (_client, invoice, actor) =>
       hooks.deleteDraftOnXero(invoice, actor),
     async markLocalInvoiceDeleted(client, xeroInvoiceId) {
@@ -252,9 +314,22 @@ export function makeDefaultRemintDeps(
         .eq("invoice_obligation_revision_id", obligationRevisionId);
     },
     async markObligationVoidLinked(client, obligationRevisionId) {
-      await client.from("makesafe_invoice_obligation_revisions")
+      const revision = await client.from("makesafe_invoice_obligation_revisions")
         .update({ state: "void_linked" })
-        .eq("id", obligationRevisionId);
+        .eq("id", obligationRevisionId)
+        .select("obligation_id")
+        .maybeSingle();
+      const obligationId = String(revision?.data?.obligation_id || "").trim();
+      if (obligationId) {
+        await client.from("makesafe_invoice_obligations")
+          .update({ status: "void_linked" })
+          .eq("id", obligationId);
+      }
+    },
+    async markParentObligationVoidLinked(client, obligationId) {
+      await client.from("makesafe_invoice_obligations")
+        .update({ status: "void_linked" })
+        .eq("id", obligationId);
     },
     prepareOverride: hooks.prepareOverride,
     createDraft: hooks.createDraft,
