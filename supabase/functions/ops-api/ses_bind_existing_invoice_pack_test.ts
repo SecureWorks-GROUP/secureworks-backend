@@ -350,6 +350,7 @@ function actionClient(
   packOverrides: Record<string, unknown> = {},
   detailOverrides: Record<string, unknown> = {},
   jobEventRows: any[] = [],
+  extraRows: Record<string, any> = {},
 ) {
   const rows: Record<string, any> = {
     jobs: { data: job, error: null },
@@ -375,6 +376,8 @@ function actionClient(
       },
       error: null,
     },
+    xero_invoices: { data: null, error: null },
+    ...extraRows,
   };
   return {
     from(table: string) {
@@ -782,6 +785,49 @@ Deno.test("bind-only refuses a divergent pack invoice before PDF or document wri
   }
   assertEquals(writes, []);
   assertEquals(message.includes("refuses to replace pack invoice"), true);
+});
+
+Deno.test("bind-only replaces a DELETED pack invoice with the reminted DRAFT", async () => {
+  const calls = { attach: 0, bind: 0, replaceableFromId: "" };
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient(
+      { xero_invoice_id: "xero-old" },
+      {},
+      [],
+      {
+        xero_invoices: { data: { status: "DELETED" }, error: null },
+      },
+    ) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-0817",
+      actor: "captain@test",
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice()],
+      fetchInvoicePdfBytes: async () => new Uint8Array([37, 80, 68, 70]),
+      attachDocument: async () => {
+        calls.attach++;
+        return { document_id: "invoice-doc-0817" } as any;
+      },
+      ensurePack: async () => {},
+      bindPack: async (
+        _client: any,
+        _jobId: string,
+        _selected: any,
+        _docId: string,
+        replaceableFromId?: string,
+      ) => {
+        calls.bind++;
+        calls.replaceableFromId = String(replaceableFromId || "");
+      },
+    },
+  );
+  assertEquals(calls.attach, 1);
+  assertEquals(calls.bind, 1);
+  assertEquals(calls.replaceableFromId, "xero-old");
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
 });
 
 Deno.test("bind-only is idempotent for the same already-bound invoice", async () => {

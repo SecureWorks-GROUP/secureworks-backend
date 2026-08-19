@@ -18797,12 +18797,40 @@ const BIND_EXISTING_INVOICE_PACK_STATUSES = [
   'portal_ready',
 ] as const
 
+function invoiceStatusIsTerminal(status: string): boolean {
+  const st = String(status || '').toUpperCase()
+  return st === 'DELETED' || st === 'VOIDED'
+}
+
+async function localInvoiceStatus(
+  client: any,
+  xeroInvoiceId: string,
+): Promise<string | null> {
+  const res = await client.from('xero_invoices')
+    .select('status')
+    .eq('xero_invoice_id', xeroInvoiceId)
+    .maybeSingle()
+  if (res?.error) {
+    throw new ApiError(
+      `bind-only invoice local status read failed: ${res.error.message}`,
+      503,
+    )
+  }
+  const status = String(res?.data?.status || '').trim()
+  return status || null
+}
+
 async function bindExistingInvoicePackStrict(
   client: any,
   jobId: string,
   invoice: { xero_invoice_id: string; status: string },
   invoiceDocId: string,
+  replaceableFromId?: string,
 ) {
+  const allowedIds = [`xero_invoice_id.eq.${invoice.xero_invoice_id}`]
+  if (replaceableFromId && replaceableFromId !== invoice.xero_invoice_id) {
+    allowedIds.push(`xero_invoice_id.eq.${replaceableFromId}`)
+  }
   const { data, error } = await client.from('makesafe_report_packs')
     .update({
       xero_invoice_id: invoice.xero_invoice_id,
@@ -18815,7 +18843,7 @@ async function bindExistingInvoicePackStrict(
     .in('status', [...BIND_EXISTING_INVOICE_PACK_STATUSES])
     .is('sent_at', null)
     .is('send_started_at', null)
-    .or(`xero_invoice_id.is.null,xero_invoice_id.eq.${invoice.xero_invoice_id}`)
+    .or(`xero_invoice_id.is.null,${allowedIds.join(',')}`)
     .select('id')
   if (error) {
     throw new ApiError(`bind-only invoice pack update failed: ${error.message}`, 500)
@@ -18982,28 +19010,41 @@ async function bindExistingMakesafeInvoicePack(
   }
 
   const existingPackInvoiceId = String(packResponse.data?.xero_invoice_id || '').trim()
+  let replaceableFromId: string | undefined
   if (
     existingPackInvoiceId &&
     existingPackInvoiceId !== String(invoice.xero_invoice_id || '').trim()
   ) {
-    const message =
-      `bind-only invoice recovery refuses to replace pack invoice ${existingPackInvoiceId} with ${invoice.xero_invoice_id}`
-    if (dryRun) {
-      return bindExistingMakesafeInvoicePackDryRefuse({
-        code: 'pack_invoice_divergence',
-        message,
-        status: 409,
-        job_id: jobId,
-        job_number: jobResponse.data.job_number || null,
-        scanned_accrec: invoices.length,
-        invoice: {
-          xero_invoice_id: invoice.xero_invoice_id,
-          invoice_number: invoice.invoice_number,
-          status: invoice.status,
-        },
-      })
+    const liveOld = invoices.find((row: any) =>
+      String(row?.xero_invoice_id || '').trim() === existingPackInvoiceId
+    )
+    const liveOldStatus = String(liveOld?.status || '').toUpperCase()
+    const localOldStatus = (await localInvoiceStatus(client, existingPackInvoiceId) || '')
+      .toUpperCase()
+    const liveOldIsAlive = !!liveOldStatus && !invoiceStatusIsTerminal(liveOldStatus)
+    const provenDead = invoiceStatusIsTerminal(liveOldStatus) ||
+      invoiceStatusIsTerminal(localOldStatus)
+    if (liveOldIsAlive || !provenDead) {
+      const message =
+        `bind-only invoice recovery refuses to replace pack invoice ${existingPackInvoiceId} with ${invoice.xero_invoice_id}`
+      if (dryRun) {
+        return bindExistingMakesafeInvoicePackDryRefuse({
+          code: 'pack_invoice_divergence',
+          message,
+          status: 409,
+          job_id: jobId,
+          job_number: jobResponse.data.job_number || null,
+          scanned_accrec: invoices.length,
+          invoice: {
+            xero_invoice_id: invoice.xero_invoice_id,
+            invoice_number: invoice.invoice_number,
+            status: invoice.status,
+          },
+        })
+      }
+      throw new ApiError(message, 409)
     }
-    throw new ApiError(message, 409)
+    replaceableFromId = existingPackInvoiceId
   }
   if (
     existingPackInvoiceId === String(invoice.xero_invoice_id || '').trim() &&
@@ -19145,7 +19186,7 @@ async function bindExistingMakesafeInvoicePack(
   const ensurePack = deps.ensurePack || _ensurePackRowStrict
   const bindPack = deps.bindPack || bindExistingInvoicePackStrict
   await ensurePack(client, jobId, 'main')
-  await bindPack(client, jobId, invoice, attached.document_id)
+  await bindPack(client, jobId, invoice, attached.document_id, replaceableFromId)
 
   if (namedPriorCycleBind) {
     try {
