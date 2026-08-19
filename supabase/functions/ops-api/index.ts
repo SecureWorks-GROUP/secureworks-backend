@@ -33678,6 +33678,10 @@ export function _groupTradeAssignmentsForTest(
     thisWeek: [] as any[],
     upcoming: [] as any[],
     recent: [] as any[],
+    // Past-dated completed allocations that "Needs Report" deliberately omits
+    // (finished fencing / already-reported make-safes). Discovery only — never
+    // merged into `recent` (that bucket stays the report-action queue).
+    recentCompleted: [] as any[],
     unscheduled: [] as any[],
     makesafePool: [] as any[],
   }
@@ -33701,7 +33705,11 @@ export function _groupTradeAssignmentsForTest(
       if (
         !filterTradeTodayRecent ||
         !shouldOmitTradeTodayRecent(a, makesafeEvidence)
-      ) grouped.recent.push(a)
+      ) {
+        grouped.recent.push(a)
+      } else if (String(a?.status || '').toLowerCase() === 'complete') {
+        grouped.recentCompleted.push(a)
+      }
     }
     else if (d === today) grouped.today.push(a)
     else if (d <= weekEnd) grouped.thisWeek.push(a)

@@ -143,6 +143,12 @@ Deno.test("Trade Today recent omits archived, finished, completed, and already-r
   });
 
   assertEquals(grouped.recent, []);
+  // Completed allocations stay discoverable outside the Needs Report queue;
+  // unfinished archived/terminal leftovers stay dropped (not "completed work").
+  assertEquals(
+    grouped.recentCompleted.map((a: { id: string }) => a.id),
+    ["completed-assignment", "reported-makesafe"],
+  );
 });
 
 Deno.test("Trade Today recent keeps a completed live make-safe while its current report is still owed", () => {

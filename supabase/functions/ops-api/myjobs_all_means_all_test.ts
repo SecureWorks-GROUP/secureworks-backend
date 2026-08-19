@@ -393,6 +393,7 @@ function nonPool(g: any): any[] {
     ...g.thisWeek,
     ...g.upcoming,
     ...g.recent,
+    ...(g.recentCompleted || []),
     ...(g.unscheduled || []),
   ];
 }
