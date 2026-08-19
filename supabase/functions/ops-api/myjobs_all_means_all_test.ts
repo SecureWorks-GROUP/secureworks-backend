@@ -1690,6 +1690,7 @@ Deno.test("allocated crew (lead AND crew) see a still-on-site allocation that st
     assertEquals(ids.includes("job-stale"), false, `${who}: stale row stays windowed out`);
     if (who === "u-crew") {
       assertEquals(
+        // deno-lint-ignore no-explicit-any
         (g.unscheduled || []).map((a: any) => a.jobs?.id),
         ["job-undated"],
         "an undated allocation lands in the unscheduled bucket",

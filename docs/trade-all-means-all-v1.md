@@ -29,10 +29,11 @@ date floor the manager branch did not. `myjobs_all_means_all_test.ts` guards it.
 
 ## What is deliberately unchanged
 
-- **Mine lens and ordinary crew.** The personal feed keeps its 30-day window and
-  its single unpaged read; an installer's `mode=all` output is still byte-identical
-  to `mode=mine`. Crew keep the narrower active-jobs All-tab browse — they do not
-  gain cancelled/archived history.
+- **Mine lens and ordinary crew.** The personal feed keeps its 30-day window (its
+  shape changed on 2026-08-17, see the addendum below) and its single unpaged
+  read; an installer's `mode=all` output is still byte-identical to `mode=mine`.
+  Crew keep the narrower active-jobs All-tab browse — they do not gain
+  cancelled/archived history.
 - **A vertical manager's non-fencing lanes** stay rolling-windowed (U2b).
 - **The open pool stays allocatable-gated.** The ruling is about *visibility*, and
   visibility is delivered by the complete job feed. Putting the 60
@@ -80,6 +81,29 @@ a raw read let a consumer deduping to one row per job pick the stale date (the
 were never visible on any calendar surface. Structural guard:
 `myjobs_ghost_rows_test.ts`; evidence:
 `docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
+
+## Addendum (2026-08-17): personal-lane recency is window overlap, plus `recentCompleted`
+
+The personal (`mode=mine`, ordinary installer) lane's 30-day window is an
+OVERLAP predicate, not a start-date floor: `_myJobsPersonalRecencyFilter(floor)`
+= `scheduled_end >= floor OR (scheduled_end IS NULL AND scheduled_date >= floor)
+OR scheduled_date IS NULL`. A multi-day allocation that started earlier and is
+still on site, and an undated allocation, are now in the crew's own feed — both
+were already in the office and fencing-manager lenses, which is the divergence
+the Captain reported. Stale one-day rows older than the floor still stay out.
+
+`my_jobs` also publishes an additive `recentCompleted` bucket: past-dated
+`complete` allocations that `shouldOmitTradeTodayRecent` deliberately keeps out
+of `recent` (the report-action / "Needs Report" queue), minus dead jobs
+(`_TRADE_RECENT_COMPLETED_EXCLUDED_STATUSES` — cancelled / lost / deleted /
+duplicate / void, and archived). It is discovery only, never merged into
+`recent`, and only the omit-filtered personal lane fills it — the office and
+manager lenses do not omit those rows in the first place, so their bucket is
+empty. Client half: render it as "My recent completed" (secureworks-ux PR #275).
+
+Diagnosis, the tier model this shipped with, and the full gap table:
+`docs/evidence/trade-access-model-2026-08-17.md`. Guards:
+`myjobs_all_means_all_test.ts`, `manager_visibility_test.ts`.
 
 ## Calendar
 
