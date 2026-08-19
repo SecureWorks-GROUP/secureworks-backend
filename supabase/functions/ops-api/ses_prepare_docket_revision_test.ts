@@ -412,6 +412,8 @@ function assertCommercialReviewProposal(
   );
   const blocker = result.blockers.find((item) =>
     item.reason_code === "pricing_evidence_missing" ||
+    item.reason_code === "materials_charge_figure_required" ||
+    item.reason_code === "materials_charge_figure_unsupported" ||
     String(item.issue_class || "") === "commercial_review"
   );
   assert(blocker, "expected a commercial review caveat");
@@ -420,6 +422,13 @@ function assertCommercialReviewProposal(
     (reviewCard(result).commercial_review_codes as string[] || []).length > 0,
     true,
     "review card must stamp commercial_review_codes",
+  );
+  // Named-card persist keeps the DB blockers column hard-only; commercial
+  // caveats live on review_spec so cockpit/inspect/SMS can surface them.
+  assertEquals(
+    String(blocker.issue_class || ""),
+    "commercial_review",
+    "commercial caveats must stay issue_class=commercial_review (not hard)",
   );
   return proposal;
 }
@@ -889,7 +898,7 @@ Deno.test("artifact content-hash mismatch stays visible in a persisted review pa
   assertEquals(result.persisted, true);
 });
 
-Deno.test("sweep-only persistence retains a draft-zero review revision while invoice action stays fenced", async () => {
+Deno.test("sweep-only persistence retains a commercial-review pack while hard blockers stay empty", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJBR" &&
     candidate.family === "physical_makesafe"
@@ -910,7 +919,17 @@ Deno.test("sweep-only persistence retains a draft-zero review revision while inv
     }),
   )).results[0];
   assertEquals(guarded.state, "ready");
-  assertDraftZeroInvoice(guarded, "pricing_evidence_missing");
+  const guardedProposal = assertCommercialReviewProposal(
+    guarded,
+    "attended hours",
+  );
+  assertStringIncludes(
+    String(
+      (guardedProposal.line_items as Array<Record<string, unknown>>)[0]
+        .description,
+    ),
+    "ASSUMED sealed floor",
+  );
   assertEquals(guardedPersistCalls, 1);
   assertEquals(guarded.persisted, true);
 
@@ -925,7 +944,7 @@ Deno.test("sweep-only persistence retains a draft-zero review revision while inv
     }),
   )).results[0];
   assertEquals(normal.state, "ready");
-  assertDraftZeroInvoice(normal, "pricing_evidence_missing");
+  assertCommercialReviewProposal(normal, "attended hours");
   assertEquals(normalPersistCalls, 1);
   assertEquals(normal.persisted, true);
 });
@@ -1003,7 +1022,7 @@ Deno.test("restoration and repair select the sealed physical labour/materials re
       dependencies(thinInput),
     )).results[0];
     assertEquals(thin.state, "ready", family);
-    assertDraftZeroInvoice(thin, "pricing_evidence_missing");
+    assertCommercialReviewProposal(thin, "attended hours");
     assertEquals(thin.envelope.v2.classification.recipe_selected, true, family);
     assert(!blockerCodes(thin).includes("restoration_recipe_unsealed"), family);
     assert(!blockerCodes(thin).includes("repair_recipe_unsealed"), family);
@@ -2683,8 +2702,8 @@ Deno.test(
 Deno.test(
   "an authorised materials figure is never silently discarded",
   async () => {
-    // Nothing to charge for: the figure must refuse, not vanish into a
-    // complete-looking labour-only proposal.
+    // Nothing to charge for: soft-flag labour-only rather than hide the pack,
+    // and keep materials_charge_refused so the figure is not stamped durable.
     const nothingRecorded = await labourProposal(
       "MLB",
       "physical_makesafe",
@@ -2697,19 +2716,20 @@ Deno.test(
       },
       materialsChargeAuthorisation(65),
     );
-    assertDraftZeroInvoice(
+    assertCommercialReviewProposal(
       nothingRecorded,
-      "materials_charge_figure_unsupported",
+      "no materials used",
     );
     assertEquals(
-      nothingRecorded.blockers.some((item) =>
-        item.reason_code === "materials_charge_figure_unsupported"
-      ),
-      true,
+      materialsChargeDecisionFromRevision({
+        local_invoice_proposal: nothingRecorded.invoice_proposal,
+        blockers: nothingRecorded.blockers,
+      }),
+      null,
+      "a refused figure must not become the standing decision",
     );
 
-    // Already priced by typed lines: charging again would double-bill, so the
-    // operator is asked to choose rather than having one silently dropped.
+    // Already priced by typed lines: soft-flag the conflict for Captain review.
     const alreadyPriced = await labourProposal(
       "MLB",
       "physical_makesafe",
@@ -2726,19 +2746,20 @@ Deno.test(
       },
       materialsChargeAuthorisation(65),
     );
-    assertDraftZeroInvoice(
+    assertCommercialReviewProposal(
       alreadyPriced,
-      "materials_charge_figure_unsupported",
+      "already prices",
     );
     assertEquals(
-      alreadyPriced.blockers.some((item) =>
-        item.reason_code === "materials_charge_figure_unsupported"
-      ),
-      true,
+      materialsChargeDecisionFromRevision({
+        local_invoice_proposal: alreadyPriced.invoice_proposal,
+        blockers: alreadyPriced.blockers,
+      }),
+      null,
     );
 
     // AJS prices on ajs_labour_materials, which has no operator materials
-    // charge line: refuse rather than price as though the figure never came.
+    // charge line: still draft-zero (early basis refuse keeps proposal null).
     const wrongBasis = await labourProposal(
       "AJS",
       "physical_makesafe",
@@ -2991,12 +3012,15 @@ Deno.test(
       { trades: 2, rate_ex_gst: 85, materials: [], materials_used: materials },
       "cleared",
     );
-    assertDraftZeroInvoice(blockedClear, "pricing_evidence_missing");
+    // Missing hours soft-flags a priced proposal; the clear still stamps as the
+    // standing NONE decision on that proposal.
+    assertCommercialReviewProposal(blockedClear, "attended hours");
     assertEquals(
-      blockedClear.blockers.some((item) =>
-        item.reason_code === "pricing_evidence_missing"
-      ),
-      true,
+      (materialsChargeDecisionFromRevision({
+        local_invoice_proposal: blockedClear.invoice_proposal,
+        blockers: blockedClear.blockers,
+      }) as Record<string, unknown> | null)?.decision,
+      "none",
     );
 
     const committed = [
@@ -3255,19 +3279,13 @@ Deno.test("AJS/AJBR repair and restoration price the existing-fence pickets like
       assertEquals(lines[1].unit_price_ex_gst, 13.5, label);
       assertEquals(proposal.subtotal_ex_gst, 750, label);
 
-      // The refusal side of the carve-out must reach them too.
+      // The refusal side of the carve-out must reach them too as a soft caveat.
       const refused = await labourProposal(builderKey, family, {
         trades: 2,
         hours_per_trade: 3,
         existing_fence_star_picket_refusal: "genuine_temporary_fence_signal",
       });
-      assertDraftZeroInvoice(refused, "pricing_evidence_missing");
-      assertStringIncludes(
-        refused.blockers.find((item) =>
-          item.reason_code === "pricing_evidence_missing"
-        )!.reason,
-        "temporary-fence kit",
-      );
+      assertCommercialReviewProposal(refused, "temporary-fence kit");
     }
   }
 });
@@ -3414,6 +3432,18 @@ Deno.test("absent attended hours soft-flag a sealed-floor proposal for Captain r
   const proposal = assertCommercialReviewProposal(result, "attended hours");
   assertEquals(proposal.billable_hours_per_trade, 3);
   assertEquals(proposal.subtotal_ex_gst, 510);
+  const labourDescription = String(
+    (proposal.line_items as Array<Record<string, unknown>>)[0].description,
+  );
+  assertStringIncludes(
+    labourDescription,
+    "ASSUMED sealed floor (attendance not evidenced)",
+  );
+  assert(
+    labourDescription.includes("ASSUMED") &&
+      labourDescription.includes("2 trades x 3 hours"),
+    "assumed sealed floor must stay legible on the money line",
+  );
 });
 
 Deno.test("a non-positive attended-hours fact soft-flags rather than silently minting without caveat", async () => {
@@ -5741,16 +5771,28 @@ Deno.test("Phase One keeps business findings visible under the named-card gate p
   unpricedMaterials.cycle_facts.hours_and_materials = {
     trades: 1,
     hours_per_trade: 3,
-    rate_ex_gst: 80,
+    rate_ex_gst: 85,
     materials: [],
     materials_used: ["Recorded material pending price"],
   };
-  assertVisibleDraftZeroException(
-    (await prepareSesDocketRevision(
-      request(unpricedMaterials.identity.job_id),
-      dependencies(unpricedMaterials),
-    )).results[0],
-    "pricing_evidence_missing",
+  // Soft commercial path: materials without a settled figure stay a visible
+  // non-blocking caveat (rate-card review or ask-one-figure), never draft-zero.
+  const unpriced = (await prepareSesDocketRevision(
+    request(unpricedMaterials.identity.job_id),
+    dependencies(unpricedMaterials),
+  )).results[0];
+  assertEquals(unpriced.state, "ready");
+  assertEquals(unpriced.envelope.pre_xero_docs_ready, true);
+  assertInvoiceHandoffCallable(unpriced);
+  assert(
+    blockerCodes(unpriced).some((code) =>
+      code === "materials_charge_figure_required" ||
+      code === "materials_quantity_review_required" ||
+      code === "materials_rate_card_proposal_review_required"
+    ),
+    `expected a materials commercial caveat; got ${
+      blockerCodes(unpriced).join(", ")
+    }`,
   );
 });
 

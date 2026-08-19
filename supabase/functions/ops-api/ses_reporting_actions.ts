@@ -498,12 +498,17 @@ export function sesDocketReleaseCaveats(
   const cards = Array.isArray(review.cards) ? review.cards : [];
   const card = object(cards[0]);
   const categories = [
-    ["review_assumption_codes", "review_assumptions"],
-    ["send_gate_codes", "send_gates"],
+    ["review_assumption_codes", "review_assumptions", "review_assumption"],
+    ["send_gate_codes", "send_gates", "send_gate"],
+    // Captain 2026-08-19: commercial taste is flag-not-wall. Persist hard-only
+    // blockers on the named-card path, then rehydrate commercial_review_* here
+    // so cockpit / Docs Ready / inspect surfaces see the caveat without C4 / money
+    // blockers treating it as a hard refusal.
+    ["commercial_review_codes", "commercial_reviews", "commercial_review"],
   ] as const;
   const seen = new Set<string>();
   const caveats: SesReviewCaveat[] = [];
-  for (const [codesKey, reasonsKey] of categories) {
+  for (const [codesKey, reasonsKey, issueClass] of categories) {
     const codes = Array.isArray(card[codesKey]) ? card[codesKey] : [];
     const reasons = Array.isArray(card[reasonsKey]) ? card[reasonsKey] : [];
     for (const [index, rawCode] of codes.entries()) {
@@ -515,8 +520,10 @@ export function sesDocketReleaseCaveats(
         state: "caveat",
         code,
         fact: fact || `The current docket still carries the ${code} caveat.`,
-        recovery_action:
-          "Resolve the named review caveat and prepare a fresh docket revision before release.",
+        recovery_action: issueClass === "commercial_review"
+          ? "Review the commercial caveat on Docs Ready; remint with a Captain lock if the proposal should change. This is not a hard money wall."
+          : "Resolve the named review caveat and prepare a fresh docket revision before release.",
+        evidence: { issue_class: issueClass },
       });
     }
   }
@@ -1912,6 +1919,15 @@ export async function prepareSesInvoiceObligationAction(
       // Hosted on priced_with_line_override (existing DB CHECK) with explicit
       // evidence.override_kind=commercial_quantity_not_rate — not a false rate.
       pricingDisposition = "priced_with_line_override";
+      if (
+        String(
+          (commercialProvenance as { authority_kind?: unknown })
+            .authority_kind || "",
+        ) === "ai_proposal" &&
+        !commercialCaveatCodes.includes("ai_commercial_proposal")
+      ) {
+        commercialCaveatCodes.push("ai_commercial_proposal");
+      }
     } catch (error) {
       if (error instanceof SesCommercialQuantityOverrideError) {
         throw new SesActionError(error.httpStatus, {

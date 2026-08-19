@@ -590,6 +590,11 @@ export type MaterialsChargeDecision =
       | typeof MATERIALS_CHARGE_FIGURE_UNSUPPORTED;
     reason: string;
     recovery_action: string;
+    /**
+     * Settled-money / double-bill refusals stay hard (draft-zero). Commercial
+     * taste refusals omit this and soft-flag for Captain review.
+     */
+    hard_money?: boolean;
   };
 
 /** The one sanctioned way an operator answers the materials question. */
@@ -682,6 +687,9 @@ export function decideStandardLabourMaterialsCharge(input: {
         }. Adding the figure now would bill those materials a second time.`,
       recovery_action:
         "Nothing on this cycle is still to be priced, so withdraw the figure and leave the shipped pack alone. If the materials genuinely went unbilled, that is a credit or a new invoice decision on the money itself, never a second charge line on a released docket.",
+      // Settled cycle money is not commercial taste — keep draft-zero so the
+      // obligation cannot be written over already-billed materials.
+      hard_money: true,
     };
   }
 

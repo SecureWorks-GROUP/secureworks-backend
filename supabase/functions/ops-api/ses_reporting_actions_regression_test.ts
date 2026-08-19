@@ -46,6 +46,14 @@ Deno.test("persisted named-card findings stay visible caveats outside the hard b
           "No independent curated source is bound.",
           "The persisted artifact has no independent source kind.",
         ],
+        commercial_review_codes: [
+          "pricing_evidence_missing",
+          "materials_charge_figure_required",
+        ],
+        commercial_reviews: [
+          "Trade hours were not evidenced; sealed floor proposed.",
+          "Materials need one ex-GST figure.",
+        ],
       }],
     },
   });
@@ -55,8 +63,17 @@ Deno.test("persisted named-card findings stay visible caveats outside the hard b
     "canonical_draft_pack_output_incomplete",
     "curated_source_missing",
     "independent_source_kind_missing",
+    "pricing_evidence_missing",
+    "materials_charge_figure_required",
   ]);
   assertEquals(caveats.every((caveat) => caveat.state === "caveat"), true);
+  const commercial = caveats.filter((caveat) =>
+    caveat.evidence?.issue_class === "commercial_review"
+  );
+  assertEquals(commercial.map((caveat) => caveat.code), [
+    "pricing_evidence_missing",
+    "materials_charge_figure_required",
+  ]);
 });
 
 async function rawSha256(bytes: Uint8Array): Promise<string> {

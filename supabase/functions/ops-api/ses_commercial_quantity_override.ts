@@ -67,7 +67,8 @@ export interface SesCommercialLabourRateOverride {
 /**
  * Who proposed the commercial figure (Captain 2026-08-19 pack system).
  * Default `staff_lock` preserves pre-mission remint payloads.
- * `ai_proposal` always surfaces as a commercial_review caveat for Captain eyes;
+ * `ai_proposal` surfaces as a commercial_review caveat and must NEVER stamp
+ * `rate_override_approved` (no tool self-attests Captain approval).
  * `captain_lock` is an identified Captain instruction.
  */
 export type SesCommercialAuthorityKind =
@@ -336,6 +337,7 @@ export function buildCommercialQuantityOverrideLines(
   const overrideKind: SesCommercialOverrideKind = rateOverride
     ? "commercial_rate_override"
     : "commercial_quantity_not_rate";
+  const isAiProposal = override.authority_kind === "ai_proposal";
 
   for (const line of override.lines) {
     if (line.line_kind === "labour" && sealedRate != null) {
@@ -356,19 +358,27 @@ export function buildCommercialQuantityOverrideLines(
       }
     }
 
-    const lineNote = rateOverride
-      ? `Staff-authorised commercial figure for this card only. Trade attendance evidence is unchanged. Labour rate overridden from sealed $${rateOverride.sealed_unit_price_ex_gst} to $${rateOverride.authorised_unit_price_ex_gst} (${rateOverride.reason}). Quantity and materials are commercial. Shared sealed schedule matrix unchanged.`
-      : "Staff-authorised commercial figure overrides the automatic floor for this card. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial.";
+    const lineNote = isAiProposal
+      ? (rateOverride
+        ? `AI commercial proposal for Captain review. Trade attendance evidence is unchanged. Proposed labour rate $${rateOverride.authorised_unit_price_ex_gst} vs sealed $${rateOverride.sealed_unit_price_ex_gst} (${rateOverride.reason}). Not Captain-approved until locked.`
+        : "AI commercial proposal for Captain review. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are proposed. Not Captain-approved until locked.")
+      : (rateOverride
+        ? `Staff-authorised commercial figure for this card only. Trade attendance evidence is unchanged. Labour rate overridden from sealed $${rateOverride.sealed_unit_price_ex_gst} to $${rateOverride.authorised_unit_price_ex_gst} (${rateOverride.reason}). Quantity and materials are commercial. Shared sealed schedule matrix unchanged.`
+        : "Staff-authorised commercial figure overrides the automatic floor for this card. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial.");
 
     lines.push({
       description: line.description,
       quantity: line.quantity,
       unit_price: line.unit_price_ex_gst,
       account_code: "210",
-      // Existing disposition vehicle for human-approved non-canon lines.
-      rate_override_approved: true,
-      rate_override_by: override.authorised_by,
-      rate_override_at: override.authorised_at,
+      // ai_proposal must not self-attest Captain/staff rate approval.
+      ...(isAiProposal ? {
+        rate_override_approved: false,
+      } : {
+        rate_override_approved: true,
+        rate_override_by: override.authorised_by,
+        rate_override_at: override.authorised_at,
+      }),
       evidence: {
         source: SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA,
         override_kind: overrideKind,
@@ -377,6 +387,10 @@ export function buildCommercialQuantityOverrideLines(
         authorised_at: override.authorised_at,
         decision_key: override.decision_key,
         reason: override.reason,
+        authority_kind: override.authority_kind || "staff_lock",
+        ...(override.proposal_source
+          ? { proposal_source: override.proposal_source }
+          : {}),
         trade_reported_hours_per_trade: override.trade_reported_hours_per_trade,
         sealed_billable_hours_floor: override.sealed_billable_hours_floor,
         sealed_labour_unit_price_ex_gst: sealedRate,

@@ -1262,9 +1262,12 @@ function localInvoiceProposal(
     ? 80
     : 85;
   // Soft commercial path: when trade count / hours are missing, propose the
-  // sealed attendance floor (1 trade × builder minimum) with a caveat rather
-  // than hiding the pack behind a 409.
-  if (trades === null || trades < 1 || reportedHoursPerTrade === null) {
+  // sealed attendance floor with a caveat rather than hiding the pack behind a
+  // 409. The invoice LINE must say the floor is assumed — never invent bare
+  // "1 trade x 3 hours" as if attendance were evidenced (F3).
+  const attendanceFactsMissing = trades === null || trades < 1 ||
+    reportedHoursPerTrade === null;
+  if (attendanceFactsMissing) {
     commercialReviews.push(
       blocked(
         "pricing_evidence_missing",
@@ -1279,12 +1282,14 @@ function localInvoiceProposal(
         "commercial_review",
       ),
     );
-    if (trades === null || trades < 1) trades = 1;
-    if (reportedHoursPerTrade === null) {
-      reportedHoursPerTrade = canonicalRate === 80 ? 2 : 3;
-    }
   }
-  const minimum = row.family === "temporary_fencing" && trades === 1
+  const billableTrades = (trades !== null && trades >= 1) ? trades : 1;
+  const evidencedOrAssumedHours = reportedHoursPerTrade !== null
+    ? reportedHoursPerTrade
+    : (canonicalRate === 80 ? 2 : 3);
+  trades = billableTrades;
+  reportedHoursPerTrade = evidencedOrAssumedHours;
+  const minimum = row.family === "temporary_fencing" && billableTrades === 1
     ? 4
     : canonicalRate === 80
     ? 2
@@ -1293,7 +1298,7 @@ function localInvoiceProposal(
   // and it never reaches below the floor, so the sealed schedule is enforced, not bypassed: the
   // proposal that leaves here always declares >= `minimum` billable hours per trade and the
   // downstream money guard re-checks it independently.
-  const hoursPerTrade = Math.max(reportedHoursPerTrade, minimum);
+  const hoursPerTrade = Math.max(evidencedOrAssumedHours, minimum);
   const suppliedRate = facts.rate_ex_gst == null
     ? canonicalRate
     : positiveNumber(facts.rate_ex_gst);
@@ -1318,12 +1323,16 @@ function localInvoiceProposal(
     );
   }
 
+  const labourQuantityLabel = `${billableTrades} trade${
+    billableTrades === 1 ? "" : "s"
+  } x ${hoursPerTrade} hours`;
+  const labourLineDescription = attendanceFactsMissing
+    ? `${ref} - ${attendanceLineSubject(row.family)} - ASSUMED sealed floor (attendance not evidenced): ${labourQuantityLabel}`
+    : `${ref} - ${attendanceLineSubject(row.family)} - ${labourQuantityLabel}`;
   const lines: Array<Record<string, unknown>> = [
     lineItem(
-      `${ref} - ${attendanceLineSubject(row.family)} - ${trades} trade${
-        trades === 1 ? "" : "s"
-      } x ${hoursPerTrade} hours`,
-      trades * hoursPerTrade,
+      labourLineDescription,
+      billableTrades * hoursPerTrade,
       canonicalRate,
     ),
   ];
@@ -1571,9 +1580,31 @@ function localInvoiceProposal(
       standing_decision_supplied_now: materialsChargeSuppliedNow,
     });
     if (materialsDecision.action === "refuse") {
+      materialsChargeRefused = true;
+      if (materialsDecision.hard_money) {
+        // Settled-cycle / double-bill: keep draft-zero. Soft commercial taste
+        // must never write an obligation over already-billed materials.
+        return {
+          proposal: null,
+          materials_charge_refused: true,
+          blocker: blocked(
+            materialsDecision.reason_code,
+            materialsDecision.reason,
+            materialsDecision.recovery_action,
+            ["canonical-input-envelope", "trade-materials-used"],
+            [],
+            {
+              materials_used: materialsDecision.materials,
+              invoice_basis: row.invoice_basis,
+              priced_materials_line_count: pricedMaterialsLineCount,
+              hard_money: true,
+            },
+            "identity_safety_hard",
+          ),
+        };
+      }
       // Soft commercial path: keep the labour proposal and surface the refuse
       // as a Captain caveat rather than nulling the whole draft.
-      materialsChargeRefused = true;
       commercialReviews.push(
         blocked(
           materialsDecision.reason_code,
@@ -1680,13 +1711,13 @@ function localInvoiceProposal(
       version: "ses-local-invoice-proposal/v1",
       builder_reference: ref,
       basis: row.invoice_basis,
-      trades,
+      trades: billableTrades,
       // The trade's submitted cost hours are kept verbatim beside the billable hours so the two
       // facts stay separately auditable and neither can be mistaken for the other later.
-      reported_hours_per_trade: reportedHoursPerTrade,
+      reported_hours_per_trade: evidencedOrAssumedHours,
       billable_hours_per_trade: hoursPerTrade,
       billable_hours_floor: minimum,
-      billable_hours_raised_to_floor: hoursPerTrade > reportedHoursPerTrade,
+      billable_hours_raised_to_floor: hoursPerTrade > evidencedOrAssumedHours,
       line_items: lines,
       subtotal_ex_gst: subtotal,
       gst: Math.round(subtotal * 10) / 100,

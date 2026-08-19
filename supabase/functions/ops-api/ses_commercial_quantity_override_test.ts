@@ -521,3 +521,24 @@ Deno.test("authority_kind defaults to staff_lock and accepts ai_proposal", () =>
   assertEquals(ai.authority_kind, "ai_proposal");
   assertEquals(ai.proposal_source, "labour-by-builder@ses-matrices/v1");
 });
+
+Deno.test("ai_proposal must not self-attest rate_override_approved", () => {
+  const { lines, provenance } = buildCommercialQuantityOverrideLines({
+    override: {
+      ...AJBR_70488,
+      authority_kind: "ai_proposal",
+      proposal_source: "labour-by-builder@ses-matrices/v1",
+    },
+    docket_revision_id: "docket-ai-1",
+    attendance_cycle_ids: ["cycle-1"],
+    sealed_labour_unit_price_ex_gst: 80,
+    builder_reference: "AJBR-70488",
+  });
+  assertEquals(provenance.authority_kind, "ai_proposal");
+  for (const line of lines) {
+    assertEquals(line.rate_override_approved, false);
+    assertEquals(line.rate_override_by, undefined);
+    assertEquals(line.rate_override_at, undefined);
+    assertEquals((line.evidence as any).authority_kind, "ai_proposal");
+  }
+});
