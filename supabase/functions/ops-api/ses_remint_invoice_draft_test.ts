@@ -202,6 +202,32 @@ Deno.test("no live invoice and no leftover refuses", async () => {
   assertEquals(err.message.includes(REMINT_REQUIRES_LIVE_INVOICE), true);
 });
 
+Deno.test("deleted DRAFT with leftover active cycle remints without deleting again", async () => {
+  const { calls, impl } = deps({
+    loadLiveInvoice: async () => null,
+    loadLeftoverMutableObligation: async () => ({
+      obligation_id: "parent-old",
+      status: "cycle_only",
+      revision_id: "obl-old",
+    }),
+  });
+  const result = await remintSesInvoiceDraftAction(
+    {},
+    auth,
+    {
+      org_id: "org",
+      job_id: JOB,
+      actor: "captain-chat",
+      commercial_quantity_override: lock,
+    },
+    impl as any,
+  );
+  assertEquals(result.state, "xero_draft_reminted");
+  assertEquals(calls.includes("delete"), false);
+  assertEquals(calls.includes("cycles"), true);
+  assertEquals(calls.includes("create:obl-new"), true);
+});
+
 Deno.test("deleted DRAFT with leftover parent remints without deleting again", async () => {
   const { calls, impl } = deps({
     loadLiveInvoice: async () => null,
