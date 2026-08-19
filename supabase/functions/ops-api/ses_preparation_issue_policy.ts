@@ -7,6 +7,11 @@ export interface SesPreparationIssueBuckets {
   review_assumptions: SesBlocker[];
   send_gates: SesBlocker[];
   invoice_gates: SesBlocker[];
+  /**
+   * Commercial taste (hours / rates / materials figure). Visible for Captain
+   * review; must never feed the draft-mint 409 wall (Captain 2026-08-19).
+   */
+  commercial_reviews: SesBlocker[];
 }
 
 /**
@@ -14,7 +19,7 @@ export interface SesPreparationIssueBuckets {
  * draft-zero review pack, so an unclassified preparation uncertainty is a
  * review assumption.  The few identity/integrity fences which must remain
  * hard are named explicitly at their emission sites; they still never hide
- * the exception pack.
+ * the exception pack. Commercial taste is `commercial_review`: flag, not wall.
  */
 export function classifySesPreparationIssue(
   blocker: SesBlocker,
@@ -30,6 +35,7 @@ export function classifySesPreparationIssues(
     review_assumptions: [],
     send_gates: [],
     invoice_gates: [],
+    commercial_reviews: [],
   };
   for (const blocker of blockers) {
     switch (classifySesPreparationIssue(blocker)) {
@@ -41,6 +47,9 @@ export function classifySesPreparationIssues(
         break;
       case "invoice_gate":
         result.invoice_gates.push(blocker);
+        break;
+      case "commercial_review":
+        result.commercial_reviews.push(blocker);
         break;
       case "review_assumption":
         result.review_assumptions.push(blocker);

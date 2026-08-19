@@ -266,6 +266,7 @@ export interface SesBlocker {
     | "review_assumption"
     | "send_gate"
     | "invoice_gate"
+    | "commercial_review"
     | "identity_safety_hard";
   searches_attempted: string[];
   rejected_candidates: string[];

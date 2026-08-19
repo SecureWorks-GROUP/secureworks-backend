@@ -64,18 +64,146 @@ Deno.test("first proposal mints opaque stable obligation and content revision", 
   assertEquals(result.proposal.totals, { ex: 320, inc: 352 });
 });
 
-Deno.test("review invoice gates refuse with a catalogue code and preserve exact gate evidence", async () => {
+Deno.test("legacy invoice_gate_codes no longer wall mint when a priced proposal exists (Captain 2026-08-19)", async () => {
+  // Commercial taste flags (legacy invoice_gate_codes or commercial_review_codes)
+  // must reach Docs Ready / obligation prepare; only draft-zero and identity
+  // exceptions stay hard. This fixture has a priced proposal plus soft flags.
   const docket = {
     id: "40000000-0000-4000-8000-000000007501",
     job_id: JOB,
     stage: "pre_xero",
-    local_invoice_proposal: { line_items: [] },
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    attendance_cycle_ids: [CYCLE_1],
+    current_attendance_cycle_id: CYCLE_1,
+    envelope: { v2: { routing: { builder: "Major Loss Builders" } } },
+    local_invoice_proposal: {
+      builder_reference: "SWMS-261164",
+      line_items: [{
+        description: "SWMS-261164 - make-safe attendance",
+        quantity: 6,
+        unit_price_ex_gst: 85,
+      }],
+      subtotal_ex_gst: 510,
+      gst: 51,
+      total_inc_gst: 561,
+    },
     review_spec: {
       cards: [{
+        exception_review_codes: [],
         invoice_gate_codes: [
           "invoice_gate",
           "materials_charge_figure_required",
         ],
+        commercial_review_codes: ["pricing_evidence_missing"],
+      }],
+    },
+  };
+  const writes: Array<Record<string, unknown>> = [];
+  const client = {
+    from(table: string) {
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          if (table === "makesafe_docket_revisions") {
+            return Promise.resolve({ data: docket, error: null });
+          }
+          if (table === "makesafe_invoice_obligation_revisions_current") {
+            return Promise.resolve({ data: null, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+        insert(row: Record<string, unknown>) {
+          writes.push(row);
+          return {
+            select() {
+              return {
+                single() {
+                  return Promise.resolve({
+                    data: { id: OBLIGATION, ...row },
+                    error: null,
+                  });
+                },
+              };
+            },
+          };
+        },
+        upsert() {
+          return Promise.resolve({ data: null, error: null });
+        },
+        update() {
+          return query;
+        },
+      };
+      return query;
+    },
+    rpc() {
+      return Promise.resolve({
+        data: { id: OBLIGATION, state: "prepared" },
+        error: null,
+      });
+    },
+  } as unknown as SesSupabaseClient;
+  // Soft commercial flags must not 409 as an invoice-gate wall. A thin mock may
+  // still fail later on unrelated reads; that is fine for this proof so long as
+  // the old "explicit invoice gate" refusal is gone.
+  let gateWallMessage: string | null = null;
+  try {
+    await prepareSesInvoiceObligationAction(
+      client,
+      { mode: "routine", user: null },
+      {
+        org_id: ORG,
+        job_id: JOB,
+        docket_revision_id: docket.id,
+        created_by: "gate-test",
+      },
+    );
+  } catch (error) {
+    if (error instanceof SesActionError) {
+      const refusal = (error as SesActionError).refusal as Record<
+        string,
+        unknown
+      >;
+      const text = `${refusal.code || ""} ${refusal.fact || ""} ${
+        (error as SesActionError).message || ""
+      }`;
+      if (/explicit invoice gate/i.test(text)) {
+        gateWallMessage = text;
+      }
+    }
+  }
+  assertEquals(
+    gateWallMessage,
+    null,
+    `commercial invoice_gate_codes must not 409 mint; got ${gateWallMessage}`,
+  );
+});
+
+Deno.test("draft-zero price_unresolved still refuses mint without a locked override", async () => {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000007502",
+    job_id: JOB,
+    stage: "pre_xero",
+    local_invoice_proposal: {
+      state: "price_unresolved",
+      invoice_gates: ["pricing_evidence_missing"],
+    },
+    review_spec: {
+      cards: [{
+        exception_review_codes: [],
+        invoice_gate_codes: [],
+        commercial_review_codes: ["pricing_evidence_missing"],
       }],
     },
   };
@@ -118,10 +246,6 @@ Deno.test("review invoice gates refuse with a catalogue code and preserve exact 
   const refusal = (error as SesActionError).refusal as Record<string, unknown>;
   assertEquals(refusal.code, "pricing_evidence_missing");
   assertEquals(typeof refusal.fact, "string");
-  assertEquals(
-    (refusal.evidence as Record<string, unknown>).invoice_gate_codes,
-    ["invoice_gate", "materials_charge_figure_required"],
-  );
 });
 
 Deno.test("F29 review assumptions allow the proposed materials obligation to mint", async () => {

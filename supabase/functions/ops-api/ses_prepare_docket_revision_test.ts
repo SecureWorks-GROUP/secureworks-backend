@@ -395,6 +395,35 @@ function assertDraftZeroInvoice(
   return proposal;
 }
 
+/** Captain 2026-08-19: commercial taste keeps a mintable proposal + caveat. */
+function assertCommercialReviewProposal(
+  result: {
+    invoice_proposal: unknown;
+    blockers: Array<{ reason_code: string; reason: string; issue_class?: string }>;
+    review_spec: Record<string, unknown>;
+  },
+  reasonIncludes: string,
+): Record<string, unknown> {
+  const proposal = object(result.invoice_proposal);
+  assertEquals(proposal.state, undefined);
+  assert(
+    Array.isArray(proposal.line_items) && proposal.line_items.length > 0,
+    "commercial review must keep a priced proposal",
+  );
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing" ||
+    String(item.issue_class || "") === "commercial_review"
+  );
+  assert(blocker, "expected a commercial review caveat");
+  assertStringIncludes(blocker.reason.toLowerCase(), reasonIncludes.toLowerCase());
+  assertEquals(
+    (reviewCard(result).commercial_review_codes as string[] || []).length > 0,
+    true,
+    "review card must stamp commercial_review_codes",
+  );
+  return proposal;
+}
+
 function assertInvoiceHandoffCallable(
   result: { invoice_proposal: unknown },
 ): Record<string, unknown> {
@@ -2147,7 +2176,7 @@ Deno.test("assessment triad produces an invoice-only draft at the sealed price",
   assertEquals(fenceResult.invoice_proposal?.total_inc_gst, 143);
 });
 
-Deno.test("assessment invoice requires an explicit fence-only fact and a non-empty builder reference", async () => {
+Deno.test("assessment invoice soft-flags missing fence-only and still hard-refuses empty builder reference", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.family === "assessment_quote"
   )!;
@@ -2158,14 +2187,14 @@ Deno.test("assessment invoice requires an explicit fence-only fact and a non-emp
     request(missingFenceOnly.identity.job_id),
     dependencies(missingFenceOnly),
   )).results[0];
-  assertDraftZeroInvoice(missingFenceResult, "pricing_evidence_missing");
-  assert(
-    blockerCodes(missingFenceResult).includes("pricing_evidence_missing"),
+  const fenceProposal = assertCommercialReviewProposal(
+    missingFenceResult,
+    "fence-only",
   );
+  assertEquals(fenceProposal.subtotal_ex_gst, 150);
   const fenceBlocker = missingFenceResult.blockers.find((blocker) =>
     blocker.reason_code === "pricing_evidence_missing"
   )!;
-  assertStringIncludes(fenceBlocker.reason.toLowerCase(), "fence-only");
   assert(!fenceBlocker.reason.includes("fence_only"));
   assert(!fenceBlocker.recovery_action.includes("fence_only"));
 
@@ -2331,7 +2360,7 @@ Deno.test("non-temporary-fencing labour pricing remains independent of panel/bas
   assertEquals(proposal.billable_hours_per_trade, 2);
 });
 
-Deno.test("labour pricing blocks on missing field-report labour facts without naming storage fields", async () => {
+Deno.test("labour pricing soft-flags missing field-report labour facts without naming storage fields", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
@@ -2344,13 +2373,14 @@ Deno.test("labour pricing blocks on missing field-report labour facts without na
     request(input.identity.job_id),
     dependencies(input),
   )).results[0];
+  const proposal = assertCommercialReviewProposal(result, "attended hours");
+  assert(proposal.subtotal_ex_gst != null);
   const blocker = result.blockers.find((item) =>
     item.reason_code === "pricing_evidence_missing"
   )!;
   // The missing fact is the trade's ATTENDED hours (the cost fact). Billable hours are never
   // recovered from the field report - they come from the sealed schedule - so the blocker must
   // not ask staff for them.
-  assertStringIncludes(blocker.reason.toLowerCase(), "attended hours");
   assertStringIncludes(blocker.recovery_action.toLowerCase(), "field report");
   assert(!blocker.reason.toLowerCase().includes("billable hours"));
   assert(!blocker.reason.includes("hours_per_trade"));
@@ -3242,17 +3272,18 @@ Deno.test("AJS/AJBR repair and restoration price the existing-fence pickets like
   }
 });
 
-Deno.test("a genuine AJS temporary-fence kit stays hard-refused", async () => {
+Deno.test("a genuine AJS temporary-fence kit soft-flags labour-only for Captain review", async () => {
   const result = await labourProposal("AJS", "physical_makesafe", {
     trades: 2,
     hours_per_trade: 3,
     existing_fence_star_picket_refusal: "genuine_temporary_fence_signal",
   });
-  assertDraftZeroInvoice(result, "pricing_evidence_missing");
-  const blocker = result.blockers.find((item) =>
-    item.reason_code === "pricing_evidence_missing"
-  )!;
-  assertStringIncludes(blocker.reason, "temporary-fence kit");
+  const proposal = assertCommercialReviewProposal(result, "temporary-fence kit");
+  assertEquals(
+    (proposal.line_items as Array<Record<string, unknown>>).length,
+    1,
+    "kit refusal must keep labour-only",
+  );
 });
 
 Deno.test("generic material facts cannot bypass the AJS picket evidence gate", async () => {
@@ -3265,12 +3296,14 @@ Deno.test("generic material facts cannot bypass the AJS picket evidence gate", a
       unit_price_ex_gst: 13.5,
     }],
   });
-  assertDraftZeroInvoice(unsupported, "pricing_evidence_missing");
-  assertStringIncludes(
-    unsupported.blockers.find((item) =>
-      item.reason_code === "pricing_evidence_missing"
-    )!.reason,
+  const unsupportedProposal = assertCommercialReviewProposal(
+    unsupported,
     "cannot bypass",
+  );
+  assertEquals(
+    (unsupportedProposal.line_items as Array<Record<string, unknown>>).length,
+    1,
+    "bypass picket line must be omitted",
   );
 
   const canonical = await labourProposal("AJS", "physical_makesafe", {
@@ -3305,12 +3338,14 @@ Deno.test("the old AJS consumables refusal cannot pass through typed materials",
       hours_per_trade: 3,
       materials: [{ description, quantity: 1, unit_price_ex_gst: 25 }],
     });
-    assertDraftZeroInvoice(result, "pricing_evidence_missing");
-    assertStringIncludes(
-      result.blockers.find((item) =>
-        item.reason_code === "pricing_evidence_missing"
-      )!.reason,
+    const proposal = assertCommercialReviewProposal(
+      result,
       "remain non-billable",
+    );
+    assertEquals(
+      (proposal.line_items as Array<Record<string, unknown>>).length,
+      1,
+      `${description} must stay off the invoice`,
     );
   }
 });
@@ -3370,20 +3405,18 @@ Deno.test("the sealed floor still binds: no proposal can leave below its company
   }
 });
 
-Deno.test("absent attended hours surface an inert review proposal: the floor is not a substitute for evidence", async () => {
+Deno.test("absent attended hours soft-flag a sealed-floor proposal for Captain review", async () => {
   const result = await labourProposal("MLB", "physical_makesafe", {
     trades: 2,
     rate_ex_gst: 85,
     materials: [],
   });
-  const blocker = result.blockers.find((item) =>
-    item.reason_code === "pricing_evidence_missing"
-  )!;
-  assert(blocker, "missing attended hours must still block");
-  assertDraftZeroInvoice(result, "pricing_evidence_missing");
+  const proposal = assertCommercialReviewProposal(result, "attended hours");
+  assertEquals(proposal.billable_hours_per_trade, 3);
+  assertEquals(proposal.subtotal_ex_gst, 510);
 });
 
-Deno.test("a non-positive attended-hours fact stays unresolved rather than silently becoming the floor", async () => {
+Deno.test("a non-positive attended-hours fact soft-flags rather than silently minting without caveat", async () => {
   for (const bad of [0, -2, "two", null]) {
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 1,
@@ -3391,28 +3424,19 @@ Deno.test("a non-positive attended-hours fact stays unresolved rather than silen
       rate_ex_gst: 85,
       materials: [],
     });
-    assert(
-      result.blockers.some((item) =>
-        item.reason_code === "pricing_evidence_missing"
-      ),
-      `hours_per_trade=${JSON.stringify(bad)} must block`,
-    );
-    assertDraftZeroInvoice(result, "pricing_evidence_missing");
+    assertCommercialReviewProposal(result, "attended hours");
   }
 });
 
-Deno.test("raising cost hours to the floor does not touch the rate check", async () => {
+Deno.test("raising cost hours to the floor soft-flags an off-schedule rate", async () => {
   const result = await labourProposal("MLB", "physical_makesafe", {
     trades: 1,
     hours_per_trade: 2,
     rate_ex_gst: 70,
     materials: [],
   });
-  const blocker = result.blockers.find((item) =>
-    item.reason_code === "pricing_evidence_missing"
-  )!;
-  assert(blocker, "an off-schedule rate must still block");
-  assertStringIncludes(blocker.reason, "85");
+  const proposal = assertCommercialReviewProposal(result, "85");
+  assertEquals(proposal.subtotal_ex_gst, 255);
 });
 
 Deno.test("hire-card pricing parks a missing star-picket quantity for review", async () => {
@@ -3676,7 +3700,7 @@ Deno.test("SWMS blocks only on genuinely absent real-world facts and never expos
   assert(!blocker.recovery_action.includes("trade-report facts"));
 });
 
-Deno.test("roof pricing blocks only when the work order states no storey classification", async () => {
+Deno.test("roof pricing soft-flags missing storey and proposes sealed single-storey for review", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "MLB" &&
     candidate.family === "ordinary_roof_portal" &&
@@ -3688,10 +3712,11 @@ Deno.test("roof pricing blocks only when the work order states no storey classif
     request(input.identity.job_id),
     dependencies(input),
   )).results[0];
+  const proposal = assertCommercialReviewProposal(result, "storey");
+  assertEquals(proposal.storeys, "single");
   const blocker = result.blockers.find((item) =>
     item.reason_code === "pricing_evidence_missing"
   )!;
-  assertStringIncludes(blocker.reason.toLowerCase(), "single/double storey");
   assert(!blocker.reason.includes("storeys"));
   assert(!blocker.recovery_action.includes("storeys"));
 });

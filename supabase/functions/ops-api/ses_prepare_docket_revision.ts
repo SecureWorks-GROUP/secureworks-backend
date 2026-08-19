@@ -1098,6 +1098,7 @@ function localInvoiceProposal(
 } {
   const facts = input.cycle_facts.hours_and_materials || {};
   const ref = input.source.builder_reference;
+  const commercialReviews: SesBlocker[] = [];
   if (!text(ref)) {
     return {
       proposal: null,
@@ -1108,7 +1109,7 @@ function localInvoiceProposal(
         ["canonical-input-envelope"],
         [],
         undefined,
-        "invoice_gate",
+        "identity_safety_hard",
       ),
     };
   }
@@ -1144,7 +1145,7 @@ function localInvoiceProposal(
             ? materialsChargeDecision.authorisation.decision_key
             : materialsChargeDecision.clearance.decision_key,
         },
-        "invoice_gate",
+        "commercial_review",
       ),
     };
   }
@@ -1174,95 +1175,120 @@ function localInvoiceProposal(
         blocker: null,
       };
     } catch {
+      // Soft commercial path (Captain 2026-08-19): propose the sealed single-
+      // storey rate with a visible caveat so Docs Ready still reaches review.
+      const price = roofReportPrice("single");
       return {
-        proposal: null,
+        proposal: {
+          version: "ses-local-invoice-proposal/v1",
+          builder_reference: ref,
+          basis: row.invoice_basis,
+          storeys: price.storey,
+          storey_assumed: true,
+          line_items: [
+            lineItem(
+              `${ref} - ${price.storey_label} roof report`,
+              1,
+              price.ex_gst,
+            ),
+          ],
+          subtotal_ex_gst: price.ex_gst,
+          gst: price.inc_gst - price.ex_gst,
+          total_inc_gst: price.inc_gst,
+          xero_identity: null,
+        },
         blocker: blocked(
           "pricing_evidence_missing",
-          "Roof report pricing requires an explicit single/double storey fact.",
-          "Record the source-evidenced storey classification and re-run.",
+          "Roof report storey was not evidenced; DRAFT proposes the sealed single-storey rate for Captain review.",
+          "Confirm single vs double from the work order and remint if the storey differs.",
           ["canonical-input-envelope"],
           [],
-          undefined,
-          "invoice_gate",
+          { assumed_storeys: "single", sealed_ex_gst: price.ex_gst },
+          "commercial_review",
         ),
       };
     }
   }
   if (row.invoice_basis === "assessment_fixed") {
-    if (typeof facts.fence_only !== "boolean") {
+    const fenceOnlyKnown = typeof facts.fence_only === "boolean";
+    const fenceOnly = fenceOnlyKnown ? Boolean(facts.fence_only) : false;
+    const ex = fenceOnly ? 130 : 150;
+    const proposal = {
+      version: "ses-local-invoice-proposal/v1",
+      builder_reference: ref,
+      basis: row.invoice_basis,
+      fence_only: fenceOnly,
+      line_items: [
+        lineItem(
+          `${ref} - ${
+            fenceOnly ? "Fence-only " : ""
+          }assessment report and quote`,
+          1,
+          ex,
+        ),
+      ],
+      subtotal_ex_gst: ex,
+      gst: ex * 0.1,
+      total_inc_gst: ex * 1.1,
+      xero_identity: null,
+      ...(fenceOnlyKnown ? {} : { fence_only_assumed: true }),
+    };
+    if (!fenceOnlyKnown) {
       return {
-        proposal: null,
+        proposal,
         blocker: blocked(
           "pricing_evidence_missing",
-          "Assessment pricing requires the work order to state whether the scope is fence-only.",
-          "Confirm from the work order whether the assessment is fence-only before selecting the $130 or $150 ex-GST price.",
+          "Assessment fence-only fact was not evidenced; DRAFT proposes the sealed $150 ex-GST assessment rate for Captain review.",
+          "Confirm fence-only vs full assessment from the work order and remint if the sealed $130 rate applies.",
           ["canonical-input-envelope"],
           [],
-          undefined,
-          "invoice_gate",
+          { assumed_fence_only: false, sealed_ex_gst: ex },
+          "commercial_review",
         ),
       };
     }
-    const fenceOnly = facts.fence_only;
-    const ex = fenceOnly ? 130 : 150;
-    return {
-      proposal: {
-        version: "ses-local-invoice-proposal/v1",
-        builder_reference: ref,
-        basis: row.invoice_basis,
-        fence_only: fenceOnly,
-        line_items: [
-          lineItem(
-            `${ref} - ${
-              fenceOnly ? "Fence-only " : ""
-            }assessment report and quote`,
-            1,
-            ex,
-          ),
-        ],
-        subtotal_ex_gst: ex,
-        gst: ex * 0.1,
-        total_inc_gst: ex * 1.1,
-        xero_identity: null,
-      },
-      blocker: null,
-    };
+    return { proposal, blocker: null };
   }
 
-  const trades = nonNegativeInteger(facts.trades);
+  let trades = nonNegativeInteger(facts.trades);
   // Two hours in, three hours out (Captain ruling 2026-08-02). The field report's
   // `hours_per_trade` is what the TRADE bills US - a cost fact. The builder minimum below is
   // what WE bill the builder - a revenue fact. They are two different commercial facts, and a
   // short attendance is the case the minimum exists for. So a report recording fewer hours than
   // the minimum is the NORMAL case, never missing evidence.
-  const reportedHoursPerTrade = positiveNumber(facts.hours_per_trade);
+  let reportedHoursPerTrade = positiveNumber(facts.hours_per_trade);
   const canonicalRate = row.invoice_basis === "ajs_labour_materials" ||
       row.invoice_basis === "ajs_temporary_fence_labour_only"
     ? 80
     : 85;
+  // Soft commercial path: when trade count / hours are missing, propose the
+  // sealed attendance floor (1 trade × builder minimum) with a caveat rather
+  // than hiding the pack behind a 409.
+  if (trades === null || trades < 1 || reportedHoursPerTrade === null) {
+    commercialReviews.push(
+      blocked(
+        "pricing_evidence_missing",
+        "Trade count and/or attended hours were not fully evidenced; DRAFT proposes the sealed attendance floor for Captain review.",
+        "Confirm trades and hours from the field report and remint if the proposal should change.",
+        ["canonical-input-envelope"],
+        [],
+        {
+          evidenced_trades: trades,
+          evidenced_hours_per_trade: reportedHoursPerTrade,
+        },
+        "commercial_review",
+      ),
+    );
+    if (trades === null || trades < 1) trades = 1;
+    if (reportedHoursPerTrade === null) {
+      reportedHoursPerTrade = canonicalRate === 80 ? 2 : 3;
+    }
+  }
   const minimum = row.family === "temporary_fencing" && trades === 1
     ? 4
     : canonicalRate === 80
     ? 2
     : 3;
-  if (
-    trades === null ||
-    trades < 1 ||
-    reportedHoursPerTrade === null
-  ) {
-    return {
-      proposal: null,
-      blocker: blocked(
-        "pricing_evidence_missing",
-        "Pricing requires a positive trade count and the attended hours for each trade.",
-        "Recover the number of trades and the attended hours for each trade from the field report; do not invent either fact.",
-        ["canonical-input-envelope"],
-        [],
-        undefined,
-        "invoice_gate",
-      ),
-    };
-  }
   // Raise the COST hours to the sealed billable floor. This never lowers a longer attendance,
   // and it never reaches below the floor, so the sealed schedule is enforced, not bypassed: the
   // proposal that leaves here always declares >= `minimum` billable hours per trade and the
@@ -1272,22 +1298,24 @@ function localInvoiceProposal(
     ? canonicalRate
     : positiveNumber(facts.rate_ex_gst);
   if (suppliedRate !== canonicalRate) {
-    return {
-      proposal: null,
-      blocker: blocked(
+    commercialReviews.push(
+      blocked(
         "pricing_evidence_missing",
         `Rate ${
           String(
             facts.rate_ex_gst,
           )
-        } does not match the sealed $${canonicalRate} ex GST schedule.`,
-        "Attach a line-specific audited rate override or use the canonical rate.",
+        } does not match the sealed $${canonicalRate} ex GST schedule; DRAFT uses the sealed rate for Captain review.`,
+        "Approve the sealed rate, remint with commercial_quantity_override, or supply labour_rate_override attribution.",
         ["canonical-input-envelope"],
         [],
-        undefined,
-        "invoice_gate",
+        {
+          supplied_rate_ex_gst: facts.rate_ex_gst,
+          sealed_rate_ex_gst: canonicalRate,
+        },
+        "commercial_review",
       ),
-    };
+    );
   }
 
   const lines: Array<Record<string, unknown>> = [
@@ -1312,22 +1340,21 @@ function localInvoiceProposal(
   ) {
     const refusal = text(facts.existing_fence_star_picket_refusal);
     const genuineKit = refusal === "genuine_temporary_fence_signal";
-    return {
-      proposal: null,
-      blocker: blocked(
+    commercialReviews.push(
+      blocked(
         "pricing_evidence_missing",
         genuineKit
-          ? "The trade evidence describes a genuine temporary-fence kit, so AJS/AJBR pickets and the other kit materials remain non-billable."
-          : "The star-picket material entry does not carry unambiguous existing-fence support and quantity evidence.",
+          ? "The trade evidence describes a genuine temporary-fence kit, so AJS/AJBR pickets and the other kit materials remain non-billable; DRAFT is labour-only for Captain review."
+          : "The star-picket material entry does not carry unambiguous existing-fence support and quantity evidence; DRAFT is labour-only for Captain review.",
         genuineKit
           ? "Bill evidenced labour and defensible travel only; do not turn panels, bases, ties, clips, fixings, consumables, hire or retrieval materials into invoice lines."
           : "Record one explicit existing-fence prop/support narrative and one positive star-picket quantity from the trade report before pricing the material.",
         ["canonical-input-envelope"],
         [],
-        undefined,
-        "invoice_gate",
+        { existing_fence_star_picket_refusal: refusal },
+        "commercial_review",
       ),
-    };
+    );
   }
   if (row.invoice_basis === "ajs_labour_materials") {
     existingFencePickets = nonNegativeInteger(
@@ -1335,22 +1362,26 @@ function localInvoiceProposal(
     );
     if (
       Object.hasOwn(facts, "existing_fence_star_picket_count") &&
-      (existingFencePickets === null || existingFencePickets < 1)
+      (existingFencePickets === null || existingFencePickets < 1) &&
+      !text(facts.existing_fence_star_picket_refusal)
     ) {
-      return {
-        proposal: null,
-        blocker: blocked(
+      commercialReviews.push(
+        blocked(
           "pricing_evidence_missing",
-          "The existing-fence star-picket quantity is not a positive whole number.",
+          "The existing-fence star-picket quantity is not a positive whole number; DRAFT omits the picket line for Captain review.",
           "Recover one positive star-picket quantity from the trade's materials-used evidence before pricing the material.",
           ["canonical-input-envelope"],
           [],
           undefined,
-          "invoice_gate",
+          "commercial_review",
         ),
-      };
+      );
+      existingFencePickets = null;
     }
-    if (existingFencePickets && existingFencePickets > 0) {
+    if (
+      existingFencePickets && existingFencePickets > 0 &&
+      !text(facts.existing_fence_star_picket_refusal)
+    ) {
       lines.push(
         lineItem(
           `${ref} - Star pickets supplied to prop and secure existing fence`,
@@ -1462,18 +1493,18 @@ function localInvoiceProposal(
           /\bcable ties?\b|\bclips?\b|\bfixings?\b|\bsmall consumables?\b/i
             .test(description)
         ) {
-          return {
-            proposal: null,
-            blocker: blocked(
+          commercialReviews.push(
+            blocked(
               "pricing_evidence_missing",
-              "AJS/AJBR cable ties, clips, fixings and small consumables remain non-billable.",
+              "AJS/AJBR cable ties, clips, fixings and small consumables remain non-billable; DRAFT omits that line for Captain review.",
               "Remove the refused material line and bill only evidenced labour, defensible travel and materials allowed by the sealed AJS/AJBR rule.",
               ["canonical-input-envelope"],
               [],
-              undefined,
-              "invoice_gate",
+              { omitted_description: description },
+              "commercial_review",
             ),
-          };
+          );
+          continue;
         }
         if (/\bstar(?:[\W_]+)?pickets?\b/i.test(description)) {
           if (
@@ -1481,18 +1512,22 @@ function localInvoiceProposal(
             quantity !== existingFencePickets ||
             unitPrice !== AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST
           ) {
-            return {
-              proposal: null,
-              blocker: blocked(
+            commercialReviews.push(
+              blocked(
                 "pricing_evidence_missing",
-                "An AJS/AJBR star-picket material line cannot bypass the trade-evidenced existing-fence quantity and sealed $13.50 ex-GST rate.",
+                "An AJS/AJBR star-picket material line cannot bypass the trade-evidenced existing-fence quantity and sealed $13.50 ex-GST rate; DRAFT omits the bypass line for Captain review.",
                 "Derive the line from the trade report's materials-used evidence and the existing-fence support narrative.",
                 ["canonical-input-envelope"],
                 [],
-                undefined,
-                "invoice_gate",
+                {
+                  typed_quantity: quantity,
+                  typed_unit_price_ex_gst: unitPrice,
+                  evidenced_quantity: existingFencePickets,
+                },
+                "commercial_review",
               ),
-            };
+            );
+            continue;
           }
           // The canonical line above owns the wording and rate. A matching
           // typed material fact is corroboration, not a second invoice line.
@@ -1511,6 +1546,7 @@ function localInvoiceProposal(
   // named ask-one-figure blocker.
   // AJS/AJBR (ajs_labour_materials) keep their picket carve-out unchanged.
   let materialsChargeMeta: Record<string, unknown> | null = null;
+  let materialsChargeRefused = false;
   let invoiceGate: SesBlocker | null = null;
   if (priceNeeded.length > 0) {
     invoiceGate = blocked(
@@ -1520,7 +1556,7 @@ function localInvoiceProposal(
       ["canonical-input-envelope", "trade-materials-used"],
       [],
       { price_needed: priceNeeded },
-      "invoice_gate",
+      "commercial_review",
     );
   }
   if (
@@ -1535,10 +1571,11 @@ function localInvoiceProposal(
       standing_decision_supplied_now: materialsChargeSuppliedNow,
     });
     if (materialsDecision.action === "refuse") {
-      return {
-        proposal: null,
-        materials_charge_refused: true,
-        blocker: blocked(
+      // Soft commercial path: keep the labour proposal and surface the refuse
+      // as a Captain caveat rather than nulling the whole draft.
+      materialsChargeRefused = true;
+      commercialReviews.push(
+        blocked(
           materialsDecision.reason_code,
           materialsDecision.reason,
           materialsDecision.recovery_action,
@@ -1549,9 +1586,9 @@ function localInvoiceProposal(
             invoice_basis: row.invoice_basis,
             priced_materials_line_count: pricedMaterialsLineCount,
           },
-          "invoice_gate",
+          "commercial_review",
         ),
-      };
+      );
     }
     if (materialsDecision.action === "charge_line") {
       lines.push(
@@ -1636,6 +1673,8 @@ function localInvoiceProposal(
     lines.reduce((sum, line) => sum + Number(line.amount_ex_gst || 0), 0) *
       100,
   ) / 100;
+  if (invoiceGate) commercialReviews.push(invoiceGate);
+  const commercialCodes = commercialReviews.map((item) => item.reason_code);
   return {
     proposal: {
       version: "ses-local-invoice-proposal/v1",
@@ -1654,11 +1693,18 @@ function localInvoiceProposal(
       total_inc_gst: Math.round(subtotal * 110) / 100,
       xero_identity: null,
       ...(priceNeeded.length ? { price_needed: priceNeeded } : {}),
-      ...(invoiceGate ? { invoice_gates: [invoiceGate.reason_code] } : {}),
+      ...(commercialCodes.length
+        ? { commercial_review_codes: commercialCodes }
+        : {}),
       ...(materialsChargeMeta ? { materials_charge: materialsChargeMeta } : {}),
     },
-    blocker: invoiceGate,
-    review_assumptions: materialsReviewAssumptions,
+    // Commercial taste rides as classified caveats, never as a mint wall.
+    blocker: null,
+    review_assumptions: [
+      ...materialsReviewAssumptions,
+      ...commercialReviews,
+    ],
+    materials_charge_refused: materialsChargeRefused || undefined,
   };
 }
 
@@ -2455,6 +2501,7 @@ function reviewHtml(
   sendGates: SesBlocker[],
   invoiceGates: SesBlocker[],
   drafts: Record<string, string>,
+  commercialReviews: SesBlocker[] = [],
 ): string {
   const escape = (value: unknown) =>
     String(value ?? "")
@@ -2500,6 +2547,9 @@ ${
   }</pre></section>
 <section id="invoice-gates"><h2>Invoice gates</h2><pre>${
     escape(canonicalSesJson(invoiceGates))
+  }</pre></section>
+<section id="commercial-reviews"><h2>Commercial reviews (Captain judgment)</h2><pre>${
+    escape(canonicalSesJson(commercialReviews))
   }</pre></section>
 <section id="email-drafts"><h2>Email drafts</h2>${
     Object.entries(drafts)
@@ -4261,12 +4311,13 @@ async function prepareOne(
     );
   }
   const issueBuckets = classifySesPreparationIssues(blockers);
-  // Semantic and evidence findings remain visible caveats/send-holds on an
-  // explicitly selected card. Only a typed invoice gate may replace a valid
-  // commercial proposal with draft-zero; the Xero duplicate guard remains at
-  // create_ses_invoice_draft, where the unsafe write can be refused/reused.
+  // Semantic, commercial, and evidence findings remain visible caveats on an
+  // explicitly selected card. Only an identity/integrity hard blocker may
+  // replace a valid commercial proposal with draft-zero. Commercial taste is
+  // Captain-reviewed (2026-08-19) and must not hide the pack. The Xero
+  // duplicate guard remains at create_ses_invoice_draft.
   const reviewPackBlocker = normalNamedCard
-    ? issueBuckets.hard_blockers[0] || issueBuckets.invoice_gates[0]
+    ? issueBuckets.hard_blockers[0]
     : blockers[0];
   if (reviewPackBlocker) {
     const replaceInvoiceProposal = reviewInvoiceProposal?.state !==
@@ -4316,11 +4367,13 @@ async function prepareOne(
   const reviewAssumptions = issueBuckets.review_assumptions;
   const sendGates = issueBuckets.send_gates;
   const invoiceGates = issueBuckets.invoice_gates;
+  const commercialReviews = issueBuckets.commercial_reviews;
   const allReviewIssues = [
     ...hardBlockers,
     ...reviewAssumptions,
     ...sendGates,
     ...invoiceGates,
+    ...commercialReviews,
   ];
   const drafts = row && !hardBlockers.length
     ? buildEmailDrafts(
@@ -4420,6 +4473,10 @@ async function prepareOne(
         send_gates: sendGates.map((item) => item.reason),
         invoice_gate_codes: invoiceGates.map((item) => item.reason_code),
         invoice_gates: invoiceGates.map((item) => item.reason),
+        commercial_review_codes: commercialReviews.map((item) =>
+          item.reason_code
+        ),
+        commercial_reviews: commercialReviews.map((item) => item.reason),
         recipient_status: sendGates.some((item) =>
             [
               "routing_evidence_missing",
@@ -4463,6 +4520,13 @@ async function prepareOne(
     ...(invoiceGates.length
       ? { invoice_gate_codes: invoiceGates.map((item) => item.reason_code) }
       : {}),
+    ...(commercialReviews.length
+      ? {
+        commercial_review_codes: commercialReviews.map((item) =>
+          item.reason_code
+        ),
+      }
+      : {}),
   };
   const review = reviewHtml(
     input,
@@ -4472,6 +4536,7 @@ async function prepareOne(
     sendGates,
     invoiceGates,
     drafts,
+    commercialReviews,
   );
   artifacts.push(
     await artifactFromText({
@@ -4579,12 +4644,15 @@ async function prepareOne(
       docket_revision_id: docketRevisionId,
     },
     pre_xero_docs_ready: preXeroDocsReady,
-    local_invoice_proposal: priced.proposal && !invoiceGates.length
+    // Commercial review caveats must not mark the proposal blocked — Captain
+    // direction 2026-08-19: commercial taste is flagged, not a draft wall.
+    local_invoice_proposal: priced.proposal && !hardBlockers.length
       ? { state: "ready", evidence: "file:ARTIFACTS/invoice_proposal.json" }
       : {
         state: "blocked",
         evidence: `blocker:${
           priced.blocker?.reason_code ||
+          hardBlockers[0]?.reason_code ||
           applicabilityBlocker?.reason_code ||
           "pricing_evidence_missing"
         }`,
