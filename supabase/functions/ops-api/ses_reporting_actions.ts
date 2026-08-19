@@ -1993,7 +1993,7 @@ export async function prepareSesInvoiceObligationAction(
   };
 }
 
-async function requireSesInvoiceMintAuthority(
+export async function requireSesInvoiceMintAuthority(
   client: SesSupabaseClient,
   auth: SesActionAuth,
 ) {
