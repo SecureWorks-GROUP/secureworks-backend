@@ -103,6 +103,29 @@ Deno.test("ready persisted result sends one SMS and confirms the effect", async 
   assertEquals(transitions, ["reserved->dispatching", "dispatching->confirmed"]);
 });
 
+Deno.test("Docs Ready SMS names commercial caveats when present", async () => {
+  const { store } = makeFakeStore(new Set());
+  const sent: string[] = [];
+  await notifySesDocsReadySms(
+    [readyResult("job-caveat", "cycle-1", {
+      review_spec: {
+        address: "12 Sample St, Duncraig",
+        cards: [{
+          job_id: "job-caveat",
+          builder_reference: "MLB-99999",
+          commercial_review_codes: [
+            "pricing_evidence_missing",
+            "materials_charge_figure_required",
+          ],
+        }],
+      },
+    })],
+    makeDeps(store, sent),
+  );
+  assertEquals(sent.length, 1);
+  assertStringIncludes(sent[0], "2 commercial caveats.");
+});
+
 Deno.test("same job and cycle never texts twice", async () => {
   const seen = new Set<string>();
   const { store } = makeFakeStore(seen);

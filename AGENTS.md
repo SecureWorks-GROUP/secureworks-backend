@@ -2933,7 +2933,11 @@ Captain 2026-08-19 (`data/ses-pack-system-plan-v1/CAPTAIN-DIRECTION-2026-08-19-n
 
 - Issue class `commercial_review` in `ses_docket_envelope.ts` / `ses_preparation_issue_policy.ts` buckets separately from `invoice_gate` and `identity_safety_hard`.
 - `localInvoiceProposal` proposes sealed-floor / sealed-rate / labour-only fallbacks with a caveat instead of nulling the proposal for commercial taste.
-- `prepareSesInvoiceObligationAction` no longer 409s on legacy `invoice_gate_codes` or `commercial_review_codes`. Identity `exception_review_codes`, true `price_unresolved` draft-zero, and `docket_pricing_stale` stay hard.
+- Named-card persist keeps DB `blockers` **hard-only**. Commercial caveats live on `review_spec.commercial_review_*` and are rehydrated by `sesDocketReleaseCaveats` into cockpit `caveats`, `inspect_ses_pack.commercial_reviews`, and the Docs Ready SMS — never into `readiness_blockers` / C4.
+- Missing attendance facts may propose the sealed floor only with **ASSUMED** wording on the labour line itself; never invent bare `"1 trade x 3 hours"` as evidenced attendance.
+- A materials figure aimed at an **already-released** attendance cycle stays hard draft-zero (`identity_safety_hard` / `materials_charge_figure_unsupported`) — settled money is not commercial taste.
+- `authority_kind=ai_proposal` must not stamp `rate_override_approved`; it adds `ai_commercial_proposal` for Captain eyes.
+- `prepareSesInvoiceObligationAction` no longer 409s on legacy `invoice_gate_codes` or `commercial_review_codes`. Identity `exception_review_codes`, true `price_unresolved` draft-zero, and `docket_pricing_stale` stay hard. Dockets persisted before the soft path still carry `price_unresolved` until re-prepared.
 - Keep send seals, AUTHORISED remint refuse, and auth fences hard.
 
 ## An SES Labour Line Is A Floor; Commercial Quantity Is A Separate Seam

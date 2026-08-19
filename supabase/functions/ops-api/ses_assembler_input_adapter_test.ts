@@ -606,11 +606,14 @@ Deno.test(
     assertEquals(response.dry_run, true);
     assertEquals(response.results.length, 1);
     const result = response.results[0];
-    assertEquals(result.state, "ready");
-    assertEquals(result.envelope.pre_xero_docs_ready, true);
+    // Missing builder reference is identity_safety_hard (Captain 2026-08-19
+    // identity fence): pack stays review-visible but blocked for Docs Ready.
+    assertEquals(result.state, "blocked");
+    assertEquals(result.envelope.pre_xero_docs_ready, false);
     assertEquals(result.persisted, false);
     assertEquals(persistCalls, 0);
     const codes = blockerCodes(result);
+    assert(codes.includes("invoice_reference_missing"));
     assert(codes.includes("spine_missing_source"));
     assert(codes.includes("spine_missing_lineage"));
     assert(codes.includes("trade_evidence_missing"));
@@ -2856,14 +2859,15 @@ Deno.test(
       ),
       false,
     );
-    assertEquals(missing.results[0].state, "ready");
-    assertEquals(missing.results[0].envelope.pre_xero_docs_ready, true);
+    assertEquals(missing.results[0].state, "blocked");
+    assertEquals(missing.results[0].envelope.pre_xero_docs_ready, false);
     assertEquals(renderCalls, 0);
     assertEquals(
       missing.results[0].blockers.filter((blocker) =>
-        blocker.reason === referenceReason
-      ).length,
-      1,
+        blocker.reason === referenceReason ||
+        blocker.reason_code === "invoice_reference_missing"
+      ).length >= 1,
+      true,
     );
   },
 );
@@ -3737,16 +3741,19 @@ Deno.test(
         result.envelope.family_matrix_version,
         SES_FAMILY_MATRIX_VERSION,
       );
+      // invoice_reference_missing is identity_safety_hard and leads the list.
+      assertEquals(result.state, "blocked", shape.jobNumber);
+      assertEquals(result.envelope.pre_xero_docs_ready, false, shape.jobNumber);
       assertEquals(
         blockerCodes(result),
         [
+          "invoice_reference_missing",
           "spine_missing_source",
           "spine_missing_lineage",
           "spine_missing_source",
           "spine_missing_deliverables",
           "canonical_draft_pack_output_missing",
           "capability_portal_degraded",
-          "invoice_reference_missing",
         ],
         shape.jobNumber,
       );

@@ -7506,12 +7506,20 @@ if (import.meta.main) serve(async (req: Request) => {
               ),
             deleteDraftOnXero: async (invoice, actor) => {
               const gw = makeSesInvoiceVoidGateway(client)
+              // Xero Idempotency-Key ceiling is ~36 chars. Prefix
+              // `ses-invoice-void-` (17) leaves 19 for operation_key. Hash the
+              // actor so long emails never blow the remint-delete key.
+              const actorKey = String(actor || 'actor')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '')
+                .slice(0, 8) || 'actor'
+              const operationKey = `rmd-${actorKey}`.slice(0, 19)
               const result = await gw.voidInvoice(
                 invoice.xero_invoice_id,
                 'DELETED',
                 {
                   external_token: `remint-${invoice.xero_invoice_id}`,
-                  operation_key: `remint-delete-${actor}`,
+                  operation_key: operationKey,
                 },
               )
               return { status: result.status }

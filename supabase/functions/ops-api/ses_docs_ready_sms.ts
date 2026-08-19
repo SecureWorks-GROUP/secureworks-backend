@@ -48,23 +48,34 @@ function smsText(
   jobId: string,
   address: string,
   builderReference: string,
+  commercialCaveatCount = 0,
 ): string {
   const name = jobNumber || jobId;
   const at = address ? ` at ${address}` : "";
   const ref = builderReference ? ` (${builderReference})` : "";
-  return `Docs Ready: ${name}${at}${ref}. Docket and draft invoice await your press.`;
+  const caveats = commercialCaveatCount > 0
+    ? ` ${commercialCaveatCount} commercial caveat${
+      commercialCaveatCount === 1 ? "" : "s"
+    }.`
+    : "";
+  return `Docs Ready: ${name}${at}${ref}. Docket and draft invoice await your press.${caveats}`;
 }
 
 function readReviewCard(result: SesPreparedRevision): {
   address: string;
   builder_reference: string;
+  commercial_review_count: number;
 } {
   const spec = (result.review_spec || {}) as Record<string, unknown>;
   const cards = Array.isArray(spec.cards) ? spec.cards : [];
   const card = (cards[0] || {}) as Record<string, unknown>;
+  const codes = Array.isArray(card.commercial_review_codes)
+    ? card.commercial_review_codes.filter((code) => String(code || "").trim())
+    : [];
   return {
     address: String(spec.address || ""),
     builder_reference: String(card.builder_reference || ""),
+    commercial_review_count: codes.length,
   };
 }
 
@@ -122,7 +133,13 @@ export async function notifySesDocsReadySms(
       const card = readReviewCard(result);
       const delivered = await deps.sendSms(
         deps.phone,
-        smsText(jobNumber, jobId, card.address, card.builder_reference),
+        smsText(
+          jobNumber,
+          jobId,
+          card.address,
+          card.builder_reference,
+          card.commercial_review_count,
+        ),
       );
       if (!delivered) throw new Error("GHL SMS send returned false");
       await deps.store.transition(

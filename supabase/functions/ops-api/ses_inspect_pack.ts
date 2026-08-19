@@ -163,6 +163,15 @@ export interface SesInspectDocketReviewEvent {
   invalidated_signoff_event_id: string | null;
 }
 
+/**
+ * Non-blocking commercial taste caveats for Captain eyes (flag, not wall).
+ * Distinct from hard readiness blockers / money holds.
+ */
+export interface SesInspectCommercialReview {
+  code: string;
+  fact: string;
+}
+
 export interface SesPackInspection {
   schema: "secureworks.makesafe.ses-pack-inspection/v1";
   job_id: string;
@@ -178,6 +187,8 @@ export interface SesPackInspection {
   approvals: SesInspectApproval[];
   review: SesInspectDocketReview | null;
   audit_trail: SesInspectDocketReviewEvent[];
+  /** Captain commercial caveats — never hard blockers. */
+  commercial_reviews: SesInspectCommercialReview[];
 }
 
 function str(value: unknown): string | null {
@@ -196,6 +207,40 @@ function stringArray(value: unknown): string[] {
  * pure so both doors' identical-truth contract can be unit-tested without a
  * database. The reader (`inspectSesPackAction`) supplies the rows.
  */
+function commercialReviewsFromInputs(args: {
+  local_invoice_proposal: Record<string, unknown> | null;
+  caveats?: Array<{
+    code?: string;
+    fact?: string;
+    evidence?: Record<string, unknown>;
+  }>;
+}): SesInspectCommercialReview[] {
+  const out: SesInspectCommercialReview[] = [];
+  const seen = new Set<string>();
+  const push = (code: string, fact: string) => {
+    const trimmed = code.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    out.push({
+      code: trimmed,
+      fact: fact.trim() ||
+        `The current pack still carries the ${trimmed} commercial caveat.`,
+    });
+  };
+  for (const caveat of args.caveats || []) {
+    if (String(caveat.evidence?.issue_class || "") !== "commercial_review") {
+      continue;
+    }
+    push(String(caveat.code || ""), String(caveat.fact || ""));
+  }
+  const proposal = args.local_invoice_proposal || {};
+  const proposalCodes = Array.isArray(proposal.commercial_review_codes)
+    ? proposal.commercial_review_codes
+    : [];
+  for (const raw of proposalCodes) push(String(raw || ""), "");
+  return out;
+}
+
 export function assembleSesPackInspection(input: {
   job_id: string;
   job_number: string | null;
@@ -213,6 +258,7 @@ export function assembleSesPackInspection(input: {
   approval_rows: Array<Record<string, unknown>>;
   review_row: Record<string, unknown> | null;
   audit_rows: Array<Record<string, unknown>>;
+  caveats?: Array<{ code?: string; fact?: string }>;
 }): SesPackInspection {
   const pack: SesPackPointers = input.pack_row
     ? {
@@ -383,6 +429,10 @@ export function assembleSesPackInspection(input: {
     approvals,
     review,
     audit_trail,
+    commercial_reviews: commercialReviewsFromInputs({
+      local_invoice_proposal: input.local_invoice_proposal,
+      caveats: input.caveats,
+    }),
   };
 }
 
@@ -592,6 +642,7 @@ export async function inspectSesPackAction(
     xero_binding: docket.xero_binding,
     xero_invoice_pdf_available: docket.xero_invoice_pdf_available === true,
     local_invoice_proposal: docket.local_invoice_proposal ?? null,
+    caveats: docket.caveats,
     docket_routes: (docket.routes ?? []) as unknown as Array<
       Record<string, unknown>
     >,

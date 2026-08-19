@@ -85,9 +85,33 @@ function assembleInput(overrides: Record<string, unknown> = {}) {
   };
 }
 
+Deno.test("T12 assembler surfaces commercial_reviews as a non-blocking list", () => {
+  const result = assembleSesPackInspection(assembleInput({
+    local_invoice_proposal: {
+      reference: "MLB-27037",
+      total_inc_gst: 464.75,
+      commercial_review_codes: ["pricing_evidence_missing"],
+    },
+    caveats: [{
+      code: "pricing_evidence_missing",
+      fact: "Attendance hours not evidenced; sealed floor proposed.",
+      evidence: { issue_class: "commercial_review" },
+    }, {
+      code: "curated_source_missing",
+      fact: "Report caveat",
+      evidence: { issue_class: "review_assumption" },
+    }],
+  }));
+  assertEquals(result.commercial_reviews, [{
+    code: "pricing_evidence_missing",
+    fact: "Attendance hours not evidenced; sealed floor proposed.",
+  }]);
+});
+
 Deno.test("T12 assembler surfaces the literal SET report_doc_id + invoice + recipe", () => {
   const result = assembleSesPackInspection(assembleInput());
   assertEquals(result.schema, "secureworks.makesafe.ses-pack-inspection/v1");
+  assertEquals(result.commercial_reviews, []);
   // The whole reason this read exists: expose the literal report_doc_id.
   assertEquals(result.pack.report_doc_id, "report-doc-abc");
   assertEquals(result.pack.invoice_doc_id, "invoice-doc-xyz");
