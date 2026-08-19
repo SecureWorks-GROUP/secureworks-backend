@@ -2598,6 +2598,18 @@ materials there. Temporary-fence hire bases are unchanged. Regression:
 `ses_materials_charge_guard_test.ts` and the silent-labour-only case in
 `ses_prepare_docket_revision_test.ts`.
 
+## Legacy `pack.status=failed` Is Bindable When Send Never Started
+
+`bind_existing_makesafe_invoice_pack` and `ensureCuratedReportPackPointer` share
+`BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES` (base unsent statuses plus
+`failed`). A main pack with `status='failed'` AND `sent_at IS NULL` AND
+`send_started_at IS NULL` may bind an existing invoice PDF or curated report
+pointer — SWMS-261015 Tuart Hill class. Any set send timestamp still refuses on
+both the pre-check and the CAS `.is('sent_at', null)` /
+`.is('send_started_at', null)` predicates; do not loosen that fence. Refusal
+messages must name send state only when a send stamp exists. Tests:
+`ses_bind_existing_invoice_pack_test.ts`, `makesafe_render_report_action_test.ts`.
+
 ## Docs Ready Is A Queue, Not A Board Column
 
 Count Docs Ready from `ops-api?action=list_ses_docs_ready_reviews`, not by eye

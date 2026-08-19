@@ -520,12 +520,14 @@ Deno.test("dry_run previews bind without document, pack, or event writes", async
   assertEquals(result.external_mutations, { xero: 0, email: 0 });
 });
 
-Deno.test("dry_run returns would_refuse for pack send-state without writes", async () => {
+Deno.test("dry_run allows legacy failed pack with no send timestamps", async () => {
   const writes: string[] = [];
   const result = await _bindExistingMakesafeInvoicePackForTest(
     actionClient({
       status: "failed",
       failed_step: "money_review_gate",
+      sent_at: null,
+      send_started_at: null,
     }) as any,
     {
       job_id: JOB_ID,
@@ -538,28 +540,85 @@ Deno.test("dry_run returns would_refuse for pack send-state without writes", asy
         writes.push("accrec");
         return [invoice()];
       },
+      fetchInvoicePdfBytes: async () => {
+        writes.push("pdf");
+        return new Uint8Array([37, 80, 68, 70]);
+      },
       attachDocument: async () => {
         writes.push("attach");
         return { document_id: "unexpected" } as any;
       },
+      ensurePack: async () => {
+        writes.push("ensure");
+      },
+      bindPack: async () => {
+        writes.push("bind");
+      },
     },
   );
 
-  assertEquals(writes, []);
-  assertEquals(result.success, false);
+  // Gate clears; dry_run still fetches the PDF but never attaches/binds.
+  assertEquals(writes, ["accrec", "pdf"]);
+  assertEquals(result.success, true);
   assertEquals(result.dry_run, true);
   assertEquals(result.persisted, false);
-  assertEquals(result.state, "would_refuse");
-  assertEquals(result.would_do, null);
-  assertEquals(result.would_refuse.code, "pack_send_state_blocks_bind");
-  assertEquals(result.would_refuse.status, 409);
-  assertEquals(
-    String(result.would_refuse.message).includes(
-      "refuses pack status 'failed'",
-    ),
-    true,
-  );
+  assertEquals(result.state, "would_bind_existing_invoice_pack");
+  assertEquals(result.would_refuse, null);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
 });
+
+for (
+  const [label, packOverrides] of [
+    ["send_started_at", { send_started_at: "2026-08-01T00:00:00Z" }],
+    ["sent_at", { sent_at: "2026-08-01T00:00:00Z" }],
+  ] as const
+) {
+  Deno.test(
+    `dry_run refuses failed pack when ${label} is set without writes`,
+    async () => {
+      const writes: string[] = [];
+      const result = await _bindExistingMakesafeInvoicePackForTest(
+        actionClient({
+          status: "failed",
+          failed_step: "money_review_gate",
+          ...packOverrides,
+        }) as any,
+        {
+          job_id: JOB_ID,
+          invoice_number: "INV-0817",
+          actor: "captain@test",
+          dry_run: true,
+        },
+        {
+          fetchAllAccrecInvoices: async () => {
+            writes.push("accrec");
+            return [invoice()];
+          },
+          attachDocument: async () => {
+            writes.push("attach");
+            return { document_id: "unexpected" } as any;
+          },
+        },
+      );
+
+      assertEquals(writes, []);
+      assertEquals(result.success, false);
+      assertEquals(result.dry_run, true);
+      assertEquals(result.persisted, false);
+      assertEquals(result.state, "would_refuse");
+      assertEquals(result.would_do, null);
+      assertEquals(result.would_refuse.code, "pack_send_state_blocks_bind");
+      assertEquals(result.would_refuse.status, 409);
+      assertEquals(
+        String(result.would_refuse.message).includes(
+          "because send state already exists",
+        ),
+        true,
+      );
+      assertEquals(result.external_mutations, { xero: 0, email: 0 });
+    },
+  );
+}
 
 Deno.test("dry_run returns would_refuse for named-invoice selection failures", async () => {
   const writes: string[] = [];
@@ -729,33 +788,87 @@ Deno.test("bind-only PDF failure writes no document or pack", async () => {
   assertEquals(message.includes("exact Xero PDF could not be fetched"), true);
 });
 
-Deno.test("bind-only refuses failed packs without clearing their failure", async () => {
-  let fetched = false;
-  let message = "";
-  try {
-    await _bindExistingMakesafeInvoicePackForTest(
-      actionClient({
-        status: "failed",
-        failed_step: "money_review_gate",
-      }) as any,
-      {
-        job_id: JOB_ID,
-        invoice_number: "INV-0817",
-        actor: "captain@test",
+Deno.test("bind-only recovers a legacy failed pack with no send timestamps", async () => {
+  const calls = { attach: 0, ensure: 0, bind: 0 };
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient({
+      status: "failed",
+      failed_step: "money_review_gate",
+      sent_at: null,
+      send_started_at: null,
+    }) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-0817",
+      actor: "captain@test",
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice()],
+      fetchInvoicePdfBytes: async () => new Uint8Array([37, 80, 68, 70]),
+      attachDocument: async () => {
+        calls.attach++;
+        return {
+          success: true,
+          document_id: "invoice-doc-0817",
+          type: "invoice",
+          url: "https://example.test/invoice-0817.pdf",
+        };
       },
-      {
-        fetchAllAccrecInvoices: async () => {
-          fetched = true;
-          return [invoice()];
-        },
+      ensurePack: async () => {
+        calls.ensure++;
       },
-    );
-  } catch (error) {
-    message = (error as Error).message;
-  }
-  assertEquals(fetched, false);
-  assertEquals(message.includes("refuses pack status 'failed'"), true);
+      bindPack: async () => {
+        calls.bind++;
+      },
+    },
+  );
+  assertEquals(calls, { attach: 1, ensure: 1, bind: 1 });
+  assertEquals(result.state, "existing_invoice_pack_bound");
+  assertEquals(result.persisted, true);
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
 });
+
+for (
+  const [label, packOverrides] of [
+    ["send_started_at", { send_started_at: "2026-08-01T00:00:00Z" }],
+    ["sent_at", { sent_at: "2026-08-01T00:00:00Z" }],
+  ] as const
+) {
+  Deno.test(
+    `bind-only refuses failed pack when ${label} is set without clearing failure`,
+    async () => {
+      let fetched = false;
+      let message = "";
+      try {
+        await _bindExistingMakesafeInvoicePackForTest(
+          actionClient({
+            status: "failed",
+            failed_step: "money_review_gate",
+            ...packOverrides,
+          }) as any,
+          {
+            job_id: JOB_ID,
+            invoice_number: "INV-0817",
+            actor: "captain@test",
+          },
+          {
+            fetchAllAccrecInvoices: async () => {
+              fetched = true;
+              return [invoice()];
+            },
+          },
+        );
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      assertEquals(fetched, false);
+      assertEquals(message.includes("because send state already exists"), true);
+    },
+  );
+}
 
 Deno.test("bind-only refuses a divergent pack invoice before PDF or document writes", async () => {
   const writes: string[] = [];
@@ -899,6 +1012,7 @@ Deno.test("bind-only pack update loses cleanly to a concurrent send lock", async
     message = (error as Error).message;
   }
   assertEquals(message.includes("entered send state"), true);
+  // Send fence stays independent of status: CAS still requires null send stamps.
   assertEquals(
     filters.some(([key, value]) => key === "is:sent_at" && value === null),
     true,
@@ -909,10 +1023,11 @@ Deno.test("bind-only pack update loses cleanly to a concurrent send lock", async
     ),
     true,
   );
+  // Recoverable set includes legacy `failed` (when unsent) but never `sending`.
   assertEquals(
     filters.some(([key, value]) =>
       key === "in:status" && Array.isArray(value) &&
-      !value.includes("failed") && !value.includes("sending")
+      value.includes("failed") && !value.includes("sending")
     ),
     true,
   );

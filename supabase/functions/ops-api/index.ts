@@ -18797,6 +18797,17 @@ const BIND_EXISTING_INVOICE_PACK_STATUSES = [
   'portal_ready',
 ] as const
 
+/**
+ * Statuses eligible for bind-only recovery when send has never started.
+ * Adds legacy `failed` packs that never reached send (`sent_at` and
+ * `send_started_at` both null). Every consumer MUST also enforce the send
+ * fence independently — never use this list without null send predicates.
+ */
+const BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES = [
+  ...BIND_EXISTING_INVOICE_PACK_STATUSES,
+  'failed',
+] as const
+
 function invoiceStatusIsTerminal(status: string): boolean {
   const st = String(status || '').toUpperCase()
   return st === 'DELETED' || st === 'VOIDED'
@@ -18840,7 +18851,7 @@ async function bindExistingInvoicePackStrict(
     })
     .eq('job_id', jobId)
     .eq('pack_kind', 'main')
-    .in('status', [...BIND_EXISTING_INVOICE_PACK_STATUSES])
+    .in('status', [...BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES])
     .is('sent_at', null)
     .is('send_started_at', null)
     .or(`xero_invoice_id.is.null,${allowedIds.join(',')}`)
@@ -18950,12 +18961,16 @@ async function bindExistingMakesafeInvoicePack(
     throw new ApiError(`bind-only invoice pack read failed: ${packResponse.error.message}`, 503)
   }
   const packStatus = String(packResponse.data?.status || '').toLowerCase()
-  if (packResponse.data && (
-    packResponse.data.sent_at || packResponse.data.send_started_at ||
-    !(BIND_EXISTING_INVOICE_PACK_STATUSES as readonly string[]).includes(packStatus)
-  )) {
-    const message =
-      `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because send state already exists`
+  const sendStarted = !!(packResponse.data?.sent_at || packResponse.data?.send_started_at)
+  const statusRecoverable = (BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES as readonly string[])
+    .includes(packStatus)
+  if (packResponse.data && (sendStarted || !statusRecoverable)) {
+    // Name the actual reason: send timestamps are the send fence; a non-recoverable
+    // status alone must not claim send state exists (legacy `failed` with null
+    // sent_at/send_started_at is recoverable and never reaches here).
+    const message = sendStarted
+      ? `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because send state already exists`
+      : `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because it is not a bindable unsent status`
     if (dryRun) {
       return bindExistingMakesafeInvoicePackDryRefuse({
         code: 'pack_send_state_blocks_bind',
@@ -38187,9 +38202,10 @@ type CuratedReportPackPointerResult = {
  * wrote the pack pointer, leaving physical Report Ready cards with a typed
  * report and a null `report_doc_id`. This fill mirrors the invoice pointer bind
  * (`bindExistingInvoicePackStrict`): the same unsent / no-send-started state
- * guard (`BIND_EXISTING_INVOICE_PACK_STATUSES` + `sent_at`/`send_started_at`
- * null), an atomic CAS on a null pointer, idempotent acceptance of an
- * already-equal pointer, and a hard refusal of a different existing pointer.
+ * guard (`BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES` + `sent_at`/
+ * `send_started_at` null), an atomic CAS on a null pointer, idempotent
+ * acceptance of an already-equal pointer, and a hard refusal of a different
+ * existing pointer.
  *
  * It writes nothing but the pointer: no invoice, no status, no send, no board
  * or job-stage field, and it never creates pack/board state (a card with no
@@ -38242,19 +38258,24 @@ async function ensureCuratedReportPackPointer(
     }
   }
   const sendStarted = pack.sent_at != null || pack.send_started_at != null
-  const bindableStatus = (BIND_EXISTING_INVOICE_PACK_STATUSES as readonly string[])
-    .includes(String(pack.status || ''))
+  const packStatus = String(pack.status || '')
+  const bindableStatus = (BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES as readonly string[])
+    .includes(packStatus)
   if (sendStarted || !bindableStatus) {
     // Null pointer but the pack has started/finished a send (or is otherwise
-    // not in a bindable unsent state): refuse rather than touch a sent pack.
+    // not in a recoverable unsent state): refuse rather than touch a sent pack.
+    // Name the actual reason — do not claim send state when only the status
+    // is non-recoverable.
     throw curatedBindError(
       'curated_bind_report_pointer_pack_not_bindable',
-      'main pack has started or completed a send and cannot bind a report pointer',
+      sendStarted
+        ? 'main pack has started or completed a send and cannot bind a report pointer'
+        : `main pack status '${packStatus || 'unknown'}' is not bindable for a report pointer`,
       409,
     )
   }
   // Atomic compare-and-swap: only a null pointer on an unsent / no-send-started
-  // bindable main pack is filled. No invoice, status, send, or board field is
+  // recoverable main pack is filled. No invoice, status, send, or board field is
   // written; the money/send fences are untouched.
   const cas = await client.from('makesafe_report_packs')
     .update({ report_doc_id: documentId, updated_at: new Date().toISOString() })
@@ -38263,7 +38284,7 @@ async function ensureCuratedReportPackPointer(
     .is('report_doc_id', null)
     .is('sent_at', null)
     .is('send_started_at', null)
-    .in('status', [...BIND_EXISTING_INVOICE_PACK_STATUSES])
+    .in('status', [...BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES])
     .select('id')
   if (cas.error) {
     throw curatedBindError(

@@ -147,8 +147,9 @@ function bindClient(
   // Mutable main pack row. `undefined` means "not modelled" (fixtures that do
   // not exercise the pointer path); an explicit `null` means "no main pack";
   // an object is the current pack the CAS reads and may fill.
-  const pack: Record<string, unknown> | null =
-    options.pack === undefined ? null : options.pack;
+  const pack: Record<string, unknown> | null = options.pack === undefined
+    ? null
+    : options.pack;
   const document = {
     id: "document-fixture",
     job_id: options.documentJobId || "job-fixture",
@@ -479,7 +480,9 @@ function draftedPack(overrides: Record<string, unknown> = {}) {
 }
 
 Deno.test("first bind fills a null main-pack report_doc_id after every evidence gate", async () => {
-  const bytes = new TextEncoder().encode("%PDF-1.7\npointer first-bind fixture");
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\npointer first-bind fixture",
+  );
   const { client, mutations, pack } = bindClient(bytes, {
     pack: draftedPack(),
   });
@@ -487,14 +490,21 @@ Deno.test("first bind fills a null main-pack report_doc_id after every evidence 
   const result = await withStoredPdf(
     bytes,
     () =>
-      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
   );
   assertEquals(result.writes, 2);
   assertEquals(result.pack_pointer_written, true);
   assertEquals(result.pack_pointer_reason, "bound");
   assertEquals(result.pack_report_doc_id, "document-fixture");
   // The pack pointer was actually swapped.
-  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "document-fixture",
+  );
   // Exactly one pack write, after the document/audit writes.
   assertEquals(mutations.map((item) => item.table), [
     "job_events",
@@ -504,34 +514,52 @@ Deno.test("first bind fills a null main-pack report_doc_id after every evidence 
 });
 
 Deno.test("idempotent-exact document re-bind still fills a null pack pointer (the five-card gap)", async () => {
-  const bytes = new TextEncoder().encode("%PDF-1.7\npointer idempotent fixture");
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\npointer idempotent fixture",
+  );
   const { client, pack } = bindClient(bytes, { pack: draftedPack() });
   const body = await bindBody(bytes);
   // First bind: document is written and the pack pointer is filled.
   await withStoredPdf(
     bytes,
     () =>
-      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
   );
-  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "document-fixture",
+  );
   // Simulate the historical gap: the document is bound but the pack pointer was
   // never set. The idempotent-exact document branch must still fill it.
   (pack as Record<string, unknown>).report_doc_id = null;
   const replay = await withStoredPdf(
     bytes,
     () =>
-      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
   );
   assertEquals(replay.skipped, true);
   assertEquals(replay.writes, 0);
   assertEquals(replay.pack_pointer_written, true);
   assertEquals(replay.pack_pointer_reason, "bound");
   assertEquals(replay.pack_report_doc_id, "document-fixture");
-  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "document-fixture",
+  );
 });
 
 Deno.test("re-bind with the pack already pointing at this document is a no-op success", async () => {
-  const bytes = new TextEncoder().encode("%PDF-1.7\npointer already-bound fixture");
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\npointer already-bound fixture",
+  );
   const { client, mutations, pack } = bindClient(bytes, {
     pack: draftedPack({ report_doc_id: "document-fixture" }),
   });
@@ -539,13 +567,20 @@ Deno.test("re-bind with the pack already pointing at this document is a no-op su
   const result = await withStoredPdf(
     bytes,
     () =>
-      _bindCurrentCycleCuratedMakesafeReportForTest(client, body, FIXTURE_ACTOR),
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
   );
   assertEquals(result.writes, 2);
   assertEquals(result.pack_pointer_written, false);
   assertEquals(result.pack_pointer_reason, "already_bound");
   assertEquals(result.pack_report_doc_id, "document-fixture");
-  assertEquals((pack as Record<string, unknown>).report_doc_id, "document-fixture");
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "document-fixture",
+  );
   // No pack UPDATE was issued for an already-equal pointer.
   assertEquals(
     mutations.filter((item) => item.table === "makesafe_report_packs").length,
@@ -620,6 +655,88 @@ Deno.test("a sent / send-started pack refuses the report pointer write", async (
     0,
   );
 });
+
+Deno.test("a legacy failed pack with no send timestamps binds the report pointer", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\npointer failed-unsent fixture",
+  );
+  const { client, mutations, pack } = bindClient(bytes, {
+    pack: draftedPack({
+      status: "failed",
+      sent_at: null,
+      send_started_at: null,
+    }),
+  });
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(result.pack_pointer_written, true);
+  assertEquals(result.pack_pointer_reason, "bound");
+  assertEquals(result.pack_report_doc_id, "document-fixture");
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "document-fixture",
+  );
+  assertEquals(
+    mutations.filter((item) => item.table === "makesafe_report_packs").length,
+    1,
+  );
+});
+
+for (
+  const [label, packOverrides] of [
+    ["send_started_at", { send_started_at: "2026-08-01T00:00:00Z" }],
+    ["sent_at", { sent_at: "2026-08-01T00:00:00Z" }],
+  ] as const
+) {
+  Deno.test(
+    `a failed pack with ${label} set still refuses the report pointer write`,
+    async () => {
+      const bytes = new TextEncoder().encode(
+        `%PDF-1.7\npointer failed-${label} fixture`,
+      );
+      const { client, mutations, pack } = bindClient(bytes, {
+        pack: draftedPack({
+          status: "failed",
+          ...packOverrides,
+        }),
+      });
+      const body = await bindBody(bytes);
+      const error = await withStoredPdf(
+        bytes,
+        () =>
+          assertRejects(
+            () =>
+              _bindCurrentCycleCuratedMakesafeReportForTest(
+                client,
+                body,
+                FIXTURE_ACTOR,
+              ),
+            ApiError,
+            "started or completed a send",
+          ),
+      );
+      assertEquals((error as ApiError).status, 409);
+      assertEquals(
+        ((error as ApiError).body as Record<string, unknown>).code,
+        "curated_bind_report_pointer_pack_not_bindable",
+      );
+      assertEquals((pack as Record<string, unknown>).report_doc_id, null);
+      assertEquals(
+        mutations.filter((item) => item.table === "makesafe_report_packs")
+          .length,
+        0,
+      );
+    },
+  );
+}
 
 Deno.test("a failed evidence gate refuses before any pack pointer write", async () => {
   // Non-eligible family fails at gate 3; the pointer path must never run, so a
