@@ -8,6 +8,7 @@ import {
   remintSesInvoiceDraftAction,
   REMINT_DRAFT_DELETED_MINT_FAILED,
   REMINT_REQUIRES_DRAFT,
+  REMINT_REQUIRES_LIVE_INVOICE,
 } from "./ses_remint_invoice_draft.ts";
 import { SesActionError } from "./ses_reporting_actions.ts";
 
@@ -52,6 +53,11 @@ function deps(overrides: Record<string, unknown> = {}) {
         status: "DRAFT",
         invoice_obligation_revision_id: "obl-old",
       }),
+      loadLeftoverMutableObligation: async () => ({
+        obligation_id: "parent-old",
+        status: "xero_bound",
+        revision_id: "obl-old",
+      }),
       deleteDraft: async () => {
         calls.push("delete");
         return { status: "DELETED" };
@@ -64,6 +70,9 @@ function deps(overrides: Record<string, unknown> = {}) {
       },
       markObligationVoidLinked: async () => {
         calls.push("void_linked");
+      },
+      markParentObligationVoidLinked: async () => {
+        calls.push("parent_void_linked");
       },
       prepareOverride: async () => {
         calls.push("prepare");
@@ -90,7 +99,7 @@ function deps(overrides: Record<string, unknown> = {}) {
   };
 }
 
-Deno.test("remint DRAFT deletes, mirrors, overrides, mints, binds, never sends", async () => {
+Deno.test("remint DRAFT deletes, closes parent, overrides, mints, binds, never sends", async () => {
   const { calls, impl } = deps();
   const result = await remintSesInvoiceDraftAction(
     {},
@@ -116,6 +125,7 @@ Deno.test("remint DRAFT deletes, mirrors, overrides, mints, binds, never sends",
     "local_deleted",
     "cycles",
     "void_linked",
+    "parent_void_linked",
     "prepare",
     "create:obl-new",
     "bind",
@@ -169,9 +179,12 @@ Deno.test("AUTHORISED never deletes", async () => {
   assertEquals(err.message.includes(REMINT_REQUIRES_DRAFT), true);
 });
 
-Deno.test("no live invoice refuses", async () => {
-  const { impl } = deps({ loadLiveInvoice: async () => null });
-  await assertRejects(
+Deno.test("no live invoice and no leftover refuses", async () => {
+  const { impl } = deps({
+    loadLiveInvoice: async () => null,
+    loadLeftoverMutableObligation: async () => null,
+  });
+  const err = await assertRejects(
     () =>
       remintSesInvoiceDraftAction(
         {},
@@ -186,6 +199,30 @@ Deno.test("no live invoice refuses", async () => {
       ),
     SesActionError,
   );
+  assertEquals(err.message.includes(REMINT_REQUIRES_LIVE_INVOICE), true);
+});
+
+Deno.test("deleted DRAFT with leftover parent remints without deleting again", async () => {
+  const { calls, impl } = deps({
+    loadLiveInvoice: async () => null,
+  });
+  const result = await remintSesInvoiceDraftAction(
+    {},
+    auth,
+    {
+      org_id: "org",
+      job_id: JOB,
+      actor: "captain-chat",
+      commercial_quantity_override: lock,
+    },
+    impl as any,
+  );
+  assertEquals(result.state, "xero_draft_reminted");
+  assertEquals(result.previous_invoice.invoice_number, "already-deleted");
+  assertEquals((result.invoice as any).invoice_number, "INV-1246");
+  assertEquals(calls.includes("delete"), false);
+  assertEquals(calls.includes("parent_void_linked"), true);
+  assertEquals(calls.includes("create:obl-new"), true);
 });
 
 Deno.test("mint fail after delete is named, not silent", async () => {
