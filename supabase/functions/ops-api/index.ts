@@ -532,6 +532,7 @@ import {
   getSesReviewablePackAction,
   listSesDocsReadyReviewsAction,
   prepareSesInvoiceObligationAction,
+  requireSesInvoiceMintAuthority,
   prepareSesReleaseRevisionAction,
   querySesProofLedgerAction,
   querySesReviewCockpitAction,
@@ -589,6 +590,10 @@ import {
   prepareSesInvoiceVoidRevisionAction,
   type SesInvoiceVoidGateway,
 } from './ses_invoice_void.ts'
+import {
+  makeDefaultRemintDeps,
+  remintSesInvoiceDraftAction,
+} from './ses_remint_invoice_draft.ts'
 import { buildOpsApiVersion } from './ops_api_version.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
@@ -4362,6 +4367,7 @@ if (import.meta.main) serve(async (req: Request) => {
       // guard first; never authorise/send — those stay JWT-gated).
       'prepare_ses_invoice_obligation',
       'create_ses_invoice_draft',
+      'remint_ses_invoice_draft',
       'resolve_ses_invoice_duplicates',
       'query_ses_invoice_obligation',
       'prepare_ses_release_revision',
@@ -7470,6 +7476,53 @@ if (import.meta.main) serve(async (req: Request) => {
           {
             bindExistingInvoiceCloseout: bindExistingSesInvoiceCloseout,
           },
+        ))
+      case 'remint_ses_invoice_draft':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'remint_ses_invoice_draft',
+        )
+        return json(await remintSesInvoiceDraftAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            actor: authUser?.email || body.actor || body.created_by ||
+              'ses-draft-reminter',
+            commercial_quantity_override: body.commercial_quantity_override,
+          },
+          makeDefaultRemintDeps({
+            requireMintAuthority: requireSesInvoiceMintAuthority,
+            prepareOverride: prepareSesInvoiceObligationAction,
+            createDraft: (c, a, args) =>
+              createSesInvoiceDraftAction(
+                c,
+                a,
+                args,
+                makeSesXeroGateway(c),
+                { bindExistingInvoiceCloseout: bindExistingSesInvoiceCloseout },
+              ),
+            deleteDraftOnXero: async (invoice, actor) => {
+              const gw = makeSesInvoiceVoidGateway(client)
+              const result = await gw.voidInvoice(
+                invoice.xero_invoice_id,
+                'DELETED',
+                {
+                  external_token: `remint-${invoice.xero_invoice_id}`,
+                  operation_key: `remint-delete-${actor}`,
+                },
+              )
+              return { status: result.status }
+            },
+            bindInvoice: (c, args) =>
+              bindExistingMakesafeInvoicePack(c, {
+                job_id: args.job_id,
+                invoice_number: args.invoice_number,
+                actor: args.actor,
+              }),
+          }),
         ))
       case 'bind_existing_makesafe_invoice_pack': {
         // Bind-only repair for cards whose existing Xero invoice predates the
