@@ -143,6 +143,7 @@ Deno.test("po grain: Builderwest duplicate is visible when the group ref and the
   assertEquals(live, ["BWCWA:PO-20877"]);
   const matches = matchExistingInstructionCards(
     live,
+    "general_makesafe",
     [{
       job_id: "job-archived",
       external_ref: "BWCWA6781",

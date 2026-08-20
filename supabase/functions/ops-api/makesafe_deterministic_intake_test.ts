@@ -2174,6 +2174,63 @@ Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliver
   assertEquals(woCase.identity.woPoIdentityKey?.includes("PO-57087"), true);
 });
 
+Deno.test("MLB-25765: one WO and PO form separate roof, assessment, and physical cases", () => {
+  const declaredTypes = [
+    ["roof", "Roof Reports EXTERNAL", "roof_report"],
+    [
+      "assessment",
+      "Assessment Report & Quote",
+      "assessment_report_quote",
+    ],
+    ["physical", "Makesafe/Emergency Repairs", "general_makesafe"],
+  ] as const;
+  const items = declaredTypes.map(([suffix, declaredType], index) => {
+    const postId = `mlb-25765-${suffix}`;
+    return source({
+      postId,
+      threadId: "mlb-25765-thread",
+      receivedAt: `2026-07-20T0${index}:00:00.000Z`,
+      subject: `NEW WORK ORDER MLB-25765 ${declaredType}`,
+      body: "Please attend the attached work order.",
+      attachments: [pdf(postId)],
+      pdfDocuments: [{
+        sourcePostId: postId,
+        attachmentId: `${postId}-pdf`,
+        attachmentName: "work_order_MLB-25765PO-54176.pdf",
+        status: "extracted" as const,
+        text: [
+          "Work Order",
+          "Work Order Number MLB-25765PO-54176",
+          "Policyholders Name Shared Client",
+          "Mobile 0422636182",
+          "Site Address 241 Old Coast Road Australind WA 6233",
+          "Allocation Work Order",
+          declaredType,
+          "Scope of Works Attend and complete the declared service",
+        ].join("\n"),
+        charCount: 300,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      }],
+    });
+  });
+
+  const plan = buildDeterministicIntakePlan(items, PROFILES);
+  assertEquals(plan.cases.length, 3);
+  assertEquals(
+    plan.cases.map((item) => item.identity.jobFamily).sort(),
+    declaredTypes.map(([, , family]) => family).sort(),
+  );
+  assertEquals(new Set(plan.cases.map((item) => item.instructionKey)).size, 3);
+  assert(
+    plan.cases.every((item) =>
+      item.identity.woPoIdentityKey?.includes("PO-54176")
+    ),
+  );
+});
+
 Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its declared family", () => {
   const item = source({
     postId: "quote-guard-1",

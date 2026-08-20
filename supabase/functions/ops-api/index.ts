@@ -22603,7 +22603,11 @@ async function approveIntakeDraft(client: any, body: any) {
       )
     }
     try {
-      await _assertInstructionCardMintAvailable(client, instructionKeys)
+      await _assertInstructionCardMintAvailable(
+        client,
+        instructionKeys,
+        approvedJobFamilyKey,
+      )
     } catch (error) {
       if (error instanceof _InstructionMintConflictError) {
         throw new ApiError(
@@ -22742,6 +22746,7 @@ async function approveIntakeDraft(client: any, body: any) {
         orgId: draft.org_id || DEFAULT_ORG_ID,
         draftId: draft.id,
         candidateKeys: canonicalInstructionKeys,
+        candidateFamily: approvedJobFamilyKey,
       })
       instructionMintReserved = true
     }
