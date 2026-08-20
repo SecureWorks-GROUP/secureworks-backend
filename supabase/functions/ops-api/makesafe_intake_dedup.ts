@@ -35,14 +35,13 @@
 // ------
 // buildIntakeDedupIndex(existingDrafts) -> a DedupIndex built ONCE per scan from
 // all drafts in a live state (draft | needs_review | approved) plus, optionally,
-// existing jobs' external refs. isDuplicateIntake(candidate, index) returns the
+// existing jobs' identities. isDuplicateIntake(candidate, index) returns the
 // reason a candidate is a duplicate (or null when it is genuinely new). A draft is
-// created ONLY when isDuplicateIntake returns null. Skipping is keyed, in priority
-// order, on:
-//   1. graph_message_id            (exact, within-path — original behaviour)
-//   2. internet_message_id         (exact, old<->old)
-//   3. external_ref + company      (normalised — the cross-path workhorse)
-//   4. external_ref (job exists)   (a live job already covers this ref)
+// created ONLY when isDuplicateIntake returns null. Exact transport and content
+// twins are refused first; then a builder WO/PO identity is authoritative. Ref and
+// family comparisons provide the cross-path fallback only where that identity is
+// absent or known to be distinct. An unknown work-order family is a review outcome,
+// never an auto-mint path.
 //
 // SAFETY
 //   - Pure, no I/O. The caller supplies the already-fetched rows.

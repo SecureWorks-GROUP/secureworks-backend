@@ -295,7 +295,8 @@ export function mergeLateWorkOrderPdfIntoDraft(
       : {};
   const candExtraction = candidate.extraction || {};
   const draftFamily = normaliseJobFamily(
-    draft.makesafe_job_family || cleanStr(draftExtraction["makesafe_job_family"]),
+    draft.makesafe_job_family ||
+      cleanStr(draftExtraction["makesafe_job_family"]),
   );
   const candidateFamily = normaliseJobFamily(
     candidate.makesafe_job_family ||
