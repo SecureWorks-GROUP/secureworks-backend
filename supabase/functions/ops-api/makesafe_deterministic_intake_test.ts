@@ -2174,7 +2174,7 @@ Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliver
   assertEquals(woCase.identity.woPoIdentityKey?.includes("PO-57087"), true);
 });
 
-Deno.test("MLB-25765: one WO and PO form separate roof, assessment, and physical cases", () => {
+Deno.test("one WO and PO with conflicting families parks one review case", () => {
   const declaredTypes = [
     ["roof", "Roof Reports EXTERNAL", "roof_report"],
     [
@@ -2218,17 +2218,15 @@ Deno.test("MLB-25765: one WO and PO form separate roof, assessment, and physical
   });
 
   const plan = buildDeterministicIntakePlan(items, PROFILES);
-  assertEquals(plan.cases.length, 3);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
   assertEquals(
-    plan.cases.map((item) => item.identity.jobFamily).sort(),
-    declaredTypes.map(([, , family]) => family).sort(),
+    plan.cases[0].sourcePostIds,
+    declaredTypes.map(([suffix]) => `mlb-25765-${suffix}`).sort(),
   );
-  assertEquals(new Set(plan.cases.map((item) => item.instructionKey)).size, 3);
-  assert(
-    plan.cases.every((item) =>
-      item.identity.woPoIdentityKey?.includes("PO-54176")
-    ),
-  );
+  assert(plan.cases[0].identity.woPoIdentityKey?.includes("PO-54176"));
 });
 
 Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its declared family", () => {

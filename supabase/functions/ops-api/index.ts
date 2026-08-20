@@ -671,7 +671,7 @@ import {
   isReportOnlyType as _isReportOnlyType,
   reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
-  decideMakeSafeJobFamily as _decideMakeSafeJobFamily,
+  decideDeterministicMakeSafeJobFamily as _decideDeterministicMakeSafeJobFamily,
   hasExplicitRapidRepairSignal as _hasExplicitRapidRepairSignal,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
@@ -21716,7 +21716,7 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
       familyContextRefused = true
     }
   }
-  const familyDecision = _decideMakeSafeJobFamily(
+  const familyDecision = _decideDeterministicMakeSafeJobFamily(
     draft?.subject || null,
     [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
     effectiveReportType,
@@ -23957,7 +23957,7 @@ async function _reextractExtractFields(
       }),
     )
   }
-  const familyDecision = _decideMakeSafeJobFamily(
+  const familyDecision = _decideDeterministicMakeSafeJobFamily(
     subject,
     [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
     draftReportType,
@@ -26930,7 +26930,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         builderEmailTextForTrade || bodyPreview,
       )
     }
-    const familyDecision = _decideMakeSafeJobFamily(
+    const familyDecision = _decideDeterministicMakeSafeJobFamily(
       subject,
       [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
       draftReportType,

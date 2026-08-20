@@ -17,8 +17,7 @@ import {
   type TemplateParsingRules,
 } from "./makesafe_template_parser.ts";
 import {
-  decideMakeSafeJobFamily,
-  hasExplicitRapidRepairSignal,
+  decideDeterministicMakeSafeJobFamily,
   subjectIsExcludedNonWorkOrder,
   subjectIsKnownBuilderNoise,
   textHasExplicitReportRequest,
@@ -896,7 +895,7 @@ function jobFamilyDecision(
 ) {
   const pdfDocuments = extractedPdfDocuments(item);
   const fullPdfText = pdfText(item);
-  const decision = decideMakeSafeJobFamily(item.subject, item.body, null, {
+  return decideDeterministicMakeSafeJobFamily(item.subject, item.body, null, {
     builder: adapterId,
     pdfScopeText: pdfScopeText(item, adapterId),
     pdfDeclaredType: declaredTypeForSource(item),
@@ -905,18 +904,6 @@ function jobFamilyDecision(
       /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
         .test(fullPdfText),
   });
-  // Captain 2026-08-13: the dispatch label "RAPID REPAIR" is an explicit
-  // repair-shaped work-order signal. Keep the override inside deterministic
-  // intake and only retag the general/ambiguous physical lane so a more specific
-  // declared PDF family still wins. MLB repair headers already resolve through
-  // pdfDeclaredType above; this closes the subject/body-labelled transport gap.
-  if (
-    hasExplicitRapidRepairSignal(item.subject, item.body) &&
-    (decision.family === "general_makesafe" || decision.family === null)
-  ) {
-    return { family: "repair" as const, evidence: "rapid_repair_signal" };
-  }
-  return decision;
 }
 
 function inferDeliverable(
@@ -2054,6 +2041,17 @@ function instructionDiscriminator(item: AdaptedSource): string {
   return base;
 }
 
+function familyReviewOwnershipKey(item: AdaptedSource): string | null {
+  const unit = item.identity.builderPoCanonical
+    ? `po:${item.identity.builderPoCanonical}`
+    : item.identity.builderWoCanonical
+    ? `wo:${item.identity.builderWoCanonical}`
+    : null;
+  return unit
+    ? `${item.identity.companyKey || item.identity.builderSlug}:${unit}`
+    : null;
+}
+
 function manifestFor(
   _identity: ExtractedIdentity,
   intent: AdaptedSource["intent"],
@@ -2293,6 +2291,24 @@ export function buildDeterministicIntakePlan(
     const clusterKey = `lineage:${stableHash(clusterStrong.join("|"))}`;
     const clusterStory = dedupeStory(sortedCluster);
     const groups = new Map<string, AdaptedSource[]>();
+    const familyReviewUnits = new Set<string>();
+    const ordinaryFamiliesByUnit = new Map<string, Set<string>>();
+    for (const item of sortedCluster) {
+      if (
+        item.intent !== "work" || isRevisionSource(item.source) ||
+        isLifecycleReopenText(lifecycleText(item.source))
+      ) continue;
+      const key = familyReviewOwnershipKey(item);
+      if (!key) continue;
+      const families = ordinaryFamiliesByUnit.get(key) || new Set<string>();
+      families.add(item.identity.jobFamily);
+      ordinaryFamiliesByUnit.set(key, families);
+    }
+    for (const [key, families] of ordinaryFamiliesByUnit) {
+      if (families.size !== 1 || families.has("unclassified")) {
+        familyReviewUnits.add(key);
+      }
+    }
     const strongDiscriminators = sortedCluster
       .filter((item) =>
         item.identity.woPoIdentityKey || item.identity.externalRefCanonical
@@ -2307,6 +2323,14 @@ export function buildDeterministicIntakePlan(
       : null;
     for (const item of sortedCluster) {
       let discriminator = instructionDiscriminator(item);
+      const familyUnit = familyReviewOwnershipKey(item);
+      if (
+        familyUnit && familyReviewUnits.has(familyUnit) &&
+        item.intent === "work" && !isRevisionSource(item.source) &&
+        !isLifecycleReopenText(lifecycleText(item.source))
+      ) {
+        discriminator = `family-review:${familyUnit}`;
+      }
       // A late PDF/link/appointment in an explicit thread often repeats no identity.
       // Recover it into the sole strong instruction only when unambiguous. If two
       // POs/deliverables exist, it remains separate and visible rather than guessed.
@@ -2366,6 +2390,15 @@ export function buildDeterministicIntakePlan(
     let cycle = 1;
     for (const instructionItems of groups.values()) {
       const merged = bestIdentity(instructionItems);
+      const instructionFamilies = new Set(
+        instructionItems.map((item) => item.identity.jobFamily),
+      );
+      if (
+        instructionFamilies.size !== 1 ||
+        instructionFamilies.has("unclassified")
+      ) {
+        merged.identity = { ...merged.identity, jobFamily: "unclassified" };
+      }
       const intent = instructionItems.some((i) => i.intent === "cancellation")
         ? "cancellation"
         : instructionItems.every((i) => i.intent === "chatter")

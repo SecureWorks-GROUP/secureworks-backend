@@ -332,6 +332,7 @@ export interface MakeSafeJobFamilyDecision {
     | "typed_assessment_report"
     | "text_assessment_report"
     | "physical_makesafe"
+    | "rapid_repair_signal"
     | "ambiguous_scope";
   /**
    * Ruling 1 quote-stage marker: a builder "please price this" request is a
@@ -504,6 +505,22 @@ export function decideMakeSafeJobFamily(
   }
 
   return { family: null, evidence: "ambiguous_scope" };
+}
+
+export function decideDeterministicMakeSafeJobFamily(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  reportType?: string | null,
+  context: MakeSafeJobFamilyContext = {},
+): MakeSafeJobFamilyDecision {
+  const decision = decideMakeSafeJobFamily(subject, body, reportType, context);
+  if (
+    hasExplicitRapidRepairSignal(subject, body) &&
+    (decision.family === "general_makesafe" || decision.family === null)
+  ) {
+    return { family: "repair", evidence: "rapid_repair_signal" };
+  }
+  return decision;
 }
 
 /**

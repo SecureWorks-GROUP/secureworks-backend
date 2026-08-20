@@ -299,6 +299,39 @@ Deno.test("clean intake board sweep accepts a PDF-declared repair family", () =>
   });
 });
 
+Deno.test("clean intake board sweep preserves deterministic AJS Rapid Repair family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "aj",
+    external_ref: "AJBR-70991",
+    client_name: "Test Client",
+    site_address: "8 Repair Road",
+    subject: "RAPID REPAIR WORK ORDER AJBR-70991",
+    body_preview: "Please attend the attached work order.",
+    extraction_json: {
+      makesafe_job_family: "repair",
+      work_order_pdf_text: [{
+        attachment_name: "AJBR-70991 Work Order.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Scope of Works: attend and repair the damaged gate",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "AJBR-70991 Work Order.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
 Deno.test("clean intake board sweep accepts a PDF-declared physical family", () => {
   const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
     status: "needs_review",
