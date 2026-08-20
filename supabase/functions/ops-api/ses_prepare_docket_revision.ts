@@ -36,6 +36,7 @@ import {
   ajsPackCc,
   isAjsBuilderKey,
   mlbPhysicalRouteRecipients,
+  universalReportCc,
 } from "./ses_release_route_shape.ts";
 import {
   evaluateSesPhotoMailVolume,
@@ -2491,6 +2492,9 @@ function buildEmailDrafts(
   if (reportFile) {
     drafts.REPORT_EMAIL_DRAFT = draftEmail({
       to: reportPhotoTo,
+      // Every non-AJS report route CCs ses@ (Shaun 2026-08-20), MLB physical
+      // included. Photo and invoice routes are untouched by that ruling.
+      cc: universalReportCc().join(", "),
       subject: reportSubject,
       body: mlbPhysical
         ? ordinaryMailSubjectMatch

@@ -172,19 +172,20 @@ Deno.test("report_invoice refuses missing invoice_to, summary PDF, photo bleed, 
   );
 });
 
-Deno.test("MLB report gate refuses any cc and invoice/photo bleed", () => {
+Deno.test("report gate requires the ses@ cc and refuses invoice/photo bleed", () => {
   const ok = {
     from: MAKESAFE_ADMIN_FROM,
     to: "builder@mlb.example",
-    cc: "",
+    cc: MAKESAFE_CC,
     subject: "MLB report",
     htmlBody: MAVERICK_HTML,
     attachments: [{ name: "Make Safe Report - SWMS-1.pdf" }],
   };
+  // Every non-AJS report route ccs ses@ (Shaun 2026-08-20).
   assertEquals(checkMlbReportClientSendGate(ok), []);
   assertEquals(
-    checkMlbReportClientSendGate({ ...ok, cc: MAKESAFE_CC }).some((f) =>
-      f.includes("no cc")
+    checkMlbReportClientSendGate({ ...ok, cc: "" }).some((f) =>
+      f.includes(MAKESAFE_CC)
     ),
     true,
   );
@@ -196,6 +197,26 @@ Deno.test("MLB report gate refuses any cc and invoice/photo bleed", () => {
         { name: "Xero Invoice INV-1.pdf" },
       ],
     }).some((f) => f.includes("invoice")),
+    true,
+  );
+});
+
+Deno.test("MLB physical report gate requires the ses@ cc too", () => {
+  const base = {
+    from: MAKESAFE_ADMIN_FROM,
+    to: "mlb.mailer@primeeco.tech",
+    cc: MAKESAFE_CC,
+    subject: "MLB physical report",
+    htmlBody: MAVERICK_HTML,
+    attachments: [{ name: "Make Safe Report - SWMS-1.pdf" }],
+  };
+  // The 2026-08-20 ruling covers EVERY non-AJS report route, physical included,
+  // so no shape is exempt and the gate never classifies the card to grade cc.
+  assertEquals(checkMlbReportClientSendGate(base), []);
+  assertEquals(
+    checkMlbReportClientSendGate({ ...base, cc: "" }).some((f) =>
+      f.includes(MAKESAFE_CC)
+    ),
     true,
   );
 });

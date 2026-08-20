@@ -22,6 +22,13 @@
 //   2. TO mlb.mailer@primeeco.tech    — the report, on the work-order subject
 //   3. TO mlb.mailer@primeeco.tech    — all the photos
 //   No invoice on either Prime mailer route. Producer: mlbPhysicalRouteRecipients().
+//
+// Shaun 2026-08-20 (report route only):
+//   EVERY non-AJS `report` route CCs ses@secureworkswa.com.au - MLB physical
+//   included, alongside MLB report-only families and every other non-AJS
+//   builder. The photo route still carries no cc, and the invoice billing pack
+//   keeps finance@ and still never ccs ses@. Producer: universalReportCc().
+//   Supersedes the 2026-07-21 ses@ removal for THAT ROUTE only.
 
 import type { SesRouteKind } from "./ses_review_cockpit.ts";
 import {
@@ -116,6 +123,27 @@ export function ajsPackCc(): string[] {
     AJS_VANESSA_CC,
     AJS_MANDI_CC,
   ]);
+}
+
+/**
+ * Report-route CC for every non-AJS builder (Shaun, 2026-08-20).
+ *
+ * Scope is exactly the `report` route, and it is shape-independent: MLB
+ * physical, MLB report-only families and every other non-AJS builder all cc
+ * ses@ on the report. It supersedes the 2026-07-21 removal of ses@ FROM THAT
+ * ONE ROUTE and nothing else:
+ *
+ *   - the photo route still carries no cc on every non-AJS builder;
+ *   - the invoice billing pack keeps finance@ and still never ccs ses@;
+ *   - AJS/AJBR are untouched and keep ajsPackCc().
+ *
+ * Single producer for the draft (`buildEmailDrafts`) and the gate, so the
+ * envelope the operator reads and the envelope the gate grades cannot drift.
+ * Because no shape is exempt, nothing has to classify the card to get the cc
+ * right - there is no undeclared-shape path back to the superseded envelope.
+ */
+export function universalReportCc(): string[] {
+  return uniqueEmails([SES_RELEASE_CC]);
 }
 
 /**
