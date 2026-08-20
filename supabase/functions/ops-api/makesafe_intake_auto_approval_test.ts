@@ -263,3 +263,74 @@ Deno.test("clean intake board sweep blocks a legacy family conflicting with AJS 
     reason: "work_order_family_needs_review",
   });
 });
+
+Deno.test("clean intake board sweep accepts a PDF-declared repair family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25953",
+    client_name: "Test Client",
+    site_address: "241 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25953",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "repair",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25953_PO-57001.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Rapid Repair",
+          "Attend site as instructed.",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25953_PO-57001.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep accepts a PDF-declared physical family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25954",
+    client_name: "Test Client",
+    site_address: "243 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25954",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "general_makesafe",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25954_PO-57002.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Makesafe/Emergency Repairs",
+          "Make Safe",
+          "Attend site as instructed.",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25954_PO-57002.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});

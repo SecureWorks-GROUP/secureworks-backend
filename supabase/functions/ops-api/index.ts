@@ -21678,22 +21678,56 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
+  const builder = cleanReviewedString(draft?.requesting_company_slug) ||
+    cleanReviewedString(extraction.requesting_company_slug) ||
+    cleanReviewedString(draft?.requesting_company_name) ||
+    cleanReviewedString(extraction.requesting_company_name) ||
+    null
+  const workOrderAttachments = draftWorkOrderAttachments(attachments)
+  const workOrderNames = new Set(
+    workOrderAttachments
+      .map((attachment: any) => normaliseDraftAttachmentName(
+        attachment?.file_name || attachment?.name || attachment?.label,
+      ))
+      .filter(Boolean),
+  )
+  const pdfDocuments = parseJsonArray(extraction.work_order_pdf_text)
+    .filter((document: any) =>
+      !workOrderNames.size ||
+      workOrderNames.has(normaliseDraftAttachmentName(
+        document?.attachment_name || document?.name || document?.file_name,
+      ))
+    )
+  let familyContext: _MakeSafeJobFamilyContext = { builder }
+  let familyContextRefused = emailCarriesMultipleWorkOrders(
+    draft,
+    extraction,
+    attachments,
+  )
+  if (!familyContextRefused && pdfDocuments.length) {
+    try {
+      familyContext = _resolveDraftFamilyClassifierContext({
+        builder,
+        workOrderCount: workOrderAttachments.length,
+        pdfDocuments,
+      })
+    } catch (error) {
+      if (!(error instanceof _DraftFamilyContextRefusal)) throw error
+      familyContextRefused = true
+    }
+  }
   const familyDecision = _decideMakeSafeJobFamily(
     draft?.subject || null,
     [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
     effectiveReportType,
-    {
-      builder: cleanReviewedString(draft?.requesting_company_slug) ||
-        cleanReviewedString(extraction.requesting_company_slug) ||
-        cleanReviewedString(draft?.requesting_company_name) ||
-        cleanReviewedString(extraction.requesting_company_name) ||
-        null,
-    },
+    familyContext,
   )
   const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
   const storedFamily = _normaliseDedupJobFamily(storedFamilyRaw)
   const decidedFamily = _normaliseDedupJobFamily(familyDecision.family)
-  const jobFamily = storedFamilyRaw
+  const jobFamily = familyContextRefused
+    ? null
+    : storedFamilyRaw
     ? (storedFamily === decidedFamily ? storedFamily : null)
     : (decidedFamily || null)
 
