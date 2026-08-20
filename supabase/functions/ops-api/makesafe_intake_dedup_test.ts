@@ -397,6 +397,110 @@ Deno.test("WORK-ORDER IDENTITY: normalises work-order and PO with company", () =
   );
 });
 
+// Australind regression: SWMS-26726 already covered the assessment at 241 Old
+// Coast Rd under MLB-25953. A later extraction may spell that same family as the
+// report_type token, but it must never mint another card (the live duplicate was
+// SWMS-261272).
+Deno.test("Australind: an exact builder work-order and assessment twin is blocked", () => {
+  const index = buildIntakeDedupIndex([], [{
+    external_ref: "MLB-25953",
+    requesting_company_slug: "mlb",
+    makesafe_job_family: "assessment_report",
+    builder_work_order_number: "MLB-25953PO-54176",
+    builder_po_number: "PO-54176",
+  }]);
+
+  assertEquals(
+    isDuplicateIntake({
+      graph_message_id: "australind-rescan",
+      external_ref: "MLB-25953",
+      requesting_company_slug: "mlb",
+      makesafe_job_family: "assessment_report_quote",
+      builder_work_order_number: "MLB-25953PO-54176",
+      builder_po_number: "PO-54176",
+    }, index),
+    "job_external_ref",
+  );
+});
+
+Deno.test("WORK-ORDER FAMILY: an uncertain WO stays in review before it can mint", () => {
+  const index = buildIntakeDedupIndex([]);
+
+  assertEquals(
+    isDuplicateIntake({
+      graph_message_id: "australind-family-uncertain",
+      external_ref: "MLB-25953",
+      requesting_company_slug: "mlb",
+      makesafe_job_family: "unknown_report",
+      builder_work_order_number: "MLB-25953PO-54176",
+      builder_po_number: "PO-54176",
+    }, index),
+    "work_order_family_needs_review",
+  );
+});
+
+Deno.test("WORK-ORDER FAMILY: an existing unknown family keeps a known candidate in review", () => {
+  const index = buildIntakeDedupIndex([], [{
+    external_ref: "MLB-25953",
+    requesting_company_slug: "mlb",
+    makesafe_job_family: "unknown_report",
+    builder_work_order_number: "MLB-25953PO-54176",
+    builder_po_number: "PO-54176",
+  }]);
+
+  assertEquals(
+    isDuplicateIntake({
+      graph_message_id: "australind-known-against-uncertain",
+      external_ref: "MLB-25953",
+      requesting_company_slug: "mlb",
+      makesafe_job_family: "assessment_report_quote",
+      builder_work_order_number: "MLB-25953PO-54176",
+      builder_po_number: "PO-54176",
+    }, index),
+    "job_work_order_identity_needs_review",
+  );
+});
+
+Deno.test("WORK-ORDER FAMILY: roof, assessment, and physical MakeSafe may each create one card", () => {
+  const index = buildIntakeDedupIndex([]);
+  const sharedWorkOrder = {
+    external_ref: "MLB-25765",
+    requesting_company_slug: "mlb",
+    builder_work_order_number: "MLB-25765PO-54176",
+    builder_po_number: "PO-54176",
+  };
+
+  for (
+    const [graph_message_id, makesafe_job_family] of [
+      ["mlb-25765-roof", "roof_report"],
+      ["mlb-25765-assessment", "assessment_report_quote"],
+      ["mlb-25765-physical", "general_makesafe"],
+    ]
+  ) {
+    const candidate = {
+      ...sharedWorkOrder,
+      graph_message_id,
+      makesafe_job_family,
+    };
+    assertEquals(
+      isDuplicateIntake(candidate, index),
+      null,
+      `${makesafe_job_family} is an independently allowed deliverable`,
+    );
+    registerIntakeDraft(candidate, index);
+  }
+
+  assertEquals(
+    isDuplicateIntake({
+      ...sharedWorkOrder,
+      graph_message_id: "mlb-25765-roof-resend",
+      makesafe_job_family: "roof_report",
+    }, index),
+    "builder_work_order_identity",
+    "the exact roof twin remains blocked after the three legitimate cards exist",
+  );
+});
+
 Deno.test("JOB-FAMILY: legacy unknown-family draft routes known-family candidate to review", () => {
   const index = buildIntakeDedupIndex([{
     graph_message_id: "old-path",
