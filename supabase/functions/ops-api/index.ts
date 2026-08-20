@@ -594,6 +594,10 @@ import {
   makeDefaultRemintDeps,
   remintSesInvoiceDraftAction,
 } from './ses_remint_invoice_draft.ts'
+import {
+  makeDefaultCaptainLockRemintDeps,
+  remintSesCaptainLockDraftAction,
+} from './ses_captain_lock_draft_remint.ts'
 import { buildOpsApiVersion } from './ops_api_version.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
@@ -4405,6 +4409,7 @@ if (import.meta.main) serve(async (req: Request) => {
       'prepare_ses_invoice_obligation',
       'create_ses_invoice_draft',
       'remint_ses_invoice_draft',
+      'remint_ses_captain_lock_draft',
       'resolve_ses_invoice_duplicates',
       'query_ses_invoice_obligation',
       'prepare_ses_release_revision',
@@ -7564,6 +7569,82 @@ if (import.meta.main) serve(async (req: Request) => {
                 'DELETED',
                 {
                   external_token: `remint-${invoice.xero_invoice_id}`,
+                  operation_key: operationKey,
+                },
+              )
+              return { status: result.status }
+            },
+            bindInvoice: (c, args) =>
+              bindExistingMakesafeInvoicePack(c, {
+                job_id: args.job_id,
+                invoice_number: args.invoice_number,
+                actor: args.actor,
+              }),
+          }),
+        ))
+      case 'remint_ses_captain_lock_draft':
+        // Captain-lock recovery when remint_ses_invoice_draft cannot run:
+        // no U4 docket, leftover obligation, or live DRAFT. Voids/deletes a
+        // current-cycle DRAFT if one is still live, then mints one bound
+        // DRAFT at the locked figure. Never authorise, send, or email.
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'remint_ses_captain_lock_draft',
+        )
+        return json(await remintSesCaptainLockDraftAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            actor: authUser?.email || body.actor || body.created_by ||
+              'ses-captain-lock-reminter',
+            commercial_quantity_override: body.commercial_quantity_override,
+          },
+          makeDefaultCaptainLockRemintDeps({
+            requireMintAuthority: requireSesInvoiceMintAuthority,
+            fetchAllAccrecInvoices: _fetchAllAccrecInvoices,
+            createDraft: async (c, args) => {
+              const created = await createInvoice(c, {
+                job_id: args.job_id,
+                contact_name: args.contact_name,
+                reference: args.reference,
+                line_items: args.line_items,
+                xero_status: 'DRAFT',
+                send_email: false,
+                bypass_preflight: true,
+                bypass_reason: 'captain_lock_draft_remint',
+                makesafe_idempotency_key: `clk-${
+                  String(args.decision_key || 'lock')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, '')
+                    .slice(0, 32)
+                }`.slice(0, 36),
+              }, {
+                captainLock: { decision_key: args.decision_key },
+              })
+              return {
+                xero_invoice_id: created?.xero_invoice_id,
+                invoice_number: created?.invoice_number,
+                status: created?.status || 'DRAFT',
+                total: created?.total,
+                reference: created?.reference,
+                invoice: created,
+              }
+            },
+            deleteDraftOnXero: async (invoice, actor) => {
+              const gw = makeSesInvoiceVoidGateway(client)
+              const actorKey = String(actor || 'actor')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '')
+                .slice(0, 8) || 'actor'
+              const operationKey = `cld-${actorKey}`.slice(0, 19)
+              const result = await gw.voidInvoice(
+                invoice.xero_invoice_id,
+                'DELETED',
+                {
+                  external_token: `captain-lock-remint-${invoice.xero_invoice_id}`,
                   operation_key: operationKey,
                 },
               )
@@ -30338,6 +30419,14 @@ interface CreateInvoiceInternalOptions {
     externalToken: string
     operationKey: string
   }
+  /**
+   * Captain-lock remint recovery: mint a DRAFT at a locked figure without a
+   * U4 docket. Forces DRAFT, never emails, and skips the portal/report-in
+   * walls that already sat behind the previous (wrong) draft.
+   */
+  captainLock?: {
+    decision_key: string
+  }
 }
 
 async function createInvoice(
@@ -30413,7 +30502,7 @@ async function createInvoice(
   //   • physical make-safe → OUR trade report filed in our system this cycle.
   // Both assertions no-op for non-make-safe jobs, so ordinary patio/fence invoicing is
   // untouched. Idempotent when reached via createMakesafeDraftInvoice (which re-checks portal).
-  if (jIdForGate) {
+  if (jIdForGate && !internal.captainLock) {
     await assertMakesafePortalVerifiedForDraftInvoice(client, jIdForGate)
     await assertMakesafeReportInForInvoice(client, jIdForGate)
   }
@@ -30566,7 +30655,7 @@ async function createInvoice(
   }))
 
   // Use requested status — DRAFT (for bookkeeper review) or AUTHORISED (approve & send)
-  const invoiceStatus = sesContext ? 'DRAFT' : (xero_status || 'DRAFT')
+  const invoiceStatus = (sesContext || internal.captainLock) ? 'DRAFT' : (xero_status || 'DRAFT')
 
   // Loop 1B-a-apply: Terms text comes from the preflight context (which
   // already resolved override > jobs.payment_terms > pricing_json.payment_terms
@@ -30639,7 +30728,7 @@ async function createInvoice(
   }
 
   // If approve & send, email the invoice to the client via Xero
-  if (!sesContext && send_email && xeroInvId) {
+  if (!sesContext && !internal.captainLock && send_email && xeroInvId) {
     try {
       await xeroPost(`/Invoices/${xeroInvId}/Email`, accessToken, tenantId, {}, 'POST')
     } catch (emailErr: any) {
@@ -30722,11 +30811,11 @@ async function createInvoice(
         invoice_number: invNumber,
         status: xeroInv?.Status || invoiceStatus,
         total: invTotal,
-        emailed: !sesContext && !!send_email,
+        emailed: !sesContext && !internal.captainLock && !!send_email,
         ses_operation_key: sesContext?.operationKey || null,
       },
     })
-    if (!sesContext) {
+    if (!sesContext && !internal.captainLock) {
       // Update job status to invoiced if complete.
       await client.from('jobs')
         .update({ status: 'invoiced' })

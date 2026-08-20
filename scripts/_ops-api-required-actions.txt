@@ -168,6 +168,7 @@ retire_ses_docket_revision # probe=source-only
 record_ses_portal_capture_evidence # probe=source-only
 create_ses_invoice_draft # probe=source-only
 remint_ses_invoice_draft # probe=source-only
+remint_ses_captain_lock_draft # probe=source-only
 bind_existing_makesafe_invoice_pack # probe=source-only
 prepare_ses_invoice_void_revision # probe=source-only
 approve_ses_invoice_void_revision # probe=source-only
