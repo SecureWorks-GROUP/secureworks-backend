@@ -114,7 +114,7 @@ Deno.test("pre-mint instruction gate ignores an otherwise matching card in anoth
       const query: any = {
         select: () => query,
         eq: (column: string, value: string) => {
-          if (table === "makesafe_job_details" && column === "org_id") orgId = value;
+          if (table === "makesafe_job_details" && column === "jobs.org_id") orgId = value;
           return query;
         },
         in: () => query,

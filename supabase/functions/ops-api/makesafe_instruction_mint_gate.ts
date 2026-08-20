@@ -119,9 +119,9 @@ export async function assertInstructionCardMintAvailable(
   for (let from = 0;; from += PAGE_SIZE) {
     const { data, error } = await client.from("makesafe_job_details")
       .select(
-        "job_id,external_ref,requesting_company_slug,jobs(job_number,status,metadata)",
+        "job_id,external_ref,requesting_company_slug,jobs!inner(job_number,status,metadata,org_id)",
       )
-      .eq("org_id", input.orgId)
+      .eq("jobs.org_id", input.orgId)
       .order("job_id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) {
