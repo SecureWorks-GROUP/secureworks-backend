@@ -4,10 +4,37 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _combinedSplitRecoveryDecisionForTest,
   _effectiveIntakeReportTypeForTest,
   _shouldAutoApproveCleanIntakeDraftRowForTest,
   _shouldAutoApproveCleanIntakeForTest,
 } from "./index.ts";
+
+Deno.test("combined recovery refuses a missing secondary card binding", () => {
+  assertEquals(
+    _combinedSplitRecoveryDecisionForTest(true, [{
+      mint_role: "primary",
+      job_id: "job-primary",
+    }]),
+    {
+      action: "review",
+      missing_roles: ["secondary_report"],
+    },
+  );
+});
+
+Deno.test("combined recovery settles only when both historical cards exist", () => {
+  assertEquals(
+    _combinedSplitRecoveryDecisionForTest(true, [
+      { mint_role: "primary", job_id: "job-primary" },
+      { mint_role: "secondary_report", job_id: "job-secondary" },
+    ]),
+    {
+      action: "settle_existing",
+      missing_roles: [],
+    },
+  );
+});
 
 Deno.test("effectiveIntakeReportType classifies legacy NULL body-only roof reports", () => {
   const reportType = _effectiveIntakeReportTypeForTest({

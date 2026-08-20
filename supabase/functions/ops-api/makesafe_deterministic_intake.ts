@@ -2041,15 +2041,73 @@ function instructionDiscriminator(item: AdaptedSource): string {
   return base;
 }
 
-function familyReviewOwnershipKey(item: AdaptedSource): string | null {
-  const unit = item.identity.builderPoCanonical
-    ? `po:${item.identity.builderPoCanonical}`
-    : item.identity.builderWoCanonical
-    ? `wo:${item.identity.builderWoCanonical}`
-    : null;
-  return unit
-    ? `${item.identity.companyKey || item.identity.builderSlug}:${unit}`
-    : null;
+function familyReviewOwnershipKeys(
+  items: readonly AdaptedSource[],
+): Map<AdaptedSource, string> {
+  const owners = new Map<AdaptedSource, string>();
+  const indexed = items.filter((item) =>
+    item.intent === "work" && !isRevisionSource(item.source) &&
+    !isLifecycleReopenText(lifecycleText(item.source)) &&
+    (item.identity.builderPoCanonical || item.identity.builderWoCanonical)
+  );
+  const union = new UnionFind(indexed.length);
+  const poOwners = new Map<string, number>();
+  const woOwners = new Map<string, number[]>();
+  for (let index = 0; index < indexed.length; index++) {
+    const item = indexed[index];
+    const company = item.identity.companyKey || item.identity.builderSlug;
+    if (!company) continue;
+    if (item.identity.builderPoCanonical) {
+      const poKey = `${company}:po:${item.identity.builderPoCanonical}`;
+      const prior = poOwners.get(poKey);
+      if (prior === undefined) poOwners.set(poKey, index);
+      else union.union(index, prior);
+    }
+    if (item.identity.builderWoCanonical) {
+      const woKey = `${company}:wo:${item.identity.builderWoCanonical}`;
+      woOwners.set(woKey, [...(woOwners.get(woKey) || []), index]);
+    }
+  }
+  for (const ownerIndexes of woOwners.values()) {
+    const purchaseOrders = new Set(
+      ownerIndexes
+        .map((index) => indexed[index].identity.builderPoCanonical)
+        .filter(Boolean),
+    );
+    if (purchaseOrders.size <= 1) {
+      for (let index = 1; index < ownerIndexes.length; index++) {
+        union.union(ownerIndexes[0], ownerIndexes[index]);
+      }
+      continue;
+    }
+    const withoutPo = ownerIndexes.filter((index) =>
+      !indexed[index].identity.builderPoCanonical
+    );
+    for (let index = 1; index < withoutPo.length; index++) {
+      union.union(withoutPo[0], withoutPo[index]);
+    }
+  }
+  const componentAliases = new Map<number, Set<string>>();
+  for (let index = 0; index < indexed.length; index++) {
+    const item = indexed[index];
+    const company = item.identity.companyKey || item.identity.builderSlug;
+    if (!company) continue;
+    const root = union.find(index);
+    const values = componentAliases.get(root) || new Set<string>();
+    if (item.identity.builderPoCanonical) {
+      values.add(`${company}:po:${item.identity.builderPoCanonical}`);
+    }
+    if (item.identity.builderWoCanonical) {
+      values.add(`${company}:wo:${item.identity.builderWoCanonical}`);
+    }
+    componentAliases.set(root, values);
+  }
+  for (let index = 0; index < indexed.length; index++) {
+    const aliasesForOwner = componentAliases.get(union.find(index));
+    if (!aliasesForOwner?.size) continue;
+    owners.set(indexed[index], [...aliasesForOwner].sort().join("|"));
+  }
+  return owners;
 }
 
 function manifestFor(
@@ -2291,6 +2349,7 @@ export function buildDeterministicIntakePlan(
     const clusterKey = `lineage:${stableHash(clusterStrong.join("|"))}`;
     const clusterStory = dedupeStory(sortedCluster);
     const groups = new Map<string, AdaptedSource[]>();
+    const familyOwnershipKeys = familyReviewOwnershipKeys(sortedCluster);
     const familyReviewUnits = new Set<string>();
     const ordinaryFamiliesByUnit = new Map<string, Set<string>>();
     for (const item of sortedCluster) {
@@ -2298,7 +2357,7 @@ export function buildDeterministicIntakePlan(
         item.intent !== "work" || isRevisionSource(item.source) ||
         isLifecycleReopenText(lifecycleText(item.source))
       ) continue;
-      const key = familyReviewOwnershipKey(item);
+      const key = familyOwnershipKeys.get(item);
       if (!key) continue;
       const families = ordinaryFamiliesByUnit.get(key) || new Set<string>();
       families.add(item.identity.jobFamily);
@@ -2323,7 +2382,7 @@ export function buildDeterministicIntakePlan(
       : null;
     for (const item of sortedCluster) {
       let discriminator = instructionDiscriminator(item);
-      const familyUnit = familyReviewOwnershipKey(item);
+      const familyUnit = familyOwnershipKeys.get(item);
       if (
         familyUnit && familyReviewUnits.has(familyUnit) &&
         item.intent === "work" && !isRevisionSource(item.source) &&

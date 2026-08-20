@@ -21285,6 +21285,28 @@ function combinedSplitObligation(extraction: any): { reportType: string } | null
   return null
 }
 
+function combinedSplitRecoveryDecision(
+  split: boolean,
+  recoveredMints: readonly any[],
+): {
+  action: 'not_split' | 'settle_existing' | 'review'
+  missing_roles: string[]
+} {
+  if (!split) return { action: 'not_split', missing_roles: [] }
+  const boundRoles = new Set(
+    recoveredMints
+      .filter((mint) => cleanReviewedString(mint?.job_id))
+      .map((mint) => cleanReviewedString(mint?.mint_role))
+      .filter(Boolean),
+  )
+  const missingRoles = ['primary', 'secondary_report'].filter((role) =>
+    !boundRoles.has(role)
+  )
+  return missingRoles.length
+    ? { action: 'review', missing_roles: missingRoles }
+    : { action: 'settle_existing', missing_roles: [] }
+}
+
 function effectiveIntakeReportType(draft: any): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
@@ -21771,6 +21793,8 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
 }
 
 export const _combinedSplitObligationForTest = combinedSplitObligation
+export const _combinedSplitRecoveryDecisionForTest =
+  combinedSplitRecoveryDecision
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
 // Intake hardening (items 1 + 3): exported so tests can exercise the positive-report
@@ -22388,6 +22412,9 @@ async function approveIntakeDraft(client: any, body: any) {
   const recoveredPrimaryMint = recoveredMints.find(
     (mint) => mint.mint_role === 'primary' && mint.job_id,
   )
+  const recoveredSecondaryMint = recoveredMints.find(
+    (mint) => mint.mint_role === 'secondary_report' && mint.job_id,
+  )
   const recoveredMintRoles = new Set(recoveredMints.map((mint) => mint.mint_role))
   const missingRequiredMints = requiredMintRoles.some(
     (role) => !recoveredMintRoles.has(role),
@@ -22396,9 +22423,27 @@ async function approveIntakeDraft(client: any, body: any) {
     recoveredPrimaryMint?.job_id ||
     null
   let effectiveDraftStatus = draft.status
-  if (splitObligation && !recoveredPrimaryMint) {
+  const splitRecovery = combinedSplitRecoveryDecision(
+    !!splitObligation,
+    recoveredMints,
+  )
+  if (splitRecovery.action === 'review') {
+    if (effectiveDraftStatus === 'approved') {
+      const { error } = await client
+        .from('makesafe_intake_drafts')
+        .update({
+          status: 'needs_review',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', draft.id)
+        .eq('status', 'approved')
+      if (error) {
+        throw new Error(`intake mint resume release failed: ${error.message || error}`)
+      }
+      effectiveDraftStatus = 'needs_review'
+    }
     throw new ApiError(
-      'Multiple builder instructions require separate reviewed bindings; no primary or secondary card was minted',
+      `Multiple builder instructions require existing reviewed bindings for ${splitRecovery.missing_roles.join(', ')}; no card was minted`,
       409,
     )
   }
@@ -22944,12 +22989,6 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
     )
 
-    // ── Item 3b: mint the SECOND card (the report obligation) ────────────────
-    // A combined make-safe + report is now expanded into TWO live cards instead of
-    // holding for human review: the physical make-safe (created above) PLUS this
-    // report-only card of the correct kind, sharing the same ref + WO PDF and
-    // cross-linked. Non-fatal: the primary already exists, so a secondary failure is
-    // logged and the primary stands (never a double-primary).
     let secondaryJob: any = null
     if (splitObligation && createdJobId) {
       try {
@@ -22962,57 +23001,16 @@ async function approveIntakeDraft(client: any, body: any) {
             sourcePostIds: authority.sourcePostIds,
           })
           : null
-        const reportFamily = splitObligation.reportType === 'assessment_report'
-          ? 'assessment_report_quote'
-          : splitObligation.reportType
         const recoveredSecondaryJob = secondaryMint
           ? await recoverIntakeMintJob(client, secondaryMint)
           : null
-        const secondaryResult = recoveredSecondaryJob
-          ? { job: recoveredSecondaryJob }
-          : await createMakesafeJob(client, {
-          client_name: approvedFields.client_name,
-          site_address: approvedFields.site_address,
-          suburb: approvedFields.site_suburb,
-          phone: approvedFields.client_phone,
-          email: approvedFields.client_email,
-          requesting_company_slug: approvedFields.requesting_company_slug,
-          requesting_company_name: approvedFields.requesting_company_name,
-          external_ref: approvedFields.external_ref,
-          description: approvedFields.description,
-          safety_requirements: approvedFields.safety_requirements,
-          special_instructions: approvedFields.special_instructions,
-          makesafe_job_family: reportFamily,
-          makesafe_job_family_label: _makeSafeJobFamilyLabel(reportFamily),
-          suppress_notifications: true,
-          ...(sourceExternalLinks ? { external_links: sourceExternalLinks } : {}),
-          builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
-          builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
-          builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
-          builder_claim_ref: extraction?.builder_claim_ref || null,
-          builder_work_order_number: extraction?.builder_work_order_number || null,
-          builder_po_number: extraction?.builder_po_number || null,
-          ...(secondaryMint ? { intake_mint_id: secondaryMint.id } : {}),
-          ...(extraction?.synthetic_livefire_marker
-            ? {
-              synthetic_livefire_marker:
-                extraction.synthetic_livefire_marker,
-            }
-            : {}),
-          suppress_manager_notification: body?.suppress_manager_notification === true ||
-            extraction?.deterministic_intake === true,
-          }, {
-            familyClassifierContext: approvedFamilyContext,
-            suppressGeocoding: notificationSuppressionReason !== null,
-            ...(authority && secondaryMint
-              ? {
-                canonicalIntakeAuthority: {
-                  case_id: authority.caseId,
-                  mint_id: secondaryMint.id,
-                },
-              }
-              : {}),
-          })
+        if (!recoveredSecondaryJob || !recoveredSecondaryMint) {
+          throw new ApiError(
+            'Secondary builder instruction requires an existing reviewed card binding; no secondary card was minted',
+            409,
+          )
+        }
+        const secondaryResult = { job: recoveredSecondaryJob }
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
           createdJobIds.push(secondaryJob.id)
