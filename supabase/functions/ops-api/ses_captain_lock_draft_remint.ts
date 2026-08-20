@@ -10,9 +10,15 @@
  * one is still live, then mints one new DRAFT at the locked figure and
  * binds it to the same card.
  *
- * DRAFT only. Never authorise, send, or email. A second live ACCREC still
- * refuses. AUTHORISED / SUBMITTED / PAID refuse. DELETED rows and a card
- * with no live ACCREC are recoverable.
+ * DRAFT only. Never authorise, send, or email. A same-card live ACCREC still
+ * refuses. AUTHORISED / SUBMITTED / PAID on THIS card refuse. DELETED rows
+ * and a card with no live ACCREC are recoverable.
+ *
+ * A claim-sibling invoice (assessment vs physical make-safe) is still a
+ * `resolveExistingInvoice` hit via `same_work`. Helper-key remint may proceed
+ * only with an explicit `post_release_disposition=second_invoice` AND a
+ * captain_lock override AND a different attributed job_id AND a different
+ * resolved family. Other dispositions stay refused.
  */
 import {
   parseSesCommercialQuantityOverride,
@@ -21,11 +27,17 @@ import {
 import { canonicalMakesafeInvoiceContactName } from "./makesafe_invoice_contact.ts";
 import { resolveExistingInvoice } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
-import { SesActionError, type SesActionAuth } from "./ses_reporting_actions.ts";
+import {
+  normalizePostReleaseDisposition,
+  sesInvoiceFamilyFromCardFacts,
+  siblingLiveInvoiceMayYieldToSecondInvoice,
+} from "./ses_second_invoice_disposition.ts";
+import { type SesActionAuth, SesActionError } from "./ses_reporting_actions.ts";
 import type {
   SesLeftoverObligation,
   SesLiveInvoice,
 } from "./ses_remint_invoice_draft.ts";
+import type { SesFamilyId } from "./ses_family_matrix.ts";
 
 export const CAPTAIN_LOCK_REMINT_REQUIRES_DRAFT =
   "captain_lock_remint_requires_draft";
@@ -34,6 +46,8 @@ export const CAPTAIN_LOCK_REMINT_AUTHORITY_REQUIRED =
   "captain_lock_authority_required";
 export const CAPTAIN_LOCK_REMINT_DRAFT_DELETED_MINT_FAILED =
   "captain_lock_remint_draft_deleted_mint_failed";
+export const CAPTAIN_LOCK_REMINT_DISPOSITION_REFUSED =
+  "captain_lock_remint_disposition_refused";
 
 export type CaptainLockLiveInvoice = SesLiveInvoice & {
   reference?: string | null;
@@ -64,6 +78,10 @@ export type RemintSesCaptainLockDraftDeps = {
     client: any,
     jobId: string,
   ) => Promise<CaptainLockCardContext>;
+  loadCardFamily: (
+    client: any,
+    jobId: string,
+  ) => Promise<SesFamilyId>;
   loadLiveInvoices: (
     client: any,
     jobId: string,
@@ -162,10 +180,68 @@ function refuseDuplicateLive(
     fact:
       `${CAPTAIN_LOCK_REMINT_DUPLICATE_LIVE}: a live ACCREC already matches this card (${
         hit.invoice_number || "unknown"
-      }, ${liveStatus(String(hit.status || ""))}). Do not mint a second invoice.`,
+      }, ${
+        liveStatus(String(hit.status || ""))
+      }). Do not mint a second invoice.`,
     recovery_action:
-      "Resolve or use the existing live invoice; captain-lock remint never creates a second live ACCREC.",
+      "Resolve or use the existing live invoice; captain-lock remint never creates a second live ACCREC on the same card. A different-family sibling (assessment vs physical make-safe) needs an explicit post_release_disposition=second_invoice on this remint.",
   });
+}
+
+function invoiceRowForHit(
+  rows: any[],
+  hit: { xero_invoice_id?: string | null; invoice_number?: string | null },
+): any | null {
+  const id = String(hit.xero_invoice_id || "").trim();
+  const number = String(hit.invoice_number || "").trim();
+  return (rows || []).find((row) => {
+    const rowId = String(row?.xero_invoice_id || "").trim();
+    const rowNumber = String(row?.invoice_number || "").trim();
+    return (id && rowId === id) || (number && rowNumber === number);
+  }) || null;
+}
+
+async function siblingSecondInvoiceAllowsHit(
+  deps: RemintSesCaptainLockDraftDeps,
+  client: any,
+  jobId: string,
+  rows: any[],
+  hit: {
+    xero_invoice_id?: string | null;
+    invoice_number?: string | null;
+    match_method?: string | null;
+  },
+): Promise<
+  | {
+    invoice_number: string | null;
+    job_id: string;
+    our_family: SesFamilyId;
+    sibling_family: SesFamilyId;
+  }
+  | null
+> {
+  if (hit.match_method === "job_id") return null;
+  const row = invoiceRowForHit(rows, hit);
+  const invoiceJobId = String(row?.job_id || "").trim();
+  if (!invoiceJobId || invoiceJobId === jobId) return null;
+  const ourFamily = await deps.loadCardFamily(client, jobId);
+  const siblingFamily = await deps.loadCardFamily(client, invoiceJobId);
+  if (
+    !siblingLiveInvoiceMayYieldToSecondInvoice({
+      ourJobId: jobId,
+      invoiceJobId,
+      ourFamily,
+      invoiceFamily: siblingFamily,
+    })
+  ) {
+    return null;
+  }
+  return {
+    invoice_number: hit.invoice_number || row?.invoice_number || null,
+    job_id: invoiceJobId,
+    our_family: ourFamily,
+    sibling_family: siblingFamily,
+  };
 }
 
 export async function remintSesCaptainLockDraftAction(
@@ -176,6 +252,7 @@ export async function remintSesCaptainLockDraftAction(
     job_id: string;
     actor: string;
     commercial_quantity_override: unknown;
+    post_release_disposition?: string | null;
   },
   deps: RemintSesCaptainLockDraftDeps,
 ) {
@@ -185,6 +262,22 @@ export async function remintSesCaptainLockDraftAction(
     throw new SesActionError(400, {
       state: "refused",
       fact: "remint_ses_captain_lock_draft requires job_id.",
+    });
+  }
+
+  const rawDisposition = args.post_release_disposition == null ||
+      String(args.post_release_disposition).trim() === ""
+    ? null
+    : args.post_release_disposition;
+  const disposition = rawDisposition == null
+    ? null
+    : normalizePostReleaseDisposition(rawDisposition);
+  if (rawDisposition != null && disposition !== "second_invoice") {
+    throw new SesActionError(403, {
+      state: "refused",
+      code: CAPTAIN_LOCK_REMINT_DISPOSITION_REFUSED,
+      fact:
+        `${CAPTAIN_LOCK_REMINT_DISPOSITION_REFUSED}: remint_ses_captain_lock_draft accepts only post_release_disposition=second_invoice (with a captain_lock override). combine_credit, document_only, and hold_pricing stay JWT-only on prepare_ses_invoice_obligation.`,
     });
   }
 
@@ -246,7 +339,9 @@ export async function remintSesCaptainLockDraftAction(
       state: "refused",
       code: CAPTAIN_LOCK_REMINT_REQUIRES_DRAFT,
       fact:
-        `${CAPTAIN_LOCK_REMINT_REQUIRES_DRAFT}: only a current-cycle DRAFT can be reminted this way (saw ${liveStatus(live.status)} on ${live.invoice_number}). AUTHORISED, sent, or paid money stays on the void path.`,
+        `${CAPTAIN_LOCK_REMINT_REQUIRES_DRAFT}: only a current-cycle DRAFT can be reminted this way (saw ${
+          liveStatus(live.status)
+        } on ${live.invoice_number}). AUTHORISED, sent, or paid money stays on the void path.`,
     });
   }
 
@@ -262,13 +357,28 @@ export async function remintSesCaptainLockDraftAction(
     });
   }
   const existingBefore = resolveExistingInvoice(accrecRows, jobId, reference);
+  let allowedSibling: Awaited<
+    ReturnType<typeof siblingSecondInvoiceAllowsHit>
+  > = null;
   if (existingBefore) {
     const existingId = String(existingBefore.xero_invoice_id || "");
     const liveId = String(live?.xero_invoice_id || "");
-    const sameDraftWeWillDelete = !!live && !!existingId && existingId === liveId &&
+    const sameDraftWeWillDelete = !!live && !!existingId &&
+      existingId === liveId &&
       liveStatus(live.status) === "DRAFT";
     if (!sameDraftWeWillDelete) {
-      refuseDuplicateLive(existingBefore);
+      if (disposition === "second_invoice") {
+        allowedSibling = await siblingSecondInvoiceAllowsHit(
+          deps,
+          client,
+          jobId,
+          accrecRows,
+          existingBefore,
+        );
+      }
+      if (!allowedSibling) {
+        refuseDuplicateLive(existingBefore);
+      }
     }
   }
 
@@ -309,7 +419,19 @@ export async function remintSesCaptainLockDraftAction(
   }
   const existingAfter = resolveExistingInvoice(accrecAfter, jobId, reference);
   if (existingAfter) {
-    refuseDuplicateLive(existingAfter);
+    const afterSibling = disposition === "second_invoice"
+      ? await siblingSecondInvoiceAllowsHit(
+        deps,
+        client,
+        jobId,
+        accrecAfter,
+        existingAfter,
+      )
+      : null;
+    if (!afterSibling) {
+      refuseDuplicateLive(existingAfter);
+    }
+    if (!allowedSibling) allowedSibling = afterSibling;
   }
 
   const lineItems = lock.lines.map((line) => ({
@@ -346,8 +468,9 @@ export async function remintSesCaptainLockDraftAction(
   if (mintedStatus && mintedStatus !== "DRAFT") {
     throw new SesActionError(409, {
       state: "refused",
-      fact:
-        `Captain-lock remint minted ${minted.invoice_number || "an invoice"} as ${mintedStatus}, not DRAFT. Do not authorise or send.`,
+      fact: `Captain-lock remint minted ${
+        minted.invoice_number || "an invoice"
+      } as ${mintedStatus}, not DRAFT. Do not authorise or send.`,
     });
   }
 
@@ -384,6 +507,8 @@ export async function remintSesCaptainLockDraftAction(
     pack_bind: packBind,
     send_dispatched: false,
     invoice_authorise_dispatched: false,
+    post_release_disposition: disposition,
+    second_invoice_sibling: allowedSibling,
   };
 }
 
@@ -391,7 +516,8 @@ export function makeDefaultCaptainLockRemintDeps(
   hooks: {
     requireMintAuthority: RemintSesCaptainLockDraftDeps["requireMintAuthority"];
     createDraft: RemintSesCaptainLockDraftDeps["createDraft"];
-    fetchAllAccrecInvoices: RemintSesCaptainLockDraftDeps["fetchAllAccrecInvoices"];
+    fetchAllAccrecInvoices:
+      RemintSesCaptainLockDraftDeps["fetchAllAccrecInvoices"];
     deleteDraftOnXero: (
       invoice: CaptainLockLiveInvoice,
       actor: string,
@@ -435,9 +561,10 @@ export function makeDefaultCaptainLockRemintDeps(
           fact: "This job has no make-safe detail row to remint against.",
         });
       }
-      const metadata = job.data.metadata && typeof job.data.metadata === "object"
-        ? job.data.metadata as Record<string, unknown>
-        : {};
+      const metadata =
+        job.data.metadata && typeof job.data.metadata === "object"
+          ? job.data.metadata as Record<string, unknown>
+          : {};
       const builder_reference = String(detail.data.external_ref || "").trim();
       const purchase_order = metadata.builder_po_number == null
         ? null
@@ -451,6 +578,43 @@ export function makeDefaultCaptainLockRemintDeps(
         ),
       };
     },
+    async loadCardFamily(client, jobId) {
+      const job = await client.from("jobs")
+        .select("id,metadata")
+        .eq("id", jobId)
+        .maybeSingle();
+      if (job.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact: `The job family could not be read (${job.error.message}).`,
+        });
+      }
+      const detail = await client.from("makesafe_job_details")
+        .select("report_type,report_delivery")
+        .eq("job_id", jobId)
+        .maybeSingle();
+      if (detail.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            `The make-safe family could not be read (${detail.error.message}).`,
+        });
+      }
+      const metadata = job.data?.metadata &&
+          typeof job.data.metadata === "object"
+        ? job.data.metadata as Record<string, unknown>
+        : {};
+      return sesInvoiceFamilyFromCardFacts({
+        makesafe_job_family: metadata.makesafe_job_family,
+        ses_family: metadata.ses_family,
+        insurance_job_type: metadata.insurance_job_type,
+        own_template_requested: metadata.own_template_requested,
+        strata: metadata.strata,
+        report_delivery: metadata.report_delivery ||
+          detail.data?.report_delivery,
+        report_type: detail.data?.report_type,
+      });
+    },
     async loadLiveInvoices(client, jobId) {
       const res = await client.from("xero_invoices")
         .select(
@@ -462,8 +626,7 @@ export function makeDefaultCaptainLockRemintDeps(
       if (res.error) {
         throw new SesActionError(503, {
           state: "refused",
-          fact:
-            `The live invoice read failed (${res.error.message}).`,
+          fact: `The live invoice read failed (${res.error.message}).`,
         });
       }
       const rows = Array.isArray(res.data) ? res.data : [];
@@ -472,8 +635,8 @@ export function makeDefaultCaptainLockRemintDeps(
           xero_invoice_id: String(row.xero_invoice_id),
           invoice_number: String(row.invoice_number || ""),
           status: String(row.status || ""),
-          invoice_obligation_revision_id:
-            row.invoice_obligation_revision_id || null,
+          invoice_obligation_revision_id: row.invoice_obligation_revision_id ||
+            null,
           reference: row.reference || null,
           total: row.total ?? null,
         }),
@@ -529,7 +692,9 @@ export function makeDefaultCaptainLockRemintDeps(
         .eq("active", true);
     },
     async markObligationVoidLinked(client, obligationRevisionId) {
-      const revision = await client.from("makesafe_invoice_obligation_revisions")
+      const revision = await client.from(
+        "makesafe_invoice_obligation_revisions",
+      )
         .update({ state: "void_linked" })
         .eq("id", obligationRevisionId)
         .select("obligation_id")

@@ -729,3 +729,33 @@ Deno.test("the production branch mints an id without an injected allocator", asy
   );
   assertNotEquals(again.obligation.id, minted);
 });
+
+Deno.test("api_key cannot attach post_release_disposition on prepare without a JWT", async () => {
+  const client = {
+    from() {
+      throw new Error("prepare must refuse the disposition before any read");
+    },
+  } as unknown as SesSupabaseClient;
+  const error = await assertRejects(
+    () =>
+      prepareSesInvoiceObligationAction(
+        client,
+        { mode: "api_key", user: null },
+        {
+          org_id: ORG,
+          job_id: JOB,
+          created_by: "mcp-helper-key",
+          post_release_disposition: "second_invoice",
+          commercial_quantity_override: {
+            authority_kind: "captain_lock",
+          },
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 403);
+  assert(
+    error.message.includes("identified human disposition"),
+    `expected the JWT disposition gate, got ${error.message}`,
+  );
+});

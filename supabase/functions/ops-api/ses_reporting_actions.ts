@@ -1639,6 +1639,9 @@ export async function prepareSesInvoiceObligationAction(
     args.post_release_disposition &&
     (auth.mode !== "jwt" || !auth.user)
   ) {
+    // Helper-key / MCP callers cannot attach a disposition here. The
+    // Captain-locked sibling second-DRAFT door is remint_ses_captain_lock_draft
+    // with post_release_disposition=second_invoice — not this JWT gate.
     throw new SesActionError(403, {
       state: "refused",
       fact:
