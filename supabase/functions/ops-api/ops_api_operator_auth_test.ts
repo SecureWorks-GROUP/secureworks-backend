@@ -153,6 +153,7 @@ Deno.test("OPS_AGENT_SERVER_KEY is a full inside pass from x-api-key or Bearer",
         "job_detail",
         "bind_existing_makesafe_invoice_pack",
         "create_ses_invoice_draft",
+        "remint_ses_captain_lock_draft",
         "allocate_job",
       ]
     ) {
@@ -169,6 +170,7 @@ Deno.test("leftover agent_read dispatch still cannot reach write and money actio
   for (
     const action of [
       "create_ses_invoice_draft",
+      "remint_ses_captain_lock_draft",
       "bind_existing_makesafe_invoice_pack",
       "allocate_job",
       "send_invoice_email",
