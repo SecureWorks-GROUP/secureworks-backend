@@ -109,15 +109,19 @@ function chunks<T>(values: readonly T[]): T[][] {
 
 export async function assertInstructionCardMintAvailable(
   client: any,
-  candidateKeys: readonly string[],
+  input: {
+    orgId: string;
+    candidateKeys: readonly string[];
+  },
 ): Promise<void> {
-  if (!candidateKeys.length) return;
+  if (!input.candidateKeys.length) return;
   const rows: InstructionCardRow[] = [];
   for (let from = 0;; from += PAGE_SIZE) {
     const { data, error } = await client.from("makesafe_job_details")
       .select(
         "job_id,external_ref,requesting_company_slug,jobs(job_number,status,metadata)",
       )
+      .eq("org_id", input.orgId)
       .order("job_id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) {
@@ -153,7 +157,7 @@ export async function assertInstructionCardMintAvailable(
     }
   }
   refuseExistingInstructionCard(
-    candidateKeys,
+    input.candidateKeys,
     rows,
     documents,
   );

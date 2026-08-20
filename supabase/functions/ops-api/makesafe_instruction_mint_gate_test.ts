@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   InstructionMintConflictError,
+  assertInstructionCardMintAvailable,
   matchExistingInstructionCards,
   refuseExistingInstructionCard,
   reserveInstructionCardMint,
@@ -97,6 +98,42 @@ Deno.test("pre-mint instruction gate fails closed on an existing unknown family"
     }],
   );
   assertEquals(matches.length, 1);
+});
+
+Deno.test("pre-mint instruction gate ignores an otherwise matching card in another org", async () => {
+  const crossTenantCard = {
+    ...terminalCard,
+    jobs: {
+      ...terminalCard.jobs,
+      metadata: { builder_po_number: "54176" },
+    },
+  };
+  const client = {
+    from(table: string) {
+      let orgId: string | null = null;
+      const query: any = {
+        select: () => query,
+        eq: (column: string, value: string) => {
+          if (table === "makesafe_job_details" && column === "org_id") orgId = value;
+          return query;
+        },
+        in: () => query,
+        order: () => query,
+        range: () => Promise.resolve({
+          data: table === "makesafe_job_details" && orgId !== "org-a"
+            ? [crossTenantCard]
+            : [],
+          error: null,
+        }),
+      };
+      return query;
+    },
+  };
+
+  await assertInstructionCardMintAvailable(client, {
+    orgId: "org-a",
+    candidateKeys: ["MLB:PO-54176"],
+  });
 });
 
 Deno.test("atomic reservation owns the canonical instruction across families", async () => {

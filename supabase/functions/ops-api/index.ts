@@ -21646,15 +21646,10 @@ function shouldAutoApproveCleanIntake(input: {
   // single-card auto-file would silently drop — both stay in the human queue.
   cancelled?: boolean
   combinedObligation?: boolean
-  // Intake item 3b: an UNAMBIGUOUS combined obligation (known report type) may
-  // auto-approve because approval now expands it into TWO cards instead of losing
-  // the second obligation. An ambiguous combined obligation leaves this false and
-  // still routes to human review.
-  combinedSplittable?: boolean
 }): { ok: boolean; reason: string } {
   if (input.enabled === false) return { ok: false, reason: 'disabled' }
   if (input.cancelled === true) return { ok: false, reason: 'cancelled_work_order' }
-  if (input.combinedObligation === true && !input.combinedSplittable) {
+  if (input.combinedObligation === true) {
     return { ok: false, reason: 'combined_makesafe_and_report_manual_review' }
   }
   if (!_normaliseDedupJobFamily(input.jobFamily)) {
@@ -21681,10 +21676,7 @@ function shouldAutoApproveCleanIntake(input: {
 
   const missing = (input.missingFields || []).map(cleanMissingFieldName).filter(Boolean)
   const blockingMissing = missing.filter((m) =>
-    !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m) &&
-    // The combined-obligation marker is not blocking when the obligation is
-    // splittable — approval expands it into two cards (item 3b).
-    !(input.combinedSplittable === true && m === COMBINED_OBLIGATION_MISSING_FIELD)
+    !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m)
   )
   if (blockingMissing.length > 0) return { ok: false, reason: 'missing_fields:' + blockingMissing.join(',') }
 
@@ -21766,9 +21758,6 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     (emailCarriesMultipleWorkOrders(draft, extraction, attachments) &&
       hasWorkOrderAttachmentEvidence(attachments) &&
       hasPositiveReportOnlyEvidence(draft, extraction, attachments))
-  // item 3b: an unambiguous combined obligation is splittable (auto-expands into two cards).
-  const combinedSplittable = combinedSplitObligation(extraction) !== null
-
   // NOTE: this is a PURE cleanliness check (no `enabled` passed). Whether auto-approval
   // is switched on at all is decided by the caller — the sweep action gates the default-on
   // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a braked flag still yields an
@@ -21788,7 +21777,6 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     attachments,
     cancelled,
     combinedObligation,
-    combinedSplittable,
   })
 }
 
@@ -22686,7 +22674,10 @@ async function approveIntakeDraft(client: any, body: any) {
     try {
       await _assertInstructionCardMintAvailable(
         client,
-        instructionKeys,
+        {
+          orgId: draft.org_id || DEFAULT_ORG_ID,
+          candidateKeys: instructionKeys,
+        },
       )
     } catch (error) {
       if (error instanceof _InstructionMintConflictError) {
@@ -24103,7 +24094,6 @@ export async function reextractIntakeDraft(
       (emailCarriesMultipleWorkOrders({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments) &&
         hasWorkOrderAttachmentEvidence(r.attachments) &&
         hasPositiveReportOnlyEvidence({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments)),
-    combinedSplittable: combinedSplitObligation(r.extraction) !== null,
   })
   if (autoDecision.ok) {
     try {
@@ -27468,8 +27458,6 @@ async function retiredPaidAiIntakeImplementation(client: any) {
     // The gate itself still requires confidence:high + the SAME required fields as the
     // human approveIntakeDraft (company + ref + client + address + servable WO PDF), and
     // now also rejects cancellations and combined make-safe+report obligations.
-    if (draftExtractionDegraded) autoFileSuppressedDrafts++
-    else autoFileEligibleDrafts++
     const autoApprovalDecision = shouldAutoApproveCleanIntake({
       enabled: autoFileEnabled && !draftExtractionDegraded && autoApproveCleanIntakeEnabled(),
       isReportCapture,
@@ -27483,12 +27471,10 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       clientName: extraction.client_name || null,
       siteAddress: extraction.site_address || null,
       attachments,
-      // Item 2/3 belt-and-braces: a cancellation never reaches here (dropped at the
-      // gate). A combined make-safe+report no longer auto-files a single card — an
-      // UNAMBIGUOUS one auto-splits into two cards (item 3b); an ambiguous one blocks.
       combinedObligation: !!(extraction?.secondary_obligation),
-      combinedSplittable: combinedSplitObligation(extraction) !== null,
     })
+    if (autoApprovalDecision.ok) autoFileEligibleDrafts++
+    else autoFileSuppressedDrafts++
 
     if (autoApprovalDecision.ok) {
       try {
