@@ -2064,7 +2064,7 @@ function familyReviewOwnershipKeys(
       else union.union(index, prior);
     }
     if (item.identity.builderWoCanonical) {
-      const woKey = `${company}:wo:${item.identity.builderWoCanonical}`;
+      const woKey = familyReviewWorkOrderKey(item, company);
       woOwners.set(woKey, [...(woOwners.get(woKey) || []), index]);
     }
   }
@@ -2108,6 +2108,23 @@ function familyReviewOwnershipKeys(
     owners.set(indexed[index], [...aliasesForOwner].sort().join("|"));
   }
   return owners;
+}
+
+function familyReviewWorkOrderKey(
+  item: AdaptedSource,
+  company: string,
+): string {
+  const workOrder = String(item.identity.builderWoCanonical || "").toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  const purchaseOrder = item.identity.builderPoCanonical?.toUpperCase()
+    .replace(/[^A-Z0-9]/g, "") || "";
+  // MLB commonly announces the claim-shaped WO first and supplies the PO-bearing
+  // PDF later. The PO suffix refines that same WO; it must not make the two
+  // sources look unrelated for family-conflict review.
+  const root = purchaseOrder && workOrder.endsWith(purchaseOrder)
+    ? workOrder.slice(0, -purchaseOrder.length)
+    : workOrder;
+  return `${company}:wo:${root || workOrder}`;
 }
 
 function manifestFor(
@@ -2364,7 +2381,14 @@ export function buildDeterministicIntakePlan(
       ordinaryFamiliesByUnit.set(key, families);
     }
     for (const [key, families] of ordinaryFamiliesByUnit) {
-      if (families.size !== 1 || families.has("unclassified")) {
+      // A source that merely carries an attachment, portal link, or other
+      // supporting evidence can be unclassified. It must not turn a known
+      // instruction into a family conflict; only contradictory *known*
+      // families for one canonical instruction need review.
+      const knownFamilies = new Set(
+        [...families].filter((family) => family !== "unclassified"),
+      );
+      if (knownFamilies.size > 1) {
         familyReviewUnits.add(key);
       }
     }
@@ -2449,14 +2473,16 @@ export function buildDeterministicIntakePlan(
     let cycle = 1;
     for (const instructionItems of groups.values()) {
       const merged = bestIdentity(instructionItems);
-      const instructionFamilies = new Set(
-        instructionItems.map((item) => item.identity.jobFamily),
+      const knownInstructionFamilies = new Set(
+        instructionItems
+          .map((item) => item.identity.jobFamily)
+          .filter((family) => family !== "unclassified"),
       );
-      if (
-        instructionFamilies.size !== 1 ||
-        instructionFamilies.has("unclassified")
-      ) {
+      if (knownInstructionFamilies.size > 1) {
         merged.identity = { ...merged.identity, jobFamily: "unclassified" };
+      } else if (knownInstructionFamilies.size === 1) {
+        const [jobFamily] = knownInstructionFamilies;
+        merged.identity = { ...merged.identity, jobFamily };
       }
       const intent = instructionItems.some((i) => i.intent === "cancellation")
         ? "cancellation"
