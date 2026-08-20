@@ -47,6 +47,7 @@ Deno.test("effectiveIntakeReportType does not fallback-classify rows with clear 
 
 Deno.test("clean intake auto-approval allows only high-confidence normal WOs with servable WO PDF", () => {
   const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "ajs", name: "AJ Building & Restoration" },
     externalRef: "AJBR 67922",
@@ -64,6 +65,7 @@ Deno.test("clean intake auto-approval allows only high-confidence normal WOs wit
 
 Deno.test("SecureWorks cover sheet cannot satisfy the intake WO floor", () => {
   const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "aj" },
     externalRef: "AJBR-70001",
@@ -81,6 +83,7 @@ Deno.test("SecureWorks cover sheet cannot satisfy the intake WO floor", () => {
 
 Deno.test("clean intake auto-approval allows report-worded rows only when a WO PDF is clear", () => {
   const reportWordedWorkOrder = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "roof_report",
     tagReportType: true,
     reportType: "roof_report",
     confidence: "high",
@@ -101,6 +104,7 @@ Deno.test("clean intake auto-approval allows report-worded rows only when a WO P
   );
 
   const reportOnly = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "assessment_report_quote",
     reportType: "assessment_report",
     confidence: "high",
     matchedCompany: { slug: "mlb" },
@@ -119,6 +123,7 @@ Deno.test("clean intake auto-approval allows report-worded rows only when a WO P
 Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
   assertEquals(
     _shouldAutoApproveCleanIntakeForTest({
+      jobFamily: "general_makesafe",
       confidence: "medium",
       matchedCompany: { slug: "ajs" },
       externalRef: "AJBR 67922",
@@ -134,6 +139,7 @@ Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
 
   assertEquals(
     _shouldAutoApproveCleanIntakeForTest({
+      jobFamily: "general_makesafe",
       confidence: "high",
       matchedCompany: { slug: "ajs" },
       externalRef: "AJBR 67922",
@@ -150,6 +156,7 @@ Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
 
   assertEquals(
     _shouldAutoApproveCleanIntakeForTest({
+      jobFamily: "general_makesafe",
       confidence: "high",
       matchedCompany: { slug: "ajs" },
       externalRef: "AJBR 67922",
@@ -208,4 +215,25 @@ Deno.test("clean intake board sweep blocks report-only legacy rows before auto p
   });
   assertEquals(decision.ok, false);
   assertEquals(decision.reason, "report_only_manual_review");
+});
+
+Deno.test("clean intake auto-approval blocks an uncertain family without WO/PO identity", () => {
+  const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: null,
+    confidence: "high",
+    matchedCompany: { slug: "mlb" },
+    externalRef: "MLB-25953",
+    clientName: "Test Client",
+    siteAddress: "241 Old Coast Rd",
+    missingFields: [],
+    attachments: [{
+      file_name: "Work Order MLB-25953.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: false,
+    reason: "work_order_family_needs_review",
+  });
 });

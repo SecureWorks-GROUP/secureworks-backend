@@ -671,6 +671,7 @@ import {
   isReportOnlyType as _isReportOnlyType,
   reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
+  decideMakeSafeJobFamily as _decideMakeSafeJobFamily,
   hasExplicitRapidRepairSignal as _hasExplicitRapidRepairSignal,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
@@ -21610,6 +21611,7 @@ function shouldAutoApproveCleanIntake(input: {
   isReportCapture?: boolean
   tagReportType?: boolean
   reportType?: string | null
+  jobFamily?: string | null
   confidence?: string | null
   missingFields?: any[]
   matchedCompany?: any
@@ -21632,6 +21634,9 @@ function shouldAutoApproveCleanIntake(input: {
   if (input.cancelled === true) return { ok: false, reason: 'cancelled_work_order' }
   if (input.combinedObligation === true && !input.combinedSplittable) {
     return { ok: false, reason: 'combined_makesafe_and_report_manual_review' }
+  }
+  if (!_normaliseDedupJobFamily(input.jobFamily)) {
+    return { ok: false, reason: 'work_order_family_needs_review' }
   }
 
   const attachments = input.attachments || []
@@ -21673,6 +21678,21 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
+  const storedFamily = cleanReviewedString(extraction.makesafe_job_family)
+  const jobFamily = storedFamily
+    ? (_normaliseDedupJobFamily(storedFamily) || null)
+    : _decideMakeSafeJobFamily(
+      draft?.subject || null,
+      [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
+      effectiveReportType,
+      {
+        builder: cleanReviewedString(draft?.requesting_company_slug) ||
+          cleanReviewedString(extraction.requesting_company_slug) ||
+          cleanReviewedString(draft?.requesting_company_name) ||
+          cleanReviewedString(extraction.requesting_company_name) ||
+          null,
+      },
+    ).family
 
   // Defence in depth for legacy rows created before scan-time cancellation/combined
   // flagging existed: recompute both signals directly from the stored draft so the sweep
@@ -21696,6 +21716,7 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   // informative dry-run preview instead of masking every draft as 'disabled'.
   return shouldAutoApproveCleanIntake({
     reportType: effectiveReportType,
+    jobFamily,
     confidence: draft?.confidence,
     missingFields: parseJsonArray(draft?.missing_fields),
     matchedCompany: {
@@ -23588,7 +23609,7 @@ async function _reextractExtractFields(
   missingFields: string[]
   matchedCompany: { slug: string; name: string } | null
   draftReportType: string | null
-  draftJobFamily: string
+  draftJobFamily: string | null
   availableWoCount: number
   isReportCapture: boolean
   extractionDegraded: boolean
@@ -23904,14 +23925,21 @@ async function _reextractExtractFields(
       }),
     )
   }
-  const draftJobFamily = _classifyMakeSafeJobFamily(
+  const familyDecision = _decideMakeSafeJobFamily(
     subject,
     [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
     draftReportType,
     draftFamilyContext,
   )
+  const draftJobFamily = familyDecision.family
   extraction.makesafe_job_family = draftJobFamily
-  extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+  extraction.makesafe_job_family_label = draftJobFamily
+    ? _makeSafeJobFamilyLabel(draftJobFamily)
+    : null
+  extraction.makesafe_job_family_evidence = familyDecision.evidence
+  if (!draftJobFamily && !missingFields.includes('work_order_family_needs_review')) {
+    missingFields.push('work_order_family_needs_review')
+  }
   extraction.reextracted_at = new Date().toISOString()
   // Item 3: flag a combined make-safe + report so the reextracted draft never auto-files
   // a single card that drops the report obligation.
@@ -24032,6 +24060,7 @@ export async function reextractIntakeDraft(
     isReportCapture: r.isReportCapture,
     tagReportType: r.draftReportType != null,
     reportType: r.draftReportType,
+    jobFamily: r.draftJobFamily,
     confidence: r.confidence,
     missingFields: r.missingFields,
     matchedCompany: r.matchedCompany,
@@ -24280,11 +24309,7 @@ async function landLateWorkOrderPdfOntoDraft(
   // matcher sees the builder_claim_ref + WO/PO identity carried in extraction_json.
   const rows: _LatePdfDraftRow[] = (liveDrafts || []).map((d: any) => {
     const ex = parseJsonObject(d.extraction_json)
-    const fam = ex.makesafe_job_family || _classifyMakeSafeJobFamily(
-      d.subject || d.external_ref || '',
-      [d.report_type, d.description].filter(Boolean).join('\n'),
-      d.report_type || null,
-    )
+    const fam = cleanReviewedString(ex.makesafe_job_family) || null
     return {
       ...d,
       external_ref: cleanReviewedString(ex.builder_claim_ref) || d.external_ref,
@@ -26873,13 +26898,23 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         builderEmailTextForTrade || bodyPreview,
       )
     }
-    const draftJobFamily = _classifyMakeSafeJobFamily(
+    const familyDecision = _decideMakeSafeJobFamily(
       subject,
       [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
       draftReportType,
+      {
+        builder: matchedCompany?.slug || matchedCompany?.name || null,
+      },
     )
+    const draftJobFamily = familyDecision.family
     extraction.makesafe_job_family = draftJobFamily
-    extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+    extraction.makesafe_job_family_label = draftJobFamily
+      ? _makeSafeJobFamilyLabel(draftJobFamily)
+      : null
+    extraction.makesafe_job_family_evidence = familyDecision.evidence
+    if (!draftJobFamily && !missingFields.includes('work_order_family_needs_review')) {
+      missingFields.push('work_order_family_needs_review')
+    }
 
     // Item 3 (one email -> two cards): a make-safe WO that ALSO owes a roof/assessment
     // report is recorded as a combined obligation (secondary_obligation + a blocking
@@ -27416,6 +27451,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       isReportCapture,
       tagReportType,
       reportType: draftReportType,
+      jobFamily: draftJobFamily,
       confidence,
       missingFields,
       matchedCompany,
