@@ -301,7 +301,8 @@ export function mergeLateWorkOrderPdfIntoDraft(
     candidate.makesafe_job_family ||
       cleanStr(candExtraction["makesafe_job_family"]),
   );
-  const familyNeedsReview = !draftFamily || !candidateFamily;
+  const familyNeedsReview = !draftFamily || !candidateFamily ||
+    draftFamily !== candidateFamily;
 
   // Fill only the client/site fields the draft left empty (identity stays put).
   const filled: string[] = [];

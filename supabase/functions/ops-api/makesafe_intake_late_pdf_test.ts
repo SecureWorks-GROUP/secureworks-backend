@@ -261,6 +261,28 @@ Deno.test("merge: a known-family PDF does not resolve an unknown draft family", 
   assertEquals(m.extraction_json.makesafe_job_family, undefined);
 });
 
+Deno.test("merge: conflicting known families remain review-only", () => {
+  const draft = announcementDraft({
+    makesafe_job_family: "roof_report",
+    extraction_json: {
+      external_ref: "MLB-25096",
+      makesafe_job_family: "roof_report",
+    },
+  });
+  const m = mergeLateWorkOrderPdfIntoDraft(draft, poCandidate());
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    ...draft,
+    attachments_json: m.attachments_json,
+    extraction_json: m.extraction_json,
+    missing_fields: m.missing_fields,
+    confidence: m.confidence,
+    client_name: m.client_name,
+    site_address: m.site_address,
+  });
+  assert(m.missing_fields.includes("work_order_family_needs_review"));
+  assertEquals(decision.ok, false);
+});
+
 // ── merged row passes / fails the UNCHANGED strict auto-approve gate ──
 Deno.test("gate: a clean merged draft row passes shouldAutoApproveCleanIntakeDraftRow", () => {
   const draft = announcementDraft();
