@@ -334,3 +334,73 @@ Deno.test("clean intake board sweep accepts a PDF-declared physical family", () 
     reason: "clean_high_confidence_work_order",
   });
 });
+
+Deno.test("clean intake board sweep accepts a PDF-scope temporary-fence family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25955",
+    client_name: "Test Client",
+    site_address: "245 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25955",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "temp_fence_makesafe",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25955_PO-57003.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Scope of Works: install temporary fencing",
+          "Work Order Terms and Conditions",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25955_PO-57003.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep keeps boilerplate-only PDF family in review", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25956",
+    client_name: "Test Client",
+    site_address: "247 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25956",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "general_makesafe",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25956_PO-57004.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Contractors must hold current insurance.",
+          "Period Trade Contract Conditions",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25956_PO-57004.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: false,
+    reason: "work_order_family_needs_review",
+  });
+});
