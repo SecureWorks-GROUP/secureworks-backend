@@ -9,6 +9,7 @@
 import {
   AJS_WORK_ORDERS_MAILBOX,
   ajsPackCc,
+  universalReportCc,
 } from "./ses_release_route_shape.ts";
 
 // ── Privileged-caller auth gate (decision: scoped-routine-key-2026-06-17) ──
@@ -958,17 +959,25 @@ export const checkAjsReportInvoiceClientSendGate =
   checkReportInvoiceClientSendGate;
 
 /**
- * MLB/universal `report`: work-order sender TO, **no CC**, report PDF only.
+ * MLB/universal `report`: work-order sender TO, report PDF only.
+ *
+ * CC: every non-AJS report route must CC ses@ (`universalReportCc()`, Shaun
+ * 2026-08-20) - MLB physical included. No shape is exempt, so the gate does not
+ * classify the card to grade the cc, and there is no undeclared-shape path back
+ * to the superseded no-cc envelope. The photo route (no cc) and the invoice
+ * billing pack (finance@, never ses@) are unchanged.
  */
 export function checkMlbReportClientSendGate(
   payload: ClientSendPayload,
 ): string[] {
   const failures = sharedEnvelopeFailures(payload);
   const cc = splitEmails(payload.cc);
-  if (cc.length > 0) {
-    failures.push(
-      `report route must have no cc; got ${cc.join(", ")}`,
-    );
+  for (const required of universalReportCc()) {
+    if (!cc.includes(required)) {
+      failures.push(
+        `report route cc must include ${required} (Shaun 2026-08-20)`,
+      );
+    }
   }
   const names = attachmentNames(payload.attachments);
   const reportNames = names.filter((n) => isReportPdf(n));
