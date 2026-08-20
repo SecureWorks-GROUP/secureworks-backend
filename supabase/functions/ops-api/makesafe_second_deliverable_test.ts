@@ -13,25 +13,19 @@ Deno.test("D-3: a second WO carrying its OWN servable WO PDF -> distinct (surfac
       matchedJobId: "job-active-makesafe",
       availableWoCount: 1, // its own WO PDF
       sameWoAsActiveJob: false,
-      candidateFamily: "general_makesafe",
-      hasFamilySpecificSibling: true, // even same-family: a distinct WO is not a re-scan
-      hasFamilyAgnosticSibling: true,
     }),
     true,
   );
 });
 
-Deno.test("D-3: a different-family sibling under the same ref -> distinct (roof report vs make-safe)", () => {
+Deno.test("D-3: a family label without a distinct WO is not new work", () => {
   assertEquals(
     isDistinctSecondDeliverable({
       matchedJobId: "job-active-makesafe",
-      availableWoCount: 0, // no new PDF, but the sibling is a different family
+      availableWoCount: 0,
       sameWoAsActiveJob: false,
-      candidateFamily: "roof_report",
-      hasFamilySpecificSibling: false, // no ref+company+roof_report job exists
-      hasFamilyAgnosticSibling: true, // but a ref+company job (the make-safe) exists
     }),
-    true,
+    false,
   );
 });
 
@@ -41,9 +35,6 @@ Deno.test("D-3: a nudge / no-WO email, same family -> NOT distinct (keeps the si
       matchedJobId: "job-active-makesafe",
       availableWoCount: 0, // no servable WO PDF (a nudge / reminder)
       sameWoAsActiveJob: false,
-      candidateFamily: "general_makesafe",
-      hasFamilySpecificSibling: true, // same family as the active job
-      hasFamilyAgnosticSibling: true,
     }),
     false,
   );
@@ -55,24 +46,17 @@ Deno.test("D-3: ambiguous ref (no company-scoped match, matchedJobId null) -> ne
       matchedJobId: null, // ambiguous ref shared across builders -> never point at a job
       availableWoCount: 1,
       sameWoAsActiveJob: false,
-      candidateFamily: "roof_report",
-      hasFamilySpecificSibling: false,
-      hasFamilyAgnosticSibling: false,
     }),
     false,
   );
 });
 
-Deno.test("D-3: different-family signal needs a family-agnostic sibling to exist", () => {
-  // family-specific miss but ALSO no family-agnostic hit -> not a sibling situation
+Deno.test("D-3: no servable WO is never a distinct deliverable", () => {
   assertEquals(
     isDistinctSecondDeliverable({
       matchedJobId: "job-x",
       availableWoCount: 0,
       sameWoAsActiveJob: false,
-      candidateFamily: "roof_report",
-      hasFamilySpecificSibling: false,
-      hasFamilyAgnosticSibling: false,
     }),
     false,
   );
@@ -86,9 +70,6 @@ Deno.test("D-3: a builder re-SENDING the SAME WO (same WO/PO identity) -> NOT di
       matchedJobId: "job-active-makesafe",
       availableWoCount: 1,
       sameWoAsActiveJob: true, // same WO/PO identity as the active job
-      candidateFamily: "general_makesafe",
-      hasFamilySpecificSibling: true,
-      hasFamilyAgnosticSibling: true,
     }),
     false,
   );

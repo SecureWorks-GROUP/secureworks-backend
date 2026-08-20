@@ -21678,21 +21678,24 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
-  const storedFamily = cleanReviewedString(extraction.makesafe_job_family)
-  const jobFamily = storedFamily
-    ? (_normaliseDedupJobFamily(storedFamily) || null)
-    : _decideMakeSafeJobFamily(
-      draft?.subject || null,
-      [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
-      effectiveReportType,
-      {
-        builder: cleanReviewedString(draft?.requesting_company_slug) ||
-          cleanReviewedString(extraction.requesting_company_slug) ||
-          cleanReviewedString(draft?.requesting_company_name) ||
-          cleanReviewedString(extraction.requesting_company_name) ||
-          null,
-      },
-    ).family
+  const familyDecision = _decideMakeSafeJobFamily(
+    draft?.subject || null,
+    [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
+    effectiveReportType,
+    {
+      builder: cleanReviewedString(draft?.requesting_company_slug) ||
+        cleanReviewedString(extraction.requesting_company_slug) ||
+        cleanReviewedString(draft?.requesting_company_name) ||
+        cleanReviewedString(extraction.requesting_company_name) ||
+        null,
+    },
+  )
+  const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
+  const storedFamily = _normaliseDedupJobFamily(storedFamilyRaw)
+  const decidedFamily = _normaliseDedupJobFamily(familyDecision.family)
+  const jobFamily = storedFamilyRaw
+    ? (storedFamily === decidedFamily ? storedFamily : null)
+    : (decidedFamily || null)
 
   // Defence in depth for legacy rows created before scan-time cancellation/combined
   // flagging existed: recompute both signals directly from the stored draft so the sweep
@@ -22485,7 +22488,6 @@ async function approveIntakeDraft(client: any, body: any) {
     )
   }
   extraction = correlatedIdentity.extraction
-  const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
 
   // A guarded source correction means the operational job already exists. The
   // review gate must link this exact source to that job instead of running the
@@ -22606,7 +22608,6 @@ async function approveIntakeDraft(client: any, body: any) {
       await _assertInstructionCardMintAvailable(
         client,
         instructionKeys,
-        approvedJobFamilyKey,
       )
     } catch (error) {
       if (error instanceof _InstructionMintConflictError) {
@@ -22659,7 +22660,7 @@ async function approveIntakeDraft(client: any, body: any) {
         || canonicalObligationPoCore(extraction?.builder_work_order_number, true)
         || canonicalObligationPoCore(approvedFields.external_ref, true)
       const { data: candidates } = await client.from('makesafe_job_details')
-        .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
+        .select('job_id, external_ref, requesting_company_slug, requesting_company_name, jobs(job_number, client_name, site_address, status, metadata)')
         .not('external_ref', 'is', null)
       const dup = (candidates || []).find((row: any) => {
         if (canonicalExternalObligationRef(row.external_ref, prefixes) !== normTarget) return false
@@ -22689,18 +22690,11 @@ async function approveIntakeDraft(client: any, body: any) {
           || canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)
           || canonicalObligationPoCore(row.external_ref, true)
         if (approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore) return false
-        const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
-          row.external_ref || '',
-          [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),
-          row.report_type || null,
-          approvedFamilyContext,
-        )
-        const existingFamilyKey = _normaliseDedupJobFamily(existingFamily)
-        return !existingFamilyKey || existingFamilyKey === approvedJobFamilyKey
+        return true
       })
       if (dup?.job_id) {
         const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
-        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same MakeSafe job family')
+        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same builder instruction')
       }
     }
   }
@@ -22746,7 +22740,6 @@ async function approveIntakeDraft(client: any, body: any) {
         orgId: draft.org_id || DEFAULT_ORG_ID,
         draftId: draft.id,
         candidateKeys: canonicalInstructionKeys,
-        candidateFamily: approvedJobFamilyKey,
       })
       instructionMintReserved = true
     }
@@ -27087,10 +27080,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
           // instead of a silent skip — never a blind live-insert, per the contract. A true
           // re-scan (byte-identical resend) is already caught upstream by the graph-id /
           // internet-id / content-fingerprint dedup, so reaching here is not a byte twin.
-          // Nudge / no-WO emails (availableWoCount == 0, same family) keep the silent skip.
-          const familySpecificEntry = (normRef && companyKey)
-            ? refToJobId.get(`${normRef}|${companyKey}|${familyKey}`) ?? null
-            : null
+          // Nudge / no-WO emails (availableWoCount == 0) keep the silent skip.
           // Same WO/PO identity as an existing job under this company = a re-send of the
           // SAME work order (not a distinct second deliverable). Keyed on the real WO/PO
           // number only (no external_ref fallback), so a NEW/unparsed WO number never matches.
@@ -27105,9 +27095,6 @@ async function retiredPaidAiIntakeImplementation(client: any) {
             matchedJobId,
             availableWoCount,
             sameWoAsActiveJob,
-            candidateFamily: familyKey,
-            hasFamilySpecificSibling: familySpecificEntry != null,
-            hasFamilyAgnosticSibling: matchedEntry != null,
           })
           if (distinctSecondDeliverable) {
             if (!missingFields.includes('second_deliverable_review')) {
@@ -42339,8 +42326,6 @@ const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived', 'cancelled
 //   • availableWoCount > 0 — the candidate carries its OWN servable WO PDF (a real second
 //     work order, not a nudge / no-WO email); the late-PDF-landing block already returned
 //     if that PDF belonged to an existing dirty draft, so reaching here it is genuinely new.
-//   • different-family sibling — the matched job(s) under this ref+company are a DIFFERENT
-//     family than this candidate (a family-specific miss but a family-agnostic hit).
 // A byte-identical resend is caught upstream by the id / content-fingerprint dedup; and a
 // builder RE-SENDING the SAME work order (same WO/PO identity as the active sibling job, but
 // a new subject/time so not a byte twin) is excluded via `sameWoAsActiveJob` so it does not
@@ -42350,15 +42335,9 @@ export function isDistinctSecondDeliverable(input: {
   matchedJobId: string | null
   availableWoCount: number
   sameWoAsActiveJob: boolean
-  candidateFamily: string | null | undefined
-  hasFamilySpecificSibling: boolean
-  hasFamilyAgnosticSibling: boolean
 }): boolean {
   if (input.matchedJobId == null) return false
-  const differentFamilySibling = !!input.candidateFamily &&
-    !input.hasFamilySpecificSibling && input.hasFamilyAgnosticSibling
-  const carriesDistinctWo = input.availableWoCount > 0 && !input.sameWoAsActiveJob
-  return carriesDistinctWo || differentFamilySibling
+  return input.availableWoCount > 0 && !input.sameWoAsActiveJob
 }
 
 async function reopenMakesafe(client: any, body: any, authz?: {

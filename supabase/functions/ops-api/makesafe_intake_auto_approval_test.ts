@@ -237,3 +237,29 @@ Deno.test("clean intake auto-approval blocks an uncertain family without WO/PO i
     reason: "work_order_family_needs_review",
   });
 });
+
+Deno.test("clean intake board sweep blocks a legacy family conflicting with AJS authority", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "aj",
+    external_ref: "AJBR-70062",
+    client_name: "Test Client",
+    site_address: "1 Example St",
+    report_type: "assessment_report",
+    subject: "AJBR-70062 Work Order",
+    body_preview: "Please complete the assessment report",
+    extraction_json: {
+      makesafe_job_family: "assessment_report_quote",
+    },
+    attachments_json: [{
+      file_name: "AJBR-70062 Work Order.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: false,
+    reason: "work_order_family_needs_review",
+  });
+});

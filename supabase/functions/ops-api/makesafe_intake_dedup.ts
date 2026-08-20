@@ -148,10 +148,6 @@ export interface DedupIndex {
   refCompanyWithoutWorkOrderIdentity: Set<string>;
   /** normalised `${workOrderIdentity}|${company}` for existing drafts */
   workOrderCompany: Set<string>;
-  /** normalised `${workOrderIdentity}|${company}|${family}` for known-family drafts */
-  workOrderCompanyFamily: Set<string>;
-  /** work-order/company identities on drafts whose family is unknown */
-  workOrderCompanyUnknownFamily: Set<string>;
   /** normalised `${ref}|${company}` for existing drafts where the family is unknown */
   refCompanyUnknownFamily: Set<string>;
   /** normalised ref for existing JOBS (a live job already covers this ref) */
@@ -174,10 +170,6 @@ export interface DedupIndex {
   jobRefCompanyWithoutWorkOrderIdentity: Set<string>;
   /** normalised `${workOrderIdentity}|${company}` for existing jobs */
   jobWorkOrderCompany: Set<string>;
-  /** normalised `${workOrderIdentity}|${company}|${family}` for known-family jobs */
-  jobWorkOrderCompanyFamily: Set<string>;
-  /** work-order/company identities on jobs whose family is unknown */
-  jobWorkOrderCompanyUnknownFamily: Set<string>;
   /** normalised `${ref}|${company}` for existing jobs with known company but unknown family */
   jobRefCompanyUnknownFamily: Set<string>;
   /**
@@ -519,15 +511,6 @@ function rowWorkOrderCompanyKey(
   return `${identity}|${c}`;
 }
 
-function rowWorkOrderCompanyFamilyKey(
-  row: IntakeDedupRow | IntakeDedupCandidate,
-): string {
-  const workOrderCompany = rowWorkOrderCompanyKey(row);
-  const family = normaliseJobFamily(row.makesafe_job_family);
-  if (!workOrderCompany || !family) return "";
-  return `${workOrderCompany}|${family}`;
-}
-
 function setLatestReceivedAt(
   map: Map<string, string>,
   key: string,
@@ -593,8 +576,6 @@ export function buildIntakeDedupIndex(
   const refCompanyWithWorkOrderIdentity = new Set<string>();
   const refCompanyWithoutWorkOrderIdentity = new Set<string>();
   const workOrderCompany = new Set<string>();
-  const workOrderCompanyFamily = new Set<string>();
-  const workOrderCompanyUnknownFamily = new Set<string>();
   const refCompanyUnknownFamily = new Set<string>();
   const jobRefs = new Set<string>();
   const jobRefFamily = new Set<string>();
@@ -606,8 +587,6 @@ export function buildIntakeDedupIndex(
   const jobRefCompanyWithWorkOrderIdentity = new Set<string>();
   const jobRefCompanyWithoutWorkOrderIdentity = new Set<string>();
   const jobWorkOrderCompany = new Set<string>();
-  const jobWorkOrderCompanyFamily = new Set<string>();
-  const jobWorkOrderCompanyUnknownFamily = new Set<string>();
   const jobRefCompanyUnknownFamily = new Set<string>();
   const rejectedRefCompany = new Map<string, string>();
   const rejectedWorkOrderCompany = new Map<string, string>();
@@ -617,12 +596,7 @@ export function buildIntakeDedupIndex(
     if (d.graph_message_id) graphIds.add(d.graph_message_id);
     if (d.internet_message_id) internetIds.add(d.internet_message_id);
     const woCompany = rowWorkOrderCompanyKey(d);
-    if (woCompany) {
-      workOrderCompany.add(woCompany);
-      const woCompanyFamily = rowWorkOrderCompanyFamilyKey(d);
-      if (woCompanyFamily) workOrderCompanyFamily.add(woCompanyFamily);
-      else workOrderCompanyUnknownFamily.add(woCompany);
-    }
+    if (woCompany) workOrderCompany.add(woCompany);
     const fp = contentFingerprint(
       d.from_email,
       d.subject,
@@ -671,14 +645,7 @@ export function buildIntakeDedupIndex(
         )
         : "";
       const woCompany = rowObj ? rowWorkOrderCompanyKey(rowObj) : "";
-      if (woCompany) {
-        jobWorkOrderCompany.add(woCompany);
-        const woCompanyFamily = rowObj
-          ? rowWorkOrderCompanyFamilyKey(rowObj)
-          : "";
-        if (woCompanyFamily) jobWorkOrderCompanyFamily.add(woCompanyFamily);
-        else jobWorkOrderCompanyUnknownFamily.add(woCompany);
-      }
+      if (woCompany) jobWorkOrderCompany.add(woCompany);
       if (rc) {
         jobRefCompany.add(rc);
         if (rowObj && hasWorkOrderIdentity(rowObj)) {
@@ -736,8 +703,6 @@ export function buildIntakeDedupIndex(
     refCompanyWithWorkOrderIdentity,
     refCompanyWithoutWorkOrderIdentity,
     workOrderCompany,
-    workOrderCompanyFamily,
-    workOrderCompanyUnknownFamily,
     refCompanyUnknownFamily,
     jobRefs,
     jobRefFamily,
@@ -749,8 +714,6 @@ export function buildIntakeDedupIndex(
     jobRefCompanyWithWorkOrderIdentity,
     jobRefCompanyWithoutWorkOrderIdentity,
     jobWorkOrderCompany,
-    jobWorkOrderCompanyFamily,
-    jobWorkOrderCompanyUnknownFamily,
     jobRefCompanyUnknownFamily,
     rejectedRefCompany,
     rejectedWorkOrderCompany,
@@ -811,28 +774,17 @@ export function isDuplicateIntake(
   const family = normaliseJobFamily(candidate.makesafe_job_family);
   const candidateHasWorkOrderIdentity = hasWorkOrderIdentity(candidate);
   const candidateWorkOrderCompany = rowWorkOrderCompanyKey(candidate);
-  const candidateWorkOrderCompanyFamily = rowWorkOrderCompanyFamilyKey(
-    candidate,
-  );
   // A builder WO with no recognised family may be a roof, assessment, or
   // physical make-safe obligation. It is therefore not safe to dedupe or mint
   // it automatically: the scanner turns this marker into a visible review draft.
   if (candidateWorkOrderCompany && !family) {
     return "work_order_family_needs_review";
   }
-  if (candidateWorkOrderCompany) {
-    if (
-      candidateWorkOrderCompanyFamily &&
-      index.workOrderCompanyFamily.has(candidateWorkOrderCompanyFamily)
-    ) {
-      return "builder_work_order_identity";
-    }
-    if (
-      family &&
-      index.workOrderCompanyUnknownFamily.has(candidateWorkOrderCompany)
-    ) {
-      return "work_order_identity_needs_review";
-    }
+  if (
+    candidateWorkOrderCompany &&
+    index.workOrderCompany.has(candidateWorkOrderCompany)
+  ) {
+    return "builder_work_order_identity";
   }
   // W3-H (Marnin's rule, stated twice 2026-07-08): same builder ref + a NEW PO number = a new,
   // separately invoiceable piece of work — not a duplicate to park in review. The *_needs_review
@@ -848,6 +800,9 @@ export function isDuplicateIntake(
     !index.workOrderCompany.has(candidateWorkOrderCompany) &&
     !index.jobWorkOrderCompany.has(candidateWorkOrderCompany);
   if (rc) {
+    if (!candidateHasWorkOrderIdentity && index.refCompany.has(rc)) {
+      return "external_ref+company";
+    }
     if (family) {
       const rcf = refCompanyFamilyKey(
         candidate.external_ref,
@@ -901,21 +856,16 @@ export function isDuplicateIntake(
   }
   const nr = normaliseRef(candidate.external_ref);
   if (nr) {
-    if (candidateWorkOrderCompany) {
-      if (
-        candidateWorkOrderCompanyFamily &&
-        index.jobWorkOrderCompanyFamily.has(candidateWorkOrderCompanyFamily)
-      ) {
-        return "job_external_ref";
-      }
-      if (
-        family &&
-        index.jobWorkOrderCompanyUnknownFamily.has(candidateWorkOrderCompany)
-      ) {
-        return "job_work_order_identity_needs_review";
-      }
+    if (
+      candidateWorkOrderCompany &&
+      index.jobWorkOrderCompany.has(candidateWorkOrderCompany)
+    ) {
+      return "job_external_ref";
     }
     if (rc) {
+      if (!candidateHasWorkOrderIdentity && index.jobRefCompany.has(rc)) {
+        return "job_external_ref";
+      }
       if (family) {
         const rcf = refCompanyFamilyKey(
           candidate.external_ref,
@@ -1047,12 +997,7 @@ export function registerIntakeDraft(
   );
   const woCompany = rowWorkOrderCompanyKey(candidate);
   const candidateHasWorkOrderIdentity = hasWorkOrderIdentity(candidate);
-  if (woCompany) {
-    index.workOrderCompany.add(woCompany);
-    const woCompanyFamily = rowWorkOrderCompanyFamilyKey(candidate);
-    if (woCompanyFamily) index.workOrderCompanyFamily.add(woCompanyFamily);
-    else index.workOrderCompanyUnknownFamily.add(woCompany);
-  }
+  if (woCompany) index.workOrderCompany.add(woCompany);
   if (rc) {
     index.refCompany.add(rc);
     if (candidateHasWorkOrderIdentity) {

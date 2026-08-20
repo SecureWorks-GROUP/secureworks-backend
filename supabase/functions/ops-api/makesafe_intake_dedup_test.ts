@@ -136,7 +136,7 @@ Deno.test("BUG 1: a NEW group-sync candidate for an OLD-path draft is a DUPLICAT
   );
 });
 
-Deno.test("JOB-FAMILY: same MLB ref/company but different family is NOT a duplicate", () => {
+Deno.test("JOB IDENTITY: a family label cannot split a claim without a distinct PO", () => {
   const index = buildIntakeDedupIndex([{
     ...BICTON_OLD,
     external_ref: "MLB-25911",
@@ -155,8 +155,7 @@ Deno.test("JOB-FAMILY: same MLB ref/company but different family is NOT a duplic
 
   assertEquals(
     reason,
-    null,
-    "assessment/quote and temp-fence MakeSafe under one MLB ref must both surface",
+    "external_ref+company",
   );
 });
 
@@ -439,7 +438,7 @@ Deno.test("WORK-ORDER FAMILY: an uncertain WO stays in review before it can mint
   );
 });
 
-Deno.test("WORK-ORDER FAMILY: an existing unknown family keeps a known candidate in review", () => {
+Deno.test("WORK-ORDER IDENTITY: an existing unknown family still owns its PO", () => {
   const index = buildIntakeDedupIndex([], [{
     external_ref: "MLB-25953",
     requesting_company_slug: "mlb",
@@ -457,11 +456,11 @@ Deno.test("WORK-ORDER FAMILY: an existing unknown family keeps a known candidate
       builder_work_order_number: "MLB-25953PO-54176",
       builder_po_number: "PO-54176",
     }, index),
-    "job_work_order_identity_needs_review",
+    "job_external_ref",
   );
 });
 
-Deno.test("WORK-ORDER FAMILY: roof, assessment, and physical MakeSafe may each create one card", () => {
+Deno.test("WORK-ORDER IDENTITY: one PO creates only one card across family labels", () => {
   const index = buildIntakeDedupIndex([]);
   const sharedWorkOrder = {
     external_ref: "MLB-25765",
@@ -470,38 +469,32 @@ Deno.test("WORK-ORDER FAMILY: roof, assessment, and physical MakeSafe may each c
     builder_po_number: "PO-54176",
   };
 
+  const roof = {
+    ...sharedWorkOrder,
+    graph_message_id: "mlb-25765-roof",
+    makesafe_job_family: "roof_report",
+  };
+  assertEquals(isDuplicateIntake(roof, index), null);
+  registerIntakeDraft(roof, index);
+
   for (
     const [graph_message_id, makesafe_job_family] of [
-      ["mlb-25765-roof", "roof_report"],
       ["mlb-25765-assessment", "assessment_report_quote"],
       ["mlb-25765-physical", "general_makesafe"],
     ]
   ) {
-    const candidate = {
-      ...sharedWorkOrder,
-      graph_message_id,
-      makesafe_job_family,
-    };
     assertEquals(
-      isDuplicateIntake(candidate, index),
-      null,
-      `${makesafe_job_family} is an independently allowed deliverable`,
+      isDuplicateIntake({
+        ...sharedWorkOrder,
+        graph_message_id,
+        makesafe_job_family,
+      }, index),
+      "builder_work_order_identity",
     );
-    registerIntakeDraft(candidate, index);
   }
-
-  assertEquals(
-    isDuplicateIntake({
-      ...sharedWorkOrder,
-      graph_message_id: "mlb-25765-roof-resend",
-      makesafe_job_family: "roof_report",
-    }, index),
-    "builder_work_order_identity",
-    "the exact roof twin remains blocked after the three legitimate cards exist",
-  );
 });
 
-Deno.test("JOB-FAMILY: legacy unknown-family draft routes known-family candidate to review", () => {
+Deno.test("JOB IDENTITY: legacy unknown-family draft still owns its claim", () => {
   const index = buildIntakeDedupIndex([{
     graph_message_id: "old-path",
     external_ref: "MLB-26001",
@@ -517,11 +510,11 @@ Deno.test("JOB-FAMILY: legacy unknown-family draft routes known-family candidate
       requesting_company_slug: "mlb",
       makesafe_job_family: "roof_report",
     }, index),
-    "unknown_family_needs_review",
+    "external_ref+company",
   );
 });
 
-Deno.test("JOB-FAMILY: existing live job on same ref only blocks matching family", () => {
+Deno.test("JOB IDENTITY: existing live job owns its claim without a distinct PO", () => {
   const index = buildIntakeDedupIndex([], [
     {
       external_ref: "MLB-25911",
@@ -537,8 +530,7 @@ Deno.test("JOB-FAMILY: existing live job on same ref only blocks matching family
   }, index);
   assertEquals(
     tempFenceReason,
-    null,
-    "later temp-fence WO must not be hidden by assessment live job",
+    "job_external_ref",
   );
 
   const assessmentReason = isDuplicateIntake({
@@ -553,7 +545,7 @@ Deno.test("JOB-FAMILY: existing live job on same ref only blocks matching family
   );
 });
 
-Deno.test("JOB-FAMILY: legacy unknown-family job routes known-family candidate to review", () => {
+Deno.test("JOB IDENTITY: legacy unknown-family job still owns its claim", () => {
   const index = buildIntakeDedupIndex([], [{
     external_ref: "MLB-26002",
     requesting_company_slug: "mlb",
@@ -566,7 +558,7 @@ Deno.test("JOB-FAMILY: legacy unknown-family job routes known-family candidate t
       requesting_company_slug: "mlb",
       makesafe_job_family: "temp_fence_makesafe",
     }, index),
-    "job_unknown_family_needs_review",
+    "job_external_ref",
   );
 });
 

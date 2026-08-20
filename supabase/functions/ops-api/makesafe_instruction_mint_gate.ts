@@ -1,6 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
 import { builderInstructionKeysForCard } from "./makesafe_builder_work_order_identity.ts";
-import { normaliseJobFamily } from "./makesafe_intake_dedup.ts";
 
 const PAGE_SIZE = 1_000;
 const ID_CHUNK_SIZE = 25;
@@ -9,7 +8,6 @@ export interface InstructionCardRow {
   job_id: string;
   external_ref?: string | null;
   requesting_company_slug?: string | null;
-  report_type?: string | null;
   jobs?: any;
 }
 
@@ -46,13 +44,11 @@ function jobOf(row: InstructionCardRow): any {
 
 export function matchExistingInstructionCards(
   candidateKeys: readonly string[],
-  candidateFamily: string,
   rows: readonly InstructionCardRow[],
   documents: readonly InstructionDocumentRow[],
 ): ExistingInstructionCardMatch[] {
   const wanted = new Set(candidateKeys);
-  const wantedFamily = normaliseJobFamily(candidateFamily);
-  if (!wanted.size || !wantedFamily) return [];
+  if (!wanted.size) return [];
   const namesByJob = new Map<string, string[]>();
   for (const document of documents) {
     if (String(document.type || "").toLowerCase() !== "work_order") continue;
@@ -67,10 +63,6 @@ export function matchExistingInstructionCards(
     const metadata = job?.metadata && typeof job.metadata === "object"
       ? job.metadata
       : {};
-    const existingFamily = normaliseJobFamily(
-      metadata.makesafe_job_family || row.report_type,
-    );
-    if (existingFamily && existingFamily !== wantedFamily) return [];
     const instructionKeys = builderInstructionKeysForCard({
       requestingCompanySlug: row.requesting_company_slug ||
         metadata.requesting_company?.slug || null,
@@ -94,13 +86,11 @@ export function matchExistingInstructionCards(
 
 export function refuseExistingInstructionCard(
   candidateKeys: readonly string[],
-  candidateFamily: string,
   rows: readonly InstructionCardRow[],
   documents: readonly InstructionDocumentRow[],
 ): void {
   const matches = matchExistingInstructionCards(
     candidateKeys,
-    candidateFamily,
     rows,
     documents,
   );
@@ -120,14 +110,13 @@ function chunks<T>(values: readonly T[]): T[][] {
 export async function assertInstructionCardMintAvailable(
   client: any,
   candidateKeys: readonly string[],
-  candidateFamily: string,
 ): Promise<void> {
   if (!candidateKeys.length) return;
   const rows: InstructionCardRow[] = [];
   for (let from = 0;; from += PAGE_SIZE) {
     const { data, error } = await client.from("makesafe_job_details")
       .select(
-        "job_id,external_ref,requesting_company_slug,report_type,jobs(job_number,status,metadata)",
+        "job_id,external_ref,requesting_company_slug,jobs(job_number,status,metadata)",
       )
       .order("job_id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
@@ -165,23 +154,9 @@ export async function assertInstructionCardMintAvailable(
   }
   refuseExistingInstructionCard(
     candidateKeys,
-    candidateFamily,
     rows,
     documents,
   );
-}
-
-export function familyScopedInstructionMintKeys(
-  candidateKeys: readonly string[],
-  candidateFamily: string,
-): string[] {
-  const family = normaliseJobFamily(candidateFamily);
-  if (!family) {
-    throw new Error("instruction mint requires a recognised make-safe family");
-  }
-  return [...new Set(candidateKeys)]
-    .map((key) => `${key}|family:${family}`)
-    .sort();
 }
 
 export async function reserveInstructionCardMint(
@@ -190,20 +165,15 @@ export async function reserveInstructionCardMint(
     orgId: string;
     draftId: string;
     candidateKeys: readonly string[];
-    candidateFamily: string;
   },
 ): Promise<void> {
   if (!input.candidateKeys.length) return;
-  const reservationKeys = familyScopedInstructionMintKeys(
-    input.candidateKeys,
-    input.candidateFamily,
-  );
   const { error } = await client.rpc(
     "reserve_makesafe_instruction_key_mint",
     {
       p_org_id: input.orgId,
       p_draft_id: input.draftId,
-      p_instruction_keys: reservationKeys,
+      p_instruction_keys: [...new Set(input.candidateKeys)].sort(),
     },
   );
   if (error) {

@@ -5,7 +5,6 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  familyScopedInstructionMintKeys,
   InstructionMintConflictError,
   matchExistingInstructionCards,
   refuseExistingInstructionCard,
@@ -33,7 +32,6 @@ Deno.test("pre-mint instruction gate refuses an exact terminal-card match", () =
     () =>
       refuseExistingInstructionCard(
         ["MLB:PO-57514"],
-        "general_makesafe",
         [terminalCard],
         documents,
       ),
@@ -45,7 +43,6 @@ Deno.test("pre-mint instruction gate refuses an exact terminal-card match", () =
 Deno.test("pre-mint instruction gate ignores own cover sheet as identity", () => {
   const matches = matchExistingInstructionCards(
     ["AJ:JOB-70062"],
-    "general_makesafe",
     [{ ...terminalCard, requesting_company_slug: "aj" }],
     [{
       job_id: "job-terminal",
@@ -56,7 +53,7 @@ Deno.test("pre-mint instruction gate ignores own cover sheet as identity", () =>
   assertEquals(matches, []);
 });
 
-Deno.test("pre-mint instruction gate permits a distinct family on the same PO", () => {
+Deno.test("pre-mint instruction gate refuses the same PO across family labels", () => {
   const rows = [{
     ...terminalCard,
     report_type: "assessment_report",
@@ -74,16 +71,14 @@ Deno.test("pre-mint instruction gate permits a distinct family on the same PO", 
   assertEquals(
     matchExistingInstructionCards(
       ["MLB:PO-54176"],
-      "roof_report",
       rows,
       documents,
-    ),
-    [],
+    ).length,
+    1,
   );
   assertEquals(
     matchExistingInstructionCards(
       ["MLB:PO-54176"],
-      "assessment_report",
       rows,
       documents,
     ).length,
@@ -94,7 +89,6 @@ Deno.test("pre-mint instruction gate permits a distinct family on the same PO", 
 Deno.test("pre-mint instruction gate fails closed on an existing unknown family", () => {
   const matches = matchExistingInstructionCards(
     ["MLB:PO-54176"],
-    "roof_report",
     [terminalCard],
     [{
       job_id: "job-terminal",
@@ -105,14 +99,23 @@ Deno.test("pre-mint instruction gate fails closed on an existing unknown family"
   assertEquals(matches.length, 1);
 });
 
-Deno.test("atomic reservation scopes the canonical instruction by family", () => {
-  assertEquals(
-    familyScopedInstructionMintKeys(
-      ["MLB:PO-54176", "MLB:PO-54176"],
-      "assessment_report",
-    ),
-    ["MLB:PO-54176|family:assessment_report_quote"],
-  );
+Deno.test("atomic reservation owns the canonical instruction across families", async () => {
+  let args: unknown = null;
+  await reserveInstructionCardMint({
+    rpc: (_name: string, input: unknown) => {
+      args = input;
+      return Promise.resolve({ error: null });
+    },
+  }, {
+    orgId: "org",
+    draftId: "draft",
+    candidateKeys: ["MLB:PO-54176", "MLB:PO-54176"],
+  });
+  assertEquals(args, {
+    p_org_id: "org",
+    p_draft_id: "draft",
+    p_instruction_keys: ["MLB:PO-54176"],
+  });
 });
 
 Deno.test("atomic reservation maps only the unique-key conflict", async () => {
@@ -130,7 +133,6 @@ Deno.test("atomic reservation maps only the unique-key conflict", async () => {
         orgId: "org",
         draftId: "draft",
         candidateKeys: ["key"],
-        candidateFamily: "roof_report",
       }),
     InstructionMintConflictError,
   );
@@ -148,7 +150,6 @@ Deno.test("atomic reservation preserves infrastructure failures", async () => {
         orgId: "org",
         draftId: "draft",
         candidateKeys: ["key"],
-        candidateFamily: "roof_report",
       }),
     Error,
   );
