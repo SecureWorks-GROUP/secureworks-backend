@@ -28,9 +28,9 @@ import { canonicalMakesafeInvoiceContactName } from "./makesafe_invoice_contact.
 import { resolveExistingInvoice } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
 import {
+  loadSesInvoiceCardFamily,
   normalizePostReleaseDisposition,
-  sesInvoiceFamilyFromCardFacts,
-  siblingLiveInvoiceMayYieldToSecondInvoice,
+  siblingLiveInvoicesAllYieldToSecondInvoice,
 } from "./ses_second_invoice_disposition.ts";
 import { type SesActionAuth, SesActionError } from "./ses_reporting_actions.ts";
 import type {
@@ -222,25 +222,19 @@ async function siblingSecondInvoiceAllowsHit(
 > {
   if (hit.match_method === "job_id") return null;
   const row = invoiceRowForHit(rows, hit);
-  const invoiceJobId = String(row?.job_id || "").trim();
-  if (!invoiceJobId || invoiceJobId === jobId) return null;
-  const ourFamily = await deps.loadCardFamily(client, jobId);
-  const siblingFamily = await deps.loadCardFamily(client, invoiceJobId);
-  if (
-    !siblingLiveInvoiceMayYieldToSecondInvoice({
-      ourJobId: jobId,
-      invoiceJobId,
-      ourFamily,
-      invoiceFamily: siblingFamily,
-    })
-  ) {
-    return null;
-  }
+  if (!row) return null;
+  const yielded = await siblingLiveInvoicesAllYieldToSecondInvoice({
+    ourJobId: jobId,
+    loadCardFamily: (id) => deps.loadCardFamily(client, id),
+    liveInvoices: [row],
+  });
+  if (!yielded.yields) return null;
+  const sibling = yielded.siblings[0];
   return {
-    invoice_number: hit.invoice_number || row?.invoice_number || null,
-    job_id: invoiceJobId,
-    our_family: ourFamily,
-    sibling_family: siblingFamily,
+    invoice_number: hit.invoice_number || row.invoice_number || null,
+    job_id: sibling.job_id,
+    our_family: yielded.ourFamily as SesFamilyId,
+    sibling_family: sibling.family as SesFamilyId,
   };
 }
 
@@ -579,41 +573,14 @@ export function makeDefaultCaptainLockRemintDeps(
       };
     },
     async loadCardFamily(client, jobId) {
-      const job = await client.from("jobs")
-        .select("id,metadata")
-        .eq("id", jobId)
-        .maybeSingle();
-      if (job.error) {
+      try {
+        return await loadSesInvoiceCardFamily(client, jobId);
+      } catch (error) {
         throw new SesActionError(503, {
           state: "refused",
-          fact: `The job family could not be read (${job.error.message}).`,
+          fact: (error as Error).message,
         });
       }
-      const detail = await client.from("makesafe_job_details")
-        .select("report_type,report_delivery")
-        .eq("job_id", jobId)
-        .maybeSingle();
-      if (detail.error) {
-        throw new SesActionError(503, {
-          state: "refused",
-          fact:
-            `The make-safe family could not be read (${detail.error.message}).`,
-        });
-      }
-      const metadata = job.data?.metadata &&
-          typeof job.data.metadata === "object"
-        ? job.data.metadata as Record<string, unknown>
-        : {};
-      return sesInvoiceFamilyFromCardFacts({
-        makesafe_job_family: metadata.makesafe_job_family,
-        ses_family: metadata.ses_family,
-        insurance_job_type: metadata.insurance_job_type,
-        own_template_requested: metadata.own_template_requested,
-        strata: metadata.strata,
-        report_delivery: metadata.report_delivery ||
-          detail.data?.report_delivery,
-        report_type: detail.data?.report_type,
-      });
     },
     async loadLiveInvoices(client, jobId) {
       const res = await client.from("xero_invoices")

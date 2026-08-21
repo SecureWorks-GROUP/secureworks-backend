@@ -94,6 +94,13 @@ import {
   verifySesAuthorisedDerivative,
 } from "./ses_authorised_derivative.ts";
 import {
+  loadSesInvoiceCardFamily,
+  matchingInvoiceRowForHit,
+  normalizePostReleaseDisposition,
+  siblingLiveInvoicesAllYieldToSecondInvoice,
+  type SesPostReleaseDisposition,
+} from "./ses_second_invoice_disposition.ts";
+import {
   requiresMakesafeSwms,
   SES_FAMILY_MATRIX_VERSION,
   type SesFamilyId,
@@ -1619,6 +1626,53 @@ export async function resolveSesInvoiceDuplicatesAction(
   };
 }
 
+type SesSecondInvoiceFamilyLoader = (
+  client: SesSupabaseClient,
+  jobId: string,
+) => Promise<string>;
+
+async function loadInvoiceCardFamilyOrRefuse(
+  client: SesSupabaseClient,
+  jobId: string,
+  loadCardFamily?: SesSecondInvoiceFamilyLoader,
+): Promise<string> {
+  try {
+    return await (loadCardFamily || loadSesInvoiceCardFamily)(client, jobId);
+  } catch (error) {
+    if (error instanceof SesActionError) throw error;
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The invoice card family could not be read (${
+        (error as Error)?.message || "unknown error"
+      }).`,
+    });
+  }
+}
+
+async function readObligationPostReleaseDisposition(
+  client: SesSupabaseClient,
+  revision: { obligation_id?: string | null },
+): Promise<SesPostReleaseDisposition | null> {
+  const obligationId = String(revision.obligation_id || "").trim();
+  if (!obligationId) return null;
+  const response = await client.from("makesafe_invoice_obligations")
+    .select("id, post_release_disposition")
+    .eq("id", obligationId)
+    .maybeSingle();
+  if (response.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The invoice obligation disposition could not be read (${
+        response.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  return normalizePostReleaseDisposition(
+    (response.data as { post_release_disposition?: unknown } | null)
+      ?.post_release_disposition,
+  );
+}
+
 export async function prepareSesInvoiceObligationAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -1634,20 +1688,27 @@ export async function prepareSesInvoiceObligationAction(
      */
     commercial_quantity_override?: unknown;
   },
+  deps: {
+    loadCardFamily?: SesSecondInvoiceFamilyLoader;
+  } = {},
 ) {
   if (
     args.post_release_disposition &&
     (auth.mode !== "jwt" || !auth.user)
   ) {
-    // Helper-key / MCP callers cannot attach a disposition here. The
-    // Captain-locked sibling second-DRAFT door is remint_ses_captain_lock_draft
-    // with post_release_disposition=second_invoice — not this JWT gate.
+    // Helper-key / MCP callers cannot attach a disposition here.
+    // combine_credit / hold_pricing / document_only stay JWT-only. A
+    // different-family sibling second DRAFT is JWT + second_invoice on this
+    // action (and helper-key remint_ses_captain_lock_draft with captain_lock).
     throw new SesActionError(403, {
       state: "refused",
       fact:
         "The later attendance has no identified human disposition; an operator must choose second invoice, combine/credit review, document only, or hold pricing.",
     });
   }
+  const requestedDisposition = normalizePostReleaseDisposition(
+    args.post_release_disposition,
+  );
   const hasLockedFigureOverride = args.commercial_quantity_override != null;
   if (hasLockedFigureOverride) {
     // Same authority bar as draft mint: api_key / routine, or captain/admin JWT.
@@ -1823,9 +1884,9 @@ export async function prepareSesInvoiceObligationAction(
   const existingIsCommerciallyBound = !!existing &&
     ["create_executed", "authorised", "released"].includes(existing.state);
   const explicitSecondInvoice = existingIsCommerciallyBound &&
-    args.post_release_disposition === "second_invoice";
+    requestedDisposition === "second_invoice";
   const explicitDocumentOnly = existingIsCommerciallyBound &&
-    args.post_release_disposition === "document_only";
+    requestedDisposition === "document_only";
   const currentCycleId = String(docket.current_attendance_cycle_id || "");
   const currentCycleWasAlreadyCovered = explicitSecondInvoice &&
     (existing.attendance_cycle_ids || []).includes(currentCycleId);
@@ -1833,7 +1894,7 @@ export async function prepareSesInvoiceObligationAction(
     duplicate.live_invoices.every((invoice: SesInvoiceIndexRow) =>
       invoice.invoice_obligation_revision_id === existing?.id
     );
-  const effectiveDuplicate = explicitSecondInvoice &&
+  let effectiveDuplicate = explicitSecondInvoice &&
       currentCycleId &&
       !currentCycleWasAlreadyCovered &&
       oldBoundInvoiceOnly &&
@@ -1848,6 +1909,29 @@ export async function prepareSesInvoiceObligationAction(
       ],
     }
     : duplicate;
+  if (
+    requestedDisposition === "second_invoice" &&
+    !effectiveDuplicate.allows_create &&
+    Array.isArray(effectiveDuplicate.live_invoices) &&
+    effectiveDuplicate.live_invoices.length > 0
+  ) {
+    const siblingYield = await siblingLiveInvoicesAllYieldToSecondInvoice({
+      ourJobId: args.job_id,
+      loadCardFamily: (jobId) =>
+        loadInvoiceCardFamilyOrRefuse(client, jobId, deps.loadCardFamily),
+      liveInvoices: effectiveDuplicate.live_invoices,
+    });
+    if (siblingYield.yields) {
+      effectiveDuplicate = {
+        ...effectiveDuplicate,
+        allows_create: true,
+        reason_codes: [
+          ...effectiveDuplicate.reason_codes,
+          "different_family_sibling_does_not_block_explicit_second_invoice",
+        ],
+      };
+    }
+  }
   type ObligationLine = {
     description: string;
     quantity: number;
@@ -1876,10 +1960,10 @@ export async function prepareSesInvoiceObligationAction(
     ? "no_additional_charge"
     : (existingIsCommerciallyBound &&
         ["combine_credit", "hold_pricing"].includes(
-          String(args.post_release_disposition || ""),
+          String(requestedDisposition || ""),
         )
       ? "money_review_required"
-      : (existingIsCommerciallyBound && !args.post_release_disposition
+      : (existingIsCommerciallyBound && !requestedDisposition
         ? "blocked_billing_disposition"
         : (effectiveDuplicate.allows_create
           ? "priced_from_canon"
@@ -1979,7 +2063,7 @@ export async function prepareSesInvoiceObligationAction(
         released_cycle_ids: existing.attendance_cycle_ids,
       }
       : null,
-    post_release_disposition: args.post_release_disposition as any,
+    post_release_disposition: requestedDisposition,
   });
   // Stamp WHY the minted reference has the grain it has, so a later reader can tell a composed
   // claim+PO reference from one the docket already carried, and can see when no PO was known.
@@ -2079,6 +2163,7 @@ export async function createSesInvoiceDraftAction(
         pdf: Uint8Array;
       },
     ) => Promise<Record<string, unknown>>;
+    loadCardFamily?: SesSecondInvoiceFamilyLoader;
   } = {},
 ) {
   // Mint is agent/api_key/routine-safe; a browser session must still be an
@@ -2158,6 +2243,10 @@ export async function createSesInvoiceDraftAction(
         "The invoice obligation has no builder reference, so the duplicate-invoice guard cannot run.",
     });
   }
+  const obligationDisposition = await readObligationPostReleaseDisposition(
+    client,
+    revision,
+  );
 
   // ── MANDATORY DUP GUARD (unskippable) — before any effect or Xero create ──
   const fetchAll = deps.fetchAllAccrecInvoices || fetchAllAccrecInvoices;
@@ -2234,7 +2323,10 @@ export async function createSesInvoiceDraftAction(
         attributedCandidate,
       ).qualifies;
     const qualifyingExisting = currentAttendance && !!hitId;
-    if (qualifyingExisting) {
+    // Explicit second_invoice means mint a new DRAFT beside a different-family
+    // sibling, not adopt this card's own live ACCREC. Same-card / same-family
+    // still 409 via sibling yield below.
+    if (qualifyingExisting && obligationDisposition !== "second_invoice") {
       // Repair, never assume: a first mint whose Xero create landed but whose
       // binding write did not would otherwise be stranded unapprovable here.
       const repairEffect = await buildSesEffect({
@@ -2343,28 +2435,40 @@ export async function createSesInvoiceDraftAction(
         external_mutations: { xero: 0, email: 0 },
       };
     }
-    const ino = existingHit.invoice_number || "?";
-    const st = existingHit.status || "?";
-    throw new SesActionError(
-      409,
-      sesRefusal(
-        "invoice_duplicate_live",
-        "Use the existing live invoice or void it before minting a new DRAFT on this card.",
-        {
-          fact:
-            `${externalRef} already has ${ino} (${st}) — no new invoice created (matched via ${existingHit.match_method}; scanned ${accrecRows.length} ACCREC invoices).`,
-          evidence: {
-            existing_invoice: {
-              invoice_number: existingHit.invoice_number,
-              status: existingHit.status,
-              xero_invoice_id: existingHit.xero_invoice_id,
-              match_method: existingHit.match_method,
+    const siblingHitRow = matchingInvoiceRowForHit(existingHit, accrecRows);
+    const siblingYield = obligationDisposition === "second_invoice" &&
+        siblingHitRow
+      ? await siblingLiveInvoicesAllYieldToSecondInvoice({
+        ourJobId: args.job_id,
+        loadCardFamily: (jobId) =>
+          loadInvoiceCardFamilyOrRefuse(client, jobId, deps.loadCardFamily),
+        liveInvoices: [siblingHitRow],
+      })
+      : { yields: false as const };
+    if (!siblingYield.yields) {
+      const ino = existingHit.invoice_number || "?";
+      const st = existingHit.status || "?";
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "invoice_duplicate_live",
+          "Use the existing live invoice or void it before minting a new DRAFT on this card.",
+          {
+            fact:
+              `${externalRef} already has ${ino} (${st}) — no new invoice created (matched via ${existingHit.match_method}; scanned ${accrecRows.length} ACCREC invoices).`,
+            evidence: {
+              existing_invoice: {
+                invoice_number: existingHit.invoice_number,
+                status: existingHit.status,
+                xero_invoice_id: existingHit.xero_invoice_id,
+                match_method: existingHit.match_method,
+              },
+              scanned_accrec: accrecRows.length,
             },
-            scanned_accrec: accrecRows.length,
           },
-        },
-      ),
-    );
+        ),
+      );
+    }
   }
 
   if (bindExistingOnly) {
@@ -2392,32 +2496,42 @@ export async function createSesInvoiceDraftAction(
     !duplicate.allows_create &&
     duplicate.match_tier !== "obligation_binding"
   ) {
-    throw new SesActionError(
-      409,
-      ["multi_live", "sibling_po"].includes(duplicate.ambiguity)
-        ? sesRefusal(
-          "invoice_duplicate_ambiguous",
-          "Resolve which Xero invoice owns this work before minting a DRAFT.",
-          {
-            evidence: {
-              duplicate_probe: {
-                ambiguity: duplicate.ambiguity,
-                match_tier: duplicate.match_tier,
-                reason_codes: duplicate.reason_codes,
-                live_invoices: duplicate.live_invoices.map((row) => ({
-                  invoice_number: row.invoice_number,
-                  status: row.status,
-                  reference: row.reference,
-                })),
+    const indexedYield = obligationDisposition === "second_invoice"
+      ? await siblingLiveInvoicesAllYieldToSecondInvoice({
+        ourJobId: args.job_id,
+        loadCardFamily: (jobId) =>
+          loadInvoiceCardFamilyOrRefuse(client, jobId, deps.loadCardFamily),
+        liveInvoices: duplicate.live_invoices,
+      })
+      : { yields: false as const };
+    if (!indexedYield.yields) {
+      throw new SesActionError(
+        409,
+        ["multi_live", "sibling_po"].includes(duplicate.ambiguity)
+          ? sesRefusal(
+            "invoice_duplicate_ambiguous",
+            "Resolve which Xero invoice owns this work before minting a DRAFT.",
+            {
+              evidence: {
+                duplicate_probe: {
+                  ambiguity: duplicate.ambiguity,
+                  match_tier: duplicate.match_tier,
+                  reason_codes: duplicate.reason_codes,
+                  live_invoices: duplicate.live_invoices.map((row) => ({
+                    invoice_number: row.invoice_number,
+                    status: row.status,
+                    reference: row.reference,
+                  })),
+                },
               },
             },
-          },
-        )
-        : sesRefusal(
-          "invoice_duplicate_live",
-          "Use the live invoice already bound to this work; no second invoice can be created.",
-        ),
-    );
+          )
+          : sesRefusal(
+            "invoice_duplicate_live",
+            "Use the live invoice already bound to this work; no second invoice can be created.",
+          ),
+      );
+    }
   }
 
   // Deliberate retry (issue #644): permitted ONLY when the prior attempt is
