@@ -2863,7 +2863,24 @@ async function resolveTradeXeroSupplierContact(
   },
 ): Promise<string | null> {
   const cachedContactId = (args.cachedContactId || '').trim()
-  if (cachedContactId) return cachedContactId
+  // Cached IDs go stale when a supplier is archived in Xero. Returning them
+  // blind makes trade invoice push fail with "contact has been archived".
+  if (cachedContactId) {
+    try {
+      const cached = await xeroGet(`/Contacts/${cachedContactId}`, args.accessToken, args.tenantId)
+      const contact = (cached?.Contacts || [])[0]
+      if (contact?.ContactID) {
+        if (String(contact.ContactStatus || '').toUpperCase() === 'ARCHIVED') {
+          await xeroPost('/Contacts', args.accessToken, args.tenantId, {
+            Contacts: [{ ContactID: contact.ContactID, ContactStatus: 'ACTIVE' }],
+          }, 'POST')
+        }
+        return contact.ContactID
+      }
+    } catch {
+      // Fall through to email/name/create when the cache misses or Xero rejects it.
+    }
+  }
 
   const tradeName = (args.name || 'Trade').trim() || 'Trade'
   const tradeEmail = (args.email || '').trim()
@@ -2871,10 +2888,24 @@ async function resolveTradeXeroSupplierContact(
 
   // 1) Email match covers the normal path where the Supabase login email is
   // the same as the Xero supplier contact email.
+  const pickContactId = async (contactsPayload: any): Promise<string | null> => {
+    const list = contactsPayload?.Contacts || []
+    const active = list.find((c: any) => String(c.ContactStatus || '').toUpperCase() === 'ACTIVE')
+    const any = list[0]
+    const chosen = active || any
+    if (!chosen?.ContactID) return null
+    if (String(chosen.ContactStatus || '').toUpperCase() === 'ARCHIVED') {
+      await xeroPost('/Contacts', args.accessToken, args.tenantId, {
+        Contacts: [{ ContactID: chosen.ContactID, ContactStatus: 'ACTIVE' }],
+      }, 'POST')
+    }
+    return chosen.ContactID
+  }
+
   if (tradeEmail) {
     try {
       const contacts = await xeroGet(xeroContactWherePath('EmailAddress', tradeEmail), args.accessToken, args.tenantId)
-      if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+      xeroContactId = await pickContactId(contacts)
     } catch { /* fallback to name lookup/create */ }
   }
 
@@ -2885,7 +2916,7 @@ async function resolveTradeXeroSupplierContact(
   if (!xeroContactId && tradeName) {
     try {
       const contacts = await xeroGet(xeroContactWherePath('Name', tradeName), args.accessToken, args.tenantId)
-      if (contacts?.Contacts?.length > 0) xeroContactId = contacts.Contacts[0].ContactID
+      xeroContactId = await pickContactId(contacts)
     } catch { /* fallback to create */ }
   }
 
