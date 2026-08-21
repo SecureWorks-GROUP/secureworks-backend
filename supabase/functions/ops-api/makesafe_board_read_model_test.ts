@@ -3,6 +3,7 @@ import {
   assert,
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _assertNoSyntheticLivefireInvoiceForTest,
@@ -104,6 +105,9 @@ const READY_UNSENT_PACK = {
   report_doc_id: "doc-report",
   invoice_doc_id: "doc-invoice",
   swms_doc_id: "doc-swms",
+  report_doc_resolved: true,
+  invoice_doc_resolved: true,
+  swms_doc_resolved: true,
   docket_revision_id: "rev-ready",
   pre_xero_docs_ready: true,
   blockers: [],
@@ -474,7 +478,9 @@ Deno.test("Prime completion is monotonic: a later unreachable result retains the
 
   assertEquals(row.canonical_stage, "trade_report_in");
   assertEquals(row.report.state, "submitted");
-  assertEquals(row.pack.closeout_documents.report, true);
+  // The portal completion remains monotonic, but it is not a sendable report
+  // artifact until the pack binds a resolvable report document.
+  assertEquals(row.pack.closeout_documents.report, false);
   assertEquals(row.computed_status_evidence.has_current_portal_capture, true);
   assertEquals(
     row.computed_status_evidence.portal_capture_revisions.map((
@@ -542,7 +548,7 @@ Deno.test("Prime completion is monotonic for the screenshot-less trade tick too"
 
   assertEquals(row.canonical_stage, "trade_report_in");
   assertEquals(row.report.state, "submitted");
-  assertEquals(row.pack.closeout_documents.report, true);
+  assertEquals(row.pack.closeout_documents.report, false);
 });
 
 Deno.test("F7 newest exact ledger truth suppresses an older embedded detail capture", () => {
@@ -1022,6 +1028,7 @@ Deno.test("Heathridge SWMS-261174: temp-fence trade report + DRAFT invoice is no
         review_state: "READY",
         report_doc_id: null,
         invoice_doc_id: "invoice-1205",
+        invoice_doc_resolved: true,
         pre_xero_docs_ready: true,
         blockers: [
           { code: "canonical_draft_pack_output_missing" },
@@ -1091,7 +1098,7 @@ Deno.test("card report tick stays off for an attach without pack.report_doc_id",
   assertEquals(card.pack.closeout_documents.report, false);
 });
 
-Deno.test("card report tick is done only when pack.report_doc_id is bound", () => {
+Deno.test("card report tick is done only when pack.report_doc_id resolves", () => {
   const [card] = buildCanonicalMakesafeRows(
     [
       baseJob("allocated", "report-bound", {
@@ -1099,6 +1106,7 @@ Deno.test("card report tick is done only when pack.report_doc_id is bound", () =
         report_pack: {
           status: "drafted",
           report_doc_id: "doc-report-bound",
+          report_doc_resolved: true,
         },
       }),
     ],
@@ -1140,6 +1148,39 @@ Deno.test("Docs Ready refuses has_report_doc without pack.report_doc_id (attach 
   assertEquals(card.pack.presentation_kind === "ready", false);
 });
 
+Deno.test("Docs Ready presentation refuses a dangling pack.report_doc_id", () => {
+  const id = "dangling-report-bind";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        report_doc_id: "doc-report-missing",
+        report_doc_resolved: false,
+        invoice_doc_resolved: true,
+        swms_doc_resolved: true,
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  // Placement still consumes the raw docket/pointer coordinate. The operator
+  // surface independently proves whether that coordinate resolves.
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.report_doc_id, "doc-report-missing");
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+  assertEquals(card.pack.closeout_documents.report, false);
+  assertStringIncludes(card.pack.presentation_reason || "", "does not resolve");
+});
+
 Deno.test("Docs Ready refuses has_swms_doc without pack.swms_doc_id (attach ≠ bind)", () => {
   // MLB physical requires SWMS; an attached SWMS document without the pack
   // pointer must not present ready or place Docs Ready.
@@ -1169,6 +1210,122 @@ Deno.test("Docs Ready refuses has_swms_doc without pack.swms_doc_id (attach ≠ 
   assertEquals(card.pack.closeout_documents.swms, false);
   assertEquals(card.pack.presentation_kind === "ready", false);
   assertEquals(card.pack.pre_xero_docs_ready, false);
+});
+
+Deno.test("Docs Ready presentation refuses a dangling required SWMS pointer", () => {
+  const id = "dangling-swms-bind";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        swms_doc_id: "doc-swms-missing",
+        report_doc_resolved: true,
+        invoice_doc_resolved: true,
+        swms_doc_resolved: false,
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.closeout_documents.swms, false);
+  assertStringIncludes(card.pack.presentation_reason || "", "does not resolve");
+});
+
+Deno.test("Docs Ready presentation refuses a qualifying DRAFT without pack.invoice_doc_id", () => {
+  const id = "draft-without-invoice-bind";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        invoice_doc_id: null,
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: false,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  // Preserve placement semantics: the qualifying DRAFT still puts the docket
+  // in the captain's review column. Presentation is not send-ready until the
+  // exact invoice artifact is bound.
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.invoice_doc_id, null);
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+  assertEquals(card.pack.closeout_documents.invoice, false);
+  assertStringIncludes(card.pack.presentation_reason || "", "invoice_doc_id");
+});
+
+Deno.test("Docs Ready presentation refuses a dangling invoice pointer", () => {
+  const id = "dangling-invoice-bind";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        invoice_doc_id: "doc-invoice-missing",
+        report_doc_resolved: true,
+        invoice_doc_resolved: false,
+        swms_doc_resolved: true,
+      },
+      invoice_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.closeout_documents.invoice, false);
+  assertStringIncludes(card.pack.presentation_reason || "", "does not resolve");
+});
+
+Deno.test("no-additional-charge pack stays ready without an invoice pointer", () => {
+  const id = "no-charge-no-invoice-bind";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      report: SUBMITTED_REPORT,
+      report_pack: {
+        ...READY_UNSENT_PACK,
+        pricing_disposition: "no_additional_charge",
+        invoice_doc_id: null,
+        invoice_doc_resolved: false,
+      },
+      invoice_status: "not_ready",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: false,
+      has_swms_doc: true,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.pack.presentation_kind, "ready");
+  assertEquals(card.pack.required_documents.invoice, false);
+  assertEquals(card.pack.closeout_documents.invoice, false);
 });
 
 Deno.test("SWMS-261243 assessment pack cannot look ready without family report evidence", () => {
@@ -1259,9 +1416,142 @@ Deno.test("pipeline fail-closed assessment stamp stays incomplete without portal
   assertEquals(card.pack.pre_xero_docs_ready, false);
 });
 
-Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence is present", () => {
+Deno.test("assessment portal triad stays ready without a local report pointer", () => {
+  const id = "assessment-portal-only-ready";
+  const links = [
+    {
+      role: "assessment_report",
+      url: "https://www.primeeco.tech/share/assessment-ready",
+    },
+    {
+      role: "photos",
+      url: "https://www.primeeco.tech/share/assessment-photos",
+    },
+    {
+      role: "quote",
+      url: "https://www.primeeco.tech/share/assessment-quote",
+    },
+  ];
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", id, {
+        metadata: { makesafe_job_family: "assessment_quote" },
+        makesafe_details: {
+          substatus: "admin_to_send_report",
+          report_type: "assessment_report",
+          cycle_number: 1,
+          attendance_cycle_id: "cycle-current",
+          external_links: links,
+          portal_captures: links.map(({ role, url }) => ({
+            status: "done",
+            role,
+            url,
+            locked: true,
+            screenshot: `assessment-${role}.png`,
+            cycle_number: 1,
+          })),
+        },
+        assignments: [],
+        report_pack: {
+          status: "drafted",
+          report_doc_id: null,
+          invoice_doc_id: "doc-assessment-invoice",
+          swms_doc_id: null,
+          invoice_doc_resolved: true,
+          docket_revision_id: "rev-assessment-ready",
+          docket_pre_xero_docs_ready: true,
+          pre_xero_docs_ready: false,
+          presentation_kind: "incomplete",
+          blockers: [],
+        },
+        has_report_doc: false,
+        has_invoice_doc: true,
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(
+    card.canonical_stage,
+    "report_ready",
+    JSON.stringify(card, null, 2),
+  );
+  assertEquals(card.pack.presentation_kind, "ready");
+  assertEquals(card.pack.required_documents.report, false);
+  assertEquals(card.pack.required_documents.invoice, true);
+});
+
+Deno.test("SWMS-26980: portal proof cannot present ready without a bound report pointer", () => {
+  // Live 2026-08-21: the roof role was portal-proved and the current docket was
+  // stamped ready, but report_doc_id was null. Placement may still reflect the
+  // portal evidence; the operator-facing pack must not read READY TO SEND.
+  const id = "roof-26980-no-bound-report";
+  const sourceUrl = "https://www.primeeco.tech/share/roof-26980";
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", id, {
+        job_number: "SWMS-26980",
+        metadata: { makesafe_job_family: "roof_report" },
+        makesafe_details: {
+          substatus: "admin_to_send_report",
+          report_type: "roof_report",
+          cycle_number: 1,
+          attendance_cycle_id: "cycle-current",
+          external_ref: "MLB-26567PO-56164",
+          external_links: [{ kind: "roof_report", url: sourceUrl }],
+          portal_captures: [{
+            status: "done",
+            role: "roof_report",
+            url: sourceUrl,
+            locked: true,
+            screenshot: "roof-26980.png",
+            cycle_number: 1,
+          }],
+        },
+        assignments: [],
+        report_pack: {
+          status: "drafted",
+          review_state: "U4_BLOCKED",
+          report_doc_id: null,
+          invoice_doc_id: "doc-invoice",
+          swms_doc_id: null,
+          docket_revision_id: "rev-roof-26980",
+          pre_xero_docs_ready: false,
+          docket_pre_xero_docs_ready: true,
+          presentation_kind: "incomplete",
+          presentation_reason: "family report evidence is not complete",
+          blockers: [],
+        },
+        pack_presentation: {
+          kind: "incomplete",
+          state: "drafted",
+          reason: "family report evidence is not complete",
+        },
+        has_report_doc: false,
+        has_invoice_doc: true,
+        has_wo: true,
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.report_doc_id, null);
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+  assertEquals(card.pack.closeout_documents.report, false);
+  assertStringIncludes(card.pack.presentation_reason || "", "report_doc_id");
+});
+
+Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence and bound report are present", () => {
   // Pipeline cannot see portal captures, so it fails closed. The board has the
-  // capture evidence and must re-derive to ready (uses preserved docket stamp).
+  // capture evidence and a bound report, so it can honestly re-derive ready.
   const id = "roof-pipeline-upgrade";
   const sourceUrl = "https://www.primeeco.tech/share/roof-upgrade";
   const [card] = buildCanonicalMakesafeRows(
@@ -1290,9 +1580,11 @@ Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence 
           status: "drafted",
           // Operator-facing honesty gate (pipeline fail-closed).
           review_state: "U4_BLOCKED",
-          report_doc_id: null,
+          report_doc_id: "doc-roof-report",
           invoice_doc_id: "doc-invoice",
           swms_doc_id: null,
+          report_doc_resolved: true,
+          invoice_doc_resolved: true,
           docket_revision_id: "rev-roof-upgrade",
           pre_xero_docs_ready: false,
           // Raw stamp preserved for placement packState.
@@ -1355,11 +1647,21 @@ Deno.test("legacySent report-only re-derive keeps the carried current docket", (
     [],
     null,
     null,
-    [],
+    [{
+      id: "doc-report-ans",
+      type: "roof_report",
+      file_name: "Roof Report - ans.pdf",
+      storage_url: "https://documents.example/roof-ans.pdf",
+    }, {
+      id: "doc-invoice-ans",
+      type: "invoice",
+      file_name: "Xero Invoice - ans.pdf",
+      storage_url: "https://documents.example/invoice-ans.pdf",
+    }],
     false,
     {
       status: "authorised_not_sent",
-      report_doc_id: null,
+      report_doc_id: "doc-report-ans",
       invoice_doc_id: "doc-invoice-ans",
       swms_doc_id: null,
       sent_at: null,
@@ -1817,7 +2119,11 @@ Deno.test("card JSON always includes report and invoice coordinates", () => {
       status: "DRAFT",
       reference: "SWMS-job-direct-coordinates",
     },
-    [{ id: "doc-report-direct", type: "makesafe_report" }],
+    [{
+      id: "doc-report-direct",
+      type: "makesafe_report",
+      storage_url: "https://documents.example/report-direct.pdf",
+    }],
     false,
     {
       ...READY_UNSENT_PACK,
@@ -1868,7 +2174,11 @@ Deno.test("card JSON always includes report and invoice coordinates", () => {
       reference: "MLB-OLD",
       created_at: "2026-07-18T12:00:00Z",
     },
-    [{ id: "doc-prior-cycle", type: "makesafe_report" }],
+    [{
+      id: "doc-prior-cycle",
+      type: "makesafe_report",
+      storage_url: "https://documents.example/report-prior-cycle.pdf",
+    }],
     false,
     {
       ...READY_UNSENT_PACK,
@@ -2267,7 +2577,11 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
         status: "drafted",
         review_state: "READY",
         report_doc_id: "doc-report",
+        invoice_doc_id: "doc-invoice",
         swms_doc_id: "doc-swms",
+        report_doc_resolved: true,
+        invoice_doc_resolved: true,
+        swms_doc_resolved: true,
         docket_revision_id: "revision-ready",
         pre_xero_docs_ready: true,
         blockers: [],
@@ -2323,7 +2637,11 @@ Deno.test("legacy failed pack over a ready docket presents ready, not failed", (
         status: "failed",
         review_state: "READY",
         report_doc_id: "doc-report",
+        invoice_doc_id: "doc-invoice",
         swms_doc_id: "doc-swms",
+        report_doc_resolved: true,
+        invoice_doc_resolved: true,
+        swms_doc_resolved: true,
         docket_revision_id: "revision-live",
         pre_xero_docs_ready: true,
         blockers: [],

@@ -13,6 +13,11 @@ import {
   qualifyMakesafeCurrentDraftInvoice,
 } from "./makesafe_docs_ready_invoice.ts";
 import { canonicalMakesafeInvoiceContactName } from "./makesafe_invoice_contact.ts";
+import {
+  makesafePackArtifactRequirements,
+  makesafeReportDocumentTypesForFamily,
+  resolveMakesafePackDocumentPointers,
+} from "./makesafe_document_truth.ts";
 // A sealed-release send used to leave `report_sent_at` untouched, so the field
 // was wrong in BOTH directions: false where the retired auto-stamp minted it,
 // absent where a pack demonstrably shipped. The route proof is the send record;
@@ -3125,11 +3130,10 @@ export async function getSesReviewablePackAction(
   ]);
   const envelope = object(docket.envelope);
   // Bind-floor honesty inputs — same set board/pipeline pass to
-  // presentSesPackHonesty. Omitting them left defaults permissive so a
-  // ready-stamped physical docket with no report_doc_id greened the review
-  // pack (SWMS-261015) while the board correctly read incomplete.
+  // presentSesPackHonesty. Resolve the exact rows here so neither a missing nor
+  // a dangling report/invoice/required-SWMS coordinate can green review.
   const jobId = String(docket.job_id || "");
-  const [packRead, jobRead, detailRead] = await Promise.all([
+  const [packRead, jobRead, detailRead, documentsRead] = await Promise.all([
     client.from("makesafe_report_packs")
       .select(
         "id,pack_kind,status,report_doc_id,invoice_doc_id,swms_doc_id,sent_at",
@@ -3143,6 +3147,9 @@ export async function getSesReviewablePackAction(
         "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,portal_verified_at,portal_verified_cycle,portal_verified_signal,requesting_company_slug,requesting_company_name,requesting_company_id",
       )
       .eq("job_id", jobId).maybeSingle(),
+    client.from("job_documents")
+      .select("id,type,file_name,storage_url,pdf_url")
+      .eq("job_id", jobId),
   ]);
   if (packRead.error) {
     throw new SesActionError(503, {
@@ -3152,11 +3159,12 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
-  if (jobRead.error || detailRead.error) {
+  if (jobRead.error || detailRead.error || documentsRead.error) {
     throw new SesActionError(503, {
       state: "refused",
       fact: `The job identity for pack honesty could not be read (${
         jobRead.error?.message || detailRead.error?.message ||
+        documentsRead.error?.message ||
         "unknown database error"
       }).`,
     });
@@ -3164,6 +3172,15 @@ export async function getSesReviewablePackAction(
   const packRow = packRead.data || null;
   const jobRow = jobRead.data || null;
   const detailRow = detailRead.data || null;
+  const packPointerResolution = resolveMakesafePackDocumentPointers(
+    packRow,
+    documentsRead.data || [],
+    {
+      report_document_types: makesafeReportDocumentTypesForFamily(
+        reviewFamily,
+      ),
+    },
+  );
   const sesFamily = (reviewFamily || null) as SesFamilyId | null;
   const honestyStatusInput = {
     job: jobRow,
@@ -3221,6 +3238,10 @@ export async function getSesReviewablePackAction(
     ? true
     : reportInEvidence(honestyStatusInput).satisfied;
   const swmsRequired = requiresMakesafeSwms(detailRow, jobRow);
+  const artifactRequirements = makesafePackArtifactRequirements({
+    ses_family: reviewFamily,
+    pricing_disposition: packObligation?.pricing_disposition,
+  });
   // Presentation honesty: actual identity/byte drift remains a refusal, while
   // review-source caveats remain visible without turning a drafted pack into a
   // false U4_BLOCKED state. Bind pointers and family evidence must still fire.
@@ -3234,8 +3255,15 @@ export async function getSesReviewablePackAction(
     },
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
     report_doc_id: packRow?.report_doc_id || null,
-    requires_bound_report_doc: needsBoundReportPdf,
+    report_doc_resolved: packPointerResolution.report_doc_resolved,
+    requires_bound_report_doc:
+      artifactRequirements.requires_bound_report_doc,
+    invoice_doc_id: packRow?.invoice_doc_id || null,
+    invoice_doc_resolved: packPointerResolution.invoice_doc_resolved,
+    requires_bound_invoice_doc:
+      artifactRequirements.requires_bound_invoice_doc,
     swms_doc_id: packRow?.swms_doc_id || null,
+    swms_doc_resolved: packPointerResolution.swms_doc_resolved,
     requires_bound_swms: swmsRequired,
     family_report_evidence_satisfied: familyReportEvidenceSatisfied,
   });
@@ -3347,6 +3375,19 @@ export async function signOffSesDocketAction(
   );
   if (sourceRefusal) {
     throw new SesActionError(409, sourceRefusal);
+  }
+  if (displayedPack.presentation.kind !== "ready") {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "required_pack_artifact_missing",
+        "Bind every required report, invoice, and family-required SWMS artifact, then reload the exact pack before signing off.",
+        {
+          fact: displayedPack.presentation.reason ||
+            "The displayed pack is not ready for sign-off.",
+        },
+      ),
+    );
   }
   if (current.review_state !== "signed_off") {
     nextSesDocsReadyState(current.review_state, "signed_off");

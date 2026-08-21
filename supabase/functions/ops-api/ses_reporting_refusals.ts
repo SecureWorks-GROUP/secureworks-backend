@@ -65,6 +65,8 @@ const FACTS = {
     "An older release containing this exact docket has started dispatch and must be reconciled before corrected content can be minted.",
   docs_ready_signoff_missing:
     "No current Captain Docs Ready signoff exists for the exact docket bytes.",
+  required_pack_artifact_missing:
+    "A report, invoice, or family-required SWMS artifact needed by this pack is not bound and retrievable.",
   invoice_approval_missing:
     "No current human APPROVE INVOICE decision exists for this exact invoice revision.",
   invoice_approval_unreadable:

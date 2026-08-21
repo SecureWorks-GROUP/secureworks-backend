@@ -229,6 +229,8 @@ Deno.test("placement: reviewable pack with a qualifying current DRAFT still reac
         review_state: "READY",
         report_doc_id: "report-doc",
         invoice_doc_id: "invoice-doc",
+        report_doc_resolved: true,
+        invoice_doc_resolved: true,
         sent_at: null,
       },
       invoice_raw_status: "DRAFT",
@@ -259,6 +261,9 @@ Deno.test("placement: named prior-cycle bind reaches Docs Ready and ticks its in
         report_doc_id: "report-doc",
         invoice_doc_id: "invoice-doc-1140",
         swms_doc_id: "swms-doc",
+        report_doc_resolved: true,
+        invoice_doc_resolved: true,
+        swms_doc_resolved: true,
         sent_at: null,
       },
       makesafe_details: { cycle_number: 4 },
@@ -1629,7 +1634,9 @@ Deno.test("portal: ROOF acceptance does not require URL identity - a live asymme
   assertEquals(deriveSesStageV2(assessmentStray).stage, "allocated");
 });
 
-// ── R7 — Docs Ready means one click from sending ────────────────────────────
+// ── R7 — canonical Docs Ready placement evidence ───────────────────────────
+// Operator sendability is a separate presentation gate: it additionally
+// resolves required pack pointers and drives the actual board controls.
 
 Deno.test("docs ready: a READY pack alone is no longer one click from sending", () => {
   // The captain's definition is that the skill has run, everything is
@@ -1923,10 +1930,10 @@ Deno.test("docs ready: qualifying DRAFT preserves every physical safety fence", 
   }
 });
 
-Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () => {
+Deno.test("placement: portal-proved roof may reach report_ready without a local pointer", () => {
   // The ruling rules out the five-artifact shorthand board-wide: a roof job
-  // produces no SecureWorks report, so demanding one would permanently block
-  // the family. What one click needs is the builder's report PROVED complete.
+  // produces no SecureWorks report in the placement engine. The separate pack
+  // presentation now requires the roof artifact before showing send controls.
   const proved = portalInput([ACCEPTED], {
     evidence: {
       assignments: [{ id: "a1" }],
@@ -1952,9 +1959,10 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
   assert(deriveSesStageV2(unproved).stage !== "report_ready");
 });
 
-Deno.test("docs ready: a qualifying Xero DRAFT is the roof invoice closeout fact", () => {
+Deno.test("placement: a qualifying Xero DRAFT is the roof invoice stage fact", () => {
   // The portal report is complete and the current DRAFT is real. It need not be
-  // copied into job_documents before the drafted pack becomes reviewable.
+  // copied into job_documents before stage placement. Operator presentation
+  // independently requires the charged pack's invoice pointer.
   const workOrderOnly = portalInput([ACCEPTED], {
     evidence: {
       assignments: [{ id: "a1" }],
@@ -2049,7 +2057,7 @@ Deno.test("docs ready: the corrected rule is never LOOSER than the existing one"
   }
 });
 
-Deno.test("docs ready: a report-only roof with no local make-safe PDF still uses the portal floor", () => {
+Deno.test("placement: report-only roof without local pointers still uses the portal floor", () => {
   const roof = portalInput([ACCEPTED], {
     evidence: {
       assignments: [{ id: "a1" }],

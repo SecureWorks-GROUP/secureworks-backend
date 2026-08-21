@@ -86,7 +86,8 @@ const RECENT = new Date(Date.now() - 3600 * 1000).toISOString();
 // state. The assessment card has NO portal evidence (the pipeline cannot load
 // portal captures, so report-in fails closed there); the physical card has its
 // builder report BOUND on the pack (report_doc_id) and a submitted current
-// trade report, and its family requires no SWMS (non-MLB company).
+// trade report, bound invoice artifact, and its family requires no SWMS
+// (non-MLB company).
 export function honestyFixtureTables(): Record<string, any[]> {
   return {
     jobs: [
@@ -151,7 +152,7 @@ export function honestyFixtureTables(): Record<string, any[]> {
         pack_kind: "main",
         status: "drafted",
         report_doc_id: "doc-physical-report",
-        invoice_doc_id: null,
+        invoice_doc_id: "doc-physical-invoice",
         swms_doc_id: null,
       },
     ],
@@ -165,7 +166,22 @@ export function honestyFixtureTables(): Record<string, any[]> {
       },
     ],
     xero_invoices: [],
-    job_documents: [],
+    job_documents: [
+      {
+        id: "doc-physical-report",
+        job_id: "job-physical-261241",
+        type: "makesafe_report",
+        file_name: "Make Safe Report - SWMS-261241.pdf",
+        storage_url: "https://documents.example/SWMS-261241-report.pdf",
+      },
+      {
+        id: "doc-physical-invoice",
+        job_id: "job-physical-261241",
+        type: "invoice",
+        file_name: "Draft Xero Invoice - INV-TEST.pdf",
+        storage_url: "https://documents.example/INV-TEST.pdf",
+      },
+    ],
     job_assignments: [],
     job_events: [],
   };

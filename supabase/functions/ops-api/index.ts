@@ -203,6 +203,12 @@ import {
   type MakesafeStatusInput,
 } from './makesafe_computed_status.ts'
 import {
+  makesafePackArtifactRequirements,
+  makesafeDocBooleans as sharedMakesafeDocBooleans,
+  makesafeReportDocumentTypesForFamily,
+  resolveMakesafePackDocumentPointers,
+} from './makesafe_document_truth.ts'
+import {
   evaluateMakesafeSubstatusGate,
   type MakesafeSubstatusGateResult,
 } from './makesafe_substatus_gate.ts'
@@ -15467,6 +15473,12 @@ export interface MakesafeReportPackLike {
   status?: string | null
   report_doc_id?: string | null
   invoice_doc_id?: string | null
+  /** Exact pointer resolves to the expected job_documents row on this card. */
+  report_doc_resolved?: boolean
+  invoice_doc_resolved?: boolean
+  swms_doc_resolved?: boolean
+  /** Current SES invoice applicability carried into operator presentation. */
+  pricing_disposition?: string | null
   xero_invoice_id?: string | null
   invoice_status?: string | null
   /** Exact prior-cycle adoption proved by the bound invoice document snapshot. */
@@ -15929,34 +15941,7 @@ function makesafeInvoiceStatus(boardStage: string, invoice: any): string {
 //     rows the skill has not re-typed yet).
 // Fail-closed: an unknown/other type counts for no kind; empty docs -> all false.
 function makesafeDocBooleans(docRows: any[] | null | undefined) {
-  const rows = docRows || []
-  const isFallbackType = (t: string) => t === '' || t === 'general'
-  const nameOf = (d: any) => String(d?.file_name || '').toLowerCase()
-  const typeOf = (d: any) => String(d?.type || '').toLowerCase()
-  // SWMS filename fallback must NOT catch the make-safe job-number prefix
-  // `SWMS-NNNNN`, which appears in most attached filenames. Match "swms" only
-  // when it is not the job-number token (not immediately followed by hyphen+digit).
-  const swmsInName = (name: string) => /swms(?![-\s]?\d)/i.test(name)
-  // A row counts for `canonicalType` when its type IS that type, or when the row
-  // is untyped/'general' and the filename fallback matches.
-  const has = (canonicalType: string, nameMatches: (name: string) => boolean) =>
-    rows.some((d: any) => {
-      const t = typeOf(d)
-      if (t === canonicalType) return true
-      if (isFallbackType(t)) return nameMatches(nameOf(d))
-      return false
-    })
-  return {
-    // has_wo stays type-only (no legacy filename WO fallback) — never inferred
-    // from a filename to avoid a stray 'general' file spoofing a work order.
-    has_wo: rows.some((d: any) =>
-      typeOf(d) === 'work_order' &&
-      !_isSelfGeneratedMakesafeWorkOrder(d?.file_name || d?.storage_url)
-    ),
-    has_report_doc: has('makesafe_report', (n) => n.includes('make safe report')),
-    has_invoice_doc: has('invoice', (n) => n.includes('invoice')),
-    has_swms_doc: has('swms', (n) => swmsInName(n)),
-  }
+  return sharedMakesafeDocBooleans(docRows)
 }
 // Test-only export for the chip-truth doc-boolean derivation.
 export const _makesafeDocBooleansForTest = makesafeDocBooleans
@@ -16156,6 +16141,22 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   const scopedAssignments = scoped.assignments
   const scopedReport = scoped.serviceReport
   const scopedPack = scoped.pack
+  const scopedFamily = canonicalSesFamilyFromCard({
+    makesafe_job_family: j?.metadata?.makesafe_job_family ||
+      detail?.report_type,
+    insurance_job_type: j?.metadata?.insurance_job_type,
+    own_template_requested: j?.metadata?.own_template_requested,
+    strata: j?.metadata?.strata,
+    report_delivery: j?.metadata?.report_delivery || detail?.report_delivery,
+  })
+  const scopedPackPointerResolution = resolveMakesafePackDocumentPointers(
+    scopedPack,
+    docRows || [],
+    {
+      report_document_types:
+        makesafeReportDocumentTypesForFamily(scopedFamily),
+    },
+  )
   const scopedPackSent = packSent === undefined ? undefined : scoped.packSent
   // Suppress closeout drivers (invoiceDone / sentClosed) on reattend while
   // still exposing invoice_status for commercial warning visibility.
@@ -16409,6 +16410,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       report_doc_id: scopedPack.report_doc_id || null,
       invoice_doc_id: scopedPack.invoice_doc_id || null,
       swms_doc_id: scopedPack.swms_doc_id || null,
+      ...scopedPackPointerResolution,
       review_state: scopedPack.review_state || null,
       sent_at: scopedPack.sent_at || null,
       docket_revision_id: scopedPack.docket_revision_id || null,
@@ -17700,6 +17702,7 @@ async function makesafePipeline(
   // by the shared surfacing predicate (drafted-not-sent / resume / sent-closed).
   let packMap: Record<string, MakesafeReportPackLike> = {}
   let docketMap: Record<string, any> = {}
+  let obligationMap: Record<string, any> = {}
   let packCyclesByPackId: Record<string, any[]> = {}
   const captainActionMap: Record<string, any> = {}
   // assignMap / packSentMap: filled in the same dependent wave as details.
@@ -17740,6 +17743,7 @@ async function makesafePipeline(
       packs,
       packCycles,
       dockets,
+      obligations,
       attention,
       assigns,
       packSent,
@@ -17781,7 +17785,7 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'job_documents',
-          'id, job_id, type, file_name, bind_source:data_snapshot_json->source, bind_only:data_snapshot_json->bind_only, named_prior_cycle_bind:data_snapshot_json->named_prior_cycle_bind, bound_xero_invoice_id:data_snapshot_json->xero_invoice_id',
+          'id, job_id, type, file_name, storage_url, pdf_url, bind_source:data_snapshot_json->source, bind_only:data_snapshot_json->bind_only, named_prior_cycle_bind:data_snapshot_json->named_prior_cycle_bind, bound_xero_invoice_id:data_snapshot_json->xero_invoice_id',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -17805,7 +17809,15 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'makesafe_docket_revisions_current',
-          'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, committed_at',
+          'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, invoice_obligation_revision_id, committed_at',
+          stageDependentJobIds,
+        )
+        : emptyRows,
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'makesafe_invoice_obligation_revisions_current',
+          'id, job_id, pricing_disposition',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -17850,6 +17862,12 @@ async function makesafePipeline(
       }
     }
     docketMap = firstByJobId(dockets || [])
+    obligationMap = Object.fromEntries(
+      (obligations || []).filter((row: any) => row?.id).map((row: any) => [
+        row.id,
+        row,
+      ]),
+    )
     for (const mark of (attention || [])) {
       if (mark?.job_id) captainActionMap[mark.job_id] = mark
     }
@@ -17874,6 +17892,22 @@ async function makesafePipeline(
 
   for (const j of (jobs || [])) {
     const rowPack = packMap[j.id]
+    const detail = detailsMap[j.id] || null
+    const sesFamily = canonicalSesFamilyFromCard({
+      makesafe_job_family: j.metadata?.makesafe_job_family ||
+        detail?.report_type,
+      insurance_job_type: j.metadata?.insurance_job_type,
+      own_template_requested: j.metadata?.own_template_requested,
+      strata: j.metadata?.strata,
+      report_delivery: j.metadata?.report_delivery || detail?.report_delivery,
+    })
+    const packPointerResolution = resolveMakesafePackDocumentPointers(
+      rowPack,
+      docsMap[j.id] || [],
+      {
+        report_document_types: makesafeReportDocumentTypesForFamily(sesFamily),
+      },
+    )
     const namedPriorCycleInvoice = selectNamedPriorCycleBoundInvoiceForPlacement({
       job: j,
       detail: detailsMap[j.id] || null,
@@ -17881,7 +17915,6 @@ async function makesafePipeline(
       documents: docsMap[j.id] || [],
       invoices: invoiceRows,
     })
-    const detail = detailsMap[j.id] || null
     const packCycle = rowPack?.id
       ? (packCyclesByPackId[rowPack.id] || []).find((pc: any) =>
         String(pc?.attendance_cycle_id || '') === String(detail?.attendance_cycle_id || '') &&
@@ -17891,6 +17924,13 @@ async function makesafePipeline(
       packCycle.cycle_attribution === 'bound' &&
       String(packCycle.attendance_cycle_id || '') === String(detail?.attendance_cycle_id || '')
     const docket = docketMap[j.id]
+    const obligation = docket?.invoice_obligation_revision_id
+      ? obligationMap[docket.invoice_obligation_revision_id] || null
+      : null
+    const artifactRequirements = makesafePackArtifactRequirements({
+      ses_family: sesFamily,
+      pricing_disposition: obligation?.pricing_disposition,
+    })
     const docketIsCurrent = !!docket &&
       String(docket.current_attendance_cycle_id || '') ===
         String(detail?.attendance_cycle_id || '')
@@ -17901,8 +17941,9 @@ async function makesafePipeline(
       legacyStatus === 'authorised_not_sent'
     // Pack presentation honesty: a ready U4 docket never publishes stale legacy
     // `failed`, and a refused docket names its reason instead of green-ticking.
-    // Attach tick is not a bind: physical families need report_doc_id, and
-    // report-only families still need report-in evidence before looking ready.
+    // Attach/portal truth is not a send bind. Required report/invoice artifacts
+    // and family-gated SWMS must resolve exactly; assessment and no-charge
+    // releases keep their explicit no-local-artifact exceptions.
     // Operator-facing pre_xero_docs_ready / review_state follow the same honesty
     // gate as the board projection (kind === ready AND docket stamp). The raw
     // docket stamp is preserved on docket_pre_xero_docs_ready so the board can
@@ -17957,13 +17998,20 @@ async function makesafePipeline(
       has_report_doc: hasReportDoc,
       has_trade_report: !!reportMap[j.id],
       report_doc_id: rowPack?.report_doc_id || null,
-      requires_bound_report_doc: needsBoundReportPdf,
+      report_doc_resolved: packPointerResolution.report_doc_resolved,
+      requires_bound_report_doc:
+        artifactRequirements.requires_bound_report_doc,
+      invoice_doc_id: rowPack?.invoice_doc_id || null,
+      invoice_doc_resolved: packPointerResolution.invoice_doc_resolved,
+      requires_bound_invoice_doc:
+        artifactRequirements.requires_bound_invoice_doc,
       swms_doc_id: rowPack?.swms_doc_id || null,
+      swms_doc_resolved: packPointerResolution.swms_doc_resolved,
       requires_bound_swms: _requiresMakesafeSwms(detail, j),
       family_report_evidence_satisfied: familyReportEvidenceSatisfied,
     })
-    // Honesty gate matches the board projection: missing binds / family
-    // evidence cannot publish pre_xero_docs_ready or review_state READY.
+    // Honesty gate matches the board projection: missing/unresolved binds or
+    // family evidence cannot publish pre_xero_docs_ready or review_state READY.
     // A synthetic pack block is never minted for a card with no row and no
     // docket, so M1's `!pack` short-circuit keeps firing.
     const honestyReady = packPresentation.kind === 'ready' && docketPreXero
@@ -17992,6 +18040,8 @@ async function makesafePipeline(
         docket_pre_xero_docs_ready: docketPreXero,
         blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
         cycle_attribution: docketIsCurrent ? 'bound' : null,
+        pricing_disposition: obligation?.pricing_disposition || null,
+        ...packPointerResolution,
         ...packHonestyFields,
       }
       : rowPack
@@ -17999,6 +18049,8 @@ async function makesafePipeline(
         ...rowPack,
         named_prior_cycle_bind: !!namedPriorCycleInvoice,
         cycle_attribution: packIsCurrent ? 'bound' : null,
+        pricing_disposition: obligation?.pricing_disposition || null,
+        ...packPointerResolution,
         ...(docket
           ? {
             honesty_docket_revision_id: docket.id,

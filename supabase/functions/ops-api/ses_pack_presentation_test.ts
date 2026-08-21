@@ -219,11 +219,71 @@ Deno.test("physical ready stamp with bound report_doc_id stays ready", () => {
       blockers: [],
     },
     report_doc_id: "doc-report",
+    report_doc_resolved: true,
     requires_bound_report_doc: true,
   });
   assertEquals(p.kind, "ready");
   assertEquals(p.review_state, "READY");
   assertEquals(p.pre_xero_docs_ready, true);
+});
+
+Deno.test("ready stamp with a dangling report_doc_id is incomplete", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-dangling-report",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report-missing",
+    report_doc_resolved: false,
+    requires_bound_report_doc: true,
+  });
+  assertEquals(p.kind, "incomplete");
+  assertEquals(p.pre_xero_docs_ready, false);
+  assertStringIncludes(p.reason || "", "does not resolve");
+  assertStringIncludes(p.reason || "", "report_doc_id");
+});
+
+Deno.test("ready stamp without its required invoice_doc_id is incomplete", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-no-invoice-bind",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    report_doc_resolved: true,
+    requires_bound_report_doc: true,
+    invoice_doc_id: null,
+    requires_bound_invoice_doc: true,
+  });
+  assertEquals(p.kind, "incomplete");
+  assertEquals(p.review_state, "U4_BLOCKED");
+  assertEquals(p.pre_xero_docs_ready, false);
+  assertStringIncludes(p.reason || "", "invoice_doc_id");
+});
+
+Deno.test("ready stamp with a dangling invoice_doc_id is incomplete", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-dangling-invoice",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    report_doc_resolved: true,
+    requires_bound_report_doc: true,
+    invoice_doc_id: "doc-invoice-missing",
+    invoice_doc_resolved: false,
+    requires_bound_invoice_doc: true,
+  });
+  assertEquals(p.kind, "incomplete");
+  assertEquals(p.pre_xero_docs_ready, false);
+  assertStringIncludes(p.reason || "", "does not resolve");
+  assertStringIncludes(p.reason || "", "invoice_doc_id");
 });
 
 Deno.test("required-SWMS ready stamp without swms_doc_id is incomplete — attach is not a bind", () => {
@@ -235,6 +295,7 @@ Deno.test("required-SWMS ready stamp without swms_doc_id is incomplete — attac
       blockers: [],
     },
     report_doc_id: "doc-report",
+    report_doc_resolved: true,
     requires_bound_report_doc: true,
     swms_doc_id: null,
     requires_bound_swms: true,
@@ -254,13 +315,39 @@ Deno.test("required-SWMS ready stamp with bound swms_doc_id stays ready", () => 
       blockers: [],
     },
     report_doc_id: "doc-report",
+    report_doc_resolved: true,
     requires_bound_report_doc: true,
     swms_doc_id: "doc-swms",
+    swms_doc_resolved: true,
     requires_bound_swms: true,
   });
   assertEquals(p.kind, "ready");
   assertEquals(p.review_state, "READY");
   assertEquals(p.pre_xero_docs_ready, true);
+});
+
+Deno.test("required-SWMS ready stamp with a dangling swms_doc_id is incomplete", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-dangling-swms",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    report_doc_resolved: true,
+    requires_bound_report_doc: true,
+    invoice_doc_id: "doc-invoice",
+    invoice_doc_resolved: true,
+    requires_bound_invoice_doc: true,
+    swms_doc_id: "doc-swms-missing",
+    swms_doc_resolved: false,
+    requires_bound_swms: true,
+  });
+  assertEquals(p.kind, "incomplete");
+  assertEquals(p.pre_xero_docs_ready, false);
+  assertStringIncludes(p.reason || "", "does not resolve");
+  assertStringIncludes(p.reason || "", "swms_doc_id");
 });
 
 Deno.test("assessment ready stamp without family report evidence is not send-ready", () => {
@@ -296,8 +383,10 @@ Deno.test("physical bound pack stays honesty-ready for pipeline pre_xero gate (2
       blockers: [],
     },
     report_doc_id: "doc-report",
+    report_doc_resolved: true,
     requires_bound_report_doc: true,
     swms_doc_id: "doc-swms",
+    swms_doc_resolved: true,
     requires_bound_swms: true,
     family_report_evidence_satisfied: true,
   });
