@@ -361,7 +361,13 @@ Deno.test("curated bind is routed, source-surface declared and has no effect aut
   assertStringIncludes(implementation, "cycle_attribution: 'bound'");
   assertStringIncludes(implementation, "prior_data_snapshot_json: prior");
   assertStringIncludes(implementation, "requireCuratedBindSha256");
+  assertStringIncludes(implementation, "recoverCuratedBindDocumentBytes(");
   assertStringIncludes(INDEX, "CURATED_BIND_SHA256_RE");
+  assertStringIncludes(INDEX, "async function persistMakesafeDocumentPdfBytes(");
+  assertStringIncludes(
+    INDEX,
+    "async function recoverCuratedBindDocumentBytes(",
+  );
   // Prior poisoned provenance is preserved in the audit event, not deleted
   // as a permanent gate on exact verified replacement bytes.
   assert(
