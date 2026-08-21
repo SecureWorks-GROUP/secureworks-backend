@@ -361,7 +361,52 @@ Deno.test("curated bind is routed, source-surface declared and has no effect aut
   assertStringIncludes(implementation, "cycle_attribution: 'bound'");
   assertStringIncludes(implementation, "prior_data_snapshot_json: prior");
   assertStringIncludes(implementation, "requireCuratedBindSha256");
+  assertStringIncludes(implementation, "recoverCuratedBindDocumentBytes(");
+  assertStringIncludes(implementation, "persistRecoveredCuratedBindDocumentBytes(");
   assertStringIncludes(INDEX, "CURATED_BIND_SHA256_RE");
+  assertStringIncludes(INDEX, "async function persistMakesafeDocumentPdfBytes(");
+  assertStringIncludes(
+    INDEX,
+    "async function recoverCuratedBindDocumentBytes(",
+  );
+  assertStringIncludes(
+    INDEX,
+    "async function persistRecoveredCuratedBindDocumentBytes(",
+  );
+  assertStringIncludes(
+    INDEX,
+    "sourceResponse.status !== 400 && sourceResponse.status !== 404",
+  );
+  assertStringIncludes(INDEX, "curated_bind_document_bytes_persist_refused");
+  {
+    const recoverCall = implementation.indexOf(
+      "recoverCuratedBindDocumentBytes(",
+    );
+    const evidenceCall = implementation.indexOf(
+      "assertCurrentWikiSourceEvidence(",
+    );
+    const persistCall = implementation.indexOf(
+      "persistRecoveredPlaceholderIfNeeded()",
+    );
+    const lastPersist = implementation.lastIndexOf(
+      "persistRecoveredPlaceholderIfNeeded()",
+    );
+    const casMarker = implementation.lastIndexOf(
+      "data_snapshot_json: exactSnapshot",
+    );
+    assert(
+      recoverCall >= 0 && evidenceCall > recoverCall,
+      "inspect recover must run before source-evidence",
+    );
+    assert(
+      persistCall > evidenceCall,
+      "placeholder persist must run after source-evidence",
+    );
+    assert(
+      casMarker > lastPersist && lastPersist > 0,
+      "placeholder persist must run before the version CAS",
+    );
+  }
   // Prior poisoned provenance is preserved in the audit event, not deleted
   // as a permanent gate on exact verified replacement bytes.
   assert(

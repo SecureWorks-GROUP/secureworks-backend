@@ -8,6 +8,7 @@ import {
   _attachCurrentWikiCuratedReportForTest,
   _bindCurrentCycleCuratedMakesafeReportForTest,
   _makesafeRenderReportForTest,
+  _setMakesafeDocumentStorageAdminForTest,
   ApiError,
   bertramProtectedReportRepairPlan,
   canonicalMakesafeReportJob,
@@ -132,6 +133,8 @@ function bindClient(
     jobType?: string;
     documentJobId?: string;
     documentType?: string;
+    fileName?: string;
+    documentPdfUrl?: string | null;
     visibleToTrades?: boolean;
     documentCycleId?: string | null;
     documentCycleAttribution?: string | null;
@@ -154,8 +157,10 @@ function bindClient(
     id: "document-fixture",
     job_id: options.documentJobId || "job-fixture",
     type: options.documentType || "makesafe_report",
-    file_name: "privacy-safe-report.pdf",
-    pdf_url: "https://storage.example.test/privacy-safe-report.pdf",
+    file_name: options.fileName || "privacy-safe-report.pdf",
+    pdf_url: options.documentPdfUrl === undefined
+      ? "https://storage.example.test/privacy-safe-report.pdf"
+      : options.documentPdfUrl,
     storage_url: null,
     visible_to_trades: options.visibleToTrades ?? true,
     attendance_cycle_id: options.documentCycleId === undefined
@@ -269,6 +274,12 @@ function bindClient(
                 | string
                 | null;
             }
+            if ("pdf_url" in values) {
+              document.pdf_url = values.pdf_url as string;
+            }
+            if ("storage_url" in values) {
+              document.storage_url = values.storage_url as string | null;
+            }
           }
           return query;
         },
@@ -366,6 +377,56 @@ async function withStoredPdf<T>(bytes: Uint8Array, run: () => Promise<T>) {
   } finally {
     globalThis.fetch = originalFetch;
   }
+}
+
+async function withMissingStoredPdf<T>(run: () => Promise<T>) {
+  return await withHttpStatus(400, run);
+}
+
+async function withHttpStatus<T>(status: number, run: () => Promise<T>) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(new Response("", { status }));
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function withFetchThrow<T>(run: () => Promise<T>) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new Error("timeout"));
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function withDocumentStorageAdmin(opts?: { failUpload?: boolean }) {
+  const uploads: Array<{ path: string; bytes: Uint8Array }> = [];
+  _setMakesafeDocumentStorageAdminForTest(() => ({
+    storage: {
+      createBucket: async () => ({}),
+      from: () => ({
+        upload: async (path: string, bytes: Uint8Array) => {
+          if (opts?.failUpload) return { error: { message: "denied" } };
+          uploads.push({ path, bytes });
+          return { error: null };
+        },
+        getPublicUrl: (path: string) => ({
+          data: {
+            publicUrl:
+              `https://storage.example.test/object/public/job-documents/${path}`,
+          },
+        }),
+      }),
+    },
+  }));
+  return {
+    uploads,
+    restore: () => _setMakesafeDocumentStorageAdminForTest(null),
+  };
 }
 
 async function expectedSuccessShape(
@@ -511,6 +572,370 @@ Deno.test("first bind fills a null main-pack report_doc_id after every evidence 
     "job_documents",
     "makesafe_report_packs",
   ]);
+});
+
+Deno.test("missing stored object plus matching pdf_base64 persists onto the attached row then binds", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nbertram missing-object fixture");
+  const fileName =
+    "Make Safe Report - AJBR-71320 - Unit 1 6 Hero Cres Bertram.pdf";
+  const { client, document, mutations, pack } = bindClient(bytes, {
+    fileName,
+    pack: draftedPack(),
+  });
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const result = await withMissingStoredPdf(() =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      )
+    );
+    assertEquals(
+      result,
+      await expectedSuccessShape(
+        bytes,
+        body.report_job as Record<string, unknown>,
+        {
+          skipped: false,
+          writes: 2,
+          documentVersion: 2,
+          packPointer: {
+            pack_report_doc_id: "document-fixture",
+            pack_pointer_written: true,
+            pack_pointer_reason: "bound",
+          },
+        },
+      ),
+    );
+    assertEquals(storage.uploads.length, 1);
+    assertEquals(
+      storage.uploads[0].path,
+      "job-fixture/Make_Safe_Report_-_AJBR-71320_-_Unit_1_6_Hero_Cres_Bertram.pdf",
+    );
+    assertEquals(
+      await sesSha256Bytes(storage.uploads[0].bytes),
+      await sesSha256Bytes(bytes),
+    );
+    assertEquals(
+      document.pdf_url,
+      "https://storage.example.test/object/public/job-documents/job-fixture/Make_Safe_Report_-_AJBR-71320_-_Unit_1_6_Hero_Cres_Bertram.pdf",
+    );
+    assertEquals(
+      (pack as Record<string, unknown>).report_doc_id,
+      "document-fixture",
+    );
+    assertEquals(mutations.map((item) => item.table), [
+      "job_documents",
+      "job_events",
+      "job_documents",
+      "makesafe_report_packs",
+    ]);
+    assertEquals(
+      Object.keys(mutations[0].values).sort(),
+      ["pdf_url", "storage_url"],
+    );
+    assertEquals(document.version, 2);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("storage GET 404 plus matching pdf_base64 persists onto the attached row", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\n404 missing-object fixture");
+  const { client, document } = bindClient(bytes);
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const result = await withHttpStatus(404, () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      )
+    );
+    assertEquals(result.success, true);
+    assertEquals(result.writes, 2);
+    assertEquals(storage.uploads.length, 1);
+    assertEquals(document.pdf_url.startsWith("https://"), true);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("empty document URL plus matching pdf_base64 persists without fetching", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nempty url persist fixture");
+  const { client, document } = bindClient(bytes, {
+    documentPdfUrl: "",
+  });
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin();
+  const originalFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = ((..._args: unknown[]) => {
+    fetched = true;
+    return Promise.reject(new Error("must not fetch"));
+  }) as typeof fetch;
+  try {
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      body,
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+    assertEquals(result.writes, 2);
+    assertEquals(fetched, false);
+    assertEquals(storage.uploads.length, 1);
+    assertEquals(document.pdf_url.startsWith("https://"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
+Deno.test("missing stored object refuses persist_failed when storage write fails", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\npersist fail fixture");
+  const { client, mutations } = bindClient(bytes);
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin({ failUpload: true });
+  try {
+    const error = await assertRejects(
+      () =>
+        withMissingStoredPdf(() =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          )
+        ),
+      ApiError,
+      "could not be written to the attached document storage",
+    );
+    assertEquals((error as ApiError).status, 503);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_document_bytes_persist_failed",
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("fetch timeout stays read_failed and does not persist supplied bytes", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ntimeout no-overwrite fixture");
+  const { client, mutations } = bindClient(bytes);
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const error = await assertRejects(
+      () =>
+        withFetchThrow(() =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          )
+        ),
+      ApiError,
+      "existing makesafe_report byte recovery failed",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_document_bytes_read_failed",
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("live stored bytes that drift from pdf_base64 still mismatch and do not persist", async () => {
+  const stored = new TextEncoder().encode("%PDF-1.7\nlive stored fixture");
+  const supplied = new TextEncoder().encode("%PDF-1.7\ncaller different fixture");
+  const { client, mutations } = bindClient(stored);
+  const body = await bindBody(supplied);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const error = await assertRejects(
+      () =>
+        withStoredPdf(
+          stored,
+          () =>
+            _bindCurrentCycleCuratedMakesafeReportForTest(
+              client,
+              body,
+              FIXTURE_ACTOR,
+            ),
+        ),
+      ApiError,
+      "bytes drift from the curated artifact",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_document_bytes_mismatch",
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("storage GET 5xx / 403 / 429 fail closed and do not persist", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nnon-missing status fixture");
+  for (const status of [403, 429, 500, 502, 503]) {
+    const { client, mutations } = bindClient(bytes);
+    const body = await bindBody(bytes);
+    const storage = withDocumentStorageAdmin();
+    try {
+      const error = await assertRejects(
+        () =>
+          withHttpStatus(status, () =>
+            _bindCurrentCycleCuratedMakesafeReportForTest(
+              client,
+              body,
+              FIXTURE_ACTOR,
+            )
+          ),
+        ApiError,
+        "existing makesafe_report byte recovery failed",
+      );
+      assertEquals((error as ApiError).status, 409);
+      assertEquals(
+        ((error as ApiError).body as Record<string, unknown>).code,
+        "curated_bind_document_bytes_read_failed",
+      );
+      assertEquals(storage.uploads.length, 0, `status ${status} must not persist`);
+      assertEquals(mutations.length, 0);
+    } finally {
+      storage.restore();
+    }
+  }
+});
+
+Deno.test("missing object plus a differing prior curated hash refuses persist", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nprior hash conflict fixture");
+  const { client, mutations } = bindClient(bytes, {
+    prior: {
+      curated_source_expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+      curated_source_artifact_content_hash: `sha256:${"b".repeat(64)}`,
+    },
+  });
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const error = await assertRejects(
+      () =>
+        withMissingStoredPdf(() =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          )
+        ),
+      ApiError,
+      "prior curated report hash differs from the supplied artifact",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_document_bytes_persist_refused",
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("missing object does not persist when a later source-evidence gate refuses", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ngate-order evidence fixture");
+  const { client, mutations } = bindClient(bytes, {
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: {
+        materials_used: ["Star pickets x 4", "Tarps / roof materials"],
+      },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  const body: Record<string, unknown> = await bindBody(bytes);
+  body.report_job = {
+    ...(body.report_job as Record<string, unknown>),
+    materials: "Star pickets x 4; Temporary fence panels x 2",
+    materials_evidence: {
+      state: "recorded_used",
+      items: ["Star pickets x 4", "Temporary fence panels x 2"],
+    },
+  };
+  const storage = withDocumentStorageAdmin();
+  try {
+    const error = await assertRejects(
+      () =>
+        withMissingStoredPdf(() =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          )
+        ),
+      ApiError,
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+    assertEquals(
+      String((error as ApiError).message).includes("bytes could not be written"),
+      false,
+    );
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("missing object does not persist when a later document-conflict gate refuses", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ngate-order conflict fixture");
+  const { client, mutations } = bindClient(bytes, {
+    documentCycleId: null,
+    documentCycleAttribution: null,
+    prior: {
+      curated_source_identity: "curation-revision:old/artifact:old",
+    },
+  });
+  const body = await bindBody(bytes);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const error = await assertRejects(
+      () =>
+        withMissingStoredPdf(() =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          )
+        ),
+      ApiError,
+      "document already has a conflicting curated source bind",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_document_conflict",
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    storage.restore();
+  }
 });
 
 Deno.test("idempotent-exact document re-bind still fills a null pack pointer (the five-card gap)", async () => {

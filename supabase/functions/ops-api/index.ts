@@ -36826,6 +36826,54 @@ async function attachEmailAttachmentToJob(
 // the `job-documents` bucket. Idempotent on (job_id, type, file_name): an
 // existing row of the same type+file_name is updated (version bumped) instead of
 // inserting a duplicate — mirrors the work-order attach pattern.
+function defaultMakesafeDocumentStorageAdmin() {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+}
+
+let makesafeDocumentStorageAdminFactory = defaultMakesafeDocumentStorageAdmin
+
+export function _setMakesafeDocumentStorageAdminForTest(
+  factory: (() => any) | null,
+) {
+  makesafeDocumentStorageAdminFactory =
+    factory || defaultMakesafeDocumentStorageAdmin
+}
+
+/**
+ * Typed job-documents PDF persist. Shared by attach_makesafe_document (the
+ * upload verb) and curated bind's missing-object recovery. Path convention
+ * matches attach: `${jobId}/${sanitized file_name}`, upsert.
+ */
+async function persistMakesafeDocumentPdfBytes(args: {
+  jobId: string
+  fileName: string
+  bytes: Uint8Array
+}): Promise<{ publicUrl: string; storagePath: string }> {
+  const bucket = 'job-documents'
+  const storagePath = `${args.jobId}/${
+    String(args.fileName || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+  }`
+  const adminClient = makesafeDocumentStorageAdminFactory()
+  try {
+    await adminClient.storage.createBucket(bucket, { public: true })
+  } catch { /* exists */ }
+  const { error: upErr } = await adminClient.storage
+    .from(bucket)
+    .upload(storagePath, args.bytes, {
+      contentType: 'application/pdf',
+      upsert: true,
+    })
+  if (upErr) throw new Error('Storage upload failed: ' + upErr.message)
+  const { data: urlData } = adminClient.storage.from(bucket).getPublicUrl(
+    storagePath,
+  )
+  const publicUrl = String(urlData?.publicUrl || '')
+  if (!publicUrl.startsWith('https://')) {
+    throw new Error('Storage public URL was not issued')
+  }
+  return { publicUrl, storagePath }
+}
+
 async function attachMakesafeDocument(
   client: any,
   body: any,
@@ -36877,22 +36925,19 @@ async function attachMakesafeDocument(
     `${type}-${jId}.pdf`
   const fileName = rawName || `${type}-${jId}.pdf`
 
-  const bucket = 'job-documents'
   let publicUrl: string
   let storagePath: string
 
   if (pdfBase64) {
     // Upload bytes — mirrors the create_makesafe_job PDF upload path.
     const pdfBuffer = Uint8Array.from(atob(pdfBase64), (c) => c.charCodeAt(0))
-    storagePath = `${jId}/${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-    const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    try { await adminClient.storage.createBucket(bucket, { public: true }) } catch { /* exists */ }
-    const { error: upErr } = await adminClient.storage
-      .from(bucket)
-      .upload(storagePath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
-    if (upErr) throw new Error('Storage upload failed: ' + upErr.message)
-    const { data: urlData } = adminClient.storage.from(bucket).getPublicUrl(storagePath)
-    publicUrl = urlData?.publicUrl || ''
+    const uploaded = await persistMakesafeDocumentPdfBytes({
+      jobId: jId,
+      fileName,
+      bytes: pdfBuffer,
+    })
+    storagePath = uploaded.storagePath
+    publicUrl = uploaded.publicUrl
   } else {
     // Already-in-storage URL path.
     publicUrl = url as string
@@ -38820,12 +38865,150 @@ async function ensureCuratedReportPackPointer(
  *   curation_revision_id, curation_artifact_id
  * }
  *
+ * Inspect already-validated caller PDF bytes against the attached document's
+ * storage object. Does not persist. GET ok compares; drift is mismatch.
+ * Persist is eligible only for an unbound placeholder (no https URL) or a
+ * definitive missing object (GET 400/404). 5xx / 403 / 429 / other non-OK and
+ * fetch timeout stay read_failed. A prior curated hash that differs from the
+ * caller hashes refuses persist. The write itself is persistRecovered… after
+ * later 409 gates.
+ */
+type CuratedBindDocumentBytesRecoverPlan = {
+  kind: 'stored' | 'persist'
+}
+
+function curatedBindPriorHashDiffers(args: {
+  priorExpectedRawSha256: string | null
+  priorArtifactContentHash: string | null
+  suppliedRawHash: string
+  suppliedArtifactHash: string
+}): boolean {
+  const priorRaw = String(args.priorExpectedRawSha256 || '').trim()
+  const priorArtifact = String(args.priorArtifactContentHash || '').trim()
+  if (priorRaw && priorRaw !== args.suppliedRawHash) return true
+  if (priorArtifact && priorArtifact !== args.suppliedArtifactHash) return true
+  return false
+}
+
+async function recoverCuratedBindDocumentBytes(args: {
+  sourceUrl: string
+  suppliedBytes: Uint8Array
+  suppliedRawHash: string
+  suppliedArtifactHash: string
+  priorExpectedRawSha256: string | null
+  priorArtifactContentHash: string | null
+}): Promise<CuratedBindDocumentBytesRecoverPlan> {
+  const sourceUrl = String(args.sourceUrl || '')
+  if (sourceUrl.startsWith('https://')) {
+    let sourceResponse: Response
+    try {
+      sourceResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) })
+    } catch {
+      throw curatedBindError(
+        'curated_bind_document_bytes_read_failed',
+        'existing makesafe_report byte recovery failed',
+      )
+    }
+    if (sourceResponse.ok) {
+      const storedBytes = new Uint8Array(await sourceResponse.arrayBuffer())
+      if (
+        !storedBytes.byteLength ||
+        storedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES ||
+        new TextDecoder().decode(storedBytes.slice(0, 5)) !== '%PDF-' ||
+        storedBytes.byteLength !== args.suppliedBytes.byteLength ||
+        `sha256:${await sha256BytesHex(storedBytes)}` !== args.suppliedRawHash ||
+        await sesSha256Bytes(storedBytes) !== args.suppliedArtifactHash
+      ) {
+        throw curatedBindError(
+          'curated_bind_document_bytes_mismatch',
+          'existing makesafe_report bytes drift from the curated artifact',
+        )
+      }
+      return { kind: 'stored' }
+    }
+    // Bertram placeholder class: row exists, storage GET is 400/404. Any other
+    // non-OK (5xx, 403, 429, …) fails closed — do not persist an object we
+    // could not honestly call missing.
+    if (sourceResponse.status !== 400 && sourceResponse.status !== 404) {
+      throw curatedBindError(
+        'curated_bind_document_bytes_read_failed',
+        'existing makesafe_report byte recovery failed',
+      )
+    }
+  }
+
+  if (
+    curatedBindPriorHashDiffers({
+      priorExpectedRawSha256: args.priorExpectedRawSha256,
+      priorArtifactContentHash: args.priorArtifactContentHash,
+      suppliedRawHash: args.suppliedRawHash,
+      suppliedArtifactHash: args.suppliedArtifactHash,
+    })
+  ) {
+    throw curatedBindError(
+      'curated_bind_document_bytes_persist_refused',
+      'prior curated report hash differs from the supplied artifact; attach the new bytes first',
+    )
+  }
+  return { kind: 'persist' }
+}
+
+async function persistRecoveredCuratedBindDocumentBytes(args: {
+  client: any
+  jobId: string
+  documentId: string
+  fileName: string
+  bytes: Uint8Array
+}): Promise<void> {
+  let persisted: { publicUrl: string }
+  try {
+    persisted = await persistMakesafeDocumentPdfBytes({
+      jobId: args.jobId,
+      fileName: args.fileName,
+      bytes: args.bytes,
+    })
+  } catch {
+    throw curatedBindError(
+      'curated_bind_document_bytes_persist_failed',
+      'matching curated report bytes could not be written to the attached document storage',
+      503,
+    )
+  }
+  const { error: urlErr } = await args.client.from('job_documents').update({
+    storage_url: persisted.publicUrl,
+    pdf_url: persisted.publicUrl,
+  }).eq('id', args.documentId)
+  if (urlErr) {
+    throw curatedBindError(
+      'curated_bind_document_bytes_persist_failed',
+      'matching curated report bytes were stored but the document URL could not be updated',
+      503,
+    )
+  }
+}
+
+/**
+ * POST ops-api?action=bind_current_cycle_curated_makesafe_report
+ *
+ * Exact body:
+ * {
+ *   job_id, document_id,
+ *   pdf_base64, pdf_sha256,
+ *   report_job,
+ *   curation_revision_id, curation_artifact_id
+ * }
+ *
  * pdf_sha256 and every report_job photo content_sha256 use the single canonical
  * sha256:<64 lowercase hex> representation. Current cycle, renderer provenance,
  * artifact content hash and canonical input hash are server-derived. This binds
  * an already-attached, trade-visible makesafe_report and establishes its verified
- * current-cycle attribution. It never uploads, renders, sends, approves,
- * invoices, or changes job/board state.
+ * current-cycle attribution. It never creates a document, never overwrites live
+ * different bytes, and never renders, sends, approves, invoices, or changes
+ * job/board state. The one persist it may do is fill a missing storage object
+ * (GET 400/404 or unbound placeholder with no https URL) on that already-attached
+ * row when the caller supplied matching pdf_base64. Persist runs after visibility,
+ * cycle-conflict, source-evidence, and later 409 gates, still before the version
+ * CAS, so a refused bind never writes a public object or rewrites pdf_url.
  */
 async function bindCurrentCycleCuratedMakesafeReport(
   client: any,
@@ -38975,38 +39158,33 @@ async function bindCurrentCycleCuratedMakesafeReport(
       'document is registered to another or inconsistent attendance cycle',
     )
   }
-  const sourceUrl = String(document.pdf_url || document.storage_url || '')
-  if (!sourceUrl.startsWith('https://')) {
-    throw curatedBindError(
-      'curated_bind_document_bytes_unrecoverable',
-      'existing makesafe_report bytes are not recoverable',
-    )
-  }
-  let sourceResponse: Response
-  try {
-    sourceResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) })
-  } catch {
-    throw curatedBindError(
-      'curated_bind_document_bytes_read_failed',
-      'existing makesafe_report byte recovery failed',
-    )
-  }
-  if (!sourceResponse.ok) {
-    throw curatedBindError(
-      'curated_bind_document_bytes_read_failed',
-      'existing makesafe_report byte recovery failed',
-    )
-  }
-  const storedBytes = new Uint8Array(await sourceResponse.arrayBuffer())
-  if (!storedBytes.byteLength || storedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES ||
-      new TextDecoder().decode(storedBytes.slice(0, 5)) !== '%PDF-' ||
-      storedBytes.byteLength !== suppliedBytes.byteLength ||
-      `sha256:${await sha256BytesHex(storedBytes)}` !== suppliedRawHash ||
-      await sesSha256Bytes(storedBytes) !== suppliedArtifactHash) {
-    throw curatedBindError(
-      'curated_bind_document_bytes_mismatch',
-      'existing makesafe_report bytes drift from the curated artifact',
-    )
+  const priorForRecover = parseJsonObject(document.data_snapshot_json)
+  let recoverPlan = await recoverCuratedBindDocumentBytes({
+    sourceUrl: String(document.pdf_url || document.storage_url || ''),
+    suppliedBytes,
+    suppliedRawHash,
+    suppliedArtifactHash,
+    priorExpectedRawSha256: String(
+      priorForRecover.curated_source_expected_raw_sha256 || '',
+    ).trim() || (
+      /^[0-9a-f]{64}$/.test(String(priorForRecover.report_render_hash || '').trim())
+        ? `sha256:${String(priorForRecover.report_render_hash).trim()}`
+        : null
+    ),
+    priorArtifactContentHash: String(
+      priorForRecover.curated_source_artifact_content_hash || '',
+    ).trim() || null,
+  })
+  const persistRecoveredPlaceholderIfNeeded = async () => {
+    if (recoverPlan.kind !== 'persist') return
+    await persistRecoveredCuratedBindDocumentBytes({
+      client,
+      jobId,
+      documentId,
+      fileName: String(document.file_name || ''),
+      bytes: suppliedBytes,
+    })
+    recoverPlan = { kind: 'stored' }
   }
 
   // Recover blank Crew / Attendance from recorded evidence before the curated
@@ -39116,6 +39294,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
     // The document is already exactly bound, but the pack pointer may still be
     // null (the historical five-card gap). Ensure it here too, after every
     // evidence gate has passed, so an idempotent re-bind fills the pointer.
+    await persistRecoveredPlaceholderIfNeeded()
     const packPointer = await ensureCuratedReportPackPointer(
       client,
       jobId,
@@ -39152,6 +39331,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
         'curated source document has no stable version for compare-and-swap',
       )
     }
+    await persistRecoveredPlaceholderIfNeeded()
     const repair = await client.from('job_documents').update({
       attendance_cycle_id: attendanceCycleId,
       cycle_attribution: 'bound',
@@ -39225,6 +39405,8 @@ async function bindCurrentCycleCuratedMakesafeReport(
       'curated source document has no stable version for compare-and-swap',
     )
   }
+
+  await persistRecoveredPlaceholderIfNeeded()
 
   // First bind on a cycle is reserved once (cycle-scoped id). A content
   // supersession that has already passed every gate uses a content-scoped id so

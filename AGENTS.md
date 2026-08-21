@@ -2917,9 +2917,22 @@ snapshot **differs**, and **all eight** curated evidence gates pass again
 (materials, photos, contact, photo SHA-256, exact served-byte match, input hash,
 authoritative renderer constants, independent curation identity). The prior
 snapshot is archived on the audit event (`prior_data_snapshot_json`,
-`supersedes_prior_bind`); PDF bytes are never rewritten by the bind itself —
-overwrite storage first via `attach_makesafe_document` on the same
-`file_name`/document id, then re-bind. Supersession audit ids are content-scoped
+`supersedes_prior_bind`); PDF bytes are never rewritten by the bind itself when
+live stored bytes already exist — overwrite those first via
+`attach_makesafe_document` on the same `file_name`/document id, then re-bind.
+The one exception is a missing storage object on an already-attached
+unbound placeholder: when the caller supplied matching `pdf_base64` and GET is
+400/404 (or the row has no https URL), bind may persist those bytes onto that
+same row after visibility, cycle-conflict, source-evidence, and later 409
+gates, still before the version CAS (`recoverCuratedBindDocumentBytes` plans;
+`persistRecoveredCuratedBindDocumentBytes` writes). 5xx / 403 / 429 / other
+non-OK and fetch timeout stay `curated_bind_document_bytes_read_failed` and do
+not overwrite. A prior curated hash that differs from the caller hashes
+refuses persist (`curated_bind_document_bytes_persist_refused`). Bind never
+creates a document. `attach_makesafe_document` remains the upload verb and is
+already routine-allowlisted; the SecureSuite wrap `sw_attach_makesafe_document`
+belongs in `SecureWorks-GROUP/secureworks-jarvis` (`src/mcp-server.ts`), not
+this repo. Supersession audit ids are content-scoped
 over the WHOLE trusted identity (bytes, curation identity, input hash), not the
 bytes alone, so a re-curation of the same PDF is not refused forever as a
 reservation conflict. Do not clear curated markers by hand or weaken a gate to
