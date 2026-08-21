@@ -12,7 +12,10 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _attachMakesafeDocumentForTest } from "./index.ts";
+import {
+  _attachMakesafeDocumentForTest,
+  _setMakesafeDocumentStorageAdminForTest,
+} from "./index.ts";
 
 // ── Chainable in-memory job_documents stub ──
 // Stores rows in a shared array; supports the exact call shapes the function uses:
@@ -24,8 +27,13 @@ import { _attachMakesafeDocumentForTest } from "./index.ts";
 //   .from('makesafe_job_details').select().eq().maybeSingle()   → null (normal job, no report_type)
 type DB = { job_documents: any[]; job_events: any[]; business_events: any[] };
 
-function makeDocClient(db: DB, opts?: { reportType?: string | null }) {
+function makeDocClient(
+  db: DB,
+  opts?: { reportType?: string | null; selectBarrierCount?: number },
+) {
   let idSeq = 1;
+  let blockedSelects = 0;
+  let releaseBlockedSelect: (() => void) | null = null;
   function builder(table: string) {
     const preds: Array<(r: any) => boolean> = [];
     let pendingInsert: any = null;
@@ -41,16 +49,38 @@ function makeDocClient(db: DB, opts?: { reportType?: string | null }) {
         preds.push((r) => r?.[col] === val);
         return b;
       },
+      is: (col: string, val: any) => {
+        preds.push((r) => val === null ? r?.[col] == null : r?.[col] === val);
+        return b;
+      },
       limit: (_n: number) => {
-        const data = rowsFor().filter((r) => preds.every((p) => p(r)));
-        return Promise.resolve({ data, error: null });
+        const read = () => ({
+          data: rowsFor().filter((r) => preds.every((p) => p(r))),
+          error: null,
+        });
+        if (table === "job_documents" && opts?.selectBarrierCount) {
+          blockedSelects += 1;
+          if (blockedSelects < opts.selectBarrierCount) {
+            return new Promise((resolve) => {
+              releaseBlockedSelect = () => resolve(read());
+            });
+          }
+          const result = read();
+          releaseBlockedSelect?.();
+          releaseBlockedSelect = null;
+          return Promise.resolve(result);
+        }
+        return Promise.resolve(read());
       },
       // maybeSingle: used by the FIX-4 report-type gate on makesafe_job_details.
       // Returns a row with report_type set (when opts.reportType is non-null) or null.
       maybeSingle: () => {
         if (table === "makesafe_job_details") {
           const rt = opts?.reportType ?? null;
-          return Promise.resolve({ data: rt != null ? { report_type: rt } : null, error: null });
+          return Promise.resolve({
+            data: rt != null ? { report_type: rt } : null,
+            error: null,
+          });
         }
         return Promise.resolve({ data: null, error: null });
       },
@@ -61,8 +91,28 @@ function makeDocClient(db: DB, opts?: { reportType?: string | null }) {
           const chain: any = {
             select: (_c?: string) => ({
               single: () => {
+                const duplicate = db.job_documents.find((r) =>
+                  r.superseded_at == null &&
+                  pendingInsert.superseded_at == null &&
+                  r.job_id === pendingInsert.job_id &&
+                  r.type === pendingInsert.type &&
+                  r.file_name === pendingInsert.file_name
+                );
+                if (duplicate) {
+                  return Promise.resolve({
+                    data: null,
+                    error: {
+                      code: "23505",
+                      message:
+                        'duplicate key value violates unique constraint "ux_job_documents_makesafe_attach_key"',
+                    },
+                  });
+                }
                 db.job_documents.push(pendingInsert);
-                return Promise.resolve({ data: { id: pendingInsert.id }, error: null });
+                return Promise.resolve({
+                  data: { id: pendingInsert.id },
+                  error: null,
+                });
               },
             }),
             // terminal insert (no .select) — resolve when awaited
@@ -183,6 +233,119 @@ Deno.test("(b) idempotent: same type+file attached twice → one row, version bu
   assertEquals(db.job_documents[0].storage_url, STORED_URL + "?v2");
 });
 
+Deno.test("superseded attach rows do not block a new active document", async () => {
+  const db: DB = {
+    job_documents: [{
+      id: "superseded-doc",
+      job_id: "job-1",
+      type: "invoice",
+      file_name: "inv.pdf",
+      version: 1,
+      superseded_at: "2026-08-20T00:00:00Z",
+    }],
+    job_events: [],
+    business_events: [],
+  };
+  const client = makeDocClient(db);
+
+  const result = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-1",
+    type: "invoice",
+    url: STORED_URL + "?replacement",
+    file_name: "inv.pdf",
+  });
+
+  assertEquals(db.job_documents.length, 2);
+  assert(result.document_id !== "superseded-doc");
+  assertEquals(
+    db.job_documents.filter((row) => row.superseded_at == null).length,
+    1,
+  );
+});
+
+Deno.test("pdf_base64 attach uploads to the provisioned bucket without creating it", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db);
+  let createBucketCalls = 0;
+  let uploadedPath = "";
+  _setMakesafeDocumentStorageAdminForTest(() => ({
+    storage: {
+      createBucket: async () => {
+        createBucketCalls += 1;
+        return { data: null, error: null };
+      },
+      from: (_bucket: string) => ({
+        upload: async (path: string, _bytes: Uint8Array, _opts: any) => {
+          uploadedPath = path;
+          return { data: { path }, error: null };
+        },
+        getPublicUrl: (path: string) => ({
+          data: {
+            publicUrl:
+              `https://stub.invalid/storage/v1/object/public/job-documents/${path}`,
+          },
+        }),
+      }),
+    },
+  }));
+  try {
+    const result = await _attachMakesafeDocumentForTest(client, {
+      job_id: "job-1",
+      type: "makesafe_report",
+      pdf_base64: btoa("%PDF-1.4\n"),
+      file_name: "report.pdf",
+    });
+    assertEquals(result.success, true);
+    assertEquals(createBucketCalls, 0);
+    assertEquals(uploadedPath, "job-1/report.pdf");
+    assertEquals(db.job_documents.length, 1);
+  } finally {
+    _setMakesafeDocumentStorageAdminForTest(null);
+  }
+});
+
+Deno.test("concurrent retry of the same attach key converges on one active row", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db, { selectBarrierCount: 2 });
+
+  const [first, second] = await Promise.all([
+    _attachMakesafeDocumentForTest(client, {
+      job_id: "job-1",
+      type: "invoice",
+      url: STORED_URL,
+      file_name: "retry.pdf",
+    }),
+    _attachMakesafeDocumentForTest(client, {
+      job_id: "job-1",
+      type: "invoice",
+      url: STORED_URL + "?retry",
+      file_name: "retry.pdf",
+    }),
+  ]);
+
+  assertEquals(db.job_documents.length, 1);
+  assertEquals(first.document_id, second.document_id);
+  assertEquals(db.job_documents[0].version, 2);
+});
+
+Deno.test("migration owns the active MakeSafe attach key without rewriting document history", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20260821093825_makesafe_attach_document_idempotency.sql",
+      import.meta.url,
+    ),
+  );
+
+  assert(
+    sql.includes(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ux_job_documents_makesafe_attach_key",
+    ),
+  );
+  assert(sql.includes("ON public.job_documents (job_id, type, file_name)"));
+  assert(sql.includes("AND superseded_at IS NULL"));
+  assert(!/\bUPDATE\s+public\.job_documents\b/i.test(sql));
+});
+
 Deno.test("rejects unknown type", async () => {
   const db: DB = { job_documents: [], job_events: [], business_events: [] };
   const client = makeDocClient(db);
@@ -236,8 +399,14 @@ Deno.test("FIX 4 — attaching makesafe_report to a report-type job is REFUSED",
     threw = true;
     errMsg = e?.message || "";
   }
-  assert(threw, "expected attach to refuse makesafe_report on a report-type job");
-  assert(errMsg.includes("builder portal"), "error must mention the builder portal");
+  assert(
+    threw,
+    "expected attach to refuse makesafe_report on a report-type job",
+  );
+  assert(
+    errMsg.includes("builder portal"),
+    "error must mention the builder portal",
+  );
   // No doc row must have been inserted.
   assertEquals(db.job_documents.length, 0);
 });

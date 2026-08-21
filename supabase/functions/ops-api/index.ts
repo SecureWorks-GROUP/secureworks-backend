@@ -36885,9 +36885,6 @@ async function persistMakesafeDocumentPdfBytes(args: {
     String(args.fileName || '').replace(/[^a-zA-Z0-9._-]/g, '_')
   }`
   const adminClient = makesafeDocumentStorageAdminFactory()
-  try {
-    await adminClient.storage.createBucket(bucket, { public: true })
-  } catch { /* exists */ }
   const { error: upErr } = await adminClient.storage
     .from(bucket)
     .upload(storagePath, args.bytes, {
@@ -36982,13 +36979,8 @@ async function attachMakesafeDocument(
   const isVisible = body.visible_to_trades != null ? body.visible_to_trades : defaultVisible
   const isPdf = /\.pdf$/i.test(fileName)
 
-  // Idempotency: same job + type + file_name → update (bump version), else insert.
-  const { data: existing } = await client.from('job_documents')
-    .select('id, version, data_snapshot_json').eq('job_id', jId).eq('type', type).eq('file_name', fileName).limit(1)
-
-  let docId: string
-  if (existing && existing.length > 0) {
-    const nextVersion = (existing[0].version || 1) + 1
+  const updateExistingAttachDocument = async (existingRow: any) => {
+    const nextVersion = (existingRow.version || 1) + 1
     const updateData: any = {
       storage_url: publicUrl,
       visible_to_trades: isVisible,
@@ -36996,7 +36988,7 @@ async function attachMakesafeDocument(
     }
     if (trustedDocumentFacts.data_snapshot_json) {
       updateData.data_snapshot_json = {
-        ...(existing[0].data_snapshot_json || {}),
+        ...(existingRow.data_snapshot_json || {}),
         ...trustedDocumentFacts.data_snapshot_json,
       }
     }
@@ -37006,9 +36998,26 @@ async function attachMakesafeDocument(
     }
     if (isPdf) updateData.pdf_url = publicUrl
     const { error: updErr } = await client.from('job_documents')
-      .update(updateData).eq('id', existing[0].id)
+      .update(updateData).eq('id', existingRow.id)
     if (updErr) throw updErr
-    docId = existing[0].id
+    return existingRow.id
+  }
+
+  // Idempotency: same job + type + file_name → update (bump version), else insert.
+  // The partial unique index ux_job_documents_makesafe_attach_key owns this
+  // invariant under concurrent retries; the read is only the fast update path.
+  const { data: existing, error: existingErr } = await client.from('job_documents')
+    .select('id, version, data_snapshot_json')
+    .eq('job_id', jId)
+    .eq('type', type)
+    .eq('file_name', fileName)
+    .is('superseded_at', null)
+    .limit(1)
+  if (existingErr) throw existingErr
+
+  let docId: string
+  if (existing && existing.length > 0) {
+    docId = await updateExistingAttachDocument(existing[0])
   } else {
     const insertData: any = {
       job_id: jId,
@@ -37035,8 +37044,24 @@ async function attachMakesafeDocument(
     if (isPdf) insertData.pdf_url = publicUrl
     const { data: newDoc, error: insErr } = await client.from('job_documents')
       .insert(insertData).select('id').single()
-    if (insErr) throw insErr
-    docId = newDoc?.id
+    if (insErr) {
+      const isAttachRetryRace = insErr.code === '23505' &&
+        String(insErr.message || '').includes('ux_job_documents_makesafe_attach_key')
+      if (!isAttachRetryRace) throw insErr
+
+      const { data: racedExisting, error: racedReadErr } = await client.from('job_documents')
+        .select('id, version, data_snapshot_json')
+        .eq('job_id', jId)
+        .eq('type', type)
+        .eq('file_name', fileName)
+        .is('superseded_at', null)
+        .limit(1)
+      if (racedReadErr) throw racedReadErr
+      if (!racedExisting || racedExisting.length === 0) throw insErr
+      docId = await updateExistingAttachDocument(racedExisting[0])
+    } else {
+      docId = newDoc?.id
+    }
   }
 
   // Job event ledger row.
