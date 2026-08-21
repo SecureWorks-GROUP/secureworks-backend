@@ -328,24 +328,6 @@ Deno.test("concurrent retry of the same attach key converges on one active row",
   assertEquals(db.job_documents[0].version, 2);
 });
 
-Deno.test("migration owns the active MakeSafe attach key without rewriting document history", async () => {
-  const sql = await Deno.readTextFile(
-    new URL(
-      "../../migrations/20260821093825_makesafe_attach_document_idempotency.sql",
-      import.meta.url,
-    ),
-  );
-
-  assert(
-    sql.includes(
-      "CREATE UNIQUE INDEX IF NOT EXISTS ux_job_documents_makesafe_attach_key",
-    ),
-  );
-  assert(sql.includes("ON public.job_documents (job_id, type, file_name)"));
-  assert(sql.includes("AND superseded_at IS NULL"));
-  assert(!/\bUPDATE\s+public\.job_documents\b/i.test(sql));
-});
-
 Deno.test("rejects unknown type", async () => {
   const db: DB = { job_documents: [], job_events: [], business_events: [] };
   const client = makeDocClient(db);

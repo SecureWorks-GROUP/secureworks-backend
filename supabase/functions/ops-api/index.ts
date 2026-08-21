@@ -473,6 +473,9 @@ import {
   SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION,
   settleApprovedIntakeDraft,
 } from './makesafe_intake_settlement.ts'
+import {
+  insertOrReadActiveMakesafeDocument,
+} from './makesafe_document_idempotency.ts'
 // Intake item 5 — deterministic WO-PDF client-block reader. Fills client_name /
 // client_phone / site_address from an unambiguous work-order-PDF client block when
 // the model/template left them null (MLB "NEW WORK ORDER" carries the homeowner
@@ -14136,19 +14139,30 @@ async function generateWorkOrderDoc(client: any, body: any) {
 
   // ── Create job_documents record (or update existing) ──
   // Check if one already exists for this job
-  const { data: existing } = await client.from('job_documents')
-    .select('id').eq('job_id', jId).eq('type', 'work_order').eq('file_name', fileName).limit(1)
+  const { data: existing, error: existingErr } = await client.from('job_documents')
+    .select('id').eq('job_id', jId).eq('type', 'work_order').eq('file_name', fileName).is('superseded_at', null).limit(1)
+  if (existingErr) throw new Error('Document record read failed: ' + existingErr.message)
 
   let docId: string
   if (existing && existing.length > 0) {
-    await client.from('job_documents').update({ storage_url: publicUrl, version: 2 }).eq('id', existing[0].id)
+    const { error: updateErr } = await client.from('job_documents').update({ storage_url: publicUrl, version: 2 }).eq('id', existing[0].id)
+    if (updateErr) throw new Error('Document record update failed: ' + updateErr.message)
     docId = existing[0].id
   } else {
-    const { data: newDoc, error: docErr } = await client.from('job_documents')
-      .insert({ job_id: jId, type: 'work_order', file_name: fileName, storage_url: publicUrl, visible_to_trades: true, version: 1, metadata: {} })
-      .select('id').single()
-    if (docErr) throw new Error('Document record failed: ' + docErr.message)
-    docId = newDoc.id
+    try {
+      const resolved = await insertOrReadActiveMakesafeDocument(client, {
+        key: { jobId: jId, type: 'work_order', fileName },
+        row: { job_id: jId, type: 'work_order', file_name: fileName, storage_url: publicUrl, visible_to_trades: true, version: 1, metadata: {} },
+        select: 'id',
+      })
+      docId = resolved.row.id
+      if (!resolved.inserted) {
+        const { error: updateErr } = await client.from('job_documents').update({ storage_url: publicUrl, version: 2 }).eq('id', docId)
+        if (updateErr) throw updateErr
+      }
+    } catch (error) {
+      throw new Error('Document record failed: ' + ((error as any)?.message || error))
+    }
   }
 
   return { document_id: docId, url: publicUrl, file_name: fileName }
@@ -37042,26 +37056,14 @@ async function attachMakesafeDocument(
       insertData.cycle_attribution = trustedDocumentFacts.cycle_attribution || 'bound'
     }
     if (isPdf) insertData.pdf_url = publicUrl
-    const { data: newDoc, error: insErr } = await client.from('job_documents')
-      .insert(insertData).select('id').single()
-    if (insErr) {
-      const isAttachRetryRace = insErr.code === '23505' &&
-        String(insErr.message || '').includes('ux_job_documents_makesafe_attach_key')
-      if (!isAttachRetryRace) throw insErr
-
-      const { data: racedExisting, error: racedReadErr } = await client.from('job_documents')
-        .select('id, version, data_snapshot_json')
-        .eq('job_id', jId)
-        .eq('type', type)
-        .eq('file_name', fileName)
-        .is('superseded_at', null)
-        .limit(1)
-      if (racedReadErr) throw racedReadErr
-      if (!racedExisting || racedExisting.length === 0) throw insErr
-      docId = await updateExistingAttachDocument(racedExisting[0])
-    } else {
-      docId = newDoc?.id
-    }
+    const resolved = await insertOrReadActiveMakesafeDocument(client, {
+      key: { jobId: jId, type, fileName },
+      row: insertData,
+      select: 'id, version, data_snapshot_json',
+    })
+    docId = resolved.inserted
+      ? resolved.row.id
+      : await updateExistingAttachDocument(resolved.row)
   }
 
   // Job event ledger row.
