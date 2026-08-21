@@ -38865,21 +38865,39 @@ async function ensureCuratedReportPackPointer(
  *   curation_revision_id, curation_artifact_id
  * }
  *
- * Compare already-validated caller PDF bytes to the attached document's
- * storage object. Live different bytes refuse. A missing/unreadable object
- * (GET !ok or no https URL) persists those caller bytes onto the same row.
- * A fetch timeout stays read_failed and does not overwrite.
+ * Inspect already-validated caller PDF bytes against the attached document's
+ * storage object. Does not persist. GET ok compares; drift is mismatch.
+ * Persist is eligible only for an unbound placeholder (no https URL) or a
+ * definitive missing object (GET 400/404). 5xx / 403 / 429 / other non-OK and
+ * fetch timeout stay read_failed. A prior curated hash that differs from the
+ * caller hashes refuses persist. The write itself is persistRecovered… after
+ * later 409 gates.
  */
+type CuratedBindDocumentBytesRecoverPlan = {
+  kind: 'stored' | 'persist'
+}
+
+function curatedBindPriorHashDiffers(args: {
+  priorExpectedRawSha256: string | null
+  priorArtifactContentHash: string | null
+  suppliedRawHash: string
+  suppliedArtifactHash: string
+}): boolean {
+  const priorRaw = String(args.priorExpectedRawSha256 || '').trim()
+  const priorArtifact = String(args.priorArtifactContentHash || '').trim()
+  if (priorRaw && priorRaw !== args.suppliedRawHash) return true
+  if (priorArtifact && priorArtifact !== args.suppliedArtifactHash) return true
+  return false
+}
+
 async function recoverCuratedBindDocumentBytes(args: {
-  client: any
-  jobId: string
-  documentId: string
-  fileName: string
   sourceUrl: string
   suppliedBytes: Uint8Array
   suppliedRawHash: string
   suppliedArtifactHash: string
-}): Promise<Uint8Array> {
+  priorExpectedRawSha256: string | null
+  priorArtifactContentHash: string | null
+}): Promise<CuratedBindDocumentBytesRecoverPlan> {
   const sourceUrl = String(args.sourceUrl || '')
   if (sourceUrl.startsWith('https://')) {
     let sourceResponse: Response
@@ -38906,20 +38924,48 @@ async function recoverCuratedBindDocumentBytes(args: {
           'existing makesafe_report bytes drift from the curated artifact',
         )
       }
-      return storedBytes
+      return { kind: 'stored' }
     }
-    // Definitive missing/unreadable object (the Bertram placeholder class:
-    // job_documents row exists, storage HEAD/GET is 400). Persist the already
-    // validated caller bytes onto the attached document. A timeout above stays
-    // read_failed — do not overwrite a live object we could not see.
+    // Bertram placeholder class: row exists, storage GET is 400/404. Any other
+    // non-OK (5xx, 403, 429, …) fails closed — do not persist an object we
+    // could not honestly call missing.
+    if (sourceResponse.status !== 400 && sourceResponse.status !== 404) {
+      throw curatedBindError(
+        'curated_bind_document_bytes_read_failed',
+        'existing makesafe_report byte recovery failed',
+      )
+    }
   }
 
+  if (
+    curatedBindPriorHashDiffers({
+      priorExpectedRawSha256: args.priorExpectedRawSha256,
+      priorArtifactContentHash: args.priorArtifactContentHash,
+      suppliedRawHash: args.suppliedRawHash,
+      suppliedArtifactHash: args.suppliedArtifactHash,
+    })
+  ) {
+    throw curatedBindError(
+      'curated_bind_document_bytes_persist_refused',
+      'prior curated report hash differs from the supplied artifact; attach the new bytes first',
+    )
+  }
+  return { kind: 'persist' }
+}
+
+async function persistRecoveredCuratedBindDocumentBytes(args: {
+  client: any
+  jobId: string
+  documentId: string
+  fileName: string
+  bytes: Uint8Array
+}): Promise<void> {
   let persisted: { publicUrl: string }
   try {
     persisted = await persistMakesafeDocumentPdfBytes({
       jobId: args.jobId,
       fileName: args.fileName,
-      bytes: args.suppliedBytes,
+      bytes: args.bytes,
     })
   } catch {
     throw curatedBindError(
@@ -38939,7 +38985,6 @@ async function recoverCuratedBindDocumentBytes(args: {
       503,
     )
   }
-  return args.suppliedBytes
 }
 
 /**
@@ -38960,7 +39005,10 @@ async function recoverCuratedBindDocumentBytes(args: {
  * current-cycle attribution. It never creates a document, never overwrites live
  * different bytes, and never renders, sends, approves, invoices, or changes
  * job/board state. The one persist it may do is fill a missing storage object
- * on that already-attached row when the caller supplied matching pdf_base64.
+ * (GET 400/404 or unbound placeholder with no https URL) on that already-attached
+ * row when the caller supplied matching pdf_base64. Persist runs after visibility,
+ * cycle-conflict, source-evidence, and later 409 gates, still before the version
+ * CAS, so a refused bind never writes a public object or rewrites pdf_url.
  */
 async function bindCurrentCycleCuratedMakesafeReport(
   client: any,
@@ -39110,16 +39158,34 @@ async function bindCurrentCycleCuratedMakesafeReport(
       'document is registered to another or inconsistent attendance cycle',
     )
   }
-  await recoverCuratedBindDocumentBytes({
-    client,
-    jobId,
-    documentId,
-    fileName: String(document.file_name || ''),
+  const priorForRecover = parseJsonObject(document.data_snapshot_json)
+  let recoverPlan = await recoverCuratedBindDocumentBytes({
     sourceUrl: String(document.pdf_url || document.storage_url || ''),
     suppliedBytes,
     suppliedRawHash,
     suppliedArtifactHash,
+    priorExpectedRawSha256: String(
+      priorForRecover.curated_source_expected_raw_sha256 || '',
+    ).trim() || (
+      /^[0-9a-f]{64}$/.test(String(priorForRecover.report_render_hash || '').trim())
+        ? `sha256:${String(priorForRecover.report_render_hash).trim()}`
+        : null
+    ),
+    priorArtifactContentHash: String(
+      priorForRecover.curated_source_artifact_content_hash || '',
+    ).trim() || null,
   })
+  const persistRecoveredPlaceholderIfNeeded = async () => {
+    if (recoverPlan.kind !== 'persist') return
+    await persistRecoveredCuratedBindDocumentBytes({
+      client,
+      jobId,
+      documentId,
+      fileName: String(document.file_name || ''),
+      bytes: suppliedBytes,
+    })
+    recoverPlan = { kind: 'stored' }
+  }
 
   // Recover blank Crew / Attendance from recorded evidence before the curated
   // input hash is computed. Same plumbing class as contact ownership via
@@ -39228,6 +39294,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
     // The document is already exactly bound, but the pack pointer may still be
     // null (the historical five-card gap). Ensure it here too, after every
     // evidence gate has passed, so an idempotent re-bind fills the pointer.
+    await persistRecoveredPlaceholderIfNeeded()
     const packPointer = await ensureCuratedReportPackPointer(
       client,
       jobId,
@@ -39264,6 +39331,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
         'curated source document has no stable version for compare-and-swap',
       )
     }
+    await persistRecoveredPlaceholderIfNeeded()
     const repair = await client.from('job_documents').update({
       attendance_cycle_id: attendanceCycleId,
       cycle_attribution: 'bound',
@@ -39337,6 +39405,8 @@ async function bindCurrentCycleCuratedMakesafeReport(
       'curated source document has no stable version for compare-and-swap',
     )
   }
+
+  await persistRecoveredPlaceholderIfNeeded()
 
   // First bind on a cycle is reserved once (cycle-scoped id). A content
   // supersession that has already passed every gate uses a content-scoped id so
