@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   InstructionMintConflictError,
+  assertInstructionCardMintAvailable,
   matchExistingInstructionCards,
   refuseExistingInstructionCard,
   reserveInstructionCardMint,
@@ -53,6 +54,107 @@ Deno.test("pre-mint instruction gate ignores own cover sheet as identity", () =>
   assertEquals(matches, []);
 });
 
+Deno.test("pre-mint instruction gate refuses the same PO across family labels", () => {
+  const rows = [{
+    ...terminalCard,
+    report_type: "assessment_report",
+    jobs: {
+      ...terminalCard.jobs,
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+  }];
+  const documents = [{
+    job_id: "job-terminal",
+    type: "work_order",
+    file_name: "MLB-25765PO-54176.pdf",
+  }];
+
+  assertEquals(
+    matchExistingInstructionCards(
+      ["MLB:PO-54176"],
+      rows,
+      documents,
+    ).length,
+    1,
+  );
+  assertEquals(
+    matchExistingInstructionCards(
+      ["MLB:PO-54176"],
+      rows,
+      documents,
+    ).length,
+    1,
+  );
+});
+
+Deno.test("pre-mint instruction gate fails closed on an existing unknown family", () => {
+  const matches = matchExistingInstructionCards(
+    ["MLB:PO-54176"],
+    [terminalCard],
+    [{
+      job_id: "job-terminal",
+      type: "work_order",
+      file_name: "MLB-25765PO-54176.pdf",
+    }],
+  );
+  assertEquals(matches.length, 1);
+});
+
+Deno.test("pre-mint instruction gate ignores an otherwise matching card in another org", async () => {
+  const crossTenantCard = {
+    ...terminalCard,
+    jobs: {
+      ...terminalCard.jobs,
+      metadata: { builder_po_number: "54176" },
+    },
+  };
+  const client = {
+    from(table: string) {
+      let orgId: string | null = null;
+      const query: any = {
+        select: () => query,
+        eq: (column: string, value: string) => {
+          if (table === "makesafe_job_details" && column === "jobs.org_id") orgId = value;
+          return query;
+        },
+        in: () => query,
+        order: () => query,
+        range: () => Promise.resolve({
+          data: table === "makesafe_job_details" && orgId !== "org-a"
+            ? [crossTenantCard]
+            : [],
+          error: null,
+        }),
+      };
+      return query;
+    },
+  };
+
+  await assertInstructionCardMintAvailable(client, {
+    orgId: "org-a",
+    candidateKeys: ["MLB:PO-54176"],
+  });
+});
+
+Deno.test("atomic reservation owns the canonical instruction across families", async () => {
+  let args: unknown = null;
+  await reserveInstructionCardMint({
+    rpc: (_name: string, input: unknown) => {
+      args = input;
+      return Promise.resolve({ error: null });
+    },
+  }, {
+    orgId: "org",
+    draftId: "draft",
+    candidateKeys: ["MLB:PO-54176", "MLB:PO-54176"],
+  });
+  assertEquals(args, {
+    p_org_id: "org",
+    p_draft_id: "draft",
+    p_instruction_keys: ["MLB:PO-54176"],
+  });
+});
+
 Deno.test("atomic reservation maps only the unique-key conflict", async () => {
   await assertRejects(
     () =>
@@ -64,7 +166,11 @@ Deno.test("atomic reservation maps only the unique-key conflict", async () => {
               message: "instruction key already reserved: MLB:PO-57514",
             },
           }),
-      }, { orgId: "org", draftId: "draft", candidateKeys: ["key"] }),
+      }, {
+        orgId: "org",
+        draftId: "draft",
+        candidateKeys: ["key"],
+      }),
     InstructionMintConflictError,
   );
 });
@@ -77,7 +183,11 @@ Deno.test("atomic reservation preserves infrastructure failures", async () => {
           Promise.resolve({
             error: { code: "42P01", message: "function does not exist" },
           }),
-      }, { orgId: "org", draftId: "draft", candidateKeys: ["key"] }),
+      }, {
+        orgId: "org",
+        draftId: "draft",
+        candidateKeys: ["key"],
+      }),
     Error,
   );
   assertEquals(

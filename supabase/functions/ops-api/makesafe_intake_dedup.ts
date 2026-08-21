@@ -35,14 +35,13 @@
 // ------
 // buildIntakeDedupIndex(existingDrafts) -> a DedupIndex built ONCE per scan from
 // all drafts in a live state (draft | needs_review | approved) plus, optionally,
-// existing jobs' external refs. isDuplicateIntake(candidate, index) returns the
+// existing jobs' identities. isDuplicateIntake(candidate, index) returns the
 // reason a candidate is a duplicate (or null when it is genuinely new). A draft is
-// created ONLY when isDuplicateIntake returns null. Skipping is keyed, in priority
-// order, on:
-//   1. graph_message_id            (exact, within-path — original behaviour)
-//   2. internet_message_id         (exact, old<->old)
-//   3. external_ref + company      (normalised — the cross-path workhorse)
-//   4. external_ref (job exists)   (a live job already covers this ref)
+// created ONLY when isDuplicateIntake returns null. Exact transport and content
+// twins are refused first; then a builder WO/PO identity is authoritative. Ref and
+// family comparisons provide the cross-path fallback only where that identity is
+// absent or known to be distinct. An unknown work-order family is a review outcome,
+// never an auto-mint path.
 //
 // SAFETY
 //   - Pure, no I/O. The caller supplies the already-fetched rows.
@@ -265,9 +264,40 @@ export function normaliseCompany(
   return String(name ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+const KNOWN_MAKESAFE_JOB_FAMILIES = new Set([
+  "assessment_report_quote",
+  "roof_report",
+  "temp_fence_makesafe",
+  "general_makesafe",
+  "repair",
+  "restoration",
+]);
+
 /** Normalise a MakeSafe job-family token for dedupe keys. */
 export function normaliseJobFamily(family: string | null | undefined): string {
-  return String(family ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+  const normalised = String(family ?? "").trim().toLowerCase()
+    .replace(/[^a-z0-9_]/g, "");
+  // The durable family is `assessment_report_quote` / `general_makesafe`, while
+  // older detail rows and extraction outputs can still carry their report/type
+  // spellings. Dedupe must compare the deliverable, not preserve a historical
+  // spelling distinction that can mint an exact twin.
+  switch (normalised) {
+    case "assessment_report":
+    case "assessment_quote":
+      return "assessment_report_quote";
+    case "physical_makesafe":
+    case "makesafe":
+      return "general_makesafe";
+    case "roof":
+      return "roof_report";
+    case "temp_fence":
+      return "temp_fence_makesafe";
+    default:
+      // An unrecognised family is not a fourth deliverable. Treat it as unknown
+      // so the caller can leave the intake in review rather than minting a card
+      // merely because two uncertain labels differ.
+      return KNOWN_MAKESAFE_JOB_FAMILIES.has(normalised) ? normalised : "";
+  }
 }
 
 // djb2 string hash — deterministic, sync, no crypto dependency. Used to fold a
@@ -743,6 +773,12 @@ export function isDuplicateIntake(
   const family = normaliseJobFamily(candidate.makesafe_job_family);
   const candidateHasWorkOrderIdentity = hasWorkOrderIdentity(candidate);
   const candidateWorkOrderCompany = rowWorkOrderCompanyKey(candidate);
+  // A builder WO with no recognised family may be a roof, assessment, or
+  // physical make-safe obligation. It is therefore not safe to dedupe or mint
+  // it automatically: the scanner turns this marker into a visible review draft.
+  if (candidateWorkOrderCompany && !family) {
+    return "work_order_family_needs_review";
+  }
   if (
     candidateWorkOrderCompany &&
     index.workOrderCompany.has(candidateWorkOrderCompany)
@@ -763,6 +799,9 @@ export function isDuplicateIntake(
     !index.workOrderCompany.has(candidateWorkOrderCompany) &&
     !index.jobWorkOrderCompany.has(candidateWorkOrderCompany);
   if (rc) {
+    if (!candidateHasWorkOrderIdentity && index.refCompany.has(rc)) {
+      return "external_ref+company";
+    }
     if (family) {
       const rcf = refCompanyFamilyKey(
         candidate.external_ref,
@@ -823,6 +862,9 @@ export function isDuplicateIntake(
       return "job_external_ref";
     }
     if (rc) {
+      if (!candidateHasWorkOrderIdentity && index.jobRefCompany.has(rc)) {
+        return "job_external_ref";
+      }
       if (family) {
         const rcf = refCompanyFamilyKey(
           candidate.external_ref,

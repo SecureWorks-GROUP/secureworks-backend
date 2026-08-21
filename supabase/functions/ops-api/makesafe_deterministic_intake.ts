@@ -17,8 +17,7 @@ import {
   type TemplateParsingRules,
 } from "./makesafe_template_parser.ts";
 import {
-  decideMakeSafeJobFamily,
-  hasExplicitRapidRepairSignal,
+  decideDeterministicMakeSafeJobFamily,
   subjectIsExcludedNonWorkOrder,
   subjectIsKnownBuilderNoise,
   textHasExplicitReportRequest,
@@ -42,6 +41,7 @@ import {
   extractPdfDeclaredType,
   type PdfDeclaredTypeResult,
 } from "./makesafe_pdf_declared_type.ts";
+import { scopeBlockFromPdfText } from "./makesafe_pdf_scope.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
   "makesafe-deterministic-intake@2026-08-13.v12";
@@ -514,56 +514,6 @@ function pdfText(item: DeterministicSourceItem): string {
   ).join("\n");
 }
 
-const PDF_SCOPE_START_RE =
-  /^(?:(?:additional|special)\s+)?(?:notes?\s*\/\s*)?instructions?\s*:?\s*(.*)$|^scope(?:\s+of\s+works?)?\s*:?\s*(.*)$|^(?:works?|job)\s+description\s*:?\s*(.*)$|^makesafe\s*\/\s*emergency\s+repairs?\b\s*(.*)$/i;
-const PDF_SCOPE_STOP_RE =
-  /^(?:totals?|subtotal|work\s+order\s+terms(?:\s+and\s+conditions)?|period\s+trade\s+contract\s+conditions|conditions|please\s+forward\s+all\s+invoices|bill\s+to:|major\s+lb\s+pty|secure\s+works\s+wa|yours\s+sincerely)\b/i;
-const PDF_SCOPE_MAX_LINES = 25;
-const PDF_SCOPE_MAX_CHARS = 4_000;
-
-function scopeBlockFromPdfText(
-  rawText: string | null | undefined,
-  adapterId: AdapterId | null,
-): string {
-  const lines = String(rawText || "").split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-  if (!lines.length) return "";
-  const starts = lines.flatMap((line, index) =>
-    PDF_SCOPE_START_RE.test(line) ? [index] : []
-  );
-  // AJS work orders put the physical instruction directly below the first
-  // "Make Safe" heading rather than under a Notes/Scope label.
-  if (!starts.length && adapterId === "ajs_ajbr") {
-    const makeSafeHeading = lines.findIndex((line) =>
-      /^make\s*-?\s*safe$/i.test(line)
-    );
-    if (makeSafeHeading >= 0) starts.push(makeSafeHeading);
-  }
-  if (!starts.length) return "";
-  const blocks: string[] = [];
-  for (const start of starts) {
-    const startMatch = lines[start].match(PDF_SCOPE_START_RE);
-    const inline = clean(
-      startMatch?.slice(1).find((value) => clean(value)) || "",
-    );
-    const block = inline ? [inline] : [];
-    for (
-      let index = start + 1;
-      index < lines.length && block.length < PDF_SCOPE_MAX_LINES;
-      index++
-    ) {
-      const line = lines[index];
-      if (PDF_SCOPE_STOP_RE.test(line)) break;
-      if (index !== start + 1 && PDF_SCOPE_START_RE.test(line)) break;
-      block.push(line);
-    }
-    const value = clean(block.join("\n"));
-    if (value) blocks.push(value);
-  }
-  return [...new Set(blocks)].join("\n").slice(0, PDF_SCOPE_MAX_CHARS);
-}
-
 function pdfScopeText(
   item: DeterministicSourceItem,
   adapterId: AdapterId | null,
@@ -945,7 +895,7 @@ function jobFamilyDecision(
 ) {
   const pdfDocuments = extractedPdfDocuments(item);
   const fullPdfText = pdfText(item);
-  const decision = decideMakeSafeJobFamily(item.subject, item.body, null, {
+  return decideDeterministicMakeSafeJobFamily(item.subject, item.body, null, {
     builder: adapterId,
     pdfScopeText: pdfScopeText(item, adapterId),
     pdfDeclaredType: declaredTypeForSource(item),
@@ -954,18 +904,6 @@ function jobFamilyDecision(
       /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
         .test(fullPdfText),
   });
-  // Captain 2026-08-13: the dispatch label "RAPID REPAIR" is an explicit
-  // repair-shaped work-order signal. Keep the override inside deterministic
-  // intake and only retag the general/ambiguous physical lane so a more specific
-  // declared PDF family still wins. MLB repair headers already resolve through
-  // pdfDeclaredType above; this closes the subject/body-labelled transport gap.
-  if (
-    hasExplicitRapidRepairSignal(item.subject, item.body) &&
-    (decision.family === "general_makesafe" || decision.family === null)
-  ) {
-    return { family: "repair" as const, evidence: "rapid_repair_signal" };
-  }
-  return decision;
 }
 
 function inferDeliverable(
@@ -2103,6 +2041,92 @@ function instructionDiscriminator(item: AdaptedSource): string {
   return base;
 }
 
+function familyReviewOwnershipKeys(
+  items: readonly AdaptedSource[],
+): Map<AdaptedSource, string> {
+  const owners = new Map<AdaptedSource, string>();
+  const indexed = items.filter((item) =>
+    item.intent === "work" && !isRevisionSource(item.source) &&
+    !isLifecycleReopenText(lifecycleText(item.source)) &&
+    (item.identity.builderPoCanonical || item.identity.builderWoCanonical)
+  );
+  const union = new UnionFind(indexed.length);
+  const poOwners = new Map<string, number>();
+  const woOwners = new Map<string, number[]>();
+  for (let index = 0; index < indexed.length; index++) {
+    const item = indexed[index];
+    const company = item.identity.companyKey || item.identity.builderSlug;
+    if (!company) continue;
+    if (item.identity.builderPoCanonical) {
+      const poKey = `${company}:po:${item.identity.builderPoCanonical}`;
+      const prior = poOwners.get(poKey);
+      if (prior === undefined) poOwners.set(poKey, index);
+      else union.union(index, prior);
+    }
+    if (item.identity.builderWoCanonical) {
+      const woKey = familyReviewWorkOrderKey(item, company);
+      woOwners.set(woKey, [...(woOwners.get(woKey) || []), index]);
+    }
+  }
+  for (const ownerIndexes of woOwners.values()) {
+    const purchaseOrders = new Set(
+      ownerIndexes
+        .map((index) => indexed[index].identity.builderPoCanonical)
+        .filter(Boolean),
+    );
+    if (purchaseOrders.size <= 1) {
+      for (let index = 1; index < ownerIndexes.length; index++) {
+        union.union(ownerIndexes[0], ownerIndexes[index]);
+      }
+      continue;
+    }
+    const withoutPo = ownerIndexes.filter((index) =>
+      !indexed[index].identity.builderPoCanonical
+    );
+    for (let index = 1; index < withoutPo.length; index++) {
+      union.union(withoutPo[0], withoutPo[index]);
+    }
+  }
+  const componentAliases = new Map<number, Set<string>>();
+  for (let index = 0; index < indexed.length; index++) {
+    const item = indexed[index];
+    const company = item.identity.companyKey || item.identity.builderSlug;
+    if (!company) continue;
+    const root = union.find(index);
+    const values = componentAliases.get(root) || new Set<string>();
+    if (item.identity.builderPoCanonical) {
+      values.add(`${company}:po:${item.identity.builderPoCanonical}`);
+    }
+    if (item.identity.builderWoCanonical) {
+      values.add(`${company}:wo:${item.identity.builderWoCanonical}`);
+    }
+    componentAliases.set(root, values);
+  }
+  for (let index = 0; index < indexed.length; index++) {
+    const aliasesForOwner = componentAliases.get(union.find(index));
+    if (!aliasesForOwner?.size) continue;
+    owners.set(indexed[index], [...aliasesForOwner].sort().join("|"));
+  }
+  return owners;
+}
+
+function familyReviewWorkOrderKey(
+  item: AdaptedSource,
+  company: string,
+): string {
+  const workOrder = String(item.identity.builderWoCanonical || "").toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  const purchaseOrder = item.identity.builderPoCanonical?.toUpperCase()
+    .replace(/[^A-Z0-9]/g, "") || "";
+  // MLB commonly announces the claim-shaped WO first and supplies the PO-bearing
+  // PDF later. The PO suffix refines that same WO; it must not make the two
+  // sources look unrelated for family-conflict review.
+  const root = purchaseOrder && workOrder.endsWith(purchaseOrder)
+    ? workOrder.slice(0, -purchaseOrder.length)
+    : workOrder;
+  return `${company}:wo:${root || workOrder}`;
+}
+
 function manifestFor(
   _identity: ExtractedIdentity,
   intent: AdaptedSource["intent"],
@@ -2342,6 +2366,32 @@ export function buildDeterministicIntakePlan(
     const clusterKey = `lineage:${stableHash(clusterStrong.join("|"))}`;
     const clusterStory = dedupeStory(sortedCluster);
     const groups = new Map<string, AdaptedSource[]>();
+    const familyOwnershipKeys = familyReviewOwnershipKeys(sortedCluster);
+    const familyReviewUnits = new Set<string>();
+    const ordinaryFamiliesByUnit = new Map<string, Set<string>>();
+    for (const item of sortedCluster) {
+      if (
+        item.intent !== "work" || isRevisionSource(item.source) ||
+        isLifecycleReopenText(lifecycleText(item.source))
+      ) continue;
+      const key = familyOwnershipKeys.get(item);
+      if (!key) continue;
+      const families = ordinaryFamiliesByUnit.get(key) || new Set<string>();
+      families.add(item.identity.jobFamily);
+      ordinaryFamiliesByUnit.set(key, families);
+    }
+    for (const [key, families] of ordinaryFamiliesByUnit) {
+      // A source that merely carries an attachment, portal link, or other
+      // supporting evidence can be unclassified. It must not turn a known
+      // instruction into a family conflict; only contradictory *known*
+      // families for one canonical instruction need review.
+      const knownFamilies = new Set(
+        [...families].filter((family) => family !== "unclassified"),
+      );
+      if (knownFamilies.size > 1) {
+        familyReviewUnits.add(key);
+      }
+    }
     const strongDiscriminators = sortedCluster
       .filter((item) =>
         item.identity.woPoIdentityKey || item.identity.externalRefCanonical
@@ -2356,6 +2406,14 @@ export function buildDeterministicIntakePlan(
       : null;
     for (const item of sortedCluster) {
       let discriminator = instructionDiscriminator(item);
+      const familyUnit = familyOwnershipKeys.get(item);
+      if (
+        familyUnit && familyReviewUnits.has(familyUnit) &&
+        item.intent === "work" && !isRevisionSource(item.source) &&
+        !isLifecycleReopenText(lifecycleText(item.source))
+      ) {
+        discriminator = `family-review:${familyUnit}`;
+      }
       // A late PDF/link/appointment in an explicit thread often repeats no identity.
       // Recover it into the sole strong instruction only when unambiguous. If two
       // POs/deliverables exist, it remains separate and visible rather than guessed.
@@ -2415,6 +2473,17 @@ export function buildDeterministicIntakePlan(
     let cycle = 1;
     for (const instructionItems of groups.values()) {
       const merged = bestIdentity(instructionItems);
+      const knownInstructionFamilies = new Set(
+        instructionItems
+          .map((item) => item.identity.jobFamily)
+          .filter((family) => family !== "unclassified"),
+      );
+      if (knownInstructionFamilies.size > 1) {
+        merged.identity = { ...merged.identity, jobFamily: "unclassified" };
+      } else if (knownInstructionFamilies.size === 1) {
+        const [jobFamily] = knownInstructionFamilies;
+        merged.identity = { ...merged.identity, jobFamily };
+      }
       const intent = instructionItems.some((i) => i.intent === "cancellation")
         ? "cancellation"
         : instructionItems.every((i) => i.intent === "chatter")

@@ -480,10 +480,9 @@ Deno.test("item3b: an AMBIGUOUS combined obligation (unknown_report) is NOT spli
   );
 });
 
-Deno.test("item3b: gate lets an UNAMBIGUOUS combined obligation through (to be split)", () => {
+Deno.test("item3b: gate keeps an unambiguous combined obligation in review", () => {
   const d = gateDecision({
     combinedObligation: true,
-    combinedSplittable: true,
     confidence: "high",
     matchedCompany: { slug: "mlb" },
     externalRef: "MLB-26721PO-55622",
@@ -492,13 +491,13 @@ Deno.test("item3b: gate lets an UNAMBIGUOUS combined obligation through (to be s
     missingFields: ["portal_link", "combined_makesafe_and_report"],
     attachments: [WO_PDF],
   });
-  assertEquals(d.ok, true);
+  assertEquals(d.ok, false);
+  assertEquals(d.reason, "combined_makesafe_and_report_manual_review");
 });
 
 Deno.test("item3b: gate still BLOCKS an ambiguous combined obligation (not splittable)", () => {
   const d = gateDecision({
     combinedObligation: true,
-    combinedSplittable: false,
     confidence: "high",
     matchedCompany: { slug: "mlb" },
     externalRef: "MLB-26010",

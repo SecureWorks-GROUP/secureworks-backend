@@ -321,11 +321,6 @@ Deno.test("terminal jobs remain visible instruction authority and cannot be remi
   assertStringIncludes(runtime, '"superseded"');
   assertStringIncludes(runtime, '"cancelled"');
   assertStringIncludes(runtime, '"void"');
-  // The approval boundary scans all cards through the exact canonical gate.
-  assertStringIncludes(
-    index,
-    "_assertInstructionCardMintAvailable(client, instructionKeys)",
-  );
 });
 
 Deno.test("runtime existing-PO derivation mirrors the approve path's builder_work_order_number fallback", () => {

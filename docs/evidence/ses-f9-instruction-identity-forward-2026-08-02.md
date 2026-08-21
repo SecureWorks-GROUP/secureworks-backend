@@ -20,6 +20,15 @@ so placing it last keeps the mint decision on one shared identity boundary
   (`supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:19`,
   `supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:248`,
   `docs/evidence/ses-identity-grain-conform-2026-08-02.md`).
+- Intake dedupe and the pre-mint gate apply that grain before a card is created:
+  one recognised builder PO may create one card, while a repeated work order is
+  separately eligible only when it carries a different PO. `report_type` and
+  family spelling cannot bypass an existing PO identity to mint a twin. A
+  work-order candidate with no recognised family, or with conflicting family
+  evidence, stays in the reason-coded review lane and cannot be auto-approved
+  (`supabase/functions/ops-api/makesafe_intake_dedup.ts`,
+  `supabase/functions/ops-api/makesafe_instruction_mint_gate.ts`,
+  `supabase/functions/ops-api/makesafe_intake_auto_approval_test.ts`).
 - AJ promotes an exact bare five-or-more-digit external reference only when the
   requesting company slug is exactly `aj`; the slug-to-scope map is closed and
   reference prefixes outrank the slug when present

@@ -4,10 +4,37 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _combinedSplitRecoveryDecisionForTest,
   _effectiveIntakeReportTypeForTest,
   _shouldAutoApproveCleanIntakeDraftRowForTest,
   _shouldAutoApproveCleanIntakeForTest,
 } from "./index.ts";
+
+Deno.test("combined recovery refuses a missing secondary card binding", () => {
+  assertEquals(
+    _combinedSplitRecoveryDecisionForTest(true, [{
+      mint_role: "primary",
+      job_id: "job-primary",
+    }]),
+    {
+      action: "review",
+      missing_roles: ["secondary_report"],
+    },
+  );
+});
+
+Deno.test("combined recovery settles only when both historical cards exist", () => {
+  assertEquals(
+    _combinedSplitRecoveryDecisionForTest(true, [
+      { mint_role: "primary", job_id: "job-primary" },
+      { mint_role: "secondary_report", job_id: "job-secondary" },
+    ]),
+    {
+      action: "settle_existing",
+      missing_roles: [],
+    },
+  );
+});
 
 Deno.test("effectiveIntakeReportType classifies legacy NULL body-only roof reports", () => {
   const reportType = _effectiveIntakeReportTypeForTest({
@@ -47,6 +74,7 @@ Deno.test("effectiveIntakeReportType does not fallback-classify rows with clear 
 
 Deno.test("clean intake auto-approval allows only high-confidence normal WOs with servable WO PDF", () => {
   const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "ajs", name: "AJ Building & Restoration" },
     externalRef: "AJBR 67922",
@@ -64,6 +92,7 @@ Deno.test("clean intake auto-approval allows only high-confidence normal WOs wit
 
 Deno.test("SecureWorks cover sheet cannot satisfy the intake WO floor", () => {
   const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "aj" },
     externalRef: "AJBR-70001",
@@ -81,6 +110,7 @@ Deno.test("SecureWorks cover sheet cannot satisfy the intake WO floor", () => {
 
 Deno.test("clean intake auto-approval allows report-worded rows only when a WO PDF is clear", () => {
   const reportWordedWorkOrder = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "roof_report",
     tagReportType: true,
     reportType: "roof_report",
     confidence: "high",
@@ -101,6 +131,7 @@ Deno.test("clean intake auto-approval allows report-worded rows only when a WO P
   );
 
   const reportOnly = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "assessment_report_quote",
     reportType: "assessment_report",
     confidence: "high",
     matchedCompany: { slug: "mlb" },
@@ -119,6 +150,7 @@ Deno.test("clean intake auto-approval allows report-worded rows only when a WO P
 Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
   assertEquals(
     _shouldAutoApproveCleanIntakeForTest({
+      jobFamily: "general_makesafe",
       confidence: "medium",
       matchedCompany: { slug: "ajs" },
       externalRef: "AJBR 67922",
@@ -134,6 +166,7 @@ Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
 
   assertEquals(
     _shouldAutoApproveCleanIntakeForTest({
+      jobFamily: "general_makesafe",
       confidence: "high",
       matchedCompany: { slug: "ajs" },
       externalRef: "AJBR 67922",
@@ -150,6 +183,7 @@ Deno.test("clean intake auto-approval blocks weak or ambiguous intake", () => {
 
   assertEquals(
     _shouldAutoApproveCleanIntakeForTest({
+      jobFamily: "general_makesafe",
       confidence: "high",
       matchedCompany: { slug: "ajs" },
       externalRef: "AJBR 67922",
@@ -208,4 +242,225 @@ Deno.test("clean intake board sweep blocks report-only legacy rows before auto p
   });
   assertEquals(decision.ok, false);
   assertEquals(decision.reason, "report_only_manual_review");
+});
+
+Deno.test("clean intake auto-approval blocks an uncertain family without WO/PO identity", () => {
+  const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: null,
+    confidence: "high",
+    matchedCompany: { slug: "mlb" },
+    externalRef: "MLB-25953",
+    clientName: "Test Client",
+    siteAddress: "241 Old Coast Rd",
+    missingFields: [],
+    attachments: [{
+      file_name: "Work Order MLB-25953.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: false,
+    reason: "work_order_family_needs_review",
+  });
+});
+
+Deno.test("clean intake board sweep blocks a legacy family conflicting with AJS authority", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "aj",
+    external_ref: "AJBR-70062",
+    client_name: "Test Client",
+    site_address: "1 Example St",
+    report_type: "assessment_report",
+    subject: "AJBR-70062 Work Order",
+    body_preview: "Please complete the assessment report",
+    extraction_json: {
+      makesafe_job_family: "assessment_report_quote",
+    },
+    attachments_json: [{
+      file_name: "AJBR-70062 Work Order.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: false,
+    reason: "work_order_family_needs_review",
+  });
+});
+
+Deno.test("clean intake board sweep accepts a PDF-declared repair family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25953",
+    client_name: "Test Client",
+    site_address: "241 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25953",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "repair",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25953_PO-57001.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Rapid Repair",
+          "Attend site as instructed.",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25953_PO-57001.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep preserves deterministic AJS Rapid Repair family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "aj",
+    external_ref: "AJBR-70991",
+    client_name: "Test Client",
+    site_address: "8 Repair Road",
+    subject: "RAPID REPAIR WORK ORDER AJBR-70991",
+    body_preview: "Please attend the attached work order.",
+    extraction_json: {
+      makesafe_job_family: "repair",
+      work_order_pdf_text: [{
+        attachment_name: "AJBR-70991 Work Order.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Scope of Works: attend and repair the damaged gate",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "AJBR-70991 Work Order.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep accepts a PDF-declared physical family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25954",
+    client_name: "Test Client",
+    site_address: "243 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25954",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "general_makesafe",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25954_PO-57002.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Makesafe/Emergency Repairs",
+          "Make Safe",
+          "Attend site as instructed.",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25954_PO-57002.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep accepts a PDF-scope temporary-fence family", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25955",
+    client_name: "Test Client",
+    site_address: "245 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25955",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "temp_fence_makesafe",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25955_PO-57003.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Scope of Works: install temporary fencing",
+          "Work Order Terms and Conditions",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25955_PO-57003.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: true,
+    reason: "clean_high_confidence_work_order",
+  });
+});
+
+Deno.test("clean intake board sweep keeps boilerplate-only PDF family in review", () => {
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    status: "needs_review",
+    confidence: "high",
+    requesting_company_slug: "mlb",
+    external_ref: "MLB-25956",
+    client_name: "Test Client",
+    site_address: "247 Old Coast Rd",
+    subject: "NEW WORK ORDER - MLB-25956",
+    body_preview: null,
+    description: "Attend site as instructed.",
+    extraction_json: {
+      makesafe_job_family: "general_makesafe",
+      work_order_pdf_text: [{
+        attachment_name: "work_order_MLB-25956_PO-57004.pdf",
+        status: "extracted",
+        text: [
+          "Allocation Work Order",
+          "Contractors must hold current insurance.",
+          "Period Trade Contract Conditions",
+        ].join("\n"),
+      }],
+    },
+    attachments_json: [{
+      file_name: "work_order_MLB-25956_PO-57004.pdf",
+      pdf_url: "https://example.test/wo.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, {
+    ok: false,
+    reason: "work_order_family_needs_review",
+  });
 });

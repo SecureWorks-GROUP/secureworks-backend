@@ -249,6 +249,40 @@ Deno.test("merge: a GENUINE candidate review marker (reply_forward_risk) is carr
   assert(m.missing_fields.includes("reply_forward_risk"));
 });
 
+Deno.test("merge: a known-family PDF does not resolve an unknown draft family", () => {
+  const m = mergeLateWorkOrderPdfIntoDraft(
+    announcementDraft({
+      makesafe_job_family: null,
+      extraction_json: { external_ref: "MLB-25096" },
+    }),
+    poCandidate(),
+  );
+  assert(m.missing_fields.includes("work_order_family_needs_review"));
+  assertEquals(m.extraction_json.makesafe_job_family, undefined);
+});
+
+Deno.test("merge: conflicting known families remain review-only", () => {
+  const draft = announcementDraft({
+    makesafe_job_family: "roof_report",
+    extraction_json: {
+      external_ref: "MLB-25096",
+      makesafe_job_family: "roof_report",
+    },
+  });
+  const m = mergeLateWorkOrderPdfIntoDraft(draft, poCandidate());
+  const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
+    ...draft,
+    attachments_json: m.attachments_json,
+    extraction_json: m.extraction_json,
+    missing_fields: m.missing_fields,
+    confidence: m.confidence,
+    client_name: m.client_name,
+    site_address: m.site_address,
+  });
+  assert(m.missing_fields.includes("work_order_family_needs_review"));
+  assertEquals(decision.ok, false);
+});
+
 // ── merged row passes / fails the UNCHANGED strict auto-approve gate ──
 Deno.test("gate: a clean merged draft row passes shouldAutoApproveCleanIntakeDraftRow", () => {
   const draft = announcementDraft();
@@ -426,6 +460,39 @@ Deno.test("orchestration: degraded extraction never auto-files even with the fla
     assertEquals(r.outcome, "landed");
     if (r.outcome === "landed") assertEquals(r.auto_filed, null);
     assertEquals(approveCalled, false);
+  } finally {
+    Deno.env.delete("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE");
+  }
+});
+
+Deno.test("orchestration: unknown-family target accepts the PDF but never auto-files", async () => {
+  Deno.env.set("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE", "true");
+  try {
+    const client = makeClient({
+      drafts: [announcementDraft({
+        makesafe_job_family: null,
+        extraction_json: { external_ref: "MLB-25096" },
+      })],
+    });
+    let approveCalled = false;
+    const r = await _landLateWorkOrderPdfOntoDraftForTest(client as any, {
+      candidate: poCandidate(),
+      autoFileEnabled: true,
+      extractionDegraded: false,
+    }, {
+      approve: (async () => {
+        approveCalled = true;
+        return { job: { id: "x" } };
+      }) as any,
+    });
+    assertEquals(r.outcome, "landed");
+    if (r.outcome === "landed") assertEquals(r.auto_filed, null);
+    assertEquals(approveCalled, false);
+    assert(
+      client._captured.update.missing_fields.includes(
+        "work_order_family_needs_review",
+      ),
+    );
   } finally {
     Deno.env.delete("MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE");
   }

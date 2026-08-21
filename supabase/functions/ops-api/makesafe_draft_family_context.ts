@@ -1,5 +1,6 @@
 import type { MakeSafeJobFamilyContext } from "./makesafe_intake_gate.ts";
 import { extractPdfDeclaredType } from "./makesafe_pdf_declared_type.ts";
+import { scopeBlockFromPdfText } from "./makesafe_pdf_scope.ts";
 
 export const PDF_EXTRACTION_PENDING_REASON = "pdf_extraction_pending";
 export const MULTIPLE_WORK_ORDERS_REASON = "multiple_work_orders";
@@ -47,8 +48,14 @@ export function resolveDraftFamilyClassifierContext(input: {
     );
   }
 
+  const pdfText = String(extracted[0].text || "");
+  const pdfScopeText = scopeBlockFromPdfText(pdfText, input.builder);
   return {
     builder: input.builder || null,
-    pdfDeclaredType: extractPdfDeclaredType(extracted[0].text),
+    pdfScopeText,
+    pdfDeclaredType: extractPdfDeclaredType(pdfText),
+    pdfOnlyBoilerplate: !pdfScopeText &&
+      /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
+        .test(pdfText),
   };
 }

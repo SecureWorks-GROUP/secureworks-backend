@@ -294,6 +294,16 @@ export function mergeLateWorkOrderPdfIntoDraft(
       ? { ...draft.extraction_json }
       : {};
   const candExtraction = candidate.extraction || {};
+  const draftFamily = normaliseJobFamily(
+    draft.makesafe_job_family ||
+      cleanStr(draftExtraction["makesafe_job_family"]),
+  );
+  const candidateFamily = normaliseJobFamily(
+    candidate.makesafe_job_family ||
+      cleanStr(candExtraction["makesafe_job_family"]),
+  );
+  const familyNeedsReview = !draftFamily || !candidateFamily ||
+    draftFamily !== candidateFamily;
 
   // Fill only the client/site fields the draft left empty (identity stays put).
   const filled: string[] = [];
@@ -330,6 +340,7 @@ export function mergeLateWorkOrderPdfIntoDraft(
     }
   }
   if (
+    !familyNeedsReview &&
     !cleanStr(draftExtraction["makesafe_job_family"]) &&
     cleanStr(candExtraction["makesafe_job_family"])
   ) {
@@ -394,6 +405,12 @@ export function mergeLateWorkOrderPdfIntoDraft(
     if (seenMarker.has(m)) continue;
     seenMarker.add(m);
     outMissing.push(m);
+  }
+  if (
+    familyNeedsReview &&
+    !seenMarker.has("work_order_family_needs_review")
+  ) {
+    outMissing.push("work_order_family_needs_review");
   }
 
   // Confidence: the higher of the two (the PDF-bearing candidate is usually higher,

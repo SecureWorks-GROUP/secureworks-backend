@@ -2174,6 +2174,167 @@ Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliver
   assertEquals(woCase.identity.woPoIdentityKey?.includes("PO-57087"), true);
 });
 
+Deno.test("one WO and PO with conflicting families parks one review case", () => {
+  const declaredTypes = [
+    ["roof", "Roof Reports EXTERNAL", "roof_report"],
+    [
+      "assessment",
+      "Assessment Report & Quote",
+      "assessment_report_quote",
+    ],
+    ["physical", "Makesafe/Emergency Repairs", "general_makesafe"],
+  ] as const;
+  const items = declaredTypes.map(([suffix, declaredType], index) => {
+    const postId = `mlb-25765-${suffix}`;
+    return source({
+      postId,
+      threadId: "mlb-25765-thread",
+      receivedAt: `2026-07-20T0${index}:00:00.000Z`,
+      subject: `NEW WORK ORDER MLB-25765 ${declaredType}`,
+      body: "Please attend the attached work order.",
+      attachments: [pdf(postId)],
+      pdfDocuments: [{
+        sourcePostId: postId,
+        attachmentId: `${postId}-pdf`,
+        attachmentName: "work_order_MLB-25765PO-54176.pdf",
+        status: "extracted" as const,
+        text: [
+          "Work Order",
+          "Work Order Number MLB-25765PO-54176",
+          "Policyholders Name Shared Client",
+          "Mobile 0422636182",
+          "Site Address 241 Old Coast Road Australind WA 6233",
+          "Allocation Work Order",
+          declaredType,
+          "Scope of Works Attend and complete the declared service",
+        ].join("\n"),
+        charCount: 300,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      }],
+    });
+  });
+
+  const plan = buildDeterministicIntakePlan(items, PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
+  assertEquals(
+    plan.cases[0].sourcePostIds,
+    declaredTypes.map(([suffix]) => `mlb-25765-${suffix}`).sort(),
+  );
+  assert(plan.cases[0].identity.woPoIdentityKey?.includes("PO-54176"));
+});
+
+Deno.test("WO-only announcement and later PO-bearing PDF share family review ownership", () => {
+  const announcement = source({
+    postId: "mlb-25765-announcement",
+    threadId: "mlb-25765-partial-po-thread",
+    subject:
+      "NEW WORK ORDER MLB-25765 Work Order: MLB-25765 Roof Reports EXTERNAL",
+    body: "Please complete the roof report for this work order.",
+    attachments: [pdf("mlb-25765-announcement")],
+  });
+  const laterPdf = source({
+    postId: "mlb-25765-later-pdf",
+    threadId: "mlb-25765-partial-po-thread",
+    receivedAt: "2026-07-20T01:00:00.000Z",
+    subject: "Documents for Work Order MLB-25765",
+    body: "The builder work order is attached.",
+    attachments: [pdf("mlb-25765-later-pdf")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-25765-later-pdf",
+      attachmentId: "mlb-25765-later-pdf-pdf",
+      attachmentName: "work_order_MLB-25765PO-54176.pdf",
+      status: "extracted",
+      text: [
+        "Work Order",
+        "Work Order Number MLB-25765PO-54176",
+        "Policyholders Name Shared Client",
+        "Mobile 0422636182",
+        "Site Address 241 Old Coast Road Australind WA 6233",
+        "Allocation Work Order",
+        "Makesafe/Emergency Repairs",
+        "Scope of Works Attend and make the property safe",
+      ].join("\n"),
+      charCount: 300,
+      pageCount: 1,
+      extractor: "test",
+      truncated: false,
+      reason: null,
+    }],
+  });
+
+  const plan = buildDeterministicIntakePlan(
+    [announcement, laterPdf],
+    PROFILES,
+  );
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
+  assertEquals(plan.cases[0].sourcePostIds, [
+    "mlb-25765-announcement",
+    "mlb-25765-later-pdf",
+  ]);
+});
+
+Deno.test("shared WO with distinct POs keeps separate family ownership", () => {
+  const items = [
+    ["roof", "54176", "Roof Reports EXTERNAL"],
+    ["physical", "54177", "Makesafe/Emergency Repairs"],
+  ].map(([suffix, purchaseOrder, declaredType], index) => {
+    const postId = `mlb-25765-${suffix}-distinct-po`;
+    return source({
+      postId,
+      threadId: "mlb-25765-distinct-po-thread",
+      receivedAt: `2026-07-20T0${index}:00:00.000Z`,
+      subject: `NEW WORK ORDER MLB-25765 ${declaredType}`,
+      body: "Please attend the attached work order.",
+      attachments: [pdf(postId)],
+      pdfDocuments: [{
+        sourcePostId: postId,
+        attachmentId: `${postId}-pdf`,
+        attachmentName: `work_order_MLB-25765PO-${purchaseOrder}.pdf`,
+        status: "extracted" as const,
+        text: [
+          "Work Order",
+          `Work Order Number MLB-25765PO-${purchaseOrder}`,
+          "Policyholders Name Shared Client",
+          "Mobile 0422636182",
+          "Site Address 241 Old Coast Road Australind WA 6233",
+          "Allocation Work Order",
+          declaredType,
+          "Scope of Works Attend and complete the declared service",
+        ].join("\n"),
+        charCount: 300,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      }],
+    });
+  });
+
+  const plan = buildDeterministicIntakePlan(items, PROFILES);
+  assertEquals(plan.cases.length, 2);
+  assertEquals(
+    new Set(plan.cases.map((intakeCase) => intakeCase.identity.jobFamily)),
+    new Set(["roof_report", "general_makesafe"]),
+  );
+  assertEquals(
+    new Set(
+      plan.cases.map((intakeCase) =>
+        intakeCase.identity.builderPoCanonical
+      ),
+    ),
+    new Set(["PO-54176", "PO-54177"]),
+  );
+});
+
 Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its declared family", () => {
   const item = source({
     postId: "quote-guard-1",

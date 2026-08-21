@@ -671,6 +671,7 @@ import {
   isReportOnlyType as _isReportOnlyType,
   reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
+  decideDeterministicMakeSafeJobFamily as _decideDeterministicMakeSafeJobFamily,
   hasExplicitRapidRepairSignal as _hasExplicitRapidRepairSignal,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
@@ -21284,6 +21285,28 @@ function combinedSplitObligation(extraction: any): { reportType: string } | null
   return null
 }
 
+function combinedSplitRecoveryDecision(
+  split: boolean,
+  recoveredMints: readonly any[],
+): {
+  action: 'not_split' | 'settle_existing' | 'review'
+  missing_roles: string[]
+} {
+  if (!split) return { action: 'not_split', missing_roles: [] }
+  const boundRoles = new Set(
+    recoveredMints
+      .filter((mint) => cleanReviewedString(mint?.job_id))
+      .map((mint) => cleanReviewedString(mint?.mint_role))
+      .filter(Boolean),
+  )
+  const missingRoles = ['primary', 'secondary_report'].filter((role) =>
+    !boundRoles.has(role)
+  )
+  return missingRoles.length
+    ? { action: 'review', missing_roles: missingRoles }
+    : { action: 'settle_existing', missing_roles: [] }
+}
+
 function effectiveIntakeReportType(draft: any): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
@@ -21610,6 +21633,7 @@ function shouldAutoApproveCleanIntake(input: {
   isReportCapture?: boolean
   tagReportType?: boolean
   reportType?: string | null
+  jobFamily?: string | null
   confidence?: string | null
   missingFields?: any[]
   matchedCompany?: any
@@ -21622,16 +21646,14 @@ function shouldAutoApproveCleanIntake(input: {
   // single-card auto-file would silently drop — both stay in the human queue.
   cancelled?: boolean
   combinedObligation?: boolean
-  // Intake item 3b: an UNAMBIGUOUS combined obligation (known report type) may
-  // auto-approve because approval now expands it into TWO cards instead of losing
-  // the second obligation. An ambiguous combined obligation leaves this false and
-  // still routes to human review.
-  combinedSplittable?: boolean
 }): { ok: boolean; reason: string } {
   if (input.enabled === false) return { ok: false, reason: 'disabled' }
   if (input.cancelled === true) return { ok: false, reason: 'cancelled_work_order' }
-  if (input.combinedObligation === true && !input.combinedSplittable) {
+  if (input.combinedObligation === true) {
     return { ok: false, reason: 'combined_makesafe_and_report_manual_review' }
+  }
+  if (!_normaliseDedupJobFamily(input.jobFamily)) {
+    return { ok: false, reason: 'work_order_family_needs_review' }
   }
 
   const attachments = input.attachments || []
@@ -21654,10 +21676,7 @@ function shouldAutoApproveCleanIntake(input: {
 
   const missing = (input.missingFields || []).map(cleanMissingFieldName).filter(Boolean)
   const blockingMissing = missing.filter((m) =>
-    !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m) &&
-    // The combined-obligation marker is not blocking when the obligation is
-    // splittable — approval expands it into two cards (item 3b).
-    !(input.combinedSplittable === true && m === COMBINED_OBLIGATION_MISSING_FIELD)
+    !AUTO_APPROVE_ALLOWED_MISSING_FIELDS.has(m)
   )
   if (blockingMissing.length > 0) return { ok: false, reason: 'missing_fields:' + blockingMissing.join(',') }
 
@@ -21673,6 +21692,58 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
+  const builder = cleanReviewedString(draft?.requesting_company_slug) ||
+    cleanReviewedString(extraction.requesting_company_slug) ||
+    cleanReviewedString(draft?.requesting_company_name) ||
+    cleanReviewedString(extraction.requesting_company_name) ||
+    null
+  const workOrderAttachments = draftWorkOrderAttachments(attachments)
+  const workOrderNames = new Set(
+    workOrderAttachments
+      .map((attachment: any) => normaliseDraftAttachmentName(
+        attachment?.file_name || attachment?.name || attachment?.label,
+      ))
+      .filter(Boolean),
+  )
+  const pdfDocuments = parseJsonArray(extraction.work_order_pdf_text)
+    .filter((document: any) =>
+      !workOrderNames.size ||
+      workOrderNames.has(normaliseDraftAttachmentName(
+        document?.attachment_name || document?.name || document?.file_name,
+      ))
+    )
+  let familyContext: _MakeSafeJobFamilyContext = { builder }
+  let familyContextRefused = emailCarriesMultipleWorkOrders(
+    draft,
+    extraction,
+    attachments,
+  )
+  if (!familyContextRefused && pdfDocuments.length) {
+    try {
+      familyContext = _resolveDraftFamilyClassifierContext({
+        builder,
+        workOrderCount: workOrderAttachments.length,
+        pdfDocuments,
+      })
+    } catch (error) {
+      if (!(error instanceof _DraftFamilyContextRefusal)) throw error
+      familyContextRefused = true
+    }
+  }
+  const familyDecision = _decideDeterministicMakeSafeJobFamily(
+    draft?.subject || null,
+    [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
+    effectiveReportType,
+    familyContext,
+  )
+  const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
+  const storedFamily = _normaliseDedupJobFamily(storedFamilyRaw)
+  const decidedFamily = _normaliseDedupJobFamily(familyDecision.family)
+  const jobFamily = familyContextRefused
+    ? null
+    : storedFamilyRaw
+    ? (storedFamily === decidedFamily ? storedFamily : null)
+    : (decidedFamily || null)
 
   // Defence in depth for legacy rows created before scan-time cancellation/combined
   // flagging existed: recompute both signals directly from the stored draft so the sweep
@@ -21687,15 +21758,13 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     (emailCarriesMultipleWorkOrders(draft, extraction, attachments) &&
       hasWorkOrderAttachmentEvidence(attachments) &&
       hasPositiveReportOnlyEvidence(draft, extraction, attachments))
-  // item 3b: an unambiguous combined obligation is splittable (auto-expands into two cards).
-  const combinedSplittable = combinedSplitObligation(extraction) !== null
-
   // NOTE: this is a PURE cleanliness check (no `enabled` passed). Whether auto-approval
   // is switched on at all is decided by the caller — the sweep action gates the default-on
   // MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE flag once, so a braked flag still yields an
   // informative dry-run preview instead of masking every draft as 'disabled'.
   return shouldAutoApproveCleanIntake({
     reportType: effectiveReportType,
+    jobFamily,
     confidence: draft?.confidence,
     missingFields: parseJsonArray(draft?.missing_fields),
     matchedCompany: {
@@ -21708,11 +21777,12 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     attachments,
     cancelled,
     combinedObligation,
-    combinedSplittable,
   })
 }
 
 export const _combinedSplitObligationForTest = combinedSplitObligation
+export const _combinedSplitRecoveryDecisionForTest =
+  combinedSplitRecoveryDecision
 export const _effectiveIntakeReportTypeForTest = effectiveIntakeReportType
 export const _shouldAutoApproveCleanIntakeForTest = shouldAutoApproveCleanIntake
 // Intake hardening (items 1 + 3): exported so tests can exercise the positive-report
@@ -22330,6 +22400,9 @@ async function approveIntakeDraft(client: any, body: any) {
   const recoveredPrimaryMint = recoveredMints.find(
     (mint) => mint.mint_role === 'primary' && mint.job_id,
   )
+  const recoveredSecondaryMint = recoveredMints.find(
+    (mint) => mint.mint_role === 'secondary_report' && mint.job_id,
+  )
   const recoveredMintRoles = new Set(recoveredMints.map((mint) => mint.mint_role))
   const missingRequiredMints = requiredMintRoles.some(
     (role) => !recoveredMintRoles.has(role),
@@ -22338,9 +22411,27 @@ async function approveIntakeDraft(client: any, body: any) {
     recoveredPrimaryMint?.job_id ||
     null
   let effectiveDraftStatus = draft.status
-  if (splitObligation && !recoveredPrimaryMint) {
+  const splitRecovery = combinedSplitRecoveryDecision(
+    !!splitObligation,
+    recoveredMints,
+  )
+  if (splitRecovery.action === 'review') {
+    if (effectiveDraftStatus === 'approved') {
+      const { error } = await client
+        .from('makesafe_intake_drafts')
+        .update({
+          status: 'needs_review',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', draft.id)
+        .eq('status', 'approved')
+      if (error) {
+        throw new Error(`intake mint resume release failed: ${error.message || error}`)
+      }
+      effectiveDraftStatus = 'needs_review'
+    }
     throw new ApiError(
-      'Multiple builder instructions require separate reviewed bindings; no primary or secondary card was minted',
+      `Multiple builder instructions require existing reviewed bindings for ${splitRecovery.missing_roles.join(', ')}; no card was minted`,
       409,
     )
   }
@@ -22464,7 +22555,6 @@ async function approveIntakeDraft(client: any, body: any) {
     )
   }
   extraction = correlatedIdentity.extraction
-  const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
 
   // A guarded source correction means the operational job already exists. The
   // review gate must link this exact source to that job instead of running the
@@ -22582,7 +22672,13 @@ async function approveIntakeDraft(client: any, body: any) {
       )
     }
     try {
-      await _assertInstructionCardMintAvailable(client, instructionKeys)
+      await _assertInstructionCardMintAvailable(
+        client,
+        {
+          orgId: draft.org_id || DEFAULT_ORG_ID,
+          candidateKeys: instructionKeys,
+        },
+      )
     } catch (error) {
       if (error instanceof _InstructionMintConflictError) {
         throw new ApiError(
@@ -22634,7 +22730,7 @@ async function approveIntakeDraft(client: any, body: any) {
         || canonicalObligationPoCore(extraction?.builder_work_order_number, true)
         || canonicalObligationPoCore(approvedFields.external_ref, true)
       const { data: candidates } = await client.from('makesafe_job_details')
-        .select('job_id, external_ref, requesting_company_slug, requesting_company_name, report_type, jobs(job_number, client_name, site_address, status, metadata, notes)')
+        .select('job_id, external_ref, requesting_company_slug, requesting_company_name, jobs(job_number, client_name, site_address, status, metadata)')
         .not('external_ref', 'is', null)
       const dup = (candidates || []).find((row: any) => {
         if (canonicalExternalObligationRef(row.external_ref, prefixes) !== normTarget) return false
@@ -22664,18 +22760,11 @@ async function approveIntakeDraft(client: any, body: any) {
           || canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)
           || canonicalObligationPoCore(row.external_ref, true)
         if (approvedPoCore && existingPoCore && approvedPoCore !== existingPoCore) return false
-        const existingFamily = existingMetadata.makesafe_job_family || _classifyMakeSafeJobFamily(
-          row.external_ref || '',
-          [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),
-          row.report_type || null,
-          approvedFamilyContext,
-        )
-        const existingFamilyKey = _normaliseDedupJobFamily(existingFamily)
-        return !existingFamilyKey || existingFamilyKey === approvedJobFamilyKey
+        return true
       })
       if (dup?.job_id) {
         const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
-        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same MakeSafe job family')
+        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same builder instruction')
       }
     }
   }
@@ -22891,12 +22980,6 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
     )
 
-    // ── Item 3b: mint the SECOND card (the report obligation) ────────────────
-    // A combined make-safe + report is now expanded into TWO live cards instead of
-    // holding for human review: the physical make-safe (created above) PLUS this
-    // report-only card of the correct kind, sharing the same ref + WO PDF and
-    // cross-linked. Non-fatal: the primary already exists, so a secondary failure is
-    // logged and the primary stands (never a double-primary).
     let secondaryJob: any = null
     if (splitObligation && createdJobId) {
       try {
@@ -22909,57 +22992,16 @@ async function approveIntakeDraft(client: any, body: any) {
             sourcePostIds: authority.sourcePostIds,
           })
           : null
-        const reportFamily = splitObligation.reportType === 'assessment_report'
-          ? 'assessment_report_quote'
-          : splitObligation.reportType
         const recoveredSecondaryJob = secondaryMint
           ? await recoverIntakeMintJob(client, secondaryMint)
           : null
-        const secondaryResult = recoveredSecondaryJob
-          ? { job: recoveredSecondaryJob }
-          : await createMakesafeJob(client, {
-          client_name: approvedFields.client_name,
-          site_address: approvedFields.site_address,
-          suburb: approvedFields.site_suburb,
-          phone: approvedFields.client_phone,
-          email: approvedFields.client_email,
-          requesting_company_slug: approvedFields.requesting_company_slug,
-          requesting_company_name: approvedFields.requesting_company_name,
-          external_ref: approvedFields.external_ref,
-          description: approvedFields.description,
-          safety_requirements: approvedFields.safety_requirements,
-          special_instructions: approvedFields.special_instructions,
-          makesafe_job_family: reportFamily,
-          makesafe_job_family_label: _makeSafeJobFamilyLabel(reportFamily),
-          suppress_notifications: true,
-          ...(sourceExternalLinks ? { external_links: sourceExternalLinks } : {}),
-          builder_email_text_for_trade: extraction?.builder_email_text_for_trade || null,
-          builder_email_subject: extraction?.builder_email_subject || draft?.subject || null,
-          builder_email_received_at: extraction?.builder_email_received_at || draft?.received_at || null,
-          builder_claim_ref: extraction?.builder_claim_ref || null,
-          builder_work_order_number: extraction?.builder_work_order_number || null,
-          builder_po_number: extraction?.builder_po_number || null,
-          ...(secondaryMint ? { intake_mint_id: secondaryMint.id } : {}),
-          ...(extraction?.synthetic_livefire_marker
-            ? {
-              synthetic_livefire_marker:
-                extraction.synthetic_livefire_marker,
-            }
-            : {}),
-          suppress_manager_notification: body?.suppress_manager_notification === true ||
-            extraction?.deterministic_intake === true,
-          }, {
-            familyClassifierContext: approvedFamilyContext,
-            suppressGeocoding: notificationSuppressionReason !== null,
-            ...(authority && secondaryMint
-              ? {
-                canonicalIntakeAuthority: {
-                  case_id: authority.caseId,
-                  mint_id: secondaryMint.id,
-                },
-              }
-              : {}),
-          })
+        if (!recoveredSecondaryJob || !recoveredSecondaryMint) {
+          throw new ApiError(
+            'Secondary builder instruction requires an existing reviewed card binding; no secondary card was minted',
+            409,
+          )
+        }
+        const secondaryResult = { job: recoveredSecondaryJob }
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
           createdJobIds.push(secondaryJob.id)
@@ -23588,7 +23630,7 @@ async function _reextractExtractFields(
   missingFields: string[]
   matchedCompany: { slug: string; name: string } | null
   draftReportType: string | null
-  draftJobFamily: string
+  draftJobFamily: string | null
   availableWoCount: number
   isReportCapture: boolean
   extractionDegraded: boolean
@@ -23904,14 +23946,21 @@ async function _reextractExtractFields(
       }),
     )
   }
-  const draftJobFamily = _classifyMakeSafeJobFamily(
+  const familyDecision = _decideDeterministicMakeSafeJobFamily(
     subject,
     [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
     draftReportType,
     draftFamilyContext,
   )
+  const draftJobFamily = familyDecision.family
   extraction.makesafe_job_family = draftJobFamily
-  extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+  extraction.makesafe_job_family_label = draftJobFamily
+    ? _makeSafeJobFamilyLabel(draftJobFamily)
+    : null
+  extraction.makesafe_job_family_evidence = familyDecision.evidence
+  if (!draftJobFamily && !missingFields.includes('work_order_family_needs_review')) {
+    missingFields.push('work_order_family_needs_review')
+  }
   extraction.reextracted_at = new Date().toISOString()
   // Item 3: flag a combined make-safe + report so the reextracted draft never auto-files
   // a single card that drops the report obligation.
@@ -24032,6 +24081,7 @@ export async function reextractIntakeDraft(
     isReportCapture: r.isReportCapture,
     tagReportType: r.draftReportType != null,
     reportType: r.draftReportType,
+    jobFamily: r.draftJobFamily,
     confidence: r.confidence,
     missingFields: r.missingFields,
     matchedCompany: r.matchedCompany,
@@ -24044,7 +24094,6 @@ export async function reextractIntakeDraft(
       (emailCarriesMultipleWorkOrders({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments) &&
         hasWorkOrderAttachmentEvidence(r.attachments) &&
         hasPositiveReportOnlyEvidence({ subject: draft?.subject ?? null, body_preview: draft?.body_preview ?? null }, r.extraction, r.attachments)),
-    combinedSplittable: combinedSplitObligation(r.extraction) !== null,
   })
   if (autoDecision.ok) {
     try {
@@ -24280,11 +24329,7 @@ async function landLateWorkOrderPdfOntoDraft(
   // matcher sees the builder_claim_ref + WO/PO identity carried in extraction_json.
   const rows: _LatePdfDraftRow[] = (liveDrafts || []).map((d: any) => {
     const ex = parseJsonObject(d.extraction_json)
-    const fam = ex.makesafe_job_family || _classifyMakeSafeJobFamily(
-      d.subject || d.external_ref || '',
-      [d.report_type, d.description].filter(Boolean).join('\n'),
-      d.report_type || null,
-    )
+    const fam = cleanReviewedString(ex.makesafe_job_family) || null
     return {
       ...d,
       external_ref: cleanReviewedString(ex.builder_claim_ref) || d.external_ref,
@@ -26873,13 +26918,23 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         builderEmailTextForTrade || bodyPreview,
       )
     }
-    const draftJobFamily = _classifyMakeSafeJobFamily(
+    const familyDecision = _decideDeterministicMakeSafeJobFamily(
       subject,
       [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
       draftReportType,
+      {
+        builder: matchedCompany?.slug || matchedCompany?.name || null,
+      },
     )
+    const draftJobFamily = familyDecision.family
     extraction.makesafe_job_family = draftJobFamily
-    extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
+    extraction.makesafe_job_family_label = draftJobFamily
+      ? _makeSafeJobFamilyLabel(draftJobFamily)
+      : null
+    extraction.makesafe_job_family_evidence = familyDecision.evidence
+    if (!draftJobFamily && !missingFields.includes('work_order_family_needs_review')) {
+      missingFields.push('work_order_family_needs_review')
+    }
 
     // Item 3 (one email -> two cards): a make-safe WO that ALSO owes a roof/assessment
     // report is recorded as a combined obligation (secondary_obligation + a blocking
@@ -26994,6 +27049,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       if (
         refDup === 'unknown_family_needs_review' ||
         refDup === 'job_unknown_family_needs_review' ||
+        refDup === 'work_order_family_needs_review' ||
         refDup === 'work_order_identity_needs_review' ||
         refDup === 'job_work_order_identity_needs_review'
       ) {
@@ -27046,10 +27102,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
           // instead of a silent skip — never a blind live-insert, per the contract. A true
           // re-scan (byte-identical resend) is already caught upstream by the graph-id /
           // internet-id / content-fingerprint dedup, so reaching here is not a byte twin.
-          // Nudge / no-WO emails (availableWoCount == 0, same family) keep the silent skip.
-          const familySpecificEntry = (normRef && companyKey)
-            ? refToJobId.get(`${normRef}|${companyKey}|${familyKey}`) ?? null
-            : null
+          // Nudge / no-WO emails (availableWoCount == 0) keep the silent skip.
           // Same WO/PO identity as an existing job under this company = a re-send of the
           // SAME work order (not a distinct second deliverable). Keyed on the real WO/PO
           // number only (no external_ref fallback), so a NEW/unparsed WO number never matches.
@@ -27064,9 +27117,6 @@ async function retiredPaidAiIntakeImplementation(client: any) {
             matchedJobId,
             availableWoCount,
             sameWoAsActiveJob,
-            candidateFamily: familyKey,
-            hasFamilySpecificSibling: familySpecificEntry != null,
-            hasFamilyAgnosticSibling: matchedEntry != null,
           })
           if (distinctSecondDeliverable) {
             if (!missingFields.includes('second_deliverable_review')) {
@@ -27408,13 +27458,12 @@ async function retiredPaidAiIntakeImplementation(client: any) {
     // The gate itself still requires confidence:high + the SAME required fields as the
     // human approveIntakeDraft (company + ref + client + address + servable WO PDF), and
     // now also rejects cancellations and combined make-safe+report obligations.
-    if (draftExtractionDegraded) autoFileSuppressedDrafts++
-    else autoFileEligibleDrafts++
     const autoApprovalDecision = shouldAutoApproveCleanIntake({
       enabled: autoFileEnabled && !draftExtractionDegraded && autoApproveCleanIntakeEnabled(),
       isReportCapture,
       tagReportType,
       reportType: draftReportType,
+      jobFamily: draftJobFamily,
       confidence,
       missingFields,
       matchedCompany,
@@ -27422,12 +27471,10 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       clientName: extraction.client_name || null,
       siteAddress: extraction.site_address || null,
       attachments,
-      // Item 2/3 belt-and-braces: a cancellation never reaches here (dropped at the
-      // gate). A combined make-safe+report no longer auto-files a single card — an
-      // UNAMBIGUOUS one auto-splits into two cards (item 3b); an ambiguous one blocks.
       combinedObligation: !!(extraction?.secondary_obligation),
-      combinedSplittable: combinedSplitObligation(extraction) !== null,
     })
+    if (autoApprovalDecision.ok) autoFileEligibleDrafts++
+    else autoFileSuppressedDrafts++
 
     if (autoApprovalDecision.ok) {
       try {
@@ -42297,8 +42344,6 @@ const REOPEN_ELIGIBLE_STATUSES = ['complete', 'invoiced', 'archived', 'cancelled
 //   • availableWoCount > 0 — the candidate carries its OWN servable WO PDF (a real second
 //     work order, not a nudge / no-WO email); the late-PDF-landing block already returned
 //     if that PDF belonged to an existing dirty draft, so reaching here it is genuinely new.
-//   • different-family sibling — the matched job(s) under this ref+company are a DIFFERENT
-//     family than this candidate (a family-specific miss but a family-agnostic hit).
 // A byte-identical resend is caught upstream by the id / content-fingerprint dedup; and a
 // builder RE-SENDING the SAME work order (same WO/PO identity as the active sibling job, but
 // a new subject/time so not a byte twin) is excluded via `sameWoAsActiveJob` so it does not
@@ -42308,15 +42353,9 @@ export function isDistinctSecondDeliverable(input: {
   matchedJobId: string | null
   availableWoCount: number
   sameWoAsActiveJob: boolean
-  candidateFamily: string | null | undefined
-  hasFamilySpecificSibling: boolean
-  hasFamilyAgnosticSibling: boolean
 }): boolean {
   if (input.matchedJobId == null) return false
-  const differentFamilySibling = !!input.candidateFamily &&
-    !input.hasFamilySpecificSibling && input.hasFamilyAgnosticSibling
-  const carriesDistinctWo = input.availableWoCount > 0 && !input.sameWoAsActiveJob
-  return carriesDistinctWo || differentFamilySibling
+  return input.availableWoCount > 0 && !input.sameWoAsActiveJob
 }
 
 async function reopenMakesafe(client: any, body: any, authz?: {

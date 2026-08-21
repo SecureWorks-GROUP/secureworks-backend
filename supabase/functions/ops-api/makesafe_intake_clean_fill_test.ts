@@ -145,6 +145,7 @@ Deno.test("M-A replay: no live-MLB / empty / noise rawText ever produces a fill"
 
 Deno.test("M-A born-clean: model-vision-filled client fields pass the unchanged gate", () => {
   const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "mlb", name: "MLB" },
     externalRef: "MLB-26705PO-55608",
@@ -166,6 +167,7 @@ Deno.test("M-A born-clean: model-vision-filled client fields pass the unchanged 
 
 Deno.test("M-A fail-closed at gate: blank client_name blocks auto-approval", () => {
   const d = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "mlb" },
     externalRef: "MLB-26533",
@@ -180,6 +182,7 @@ Deno.test("M-A fail-closed at gate: blank client_name blocks auto-approval", () 
 
 Deno.test("M-A fail-closed at gate: blank site_address blocks auto-approval", () => {
   const d = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: "high",
     matchedCompany: { slug: "mlb" },
     externalRef: "MLB-26533",
@@ -232,6 +235,7 @@ Deno.test("M-A text-layer WO: fill bumps medium->high, then the unchanged gate a
 
   // Feed the freshly-filled draft into the UNCHANGED gate exactly as the scanner does.
   const decision = _shouldAutoApproveCleanIntakeForTest({
+    jobFamily: "general_makesafe",
     confidence: fill.confidence,
     matchedCompany: { slug: "wb", name: "Western Building" },
     externalRef: "WB-12345PO-99999",
