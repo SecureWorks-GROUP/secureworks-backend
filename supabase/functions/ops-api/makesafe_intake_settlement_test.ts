@@ -14,6 +14,7 @@ const noIdentityRefresh = async () => null;
 
 function client(existing: any[] = [], insertError: any = null) {
   const inserts: any[] = [];
+  let nextId = 1;
   const query: any = {
     select() {
       return query;
@@ -22,7 +23,16 @@ function client(existing: any[] = [], insertError: any = null) {
       return query;
     },
     eq() {
+      return query;
+    },
+    is() {
+      return query;
+    },
+    limit() {
       return Promise.resolve({ data: existing, error: null });
+    },
+    then(resolve: (value: any) => unknown) {
+      return resolve({ data: existing, error: null });
     },
   };
   return {
@@ -35,7 +45,23 @@ function client(existing: any[] = [], insertError: any = null) {
           },
           insert(row: any) {
             inserts.push(row);
-            return Promise.resolve({ data: null, error: insertError });
+            const inserted = { id: `doc-${nextId++}`, ...row };
+            return {
+              select() {
+                return {
+                  single() {
+                    if (insertError) {
+                      return Promise.resolve({
+                        data: null,
+                        error: insertError,
+                      });
+                    }
+                    existing.push(inserted);
+                    return Promise.resolve({ data: inserted, error: null });
+                  },
+                };
+              },
+            };
           },
         };
       },
@@ -85,6 +111,89 @@ Deno.test("work-order evidence continuation remains retryable after an insert fa
     Error,
     "work-order evidence attach failed",
   );
+});
+
+Deno.test("work-order evidence continuation adopts a concurrent insert winner", async () => {
+  const winner = {
+    id: "doc-winner",
+    job_id: "job-1",
+    type: "work_order",
+    file_name: "work-order.pdf",
+    storage_url: "storage/work-order.pdf",
+    pdf_url: "storage/work-order.pdf",
+  };
+  let refreshes = 0;
+  const makeRead = (initial: boolean) => {
+    const query: any = {
+      select() {
+        return query;
+      },
+      in() {
+        return query;
+      },
+      eq() {
+        return query;
+      },
+      is() {
+        return query;
+      },
+      limit() {
+        return Promise.resolve({ data: [winner], error: null });
+      },
+      then(resolve: (value: any) => unknown) {
+        return resolve({ data: initial ? [] : [winner], error: null });
+      },
+    };
+    return query;
+  };
+  let reads = 0;
+  const raceClient = {
+    from(table: string) {
+      assertEquals(table, "job_documents");
+      return {
+        select() {
+          reads += 1;
+          return makeRead(reads === 1);
+        },
+        insert() {
+          return {
+            select() {
+              return {
+                single() {
+                  return Promise.resolve({
+                    data: null,
+                    error: {
+                      code: "23505",
+                      message:
+                        'duplicate key value violates unique constraint "ux_job_documents_makesafe_attach_key"',
+                    },
+                  });
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+
+  await ensureIntakeWorkOrderEvidence(
+    raceClient,
+    ["job-1"],
+    [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    {},
+    {
+      refreshIdentity: async () => {
+        refreshes += 1;
+        return null;
+      },
+    },
+  );
+
+  assertEquals(refreshes, 1);
 });
 
 Deno.test("settlement repairs legacy evidence but only explicit mint authority can notify", async () => {
@@ -156,6 +265,9 @@ Deno.test("an explicit no-send settlement records suppression without calling th
             return query;
           },
           eq() {
+            return query;
+          },
+          is() {
             return Promise.resolve({
               data: [{
                 job_id: "job-no-send",

@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
+import { insertOrReadActiveMakesafeDocument } from "./makesafe_document_idempotency.ts";
 import { refreshMakesafeIdentityAfterWorkOrderAttach } from "./makesafe_work_order_identity_refresh.ts";
 
 export const SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION =
@@ -115,7 +116,8 @@ export async function ensureIntakeWorkOrderEvidence(
     .from("job_documents")
     .select("job_id,storage_url,pdf_url")
     .in("job_id", uniqueJobIds)
-    .eq("type", "work_order");
+    .eq("type", "work_order")
+    .is("superseded_at", null);
   if (existingError) {
     throw new Error(
       `work-order evidence read failed: ${
@@ -139,24 +141,32 @@ export async function ensureIntakeWorkOrderEvidence(
       ) continue;
       const fileName = attachment.file_name || attachment.name ||
         "work-order.pdf";
-      const { error } = await client.from("job_documents").insert({
-        job_id: jobId,
-        type: "work_order",
-        file_name: fileName,
-        storage_url: storageUrl,
-        pdf_url: pdfUrl,
-        ...(extraction?.synthetic_livefire_marker
-          ? {
-            data_snapshot_json: {
-              synthetic_livefire_marker: extraction.synthetic_livefire_marker,
-            },
-          }
-          : {}),
-        visible_to_trades: true,
-      });
-      if (error) {
+      try {
+        await insertOrReadActiveMakesafeDocument(client, {
+          key: { jobId, type: "work_order", fileName },
+          row: {
+            job_id: jobId,
+            type: "work_order",
+            file_name: fileName,
+            storage_url: storageUrl,
+            pdf_url: pdfUrl,
+            ...(extraction?.synthetic_livefire_marker
+              ? {
+                data_snapshot_json: {
+                  synthetic_livefire_marker:
+                    extraction.synthetic_livefire_marker,
+                },
+              }
+              : {}),
+            visible_to_trades: true,
+          },
+          select: "id",
+        });
+      } catch (error) {
         throw new Error(
-          `work-order evidence attach failed: ${error.message || error}`,
+          `work-order evidence attach failed: ${
+            (error as any)?.message || error
+          }`,
         );
       }
       existingKeys.add(`${jobId}:${storageUrl}`);
