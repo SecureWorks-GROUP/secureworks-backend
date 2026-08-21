@@ -14,6 +14,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _attachMakesafeDocumentForTest,
+  _confirmDocumentUploadForTest,
   _setMakesafeDocumentStorageAdminForTest,
 } from "./index.ts";
 
@@ -326,6 +327,32 @@ Deno.test("concurrent retry of the same attach key converges on one active row",
   assertEquals(db.job_documents.length, 1);
   assertEquals(first.document_id, second.document_id);
   assertEquals(db.job_documents[0].version, 2);
+});
+
+Deno.test("concurrent upload confirmations converge on one active document", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db);
+
+  const [first, second] = await Promise.all([
+    _confirmDocumentUploadForTest(client, {
+      job_id: "job-1",
+      publicUrl: STORED_URL,
+      path: "job-1/confirmed.pdf",
+      fileName: "confirmed.pdf",
+      type: "invoice",
+    }),
+    _confirmDocumentUploadForTest(client, {
+      job_id: "job-1",
+      publicUrl: STORED_URL,
+      path: "job-1/confirmed.pdf",
+      fileName: "confirmed.pdf",
+      type: "invoice",
+    }),
+  ]);
+
+  assertEquals(db.job_documents.length, 1);
+  assertEquals(first.document_id, second.document_id);
+  assertEquals(first.document_id, db.job_documents[0].id);
 });
 
 Deno.test("rejects unknown type", async () => {

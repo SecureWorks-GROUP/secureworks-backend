@@ -18873,6 +18873,7 @@ export const _persistMakesafeStatusApplicationsForTest = persistMakesafeStatusAp
 
 // Test-only export for the close-out doc-attach path (typed + idempotent).
 export const _attachMakesafeDocumentForTest = attachMakesafeDocument
+export const _confirmDocumentUploadForTest = confirmDocumentUpload
 
 async function bindExistingSesInvoiceCloseout(
   client: any,
@@ -36583,10 +36584,16 @@ async function confirmDocumentUpload(client: any, body: any) {
     insertData.pdf_url = publicUrl
   }
 
-  const { data: doc, error } = await client.from('job_documents')
-    .insert(insertData).select('id').single()
-
-  if (error) throw error
+  const resolved = await insertOrReadActiveMakesafeDocument(client, {
+    key: {
+      jobId: jId,
+      type: docType,
+      fileName: insertData.file_name,
+    },
+    row: insertData,
+    select: 'id',
+  })
+  const doc = resolved.row
 
   // Log event
   await client.from('job_events').insert({
