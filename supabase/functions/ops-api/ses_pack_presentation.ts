@@ -163,6 +163,8 @@ export function presentSesPackHonesty(input: {
   has_report_doc?: boolean | null;
   /** Trade service report submitted (even if no curated PDF yet). */
   has_trade_report?: boolean | null;
+  /** Exact selected non-draft trade report for the current attendance cycle. */
+  has_selected_current_cycle_trade_report?: boolean | null;
   /**
    * Pack bind pointer for the builder-facing report. Attach ticks are not
    * binds — when `requires_bound_report_doc` is true, a null pointer cannot
@@ -176,6 +178,11 @@ export function presentSesPackHonesty(input: {
    * family. Placement may still use the separate portal/report-in contract.
    */
   requires_bound_report_doc?: boolean | null;
+  /**
+   * Families whose builder-facing PDF is produced from a trade report require
+   * that selected current-cycle source as well as the bound PDF pointer.
+   */
+  requires_selected_current_cycle_trade_report?: boolean | null;
   /** Pack bind pointer for the invoice reviewed and sent with this docket. */
   invoice_doc_id?: string | null;
   /** False when the exact pointer does not resolve to its invoice document. */
@@ -217,6 +224,8 @@ export function presentSesPackHonesty(input: {
   const docketState = lower(docket?.state);
   const boundReportDocId = txt(input.report_doc_id);
   const requiresBoundReport = input.requires_bound_report_doc === true;
+  const requiresSelectedTradeReport =
+    input.requires_selected_current_cycle_trade_report === true;
   const boundInvoiceDocId = txt(input.invoice_doc_id);
   const requiresBoundInvoice = input.requires_bound_invoice_doc === true;
   const boundSwmsDocId = txt(input.swms_doc_id);
@@ -301,6 +310,23 @@ export function presentSesPackHonesty(input: {
           docket_revision_id: docketId,
           drafted: true,
           reason,
+          blockers: [],
+          legacy_pack_status: legacyPackStatus,
+        };
+      }
+      if (
+        requiresSelectedTradeReport &&
+        input.has_selected_current_cycle_trade_report !== true
+      ) {
+        return {
+          kind: "incomplete",
+          state: "drafted",
+          review_state: "U4_BLOCKED",
+          pre_xero_docs_ready: false,
+          docket_revision_id: docketId,
+          drafted: true,
+          reason:
+            "The SES docket is stamped ready, but no selected current-cycle trade report backs the bound report document.",
           blockers: [],
           legacy_pack_status: legacyPackStatus,
         };

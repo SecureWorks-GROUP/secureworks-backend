@@ -111,6 +111,7 @@ function reviewPackClient(
     jobRow?: Record<string, unknown> | null;
     detailRow?: Record<string, unknown> | null;
     portalCaptures?: Array<Record<string, unknown>>;
+    serviceReports?: Array<Record<string, unknown>>;
     pricingDisposition?: string;
   } = {},
 ) {
@@ -222,6 +223,16 @@ function reviewPackClient(
     jobs: jobRow ? [jobRow] : [],
     makesafe_job_details: detailRow ? [detailRow] : [],
     makesafe_portal_capture_revisions: options.portalCaptures || [],
+    job_service_reports: options.serviceReports || [{
+      id: "service-report-current",
+      job_id: "job-fixture",
+      status: "submitted",
+      submitted_at: "2026-08-04T00:00:00.000Z",
+      created_at: "2026-08-04T00:00:00.000Z",
+      cycle_number: 1,
+      attendance_cycle_id: null,
+      cycle_attribution: null,
+    }],
     makesafe_invoice_obligation_revisions: options.pricingDisposition
       ? [{
         id: "obligation-fixture",
@@ -718,6 +729,56 @@ Deno.test("get_ses_reviewable_pack: physical pack with bound report and invoice 
   assertEquals(bound.presentation.pre_xero_docs_ready, true);
   assertEquals(bound.presentation.review_state, "READY");
   assertEquals(bound.presentation.reason, null);
+});
+
+Deno.test("get_ses_reviewable_pack: bound physical report without a selected current-cycle trade report is incomplete", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nno-selected-report");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const mark = supersessionEvent();
+  mark.detail_json.expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const result = await getSesReviewablePackAction(
+    reviewPackClient(artifact, bytes, {
+      jobEvents: [mark],
+      preXeroDocsReady: true,
+      detailRow: {
+        job_id: "job-fixture",
+        report_type: null,
+        substatus: "admin_to_send_report",
+        external_ref: "AJBR-70000",
+        external_links: [],
+        attendance_cycle_id: "cycle-current",
+        cycle_number: 2,
+        reattend_count: 1,
+        requesting_company_slug: "aj",
+        requesting_company_name: "AJS",
+      },
+      serviceReports: [{
+        id: "service-report-prior-cycle",
+        job_id: "job-fixture",
+        status: "submitted",
+        submitted_at: "2026-08-03T00:00:00.000Z",
+        created_at: "2026-08-03T00:00:00.000Z",
+        cycle_number: 1,
+        attendance_cycle_id: "cycle-prior",
+        cycle_attribution: "bound",
+      }],
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+
+  assertEquals(result.presentation.kind, "incomplete");
+  assertEquals(result.presentation.pre_xero_docs_ready, false);
+  assertStringIncludes(
+    String(result.presentation.reason || ""),
+    "selected current-cycle trade report",
+  );
 });
 
 Deno.test("get_ses_reviewable_pack: roof card with portal proof and bound artifacts is ready", async () => {

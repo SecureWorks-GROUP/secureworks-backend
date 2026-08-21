@@ -107,6 +107,7 @@ import {
   reportInEvidence,
   requiresBoundBuilderReportPdf,
 } from "./makesafe_computed_status.ts";
+import { selectCurrentCycleReport } from "./makesafe_cycle_evidence.ts";
 import { projectMakesafePortalCaptures } from "./makesafe_board_read_model.ts";
 import {
   inspectSesSupportingReportProof,
@@ -3133,7 +3134,8 @@ export async function getSesReviewablePackAction(
   // presentSesPackHonesty. Resolve the exact rows here so neither a missing nor
   // a dangling report/invoice/required-SWMS coordinate can green review.
   const jobId = String(docket.job_id || "");
-  const [packRead, jobRead, detailRead, documentsRead] = await Promise.all([
+  const [packRead, jobRead, detailRead, documentsRead, reportsRead] =
+    await Promise.all([
     client.from("makesafe_report_packs")
       .select(
         "id,pack_kind,status,report_doc_id,invoice_doc_id,swms_doc_id,sent_at",
@@ -3144,12 +3146,18 @@ export async function getSesReviewablePackAction(
       .eq("id", jobId).maybeSingle(),
     client.from("makesafe_job_details")
       .select(
-        "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,portal_verified_at,portal_verified_cycle,portal_verified_signal,requesting_company_slug,requesting_company_name,requesting_company_id",
+        "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,reattend_count,portal_verified_at,portal_verified_cycle,portal_verified_signal,requesting_company_slug,requesting_company_name,requesting_company_id",
       )
       .eq("job_id", jobId).maybeSingle(),
     client.from("job_documents")
       .select("id,type,file_name,storage_url,pdf_url")
       .eq("job_id", jobId),
+    client.from("job_service_reports")
+      .select(
+        "id,job_id,status,submitted_at,created_at,cycle_number,attendance_cycle_id,cycle_attribution",
+      )
+      .eq("job_id", jobId)
+      .order("submitted_at", { ascending: false }),
   ]);
   if (packRead.error) {
     throw new SesActionError(503, {
@@ -3159,12 +3167,16 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
-  if (jobRead.error || detailRead.error || documentsRead.error) {
+  if (
+    jobRead.error || detailRead.error || documentsRead.error ||
+    reportsRead.error
+  ) {
     throw new SesActionError(503, {
       state: "refused",
       fact: `The job identity for pack honesty could not be read (${
         jobRead.error?.message || detailRead.error?.message ||
         documentsRead.error?.message ||
+        reportsRead.error?.message ||
         "unknown database error"
       }).`,
     });
@@ -3172,6 +3184,11 @@ export async function getSesReviewablePackAction(
   const packRow = packRead.data || null;
   const jobRow = jobRead.data || null;
   const detailRow = detailRead.data || null;
+  const selectedCurrentCycleTradeReport = selectCurrentCycleReport(
+    reportsRead.data || [],
+    detailRow,
+    detailRow?.attendance_cycle_id || null,
+  );
   const packPointerResolution = resolveMakesafePackDocumentPointers(
     packRow,
     documentsRead.data || [],
@@ -3195,7 +3212,9 @@ export async function getSesReviewablePackAction(
       documents: {
         report: !!String(packRow?.report_doc_id || "").trim(),
       },
-      serviceReports: [] as unknown[],
+      serviceReports: selectedCurrentCycleTradeReport
+        ? [selectedCurrentCycleTradeReport]
+        : [],
       portalCaptures: [] as ReturnType<typeof projectMakesafePortalCaptures>,
     },
     ses_family: sesFamily,
@@ -3257,6 +3276,10 @@ export async function getSesReviewablePackAction(
     report_doc_id: packRow?.report_doc_id || null,
     report_doc_resolved: packPointerResolution.report_doc_resolved,
     requires_bound_report_doc:
+      artifactRequirements.requires_bound_report_doc,
+    has_selected_current_cycle_trade_report:
+      !!selectedCurrentCycleTradeReport,
+    requires_selected_current_cycle_trade_report:
       artifactRequirements.requires_bound_report_doc,
     invoice_doc_id: packRow?.invoice_doc_id || null,
     invoice_doc_resolved: packPointerResolution.invoice_doc_resolved,

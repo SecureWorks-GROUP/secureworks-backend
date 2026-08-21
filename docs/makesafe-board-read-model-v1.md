@@ -202,7 +202,9 @@ must have `pack.invoice_doc_id`; a family-required SWMS must have
 must resolve to the exact expected `job_documents` class on this card and carry
 a storage/PDF URL. Missing, dangling, wrong-class, or empty-object pointers
 present `incomplete` with a plain-English reason, even when the docket stamp
-says docs-ready; they are missing artifacts, not caveats. Report-only cards
+is docs-ready. A report-producing family also needs its selected current-cycle
+non-draft trade report; `has_report_doc` proves neither the pointer nor that
+current-cycle source. These are missing artifacts, not caveats. Report-only cards
 still need their separate family report-in evidence as well. The published
 `pack.pre_xero_docs_ready` is gated the same way: it is `true` only when the
 presentation kind is `ready` AND the raw U4 docket stamp is true. The

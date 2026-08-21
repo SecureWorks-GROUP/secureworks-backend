@@ -221,10 +221,31 @@ Deno.test("physical ready stamp with bound report_doc_id stays ready", () => {
     report_doc_id: "doc-report",
     report_doc_resolved: true,
     requires_bound_report_doc: true,
+    has_selected_current_cycle_trade_report: true,
+    requires_selected_current_cycle_trade_report: true,
   });
   assertEquals(p.kind, "ready");
   assertEquals(p.review_state, "READY");
   assertEquals(p.pre_xero_docs_ready, true);
+});
+
+Deno.test("bound report pointer without a selected current-cycle trade report is incomplete", () => {
+  const p = presentSesPackHonesty({
+    docket: {
+      id: "rev-ready-no-selected-report",
+      state: "ready",
+      pre_xero_docs_ready: true,
+      blockers: [],
+    },
+    report_doc_id: "doc-report",
+    report_doc_resolved: true,
+    requires_bound_report_doc: true,
+    has_selected_current_cycle_trade_report: false,
+    requires_selected_current_cycle_trade_report: true,
+  });
+  assertEquals(p.kind, "incomplete");
+  assertEquals(p.pre_xero_docs_ready, false);
+  assertStringIncludes(p.reason || "", "selected current-cycle trade report");
 });
 
 Deno.test("ready stamp with a dangling report_doc_id is incomplete", () => {
@@ -389,6 +410,8 @@ Deno.test("physical bound pack stays honesty-ready for pipeline pre_xero gate (2
     swms_doc_resolved: true,
     requires_bound_swms: true,
     family_report_evidence_satisfied: true,
+    has_selected_current_cycle_trade_report: true,
+    requires_selected_current_cycle_trade_report: true,
   });
   assertEquals(p.kind, "ready");
   assertEquals(p.pre_xero_docs_ready, true);

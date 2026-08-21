@@ -1484,6 +1484,32 @@ Deno.test("assessment portal triad stays ready without a local report pointer", 
   assertEquals(card.pack.required_documents.invoice, true);
 });
 
+Deno.test("bound report cannot present ready without a selected current-cycle trade report", () => {
+  const [card] = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", "physical-bound-without-current-report", {
+        report: null,
+        report_pack: READY_UNSENT_PACK,
+        invoice_id: "invoice-row-ready",
+        invoice_status: "draft",
+        invoice_qualifies_as_current_draft: true,
+        has_report_doc: true,
+        has_invoice_doc: true,
+        has_swms_doc: true,
+      }),
+    ],
+    { computedAt: NOW },
+    "card",
+  );
+
+  assertEquals(card.pack.presentation_kind, "incomplete");
+  assertEquals(card.pack.pre_xero_docs_ready, false);
+  assertStringIncludes(
+    String(card.pack.presentation_reason || ""),
+    "selected current-cycle trade report",
+  );
+});
+
 Deno.test("SWMS-26980: portal proof cannot present ready without a bound report pointer", () => {
   // Live 2026-08-21: the roof role was portal-proved and the current docket was
   // stamped ready, but report_doc_id was null. Placement may still reflect the
@@ -1576,6 +1602,7 @@ Deno.test("pipeline fail-closed report-only stamp upgrades when portal evidence 
           }],
         },
         assignments: [],
+        report: SUBMITTED_REPORT,
         report_pack: {
           status: "drafted",
           // Operator-facing honesty gate (pipeline fail-closed).
@@ -1645,7 +1672,7 @@ Deno.test("legacySent report-only re-derive keeps the carried current docket", (
     }),
     detail,
     [],
-    null,
+    SUBMITTED_REPORT,
     null,
     [{
       id: "doc-report-ans",
@@ -2573,6 +2600,7 @@ Deno.test("canonical row preserves the visible plain-English Captain action", ()
 Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers without money facts", () => {
   const [ready] = buildCanonicalMakesafeRows([
     baseJob("report_ready", "u4-ready", {
+      report: SUBMITTED_REPORT,
       report_pack: {
         status: "drafted",
         review_state: "READY",
@@ -2632,6 +2660,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
 Deno.test("legacy failed pack over a ready docket presents ready, not failed", () => {
   const [row] = buildCanonicalMakesafeRows([
     baseJob("report_ready", "legacy-failed-ready-docket", {
+      report: SUBMITTED_REPORT,
       report_pack: {
         // Stale legacy status that used to green-tick or red-lie on the board.
         status: "failed",

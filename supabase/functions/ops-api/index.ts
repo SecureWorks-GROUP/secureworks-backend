@@ -17997,9 +17997,12 @@ async function makesafePipeline(
       pack_sent: packSentMap[j.id] === true,
       has_report_doc: hasReportDoc,
       has_trade_report: !!reportMap[j.id],
+      has_selected_current_cycle_trade_report: !!reportMap[j.id],
       report_doc_id: rowPack?.report_doc_id || null,
       report_doc_resolved: packPointerResolution.report_doc_resolved,
       requires_bound_report_doc:
+        artifactRequirements.requires_bound_report_doc,
+      requires_selected_current_cycle_trade_report:
         artifactRequirements.requires_bound_report_doc,
       invoice_doc_id: rowPack?.invoice_doc_id || null,
       invoice_doc_resolved: packPointerResolution.invoice_doc_resolved,

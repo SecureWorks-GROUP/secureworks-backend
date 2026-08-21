@@ -2670,13 +2670,17 @@ exceptions. Each required pointer must resolve to the matching typed/legacy
 `job_documents` row on that card with a storage/PDF URL — a non-null dangling or
 empty-object ID is still missing. Attach ticks (`has_report_doc` /
 `documents.report`) are not binds and cannot green pack presentation or the
-closeout tiles. Missing pointers present `incomplete`, never a caveat; genuine
+closeout tiles. A report-producing family also needs its selected current-cycle
+non-draft trade report; the pointer and source report are separate proofs and
+both must be present. Missing pointers or selected report evidence present
+`incomplete`, never a caveat; genuine
 caveat-class codes continue to ride ready cards. Soft-assuming
 `canonical_draft_pack_output_missing` / `curated_source_missing` must not pull
 the card out of Docs Ready. Placement remains separate: roof and assessment
 stay on the portal report-in floor, so `canonical_stage` may remain
 `report_ready` while presentation independently enforces the artifacts required
-for that family/release (SWMS-26980 class). `presentSesPackHonesty` owns this operator boundary;
+for that family/release (SWMS-26980 class). `presentSesPackHonesty` owns this
+operator boundary;
 `physicalReportCloseoutSatisfied` / `requiresBoundBuilderReportPdf` in
 `makesafe_computed_status.ts` continue to own placement.
 
