@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any no-import-prefix
 // Tests for the M3 make-safe close-out doc-attach path (attachMakesafeDocument):
 //   (a) typed attach keeps the type — invoice/makesafe_report/swms do NOT
 //       downgrade to 'general' (the old uploadDocument/confirmDocumentUpload
@@ -271,14 +272,14 @@ Deno.test("pdf_base64 attach uploads to the provisioned bucket without creating 
   let uploadedPath = "";
   _setMakesafeDocumentStorageAdminForTest(() => ({
     storage: {
-      createBucket: async () => {
+      createBucket: () => {
         createBucketCalls += 1;
-        return { data: null, error: null };
+        return Promise.resolve({ data: null, error: null });
       },
       from: (_bucket: string) => ({
-        upload: async (path: string, _bytes: Uint8Array, _opts: any) => {
+        upload: (path: string, _bytes: Uint8Array, _opts: any) => {
           uploadedPath = path;
-          return { data: { path }, error: null };
+          return Promise.resolve({ data: { path }, error: null });
         },
         getPublicUrl: (path: string) => ({
           data: {
