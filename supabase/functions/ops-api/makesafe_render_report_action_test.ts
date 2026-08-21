@@ -368,6 +368,11 @@ async function bindBody(bytes: Uint8Array) {
   };
 }
 
+async function bindBodyOmittingPdf(bytes: Uint8Array) {
+  const { pdf_base64: _omitted, ...rest } = await bindBody(bytes);
+  return rest;
+}
+
 async function withStoredPdf<T>(bytes: Uint8Array, run: () => Promise<T>) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () =>
@@ -787,11 +792,57 @@ Deno.test("live stored bytes that drift from pdf_base64 still mismatch and do no
   }
 });
 
-Deno.test("storage GET 5xx / 403 / 429 fail closed and do not persist", async () => {
-  const bytes = new TextEncoder().encode("%PDF-1.7\nnon-missing status fixture");
-  for (const status of [403, 429, 500, 502, 503]) {
+Deno.test("omit pdf_base64 plus live GET 200 matching sha binds stored bytes without persist", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nomit live-object fixture");
+  const { client, document, mutations } = bindClient(bytes);
+  const body = await bindBodyOmittingPdf(bytes);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const result = await withStoredPdf(
+      bytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          body,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(
+      result,
+      await expectedSuccessShape(
+        bytes,
+        body.report_job as Record<string, unknown>,
+        {
+          skipped: false,
+          writes: 2,
+          documentVersion: 2,
+        },
+      ),
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.map((item) => item.table), [
+      "job_events",
+      "job_documents",
+    ]);
+    assertEquals(
+      Object.keys(mutations[1].values).includes("pdf_url"),
+      false,
+    );
+    assertEquals(document.version, 2);
+    assertEquals(
+      document.data_snapshot_json.curated_source_expected_raw_sha256,
+      `sha256:${await sha(bytes)}`,
+    );
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("omit pdf_base64 plus storage GET 400/404 still requires caller bytes", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nomit missing-object fixture");
+  for (const status of [400, 404]) {
     const { client, mutations } = bindClient(bytes);
-    const body = await bindBody(bytes);
+    const body = await bindBodyOmittingPdf(bytes);
     const storage = withDocumentStorageAdmin();
     try {
       const error = await assertRejects(
@@ -804,17 +855,128 @@ Deno.test("storage GET 5xx / 403 / 429 fail closed and do not persist", async ()
             )
           ),
         ApiError,
-        "existing makesafe_report byte recovery failed",
+        "pdf_base64 is required",
       );
-      assertEquals((error as ApiError).status, 409);
+      assertEquals((error as ApiError).status, 400);
       assertEquals(
         ((error as ApiError).body as Record<string, unknown>).code,
-        "curated_bind_document_bytes_read_failed",
+        "curated_bind_pdf_required",
       );
       assertEquals(storage.uploads.length, 0, `status ${status} must not persist`);
       assertEquals(mutations.length, 0);
     } finally {
       storage.restore();
+    }
+  }
+});
+
+Deno.test("omit pdf_base64 plus empty document URL still requires caller bytes", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nomit empty url fixture");
+  const { client, mutations } = bindClient(bytes, {
+    documentPdfUrl: "",
+  });
+  const body = await bindBodyOmittingPdf(bytes);
+  const storage = withDocumentStorageAdmin();
+  const originalFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = ((..._args: unknown[]) => {
+    fetched = true;
+    return Promise.reject(new Error("must not fetch"));
+  }) as typeof fetch;
+  try {
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          body,
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+      "pdf_base64 is required",
+    );
+    assertEquals((error as ApiError).status, 400);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_pdf_required",
+    );
+    assertEquals(fetched, false);
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
+Deno.test("omit pdf_base64 plus live GET 200 sha mismatch refuses without persist", async () => {
+  const stored = new TextEncoder().encode("%PDF-1.7\nomit stored fixture");
+  const claimed = new TextEncoder().encode("%PDF-1.7\nomit claimed fixture");
+  const { client, mutations } = bindClient(stored);
+  const body = await bindBodyOmittingPdf(claimed);
+  const storage = withDocumentStorageAdmin();
+  try {
+    const error = await assertRejects(
+      () =>
+        withStoredPdf(
+          stored,
+          () =>
+            _bindCurrentCycleCuratedMakesafeReportForTest(
+              client,
+              body,
+              FIXTURE_ACTOR,
+            ),
+        ),
+      ApiError,
+      "raw SHA-256 mismatch",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(
+      ((error as ApiError).body as Record<string, unknown>).code,
+      "curated_bind_pdf_sha256_mismatch",
+    );
+    assertEquals(storage.uploads.length, 0);
+    assertEquals(mutations.length, 0);
+  } finally {
+    storage.restore();
+  }
+});
+
+Deno.test("storage GET 5xx / 403 / 429 fail closed and do not persist", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nnon-missing status fixture");
+  for (const omitPdf of [false, true]) {
+    for (const status of [403, 429, 500, 502, 503]) {
+      const { client, mutations } = bindClient(bytes);
+      const body = omitPdf
+        ? await bindBodyOmittingPdf(bytes)
+        : await bindBody(bytes);
+      const storage = withDocumentStorageAdmin();
+      try {
+        const error = await assertRejects(
+          () =>
+            withHttpStatus(status, () =>
+              _bindCurrentCycleCuratedMakesafeReportForTest(
+                client,
+                body,
+                FIXTURE_ACTOR,
+              )
+            ),
+          ApiError,
+          "existing makesafe_report byte recovery failed",
+        );
+        assertEquals((error as ApiError).status, 409);
+        assertEquals(
+          ((error as ApiError).body as Record<string, unknown>).code,
+          "curated_bind_document_bytes_read_failed",
+        );
+        assertEquals(
+          storage.uploads.length,
+          0,
+          `status ${status} omit=${omitPdf} must not persist`,
+        );
+        assertEquals(mutations.length, 0);
+      } finally {
+        storage.restore();
+      }
     }
   }
 });

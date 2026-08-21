@@ -223,7 +223,7 @@ function object(value: unknown): Record<string, any> {
 }
 
 export const SES_CURATED_SOURCE_RECOVERY_ACTION =
-  "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, pdf_base64, pdf_sha256 (sha256:<64 lowercase hex>), report_job (photo content_sha256 same format), curation_revision_id, and curation_artifact_id; server derives current attendance cycle, renderer provenance, artifact content hash and report_input_hash, then establishes cycle attribution. Then prepare_ses_docket_revision (dry_run or draft only).";
+  "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, pdf_sha256 (sha256:<64 lowercase hex>), optional pdf_base64 (required when the attached storage object is missing), report_job (photo content_sha256 same format), curation_revision_id, and curation_artifact_id; server derives current attendance cycle, renderer provenance, artifact content hash and report_input_hash, then establishes cycle attribution. Then prepare_ses_docket_revision (dry_run or draft only).";
 
 /**
  * What ONE job's append-only curated-bind trail records: the supersessions it

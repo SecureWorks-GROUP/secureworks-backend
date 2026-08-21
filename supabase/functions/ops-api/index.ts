@@ -38891,21 +38891,27 @@ async function ensureCuratedReportPackPointer(
  * Exact body:
  * {
  *   job_id, document_id,
- *   pdf_base64, pdf_sha256,
+ *   pdf_sha256,
+ *   pdf_base64?,
  *   report_job,
  *   curation_revision_id, curation_artifact_id
  * }
  *
- * Inspect already-validated caller PDF bytes against the attached document's
- * storage object. Does not persist. GET ok compares; drift is mismatch.
- * Persist is eligible only for an unbound placeholder (no https URL) or a
- * definitive missing object (GET 400/404). 5xx / 403 / 429 / other non-OK and
- * fetch timeout stay read_failed. A prior curated hash that differs from the
- * caller hashes refuses persist. The write itself is persistRecovered… after
- * later 409 gates.
+ * Inspect the attached document's storage object. pdf_sha256 is always
+ * required. pdf_base64 may be omitted only when GET is 200 and the stored
+ * bytes hash to that sha — those stored bytes become the bind artifact and
+ * nothing is persisted. GET ok with caller bytes still compares; drift is
+ * mismatch. Persist is eligible only when caller bytes were supplied AND the
+ * row is an unbound placeholder (no https URL) or a definitive missing object
+ * (GET 400/404). Omit is not a persist license: 400/404 / no https still
+ * require pdf_base64. 5xx / 403 / 429 / other non-OK and fetch timeout stay
+ * read_failed. A prior curated hash that differs from the caller hashes
+ * refuses persist. The write itself is persistRecovered… after later 409
+ * gates.
  */
 type CuratedBindDocumentBytesRecoverPlan = {
   kind: 'stored' | 'persist'
+  bytes: Uint8Array
 }
 
 function curatedBindPriorHashDiffers(args: {
@@ -38923,9 +38929,9 @@ function curatedBindPriorHashDiffers(args: {
 
 async function recoverCuratedBindDocumentBytes(args: {
   sourceUrl: string
-  suppliedBytes: Uint8Array
+  suppliedBytes: Uint8Array | null
   suppliedRawHash: string
-  suppliedArtifactHash: string
+  suppliedArtifactHash: string | null
   priorExpectedRawSha256: string | null
   priorArtifactContentHash: string | null
 }): Promise<CuratedBindDocumentBytesRecoverPlan> {
@@ -38945,9 +38951,28 @@ async function recoverCuratedBindDocumentBytes(args: {
       if (
         !storedBytes.byteLength ||
         storedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES ||
-        new TextDecoder().decode(storedBytes.slice(0, 5)) !== '%PDF-' ||
+        new TextDecoder().decode(storedBytes.slice(0, 5)) !== '%PDF-'
+      ) {
+        throw curatedBindError(
+          'curated_bind_document_bytes_mismatch',
+          'existing makesafe_report bytes drift from the curated artifact',
+        )
+      }
+      const storedRawHash = `sha256:${await sha256BytesHex(storedBytes)}`
+      if (!args.suppliedBytes) {
+        // Live-object omit path: stored bytes are the bind artifact when they
+        // match caller pdf_sha256. Hash match is not a persist license.
+        if (storedRawHash !== args.suppliedRawHash) {
+          throw curatedBindError(
+            'curated_bind_pdf_sha256_mismatch',
+            'curated report raw SHA-256 mismatch',
+          )
+        }
+        return { kind: 'stored', bytes: storedBytes }
+      }
+      if (
         storedBytes.byteLength !== args.suppliedBytes.byteLength ||
-        `sha256:${await sha256BytesHex(storedBytes)}` !== args.suppliedRawHash ||
+        storedRawHash !== args.suppliedRawHash ||
         await sesSha256Bytes(storedBytes) !== args.suppliedArtifactHash
       ) {
         throw curatedBindError(
@@ -38955,7 +38980,7 @@ async function recoverCuratedBindDocumentBytes(args: {
           'existing makesafe_report bytes drift from the curated artifact',
         )
       }
-      return { kind: 'stored' }
+      return { kind: 'stored', bytes: storedBytes }
     }
     // Bertram placeholder class: row exists, storage GET is 400/404. Any other
     // non-OK (5xx, 403, 429, …) fails closed — do not persist an object we
@@ -38966,6 +38991,14 @@ async function recoverCuratedBindDocumentBytes(args: {
         'existing makesafe_report byte recovery failed',
       )
     }
+  }
+
+  if (!args.suppliedBytes || !args.suppliedArtifactHash) {
+    throw curatedBindError(
+      'curated_bind_pdf_required',
+      'pdf_base64 is required',
+      400,
+    )
   }
 
   if (
@@ -38981,7 +39014,7 @@ async function recoverCuratedBindDocumentBytes(args: {
       'prior curated report hash differs from the supplied artifact; attach the new bytes first',
     )
   }
-  return { kind: 'persist' }
+  return { kind: 'persist', bytes: args.suppliedBytes }
 }
 
 async function persistRecoveredCuratedBindDocumentBytes(args: {
@@ -39024,7 +39057,8 @@ async function persistRecoveredCuratedBindDocumentBytes(args: {
  * Exact body:
  * {
  *   job_id, document_id,
- *   pdf_base64, pdf_sha256,
+ *   pdf_sha256,
+ *   pdf_base64?,
  *   report_job,
  *   curation_revision_id, curation_artifact_id
  * }
@@ -39035,11 +39069,14 @@ async function persistRecoveredCuratedBindDocumentBytes(args: {
  * an already-attached, trade-visible makesafe_report and establishes its verified
  * current-cycle attribution. It never creates a document, never overwrites live
  * different bytes, and never renders, sends, approves, invoices, or changes
- * job/board state. The one persist it may do is fill a missing storage object
+ * job/board state. pdf_base64 may be omitted when the attached object's storage
+ * GET is 200 and those stored bytes hash to pdf_sha256 — the stored object is
+ * the bind artifact. The one persist it may do is fill a missing storage object
  * (GET 400/404 or unbound placeholder with no https URL) on that already-attached
- * row when the caller supplied matching pdf_base64. Persist runs after visibility,
- * cycle-conflict, source-evidence, and later 409 gates, still before the version
- * CAS, so a refused bind never writes a public object or rewrites pdf_url.
+ * row when the caller supplied matching pdf_base64. Omit is not a persist
+ * license. Persist runs after visibility, cycle-conflict, source-evidence, and
+ * later 409 gates, still before the version CAS, so a refused bind never writes
+ * a public object or rewrites pdf_url.
  */
 async function bindCurrentCycleCuratedMakesafeReport(
   client: any,
@@ -39073,47 +39110,45 @@ async function bindCurrentCycleCuratedMakesafeReport(
     )
   }
 
+  const suppliedRawHash = requireCuratedBindSha256(body.pdf_sha256, 'pdf_sha256')
   const suppliedBase64 = String(body.pdf_base64 || '').trim()
-  if (!suppliedBase64) {
-    throw curatedBindError(
-      'curated_bind_pdf_required',
-      'pdf_base64 is required',
-      400,
-    )
+  let callerBytes: Uint8Array | null = null
+  let callerArtifactHash: string | null = null
+  if (suppliedBase64) {
+    let decoded: Uint8Array
+    try {
+      decoded = Uint8Array.from(atob(suppliedBase64), (value) => value.charCodeAt(0))
+    } catch {
+      throw curatedBindError(
+        'curated_bind_pdf_base64_invalid',
+        'pdf_base64 is invalid',
+        400,
+      )
+    }
+    if (!decoded.byteLength ||
+        decoded.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
+      throw curatedBindError(
+        'curated_bind_pdf_size_invalid',
+        'curated report exceeds the configured 8 MiB byte budget',
+        413,
+      )
+    }
+    if (new TextDecoder().decode(decoded.slice(0, 5)) !== '%PDF-') {
+      throw curatedBindError(
+        'curated_bind_pdf_type_invalid',
+        'curated report is not a PDF',
+        400,
+      )
+    }
+    if (`sha256:${await sha256BytesHex(decoded)}` !== suppliedRawHash) {
+      throw curatedBindError(
+        'curated_bind_pdf_sha256_mismatch',
+        'curated report raw SHA-256 mismatch',
+      )
+    }
+    callerBytes = decoded
+    callerArtifactHash = await sesSha256Bytes(decoded)
   }
-  let suppliedBytes: Uint8Array
-  try {
-    suppliedBytes = Uint8Array.from(atob(suppliedBase64), (value) => value.charCodeAt(0))
-  } catch {
-    throw curatedBindError(
-      'curated_bind_pdf_base64_invalid',
-      'pdf_base64 is invalid',
-      400,
-    )
-  }
-  if (!suppliedBytes.byteLength ||
-      suppliedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
-    throw curatedBindError(
-      'curated_bind_pdf_size_invalid',
-      'curated report exceeds the configured 8 MiB byte budget',
-      413,
-    )
-  }
-  if (new TextDecoder().decode(suppliedBytes.slice(0, 5)) !== '%PDF-') {
-    throw curatedBindError(
-      'curated_bind_pdf_type_invalid',
-      'curated report is not a PDF',
-      400,
-    )
-  }
-  const suppliedRawHash = `sha256:${await sha256BytesHex(suppliedBytes)}`
-  if (requireCuratedBindSha256(body.pdf_sha256, 'pdf_sha256') !== suppliedRawHash) {
-    throw curatedBindError(
-      'curated_bind_pdf_sha256_mismatch',
-      'curated report raw SHA-256 mismatch',
-    )
-  }
-  const suppliedArtifactHash = await sesSha256Bytes(suppliedBytes)
 
   // Authority rows first: current attendance cycle is server-derived and must
   // exist before the cycle-scoped conflict scan can run.
@@ -39192,9 +39227,9 @@ async function bindCurrentCycleCuratedMakesafeReport(
   const priorForRecover = parseJsonObject(document.data_snapshot_json)
   let recoverPlan = await recoverCuratedBindDocumentBytes({
     sourceUrl: String(document.pdf_url || document.storage_url || ''),
-    suppliedBytes,
+    suppliedBytes: callerBytes,
     suppliedRawHash,
-    suppliedArtifactHash,
+    suppliedArtifactHash: callerArtifactHash,
     priorExpectedRawSha256: String(
       priorForRecover.curated_source_expected_raw_sha256 || '',
     ).trim() || (
@@ -39206,6 +39241,9 @@ async function bindCurrentCycleCuratedMakesafeReport(
       priorForRecover.curated_source_artifact_content_hash || '',
     ).trim() || null,
   })
+  const suppliedBytes = recoverPlan.bytes
+  const suppliedArtifactHash = callerArtifactHash ??
+    await sesSha256Bytes(suppliedBytes)
   const persistRecoveredPlaceholderIfNeeded = async () => {
     if (recoverPlan.kind !== 'persist') return
     await persistRecoveredCuratedBindDocumentBytes({
@@ -39215,7 +39253,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
       fileName: String(document.file_name || ''),
       bytes: suppliedBytes,
     })
-    recoverPlan = { kind: 'stored' }
+    recoverPlan = { kind: 'stored', bytes: suppliedBytes }
   }
 
   // Recover blank Crew / Attendance from recorded evidence before the curated
