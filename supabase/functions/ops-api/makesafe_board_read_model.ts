@@ -679,6 +679,11 @@ export interface CanonicalMakesafeExtras {
   boundPhotoSourceScopeByJobId?: Record<string, string>;
   /** Optional explicit bound-pack photo count when known. */
   boundPackPhotoCountByJobId?: Record<string, number>;
+  /**
+   * Current docket `completion_photo` artifact count (photo-route attachments).
+   * Hillarys-class: route already complete while board was fail-closed to 0.
+   */
+  packPhotoAttachmentCountByJobId?: Record<string, number>;
   contactsByJobId?: Record<string, any[]>;
   intakeCaseByJobId?: Record<string, any>;
   holdsByJobId?: Record<string, MakesafeStatusHold>;
@@ -1386,6 +1391,8 @@ export function buildCanonicalMakesafeRows(
         extras.photosHaveCycleBindingByJobId?.[base?.id] === true,
       boundPhotoSourceScope: extras.boundPhotoSourceScopeByJobId?.[base?.id],
       boundPackPhotoCount: extras.boundPackPhotoCountByJobId?.[base?.id] ?? null,
+      packPhotoAttachmentCount:
+        extras.packPhotoAttachmentCountByJobId?.[base?.id] ?? null,
     });
     const swmsRequired = requiresMakesafeSwms(detail, base);
     const requiredDocuments = deriveSesRequiredDocuments({

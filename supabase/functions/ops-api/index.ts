@@ -239,6 +239,7 @@ import {
   currentCycleReportMap as cycleEvidenceReportMap,
   filterMediaForCurrentCycle,
   hasReattendBoundary,
+  isApplicablePackPhoto,
   isLegacyMakesafeCard,
   filterHoldsForCurrentCycle,
   normalizePackPhotoSourceScope,
@@ -18567,12 +18568,15 @@ async function loadCanonicalMakesafeBoard(
   // serial round-trips, not payload bytes, dominate board TTFB.
   // attendance_cycle_id / cycle_attribution exist live (U2 state-authority) and
   // let reattend cards count current-cycle media instead of fail-closing to 0.
+  // Match pack applicability (type=photo), not the old phase=completion AND —
+  // Hillarys-class site photos are type=photo and must not vanish from the count
+  // when phase is blank or a non-completion label. Receipts are dropped below.
   const photosPromise = _fetchAllByJobIdChunked(
     client,
     'job_media',
     'id, job_id, type, phase, attendance_cycle_id, cycle_attribution',
     jobIds,
-    (q) => q.eq('type', 'photo').eq('phase', 'completion'),
+    (q) => q.eq('type', 'photo'),
   )
   // Bound curated report scope for the pack's report_doc_id — when the bind
   // stamped same_job_all_attendances, board photo_count must read the full set.
@@ -18583,33 +18587,51 @@ async function loadCanonicalMakesafeBoard(
     jobIds,
     (q) => q.eq('type', 'makesafe_report'),
   )
+  // Current docket completion_photo artifacts = photo-route attachment_count.
+  // Hillarys SWMS-261134: route already carries 21 while board was fail-closed.
+  const packPhotoArtifactPromise = _fetchAllByJobIdChunked(
+    client,
+    'makesafe_docket_artifacts',
+    'id, job_id, revision_id, role',
+    jobIds,
+    (q) => q.eq('role', 'completion_photo'),
+  )
 
   let reportPhotoScopeRows: any[] = []
+  let packPhotoArtifactRows: any[] = []
   if (cardMode) {
-    ;[photos, reportPhotoScopeRows] = await Promise.all([
+    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows] = await Promise.all([
       photosPromise,
       reportPhotoScopePromise,
+      packPhotoArtifactPromise,
     ])
   } else {
-    ;[photos, reportPhotoScopeRows, notes, contacts] = await Promise.all([
-      photosPromise,
-      reportPhotoScopePromise,
-      _fetchAllByJobIdChunked(
-        client,
-        'job_events',
-        'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
-        jobIds,
-        (q) => q.eq('event_type', 'note'),
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'job_contacts',
-        'job_id, client_name, client_phone, is_primary, contact_label, status',
-        jobIds,
-        (q) => q.eq('status', 'active'),
-      ),
-    ])
+    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows, notes, contacts] =
+      await Promise.all([
+        photosPromise,
+        reportPhotoScopePromise,
+        packPhotoArtifactPromise,
+        _fetchAllByJobIdChunked(
+          client,
+          'job_events',
+          'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
+          jobIds,
+          (q) => q.eq('event_type', 'note'),
+        ),
+        _fetchAllByJobIdChunked(
+          client,
+          'job_contacts',
+          'job_id, client_name, client_phone, is_primary, contact_label, status',
+          jobIds,
+          (q) => q.eq('status', 'active'),
+        ),
+      ])
   }
+  // Drop receipt photos from the board count — same exclusion the mailer uses.
+  photos = (photos || []).filter((photo: any) =>
+    isApplicablePackPhoto(photo) &&
+    String(photo?.phase || '').trim().toLowerCase() !== 'receipt'
+  )
 
   {
     // F7: the append-only capture ledger is the durable Prime truth source. Read
@@ -18725,6 +18747,24 @@ async function loadCanonicalMakesafeBoard(
       reportDocById.get(reportDocId)?.photo_source_scope,
     )
     if (scope) boundPhotoSourceScopeByJobId[jobId] = scope
+  }
+  const packPhotoAttachmentCountByJobId: Record<string, number> = {}
+  const currentDocketRevisionByJobId = new Map<string, string>()
+  for (const row of buildBase) {
+    const jobId = row?.id
+    const revisionId = String(row?.report_pack?.docket_revision_id || '').trim()
+    if (jobId && revisionId) currentDocketRevisionByJobId.set(jobId, revisionId)
+  }
+  for (const artifact of packPhotoArtifactRows || []) {
+    const jobId = artifact?.job_id
+    if (!jobId) continue
+    const currentRevision = currentDocketRevisionByJobId.get(jobId)
+    if (
+      !currentRevision ||
+      String(artifact?.revision_id || '').trim() !== currentRevision
+    ) continue
+    packPhotoAttachmentCountByJobId[jobId] =
+      (packPhotoAttachmentCountByJobId[jobId] || 0) + 1
   }
   const contactsByJobId: Record<string, any[]> = {}
   for (const contact of contacts) {
@@ -18861,6 +18901,7 @@ async function loadCanonicalMakesafeBoard(
     currentCyclePhotoCountByJobId,
     photosHaveCycleBindingByJobId,
     boundPhotoSourceScopeByJobId,
+    packPhotoAttachmentCountByJobId,
     contactsByJobId,
     intakeCaseByJobId,
     holdsByJobId,

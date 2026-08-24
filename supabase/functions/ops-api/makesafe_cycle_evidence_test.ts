@@ -240,20 +240,39 @@ Deno.test("resolveBoardPhotoCount: single-visit unchanged, reattend scopes hones
     resolveBoardPhotoCount({ rawPhotoCount: 30, detail: reattend }),
     0,
   );
+
+  // Hillarys SWMS-261134 — board half only: photo route already has 21, board
+  // was fail-closed to 0. Prefer the persisted pack attachment count.
   assertEquals(
     resolveBoardPhotoCount({
-      rawPhotoCount: 30,
+      rawPhotoCount: 49,
+      detail: reattend,
+      packPhotoAttachmentCount: 21,
+      photosHaveCycleBinding: true,
+      currentCyclePhotoCount: 21,
+    }),
+    21,
+  );
+  assertEquals(
+    resolveBoardPhotoCount({
+      rawPhotoCount: 49,
       detail: reattend,
       photosHaveCycleBinding: true,
-      currentCyclePhotoCount: 7,
+      currentCyclePhotoCount: 21,
     }),
-    7,
+    21,
   );
+
+  // Willetton SWMS-261288 — all-attendances outranks a stale current-cycle pack
+  // count (route was still 7 until re-prepare).
   assertEquals(
     resolveBoardPhotoCount({
       rawPhotoCount: 30,
       detail: reattend,
       boundPhotoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+      packPhotoAttachmentCount: 7,
+      photosHaveCycleBinding: true,
+      currentCyclePhotoCount: 7,
     }),
     30,
   );
@@ -266,17 +285,6 @@ Deno.test("resolveBoardPhotoCount: single-visit unchanged, reattend scopes hones
     }),
     30,
     "null boundPackPhotoCount must not coerce to 0 via Number(null)",
-  );
-  assertEquals(
-    resolveBoardPhotoCount({
-      rawPhotoCount: 30,
-      detail: reattend,
-      boundPhotoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
-      boundPackPhotoCount: 30,
-      photosHaveCycleBinding: true,
-      currentCyclePhotoCount: 7,
-    }),
-    30,
   );
 });
 

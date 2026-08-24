@@ -371,9 +371,12 @@ export function photoCountForCurrentCycle(
  * Board/report photo_count for a card.
  *
  * - Single-visit: raw job media count (unchanged).
- * - Reattend + curated `same_job_all_attendances`: bound pack / full-job count.
+ * - Reattend + curated `same_job_all_attendances`: full same-job / bound count
+ *   (Willetton SWMS-261288 class — do not trust a stale current-cycle pack count).
+ * - Reattend + persisted pack photo-route attachments: read that count back
+ *   (Hillarys SWMS-261134 class — route already complete, board was fail-closed).
  * - Reattend + cycle-keyed media: current-cycle count only.
- * - Reattend with neither: fail closed to 0 (legacy).
+ * - Reattend with none of the above: fail closed to 0 (legacy).
  */
 export function resolveBoardPhotoCount(opts: {
   rawPhotoCount: number;
@@ -382,6 +385,8 @@ export function resolveBoardPhotoCount(opts: {
   photosHaveCycleBinding?: boolean;
   boundPhotoSourceScope?: unknown;
   boundPackPhotoCount?: number | null;
+  /** completion_photo artifacts on the card's current docket revision. */
+  packPhotoAttachmentCount?: number | null;
 }): number {
   const raw = Number(opts.rawPhotoCount || 0);
   if (!hasReattendBoundary(opts.detail)) return raw;
@@ -397,6 +402,14 @@ export function resolveBoardPhotoCount(opts: {
       return Number(opts.boundPackPhotoCount);
     }
     return raw;
+  }
+
+  if (
+    opts.packPhotoAttachmentCount != null &&
+    Number.isFinite(Number(opts.packPhotoAttachmentCount)) &&
+    Number(opts.packPhotoAttachmentCount) > 0
+  ) {
+    return Number(opts.packPhotoAttachmentCount);
   }
 
   if (opts.photosHaveCycleBinding === true) {

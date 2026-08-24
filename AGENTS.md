@@ -3323,10 +3323,12 @@ photo email and board `report.photo_count` must use that same complete same-job
 set — not current-cycle only. `selectPackPhotoMedia` /
 `resolveBoardPhotoCount` in `makesafe_cycle_evidence.ts` own the selection;
 the assembler reads the stamp via `curatedPackPhotoSourceScope`, and the board
-loader joins the pack's `report_doc_id` scope. Single-visit and current-cycle
-binds stay unchanged. Missing scope repairs to the current-cycle default on
-re-prepare; never hard-refuse a send for a stale photo binding. Worked defect:
-SWMS-261288 Willetton (30 bound / 7 route / 0 board). Tests:
+loader joins the pack's `report_doc_id` scope plus current-docket
+`completion_photo` counts. Single-visit and current-cycle binds stay unchanged.
+Missing scope repairs to the current-cycle default on re-prepare; never
+hard-refuse a send for a stale photo binding. Separable worked defects:
+Willetton SWMS-261288 (board 0 + route 7 vs 30 — both halves) and Hillarys
+SWMS-261134 (board 0 while route already 21 — board half only). Tests:
 `makesafe_cycle_evidence_test.ts`, `ses_assembler_input_adapter_test.ts`,
 `makesafe_board_read_model_test.ts`.
 
