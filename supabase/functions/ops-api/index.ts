@@ -38566,6 +38566,10 @@ type CuratedBindMaterialsSourceAccounting = {
   excluded: Array<{ item: string; reason: string }>
 }
 
+type CuratedBindPhotoSourceScope =
+  | 'current_cycle'
+  | 'same_job_all_attendances'
+
 const CURATED_BIND_MATERIALS_OMISSION_REASON =
   'omitted_from_report_materials_evidence'
 
@@ -38575,7 +38579,10 @@ async function assertCurrentWikiSourceEvidence(
   detail: any,
   attendanceCycleId: string,
   validated: CurrentWikiValidatedInput,
-): Promise<{ materials_source_accounting: CuratedBindMaterialsSourceAccounting }> {
+): Promise<{
+  materials_source_accounting: CuratedBindMaterialsSourceAccounting
+  photo_source_scope: CuratedBindPhotoSourceScope
+}> {
   const [reportsResponse, mediaResponse] = await Promise.all([
     client.from('job_service_reports')
       .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number')
@@ -38661,8 +38668,14 @@ async function assertCurrentWikiSourceEvidence(
     })),
   }
 
+  // The job_id predicate above is the ownership boundary. Keep the existing
+  // exact current-cycle set, and additionally allow the exact full set returned
+  // for this same job so one curated report can cover multiple attendances.
+  // This does not admit subsets or arbitrary selections: the caller must match
+  // one complete server-derived set, and every applicable byte is still hashed.
+  const sameJobMedia = mediaResponse.data || []
   const currentMedia = filterMediaForCurrentCycle(
-    mediaResponse.data || [],
+    sameJobMedia,
     detail,
     attendanceCycleId,
   )
@@ -38685,23 +38698,15 @@ async function assertCurrentWikiSourceEvidence(
   //
   // Compare parsed instants, never raw timestamp strings. The shared comparator
   // also preserves Postgres microseconds and puts missing timestamps last.
-  const applicable = currentMedia.filter(photoIsApplicable).slice()
-    .sort(comparePackMediaCreatedAtThenId)
-  const excluded = currentMedia.filter((item: any) => !photoIsApplicable(item))
-    .slice().sort(comparePackMediaCreatedAtThenId)
-  const applicableIds = applicable.map((item: any) => String(item.id || '').trim())
-  const excludedIds = excluded.map((item: any) => String(item.id || '').trim())
   const photoEvidence = (validated.supplied as any).photo_evidence
   const suppliedExcludedIds = photoEvidence.excluded.map((item: any) =>
     String(item?.evidence_id || '').trim()
   )
-  // Four independent comparisons share one refusal code, and an order-only
-  // disagreement on an otherwise complete ID set is now the likeliest failure.
-  // Name the comparison that failed, and say which sequence is expected.
   const describeIdMismatch = (
     label: string,
     supplied: unknown,
     expected: string[],
+    sourceLabel: string,
   ): string | null => {
     if (canonicalSesJson(supplied) === canonicalSesJson(expected)) return null
     const sameMembers = Array.isArray(supplied) &&
@@ -38709,34 +38714,84 @@ async function assertCurrentWikiSourceEvidence(
       canonicalSesJson(supplied.map((item) => canonicalSesJson(item)).sort()) ===
         canonicalSesJson(expected.map((item) => canonicalSesJson(item)).sort())
     return sameMembers
-      ? `${label} carries the current-cycle IDs in the wrong sequence (expected created_at ascending, then id)`
-      : `${label} does not match the current-cycle set`
+      ? `${label} carries the ${sourceLabel} IDs in the wrong sequence (expected created_at ascending, then id)`
+      : `${label} does not match the ${sourceLabel} set`
   }
-  const photoMismatches = [
-    photoEvidence.source_count !== currentMedia.length
-      ? `source_count ${photoEvidence.source_count} does not equal the current-cycle job_media count ${currentMedia.length}`
-      : null,
-    describeIdMismatch('applicable_ids', photoEvidence.applicable_ids, applicableIds),
-    describeIdMismatch('selected_ids', photoEvidence.selected_ids, applicableIds),
-    describeIdMismatch('excluded evidence_ids', suppliedExcludedIds, excludedIds),
-  ].filter((entry): entry is string => Boolean(entry))
-  if (photoMismatches.length) {
+
+  const photoSourceCandidate = (
+    scope: CuratedBindPhotoSourceScope,
+    sourceLabel: string,
+    media: any[],
+  ) => {
+    const applicable = media.filter(photoIsApplicable).slice()
+      .sort(comparePackMediaCreatedAtThenId)
+    const excluded = media.filter((item: any) => !photoIsApplicable(item))
+      .slice().sort(comparePackMediaCreatedAtThenId)
+    const applicableIds = applicable.map((item: any) =>
+      String(item.id || '').trim()
+    )
+    const excludedIds = excluded.map((item: any) =>
+      String(item.id || '').trim()
+    )
+    const mismatches = [
+      photoEvidence.source_count !== media.length
+        ? `source_count ${photoEvidence.source_count} does not equal the ${sourceLabel} job_media count ${media.length}`
+        : null,
+      describeIdMismatch(
+        'applicable_ids',
+        photoEvidence.applicable_ids,
+        applicableIds,
+        sourceLabel,
+      ),
+      describeIdMismatch(
+        'selected_ids',
+        photoEvidence.selected_ids,
+        applicableIds,
+        sourceLabel,
+      ),
+      describeIdMismatch(
+        'excluded evidence_ids',
+        suppliedExcludedIds,
+        excludedIds,
+        sourceLabel,
+      ),
+    ].filter((entry): entry is string => Boolean(entry))
+    return { scope, sourceLabel, applicable, mismatches }
+  }
+
+  // Current-cycle remains the first/default match, preserving the established
+  // single-visit and current-visit-only contract. The second candidate is the
+  // complete same-job history, never a caller-chosen subset.
+  const currentCycleCandidate = photoSourceCandidate(
+    'current_cycle',
+    'current-cycle',
+    currentMedia,
+  )
+  const allAttendancesCandidate = photoSourceCandidate(
+    'same_job_all_attendances',
+    'same-job all-attendance',
+    sameJobMedia,
+  )
+  const selectedPhotoSource = currentCycleCandidate.mismatches.length === 0
+    ? currentCycleCandidate
+    : allAttendancesCandidate.mismatches.length === 0
+    ? allAttendancesCandidate
+    : null
+  if (!selectedPhotoSource) {
     throw curatedBindError(
       'curated_bind_photo_source_mismatch',
-      `photo_evidence does not completely account for current-cycle job_media: ${
-        photoMismatches.join('; ')
-      }`,
+      `photo_evidence does not completely account for either supported same-job set: current-cycle (${currentCycleCandidate.mismatches.join('; ')}); same-job all-attendance (${allAttendancesCandidate.mismatches.join('; ')})`,
     )
   }
   const suppliedPhotos = (validated.supplied as any).photos as any[]
-  for (let index = 0; index < applicable.length; index++) {
-    const source = applicable[index]
+  for (let index = 0; index < selectedPhotoSource.applicable.length; index++) {
+    const source = selectedPhotoSource.applicable[index]
     // Full object only — never hash a thumbnail derivative into report trust.
     const sourceUrl = String(source.storage_url || '').trim()
     if (!sourceUrl.startsWith('https://')) {
       throw curatedBindError(
         'curated_bind_photo_bytes_unrecoverable',
-        `current-cycle photo ${String(source.id || '')} has no recoverable full-image HTTPS source`,
+        `${selectedPhotoSource.sourceLabel} photo ${String(source.id || '')} has no recoverable full-image HTTPS source`,
       )
     }
     let response: Response
@@ -38745,13 +38800,13 @@ async function assertCurrentWikiSourceEvidence(
     } catch {
       throw curatedBindError(
         'curated_bind_photo_bytes_read_failed',
-        `current-cycle photo ${String(source.id || '')} byte recovery failed`,
+        `${selectedPhotoSource.sourceLabel} photo ${String(source.id || '')} byte recovery failed`,
       )
     }
     if (!response.ok) {
       throw curatedBindError(
         'curated_bind_photo_bytes_read_failed',
-        `current-cycle photo ${String(source.id || '')} byte recovery failed`,
+        `${selectedPhotoSource.sourceLabel} photo ${String(source.id || '')} byte recovery failed`,
       )
     }
     const sourceBytes = new Uint8Array(await response.arrayBuffer())
@@ -38763,11 +38818,14 @@ async function assertCurrentWikiSourceEvidence(
     if (actualHash !== expectedHash) {
       throw curatedBindError(
         'curated_bind_photo_sha256_mismatch',
-        `current-cycle photo ${String(source.id || '')} SHA-256 mismatch`,
+        `${selectedPhotoSource.sourceLabel} photo ${String(source.id || '')} SHA-256 mismatch`,
       )
     }
   }
-  return { materials_source_accounting: materialsSourceAccounting }
+  return {
+    materials_source_accounting: materialsSourceAccounting,
+    photo_source_scope: selectedPhotoSource.scope,
+  }
 }
 
 async function assertBertramProtectedReportRepairCas(
@@ -39392,6 +39450,12 @@ async function bindCurrentCycleCuratedMakesafeReport(
     // Omitted service-report ticks (boilerplate strip or genuine drop) land
     // here so under-billing is never silent. Super-set still refused above.
     materials_source_accounting: sourceEvidence.materials_source_accounting,
+    // Keep legacy current-cycle snapshots byte-for-byte stable. Multi-visit
+    // binds carry an explicit durable marker because they intentionally use the
+    // alternate complete same-job source set.
+    ...(sourceEvidence.photo_source_scope === 'same_job_all_attendances'
+      ? { photo_source_scope: sourceEvidence.photo_source_scope }
+      : {}),
     report_scope_narratives: [
       validatedInput.job.scope,
       validatedInput.job.findings,
@@ -39590,6 +39654,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
       // answers "what did the trade record that the report did not carry?"
       // without reading job_documents.
       materials_source_accounting: sourceEvidence.materials_source_accounting,
+      photo_source_scope: sourceEvidence.photo_source_scope,
       ...(isTrustedContentSupersession
         ? {
           supersedes_prior_bind: true,
@@ -39601,7 +39666,8 @@ async function bindCurrentCycleCuratedMakesafeReport(
         : {}),
       // Residual product boundary: this is privileged attestation that the
       // served PDF is the curated artifact for verified current-cycle
-      // materials/photos — not a re-render proof of those bytes.
+      // materials and an exact supported same-job photo set — not a re-render
+      // proof of those bytes.
       attestation: 'privileged_ops_curated_bind_served_bytes',
     },
   })
