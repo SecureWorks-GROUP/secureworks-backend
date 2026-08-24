@@ -73,7 +73,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r19-attach-tick-not-a-bind";
+  "ses-stage-engine.v2-r20-historical-backfill-closeout";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -205,6 +205,42 @@ export function sesStageBindingTerminalProof(
     input.evidence?.attendanceCycleIds,
     input.evidence?.currentAttendanceCycleId,
   );
+}
+
+/**
+ * Captain-accepted historical backfill closeout (SWMS-261124 class).
+ *
+ * `makesafe_adjudicated_historical_backfill` marks the card
+ * `legacy_incomplete_evidence: true`, links the raised ACCREC, and used to
+ * park it in Archive only via a display-ledger overlay (`new -> archive`).
+ * Release 12 places from the derived stage: when derivation moved (or an
+ * older overlay was anchored on `report_ready`), that overlay unbound and the
+ * card fell back to New despite INV PAID and an explicit captain acceptance.
+ *
+ * This reads the SAME facts the backfill already stamps — no invented trade
+ * evidence, no second invoice, no stage write. It sits beside a bound terminal
+ * proof as another evidence closeout, not as a display override.
+ */
+export function sesStageHistoricalBackfillCloseout(
+  input: SesStageV2Input,
+): { recovery_key: string; invoice_status: string } | null {
+  const metadata = input.job?.metadata && typeof input.job.metadata === "object"
+    ? input.job.metadata as Record<string, unknown>
+    : null;
+  if (!metadata || metadata.legacy_incomplete_evidence !== true) return null;
+  const recoveryKey = String(metadata.historical_backfill_key || "").trim();
+  if (!recoveryKey) return null;
+  const invoiceStatus = String(input.evidence?.invoiceStatus || "")
+    .trim()
+    .toUpperCase();
+  if (
+    !(SES_STAGE_ISSUED_INVOICE_STATUSES as readonly string[]).includes(
+      invoiceStatus,
+    )
+  ) {
+    return null;
+  }
+  return { recovery_key: recoveryKey, invoice_status: invoiceStatus };
 }
 
 export interface SesStageCompletionClock {
@@ -692,6 +728,23 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     const terminal = sesStageCompletedStage(
       input,
       `a ${terminalProof.kind} terminal proof covers this card's exact attendance-cycle set`,
+    );
+    return {
+      ...base,
+      stage: terminal.stage,
+      reasons: terminal.reasons,
+      missing: [],
+      conflicts: [...conflicts, ...terminal.conflicts],
+    };
+  }
+  // Captain-accepted historical backfill (SWMS-261124 / BWCWA-6648): legacy
+  // incomplete field evidence + linked issued ACCREC. Same completion clock as
+  // every other terminal path; ages to Archive once the invoice date is ≥7 days.
+  const historicalCloseout = sesStageHistoricalBackfillCloseout(input);
+  if (historicalCloseout) {
+    const terminal = sesStageCompletedStage(
+      input,
+      `captain-accepted historical backfill ${historicalCloseout.recovery_key} with ${historicalCloseout.invoice_status} invoice`,
     );
     return {
       ...base,

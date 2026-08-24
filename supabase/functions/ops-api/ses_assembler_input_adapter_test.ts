@@ -38,6 +38,7 @@ import {
 } from "./makesafe_report_render.ts";
 import { buildSesSwmsGenerationPlan } from "./ses_swms_template.ts";
 import { renderSesSwmsPdf, sesSwmsRenderHash } from "./ses_swms_render.ts";
+import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
 import {
   prepare_ses_docket_revision,
   SES_ASSESSMENT_RECIPE_VERSION,
@@ -405,6 +406,183 @@ Deno.test(
         ),
       false,
       "chronological order must not collapse to lexicographic photo ID order",
+    );
+  },
+);
+
+Deno.test(
+  "assembler keeps current-cycle photos on a reattend without all-attendance scope",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.detail!.reattend_count = 1;
+    live.detail!.cycle_number = 2;
+    const cycleOne = "cycle-visit-one";
+    const cycleTwo = String(live.detail!.attendance_cycle_id);
+    live.media = [
+      {
+        id: "prior-visit-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleOne,
+        cycle_attribution: "bound",
+      },
+      {
+        id: "current-visit-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+      },
+    ];
+    live.documents = live.documents.filter((row) =>
+      String(row.type || "").toLowerCase() !== "makesafe_report"
+    );
+
+    const photos = buildSesAssemblerInput(live).cycle_facts.photos;
+    assertEquals(photos.map((photo) => photo.id), ["current-visit-photo"]);
+  },
+);
+
+Deno.test(
+  "assembler attaches both visit photos when curated bind stamped same_job_all_attendances",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.detail!.reattend_count = 1;
+    live.detail!.cycle_number = 2;
+    const cycleOne = "cycle-visit-one";
+    const cycleTwo = String(live.detail!.attendance_cycle_id);
+    live.media = [
+      {
+        id: "friday-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleOne,
+        cycle_attribution: "bound",
+        label: "Friday site visit",
+      },
+      {
+        id: "monday-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        label: "Monday site visit",
+      },
+    ];
+    live.documents = [
+      ...live.documents.filter((row) =>
+        String(row.type || "").toLowerCase() !== "makesafe_report"
+      ),
+      {
+        id: "curated-report-all-attendances",
+        job_id: live.job.id,
+        type: "makesafe_report",
+        version: 5,
+        created_at: "2026-08-24T10:00:00.000Z",
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        visible_to_trades: true,
+        data_snapshot_json: {
+          photo_source_scope: "same_job_all_attendances",
+          photo_selected_ids: ["friday-photo", "monday-photo"],
+        },
+      },
+    ];
+
+    const photos = buildSesAssemblerInput(live).cycle_facts.photos;
+    assertEquals(photos.map((photo) => photo.id), [
+      "friday-photo",
+      "monday-photo",
+    ]);
+    assertEquals(photos.map((photo) => photo.order), [1, 2]);
+  },
+);
+
+Deno.test(
+  "F2: assembler photo route attaches sealed bind ids only — not post-bind uploads",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.detail!.reattend_count = 1;
+    live.detail!.cycle_number = 2;
+    const cycleOne = "cycle-visit-one";
+    const cycleTwo = String(live.detail!.attendance_cycle_id);
+    live.media = [
+      {
+        id: "friday-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleOne,
+        cycle_attribution: "bound",
+        label: "Friday site visit",
+      },
+      {
+        id: "monday-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        label: "Monday site visit",
+      },
+      {
+        id: "extra-after-bind",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T12:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        label: "Uploaded after bind",
+      },
+    ];
+    live.documents = [
+      ...live.documents.filter((row) =>
+        String(row.type || "").toLowerCase() !== "makesafe_report"
+      ),
+      {
+        id: "curated-report-sealed-ids",
+        job_id: live.job.id,
+        type: "makesafe_report",
+        version: 5,
+        created_at: "2026-08-24T10:00:00.000Z",
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        visible_to_trades: true,
+        data_snapshot_json: {
+          photo_source_scope: "same_job_all_attendances",
+          photo_selected_ids: ["friday-photo", "monday-photo"],
+        },
+      },
+    ];
+
+    const photos = buildSesAssemblerInput(live).cycle_facts.photos;
+    assertEquals(photos.map((photo) => photo.id), [
+      "friday-photo",
+      "monday-photo",
+    ]);
+    assertEquals(
+      photos.some((photo) => photo.id === "extra-after-bind"),
+      false,
     );
   },
 );
@@ -3604,6 +3782,52 @@ Deno.test(
       "physical_makesafe",
     );
     assertEquals(result.envelope.v2.classification.recipe_selected, true);
+    const restorationRoutes = resolveDocketRoutes(
+      {
+        id: "restoration-recipient-shape",
+        stage: "invoice_bound",
+        envelope: result.envelope,
+        local_invoice_proposal: { builder_reference: "MLB-MW-26873" },
+        xero_binding: {
+          status: "AUTHORISED",
+          xero_invoice_id: "xero-restoration-1",
+          invoice_number: "INV-RESTORATION-1",
+        },
+        email_drafts: {
+          REPORT_EMAIL_DRAFT: [
+            "To: reports@builder.example",
+            "Cc: ses@secureworkswa.com.au",
+            "Subject: Restoration report",
+            "Attachments:",
+            "",
+            "Report body",
+          ].join("\n"),
+          PHOTO_EMAIL_DRAFT: [
+            "To: photos@builder.example",
+            "Cc: ses@secureworkswa.com.au",
+            "Subject: Restoration photos",
+            "Attachments:",
+            "",
+            "Photo body",
+          ].join("\n"),
+          INVOICE_EMAIL_DRAFT: [
+            "To: invoices@builder.example",
+            "Cc: finance@secureworkswa.com.au",
+            "Subject: Restoration invoice",
+            "Attachments:",
+            "",
+            "Invoice body",
+          ].join("\n"),
+        },
+      },
+      [],
+      null,
+    );
+    assertEquals(
+      restorationRoutes.find((route) => route.route_kind === "photo")?.cc,
+      [],
+      "insurance/restoration photo route must carry no CC",
+    );
     assert(!codes.includes("restoration_recipe_unsealed"));
     assert(!codes.includes("family_unknown"));
     // No trade report / photos on this fixture — physical evidence remains in

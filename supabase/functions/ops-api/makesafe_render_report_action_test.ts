@@ -2470,6 +2470,7 @@ Deno.test("curated bind accepts the exact all-attendance photo set for canonical
       document.data_snapshot_json.photo_source_scope,
       "same_job_all_attendances",
     );
+    assertEquals(document.data_snapshot_json.photo_selected_ids, selectedIds);
     assertEquals(fetchedPhotoUrls, [
       "https://storage.example.test/visit-one.jpg",
       "https://storage.example.test/visit-two.jpg",
@@ -2550,6 +2551,7 @@ Deno.test("curated bind pins created_at then id order on the widened all-attenda
       document.data_snapshot_json.photo_source_scope,
       "same_job_all_attendances",
     );
+    assertEquals(document.data_snapshot_json.photo_selected_ids, expected);
 
     const { client: second, mutations } = bindClient(bytes, {
       cycleId: "cycle-two",
@@ -2661,6 +2663,11 @@ Deno.test("curated bind keeps current-cycle-only photo behavior on a reattended 
     );
     assertEquals(result.success, true);
     assertEquals(document.data_snapshot_json.photo_source_scope, undefined);
+    assertEquals(
+      document.data_snapshot_json.photo_selected_ids,
+      undefined,
+      "current-cycle binds keep snapshot byte-stable — no sealed id list",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

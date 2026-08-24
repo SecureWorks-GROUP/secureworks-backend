@@ -39,9 +39,10 @@ export const SES_RELEASE_MAILBOX = "admin@secureworkswa.com.au";
 export const SES_RELEASE_CC = "ses@secureworkswa.com.au";
 export const AJS_WORK_ORDERS_MAILBOX = "workorders@ajs.build";
 /**
- * Permanent builder CCs on every AJS/AJBR sealed pack email (Captain 2026-08-06).
- * Domain is always `ajs.build` — never copy a live value that may be misspelled.
- * ses@ remains the SecureWorks proof-surface CC and is composed in ajsPackCc().
+ * AJS permanent builder CC constants (Captain 2026-08-06). The Captain's
+ * 2026-08-24 ruling moved AJBR completion docs to finance-only and cleared every
+ * photo CC; route-scoped composition now lives in sesReleaseRouteCc(). Domain is
+ * always `ajs.build` — never copy a live value that may be misspelled.
  */
 export const AJS_VANESSA_CC = "vanessa@ajs.build";
 export const AJS_MANDI_CC = "mandi@ajs.build";

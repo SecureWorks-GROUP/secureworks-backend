@@ -878,7 +878,8 @@ Deno.test(
     assertEquals((report as any).subject_source, "generated_fallback");
     assertEquals(report.subject, "MLB-PO-54000 - physical makesafe");
     assertEquals(report.attachment_hashes, ["report-hash"]);
-    assertEquals(report.cc || [], []);
+    // Scope guard: MLB's shipped report rule remains MAKESAFE_CC.
+    assertEquals(report.cc || [], [MAKESAFE_CC]);
     // Captain 2026-08-06: report goes to the Prime mailer, report only. The
     // fixture drafts address site.manager@mlb.example, so this also proves the
     // resolved route is SET here rather than inherited from a stale draft.
@@ -1115,7 +1116,8 @@ Deno.test(
     ];
     assertEquals(routes[0].cc, ajsPackCc);
     assertEquals(routes[0].requires_thread_reply, undefined);
-    assertEquals(routes[1].cc, ajsPackCc);
+    // Captain 2026-08-24: every photo route has no CC.
+    assertEquals(routes[1].cc, []);
     // AJS does not stamp MLB thread reply fields.
     assertEquals(routes[0].reply_to_thread_id, undefined);
   },

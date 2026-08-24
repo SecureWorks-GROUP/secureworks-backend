@@ -239,8 +239,12 @@ import {
   currentCycleReportMap as cycleEvidenceReportMap,
   filterMediaForCurrentCycle,
   hasReattendBoundary,
+  isApplicablePackPhoto,
   isLegacyMakesafeCard,
   filterHoldsForCurrentCycle,
+  normalizePackPhotoSelectedIds,
+  normalizePackPhotoSourceScope,
+  PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
   projectCycleScopedEvidence,
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
@@ -421,6 +425,16 @@ import {
   correctMakesafeFalseSendStamps as _correctMakesafeFalseSendStamps,
   FalseSendStampRequestError as _FalseSendStampRequestError,
 } from './makesafe_false_send_stamp.ts'
+// Privileged recorder for verified_historical_closeout proofs — the callable
+// closeout path for already-sent sibling-bundled cards (SWMS-26832 class) that
+// U2 reconcile cannot cover because they carry no OWN raised ACCREC. Records
+// evidence only; the stage engine derives archive/completed. Never mints,
+// sends, or rewrites jobs/substatus/money.
+import {
+  recordMakesafeTerminalProofAction as _recordMakesafeTerminalProofAction,
+  RecordTerminalProofConflictError as _RecordTerminalProofConflictError,
+  RecordTerminalProofRequestError as _RecordTerminalProofRequestError,
+} from './makesafe_record_terminal_proof.ts'
 // report_sent_at is derived from a recorded send, never asserted by a caller.
 // This module names the producers and carries the refusal the generic detail
 // editor throws when a caller tries to supply the field.
@@ -5460,6 +5474,40 @@ if (import.meta.main) serve(async (req: Request) => {
       // action re-derives send truth from the four real surfaces and refuses any
       // card it cannot prove was never sent. It only ever CLEARS; it can never
       // stamp one. Dry run by default, explicit job list, capped at 25.
+      case 'record_makesafe_terminal_proof': {
+        // Deliberately NOT in ROUTINE_ALLOWED_ACTIONS. Dry-run is the default;
+        // a live write must set dry_run:false. Records one append-only
+        // makesafe_terminal_proofs row (verified_historical_closeout) from own
+        // raised ACCREC or reciprocal sibling-bundle coverage + pack-sent
+        // evidence. Never mints an invoice, never sends, never rewrites stage.
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({
+            error:
+              'forbidden: record_makesafe_terminal_proof requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'record_makesafe_terminal_proof requires POST' }, 405)
+        }
+        try {
+          return json(await _recordMakesafeTerminalProofAction(client, body))
+        } catch (err: any) {
+          if (err instanceof _RecordTerminalProofRequestError) {
+            return json({ error: err.message, code: 'bad_request' }, err.status)
+          }
+          if (err instanceof _RecordTerminalProofConflictError) {
+            return json({
+              error: err.message,
+              code: err.code,
+              evidence: err.evidence ?? null,
+            }, err.status)
+          }
+          throw err
+        }
+      }
+
       case 'repair_makesafe_pack_sent_from_route_proofs': {
         // Deliberately NOT in ROUTINE_ALLOWED_ACTIONS. Dry-run default true.
         // Backfills makesafe_report_packs.sent_at/status from an already-proved
@@ -18625,35 +18673,73 @@ async function loadCanonicalMakesafeBoard(
   // every PostgREST error and paginates every 1000 rows. Built first and awaited
   // together with the detail-only reads so full mode pays no extra serial wave —
   // serial round-trips, not payload bytes, dominate board TTFB.
+  // attendance_cycle_id / cycle_attribution exist live (U2 state-authority) and
+  // let reattend cards count current-cycle media instead of fail-closing to 0.
+  // Match pack applicability (type=photo), not the old phase=completion AND —
+  // Hillarys-class site photos are type=photo and must not vanish from the count
+  // when phase is blank or a non-completion label. Receipts are dropped below.
   const photosPromise = _fetchAllByJobIdChunked(
     client,
     'job_media',
-    'id, job_id, type, phase',
+    'id, job_id, type, phase, attendance_cycle_id, cycle_attribution',
     jobIds,
-    (q) => q.eq('type', 'photo').eq('phase', 'completion'),
+    (q) => q.eq('type', 'photo'),
+  )
+  // Bound curated report scope + sealed photo_selected_ids for the pack's
+  // report_doc_id — when the bind stamped same_job_all_attendances, board
+  // photo_count must read the bind's own selected count, not live traffic.
+  const reportPhotoScopePromise = _fetchAllByJobIdChunked(
+    client,
+    'job_documents',
+    'id, job_id, type, photo_source_scope:data_snapshot_json->photo_source_scope, photo_selected_ids:data_snapshot_json->photo_selected_ids',
+    jobIds,
+    (q) => q.eq('type', 'makesafe_report'),
+  )
+  // Current docket completion_photo artifacts = photo-route attachment_count.
+  // Hillarys SWMS-261134: route already carries 21 while board was fail-closed.
+  const packPhotoArtifactPromise = _fetchAllByJobIdChunked(
+    client,
+    'makesafe_docket_artifacts',
+    'id, job_id, revision_id, role',
+    jobIds,
+    (q) => q.eq('role', 'completion_photo'),
   )
 
+  let reportPhotoScopeRows: any[] = []
+  let packPhotoArtifactRows: any[] = []
   if (cardMode) {
-    photos = await photosPromise
-  } else {
-    ;[photos, notes, contacts] = await Promise.all([
+    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows] = await Promise.all([
       photosPromise,
-      _fetchAllByJobIdChunked(
-        client,
-        'job_events',
-        'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
-        jobIds,
-        (q) => q.eq('event_type', 'note'),
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'job_contacts',
-        'job_id, client_name, client_phone, is_primary, contact_label, status',
-        jobIds,
-        (q) => q.eq('status', 'active'),
-      ),
+      reportPhotoScopePromise,
+      packPhotoArtifactPromise,
     ])
+  } else {
+    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows, notes, contacts] =
+      await Promise.all([
+        photosPromise,
+        reportPhotoScopePromise,
+        packPhotoArtifactPromise,
+        _fetchAllByJobIdChunked(
+          client,
+          'job_events',
+          'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
+          jobIds,
+          (q) => q.eq('event_type', 'note'),
+        ),
+        _fetchAllByJobIdChunked(
+          client,
+          'job_contacts',
+          'job_id, client_name, client_phone, is_primary, contact_label, status',
+          jobIds,
+          (q) => q.eq('status', 'active'),
+        ),
+      ])
   }
+  // Drop receipt photos from the board count — same exclusion the mailer uses.
+  photos = (photos || []).filter((photo: any) =>
+    isApplicablePackPhoto(photo) &&
+    String(photo?.phase || '').trim().toLowerCase() !== 'receipt'
+  )
 
   {
     // F7: the append-only capture ledger is the durable Prime truth source. Read
@@ -18732,8 +18818,70 @@ async function loadCanonicalMakesafeBoard(
     notesByJobId[note.job_id].push(note)
   }
   const photoCountByJobId: Record<string, number> = {}
+  const photosByJobId: Record<string, any[]> = {}
   for (const photo of photos) {
-    if (photo?.job_id) photoCountByJobId[photo.job_id] = (photoCountByJobId[photo.job_id] || 0) + 1
+    if (!photo?.job_id) continue
+    photoCountByJobId[photo.job_id] = (photoCountByJobId[photo.job_id] || 0) + 1
+    ;(photosByJobId[photo.job_id] ||= []).push(photo)
+  }
+  const currentCyclePhotoCountByJobId: Record<string, number> = {}
+  const photosHaveCycleBindingByJobId: Record<string, boolean> = {}
+  for (const row of buildBase) {
+    const jobId = row?.id
+    if (!jobId) continue
+    const detail = row?.makesafe_details || {}
+    const jobPhotos = photosByJobId[jobId] || []
+    const hasCycleBinding = jobPhotos.some((photo) =>
+      String(photo?.attendance_cycle_id || '').trim()
+    )
+    photosHaveCycleBindingByJobId[jobId] = hasCycleBinding
+    if (!hasCycleBinding) continue
+    currentCyclePhotoCountByJobId[jobId] = filterMediaForCurrentCycle(
+      jobPhotos,
+      detail,
+      detail?.attendance_cycle_id ?? null,
+    ).length
+  }
+  const reportDocById = new Map<string, any>()
+  for (const doc of reportPhotoScopeRows) {
+    if (doc?.id) reportDocById.set(String(doc.id), doc)
+  }
+  const boundPhotoSourceScopeByJobId: Record<string, string> = {}
+  const boundPackPhotoCountByJobId: Record<string, number> = {}
+  for (const row of buildBase) {
+    const jobId = row?.id
+    const reportDocId = String(row?.report_pack?.report_doc_id || '').trim()
+    if (!jobId || !reportDocId) continue
+    const reportDoc = reportDocById.get(reportDocId)
+    const scope = normalizePackPhotoSourceScope(reportDoc?.photo_source_scope)
+    if (scope) boundPhotoSourceScopeByJobId[jobId] = scope
+    // Prefer the sealed bind selection length when present. Missing sealed ids
+    // on an older all-attendances card fall through to resolveBoardPhotoCount's
+    // raw/live fallback — repair path, never invent a count.
+    if (scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) {
+      const sealedIds = normalizePackPhotoSelectedIds(
+        reportDoc?.photo_selected_ids,
+      )
+      if (sealedIds) boundPackPhotoCountByJobId[jobId] = sealedIds.length
+    }
+  }
+  const packPhotoAttachmentCountByJobId: Record<string, number> = {}
+  const currentDocketRevisionByJobId = new Map<string, string>()
+  for (const row of buildBase) {
+    const jobId = row?.id
+    const revisionId = String(row?.report_pack?.docket_revision_id || '').trim()
+    if (jobId && revisionId) currentDocketRevisionByJobId.set(jobId, revisionId)
+  }
+  for (const artifact of packPhotoArtifactRows || []) {
+    const jobId = artifact?.job_id
+    if (!jobId) continue
+    const currentRevision = currentDocketRevisionByJobId.get(jobId)
+    if (
+      !currentRevision ||
+      String(artifact?.revision_id || '').trim() !== currentRevision
+    ) continue
+    packPhotoAttachmentCountByJobId[jobId] =
+      (packPhotoAttachmentCountByJobId[jobId] || 0) + 1
   }
   const contactsByJobId: Record<string, any[]> = {}
   for (const contact of contacts) {
@@ -18867,6 +19015,11 @@ async function loadCanonicalMakesafeBoard(
   const built = buildCanonicalMakesafeRows(buildBase, {
     notesByJobId,
     photoCountByJobId,
+    currentCyclePhotoCountByJobId,
+    photosHaveCycleBindingByJobId,
+    boundPhotoSourceScopeByJobId,
+    boundPackPhotoCountByJobId,
+    packPhotoAttachmentCountByJobId,
     contactsByJobId,
     intakeCaseByJobId,
     holdsByJobId,
@@ -38687,6 +38840,8 @@ async function assertCurrentWikiSourceEvidence(
 ): Promise<{
   materials_source_accounting: CuratedBindMaterialsSourceAccounting
   photo_source_scope: CuratedBindPhotoSourceScope
+  /** Ordered ids the bind accounted for — sealed onto the snapshot for packs. */
+  photo_selected_ids: string[]
 }> {
   const [reportsResponse, mediaResponse] = await Promise.all([
     client.from('job_service_reports')
@@ -38930,6 +39085,11 @@ async function assertCurrentWikiSourceEvidence(
   return {
     materials_source_accounting: materialsSourceAccounting,
     photo_source_scope: selectedPhotoSource.scope,
+    // Sealed bind selection (created_at then id). Pack/board honour this list
+    // so a later live upload cannot grow the builder photo email past the report.
+    photo_selected_ids: selectedPhotoSource.applicable.map((item: any) =>
+      String(item.id || '').trim()
+    ).filter(Boolean),
   }
 }
 
@@ -39556,10 +39716,13 @@ async function bindCurrentCycleCuratedMakesafeReport(
     // here so under-billing is never silent. Super-set still refused above.
     materials_source_accounting: sourceEvidence.materials_source_accounting,
     // Keep legacy current-cycle snapshots byte-for-byte stable. Multi-visit
-    // binds carry an explicit durable marker because they intentionally use the
-    // alternate complete same-job source set.
+    // binds carry an explicit durable marker plus the sealed selected ids so
+    // the photo route and board count honour the bind, never live traffic.
     ...(sourceEvidence.photo_source_scope === 'same_job_all_attendances'
-      ? { photo_source_scope: sourceEvidence.photo_source_scope }
+      ? {
+        photo_source_scope: sourceEvidence.photo_source_scope,
+        photo_selected_ids: sourceEvidence.photo_selected_ids,
+      }
       : {}),
     report_scope_narratives: [
       validatedInput.job.scope,
@@ -39760,6 +39923,9 @@ async function bindCurrentCycleCuratedMakesafeReport(
       // without reading job_documents.
       materials_source_accounting: sourceEvidence.materials_source_accounting,
       photo_source_scope: sourceEvidence.photo_source_scope,
+      ...(sourceEvidence.photo_source_scope === 'same_job_all_attendances'
+        ? { photo_selected_ids: sourceEvidence.photo_selected_ids }
+        : {}),
       ...(isTrustedContentSupersession
         ? {
           supersedes_prior_bind: true,

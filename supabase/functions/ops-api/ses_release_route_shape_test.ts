@@ -6,15 +6,20 @@ import {
   ajsPackCc,
   ajsPackRecipients,
   clientSendGateKindForRoute,
+  isAjbrBuilderKey,
   isAjsBuilderKey,
   isMlbPrimeMailerRouteKind,
   MLB_PRIME_MAILER,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
+  repairSesReleaseRouteCc,
   SES_AJS_ROUTE_ORDER,
+  SES_FINANCE_CC,
   SES_UNIVERSAL_ROUTE_ORDER,
   sesBodyCarriesInternalAnnotation,
   sesBuilderRouteBody,
+  sesReleaseRouteCc,
+  sesReleaseRouteCcForBuilders,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -43,6 +48,8 @@ Deno.test("AJS builder keys select report_invoice + photo only", () => {
   assertEquals(isAjsBuilderKey("AJS"), true);
   assertEquals(isAjsBuilderKey("ajbr"), true);
   assertEquals(isAjsBuilderKey("MLB"), false);
+  assertEquals(isAjbrBuilderKey("ajbr"), true);
+  assertEquals(isAjbrBuilderKey("AJS"), false);
   assertEquals(sesReleaseRouteOrder("AJS"), SES_AJS_ROUTE_ORDER);
   assertEquals(sesReleaseRouteOrder("MLB"), SES_UNIVERSAL_ROUTE_ORDER);
   assertEquals(sesReleaseRouteOrder("AJS"), ["report_invoice", "photo"]);
@@ -68,6 +75,127 @@ Deno.test("AJS pack recipients always include workorders@ and permanent CCs", ()
       assertEquals(addr.includes("ajsbuild"), false);
       assertEquals(addr.includes("ajsbuid"), false);
     }
+  }
+});
+
+Deno.test("route CC producer scopes AJBR completion docs and clears every photo route", () => {
+  assertEquals(
+    sesReleaseRouteCc({ routeKind: "report_invoice", builderKey: "AJBR" }),
+    [SES_FINANCE_CC],
+  );
+  assertEquals(
+    sesReleaseRouteCc({ routeKind: "report_invoice", builderKey: "AJS" }),
+    AJS_PACK_CC,
+  );
+  assertEquals(
+    sesReleaseRouteCc({ routeKind: "report", builderKey: "MLB" }),
+    [MAKESAFE_CC],
+  );
+  assertEquals(
+    sesReleaseRouteCc({ routeKind: "invoice", builderKey: "MLB" }),
+    [MAKESAFE_FINANCE_CC],
+  );
+  for (const builderKey of ["AJS", "AJBR", "MLB", "WESTERN"]) {
+    assertEquals(
+      sesReleaseRouteCc({ routeKind: "photo", builderKey }),
+      [],
+      `${builderKey} photo route must have no CC`,
+    );
+  }
+});
+
+Deno.test("composite route CCs apply every member's builder rule independent of order", () => {
+  const expectedCompletionCc = [
+    SES_FINANCE_CC,
+    ...AJS_PACK_CC,
+  ].sort();
+  for (const builderKeys of [["AJS", "AJBR"], ["AJBR", "AJS"]]) {
+    assertEquals(
+      sesReleaseRouteCcForBuilders({
+        routeKind: "report_invoice",
+        builderKeys,
+      }),
+      expectedCompletionCc,
+    );
+    assertEquals(
+      sesReleaseRouteCcForBuilders({
+        routeKind: "photo",
+        builderKeys,
+      }),
+      [],
+    );
+  }
+  assertEquals(
+    sesReleaseRouteCcForBuilders({
+      routeKind: "report_invoice",
+      builderKeys: ["AJS"],
+    }),
+    [...AJS_PACK_CC].sort(),
+  );
+  assertEquals(
+    repairSesReleaseRouteCc({
+      routeKind: "invoice",
+      builderKeys: ["MLB"],
+      storedCc: [],
+    }),
+    [],
+  );
+  assertEquals(
+    repairSesReleaseRouteCc({
+      routeKind: "report_invoice",
+      builderKeys: ["AJBR"],
+      storedCc: AJS_PACK_CC,
+    }),
+    [SES_FINANCE_CC],
+  );
+  assertEquals(
+    repairSesReleaseRouteCc({
+      routeKind: "photo",
+      builderKeys: ["WESTERN"],
+      storedCc: [MAKESAFE_CC],
+    }),
+    [],
+  );
+});
+
+Deno.test("send-time repair leaves every non-AJBR report and invoice CC byte-identical", () => {
+  const unchanged = [
+    {
+      routeKind: "report_invoice" as const,
+      builderKey: "AJS",
+      storedCc: AJS_PACK_CC,
+    },
+    {
+      routeKind: "report" as const,
+      builderKey: "MLB",
+      storedCc: [MAKESAFE_CC],
+    },
+    {
+      routeKind: "invoice" as const,
+      builderKey: "MLB",
+      storedCc: [MAKESAFE_FINANCE_CC],
+    },
+    {
+      routeKind: "report" as const,
+      builderKey: "WESTERN",
+      storedCc: [MAKESAFE_CC],
+    },
+    {
+      routeKind: "invoice" as const,
+      builderKey: "WESTERN",
+      storedCc: [MAKESAFE_FINANCE_CC],
+    },
+  ];
+  for (const row of unchanged) {
+    assertEquals(
+      repairSesReleaseRouteCc({
+        routeKind: row.routeKind,
+        builderKeys: [row.builderKey],
+        storedCc: row.storedCc,
+      }),
+      row.storedCc,
+      `${row.builderKey} ${row.routeKind} must remain byte-identical`,
+    );
   }
 });
 
@@ -128,6 +256,31 @@ Deno.test("report_invoice gate passes AJS combined shape", () => {
   assertEquals(
     checkSesReleaseClientSendGate("ajs_report_invoice", AJS_COMBINED_PAYLOAD),
     [],
+  );
+});
+
+Deno.test("AJBR report_invoice gate requires finance only and rejects the old ses CC set", () => {
+  const ajbr = {
+    ...AJS_COMBINED_PAYLOAD,
+    cc: MAKESAFE_FINANCE_CC,
+  };
+  assertEquals(
+    checkReportInvoiceClientSendGate(ajbr, {
+      builderKey: "AJBR",
+      configuredInvoiceTo: AJS_INVOICE_TO,
+    }),
+    [],
+  );
+  const failures = checkReportInvoiceClientSendGate({
+    ...ajbr,
+    cc: `${MAKESAFE_FINANCE_CC},${MAKESAFE_CC}`,
+  }, {
+    builderKey: "AJBR",
+    configuredInvoiceTo: AJS_INVOICE_TO,
+  });
+  assertEquals(
+    failures.some((failure) => failure.includes("finance only")),
+    true,
   );
 });
 
@@ -221,7 +374,7 @@ Deno.test("MLB physical report gate requires the ses@ cc too", () => {
   );
 });
 
-Deno.test("photo gate: AJS requires permanent pack CCs; MLB forbids cc; raw photoNN refused", () => {
+Deno.test("photo gate: every builder requires empty cc; raw photoNN is refused", () => {
   assertEquals(isRawPhotoDumpName("photo12.jpg"), true);
   assertEquals(isRawPhotoDumpName("Front elevation.jpg"), false);
 
@@ -233,21 +386,15 @@ Deno.test("photo gate: AJS requires permanent pack CCs; MLB forbids cc; raw phot
     attachments: [{ name: "Front elevation.jpg" }],
   };
   assertEquals(
-    checkPhotoRouteClientSendGate({ ...base, cc: AJS_PACK_CC }, {
+    checkPhotoRouteClientSendGate({ ...base, cc: "" }, {
       builderKey: "AJS",
     }),
     [],
   );
-  // ses@ alone is no longer enough for AJS — vanessa and mandi are permanent.
   assertEquals(
-    checkPhotoRouteClientSendGate({ ...base, cc: MAKESAFE_CC }, {
+    checkPhotoRouteClientSendGate({ ...base, cc: AJS_PACK_CC }, {
       builderKey: "AJS",
-    }).some((f) => f.includes(AJS_VANESSA_CC) || f.includes(AJS_MANDI_CC)),
-    true,
-  );
-  assertEquals(
-    checkPhotoRouteClientSendGate({ ...base, cc: "" }, { builderKey: "AJS" })
-      .some((f) => f.includes(MAKESAFE_CC)),
+    }).some((f) => f.includes("no cc")),
     true,
   );
   assertEquals(
@@ -263,7 +410,7 @@ Deno.test("photo gate: AJS requires permanent pack CCs; MLB forbids cc; raw phot
   assertEquals(
     checkPhotoRouteClientSendGate({
       ...base,
-      cc: MAKESAFE_CC,
+      cc: "",
       attachments: [{ name: "photo3.jpg" }],
     }, { builderKey: "AJS" }).some((f) => f.includes("raw dump")),
     true,
@@ -271,7 +418,7 @@ Deno.test("photo gate: AJS requires permanent pack CCs; MLB forbids cc; raw phot
   assertEquals(
     checkPhotoRouteClientSendGate({
       ...base,
-      cc: MAKESAFE_CC,
+      cc: "",
       attachments: [
         { name: "Front.jpg" },
         { name: "Xero Invoice INV-1.pdf" },
@@ -313,13 +460,20 @@ Deno.test("MLB invoice gate requires finance@, forbids ses@, needs explicit invo
   );
 });
 
-function ajsDocket(stage: string, xero: Record<string, unknown> | null) {
+function ajsDocket(
+  stage: string,
+  xero: Record<string, unknown> | null,
+  builderKey: "AJS" | "AJBR" = "AJS",
+) {
   return {
     id: "docket-ajs",
     stage,
     envelope: {
       v2: {
-        classification: { builder_key: "AJS", family: "physical_makesafe" },
+        classification: {
+          builder_key: builderKey,
+          family: "physical_makesafe",
+        },
         routing: {
           report_to: "site.manager@ajs.build",
           photo_to: "site.manager@ajs.build",
@@ -389,7 +543,7 @@ const AJS_ARTIFACTS = [
   },
 ];
 
-Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on route 1", () => {
+Deno.test("AJS resolveDocketRoutes keeps completion CCs and clears photo CC", () => {
   const routes = resolveDocketRoutes(
     ajsDocket("invoice_bound", {
       status: "AUTHORISED",
@@ -407,9 +561,28 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(pack.attachment_hashes.includes("report-hash"), true);
   assertEquals(pack.ready, true);
   assertEquals(routes[1].route_kind, "photo");
-  assertEquals(routes[1].cc, AJS_PACK_CC);
+  assertEquals(routes[1].cc, []);
   assertEquals(routes[1].attachment_hashes, ["photo-hash-1"]);
   assertEquals(routes[1].ready, true);
+});
+
+Deno.test("AJBR resolveDocketRoutes sends completion docs to finance CC only and photos to no CC", () => {
+  const routes = resolveDocketRoutes(
+    ajsDocket("invoice_bound", {
+      status: "AUTHORISED",
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1",
+    }, "AJBR"),
+    AJS_ARTIFACTS,
+    null,
+  );
+  assertEquals(routes.map((route) => route.route_kind), [
+    "report_invoice",
+    "photo",
+  ]);
+  assertEquals(routes[0].cc, [MAKESAFE_FINANCE_CC]);
+  assertEquals((routes[0].cc || []).includes(MAKESAFE_CC), false);
+  assertEquals(routes[1].cc, []);
 });
 
 Deno.test("AJS DRAFT report_invoice is review-ready when the draft PDF hash is present", () => {
