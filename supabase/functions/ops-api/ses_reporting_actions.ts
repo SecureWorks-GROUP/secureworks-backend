@@ -23,6 +23,7 @@ import {
 // absent where a pack demonstrably shipped. The route proof is the send record;
 // this stamps the card from it, additively and without ever throwing.
 import { stampMakesafeReportSentFromRouteProofs } from "./makesafe_report_sent_stamp.ts";
+import { stampMakesafePackSentFromRouteProofs } from "./makesafe_pack_sent_from_route_proofs.ts";
 import {
   NOT_EVALUATED_CARD_MONEY,
   readSesExistingCardMoneyForJob,
@@ -7599,6 +7600,27 @@ export async function executeSesReleaseRevisionAction(
     );
   }
 
+  // Stamp makesafe_report_packs.sent_at / status='sent' the same way the legacy
+  // send_pack closeout does. Closeout SQL writes the terminal proof + note but
+  // never patches the pack row — without this, inspect_ses_pack keeps showing
+  // drafted/null after a fully proved release (Jolimont SWMS-261289 class).
+  // Additive CAS; never throws; never redispatches Graph.
+  const packSentStamps = [];
+  for (const jobId of reportSentStampJobIds) {
+    packSentStamps.push(
+      await stampMakesafePackSentFromRouteProofs(client, jobId, routeProofs, {
+        releaseRevisionId: args.release_revision_id,
+        actor: args.actor,
+        releaseProgress: {
+          kind: "released",
+          release_revision_id: args.release_revision_id,
+          required_route_kinds: routeKinds,
+          proved_route_kinds: routeProofs.map((p) => String(p.route_kind || "")),
+        },
+      }),
+    );
+  }
+
   return {
     state: "released",
     release_revision_id: args.release_revision_id,
@@ -7607,6 +7629,7 @@ export async function executeSesReleaseRevisionAction(
     dispatch_previews: dispatchPreviews,
     closeout: verification.data,
     report_sent_at_stamps: reportSentStamps,
+    pack_sent_stamps: packSentStamps,
   };
 }
 
