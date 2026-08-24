@@ -108,6 +108,29 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "missing invoice PDF is a caveat, not a route blocker, when support is present",
+  () => {
+    const input = cleanInput({
+      family: "ordinary_roof_portal",
+      report_route_applicable: false,
+      photo_route_applicable: false,
+      invoice_route_artifact_caveat: true,
+      routes: cleanInput().routes
+        .filter((route) => route.route_kind === "invoice")
+        .map((route) => ({ ...route, ready: false })),
+    });
+    const result = evaluateSesMechanicalClean(input);
+    assert(result.clean);
+    assertEquals(
+      result.blockers.filter((blocker) =>
+        blocker.code === "route_draft_missing"
+      ),
+      [],
+    );
+  },
+);
+
 Deno.test("API and routine keys cannot record human approvals", () => {
   const clean = evaluateSesMechanicalClean(cleanInput());
   for (const mode of ["api_key", "routine"] as const) {
@@ -942,6 +965,50 @@ Deno.test("a ruled roof-report card requires exactly the one invoice route", () 
   assert(blocker, "an unready invoice route must still be named");
   assertStringIncludes(blocker!.fact, "invoice email");
 });
+
+Deno.test(
+  "an absent invoice PDF stays visible on the card and send preview",
+  () => {
+    const input = cleanInput({
+      family: "ordinary_roof_portal",
+      report_route_applicable: false,
+      photo_route_applicable: false,
+      invoice_route_artifact_caveat: true,
+      routes: cleanInput().routes
+        .filter((route) => route.route_kind === "invoice")
+        .map((route) => ({ ...route, ready: false })),
+    });
+    const caveat = {
+      state: "caveat" as const,
+      code: "invoice_route_artifact_missing",
+      fact: "The billing PDF is unavailable.",
+      recovery_action: "Review the missing billing PDF before deciding.",
+    };
+    const view = buildSesCockpitView({
+      job_id: "job-invoice-caveat",
+      job_number: "SWMS-CAVEAT",
+      docket_revision_id: "docket-caveat",
+      readiness_revision: "readiness-caveat",
+      dependency_generation: 1,
+      invoice_obligation_revision_id: "obligation-caveat",
+      attendance_cycle_ids: ["cycle-caveat"],
+      xero_binding: null,
+      local_invoice_proposal: null,
+      work_order: null,
+      family_evidence: {},
+      swms: {},
+      routes: input.routes,
+      caveats: [caveat],
+      crew_and_trade_visits: [],
+      clean_input: input,
+    });
+    assertEquals(view.caveats, [caveat]);
+    assertEquals(view.controls.send_it.enabled, true);
+    const preview = view.sections.send_preview as Record<string, any>;
+    assertEquals(preview.caveats, [caveat]);
+    assertEquals(preview.routes[0].attachment_count, 1);
+  },
+);
 
 Deno.test("SEND IT states the real cause, quoting the blocker's own fact", () => {
   // The live Bertram case: report and invoice fine, photo drafted with zero

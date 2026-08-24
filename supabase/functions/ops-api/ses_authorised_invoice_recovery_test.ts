@@ -38,6 +38,14 @@ const FAMILY_MATRIX_VERSION = "ses-family-matrix-v1";
 const DOCKET_IDEMPOTENCY_CONSTRAINT =
   "makesafe_docket_revisions_job_id_idempotency_key_assembler__key";
 
+interface RecoveryTrack {
+  commits: number;
+  uploads: number;
+  authorises: number;
+  creates: number;
+  observed_effects?: number;
+}
+
 /**
  * Mirrors the shipped migration
  * `20260804010000_ses_invoice_bound_docket_idempotent_adopt.sql`, which scopes
@@ -93,7 +101,7 @@ function recoveryClient(opts: {
   commitReturns?: Record<string, any> | null;
   /** Simulate live 23505 unique key collision on commit. */
   commitDuplicateKey?: boolean;
-  track?: { commits: number; uploads: number; authorises: number; creates: number };
+  track?: RecoveryTrack;
 }) {
   const track = opts.track || {
     commits: 0,
@@ -104,6 +112,7 @@ function recoveryClient(opts: {
   const artifacts = opts.artifacts || [];
   const artifactsByRevision = opts.artifactsByRevision || {};
   let committedDocket = opts.commitReturns ?? null;
+  let observedEffect: Record<string, any> | null = null;
   const existingBound = opts.existingBoundDockets || [];
   let lastArtifactRevisionId: string | null = null;
   // Seed the unique index from any pre-existing invoice_bound rows, using each
@@ -261,6 +270,60 @@ function recoveryClient(opts: {
       return builder;
     },
     async rpc(name: string, args: Record<string, any>) {
+      if (name === "claim_ses_external_effect_v1") {
+        const effect = args.p_effect || {};
+        if (!observedEffect) {
+          observedEffect = {
+            ...effect,
+            id: "observed-effect-1",
+            state: "reserved",
+          };
+          return {
+            data: {
+              effect: { ...observedEffect },
+              claim_mode: "dispatch",
+              duplicate_refused: false,
+            },
+            error: null,
+          };
+        }
+        return {
+          data: {
+            effect: { ...observedEffect },
+            claim_mode: observedEffect.state === "confirmed"
+              ? "confirmed"
+              : "reconcile",
+            duplicate_refused: true,
+          },
+          error: null,
+        };
+      }
+      if (name === "transition_ses_external_effect_v1") {
+        if (!observedEffect) {
+          return {
+            data: null,
+            error: { code: "P0002", message: "external effect does not exist" },
+          };
+        }
+        if (
+          observedEffect.state !== args.p_from_state ||
+          args.p_to_state !== "confirmed" ||
+          args.p_event_kind !== "provider_observed_without_dispatch"
+        ) {
+          return {
+            data: null,
+            error: { code: "23514", message: "invalid observed transition" },
+          };
+        }
+        observedEffect = {
+          ...observedEffect,
+          state: "confirmed",
+          external_id: args.p_detail?.external_id || null,
+          provider_digest: args.p_detail?.provider_digest || null,
+        };
+        track.observed_effects = (track.observed_effects || 0) + 1;
+        return { data: { ...observedEffect }, error: null };
+      }
       if (name === "commit_ses_invoice_bound_docket_v1") {
         track.commits += 1;
         const binding = args.p_binding || {};
@@ -402,7 +465,12 @@ function gateway(opts: {
 }
 
 Deno.test("recovery: binds AUTHORISED PDF to current pre_xero docket without re-approval", async () => {
-  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const track: RecoveryTrack = {
+    commits: 0,
+    uploads: 0,
+    authorises: 0,
+    creates: 0,
+  };
   const client = recoveryClient({
     revision: {
       id: OBLIGATION_ID,
@@ -449,6 +517,7 @@ Deno.test("recovery: binds AUTHORISED PDF to current pre_xero docket without re-
   assertEquals(result.invoice.xero_invoice_id, XERO_ID);
   assertEquals(result.invoice.total, TOTAL);
   assertEquals(track.commits, 1);
+  assertEquals(track.observed_effects, 1);
   assertEquals(gTrack.creates, 0);
   assertEquals(gTrack.authorises, 0);
   assertEquals(gTrack.pdfFetches, 1);
@@ -456,7 +525,12 @@ Deno.test("recovery: binds AUTHORISED PDF to current pre_xero docket without re-
 });
 
 Deno.test("recovery: replay is idempotent — second run does not re-commit or re-authorise", async () => {
-  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const track: RecoveryTrack = {
+    commits: 0,
+    uploads: 0,
+    authorises: 0,
+    creates: 0,
+  };
   const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
   const client = recoveryClient({
     revision: {
@@ -509,6 +583,7 @@ Deno.test("recovery: replay is idempotent — second run does not re-commit or r
   assertEquals(second.invoice.invoice_number, INVOICE_NUMBER);
   // First run commits once; second hits the already-bound path (no second commit).
   assertEquals(track.commits, 1);
+  assertEquals(track.observed_effects, 1);
   assertEquals(gTrack.creates, 0);
   assertEquals(gTrack.authorises, 0);
   // PDF may be fetched once on first bind only.

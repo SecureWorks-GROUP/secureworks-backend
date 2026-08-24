@@ -45,6 +45,7 @@ import {
 import {
   buildSesEffect,
   executeSesExternalEffect,
+  recordSesObservedExternalEffect,
   type SesEffectClaim,
   type SesExternalAdapter,
   type SesExternalEffect,
@@ -58,6 +59,7 @@ import {
   classifySesReleaseSendProgress,
   evaluateSesMechanicalClean,
   existingCardMoneyRefusal,
+  hasSesInvoiceRouteArtifactCaveat,
   SES_ROUTE_ORDER,
   type SesApprovalAuth,
   type SesCleanInput,
@@ -1158,6 +1160,45 @@ function packArtifactTruthCaveat(
   };
 }
 
+function sesInvoiceRouteArtifactCaveat(args: {
+  routes: SesReviewRoute[];
+  xeroBinding: Record<string, any> | null;
+  xeroInvoicePdfAvailable: boolean;
+}): SesReviewCaveat | null {
+  const route = args.routes.find((candidate) =>
+    candidate.route_kind === "invoice" ||
+    candidate.route_kind === "report_invoice"
+  );
+  if (
+    !route || route.ready || route.recipients.length === 0 ||
+    !route.subject.trim() || !route.body.trim() ||
+    route.attachment_hashes.length === 0
+  ) {
+    return null;
+  }
+  const status = String(args.xeroBinding?.status || "").toUpperCase();
+  const pdfUnavailable = !args.xeroInvoicePdfAvailable;
+  const eligibleStatus = status === "" || status === "DRAFT" ||
+    status === "AUTHORISED";
+  if (!eligibleStatus || !pdfUnavailable) return null;
+  return {
+    state: "caveat",
+    code: "invoice_route_artifact_missing",
+    fact: status === "AUTHORISED"
+      ? "The live AUTHORISED Xero invoice is bound, but its billing PDF is not available on this docket revision."
+      : "The invoice route is prepared from the live pack, but the billing PDF is not currently available.",
+    recovery_action:
+      "Review the invoice route and its missing billing PDF in the send preview; this is a Captain caveat, not a send wall.",
+    evidence: {
+      route_kind: route.route_kind,
+      xero_invoice_id: String(args.xeroBinding?.xero_invoice_id || "") || null,
+      xero_status: status || null,
+      xero_invoice_pdf_available: args.xeroInvoicePdfAvailable,
+      support_attachment_count: route.attachment_hashes.length,
+    },
+  };
+}
+
 function manifestSwmsRequirement(
   docket: Record<string, any>,
   reviewFamily: string,
@@ -1673,22 +1714,30 @@ export async function loadSesCockpitDocket(
     cockpitArtifacts,
     obligation,
   );
-  const cleanInput = cleanInputFromRows({
-    docket,
-    readiness,
-    obligation,
-    routes,
-  });
-  if (sourceRefusal) {
-    cleanInput.readiness_blockers.push(sourceRefusal);
-    cleanInput.money_blocker_codes.push(sourceRefusal.code);
-  }
   const artifactTruth = await readSesPackArtifactTruth(client, {
     docket,
     review_family: family,
     pack_obligation: obligation,
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
   });
+  const invoiceRouteCaveat = sesInvoiceRouteArtifactCaveat({
+    routes,
+    xeroBinding,
+    xeroInvoicePdfAvailable,
+  });
+  const cleanInput = cleanInputFromRows({
+    docket,
+    readiness,
+    obligation,
+    routes,
+  });
+  if (invoiceRouteCaveat) {
+    cleanInput.invoice_route_artifact_caveat = true;
+  }
+  if (sourceRefusal) {
+    cleanInput.readiness_blockers.push(sourceRefusal);
+    cleanInput.money_blocker_codes.push(sourceRefusal.code);
+  }
   const releaseSendProgress = await loadSesReleaseSendProgressForJob(
     client,
     jobId,
@@ -1735,6 +1784,7 @@ export async function loadSesCockpitDocket(
     caveats: uniqueSesReviewCaveats([
       ...sesDocketReleaseCaveats(docket),
       ...(sourceCaveat ? [sourceCaveat] : []),
+      ...(invoiceRouteCaveat ? [invoiceRouteCaveat] : []),
       ...artifactTruth.caveats,
     ]),
     artifact_truth: artifactTruth.truth,
@@ -5222,6 +5272,36 @@ export async function recoverAuthorisedInvoicePdfBind(
       : (Number.isFinite(boundTotal) ? boundTotal : 0),
   };
 
+  // The legacy adopt-existing path proved this exact AUTHORISED invoice in
+  // Xero and bound it to the obligation, but did not dispatch through SES and
+  // therefore never created `invoice_authorise` in the effect ledger. Record
+  // that provider observation now so the docket-bind RPC can enforce the same
+  // exact identity without pretending that SES authorised money a second time.
+  const authorisePayload = {
+    xero_invoice_id: authorisedInvoice.xero_invoice_id,
+    expected_status: "AUTHORISED",
+  };
+  const authoriseEffect = await buildSesEffect({
+    org_id: args.org_id,
+    job_id: args.job_id,
+    effect_kind: "invoice_authorise",
+    invoice_obligation_revision_id: revision.id,
+    payload: authorisePayload,
+  });
+  await recordSesObservedExternalEffect({
+    store: createSupabaseSesEffectStore(client),
+    effect: authoriseEffect,
+    external_id: authorisedInvoice.xero_invoice_id,
+    provider_digest: {
+      invoice_number: authorisedInvoice.invoice_number,
+      status: authorisedInvoice.status,
+      reference: authorisedInvoice.reference,
+      total: authorisedInvoice.total,
+      reconciliation: "legacy_authorised_invoice",
+    },
+    actor: args.actor,
+  });
+
   const cockpit = await loadSesCockpitDocket(client, args.job_id);
   if (
     cockpit.invoice_obligation_revision_id &&
@@ -6583,6 +6663,14 @@ export async function approveSesReleaseRevisionAction(
             "The current later attendance is not recorded as a proposed no-additional-charge obligation.",
         });
       }
+    } else if (
+      hasSesInvoiceRouteArtifactCaveat(docket) &&
+      String(docket.xero_binding?.status || "").toUpperCase() !== "DRAFT"
+    ) {
+      // The invoice route is structurally reviewable, but its billing PDF is a
+      // visible Captain caveat. Do not turn that missing artifact into a
+      // second-approval wall; the release route remains explicit about what is
+      // and is not attached in the send preview.
     } else {
       const boundDocket = requireValue(
         await client.from("makesafe_docket_revisions")
@@ -7039,6 +7127,10 @@ export async function executeSesReleaseRevisionAction(
           ),
         );
       }
+    } else if (!String(xero.status || "").trim()) {
+      // A missing live invoice/PDF is carried as the persisted card caveat and
+      // send-preview evidence. It must not become a second wall after the
+      // Captain approved the explicit route; no invoice is minted here.
     } else {
       const noChargeRevision = await client.from(
         "makesafe_invoice_obligation_revisions",
