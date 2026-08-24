@@ -18,6 +18,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  isIntentionalNoInvoiceCompleteNote,
   planMakesafeTerminalProofRecord,
   RecordTerminalProofConflictError,
   RecordTerminalProofRequestError,
@@ -92,8 +93,50 @@ function baseObservation(
       invoice_date: "2026-06-30",
       fully_paid_on: "2026-07-02",
     }],
+    substatus: null,
+    makesafe_job_family: "general_makesafe",
+    report_type: null,
+    substatus_complete_at: null,
     ...over,
   };
+}
+
+const SWMS_26791_NO_INVOICE_NOTE =
+  "NO make-safe performed - member already had temporary fencing in place at attendance " +
+  "(field note: 'no temp fencing required, already has temp fencing in place'). " +
+  "Assessment/measurement-only visit. NO invoice to raise.";
+
+const JOB_26791 = "8b916846-c67b-446d-86d1-fc56d75e6026";
+const CYCLE_26791 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+function nonworkObservation(
+  over: Partial<RecordTerminalProofObservation> = {},
+): RecordTerminalProofObservation {
+  return baseObservation({
+    job: {
+      id: JOB_26791,
+      org_id: ORG,
+      job_number: "SWMS-26791",
+      type: "makesafe",
+      status: "processing",
+    },
+    cycle_ids: [CYCLE_26791],
+    own_raised_invoices: [],
+    pack_sent_events: [{
+      id: "evt-26791-note",
+      created_at: "2026-06-30T09:07:00.705Z",
+      text: SWMS_26791_NO_INVOICE_NOTE,
+    }],
+    pack_sent_at: null,
+    outbound_bindings: [],
+    reverse_bindings: [],
+    sibling_raised_invoices: [],
+    substatus: "complete",
+    makesafe_job_family: "assessment_report_quote",
+    report_type: "assessment",
+    substatus_complete_at: "2026-06-30T09:07:01.235Z",
+    ...over,
+  });
 }
 
 Deno.test("SWMS-26832 bundled path: reciprocal binding + sibling PAID + bundled send note plans a proof", async () => {
@@ -443,12 +486,19 @@ Deno.test("dry_run default: action observes + plans and inserts nothing", async 
                 job_number: "SWMS-26832",
                 type: "makesafe",
                 status: "invoiced",
+                metadata: { makesafe_job_family: "general_makesafe" },
               },
               error: null,
             };
           }
           if (table === "makesafe_report_packs") {
             return { data: null, error: null };
+          }
+          if (table === "makesafe_job_details") {
+            return {
+              data: { substatus: "complete", report_type: null },
+              error: null,
+            };
           }
           return { data: null, error: null };
         },
@@ -552,4 +602,157 @@ Deno.test("missing proven_by on the action is a 400", async () => {
     () => recordMakesafeTerminalProofAction({}, { job_id: JOB, dry_run: true }),
     RecordTerminalProofRequestError,
   );
+});
+
+Deno.test("SWMS-26791 note classifier requires both no-work and no-invoice signals", () => {
+  assertEquals(isIntentionalNoInvoiceCompleteNote(SWMS_26791_NO_INVOICE_NOTE), true);
+  assertEquals(
+    isIntentionalNoInvoiceCompleteNote(
+      "Assessment/measurement-only visit. Still waiting on invoice.",
+    ),
+    false,
+  );
+  assertEquals(
+    isIntentionalNoInvoiceCompleteNote("NO invoice to raise — crew will return"),
+    false,
+  );
+});
+
+Deno.test("SWMS-26791 approved_nonwork_archive path plans from complete + no-invoice note", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
+    observation: nonworkObservation(),
+    proven_by: "ses-codefix:swms-26791-nonwork-archive",
+    kind: "approved_nonwork_archive",
+  });
+  assertEquals(plan.path, "intentional_no_invoice_complete");
+  assertEquals(plan.kind, "approved_nonwork_archive");
+  assertEquals(plan.job_id, JOB_26791);
+  assertEquals(plan.proven_at, "2026-06-30T09:07:00.705Z");
+  assert(plan.evidence_refs.some((r) => r.includes("evt-26791-note")));
+  assert(plan.evidence_refs.some((r) => r.includes("assessment")));
+  assertEquals(plan.sibling_invoice_number, null);
+});
+
+Deno.test("SWMS-26791 planned nonwork proof places the card in archive via stage engine", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
+    observation: nonworkObservation(),
+    proven_by: "ses-codefix:swms-26791-nonwork-archive",
+    kind: "approved_nonwork_archive",
+  });
+  const result = deriveSesStageV2({
+    job: {
+      status: "processing",
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    detail: {
+      cycle_number: 1,
+      attendance_cycle_id: CYCLE_26791,
+      substatus: "complete",
+      report_type: "assessment",
+    },
+    evidence: {
+      assignments: [{ id: "a1", status: "complete" }],
+      serviceReports: [],
+      completionPhotoCount: 0,
+      invoiceStatus: null,
+      packSent: false,
+      attendanceCycleIds: [CYCLE_26791],
+      currentAttendanceCycleId: CYCLE_26791,
+      terminalProofs: [{
+        id: "proof-26791",
+        kind: plan.kind,
+        attendance_cycle_ids: plan.attendance_cycle_ids,
+        evidence_refs: plan.evidence_refs,
+        proven_by: plan.proven_by,
+        proven_at: plan.proven_at,
+        validatedCycleSetHash: true,
+      }],
+    },
+    nowIso: "2026-08-24T00:00:00.000Z",
+  } as any);
+  assertEquals(result.stage, "archive");
+  assert(result.reasons.some((r) => r.includes("approved_nonwork_archive")));
+});
+
+Deno.test("approved_nonwork_archive refuses when a raised ACCREC already exists", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation({
+          own_raised_invoices: [{
+            id: "own-inv",
+            job_id: JOB_26791,
+            invoice_number: "INV-9999",
+            status: "AUTHORISED",
+            invoice_type: "ACCREC",
+          }],
+        }),
+        proven_by: "operator",
+        kind: "approved_nonwork_archive",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "own_raised_invoice_present");
+});
+
+Deno.test("approved_nonwork_archive refuses non-assessment families", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation({
+          makesafe_job_family: "general_makesafe",
+          report_type: null,
+        }),
+        proven_by: "operator",
+        kind: "approved_nonwork_archive",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "nonwork_family_not_assessment");
+});
+
+Deno.test("approved_nonwork_archive refuses when substatus is not complete", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation({ substatus: "waiting_on_trade_report" }),
+        proven_by: "operator",
+        kind: "approved_nonwork_archive",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "substatus_not_complete");
+});
+
+Deno.test("approved_nonwork_archive refuses without an intentional no-invoice note", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation({
+          pack_sent_events: [{
+            id: "evt-noise",
+            created_at: "2026-06-30T09:07:00Z",
+            text: "crew attended, assessment form still open",
+          }],
+        }),
+        proven_by: "operator",
+        kind: "approved_nonwork_archive",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "intentional_no_invoice_note_missing");
+});
+
+Deno.test("default verified_historical_closeout still refuses a no-invoice assessment card", async () => {
+  // Neighbour unchanged: without pack-sent + raised money, the card cannot
+  // silently take the nonwork path when the caller omits the kind.
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation(),
+        proven_by: "operator",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "pack_send_evidence_missing");
 });
