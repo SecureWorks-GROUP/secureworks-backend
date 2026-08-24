@@ -2373,7 +2373,7 @@ Deno.test("curated bind survives a client that rejects unknown job_media columns
   assertEquals(result.cycle_attribution, "bound");
 });
 
-Deno.test("curated bind accepts the exact all-attendance photo set for one reattended job", async () => {
+Deno.test("curated bind accepts the exact all-attendance photo set for canonical insurance restoration storage", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nall-attendance fixture");
   const visitOneBytes = new TextEncoder().encode("verified visit one bytes");
   const visitTwoBytes = new TextEncoder().encode("verified visit two bytes");
@@ -2401,6 +2401,8 @@ Deno.test("curated bind accepts the exact all-attendance photo set for one reatt
     cycleId: "cycle-two",
     documentCycleId: "cycle-two",
     reattendCount: 1,
+    jobType: "insurance",
+    jobFamily: "restoration",
     media,
     serviceReport: {
       id: SERVICE_REPORT_ID,
@@ -2467,6 +2469,112 @@ Deno.test("curated bind accepts the exact all-attendance photo set for one reatt
       "https://storage.example.test/visit-one.jpg",
       "https://storage.example.test/visit-two.jpg",
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("curated bind pins created_at then id order on the widened all-attendance source", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\nwidened adversarial order fixture",
+  );
+  const photoBytes = new TextEncoder().encode("ordered widened photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const media = PACK_PHOTO_ORDER_MEDIA.map((row, index) => ({
+    ...row,
+    attendance_cycle_id: index % 2 === 0 ? "cycle-one" : "cycle-two",
+    cycle_attribution: "bound",
+  }));
+  const expected = [...PACK_PHOTO_ORDER_EXPECTED_IDS];
+  const idOrdered = media.map((row) => row.id).toSorted();
+  assertEquals(
+    canonicalSesJson(idOrdered) === canonicalSesJson(expected),
+    false,
+  );
+  const serviceReport = {
+    id: SERVICE_REPORT_ID,
+    status: "submitted",
+    checklist_json: { materials_used: [] },
+    attendance_cycle_id: "cycle-two",
+    cycle_attribution: "bound",
+    cycle_number: 2,
+  };
+  const reportJob = (ids: string[]) =>
+    currentReportJob({
+      photos: ids.map((id) => ({
+        evidence_id: id,
+        caption: `Site photo ${id}`,
+        content_sha256: contentHash,
+      })),
+      photo_evidence: {
+        source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+        completeness_verified: true,
+        source_count: media.length,
+        applicable_count: media.length,
+        selected_count: media.length,
+        applicable_ids: ids,
+        selected_ids: ids,
+        excluded: [],
+        rejected: [],
+      },
+    });
+  const base = await bindBody(bytes);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const { client, document } = bindClient(bytes, {
+      cycleId: "cycle-two",
+      documentCycleId: "cycle-two",
+      reattendCount: 1,
+      media,
+      serviceReport,
+    });
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      { ...base, report_job: reportJob(expected) },
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+    assertEquals(
+      document.data_snapshot_json.photo_source_scope,
+      "same_job_all_attendances",
+    );
+
+    const { client: second, mutations } = bindClient(bytes, {
+      cycleId: "cycle-two",
+      documentCycleId: "cycle-two",
+      reattendCount: 1,
+      media,
+      serviceReport,
+    });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          second,
+          { ...base, report_job: reportJob(idOrdered) },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertEquals(
+      ((error as ApiError).body as any)?.code,
+      "curated_bind_photo_source_mismatch",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "applicable_ids carries the same-job all-attendance IDs in the wrong sequence",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "created_at ascending, then id",
+    );
+    assertEquals(mutations, []);
   } finally {
     globalThis.fetch = originalFetch;
   }
