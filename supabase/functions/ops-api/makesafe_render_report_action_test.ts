@@ -128,6 +128,7 @@ function bindClient(
   bytes: Uint8Array,
   options: {
     cycleId?: string | null;
+    reattendCount?: number;
     prior?: Record<string, unknown>;
     otherDocuments?: Array<Record<string, unknown>>;
     jobType?: string;
@@ -204,7 +205,7 @@ function bindClient(
       report_type: null,
       attendance_cycle_id: detailCycle,
       cycle_number: 1,
-      reattend_count: 0,
+      reattend_count: options.reattendCount ?? 0,
       external_ref: "REF-001",
     },
     job_documents: document,
@@ -317,7 +318,12 @@ function bindClient(
             }).then(resolve);
           }
           if (table === "job_media") {
-            return Promise.resolve({ data: media, error: responseError }).then(
+            const list = media.filter((row) =>
+              row.job_id === undefined ||
+              filters.job_id === undefined ||
+              row.job_id === filters.job_id
+            );
+            return Promise.resolve({ data: list, error: responseError }).then(
               resolve,
             );
           }
@@ -2365,6 +2371,277 @@ Deno.test("curated bind survives a client that rejects unknown job_media columns
   assertEquals(rejected, []);
   assertEquals(result.success, true);
   assertEquals(result.cycle_attribution, "bound");
+});
+
+Deno.test("curated bind accepts the exact all-attendance photo set for one reattended job", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nall-attendance fixture");
+  const visitOneBytes = new TextEncoder().encode("verified visit one bytes");
+  const visitTwoBytes = new TextEncoder().encode("verified visit two bytes");
+  const media = [
+    {
+      id: "visit-one-photo",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-08-21T08:00:00.000Z",
+      storage_url: "https://storage.example.test/visit-one.jpg",
+      attendance_cycle_id: "cycle-one",
+      cycle_attribution: "bound",
+    },
+    {
+      id: "visit-two-photo",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-08-24T08:00:00.000Z",
+      storage_url: "https://storage.example.test/visit-two.jpg",
+      attendance_cycle_id: "cycle-two",
+      cycle_attribution: "bound",
+    },
+  ];
+  const { client, document } = bindClient(bytes, {
+    cycleId: "cycle-two",
+    documentCycleId: "cycle-two",
+    reattendCount: 1,
+    media,
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-two",
+      cycle_attribution: "bound",
+      cycle_number: 2,
+    },
+  });
+  const selectedIds = media.map((row) => row.id);
+  const contentHashes = new Map([
+    ["visit-one-photo", `sha256:${await sha(visitOneBytes)}`],
+    ["visit-two-photo", `sha256:${await sha(visitTwoBytes)}`],
+  ]);
+  const body = {
+    ...(await bindBody(bytes)),
+    report_job: currentReportJob({
+      photos: selectedIds.map((id) => ({
+        evidence_id: id,
+        caption: `Site photo ${id}`,
+        content_sha256: contentHashes.get(id),
+      })),
+      photo_evidence: {
+        source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+        completeness_verified: true,
+        source_count: selectedIds.length,
+        applicable_count: selectedIds.length,
+        selected_count: selectedIds.length,
+        applicable_ids: selectedIds,
+        selected_ids: selectedIds,
+        excluded: [],
+        rejected: [],
+      },
+    }),
+  };
+  const originalFetch = globalThis.fetch;
+  const fetchedPhotoUrls: string[] = [];
+  globalThis.fetch = (input: any) => {
+    const url = String(input);
+    if (url.endsWith(".pdf")) {
+      return Promise.resolve(new Response(bytes, { status: 200 })) as any;
+    }
+    fetchedPhotoUrls.push(url);
+    const photoBytes = url.endsWith("visit-one.jpg")
+      ? visitOneBytes
+      : visitTwoBytes;
+    return Promise.resolve(
+      new Response(photoBytes, { status: 200 }),
+    ) as any;
+  };
+  try {
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      body,
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+    assertEquals(
+      document.data_snapshot_json.photo_source_scope,
+      "same_job_all_attendances",
+    );
+    assertEquals(fetchedPhotoUrls, [
+      "https://storage.example.test/visit-one.jpg",
+      "https://storage.example.test/visit-two.jpg",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("curated bind keeps current-cycle-only photo behavior on a reattended job", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ncurrent-cycle fixture");
+  const photoBytes = new TextEncoder().encode("verified current photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const media = [
+    {
+      id: "prior-visit-photo",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-08-21T08:00:00.000Z",
+      storage_url: "https://storage.example.test/prior.jpg",
+      attendance_cycle_id: "cycle-one",
+      cycle_attribution: "bound",
+    },
+    {
+      id: "current-visit-photo",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-08-24T08:00:00.000Z",
+      storage_url: "https://storage.example.test/current.jpg",
+      attendance_cycle_id: "cycle-two",
+      cycle_attribution: "bound",
+    },
+  ];
+  const { client, document } = bindClient(bytes, {
+    cycleId: "cycle-two",
+    documentCycleId: "cycle-two",
+    reattendCount: 1,
+    media,
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-two",
+      cycle_attribution: "bound",
+      cycle_number: 2,
+    },
+  });
+  const selectedIds = ["current-visit-photo"];
+  const body = {
+    ...(await bindBody(bytes)),
+    report_job: currentReportJob({
+      photos: [{
+        evidence_id: selectedIds[0],
+        caption: "Current visit photo",
+        content_sha256: contentHash,
+      }],
+      photo_evidence: {
+        source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+        completeness_verified: true,
+        source_count: 1,
+        applicable_count: 1,
+        selected_count: 1,
+        applicable_ids: selectedIds,
+        selected_ids: selectedIds,
+        excluded: [],
+        rejected: [],
+      },
+    }),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      body,
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+    assertEquals(document.data_snapshot_json.photo_source_scope, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("curated bind refuses a photo identity from a different job", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ncross-job refusal fixture");
+  const photoBytes = new TextEncoder().encode("verified same-job photo bytes");
+  const differentJobBytes = new TextEncoder().encode(
+    "verified different-job photo bytes",
+  );
+  const contentHashes = new Map([
+    ["same-job-photo", `sha256:${await sha(photoBytes)}`],
+    ["different-job-photo", `sha256:${await sha(differentJobBytes)}`],
+  ]);
+  const { client, mutations } = bindClient(bytes, {
+    cycleId: "cycle-two",
+    documentCycleId: "cycle-two",
+    reattendCount: 1,
+    media: [
+      {
+        id: "same-job-photo",
+        job_id: "job-fixture",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        storage_url: "https://storage.example.test/same-job.jpg",
+        attendance_cycle_id: "cycle-two",
+        cycle_attribution: "bound",
+      },
+      {
+        id: "different-job-photo",
+        job_id: "other-job",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-23T08:00:00.000Z",
+        storage_url: "https://storage.example.test/different-job.jpg",
+        attendance_cycle_id: "other-cycle",
+        cycle_attribution: "bound",
+      },
+    ],
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-two",
+      cycle_attribution: "bound",
+      cycle_number: 2,
+    },
+  });
+  // The mock applies the same job_id ownership filter as PostgREST. A caller
+  // cannot smuggle the filtered-out job's well-formed identity and hash into
+  // either complete supported set.
+  const selectedIds = ["same-job-photo", "different-job-photo"];
+  const body = {
+    ...(await bindBody(bytes)),
+    report_job: currentReportJob({
+      photos: selectedIds.map((id) => ({
+        evidence_id: id,
+        caption: `Site photo ${id}`,
+        content_sha256: contentHashes.get(id),
+      })),
+      photo_evidence: {
+        source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+        completeness_verified: true,
+        source_count: selectedIds.length,
+        applicable_count: selectedIds.length,
+        selected_count: selectedIds.length,
+        applicable_ids: selectedIds,
+        selected_ids: selectedIds,
+        excluded: [],
+        rejected: [],
+      },
+    }),
+  };
+  const error = await assertRejects(
+    () =>
+      withStoredPdf(
+        bytes,
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+      ),
+    ApiError,
+    "photo_evidence does not completely account",
+  );
+  assertEquals(
+    ((error as ApiError).body as any)?.code,
+    "curated_bind_photo_source_mismatch",
+  );
+  assertEquals(mutations, []);
 });
 
 Deno.test("curated bind and assembler agree on created_at then id photo order", async () => {
