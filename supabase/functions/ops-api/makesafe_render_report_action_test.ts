@@ -573,6 +573,75 @@ for (
   );
 }
 
+Deno.test("curated bind family gate admits canonical insurance restoration storage", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\ncanonical insurance restoration bind fixture",
+  );
+  const { client, mutations, pack } = bindClient(bytes, {
+    jobType: "insurance",
+    jobFamily: "restoration",
+    pack: draftedPack(),
+  });
+  const body = await bindBody(bytes);
+
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+
+  assertEquals(result.skipped, false);
+  assertEquals(result.pack_pointer_written, true);
+  assertEquals(result.pack_report_doc_id, "document-fixture");
+  assertEquals(
+    (pack as Record<string, unknown>).report_doc_id,
+    "document-fixture",
+  );
+  assertEquals(mutations.map((item) => item.table), [
+    "job_events",
+    "job_documents",
+    "makesafe_report_packs",
+  ]);
+});
+
+Deno.test("curated bind family gate keeps unrelated insurance families refused", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\nunrelated insurance family bind fixture",
+  );
+  const { client, mutations, pack } = bindClient(bytes, {
+    jobType: "insurance",
+    jobFamily: "repair",
+    pack: draftedPack(),
+  });
+  const body = await bindBody(bytes);
+
+  const error = await withStoredPdf(
+    bytes,
+    () =>
+      assertRejects(
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+        ApiError,
+        "only a physical make-safe job",
+      ),
+  );
+
+  assertEquals(
+    ((error as ApiError).body as Record<string, unknown>).code,
+    "curated_bind_family_not_eligible",
+  );
+  assertEquals((pack as Record<string, unknown>).report_doc_id, null);
+  assertEquals(mutations.length, 0);
+});
+
 Deno.test("curated bind family gate keeps assessment report-doc semantics unchanged", async () => {
   const bytes = new TextEncoder().encode(
     "%PDF-1.7\nassessment curated bind family fixture",

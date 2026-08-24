@@ -39233,7 +39233,10 @@ async function bindCurrentCycleCuratedMakesafeReport(
     strata: metadata.strata,
     report_delivery: metadata.report_delivery,
   })
-  if (jobResponse.data.type !== 'makesafe' ||
+  const canonicalRestorationStorageShape =
+    jobResponse.data.type === 'insurance' && family === 'restoration'
+  if ((jobResponse.data.type !== 'makesafe' &&
+        !canonicalRestorationStorageShape) ||
       ![
         'physical_makesafe',
         'temporary_fencing',
