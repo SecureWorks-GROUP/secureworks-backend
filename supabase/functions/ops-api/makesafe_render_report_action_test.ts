@@ -133,6 +133,7 @@ function bindClient(
     otherDocuments?: Array<Record<string, unknown>>;
     jobType?: string;
     jobFamily?: string;
+    insuranceJobType?: string;
     documentJobId?: string;
     documentType?: string;
     fileName?: string;
@@ -199,6 +200,9 @@ function bindClient(
       client_name: "Canonical site contact",
       metadata: {
         makesafe_job_family: options.jobFamily || "general_makesafe",
+        ...(options.insuranceJobType
+          ? { insurance_job_type: options.insuranceJobType }
+          : {}),
       },
     },
     makesafe_job_details: {
@@ -2402,7 +2406,8 @@ Deno.test("curated bind accepts the exact all-attendance photo set for canonical
     documentCycleId: "cycle-two",
     reattendCount: 1,
     jobType: "insurance",
-    jobFamily: "restoration",
+    jobFamily: "general_makesafe",
+    insuranceJobType: "restoration",
     media,
     serviceReport: {
       id: SERVICE_REPORT_ID,
