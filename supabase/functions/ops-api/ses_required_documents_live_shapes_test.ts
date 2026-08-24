@@ -38,8 +38,12 @@ function boardRow(
     metadata: fixture.board_card.metadata,
     makesafe_details: {
       external_ref: fixture.board_card.external_ref,
+      requesting_company_slug: fixture.board_card.requesting_company_slug,
       substatus: "company_contact_required",
       cycle_number: 1,
+    },
+    report_pack: {
+      pricing_disposition: fixture.inspect_classification.pricing_disposition,
     },
     assignments: [],
   };
@@ -69,7 +73,9 @@ function inspectDocket(
     clean_input: {
       builder_key: fixture.inspect_classification.builder_key,
       family: fixture.inspect_classification.family,
+      pricing_disposition: fixture.inspect_classification.pricing_disposition,
     } as SesCockpitDocket["clean_input"],
+    artifact_truth: fixture.inspect_artifact_truth,
     release_send_progress: { kind: "none" as const },
   } as unknown as SesCockpitDocket;
 }
@@ -147,12 +153,39 @@ for (const fixture of SES_REQUIRED_DOCUMENTS_LIVE_SHAPES) {
       card.pack.required_documents,
       `${fixture.name} board/inspect parity`,
     );
-    // The obligation map is additive; literal proof coordinates remain intact.
+    // The requirement map is additive; literal proof coordinates remain intact.
     assertEquals(inspection.pack.report_doc_id, "report-doc");
     assertEquals(inspection.pack.invoice_doc_id, "invoice-doc");
     assertEquals(inspection.pack.swms_doc_id, "swms-doc");
   });
 }
+
+Deno.test("no-additional-charge exception is identical through board and inspect actions", async () => {
+  const source = SES_REQUIRED_DOCUMENTS_LIVE_SHAPES[0];
+  const fixture: TestFixture = {
+    ...source,
+    name: "mlb_physical_no_additional_charge",
+    inspect_classification: {
+      ...source.inspect_classification,
+      pricing_disposition: "no_additional_charge",
+    },
+    expected: { ...source.expected, invoice: false },
+    inspect_artifact_truth: {
+      required_documents: { ...source.expected, invoice: false },
+    },
+  };
+  const [card] = buildCanonicalMakesafeRows([boardRow(fixture)], {}, "card");
+  const inspection = await inspectSesPackAction(
+    inspectClient(),
+    `fixture-${fixture.name}`,
+    null,
+    { loadDocket: async () => inspectDocket(fixture) },
+  );
+
+  assertEquals(card.pack.required_documents, fixture.expected);
+  assertEquals(inspection.required_documents, fixture.expected);
+  assertEquals(inspection.required_documents, card.pack.required_documents);
+});
 
 Deno.test("unresolved matrix authority publishes unknown, never invented obligations", async () => {
   const unknownFixture = {

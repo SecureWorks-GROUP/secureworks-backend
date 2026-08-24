@@ -1,7 +1,7 @@
 import type {
   SesRequiredDocumentMap,
   SesRequiredDocumentsCard,
-} from "../ses_family_matrix.ts";
+} from "../makesafe_document_truth.ts";
 
 export interface SesRequiredDocumentsLiveShape {
   name:
@@ -15,12 +15,15 @@ export interface SesRequiredDocumentsLiveShape {
     metadata: { makesafe_job_family: string };
   };
   inspect_classification: SesRequiredDocumentsCard;
+  inspect_artifact_truth: {
+    required_documents: SesRequiredDocumentMap;
+  };
   expected: SesRequiredDocumentMap;
 }
 
 /**
- * Sanitised classification slices copied from read-only production payloads.
- * These retain the real producer spellings (`general_makesafe`,
+ * Sanitised board, docket-classification and artifact-truth slices copied from
+ * read-only production payloads. These retain the real producer spellings (`general_makesafe`,
  * `temp_fence_makesafe`, `assessment_report_quote`) instead of normalising the
  * fixtures into values invented for this test.
  */
@@ -39,6 +42,10 @@ export const SES_REQUIRED_DOCUMENTS_LIVE_SHAPES:
       inspect_classification: {
         builder_key: "MLB",
         family: "physical_makesafe",
+        pricing_disposition: "priced_from_canon",
+      },
+      inspect_artifact_truth: {
+        required_documents: { report: true, invoice: true, swms: true },
       },
       expected: { report: true, invoice: true, swms: true },
     },
@@ -55,6 +62,10 @@ export const SES_REQUIRED_DOCUMENTS_LIVE_SHAPES:
       inspect_classification: {
         builder_key: "AJBR",
         family: "physical_makesafe",
+        pricing_disposition: "priced_from_canon",
+      },
+      inspect_artifact_truth: {
+        required_documents: { report: true, invoice: true, swms: false },
       },
       expected: { report: true, invoice: true, swms: false },
     },
@@ -71,6 +82,10 @@ export const SES_REQUIRED_DOCUMENTS_LIVE_SHAPES:
       inspect_classification: {
         builder_key: "MLB",
         family: "ordinary_roof_portal",
+        pricing_disposition: "priced_from_canon",
+      },
+      inspect_artifact_truth: {
+        required_documents: { report: true, invoice: true, swms: false },
       },
       expected: { report: true, invoice: true, swms: false },
     },
@@ -87,6 +102,10 @@ export const SES_REQUIRED_DOCUMENTS_LIVE_SHAPES:
       inspect_classification: {
         builder_key: "AJBR",
         family: "temporary_fencing",
+        pricing_disposition: "priced_from_canon",
+      },
+      inspect_artifact_truth: {
+        required_documents: { report: true, invoice: true, swms: false },
       },
       expected: { report: true, invoice: true, swms: false },
     },
@@ -103,7 +122,11 @@ export const SES_REQUIRED_DOCUMENTS_LIVE_SHAPES:
       inspect_classification: {
         builder_key: "MLB",
         family: "assessment_quote",
+        pricing_disposition: "priced_from_canon",
       },
-      expected: { report: true, invoice: true, swms: false },
+      inspect_artifact_truth: {
+        required_documents: { report: false, invoice: true, swms: false },
+      },
+      expected: { report: false, invoice: true, swms: false },
     },
   ];

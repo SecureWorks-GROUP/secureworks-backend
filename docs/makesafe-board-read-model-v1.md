@@ -189,18 +189,19 @@ placement, `canonical_stage`, and the stored detail row are unchanged.
 
 Every matrix-resolved pack publishes
 `required_documents: {report, invoice, swms}` with
-`required_documents_resolved: true`. This is the family obligation map derived once by
-`deriveSesRequiredDocuments` from the sealed family-matrix row. A report
-obligation may be a bound report PDF (physical/own-template) or locked portal
-evidence (ordinary roof and the assessment triad); invoice follows the matrix
-invoice basis; SWMS is owed only where the matrix makes it mandatory, excluding
-the temporary-fence bases. The board and `inspect_ses_pack` emit the identical
-map. If builder/family authority does not resolve, the map is `null`,
+`required_documents_resolved: true`. This is the pack-artifact map derived once
+by `deriveSesRequiredDocuments` in `makesafe_document_truth.ts`. The sealed
+family-matrix row establishes authority and the baseline recipe, then the
+existing pack-honesty exceptions narrow what must be bound: the assessment triad
+needs no report document, and `no_additional_charge` needs no invoice document.
+SWMS follows the card's resolved requirement, with temporary fencing excluded.
+The board and `inspect_ses_pack` emit the identical map. If builder/family
+authority does not resolve, the map is `null`,
 `required_documents_resolved` is `false`, and
 `required_documents_unresolved_reason` names the matrix refusal. Unknown cards
-never manufacture document obligations. This does not green any tile or change readiness: the proof object remains
-the exact report/invoice/SWMS pointers, current-cycle selected report, live Xero
-status, and send routes.
+never manufacture document requirements. This does not green any tile or change
+readiness: the proof object remains the exact report/invoice/SWMS pointers,
+current-cycle selected report, live Xero status, and send routes.
 
 Pack state is produced once, by `presentSesPackHonesty`
 (`ses_pack_presentation.ts`), as a kind of

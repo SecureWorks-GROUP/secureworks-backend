@@ -32,7 +32,7 @@ import {
   deriveSesRequiredDocuments,
   type SesRequiredDocumentMap,
   type SesRequiredDocumentsCard,
-} from "./ses_family_matrix.ts";
+} from "./makesafe_document_truth.ts";
 
 /** Main-pack pointer ids and send lifecycle facts. */
 export interface SesPackPointers {
@@ -208,6 +208,17 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.map((v) => String(v ?? "")).filter((v) => v.length > 0)
     : [];
+}
+
+function artifactTruthSwmsRequirement(value: unknown): boolean | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const requiredDocuments = (value as Record<string, unknown>)
+    .required_documents;
+  if (!requiredDocuments || typeof requiredDocuments !== "object") {
+    return undefined;
+  }
+  const swms = (requiredDocuments as Record<string, unknown>).swms;
+  return typeof swms === "boolean" ? swms : undefined;
 }
 
 /**
@@ -649,6 +660,8 @@ export async function inspectSesPackAction(
       builder_key: docket.clean_input.builder_key,
       family: docket.clean_input.family,
       job_number: docket.job_number,
+      pricing_disposition: docket.clean_input.pricing_disposition,
+      swms_required: artifactTruthSwmsRequirement(docket.artifact_truth),
     },
     docket: {
       docket_revision_id: docket.docket_revision_id,

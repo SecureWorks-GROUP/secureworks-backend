@@ -47,12 +47,16 @@ and the Trade `New / Allocated / Complete / Archive` columns are parity-checked
 from the same canonical rows. Keep trade payloads allow-listed and free of pricing
 and trade-invoice data.
 
-`pack.required_documents` is the family obligation map, not completion proof.
-`deriveSesRequiredDocuments` in `ses_family_matrix.ts` is its one owner, and the
-board plus `inspect_ses_pack` must emit that same `{report, invoice, swms}` map.
-If matrix authority does not resolve, publish `required_documents: null`,
-`required_documents_resolved: false`, and the unresolved reason; never invent
-document obligations for an unknown family or builder.
+`pack.required_documents` is the pack-artifact requirement map, not raw family
+obligations and not completion proof. `deriveSesRequiredDocuments` in
+`makesafe_document_truth.ts` is its one owner: it resolves family-matrix
+authority, then preserves the artifact exceptions already used by pack honesty
+(assessment needs no bound report document; `no_additional_charge` needs no
+invoice document). The board plus `inspect_ses_pack` must emit that same
+`{report, invoice, swms}` map. If matrix authority does not resolve, publish
+`required_documents: null`, `required_documents_resolved: false`, and the
+unresolved reason; never invent document requirements for an unknown family or
+builder.
 Keep pointer resolution, current-cycle selected report, live Xero status and
 send routes separate: `has_report_doc` is not proof and attach is not bind.
 

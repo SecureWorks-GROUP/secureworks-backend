@@ -7,6 +7,44 @@
 // long-standing chip rules; a different typed row must never satisfy a pointer.
 
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
+import {
+  canonicalSesFamilyFromCard,
+  resolveSesFamilyMatrixRow,
+  type SesBuilderKey,
+} from "./ses_family_matrix.ts";
+
+export type SesRequiredDocumentMap = Readonly<{
+  report: boolean;
+  invoice: boolean;
+  swms: boolean;
+}>;
+
+export type SesRequiredDocumentsResolution =
+  | Readonly<{
+    required_documents_resolved: true;
+    required_documents: SesRequiredDocumentMap;
+    required_documents_unresolved_reason: null;
+  }>
+  | Readonly<{
+    required_documents_resolved: false;
+    required_documents: null;
+    required_documents_unresolved_reason: string;
+  }>;
+
+export interface SesRequiredDocumentsCard {
+  builder_key?: unknown;
+  family?: unknown;
+  job_number?: unknown;
+  requesting_company_slug?: unknown;
+  requesting_company_name?: unknown;
+  requesting_company?: unknown;
+  external_ref?: unknown;
+  site_suburb?: unknown;
+  strata?: unknown;
+  own_template_requested?: unknown;
+  pricing_disposition?: unknown;
+  swms_required?: unknown;
+}
 
 export interface MakesafeDocumentFlags {
   has_wo: boolean;
@@ -83,6 +121,106 @@ export function makesafePackArtifactRequirements(input: {
     requires_bound_invoice_doc:
       pointerText(input.pricing_disposition).toLowerCase() !==
         "no_additional_charge",
+  };
+}
+
+function requiredDocumentsBuilderKey(
+  card: SesRequiredDocumentsCard,
+): SesBuilderKey {
+  const explicit = String(card.builder_key ?? "").trim().toUpperCase();
+  if (
+    ["MLB", "AJS", "AJBR", "WESTERN", "SYNTHETIC"].includes(explicit)
+  ) {
+    return explicit as SesBuilderKey;
+  }
+  const token = [
+    card.requesting_company_slug,
+    card.requesting_company_name,
+    card.requesting_company,
+    card.external_ref,
+    card.job_number,
+  ].map((value) => String(value ?? "").trim().toLowerCase()).join(" ");
+  if (token.includes("synthetic-livefire")) return "SYNTHETIC";
+  if (/\bajbr\b/.test(token)) return "AJBR";
+  if (/\bajs?\b/.test(token) || token.includes("alliance joinery")) {
+    return "AJS";
+  }
+  if (
+    /\b(mlb|ml builders?|major loss builders?)\b/.test(token) ||
+    token.includes("mlbuilders")
+  ) {
+    return "MLB";
+  }
+  if (
+    /\b(wb|bw|bwcwa)\b/.test(token) ||
+    token.includes("western build") || token.includes("builderwest")
+  ) {
+    return "WESTERN";
+  }
+  return "UNKNOWN";
+}
+
+/**
+ * The one pack-artifact requirement derivation shared by board and inspection.
+ *
+ * Matrix resolution establishes family/builder authority. The artifact contract
+ * then narrows raw family obligations: assessment is satisfied by its portal
+ * triad rather than a bound report document, and no-additional-charge packs must
+ * not invent an invoice document. This map says what the pack must bind; pointer
+ * resolution, current-cycle report selection, Xero status and send routes remain
+ * separate proof.
+ */
+export function deriveSesRequiredDocuments(
+  card: SesRequiredDocumentsCard,
+): SesRequiredDocumentsResolution {
+  const builderKey = requiredDocumentsBuilderKey(card);
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: card.family,
+    strata: card.strata,
+    own_template_requested: card.own_template_requested,
+  });
+  const ownTemplateRequested = card.own_template_requested === true ||
+    family === "own_template_roof";
+  const resolved = resolveSesFamilyMatrixRow({
+    builder_key: builderKey,
+    family,
+    strata: card.strata === true,
+    own_template_requested: ownTemplateRequested,
+    site_suburb: card.site_suburb,
+  });
+  if (!resolved.ok) {
+    return {
+      required_documents_resolved: false,
+      required_documents: null,
+      required_documents_unresolved_reason:
+        `${resolved.failure.code}: ${resolved.failure.reason}`,
+    };
+  }
+
+  const { row } = resolved;
+  const matrixReportOwed = row.required_portal_roles.length > 0 ||
+    row.report_route === "work_order_sender";
+  const matrixInvoiceOwed = row.invoice_basis.length > 0;
+  const temporaryFenceBasis = row.invoice_basis.includes("temporary_fence");
+  const artifactRequirements = makesafePackArtifactRequirements({
+    ses_family: row.family,
+    pricing_disposition: card.pricing_disposition,
+  });
+  const swmsRequired = temporaryFenceBasis
+    ? false
+    : typeof card.swms_required === "boolean"
+    ? card.swms_required
+    : row.swms_policy === "always";
+  return {
+    required_documents_resolved: true,
+    required_documents: {
+      report: matrixReportOwed &&
+        artifactRequirements.requires_bound_report_doc,
+      invoice: matrixInvoiceOwed &&
+        artifactRequirements.requires_bound_invoice_doc,
+      swms: swmsRequired,
+    },
+    required_documents_unresolved_reason: null,
   };
 }
 
