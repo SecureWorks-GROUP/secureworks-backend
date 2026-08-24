@@ -330,27 +330,66 @@ export function normalizePackPhotoSourceScope(
 }
 
 /**
+ * Immutable photo ids sealed on a curated bind snapshot
+ * (`data_snapshot_json.photo_selected_ids`). Null means "not sealed" — older
+ * cards or a current-cycle bind — so callers fall back safely. An empty array
+ * means the bind selected none and must stay empty (never invent attachments).
+ */
+export function normalizePackPhotoSelectedIds(
+  value: unknown,
+): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const entry of value) {
+    const id = String(entry || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
  * Select the photo media set the pack/photo route owes.
  *
  * Default remains current-cycle (single-visit and current-visit-only binds).
- * When the curated bind stamped `same_job_all_attendances`, return the complete
- * same-job applicable set so the photo email matches the bound report.
+ * When the curated bind stamped `same_job_all_attendances`, honour the sealed
+ * `photo_selected_ids` so the photo email matches the bound report exactly —
+ * never grow to live media uploaded after the bind. Missing sealed ids on an
+ * older card fall back to the live applicable set (repair by re-prepare /
+ * re-bind, never refuse SEND IT).
  */
 export function selectPackPhotoMedia(opts: {
   media: any[] | null | undefined;
   detail: any;
   attendanceCycleId?: string | null;
   photoSourceScope?: unknown;
+  photoSelectedIds?: unknown;
 }): any[] {
   const scope = normalizePackPhotoSourceScope(opts.photoSourceScope);
-  const source = scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES
-    ? (opts.media || [])
-    : filterMediaForCurrentCycle(
-      opts.media,
-      opts.detail,
-      opts.attendanceCycleId,
-    );
-  return source
+  if (scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) {
+    const sealedIds = normalizePackPhotoSelectedIds(opts.photoSelectedIds);
+    const applicable = (opts.media || []).filter(isApplicablePackPhoto);
+    if (sealedIds) {
+      const byId = new Map<string, any>();
+      for (const row of applicable) {
+        const id = String(row?.id || "").trim();
+        if (id && !byId.has(id)) byId.set(id, row);
+      }
+      // Preserve bind order. Deleted/unreadable rows drop out quietly — missing
+      // evidence is a caveat the operator weighs, never a SEND IT hard-refuse.
+      return sealedIds
+        .map((id) => byId.get(id))
+        .filter((row): row is any => Boolean(row));
+    }
+    return applicable.slice().sort(comparePackMediaCreatedAtThenId);
+  }
+  return filterMediaForCurrentCycle(
+    opts.media,
+    opts.detail,
+    opts.attendanceCycleId,
+  )
     .filter(isApplicablePackPhoto)
     .slice()
     .sort(comparePackMediaCreatedAtThenId);

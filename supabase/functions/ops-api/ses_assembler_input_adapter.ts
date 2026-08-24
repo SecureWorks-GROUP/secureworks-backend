@@ -1363,14 +1363,17 @@ export function buildSesAssemblerInput(
     cycle.id || null,
   );
   // Photo email attachments follow the curated bind's photo_source_scope when
-  // present: same_job_all_attendances expands to the complete same-job set so a
-  // two-visit pack does not silently drop the prior visit. Missing/stale scope
-  // keeps the current-cycle default (repair by re-prepare, never refuse).
+  // present: same_job_all_attendances plus sealed photo_selected_ids attach
+  // exactly the bind-accounted set so a two-visit pack matches the report.
+  // Missing/stale scope or sealed ids keep/repair the current-cycle default —
+  // never refuse SEND IT, never grow past the bind selection.
+  const curatedPhotoSource = curatedPackPhotoSource(snapshot, cycle.id || "");
   const packPhotoMedia = selectPackPhotoMedia({
     media: snapshot.media,
     detail,
     attendanceCycleId: cycle.id || null,
-    photoSourceScope: curatedPackPhotoSourceScope(snapshot, cycle.id || ""),
+    photoSourceScope: curatedPhotoSource.scope,
+    photoSelectedIds: curatedPhotoSource.selectedIds,
   });
   const workOrders = snapshot.documents.filter((item) =>
     ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase())
@@ -2352,21 +2355,30 @@ function durableCuratedDocumentForCycle(
 }
 
 /**
- * Photo-route scope for this attendance. Prefer the durable curated document;
- * if that gate misses but a cycle-bound report already carries the sealed
- * same_job_all_attendances marker, honour it so the photo email matches the
- * bound report. A missing marker keeps the current-cycle default — repair by
- * re-prepare, never refuse.
+ * Photo-route scope + sealed selection for this attendance. Prefer the durable
+ * curated document; if that gate misses but a cycle-bound report already
+ * carries the sealed same_job_all_attendances marker, honour it so the photo
+ * email matches the bound report. A missing marker keeps the current-cycle
+ * default — repair by re-prepare, never refuse.
  */
-function curatedPackPhotoSourceScope(
+function curatedPackPhotoSource(
   snapshot: SesAssemblerLiveSnapshot,
   currentCycleId: string,
-): unknown {
+): { scope: unknown; selectedIds: unknown } {
+  const fromSnapshot = (row: LiveRow | null | undefined) => {
+    if (!row) return { scope: null as unknown, selectedIds: null as unknown };
+    const facts = record(row.data_snapshot_json);
+    return {
+      scope: facts.photo_source_scope,
+      selectedIds: facts.photo_selected_ids,
+    };
+  };
+
   const durable = durableCuratedDocumentForCycle(snapshot, currentCycleId);
   const durableScope = normalizePackPhotoSourceScope(
     record(durable?.data_snapshot_json).photo_source_scope,
   );
-  if (durableScope) return durableScope;
+  if (durableScope) return fromSnapshot(durable);
 
   const stamped = snapshot.documents
     .filter((row) => text(row.type).toLowerCase() === "makesafe_report")
@@ -2391,9 +2403,7 @@ function curatedPackPhotoSourceScope(
       text(right.created_at).localeCompare(text(left.created_at)) ||
       text(right.id).localeCompare(text(left.id))
     )[0] || null;
-  return stamped
-    ? record(stamped.data_snapshot_json).photo_source_scope
-    : null;
+  return fromSnapshot(stamped);
 }
 
 interface PhysicalReportSource {

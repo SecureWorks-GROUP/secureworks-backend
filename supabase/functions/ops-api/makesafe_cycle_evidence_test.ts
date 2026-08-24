@@ -16,6 +16,7 @@ import {
   PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
   projectCycleScopedEvidence,
   readinessRevisionPayload,
+  normalizePackPhotoSelectedIds,
   resolveBoardPhotoCount,
   selectPackPhotoMedia,
   tradeSafeHold,
@@ -216,6 +217,7 @@ Deno.test(
       }).map((row) => row.id),
       ["monday-1"],
     );
+    // Legacy stamp without sealed ids: live applicable set (repair path).
     assertEquals(
       selectPackPhotoMedia({
         media,
@@ -225,6 +227,90 @@ Deno.test(
       }).map((row) => row.id),
       ["friday-1", "monday-1"],
     );
+  },
+);
+
+Deno.test(
+  "F2: sealed photo_selected_ids must not grow to post-bind live uploads",
+  () => {
+    const detail = {
+      cycle_number: 2,
+      reattend_count: 1,
+      attendance_cycle_id: "cycle-2",
+    };
+    const media = [
+      {
+        id: "friday-1",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+      {
+        id: "monday-1",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+      {
+        id: "extra-after-bind",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T12:00:00.000Z",
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+      {
+        id: "receipt-accounted",
+        type: "photo",
+        phase: "receipt",
+        created_at: "2026-08-24T09:00:00.000Z",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+    ];
+    const sealed = ["friday-1", "receipt-accounted", "monday-1"];
+    assertEquals(
+      selectPackPhotoMedia({
+        media,
+        detail,
+        attendanceCycleId: "cycle-2",
+        photoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+        photoSelectedIds: sealed,
+      }).map((row) => row.id),
+      sealed,
+      "pack must attach exactly the bind selection, in bind order",
+    );
+    assertEquals(
+      selectPackPhotoMedia({
+        media,
+        detail,
+        attendanceCycleId: "cycle-2",
+        photoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+        photoSelectedIds: sealed,
+      }).some((row) => row.id === "extra-after-bind"),
+      false,
+      "post-bind upload must never ride the photo email",
+    );
+    // Deleted sealed id drops quietly — never refuse SEND IT.
+    assertEquals(
+      selectPackPhotoMedia({
+        media: media.filter((row) => row.id !== "monday-1"),
+        detail,
+        attendanceCycleId: "cycle-2",
+        photoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+        photoSelectedIds: sealed,
+      }).map((row) => row.id),
+      ["friday-1", "receipt-accounted"],
+    );
+    assertEquals(normalizePackPhotoSelectedIds(null), null);
+    assertEquals(normalizePackPhotoSelectedIds(["a", "", "a", "b"]), [
+      "a",
+      "b",
+    ]);
   },
 );
 
@@ -285,6 +371,22 @@ Deno.test("resolveBoardPhotoCount: single-visit unchanged, reattend scopes hones
     }),
     30,
     "null boundPackPhotoCount must not coerce to 0 via Number(null)",
+  );
+
+  // F1: sealed bind count wins over live raw (receipt-in-bind / completion-only
+  // raw diverge). Board must publish the bind's own selected count.
+  assertEquals(
+    resolveBoardPhotoCount({
+      rawPhotoCount: 2,
+      detail: reattend,
+      boundPhotoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+      boundPackPhotoCount: 3,
+      packPhotoAttachmentCount: 2,
+      photosHaveCycleBinding: true,
+      currentCyclePhotoCount: 2,
+    }),
+    3,
+    "F1: board photo_count must equal sealed bind selection, not live raw",
   );
 });
 

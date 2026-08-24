@@ -3318,19 +3318,23 @@ Tests: ops_api_operator_auth_test.ts.
 
 ## Reattend Pack Photos Follow Curated `photo_source_scope`
 
-When a curated bind stamps `photo_source_scope=same_job_all_attendances`, the
-photo email and board `report.photo_count` must use that same complete same-job
-set — not current-cycle only. `selectPackPhotoMedia` /
-`resolveBoardPhotoCount` in `makesafe_cycle_evidence.ts` own the selection;
-the assembler reads the stamp via `curatedPackPhotoSourceScope`, and the board
-loader joins the pack's `report_doc_id` scope plus current-docket
-`completion_photo` counts. Single-visit and current-cycle binds stay unchanged.
-Missing scope repairs to the current-cycle default on re-prepare; never
-hard-refuse a send for a stale photo binding. Separable worked defects:
-Willetton SWMS-261288 (board 0 + route 7 vs 30 — both halves) and Hillarys
-SWMS-261134 (board 0 while route already 21 — board half only). Tests:
-`makesafe_cycle_evidence_test.ts`, `ses_assembler_input_adapter_test.ts`,
-`makesafe_board_read_model_test.ts`.
+When a curated bind stamps `photo_source_scope=same_job_all_attendances`, it
+also seals `photo_selected_ids` on the report snapshot. The photo email and
+board `report.photo_count` must honour that exact sealed set — never live
+traffic uploaded after the bind, never a guessed count.
+`selectPackPhotoMedia` / `resolveBoardPhotoCount` in
+`makesafe_cycle_evidence.ts` own the selection; the assembler reads scope +
+ids via `curatedPackPhotoSource`; the board loader joins the pack's
+`report_doc_id` (`boundPackPhotoCountByJobId` = sealed id length) plus
+current-docket `completion_photo` counts for Hillarys-class cards without the
+all-attendances stamp. Single-visit and current-cycle binds stay unchanged
+(no sealed id list on those snapshots). Missing sealed ids on an older stamp
+fall back to the live applicable set / raw count — repair by re-bind, never
+hard-refuse SEND IT. Separable worked defects: Willetton SWMS-261288 (board 0
++ route 7 vs 30 — both halves) and Hillarys SWMS-261134 (board 0 while route
+already 21 — board half only). Tests: `makesafe_cycle_evidence_test.ts`,
+`ses_assembler_input_adapter_test.ts`, `makesafe_board_read_model_test.ts`,
+`makesafe_render_report_action_test.ts`.
 
 ## Maintaining this file
 

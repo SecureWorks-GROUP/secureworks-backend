@@ -674,10 +674,11 @@ export interface CanonicalMakesafeExtras {
   photosHaveCycleBindingByJobId?: Record<string, boolean>;
   /**
    * Curated bind photo_source_scope from the pack's bound report document.
-   * `same_job_all_attendances` makes board photo_count read the full same-job set.
+   * `same_job_all_attendances` prefers sealed `boundPackPhotoCountByJobId`
+   * (`photo_selected_ids.length`) over live traffic.
    */
   boundPhotoSourceScopeByJobId?: Record<string, string>;
-  /** Optional explicit bound-pack photo count when known. */
+  /** Sealed bind photo count from `photo_selected_ids`; never live traffic. */
   boundPackPhotoCountByJobId?: Record<string, number>;
   /**
    * Current docket `completion_photo` artifact count (photo-route attachments).

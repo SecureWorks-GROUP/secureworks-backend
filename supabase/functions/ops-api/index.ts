@@ -242,7 +242,9 @@ import {
   isApplicablePackPhoto,
   isLegacyMakesafeCard,
   filterHoldsForCurrentCycle,
+  normalizePackPhotoSelectedIds,
   normalizePackPhotoSourceScope,
+  PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
   projectCycleScopedEvidence,
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
@@ -18578,12 +18580,13 @@ async function loadCanonicalMakesafeBoard(
     jobIds,
     (q) => q.eq('type', 'photo'),
   )
-  // Bound curated report scope for the pack's report_doc_id — when the bind
-  // stamped same_job_all_attendances, board photo_count must read the full set.
+  // Bound curated report scope + sealed photo_selected_ids for the pack's
+  // report_doc_id — when the bind stamped same_job_all_attendances, board
+  // photo_count must read the bind's own selected count, not live traffic.
   const reportPhotoScopePromise = _fetchAllByJobIdChunked(
     client,
     'job_documents',
-    'id, job_id, type, photo_source_scope:data_snapshot_json->photo_source_scope',
+    'id, job_id, type, photo_source_scope:data_snapshot_json->photo_source_scope, photo_selected_ids:data_snapshot_json->photo_selected_ids',
     jobIds,
     (q) => q.eq('type', 'makesafe_report'),
   )
@@ -18739,14 +18742,23 @@ async function loadCanonicalMakesafeBoard(
     if (doc?.id) reportDocById.set(String(doc.id), doc)
   }
   const boundPhotoSourceScopeByJobId: Record<string, string> = {}
+  const boundPackPhotoCountByJobId: Record<string, number> = {}
   for (const row of buildBase) {
     const jobId = row?.id
     const reportDocId = String(row?.report_pack?.report_doc_id || '').trim()
     if (!jobId || !reportDocId) continue
-    const scope = normalizePackPhotoSourceScope(
-      reportDocById.get(reportDocId)?.photo_source_scope,
-    )
+    const reportDoc = reportDocById.get(reportDocId)
+    const scope = normalizePackPhotoSourceScope(reportDoc?.photo_source_scope)
     if (scope) boundPhotoSourceScopeByJobId[jobId] = scope
+    // Prefer the sealed bind selection length when present. Missing sealed ids
+    // on an older all-attendances card fall through to resolveBoardPhotoCount's
+    // raw/live fallback — repair path, never invent a count.
+    if (scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) {
+      const sealedIds = normalizePackPhotoSelectedIds(
+        reportDoc?.photo_selected_ids,
+      )
+      if (sealedIds) boundPackPhotoCountByJobId[jobId] = sealedIds.length
+    }
   }
   const packPhotoAttachmentCountByJobId: Record<string, number> = {}
   const currentDocketRevisionByJobId = new Map<string, string>()
@@ -18901,6 +18913,7 @@ async function loadCanonicalMakesafeBoard(
     currentCyclePhotoCountByJobId,
     photosHaveCycleBindingByJobId,
     boundPhotoSourceScopeByJobId,
+    boundPackPhotoCountByJobId,
     packPhotoAttachmentCountByJobId,
     contactsByJobId,
     intakeCaseByJobId,
@@ -38722,6 +38735,8 @@ async function assertCurrentWikiSourceEvidence(
 ): Promise<{
   materials_source_accounting: CuratedBindMaterialsSourceAccounting
   photo_source_scope: CuratedBindPhotoSourceScope
+  /** Ordered ids the bind accounted for — sealed onto the snapshot for packs. */
+  photo_selected_ids: string[]
 }> {
   const [reportsResponse, mediaResponse] = await Promise.all([
     client.from('job_service_reports')
@@ -38965,6 +38980,11 @@ async function assertCurrentWikiSourceEvidence(
   return {
     materials_source_accounting: materialsSourceAccounting,
     photo_source_scope: selectedPhotoSource.scope,
+    // Sealed bind selection (created_at then id). Pack/board honour this list
+    // so a later live upload cannot grow the builder photo email past the report.
+    photo_selected_ids: selectedPhotoSource.applicable.map((item: any) =>
+      String(item.id || '').trim()
+    ).filter(Boolean),
   }
 }
 
@@ -39591,10 +39611,13 @@ async function bindCurrentCycleCuratedMakesafeReport(
     // here so under-billing is never silent. Super-set still refused above.
     materials_source_accounting: sourceEvidence.materials_source_accounting,
     // Keep legacy current-cycle snapshots byte-for-byte stable. Multi-visit
-    // binds carry an explicit durable marker because they intentionally use the
-    // alternate complete same-job source set.
+    // binds carry an explicit durable marker plus the sealed selected ids so
+    // the photo route and board count honour the bind, never live traffic.
     ...(sourceEvidence.photo_source_scope === 'same_job_all_attendances'
-      ? { photo_source_scope: sourceEvidence.photo_source_scope }
+      ? {
+        photo_source_scope: sourceEvidence.photo_source_scope,
+        photo_selected_ids: sourceEvidence.photo_selected_ids,
+      }
       : {}),
     report_scope_narratives: [
       validatedInput.job.scope,
@@ -39795,6 +39818,9 @@ async function bindCurrentCycleCuratedMakesafeReport(
       // without reading job_documents.
       materials_source_accounting: sourceEvidence.materials_source_accounting,
       photo_source_scope: sourceEvidence.photo_source_scope,
+      ...(sourceEvidence.photo_source_scope === 'same_job_all_attendances'
+        ? { photo_selected_ids: sourceEvidence.photo_selected_ids }
+        : {}),
       ...(isTrustedContentSupersession
         ? {
           supersedes_prior_bind: true,
