@@ -19,6 +19,17 @@
  * repair door for already-proved releases. It never sends mail, never mints,
  * and never takes a timestamp from a caller — only from route-proof
  * `proven_at`, same as `stampMakesafeReportSentFromRouteProofs`.
+ *
+ * STAMP GATE (never-sent must not look sent)
+ * ------------------------------------------
+ * Refuse unless ALL of:
+ *   1. release progress kind is exactly `released` (no default),
+ *   2. required_route_kinds is a non-empty set (empty never passes),
+ *   3. every required kind appears on a proof ROW with parseable proven_at
+ *      (caller-asserted proved_route_kinds are ignored),
+ *   4. pack is in a stampable unsent status with sent_at null.
+ * Repair additionally membership-binds job ↔ release and never selects a
+ * non-released revision for a write. Refusing to stamp never blocks SEND IT.
  */
 
 import { earliestReleaseProvenAt } from "./makesafe_report_sent_stamp.ts";
@@ -70,6 +81,26 @@ function text(value: unknown): string {
   return String(value ?? "").trim();
 }
 
+/**
+ * Proved route kinds come ONLY from proof rows with a parseable proven_at.
+ * Caller-asserted progress.proved_route_kinds must never enlarge this set.
+ */
+export function provedRouteKindsFromProofRows(
+  proofs: PackSentProofRow[] | null | undefined,
+): string[] {
+  const kinds = new Set<string>();
+  for (const proof of proofs || []) {
+    const kind = text(proof?.route_kind);
+    if (!kind) continue;
+    const raw = proof?.proven_at;
+    if (!raw) continue;
+    const ms = new Date(String(raw)).getTime();
+    if (!Number.isFinite(ms)) continue;
+    kinds.add(kind);
+  }
+  return [...kinds].sort();
+}
+
 export interface PackSentProofRow {
   route_kind?: string | null;
   proof_hash?: string | null;
@@ -81,6 +112,10 @@ export interface PackSentReleaseProgress {
   kind?: string | null;
   release_revision_id?: string | null;
   required_route_kinds?: string[] | null;
+  /**
+   * Ignored by the planner. Retained on the type so callers that already
+   * publish progress shapes do not break — completeness is proof-row only.
+   */
   proved_route_kinds?: string[] | null;
 }
 
@@ -123,9 +158,32 @@ export interface PackSentStampOutcome extends PackSentStampPlan {
   detail?: string;
 }
 
+const STAMP_PROOF_REFUSALS = new Set([
+  "no_proof",
+  "required_routes_unproved",
+  "required_routes_empty",
+  "release_not_released",
+  "release_progress_required",
+]);
+
+/**
+ * Substatus advance is allowed only after a fresh stamp under the hardened
+ * gate. `already_sent` returns before proof completeness and must never force
+ * `complete`. Dry-run may preview advance only for `would_stamp`.
+ */
+export function mayAdvanceSubstatusFromPackStamp(outcome: {
+  outcome: string;
+  dry_run?: boolean;
+}): boolean {
+  if (outcome.outcome === "stamped") return true;
+  if (outcome.dry_run === true && outcome.outcome === "would_stamp") return true;
+  return false;
+}
+
 /**
  * Pure plan: may we stamp this pack from these proofs / release progress?
- * Never invents a send — every required route must already be proved.
+ * Never invents a send — every required route must already be proved on a
+ * proof row, the release must be `released`, and required must be non-empty.
  */
 export function planMakesafePackSentFromRouteProofs(input: {
   job_id: string;
@@ -142,19 +200,8 @@ export function planMakesafePackSentFromRouteProofs(input: {
       .map((k) => text(k))
       .filter(Boolean),
   )].sort();
-  const provedFromProgress = [...new Set(
-    (progress?.proved_route_kinds || [])
-      .map((k) => text(k))
-      .filter(Boolean),
-  )].sort();
-  const provedFromProofs = [...new Set(
-    (input.proofs || [])
-      .map((p) => text(p.route_kind))
-      .filter(Boolean),
-  )].sort();
-  const proved = provedFromProgress.length > 0
-    ? provedFromProgress
-    : provedFromProofs;
+  // Completeness is derived from proof rows only — never from caller progress.
+  const proved = provedRouteKindsFromProofRows(input.proofs);
   const releaseRevisionId = text(progress?.release_revision_id) || null;
   const provenAt = earliestReleaseProvenAt(input.proofs);
 
@@ -200,21 +247,22 @@ export function planMakesafePackSentFromRouteProofs(input: {
   if (!provenAt || proved.length === 0) {
     return { ...base, refusal_code: "no_proof" };
   }
-  // When the release names required routes, every one must already be proved.
-  // When required is empty (caller passed proofs only), any non-empty proved
-  // set with a proven_at is enough for the forward execute path which only
-  // runs after closeout verified the required set.
-  if (required.length > 0) {
-    const missing = required.filter((k) => !proved.includes(k));
-    if (missing.length > 0) {
-      return { ...base, refusal_code: "required_routes_unproved" };
-    }
+  // Empty required never stamps — that path used to skip the release-state
+  // gate and let a partial/non-released release look fully sent.
+  if (required.length === 0) {
+    return { ...base, refusal_code: "required_routes_empty" };
   }
-  if (
-    text(progress?.kind) &&
-    text(progress?.kind).toLowerCase() !== "released" &&
-    required.length > 0
-  ) {
+  const missing = required.filter((k) => !proved.includes(k));
+  if (missing.length > 0) {
+    return { ...base, refusal_code: "required_routes_unproved" };
+  }
+  // kind === released is unconditional. Missing kind refuses; non-released
+  // refuses. Never default kind to released at the stamp entry.
+  const kind = text(progress?.kind).toLowerCase();
+  if (!kind) {
+    return { ...base, refusal_code: "release_progress_required" };
+  }
+  if (kind !== "released") {
     return { ...base, refusal_code: "release_not_released" };
   }
 
@@ -224,6 +272,7 @@ export function planMakesafePackSentFromRouteProofs(input: {
 /**
  * Additive CAS stamp of the main pack row from route proofs.
  * Never overwrites a set sent_at. Never throws on write fault — reports it.
+ * Never defaults release kind to "released" or required routes to [].
  */
 export async function stampMakesafePackSentFromRouteProofs(
   client: any,
@@ -263,18 +312,20 @@ export async function stampMakesafePackSentFromRouteProofs(
     };
   }
 
+  // No invented progress: absent kind / required stay absent so the planner
+  // refuses rather than defaulting to released + [].
+  const releaseProgress: PackSentReleaseProgress = {
+    kind: ctx.releaseProgress?.kind ?? null,
+    release_revision_id: ctx.releaseRevisionId ??
+      ctx.releaseProgress?.release_revision_id ?? null,
+    required_route_kinds: ctx.releaseProgress?.required_route_kinds ?? null,
+  };
+
   const plan = planMakesafePackSentFromRouteProofs({
     job_id: jobId,
     pack: packResp.data,
     proofs,
-    release_progress: {
-      kind: ctx.releaseProgress?.kind ?? "released",
-      release_revision_id: ctx.releaseRevisionId ??
-        ctx.releaseProgress?.release_revision_id ?? null,
-      required_route_kinds: ctx.releaseProgress?.required_route_kinds ?? [],
-      proved_route_kinds: ctx.releaseProgress?.proved_route_kinds ??
-        (proofs || []).map((p) => text(p.route_kind)).filter(Boolean),
-    },
+    release_progress: releaseProgress,
     pack_kind: packKind,
   });
 
@@ -294,9 +345,7 @@ export async function stampMakesafePackSentFromRouteProofs(
       after_sent_at: null,
     };
   }
-  if (plan.refusal_code === "no_proof" ||
-    plan.refusal_code === "required_routes_unproved" ||
-    plan.refusal_code === "release_not_released") {
+  if (plan.refusal_code && STAMP_PROOF_REFUSALS.has(plan.refusal_code)) {
     return {
       ...plan,
       outcome: "no_proof",
@@ -389,6 +438,8 @@ export async function stampMakesafePackSentFromRouteProofs(
 /**
  * Repair entry: load the job's released release + proofs, stamp the pack.
  * Dry-run default true. Never redispatches Graph.
+ * Always membership-binds job ↔ release; never falls back to a non-released
+ * revision for a write.
  */
 export async function repairMakesafePackSentFromRouteProofsAction(
   client: any,
@@ -420,32 +471,47 @@ export async function repairMakesafePackSentFromRouteProofsAction(
     throw new PackSentFromProofsRequestError("job_id or job_number is required");
   }
 
-  let releaseRevisionId = text(body?.release_revision_id) || null;
-  if (!releaseRevisionId) {
-    const memberResp = await client.from("makesafe_release_revision_members")
-      .select("release_revision_id")
-      .eq("job_id", jobId)
-      .order("ordinal", { ascending: true });
-    if (memberResp.error) {
+  const explicitReleaseRevisionId = text(body?.release_revision_id) || null;
+
+  const memberResp = await client.from("makesafe_release_revision_members")
+    .select("release_revision_id")
+    .eq("job_id", jobId)
+    .order("ordinal", { ascending: true });
+  if (memberResp.error) {
+    throw new PackSentFromProofsConflictError(
+      "release_unreadable",
+      `release members read failed: ${memberResp.error.message}`,
+    );
+  }
+  const memberReleaseIds = [...new Set(
+    (memberResp.data || []).map((r: any) => text(r.release_revision_id))
+      .filter(Boolean),
+  )];
+  if (memberReleaseIds.length === 0) {
+    throw new PackSentFromProofsConflictError(
+      "release_missing",
+      "No SES release revision membership exists for this job.",
+    );
+  }
+
+  let releaseRevisionId: string | null = null;
+  if (explicitReleaseRevisionId) {
+    // Foreign release_revision_id must never stamp this job's pack.
+    if (!memberReleaseIds.includes(explicitReleaseRevisionId)) {
       throw new PackSentFromProofsConflictError(
-        "release_unreadable",
-        `release members read failed: ${memberResp.error.message}`,
+        "release_job_mismatch",
+        "release_revision_id is not a member release for this job.",
+        {
+          job_id: jobId,
+          release_revision_id: explicitReleaseRevisionId,
+        },
       );
     }
-    const releaseIds = [...new Set(
-      (memberResp.data || []).map((r: any) => text(r.release_revision_id))
-        .filter(Boolean),
-    )];
-    if (releaseIds.length === 0) {
-      throw new PackSentFromProofsConflictError(
-        "release_missing",
-        "No SES release revision membership exists for this job.",
-      );
-    }
-    // Prefer a released revision when several exist.
+    releaseRevisionId = explicitReleaseRevisionId;
+  } else {
     const releasesResp = await client.from("makesafe_release_revisions")
       .select("id,state,updated_at")
-      .in("id", releaseIds)
+      .in("id", memberReleaseIds)
       .order("updated_at", { ascending: false });
     if (releasesResp.error) {
       throw new PackSentFromProofsConflictError(
@@ -456,14 +522,15 @@ export async function repairMakesafePackSentFromRouteProofsAction(
     const released = (releasesResp.data || []).find((r: any) =>
       text(r.state).toLowerCase() === "released"
     );
-    releaseRevisionId = text(released?.id) || text(releasesResp.data?.[0]?.id) ||
-      null;
-  }
-  if (!releaseRevisionId) {
-    throw new PackSentFromProofsConflictError(
-      "release_missing",
-      "No SES release revision could be selected for this job.",
-    );
+    // Never fall back to a non-released revision for a write.
+    releaseRevisionId = text(released?.id) || null;
+    if (!releaseRevisionId) {
+      throw new PackSentFromProofsConflictError(
+        "release_not_released",
+        "No released SES release revision exists for this job.",
+        { candidate_release_ids: memberReleaseIds },
+      );
+    }
   }
 
   const [releaseResp, routesResp, proofsResp] = await Promise.all([
@@ -498,7 +565,6 @@ export async function repairMakesafePackSentFromRouteProofsAction(
     .map((r: any) => text(r.route_kind))
     .filter(Boolean);
   const proofs = proofsResp.data || [];
-  const proved = proofs.map((p: any) => text(p.route_kind)).filter(Boolean);
 
   const outcome = await stampMakesafePackSentFromRouteProofs(client, jobId, proofs, {
     releaseRevisionId,
@@ -509,7 +575,7 @@ export async function repairMakesafePackSentFromRouteProofsAction(
         : text(releaseResp.data.state),
       release_revision_id: releaseRevisionId,
       required_route_kinds: required,
-      proved_route_kinds: proved,
+      // proved_route_kinds deliberately omitted — planner reads proof rows.
     },
     dryRun,
   });

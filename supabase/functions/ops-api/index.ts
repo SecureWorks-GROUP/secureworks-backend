@@ -434,6 +434,7 @@ import {
 import {
   PackSentFromProofsConflictError as _PackSentFromProofsConflictError,
   PackSentFromProofsRequestError as _PackSentFromProofsRequestError,
+  mayAdvanceSubstatusFromPackStamp as _mayAdvanceSubstatusFromPackStamp,
   repairMakesafePackSentFromRouteProofsAction as _repairMakesafePackSentFromRouteProofsAction,
 } from './makesafe_pack_sent_from_route_proofs.ts'
 import {
@@ -5488,11 +5489,13 @@ if (import.meta.main) serve(async (req: Request) => {
             'admin_to_send_report',
             'ready_to_invoice',
           ])
+          // Only a fresh stamp (or dry-run would_stamp of a stampable plan)
+          // may advance substatus. already_sent must NEVER — that outcome
+          // returns before proof completeness and would force complete on a
+          // historically false/sent_marker_failed pack without re-proving.
           if (
             advanceSubstatus &&
-            (packStamp.outcome === 'stamped' ||
-              packStamp.outcome === 'already_sent' ||
-              packStamp.outcome === 'would_stamp')
+            _mayAdvanceSubstatusFromPackStamp(packStamp)
           ) {
             const detailResp = await client.from('makesafe_job_details')
               .select('substatus')
