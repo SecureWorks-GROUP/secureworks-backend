@@ -39234,7 +39234,12 @@ async function bindCurrentCycleCuratedMakesafeReport(
     report_delivery: metadata.report_delivery,
   })
   if (jobResponse.data.type !== 'makesafe' ||
-      !['physical_makesafe', 'temporary_fencing'].includes(family) ||
+      ![
+        'physical_makesafe',
+        'temporary_fencing',
+        'repair',
+        'restoration',
+      ].includes(family) ||
       detailResponse.data.report_type != null) {
     throw curatedBindError(
       'curated_bind_family_not_eligible',
