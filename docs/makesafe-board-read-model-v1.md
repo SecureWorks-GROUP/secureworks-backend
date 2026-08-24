@@ -1,4 +1,4 @@
-# Make-safe board read model v1
+# Make-safe board read model v1.2
 
 Consumer contract for the Ops and Trade board builds, and for the `makesafe_audit`
 read over the same make-safe jobs.
@@ -7,7 +7,7 @@ read over the same make-safe jobs.
 
 `GET /functions/v1/ops-api?action=makesafe_board&projection=ops|trade`
 
-Contract version: `makesafe-board.v1`.
+Contract version: `makesafe-board.v1.2`.
 
 - `projection=ops` requires the ops API key or an admin, owner, or ops-manager JWT.
 - `projection=trade` requires the signed-in trade JWT. If a browser request also carries the dashboard `x-api-key`, the verified user Bearer remains the caller identity. Visibility is resolved server-side.
@@ -80,7 +80,7 @@ increment `column_counts.archive`.
 
 The same endpoint accepts `contract_version=v2` only for the `ops` projection
 with an API key or an `admin`, `owner`, or `ops_manager` JWT. It is a compare-only
-response: the default remains `makesafe-board.v1`, and the v2 projector does not
+response: the default remains `makesafe-board.v1.2`, and the v2 projector does not
 become display authority or mutate operational state. When enabled by
 `makesafe_state_projection_config.compare_enabled`, the response is
 `makesafe-board.v2` and adds `state_v2` plus the machine-readable `v1_v2_diff`
@@ -186,6 +186,22 @@ to `awaiting_portal_completion` (roof/assessment) or `waiting_on_trade_report`
 placement, `canonical_stage`, and the stored detail row are unchanged.
 
 ### Pack presentation honesty
+
+Every matrix-resolved pack publishes
+`required_documents: {report, invoice, swms}` with
+`required_documents_resolved: true`. This is the pack-artifact map derived once
+by `deriveSesRequiredDocuments` in `makesafe_document_truth.ts`. The sealed
+family-matrix row establishes authority and the baseline recipe, then the
+existing pack-honesty exceptions narrow what must be bound: the assessment triad
+needs no report document, and `no_additional_charge` needs no invoice document.
+SWMS follows the card's resolved requirement, with temporary fencing excluded.
+The board and `inspect_ses_pack` emit the identical map. If builder/family
+authority does not resolve, the map is `null`,
+`required_documents_resolved` is `false`, and
+`required_documents_unresolved_reason` names the matrix refusal. Unknown cards
+never manufacture document requirements. This does not green any tile or change
+readiness: the proof object remains the exact report/invoice/SWMS pointers,
+current-cycle selected report, live Xero status, and send routes.
 
 Pack state is produced once, by `presentSesPackHonesty`
 (`ses_pack_presentation.ts`), as a kind of

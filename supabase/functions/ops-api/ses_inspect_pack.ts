@@ -28,6 +28,11 @@ import type {
   SesCockpitDocket,
   SesReleaseSendProgress,
 } from "./ses_review_cockpit.ts";
+import {
+  deriveSesRequiredDocuments,
+  type SesRequiredDocumentMap,
+  type SesRequiredDocumentsCard,
+} from "./makesafe_document_truth.ts";
 
 /** Main-pack pointer ids and send lifecycle facts. */
 export interface SesPackPointers {
@@ -176,6 +181,9 @@ export interface SesPackInspection {
   schema: "secureworks.makesafe.ses-pack-inspection/v1";
   job_id: string;
   job_number: string | null;
+  required_documents_resolved: boolean;
+  required_documents: SesRequiredDocumentMap | null;
+  required_documents_unresolved_reason: string | null;
   pack: SesPackPointers;
   docket: SesInspectDocketCoordinates;
   xero_binding: SesCockpitDocket["xero_binding"];
@@ -200,6 +208,17 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.map((v) => String(v ?? "")).filter((v) => v.length > 0)
     : [];
+}
+
+function artifactTruthSwmsRequirement(value: unknown): boolean | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const requiredDocuments = (value as Record<string, unknown>)
+    .required_documents;
+  if (!requiredDocuments || typeof requiredDocuments !== "object") {
+    return undefined;
+  }
+  const swms = (requiredDocuments as Record<string, unknown>).swms;
+  return typeof swms === "boolean" ? swms : undefined;
 }
 
 /**
@@ -244,6 +263,7 @@ function commercialReviewsFromInputs(args: {
 export function assembleSesPackInspection(input: {
   job_id: string;
   job_number: string | null;
+  required_document_card?: SesRequiredDocumentsCard;
   docket: SesInspectDocketCoordinates;
   xero_binding: SesCockpitDocket["xero_binding"];
   xero_invoice_pdf_available?: boolean;
@@ -414,10 +434,14 @@ export function assembleSesPackInspection(input: {
       invalidated_signoff_event_id: str(row.invalidated_signoff_event_id),
     }));
 
+  const requiredDocuments = deriveSesRequiredDocuments(
+    input.required_document_card || {},
+  );
   return {
     schema: "secureworks.makesafe.ses-pack-inspection/v1",
     job_id: input.job_id,
     job_number: input.job_number,
+    ...requiredDocuments,
     pack,
     docket: input.docket,
     xero_binding: input.xero_binding,
@@ -632,6 +656,13 @@ export async function inspectSesPackAction(
   return assembleSesPackInspection({
     job_id: jobId,
     job_number: docket.job_number,
+    required_document_card: {
+      builder_key: docket.clean_input.builder_key,
+      family: docket.clean_input.family,
+      job_number: docket.job_number,
+      pricing_disposition: docket.clean_input.pricing_disposition,
+      swms_required: artifactTruthSwmsRequirement(docket.artifact_truth),
+    },
     docket: {
       docket_revision_id: docket.docket_revision_id,
       output_content_hash: docket.docket_output_content_hash ?? null,
