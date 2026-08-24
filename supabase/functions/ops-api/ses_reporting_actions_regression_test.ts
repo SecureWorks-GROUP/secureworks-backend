@@ -632,10 +632,12 @@ Deno.test("get_ses_reviewable_pack: ready-stamped physical pack without report_d
     String(unbound.presentation.reason || ""),
     "report_doc_id",
   );
-  assertEquals(unbound.caveats, []);
+  assertEquals(unbound.caveats[0].state, "caveat");
+  assertEquals(unbound.caveats[0].code, "required_pack_artifact_missing");
+  assertEquals(unbound.artifact_truth.missing_required, ["report", "invoice"]);
 });
 
-Deno.test("Captain signoff refuses a ready stamp whose required report pointer is missing", async () => {
+Deno.test("Captain signoff records a reviewed pack while preserving its missing-artifact caveat", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nmissing-bind-signoff");
   const artifact = await curatedReportArtifact(bytes, {
     source_identity: CORRECTED_IDENTITY,
@@ -661,25 +663,20 @@ Deno.test("Captain signoff refuses a ready stamp whose required report pointer i
     },
   });
 
-  const error = await assertRejects(
-    () =>
-      signOffSesDocketAction(
-        fixture.client,
-        {
-          mode: "jwt",
-          user: { id: "captain-fixture", email: "", role: "owner" },
-        },
-        {
-          docket_revision_id: "docket-fixture",
-          expected_output_content_hash:
-            fixture.review.docket_output_content_hash,
-        },
-      ),
-    SesActionError,
-    "no bound report_doc_id",
+  const result = await signOffSesDocketAction(
+    fixture.client,
+    {
+      mode: "jwt",
+      user: { id: "captain-fixture", email: "", role: "owner" },
+    },
+    {
+      docket_revision_id: "docket-fixture",
+      expected_output_content_hash: fixture.review.docket_output_content_hash,
+    },
   );
-  assertEquals((error as SesActionError).status, 409);
-  assertEquals(fixture.rpcCalls, []);
+  assertEquals(fixture.rpcCalls, ["record_ses_docket_review_state_v1"]);
+  assertEquals(result.caveats[0].code, "required_pack_artifact_missing");
+  assertEquals(result.artifact_truth.missing_required, ["report"]);
 });
 
 Deno.test("get_ses_reviewable_pack: physical pack with bound report and invoice stays ready (261241)", async () => {
@@ -1807,6 +1804,74 @@ Deno.test("cockpit reads the portal-is-the-report manifest declaration and drops
   );
 });
 
+Deno.test("cockpit shows recipients, attachments, and missing artifact truth without turning it into a send blocker", async () => {
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient("not_applicable", {
+      makesafe_report_packs: {
+        id: "pack-fixture",
+        pack_kind: "main",
+        status: "drafted",
+        report_doc_id: null,
+        invoice_doc_id: null,
+        swms_doc_id: null,
+        sent_at: null,
+      },
+      jobs: {
+        id: "job-fixture",
+        type: "makesafe",
+        status: "active",
+        metadata: {},
+      },
+      makesafe_job_details: {
+        job_id: "job-fixture",
+        report_type: "roof_report",
+        attendance_cycle_id: "cycle-fixture",
+        cycle_number: 1,
+        reattend_count: 0,
+        external_links: [],
+      },
+      job_documents: [],
+      job_service_reports: [{
+        id: "report-fixture",
+        job_id: "job-fixture",
+        status: "submitted",
+        submitted_at: "2026-08-21T00:00:00.000Z",
+        created_at: "2026-08-21T00:00:00.000Z",
+        cycle_number: 1,
+        attendance_cycle_id: "cycle-fixture",
+        cycle_attribution: "exact",
+      }],
+      makesafe_portal_capture_revisions: [],
+    }),
+    "job-fixture",
+  );
+
+  assertEquals(
+    cockpit.verdict.blockers.some((blocker) =>
+      blocker.code === "required_pack_artifact_missing"
+    ),
+    false,
+  );
+  assertEquals(
+    cockpit.caveats.some((caveat) =>
+      caveat.code === "required_pack_artifact_missing"
+    ),
+    true,
+  );
+  assertEquals(
+    (cockpit.sections.artifact_truth as any).missing_required,
+    ["report"],
+  );
+  assertEquals((cockpit.sections.send_preview as any).routes, [{
+    route_kind: "invoice",
+    recipients: ["makesafes@builder.example"],
+    cc: [],
+    subject: "Make-safe - no additional charge",
+    attachment_hashes: [],
+    attachment_count: 0,
+  }]);
+});
+
 Deno.test("cockpit still demands the report email when the manifest does not declare not_applicable", async () => {
   // Fail-strict control: any other manifest state (here the initial "blocked")
   // keeps the report route required, so a family that owes a report email and
@@ -2555,6 +2620,20 @@ Deno.test("SEND IT executes a sealed one-route invoice-only release", async () =
   );
   assertEquals(result.state, "released");
   assertEquals(sentSubjects, ["Invoice"]);
+  assertEquals(result.dispatch_previews[0].recipients, [
+    "makesafes@mlbuilders.com.au",
+  ]);
+  assertEquals(result.dispatch_previews[0].attachment_hashes, [
+    "sha256:" + "3".repeat(64),
+  ]);
+  assertEquals(
+    result.dispatch_previews[0].members[0].artifact_truth.missing_required,
+    ["report", "invoice"],
+  );
+  assertEquals(
+    result.dispatch_previews[0].members[0].caveats[0].code,
+    "required_pack_artifact_missing",
+  );
 });
 
 Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", async () => {

@@ -2673,8 +2673,14 @@ empty-object ID is still missing. Attach ticks (`has_report_doc` /
 closeout tiles. A report-producing family also needs its selected current-cycle
 non-draft trade report; the pointer and source report are separate proofs and
 both must be present. Missing pointers or selected report evidence present
-`incomplete`, never a caveat; genuine
-caveat-class codes continue to ride ready cards. Soft-assuming
+`incomplete` on the board/review presentation, never a false ready card.
+Captain review is a separate authority boundary: the same artifact truth is
+re-read into a visible `required_pack_artifact_missing` caveat and explicit
+send preview (recipients, attachment hashes, present/missing documents), but it
+must not hard-refuse Captain signoff, approval, or dispatch. Dispatch re-reads
+that truth immediately before each route and returns it as audit evidence
+without changing the route effect identity. Genuine caveat-class codes also
+continue to ride ready cards. Soft-assuming
 `canonical_draft_pack_output_missing` / `curated_source_missing` must not pull
 the card out of Docs Ready. Placement remains separate: roof and assessment
 stay on the portal report-in floor, so `canonical_stage` may remain
