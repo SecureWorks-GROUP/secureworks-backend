@@ -48,7 +48,7 @@ import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import { makesafePackArtifactRequirements } from "./makesafe_document_truth.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
 
-export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1.1";
+export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1.2";
 
 function boundPackPointerReady(
   id: unknown,
@@ -240,6 +240,28 @@ export function projectOpsMakesafeCardRow(row: any) {
   const presentation = row?.presentation && typeof row.presentation === "object"
     ? row.presentation
     : {};
+  const requiredDocuments = row?.pack?.required_documents_resolved === true
+    ? {
+      required_documents_resolved: true as const,
+      required_documents: row.pack.required_documents,
+      required_documents_unresolved_reason: null,
+    }
+    : row?.pack?.required_documents_resolved === false
+    ? {
+      required_documents_resolved: false as const,
+      required_documents: null,
+      required_documents_unresolved_reason:
+        row.pack.required_documents_unresolved_reason ||
+        "Family-matrix authority did not resolve.",
+    }
+    : deriveSesRequiredDocuments({
+      family: row?.ses_family,
+      job_number: row?.job_number,
+      requesting_company_slug: row?.requesting_company_slug,
+      requesting_company_name: row?.builder?.name,
+      external_ref: row?.builder?.external_ref,
+      site_suburb: row?.site_suburb,
+    });
   return {
     contract_version: row?.contract_version || MAKESAFE_BOARD_CONTRACT_VERSION,
     id: row?.id,
@@ -281,15 +303,7 @@ export function projectOpsMakesafeCardRow(row: any) {
         report_doc_id: row.pack.report_doc_id || null,
         invoice_doc_id: row.pack.invoice_doc_id || null,
         swms_doc_id: row.pack.swms_doc_id || null,
-        required_documents: row.pack.required_documents ||
-          deriveSesRequiredDocuments({
-            family: row?.ses_family,
-            job_number: row?.job_number,
-            requesting_company_slug: row?.requesting_company_slug,
-            requesting_company_name: row?.builder?.name,
-            external_ref: row?.builder?.external_ref,
-            site_suburb: row?.site_suburb,
-          }),
+        ...requiredDocuments,
         closeout_documents: row.pack.closeout_documents || {
           report: false,
           invoice: false,
@@ -1601,7 +1615,7 @@ export function buildCanonicalMakesafeRows(
       report_doc_id: pack?.report_doc_id || null,
       invoice_doc_id: pack?.invoice_doc_id || null,
       swms_doc_id: pack?.swms_doc_id || null,
-      required_documents: requiredDocuments,
+      ...requiredDocuments,
       closeout_documents: {
         // Send presentation follows exact resolved artifacts for every family.
         // Portal/report-in evidence may still place a report-only card, but it

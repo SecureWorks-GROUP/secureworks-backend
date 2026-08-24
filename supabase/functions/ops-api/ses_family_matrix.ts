@@ -128,6 +128,18 @@ export type SesRequiredDocumentMap = Readonly<{
   swms: boolean;
 }>;
 
+export type SesRequiredDocumentsResolution =
+  | Readonly<{
+    required_documents_resolved: true;
+    required_documents: SesRequiredDocumentMap;
+    required_documents_unresolved_reason: null;
+  }>
+  | Readonly<{
+    required_documents_resolved: false;
+    required_documents: null;
+    required_documents_unresolved_reason: string;
+  }>;
+
 export interface SesRequiredDocumentsCard {
   builder_key?: unknown;
   family?: unknown;
@@ -723,7 +735,7 @@ function requiredDocumentsBuilderKey(
  */
 export function deriveSesRequiredDocuments(
   card: SesRequiredDocumentsCard,
-): SesRequiredDocumentMap {
+): SesRequiredDocumentsResolution {
   const builderKey = requiredDocumentsBuilderKey(card);
   const family = canonicalSesFamilyFromCard({
     makesafe_job_family: card.family,
@@ -740,9 +752,12 @@ export function deriveSesRequiredDocuments(
     site_suburb: card.site_suburb,
   });
   if (!resolved.ok) {
-    // An unsealed family/builder may never make a missing document disappear.
-    // Keep every key boolean while failing closed until matrix authority exists.
-    return { report: true, invoice: true, swms: true };
+    return {
+      required_documents_resolved: false,
+      required_documents: null,
+      required_documents_unresolved_reason:
+        `${resolved.failure.code}: ${resolved.failure.reason}`,
+    };
   }
 
   const { row } = resolved;
@@ -750,8 +765,12 @@ export function deriveSesRequiredDocuments(
   const boundReportOwed = row.report_route === "work_order_sender";
   const temporaryFenceBasis = row.invoice_basis.includes("temporary_fence");
   return {
-    report: portalReportOwed || boundReportOwed,
-    invoice: row.invoice_basis.length > 0,
-    swms: row.swms_policy === "always" && !temporaryFenceBasis,
+    required_documents_resolved: true,
+    required_documents: {
+      report: portalReportOwed || boundReportOwed,
+      invoice: row.invoice_basis.length > 0,
+      swms: row.swms_policy === "always" && !temporaryFenceBasis,
+    },
+    required_documents_unresolved_reason: null,
   };
 }

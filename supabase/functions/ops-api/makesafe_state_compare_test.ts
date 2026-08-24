@@ -158,7 +158,7 @@ function emptyCanonicalBoardClient(compareEnabled = false) {
   };
 }
 
-Deno.test("default makesafe-board v1.1 includes the additive intake exception desk", async () => {
+Deno.test("default makesafe-board v1.2 includes the additive intake exception desk", async () => {
   const client = emptyCanonicalBoardClient();
   const response = await _makesafeBoardActionForTest(
     client,
@@ -172,7 +172,7 @@ Deno.test("default makesafe-board v1.1 includes the additive intake exception de
   assertEquals(
     body,
     JSON.stringify({
-      contract_version: "makesafe-board.v1.1",
+      contract_version: "makesafe-board.v1.2",
       projection: "ops",
       // Default ops board is card-shaped (#553) and active-columns-only.
       fields: "card",

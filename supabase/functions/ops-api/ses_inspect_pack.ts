@@ -181,7 +181,9 @@ export interface SesPackInspection {
   schema: "secureworks.makesafe.ses-pack-inspection/v1";
   job_id: string;
   job_number: string | null;
-  required_documents: SesRequiredDocumentMap;
+  required_documents_resolved: boolean;
+  required_documents: SesRequiredDocumentMap | null;
+  required_documents_unresolved_reason: string | null;
   pack: SesPackPointers;
   docket: SesInspectDocketCoordinates;
   xero_binding: SesCockpitDocket["xero_binding"];
@@ -421,13 +423,14 @@ export function assembleSesPackInspection(input: {
       invalidated_signoff_event_id: str(row.invalidated_signoff_event_id),
     }));
 
+  const requiredDocuments = deriveSesRequiredDocuments(
+    input.required_document_card || {},
+  );
   return {
     schema: "secureworks.makesafe.ses-pack-inspection/v1",
     job_id: input.job_id,
     job_number: input.job_number,
-    required_documents: deriveSesRequiredDocuments(
-      input.required_document_card || {},
-    ),
+    ...requiredDocuments,
     pack,
     docket: input.docket,
     xero_binding: input.xero_binding,
