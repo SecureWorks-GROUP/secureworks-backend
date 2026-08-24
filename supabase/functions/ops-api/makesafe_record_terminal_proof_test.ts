@@ -7,10 +7,12 @@
  * These tests pin the planner: bundled path accepts reciprocal binding +
  * sibling PAID + pack-sent triage; neighbours stay refused.
  *
- * Adversarial regressions (PR 752 review):
+ * Adversarial regressions (PR 752 + PR 754 rewrite):
  *   A — superseded same-kind proof must not wall a covering re-attend write
  *   B — caller proven_at that is not an observed instant is refused
  *   C — own path must not elevate a triage-only freeform note into closeout
+ *   E — FINISHED triage note naming a claim INV must never fund closeout
+ *   F — planning / bare-email FINISHED notes must never fund closeout
  */
 import {
   assert,
@@ -332,6 +334,122 @@ Deno.test("probe C: own path refuses triage-only freeform note without canonical
     RecordTerminalProofConflictError,
   ) as RecordTerminalProofConflictError;
   assertEquals(err.code, "pack_send_evidence_missing");
+});
+
+const SWMS_26782_FINISHED_NOTE =
+  "FIRSTMATE TRIAGE 2026-07-28: FINISHED. The three-net audit proved the family " +
+  "deliverable was sent to bunbury@mlbuilders.com.au on 2026-06-29, and INV-0800 " +
+  "is AUTHORISED. No further action is required; this card is closed.";
+
+Deno.test("probe E: FINISHED note that denies send never funds verified_historical_closeout", async () => {
+  // A freeform FINISHED note naming INV-0800 is not dispatch proof and must not
+  // become path finished_note_named_invoice (removed). Even a claim-matched
+  // raised ACCREC observation cannot fund irreversible closeout from the note.
+  const lie =
+    "FINISHED. No pack emailed yet; hold INV-0800 on the claim.";
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: baseObservation({
+          job: {
+            id: "d4653440-6e9e-4451-858a-c30fd52336ba",
+            org_id: ORG,
+            job_number: "SWMS-26782",
+            type: "makesafe",
+            status: "processing",
+          },
+          outbound_bindings: [],
+          reverse_bindings: [],
+          sibling_raised_invoices: [],
+          own_raised_invoices: [],
+          pack_sent_at: null,
+          pack_sent_events: [{
+            id: "evt-lie",
+            created_at: "2026-07-28T07:52:30.052Z",
+            text: lie,
+          }],
+        }),
+        proven_by: "adversarial-probe",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "pack_send_evidence_missing");
+});
+
+Deno.test("probe F: FINISHED planning note with bare email verb never funds closeout", async () => {
+  const planNote =
+    "FINISHED — please email INV-0800 copy to finance when ready";
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: baseObservation({
+          outbound_bindings: [],
+          reverse_bindings: [],
+          sibling_raised_invoices: [],
+          own_raised_invoices: [],
+          pack_sent_at: null,
+          pack_sent_events: [{
+            id: "evt-plan",
+            created_at: "2026-07-28T07:52:30.052Z",
+            text: planNote,
+          }],
+        }),
+        proven_by: "adversarial-probe",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "pack_send_evidence_missing");
+});
+
+Deno.test("SWMS-26782 FINISHED triage note alone never plans a terminal proof", async () => {
+  // Live Myalup note shape: asserts FINISHED + INV + sent prose without U7
+  // binding, route proof, or canonical pack-sent. Must refuse — freeform notes
+  // are not verified_historical_closeout funding.
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: baseObservation({
+          job: {
+            id: "d4653440-6e9e-4451-858a-c30fd52336ba",
+            org_id: ORG,
+            job_number: "SWMS-26782",
+            type: "makesafe",
+            status: "processing",
+          },
+          outbound_bindings: [],
+          reverse_bindings: [],
+          sibling_raised_invoices: [],
+          own_raised_invoices: [],
+          pack_sent_at: null,
+          pack_sent_events: [{
+            id: "evt-finished",
+            created_at: "2026-07-28T07:52:30.052Z",
+            text: SWMS_26782_FINISHED_NOTE,
+          }],
+        }),
+        proven_by: "ses-codefix:swms-26782-finished-closeout",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "pack_send_evidence_missing");
+});
+
+Deno.test("source pin: finished_note_named_invoice path stays deleted", async () => {
+  // Re-introducing the PR 754 tip path would undo the rewrite. Read the
+  // planner + packer sources rather than trusting types alone.
+  const planner = await Deno.readTextFile(
+    new URL("./makesafe_record_terminal_proof.ts", import.meta.url),
+  );
+  const packer = await Deno.readTextFile(
+    new URL("./makesafe_send_pack.ts", import.meta.url),
+  );
+  assertEquals(planner.includes("finished_note_named_invoice"), false);
+  assertEquals(packer.includes("isFinishedCoverageSendNote"), false);
+  assertEquals(packer.includes("invoiceNumberFromSendNote"), false);
+  assert(
+    planner.includes("resolveObservedProvenAt"),
+    "PR 752 observed proven_at resolver must remain",
+  );
 });
 
 Deno.test("caller evidence_refs are refused", async () => {
