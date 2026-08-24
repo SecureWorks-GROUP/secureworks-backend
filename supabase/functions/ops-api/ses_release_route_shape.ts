@@ -182,6 +182,60 @@ export function sesReleaseRouteCc(args: {
 }
 
 /**
+ * Canonical CC list for a release whose one stored route covers multiple
+ * members. Each member contributes the rule for its own builder; normalising
+ * and sorting the keys makes the result independent of member order. The final
+ * address sort matches the immutable release-envelope normalisation, so a
+ * current single-member release remains byte-identical at Graph dispatch.
+ */
+export function sesReleaseRouteCcForBuilders(args: {
+  routeKind: SesRouteKind;
+  builderKeys: unknown[];
+}): string[] {
+  const builderKeys = [
+    ...new Set(
+      args.builderKeys.map((value) => String(value || "").trim().toUpperCase()),
+    ),
+  ].sort();
+  const effectiveBuilderKeys = builderKeys.length > 0 ? builderKeys : [""];
+  return uniqueEmails(
+    effectiveBuilderKeys.flatMap((builderKey) =>
+      sesReleaseRouteCc({ routeKind: args.routeKind, builderKey })
+    ),
+  ).sort();
+}
+
+/**
+ * Apply the Captain's new recipient rules without rewriting unaffected stored
+ * routes. AJBR completion and every photo route are repaired; a mixed-builder
+ * composite is rebuilt from every member's canonical rule; every other
+ * single-builder route keeps its stored CC bytes.
+ */
+export function repairSesReleaseRouteCc(args: {
+  routeKind: SesRouteKind;
+  builderKeys: unknown[];
+  storedCc: string[];
+}): string[] {
+  if (args.routeKind === "photo") return [];
+  const builderKeys = [
+    ...new Set(
+      args.builderKeys.map((value) => String(value || "").trim().toUpperCase()),
+    ),
+  ];
+  const mixedBuilders = builderKeys.length > 1;
+  const ajbrCompletion = builderKeys.length === 1 &&
+    builderKeys[0] === "AJBR" &&
+    (args.routeKind === "report" || args.routeKind === "report_invoice");
+  if (mixedBuilders || ajbrCompletion) {
+    return sesReleaseRouteCcForBuilders({
+      routeKind: args.routeKind,
+      builderKeys,
+    });
+  }
+  return [...args.storedCc];
+}
+
+/**
  * Authoritative MLB physical destination per route (Captain 2026-08-06).
  *
  *   invoice — the sealed matrix billing mailbox (`makesafes@mlbuilders.com.au`,

@@ -1,25 +1,24 @@
 // deno-lint-ignore-file no-explicit-any require-await
 /**
- * SEND IT envelope gate for the route-scoped AJS/AJBR recipient rules. The
- * producer is proved in ses_release_route_shape_test.ts; this drives the real
- * executeSesReleaseRevisionAction so the boundary under test is WHICH stored
- * envelopes the current CC requirement may refuse.
- *
- * A release approved before the ruling stores cc [ses@] only. Refusing such a
- * release once it has already mailed a route would strand it: the refusal's own
- * recovery is a new release revision, whose content-derived id mints fresh
- * operation keys and re-mails what already went.
+ * SEND IT repair proof for route-scoped AJS/AJBR recipient rules. The harness
+ * drives the real execute action through persisted release rows and captures
+ * the actual Graph payload, including old and partially delivered releases.
  */
 import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  buildSesReleaseRevisionPlanForDockets,
   executeSesReleaseRevisionAction,
   SesActionError,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
-import { ajsPackCc, SES_FINANCE_CC } from "./ses_release_route_shape.ts";
+import {
+  ajsPackCc,
+  SES_FINANCE_CC,
+  sesReleaseRouteCcForBuilders,
+} from "./ses_release_route_shape.ts";
 import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
 const RELEASE_ID = "release-cc-1";
@@ -91,7 +90,7 @@ const ARTIFACTS = [
 
 interface Harness {
   routes: any[];
-  builderKey: "AJS" | "AJBR";
+  builderKeys: Array<"AJS" | "AJBR">;
   /** route_kinds whose send effect already exists and is confirmed. */
   confirmedKinds: string[];
   /** Forces the prior-send ledger read to fault. */
@@ -99,6 +98,79 @@ interface Harness {
   effects: Map<string, any>;
   confirmedTokens: Set<string>;
   graphCalls: any[];
+}
+
+function memberRows(harness: Harness): any[] {
+  return harness.builderKeys.map((_, index) => ({
+    ordinal: index + 1,
+    job_id: index === 0 ? JOB_ID : `${JOB_ID}-${index + 1}`,
+    docket_revision_id: index === 0 ? DOCKET_ID : `${DOCKET_ID}-${index + 1}`,
+    invoice_obligation_revision_id: `obligation-${index + 1}`,
+  }));
+}
+
+function docketRows(harness: Harness): any[] {
+  return memberRows(harness).map((member, index) => ({
+    id: member.docket_revision_id,
+    job_id: member.job_id,
+    xero_binding: {
+      status: "AUTHORISED",
+      xero_invoice_id: `xero-invoice-${index + 1}`,
+    },
+    invoice_obligation_revision_id: member.invoice_obligation_revision_id,
+    envelope: {
+      v2: {
+        classification: {
+          builder_key: harness.builderKeys[index],
+          family: "physical_makesafe",
+        },
+        routing: {},
+      },
+    },
+    review_spec: {},
+  }));
+}
+
+function docketQuery(harness: Harness): any {
+  const rows = docketRows(harness);
+  let selectedId = "";
+  const result = (single: boolean) => ({
+    data: single ? rows.find((row) => row.id === selectedId) || null : rows,
+    error: null,
+  });
+  const builder: any = {
+    select: () => builder,
+    eq: (column: string, value: unknown) => {
+      if (column === "id") selectedId = String(value || "");
+      return builder;
+    },
+    in: () => builder,
+    order: () => Promise.resolve(result(false)),
+    limit: () => builder,
+    maybeSingle: () => Promise.resolve(result(true)),
+    then: (resolve: any, reject: any) =>
+      Promise.resolve(result(false)).then(resolve, reject),
+  };
+  return builder;
+}
+
+function confirmedEffect(kind: string): any {
+  const externalToken = `SES-confirmed-${kind}`;
+  return {
+    operation_key: `op-${kind}`,
+    org_id: "org-1",
+    effect_kind: "route_send",
+    release_revision_id: RELEASE_ID,
+    route_kind: kind,
+    payload_hash: hash(kind === "report_invoice" ? 91 : 92),
+    external_token: externalToken,
+    state: "confirmed",
+    provider_digest: {
+      message_id: `graph-message-prior-${kind}`,
+      internet_message_id: `<prior-${kind}@graph>`,
+      operation_token: externalToken,
+    },
+  };
 }
 
 function scriptedClient(harness: Harness): SesSupabaseClient {
@@ -112,12 +184,7 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
           });
         case "makesafe_release_revision_members":
           return query({
-            data: [{
-              ordinal: 1,
-              job_id: JOB_ID,
-              docket_revision_id: DOCKET_ID,
-              invoice_obligation_revision_id: "obligation-1",
-            }],
+            data: memberRows(harness),
             error: null,
           });
         case "makesafe_release_revision_routes":
@@ -126,34 +193,11 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
           return query({
             data: harness.effectReadError
               ? null
-              : harness.confirmedKinds.map((kind) => ({
-                operation_key: `op-${kind}`,
-              })),
+              : harness.confirmedKinds.map(confirmedEffect),
             error: harness.effectReadError || null,
           });
         case "makesafe_docket_revisions":
-          return query({
-            data: {
-              id: DOCKET_ID,
-              job_id: JOB_ID,
-              xero_binding: {
-                status: "AUTHORISED",
-                xero_invoice_id: "xero-invoice-1",
-              },
-              invoice_obligation_revision_id: "obligation-1",
-              envelope: {
-                v2: {
-                  classification: {
-                    builder_key: harness.builderKey,
-                    family: "physical_makesafe",
-                  },
-                  routing: {},
-                },
-              },
-              review_spec: {},
-            },
-            error: null,
-          });
+          return docketQuery(harness);
         case "makesafe_docket_artifacts":
           return query({ data: ARTIFACTS, error: null });
         case "makesafe_closeout_revisions":
@@ -244,7 +288,9 @@ function mailGatewayStub(harness: Harness): any {
   return {
     createDraftAndSend: async (payload: any, context: any) => {
       harness.graphCalls.push({
+        route_kind: payload.route_kind,
         subject: payload.subject,
+        recipients: payload.recipients,
         cc: payload.cc,
         token: context.external_token,
       });
@@ -277,12 +323,12 @@ function mailGatewayStub(harness: Harness): any {
 const xeroReader = { readAuthorised: async () => ({ id: "xero-invoice-1" }) };
 
 function harness(overrides: Partial<Harness> = {}): Harness {
-  const builderKey = overrides.builderKey || "AJS";
+  const builderKeys = overrides.builderKeys || ["AJS"];
   return {
-    routes: builderKey === "AJBR"
+    routes: builderKeys.length === 1 && builderKeys[0] === "AJBR"
       ? ajsRoutes([SES_FINANCE_CC], [])
-      : ajsRoutes(ajsPackCc(), []),
-    builderKey,
+      : ajsRoutes([...ajsPackCc()].sort(), []),
+    builderKeys,
     confirmedKinds: [],
     effectReadError: null,
     effects: new Map(),
@@ -302,37 +348,51 @@ async function execute(state: Harness) {
   );
 }
 
-Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanent pack CC", async () => {
-  const state = harness({ routes: ajsRoutes(LEGACY_CC, LEGACY_CC) });
-  let error: SesActionError | null = null;
-  try {
-    await execute(state);
-  } catch (err) {
-    error = err as SesActionError;
-  }
-  assert(error instanceof SesActionError, "expected a typed SES refusal");
-  assertEquals(error!.status, 409);
-  const refusal = error!.refusal as any;
-  assertEquals(refusal.code, "route_recipient_invalid");
-  assertEquals(refusal.evidence.release_send_in_flight, false);
-  assertEquals(refusal.evidence.required, ajsPackCc());
-  // Nothing has reached the builder, so preparing a new revision is safe.
-  assertEquals(state.graphCalls.length, 0);
+Deno.test("SEND IT repairs a never-dispatched AJS release before Graph send", async () => {
+  const state = harness({
+    routes: ajsRoutes([...ajsPackCc()].sort(), LEGACY_CC),
+  });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls[0].cc, [...ajsPackCc()].sort());
+  assertEquals(state.graphCalls[1].cc, []);
+  assertEquals(
+    result.dispatch_previews.map((route: any) => ({
+      route_kind: route.route_kind,
+      recipients: route.recipients,
+      cc: route.cc,
+    })),
+    state.graphCalls.map((route) => ({
+      route_kind: route.route_kind,
+      recipients: route.recipients,
+      cc: route.cc,
+    })),
+  );
 });
 
 Deno.test("SEND IT finishes an in-flight pre-ruling AJS release instead of stranding it", async () => {
   const state = harness({
     routes: ajsRoutes(LEGACY_CC, LEGACY_CC),
-    builderKey: "AJS",
+    builderKeys: ["AJS"],
     confirmedKinds: ["report_invoice"],
   });
   const result: any = await execute(state);
   assertEquals(result.state, "released");
   // The confirmed route reconciles; only the outstanding photo route dispatches.
   assertEquals(state.graphCalls.map((call) => call.subject), ["Photos"]);
+  // Permanent regression assertion from the adversarial review: the legacy
+  // stored photo CC never reaches Graph.
+  assertEquals(state.graphCalls[0].cc, []);
+  assertEquals(result.dispatch_previews.length, 1);
+  assertEquals(result.dispatch_previews[0].route_kind, "photo");
+  assertEquals(
+    result.dispatch_previews[0].recipients,
+    state.graphCalls[0].recipients,
+  );
+  assertEquals(result.dispatch_previews[0].cc, state.graphCalls[0].cc);
 });
 
-Deno.test("SEND IT still enforces the ses@ floor on an in-flight pre-ruling release", async () => {
+Deno.test("SEND IT repairs an arbitrary stale CC on an outstanding in-flight route", async () => {
   const state = harness({
     routes: ajsRoutes(
       ["someone-else@example.com"],
@@ -340,18 +400,10 @@ Deno.test("SEND IT still enforces the ses@ floor on an in-flight pre-ruling rele
     ),
     confirmedKinds: ["report_invoice"],
   });
-  let error: SesActionError | null = null;
-  try {
-    await execute(state);
-  } catch (err) {
-    error = err as SesActionError;
-  }
-  assert(error instanceof SesActionError, "expected a typed SES refusal");
-  const refusal = error!.refusal as any;
-  assertEquals(refusal.code, "route_recipient_invalid");
-  assertEquals(refusal.evidence.release_send_in_flight, true);
-  assertEquals(refusal.evidence.required, [MAKESAFE_CC]);
-  assertEquals(state.graphCalls.length, 0);
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls.map((call) => call.subject), ["Photos"]);
+  assertEquals(state.graphCalls[0].cc, []);
 });
 
 Deno.test("SEND IT refuses on an unreadable send ledger rather than guessing the CC floor", async () => {
@@ -380,12 +432,12 @@ Deno.test("SEND IT keeps AJS completion CCs and clears the AJS photo CC", async 
     "Report + Invoice",
     "Photos",
   ]);
-  assertEquals(state.graphCalls[0].cc, ajsPackCc());
+  assertEquals(state.graphCalls[0].cc, [...ajsPackCc()].sort());
   assertEquals(state.graphCalls[1].cc, []);
 });
 
 Deno.test("SEND IT dispatches AJBR completion docs with finance only and photos with no CC", async () => {
-  const state = harness({ builderKey: "AJBR" });
+  const state = harness({ builderKeys: ["AJBR"] });
   const result: any = await execute(state);
   assertEquals(result.state, "released");
   assertEquals(state.graphCalls.map((call) => call.subject), [
@@ -397,22 +449,102 @@ Deno.test("SEND IT dispatches AJBR completion docs with finance only and photos 
   assertEquals(state.graphCalls[1].cc, []);
 });
 
-Deno.test("SEND IT refuses a never-dispatched AJBR release carrying the old CC set", async () => {
+Deno.test("SEND IT clears the outstanding photo CC on an in-flight legacy AJBR release", async () => {
   const state = harness({
-    builderKey: "AJBR",
+    builderKeys: ["AJBR"],
+    routes: ajsRoutes(ajsPackCc(), ajsPackCc()),
+    confirmedKinds: ["report_invoice"],
+  });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls.map((call) => call.subject), ["Photos"]);
+  assertEquals(state.graphCalls[0].cc, []);
+  assertEquals(result.dispatch_previews.map((route: any) => route.route_kind), [
+    "photo",
+  ]);
+  assertEquals(result.dispatch_previews[0].cc, state.graphCalls[0].cc);
+});
+
+Deno.test("SEND IT repairs a never-dispatched AJBR release carrying the old CC set", async () => {
+  const state = harness({
+    builderKeys: ["AJBR"],
     routes: ajsRoutes(ajsPackCc(), ajsPackCc()),
   });
-  let error: SesActionError | null = null;
-  try {
-    await execute(state);
-  } catch (err) {
-    error = err as SesActionError;
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls[0].cc, [SES_FINANCE_CC]);
+  assertEquals(state.graphCalls[0].cc.includes(MAKESAFE_CC), false);
+  assertEquals(state.graphCalls[1].cc, []);
+  for (let index = 0; index < state.graphCalls.length; index++) {
+    assertEquals(
+      result.dispatch_previews[index].recipients,
+      state.graphCalls[index].recipients,
+    );
+    assertEquals(
+      result.dispatch_previews[index].cc,
+      state.graphCalls[index].cc,
+    );
   }
-  assert(error instanceof SesActionError, "expected a typed SES refusal");
-  const refusal = error!.refusal as any;
-  assertEquals(refusal.code, "route_recipient_invalid");
-  assertEquals(refusal.evidence.builder_key, "AJBR");
-  assertEquals(refusal.evidence.required, [SES_FINANCE_CC]);
-  assertEquals(refusal.evidence.exact, true);
-  assertEquals(state.graphCalls.length, 0);
+});
+
+Deno.test("mixed AJS/AJBR composites compose every member rule in either order", async () => {
+  const expectedCompletionCc = sesReleaseRouteCcForBuilders({
+    routeKind: "report_invoice",
+    builderKeys: ["AJS", "AJBR"],
+  });
+  for (
+    const builderKeys of [
+      ["AJS", "AJBR"],
+      ["AJBR", "AJS"],
+    ] as Array<Array<"AJS" | "AJBR">>
+  ) {
+    const state = harness({
+      builderKeys,
+      routes: ajsRoutes(LEGACY_CC, LEGACY_CC),
+    });
+    const result: any = await execute(state);
+    assertEquals(result.state, "released");
+    assertEquals(state.graphCalls[0].cc, expectedCompletionCc);
+    assertEquals(state.graphCalls[1].cc, []);
+    assertEquals(result.dispatch_previews[0].cc, state.graphCalls[0].cc);
+    assertEquals(result.dispatch_previews[1].cc, state.graphCalls[1].cc);
+  }
+});
+
+Deno.test("mixed AJS/AJBR release planning persists the same order-independent recipients", async () => {
+  const expectedCompletionCc = sesReleaseRouteCcForBuilders({
+    routeKind: "report_invoice",
+    builderKeys: ["AJS", "AJBR"],
+  });
+  for (
+    const builderKeys of [
+      ["AJS", "AJBR"],
+      ["AJBR", "AJS"],
+    ] as Array<Array<"AJS" | "AJBR">>
+  ) {
+    const dockets = builderKeys.map((builderKey, index) => ({
+      job_id: `plan-job-${index + 1}`,
+      docket_revision_id: `plan-docket-${index + 1}`,
+      invoice_obligation_revision_id: `plan-obligation-${index + 1}`,
+      attendance_cycle_ids: [`plan-cycle-${index + 1}`],
+      readiness_revision: hash(70 + index),
+      dependency_generation: index + 1,
+      clean_input: {
+        builder_key: builderKey,
+        family: "physical_makesafe",
+        photo_route_applicable: true,
+        report_route_applicable: true,
+      },
+    })) as any;
+    const plan = await buildSesReleaseRevisionPlanForDockets({
+      org_id: "org-1",
+      dockets,
+      routes: ajsRoutes(LEGACY_CC, LEGACY_CC),
+      created_by: "captain",
+    });
+    assertEquals(plan.routes.map((route) => route.cc), [
+      expectedCompletionCc,
+      [],
+    ]);
+  }
 });

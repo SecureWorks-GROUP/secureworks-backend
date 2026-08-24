@@ -878,7 +878,7 @@ Deno.test(
     assertEquals((report as any).subject_source, "generated_fallback");
     assertEquals(report.subject, "MLB-PO-54000 - physical makesafe");
     assertEquals(report.attachment_hashes, ["report-hash"]);
-    // MLB report recipients are unchanged: report still CCs ses@.
+    // Scope guard: MLB's shipped report rule remains MAKESAFE_CC.
     assertEquals(report.cc || [], [MAKESAFE_CC]);
     // Captain 2026-08-06: report goes to the Prime mailer, report only. The
     // fixture drafts address site.manager@mlb.example, so this also proves the

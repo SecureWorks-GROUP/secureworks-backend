@@ -12,12 +12,14 @@ import {
   MLB_PRIME_MAILER,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
+  repairSesReleaseRouteCc,
   SES_AJS_ROUTE_ORDER,
   SES_FINANCE_CC,
   SES_UNIVERSAL_ROUTE_ORDER,
   sesBodyCarriesInternalAnnotation,
   sesBuilderRouteBody,
   sesReleaseRouteCc,
+  sesReleaseRouteCcForBuilders,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -98,6 +100,101 @@ Deno.test("route CC producer scopes AJBR completion docs and clears every photo 
       sesReleaseRouteCc({ routeKind: "photo", builderKey }),
       [],
       `${builderKey} photo route must have no CC`,
+    );
+  }
+});
+
+Deno.test("composite route CCs apply every member's builder rule independent of order", () => {
+  const expectedCompletionCc = [
+    SES_FINANCE_CC,
+    ...AJS_PACK_CC,
+  ].sort();
+  for (const builderKeys of [["AJS", "AJBR"], ["AJBR", "AJS"]]) {
+    assertEquals(
+      sesReleaseRouteCcForBuilders({
+        routeKind: "report_invoice",
+        builderKeys,
+      }),
+      expectedCompletionCc,
+    );
+    assertEquals(
+      sesReleaseRouteCcForBuilders({
+        routeKind: "photo",
+        builderKeys,
+      }),
+      [],
+    );
+  }
+  assertEquals(
+    sesReleaseRouteCcForBuilders({
+      routeKind: "report_invoice",
+      builderKeys: ["AJS"],
+    }),
+    [...AJS_PACK_CC].sort(),
+  );
+  assertEquals(
+    repairSesReleaseRouteCc({
+      routeKind: "invoice",
+      builderKeys: ["MLB"],
+      storedCc: [],
+    }),
+    [],
+  );
+  assertEquals(
+    repairSesReleaseRouteCc({
+      routeKind: "report_invoice",
+      builderKeys: ["AJBR"],
+      storedCc: AJS_PACK_CC,
+    }),
+    [SES_FINANCE_CC],
+  );
+  assertEquals(
+    repairSesReleaseRouteCc({
+      routeKind: "photo",
+      builderKeys: ["WESTERN"],
+      storedCc: [MAKESAFE_CC],
+    }),
+    [],
+  );
+});
+
+Deno.test("send-time repair leaves every non-AJBR report and invoice CC byte-identical", () => {
+  const unchanged = [
+    {
+      routeKind: "report_invoice" as const,
+      builderKey: "AJS",
+      storedCc: AJS_PACK_CC,
+    },
+    {
+      routeKind: "report" as const,
+      builderKey: "MLB",
+      storedCc: [MAKESAFE_CC],
+    },
+    {
+      routeKind: "invoice" as const,
+      builderKey: "MLB",
+      storedCc: [MAKESAFE_FINANCE_CC],
+    },
+    {
+      routeKind: "report" as const,
+      builderKey: "WESTERN",
+      storedCc: [MAKESAFE_CC],
+    },
+    {
+      routeKind: "invoice" as const,
+      builderKey: "WESTERN",
+      storedCc: [MAKESAFE_FINANCE_CC],
+    },
+  ];
+  for (const row of unchanged) {
+    assertEquals(
+      repairSesReleaseRouteCc({
+        routeKind: row.routeKind,
+        builderKeys: [row.builderKey],
+        storedCc: row.storedCc,
+      }),
+      row.storedCc,
+      `${row.builderKey} ${row.routeKind} must remain byte-identical`,
     );
   }
 });
