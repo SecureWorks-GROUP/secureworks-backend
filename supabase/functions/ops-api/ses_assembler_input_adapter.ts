@@ -44,12 +44,13 @@ import {
   resolveIntakeThreadCoordinates,
 } from "./ses_mlb_thread_reply.ts";
 import {
-  comparePackMediaCreatedAtThenId,
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
-  filterMediaForCurrentCycle,
   isEvidenceBoundToCurrentCycle,
+  normalizePackPhotoSourceScope,
+  PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
   selectCurrentCycleReport,
+  selectPackPhotoMedia,
 } from "./makesafe_cycle_evidence.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
@@ -1361,11 +1362,19 @@ export function buildSesAssemblerInput(
     detail,
     cycle.id || null,
   );
-  const currentMedia = filterMediaForCurrentCycle(
-    snapshot.media,
+  // Photo email attachments follow the curated bind's photo_source_scope when
+  // present: same_job_all_attendances plus sealed photo_selected_ids attach
+  // exactly the bind-accounted set so a two-visit pack matches the report.
+  // Missing/stale scope or sealed ids keep/repair the current-cycle default —
+  // never refuse SEND IT, never grow past the bind selection.
+  const curatedPhotoSource = curatedPackPhotoSource(snapshot, cycle.id || "");
+  const packPhotoMedia = selectPackPhotoMedia({
+    media: snapshot.media,
     detail,
-    cycle.id || null,
-  );
+    attendanceCycleId: cycle.id || null,
+    photoSourceScope: curatedPhotoSource.scope,
+    photoSelectedIds: curatedPhotoSource.selectedIds,
+  });
   const workOrders = snapshot.documents.filter((item) =>
     ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase())
   );
@@ -1416,18 +1425,7 @@ export function buildSesAssemblerInput(
     url: link.url,
     source: "job_detail" as const,
   }));
-  const photos = currentMedia
-    .filter((item) => {
-      const type = text(item.type).toLowerCase();
-      const phase = text(item.phase).toLowerCase();
-      return (
-        type.includes("photo") ||
-        type.includes("image") ||
-        phase.includes("completion") ||
-        phase.includes("after")
-      );
-    })
-    .sort(comparePackMediaCreatedAtThenId)
+  const photos = packPhotoMedia
     .map((item, index) => ({
       id: text(item.id),
       path_or_key: `job_media:${text(item.id)}`,
@@ -2354,6 +2352,58 @@ function durableCuratedDocumentForCycle(
       text(right.created_at).localeCompare(text(left.created_at)) ||
       text(right.id).localeCompare(text(left.id))
     )[0] || null;
+}
+
+/**
+ * Photo-route scope + sealed selection for this attendance. Prefer the durable
+ * curated document; if that gate misses but a cycle-bound report already
+ * carries the sealed same_job_all_attendances marker, honour it so the photo
+ * email matches the bound report. A missing marker keeps the current-cycle
+ * default — repair by re-prepare, never refuse.
+ */
+function curatedPackPhotoSource(
+  snapshot: SesAssemblerLiveSnapshot,
+  currentCycleId: string,
+): { scope: unknown; selectedIds: unknown } {
+  const fromSnapshot = (row: LiveRow | null | undefined) => {
+    if (!row) return { scope: null as unknown, selectedIds: null as unknown };
+    const facts = record(row.data_snapshot_json);
+    return {
+      scope: facts.photo_source_scope,
+      selectedIds: facts.photo_selected_ids,
+    };
+  };
+
+  const durable = durableCuratedDocumentForCycle(snapshot, currentCycleId);
+  const durableScope = normalizePackPhotoSourceScope(
+    record(durable?.data_snapshot_json).photo_source_scope,
+  );
+  if (durableScope) return fromSnapshot(durable);
+
+  const stamped = snapshot.documents
+    .filter((row) => text(row.type).toLowerCase() === "makesafe_report")
+    .filter((row) => {
+      const scope = normalizePackPhotoSourceScope(
+        record(row.data_snapshot_json).photo_source_scope,
+      );
+      if (scope !== PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) return false;
+      if (currentCycleId) {
+        return text(row.attendance_cycle_id) === currentCycleId &&
+          text(row.cycle_attribution).toLowerCase() === "bound";
+      }
+      return isEvidenceBoundToCurrentCycle(
+        row,
+        snapshot.detail || {},
+        currentCycleId || null,
+      );
+    })
+    .slice()
+    .sort((left, right) =>
+      Number(right.version || 0) - Number(left.version || 0) ||
+      text(right.created_at).localeCompare(text(left.created_at)) ||
+      text(right.id).localeCompare(text(left.id))
+    )[0] || null;
+  return fromSnapshot(stamped);
 }
 
 interface PhysicalReportSource {

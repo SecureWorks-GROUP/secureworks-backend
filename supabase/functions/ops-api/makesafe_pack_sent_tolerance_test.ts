@@ -90,6 +90,24 @@ Deno.test("SWMS-26832 legacy note: triage=true, strict main detector=false", () 
   assertEquals(isPackSentTriageEvent(ev), true, "board triage tolerates the legacy note");
 });
 
+const SWMS_26782_FINISHED_NOTE =
+  "FIRSTMATE TRIAGE 2026-07-28: FINISHED. The three-net audit proved the family " +
+  "deliverable was sent to bunbury@mlbuilders.com.au on 2026-06-29, and INV-0800 " +
+  "is AUTHORISED. No further action is required; this card is closed.";
+
+// Probe E / F (PR 754 rewrite): freeform FINISHED notes naming an INV must never
+// become board pack-sent presentation. Bundled-coverage phrases stay the only
+// non-canonical triage exception.
+Deno.test("probe E/F: FINISHED triage notes are not pack-sent triage or main markers", () => {
+  const denial = "FINISHED. No pack emailed yet; hold INV-0800 on the claim.";
+  const planning = "FINISHED — please email INV-0800 copy to finance when ready";
+  for (const text of [SWMS_26782_FINISHED_NOTE, denial, planning]) {
+    assertEquals(isPackSentMainEvent(noteEvent(text)), false);
+    assertEquals(isPackSentTriageEvent(noteEvent(text)), false);
+    assertEquals(isBundledCoverageSendNote(text), false);
+  }
+});
+
 Deno.test("canonical marker is both triage and strict-main true", () => {
   const ev = noteEvent("MAKESAFE_PACK_SENT | main | INV-0814 | to=x | ts | msgid=y");
   assert(isPackSentMainEvent(ev));
@@ -128,15 +146,18 @@ Deno.test("buildPackSentMap: canonical marker AND legacy bundled note both count
     "job-bundled": [SWMS_26832_LEGACY_NOTE],
     "job-unsent": ["crew attended, awaiting report"],
     "job-photo-only": ["MAKESAFE_PACK_SENT | photo | INV-1 | to=x"],
+    "job-finished-note": [SWMS_26782_FINISHED_NOTE],
   });
   const map = await _buildPackSentMapForTest(client, [
     "job-canonical",
     "job-bundled",
     "job-unsent",
     "job-photo-only",
+    "job-finished-note",
   ]);
   assertEquals(map["job-canonical"], true);
   assertEquals(map["job-bundled"], true); // SWMS-26832 class: no longer false OUTSTANDING-TO-SEND
   assertEquals(map["job-unsent"], undefined);
   assertEquals(map["job-photo-only"], undefined); // photo alone is never a verified send
+  assertEquals(map["job-finished-note"], undefined); // FINISHED+INV note never looks sent
 });

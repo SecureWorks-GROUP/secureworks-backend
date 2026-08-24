@@ -1,3 +1,4 @@
+-- Executed by ../run.sh after the matching migration is applied to PostgreSQL.
 BEGIN;
 
 INSERT INTO public.jobs (id, org_id, status, type, job_number)
@@ -104,5 +105,102 @@ BEGIN
   END IF;
 END;
 $$;
+
+-- Pin every guarded document class in the partial-index predicate. A future
+-- edit that accidentally removes one class must make this contract fail.
+DO $$
+DECLARE
+  guarded_type text;
+  guarded_file text;
+BEGIN
+  FOREACH guarded_type IN ARRAY ARRAY[
+    'work_order',
+    'makesafe_report',
+    'roof_report',
+    'invoice',
+    'swms'
+  ]
+  LOOP
+    guarded_file := 'all-types-' || guarded_type || '.pdf';
+
+    INSERT INTO public.job_documents (
+      job_id,
+      type,
+      file_name,
+      storage_url,
+      version
+    )
+    VALUES (
+      'f6453cb9-243c-45d7-88f2-01a2750b67a4',
+      guarded_type,
+      guarded_file,
+      'https://example.invalid/' || guarded_type || '-original.pdf',
+      1
+    );
+
+    BEGIN
+      INSERT INTO public.job_documents (
+        job_id,
+        type,
+        file_name,
+        storage_url,
+        version
+      )
+      VALUES (
+        'f6453cb9-243c-45d7-88f2-01a2750b67a4',
+        guarded_type,
+        guarded_file,
+        'https://example.invalid/' || guarded_type || '-duplicate.pdf',
+        2
+      );
+      RAISE EXCEPTION 'active duplicate was accepted for type %', guarded_type;
+    EXCEPTION
+      WHEN unique_violation THEN
+        IF SQLERRM NOT LIKE '%ux_job_documents_makesafe_attach_key%' THEN
+          RAISE;
+        END IF;
+    END;
+  END LOOP;
+END;
+$$;
+
+-- The authored predicate deliberately excludes null filenames and document
+-- classes outside the MakeSafe attach surface.
+INSERT INTO public.job_documents (
+  job_id,
+  type,
+  file_name,
+  storage_url,
+  version
+)
+VALUES
+  (
+    'f6453cb9-243c-45d7-88f2-01a2750b67a4',
+    'quote',
+    'outside-guard.pdf',
+    'https://example.invalid/quote-1.pdf',
+    1
+  ),
+  (
+    'f6453cb9-243c-45d7-88f2-01a2750b67a4',
+    'quote',
+    'outside-guard.pdf',
+    'https://example.invalid/quote-2.pdf',
+    2
+  ),
+  (
+    'f6453cb9-243c-45d7-88f2-01a2750b67a4',
+    'work_order',
+    NULL,
+    'https://example.invalid/null-name-1.pdf',
+    1
+  ),
+  (
+    'f6453cb9-243c-45d7-88f2-01a2750b67a4',
+    'work_order',
+    NULL,
+    'https://example.invalid/null-name-2.pdf',
+    2
+  );
 
 ROLLBACK;

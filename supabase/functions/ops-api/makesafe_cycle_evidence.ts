@@ -295,15 +295,173 @@ export function commercialCloseoutAllowed(detail: any): boolean {
   return !hasReattendBoundary(detail);
 }
 
+/**
+ * Curated bind photo source scopes that the pack/photo route may honour.
+ * `same_job_all_attendances` is the sealed multi-visit set already accepted by
+ * curated bind — the photo email and board count must read the same set.
+ */
+export const PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES =
+  "same_job_all_attendances" as const;
+export const PACK_PHOTO_SOURCE_CURRENT_CYCLE = "current_cycle" as const;
+
+export type PackPhotoSourceScope =
+  | typeof PACK_PHOTO_SOURCE_CURRENT_CYCLE
+  | typeof PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES;
+
+/** Same applicability predicate curated bind and the assembler share. */
+export function isApplicablePackPhoto(item: any): boolean {
+  const type = String(item?.type || "").trim().toLowerCase();
+  const phase = String(item?.phase || "").trim().toLowerCase();
+  return type.includes("photo") || type.includes("image") ||
+    phase.includes("completion") || phase.includes("after");
+}
+
+export function normalizePackPhotoSourceScope(
+  value: unknown,
+): PackPhotoSourceScope | null {
+  const scope = String(value || "").trim();
+  if (scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) {
+    return PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES;
+  }
+  if (scope === PACK_PHOTO_SOURCE_CURRENT_CYCLE) {
+    return PACK_PHOTO_SOURCE_CURRENT_CYCLE;
+  }
+  return null;
+}
+
+/**
+ * Immutable photo ids sealed on a curated bind snapshot
+ * (`data_snapshot_json.photo_selected_ids`). Null means "not sealed" — older
+ * cards or a current-cycle bind — so callers fall back safely. An empty array
+ * means the bind selected none and must stay empty (never invent attachments).
+ */
+export function normalizePackPhotoSelectedIds(
+  value: unknown,
+): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const entry of value) {
+    const id = String(entry || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Select the photo media set the pack/photo route owes.
+ *
+ * Default remains current-cycle (single-visit and current-visit-only binds).
+ * When the curated bind stamped `same_job_all_attendances`, honour the sealed
+ * `photo_selected_ids` so the photo email matches the bound report exactly —
+ * never grow to live media uploaded after the bind. Missing sealed ids on an
+ * older card fall back to the live applicable set (repair by re-prepare /
+ * re-bind, never refuse SEND IT).
+ */
+export function selectPackPhotoMedia(opts: {
+  media: any[] | null | undefined;
+  detail: any;
+  attendanceCycleId?: string | null;
+  photoSourceScope?: unknown;
+  photoSelectedIds?: unknown;
+}): any[] {
+  const scope = normalizePackPhotoSourceScope(opts.photoSourceScope);
+  if (scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) {
+    const sealedIds = normalizePackPhotoSelectedIds(opts.photoSelectedIds);
+    const applicable = (opts.media || []).filter(isApplicablePackPhoto);
+    if (sealedIds) {
+      const byId = new Map<string, any>();
+      for (const row of applicable) {
+        const id = String(row?.id || "").trim();
+        if (id && !byId.has(id)) byId.set(id, row);
+      }
+      // Preserve bind order. Deleted/unreadable rows drop out quietly — missing
+      // evidence is a caveat the operator weighs, never a SEND IT hard-refuse.
+      return sealedIds
+        .map((id) => byId.get(id))
+        .filter((row): row is any => Boolean(row));
+    }
+    return applicable.slice().sort(comparePackMediaCreatedAtThenId);
+  }
+  return filterMediaForCurrentCycle(
+    opts.media,
+    opts.detail,
+    opts.attendanceCycleId,
+  )
+    .filter(isApplicablePackPhoto)
+    .slice()
+    .sort(comparePackMediaCreatedAtThenId);
+}
+
 export function photoCountForCurrentCycle(
   photoCount: number,
   detail: any,
   photosBoundToCurrent: boolean,
 ): number {
   if (!hasReattendBoundary(detail)) return photoCount;
-  // Photos are not yet cycle-keyed; fail closed unless an explicit binding flag
-  // is provided by a future write path.
+  // Fail closed unless the caller proved a current binding (cycle-keyed media
+  // or a same-job all-attendance curated pack scope).
   return photosBoundToCurrent ? photoCount : 0;
+}
+
+/**
+ * Board/report photo_count for a card.
+ *
+ * - Single-visit: raw job media count (unchanged).
+ * - Reattend + curated `same_job_all_attendances`: full same-job / bound count
+ *   (Willetton SWMS-261288 class — do not trust a stale current-cycle pack count).
+ * - Reattend + persisted pack photo-route attachments: read that count back
+ *   (Hillarys SWMS-261134 class — route already complete, board was fail-closed).
+ * - Reattend + cycle-keyed media: current-cycle count only.
+ * - Reattend with none of the above: fail closed to 0 (legacy).
+ */
+export function resolveBoardPhotoCount(opts: {
+  rawPhotoCount: number;
+  detail: any;
+  currentCyclePhotoCount?: number | null;
+  photosHaveCycleBinding?: boolean;
+  boundPhotoSourceScope?: unknown;
+  boundPackPhotoCount?: number | null;
+  /** completion_photo artifacts on the card's current docket revision. */
+  packPhotoAttachmentCount?: number | null;
+}): number {
+  const raw = Number(opts.rawPhotoCount || 0);
+  if (!hasReattendBoundary(opts.detail)) return raw;
+
+  const scope = normalizePackPhotoSourceScope(opts.boundPhotoSourceScope);
+  if (scope === PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES) {
+    // null/undefined mean "unknown" — Number(null) is 0 and must not win.
+    if (
+      opts.boundPackPhotoCount != null &&
+      Number.isFinite(Number(opts.boundPackPhotoCount)) &&
+      Number(opts.boundPackPhotoCount) >= 0
+    ) {
+      return Number(opts.boundPackPhotoCount);
+    }
+    return raw;
+  }
+
+  if (
+    opts.packPhotoAttachmentCount != null &&
+    Number.isFinite(Number(opts.packPhotoAttachmentCount)) &&
+    Number(opts.packPhotoAttachmentCount) > 0
+  ) {
+    return Number(opts.packPhotoAttachmentCount);
+  }
+
+  if (opts.photosHaveCycleBinding === true) {
+    if (
+      opts.currentCyclePhotoCount != null &&
+      Number.isFinite(Number(opts.currentCyclePhotoCount)) &&
+      Number(opts.currentCyclePhotoCount) >= 0
+    ) {
+      return Number(opts.currentCyclePhotoCount);
+    }
+  }
+
+  return photoCountForCurrentCycle(raw, opts.detail, false);
 }
 
 export interface CycleScopedEvidenceInput {
