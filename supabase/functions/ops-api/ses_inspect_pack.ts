@@ -280,14 +280,40 @@ export function assembleSesPackInspection(input: {
   audit_rows: Array<Record<string, unknown>>;
   caveats?: Array<{ code?: string; fact?: string }>;
 }): SesPackInspection {
+  // When the sealed release is fully proved (`released`) but the pack row was
+  // never patched (legacy gap on execute_ses_release_revision), surface the
+  // send as sent_at/status from the earliest route proof rather than leaving
+  // inspect stuck on drafted/null. Presentation only — the durable pack-row
+  // repair is repair_makesafe_pack_sent_from_route_proofs.
+  const releaseProvedSent =
+    String(input.release_send_progress?.kind || "").toLowerCase() ===
+      "released";
+  let provedSentAt: string | null = null;
+  if (releaseProvedSent && input.proof_rows.length > 0) {
+    let best: number | null = null;
+    for (const row of input.proof_rows) {
+      const raw = str(row.proven_at);
+      if (!raw) continue;
+      const ms = new Date(raw).getTime();
+      if (!Number.isFinite(ms)) continue;
+      if (best === null || ms < best) {
+        best = ms;
+        provedSentAt = new Date(ms).toISOString();
+      }
+    }
+  }
+  const packRowStatus = input.pack_row ? str(input.pack_row.status) : null;
+  const packRowSentAt = input.pack_row ? str(input.pack_row.sent_at) : null;
   const pack: SesPackPointers = input.pack_row
     ? {
       exists: true,
-      status: str(input.pack_row.status),
+      status: packRowSentAt
+        ? packRowStatus
+        : (releaseProvedSent ? "sent" : packRowStatus),
       report_doc_id: str(input.pack_row.report_doc_id),
       invoice_doc_id: str(input.pack_row.invoice_doc_id),
       swms_doc_id: str(input.pack_row.swms_doc_id),
-      sent_at: str(input.pack_row.sent_at),
+      sent_at: packRowSentAt || (releaseProvedSent ? provedSentAt : null),
       send_started_at: str(input.pack_row.send_started_at),
     }
     : {

@@ -442,6 +442,15 @@ import {
   bodyAssertsReportSentAt as _bodyAssertsReportSentAt,
   REPORT_SENT_AT_ASSERTION_REFUSAL as _REPORT_SENT_AT_ASSERTION_REFUSAL,
 } from './makesafe_report_sent_stamp.ts'
+// Repair / forward stamp for makesafe_report_packs.sent_at from proved SES
+// release route proofs. Closeout SQL never patched the pack row; this is the
+// sealed-path twin of legacy send_pack's _patchPack(... status:sent).
+import {
+  PackSentFromProofsConflictError as _PackSentFromProofsConflictError,
+  PackSentFromProofsRequestError as _PackSentFromProofsRequestError,
+  mayAdvanceSubstatusFromPackStamp as _mayAdvanceSubstatusFromPackStamp,
+  repairMakesafePackSentFromRouteProofsAction as _repairMakesafePackSentFromRouteProofsAction,
+} from './makesafe_pack_sent_from_route_proofs.ts'
 import {
   degradedIntakeExceptionProjection as _degradedIntakeExceptionProjection,
   findIntakeExceptionItem as _findIntakeExceptionItem,
@@ -5489,6 +5498,102 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({ error: err.message, code: 'bad_request' }, err.status)
           }
           if (err instanceof _RecordTerminalProofConflictError) {
+            return json({
+              error: err.message,
+              code: err.code,
+              evidence: err.evidence ?? null,
+            }, err.status)
+          }
+          throw err
+        }
+      }
+
+      case 'repair_makesafe_pack_sent_from_route_proofs': {
+        // Deliberately NOT in ROUTINE_ALLOWED_ACTIONS. Dry-run default true.
+        // Backfills makesafe_report_packs.sent_at/status from an already-proved
+        // SES release; never redispatches Graph. Optionally advances a stale
+        // admin_to_send_report / ready_to_invoice substatus to complete.
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({
+            error:
+              'forbidden: repair_makesafe_pack_sent_from_route_proofs requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({
+            error: 'repair_makesafe_pack_sent_from_route_proofs requires POST',
+          }, 405)
+        }
+        try {
+          const packStamp = await _repairMakesafePackSentFromRouteProofsAction(
+            client,
+            body,
+          )
+          let substatus_repair: any = null
+          const advanceSubstatus = body?.advance_substatus !== false
+          const staleSendSubstatuses = new Set([
+            'admin_to_send_report',
+            'ready_to_invoice',
+          ])
+          // Only a fresh stamp (or dry-run would_stamp of a stampable plan)
+          // may advance substatus. already_sent must NEVER — that outcome
+          // returns before proof completeness and would force complete on a
+          // historically false/sent_marker_failed pack without re-proving.
+          if (
+            advanceSubstatus &&
+            _mayAdvanceSubstatusFromPackStamp(packStamp)
+          ) {
+            const detailResp = await client.from('makesafe_job_details')
+              .select('substatus')
+              .eq('job_id', packStamp.job_id)
+              .maybeSingle()
+            const currentSub = String(detailResp.data?.substatus || '')
+              .trim()
+              .toLowerCase()
+            if (staleSendSubstatuses.has(currentSub)) {
+              if (packStamp.dry_run) {
+                substatus_repair = {
+                  dry_run: true,
+                  would_advance: true,
+                  from: currentSub,
+                  to: 'complete',
+                }
+              } else {
+                const { error: subErr } = await writeMakesafeSubstatus(
+                  client,
+                  packStamp.job_id,
+                  {
+                    substatus: 'complete',
+                    updated_at: new Date().toISOString(),
+                  },
+                  internalEvidenceOrigin('closeout'),
+                )
+                substatus_repair = {
+                  dry_run: false,
+                  advanced: !subErr,
+                  from: currentSub,
+                  to: 'complete',
+                  error: subErr ? String(subErr.message || subErr) : null,
+                }
+              }
+            } else {
+              substatus_repair = {
+                dry_run: packStamp.dry_run,
+                would_advance: false,
+                from: currentSub || null,
+                to: null,
+                reason: 'substatus_not_stale_send',
+              }
+            }
+          }
+          return json({ ...packStamp, substatus_repair })
+        } catch (err: any) {
+          if (err instanceof _PackSentFromProofsRequestError) {
+            return json({ error: err.message, code: 'bad_request' }, err.status)
+          }
+          if (err instanceof _PackSentFromProofsConflictError) {
             return json({
               error: err.message,
               code: err.code,
