@@ -14,10 +14,20 @@
  * stage engine already reads (SWMS-261059 pattern), without minting a second
  * invoice and without inventing a stage write.
  *
+ * A second class — intentional assessment-only / no-invoice closeout
+ * (SWMS-26791) — needs the already-sealed `approved_nonwork_archive` kind.
+ * Substatus `complete` alone never places Archive under R12 (job status stays
+ * processing; no issued invoice corroborates a raw terminal claim). Funding is
+ * the privileged caller naming `kind=approved_nonwork_archive` against sealed
+ * assessment family + complete substatus + zero active own ACCREC — never a
+ * freeform triage note (same bar as #754). It never invents portal captures or
+ * money.
+ *
  * Standing law: an internal bookkeeping gap must not wall the captain. This
  * action records evidence; `ses_stage_engine_v2` then DERIVES archive/completed.
  * It never sends, never mints, never rewrites jobs/substatus/money, and never
- * widens the closed `kind` vocabulary.
+ * widens the closed `kind` vocabulary (both recordable kinds already exist on
+ * the table CHECK).
  *
  * Dry-run is the DEFAULT. A live write must be asked for explicitly.
  */
@@ -60,12 +70,41 @@ export class RecordTerminalProofConflictError extends Error {
 /** Closed set this action may write. Release closeout stays on the send path. */
 export const RECORDABLE_TERMINAL_PROOF_KINDS = [
   "verified_historical_closeout",
+  "approved_nonwork_archive",
 ] as const satisfies readonly MakesafeTerminalProofKind[];
 
 export type RecordableTerminalProofKind =
   typeof RECORDABLE_TERMINAL_PROOF_KINDS[number];
 
 const RAISED_INVOICE_STATUSES = new Set(["AUTHORISED", "PAID", "SUBMITTED"]);
+
+/** Sealed assessment family tokens only — never report_type alone. */
+const ASSESSMENT_FAMILY_TOKENS = new Set([
+  "assessment_report_quote",
+  "assessment",
+  "assessment_quote",
+]);
+
+/**
+ * Assessment non-work archive is family-gated off the sealed
+ * `jobs.metadata.makesafe_job_family` field. `report_type` may corroborate in
+ * evidence refs but must never sole-qualify a physical card.
+ */
+export function isAssessmentNonworkFamily(input: {
+  makesafe_job_family?: string | null;
+  report_type?: string | null;
+}): boolean {
+  const family = text(input.makesafe_job_family).toLowerCase().replace(
+    /[\s-]+/g,
+    "_",
+  );
+  if (!family) return false;
+  if (ASSESSMENT_FAMILY_TOKENS.has(family)) return true;
+  // Exact sealed assessment* family only — not a report_type substring, and
+  // not a loose includes() over unrelated tokens that happen to contain the
+  // word (e.g. a future "pre_assessment_physical" invent).
+  return false;
+}
 
 function badRequest(message: string): Error {
   return new RecordTerminalProofRequestError(message);
@@ -176,9 +215,18 @@ export interface RecordTerminalProofObservation {
   outbound_bindings: SiblingBindingRow[];
   reverse_bindings: SiblingBindingRow[];
   sibling_raised_invoices: SiblingInvoiceRow[];
+  /** makesafe_job_details overlay facts for the non-work archive path. */
+  substatus: string | null;
+  makesafe_job_family: string | null;
+  report_type: string | null;
+  /** Observed instant when substatus moved to complete (event created_at). */
+  substatus_complete_at: string | null;
 }
 
-export type RecordTerminalProofPath = "own_raised_invoice" | "sibling_bundle";
+export type RecordTerminalProofPath =
+  | "own_raised_invoice"
+  | "sibling_bundle"
+  | "intentional_no_invoice_complete";
 
 export interface RecordTerminalProofPlan {
   path: RecordTerminalProofPath;
@@ -203,6 +251,20 @@ function isRaisedAccrec(row: SiblingInvoiceRow | null | undefined): boolean {
   const type = text(row.invoice_type).toUpperCase();
   if (type && type !== "ACCREC") return false;
   return RAISED_INVOICE_STATUSES.has(text(row.status).toUpperCase());
+}
+
+/**
+ * Any live own ACCREC (DRAFT included). A DRAFT proves invoicing already
+ * started — archiving as "no invoice to raise" while it sits unpaid hides
+ * owed money. Mirrors hasActiveMakesafeInvoice (non-VOIDED/DELETED).
+ */
+function isActiveAccrec(row: SiblingInvoiceRow | null | undefined): boolean {
+  if (!row) return false;
+  const type = text(row.invoice_type).toUpperCase();
+  if (type && type !== "ACCREC") return false;
+  const status = text(row.status).toUpperCase();
+  if (!status) return false;
+  return !["VOIDED", "DELETED"].includes(status);
 }
 
 function currentBoundOutbound(
@@ -318,8 +380,84 @@ export async function planMakesafeTerminalProofRecord(input: {
     );
   }
 
-  const packRowSentAt = asIso(input.observation.pack_sent_at);
   const allNoteEvents = input.observation.pack_sent_events || [];
+  const ownRaised = (input.observation.own_raised_invoices || []).filter(
+    (row) => isRaisedAccrec(row) && text(row.job_id) === job.id,
+  );
+
+  // Path 0 — intentional assessment-only / no-invoice complete (SWMS-26791).
+  // Caller must name kind=approved_nonwork_archive explicitly. That privileged
+  // stamp is the durable captain decision — freeform notes never fund it
+  // (same bar as #754). Never selected as the default verified_historical
+  // closeout path.
+  if (kind === "approved_nonwork_archive") {
+    const ownActive = (input.observation.own_raised_invoices || []).filter(
+      (row) => isActiveAccrec(row) && text(row.job_id) === job.id,
+    );
+    if (ownActive.length > 0) {
+      throw conflict(
+        "own_active_invoice_present",
+        "This card already has a live ACCREC (including DRAFT); use verified_historical_closeout or resolve the invoice, not approved_nonwork_archive.",
+        {
+          own_invoice_numbers: ownActive.map((row) => text(row.invoice_number)),
+          own_invoice_statuses: ownActive.map((row) => text(row.status)),
+        },
+      );
+    }
+    if (
+      !isAssessmentNonworkFamily({
+        makesafe_job_family: input.observation.makesafe_job_family,
+        report_type: input.observation.report_type,
+      })
+    ) {
+      throw conflict(
+        "nonwork_family_not_assessment",
+        "approved_nonwork_archive is only for sealed assessment/quote family cards.",
+        {
+          makesafe_job_family: input.observation.makesafe_job_family,
+          report_type: input.observation.report_type,
+        },
+      );
+    }
+    if (text(input.observation.substatus).toLowerCase() !== "complete") {
+      throw conflict(
+        "substatus_not_complete",
+        "approved_nonwork_archive requires makesafe_job_details.substatus=complete.",
+        { substatus: input.observation.substatus },
+      );
+    }
+    const provenAt = resolveObservedProvenAt({
+      callerProvenAt: input.proven_at,
+      candidates: [input.observation.substatus_complete_at],
+    });
+    const family = text(input.observation.makesafe_job_family);
+    const refs = [
+      "terminal_proof_kind:approved_nonwork_archive",
+      ...(asIso(input.observation.substatus_complete_at)
+        ? ["makesafe_job_details:substatus=complete"]
+        : []),
+      `makesafe_job_family:${family}`,
+    ];
+    return {
+      path: "intentional_no_invoice_complete",
+      job_id: job.id,
+      org_id: job.org_id,
+      job_number: job.job_number,
+      kind,
+      attendance_cycle_ids: cycleIds,
+      attendance_cycle_set_hash: cycleSetHash,
+      evidence_refs: [...new Set(refs.filter(Boolean))],
+      proven_by: provenBy,
+      proven_at: provenAt,
+      sibling_job_id: null,
+      sibling_invoice_number: null,
+      sibling_invoice_id: null,
+      binding_revision_id: null,
+      reverse_binding_revision_id: null,
+    };
+  }
+
+  const packRowSentAt = asIso(input.observation.pack_sent_at);
   // Canonical main marker — irreversible-action grade (own path / U2 shape).
   const canonicalPackSentEvents = allNoteEvents.filter((ev) =>
     isPackSentMainEvent(asNoteEvent(ev))
@@ -330,9 +468,6 @@ export async function planMakesafeTerminalProofRecord(input: {
   );
 
   // Path 1 — own raised invoice (the U2 reconcile shape, callable here too).
-  const ownRaised = (input.observation.own_raised_invoices || []).filter(
-    (row) => isRaisedAccrec(row) && text(row.job_id) === job.id,
-  );
   if (ownRaised.length === 1 && !text(input.sibling_job_id)) {
     // Own path may NOT elevate a triage-only freeform note into closeout
     // evidence. Require a sent pack row or a canonical MAKESAFE_PACK_SENT marker.
@@ -544,7 +679,7 @@ export async function observeMakesafeTerminalProofRecord(
   jobId: string,
 ): Promise<RecordTerminalProofObservation> {
   const jobResp = await client.from("jobs").select(
-    "id,org_id,job_number,type,status",
+    "id,org_id,job_number,type,status,metadata",
   ).eq("id", jobId).maybeSingle();
   if (jobResp.error) {
     throw conflict("job_unreadable", `jobs read failed: ${jobResp.error.message}`);
@@ -560,6 +695,8 @@ export async function observeMakesafeTerminalProofRecord(
     eventsResp,
     packsResp,
     outboundResp,
+    detailsResp,
+    completeEventsResp,
   ] = await Promise.all([
     client.from("makesafe_attendance_cycles").select("id").eq("job_id", jobId),
     client.from("makesafe_terminal_proofs").select(
@@ -578,6 +715,12 @@ export async function observeMakesafeTerminalProofRecord(
     client.from("makesafe_sibling_bundle_binding_revisions").select(
       "id,job_id,sibling_job_id,bundle_id,org_id,state,recorded_at",
     ).eq("job_id", jobId).eq("state", "bound"),
+    client.from("makesafe_job_details").select(
+      "substatus,report_type",
+    ).eq("job_id", jobId).maybeSingle(),
+    client.from("job_events").select("id,event_type,detail_json,created_at")
+      .eq("job_id", jobId).eq("event_type", "makesafe_substatus_changed")
+      .order("created_at", { ascending: false }).limit(50),
   ]);
 
   for (
@@ -588,6 +731,8 @@ export async function observeMakesafeTerminalProofRecord(
       ["job_events", eventsResp],
       ["report_packs", packsResp],
       ["sibling_bindings", outboundResp],
+      ["makesafe_job_details", detailsResp],
+      ["substatus_events", completeEventsResp],
     ] as const
   ) {
     if (resp.error) {
@@ -633,6 +778,19 @@ export async function observeMakesafeTerminalProofRecord(
     ? asIso(packRow?.sent_at)
     : null;
 
+  const metadata = jobResp.data.metadata &&
+      typeof jobResp.data.metadata === "object"
+    ? jobResp.data.metadata as Record<string, unknown>
+    : {};
+  const detail = detailsResp.data || {};
+  const completeAt = (completeEventsResp.data || [])
+    .map((row: any) => {
+      const sub = text(row?.detail_json?.substatus).toLowerCase();
+      if (sub !== "complete") return null;
+      return asIso(row?.created_at);
+    })
+    .find((iso: string | null) => !!iso) || null;
+
   return {
     job: {
       id: text(jobResp.data.id),
@@ -655,6 +813,10 @@ export async function observeMakesafeTerminalProofRecord(
     outbound_bindings: outbound,
     reverse_bindings: reverse,
     sibling_raised_invoices: siblingInvoices,
+    substatus: detail.substatus ?? null,
+    makesafe_job_family: text(metadata.makesafe_job_family) || null,
+    report_type: detail.report_type ?? null,
+    substatus_complete_at: completeAt,
   };
 }
 
@@ -795,6 +957,7 @@ export async function recordMakesafeTerminalProofAction(
 /** Test-only helpers. */
 export const _internals = {
   isRaisedAccrec,
+  isActiveAccrec,
   currentBoundOutbound,
   matchingReverse,
   noteEventsFromRows,
