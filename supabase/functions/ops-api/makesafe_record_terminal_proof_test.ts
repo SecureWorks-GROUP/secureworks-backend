@@ -20,11 +20,12 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  isIntentionalNoInvoiceCompleteNote,
+  isAssessmentNonworkFamily,
   planMakesafeTerminalProofRecord,
   RecordTerminalProofConflictError,
   RecordTerminalProofRequestError,
   recordMakesafeTerminalProofAction,
+  _internals as terminalProofInternals,
   type RecordTerminalProofObservation,
 } from "./makesafe_record_terminal_proof.ts";
 import { deriveSesStageV2 } from "./ses_stage_engine_v2.ts";
@@ -103,10 +104,17 @@ function baseObservation(
   };
 }
 
+/** Live freeform triage prose on SWMS-26791 — must NEVER fund archive. */
 const SWMS_26791_NO_INVOICE_NOTE =
   "NO make-safe performed - member already had temporary fencing in place at attendance " +
   "(field note: 'no temp fencing required, already has temp fencing in place'). " +
   "Assessment/measurement-only visit. NO invoice to raise.";
+
+const PLANNING_AWAITING_INVOICE_NOTE =
+  "Assessment-only visit. There is no invoice yet; awaiting quote approval";
+
+const WO_MISSING_INVOICE_NUMBER_NOTE =
+  "Assessment visit complete. No invoice number on the WO.";
 
 const JOB_26791 = "8b916846-c67b-446d-86d1-fc56d75e6026";
 const CYCLE_26791 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -124,6 +132,7 @@ function nonworkObservation(
     },
     cycle_ids: [CYCLE_26791],
     own_raised_invoices: [],
+    // Freeform notes may exist on the card; they must never fund the path.
     pack_sent_events: [{
       id: "evt-26791-note",
       created_at: "2026-06-30T09:07:00.705Z",
@@ -722,38 +731,99 @@ Deno.test("missing proven_by on the action is a 400", async () => {
   );
 });
 
-Deno.test("SWMS-26791 note classifier requires both no-work and no-invoice signals", () => {
-  assertEquals(isIntentionalNoInvoiceCompleteNote(SWMS_26791_NO_INVOICE_NOTE), true);
+Deno.test("source pin: freeform intentional-no-invoice note classifier stays deleted", async () => {
+  const planner = await Deno.readTextFile(
+    new URL("./makesafe_record_terminal_proof.ts", import.meta.url),
+  );
+  assertEquals(planner.includes("isIntentionalNoInvoiceCompleteNote"), false);
+  assertEquals(planner.includes("intentional_no_invoice_note_missing"), false);
+  assertEquals(planner.includes('t.includes("no invoice")'), false);
+});
+
+Deno.test("sealed assessment family gate ignores report_type alone", () => {
   assertEquals(
-    isIntentionalNoInvoiceCompleteNote(
-      "Assessment/measurement-only visit. Still waiting on invoice.",
-    ),
+    isAssessmentNonworkFamily({
+      makesafe_job_family: "assessment_report_quote",
+      report_type: null,
+    }),
+    true,
+  );
+  assertEquals(
+    isAssessmentNonworkFamily({
+      makesafe_job_family: "general_makesafe",
+      report_type: "assessment",
+    }),
     false,
   );
   assertEquals(
-    isIntentionalNoInvoiceCompleteNote("NO invoice to raise — crew will return"),
+    isAssessmentNonworkFamily({
+      makesafe_job_family: null,
+      report_type: "assessment",
+    }),
     false,
   );
 });
 
-Deno.test("SWMS-26791 approved_nonwork_archive path plans from complete + no-invoice note", async () => {
+Deno.test("active ACCREC predicate counts DRAFT and refuses VOIDED/DELETED", () => {
+  assertEquals(
+    terminalProofInternals.isActiveAccrec({
+      id: "d1",
+      job_id: JOB_26791,
+      invoice_number: "INV-DRAFT",
+      status: "DRAFT",
+      invoice_type: "ACCREC",
+    }),
+    true,
+  );
+  assertEquals(
+    terminalProofInternals.isActiveAccrec({
+      id: "a1",
+      job_id: JOB_26791,
+      invoice_number: "INV-AUTH",
+      status: "AUTHORISED",
+      invoice_type: "ACCREC",
+    }),
+    true,
+  );
+  assertEquals(
+    terminalProofInternals.isActiveAccrec({
+      id: "v1",
+      job_id: JOB_26791,
+      invoice_number: "INV-VOID",
+      status: "VOIDED",
+      invoice_type: "ACCREC",
+    }),
+    false,
+  );
+});
+
+Deno.test("SWMS-26791 approved_nonwork_archive plans from captain stamp + sealed assessment + complete", async () => {
+  // Privileged explicit kind is the durable captain stamp. Freeform notes on
+  // the card are ignored — they must not appear in evidence_refs.
   const plan = await planMakesafeTerminalProofRecord({
-    observation: nonworkObservation(),
+    observation: nonworkObservation({
+      pack_sent_events: [],
+    }),
     proven_by: "ses-codefix:swms-26791-nonwork-archive",
     kind: "approved_nonwork_archive",
   });
   assertEquals(plan.path, "intentional_no_invoice_complete");
   assertEquals(plan.kind, "approved_nonwork_archive");
   assertEquals(plan.job_id, JOB_26791);
-  assertEquals(plan.proven_at, "2026-06-30T09:07:00.705Z");
-  assert(plan.evidence_refs.some((r) => r.includes("evt-26791-note")));
-  assert(plan.evidence_refs.some((r) => r.includes("assessment")));
+  assertEquals(plan.proven_at, "2026-06-30T09:07:01.235Z");
+  assert(plan.evidence_refs.includes("terminal_proof_kind:approved_nonwork_archive"));
+  assert(plan.evidence_refs.includes("makesafe_job_details:substatus=complete"));
+  assert(
+    plan.evidence_refs.includes("makesafe_job_family:assessment_report_quote"),
+  );
+  assertEquals(plan.evidence_refs.some((r) => r.startsWith("job_events:")), false);
+  assertEquals(plan.evidence_refs.some((r) => r.includes("note:")), false);
   assertEquals(plan.sibling_invoice_number, null);
 });
 
 Deno.test("SWMS-26791 planned nonwork proof places the card in archive via stage engine", async () => {
   const plan = await planMakesafeTerminalProofRecord({
-    observation: nonworkObservation(),
+    observation: nonworkObservation({ pack_sent_events: [] }),
     proven_by: "ses-codefix:swms-26791-nonwork-archive",
     kind: "approved_nonwork_archive",
   });
@@ -792,7 +862,7 @@ Deno.test("SWMS-26791 planned nonwork proof places the card in archive via stage
   assert(result.reasons.some((r) => r.includes("approved_nonwork_archive")));
 });
 
-Deno.test("approved_nonwork_archive refuses when a raised ACCREC already exists", async () => {
+Deno.test("approved_nonwork_archive refuses when a raised AUTHORISED ACCREC already exists", async () => {
   const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
@@ -810,7 +880,28 @@ Deno.test("approved_nonwork_archive refuses when a raised ACCREC already exists"
       }),
     RecordTerminalProofConflictError,
   ) as RecordTerminalProofConflictError;
-  assertEquals(err.code, "own_raised_invoice_present");
+  assertEquals(err.code, "own_active_invoice_present");
+});
+
+Deno.test("probe 2: DRAFT own ACCREC blocks no-invoice archive", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation({
+          own_raised_invoices: [{
+            id: "own-draft",
+            job_id: JOB_26791,
+            invoice_number: "INV-DRAFT-1",
+            status: "DRAFT",
+            invoice_type: "ACCREC",
+          }],
+        }),
+        proven_by: "operator",
+        kind: "approved_nonwork_archive",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "own_active_invoice_present");
 });
 
 Deno.test("approved_nonwork_archive refuses non-assessment families", async () => {
@@ -820,6 +911,22 @@ Deno.test("approved_nonwork_archive refuses non-assessment families", async () =
         observation: nonworkObservation({
           makesafe_job_family: "general_makesafe",
           report_type: null,
+        }),
+        proven_by: "operator",
+        kind: "approved_nonwork_archive",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "nonwork_family_not_assessment");
+});
+
+Deno.test("probe 5: report_type=assessment alone on general_makesafe family refuses", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: nonworkObservation({
+          makesafe_job_family: "general_makesafe",
+          report_type: "assessment",
         }),
         proven_by: "operator",
         kind: "approved_nonwork_archive",
@@ -842,28 +949,54 @@ Deno.test("approved_nonwork_archive refuses when substatus is not complete", asy
   assertEquals(err.code, "substatus_not_complete");
 });
 
-Deno.test("approved_nonwork_archive refuses without an intentional no-invoice note", async () => {
-  const err = await assertRejects(
-    () =>
-      planMakesafeTerminalProofRecord({
-        observation: nonworkObservation({
-          pack_sent_events: [{
-            id: "evt-noise",
-            created_at: "2026-06-30T09:07:00Z",
-            text: "crew attended, assessment form still open",
-          }],
-        }),
-        proven_by: "operator",
-        kind: "approved_nonwork_archive",
-      }),
-    RecordTerminalProofConflictError,
-  ) as RecordTerminalProofConflictError;
-  assertEquals(err.code, "intentional_no_invoice_note_missing");
+Deno.test("probe 1: awaiting-invoice planning note never funds nonwork archive evidence", async () => {
+  // Explicit captain kind still required; when it is present the path plans from
+  // sealed family + complete — but the planning note must not be cited.
+  const plan = await planMakesafeTerminalProofRecord({
+    observation: nonworkObservation({
+      pack_sent_events: [{
+        id: "evt-planning",
+        created_at: "2026-06-30T09:07:00Z",
+        text: PLANNING_AWAITING_INVOICE_NOTE,
+      }],
+    }),
+    proven_by: "operator",
+    kind: "approved_nonwork_archive",
+  });
+  assertEquals(plan.path, "intentional_no_invoice_complete");
+  assertEquals(
+    plan.evidence_refs.some((r) =>
+      r.includes("evt-planning") || r.includes("note:")
+    ),
+    false,
+  );
+});
+
+Deno.test("probe 3: 'no invoice number on the WO' note never funds archive evidence", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
+    observation: nonworkObservation({
+      pack_sent_events: [{
+        id: "evt-wo-missing",
+        created_at: "2026-06-30T09:07:00Z",
+        text: WO_MISSING_INVOICE_NUMBER_NOTE,
+      }],
+    }),
+    proven_by: "operator",
+    kind: "approved_nonwork_archive",
+  });
+  assertEquals(plan.path, "intentional_no_invoice_complete");
+  assertEquals(
+    plan.evidence_refs.some((r) =>
+      r.includes("evt-wo-missing") || r.includes("note:")
+    ),
+    false,
+  );
 });
 
 Deno.test("default verified_historical_closeout still refuses a no-invoice assessment card", async () => {
   // Neighbour unchanged: without pack-sent + raised money, the card cannot
-  // silently take the nonwork path when the caller omits the kind.
+  // silently take the nonwork path when the caller omits the kind. Freeform
+  // notes alone never open approved_nonwork_archive.
   const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({

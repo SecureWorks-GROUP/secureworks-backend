@@ -17,9 +17,11 @@
  * A second class — intentional assessment-only / no-invoice closeout
  * (SWMS-26791) — needs the already-sealed `approved_nonwork_archive` kind.
  * Substatus `complete` alone never places Archive under R12 (job status stays
- * processing; no issued invoice corroborates a raw terminal claim). This
- * recorder cites the durable no-work/no-invoice note + complete substatus and
- * records that kind; it never invents portal captures or money.
+ * processing; no issued invoice corroborates a raw terminal claim). Funding is
+ * the privileged caller naming `kind=approved_nonwork_archive` against sealed
+ * assessment family + complete substatus + zero active own ACCREC — never a
+ * freeform triage note (same bar as #754). It never invents portal captures or
+ * money.
  *
  * Standing law: an internal bookkeeping gap must not wall the captain. This
  * action records evidence; `ses_stage_engine_v2` then DERIVES archive/completed.
@@ -76,6 +78,7 @@ export type RecordableTerminalProofKind =
 
 const RAISED_INVOICE_STATUSES = new Set(["AUTHORISED", "PAID", "SUBMITTED"]);
 
+/** Sealed assessment family tokens only — never report_type alone. */
 const ASSESSMENT_FAMILY_TOKENS = new Set([
   "assessment_report_quote",
   "assessment",
@@ -83,29 +86,10 @@ const ASSESSMENT_FAMILY_TOKENS = new Set([
 ]);
 
 /**
- * Durable intentional no-invoice / no-make-safe note (SWMS-26791 class).
- * Requires BOTH a no-work signal and a no-invoice signal so an ordinary
- * "awaiting invoice" triage note cannot fund a non-work archive.
+ * Assessment non-work archive is family-gated off the sealed
+ * `jobs.metadata.makesafe_job_family` field. `report_type` may corroborate in
+ * evidence refs but must never sole-qualify a physical card.
  */
-export function isIntentionalNoInvoiceCompleteNote(raw: string): boolean {
-  const t = String(raw || "").toLowerCase();
-  if (!t) return false;
-  const noWork =
-    t.includes("no make-safe performed") ||
-    t.includes("no makesafe performed") ||
-    t.includes("assessment/measurement-only") ||
-    t.includes("assessment-only") ||
-    t.includes("assessment only") ||
-    (t.includes("no temp fencing required") &&
-      t.includes("already has temp"));
-  const noInvoice =
-    t.includes("no invoice to raise") ||
-    t.includes("no invoice") ||
-    t.includes("without an invoice") ||
-    t.includes("without invoice");
-  return noWork && noInvoice;
-}
-
 export function isAssessmentNonworkFamily(input: {
   makesafe_job_family?: string | null;
   report_type?: string | null;
@@ -114,14 +98,11 @@ export function isAssessmentNonworkFamily(input: {
     /[\s-]+/g,
     "_",
   );
-  const reportType = text(input.report_type).toLowerCase().replace(
-    /[\s-]+/g,
-    "_",
-  );
+  if (!family) return false;
   if (ASSESSMENT_FAMILY_TOKENS.has(family)) return true;
-  if (family.includes("assessment")) return true;
-  if (ASSESSMENT_FAMILY_TOKENS.has(reportType)) return true;
-  if (reportType.includes("assessment")) return true;
+  // Exact sealed assessment* family only — not a report_type substring, and
+  // not a loose includes() over unrelated tokens that happen to contain the
+  // word (e.g. a future "pre_assessment_physical" invent).
   return false;
 }
 
@@ -272,6 +253,20 @@ function isRaisedAccrec(row: SiblingInvoiceRow | null | undefined): boolean {
   return RAISED_INVOICE_STATUSES.has(text(row.status).toUpperCase());
 }
 
+/**
+ * Any live own ACCREC (DRAFT included). A DRAFT proves invoicing already
+ * started — archiving as "no invoice to raise" while it sits unpaid hides
+ * owed money. Mirrors hasActiveMakesafeInvoice (non-VOIDED/DELETED).
+ */
+function isActiveAccrec(row: SiblingInvoiceRow | null | undefined): boolean {
+  if (!row) return false;
+  const type = text(row.invoice_type).toUpperCase();
+  if (type && type !== "ACCREC") return false;
+  const status = text(row.status).toUpperCase();
+  if (!status) return false;
+  return !["VOIDED", "DELETED"].includes(status);
+}
+
 function currentBoundOutbound(
   rows: readonly SiblingBindingRow[],
   jobId: string,
@@ -391,15 +386,21 @@ export async function planMakesafeTerminalProofRecord(input: {
   );
 
   // Path 0 — intentional assessment-only / no-invoice complete (SWMS-26791).
-  // Caller must name kind=approved_nonwork_archive explicitly. Never selected
-  // as the default verified_historical_closeout path.
+  // Caller must name kind=approved_nonwork_archive explicitly. That privileged
+  // stamp is the durable captain decision — freeform notes never fund it
+  // (same bar as #754). Never selected as the default verified_historical
+  // closeout path.
   if (kind === "approved_nonwork_archive") {
-    if (ownRaised.length > 0) {
+    const ownActive = (input.observation.own_raised_invoices || []).filter(
+      (row) => isActiveAccrec(row) && text(row.job_id) === job.id,
+    );
+    if (ownActive.length > 0) {
       throw conflict(
-        "own_raised_invoice_present",
-        "This card already has a raised ACCREC; use verified_historical_closeout, not approved_nonwork_archive.",
+        "own_active_invoice_present",
+        "This card already has a live ACCREC (including DRAFT); use verified_historical_closeout or resolve the invoice, not approved_nonwork_archive.",
         {
-          own_invoice_numbers: ownRaised.map((row) => text(row.invoice_number)),
+          own_invoice_numbers: ownActive.map((row) => text(row.invoice_number)),
+          own_invoice_statuses: ownActive.map((row) => text(row.status)),
         },
       );
     }
@@ -411,7 +412,7 @@ export async function planMakesafeTerminalProofRecord(input: {
     ) {
       throw conflict(
         "nonwork_family_not_assessment",
-        "approved_nonwork_archive is only for assessment/quote cards with an intentional no-invoice closeout.",
+        "approved_nonwork_archive is only for sealed assessment/quote family cards.",
         {
           makesafe_job_family: input.observation.makesafe_job_family,
           report_type: input.observation.report_type,
@@ -425,36 +426,17 @@ export async function planMakesafeTerminalProofRecord(input: {
         { substatus: input.observation.substatus },
       );
     }
-    const intentionalNotes = allNoteEvents.filter((ev) =>
-      isIntentionalNoInvoiceCompleteNote(ev.text)
-    );
-    if (intentionalNotes.length === 0) {
-      throw conflict(
-        "intentional_no_invoice_note_missing",
-        "No durable note records both that no make-safe was performed and that no invoice is to be raised.",
-      );
-    }
     const provenAt = resolveObservedProvenAt({
       callerProvenAt: input.proven_at,
-      candidates: [
-        intentionalNotes[0]?.created_at,
-        input.observation.substatus_complete_at,
-      ],
+      candidates: [input.observation.substatus_complete_at],
     });
+    const family = text(input.observation.makesafe_job_family);
     const refs = [
-      ...intentionalNotes.slice(0, 1).map((ev) =>
-        ev.id
-          ? `job_events:${text(ev.id)}`
-          : "note:intentional_no_invoice_complete"
-      ),
+      "terminal_proof_kind:approved_nonwork_archive",
       ...(asIso(input.observation.substatus_complete_at)
         ? ["makesafe_job_details:substatus=complete"]
         : []),
-      `makesafe_job_family:${
-        text(input.observation.makesafe_job_family) ||
-        text(input.observation.report_type) ||
-        "assessment"
-      }`,
+      `makesafe_job_family:${family}`,
     ];
     return {
       path: "intentional_no_invoice_complete",
@@ -975,6 +957,7 @@ export async function recordMakesafeTerminalProofAction(
 /** Test-only helpers. */
 export const _internals = {
   isRaisedAccrec,
+  isActiveAccrec,
   currentBoundOutbound,
   matchingReverse,
   noteEventsFromRows,
