@@ -98,6 +98,44 @@ function eventNoteText(ev: any): string {
   return text(ev?.detail || "");
 }
 
+function asNoteEvent(ev: { text: string }) {
+  return { event_type: "note", detail_json: { text: ev.text } };
+}
+
+/**
+ * proven_at is derived only from observed evidence. A caller may echo one of
+ * those instants; inventing a different clock (or falling back to "now") is
+ * refused — the stage engine ages Archive off this field.
+ */
+function resolveObservedProvenAt(input: {
+  callerProvenAt: string | null | undefined;
+  candidates: ReadonlyArray<unknown>;
+}): string {
+  const ordered: string[] = [];
+  for (const candidate of input.candidates) {
+    const iso = asIso(candidate);
+    if (iso && !ordered.includes(iso)) ordered.push(iso);
+  }
+  if (ordered.length === 0) {
+    throw conflict(
+      "proven_at_unresolvable",
+      "No observed pack-sent, invoice, or binding timestamp is available to stamp proven_at.",
+    );
+  }
+  const caller = asIso(input.callerProvenAt);
+  if (caller) {
+    if (!ordered.includes(caller)) {
+      throw conflict(
+        "proven_at_not_observed",
+        "proven_at must equal an observed pack-sent, invoice, or binding timestamp.",
+        { caller_proven_at: caller, observed: ordered },
+      );
+    }
+    return caller;
+  }
+  return ordered[0];
+}
+
 export interface SiblingBindingRow {
   id?: string | null;
   job_id?: string | null;
@@ -190,10 +228,12 @@ function matchingReverse(
 }
 
 /**
- * Pure planner: given live observations, either return a write plan or throw a
- * typed refusal. Never invents a sibling, invoice, or send that is not present.
+ * Planner: given live observations, either return a write plan or throw a typed
+ * refusal. Never invents a sibling, invoice, send, or completion clock.
+ * Async so the cycle-set hash (U2 semantics) is known before the already-recorded
+ * gate — a superseded proof for an older cycle set must not wall a covering write.
  */
-export function planMakesafeTerminalProofRecord(input: {
+export async function planMakesafeTerminalProofRecord(input: {
   observation: RecordTerminalProofObservation;
   proven_by: string;
   kind?: string | null;
@@ -201,7 +241,7 @@ export function planMakesafeTerminalProofRecord(input: {
   extra_evidence_refs?: readonly string[] | null;
   sibling_job_id?: string | null;
   sibling_invoice_number?: string | null;
-}): RecordTerminalProofPlan {
+}): Promise<RecordTerminalProofPlan> {
   const provenBy = text(input.proven_by);
   if (!provenBy) throw badRequest("proven_by is required");
 
@@ -217,6 +257,16 @@ export function planMakesafeTerminalProofRecord(input: {
     throw badRequest(`unrecognised terminal proof kind: ${kindRaw}`);
   }
   const kind = kindRaw as RecordableTerminalProofKind;
+
+  // Caller may not invent citations; the recorder stamps only observed refs.
+  const callerRefs = (input.extra_evidence_refs || [])
+    .map((r) => text(r))
+    .filter(Boolean);
+  if (callerRefs.length > 0) {
+    throw badRequest(
+      "caller evidence_refs are not accepted; the recorder cites only observed evidence",
+    );
+  }
 
   const job = input.observation.job;
   if (!job?.id || !job.org_id) {
@@ -247,62 +297,71 @@ export function planMakesafeTerminalProofRecord(input: {
     );
   }
 
-  // Hash is computed by the caller (async crypto); placeholder filled later.
-  // The planner still needs the cycle set. The action fills the hash before write.
+  const cycleSetHash = await makesafeAttendanceCycleSetHash(cycleIds);
 
-  const existing = (input.observation.existing_proofs || []).filter((row) =>
-    text(row.kind) === kind
+  // U2 reconcile semantics: refuse only a same-kind proof that already covers
+  // THIS cycle-set hash. A re-attendance changes the set; the old proof stops
+  // covering and must not block a fresh covering write.
+  const coveringExisting = (input.observation.existing_proofs || []).filter(
+    (row) =>
+      text(row.kind) === kind &&
+      text(row.attendance_cycle_set_hash) === cycleSetHash,
   );
-  if (existing.length > 0) {
-    // Exact hash compare happens after the hash is known; refuse early when ANY
-    // same-kind proof already exists for this job — SWMS-261059 pattern.
+  if (coveringExisting.length > 0) {
     throw conflict(
       "terminal_proof_already_recorded",
-      "A verified historical closeout proof is already recorded for this job.",
+      "A verified historical closeout proof is already recorded for this attendance-cycle set.",
       {
-        proof_ids: existing.map((row) => row.id),
-        kinds: existing.map((row) => row.kind),
+        proof_ids: coveringExisting.map((row) => row.id),
+        attendance_cycle_set_hash: cycleSetHash,
       },
     );
   }
 
-  const packSentEvents = (input.observation.pack_sent_events || []).filter(
-    (ev) =>
-      isPackSentTriageEvent({
-        event_type: "note",
-        detail_json: { text: ev.text },
-      }),
+  const packRowSentAt = asIso(input.observation.pack_sent_at);
+  const allNoteEvents = input.observation.pack_sent_events || [];
+  // Canonical main marker — irreversible-action grade (own path / U2 shape).
+  const canonicalPackSentEvents = allNoteEvents.filter((ev) =>
+    isPackSentMainEvent(asNoteEvent(ev))
   );
-  const packSentAt = asIso(input.observation.pack_sent_at) ||
-    asIso(packSentEvents[0]?.created_at);
-  const hasPackSent = !!packSentAt || packSentEvents.length > 0;
-  if (!hasPackSent) {
-    throw conflict(
-      "pack_send_evidence_missing",
-      "No pack-sent marker (canonical or bundled-coverage) is recorded on this card.",
-    );
-  }
-
-  const extraRefs = [...new Set(
-    (input.extra_evidence_refs || []).map((r) => text(r)).filter(Boolean),
-  )];
+  // Board-triage set (canonical OR bundled-coverage note) — sibling path only.
+  const triagePackSentEvents = allNoteEvents.filter((ev) =>
+    isPackSentTriageEvent(asNoteEvent(ev))
+  );
 
   // Path 1 — own raised invoice (the U2 reconcile shape, callable here too).
   const ownRaised = (input.observation.own_raised_invoices || []).filter(
     (row) => isRaisedAccrec(row) && text(row.job_id) === job.id,
   );
   if (ownRaised.length === 1 && !text(input.sibling_job_id)) {
+    // Own path may NOT elevate a triage-only freeform note into closeout
+    // evidence. Require a sent pack row or a canonical MAKESAFE_PACK_SENT marker.
+    const ownPackSentAt = packRowSentAt ||
+      asIso(canonicalPackSentEvents[0]?.created_at);
+    if (!ownPackSentAt && canonicalPackSentEvents.length === 0) {
+      throw conflict(
+        "pack_send_evidence_missing",
+        "Own-invoice closeout requires a sent pack or canonical MAKESAFE_PACK_SENT marker; a triage-only bundled note is not enough.",
+      );
+    }
     const invoice = ownRaised[0];
-    const provenAt = asIso(input.proven_at) || packSentAt ||
-      asIso(invoice.fully_paid_on) || asIso(invoice.invoice_date) ||
-      new Date().toISOString();
+    const provenAt = resolveObservedProvenAt({
+      callerProvenAt: input.proven_at,
+      candidates: [
+        ownPackSentAt,
+        invoice.fully_paid_on,
+        invoice.invoice_date,
+      ],
+    });
     const refs = [
       `xero_invoices:${text(invoice.id)}`,
       `xero_invoice_number:${text(invoice.invoice_number)}`,
-      ...packSentEvents.slice(0, 1).map((ev) =>
-        ev.id ? `job_events:${text(ev.id)}` : "pack_sent:triage_marker"
+      ...canonicalPackSentEvents.slice(0, 1).map((ev) =>
+        ev.id ? `job_events:${text(ev.id)}` : "pack_sent:main_marker"
       ),
-      ...extraRefs,
+      ...(packRowSentAt && canonicalPackSentEvents.length === 0
+        ? ["pack_sent:report_pack_sent_at"]
+        : []),
     ];
     return {
       path: "own_raised_invoice",
@@ -311,10 +370,10 @@ export function planMakesafeTerminalProofRecord(input: {
       job_number: job.job_number,
       kind,
       attendance_cycle_ids: cycleIds,
-      attendance_cycle_set_hash: "", // filled by action
+      attendance_cycle_set_hash: cycleSetHash,
       evidence_refs: [...new Set(refs.filter(Boolean))],
       proven_by: provenBy,
-      proven_at: provenAt!,
+      proven_at: provenAt,
       sibling_job_id: null,
       sibling_invoice_number: text(invoice.invoice_number) || null,
       sibling_invoice_id: text(invoice.id) || null,
@@ -324,6 +383,17 @@ export function planMakesafeTerminalProofRecord(input: {
   }
 
   // Path 2 — sibling bundle: reciprocal binding + sibling raised ACCREC.
+  // Bundled-coverage triage notes are allowed here as ONE leg beside the
+  // binding and the sibling raised invoice — never alone, never on the own path.
+  const siblingPackSentAt = packRowSentAt ||
+    asIso(triagePackSentEvents[0]?.created_at);
+  if (!siblingPackSentAt && triagePackSentEvents.length === 0) {
+    throw conflict(
+      "pack_send_evidence_missing",
+      "No pack-sent marker (canonical or bundled-coverage) is recorded on this card.",
+    );
+  }
+
   const requestedSibling = text(input.sibling_job_id);
   const outboundAll = currentBoundOutbound(
     input.observation.outbound_bindings,
@@ -411,11 +481,15 @@ export function planMakesafeTerminalProofRecord(input: {
     );
   }
 
-  const provenAt = asIso(input.proven_at) || packSentAt ||
-    asIso(siblingInvoice.fully_paid_on) ||
-    asIso(siblingInvoice.invoice_date) ||
-    asIso(binding.recorded_at) ||
-    new Date().toISOString();
+  const provenAt = resolveObservedProvenAt({
+    callerProvenAt: input.proven_at,
+    candidates: [
+      siblingPackSentAt,
+      siblingInvoice.fully_paid_on,
+      siblingInvoice.invoice_date,
+      binding.recorded_at,
+    ],
+  });
 
   const refs = [
     `makesafe_sibling_bundle_binding_revisions:${text(binding.id)}`,
@@ -423,14 +497,13 @@ export function planMakesafeTerminalProofRecord(input: {
     `sibling_job_id:${siblingId}`,
     `xero_invoices:${text(siblingInvoice.id)}`,
     `xero_invoice_number:${text(siblingInvoice.invoice_number)}`,
-    ...packSentEvents.slice(0, 2).map((ev) =>
+    ...triagePackSentEvents.slice(0, 2).map((ev) =>
       ev.id
         ? `job_events:${text(ev.id)}`
         : (isBundledCoverageSendNote(ev.text)
           ? "pack_sent:bundled_coverage_note"
           : "pack_sent:triage_marker")
     ),
-    ...extraRefs,
   ];
 
   return {
@@ -440,23 +513,16 @@ export function planMakesafeTerminalProofRecord(input: {
     job_number: job.job_number,
     kind,
     attendance_cycle_ids: cycleIds,
-    attendance_cycle_set_hash: "",
+    attendance_cycle_set_hash: cycleSetHash,
     evidence_refs: [...new Set(refs.filter(Boolean))],
     proven_by: provenBy,
-    proven_at: provenAt!,
+    proven_at: provenAt,
     sibling_job_id: siblingId,
     sibling_invoice_number: text(siblingInvoice.invoice_number) || null,
     sibling_invoice_id: text(siblingInvoice.id) || null,
     binding_revision_id: text(binding.id) || null,
     reverse_binding_revision_id: text(reverse.id) || null,
   };
-}
-
-async function withHash(
-  plan: RecordTerminalProofPlan,
-): Promise<RecordTerminalProofPlan> {
-  const hash = await makesafeAttendanceCycleSetHash(plan.attendance_cycle_ids);
-  return { ...plan, attendance_cycle_set_hash: hash };
 }
 
 function noteEventsFromRows(rows: any[] | null | undefined) {
@@ -645,7 +711,7 @@ export async function recordMakesafeTerminalProofAction(
   if (!jobId) throw badRequest("job_id or job_number is required");
 
   const observation = await observeMakesafeTerminalProofRecord(client, jobId);
-  const planned = planMakesafeTerminalProofRecord({
+  const plan = await planMakesafeTerminalProofRecord({
     observation,
     proven_by: provenBy,
     kind: text(body?.kind) || "verified_historical_closeout",
@@ -656,7 +722,6 @@ export async function recordMakesafeTerminalProofAction(
     sibling_job_id: text(body?.sibling_job_id) || null,
     sibling_invoice_number: text(body?.sibling_invoice_number) || null,
   });
-  const plan = await withHash(planned);
 
   if (dryRun) {
     return {

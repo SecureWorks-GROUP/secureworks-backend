@@ -6,12 +6,16 @@
  * INV-0835 PAID. U2 reconcile never writes a proof (no OWN raised invoice).
  * These tests pin the planner: bundled path accepts reciprocal binding +
  * sibling PAID + pack-sent triage; neighbours stay refused.
+ *
+ * Adversarial regressions (PR 752 review):
+ *   A — superseded same-kind proof must not wall a covering re-attend write
+ *   B — caller proven_at that is not an observed instant is refused
+ *   C — own path must not elevate a triage-only freeform note into closeout
  */
 import {
   assert,
   assertEquals,
   assertRejects,
-  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   planMakesafeTerminalProofRecord,
@@ -26,6 +30,7 @@ import { makesafeAttendanceCycleSetHash } from "./makesafe_terminal_proof.ts";
 const JOB = "c3afc061-0d4a-43ff-8309-0b8b512e307a";
 const SIBLING = "02f614a4-09a7-422e-9381-c89a44aceccd";
 const CYCLE = "8360be6f-390d-4205-a711-6d7730bb8085";
+const CYCLE_2 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const BINDING = "7dcf8954-5f8c-412b-898e-bc92987e44fc";
 const REVERSE = "a2ebb22e-6f46-463d-87c8-7e7ec71cd399";
 const BUNDLE = "1cd35292-1eb7-438f-bf6e-8dbcdf3fb135";
@@ -36,6 +41,9 @@ const SWMS_26832_LEGACY_NOTE =
   "BUNDLED into SWMS-26837 temp-fence make-safe (one WO) - no separate invoice; " +
   "labour+report+SWMS covered under INV-0835. Sent to bunbury@ in the MLB-26393 " +
   "claim email 2026-06-30T08:32:20Z.";
+
+const CANONICAL_PACK_SENT =
+  "MAKESAFE_PACK_SENT | main | - | to=bunbury@mlbuilders.com.au | 2026-06-30T08:32:01Z | msgid=abc | bundled under INV-0835 on SWMS-26837";
 
 function baseObservation(
   over: Partial<RecordTerminalProofObservation> = {},
@@ -88,8 +96,8 @@ function baseObservation(
   };
 }
 
-Deno.test("SWMS-26832 bundled path: reciprocal binding + sibling PAID + bundled send note plans a proof", () => {
-  const plan = planMakesafeTerminalProofRecord({
+Deno.test("SWMS-26832 bundled path: reciprocal binding + sibling PAID + bundled send note plans a proof", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
     observation: baseObservation(),
     proven_by: "ses-codefix:swms-26832-bundled-closeout",
   });
@@ -100,6 +108,7 @@ Deno.test("SWMS-26832 bundled path: reciprocal binding + sibling PAID + bundled 
   assertEquals(plan.binding_revision_id, BINDING);
   assertEquals(plan.reverse_binding_revision_id, REVERSE);
   assertEquals(plan.proven_at, "2026-06-30T08:32:21.612Z");
+  assert(plan.attendance_cycle_set_hash.startsWith("sha256:"));
   assert(plan.evidence_refs.some((r) => r.includes(BINDING)));
   assert(plan.evidence_refs.some((r) => r.includes("INV-0835")));
   // Photo claim is deliberately NOT required — missing photo must not wall closeout.
@@ -109,14 +118,13 @@ Deno.test("SWMS-26832 bundled path: reciprocal binding + sibling PAID + bundled 
   );
 });
 
-Deno.test("canonical MAKESAFE_PACK_SENT marker also satisfies pack-sent evidence", () => {
-  const plan = planMakesafeTerminalProofRecord({
+Deno.test("canonical MAKESAFE_PACK_SENT marker also satisfies pack-sent evidence", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
     observation: baseObservation({
       pack_sent_events: [{
         id: "evt-canonical",
         created_at: "2026-06-30T08:32:01Z",
-        text:
-          "MAKESAFE_PACK_SENT | main | - | to=bunbury@mlbuilders.com.au | 2026-06-30T08:32:01Z | msgid=abc | bundled under INV-0835 on SWMS-26837",
+        text: CANONICAL_PACK_SENT,
       }],
     }),
     proven_by: "operator",
@@ -125,8 +133,8 @@ Deno.test("canonical MAKESAFE_PACK_SENT marker also satisfies pack-sent evidence
   assertEquals(plan.proven_at, "2026-06-30T08:32:01.000Z");
 });
 
-Deno.test("missing reciprocal binding refuses", () => {
-  const err = assertThrows(
+Deno.test("missing reciprocal binding refuses", async () => {
+  const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation({ reverse_bindings: [] }),
@@ -137,8 +145,8 @@ Deno.test("missing reciprocal binding refuses", () => {
   assertEquals(err.code, "sibling_binding_not_bidirectional");
 });
 
-Deno.test("missing sibling raised invoice refuses", () => {
-  const err = assertThrows(
+Deno.test("missing sibling raised invoice refuses", async () => {
+  const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation({ sibling_raised_invoices: [] }),
@@ -149,8 +157,8 @@ Deno.test("missing sibling raised invoice refuses", () => {
   assertEquals(err.code, "sibling_raised_invoice_missing");
 });
 
-Deno.test("DRAFT sibling invoice never funds a closeout proof", () => {
-  const err = assertThrows(
+Deno.test("DRAFT sibling invoice never funds a closeout proof", async () => {
+  const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation({
@@ -169,8 +177,8 @@ Deno.test("DRAFT sibling invoice never funds a closeout proof", () => {
   assertEquals(err.code, "sibling_raised_invoice_missing");
 });
 
-Deno.test("no pack-sent evidence refuses", () => {
-  const err = assertThrows(
+Deno.test("no pack-sent evidence refuses", async () => {
+  const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation({
@@ -188,8 +196,8 @@ Deno.test("no pack-sent evidence refuses", () => {
   assertEquals(err.code, "pack_send_evidence_missing");
 });
 
-Deno.test("own raised invoice on the claiming card refuses the bundled path", () => {
-  const err = assertThrows(
+Deno.test("own raised invoice on the claiming card refuses the bundled path", async () => {
+  const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation({
@@ -209,8 +217,8 @@ Deno.test("own raised invoice on the claiming card refuses the bundled path", ()
   assertEquals(err.code, "own_raised_invoice_present");
 });
 
-Deno.test("own raised invoice path works when no sibling is forced", () => {
-  const plan = planMakesafeTerminalProofRecord({
+Deno.test("own raised invoice path works with canonical pack-sent evidence", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
     observation: baseObservation({
       own_raised_invoices: [{
         id: "own-inv",
@@ -220,23 +228,30 @@ Deno.test("own raised invoice path works when no sibling is forced", () => {
         invoice_type: "ACCREC",
         invoice_date: "2026-06-30",
       }],
+      pack_sent_events: [{
+        id: "evt-canonical",
+        created_at: "2026-06-30T08:32:01Z",
+        text: CANONICAL_PACK_SENT,
+      }],
       // Keep sibling data; own path wins when sibling_job_id is not forced.
     }),
     proven_by: "operator",
   });
   assertEquals(plan.path, "own_raised_invoice");
   assertEquals(plan.sibling_invoice_number, "INV-9999");
+  assertEquals(plan.proven_at, "2026-06-30T08:32:01.000Z");
 });
 
-Deno.test("already-recorded proof refuses", () => {
-  const err = assertThrows(
+Deno.test("covering same-kind proof for the current cycle set refuses", async () => {
+  const currentHash = await makesafeAttendanceCycleSetHash([CYCLE]);
+  const err = await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation({
           existing_proofs: [{
             id: "proof-1",
             kind: "verified_historical_closeout",
-            attendance_cycle_set_hash: "sha256:abc",
+            attendance_cycle_set_hash: currentHash,
           }],
         }),
         proven_by: "operator",
@@ -246,8 +261,94 @@ Deno.test("already-recorded proof refuses", () => {
   assertEquals(err.code, "terminal_proof_already_recorded");
 });
 
-Deno.test("proven_by is required", () => {
-  assertThrows(
+Deno.test("probe A: superseded same-kind proof after reattend does not wall a covering write", async () => {
+  // Old proof covered C1 only. Current set is C1+C2 after re-attendance.
+  // U2 semantics: hash differs → plan a fresh covering proof.
+  const plan = await planMakesafeTerminalProofRecord({
+    observation: baseObservation({
+      cycle_ids: [CYCLE, CYCLE_2],
+      existing_proofs: [{
+        id: "proof-old-cycle1-only",
+        kind: "verified_historical_closeout",
+        attendance_cycle_set_hash: "sha256:deadbeef",
+      }],
+    }),
+    proven_by: "adversarial-probe",
+  });
+  assertEquals(plan.path, "sibling_bundle");
+  const expectedHash = await makesafeAttendanceCycleSetHash([CYCLE, CYCLE_2]);
+  assertEquals(plan.attendance_cycle_set_hash, expectedHash);
+  assertEquals(plan.attendance_cycle_ids.sort(), [CYCLE, CYCLE_2].sort());
+});
+
+Deno.test("probe B: caller proven_at that is not an observed instant refuses", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: baseObservation(),
+        proven_by: "adversarial-probe",
+        proven_at: "2020-01-01T00:00:00.000Z",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "proven_at_not_observed");
+});
+
+Deno.test("caller proven_at that echoes the observed pack-sent time is accepted", async () => {
+  const plan = await planMakesafeTerminalProofRecord({
+    observation: baseObservation(),
+    proven_by: "operator",
+    proven_at: "2026-06-30T08:32:21.612Z",
+  });
+  assertEquals(plan.proven_at, "2026-06-30T08:32:21.612Z");
+});
+
+Deno.test("probe C: own path refuses triage-only freeform note without canonical pack-sent", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: baseObservation({
+          outbound_bindings: [],
+          reverse_bindings: [],
+          sibling_raised_invoices: [],
+          own_raised_invoices: [{
+            id: "own-inv",
+            job_id: JOB,
+            invoice_number: "INV-9999",
+            status: "AUTHORISED",
+            invoice_type: "ACCREC",
+            invoice_date: "2026-08-01",
+          }],
+          pack_sent_events: [{
+            id: "evt-fake",
+            created_at: "2026-08-01T12:00:00Z",
+            text:
+              "BUNDLED into sibling covered under INV-9999 — will send later",
+          }],
+          pack_sent_at: null,
+        }),
+        proven_by: "adversarial-probe",
+      }),
+    RecordTerminalProofConflictError,
+  ) as RecordTerminalProofConflictError;
+  assertEquals(err.code, "pack_send_evidence_missing");
+});
+
+Deno.test("caller evidence_refs are refused", async () => {
+  const err = await assertRejects(
+    () =>
+      planMakesafeTerminalProofRecord({
+        observation: baseObservation(),
+        proven_by: "operator",
+        extra_evidence_refs: ["invented:citation"],
+      }),
+    RecordTerminalProofRequestError,
+  );
+  assert(String(err.message).includes("evidence_refs"));
+});
+
+Deno.test("proven_by is required", async () => {
+  await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation(),
@@ -257,8 +358,8 @@ Deno.test("proven_by is required", () => {
   );
 });
 
-Deno.test("release_closeout kind is refused here (send path owns it)", () => {
-  assertThrows(
+Deno.test("release_closeout kind is refused here (send path owns it)", async () => {
+  await assertRejects(
     () =>
       planMakesafeTerminalProofRecord({
         observation: baseObservation(),
@@ -270,11 +371,13 @@ Deno.test("release_closeout kind is refused here (send path owns it)", () => {
 });
 
 Deno.test("a planned bundled proof places SWMS-26832 into archive via the stage engine", async () => {
-  const plan = planMakesafeTerminalProofRecord({
+  const plan = await planMakesafeTerminalProofRecord({
     observation: baseObservation(),
     proven_by: "ses-codefix:swms-26832-bundled-closeout",
   });
   const hash = await makesafeAttendanceCycleSetHash(plan.attendance_cycle_ids);
+  // Cast matches ses_stage_engine_v2_terminal_proof_test: detail carries the
+  // cycle id the board loader stamps; the published SesStageV2Input type lags.
   const result = deriveSesStageV2({
     job: {
       status: "invoiced",
@@ -300,8 +403,8 @@ Deno.test("a planned bundled proof places SWMS-26832 into archive via the stage 
       }],
     },
     nowIso: "2026-08-24T00:00:00.000Z",
-  });
-  assertEquals(hash.startsWith("sha256:"), true);
+  } as any);
+  assertEquals(hash, plan.attendance_cycle_set_hash);
   assertEquals(result.stage, "archive");
   assert(
     result.reasons.some((r) => r.includes("verified_historical_closeout")),
