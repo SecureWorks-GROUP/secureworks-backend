@@ -9,6 +9,9 @@
 import {
   AJS_WORK_ORDERS_MAILBOX,
   ajsPackCc,
+  isAjbrBuilderKey,
+  SES_FINANCE_CC,
+  sesReleaseRouteCc,
   universalReportCc,
 } from "./ses_release_route_shape.ts";
 
@@ -774,11 +777,12 @@ export function checkReportJobClientSendGate(
 // ── Sealed-release client-send gate kinds ────────────────────────────────────
 //
 // Skill / Captain backend release contract (2026-08-04):
-//   AJS/AJBR: report_invoice + photo (ses@ on both)
+//   AJS: report_invoice keeps permanent pack CCs; AJBR completion docs finance only
+//   every builder: photo has no cc
 //   MLB/others: report + photo + invoice (report/photo no cc; invoice finance@ only)
 // Kind names match the skill table exactly — do not invent parallel aliases.
 
-export const MAKESAFE_FINANCE_CC = "finance@secureworkswa.com.au";
+export const MAKESAFE_FINANCE_CC = SES_FINANCE_CC;
 export const AJS_INVOICE_TO = "workorders@ajs.build";
 
 /** Route kinds from the skill backend release contract. */
@@ -799,7 +803,7 @@ export type SesReleaseClientSendGateKind =
 
 export interface SesClientSendRouteContext {
   kind: SesClientSendRouteKind;
-  /** AJS | AJBR | MLB | … — required for photo (cc rules differ). */
+  /** AJS | AJBR | MLB | … — required for builder-scoped route CC rules. */
   builderKey?: string | null;
   /**
    * Explicit processing mailbox for report_invoice / invoice.
@@ -820,11 +824,6 @@ export function isRawPhotoDumpName(name: string): boolean {
   const base = name.split(/[\\/]/).pop() || name;
   const stem = base.replace(/\.[^.]+$/, "");
   return /^photo\d+$/i.test(stem) || /^img[_\s-]?\d+$/i.test(stem);
-}
-
-function isAjsBuilder(builderKey: unknown): boolean {
-  const key = String(builderKey || "").trim().toUpperCase();
-  return key === "AJS" || key === "AJBR";
 }
 
 function sharedEnvelopeFailures(payload: ClientSendPayload): string[] {
@@ -897,12 +896,15 @@ function toIncludesConfigured(
 
 /**
  * AJS/AJBR `report_invoice`: combined final report + real Xero invoice PDF.
- * TO must include explicit invoice_to (workorders@ajs.build); CC must include
- * the permanent AJS pack set (ses@ + vanessa@ + mandi@).
+ * TO must include explicit invoice_to (workorders@ajs.build). AJS keeps its
+ * permanent pack CC set; AJBR must use finance only.
  */
 export function checkReportInvoiceClientSendGate(
   payload: ClientSendPayload,
-  ctx: Pick<SesClientSendRouteContext, "configuredInvoiceTo"> = {},
+  ctx: Pick<
+    SesClientSendRouteContext,
+    "configuredInvoiceTo" | "builderKey"
+  > = {},
 ): string[] {
   const failures = sharedEnvelopeFailures(payload);
   const configured = String(ctx.configuredInvoiceTo || AJS_INVOICE_TO).trim()
@@ -919,9 +921,25 @@ export function checkReportInvoiceClientSendGate(
     );
   }
   const cc = splitEmails(payload.cc);
-  for (const required of ajsPackCc()) {
+  const builderKey = ctx.builderKey || "AJS";
+  const requiredCc = sesReleaseRouteCc({
+    routeKind: "report_invoice",
+    builderKey,
+  });
+  for (const required of requiredCc) {
     if (!cc.includes(required)) {
       failures.push(`report_invoice cc must include ${required}`);
+    }
+  }
+  if (isAjbrBuilderKey(builderKey)) {
+    const requiredSet = new Set(requiredCc);
+    const extras = cc.filter((address) => !requiredSet.has(address));
+    if (extras.length > 0) {
+      failures.push(
+        `AJBR report_invoice cc must be finance only; got extra ${
+          extras.join(", ")
+        }`,
+      );
     }
   }
   const names = attachmentNames(payload.attachments);
@@ -999,9 +1017,7 @@ export function checkMlbReportClientSendGate(
 }
 
 /**
- * `photo` route — builder-aware CC:
- *   AJS/AJBR: must include permanent pack CCs (ses@ + vanessa@ + mandi@)
- *   MLB/others: must have no cc
+ * `photo` route — no CC for every builder (Captain 2026-08-24).
  * Attachments: labelled images only; refuse PDF pack bleed and raw photoNN names.
  */
 export function checkPhotoRouteClientSendGate(
@@ -1009,17 +1025,10 @@ export function checkPhotoRouteClientSendGate(
   ctx: Pick<SesClientSendRouteContext, "builderKey" | "configuredPhotoTo"> = {},
 ): string[] {
   const failures = sharedEnvelopeFailures(payload);
-  const ajs = isAjsBuilder(ctx.builderKey);
   const cc = splitEmails(payload.cc);
-  if (ajs) {
-    for (const required of ajsPackCc()) {
-      if (!cc.includes(required)) {
-        failures.push(`AJS photo route cc must include ${required}`);
-      }
-    }
-  } else if (cc.length > 0) {
+  if (cc.length > 0) {
     failures.push(
-      `photo route must have no cc for non-AJS builders; got ${cc.join(", ")}`,
+      `photo route must have no cc; got ${cc.join(", ")}`,
     );
   }
   const configuredPhoto = String(ctx.configuredPhotoTo || "").trim()
@@ -1058,7 +1067,7 @@ export function checkPhotoRouteClientSendGate(
   return failures;
 }
 
-/** @deprecated alias for AJS photo (ses@ required via builderKey) */
+/** @deprecated alias for the canonical photo gate. */
 export function checkAjsPhotoClientSendGate(
   payload: ClientSendPayload,
 ): string[] {

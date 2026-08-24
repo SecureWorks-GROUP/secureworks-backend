@@ -35,7 +35,7 @@ import {
   type SesDocketPersistenceClient,
 } from "./ses_docket_persistence.ts";
 import { mlbPhysicalUsesOrdinaryMailSendFallback } from "./ses_mlb_thread_reply.ts";
-import { ajsPackCc } from "./ses_release_route_shape.ts";
+import { ajsPackCc, sesReleaseRouteCc } from "./ses_release_route_shape.ts";
 import {
   materialsChargeDecisionFromRevision,
   SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
@@ -399,7 +399,9 @@ function assertDraftZeroInvoice(
 function assertCommercialReviewProposal(
   result: {
     invoice_proposal: unknown;
-    blockers: Array<{ reason_code: string; reason: string; issue_class?: string }>;
+    blockers: Array<
+      { reason_code: string; reason: string; issue_class?: string }
+    >;
     review_spec: Record<string, unknown>;
   },
   reasonIncludes: string,
@@ -417,7 +419,10 @@ function assertCommercialReviewProposal(
     String(item.issue_class || "") === "commercial_review"
   );
   assert(blocker, "expected a commercial review caveat");
-  assertStringIncludes(blocker.reason.toLowerCase(), reasonIncludes.toLowerCase());
+  assertStringIncludes(
+    blocker.reason.toLowerCase(),
+    reasonIncludes.toLowerCase(),
+  );
   assertEquals(
     (reviewCard(result).commercial_review_codes as string[] || []).length > 0,
     true,
@@ -1236,16 +1241,11 @@ Deno.test("AJS 70062 roof wording assembles the physical make-safe pack", async 
   ]);
 });
 
-// Captain 2026-08-06: the operator-facing AJS/AJBR drafts must render the SAME
-// permanent pack CC set the sealed route sends on — ses@ + vanessa@ + mandi@,
-// domain always ajs.build — and must never put a billing contact on the To.
-// MLB drafts are untouched by that ruling and must carry neither address.
-Deno.test("AJS/AJBR email drafts render the permanent pack CC set; MLB drafts do not", async () => {
-  const expectedCc = `Cc: ${ajsPackCc().join(", ")}`;
-  assertEquals(
-    expectedCc,
-    "Cc: ses@secureworkswa.com.au, vanessa@ajs.build, mandi@ajs.build",
-  );
+// Captain 2026-08-24: AJBR completion docs CC finance only and every photo
+// route has no CC. AJS completion docs and MLB report/invoice recipients stay
+// unchanged. These are the operator-facing drafts; resolved release routes use
+// the same producer and are pinned independently in ses_release_route_shape_test.
+Deno.test("email drafts show the builder-scoped completion CC and no photo CC", async () => {
   for (const builderKey of ["AJS", "AJBR"] as const) {
     const row = SES_FAMILY_MATRIX.find((candidate) =>
       candidate.builder_key === builderKey &&
@@ -1256,13 +1256,24 @@ Deno.test("AJS/AJBR email drafts render the permanent pack CC set; MLB drafts do
       request(input.identity.job_id),
       dependencies(input),
     )).results[0];
-    for (
-      const draft of [
-        result.email_drafts.REPORT_EMAIL_DRAFT,
-        result.email_drafts.PHOTO_EMAIL_DRAFT,
-      ]
-    ) {
-      assertStringIncludes(draft, expectedCc);
+    const reportDraft = String(result.email_drafts.REPORT_EMAIL_DRAFT);
+    const photoDraft = String(result.email_drafts.PHOTO_EMAIL_DRAFT);
+    const expectedReportCc = sesReleaseRouteCc({
+      routeKind: "report_invoice",
+      builderKey,
+    });
+    assertStringIncludes(
+      reportDraft,
+      `Cc: ${expectedReportCc.join(", ")}`,
+    );
+    assertStringIncludes(photoDraft, "Cc: \n");
+    if (builderKey === "AJBR") {
+      assertEquals(reportDraft.includes("ses@secureworkswa.com.au"), false);
+      assertStringIncludes(reportDraft, "finance@secureworkswa.com.au");
+    } else {
+      assertEquals(expectedReportCc, ajsPackCc());
+    }
+    for (const draft of [reportDraft, photoDraft]) {
       const toLine = String(draft).split("\n").find((line) =>
         line.startsWith("To:")
       )!;
@@ -1289,6 +1300,18 @@ Deno.test("AJS/AJBR email drafts render the permanent pack CC set; MLB drafts do
     request(fixtureInput(mlbRow).identity.job_id),
     dependencies(fixtureInput(mlbRow)),
   )).results[0];
+  assertStringIncludes(
+    String(mlbResult.email_drafts.REPORT_EMAIL_DRAFT),
+    "Cc: ses@secureworkswa.com.au",
+  );
+  assertStringIncludes(
+    String(mlbResult.email_drafts.INVOICE_EMAIL_DRAFT),
+    "Cc: finance@secureworkswa.com.au",
+  );
+  assertStringIncludes(
+    String(mlbResult.email_drafts.PHOTO_EMAIL_DRAFT),
+    "Cc: \n",
+  );
   for (const draft of Object.values(mlbResult.email_drafts)) {
     assertEquals(
       String(draft).includes("vanessa@") || String(draft).includes("mandi@"),
@@ -3296,7 +3319,10 @@ Deno.test("a genuine AJS temporary-fence kit soft-flags labour-only for Captain 
     hours_per_trade: 3,
     existing_fence_star_picket_refusal: "genuine_temporary_fence_signal",
   });
-  const proposal = assertCommercialReviewProposal(result, "temporary-fence kit");
+  const proposal = assertCommercialReviewProposal(
+    result,
+    "temporary-fence kit",
+  );
   assertEquals(
     (proposal.line_items as Array<Record<string, unknown>>).length,
     1,

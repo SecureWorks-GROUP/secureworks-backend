@@ -1,9 +1,9 @@
 // deno-lint-ignore-file no-explicit-any require-await
 /**
- * SEND IT envelope gate for the permanent AJS/AJBR pack CCs (Captain
- * 2026-08-06). The producer is proved in ses_release_route_shape_test.ts; this
- * drives the real executeSesReleaseRevisionAction so the boundary under test is
- * WHICH stored envelopes the widened CC requirement may refuse.
+ * SEND IT envelope gate for the route-scoped AJS/AJBR recipient rules. The
+ * producer is proved in ses_release_route_shape_test.ts; this drives the real
+ * executeSesReleaseRevisionAction so the boundary under test is WHICH stored
+ * envelopes the current CC requirement may refuse.
  *
  * A release approved before the ruling stores cc [ses@] only. Refusing such a
  * release once it has already mailed a route would strand it: the refusal's own
@@ -19,7 +19,7 @@ import {
   SesActionError,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
-import { ajsPackCc } from "./ses_release_route_shape.ts";
+import { ajsPackCc, SES_FINANCE_CC } from "./ses_release_route_shape.ts";
 import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
 const RELEASE_ID = "release-cc-1";
@@ -46,13 +46,13 @@ function query(result: { data: any; error: any }): any {
   return builder;
 }
 
-function ajsRoutes(cc: string[]): any[] {
+function ajsRoutes(completionCc: string[], photoCc: string[]): any[] {
   return [
     {
       ordinal: 1,
       route_kind: "report_invoice",
       recipients: ["workorders@ajs.build"],
-      cc,
+      cc: completionCc,
       subject: "Report + Invoice",
       // Builder-facing wording: the execute body guard refuses annotation
       // vocabulary, so stub bodies must be as clean as real producer output.
@@ -65,7 +65,7 @@ function ajsRoutes(cc: string[]): any[] {
       ordinal: 2,
       route_kind: "photo",
       recipients: ["workorders@ajs.build"],
-      cc,
+      cc: photoCc,
       subject: "Photos",
       body: "Please find attached site photos for AJBR-1.\n\nThank you.",
       body_hash: hash(2),
@@ -91,6 +91,7 @@ const ARTIFACTS = [
 
 interface Harness {
   routes: any[];
+  builderKey: "AJS" | "AJBR";
   /** route_kinds whose send effect already exists and is confirmed. */
   confirmedKinds: string[];
   /** Forces the prior-send ledger read to fault. */
@@ -143,7 +144,7 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
               envelope: {
                 v2: {
                   classification: {
-                    builder_key: "AJS",
+                    builder_key: harness.builderKey,
                     family: "physical_makesafe",
                   },
                   routing: {},
@@ -182,6 +183,15 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
         const effect = {
           ...rpcArgs.p_effect,
           state: alreadyConfirmed ? "confirmed" : "reserved",
+          ...(alreadyConfirmed
+            ? {
+              provider_digest: {
+                message_id: `graph-message-prior-${routeKind}`,
+                internet_message_id: `<prior-${routeKind}@graph>`,
+                operation_token: rpcArgs.p_effect.external_token,
+              },
+            }
+            : {}),
         };
         harness.effects.set(String(effect.operation_key), effect);
         if (alreadyConfirmed) {
@@ -267,8 +277,12 @@ function mailGatewayStub(harness: Harness): any {
 const xeroReader = { readAuthorised: async () => ({ id: "xero-invoice-1" }) };
 
 function harness(overrides: Partial<Harness> = {}): Harness {
+  const builderKey = overrides.builderKey || "AJS";
   return {
-    routes: ajsRoutes(ajsPackCc()),
+    routes: builderKey === "AJBR"
+      ? ajsRoutes([SES_FINANCE_CC], [])
+      : ajsRoutes(ajsPackCc(), []),
+    builderKey,
     confirmedKinds: [],
     effectReadError: null,
     effects: new Map(),
@@ -289,7 +303,7 @@ async function execute(state: Harness) {
 }
 
 Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanent pack CC", async () => {
-  const state = harness({ routes: ajsRoutes(LEGACY_CC) });
+  const state = harness({ routes: ajsRoutes(LEGACY_CC, LEGACY_CC) });
   let error: SesActionError | null = null;
   try {
     await execute(state);
@@ -308,7 +322,8 @@ Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanen
 
 Deno.test("SEND IT finishes an in-flight pre-ruling AJS release instead of stranding it", async () => {
   const state = harness({
-    routes: ajsRoutes(LEGACY_CC),
+    routes: ajsRoutes(LEGACY_CC, LEGACY_CC),
+    builderKey: "AJS",
     confirmedKinds: ["report_invoice"],
   });
   const result: any = await execute(state);
@@ -319,7 +334,10 @@ Deno.test("SEND IT finishes an in-flight pre-ruling AJS release instead of stran
 
 Deno.test("SEND IT still enforces the ses@ floor on an in-flight pre-ruling release", async () => {
   const state = harness({
-    routes: ajsRoutes(["someone-else@example.com"]),
+    routes: ajsRoutes(
+      ["someone-else@example.com"],
+      ["someone-else@example.com"],
+    ),
     confirmedKinds: ["report_invoice"],
   });
   let error: SesActionError | null = null;
@@ -338,7 +356,7 @@ Deno.test("SEND IT still enforces the ses@ floor on an in-flight pre-ruling rele
 
 Deno.test("SEND IT refuses on an unreadable send ledger rather than guessing the CC floor", async () => {
   const state = harness({
-    routes: ajsRoutes(LEGACY_CC),
+    routes: ajsRoutes(LEGACY_CC, LEGACY_CC),
     effectReadError: { message: "connection reset" },
   });
   let error: SesActionError | null = null;
@@ -354,7 +372,7 @@ Deno.test("SEND IT refuses on an unreadable send ledger rather than guessing the
   assertEquals(state.graphCalls.length, 0);
 });
 
-Deno.test("SEND IT dispatches a current AJS release carrying all three permanent CCs", async () => {
+Deno.test("SEND IT keeps AJS completion CCs and clears the AJS photo CC", async () => {
   const state = harness();
   const result: any = await execute(state);
   assertEquals(result.state, "released");
@@ -362,7 +380,39 @@ Deno.test("SEND IT dispatches a current AJS release carrying all three permanent
     "Report + Invoice",
     "Photos",
   ]);
-  for (const call of state.graphCalls) {
-    assertEquals(call.cc, ajsPackCc());
+  assertEquals(state.graphCalls[0].cc, ajsPackCc());
+  assertEquals(state.graphCalls[1].cc, []);
+});
+
+Deno.test("SEND IT dispatches AJBR completion docs with finance only and photos with no CC", async () => {
+  const state = harness({ builderKey: "AJBR" });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls.map((call) => call.subject), [
+    "Report + Invoice",
+    "Photos",
+  ]);
+  assertEquals(state.graphCalls[0].cc, [SES_FINANCE_CC]);
+  assertEquals(state.graphCalls[0].cc.includes(MAKESAFE_CC), false);
+  assertEquals(state.graphCalls[1].cc, []);
+});
+
+Deno.test("SEND IT refuses a never-dispatched AJBR release carrying the old CC set", async () => {
+  const state = harness({
+    builderKey: "AJBR",
+    routes: ajsRoutes(ajsPackCc(), ajsPackCc()),
+  });
+  let error: SesActionError | null = null;
+  try {
+    await execute(state);
+  } catch (err) {
+    error = err as SesActionError;
   }
+  assert(error instanceof SesActionError, "expected a typed SES refusal");
+  const refusal = error!.refusal as any;
+  assertEquals(refusal.code, "route_recipient_invalid");
+  assertEquals(refusal.evidence.builder_key, "AJBR");
+  assertEquals(refusal.evidence.required, [SES_FINANCE_CC]);
+  assertEquals(refusal.evidence.exact, true);
+  assertEquals(state.graphCalls.length, 0);
 });

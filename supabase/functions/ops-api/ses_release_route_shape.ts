@@ -4,8 +4,11 @@
 //   two emails — (A) report + invoice together, (B) photos follow-up;
 //   TO workorders@ajs.build + thread participants; from admin@.
 //
-// Captain ruling 2026-08-06 (AJS/AJBR permanent builder CCs):
-//   CC on ALL AJS/AJBR pack emails: ses@ + vanessa@ajs.build + mandi@ajs.build.
+// Captain ruling 2026-08-06 (AJS/AJBR permanent builder CCs), superseded for
+// AJBR by the Captain's 2026-08-24 recipient ruling below:
+//   AJS completion docs keep ses@ + vanessa@ajs.build + mandi@ajs.build.
+//   AJBR completion docs CC finance@ only; AJBR no longer CCs ses@.
+//   Every photo route has no CC, regardless of builder.
 //   Domain spelling is always ajs.build (never ajsbuild / ajsbuid).
 //
 // Captain ruling 2026-08-05 (MLB physical / Maylands):
@@ -26,8 +29,8 @@
 // Shaun 2026-08-20 (report route only):
 //   EVERY non-AJS `report` route CCs ses@secureworkswa.com.au - MLB physical
 //   included, alongside MLB report-only families and every other non-AJS
-//   builder. The photo route still carries no cc, and the invoice billing pack
-//   keeps finance@ and still never ccs ses@. Producer: universalReportCc().
+//   builder. Every photo route carries no cc, and the invoice billing pack keeps
+//   finance@ and still never ccs ses@. Producer: sesReleaseRouteCc().
 //   Supersedes the 2026-07-21 ses@ removal for THAT ROUTE only.
 
 import type { SesRouteKind } from "./ses_review_cockpit.ts";
@@ -50,6 +53,8 @@ export {
 };
 
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;
+
+export const SES_FINANCE_CC = "finance@secureworkswa.com.au";
 
 export const SES_UNIVERSAL_ROUTE_ORDER: SesRouteKind[] = [
   "report",
@@ -74,6 +79,10 @@ export const SES_MLB_PHYSICAL_ROUTE_ORDER: SesRouteKind[] = [
 export function isAjsBuilderKey(builderKey: unknown): boolean {
   const key = String(builderKey || "").trim().toUpperCase();
   return key === "AJS" || key === "AJBR";
+}
+
+export function isAjbrBuilderKey(builderKey: unknown): boolean {
+  return String(builderKey || "").trim().toUpperCase() === "AJBR";
 }
 
 export function sesReleaseRouteOrder(
@@ -112,10 +121,11 @@ export function ajsPackRecipients(args: {
 }
 
 /**
- * Authoritative AJS/AJBR pack CC set (Captain 2026-08-06).
+ * The AJS permanent pack CC set (Captain 2026-08-06).
  * Order is stable: SecureWorks proof surface first, then permanent builder CCs.
- * This function is the single producer for sealed SES release routes; legacy
- * makesafe_send_pack and recipient gates must consume the same list.
+ * AJBR sealed releases no longer consume this set after the Captain's
+ * 2026-08-24 ruling; legacy makesafe_send_pack still does until that separate
+ * send path is retired or migrated.
  */
 export function ajsPackCc(): string[] {
   return uniqueEmails([
@@ -133,9 +143,9 @@ export function ajsPackCc(): string[] {
  * ses@ on the report. It supersedes the 2026-07-21 removal of ses@ FROM THAT
  * ONE ROUTE and nothing else:
  *
- *   - the photo route still carries no cc on every non-AJS builder;
+ *   - the photo route carries no cc for every builder;
  *   - the invoice billing pack keeps finance@ and still never ccs ses@;
- *   - AJS/AJBR are untouched and keep ajsPackCc().
+ *   - AJS completion docs keep ajsPackCc(); AJBR completion docs use finance.
  *
  * Single producer for the draft (`buildEmailDrafts`) and the gate, so the
  * envelope the operator reads and the envelope the gate grades cannot drift.
@@ -144,6 +154,31 @@ export function ajsPackCc(): string[] {
  */
 export function universalReportCc(): string[] {
   return uniqueEmails([SES_RELEASE_CC]);
+}
+
+/**
+ * Canonical CC list for one sealed SES release route.
+ *
+ * Captain 2026-08-24:
+ *   - AJBR completion documents (`report_invoice`, including its stored
+ *     pre-combine `report` draft) CC finance only;
+ *   - every photo route has no CC, for every builder;
+ *   - AJS and every non-AJBR report/invoice route keep their prior recipients.
+ *
+ * Draft construction, resolved cockpit routes, client-send gates and SEND IT
+ * all consume this producer so the operator preview and Graph envelope agree.
+ */
+export function sesReleaseRouteCc(args: {
+  routeKind: SesRouteKind;
+  builderKey?: unknown;
+}): string[] {
+  if (args.routeKind === "photo") return [];
+  if (args.routeKind === "invoice") return uniqueEmails([SES_FINANCE_CC]);
+  if (isAjbrBuilderKey(args.builderKey)) {
+    return uniqueEmails([SES_FINANCE_CC]);
+  }
+  if (isAjsBuilderKey(args.builderKey)) return ajsPackCc();
+  return universalReportCc();
 }
 
 /**

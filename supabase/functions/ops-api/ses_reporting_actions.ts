@@ -71,17 +71,16 @@ import {
   presentSesPackHonesty,
   type SesPackPresentation,
 } from "./ses_pack_presentation.ts";
+import { applySesSampleDestinationOverride } from "./ses_sample_destination.ts";
 import {
-  applySesSampleDestinationOverride,
-} from "./ses_sample_destination.ts";
-import {
-  ajsPackCc,
   ajsPackRecipients,
+  isAjbrBuilderKey,
   isAjsBuilderKey,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
   sesBodyCarriesInternalAnnotation,
   sesBuilderRouteBody,
+  sesReleaseRouteCc,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -662,6 +661,10 @@ export function resolveDocketRoutes(
   ).trim();
 
   const resolvedRoutes = draftRoutes(docket).map((route) => {
+    const routeCc = sesReleaseRouteCc({
+      routeKind: route.route_kind,
+      builderKey,
+    });
     const referenced = route.attachment_hashes.map((path) => byPath.get(path));
     const resolved = referenced
       .filter((artifact): artifact is Record<string, any> => !!artifact)
@@ -669,6 +672,7 @@ export function resolveDocketRoutes(
     if (route.route_kind !== "invoice") {
       return {
         ...route,
+        cc: routeCc,
         // Builder-facing body is SET here, never inherited from the stored
         // draft: `email_drafts` bodies are operator annotations for the docket
         // display and shipped verbatim to the builder on the MLB physical and
@@ -707,6 +711,7 @@ export function resolveDocketRoutes(
     if (noAdditionalCharge) {
       return {
         ...route,
+        cc: routeCc,
         subject: `${reference || "Make-safe"} - no additional charge`,
         body: sesBuilderRouteBody("invoice", builderReference, {
           noAdditionalCharge: true,
@@ -724,6 +729,7 @@ export function resolveDocketRoutes(
       const invoiceNumber = boundInvoiceNumber || "pending-number";
       return {
         ...route,
+        cc: routeCc,
         subject: `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`
           .trim(),
         // Builder-facing wording even while pre-authorise: the route is what
@@ -747,6 +753,7 @@ export function resolveDocketRoutes(
     if (docket.stage !== "invoice_bound" || xeroStatus !== "AUTHORISED") {
       return {
         ...route,
+        cc: routeCc,
         body: sesBuilderRouteBody("invoice", builderReference),
         attachment_hashes: [...new Set(supportHashes)],
         // Support PDFs are not an invoice. Until a live Xero draft is bound
@@ -762,6 +769,7 @@ export function resolveDocketRoutes(
     const invoiceNumber = boundInvoiceNumber;
     return {
       ...route,
+      cc: routeCc,
       subject: `${reference || "Make-safe"} - Xero invoice ${invoiceNumber}`
         .trim(),
       body: sesBuilderRouteBody("invoice", builderReference),
@@ -825,38 +833,39 @@ export function resolveDocketRoutes(
     return applySesSampleDestinationOverride(
       docket,
       resolvedRoutes.map((route) => {
-      const declared = mlbPhysicalRouteRecipients(
-        route.route_kind,
-        billingMailbox,
-      );
-      // A legacy envelope that declares no billing mailbox keeps whatever the
-      // draft addressed the invoice to: emptying a money route is worse than
-      // leaving it as prepared, and assertSesRouteRecipients still guards it.
-      const recipients = declared.length > 0 ? declared : route.recipients;
-      const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
-        routeKind: route.route_kind,
-        attachmentHashes: route.attachment_hashes,
-        invoicePdfContentHash: invoicePdfHash,
-      });
-      return applyMlbThreadReplyToRoute(
-        {
-          ...route,
-          recipients,
-          // The Captain's boundary is absolute, so a Prime mailer route holding
-          // the invoice PDF is refused rather than silently stripped.
-          ready: route.ready && recipients.length > 0 && !invoiceOnMailerRoute,
-        },
-        shape,
-        thread,
-        ordinaryMailSend,
-        ordinaryMailSend
-          ? {
-            originalSubject,
-            originalSubjectSource,
-          }
-          : null,
-      );
-    }),
+        const declared = mlbPhysicalRouteRecipients(
+          route.route_kind,
+          billingMailbox,
+        );
+        // A legacy envelope that declares no billing mailbox keeps whatever the
+        // draft addressed the invoice to: emptying a money route is worse than
+        // leaving it as prepared, and assertSesRouteRecipients still guards it.
+        const recipients = declared.length > 0 ? declared : route.recipients;
+        const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
+          routeKind: route.route_kind,
+          attachmentHashes: route.attachment_hashes,
+          invoicePdfContentHash: invoicePdfHash,
+        });
+        return applyMlbThreadReplyToRoute(
+          {
+            ...route,
+            recipients,
+            // The Captain's boundary is absolute, so a Prime mailer route holding
+            // the invoice PDF is refused rather than silently stripped.
+            ready: route.ready && recipients.length > 0 &&
+              !invoiceOnMailerRoute,
+          },
+          shape,
+          thread,
+          ordinaryMailSend,
+          ordinaryMailSend
+            ? {
+              originalSubject,
+              originalSubjectSource,
+            }
+            : null,
+        );
+      }),
     );
   }
 
@@ -875,7 +884,11 @@ export function resolveDocketRoutes(
   // Explicit invoice_to bind: workorders@ajs.build first — never silent inherit
   // of work-order sender alone without the processing mailbox.
   const recipients = ajsPackRecipients({ workOrderSender });
-  const cc = ajsPackCc();
+  const completionDocsCc = sesReleaseRouteCc({
+    routeKind: "report_invoice",
+    builderKey,
+  });
+  const photoCc = sesReleaseRouteCc({ routeKind: "photo", builderKey });
   const out: SesReviewRoute[] = [];
   const reference = String(
     object(docket.local_invoice_proposal).builder_reference || "",
@@ -913,7 +926,7 @@ export function resolveDocketRoutes(
     const combined: SesReviewRoute = {
       route_kind: "report_invoice",
       recipients,
-      cc,
+      cc: completionDocsCc,
       subject: authorised
         ? `${
           reference || "Make-safe"
@@ -948,7 +961,7 @@ export function resolveDocketRoutes(
       route_kind: "photo",
       body: ajsPhotoBody,
       recipients: recipients.length ? recipients : photo.recipients,
-      cc,
+      cc: photoCc,
       ready: photo.ready &&
         (recipients.length > 0 || photo.recipients.length > 0),
     });
@@ -2302,9 +2315,9 @@ export async function prepareSesInvoiceObligationAction(
       pricingDisposition = "priced_with_line_override";
       if (
         String(
-          (commercialProvenance as { authority_kind?: unknown })
-            .authority_kind || "",
-        ) === "ai_proposal" &&
+            (commercialProvenance as { authority_kind?: unknown })
+              .authority_kind || "",
+          ) === "ai_proposal" &&
         !commercialCaveatCodes.includes("ai_commercial_proposal")
       ) {
         commercialCaveatCodes.push("ai_commercial_proposal");
@@ -7155,10 +7168,11 @@ export async function executeSesReleaseRevisionAction(
       client,
       exactDocketRevisionIds,
     );
-    // Envelope check for AJS two-email shape: cc must include the permanent pack
-    // set (ses@ + vanessa@ajs.build + mandi@ajs.build), TO present. A release
-    // already in flight keeps the ses@ floor that governed at approval — see
-    // releaseSendInFlight above.
+    // Envelope check for the AJS/AJBR two-email shape. New releases consume the
+    // same route-scoped CC producer as prepare/preview: AJBR completion docs use
+    // finance only and every photo route has no CC; AJS completion docs keep the
+    // prior permanent pack set. A release already in flight may keep the ses@
+    // floor that governed its old approved envelope — see releaseSendInFlight.
     // Filename-level client-send gates (report+invoice PDFs / photo images) are
     // applied when operators build the payload; at execute we only have content
     // hashes, so we enforce the sealed envelope facts that survive hashing.
@@ -7166,27 +7180,49 @@ export async function executeSesReleaseRevisionAction(
       const ccList = (Array.isArray(route.cc) ? route.cc : []).map((
         v: string,
       ) => String(v || "").trim().toLowerCase());
-      const requiredCc = releaseSendInFlight ? [MAKESAFE_CC] : ajsPackCc();
-      for (const required of requiredCc) {
-        if (!ccList.includes(required.trim().toLowerCase())) {
-          throw new SesActionError(
-            409,
-            sesRefusal(
-              "route_recipient_invalid",
-              releaseSendInFlight
-                ? `AJS pack routes must CC ${required}; this release has already dispatched a route, so reconcile it by its SES operation token and raise the envelope on the next release, never by re-preparing this one.`
-                : `AJS pack routes must CC ${required}; prepare a new release revision.`,
-              {
-                evidence: {
-                  route_kind: kind,
-                  cc: ccList,
-                  required: requiredCc,
-                  release_send_in_flight: releaseSendInFlight,
-                },
+      const builderKey = primaryShape.builder_key || "AJS";
+      const canonicalCc = sesReleaseRouteCc({
+        routeKind: kind,
+        builderKey,
+      });
+      const canonicalSet = new Set(canonicalCc);
+      const matchesCanonical = ccList.length === canonicalCc.length &&
+        ccList.every((address: string) => canonicalSet.has(address));
+      const exactCanonicalRequired = kind === "photo" ||
+        isAjbrBuilderKey(builderKey);
+      // Old in-flight AJS/AJBR releases cannot be rewritten without minting a
+      // new release id and re-mailing an already-proved route. Keep the prior
+      // ses@ floor only when the stored route is not already on the new shape.
+      const requiredCc = releaseSendInFlight && !matchesCanonical
+        ? [MAKESAFE_CC]
+        : canonicalCc;
+      const missingRequired = requiredCc.filter((required) =>
+        !ccList.includes(required.trim().toLowerCase())
+      );
+      const invalidExactSet = !releaseSendInFlight && exactCanonicalRequired &&
+        !matchesCanonical;
+      if (missingRequired.length > 0 || invalidExactSet) {
+        throw new SesActionError(
+          409,
+          sesRefusal(
+            "route_recipient_invalid",
+            releaseSendInFlight
+              ? "This in-flight AJS/AJBR route must retain the ses@ floor that governed its approved envelope; reconcile it by its SES operation token and use the current route recipients on the next release."
+              : `The ${kind} route CC list does not match the current ${
+                builderKey || "AJS/AJBR"
+              } recipient rule; prepare a new release revision.`,
+            {
+              evidence: {
+                route_kind: kind,
+                builder_key: builderKey,
+                cc: ccList,
+                required: requiredCc,
+                exact: exactCanonicalRequired,
+                release_send_in_flight: releaseSendInFlight,
               },
-            ),
-          );
-        }
+            },
+          ),
+        );
       }
       if (
         (kind === "report_invoice" || kind === "report") &&
