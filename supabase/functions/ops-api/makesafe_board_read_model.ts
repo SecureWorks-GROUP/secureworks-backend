@@ -15,7 +15,7 @@ import {
   isMakesafeTerminalJobState,
 } from "./makesafe_status_apply.ts";
 import {
-  photoCountForCurrentCycle,
+  resolveBoardPhotoCount,
   tradeSafeHold,
 } from "./makesafe_cycle_evidence.ts";
 import {
@@ -668,6 +668,17 @@ export function authorizeMakesafeTradeProjection(
 export interface CanonicalMakesafeExtras {
   notesByJobId?: Record<string, any[]>;
   photoCountByJobId?: Record<string, number>;
+  /** Reattend: count of media rows bound to the current attendance cycle. */
+  currentCyclePhotoCountByJobId?: Record<string, number>;
+  /** True when the job's loaded media carries attendance_cycle_id keys. */
+  photosHaveCycleBindingByJobId?: Record<string, boolean>;
+  /**
+   * Curated bind photo_source_scope from the pack's bound report document.
+   * `same_job_all_attendances` makes board photo_count read the full same-job set.
+   */
+  boundPhotoSourceScopeByJobId?: Record<string, string>;
+  /** Optional explicit bound-pack photo count when known. */
+  boundPackPhotoCountByJobId?: Record<string, number>;
   contactsByJobId?: Record<string, any[]>;
   intakeCaseByJobId?: Record<string, any>;
   holdsByJobId?: Record<string, MakesafeStatusHold>;
@@ -1352,8 +1363,8 @@ export function buildCanonicalMakesafeRows(
     !isExcludedTerminalSyntheticBoardRow(base, terminalSyntheticJobIds)
   ).map((base) => {
     // enrichMakesafeBoardJob already cycle-scopes assignments/report/pack on the
-    // base row; re-apply photo fail-closed for reattend here (photos are not
-    // cycle-keyed yet).
+    // base row. Photo counts resolve from cycle-keyed media and/or the curated
+    // bind's same_job_all_attendances scope — never invent, never refuse a send.
     const assignments = assignmentFacts(base?.assignments || []);
     const report = base?.report || null;
     const pack = base?.report_pack || null;
@@ -1366,12 +1377,16 @@ export function buildCanonicalMakesafeRows(
     const ledgerPortalCaptures = portalCapturesFromLedger(base, ledgerRows);
     const portalCaptures = projectMakesafePortalCaptures(base, ledgerRows);
     const hold = extras.holdsByJobId?.[base?.id] || null;
-    const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
-    const photoCount = photoCountForCurrentCycle(
-      rawPhotoCount,
+    const photoCount = resolveBoardPhotoCount({
+      rawPhotoCount: Number(extras.photoCountByJobId?.[base?.id] || 0),
       detail,
-      false, // no photo attendance_cycle_id write path yet → reattend fail-closed
-    );
+      currentCyclePhotoCount:
+        extras.currentCyclePhotoCountByJobId?.[base?.id] ?? null,
+      photosHaveCycleBinding:
+        extras.photosHaveCycleBindingByJobId?.[base?.id] === true,
+      boundPhotoSourceScope: extras.boundPhotoSourceScopeByJobId?.[base?.id],
+      boundPackPhotoCount: extras.boundPackPhotoCountByJobId?.[base?.id] ?? null,
+    });
     const swmsRequired = requiresMakesafeSwms(detail, base);
     const requiredDocuments = deriveSesRequiredDocuments({
       family: sesFamily,

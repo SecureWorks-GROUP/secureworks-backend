@@ -411,6 +411,107 @@ Deno.test(
 );
 
 Deno.test(
+  "assembler keeps current-cycle photos on a reattend without all-attendance scope",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.detail!.reattend_count = 1;
+    live.detail!.cycle_number = 2;
+    const cycleOne = "cycle-visit-one";
+    const cycleTwo = String(live.detail!.attendance_cycle_id);
+    live.media = [
+      {
+        id: "prior-visit-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleOne,
+        cycle_attribution: "bound",
+      },
+      {
+        id: "current-visit-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+      },
+    ];
+    live.documents = live.documents.filter((row) =>
+      String(row.type || "").toLowerCase() !== "makesafe_report"
+    );
+
+    const photos = buildSesAssemblerInput(live).cycle_facts.photos;
+    assertEquals(photos.map((photo) => photo.id), ["current-visit-photo"]);
+  },
+);
+
+Deno.test(
+  "assembler attaches both visit photos when curated bind stamped same_job_all_attendances",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.detail!.reattend_count = 1;
+    live.detail!.cycle_number = 2;
+    const cycleOne = "cycle-visit-one";
+    const cycleTwo = String(live.detail!.attendance_cycle_id);
+    live.media = [
+      {
+        id: "friday-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleOne,
+        cycle_attribution: "bound",
+        label: "Friday site visit",
+      },
+      {
+        id: "monday-photo",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        job_id: live.job.id,
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        label: "Monday site visit",
+      },
+    ];
+    live.documents = [
+      ...live.documents.filter((row) =>
+        String(row.type || "").toLowerCase() !== "makesafe_report"
+      ),
+      {
+        id: "curated-report-all-attendances",
+        job_id: live.job.id,
+        type: "makesafe_report",
+        version: 5,
+        created_at: "2026-08-24T10:00:00.000Z",
+        attendance_cycle_id: cycleTwo,
+        cycle_attribution: "bound",
+        visible_to_trades: true,
+        data_snapshot_json: {
+          photo_source_scope: "same_job_all_attendances",
+        },
+      },
+    ];
+
+    const photos = buildSesAssemblerInput(live).cycle_facts.photos;
+    assertEquals(photos.map((photo) => photo.id), [
+      "friday-photo",
+      "monday-photo",
+    ]);
+    assertEquals(photos.map((photo) => photo.order), [1, 2]);
+  },
+);
+
+Deno.test(
   "an omitted materials_charge and a present null are different answers",
   () => {
     const base = {

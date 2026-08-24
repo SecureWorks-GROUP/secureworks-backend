@@ -13,8 +13,11 @@ import {
   hasReattendBoundary,
   isEvidenceBoundToCurrentCycle,
   isLegacyMakesafeCard,
+  PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
   projectCycleScopedEvidence,
   readinessRevisionPayload,
+  resolveBoardPhotoCount,
+  selectPackPhotoMedia,
   tradeSafeHold,
   typedReportDocSatisfiesCurrent,
 } from "./makesafe_cycle_evidence.ts";
@@ -168,6 +171,112 @@ Deno.test("R3c reattend form sees only current-cycle media", () => {
       reattend_count: 0,
     }, "cycle-1").map((row) => row.id),
     ["old-photo", "current-photo", "legacy-unbound-photo"],
+  );
+});
+
+Deno.test(
+  "selectPackPhotoMedia expands to same-job all attendances when curated scope says so",
+  () => {
+    const detail = {
+      cycle_number: 2,
+      reattend_count: 1,
+      attendance_cycle_id: "cycle-2",
+    };
+    const media = [
+      {
+        id: "friday-1",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-21T08:00:00.000Z",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+      {
+        id: "monday-1",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-08-24T08:00:00.000Z",
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+      {
+        id: "receipt",
+        type: "receipt",
+        phase: "receipt",
+        created_at: "2026-08-24T09:00:00.000Z",
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+      },
+    ];
+    assertEquals(
+      selectPackPhotoMedia({
+        media,
+        detail,
+        attendanceCycleId: "cycle-2",
+      }).map((row) => row.id),
+      ["monday-1"],
+    );
+    assertEquals(
+      selectPackPhotoMedia({
+        media,
+        detail,
+        attendanceCycleId: "cycle-2",
+        photoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+      }).map((row) => row.id),
+      ["friday-1", "monday-1"],
+    );
+  },
+);
+
+Deno.test("resolveBoardPhotoCount: single-visit unchanged, reattend scopes honestly", () => {
+  const singleVisit = { cycle_number: 1, reattend_count: 0 };
+  assertEquals(
+    resolveBoardPhotoCount({ rawPhotoCount: 12, detail: singleVisit }),
+    12,
+  );
+
+  const reattend = { cycle_number: 2, reattend_count: 1 };
+  assertEquals(
+    resolveBoardPhotoCount({ rawPhotoCount: 30, detail: reattend }),
+    0,
+  );
+  assertEquals(
+    resolveBoardPhotoCount({
+      rawPhotoCount: 30,
+      detail: reattend,
+      photosHaveCycleBinding: true,
+      currentCyclePhotoCount: 7,
+    }),
+    7,
+  );
+  assertEquals(
+    resolveBoardPhotoCount({
+      rawPhotoCount: 30,
+      detail: reattend,
+      boundPhotoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+    }),
+    30,
+  );
+  assertEquals(
+    resolveBoardPhotoCount({
+      rawPhotoCount: 30,
+      detail: reattend,
+      boundPhotoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+      boundPackPhotoCount: null,
+    }),
+    30,
+    "null boundPackPhotoCount must not coerce to 0 via Number(null)",
+  );
+  assertEquals(
+    resolveBoardPhotoCount({
+      rawPhotoCount: 30,
+      detail: reattend,
+      boundPhotoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+      boundPackPhotoCount: 30,
+      photosHaveCycleBinding: true,
+      currentCyclePhotoCount: 7,
+    }),
+    30,
   );
 });
 

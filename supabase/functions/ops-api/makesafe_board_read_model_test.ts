@@ -2380,6 +2380,79 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
   );
 });
 
+Deno.test("board photo_count: single-visit unchanged; reattend reads bound all-attendance or cycle keys", () => {
+  const [singleVisit] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "single", {
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+        reattend_count: 0,
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 1 },
+    }),
+  ], {
+    photoCountByJobId: { single: 12 },
+  });
+  assertEquals(singleVisit.report.photo_count, 12);
+
+  const [failClosed] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "reattend-closed", {
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 2,
+        reattend_count: 1,
+        attendance_cycle_id: "cycle-2",
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+    }),
+  ], {
+    photoCountByJobId: { "reattend-closed": 30 },
+  });
+  assertEquals(failClosed.report.photo_count, 0);
+
+  const [cycleKeyed] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "reattend-keyed", {
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 2,
+        reattend_count: 1,
+        attendance_cycle_id: "cycle-2",
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+    }),
+  ], {
+    photoCountByJobId: { "reattend-keyed": 30 },
+    photosHaveCycleBindingByJobId: { "reattend-keyed": true },
+    currentCyclePhotoCountByJobId: { "reattend-keyed": 7 },
+  });
+  assertEquals(cycleKeyed.report.photo_count, 7);
+
+  const [allAttendances] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "reattend-all", {
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 2,
+        reattend_count: 1,
+        attendance_cycle_id: "cycle-2",
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+      report_pack: {
+        status: "drafted",
+        report_doc_id: "doc-all-attendances",
+        sent_at: null,
+      },
+    }),
+  ], {
+    photoCountByJobId: { "reattend-all": 30 },
+    photosHaveCycleBindingByJobId: { "reattend-all": true },
+    currentCyclePhotoCountByJobId: { "reattend-all": 7 },
+    boundPhotoSourceScopeByJobId: {
+      "reattend-all": "same_job_all_attendances",
+    },
+  });
+  assertEquals(allAttendances.report.photo_count, 30);
+});
+
 Deno.test("presentMakesafeBoardSubstatus demotes unbacked ready_to_invoice by family", () => {
   // Pure presentation helper: ready_to_invoice is an operator CLAIM and may
   // only surface when report-in evidence backs it.

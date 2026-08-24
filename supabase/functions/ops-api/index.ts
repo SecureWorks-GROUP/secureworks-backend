@@ -241,6 +241,7 @@ import {
   hasReattendBoundary,
   isLegacyMakesafeCard,
   filterHoldsForCurrentCycle,
+  normalizePackPhotoSourceScope,
   projectCycleScopedEvidence,
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
@@ -18564,19 +18565,35 @@ async function loadCanonicalMakesafeBoard(
   // every PostgREST error and paginates every 1000 rows. Built first and awaited
   // together with the detail-only reads so full mode pays no extra serial wave —
   // serial round-trips, not payload bytes, dominate board TTFB.
+  // attendance_cycle_id / cycle_attribution exist live (U2 state-authority) and
+  // let reattend cards count current-cycle media instead of fail-closing to 0.
   const photosPromise = _fetchAllByJobIdChunked(
     client,
     'job_media',
-    'id, job_id, type, phase',
+    'id, job_id, type, phase, attendance_cycle_id, cycle_attribution',
     jobIds,
     (q) => q.eq('type', 'photo').eq('phase', 'completion'),
   )
+  // Bound curated report scope for the pack's report_doc_id — when the bind
+  // stamped same_job_all_attendances, board photo_count must read the full set.
+  const reportPhotoScopePromise = _fetchAllByJobIdChunked(
+    client,
+    'job_documents',
+    'id, job_id, type, photo_source_scope:data_snapshot_json->photo_source_scope',
+    jobIds,
+    (q) => q.eq('type', 'makesafe_report'),
+  )
 
+  let reportPhotoScopeRows: any[] = []
   if (cardMode) {
-    photos = await photosPromise
-  } else {
-    ;[photos, notes, contacts] = await Promise.all([
+    ;[photos, reportPhotoScopeRows] = await Promise.all([
       photosPromise,
+      reportPhotoScopePromise,
+    ])
+  } else {
+    ;[photos, reportPhotoScopeRows, notes, contacts] = await Promise.all([
+      photosPromise,
+      reportPhotoScopePromise,
       _fetchAllByJobIdChunked(
         client,
         'job_events',
@@ -18671,8 +18688,43 @@ async function loadCanonicalMakesafeBoard(
     notesByJobId[note.job_id].push(note)
   }
   const photoCountByJobId: Record<string, number> = {}
+  const photosByJobId: Record<string, any[]> = {}
   for (const photo of photos) {
-    if (photo?.job_id) photoCountByJobId[photo.job_id] = (photoCountByJobId[photo.job_id] || 0) + 1
+    if (!photo?.job_id) continue
+    photoCountByJobId[photo.job_id] = (photoCountByJobId[photo.job_id] || 0) + 1
+    ;(photosByJobId[photo.job_id] ||= []).push(photo)
+  }
+  const currentCyclePhotoCountByJobId: Record<string, number> = {}
+  const photosHaveCycleBindingByJobId: Record<string, boolean> = {}
+  for (const row of buildBase) {
+    const jobId = row?.id
+    if (!jobId) continue
+    const detail = row?.makesafe_details || {}
+    const jobPhotos = photosByJobId[jobId] || []
+    const hasCycleBinding = jobPhotos.some((photo) =>
+      String(photo?.attendance_cycle_id || '').trim()
+    )
+    photosHaveCycleBindingByJobId[jobId] = hasCycleBinding
+    if (!hasCycleBinding) continue
+    currentCyclePhotoCountByJobId[jobId] = filterMediaForCurrentCycle(
+      jobPhotos,
+      detail,
+      detail?.attendance_cycle_id ?? null,
+    ).length
+  }
+  const reportDocById = new Map<string, any>()
+  for (const doc of reportPhotoScopeRows) {
+    if (doc?.id) reportDocById.set(String(doc.id), doc)
+  }
+  const boundPhotoSourceScopeByJobId: Record<string, string> = {}
+  for (const row of buildBase) {
+    const jobId = row?.id
+    const reportDocId = String(row?.report_pack?.report_doc_id || '').trim()
+    if (!jobId || !reportDocId) continue
+    const scope = normalizePackPhotoSourceScope(
+      reportDocById.get(reportDocId)?.photo_source_scope,
+    )
+    if (scope) boundPhotoSourceScopeByJobId[jobId] = scope
   }
   const contactsByJobId: Record<string, any[]> = {}
   for (const contact of contacts) {
@@ -18806,6 +18858,9 @@ async function loadCanonicalMakesafeBoard(
   const built = buildCanonicalMakesafeRows(buildBase, {
     notesByJobId,
     photoCountByJobId,
+    currentCyclePhotoCountByJobId,
+    photosHaveCycleBindingByJobId,
+    boundPhotoSourceScopeByJobId,
     contactsByJobId,
     intakeCaseByJobId,
     holdsByJobId,
