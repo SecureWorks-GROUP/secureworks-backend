@@ -421,6 +421,16 @@ import {
   correctMakesafeFalseSendStamps as _correctMakesafeFalseSendStamps,
   FalseSendStampRequestError as _FalseSendStampRequestError,
 } from './makesafe_false_send_stamp.ts'
+// Privileged recorder for verified_historical_closeout proofs — the callable
+// closeout path for already-sent sibling-bundled cards (SWMS-26832 class) that
+// U2 reconcile cannot cover because they carry no OWN raised ACCREC. Records
+// evidence only; the stage engine derives archive/completed. Never mints,
+// sends, or rewrites jobs/substatus/money.
+import {
+  recordMakesafeTerminalProofAction as _recordMakesafeTerminalProofAction,
+  RecordTerminalProofConflictError as _RecordTerminalProofConflictError,
+  RecordTerminalProofRequestError as _RecordTerminalProofRequestError,
+} from './makesafe_record_terminal_proof.ts'
 // report_sent_at is derived from a recorded send, never asserted by a caller.
 // This module names the producers and carries the refusal the generic detail
 // editor throws when a caller tries to supply the field.
@@ -5451,6 +5461,40 @@ if (import.meta.main) serve(async (req: Request) => {
       // action re-derives send truth from the four real surfaces and refuses any
       // card it cannot prove was never sent. It only ever CLEARS; it can never
       // stamp one. Dry run by default, explicit job list, capped at 25.
+      case 'record_makesafe_terminal_proof': {
+        // Deliberately NOT in ROUTINE_ALLOWED_ACTIONS. Dry-run is the default;
+        // a live write must set dry_run:false. Records one append-only
+        // makesafe_terminal_proofs row (verified_historical_closeout) from own
+        // raised ACCREC or reciprocal sibling-bundle coverage + pack-sent
+        // evidence. Never mints an invoice, never sends, never rewrites stage.
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({
+            error:
+              'forbidden: record_makesafe_terminal_proof requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'record_makesafe_terminal_proof requires POST' }, 405)
+        }
+        try {
+          return json(await _recordMakesafeTerminalProofAction(client, body))
+        } catch (err: any) {
+          if (err instanceof _RecordTerminalProofRequestError) {
+            return json({ error: err.message, code: 'bad_request' }, err.status)
+          }
+          if (err instanceof _RecordTerminalProofConflictError) {
+            return json({
+              error: err.message,
+              code: err.code,
+              evidence: err.evidence ?? null,
+            }, err.status)
+          }
+          throw err
+        }
+      }
+
       case 'correct_makesafe_false_send_stamp': {
         const isPrivileged = authMode === 'api_key' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
