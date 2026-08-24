@@ -22,6 +22,7 @@ import {
   type SesReviewRoute,
   sesRouteKindsOnPack,
 } from "./ses_review_cockpit.ts";
+import { SES_FINANCE_CC } from "./ses_release_route_shape.ts";
 
 function cleanInput(
   overrides: Partial<SesCleanInput> = {},
@@ -302,6 +303,84 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
   });
   assertEquals(sendReady.controls.approve_invoice.enabled, false);
   assert(sendReady.controls.send_it.enabled);
+});
+
+Deno.test("AJBR send preview recipients exactly match the frozen release send routes", async () => {
+  const routes: SesReviewRoute[] = [
+    {
+      route_kind: "report_invoice",
+      recipients: ["workorders@ajs.build"],
+      cc: [SES_FINANCE_CC],
+      subject: "AJBR-70000 - report and invoice",
+      body:
+        "Please find attached the report and invoice for AJBR-70000.\n\nThank you.",
+      attachment_hashes: [`sha256:${"a".repeat(64)}`],
+      ready: true,
+    },
+    {
+      route_kind: "photo",
+      recipients: ["workorders@ajs.build"],
+      cc: [],
+      subject: "Photo Evidence - AJBR-70000",
+      body: "Please find attached site photos for AJBR-70000.\n\nThank you.",
+      attachment_hashes: [`sha256:${"b".repeat(64)}`],
+      ready: true,
+    },
+  ];
+  const input = cleanInput({
+    routes,
+    invoice_already_bound: true,
+    duplicate_allows_create: false,
+  });
+  const cockpit = buildSesCockpitView({
+    job_id: "job-ajbr-1",
+    job_number: "SWMS-AJBR-1",
+    docket_revision_id: "docket-ajbr-1",
+    readiness_revision: `sha256:${"c".repeat(64)}`,
+    dependency_generation: 1,
+    invoice_obligation_revision_id: "obligation-ajbr-1",
+    attendance_cycle_ids: ["cycle-ajbr-1"],
+    xero_binding: {
+      xero_invoice_id: "xero-ajbr-1",
+      invoice_number: "INV-AJBR-1",
+      status: "AUTHORISED",
+    },
+    local_invoice_proposal: { total: 100 },
+    work_order: { state: "ready" },
+    family_evidence: {},
+    swms: {},
+    routes,
+    crew_and_trade_visits: [],
+    clean_input: input,
+  });
+  const frozen = await buildSesReleaseRevision({
+    org_id: "org-1",
+    members: [{
+      job_id: "job-ajbr-1",
+      docket_revision_id: "docket-ajbr-1",
+      invoice_obligation_revision_id: "obligation-ajbr-1",
+      attendance_cycle_ids: ["cycle-ajbr-1"],
+      readiness_revision: `sha256:${"c".repeat(64)}`,
+      dependency_generation: 1,
+    }],
+    routes,
+    created_by: "captain",
+    builder_key: "AJBR",
+    family: "physical_makesafe",
+  });
+  const previewRoutes = (cockpit.sections.send_preview as {
+    routes: Array<Record<string, unknown>>;
+  }).routes.map((route) => ({
+    route_kind: route.route_kind,
+    recipients: route.recipients,
+    cc: route.cc,
+  }));
+  const frozenSendRoutes = frozen.routes.map((route) => ({
+    route_kind: route.route_kind,
+    recipients: route.recipients,
+    cc: route.cc,
+  }));
+  assertEquals(previewRoutes, frozenSendRoutes);
 });
 
 Deno.test("AJS DRAFT with unready report_invoice still lights APPROVE, not HOLD", () => {

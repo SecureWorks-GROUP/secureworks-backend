@@ -1,7 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 import {
   fetchAllAccrecInvoices,
-  MAKESAFE_CC,
   normRef,
   resolveExistingInvoice,
   splitEmails,
@@ -73,17 +72,16 @@ import {
   presentSesPackHonesty,
   type SesPackPresentation,
 } from "./ses_pack_presentation.ts";
+import { applySesSampleDestinationOverride } from "./ses_sample_destination.ts";
 import {
-  applySesSampleDestinationOverride,
-} from "./ses_sample_destination.ts";
-import {
-  ajsPackCc,
   ajsPackRecipients,
   isAjsBuilderKey,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
+  repairSesReleaseRouteCc,
   sesBodyCarriesInternalAnnotation,
   sesBuilderRouteBody,
+  sesReleaseRouteCc,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -664,6 +662,16 @@ export function resolveDocketRoutes(
   ).trim();
 
   const resolvedRoutes = draftRoutes(docket).map((route) => {
+    // Preserve the shipped invoice envelope byte-for-byte. Completion/report
+    // and photo routes consume the canonical producer: that retains today's
+    // AJS and MLB report CCs while applying only the two Captain-ordered deltas
+    // (AJBR completion finance-only; every photo route empty).
+    const routeCc = route.route_kind === "invoice"
+      ? [...(route.cc || [])]
+      : sesReleaseRouteCc({
+        routeKind: route.route_kind,
+        builderKey,
+      });
     const referenced = route.attachment_hashes.map((path) => byPath.get(path));
     const resolved = referenced
       .filter((artifact): artifact is Record<string, any> => !!artifact)
@@ -671,6 +679,7 @@ export function resolveDocketRoutes(
     if (route.route_kind !== "invoice") {
       return {
         ...route,
+        cc: routeCc,
         // Builder-facing body is SET here, never inherited from the stored
         // draft: `email_drafts` bodies are operator annotations for the docket
         // display and shipped verbatim to the builder on the MLB physical and
@@ -709,6 +718,7 @@ export function resolveDocketRoutes(
     if (noAdditionalCharge) {
       return {
         ...route,
+        cc: routeCc,
         subject: `${reference || "Make-safe"} - no additional charge`,
         body: sesBuilderRouteBody("invoice", builderReference, {
           noAdditionalCharge: true,
@@ -726,6 +736,7 @@ export function resolveDocketRoutes(
       const invoiceNumber = boundInvoiceNumber || "pending-number";
       return {
         ...route,
+        cc: routeCc,
         subject: `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`
           .trim(),
         // Builder-facing wording even while pre-authorise: the route is what
@@ -749,6 +760,7 @@ export function resolveDocketRoutes(
     if (docket.stage !== "invoice_bound" || xeroStatus !== "AUTHORISED") {
       return {
         ...route,
+        cc: routeCc,
         body: sesBuilderRouteBody("invoice", builderReference),
         attachment_hashes: [...new Set(supportHashes)],
         // Support PDFs are not an invoice. Until a live Xero draft is bound
@@ -764,6 +776,7 @@ export function resolveDocketRoutes(
     const invoiceNumber = boundInvoiceNumber;
     return {
       ...route,
+      cc: routeCc,
       subject: `${reference || "Make-safe"} - Xero invoice ${invoiceNumber}`
         .trim(),
       body: sesBuilderRouteBody("invoice", builderReference),
@@ -827,38 +840,39 @@ export function resolveDocketRoutes(
     return applySesSampleDestinationOverride(
       docket,
       resolvedRoutes.map((route) => {
-      const declared = mlbPhysicalRouteRecipients(
-        route.route_kind,
-        billingMailbox,
-      );
-      // A legacy envelope that declares no billing mailbox keeps whatever the
-      // draft addressed the invoice to: emptying a money route is worse than
-      // leaving it as prepared, and assertSesRouteRecipients still guards it.
-      const recipients = declared.length > 0 ? declared : route.recipients;
-      const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
-        routeKind: route.route_kind,
-        attachmentHashes: route.attachment_hashes,
-        invoicePdfContentHash: invoicePdfHash,
-      });
-      return applyMlbThreadReplyToRoute(
-        {
-          ...route,
-          recipients,
-          // The Captain's boundary is absolute, so a Prime mailer route holding
-          // the invoice PDF is refused rather than silently stripped.
-          ready: route.ready && recipients.length > 0 && !invoiceOnMailerRoute,
-        },
-        shape,
-        thread,
-        ordinaryMailSend,
-        ordinaryMailSend
-          ? {
-            originalSubject,
-            originalSubjectSource,
-          }
-          : null,
-      );
-    }),
+        const declared = mlbPhysicalRouteRecipients(
+          route.route_kind,
+          billingMailbox,
+        );
+        // A legacy envelope that declares no billing mailbox keeps whatever the
+        // draft addressed the invoice to: emptying a money route is worse than
+        // leaving it as prepared, and assertSesRouteRecipients still guards it.
+        const recipients = declared.length > 0 ? declared : route.recipients;
+        const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
+          routeKind: route.route_kind,
+          attachmentHashes: route.attachment_hashes,
+          invoicePdfContentHash: invoicePdfHash,
+        });
+        return applyMlbThreadReplyToRoute(
+          {
+            ...route,
+            recipients,
+            // The Captain's boundary is absolute, so a Prime mailer route holding
+            // the invoice PDF is refused rather than silently stripped.
+            ready: route.ready && recipients.length > 0 &&
+              !invoiceOnMailerRoute,
+          },
+          shape,
+          thread,
+          ordinaryMailSend,
+          ordinaryMailSend
+            ? {
+              originalSubject,
+              originalSubjectSource,
+            }
+            : null,
+        );
+      }),
     );
   }
 
@@ -877,7 +891,11 @@ export function resolveDocketRoutes(
   // Explicit invoice_to bind: workorders@ajs.build first — never silent inherit
   // of work-order sender alone without the processing mailbox.
   const recipients = ajsPackRecipients({ workOrderSender });
-  const cc = ajsPackCc();
+  const completionDocsCc = sesReleaseRouteCc({
+    routeKind: "report_invoice",
+    builderKey,
+  });
+  const photoCc = sesReleaseRouteCc({ routeKind: "photo", builderKey });
   const out: SesReviewRoute[] = [];
   const reference = String(
     object(docket.local_invoice_proposal).builder_reference || "",
@@ -915,7 +933,7 @@ export function resolveDocketRoutes(
     const combined: SesReviewRoute = {
       route_kind: "report_invoice",
       recipients,
-      cc,
+      cc: completionDocsCc,
       subject: authorised
         ? `${
           reference || "Make-safe"
@@ -950,7 +968,7 @@ export function resolveDocketRoutes(
       route_kind: "photo",
       body: ajsPhotoBody,
       recipients: recipients.length ? recipients : photo.recipients,
-      cc,
+      cc: photoCc,
       ready: photo.ready &&
         (recipients.length > 0 || photo.recipients.length > 0),
     });
@@ -2352,9 +2370,9 @@ export async function prepareSesInvoiceObligationAction(
       pricingDisposition = "priced_with_line_override";
       if (
         String(
-          (commercialProvenance as { authority_kind?: unknown })
-            .authority_kind || "",
-        ) === "ai_proposal" &&
+            (commercialProvenance as { authority_kind?: unknown })
+              .authority_kind || "",
+          ) === "ai_proposal" &&
         !commercialCaveatCodes.includes("ai_commercial_proposal")
       ) {
         commercialCaveatCodes.push("ai_commercial_proposal");
@@ -6442,15 +6460,26 @@ export async function buildSesReleaseRevisionPlanForDockets(args: {
   created_by: string;
 }) {
   const { dockets, routes } = args;
-  // Composite multi-job releases keep the universal three-route order unless
-  // every member is AJS/AJBR (Captain carve-out is AJS/AJBR only).
   const builderKeys = dockets.map((docket) =>
     String(docket.clean_input.builder_key || "")
   );
+  // AJS and AJBR share the same two-route shape, but not the same completion
+  // CC policy. Route-shape selection can therefore use the common AJS family
+  // while the stored envelope below composes each member's own builder rule.
+  // Any composite containing another builder keeps the prior strict universal
+  // shape rather than inheriting the first member's route order.
   const builderKey = builderKeys.length > 0 &&
       builderKeys.every((key) => isAjsBuilderKey(key))
     ? builderKeys[0]
     : (builderKeys.length === 1 ? builderKeys[0] : null);
+  const effectiveRoutes = routes.map((route) => ({
+    ...route,
+    cc: repairSesReleaseRouteCc({
+      routeKind: route.route_kind,
+      builderKeys,
+      storedCc: route.cc || [],
+    }),
+  }));
   // Route applicability travels with the builder key so the send path requires
   // exactly what the cockpit required (Captain 2026-08-06). Composite releases
   // are CONSERVATIVE by the same rule the builder key uses: a route is exempt
@@ -6480,7 +6509,7 @@ export async function buildSesReleaseRevisionPlanForDockets(args: {
       readiness_revision: docket.readiness_revision,
       dependency_generation: docket.dependency_generation,
     })),
-    routes,
+    routes: effectiveRoutes,
     created_by: args.created_by,
     builder_key: builderKey,
     family,
@@ -7063,11 +7092,14 @@ export async function executeSesReleaseRevisionAction(
         : "The approved release does not contain the exact member set and all three required routes.",
     });
   }
+  // Preserve the pre-existing SEND IT destination gate for malformed or empty
+  // TO values. Stored CC values are deliberately excluded: CC policy is
+  // repaired from each member's current builder rule immediately before send.
   for (const route of routes) {
     try {
       assertSesRouteRecipients({
         recipients: Array.isArray(route.recipients) ? route.recipients : [],
-        cc: Array.isArray(route.cc) ? route.cc : [],
+        cc: [],
       });
     } catch {
       throw new SesActionError(
@@ -7090,6 +7122,7 @@ export async function executeSesReleaseRevisionAction(
     }),
     "The current readiness rows and exact SEND IT release could not be reserved for execution.",
   );
+  const memberDocketsByRevision = new Map<string, Record<string, any>>();
   for (const member of members) {
     const approval = await client.from(
       "makesafe_revision_approvals_current_v2",
@@ -7110,9 +7143,13 @@ export async function executeSesReleaseRevisionAction(
     }
     const docket = requireValue(
       await client.from("makesafe_docket_revisions").select(
-        "id,xero_binding,invoice_obligation_revision_id",
+        "id,xero_binding,invoice_obligation_revision_id,envelope,review_spec",
       ).eq("id", member.docket_revision_id).maybeSingle(),
       "A release member's exact docket revision no longer exists.",
+    );
+    memberDocketsByRevision.set(
+      String(member.docket_revision_id || ""),
+      docket,
     );
     const xero = object(docket.xero_binding);
     if (xero.status === "AUTHORISED") {
@@ -7157,14 +7194,15 @@ export async function executeSesReleaseRevisionAction(
   const exactDocketRevisionIds = members.map((member: any) =>
     String(member.docket_revision_id || "")
   );
-  // Reload primary docket envelope so MLB intake-thread coordinates survive
-  // even when release_revision_routes has no reply columns (no migration).
-  const primaryDocket = members[0]
-    ? await client.from("makesafe_docket_revisions").select(
-      "id,envelope,review_spec",
-    ).eq("id", members[0].docket_revision_id).maybeSingle()
-    : { data: null, error: null };
-  const primaryEnvelope = object(primaryDocket.data?.envelope);
+  // Docket envelopes were read above as part of the unchanged approval/Xero
+  // gate. Reuse those exact rows for recipient composition so a mixed AJS/AJBR
+  // release cannot apply whichever builder happened to be first to every
+  // member. The primary row still owns the existing MLB thread coordinates.
+  const memberDockets = members.map((member: any) =>
+    memberDocketsByRevision.get(String(member.docket_revision_id || "")) || {}
+  );
+  const primaryDocket = memberDockets[0] || {};
+  const primaryEnvelope = object(primaryDocket.envelope);
   const primaryRouting = object(object(primaryEnvelope.v2).routing);
   const primaryClassification = object(
     object(primaryEnvelope.v2).classification,
@@ -7172,47 +7210,51 @@ export async function executeSesReleaseRevisionAction(
   const primaryShape = {
     builder_key: String(
       primaryClassification.builder_key ||
-        object(primaryDocket.data?.review_spec).builder_key ||
+        object(primaryDocket.review_spec).builder_key ||
         "",
     ),
     family: String(
       primaryClassification.family ||
-        object(primaryDocket.data?.review_spec).family ||
+        object(primaryDocket.review_spec).family ||
         "",
     ),
   };
+  const memberBuilderKeys = memberDockets.map((docket: Record<string, any>) => {
+    const envelope = object(docket.envelope);
+    const classification = object(object(envelope.v2).classification);
+    return String(
+      classification.builder_key || object(docket.review_spec).builder_key ||
+        (isAjsRelease ? "AJS" : ""),
+    );
+  });
   const primaryThread = routingIntakeThread(primaryRouting);
-  // Once ANY route of this release has a send effect, execution is in flight:
-  // the loop reconciles those routes rather than re-dispatching them, and the
-  // stored envelope of the routes still to go cannot be rewritten. Enforcing a
-  // CC rule minted after that envelope was approved would strand the release —
-  // the only escape a refusal can offer is a new release revision, whose
-  // content-derived id mints fresh operation keys and re-mails whatever already
-  // went. So an in-flight release keeps the ses@ floor that governed when it
-  // was approved; a release that has never dispatched is fully gated, and
-  // re-preparing it is safe because no builder copy exists yet.
-  let releaseSendInFlight = false;
-  if (isAjsRelease) {
-    const priorSends = await client.from("ses_external_effects")
-      .select("operation_key")
-      .eq("release_revision_id", args.release_revision_id)
-      .eq("effect_kind", "route_send")
-      .limit(1);
-    if (priorSends.error) {
-      throw new SesActionError(
-        503,
-        sesRefusal(
-          "route_send_proof_unreadable",
-          "Retry SEND IT once the release send ledger is readable; never prepare a new release revision to work around this read fault.",
-          {
-            fact: priorSends.error.message ||
-              "The release send effect ledger could not be read.",
-            evidence: { release_revision_id: args.release_revision_id },
-          },
-        ),
-      );
-    }
-    releaseSendInFlight = (priorSends.data || []).length > 0;
+  // Confirmed routes retain their original immutable effect payload and proof;
+  // they are never re-claimed after a later recipient ruling changes the
+  // effective envelope. Every route that still has to leave the system is
+  // rebuilt below with the current canonical CC policy before effect creation.
+  const confirmedEffectsRead = await client.from("ses_external_effects")
+    .select(SES_EFFECT_CLAIM_COLUMNS)
+    .eq("release_revision_id", args.release_revision_id)
+    .eq("effect_kind", "route_send")
+    .eq("state", "confirmed");
+  if (confirmedEffectsRead.error) {
+    throw new SesActionError(
+      503,
+      sesRefusal(
+        "route_send_proof_unreadable",
+        "Retry SEND IT once the confirmed route proof ledger is readable; never resend a route whose outcome cannot be proven.",
+        {
+          fact: confirmedEffectsRead.error.message ||
+            "The confirmed release send effects could not be read.",
+          evidence: { release_revision_id: args.release_revision_id },
+        },
+      ),
+    );
+  }
+  const confirmedEffectsByKind = new Map<string, SesExternalEffect>();
+  for (const effect of confirmedEffectsRead.data || []) {
+    const routeKind = String(effect.route_kind || "");
+    if (routeKind) confirmedEffectsByKind.set(routeKind, effect);
   }
 
   for (const kind of requiredOrder) {
@@ -7247,39 +7289,19 @@ export async function executeSesReleaseRevisionAction(
       client,
       exactDocketRevisionIds,
     );
-    // Envelope check for AJS two-email shape: cc must include the permanent pack
-    // set (ses@ + vanessa@ajs.build + mandi@ajs.build), TO present. A release
-    // already in flight keeps the ses@ floor that governed at approval — see
-    // releaseSendInFlight above.
-    // Filename-level client-send gates (report+invoice PDFs / photo images) are
-    // applied when operators build the payload; at execute we only have content
-    // hashes, so we enforce the sealed envelope facts that survive hashing.
+    // Recipient policy is an execution-time safety overlay for persisted routes:
+    // old release rows remain immutable audit evidence, but no unsent route may
+    // carry a superseded CC set to Graph. This also makes the dispatch preview
+    // and actual gateway payload consume the same repaired route object.
+    const effectiveRoute = {
+      ...route,
+      cc: repairSesReleaseRouteCc({
+        routeKind: kind,
+        builderKeys: memberBuilderKeys,
+        storedCc: Array.isArray(route.cc) ? route.cc : [],
+      }),
+    };
     if (isAjsRelease) {
-      const ccList = (Array.isArray(route.cc) ? route.cc : []).map((
-        v: string,
-      ) => String(v || "").trim().toLowerCase());
-      const requiredCc = releaseSendInFlight ? [MAKESAFE_CC] : ajsPackCc();
-      for (const required of requiredCc) {
-        if (!ccList.includes(required.trim().toLowerCase())) {
-          throw new SesActionError(
-            409,
-            sesRefusal(
-              "route_recipient_invalid",
-              releaseSendInFlight
-                ? `AJS pack routes must CC ${required}; this release has already dispatched a route, so reconcile it by its SES operation token and raise the envelope on the next release, never by re-preparing this one.`
-                : `AJS pack routes must CC ${required}; prepare a new release revision.`,
-              {
-                evidence: {
-                  route_kind: kind,
-                  cc: ccList,
-                  required: requiredCc,
-                  release_send_in_flight: releaseSendInFlight,
-                },
-              },
-            ),
-          );
-        }
-      }
       if (
         (kind === "report_invoice" || kind === "report") &&
         (!Array.isArray(route.attachment_hashes) ||
@@ -7302,13 +7324,14 @@ export async function executeSesReleaseRevisionAction(
     // MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1).
     const sendRoute = applyMlbThreadReplyToRoute(
       {
-        ...route,
+        ...effectiveRoute,
         route_kind: kind,
         ready: true,
       },
       primaryShape,
       primaryThread,
     );
+    const confirmedEffect = confirmedEffectsByKind.get(kind);
     if (
       sendRoute.requires_thread_reply &&
       !String(sendRoute.reply_to_thread_id || "").trim()
@@ -7331,8 +7354,10 @@ export async function executeSesReleaseRevisionAction(
     // Pre-Graph volume guard from stored size_bytes (no byte download). Loud
     // refusal if the pack cannot fit one message; never cull photos.
     {
-      const attachmentHashes: unknown[] = Array.isArray(route.attachment_hashes)
-        ? route.attachment_hashes
+      const attachmentHashes: unknown[] = Array.isArray(
+          sendRoute.attachment_hashes,
+        )
+        ? sendRoute.attachment_hashes
         : [];
       const hashes: string[] = [
         ...new Set<string>(
@@ -7396,30 +7421,34 @@ export async function executeSesReleaseRevisionAction(
     // Missing/unreadable documents are recorded as Captain-facing honesty and
     // never become a new refusal: the approved route, recipients and attachment
     // hashes remain the send authority.
-    dispatchPreviews.push({
-      route_kind: kind,
-      recipients: Array.isArray(route.recipients) ? route.recipients : [],
-      cc: Array.isArray(route.cc) ? route.cc : [],
-      attachment_hashes: Array.isArray(route.attachment_hashes)
-        ? route.attachment_hashes
-        : [],
-      members: await readSesReleaseArtifactTruthForDisplay(client, members),
-    });
+    if (!confirmedEffect) {
+      dispatchPreviews.push({
+        route_kind: kind,
+        recipients: Array.isArray(sendRoute.recipients)
+          ? sendRoute.recipients
+          : [],
+        cc: Array.isArray(sendRoute.cc) ? sendRoute.cc : [],
+        attachment_hashes: Array.isArray(sendRoute.attachment_hashes)
+          ? sendRoute.attachment_hashes
+          : [],
+        members: await readSesReleaseArtifactTruthForDisplay(client, members),
+      });
+    }
     const mlbExceptionRouteFields = mlbOrdinaryMailSendEffectPayloadFields(
       sendRoute as any,
     );
-    const effect = await buildSesEffect({
+    const effect = confirmedEffect || await buildSesEffect({
       org_id: args.org_id,
       effect_kind: "route_send",
       release_revision_id: args.release_revision_id,
       route_kind: kind,
       payload: {
-        recipients: route.recipients,
-        cc: route.cc,
-        subject: route.subject,
-        body: route.body,
-        body_hash: route.body_hash,
-        attachment_hashes: route.attachment_hashes,
+        recipients: sendRoute.recipients,
+        cc: sendRoute.cc,
+        subject: sendRoute.subject,
+        body: sendRoute.body,
+        body_hash: sendRoute.body_hash,
+        attachment_hashes: sendRoute.attachment_hashes,
         reply_to_thread_id: sendRoute.reply_to_thread_id || null,
         reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
         requires_thread_reply: sendRoute.requires_thread_reply === true,
@@ -7441,19 +7470,24 @@ export async function executeSesReleaseRevisionAction(
         operation_token: result.operation_token,
       }),
     };
-    const sent = await executeSesExternalEffect({
-      store,
-      effect,
-      payload: {
-        ...route,
-        reply_to_thread_id: sendRoute.reply_to_thread_id || null,
-        reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
-        requires_thread_reply: sendRoute.requires_thread_reply === true,
-        ...mlbExceptionRouteFields,
-      },
-      adapter,
-      actor: args.actor,
-    });
+    const sent = confirmedEffect
+      ? {
+        state: "confirmed" as const,
+        effect: confirmedEffect,
+        result: confirmedRouteResultFromLedger(confirmedEffect),
+        refusal: undefined,
+        dispatched: false,
+      }
+      : await executeSesExternalEffect({
+        store,
+        effect,
+        payload: {
+          ...sendRoute,
+          ...mlbExceptionRouteFields,
+        },
+        adapter,
+        actor: args.actor,
+      });
     if (sent.state !== "confirmed") {
       // Surface the underlying Graph/transport failure when the effect ledger
       // recorded one — graph_outcome_unknown alone was swallowing 4xx/5xx text

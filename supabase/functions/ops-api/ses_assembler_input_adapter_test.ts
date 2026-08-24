@@ -38,6 +38,7 @@ import {
 } from "./makesafe_report_render.ts";
 import { buildSesSwmsGenerationPlan } from "./ses_swms_template.ts";
 import { renderSesSwmsPdf, sesSwmsRenderHash } from "./ses_swms_render.ts";
+import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
 import {
   prepare_ses_docket_revision,
   SES_ASSESSMENT_RECIPE_VERSION,
@@ -3604,6 +3605,52 @@ Deno.test(
       "physical_makesafe",
     );
     assertEquals(result.envelope.v2.classification.recipe_selected, true);
+    const restorationRoutes = resolveDocketRoutes(
+      {
+        id: "restoration-recipient-shape",
+        stage: "invoice_bound",
+        envelope: result.envelope,
+        local_invoice_proposal: { builder_reference: "MLB-MW-26873" },
+        xero_binding: {
+          status: "AUTHORISED",
+          xero_invoice_id: "xero-restoration-1",
+          invoice_number: "INV-RESTORATION-1",
+        },
+        email_drafts: {
+          REPORT_EMAIL_DRAFT: [
+            "To: reports@builder.example",
+            "Cc: ses@secureworkswa.com.au",
+            "Subject: Restoration report",
+            "Attachments:",
+            "",
+            "Report body",
+          ].join("\n"),
+          PHOTO_EMAIL_DRAFT: [
+            "To: photos@builder.example",
+            "Cc: ses@secureworkswa.com.au",
+            "Subject: Restoration photos",
+            "Attachments:",
+            "",
+            "Photo body",
+          ].join("\n"),
+          INVOICE_EMAIL_DRAFT: [
+            "To: invoices@builder.example",
+            "Cc: finance@secureworkswa.com.au",
+            "Subject: Restoration invoice",
+            "Attachments:",
+            "",
+            "Invoice body",
+          ].join("\n"),
+        },
+      },
+      [],
+      null,
+    );
+    assertEquals(
+      restorationRoutes.find((route) => route.route_kind === "photo")?.cc,
+      [],
+      "insurance/restoration photo route must carry no CC",
+    );
     assert(!codes.includes("restoration_recipe_unsealed"));
     assert(!codes.includes("family_unknown"));
     // No trade report / photos on this fixture — physical evidence remains in

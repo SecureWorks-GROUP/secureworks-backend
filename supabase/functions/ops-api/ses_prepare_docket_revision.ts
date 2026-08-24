@@ -33,10 +33,9 @@ import {
   sesFamilyRequiresSwms,
 } from "./ses_family_matrix.ts";
 import {
-  ajsPackCc,
   isAjsBuilderKey,
   mlbPhysicalRouteRecipients,
-  universalReportCc,
+  sesReleaseRouteCc,
 } from "./ses_release_route_shape.ts";
 import {
   evaluateSesPhotoMailVolume,
@@ -1328,7 +1327,9 @@ function localInvoiceProposal(
     billableTrades === 1 ? "" : "s"
   } x ${hoursPerTrade} hours`;
   const labourLineDescription = attendanceFactsMissing
-    ? `${ref} - ${attendanceLineSubject(row.family)} - ASSUMED sealed floor (attendance not evidenced): ${labourQuantityLabel}`
+    ? `${ref} - ${
+      attendanceLineSubject(row.family)
+    } - ASSUMED sealed floor (attendance not evidenced): ${labourQuantityLabel}`
     : `${ref} - ${attendanceLineSubject(row.family)} - ${labourQuantityLabel}`;
   const lines: Array<Record<string, unknown>> = [
     lineItem(
@@ -2384,7 +2385,10 @@ function buildEmailDrafts(
     return {
       INVOICE_EMAIL_DRAFT: draftEmail({
         to: invoiceTo,
-        cc: "finance@secureworkswa.com.au",
+        cc: sesReleaseRouteCc({
+          routeKind: "invoice",
+          builderKey: row.builder_key,
+        }).join(", "),
         subject: `${ref} - assessment report and quote invoice`,
         body:
           "Draft only. The assessment, photo schedule and quote have been completed and submitted through Prime. No authorised Xero invoice exists yet, so no invoice is attached. No SWMS, local report or separate photo pack applies to this assessment card.",
@@ -2405,12 +2409,14 @@ function buildEmailDrafts(
     // Builder-facing copy only: what is attached, job ref, thanks.
     // No internal vocabulary (draft, docket, pack, route, cycle, revision).
     const drafts: Record<string, string> = {};
-    const ajsCc = ajsPackCc().join(", ");
     if (reportFile) {
       drafts.REPORT_EMAIL_DRAFT = draftEmail({
         to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean)
           .join(", "),
-        cc: ajsCc,
+        cc: sesReleaseRouteCc({
+          routeKind: "report_invoice",
+          builderKey: row.builder_key,
+        }).join(", "),
         subject: `${ref} - report and invoice`,
         body:
           `Please find attached the report and invoice for ${ref}.\n\nThank you.`,
@@ -2424,7 +2430,10 @@ function buildEmailDrafts(
       drafts.PHOTO_EMAIL_DRAFT = draftEmail({
         to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean)
           .join(", "),
-        cc: ajsCc,
+        cc: sesReleaseRouteCc({
+          routeKind: "photo",
+          builderKey: row.builder_key,
+        }).join(", "),
         subject: `Photo Evidence - ${ref}`,
         body: `Please find attached site photos for ${ref}.\n\nThank you.`,
         attachments: photoFiles,
@@ -2479,7 +2488,10 @@ function buildEmailDrafts(
 
   const invoice = draftEmail({
     to: invoiceTo,
-    cc: "finance@secureworkswa.com.au",
+    cc: sesReleaseRouteCc({
+      routeKind: "invoice",
+      builderKey: row.builder_key,
+    }).join(", "),
     subject: mlbPhysical
       ? `${ref} - billing pack (report, SWMS, invoice)`
       : `${ref} - invoice proposal`,
@@ -2494,7 +2506,10 @@ function buildEmailDrafts(
       to: reportPhotoTo,
       // Every non-AJS report route CCs ses@ (Shaun 2026-08-20), MLB physical
       // included. Photo and invoice routes are untouched by that ruling.
-      cc: universalReportCc().join(", "),
+      cc: sesReleaseRouteCc({
+        routeKind: "report",
+        builderKey: row.builder_key,
+      }).join(", "),
       subject: reportSubject,
       body: mlbPhysical
         ? ordinaryMailSubjectMatch
@@ -2516,6 +2531,10 @@ function buildEmailDrafts(
   if (row.photo_route === "work_order_sender" && photoFiles.length > 0) {
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
       to: reportPhotoTo,
+      cc: sesReleaseRouteCc({
+        routeKind: "photo",
+        builderKey: row.builder_key,
+      }).join(", "),
       subject: photoSubject,
       body: mlbPhysical
         ? ordinaryMailSubjectMatch
