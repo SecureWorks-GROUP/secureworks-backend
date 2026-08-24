@@ -2662,19 +2662,37 @@ placement promise, and both gaps have already cost a run:
 Worked run, with the PO-grain reference screen that keeps a sibling's money from
 refusing a mintable card: `docs/evidence/ses-draft-mint-run-2026-08-07.md`.
 
-Physical make-safe and temp-fence Docs Ready require a bound builder-facing
-report PDF via `pack.report_doc_id` only. Attach tick (`has_report_doc` /
-`documents.report`) is not a bind — a typed `job_documents` row alone must not
-place Docs Ready or green pack presentation / the report closeout tile. A
-submitted trade service report is Trade Report In only. Required SWMS likewise
-needs `pack.swms_doc_id`, not an attach tick. Soft-assuming
-`canonical_draft_pack_output_missing` / `curated_source_missing` must not keep
-the card in Docs Ready. Roof and assessment honestly have no local make-safe
-report and stay on the portal floor; their pack presentation still needs
-family report-in evidence before looking send-ready (SWMS-261243 class).
+Pack send readiness requires exact, resolvable, retrievable artifact pointers.
+Physical and roof families need `pack.report_doc_id`; charged packs need
+`pack.invoice_doc_id`; MLB physical also needs `pack.swms_doc_id`. Assessment's
+portal-only report and `no_additional_charge`'s no-invoice release remain named
+exceptions. Each required pointer must resolve to the matching typed/legacy
+`job_documents` row on that card with a storage/PDF URL — a non-null dangling or
+empty-object ID is still missing. Legacy filename fallback is family-specific:
+a roof pointer may fall back only to `Roof Report` semantics, never the generic
+`Make Safe Report` phrase used by physical make-safe documents. Attach ticks
+(`has_report_doc` / `documents.report`) are not binds and cannot green pack
+presentation or the closeout tiles. A report-producing family also needs its selected current-cycle
+non-draft trade report; the pointer and source report are separate proofs and
+both must be present. Missing pointers or selected report evidence present
+`incomplete` on the board/review presentation, never a false ready card.
+Captain review is a separate authority boundary: the same artifact truth is
+re-read into a visible `required_pack_artifact_missing` caveat and explicit
+send preview (recipients, attachment hashes, present/missing documents), but it
+must not hard-refuse Captain signoff, approval, or dispatch. Dispatch re-reads
+that truth immediately before each route and returns it as audit evidence
+without changing the route effect identity. An unreadable artifact read keeps
+known family, pricing and SWMS requirements visible and marks resolution
+unknown; it never rewrites those requirements to false. Genuine caveat-class
+codes also continue to ride ready cards. Soft-assuming
+`canonical_draft_pack_output_missing` / `curated_source_missing` must not pull
+the card out of Docs Ready. Placement remains separate: roof and assessment
+stay on the portal report-in floor, so `canonical_stage` may remain
+`report_ready` while presentation independently enforces the artifacts required
+for that family/release (SWMS-26980 class). `presentSesPackHonesty` owns this
+operator boundary;
 `physicalReportCloseoutSatisfied` / `requiresBoundBuilderReportPdf` in
-`makesafe_computed_status.ts` are the one producer; Heathridge SWMS-261174
-(AJBR-70781, 2026-08-14) is the named miss.
+`makesafe_computed_status.ts` continue to own placement.
 
 ## Portal Truth Has Two Stores, And `portal_verified_at` Is Only One Of Them
 
@@ -2880,10 +2898,11 @@ output rides on `pack_presentation` (additive, top-level) plus
 `report_pack.presentation_kind` / `presentation_reason` /
 `legacy_pack_status` / gated `pre_xero_docs_ready` / `review_state`, and
 `get_ses_reviewable_pack` returns it under its own `presentation` key. Every
-caller must pass the bind-floor inputs (`report_doc_id`,
-`requires_bound_report_doc`, `swms_doc_id`, `requires_bound_swms`,
-`family_report_evidence_satisfied`) — defaults are permissive, so omitting them
-greens a ready-stamped physical docket with no pack bind (SWMS-261015 class).
+caller must pass the bind-floor inputs (`report_doc_id` / `_resolved`,
+`invoice_doc_id` / `_resolved`, `swms_doc_id` / `_resolved`, each matching
+requirement flag, and `family_report_evidence_satisfied`). A required pointer
+without explicit resolution proof fails closed, so no caller can green a
+ready-stamped docket from a coordinate alone (SWMS-261015/SWMS-26980 class).
 It must NEVER be written into `report_pack.status` or `blockers`: those stay the
 raw legacy + docket values the stage ladder, the SENT chip and M1 read. Likewise
 never mint a `report_pack` object for a card with no pack row and no docket —

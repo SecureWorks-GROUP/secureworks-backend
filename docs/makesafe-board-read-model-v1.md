@@ -195,14 +195,22 @@ green tick and never the legacy send-pipeline `failed`.
 
 Kind `ready` additionally requires the pack bind pointers — attach ticks are
 not binds (AGENTS.md "Docs Ready Is A Queue, Not A Board Column" owns the
-rule). A physical-shaped family with no `pack.report_doc_id`, a required SWMS
-with no `pack.swms_doc_id`, or a report-only (roof/assessment) card without
-family report-in evidence presents `incomplete` with a reason, even when the
-docket stamp says docs-ready. The published `pack.pre_xero_docs_ready` is gated
-the same way: it is `true` only when the presentation kind is `ready` AND the
-raw U4 docket stamp is true, and the
-`closeout_documents.report` / `.swms` ticks on bind-required families follow
-the pack pointer alone, never `has_report_doc` / `has_swms_doc`.
+rule). Physical and roof packs must have `pack.report_doc_id`; charged packs
+must have `pack.invoice_doc_id`; a family-required SWMS must have
+`pack.swms_doc_id`. Assessment keeps its portal-only report exception, and
+`no_additional_charge` keeps its no-invoice exception. Each required pointer
+must resolve to the exact expected `job_documents` class on this card and carry
+a storage/PDF URL. Missing, dangling, wrong-class, or empty-object pointers
+present `incomplete` with a plain-English reason, even when the docket stamp
+is docs-ready. A report-producing family also needs its selected current-cycle
+non-draft trade report; `has_report_doc` proves neither the pointer nor that
+current-cycle source. These are missing artifacts, not caveats. Report-only cards
+still need their separate family report-in evidence as well. The published
+`pack.pre_xero_docs_ready` is gated the same way: it is `true` only when the
+presentation kind is `ready` AND the raw U4 docket stamp is true. The
+`closeout_documents.report` / `.invoice` ticks follow those exact pointer
+resolutions, and a required `.swms` tick does too; attach or portal evidence
+cannot green a send artifact tile.
 
 Ops rows publish it as:
 
@@ -230,11 +238,11 @@ the honesty-gated values — falling back to `review_state` /
 AGENTS.md ("Previously Committed PDF Is Restorable, Not Complete") owns the
 seam. The `pack_presentation` object on the internal `makesafe_pipeline` row
 is that stamp's carrier; the board reads it for physical packs, and re-derives
-when there is no stamp, when a stale stamp claims `ready` while the live bind
-pointers refuse it, or always for report-only (roof/assessment) cards — the
-pipeline cannot see portal captures and fails closed without them, so this
-read model, which loads the capture ledger, is the honesty authority there. A
-stamped ready can never outrank the bind floor.
+when there is no stamp, when a stale stamp claims `ready` while the exact live
+report/invoice/required-SWMS pointers refuse it, or always for report-only
+(roof/assessment) cards — the pipeline cannot see portal captures and fails
+closed without them, so this read model, which loads the capture ledger, is the
+honesty authority there. A stamped ready can never outrank the bind floor.
 
 ### U2-S1 cycle-scoped evidence (board + audit)
 

@@ -893,6 +893,12 @@ export interface SesCockpitDocket {
   swms: Record<string, unknown>;
   routes: SesReviewRoute[];
   caveats?: SesReviewCaveat[];
+  /**
+   * Current read-back of pack pointers, exact document resolution and the
+   * selected current-cycle trade report. This is Captain review evidence, not
+   * a mechanical send blocker.
+   */
+  artifact_truth?: object | null;
   crew_and_trade_visits: unknown;
   clean_input: SesCleanInput;
   /**
@@ -1077,6 +1083,19 @@ export function buildSesCockpitView(
         local_invoice_proposal: docket.local_invoice_proposal,
       },
       email_drafts: docket.routes,
+      send_preview: {
+        route_count: docket.routes.length,
+        routes: docket.routes.map((route) => ({
+          route_kind: route.route_kind,
+          recipients: route.recipients,
+          cc: route.cc,
+          subject: route.subject,
+          attachment_hashes: route.attachment_hashes,
+          attachment_count: route.attachment_hashes.length,
+        })),
+        artifact_truth: docket.artifact_truth || null,
+      },
+      artifact_truth: docket.artifact_truth || null,
       crew_and_trade_visits: docket.crew_and_trade_visits,
       decision_controls: {
         approve_invoice: approveInvoice,

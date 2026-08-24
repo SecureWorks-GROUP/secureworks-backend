@@ -13,7 +13,8 @@
  *      exists — and a legacy `failed` is an honest refusal, not a green ready.
  *
  * Kinds (do not collapse these):
- *   - ready      — docket proves pre_xero_docs_ready with no blockers
+ *   - ready      — docket proves pre_xero_docs_ready with no blockers and all
+ *                  required bound artifacts resolve
  *   - refused    — system declined on evidence (healthy stop; name why)
  *   - incomplete — still assembling / no pack yet (in progress, not a stop)
  *   - sent       — already out the door
@@ -162,23 +163,40 @@ export function presentSesPackHonesty(input: {
   has_report_doc?: boolean | null;
   /** Trade service report submitted (even if no curated PDF yet). */
   has_trade_report?: boolean | null;
+  /** Exact selected non-draft trade report for the current attendance cycle. */
+  has_selected_current_cycle_trade_report?: boolean | null;
   /**
    * Pack bind pointer for the builder-facing report. Attach ticks are not
    * binds — when `requires_bound_report_doc` is true, a null pointer cannot
    * present as ready / READY TO SEND.
    */
   report_doc_id?: string | null;
+  /** False when the exact pointer does not resolve to its report document. */
+  report_doc_resolved?: boolean | null;
   /**
-   * Physical / temp-fence / repair / restoration: Docs Ready presentation
-   * requires `report_doc_id`. Roof / assessment leave this false.
+   * Operator/send readiness requires `report_doc_id` for every sendable
+   * family. Placement may still use the separate portal/report-in contract.
    */
   requires_bound_report_doc?: boolean | null;
+  /**
+   * Families whose builder-facing PDF is produced from a trade report require
+   * that selected current-cycle source as well as the bound PDF pointer.
+   */
+  requires_selected_current_cycle_trade_report?: boolean | null;
+  /** Pack bind pointer for the invoice reviewed and sent with this docket. */
+  invoice_doc_id?: string | null;
+  /** False when the exact pointer does not resolve to its invoice document. */
+  invoice_doc_resolved?: boolean | null;
+  /** Every charged SES operator pack requires its bound invoice artifact. */
+  requires_bound_invoice_doc?: boolean | null;
   /**
    * Pack bind pointer for the required SWMS. Same rule as the report: when
    * `requires_bound_swms` is true, an attached SWMS document alone cannot
    * present as ready / READY TO SEND.
    */
   swms_doc_id?: string | null;
+  /** False when the exact pointer does not resolve to its SWMS document. */
+  swms_doc_resolved?: boolean | null;
   /** Family requires SWMS (MLB physical make-safe). */
   requires_bound_swms?: boolean | null;
   /**
@@ -206,6 +224,10 @@ export function presentSesPackHonesty(input: {
   const docketState = lower(docket?.state);
   const boundReportDocId = txt(input.report_doc_id);
   const requiresBoundReport = input.requires_bound_report_doc === true;
+  const requiresSelectedTradeReport =
+    input.requires_selected_current_cycle_trade_report === true;
+  const boundInvoiceDocId = txt(input.invoice_doc_id);
+  const requiresBoundInvoice = input.requires_bound_invoice_doc === true;
   const boundSwmsDocId = txt(input.swms_doc_id);
   const requiresBoundSwms = input.requires_bound_swms === true;
   const familyReportEvidenceOk =
@@ -248,9 +270,38 @@ export function presentSesPackHonesty(input: {
       };
     }
     // Ready: docket proves docs ready and no refusal blockers — but attach is
-    // not a bind, and a report-only card still needs family report evidence.
+    // not a bind, every required pointer must resolve, and a report-only card
+    // still needs family report evidence.
     if (preXero) {
-      if (requiresBoundReport && !boundReportDocId) {
+      const pointerProblem = [
+        {
+          required: requiresBoundReport,
+          id: boundReportDocId,
+          resolved: input.report_doc_resolved,
+          field: "report_doc_id",
+          artifact: "report",
+        },
+        {
+          required: requiresBoundInvoice,
+          id: boundInvoiceDocId,
+          resolved: input.invoice_doc_resolved,
+          field: "invoice_doc_id",
+          artifact: "invoice",
+        },
+        {
+          required: requiresBoundSwms,
+          id: boundSwmsDocId,
+          resolved: input.swms_doc_resolved,
+          field: "swms_doc_id",
+          artifact: "SWMS",
+        },
+      ].find((pointer) =>
+        pointer.required && (!pointer.id || pointer.resolved !== true)
+      );
+      if (pointerProblem) {
+        const reason = !pointerProblem.id
+          ? `The SES docket is stamped ready, but the pack has no bound ${pointerProblem.field} — an attached ${pointerProblem.artifact} alone is not a bind.`
+          : `The SES docket is stamped ready, but its ${pointerProblem.field} does not resolve to the required ${pointerProblem.artifact} document.`;
         return {
           kind: "incomplete",
           state: "drafted",
@@ -258,13 +309,15 @@ export function presentSesPackHonesty(input: {
           pre_xero_docs_ready: false,
           docket_revision_id: docketId,
           drafted: true,
-          reason:
-            "The SES docket is stamped ready, but the pack has no bound report_doc_id — an attached document alone is not a bind.",
+          reason,
           blockers: [],
           legacy_pack_status: legacyPackStatus,
         };
       }
-      if (requiresBoundSwms && !boundSwmsDocId) {
+      if (
+        requiresSelectedTradeReport &&
+        input.has_selected_current_cycle_trade_report !== true
+      ) {
         return {
           kind: "incomplete",
           state: "drafted",
@@ -273,7 +326,7 @@ export function presentSesPackHonesty(input: {
           docket_revision_id: docketId,
           drafted: true,
           reason:
-            "The SES docket is stamped ready, but the pack has no bound swms_doc_id — an attached SWMS alone is not a bind.",
+            "The SES docket is stamped ready, but no selected current-cycle trade report backs the bound report document.",
           blockers: [],
           legacy_pack_status: legacyPackStatus,
         };

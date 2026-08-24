@@ -44,9 +44,17 @@ import {
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
+import { makesafePackArtifactRequirements } from "./makesafe_document_truth.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+
+function boundPackPointerReady(
+  id: unknown,
+  resolved: unknown,
+): boolean {
+  return !!String(id ?? "").trim() && resolved === true;
+}
 
 /**
  * Ops board field shape.
@@ -272,6 +280,11 @@ export function projectOpsMakesafeCardRow(row: any) {
         report_doc_id: row.pack.report_doc_id || null,
         invoice_doc_id: row.pack.invoice_doc_id || null,
         swms_doc_id: row.pack.swms_doc_id || null,
+        required_documents: row.pack.required_documents || {
+          report: true,
+          invoice: true,
+          swms: false,
+        },
         closeout_documents: row.pack.closeout_documents || {
           report: false,
           invoice: false,
@@ -1455,6 +1468,22 @@ export function buildCanonicalMakesafeRows(
     // captures; this read model has them). `drafted` always comes from the
     // presentation, never from reading a presentation state string.
     const needsBoundReportPdf = requiresBoundBuilderReportPdf(statusInput);
+    const artifactRequirements = makesafePackArtifactRequirements({
+      ses_family: sesFamily,
+      pricing_disposition: pack?.pricing_disposition,
+    });
+    const reportPointerReady = boundPackPointerReady(
+      pack?.report_doc_id,
+      pack?.report_doc_resolved,
+    );
+    const invoicePointerReady = boundPackPointerReady(
+      pack?.invoice_doc_id,
+      pack?.invoice_doc_resolved,
+    );
+    const swmsPointerReady = boundPackPointerReady(
+      pack?.swms_doc_id,
+      pack?.swms_doc_resolved,
+    );
     // Prefer the preserved raw U4 stamp when the pipeline already gated
     // operator-facing pre_xero_docs_ready. Legacy rows only carried the stamp
     // on pre_xero_docs_ready itself.
@@ -1488,9 +1517,18 @@ export function buildCanonicalMakesafeRows(
       pack_sent: packSent || base?.sent_to_builder === true,
       has_report_doc: base?.has_report_doc === true,
       has_trade_report: !!report,
+      has_selected_current_cycle_trade_report: !!report,
       report_doc_id: pack?.report_doc_id || null,
-      requires_bound_report_doc: needsBoundReportPdf,
+      report_doc_resolved: pack?.report_doc_resolved,
+      requires_bound_report_doc: artifactRequirements.requires_bound_report_doc,
+      requires_selected_current_cycle_trade_report:
+        artifactRequirements.requires_bound_report_doc,
+      invoice_doc_id: pack?.invoice_doc_id || null,
+      invoice_doc_resolved: pack?.invoice_doc_resolved,
+      requires_bound_invoice_doc:
+        artifactRequirements.requires_bound_invoice_doc,
       swms_doc_id: pack?.swms_doc_id || null,
+      swms_doc_resolved: pack?.swms_doc_resolved,
       requires_bound_swms: swmsRequired,
       // Report-only: ready presentation still needs portal/own-template proof.
       family_report_evidence_satisfied: needsBoundReportPdf
@@ -1502,8 +1540,12 @@ export function buildCanonicalMakesafeRows(
     // re-derive when the stamp would green a card the live binds refuse.
     // Report-only always re-derives: the pipeline cannot see portal captures.
     const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
-      (needsBoundReportPdf && !String(pack?.report_doc_id || "").trim()) ||
-      (swmsRequired && !String(pack?.swms_doc_id || "").trim()) ||
+      (artifactRequirements.requires_bound_report_doc &&
+        !reportPointerReady) ||
+      (artifactRequirements.requires_bound_report_doc && !report) ||
+      (artifactRequirements.requires_bound_invoice_doc &&
+        !invoicePointerReady) ||
+      (swmsRequired && !swmsPointerReady) ||
       (!needsBoundReportPdf && !reportIn.satisfied)
     );
     const reportOnlyNeedsLiveHonesty = !needsBoundReportPdf;
@@ -1543,20 +1585,21 @@ export function buildCanonicalMakesafeRows(
       report_doc_id: pack?.report_doc_id || null,
       invoice_doc_id: pack?.invoice_doc_id || null,
       swms_doc_id: pack?.swms_doc_id || null,
+      required_documents: {
+        report: artifactRequirements.requires_bound_report_doc,
+        invoice: artifactRequirements.requires_bound_invoice_doc,
+        swms: swmsRequired,
+      },
       closeout_documents: {
-        // Physical / temp-fence: the report tile is the pack bind only.
-        // Attach tick (`has_report_doc`) is not a bind.
-        // Roof / assessment honestly have no local make-safe report, so the
-        // portal/own-template report-in predicate remains the tile.
-        report: needsBoundReportPdf
-          ? !!String(pack?.report_doc_id || "").trim()
-          : (reportIn.satisfied || base?.has_report_doc === true ||
-            !!pack?.report_doc_id),
-        invoice: invoiceCloseoutSatisfied,
+        // Send presentation follows exact resolved artifacts for every family.
+        // Portal/report-in evidence may still place a report-only card, but it
+        // cannot green the report tile or invoice tile for a human press.
+        report: reportPointerReady,
+        invoice: invoicePointerReady,
         // Required SWMS closeout tick is the pack pointer; attach alone is not.
         swms: swmsRequired
-          ? !!String(pack?.swms_doc_id || "").trim()
-          : (base?.has_swms_doc === true || !!pack?.swms_doc_id),
+          ? swmsPointerReady
+          : (base?.has_swms_doc === true || swmsPointerReady),
       },
     };
     const rawReportState = String(
@@ -1656,7 +1699,7 @@ export function buildCanonicalMakesafeRows(
       // are aliases of evidence already loaded and cycle-scoped by the board;
       // they do not query, bind, build, approve, or send anything.
       report_doc_id: pack?.report_doc_id || null,
-      has_report_doc: base?.has_report_doc === true || !!pack?.report_doc_id,
+      has_report_doc: base?.has_report_doc === true || reportPointerReady,
       invoice_id: base?.invoice_id || null,
       pack: packPayload,
       age: ageFacts(base),
