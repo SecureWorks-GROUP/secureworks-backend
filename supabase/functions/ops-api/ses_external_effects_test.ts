@@ -6,6 +6,7 @@ import {
 import {
   buildSesEffect,
   executeSesExternalEffect,
+  recordSesObservedExternalEffect,
   type SesEffectClaim,
   type SesEffectState,
   type SesExternalEffect,
@@ -52,7 +53,7 @@ class MemoryEffectStore implements SesExternalEffectStore {
     operationKey: string,
     from: SesEffectState,
     to: SesEffectState,
-    _eventKind: string,
+    eventKind: string,
     detail: Record<string, unknown>,
     _actor: string,
   ): Promise<SesExternalEffect> {
@@ -67,6 +68,10 @@ class MemoryEffectStore implements SesExternalEffectStore {
     // deployed SQL rejects.
     const allowed =
       (from === "reserved" && ["dispatching", "failed"].includes(to)) ||
+      (from === "reserved" && to === "confirmed" &&
+        eventKind === "provider_observed_without_dispatch" &&
+        this.row.effect_kind === "invoice_authorise" &&
+        String(detail.external_id || "").trim().length > 0) ||
       (from === "dispatching" &&
         ["unknown", "confirmed", "failed"].includes(to)) ||
       (from === "unknown" && ["confirmed", "failed"].includes(to)) ||
@@ -253,8 +258,13 @@ function createRpcEffectHarness() {
         }
         const from = row.state;
         const to = toState;
+        const eventKind = String(args.p_event_kind || "");
         const allowed =
           (from === "reserved" && ["dispatching", "failed"].includes(to)) ||
+          (from === "reserved" && to === "confirmed" &&
+            eventKind === "provider_observed_without_dispatch" &&
+            row.effect_kind === "invoice_authorise" &&
+            String(detail.external_id || "").trim().length > 0) ||
           (from === "dispatching" &&
             ["unknown", "confirmed", "failed"].includes(to)) ||
           (from === "unknown" && ["confirmed", "failed"].includes(to)) ||
@@ -361,6 +371,42 @@ Deno.test("second invoice attempt cannot dispatch a second Xero create", async (
   assertEquals(dispatches, 1, "the duplicate attempt must not call Xero");
   assertEquals(second.dispatched, false);
 });
+
+Deno.test(
+  "legacy authorised invoice observation confirms its effect without dispatch",
+  async () => {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_authorise",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000001",
+      payload: {
+        xero_invoice_id: "legacy-xero-invoice",
+        expected_status: "AUTHORISED",
+      },
+    });
+    const observed = await recordSesObservedExternalEffect({
+      store,
+      effect,
+      external_id: "legacy-xero-invoice",
+      provider_digest: { status: "AUTHORISED" },
+      actor: "legacy-recovery",
+    });
+    const replay = await recordSesObservedExternalEffect({
+      store,
+      effect,
+      external_id: "legacy-xero-invoice",
+      provider_digest: { status: "AUTHORISED" },
+      actor: "legacy-recovery",
+    });
+
+    assertEquals(observed.state, "confirmed");
+    assertEquals(observed.external_id, "legacy-xero-invoice");
+    assertEquals(replay.state, "confirmed");
+    assertEquals(store.row?.state, "confirmed");
+  },
+);
 
 Deno.test("unknown invoice outcome reconciles original token and never redispatches", async () => {
   const store = new MemoryEffectStore();

@@ -209,6 +209,70 @@ function unknownRefusal(
 }
 
 /**
+ * Record provider truth that was observed outside the current dispatch path.
+ *
+ * This is intentionally separate from executeSesExternalEffect: a legacy Xero
+ * invoice may already be AUTHORISED before SES owns its effect ledger. Recovery
+ * can reconcile that exact live identity and close the corresponding effect as
+ * observed, but it must never call the provider's authorise operation again.
+ */
+export async function recordSesObservedExternalEffect(args: {
+  store: SesExternalEffectStore;
+  effect: Omit<SesExternalEffect, "state">;
+  external_id: string;
+  provider_digest?: Record<string, unknown>;
+  actor: string;
+}): Promise<SesExternalEffect> {
+  const externalId = String(args.external_id || "").trim();
+  if (!externalId) {
+    throw new Error("observed external effect requires an external id");
+  }
+  if (args.effect.effect_kind !== "invoice_authorise") {
+    throw new Error(
+      "provider-observed reconciliation is reserved for invoice_authorise",
+    );
+  }
+  const claim = await args.store.claim(
+    args.effect,
+    `${args.actor}:observed:${crypto.randomUUID()}`,
+  );
+  if (claim.effect.payload_hash !== args.effect.payload_hash) {
+    throw new Error(
+      "the observed external effect payload differs from the immutable ledger effect",
+    );
+  }
+  if (claim.effect.state === "confirmed" || claim.claim_mode === "confirmed") {
+    const priorExternalId = String(claim.effect.external_id || "").trim();
+    if (priorExternalId && priorExternalId !== externalId) {
+      throw new Error(
+        "the confirmed external effect names a different provider identity",
+      );
+    }
+    return claim.effect;
+  }
+  if (
+    !["reserved", "dispatching", "unknown", "failed"].includes(
+      claim.effect.state,
+    )
+  ) {
+    throw new Error(
+      `the observed external effect is in an unrecoverable state: ${claim.effect.state}`,
+    );
+  }
+  return await args.store.transition(
+    claim.effect.operation_key,
+    claim.effect.state,
+    "confirmed",
+    "provider_observed_without_dispatch",
+    {
+      external_id: externalId,
+      provider_digest: args.provider_digest || {},
+    },
+    args.actor,
+  );
+}
+
+/**
  * Exact-once execution. A confirmed effect is structurally unable to dispatch
  * again. An uncertain route_send first wins an atomic per-operation lease,
  * because exact-token reconciliation may itself finish and send a checkpointed
