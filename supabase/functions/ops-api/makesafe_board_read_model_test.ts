@@ -2380,6 +2380,163 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
   );
 });
 
+Deno.test("board photo_count: single-visit unchanged on reattend fail-closed default", () => {
+  const [singleVisit] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "single", {
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+        reattend_count: 0,
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 1 },
+    }),
+  ], {
+    photoCountByJobId: { single: 12 },
+  });
+  assertEquals(singleVisit.report.photo_count, 12);
+
+  const [failClosed] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "reattend-closed", {
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 2,
+        reattend_count: 1,
+        attendance_cycle_id: "cycle-2",
+      },
+      report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+    }),
+  ], {
+    photoCountByJobId: { "reattend-closed": 30 },
+  });
+  assertEquals(failClosed.report.photo_count, 0);
+});
+
+Deno.test(
+  "board photo_count Hillarys SWMS-261134: reattend reads pack photo-route count (board half only)",
+  () => {
+    // Live shape: cycle 2 reattend, photo route attachment_count already 21,
+    // board was fail-closed to 0. Route-attachment half does NOT reproduce here.
+    const [hillarys] = buildCanonicalMakesafeRows([
+      baseJob("allocated", "hillarys-261134", {
+        job_number: "SWMS-261134",
+        site_suburb: "Hillarys",
+        makesafe_details: {
+          substatus: "waiting_on_trade_report",
+          cycle_number: 2,
+          reattend_count: 1,
+          attendance_cycle_id: "cycle-2",
+        },
+        report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+        report_pack: {
+          status: "drafted",
+          report_doc_id: "doc-hillarys-report",
+          docket_revision_id: "docket-hillarys",
+          sent_at: null,
+        },
+      }),
+    ], {
+      photoCountByJobId: { "hillarys-261134": 49 },
+      photosHaveCycleBindingByJobId: { "hillarys-261134": true },
+      currentCyclePhotoCountByJobId: { "hillarys-261134": 21 },
+      packPhotoAttachmentCountByJobId: { "hillarys-261134": 21 },
+    });
+    assertEquals(hillarys.report.photo_count, 21);
+  },
+);
+
+Deno.test(
+  "board photo_count Willetton SWMS-261288: all-attendances outranks stale 7-photo pack",
+  () => {
+    // Live shape: curated bind same_job_all_attendances (30), but photo route
+    // still carried only the current-cycle 7 until prepare expands. Board half
+    // must read 30; route-attachment half is covered by the assembler tests.
+    const [willetton] = buildCanonicalMakesafeRows([
+      baseJob("allocated", "willetton-261288", {
+        job_number: "SWMS-261288",
+        site_suburb: "Willetton",
+        makesafe_details: {
+          substatus: "waiting_on_trade_report",
+          cycle_number: 2,
+          reattend_count: 1,
+          attendance_cycle_id: "cycle-2",
+        },
+        report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+        report_pack: {
+          status: "drafted",
+          report_doc_id: "doc-willetton-all-attendances",
+          docket_revision_id: "docket-willetton-stale-7",
+          sent_at: null,
+        },
+      }),
+    ], {
+      photoCountByJobId: { "willetton-261288": 30 },
+      photosHaveCycleBindingByJobId: { "willetton-261288": true },
+      currentCyclePhotoCountByJobId: { "willetton-261288": 7 },
+      packPhotoAttachmentCountByJobId: { "willetton-261288": 7 },
+      boundPhotoSourceScopeByJobId: {
+        "willetton-261288": "same_job_all_attendances",
+      },
+    });
+    assertEquals(willetton.report.photo_count, 30);
+  },
+);
+
+Deno.test(
+  "F1: board photo_count publishes sealed bind selection, not live completion raw",
+  () => {
+    // Bind accounted 3 (2 completion + 1 receipt-phase photo). Live board raw
+    // only saw 2 completion rows. Sealed boundPackPhotoCount must win.
+    const [card] = buildCanonicalMakesafeRows([
+      baseJob("allocated", "reattend-bound-photos", {
+        job_number: "SWMS-F1-BOUND",
+        makesafe_details: {
+          substatus: "waiting_on_trade_report",
+          cycle_number: 2,
+          reattend_count: 1,
+          attendance_cycle_id: "cycle-2",
+        },
+        report: { status: "submitted", submitted_at: NOW, cycle_number: 2 },
+        report_pack: {
+          status: "drafted",
+          report_doc_id: "doc-bound-photos",
+          docket_revision_id: "docket-bound",
+          sent_at: null,
+        },
+      }),
+    ], {
+      photoCountByJobId: { "reattend-bound-photos": 2 },
+      photosHaveCycleBindingByJobId: { "reattend-bound-photos": true },
+      currentCyclePhotoCountByJobId: { "reattend-bound-photos": 1 },
+      packPhotoAttachmentCountByJobId: { "reattend-bound-photos": 2 },
+      boundPhotoSourceScopeByJobId: {
+        "reattend-bound-photos": "same_job_all_attendances",
+      },
+      boundPackPhotoCountByJobId: { "reattend-bound-photos": 3 },
+    });
+    assertEquals(card.report.photo_count, 3);
+
+    // Single-visit neighbour stays raw — sealed bind fields must not move it.
+    const [single] = buildCanonicalMakesafeRows([
+      baseJob("allocated", "single-visit-raw", {
+        job_number: "SWMS-SINGLE",
+        makesafe_details: {
+          substatus: "waiting_on_trade_report",
+          cycle_number: 1,
+          reattend_count: 0,
+        },
+        report: { status: "submitted", submitted_at: NOW, cycle_number: 1 },
+      }),
+    ], {
+      photoCountByJobId: { "single-visit-raw": 12 },
+      boundPhotoSourceScopeByJobId: {
+        "single-visit-raw": "same_job_all_attendances",
+      },
+      boundPackPhotoCountByJobId: { "single-visit-raw": 99 },
+    });
+    assertEquals(single.report.photo_count, 12);
+  },
+);
+
 Deno.test("presentMakesafeBoardSubstatus demotes unbacked ready_to_invoice by family", () => {
   // Pure presentation helper: ready_to_invoice is an operator CLAIM and may
   // only surface when report-in evidence backs it.
