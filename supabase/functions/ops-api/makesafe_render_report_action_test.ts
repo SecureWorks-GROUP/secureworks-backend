@@ -131,6 +131,7 @@ function bindClient(
     prior?: Record<string, unknown>;
     otherDocuments?: Array<Record<string, unknown>>;
     jobType?: string;
+    jobFamily?: string;
     documentJobId?: string;
     documentType?: string;
     fileName?: string;
@@ -195,7 +196,9 @@ function bindClient(
       job_number: "SWMS-TEST",
       type: options.jobType || "makesafe",
       client_name: "Canonical site contact",
-      metadata: { makesafe_job_family: "general_makesafe" },
+      metadata: {
+        makesafe_job_family: options.jobFamily || "general_makesafe",
+      },
     },
     makesafe_job_details: {
       report_type: null,
@@ -526,6 +529,81 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
   assertEquals(replay.skipped, true);
   assertEquals(replay.writes, 0);
   assertEquals(mutations.length, 2);
+});
+
+for (
+  const family of ["physical_makesafe", "repair", "restoration"] as const
+) {
+  Deno.test(
+    `curated bind family gate admits report-owing ${family} cards`,
+    async () => {
+      const bytes = new TextEncoder().encode(
+        `%PDF-1.7\n${family} curated bind family fixture`,
+      );
+      const { client, mutations, pack } = bindClient(bytes, {
+        jobFamily: family,
+        pack: draftedPack(),
+      });
+      const body = await bindBody(bytes);
+
+      const result = await withStoredPdf(
+        bytes,
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+      );
+
+      assertEquals(result.skipped, false);
+      assertEquals(result.writes, 2);
+      assertEquals(result.pack_pointer_written, true);
+      assertEquals(result.pack_report_doc_id, "document-fixture");
+      assertEquals(
+        (pack as Record<string, unknown>).report_doc_id,
+        "document-fixture",
+      );
+      assertEquals(mutations.map((item) => item.table), [
+        "job_events",
+        "job_documents",
+        "makesafe_report_packs",
+      ]);
+    },
+  );
+}
+
+Deno.test("curated bind family gate keeps assessment report-doc semantics unchanged", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\nassessment curated bind family fixture",
+  );
+  const { client, mutations, pack } = bindClient(bytes, {
+    jobFamily: "assessment_quote",
+    pack: draftedPack(),
+  });
+  const body = await bindBody(bytes);
+
+  const error = await withStoredPdf(
+    bytes,
+    () =>
+      assertRejects(
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+        ApiError,
+        "only a physical make-safe job",
+      ),
+  );
+
+  assertEquals(
+    ((error as ApiError).body as Record<string, unknown>).code,
+    "curated_bind_family_not_eligible",
+  );
+  assertEquals((pack as Record<string, unknown>).report_doc_id, null);
+  assertEquals(mutations.length, 0);
 });
 
 function draftedPack(overrides: Record<string, unknown> = {}) {
