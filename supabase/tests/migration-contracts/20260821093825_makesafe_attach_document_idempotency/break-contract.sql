@@ -1,0 +1,1 @@
+DROP INDEX public.ux_job_documents_makesafe_attach_key;

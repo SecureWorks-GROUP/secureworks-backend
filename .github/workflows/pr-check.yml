@@ -12,6 +12,7 @@ on:
       # never merge. Prefer scripts/** over a hardcoded list so new files under
       # scripts/ (e.g. evidence checkers) still fire the required check.
       - 'supabase/migrations/**'
+      - 'supabase/tests/migration-contracts/**'
       - 'scripts/**'
       - 'scripts/deploy-edge-function.sh'
       - 'scripts/smoke-edge-functions.sh'
@@ -203,6 +204,46 @@ jobs:
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
+
+  # Execute migration behaviour against PostgreSQL, not a text parser. The
+  # repository's historical migrations include Supabase-only schemas and live
+  # baseline drift, so the contract registry supplies the narrow prerequisites
+  # for each registered migration and applies those migrations in timestamp
+  # order. See supabase/tests/migration-contracts/README.md.
+  migration-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure PostgreSQL client is available
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes postgresql-client
+          fi
+
+      - name: Run PostgreSQL migration contracts
+        env:
+          MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+          MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
+        run: bash supabase/tests/migration-contracts/run.sh
 
   # Automated coverage for the SES Reporting proof harness. This runs the fast
   # TypeScript check, the recipient / DRAFT / marker / cleanup safety contract,
