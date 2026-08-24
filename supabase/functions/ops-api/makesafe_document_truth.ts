@@ -135,11 +135,15 @@ export function resolveMakesafePackDocumentPointers(
   const invoice = pointedRow(pack?.invoice_doc_id);
   const swms = pointedRow(pack?.swms_doc_id);
   const reportTypes = options.report_document_types || ["makesafe_report"];
+  const legacyReportNameMatches = (name: string): boolean =>
+    (reportTypes.includes("roof_report") && name.includes("roof report")) ||
+    (reportTypes.includes("makesafe_report") &&
+      name.includes("make safe report"));
   return {
     report_doc_resolved: typed(
       report,
       reportTypes,
-      (name) => name.includes("make safe report"),
+      legacyReportNameMatches,
     ),
     invoice_doc_resolved: typed(
       invoice,

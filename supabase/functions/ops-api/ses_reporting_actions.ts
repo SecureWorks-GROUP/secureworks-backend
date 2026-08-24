@@ -1108,18 +1108,19 @@ interface SesPackArtifactTruth {
   read_state: "current" | "unreadable";
   presentation_kind: SesPackPresentation["kind"];
   presentation_reason: string | null;
-  required_documents: Record<SesPackArtifactDocumentKey, boolean>;
-  closeout_documents: Record<SesPackArtifactDocumentKey, boolean>;
+  required_documents: Record<SesPackArtifactDocumentKey, boolean | null>;
+  closeout_documents: Record<SesPackArtifactDocumentKey, boolean | null>;
   document_ids: Record<SesPackArtifactDocumentKey, string | null>;
-  document_resolution: Record<SesPackArtifactDocumentKey, boolean>;
+  document_resolution: Record<SesPackArtifactDocumentKey, boolean | null>;
   current_cycle_trade_report: {
-    required: boolean;
-    present: boolean;
+    required: boolean | null;
+    present: boolean | null;
     report_id: string | null;
     status: string | null;
   };
   family_report_evidence_satisfied: boolean | null;
   missing_required: string[];
+  unresolved_required: string[];
   read_error: string | null;
 }
 
@@ -1157,9 +1158,26 @@ function packArtifactTruthCaveat(
   };
 }
 
+function manifestSwmsRequirement(
+  docket: Record<string, any>,
+  reviewFamily: string,
+): boolean | null {
+  const classification = object(object(docket.envelope).v2).classification;
+  const builderKey = String(object(classification).builder_key || "")
+    .toUpperCase();
+  if (!reviewFamily || !builderKey) return null;
+  return builderKey === "MLB" && reviewFamily === "physical_makesafe";
+}
+
 function unreadablePackArtifactTruth(
   docket: Record<string, any>,
   error: string,
+  context: {
+    requirements?: Partial<
+      Record<SesPackArtifactDocumentKey, boolean>
+    >;
+    pack?: Record<string, any> | null;
+  } = {},
 ): SesPackArtifactTruthRead {
   const presentation: SesPackPresentation = {
     kind: "incomplete",
@@ -1172,22 +1190,40 @@ function unreadablePackArtifactTruth(
     blockers: [],
     legacy_pack_status: null,
   };
+  const requirement = (key: SesPackArtifactDocumentKey): boolean | null =>
+    typeof context.requirements?.[key] === "boolean"
+      ? context.requirements[key]!
+      : null;
+  const requiredDocuments = {
+    report: requirement("report"),
+    invoice: requirement("invoice"),
+    swms: requirement("swms"),
+  };
+  const unresolvedRequired = (Object.entries(requiredDocuments) as Array<
+    [SesPackArtifactDocumentKey, boolean | null]
+  >).filter(([, required]) => required === true).map(([key]) => key);
+  const pack = context.pack || null;
   const truth: SesPackArtifactTruth = {
     read_state: "unreadable",
     presentation_kind: presentation.kind,
     presentation_reason: presentation.reason,
-    required_documents: { report: false, invoice: false, swms: false },
-    closeout_documents: { report: false, invoice: false, swms: false },
-    document_ids: { report: null, invoice: null, swms: null },
-    document_resolution: { report: false, invoice: false, swms: false },
+    required_documents: requiredDocuments,
+    closeout_documents: { report: null, invoice: null, swms: null },
+    document_ids: {
+      report: String(pack?.report_doc_id || "").trim() || null,
+      invoice: String(pack?.invoice_doc_id || "").trim() || null,
+      swms: String(pack?.swms_doc_id || "").trim() || null,
+    },
+    document_resolution: { report: null, invoice: null, swms: null },
     current_cycle_trade_report: {
-      required: false,
-      present: false,
+      required: requiredDocuments.report,
+      present: null,
       report_id: null,
       status: null,
     },
     family_report_evidence_satisfied: null,
     missing_required: [],
+    unresolved_required: unresolvedRequired,
     read_error: error,
   };
   const caveat = packArtifactTruthCaveat(truth);
@@ -1213,11 +1249,22 @@ async function readSesPackArtifactTruth(
     review_family: reviewFamily,
     pack_obligation: packObligation,
   } = args;
+  const artifactRequirements = makesafePackArtifactRequirements({
+    ses_family: reviewFamily,
+    pricing_disposition: packObligation?.pricing_disposition,
+  });
+  const manifestSwmsRequired = manifestSwmsRequirement(docket, reviewFamily);
+  const requirements = (swmsRequired: boolean | null) => ({
+    report: artifactRequirements.requires_bound_report_doc,
+    invoice: artifactRequirements.requires_bound_invoice_doc,
+    ...(typeof swmsRequired === "boolean" ? { swms: swmsRequired } : {}),
+  });
   const jobId = String(docket.job_id || "").trim();
   if (!jobId) {
     return unreadablePackArtifactTruth(
       docket,
       "The current docket has no job identity for artifact revalidation.",
+      { requirements: requirements(manifestSwmsRequired) },
     );
   }
   const [packRead, jobRead, detailRead, documentsRead, reportsRead] =
@@ -1249,9 +1296,16 @@ async function readSesPackArtifactTruth(
     detailRead.error?.message || documentsRead.error?.message ||
     reportsRead.error?.message;
   if (readError) {
+    const swmsRequired = !jobRead.error && !detailRead.error
+      ? requiresMakesafeSwms(detailRead.data || null, jobRead.data || null)
+      : manifestSwmsRequired;
     return unreadablePackArtifactTruth(
       docket,
       `Pack artifact truth could not be read (${readError}).`,
+      {
+        requirements: requirements(swmsRequired),
+        pack: packRead.error ? null : packRead.data || null,
+      },
     );
   }
 
@@ -1308,6 +1362,12 @@ async function readSesPackArtifactTruth(
           `Portal evidence for pack honesty could not be read (${
             portalRead.error.message || "unknown database error"
           }).`,
+          {
+            requirements: requirements(
+              requiresMakesafeSwms(detailRow, jobRow),
+            ),
+            pack: packRow,
+          },
         );
       }
       ledgerRows = portalRead.data || [];
@@ -1325,10 +1385,6 @@ async function readSesPackArtifactTruth(
   const familyReportEvidenceSatisfied = needsBoundReportPdf
     ? true
     : reportInEvidence(honestyStatusInput).satisfied;
-  const artifactRequirements = makesafePackArtifactRequirements({
-    ses_family: reviewFamily,
-    pricing_disposition: packObligation?.pricing_disposition,
-  });
   const swmsRequired = requiresMakesafeSwms(detailRow, jobRow);
   const envelope = object(docket.envelope);
   const presentation = presentSesPackHonesty({
@@ -1401,6 +1457,7 @@ async function readSesPackArtifactTruth(
     },
     family_report_evidence_satisfied: familyReportEvidenceSatisfied,
     missing_required: missingRequired,
+    unresolved_required: missingRequired,
     read_error: null,
   };
   const caveat = packArtifactTruthCaveat(truth);
@@ -1500,13 +1557,11 @@ export async function loadSesCockpitDocket(
       .eq("job_id", jobId)
       .order("created_at", { ascending: true }),
   ]);
-  if (assignmentsResponse.error || reportsResponse.error) {
+  if (assignmentsResponse.error) {
     throw new SesActionError(503, {
       state: "refused",
-      fact: `The crew and raw trade visit history could not be read (${
-        assignmentsResponse.error?.message ||
-        reportsResponse.error?.message ||
-        "unknown database error"
+      fact: `The crew assignment history could not be read (${
+        assignmentsResponse.error.message || "unknown database error"
       }).`,
     });
   }
@@ -1685,7 +1740,11 @@ export async function loadSesCockpitDocket(
     artifact_truth: artifactTruth.truth,
     crew_and_trade_visits: {
       assignments: assignmentsResponse.data || [],
-      visit_reports: reportsResponse.data || [],
+      // Artifact truth re-reads this table below. A report-history fault is
+      // therefore represented by the shared pack_artifact_truth_unreadable
+      // caveat rather than blocking Captain review/approval at this earlier
+      // display-only projection.
+      visit_reports: reportsResponse.error ? [] : reportsResponse.data || [],
     },
     clean_input: cleanInput,
     release_send_progress: releaseSendProgress,
@@ -3445,220 +3504,21 @@ export async function getSesReviewablePackAction(
     ...sesDocketReleaseCaveats(docket),
     ...sourceCaveats,
   ]);
-  const envelope = object(docket.envelope);
-  // Bind-floor honesty inputs — same set board/pipeline pass to
-  // presentSesPackHonesty. Resolve the exact rows here so neither a missing nor
-  // a dangling report/invoice/required-SWMS coordinate can green review.
-  const jobId = String(docket.job_id || "");
-  const [packRead, jobRead, detailRead, documentsRead, reportsRead] =
-    await Promise.all([
-    client.from("makesafe_report_packs")
-      .select(
-        "id,pack_kind,status,report_doc_id,invoice_doc_id,swms_doc_id,sent_at",
-      )
-      .eq("job_id", jobId).eq("pack_kind", "main").maybeSingle(),
-    client.from("jobs")
-      .select("id,type,status,metadata")
-      .eq("id", jobId).maybeSingle(),
-    client.from("makesafe_job_details")
-      .select(
-        "job_id,report_type,substatus,external_ref,external_links,attendance_cycle_id,cycle_number,reattend_count,portal_verified_at,portal_verified_cycle,portal_verified_signal,requesting_company_slug,requesting_company_name,requesting_company_id",
-      )
-      .eq("job_id", jobId).maybeSingle(),
-    client.from("job_documents")
-      .select("id,type,file_name,storage_url,pdf_url")
-      .eq("job_id", jobId),
-    client.from("job_service_reports")
-      .select(
-        "id,job_id,status,submitted_at,created_at,cycle_number,attendance_cycle_id,cycle_attribution",
-      )
-      .eq("job_id", jobId)
-      .order("submitted_at", { ascending: false }),
-  ]);
-  if (packRead.error) {
-    throw new SesActionError(503, {
-      state: "refused",
-      fact: `The pack pointers could not be read (${
-        packRead.error.message || "unknown database error"
-      }).`,
-    });
-  }
-  if (
-    jobRead.error || detailRead.error || documentsRead.error ||
-    reportsRead.error
-  ) {
-    throw new SesActionError(503, {
-      state: "refused",
-      fact: `The job identity for pack honesty could not be read (${
-        jobRead.error?.message || detailRead.error?.message ||
-        documentsRead.error?.message ||
-        reportsRead.error?.message ||
-        "unknown database error"
-      }).`,
-    });
-  }
-  const packRow = packRead.data || null;
-  const jobRow = jobRead.data || null;
-  const detailRow = detailRead.data || null;
-  const selectedCurrentCycleTradeReport = selectCurrentCycleReport(
-    reportsRead.data || [],
-    detailRow,
-    detailRow?.attendance_cycle_id || null,
-  );
-  const packPointerResolution = resolveMakesafePackDocumentPointers(
-    packRow,
-    documentsRead.data || [],
-    {
-      report_document_types: makesafeReportDocumentTypesForFamily(
-        reviewFamily,
-      ),
-    },
-  );
-  const sesFamily = (reviewFamily || null) as SesFamilyId | null;
-  const honestyStatusInput = {
-    job: jobRow,
-    detail: detailRow,
-    evidence: {
-      pack: packRow
-        ? {
-          report_doc_id: packRow.report_doc_id ?? null,
-          swms_doc_id: packRow.swms_doc_id ?? null,
-        }
-        : null,
-      documents: {
-        report: !!String(packRow?.report_doc_id || "").trim(),
-      },
-      serviceReports: selectedCurrentCycleTradeReport
-        ? [selectedCurrentCycleTradeReport]
-        : [],
-      portalCaptures: [] as ReturnType<typeof projectMakesafePortalCaptures>,
-    },
-    ses_family: sesFamily,
-  };
-  const needsBoundReportPdf = requiresBoundBuilderReportPdf(honestyStatusInput);
-  // Report-only: project portal captures (validated ledger rows plus the
-  // card's own detail-derived captures) so family evidence matches the board
-  // projection. Physical cards skip this — the bind floor is the gate.
-  if (!needsBoundReportPdf && detailRow) {
-    const cycleId = String(detailRow.attendance_cycle_id || "").trim();
-    let ledgerRows: Record<string, unknown>[] = [];
-    if (cycleId) {
-      const portalRead = await client.from("makesafe_portal_capture_revisions")
-        .select(
-          "id,job_id,attendance_cycle_id,role,source_url,capture_result,status,capture_producer,captured_by,captured_at,builder_reference,source_content_hash,signal,screenshot_object_key,screenshot_media_type,screenshot_content_hash,screenshot_size_bytes,makesafe_fact_version",
-        )
-        .eq("job_id", jobId)
-        .eq("attendance_cycle_id", cycleId);
-      if (portalRead.error) {
-        throw new SesActionError(503, {
-          state: "refused",
-          fact: `Portal capture evidence for pack honesty could not be read (${
-            portalRead.error.message || "unknown database error"
-          }).`,
-        });
-      }
-      ledgerRows = portalRead.data || [];
-    }
-    honestyStatusInput.evidence.portalCaptures = projectMakesafePortalCaptures(
-      {
-        id: jobId,
-        metadata: jobRow?.metadata || {},
-        makesafe_details: detailRow,
-        cycle_number: detailRow.cycle_number,
-      },
-      ledgerRows,
-    );
-  }
-  const familyReportEvidenceSatisfied = needsBoundReportPdf
-    ? true
-    : reportInEvidence(honestyStatusInput).satisfied;
-  const swmsRequired = requiresMakesafeSwms(detailRow, jobRow);
-  const artifactRequirements = makesafePackArtifactRequirements({
-    ses_family: reviewFamily,
-    pricing_disposition: packObligation?.pricing_disposition,
-  });
-  // Presentation honesty: actual identity/byte drift remains a refusal, while
-  // review-source caveats remain visible without turning a drafted pack into a
-  // false U4_BLOCKED state. Bind pointers and family evidence must still fire.
-  const presentation = presentSesPackHonesty({
-    docket: {
-      id: docket.id,
-      state: docket.state ?? null,
-      pre_xero_docs_ready: envelope.pre_xero_docs_ready === true ||
-        docket.pre_xero_docs_ready === true,
-      blockers: storedBlockers,
-    },
+  // One reader owns artifact truth for review, signoff, approval previews and
+  // dispatch previews. A read fault therefore degrades to the same explicit
+  // unreadable caveat everywhere instead of one door throwing a 503 while
+  // another continues with Captain authority.
+  const artifactRead = await readSesPackArtifactTruth(client, {
+    docket,
+    review_family: reviewFamily,
+    pack_obligation: packObligation,
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
-    report_doc_id: packRow?.report_doc_id || null,
-    report_doc_resolved: packPointerResolution.report_doc_resolved,
-    requires_bound_report_doc:
-      artifactRequirements.requires_bound_report_doc,
-    has_selected_current_cycle_trade_report:
-      !!selectedCurrentCycleTradeReport,
-    requires_selected_current_cycle_trade_report:
-      artifactRequirements.requires_bound_report_doc,
-    invoice_doc_id: packRow?.invoice_doc_id || null,
-    invoice_doc_resolved: packPointerResolution.invoice_doc_resolved,
-    requires_bound_invoice_doc:
-      artifactRequirements.requires_bound_invoice_doc,
-    swms_doc_id: packRow?.swms_doc_id || null,
-    swms_doc_resolved: packPointerResolution.swms_doc_resolved,
-    requires_bound_swms: swmsRequired,
-    family_report_evidence_satisfied: familyReportEvidenceSatisfied,
   });
-  const reportCloseout = packPointerResolution.report_doc_resolved &&
-    (!artifactRequirements.requires_bound_report_doc ||
-      !!selectedCurrentCycleTradeReport);
-  const invoiceCloseout = packPointerResolution.invoice_doc_resolved;
-  const swmsCloseout = packPointerResolution.swms_doc_resolved;
-  const missingRequired: string[] = [];
-  if (
-    artifactRequirements.requires_bound_report_doc && !reportCloseout
-  ) missingRequired.push("report");
-  if (
-    artifactRequirements.requires_bound_invoice_doc && !invoiceCloseout
-  ) missingRequired.push("invoice");
-  if (swmsRequired && !swmsCloseout) missingRequired.push("swms");
-  const artifactTruth: SesPackArtifactTruth = {
-    read_state: "current",
-    presentation_kind: presentation.kind,
-    presentation_reason: presentation.reason,
-    required_documents: {
-      report: artifactRequirements.requires_bound_report_doc,
-      invoice: artifactRequirements.requires_bound_invoice_doc,
-      swms: swmsRequired,
-    },
-    closeout_documents: {
-      report: reportCloseout,
-      invoice: invoiceCloseout,
-      swms: swmsCloseout,
-    },
-    document_ids: {
-      report: String(packRow?.report_doc_id || "").trim() || null,
-      invoice: String(packRow?.invoice_doc_id || "").trim() || null,
-      swms: String(packRow?.swms_doc_id || "").trim() || null,
-    },
-    document_resolution: {
-      report: packPointerResolution.report_doc_resolved,
-      invoice: packPointerResolution.invoice_doc_resolved,
-      swms: packPointerResolution.swms_doc_resolved,
-    },
-    current_cycle_trade_report: {
-      required: artifactRequirements.requires_bound_report_doc,
-      present: !!selectedCurrentCycleTradeReport,
-      report_id: String(selectedCurrentCycleTradeReport?.id || "").trim() ||
-        null,
-      status: String(selectedCurrentCycleTradeReport?.status || "").trim() ||
-        null,
-    },
-    family_report_evidence_satisfied: familyReportEvidenceSatisfied,
-    missing_required: missingRequired,
-    read_error: null,
-  };
-  const artifactCaveat = packArtifactTruthCaveat(artifactTruth);
+  const presentation = artifactRead.presentation;
+  const artifactTruth = artifactRead.truth;
   const finalResponseCaveats = uniqueSesReviewCaveats([
     ...responseCaveats,
-    ...(artifactCaveat ? [artifactCaveat] : []),
+    ...artifactRead.caveats,
   ]);
   // Enrich the ORIGINAL refusal objects rather than rebuilding them from the
   // normalized shape: `evidence` and `decision_key` are the only things telling
@@ -6956,11 +6816,25 @@ async function readSesReleaseArtifactTruthForDisplay(
         columns: "id,pricing_disposition",
       });
       if (obligation.error) {
+        const manifest = object(object(docket.envelope).v2);
+        const family = String(object(manifest.classification).family || "");
+        const reportRequirement = makesafePackArtifactRequirements({
+          ses_family: family,
+        }).requires_bound_report_doc;
+        const swmsRequirement = manifestSwmsRequirement(docket, family);
         const read = unreadablePackArtifactTruth(
           docket,
           `The release obligation could not be read for artifact honesty (${
             obligation.error.message || "unknown database error"
           }).`,
+          {
+            requirements: {
+              report: reportRequirement,
+              ...(typeof swmsRequirement === "boolean"
+                ? { swms: swmsRequirement }
+                : {}),
+            },
+          },
         );
         results.push({
           job_id: String(docket.job_id || "") || null,

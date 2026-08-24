@@ -133,6 +133,29 @@ Deno.test("roof report pointers resolve only through the sanctioned roof_report 
   );
 });
 
+Deno.test("roof legacy filename fallback accepts roof semantics and rejects generic make-safe semantics", () => {
+  const reportTypes = makesafeReportDocumentTypesForFamily(
+    "ordinary_roof_portal",
+  );
+  const resolve = (id: string, fileName: string) =>
+    resolveMakesafePackDocumentPointers(
+      { report_doc_id: id },
+      [{
+        id,
+        type: "general",
+        file_name: fileName,
+        storage_url: `https://documents.example/${id}.pdf`,
+      }],
+      { report_document_types: reportTypes },
+    ).report_doc_resolved;
+
+  assertEquals(resolve("legacy-roof", "Roof Report - SWMS-26980.pdf"), true);
+  assertEquals(
+    resolve("generic-makesafe", "Make Safe Report - SWMS-26980.pdf"),
+    false,
+  );
+});
+
 Deno.test("a typed pointer without retrievable document storage is unresolved", () => {
   assertEquals(
     resolveMakesafePackDocumentPointers(

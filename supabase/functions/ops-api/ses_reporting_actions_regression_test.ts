@@ -113,6 +113,9 @@ function reviewPackClient(
     portalCaptures?: Array<Record<string, unknown>>;
     serviceReports?: Array<Record<string, unknown>>;
     pricingDisposition?: string;
+    artifactReadErrors?: Partial<
+      Record<"job_documents" | "job_service_reports", Record<string, unknown>>
+    >;
   } = {},
 ) {
   const signedPaths: string[] = [];
@@ -320,6 +323,17 @@ function reviewPackClient(
             return Promise.resolve({ data: null, error: faultFor.error }).then(
               resolve,
             );
+          }
+          const artifactReadError = options.artifactReadErrors?.[
+            table as "job_documents" | "job_service_reports"
+          ];
+          const isArtifactTruthRead = table === "job_service_reports" ||
+            (table === "job_documents" && columns.includes("file_name"));
+          if (artifactReadError && isArtifactTruthRead) {
+            return Promise.resolve({ data: null, error: artifactReadError })
+              .then(
+                resolve,
+              );
           }
           // Curated-bind events are read per job, so a fixture row that names
           // its own job is honoured here - a sibling's trail must not answer a
@@ -677,6 +691,147 @@ Deno.test("Captain signoff records a reviewed pack while preserving its missing-
   assertEquals(fixture.rpcCalls, ["record_ses_docket_review_state_v1"]);
   assertEquals(result.caveats[0].code, "required_pack_artifact_missing");
   assertEquals(result.artifact_truth.missing_required, ["report"]);
+});
+
+Deno.test("artifact read faults stay non-blocking at review and Captain signoff while known MLB requirements remain visible", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nunreadable-artifacts");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const mark = supersessionEvent();
+  mark.detail_json.expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const fixture = reviewPackClient(artifact, bytes, {
+    jobEvents: [mark],
+    preXeroDocsReady: true,
+    family: "physical_makesafe",
+    pricingDisposition: "priced_from_canon",
+    jobRow: {
+      id: "job-fixture",
+      type: "makesafe",
+      status: "in_progress",
+      metadata: { makesafe_job_family: "physical_makesafe" },
+    },
+    detailRow: {
+      job_id: "job-fixture",
+      report_type: null,
+      substatus: "admin_to_send_report",
+      external_ref: "MLB-70000",
+      external_links: [],
+      attendance_cycle_id: "cycle-fixture",
+      cycle_number: 1,
+      requesting_company_slug: "mlb",
+      requesting_company_name: "ML Builders",
+    },
+    packRow: {
+      id: "pack-unreadable",
+      job_id: "job-fixture",
+      pack_kind: "main",
+      status: "drafted",
+      report_doc_id: "doc-report-bound",
+      invoice_doc_id: "doc-invoice-bound",
+      swms_doc_id: "doc-swms-bound",
+      sent_at: null,
+    },
+    packDocuments: [{
+      id: "doc-report-bound",
+      type: "makesafe_report",
+      file_name: "Make Safe Report.pdf",
+      storage_url: "https://documents.example/report.pdf",
+    }, {
+      id: "doc-invoice-bound",
+      type: "invoice",
+      file_name: "Invoice.pdf",
+      storage_url: "https://documents.example/invoice.pdf",
+    }, {
+      id: "doc-swms-bound",
+      type: "swms",
+      file_name: "Safe Work Method Statement.pdf",
+      storage_url: "https://documents.example/swms.pdf",
+    }],
+    artifactReadErrors: {
+      job_service_reports: { message: "trade reports unavailable" },
+    },
+  });
+
+  const pack = await getSesReviewablePackAction(
+    fixture.client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.presentation.kind, "incomplete");
+  assertEquals(pack.blockers, []);
+  assertEquals(pack.caveats.at(-1)?.code, "pack_artifact_truth_unreadable");
+  assertEquals(pack.artifact_truth.read_state, "unreadable");
+  assertEquals(pack.artifact_truth.required_documents, {
+    report: true,
+    invoice: true,
+    swms: true,
+  });
+  assertEquals(pack.artifact_truth.document_resolution, {
+    report: null,
+    invoice: null,
+    swms: null,
+  });
+  assertEquals(pack.artifact_truth.unresolved_required, [
+    "report",
+    "invoice",
+    "swms",
+  ]);
+  assertEquals(pack.artifact_truth.document_ids, {
+    report: "doc-report-bound",
+    invoice: "doc-invoice-bound",
+    swms: "doc-swms-bound",
+  });
+
+  const signedOff = await signOffSesDocketAction(
+    fixture.client,
+    {
+      mode: "jwt",
+      user: { id: "captain-fixture", email: "", role: "owner" },
+    },
+    {
+      docket_revision_id: "docket-fixture",
+      expected_output_content_hash: fixture.review.docket_output_content_hash,
+    },
+  );
+  assertEquals(fixture.rpcCalls, ["record_ses_docket_review_state_v1"]);
+  assertEquals(
+    signedOff.caveats.at(-1)?.code,
+    "pack_artifact_truth_unreadable",
+  );
+});
+
+Deno.test("review pack routes unreadable document rows through the shared caveat", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nunreadable-documents");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const mark = supersessionEvent();
+  mark.detail_json.expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const pack = await getSesReviewablePackAction(
+    reviewPackClient(artifact, bytes, {
+      jobEvents: [mark],
+      preXeroDocsReady: true,
+      artifactReadErrors: {
+        job_documents: { message: "document index unavailable" },
+      },
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+
+  assertEquals(pack.presentation.kind, "incomplete");
+  assertEquals(pack.blockers, []);
+  assertEquals(pack.caveats.at(-1)?.code, "pack_artifact_truth_unreadable");
+  assertEquals(pack.artifact_truth.document_resolution.report, null);
 });
 
 Deno.test("get_ses_reviewable_pack: physical pack with bound report and invoice stays ready (261241)", async () => {
@@ -1698,6 +1853,7 @@ function roofPortalCockpitClient(
   reviewSpec: Record<string, unknown> = {
     cards: [{ family: "ordinary_roof_portal" }],
   },
+  readErrors: Record<string, Record<string, unknown>> = {},
 ): any {
   const rows: Record<string, unknown> = {
     makesafe_docket_revisions_current: {
@@ -1768,6 +1924,12 @@ function roofPortalCockpitClient(
           return query;
         },
         then: (resolve: (value: unknown) => unknown) => {
+          if (readErrors[table]) {
+            return Promise.resolve({
+              data: null,
+              error: readErrors[table],
+            }).then(resolve);
+          }
           const value = rows[table];
           return Promise.resolve({
             data: single && Array.isArray(value) ? value[0] || null : value,
@@ -1870,6 +2032,71 @@ Deno.test("cockpit shows recipients, attachments, and missing artifact truth wit
     attachment_hashes: [],
     attachment_count: 0,
   }]);
+});
+
+Deno.test("cockpit approval preview keeps an unreadable trade-report history as an honesty caveat", async () => {
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient(
+      "not_applicable",
+      {
+        makesafe_report_packs: {
+          id: "pack-fixture",
+          pack_kind: "main",
+          status: "drafted",
+          report_doc_id: "roof-report-bound",
+          invoice_doc_id: null,
+          swms_doc_id: null,
+          sent_at: null,
+        },
+        jobs: {
+          id: "job-fixture",
+          type: "makesafe",
+          status: "active",
+          metadata: {},
+        },
+        makesafe_job_details: {
+          job_id: "job-fixture",
+          report_type: "roof_report",
+          attendance_cycle_id: "cycle-fixture",
+          cycle_number: 1,
+          reattend_count: 0,
+          external_links: [],
+        },
+        job_documents: [{
+          id: "roof-report-bound",
+          type: "roof_report",
+          file_name: "Roof Report - SWMS-TEST.pdf",
+          storage_url: "https://documents.example/roof-report.pdf",
+        }],
+        makesafe_portal_capture_revisions: [],
+      },
+      { cards: [{ family: "ordinary_roof_portal" }] },
+      {
+        job_service_reports: { message: "trade report history unavailable" },
+      },
+    ),
+    "job-fixture",
+  );
+
+  assertEquals(
+    cockpit.caveats.some((caveat) =>
+      caveat.code === "pack_artifact_truth_unreadable"
+    ),
+    true,
+  );
+  const truth = cockpit.sections.artifact_truth as any;
+  assertEquals(truth.read_state, "unreadable");
+  assertEquals(truth.required_documents, {
+    report: true,
+    invoice: false,
+    swms: false,
+  });
+  assertEquals(truth.document_resolution, {
+    report: null,
+    invoice: null,
+    swms: null,
+  });
+  assertEquals(truth.unresolved_required, ["report"]);
 });
 
 Deno.test("cockpit still demands the report email when the manifest does not declare not_applicable", async () => {
