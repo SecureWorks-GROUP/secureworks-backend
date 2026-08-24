@@ -28,6 +28,11 @@ import type {
   SesCockpitDocket,
   SesReleaseSendProgress,
 } from "./ses_review_cockpit.ts";
+import {
+  deriveSesRequiredDocuments,
+  type SesRequiredDocumentMap,
+  type SesRequiredDocumentsCard,
+} from "./ses_family_matrix.ts";
 
 /** Main-pack pointer ids and send lifecycle facts. */
 export interface SesPackPointers {
@@ -176,6 +181,7 @@ export interface SesPackInspection {
   schema: "secureworks.makesafe.ses-pack-inspection/v1";
   job_id: string;
   job_number: string | null;
+  required_documents: SesRequiredDocumentMap;
   pack: SesPackPointers;
   docket: SesInspectDocketCoordinates;
   xero_binding: SesCockpitDocket["xero_binding"];
@@ -244,6 +250,7 @@ function commercialReviewsFromInputs(args: {
 export function assembleSesPackInspection(input: {
   job_id: string;
   job_number: string | null;
+  required_document_card?: SesRequiredDocumentsCard;
   docket: SesInspectDocketCoordinates;
   xero_binding: SesCockpitDocket["xero_binding"];
   xero_invoice_pdf_available?: boolean;
@@ -418,6 +425,9 @@ export function assembleSesPackInspection(input: {
     schema: "secureworks.makesafe.ses-pack-inspection/v1",
     job_id: input.job_id,
     job_number: input.job_number,
+    required_documents: deriveSesRequiredDocuments(
+      input.required_document_card || {},
+    ),
     pack,
     docket: input.docket,
     xero_binding: input.xero_binding,
@@ -632,6 +642,11 @@ export async function inspectSesPackAction(
   return assembleSesPackInspection({
     job_id: jobId,
     job_number: docket.job_number,
+    required_document_card: {
+      builder_key: docket.clean_input.builder_key,
+      family: docket.clean_input.family,
+      job_number: docket.job_number,
+    },
     docket: {
       docket_revision_id: docket.docket_revision_id,
       output_content_hash: docket.docket_output_content_hash ?? null,

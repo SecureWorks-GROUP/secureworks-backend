@@ -1324,7 +1324,7 @@ Deno.test("no-additional-charge pack stays ready without an invoice pointer", ()
   }, "card");
 
   assertEquals(card.pack.presentation_kind, "ready");
-  assertEquals(card.pack.required_documents.invoice, false);
+  assertEquals(card.pack.required_documents.invoice, true);
   assertEquals(card.pack.closeout_documents.invoice, false);
 });
 
@@ -1480,7 +1480,7 @@ Deno.test("assessment portal triad stays ready without a local report pointer", 
     JSON.stringify(card, null, 2),
   );
   assertEquals(card.pack.presentation_kind, "ready");
-  assertEquals(card.pack.required_documents.report, false);
+  assertEquals(card.pack.required_documents.report, true);
   assertEquals(card.pack.required_documents.invoice, true);
 });
 

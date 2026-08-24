@@ -47,6 +47,12 @@ and the Trade `New / Allocated / Complete / Archive` columns are parity-checked
 from the same canonical rows. Keep trade payloads allow-listed and free of pricing
 and trade-invoice data.
 
+`pack.required_documents` is the family obligation map, not completion proof.
+`deriveSesRequiredDocuments` in `ses_family_matrix.ts` is its one owner, and the
+board plus `inspect_ses_pack` must emit that same `{report, invoice, swms}` map.
+Keep pointer resolution, current-cycle selected report, live Xero status and
+send routes separate: `has_report_doc` is not proof and attach is not bind.
+
 Ops projection defaults to **card shape** (`fields=card`, response `shape:"card"`):
 placement keys plus the presentation fields the kanban paints. Diagnostics
 (`computed_status_evidence`, `derived_stage_v2_*`, fat `lineage` siblings,

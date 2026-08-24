@@ -20,6 +20,7 @@ import {
 } from "./makesafe_cycle_evidence.ts";
 import {
   canonicalSesFamilyFromCard,
+  deriveSesRequiredDocuments,
   requiresMakesafeSwms,
   sesFamilyLabel,
 } from "./ses_family_matrix.ts";
@@ -47,7 +48,7 @@ import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import { makesafePackArtifactRequirements } from "./makesafe_document_truth.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
 
-export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1.1";
 
 function boundPackPointerReady(
   id: unknown,
@@ -280,11 +281,15 @@ export function projectOpsMakesafeCardRow(row: any) {
         report_doc_id: row.pack.report_doc_id || null,
         invoice_doc_id: row.pack.invoice_doc_id || null,
         swms_doc_id: row.pack.swms_doc_id || null,
-        required_documents: row.pack.required_documents || {
-          report: true,
-          invoice: true,
-          swms: false,
-        },
+        required_documents: row.pack.required_documents ||
+          deriveSesRequiredDocuments({
+            family: row?.ses_family,
+            job_number: row?.job_number,
+            requesting_company_slug: row?.requesting_company_slug,
+            requesting_company_name: row?.builder?.name,
+            external_ref: row?.builder?.external_ref,
+            site_suburb: row?.site_suburb,
+          }),
         closeout_documents: row.pack.closeout_documents || {
           report: false,
           invoice: false,
@@ -1336,6 +1341,17 @@ export function buildCanonicalMakesafeRows(
     const pack = base?.report_pack || null;
     const detail = base?.makesafe_details || {};
     const sesFamily = boardRowSesFamily(base);
+    const requiredDocuments = deriveSesRequiredDocuments({
+      family: sesFamily,
+      job_number: base?.job_number,
+      requesting_company_slug: base?.requesting_company_slug,
+      requesting_company_name: base?.requesting_company_name,
+      requesting_company: base?.requesting_company,
+      external_ref: detail?.external_ref || base?.external_ref,
+      site_suburb: base?.site_suburb,
+      strata: base?.metadata?.strata,
+      own_template_requested: base?.metadata?.own_template_requested,
+    });
     // Release 12: portal captures, holds and photo counts are PLACEMENT
     // evidence now (the corrected engine reads them), so card mode loads and
     // projects them like full mode. Card and full mode must place identically.
@@ -1585,11 +1601,7 @@ export function buildCanonicalMakesafeRows(
       report_doc_id: pack?.report_doc_id || null,
       invoice_doc_id: pack?.invoice_doc_id || null,
       swms_doc_id: pack?.swms_doc_id || null,
-      required_documents: {
-        report: artifactRequirements.requires_bound_report_doc,
-        invoice: artifactRequirements.requires_bound_invoice_doc,
-        swms: swmsRequired,
-      },
+      required_documents: requiredDocuments,
       closeout_documents: {
         // Send presentation follows exact resolved artifacts for every family.
         // Portal/report-in evidence may still place a report-only card, but it

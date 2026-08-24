@@ -122,6 +122,25 @@ export type SesFamilyMatrixResolution =
   | { ok: true; row: SesFamilyMatrixRow }
   | { ok: false; failure: SesFamilyMatrixFailure };
 
+export type SesRequiredDocumentMap = Readonly<{
+  report: boolean;
+  invoice: boolean;
+  swms: boolean;
+}>;
+
+export interface SesRequiredDocumentsCard {
+  builder_key?: unknown;
+  family?: unknown;
+  job_number?: unknown;
+  requesting_company_slug?: unknown;
+  requesting_company_name?: unknown;
+  requesting_company?: unknown;
+  external_ref?: unknown;
+  site_suburb?: unknown;
+  strata?: unknown;
+  own_template_requested?: unknown;
+}
+
 const MLB_MAKESAFES = "makesafes@mlbuilders.com.au";
 const MLB_BUNBURY = "bunbury@mlbuilders.com.au";
 const AJS_WORK_ORDERS = "workorders@ajs.build";
@@ -656,4 +675,83 @@ export function resolveSesFamilyMatrixRow(args: {
     };
   }
   return { ok: true, row };
+}
+
+function requiredDocumentsBuilderKey(
+  card: SesRequiredDocumentsCard,
+): SesBuilderKey {
+  const explicit = String(card.builder_key ?? "").trim().toUpperCase();
+  if (
+    ["MLB", "AJS", "AJBR", "WESTERN", "SYNTHETIC"].includes(explicit)
+  ) {
+    return explicit as SesBuilderKey;
+  }
+  const token = [
+    card.requesting_company_slug,
+    card.requesting_company_name,
+    card.requesting_company,
+    card.external_ref,
+    card.job_number,
+  ].map((value) => String(value ?? "").trim().toLowerCase()).join(" ");
+  if (token.includes("synthetic-livefire")) return "SYNTHETIC";
+  if (/\bajbr\b/.test(token)) return "AJBR";
+  if (/\bajs?\b/.test(token) || token.includes("alliance joinery")) {
+    return "AJS";
+  }
+  if (
+    /\b(mlb|ml builders?|major loss builders?)\b/.test(token) ||
+    token.includes("mlbuilders")
+  ) {
+    return "MLB";
+  }
+  if (
+    /\b(wb|bw|bwcwa)\b/.test(token) ||
+    token.includes("western build") || token.includes("builderwest")
+  ) {
+    return "WESTERN";
+  }
+  return "UNKNOWN";
+}
+
+/**
+ * The one required-document derivation shared by board and pack inspection.
+ *
+ * This is an obligation map, not a proof map. `report: true` can therefore
+ * mean a bound report PDF (physical/own-template) or the matrix's locked portal
+ * role set (roof/assessment). Pointer resolution, current-cycle report
+ * selection, Xero status and send-route proof remain separate evidence.
+ */
+export function deriveSesRequiredDocuments(
+  card: SesRequiredDocumentsCard,
+): SesRequiredDocumentMap {
+  const builderKey = requiredDocumentsBuilderKey(card);
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: card.family,
+    strata: card.strata,
+    own_template_requested: card.own_template_requested,
+  });
+  const ownTemplateRequested = card.own_template_requested === true ||
+    family === "own_template_roof";
+  const resolved = resolveSesFamilyMatrixRow({
+    builder_key: builderKey,
+    family,
+    strata: card.strata === true,
+    own_template_requested: ownTemplateRequested,
+    site_suburb: card.site_suburb,
+  });
+  if (!resolved.ok) {
+    // An unsealed family/builder may never make a missing document disappear.
+    // Keep every key boolean while failing closed until matrix authority exists.
+    return { report: true, invoice: true, swms: true };
+  }
+
+  const { row } = resolved;
+  const portalReportOwed = row.required_portal_roles.length > 0;
+  const boundReportOwed = row.report_route === "work_order_sender";
+  const temporaryFenceBasis = row.invoice_basis.includes("temporary_fence");
+  return {
+    report: portalReportOwed || boundReportOwed,
+    invoice: row.invoice_basis.length > 0,
+    swms: row.swms_policy === "always" && !temporaryFenceBasis,
+  };
 }
