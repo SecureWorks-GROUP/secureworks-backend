@@ -591,6 +591,13 @@ Deno.test("recovery: replay is idempotent — second run does not re-commit or r
 });
 
 Deno.test("recovery: refuses when live Xero identity does not match stored binding", async () => {
+  const track: RecoveryTrack = {
+    commits: 0,
+    uploads: 0,
+    authorises: 0,
+    creates: 0,
+  };
+  const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
   const client = recoveryClient({
     revision: {
       id: OBLIGATION_ID,
@@ -611,6 +618,7 @@ Deno.test("recovery: refuses when live Xero identity does not match stored bindi
       envelope: { v2: { classification: {}, items: {} } },
       email_drafts: {},
     },
+    track,
   });
   const err = await assertRejects(
     () =>
@@ -627,13 +635,80 @@ Deno.test("recovery: refuses when live Xero identity does not match stored bindi
             invoice_number: "INV-9999",
             total: 999,
           }),
+          track: gTrack,
         }),
       ),
     SesActionError,
   );
   assertEquals(err.status, 409);
   assertStringIncludes(err.message, "does not match");
+  assertEquals(track.observed_effects || 0, 0);
+  assertEquals(track.commits, 0);
+  assertEquals(gTrack.pdfFetches, 0);
+  assertEquals(gTrack.creates, 0);
+  assertEquals(gTrack.authorises, 0);
 });
+
+for (const liveStatus of ["DRAFT", "DELETED", "VOIDED"] as const) {
+  Deno.test(
+    `recovery: refuses live ${liveStatus} before effect ledger or docket writes`,
+    async () => {
+      const track: RecoveryTrack = {
+        commits: 0,
+        uploads: 0,
+        authorises: 0,
+        creates: 0,
+      };
+      const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
+      const client = recoveryClient({
+        revision: {
+          id: OBLIGATION_ID,
+          job_id: JOB_ID,
+          state: "authorised",
+          xero_binding: {
+            xero_invoice_id: XERO_ID,
+            invoice_number: INVOICE_NUMBER,
+            status: "AUTHORISED",
+            total: TOTAL,
+          },
+        },
+        currentDocket: {
+          id: PRE_XERO_DOCKET_ID,
+          job_id: JOB_ID,
+          stage: "pre_xero",
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          envelope: { v2: { classification: {}, items: {} } },
+          email_drafts: {},
+        },
+        track,
+      });
+      const err = await assertRejects(
+        () =>
+          recoverAuthorisedInvoicePdfBind(
+            client as any,
+            {
+              org_id: ORG_ID,
+              job_id: JOB_ID,
+              invoice_obligation_revision_id: OBLIGATION_ID,
+              actor: "api-key-recovery",
+            },
+            gateway({
+              live: authorisedInvoice({ status: liveStatus }),
+              track: gTrack,
+            }),
+          ),
+        SesActionError,
+      );
+      assertEquals(err.status, 409);
+      assertStringIncludes(err.message, `(${liveStatus})`);
+      assertEquals(track.observed_effects || 0, 0);
+      assertEquals(track.commits, 0);
+      assertEquals(gTrack.pdfFetches, 0);
+      assertEquals(gTrack.creates, 0);
+      assertEquals(gTrack.authorises, 0);
+    },
+  );
+}
 
 Deno.test("recovery: refuses when live total differs from stored binding", async () => {
   const client = recoveryClient({
