@@ -105,7 +105,10 @@ const ARTIFACTS = [
 
 interface Harness {
   routes: any[];
+  /** route_kinds whose send effect already exists and is confirmed. */
+  confirmedKinds: string[];
   effects: Map<string, any>;
+  confirmedTokens: Set<string>;
   graphCalls: any[];
 }
 
@@ -131,7 +134,22 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
         case "makesafe_release_revision_routes":
           return query({ data: harness.routes, error: null });
         case "ses_external_effects":
-          return query({ data: [], error: null });
+          return query({
+            data: harness.confirmedKinds.map((kind) => ({
+              operation_key: `op-${kind}`,
+              route_kind: kind,
+              state: "confirmed",
+              effect_kind: "route_send",
+              payload_hash: "sha256:" + "a".repeat(64),
+              external_token: `tok-${kind}`,
+              external_id: `graph-prior-${kind}`,
+              provider_digest: {
+                message_id: `graph-prior-${kind}`,
+                operation_token: `tok-${kind}`,
+              },
+            })),
+            error: null,
+          });
         case "makesafe_docket_revisions":
           return query({
             data: {
@@ -179,10 +197,21 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
         return Promise.resolve({ data: { reserved: true }, error: null });
       }
       if (name === "claim_ses_external_effect_v1") {
-        const effect = { ...rpcArgs.p_effect, state: "reserved" };
+        const routeKind = String(rpcArgs.p_effect?.route_kind || "");
+        const alreadyConfirmed = harness.confirmedKinds.includes(routeKind);
+        const effect = {
+          ...rpcArgs.p_effect,
+          state: alreadyConfirmed ? "confirmed" : "reserved",
+        };
         harness.effects.set(String(effect.operation_key), effect);
+        if (alreadyConfirmed) {
+          harness.confirmedTokens.add(String(effect.external_token));
+        }
         return Promise.resolve({
-          data: { claim_mode: "reserved", effect },
+          data: {
+            claim_mode: alreadyConfirmed ? "confirmed" : "reserved",
+            effect,
+          },
           error: null,
         });
       }
@@ -238,8 +267,17 @@ function mailGatewayStub(harness: Harness): any {
       return result;
     },
     reconcileSent: async (token: string) => {
-      const match = sentByToken.get(String(token));
-      return match ? [match] : [];
+      const key = String(token);
+      const match = sentByToken.get(key);
+      if (match) return [match];
+      if (harness.confirmedTokens.has(key)) {
+        return [{
+          message_id: `graph-message-prior-${key.slice(0, 8)}`,
+          internet_message_id: `<prior-${key.slice(0, 8)}@graph>`,
+          operation_token: key,
+        }];
+      }
+      return [];
     },
   };
 }
@@ -259,7 +297,9 @@ async function execute(state: Harness) {
 Deno.test("SEND IT refuses a persisted route whose body carries internal annotations, before any dispatch", async () => {
   const state: Harness = {
     routes: mlbRoutes(LEAKED_REPORT_BODY),
+    confirmedKinds: [],
     effects: new Map(),
+    confirmedTokens: new Set<string>(),
     graphCalls: [],
   };
   let error: SesActionError | null = null;
@@ -277,12 +317,35 @@ Deno.test("SEND IT refuses a persisted route whose body carries internal annotat
   assertEquals(state.graphCalls.length, 0);
 });
 
+Deno.test("SEND IT finishes an in-flight MLB release whose frozen report body still leaks, instead of stranding remaining routes", async () => {
+  const leakedPhoto =
+    "Draft only. Photo pack. Ordinary Mail.Send; subject matches the original work-order email for inbox grouping only — not real threading. The complete, ordered original photo set is listed on the docket.";
+  const leakedInvoice =
+    "Please find the authorised SecureWorks Xero invoice and the supporting current-cycle documents attached.";
+  const routes = mlbRoutes(LEAKED_REPORT_BODY);
+  routes[1].body = leakedPhoto;
+  routes[2].body = leakedInvoice;
+  const state: Harness = {
+    routes,
+    confirmedKinds: ["report"],
+    effects: new Map(),
+    confirmedTokens: new Set<string>(),
+    graphCalls: [],
+  };
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  // Confirmed report is reconciled, not re-mailed. Photo + invoice still leave.
+  assertEquals(state.graphCalls.length, 2);
+});
+
 Deno.test("SEND IT dispatches an MLB release whose persisted bodies are clean", async () => {
   const state: Harness = {
     routes: mlbRoutes(
       "Please find attached the report for MLB-27516.\n\nThank you.",
     ),
+    confirmedKinds: [],
     effects: new Map(),
+    confirmedTokens: new Set<string>(),
     graphCalls: [],
   };
   const result: any = await execute(state);
