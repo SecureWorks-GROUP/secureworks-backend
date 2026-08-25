@@ -284,6 +284,9 @@ export function projectOpsMakesafeCardRow(row: any) {
     duplicate_of_job_id: row?.duplicate_of_job_id || null,
     duplicate_of_job_number: row?.duplicate_of_job_number || null,
     captain_action: row?.captain_action || null,
+    stuck_dispatching: Array.isArray(row?.stuck_dispatching)
+      ? row.stuck_dispatching
+      : [],
     projection_warning: row?.projection_warning || null,
     makesafe_type: row?.makesafe_type || null,
     builder: row?.builder || null,
@@ -689,6 +692,8 @@ export interface CanonicalMakesafeExtras {
   intakeCaseByJobId?: Record<string, any>;
   holdsByJobId?: Record<string, MakesafeStatusHold>;
   statusApplicationsByJobId?: Record<string, any>;
+  /** DB-clock-derived expired SES route dispatches; presentation only. */
+  stuckDispatchingByJobId?: Record<string, any[]>;
   portalCaptureRowsByJobId?: Record<string, any[]>;
   /** R5 — current own-template roof draft per job, for that family only. */
   ownRoofDraftByJobId?: Record<string, any>;
@@ -1391,7 +1396,8 @@ export function buildCanonicalMakesafeRows(
       photosHaveCycleBinding:
         extras.photosHaveCycleBindingByJobId?.[base?.id] === true,
       boundPhotoSourceScope: extras.boundPhotoSourceScopeByJobId?.[base?.id],
-      boundPackPhotoCount: extras.boundPackPhotoCountByJobId?.[base?.id] ?? null,
+      boundPackPhotoCount: extras.boundPackPhotoCountByJobId?.[base?.id] ??
+        null,
       packPhotoAttachmentCount:
         extras.packPhotoAttachmentCountByJobId?.[base?.id] ?? null,
     });
@@ -1727,6 +1733,10 @@ export function buildCanonicalMakesafeRows(
       duplicate_of_job_id: application?.duplicate_of_job_id ?? null,
       duplicate_of_job_number: application?.duplicate_of_job_number ?? null,
       captain_action: base?.captain_action ?? null,
+      // Operator alarm only. It is deliberately absent from statusInput,
+      // deriveSesStageV2 and every SEND gate: recovery happens through the
+      // existing exact release path, while canonical_stage remains authority.
+      stuck_dispatching: extras.stuckDispatchingByJobId?.[base?.id] || [],
       attendance_cycle_id: base?.attendance_cycle_id ?? null,
       cycle_number: Number(
         base?.cycle_number || detail?.cycle_number || report?.cycle_number || 1,

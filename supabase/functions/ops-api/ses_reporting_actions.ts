@@ -48,6 +48,7 @@ import {
   recordSesObservedExternalEffect,
   type SesEffectClaim,
   type SesExternalAdapter,
+  type SesExternalContext,
   type SesExternalEffect,
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
@@ -3041,7 +3042,35 @@ const SES_EFFECT_CLAIM_COLUMNS = [
   "provider_digest",
   "lease_owner",
   "lease_expires_at",
+  "created_at",
+  "updated_at",
 ].join(",");
+
+function exactRouteEffectExpectation(
+  effect: SesExternalEffect,
+): Record<string, unknown> | null {
+  const effectId = String(effect.id || "").trim();
+  const releaseRevisionId = String(effect.release_revision_id || "").trim();
+  const routeKind = String(effect.route_kind || "").trim();
+  const operationKey = String(effect.operation_key || "").trim();
+  const externalToken = String(effect.external_token || "").trim();
+  const payloadHash = String(effect.payload_hash || "").trim();
+  if (
+    effect.effect_kind !== "route_send" || !effectId || !releaseRevisionId ||
+    !routeKind || !operationKey || !externalToken || !payloadHash
+  ) return null;
+  return {
+    effect_id: effectId,
+    release_revision_id: releaseRevisionId,
+    operation_key: operationKey,
+    route_kind: routeKind,
+    external_token: externalToken,
+    payload_hash: payloadHash,
+    state: effect.state,
+    lease_owner: effect.lease_owner || null,
+    lease_expires_at: effect.lease_expires_at || null,
+  };
+}
 
 /**
  * `claim_ses_external_effect_v1` raises SQLSTATE 23505 when an existing
@@ -3137,20 +3166,14 @@ export function createSupabaseSesEffectStore(
       ) {
         return null;
       }
-      const priorState = effect.state;
-      const leaseExpiresAt = new Date(Date.now() + 120_000).toISOString();
-      const claimed = await client.from("ses_external_effects").update({
-        state: "dispatching",
-        lease_owner: leaseOwner,
-        lease_expires_at: leaseExpiresAt,
-        updated_at: new Date().toISOString(),
-      }).eq("operation_key", effect.operation_key)
-        .eq("effect_kind", "route_send")
-        .eq("payload_hash", effect.payload_hash)
-        .eq("external_token", effect.external_token)
-        .eq("state", priorState)
-        .select(SES_EFFECT_CLAIM_COLUMNS)
-        .maybeSingle();
+      const expectation = exactRouteEffectExpectation(effect);
+      if (!expectation) return null;
+      const claimed = await client.rpc("claim_ses_route_redispatch_v1", {
+        p_expectation: expectation,
+        p_lease_owner: leaseOwner,
+        p_actor: actor,
+        p_lease_seconds: 120,
+      });
       if (claimed.error) {
         throw new SesActionError(503, {
           state: "refused",
@@ -3158,39 +3181,57 @@ export function createSupabaseSesEffectStore(
             "The exact-token-absent route could not acquire its exclusive redispatch lease.",
         });
       }
-      if (!claimed.data) return null;
-      const active = claimed.data as SesExternalEffect;
-      const event = await client.from("ses_external_effect_events").insert({
-        effect_id: active.id,
-        from_state: priorState,
-        to_state: "dispatching",
-        event_kind: "exact_token_absent_redispatch_claimed",
-        detail: {
-          reconciled_match_count: 0,
-          lease_owner: leaseOwner,
-          lease_expires_at: leaseExpiresAt,
+      return claimed.data ? claimed.data as SesExternalEffect : null;
+    },
+    async inspectStaleDispatching(effect) {
+      const expectation = exactRouteEffectExpectation(effect);
+      if (!expectation || effect.state !== "dispatching") return null;
+      const inspected = await client.rpc(
+        "inspect_stale_ses_route_dispatch_v1",
+        { p_expectation: expectation },
+      );
+      if (inspected.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            "The exact route dispatch lease could not be checked against the database clock.",
+        });
+      }
+      return inspected.data ? inspected.data as SesExternalEffect : null;
+    },
+    async settleStaleDispatching(
+      effect,
+      outcome,
+      identify,
+      digest,
+      actor,
+    ) {
+      const expectation = exactRouteEffectExpectation(effect);
+      if (!expectation || effect.state !== "dispatching") return null;
+      const providerOutcome = outcome.kind === "sent"
+        ? {
+          kind: "sent",
+          match_count: 1,
+          external_id: identify(outcome.result),
+          provider_digest: digest(outcome.result),
+        }
+        : { kind: "no_send", match_count: 0 };
+      const settled = await client.rpc(
+        "settle_stale_ses_route_dispatch_v1",
+        {
+          p_expectation: expectation,
+          p_outcome: providerOutcome,
+          p_actor: actor,
         },
-        actor,
-      });
-      if (!event.error) return active;
-
-      // The audit append is required before external I/O. If it fails, return
-      // the lease to its exact prior uncertainty state by owner-scoped CAS and
-      // send nothing. A failed compensation stays safely dispatching: callers
-      // still refuse and no second worker can claim it.
-      await client.from("ses_external_effects").update({
-        state: priorState,
-        lease_owner: null,
-        lease_expires_at: null,
-        updated_at: new Date().toISOString(),
-      }).eq("id", active.id)
-        .eq("state", "dispatching")
-        .eq("lease_owner", leaseOwner);
-      throw new SesActionError(503, {
-        state: "refused",
-        fact:
-          "The exclusive redispatch lease could not be audit-recorded, so the route was not sent.",
-      });
+      );
+      if (settled.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            "The exact stale route dispatch reconciliation could not be audit-recorded.",
+        });
+      }
+      return settled.data ? settled.data as SesExternalEffect : null;
     },
   };
 }
@@ -6823,11 +6864,17 @@ export interface SesRouteSendResult {
 export interface SesMailGateway {
   createDraftAndSend(
     route: Record<string, any>,
-    context: { external_token: string; operation_key: string },
+    context: SesExternalContext,
   ): Promise<SesRouteSendResult>;
   reconcileSent(
     externalToken: string,
     route?: Record<string, any>,
+    context?: SesExternalContext,
+  ): Promise<SesRouteSendResult[]>;
+  reconcileSentOnly?(
+    externalToken: string,
+    route: Record<string, any> | undefined,
+    ledgerCreatedAt: string,
   ): Promise<SesRouteSendResult[]>;
 }
 
@@ -7463,7 +7510,23 @@ export async function executeSesReleaseRevisionAction(
       dispatch: (payload, context) =>
         mailGateway.createDraftAndSend(payload, context),
       reconcile: (context) =>
-        mailGateway.reconcileSent(context.external_token, sendRoute),
+        mailGateway.reconcileSent(
+          context.external_token,
+          sendRoute,
+          context,
+        ),
+      reconcileStale: (context) =>
+        mailGateway.reconcileSentOnly
+          ? mailGateway.reconcileSentOnly(
+            context.external_token,
+            sendRoute,
+            context.ledger_created_at,
+          )
+          : Promise.reject(
+            new Error(
+              "Read-only stale dispatch reconciliation is unavailable.",
+            ),
+          ),
       identify: (result) => result.message_id,
       digest: (result) => ({
         message_id: result.message_id,
@@ -7649,7 +7712,9 @@ export async function executeSesReleaseRevisionAction(
           kind: "released",
           release_revision_id: args.release_revision_id,
           required_route_kinds: routeKinds,
-          proved_route_kinds: routeProofs.map((p) => String(p.route_kind || "")),
+          proved_route_kinds: routeProofs.map((p) =>
+            String(p.route_kind || "")
+          ),
         },
       }),
     );

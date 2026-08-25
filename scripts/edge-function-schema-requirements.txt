@@ -226,3 +226,12 @@ ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|c
 # field (alarm_phones empties, operator-configured arrival phones revert), so the deploy
 # must refuse rather than ship ahead of the migration.
 ops-api|supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql|column|makesafe_notify_settings.d1_reconcile_enabled
+# Exact-once stale route recovery is migration-first. These service-role-only
+# RPCs own database-clock expiry, timeout settlement, redispatch leasing,
+# pre-Graph generation renewal, and the bounded board alarm read.
+ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|index|idx_ses_route_dispatching_lease
+ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|inspect_stale_ses_route_dispatch_v1
+ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|settle_stale_ses_route_dispatch_v1
+ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|claim_ses_route_redispatch_v1
+ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|renew_ses_route_dispatch_lease_v1
+ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|read_stuck_ses_route_dispatches_v1

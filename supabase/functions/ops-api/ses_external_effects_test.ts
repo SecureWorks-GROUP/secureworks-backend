@@ -7,8 +7,10 @@ import {
   buildSesEffect,
   executeSesExternalEffect,
   recordSesObservedExternalEffect,
+  SesDispatchGenerationLostError,
   type SesEffectClaim,
   type SesEffectState,
+  type SesExternalContext,
   type SesExternalEffect,
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
@@ -20,6 +22,36 @@ import {
   createSesGraphMailGateway,
   SES_OPERATION_HEADER,
 } from "./ses_graph_mail_gateway.ts";
+
+Deno.test("a superseded dispatch worker cannot state-transition the newer generation", async () => {
+  const store = new MemoryEffectStore();
+  const effect = await buildSesEffect({
+    org_id: "00000000-0000-4000-8000-000000000001",
+    effect_kind: "route_send",
+    release_revision_id: "40000000-0000-4000-8000-000000000099",
+    route_kind: "invoice",
+    payload: { subject: "generation fence" },
+  });
+  const result = await executeSesExternalEffect({
+    store,
+    effect,
+    payload: { subject: "generation fence" },
+    adapter: {
+      dispatch: () =>
+        Promise.reject(
+          new SesDispatchGenerationLostError("superseded before Graph send"),
+        ),
+      reconcile: () => Promise.resolve([]),
+      identify: (row: { message_id: string }) => row.message_id,
+      digest: (row: { message_id: string }) => row,
+    },
+    actor: "old-worker",
+  });
+
+  assertEquals(result.state, "refused");
+  assertEquals(result.dispatched, false);
+  assertEquals(store.row?.state, "dispatching");
+});
 
 class MemoryEffectStore implements SesExternalEffectStore {
   row: SesExternalEffect | null = null;
@@ -90,6 +122,9 @@ class MemoryEffectStore implements SesExternalEffectStore {
         null,
       provider_digest: detail.provider_digest as Record<string, unknown> ||
         this.row.provider_digest,
+      failure: "failure" in detail
+        ? detail.failure as Record<string, unknown>
+        : this.row.failure,
     };
     return Promise.resolve({ ...this.row });
   }
@@ -201,6 +236,8 @@ function createRpcEffectHarness() {
             state: "reserved",
             lease_owner: String(args.p_lease_owner || ""),
             lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
           } as SesExternalEffect;
           return {
             data: {
@@ -234,6 +271,105 @@ function createRpcEffectHarness() {
           },
           error: null,
         };
+      }
+      const expectationMatches = (
+        expectation: Record<string, unknown>,
+        expectedState?: string,
+      ) => {
+        if (!row) return false;
+        const exact: Array<[keyof SesExternalEffect, string]> = [
+          ["id", "effect_id"],
+          ["release_revision_id", "release_revision_id"],
+          ["operation_key", "operation_key"],
+          ["route_kind", "route_kind"],
+          ["external_token", "external_token"],
+          ["payload_hash", "payload_hash"],
+        ];
+        return exact.every(([field, key]) =>
+          String(row?.[field] ?? "") === String(expectation[key] ?? "")
+        ) && (!expectedState || row.state === expectedState) &&
+          (expectation.lease_owner === undefined ||
+            String(row.lease_owner || "") ===
+              String(expectation.lease_owner || "")) &&
+          (expectation.lease_expires_at === undefined ||
+            String(row.lease_expires_at || "") ===
+              String(expectation.lease_expires_at || ""));
+      };
+      if (name === "inspect_stale_ses_route_dispatch_v1") {
+        const expectation = args.p_expectation as Record<string, unknown>;
+        const expired = expectationMatches(expectation, "dispatching") &&
+          Date.parse(String(row?.lease_expires_at || "")) <= Date.now();
+        return { data: expired && row ? { ...row } : null, error: null };
+      }
+      if (name === "settle_stale_ses_route_dispatch_v1") {
+        const expectation = args.p_expectation as Record<string, unknown>;
+        const expired = expectationMatches(expectation, "dispatching") &&
+          Date.parse(String(row?.lease_expires_at || "")) <= Date.now();
+        if (!expired || !row) return { data: null, error: null };
+        const outcome = args.p_outcome as Record<string, unknown>;
+        const from = row.state;
+        if (outcome.kind === "sent" && outcome.match_count === 1) {
+          row = {
+            ...row,
+            state: "confirmed",
+            external_id: String(outcome.external_id || ""),
+            provider_digest: outcome.provider_digest as Record<string, unknown>,
+          };
+          transitions.push({
+            from,
+            to: "confirmed",
+            event_kind: "stale_dispatch_provider_confirmed",
+          });
+          return { data: { ...row }, error: null };
+        }
+        if (outcome.kind === "no_send" && outcome.match_count === 0) {
+          row = {
+            ...row,
+            state: "failed",
+            failure: { code: "dispatch_lease_timeout" },
+          };
+          transitions.push({
+            from,
+            to: "failed",
+            event_kind: "dispatch_lease_timed_out_no_send",
+          });
+          return { data: { ...row }, error: null };
+        }
+        return {
+          data: null,
+          error: { code: "22023", message: "invalid stale outcome" },
+        };
+      }
+      if (name === "claim_ses_route_redispatch_v1") {
+        const expectation = args.p_expectation as Record<string, unknown>;
+        const priorState = String(expectation.state || "");
+        if (
+          !["unknown", "failed"].includes(priorState) ||
+          !expectationMatches(expectation, priorState) || !row
+        ) return { data: null, error: null };
+        row = {
+          ...row,
+          state: "dispatching",
+          lease_owner: String(args.p_lease_owner || ""),
+          lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
+        };
+        transitions.push({
+          from: priorState as SesEffectState,
+          to: "dispatching",
+          event_kind: "exact_token_absent_redispatch_claimed",
+        });
+        return { data: { ...row }, error: null };
+      }
+      if (name === "renew_ses_route_dispatch_lease_v1") {
+        const expectation = args.p_expectation as Record<string, unknown>;
+        const live = expectationMatches(expectation, "dispatching") &&
+          Date.parse(String(row?.lease_expires_at || "")) > Date.now();
+        if (!live || !row) return { data: null, error: null };
+        row = {
+          ...row,
+          lease_expires_at: new Date(Date.now() + 900_000).toISOString(),
+        };
+        return { data: { ...row }, error: null };
       }
       if (name === "transition_ses_external_effect_v1") {
         const operationKey = String(args.p_operation_key || "");
@@ -293,6 +429,9 @@ function createRpcEffectHarness() {
           provider_digest:
             (detail.provider_digest as Record<string, unknown> | undefined) ||
             row.provider_digest,
+          failure: "failure" in detail
+            ? detail.failure as Record<string, unknown>
+            : row.failure,
         };
         return { data: { ...row }, error: null };
       }
@@ -736,7 +875,7 @@ Deno.test(
     const adapter = {
       dispatch: (
         payload: typeof route,
-        context: { external_token: string; operation_key: string },
+        context: SesExternalContext,
       ) => gateway.createDraftAndSend(payload, context),
       reconcile: (context: { external_token: string }) =>
         gateway.reconcileSent(context.external_token, route),
@@ -1163,6 +1302,186 @@ Deno.test(
     assertEquals(result.dispatched, false);
     assertEquals(dispatches, 0);
     assertEquals(harness.transitions, []);
+  },
+);
+
+Deno.test(
+  "real RPC store times out an expired dispatch only after exhaustive no-send proof and retries through the existing lease path",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000014",
+      route_kind: "invoice",
+      payload: { subject: "expired invoice route" },
+    });
+    harness.seed({
+      ...effect,
+      state: "dispatching",
+      lease_owner: "dead-worker",
+      lease_expires_at: "2000-01-01T00:02:00.000Z",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:01.000Z",
+    });
+    let dispatches = 0;
+    let provider: Array<{ message_id: string }> = [];
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: { subject: "expired invoice route" },
+      adapter: {
+        async dispatch() {
+          dispatches++;
+          provider = [{ message_id: "sent-on-supported-retry" }];
+          return provider[0];
+        },
+        reconcile() {
+          return Promise.resolve(provider);
+        },
+        reconcileStale() {
+          return Promise.resolve([] as Array<{ message_id: string }>);
+        },
+        identify(row: { message_id: string }) {
+          return row.message_id;
+        },
+        digest(row: { message_id: string }) {
+          return row;
+        },
+      },
+      actor: "recovery-operator",
+    });
+
+    assertEquals(result.state, "confirmed");
+    assertEquals(result.dispatched, true);
+    assertEquals(dispatches, 1);
+    assertEquals(harness.row()?.state, "confirmed");
+    assertEquals(harness.row()?.failure, {});
+    assertEquals(harness.transitions.slice(0, 2), [
+      {
+        from: "dispatching",
+        to: "failed",
+        event_kind: "dispatch_lease_timed_out_no_send",
+      },
+      {
+        from: "failed",
+        to: "dispatching",
+        event_kind: "exact_token_absent_redispatch_claimed",
+      },
+    ]);
+  },
+);
+
+Deno.test(
+  "real RPC store confirms a sent-found stale dispatch and never redispatches it",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000015",
+      route_kind: "report",
+      payload: { subject: "already sent report" },
+    });
+    harness.seed({
+      ...effect,
+      state: "dispatching",
+      lease_owner: "dead-worker",
+      lease_expires_at: "2000-01-01T00:02:00.000Z",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:01.000Z",
+    });
+    let dispatches = 0;
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: { subject: "already sent report" },
+      adapter: {
+        dispatch() {
+          dispatches++;
+          return Promise.resolve({ message_id: "must-not-send" });
+        },
+        reconcile() {
+          return Promise.resolve([] as Array<{ message_id: string }>);
+        },
+        reconcileStale() {
+          return Promise.resolve([{ message_id: "graph-existing-send" }]);
+        },
+        identify(row: { message_id: string }) {
+          return row.message_id;
+        },
+        digest(row: { message_id: string }) {
+          return row;
+        },
+      },
+      actor: "recovery-operator",
+    });
+
+    assertEquals(result.state, "confirmed");
+    assertEquals(result.dispatched, false);
+    assertEquals(dispatches, 0);
+    assertEquals(harness.row()?.external_id, "graph-existing-send");
+    assertEquals(harness.transitions, [{
+      from: "dispatching",
+      to: "confirmed",
+      event_kind: "stale_dispatch_provider_confirmed",
+    }]);
+  },
+);
+
+Deno.test(
+  "real RPC store keeps the stale dispatch fence when provider reconciliation is inconclusive",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "40000000-0000-4000-8000-000000000016",
+      route_kind: "photo",
+      payload: { subject: "inconclusive photo route" },
+    });
+    harness.seed({
+      ...effect,
+      state: "dispatching",
+      lease_owner: "dead-worker",
+      lease_expires_at: "2000-01-01T00:02:00.000Z",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:01.000Z",
+    });
+    let dispatches = 0;
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: { subject: "inconclusive photo route" },
+      adapter: {
+        dispatch() {
+          dispatches++;
+          return Promise.resolve({ message_id: "must-not-send" });
+        },
+        reconcile() {
+          return Promise.resolve([] as Array<{ message_id: string }>);
+        },
+        reconcileStale() {
+          throw new Error("Graph page could not be hydrated");
+        },
+        identify(row: { message_id: string }) {
+          return row.message_id;
+        },
+        digest(row: { message_id: string }) {
+          return row;
+        },
+      },
+      actor: "recovery-operator",
+    });
+
+    assertEquals(result.state, "refused");
+    assertEquals(result.dispatched, false);
+    assertEquals(dispatches, 0);
+    assertEquals(harness.row()?.state, "dispatching");
+    assertEquals(harness.transitions, []);
+    assert(
+      String(result.refusal?.fact || "").includes("inconclusive"),
+    );
   },
 );
 

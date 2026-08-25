@@ -39,9 +39,28 @@ export interface SesExternalEffect {
   lease_owner?: string | null;
   /** Claim lease returned by claim_ses_external_effect_v1. */
   lease_expires_at?: string | null;
+  /** Database-owned reservation time; bounds exhaustive stale reconciliation. */
+  created_at?: string | null;
+  /** Database-owned last ledger mutation time. */
+  updated_at?: string | null;
   external_id?: string | null;
   provider_digest?: Record<string, unknown>;
+  failure?: Record<string, unknown>;
 }
+
+export interface SesExternalContext {
+  external_token: string;
+  operation_key: string;
+  payload_hash: string;
+  effect_id: string;
+  release_revision_id: string;
+  route_kind: string;
+  lease_owner: string;
+}
+
+export type SesStaleDispatchOutcome<TResult> =
+  | { kind: "sent"; result: TResult }
+  | { kind: "no_send" };
 
 export interface SesEffectClaim {
   effect: SesExternalEffect;
@@ -72,15 +91,36 @@ export interface SesExternalEffectStore {
     leaseOwner: string,
     actor: string,
   ): Promise<SesExternalEffect | null>;
+  /** Database-clock/exact-coordinate proof that this dispatch lease is stale. */
+  inspectStaleDispatching?(
+    effect: SesExternalEffect,
+  ): Promise<SesExternalEffect | null>;
+  /**
+   * Exact expired-lease CAS after read-only provider reconciliation. A CAS
+   * loser receives null and remains structurally unable to redispatch.
+   */
+  settleStaleDispatching?<TResult>(
+    effect: SesExternalEffect,
+    outcome: SesStaleDispatchOutcome<TResult>,
+    identify: (result: TResult) => string,
+    digest: (result: TResult) => Record<string, unknown>,
+    actor: string,
+  ): Promise<SesExternalEffect | null>;
 }
 
 export interface SesExternalAdapter<TPayload, TResult> {
   dispatch(
     payload: TPayload,
-    context: { external_token: string; operation_key: string },
+    context: SesExternalContext,
   ): Promise<TResult>;
   reconcile(
-    context: { external_token: string; operation_key: string },
+    context: SesExternalContext,
+  ): Promise<TResult[]>;
+  /** Read-only, exhaustive provider proof used only after DB-proven expiry. */
+  reconcileStale?(
+    context: SesExternalContext & {
+      ledger_created_at: string;
+    },
   ): Promise<TResult[]>;
   identify(result: TResult): string;
   digest(result: TResult): Record<string, unknown>;
@@ -104,6 +144,18 @@ export class SesExternalOutcomeUnknownError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SesExternalOutcomeUnknownError";
+  }
+}
+
+/**
+ * The database rejected this worker's exact lease-owner generation before the
+ * Graph send boundary. The caller must stop without applying a state-only
+ * transition, because a newer generation may already own `dispatching`.
+ */
+export class SesDispatchGenerationLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SesDispatchGenerationLostError";
   }
 }
 
@@ -287,6 +339,16 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   adapter: SesExternalAdapter<TPayload, TResult>;
   actor: string;
 }): Promise<SesExecuteEffectResult<TResult>> {
+  const contextFor = (active: SesExternalEffect): SesExternalContext => ({
+    external_token: active.external_token,
+    operation_key: active.operation_key,
+    payload_hash: active.payload_hash,
+    effect_id: String(active.id || ""),
+    release_revision_id: String(active.release_revision_id || ""),
+    route_kind: String(active.route_kind || ""),
+    lease_owner: String(active.lease_owner || ""),
+  });
+
   const retainOutcomeUnknown = (
     active: SesExternalEffect,
     error: SesExternalOutcomeUnknownError,
@@ -317,12 +379,17 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       ? "failed"
       : "unknown";
     try {
-      await args.adapter.dispatch(args.payload, {
-        external_token: active.external_token,
-        operation_key: active.operation_key,
-      });
+      await args.adapter.dispatch(args.payload, contextFor(active));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof SesDispatchGenerationLostError) {
+        return {
+          state: "refused",
+          effect: { ...active, failure: { message } } as SesExternalEffect,
+          refusal: unknownRefusal(active.effect_kind, message),
+          dispatched: false,
+        };
+      }
       const unknown = await args.store.transition(
         active.operation_key,
         active.state,
@@ -343,10 +410,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
 
     let matches: TResult[];
     try {
-      matches = await args.adapter.reconcile({
-        external_token: active.external_token,
-        operation_key: active.operation_key,
-      });
+      matches = await args.adapter.reconcile(contextFor(active));
     } catch (error) {
       if (error instanceof SesExternalOutcomeUnknownError) {
         return retainOutcomeUnknown(active, error);
@@ -381,6 +445,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       {
         external_id: args.adapter.identify(result),
         provider_digest: args.adapter.digest(result),
+        failure: {},
       },
       args.actor,
     );
@@ -390,6 +455,90 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       result,
       dispatched: true,
     };
+  };
+
+  const redispatchRoute = async (
+    uncertain: SesExternalEffect,
+  ): Promise<SesExecuteEffectResult<TResult>> => {
+    // Graph reconciliation may finish a checkpointed Draft by uploading its
+    // missing frozen attachments and sending it. It is therefore an external
+    // dispatch, not a read-only probe, and must sit behind the same atomic
+    // unknown|failed -> dispatching lease as a token-absent redispatch.
+    if (!args.store.claimRedispatch) {
+      return {
+        state: "refused",
+        effect: uncertain,
+        refusal: unknownRefusal(uncertain.effect_kind),
+        dispatched: false,
+      };
+    }
+    const retry = await args.store.claimRedispatch(
+      uncertain,
+      `${args.actor}:${crypto.randomUUID()}`,
+      args.actor,
+    );
+    if (!retry) {
+      return {
+        state: "refused",
+        effect: uncertain,
+        refusal: unknownRefusal(uncertain.effect_kind),
+        dispatched: false,
+      };
+    }
+    let matches: TResult[];
+    try {
+      matches = await args.adapter.reconcile(contextFor(retry));
+    } catch (error) {
+      if (error instanceof SesExternalOutcomeUnknownError) {
+        return retainOutcomeUnknown(retry, error);
+      }
+      if (error instanceof SesDispatchGenerationLostError) {
+        const message = String(error.message || "dispatch generation lost");
+        return {
+          state: "refused",
+          effect: { ...retry, failure: { message } } as SesExternalEffect,
+          refusal: unknownRefusal(retry.effect_kind, message),
+          dispatched: false,
+        };
+      }
+      throw error;
+    }
+    if (matches.length === 1) {
+      const result = matches[0];
+      const effect = await args.store.transition(
+        retry.operation_key,
+        "dispatching",
+        "confirmed",
+        "reconciled_under_redispatch_lease",
+        {
+          external_id: args.adapter.identify(result),
+          provider_digest: args.adapter.digest(result),
+          failure: {},
+        },
+        args.actor,
+      );
+      return { state: "confirmed", effect, result, dispatched: false };
+    }
+    if (matches.length > 1) {
+      const unknown = await args.store.transition(
+        retry.operation_key,
+        "dispatching",
+        "unknown",
+        "redispatch_reconcile_ambiguous",
+        { match_count: matches.length },
+        args.actor,
+      );
+      return {
+        state: "refused",
+        effect: unknown,
+        refusal: unknownRefusal(
+          unknown.effect_kind,
+          `redispatch reconcile match_count=${matches.length}`,
+        ),
+        dispatched: false,
+      };
+    }
+    return await dispatchFrom(retry);
   };
 
   const claim = await args.store.claim(
@@ -426,11 +575,21 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     const redispatchableRoute = claim.effect.effect_kind === "route_send" &&
       (claim.effect.state === "unknown" || claim.effect.state === "failed");
     if (redispatchableRoute) {
-      // Graph reconciliation may finish a checkpointed Draft by uploading its
-      // missing frozen attachments and sending it. It is therefore an external
-      // dispatch, not a read-only probe, and must sit behind the same atomic
-      // unknown|failed -> dispatching lease as a token-absent redispatch.
-      if (!args.store.claimRedispatch) {
+      return await redispatchRoute(claim.effect);
+    }
+
+    // A fresh route lease belongs to another worker. Only the database can
+    // decide that its durable lease expired; application clocks and request
+    // timestamps carry no timeout authority. Once stale, use the adapter's
+    // exhaustive READ-ONLY provider probe. The mutation-capable reconcile path
+    // remains behind a newly claimed redispatch generation above.
+    if (claim.effect.effect_kind === "route_send") {
+      if (
+        claim.effect.state !== "dispatching" ||
+        !args.store.inspectStaleDispatching ||
+        !args.store.settleStaleDispatching ||
+        !args.adapter.reconcileStale
+      ) {
         return {
           state: "refused",
           effect: claim.effect,
@@ -438,12 +597,9 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
           dispatched: false,
         };
       }
-      const retry = await args.store.claimRedispatch(
-        claim.effect,
-        `${args.actor}:${crypto.randomUUID()}`,
-        args.actor,
-      );
-      if (!retry) {
+      const stale = await args.store.inspectStaleDispatching(claim.effect);
+      const ledgerCreatedAt = String(stale?.created_at || "").trim();
+      if (!stale || !ledgerCreatedAt) {
         return {
           state: "refused",
           effect: claim.effect,
@@ -451,73 +607,65 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
           dispatched: false,
         };
       }
+
       let matches: TResult[];
       try {
-        matches = await args.adapter.reconcile({
-          external_token: retry.external_token,
-          operation_key: retry.operation_key,
+        matches = await args.adapter.reconcileStale({
+          ...contextFor(stale),
+          ledger_created_at: ledgerCreatedAt,
         });
       } catch (error) {
-        if (error instanceof SesExternalOutcomeUnknownError) {
-          return retainOutcomeUnknown(retry, error);
-        }
-        throw error;
-      }
-      if (matches.length === 1) {
-        const result = matches[0];
-        const effect = await args.store.transition(
-          retry.operation_key,
-          "dispatching",
-          "confirmed",
-          "reconciled_under_redispatch_lease",
-          {
-            external_id: args.adapter.identify(result),
-            provider_digest: args.adapter.digest(result),
-          },
-          args.actor,
-        );
-        return { state: "confirmed", effect, result, dispatched: false };
-      }
-      if (matches.length > 1) {
-        const unknown = await args.store.transition(
-          retry.operation_key,
-          "dispatching",
-          "unknown",
-          "redispatch_reconcile_ambiguous",
-          { match_count: matches.length },
-          args.actor,
-        );
+        const message = error instanceof Error ? error.message : String(error);
         return {
           state: "refused",
-          effect: unknown,
+          effect: { ...stale, failure: { message } } as SesExternalEffect,
           refusal: unknownRefusal(
-            unknown.effect_kind,
-            `redispatch reconcile match_count=${matches.length}`,
+            stale.effect_kind,
+            `stale dispatch reconciliation inconclusive: ${message}`,
           ),
           dispatched: false,
         };
       }
-      return await dispatchFrom(retry);
+      if (matches.length > 1) {
+        return {
+          state: "refused",
+          effect: stale,
+          refusal: unknownRefusal(
+            stale.effect_kind,
+            `stale dispatch reconciliation ambiguous match_count=${matches.length}`,
+          ),
+          dispatched: false,
+        };
+      }
+
+      const result = matches[0];
+      const settled = await args.store.settleStaleDispatching(
+        stale,
+        result ? { kind: "sent", result } : { kind: "no_send" },
+        args.adapter.identify,
+        args.adapter.digest,
+        args.actor,
+      );
+      if (!settled) {
+        return {
+          state: "refused",
+          effect: stale,
+          refusal: unknownRefusal(stale.effect_kind),
+          dispatched: false,
+        };
+      }
+      if (result) {
+        return {
+          state: "confirmed",
+          effect: settled,
+          result,
+          dispatched: false,
+        };
+      }
+      return await redispatchRoute(settled);
     }
 
-    // A route already carrying a dispatching lease belongs to another active
-    // or crashed worker. Reconciliation can send a checkpointed Graph draft,
-    // so a non-owner must make no provider call. Unknown/failed is the only
-    // application-level redispatch entry and acquires a fresh atomic lease
-    // above; confirmed was handled before this branch.
-    if (claim.effect.effect_kind === "route_send") {
-      return {
-        state: "refused",
-        effect: claim.effect,
-        refusal: unknownRefusal(claim.effect.effect_kind),
-        dispatched: false,
-      };
-    }
-
-    const matches = await args.adapter.reconcile({
-      external_token: claim.effect.external_token,
-      operation_key: claim.effect.operation_key,
-    });
+    const matches = await args.adapter.reconcile(contextFor(claim.effect));
     if (matches.length === 1) {
       const result = matches[0];
       const confirmable = claim.effect.state === "reserved"
@@ -561,10 +709,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
   );
   let preDispatchMatches: TResult[];
   try {
-    preDispatchMatches = await args.adapter.reconcile({
-      external_token: dispatching.external_token,
-      operation_key: dispatching.operation_key,
-    });
+    preDispatchMatches = await args.adapter.reconcile(contextFor(dispatching));
   } catch (error) {
     if (error instanceof SesExternalOutcomeUnknownError) {
       return retainOutcomeUnknown(dispatching, error);

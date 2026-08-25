@@ -1184,7 +1184,7 @@ export async function sendMailerOpsVisibilityAction(
      */
     makeMailGateway: (
       loadAttachments: (hashes: string[]) => Promise<SesRouteAttachment[]>,
-    ) => SesMailGateway;
+    ) => Pick<SesMailGateway, "createDraftAndSend" | "reconcileSent">;
     effectStore: SesExternalEffectStore;
   },
 ): Promise<Record<string, unknown>> {
@@ -1619,7 +1619,8 @@ export async function sendMailerOpsVisibilityAction(
       dispatchedByThisCall = true;
       return mailGateway.createDraftAndSend(payload, context);
     },
-    reconcile: (context) => mailGateway.reconcileSent(context.external_token),
+    reconcile: (context) =>
+      mailGateway.reconcileSent(context.external_token, undefined, context),
     identify: (result) => result.message_id,
     digest: (result) => ({
       message_id: result.message_id,

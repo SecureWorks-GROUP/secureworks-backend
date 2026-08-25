@@ -33,6 +33,7 @@ RELEASE_ROUTE_KIND_MIGRATION="$REPO_ROOT/supabase/migrations/20260804090000_ses_
 MAILER_OPS_SEND_MIGRATION="$REPO_ROOT/supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql"
 ECHO_CODE_APPROVAL_MIGRATION="$REPO_ROOT/supabase/migrations/20260808010000_ses_echo_code_approval.sql"
 D1_RECONCILE_KILL_SWITCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql"
+STALE_ROUTE_DISPATCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql"
 
 
 PASS_COUNT=0
@@ -159,6 +160,10 @@ d1_reconcile_kill_switch_migration_sha() {
   shasum -a 256 "$D1_RECONCILE_KILL_SWITCH_MIGRATION" | awk '{print $1}'
 }
 
+stale_route_dispatch_migration_sha() {
+  shasum -a 256 "$STALE_ROUTE_DISPATCH_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -191,6 +196,7 @@ write_response() {
   MAILER_OPS_SEND_EXPECTED_SHA="$(mailer_ops_send_migration_sha)" \
   ECHO_CODE_APPROVAL_EXPECTED_SHA="$(echo_code_approval_migration_sha)" \
   D1_RECONCILE_KILL_SWITCH_EXPECTED_SHA="$(d1_reconcile_kill_switch_migration_sha)" \
+  STALE_ROUTE_DISPATCH_EXPECTED_SHA="$(stale_route_dispatch_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -490,6 +496,17 @@ d1_reconcile_kill_switch_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+stale_route_dispatch_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260825034944",
+    "expected_migration_name": "ses_stale_route_dispatch_recovery",
+    "expected_statement_sha256": os.environ["STALE_ROUTE_DISPATCH_EXPECTED_SHA"],
+    "actual_migration_version": "20260825034944",
+    "actual_migration_name": "ses_stale_route_dispatch_recovery",
+    "actual_statement_count": 18,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -519,6 +536,7 @@ with open(sys.argv[1], "w") as f:
             mailer_ops_send_row,
             echo_code_approval_row,
             d1_reconcile_kill_switch_row,
+            stale_route_dispatch_row,
         ],
         f,
     )
@@ -546,6 +564,7 @@ test_incident_dependency_is_declared() {
   local vault_sync_expected='ops-api|supabase/migrations/20260731152254_vault_sync_sw_api_key.sql|function|vault_upsert_sw_api_key'
   local ses_recovery_expected='ops-api|supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
   local roof_initial_cycle_expected='ops-api|supabase/migrations/20260803080000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1'
+  local stale_route_dispatch_expected='ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|settle_stale_ses_route_dispatch_v1'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
@@ -553,10 +572,11 @@ test_incident_dependency_is_declared() {
     grep -Fxq "$board_v2_preview_expected" "$MANIFEST" && \
     grep -Fxq "$vault_sync_expected" "$MANIFEST" && \
     grep -Fxq "$ses_recovery_expected" "$MANIFEST" && \
-    grep -Fxq "$roof_initial_cycle_expected" "$MANIFEST"; then
+    grep -Fxq "$roof_initial_cycle_expected" "$MANIFEST" && \
+    grep -Fxq "$stale_route_dispatch_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, and SES recovery markers are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, SES recovery, and stale-route dispatch markers are not permanent ops-api deploy requirements"
   fi
 }
 

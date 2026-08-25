@@ -221,6 +221,9 @@ function makeCanonicalLoaderClient(failTable?: string) {
     }],
   };
   const calls: LoaderQueryCall[] = [];
+  const rpcCalls: Array<
+    { functionName: string; args: Record<string, unknown> }
+  > = [];
 
   function builder(table: string) {
     const call: LoaderQueryCall = { table };
@@ -288,8 +291,37 @@ function makeCanonicalLoaderClient(failTable?: string) {
   }
 
   return {
-    client: { from: (table: string) => builder(table) },
+    client: {
+      from: (table: string) => builder(table),
+      rpc: (functionName: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ functionName, args });
+        if (functionName === failTable) {
+          return Promise.resolve({
+            data: null,
+            error: { message: `${functionName} fixture failure` },
+          });
+        }
+        if (functionName === "read_stuck_ses_route_dispatches_v1") {
+          return Promise.resolve({
+            data: [{
+              job_id: "loader-job",
+              effect_id: "loader-effect-1",
+              release_revision_id: "loader-release-1",
+              operation_key: "ses:route_send:loader-operation",
+              route_kind: "invoice",
+              dispatch_started_at: "2026-07-20T09:50:00Z",
+              dispatch_age_seconds: 600,
+              lease_owner: "loader-dead-worker",
+              lease_expires_at: "2026-07-20T09:52:00Z",
+            }],
+            error: null,
+          });
+        }
+        throw new Error(`unexpected fixture RPC ${functionName}`);
+      },
+    },
     calls,
+    rpcCalls,
   };
 }
 
@@ -800,7 +832,7 @@ Deno.test("Prime placement: locked and submitted-plus-expired roofs both reach T
 });
 
 Deno.test("F7 canonical board loader executes the capture-ledger handoff", async () => {
-  const { client, calls } = makeCanonicalLoaderClient();
+  const { client, calls, rpcCalls } = makeCanonicalLoaderClient();
   const rows = await _loadCanonicalMakesafeBoardForTest(client);
 
   assert(
@@ -817,6 +849,20 @@ Deno.test("F7 canonical board loader executes the capture-ledger handoff", async
     rows[0].computed_status_evidence.has_current_portal_capture,
     true,
   );
+  assertEquals(rpcCalls, [{
+    functionName: "read_stuck_ses_route_dispatches_v1",
+    args: { p_job_ids: ["loader-job"] },
+  }]);
+  assertEquals(rows[0].stuck_dispatching, [{
+    effect_id: "loader-effect-1",
+    release_revision_id: "loader-release-1",
+    operation_key: "ses:route_send:loader-operation",
+    route_kind: "invoice",
+    dispatch_started_at: "2026-07-20T09:50:00Z",
+    age_seconds: 600,
+    lease_owner: "loader-dead-worker",
+    lease_expires_at: "2026-07-20T09:52:00Z",
+  }]);
 });
 
 Deno.test("F7 observer and canonical loader share one live-board population predicate", async () => {
@@ -873,6 +919,10 @@ Deno.test("canonical loader logs explicit degradation evidence for additive evid
     {
       table: "makesafe_terminal_proofs_current_v2",
       message: "makesafe terminal proof read unavailable",
+    },
+    {
+      table: "read_stuck_ses_route_dispatches_v1",
+      message: "makesafe_board stuck SES dispatch read unavailable",
     },
   ];
 
@@ -2053,6 +2103,13 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
     applied_by: "captain",
     applied_at: NOW,
   };
+  const stuckDispatching = [{
+    effect_id: "effect-stuck-card",
+    operation_key: "ses:route_send:stuck-card",
+    route_kind: "invoice",
+    age_seconds: 480,
+    lease_owner: "worker-stuck-card",
+  }];
   const full = buildCanonicalMakesafeRows([source()], {
     photoCountByJobId: photoFloorFor("job-card"),
     computedAt: NOW,
@@ -2065,11 +2122,13 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
       }],
     },
     statusApplicationsByJobId: { "job-card": application },
+    stuckDispatchingByJobId: { "job-card": stuckDispatching },
   }, "full");
   const card = buildCanonicalMakesafeRows([source()], {
     photoCountByJobId: photoFloorFor("job-card"),
     computedAt: NOW,
     statusApplicationsByJobId: { "job-card": application },
+    stuckDispatchingByJobId: { "job-card": stuckDispatching },
   }, "card");
 
   // Placement is identical: the captain display overlay still archives the card.
@@ -2103,6 +2162,8 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   assertEquals(full[0].report_doc_id, "doc-report");
   assertEquals(full[0].has_report_doc, true);
   assertEquals(full[0].invoice_id, "invoice-row-ready");
+  assertEquals(card[0].stuck_dispatching, stuckDispatching);
+  assertEquals(full[0].stuck_dispatching, stuckDispatching);
 
   const opsCard = projectOpsMakesafeBoard(card, { fields: "card" });
   assertEquals(opsCard.shape, "card");
@@ -2115,6 +2176,10 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   assertEquals(opsCard.columns.archive[0].pack.report_doc_id, "doc-report");
   assertEquals(opsCard.columns.archive[0].pack.invoice_doc_id, "doc-invoice");
   assertEquals(opsCard.columns.archive[0].pack.swms_doc_id, "doc-swms");
+  assertEquals(
+    opsCard.columns.archive[0].stuck_dispatching,
+    stuckDispatching,
+  );
   assertEquals(opsCard.row_count, 1);
 
   // Stripping a full row through projectOpsMakesafeCardRow never moves stage
@@ -2130,6 +2195,7 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   assertEquals(stripped.report_doc_id, "doc-report");
   assertEquals(stripped.has_report_doc, true);
   assertEquals(stripped.invoice_id, "invoice-row-ready");
+  assertEquals(stripped.stuck_dispatching, stuckDispatching);
 });
 
 Deno.test("card JSON always includes report and invoice coordinates", () => {
