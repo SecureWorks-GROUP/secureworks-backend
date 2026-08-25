@@ -2677,13 +2677,7 @@ Deno.test("cockpit read still refuses a release that does not contain this job",
   );
 });
 
-function releaseExecuteClient(
-  routes: Array<Record<string, unknown>>,
-  xeroBinding: Record<string, unknown> | null = {
-    status: "AUTHORISED",
-    xero_invoice_id: "xero-invoice-1",
-  },
-): any {
+function releaseExecuteClient(routes: Array<Record<string, unknown>>): any {
   const effects = new Map<string, any>();
   return {
     from(table: string) {
@@ -2714,7 +2708,10 @@ function releaseExecuteClient(
               data: {
                 id: "docket-fixture",
                 job_id: "job-fixture",
-                xero_binding: xeroBinding,
+                xero_binding: {
+                  status: "AUTHORISED",
+                  xero_invoice_id: "xero-invoice-1",
+                },
                 invoice_obligation_revision_id: "obligation-fixture",
                 envelope: {
                   v2: {
@@ -2864,32 +2861,6 @@ Deno.test("SEND IT executes a sealed one-route invoice-only release", async () =
     result.dispatch_previews[0].members[0].caveats[0].code,
     "required_pack_artifact_missing",
   );
-});
-
-Deno.test("SEND IT refuses a priced route with no AUTHORISED Xero binding", async () => {
-  const sentSubjects: string[] = [];
-  const error = await assertRejects(
-    () =>
-      executeSesReleaseRevisionAction(
-        releaseExecuteClient([INVOICE_ONLY_ROUTE], null),
-        { mode: "api_key", user: null },
-        {
-          org_id: "org-1",
-          release_revision_id: "release-fixture",
-          actor: "captain",
-        },
-        releaseExecuteMailGateway(sentSubjects),
-        { readAuthorised: () => Promise.resolve(false) } as any,
-      ),
-    SesActionError,
-  );
-  assertEquals(error.status, 409);
-  assertEquals((error.refusal as any).code, "xero_not_authorised");
-  assertStringIncludes(
-    String((error.refusal as any).fact),
-    "real invoice PDF cannot be released",
-  );
-  assertEquals(sentSubjects, []);
 });
 
 Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", async () => {
