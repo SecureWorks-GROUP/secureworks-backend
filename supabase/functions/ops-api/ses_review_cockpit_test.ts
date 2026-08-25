@@ -110,24 +110,23 @@ Deno.test(
 );
 
 Deno.test(
-  "missing invoice PDF is a caveat, not a route blocker, when support is present",
+  "missing invoice PDF remains a route blocker even when support is present",
   () => {
     const input = cleanInput({
       family: "ordinary_roof_portal",
       report_route_applicable: false,
       photo_route_applicable: false,
-      invoice_route_artifact_caveat: true,
       routes: cleanInput().routes
         .filter((route) => route.route_kind === "invoice")
         .map((route) => ({ ...route, ready: false })),
     });
     const result = evaluateSesMechanicalClean(input);
-    assert(result.clean);
+    assertEquals(result.clean, false);
     assertEquals(
-      result.blockers.filter((blocker) =>
+      result.blockers.some((blocker) =>
         blocker.code === "route_draft_missing"
       ),
-      [],
+      true,
     );
   },
 );
@@ -1052,7 +1051,6 @@ Deno.test(
       family: "ordinary_roof_portal",
       report_route_applicable: false,
       photo_route_applicable: false,
-      invoice_route_artifact_caveat: true,
       routes: cleanInput().routes
         .filter((route) => route.route_kind === "invoice")
         .map((route) => ({ ...route, ready: false })),
@@ -1082,7 +1080,8 @@ Deno.test(
       clean_input: input,
     });
     assertEquals(view.caveats, [caveat]);
-    assertEquals(view.controls.send_it.enabled, true);
+    assertEquals(view.controls.send_it.enabled, false);
+    assertEquals(view.status, "HOLD");
     const preview = view.sections.send_preview as Record<string, any>;
     assertEquals(preview.caveats, [caveat]);
     assertEquals(preview.routes[0].attachment_count, 1);

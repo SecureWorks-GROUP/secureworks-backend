@@ -59,7 +59,6 @@ import {
   classifySesReleaseSendProgress,
   evaluateSesMechanicalClean,
   existingCardMoneyRefusal,
-  hasSesInvoiceRouteArtifactCaveat,
   SES_ROUTE_ORDER,
   type SesApprovalAuth,
   type SesCleanInput,
@@ -1750,9 +1749,6 @@ export async function loadSesCockpitDocket(
     obligation,
     routes,
   });
-  if (invoiceRouteCaveat) {
-    cleanInput.invoice_route_artifact_caveat = true;
-  }
   if (sourceRefusal) {
     cleanInput.readiness_blockers.push(sourceRefusal);
     cleanInput.money_blocker_codes.push(sourceRefusal.code);
@@ -6693,14 +6689,6 @@ export async function approveSesReleaseRevisionAction(
             "The current later attendance is not recorded as a proposed no-additional-charge obligation.",
         });
       }
-    } else if (
-      hasSesInvoiceRouteArtifactCaveat(docket) &&
-      String(docket.xero_binding?.status || "").toUpperCase() !== "DRAFT"
-    ) {
-      // The invoice route is structurally reviewable, but its billing PDF is a
-      // visible Captain caveat. Do not turn that missing artifact into a
-      // second-approval wall; the release route remains explicit about what is
-      // and is not attached in the send preview.
     } else {
       const boundDocket = requireValue(
         await client.from("makesafe_docket_revisions")
@@ -7165,10 +7153,6 @@ export async function executeSesReleaseRevisionAction(
           ),
         );
       }
-    } else if (!String(xero.status || "").trim()) {
-      // A missing live invoice/PDF is carried as the persisted card caveat and
-      // send-preview evidence. It must not become a second wall after the
-      // Captain approved the explicit route; no invoice is minted here.
     } else {
       const noChargeRevision = await client.from(
         "makesafe_invoice_obligation_revisions",

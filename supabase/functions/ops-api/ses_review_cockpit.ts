@@ -123,11 +123,6 @@ export interface SesCleanInput {
   report_only: boolean;
   /** Builder key from the family matrix / docket classification (AJS, AJBR, MLB, …). */
   builder_key?: string | null;
-  /**
-   * The invoice route is structurally reviewable but its billing PDF is not
-   * currently available. This is an operator caveat, not a mechanical wall.
-   */
-  invoice_route_artifact_caveat?: boolean;
 }
 
 export interface SesCleanCheck {
@@ -518,7 +513,6 @@ function missingRouteRefusals(
   photoRouteApplicable: boolean,
   builderKey?: string | null,
   reportRouteApplicable = true,
-  invoiceRouteArtifactCaveat = false,
 ): SesRefusal[] {
   const byKind = new Map(routes.map((route) => [route.route_kind, route]));
   const refusals: SesRefusal[] = [];
@@ -535,14 +529,7 @@ function missingRouteRefusals(
   );
   for (const kind of requiredRoutes) {
     const route = byKind.get(kind);
-    const softInvoiceArtifactGap = kind === "invoice" &&
-      invoiceRouteArtifactCaveat && !!route &&
-      route.recipients.length > 0 && route.subject.trim().length > 0 &&
-      route.body.trim().length > 0 && route.attachment_hashes.length > 0;
-    if (
-      !softInvoiceArtifactGap &&
-      (!route || !route.ready || !route.subject.trim() || !route.body.trim())
-    ) {
+    if (!route || !route.ready || !route.subject.trim() || !route.body.trim()) {
       refusals.push(
         sesRefusal(
           "route_draft_missing",
@@ -599,7 +586,6 @@ export function evaluateSesMechanicalClean(
     input.photo_route_applicable !== false,
     input.builder_key,
     input.report_route_applicable !== false,
-    input.invoice_route_artifact_caveat === true,
   );
   const checks: SesCleanCheck[] = [
     check(
@@ -930,19 +916,6 @@ export interface SesReviewCaveat {
   evidence?: Record<string, unknown>;
 }
 
-/**
- * A missing invoice PDF is review context. It must not silently become a
- * route-shape or money-state blocker, but the card and send preview must name
- * it so the Captain can weigh the missing artifact.
- */
-export function hasSesInvoiceRouteArtifactCaveat(
-  docket: Pick<SesCockpitDocket, "caveats">,
-): boolean {
-  return (docket.caveats || []).some((caveat) =>
-    caveat.code === "invoice_route_artifact_missing"
-  );
-}
-
 export interface SesCockpitView {
   schema: "secureworks.makesafe.ses-review-cockpit/v1";
   section_order: typeof SES_REVIEW_SECTION_ORDER;
@@ -1015,11 +988,6 @@ export function buildSesCockpitView(
   const xeroIsDraft =
     String(docket.xero_binding?.status || "").toUpperCase() ===
       "DRAFT";
-  const invoiceRouteArtifactCaveat = hasSesInvoiceRouteArtifactCaveat(docket) ||
-    docket.clean_input.invoice_route_artifact_caveat === true;
-  const invoiceRouteExists = docket.routes.some((route) =>
-    route.route_kind === "invoice" || route.route_kind === "report_invoice"
-  );
   const approveInvoice = !stale && !hardDecisionBlock &&
     !noAdditionalCharge &&
     verdict.checks.filter((item) => item.id !== "C11").every((item) =>
@@ -1033,8 +1001,7 @@ export function buildSesCockpitView(
   // A proved or released pack must never read as SEND_READY — that would invite
   // a second builder send of routes already on the ledger.
   const sendIt = !stale && !releaseBlocksSend && verdict.clean &&
-    (xeroAuthorised || noAdditionalCharge ||
-      (invoiceRouteArtifactCaveat && invoiceRouteExists && !xeroIsDraft));
+    (xeroAuthorised || noAdditionalCharge);
   let status: SesCockpitView["status"];
   if (releaseProgress.kind === "released") {
     status = "RELEASED";
