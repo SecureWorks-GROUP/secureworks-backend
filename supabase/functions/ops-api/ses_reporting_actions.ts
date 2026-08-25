@@ -7273,10 +7273,16 @@ export async function executeSesReleaseRevisionAction(
     }
     // Outbound bodies must be plain client English (SWMS-261161 / SWMS-261158
     // live leak: stored draft annotations rode the persisted routes to the
-    // builder). Refuse the whole release rather than dispatch or rewrite: a
-    // fresh prepare resolves clean bodies from the same dockets, so the only
-    // cost is a new press — never a builder-visible annotation.
-    if (sesBodyCarriesInternalAnnotation(route.body)) {
+    // builder). A never-dispatched release still refuses rather than rewrite:
+    // a fresh prepare resolves clean bodies from the same dockets.
+    // An in-flight release cannot take that escape — a new revision mints
+    // fresh operation keys and re-mails proved routes. Keep the frozen
+    // envelope, the same rule as the AJS CC in-flight exemption.
+    const releaseSendInFlight = confirmedEffectsByKind.size > 0;
+    if (
+      !releaseSendInFlight &&
+      sesBodyCarriesInternalAnnotation(route.body)
+    ) {
       throw new SesActionError(
         409,
         sesRefusal(
