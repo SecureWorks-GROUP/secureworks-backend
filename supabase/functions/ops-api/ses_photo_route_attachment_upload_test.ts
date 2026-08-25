@@ -199,7 +199,15 @@ Deno.test("photo route: createDraftAndSend completes a realistic 43-attachment p
       cc: [],
       attachment_hashes: hashes,
     },
-    { external_token: token, operation_key: "op-photo-1" },
+    {
+      external_token: token,
+      operation_key: "op-photo-1",
+      payload_hash: "photo-payload-hash",
+      effect_id: "10000000-0000-4000-8000-000000000001",
+      release_revision_id: "20000000-0000-4000-8000-000000000001",
+      route_kind: "photo",
+      lease_owner: "photo-test-worker",
+    },
   );
   const elapsedMs = performance.now() - started;
 

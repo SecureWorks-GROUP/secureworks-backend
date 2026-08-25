@@ -14,7 +14,10 @@ import {
   assertSesPhotoMailVolumeFits,
   resolveSesMailTransport,
 } from "./ses_photo_mail_volume_guard.ts";
-import { SesExternalOutcomeUnknownError } from "./ses_external_effects.ts";
+import {
+  type SesExternalContext,
+  SesExternalOutcomeUnknownError,
+} from "./ses_external_effects.ts";
 import { assertSesSampleSendAllowed } from "./ses_sample_destination.ts";
 
 export interface SesRouteSendResult {
@@ -27,11 +30,17 @@ export interface SesRouteSendResult {
 export interface SesMailGateway {
   createDraftAndSend(
     route: Record<string, any>,
-    context: { external_token: string; operation_key: string },
+    context: SesExternalContext,
   ): Promise<SesRouteSendResult>;
   reconcileSent(
     externalToken: string,
     route?: Record<string, any>,
+    context?: SesExternalContext,
+  ): Promise<SesRouteSendResult[]>;
+  reconcileSentOnly(
+    externalToken: string,
+    route: Record<string, any> | undefined,
+    ledgerCreatedAt: string,
   ): Promise<SesRouteSendResult[]>;
 }
 
@@ -220,9 +229,11 @@ export interface SesGraphMailGatewayDeps {
   graphJson: SesGraphJson;
   loadAttachments: (hashes: string[]) => Promise<SesRouteAttachment[]>;
   checkpointDraft: (
-    operationKey: string,
+    context: SesExternalContext,
     draftId: string,
   ) => Promise<void>;
+  /** Exact active generation renewal immediately before provider mutation. */
+  renewDispatchLease?: (context: SesExternalContext) => Promise<void>;
   uploadAttachment: (
     mailbox: string,
     messageId: string,
@@ -275,12 +286,20 @@ async function hydrateOperationHeaders(
   graphJson: SesGraphJson,
   mailbox: string,
   messages: Array<Record<string, unknown>>,
+  strict = false,
 ): Promise<Array<Record<string, unknown>>> {
   const out = messages.map((message) => ({ ...message }));
   await Promise.all(out.map(async (message) => {
     if (Array.isArray(message.internetMessageHeaders)) return;
     const id = String(message.id || "").trim();
-    if (!id) return;
+    if (!id) {
+      if (strict) {
+        throw new SesExternalOutcomeUnknownError(
+          "Graph returned a Sent Items row without the message id required to read its operation headers.",
+        );
+      }
+      return;
+    }
     try {
       const full = await graphJson(
         `https://graph.microsoft.com/v1.0/users/${
@@ -293,11 +312,22 @@ async function hydrateOperationHeaders(
       );
       if (Array.isArray(full?.internetMessageHeaders)) {
         message.internetMessageHeaders = full.internetMessageHeaders;
+      } else if (strict) {
+        throw new SesExternalOutcomeUnknownError(
+          `Graph returned no readable operation headers for message ${id}.`,
+        );
       }
       if (full?.internetMessageId && !message.internetMessageId) {
         message.internetMessageId = full.internetMessageId;
       }
-    } catch {
+    } catch (error) {
+      if (strict) {
+        throw new SesExternalOutcomeUnknownError(
+          `Graph could not hydrate operation headers for message ${id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
       // Leave the list row as-is; legacy subject match may still apply.
     }
   }));
@@ -475,6 +505,82 @@ export function createSesGraphMailGateway(
     return toSesRouteSendResults(sent, externalToken);
   };
 
+  const exhaustiveLowerBoundMs = (ledgerCreatedAt: string): number => {
+    const ledgerMs = Date.parse(String(ledgerCreatedAt || ""));
+    if (!Number.isFinite(ledgerMs)) {
+      throw new SesExternalOutcomeUnknownError(
+        "The durable SES effect creation time is missing or invalid.",
+      );
+    }
+    // Graph and Postgres clocks can differ slightly. The five-minute overlap
+    // only widens the READ window; it can never manufacture a token match.
+    return ledgerMs - 5 * 60_000;
+  };
+
+  const reconcileSentExhaustive = async (
+    externalToken: string,
+    ledgerCreatedAt: string,
+  ): Promise<SesRouteSendResult[]> => {
+    const lowerBoundMs = exhaustiveLowerBoundMs(ledgerCreatedAt);
+    const params = new URLSearchParams({
+      "$select": MESSAGE_LIST_SELECT,
+      "$orderby": "sentDateTime desc",
+      "$top": "50",
+    });
+    let nextUrl = `https://graph.microsoft.com/v1.0/users/${
+      encodeURIComponent(mailbox)
+    }/mailFolders/sentitems/messages?${params}`;
+    const seenPages = new Set<string>();
+    const matches: SesRouteSendResult[] = [];
+    const matchedIds = new Set<string>();
+
+    for (let page = 0; nextUrl; page++) {
+      if (page >= 200 || seenPages.has(nextUrl)) {
+        throw new SesExternalOutcomeUnknownError(
+          "Exhaustive Sent Items reconciliation did not terminate safely.",
+        );
+      }
+      seenPages.add(nextUrl);
+      const response = await deps.graphJson(
+        nextUrl,
+        { method: "GET" },
+        [200],
+      );
+      if (!Array.isArray(response?.value)) {
+        throw new SesExternalOutcomeUnknownError(
+          "Graph Sent Items reconciliation returned no readable message page.",
+        );
+      }
+      const rows = await hydrateOperationHeaders(
+        deps.graphJson,
+        mailbox,
+        response.value,
+        true,
+      );
+      for (const match of toSesRouteSendResults(rows, externalToken)) {
+        if (!matchedIds.has(match.message_id)) {
+          matchedIds.add(match.message_id);
+          matches.push(match);
+        }
+      }
+      if (matches.length > 1) return matches;
+
+      const next = String(response?.["@odata.nextLink"] || "").trim();
+      if (!next) return matches;
+      const sentTimes = rows.map((row) =>
+        Date.parse(String(row.sentDateTime || ""))
+      );
+      if (
+        rows.length > 0 && sentTimes.every(Number.isFinite) &&
+        Math.min(...sentTimes) < lowerBoundMs
+      ) {
+        return matches;
+      }
+      nextUrl = next;
+    }
+    return matches;
+  };
+
   const waitForSent = async (
     externalToken: string,
   ): Promise<SesRouteSendResult[]> => {
@@ -633,30 +739,79 @@ export function createSesGraphMailGateway(
   const reconcileGroupThread = async (
     externalToken: string,
     threadId: string,
+    ledgerCreatedAt?: string,
   ): Promise<SesRouteSendResult[]> => {
     const groupId = await resolveGroupId(deps.graphJson);
-    const listed = await deps.graphJson(
-      `https://graph.microsoft.com/v1.0/groups/${
-        encodeURIComponent(groupId)
-      }/threads/${
-        encodeURIComponent(threadId)
-      }/posts?$select=id,createdDateTime&$expand=extensions&$orderby=createdDateTime desc&$top=50`,
-      { method: "GET" },
-      [200],
-    );
-    const matches = (Array.isArray(listed?.value) ? listed.value : []).filter(
-      (post: any) =>
-        (Array.isArray(post?.extensions) ? post.extensions : []).some(
-          (extension: any) =>
-            String(extension?.id || "") === SES_OPERATION_EXTENSION_ID &&
-            String(extension?.externalToken || "") === externalToken,
-        ),
-    );
-    return matches.map((post: any) => ({
-      message_id: String(post.id || ""),
-      state: "sent" as const,
-      operation_token: externalToken,
-    })).filter((result: SesRouteSendResult) => !!result.message_id);
+    let nextUrl = `https://graph.microsoft.com/v1.0/groups/${
+      encodeURIComponent(groupId)
+    }/threads/${
+      encodeURIComponent(threadId)
+    }/posts?$select=id,createdDateTime&$expand=extensions&$orderby=createdDateTime desc&$top=50`;
+    const exhaustive = !!ledgerCreatedAt;
+    const lowerBoundMs = exhaustive
+      ? exhaustiveLowerBoundMs(ledgerCreatedAt!)
+      : null;
+    const seenPages = new Set<string>();
+    const matches: SesRouteSendResult[] = [];
+    const matchedIds = new Set<string>();
+
+    for (let page = 0; nextUrl; page++) {
+      if (page >= 200 || seenPages.has(nextUrl)) {
+        throw new SesExternalOutcomeUnknownError(
+          "Exhaustive group-thread reconciliation did not terminate safely.",
+        );
+      }
+      seenPages.add(nextUrl);
+      const listed = await deps.graphJson(
+        nextUrl,
+        { method: "GET" },
+        [200],
+      );
+      if (!Array.isArray(listed?.value)) {
+        if (exhaustive) {
+          throw new SesExternalOutcomeUnknownError(
+            "Graph group-thread reconciliation returned no readable post page.",
+          );
+        }
+        return [];
+      }
+      for (const post of listed.value) {
+        if (exhaustive && !Array.isArray(post?.extensions)) {
+          throw new SesExternalOutcomeUnknownError(
+            `Graph returned no readable operation extensions for group post ${
+              String(post?.id || "unknown")
+            }.`,
+          );
+        }
+        const matched = (Array.isArray(post?.extensions) ? post.extensions : [])
+          .some(
+            (extension: any) =>
+              String(extension?.id || "") === SES_OPERATION_EXTENSION_ID &&
+              String(extension?.externalToken || "") === externalToken,
+          );
+        const messageId = String(post?.id || "");
+        if (matched && messageId && !matchedIds.has(messageId)) {
+          matchedIds.add(messageId);
+          matches.push({
+            message_id: messageId,
+            state: "sent",
+            operation_token: externalToken,
+          });
+        }
+      }
+      if (matches.length > 1 || !exhaustive) return matches;
+      const next = String(listed?.["@odata.nextLink"] || "").trim();
+      if (!next) return matches;
+      const createdTimes = listed.value.map((post: any) =>
+        Date.parse(String(post?.createdDateTime || ""))
+      );
+      if (
+        listed.value.length > 0 && createdTimes.every(Number.isFinite) &&
+        Math.min(...createdTimes) < lowerBoundMs!
+      ) return matches;
+      nextUrl = next;
+    }
+    return matches;
   };
 
   /**
@@ -666,7 +821,7 @@ export function createSesGraphMailGateway(
    * Builder-facing subject/body never carry the token.
    */
   const sendGroupThreadReply = async (
-    context: { external_token: string; operation_key: string },
+    context: SesExternalContext,
     threadId: string,
     attachments: SesRouteAttachment[],
     html: string,
@@ -681,9 +836,12 @@ export function createSesGraphMailGateway(
     // Checkpoint a stable operation key before the fire-and-forget reply so a
     // crash mid-send can still be reconciled by human review of the thread.
     await deps.checkpointDraft(
-      context.operation_key,
+      context,
       `group-thread:${groupId}:${threadId}`,
     );
+    if (deps.renewDispatchLease) {
+      await deps.renewDispatchLease(context);
+    }
     await deps.graphJson(
       `https://graph.microsoft.com/v1.0/groups/${
         encodeURIComponent(groupId)
@@ -806,6 +964,9 @@ export function createSesGraphMailGateway(
       );
 
       let message: any;
+      if (deps.renewDispatchLease) {
+        await deps.renewDispatchLease(context);
+      }
       if (replyToId) {
         message = await deps.graphJson(
           `https://graph.microsoft.com/v1.0/users/${
@@ -834,9 +995,12 @@ export function createSesGraphMailGateway(
       if (!message?.id) {
         throw new Error("Microsoft Graph did not return the created draft id");
       }
-      await deps.checkpointDraft(context.operation_key, String(message.id));
+      await deps.checkpointDraft(context, String(message.id));
       for (const attachment of attachments) {
         await deps.uploadAttachment(mailbox, String(message.id), attachment);
+      }
+      if (deps.renewDispatchLease) {
+        await deps.renewDispatchLease(context);
       }
       await deps.graphJson(
         `https://graph.microsoft.com/v1.0/users/${
@@ -854,7 +1018,7 @@ export function createSesGraphMailGateway(
       return sent;
     },
 
-    async reconcileSent(externalToken, route) {
+    async reconcileSent(externalToken, route, context) {
       const threadId = String(route?.reply_to_thread_id || "").trim();
       if (route?.requires_thread_reply === true) {
         if (!threadId) {
@@ -882,6 +1046,14 @@ export function createSesGraphMailGateway(
       const draftId = String(drafts[0].id || "");
       if (!draftId) return [];
       await completeRecoveredDraftAttachments(draftId, route || {});
+      if (deps.renewDispatchLease) {
+        if (!context) {
+          throw new Error(
+            "Recovered Graph draft send requires the exact active dispatch generation.",
+          );
+        }
+        await deps.renewDispatchLease(context);
+      }
       await deps.graphJson(
         `https://graph.microsoft.com/v1.0/users/${
           encodeURIComponent(mailbox)
@@ -896,6 +1068,23 @@ export function createSesGraphMailGateway(
         );
       }
       return sent;
+    },
+
+    async reconcileSentOnly(externalToken, route, ledgerCreatedAt) {
+      const threadId = String(route?.reply_to_thread_id || "").trim();
+      if (route?.requires_thread_reply === true) {
+        if (!threadId) {
+          throw new SesExternalOutcomeUnknownError(
+            "The exact group-thread route has no bound thread id.",
+          );
+        }
+        return await reconcileGroupThread(
+          externalToken,
+          threadId,
+          ledgerCreatedAt,
+        );
+      }
+      return await reconcileSentExhaustive(externalToken, ledgerCreatedAt);
     },
   };
 }

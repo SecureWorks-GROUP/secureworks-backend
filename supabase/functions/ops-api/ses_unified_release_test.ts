@@ -308,6 +308,28 @@ class RealRpcEffectLedger {
           error: null,
         };
       }
+      if (name === "claim_ses_route_redispatch_v1") {
+        const expectation = args.p_expectation as Record<string, unknown>;
+        const operationKey = String(expectation.operation_key || "");
+        const current = this.rows.get(operationKey);
+        const exact = current &&
+          current.id === expectation.effect_id &&
+          current.release_revision_id === expectation.release_revision_id &&
+          current.route_kind === expectation.route_kind &&
+          current.external_token === expectation.external_token &&
+          current.payload_hash === expectation.payload_hash &&
+          current.state === expectation.state &&
+          ["unknown", "failed"].includes(current.state);
+        if (!exact || !current) return { data: null, error: null };
+        const next: SesExternalEffect = {
+          ...current,
+          state: "dispatching",
+          lease_owner: String(args.p_lease_owner || ""),
+          lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
+        };
+        this.rows.set(operationKey, next);
+        return { data: { ...next }, error: null };
+      }
       if (name !== "transition_ses_external_effect_v1") {
         return { data: null, error: { message: `unexpected rpc ${name}` } };
       }

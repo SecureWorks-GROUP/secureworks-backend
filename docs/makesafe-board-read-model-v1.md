@@ -28,6 +28,14 @@ Every card also carries the direct current-card coordinates `report_doc_id`,
 the card); absent evidence is represented as `null`, `false`, and `null` rather
 than by omitting the keys.
 
+An expired SES route-dispatch lease is exposed in `stuck_dispatching[]` with
+`effect_id`, `release_revision_id`, `operation_key`, `route_kind`,
+`dispatch_started_at`, database-derived `age_seconds`, `lease_owner`, and
+`lease_expires_at`. This is an operator alarm only: it never feeds
+`canonical_stage`, blocker derivation, pack sent/closed presentation, or a SEND
+gate. Empty means `[]`. The board read joins through the sealed release-member
+set and never widens to current live attachments or caller timestamps.
+
 Card shape deliberately omits:
 
 - diagnostics: `lineage` siblings, `computed_status_evidence`, all
@@ -153,6 +161,9 @@ migration before the matching `ops-api`.
 Every card originates as one canonical job row with:
 
 - `job_state`, `substatus`, `canonical_stage`
+- `stuck_dispatching[]`: database-clock evidence for expired route dispatch
+  leases, retained identically in card and full shapes without changing
+  placement or making an unproved email look sent
 - `assignments[]`: who, scheduled date/time, travel, arrival, start and completion facts
 - `report`: state, submitted date, current cycle and completion photo count
 - `pack`: draft/send state and close-out document presence

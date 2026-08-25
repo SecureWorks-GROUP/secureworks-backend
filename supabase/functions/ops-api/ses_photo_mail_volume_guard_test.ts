@@ -400,7 +400,15 @@ Deno.test("gateway createDraftAndSend refuses oversized pack before Graph", asyn
         cc: ["ses@secureworkswa.com.au"],
         attachment_hashes: ["h1", "h2"],
       },
-      { external_token: "SES-volume-test", operation_key: "op-volume" },
+      {
+        external_token: "SES-volume-test",
+        operation_key: "op-volume",
+        payload_hash: "volume-payload-hash",
+        effect_id: "10000000-0000-4000-8000-000000000001",
+        release_revision_id: "20000000-0000-4000-8000-000000000001",
+        route_kind: "photo",
+        lease_owner: "volume-test-worker",
+      },
     );
   } catch (err) {
     failed = true;
@@ -445,7 +453,15 @@ Deno.test("gateway createDraftAndSend refuses oversized group-thread pack before
         reply_to_thread_id: "thread-1",
         requires_thread_reply: true,
       },
-      { external_token: "SES-volume-thread", operation_key: "op-thread-vol" },
+      {
+        external_token: "SES-volume-thread",
+        operation_key: "op-thread-vol",
+        payload_hash: "thread-volume-payload-hash",
+        effect_id: "10000000-0000-4000-8000-000000000002",
+        release_revision_id: "20000000-0000-4000-8000-000000000002",
+        route_kind: "photo",
+        lease_owner: "thread-volume-test-worker",
+      },
     );
   } catch (err) {
     failed = true;

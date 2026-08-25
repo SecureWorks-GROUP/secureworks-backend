@@ -22,8 +22,24 @@ import {
   subjectHasOperationToken,
   toSesRouteSendResults,
 } from "./ses_graph_mail_gateway.ts";
+import type { SesExternalContext } from "./ses_external_effects.ts";
 
 const TOKEN = "SES-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+function dispatchContext(
+  externalToken: string,
+  operationKey: string,
+): SesExternalContext {
+  return {
+    external_token: externalToken,
+    operation_key: operationKey,
+    payload_hash: "payload-hash",
+    effect_id: "10000000-0000-4000-8000-000000000001",
+    release_revision_id: "20000000-0000-4000-8000-000000000001",
+    route_kind: "report",
+    lease_owner: "test-worker",
+  };
+}
 
 Deno.test("builder-facing subject never carries the SES operation token", () => {
   assertEquals(sesOperationSubject("Report pack", TOKEN), "Report pack");
@@ -157,7 +173,7 @@ Deno.test("createDraftAndSend stamps header only, not subject/body, and proves v
       cc: ["ses@secureworkswa.com.au"],
       attachment_hashes: [],
     },
-    { external_token: token, operation_key: "op-1" },
+    dispatchContext(token, "op-1"),
   );
   assertEquals(sent.message_id, "sent-1");
   assertEquals(sent.operation_token, token);
@@ -208,6 +224,166 @@ Deno.test("reconcileSent finds message by header when subject is clean", async (
   const rows = await gateway.reconcileSent(token);
   assertEquals(rows.length, 1);
   assertEquals(rows[0].message_id, "sent-9");
+});
+
+Deno.test("stale reconciliation exhausts Sent Items to the durable ledger lower bound before proving no send", async () => {
+  const token = "SES-exhaustive-no-send";
+  let listCalls = 0;
+  const gateway = createSesGraphMailGateway({
+    graphJson: async (url, init) => {
+      assertEquals(String(init.method || "GET"), "GET");
+      assertStringIncludes(url, "mailFolders/sentitems/messages");
+      listCalls++;
+      return {
+        value: [{
+          id: "older-unrelated",
+          subject: "Other operation",
+          sentDateTime: "2026-08-19T23:00:00Z",
+          internetMessageHeaders: [],
+        }],
+        "@odata.nextLink": "https://graph.microsoft.test/older-page",
+      };
+    },
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {},
+  });
+
+  const rows = await gateway.reconcileSentOnly(
+    token,
+    undefined,
+    "2026-08-20T02:44:18Z",
+  );
+  assertEquals(rows, []);
+  assertEquals(listCalls, 1);
+});
+
+Deno.test("stale reconciliation follows Sent Items pagination and finds the exact token", async () => {
+  const token = "SES-exhaustive-found";
+  const urls: string[] = [];
+  const gateway = createSesGraphMailGateway({
+    graphJson: async (url, init) => {
+      assertEquals(String(init.method || "GET"), "GET");
+      urls.push(url);
+      if (url === "https://graph.microsoft.test/page-2") {
+        return {
+          value: [{
+            id: "sent-exact-page-2",
+            internetMessageId: "<exact-page-2@example.test>",
+            subject: "Clean subject",
+            sentDateTime: "2026-08-20T02:45:00Z",
+            internetMessageHeaders: [{
+              name: SES_OPERATION_HEADER,
+              value: token,
+            }],
+          }],
+        };
+      }
+      return {
+        value: [{
+          id: "newer-unrelated",
+          subject: "Other operation",
+          sentDateTime: "2026-08-20T02:46:00Z",
+          internetMessageHeaders: [],
+        }],
+        "@odata.nextLink": "https://graph.microsoft.test/page-2",
+      };
+    },
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {},
+  });
+
+  const rows = await gateway.reconcileSentOnly(
+    token,
+    undefined,
+    "2026-08-20T02:44:18Z",
+  );
+  assertEquals(rows, [{
+    message_id: "sent-exact-page-2",
+    internet_message_id: "<exact-page-2@example.test>",
+    state: "sent",
+    operation_token: token,
+  }]);
+  assertEquals(urls.length, 2);
+});
+
+Deno.test("stale reconciliation is inconclusive when an operation header cannot be read", async () => {
+  const token = "SES-exhaustive-inconclusive";
+  const gateway = createSesGraphMailGateway({
+    graphJson: async (url) => {
+      if (url.includes("mailFolders/sentitems/messages")) {
+        return {
+          value: [{
+            id: "header-unreadable",
+            subject: "Clean subject",
+            sentDateTime: "2026-08-20T02:46:00Z",
+          }],
+        };
+      }
+      throw new Error("synthetic Graph header read failure");
+    },
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {},
+  });
+
+  const error = await assertRejects(
+    () =>
+      gateway.reconcileSentOnly(
+        token,
+        undefined,
+        "2026-08-20T02:44:18Z",
+      ),
+    Error,
+  );
+  assertStringIncludes(error.message, "could not hydrate operation headers");
+});
+
+Deno.test("a superseded dispatch generation cannot resume from draft checkpoint into Graph send", async () => {
+  const token = "SES-superseded-before-send";
+  let renewals = 0;
+  let sends = 0;
+  let checkpoints = 0;
+  const gateway = createSesGraphMailGateway({
+    graphJson: async (url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "POST" && url.endsWith("/messages")) {
+        return { id: "draft-superseded" };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        sends++;
+        return null;
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    },
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {
+      checkpoints++;
+    },
+    renewDispatchLease: async () => {
+      renewals++;
+      if (renewals === 2) {
+        throw new Error("dispatch generation expired or was superseded");
+      }
+    },
+    uploadAttachment: async () => {},
+  });
+
+  const error = await assertRejects(
+    () =>
+      gateway.createDraftAndSend({
+        subject: "Report",
+        body: "Body",
+        recipients: ["builder@example.test"],
+        attachment_hashes: [],
+      }, dispatchContext(token, "op-superseded-before-send")),
+    Error,
+  );
+  assertStringIncludes(error.message, "superseded");
+  assertEquals(renewals, 2);
+  assertEquals(checkpoints, 1);
+  assertEquals(sends, 0);
 });
 
 Deno.test(
@@ -315,8 +491,8 @@ Deno.test(
       graphJson: graphJson as any,
       loadAttachments: async (hashes) =>
         hashes.map((hash) => frozen.find((item) => item.hash === hash)!),
-      checkpointDraft: async (operationKey, draftId) => {
-        checkpoints.push({ operationKey, draftId });
+      checkpointDraft: async (context, draftId) => {
+        checkpoints.push({ operationKey: context.operation_key, draftId });
       },
       uploadAttachment: async (_mailbox, messageId, attachment) => {
         assertEquals(messageId, "draft-partial");
@@ -340,10 +516,10 @@ Deno.test(
     };
     const first = await assertRejects(
       () =>
-        gateway.createDraftAndSend(route, {
-          external_token: token,
-          operation_key: "operation-partial",
-        }),
+        gateway.createDraftAndSend(
+          route,
+          dispatchContext(token, "operation-partial"),
+        ),
       Error,
     );
     assertStringIncludes(first.message, "second attachment upload failure");
@@ -618,7 +794,7 @@ Deno.test("group thread reply posts on intake thread and never opens a new messa
       reply_to_thread_id: "thread-1",
       requires_thread_reply: true,
     },
-    { external_token: token, operation_key: "op-thread-1" },
+    dispatchContext(token, "op-thread-1"),
   );
   assertEquals(sent.message_id, "post-reply-1");
   assertEquals(sent.operation_token, token);
@@ -699,7 +875,7 @@ Deno.test("requires_thread_reply without thread id refuses rather than new threa
         attachment_hashes: [],
         requires_thread_reply: true,
       },
-      { external_token: "SES-x", operation_key: "op-x" },
+      dispatchContext("SES-x", "op-x"),
     );
   } catch (err) {
     failed = true;
@@ -800,7 +976,7 @@ Deno.test(
         in_reply_to_internet_message_id: "mid@mlb.example",
         mlb_transport: "ordinary_mail_send_captain_exception_v1",
       },
-      { external_token: token, operation_key: "op-ordinary-1" },
+      dispatchContext(token, "op-ordinary-1"),
     );
     assertEquals(sent.message_id, "sent-ordinary-1");
     assertEquals(sent.operation_token, token);
@@ -895,7 +1071,7 @@ Deno.test(
         // No Message-ID — must still send.
         in_reply_to_internet_message_id: null,
       },
-      { external_token: token, operation_key: "op-no-mid" },
+      dispatchContext(token, "op-no-mid"),
     );
     assertEquals(sent.message_id, "sent-no-mid");
   },

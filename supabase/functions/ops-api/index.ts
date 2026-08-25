@@ -583,6 +583,7 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
+import { SesDispatchGenerationLostError } from './ses_external_effects.ts'
 // T12 Harden SES v1: ONE shared inspect read so both front doors show identical
 // pack truth (pointer ids + exact revision/hash + frozen release manifest +
 // audit) instead of composing four feeds.
@@ -1767,14 +1768,43 @@ function makeSesGraphMailGateway(client: any): SesMailGateway {
   return createSesGraphMailGateway({
     graphJson: sesGraphJson,
     loadAttachments: (hashes) => loadSesRouteAttachments(client, hashes),
-    async checkpointDraft(operationKey, draftId) {
-      const { error: checkpointError } = await client.from('ses_external_effects').update({
+    async checkpointDraft(context, draftId) {
+      const checkpoint = await client.from('ses_external_effects').update({
         external_id: draftId,
         provider_digest: { phase: 'draft_created', mailbox: 'admin@secureworkswa.com.au' },
-        updated_at: new Date().toISOString(),
-      }).eq('operation_key', operationKey).eq('state', 'dispatching')
-      if (checkpointError) {
-        throw new Error(`The Graph draft exists but its exact draft id was not checkpointed (${checkpointError.message})`)
+      }).eq('id', context.effect_id)
+        .eq('operation_key', context.operation_key)
+        .eq('external_token', context.external_token)
+        .eq('payload_hash', context.payload_hash)
+        .eq('state', 'dispatching')
+        .eq('lease_owner', context.lease_owner)
+        .select('id')
+        .maybeSingle()
+      if (checkpoint.error) {
+        throw new Error(`The Graph draft exists but its exact dispatch generation could not checkpoint it (${checkpoint.error?.message || 'lease lost'})`)
+      }
+      if (!checkpoint.data) {
+        throw new SesDispatchGenerationLostError('The Graph draft exists, but this worker no longer owns the exact route dispatch generation.')
+      }
+    },
+    async renewDispatchLease(context) {
+      const renewed = await client.rpc('renew_ses_route_dispatch_lease_v1', {
+        p_expectation: {
+          effect_id: context.effect_id,
+          release_revision_id: context.release_revision_id,
+          operation_key: context.operation_key,
+          route_kind: context.route_kind,
+          external_token: context.external_token,
+          payload_hash: context.payload_hash,
+          lease_owner: context.lease_owner,
+        },
+        p_lease_seconds: 900,
+      })
+      if (renewed.error) {
+        throw new Error(`The exact dispatch generation lost its Graph send lease (${renewed.error?.message || 'lease expired or superseded'})`)
+      }
+      if (!renewed.data) {
+        throw new SesDispatchGenerationLostError('The route dispatch lease expired or was superseded before Graph send.')
       }
     },
     uploadAttachment: uploadSesGraphAttachment,
@@ -1796,19 +1826,30 @@ function makeMailerOpsGraphMailGateway(
   return createSesGraphMailGateway({
     graphJson: sesGraphJson,
     loadAttachments,
-    async checkpointDraft(operationKey, draftId) {
-      const { error: checkpointError } = await client.from('ses_external_effects').update({
+    async checkpointDraft(context, draftId) {
+      const checkpoint = await client.from('ses_external_effects').update({
         external_id: draftId,
         provider_digest: {
           phase: 'draft_created',
           mailbox: 'admin@secureworkswa.com.au',
           path: 'mailer_ops_visibility',
         },
-        updated_at: new Date().toISOString(),
-      }).eq('operation_key', operationKey).eq('state', 'dispatching')
-      if (checkpointError) {
+      }).eq('id', context.effect_id)
+        .eq('operation_key', context.operation_key)
+        .eq('external_token', context.external_token)
+        .eq('payload_hash', context.payload_hash)
+        .eq('state', 'dispatching')
+        .eq('lease_owner', context.lease_owner)
+        .select('id')
+        .maybeSingle()
+      if (checkpoint.error) {
         throw new Error(
-          `The Graph draft exists but its exact draft id was not checkpointed (${checkpointError.message})`,
+          `The Graph draft exists but its exact dispatch generation could not checkpoint it (${checkpoint.error?.message || 'lease lost'})`,
+        )
+      }
+      if (!checkpoint.data) {
+        throw new SesDispatchGenerationLostError(
+          'The Graph draft exists, but this worker no longer owns the exact mailer dispatch generation.',
         )
       }
     },
@@ -18668,6 +18709,7 @@ async function loadCanonicalMakesafeBoard(
   let portalCaptureRows: any[] = []
   let holds: any[] = []
   let intakeCases: any[] = []
+  let stuckDispatchRows: any[] = []
 
   // Placement-bearing photo count, every mode. _fetchAllByJobIdChunked checks
   // every PostgREST error and paginates every 1000 rows. Built first and awaited
@@ -18704,21 +18746,37 @@ async function loadCanonicalMakesafeBoard(
     jobIds,
     (q) => q.eq('role', 'completion_photo'),
   )
+  const stuckDispatchPromise = client.rpc(
+    'read_stuck_ses_route_dispatches_v1',
+    { p_job_ids: jobIds },
+  ).then((response: any) => {
+    if (response?.error) {
+      throw new Error(response.error.message || 'stuck dispatch read failed')
+    }
+    return Array.isArray(response?.data) ? response.data : []
+  }).catch((error: unknown) => {
+    // Additive operator alarm only: never move a card or take down the board.
+    // Migration preflight pins the RPC; a runtime read failure stays loud.
+    console.error('[ops-api] makesafe_board stuck SES dispatch read unavailable:', (error as Error).message)
+    return []
+  })
 
   let reportPhotoScopeRows: any[] = []
   let packPhotoArtifactRows: any[] = []
   if (cardMode) {
-    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows] = await Promise.all([
+    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows, stuckDispatchRows] = await Promise.all([
       photosPromise,
       reportPhotoScopePromise,
       packPhotoArtifactPromise,
+      stuckDispatchPromise,
     ])
   } else {
-    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows, notes, contacts] =
+    ;[photos, reportPhotoScopeRows, packPhotoArtifactRows, stuckDispatchRows, notes, contacts] =
       await Promise.all([
         photosPromise,
         reportPhotoScopePromise,
         packPhotoArtifactPromise,
+        stuckDispatchPromise,
         _fetchAllByJobIdChunked(
           client,
           'job_events',
@@ -18901,6 +18959,21 @@ async function loadCanonicalMakesafeBoard(
       statusApplicationsByJobId[application.job_id] = application
     }
   }
+  const stuckDispatchingByJobId: Record<string, any[]> = {}
+  for (const dispatch of stuckDispatchRows) {
+    const jobId = String(dispatch?.job_id || '')
+    if (!jobId) continue
+    ;(stuckDispatchingByJobId[jobId] ||= []).push({
+      effect_id: dispatch.effect_id || null,
+      release_revision_id: dispatch.release_revision_id || null,
+      operation_key: dispatch.operation_key || null,
+      route_kind: dispatch.route_kind || null,
+      dispatch_started_at: dispatch.dispatch_started_at || null,
+      age_seconds: Number(dispatch.dispatch_age_seconds) || 0,
+      lease_owner: dispatch.lease_owner || null,
+      lease_expires_at: dispatch.lease_expires_at || null,
+    })
+  }
   const portalCaptureRowsByJobId: Record<string, any[]> = {}
   for (const capture of portalCaptureRows) {
     if (!capture?.job_id) continue
@@ -19024,6 +19097,7 @@ async function loadCanonicalMakesafeBoard(
     intakeCaseByJobId,
     holdsByJobId,
     statusApplicationsByJobId,
+    stuckDispatchingByJobId,
     portalCaptureRowsByJobId,
     ownRoofDraftByJobId,
     ownRoofReportDocumentIdsByJobId,
