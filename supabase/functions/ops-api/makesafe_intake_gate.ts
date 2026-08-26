@@ -527,6 +527,27 @@ export function decideDeterministicMakeSafeJobFamily(
  * Back-compatible classifier for callers whose existing contract requires one
  * of the known families. New intake code should use decideMakeSafeJobFamily so
  * genuine ambiguity stays visible.
+ *
+ * It wraps the DETERMINISTIC variant, and that is load-bearing rather than
+ * tidiness. It previously wrapped decideMakeSafeJobFamily, which carries no
+ * rapid-repair upgrade — so on the approval fallback path a work order whose
+ * subject reads `**RAPID REPAIR**` was STRUCTURALLY INCAPABLE of becoming a
+ * repair job. Not hypothetical: a 90-day sweep found exactly two such subjects
+ * and both were approved as general_makesafe, and neither of the two
+ * intake-born live repair cards was classified repair at mint.
+ *
+ * This adds NO new business rule. It gives the fallback exactly the repair
+ * signals the deterministic layer already seals — the RAPID REPAIR subject and
+ * the labelled `Dispatch Class: Rapid Repairs` line — and the upgrade still
+ * fires only when the ladder returned general_makesafe or abstained, so no
+ * other family can be overwritten by it. The declared repair PDF header
+ * (`Rapid Repairs`, `Scaffolding/Access Equipment`) already reached repair
+ * through the shared ladder and is unaffected.
+ *
+ * Deliberately NOT included: MLB's `Makesafe/Emergency Repairs` work-order
+ * category, which is 242 of the last 90 days' headers and which the grammar
+ * maps to make-safe on purpose. Reading that label as repair is a captain
+ * decision and is not taken here.
  */
 export function classifyMakeSafeJobFamily(
   subject: string | null | undefined,
@@ -534,8 +555,8 @@ export function classifyMakeSafeJobFamily(
   reportType?: string | null,
   context: MakeSafeJobFamilyContext = {},
 ): MakeSafeJobFamily {
-  return decideMakeSafeJobFamily(subject, body, reportType, context).family ||
-    "general_makesafe";
+  return decideDeterministicMakeSafeJobFamily(subject, body, reportType, context)
+    .family || "general_makesafe";
 }
 
 // ── M-G FIX 2 — top-down taxonomy (Marnin's Emergency-Insurance-Work model) ────

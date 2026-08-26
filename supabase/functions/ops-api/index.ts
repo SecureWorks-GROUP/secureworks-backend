@@ -22807,6 +22807,39 @@ function deterministicDraftFamilyForApproval(
 export const _deterministicDraftFamilyForApprovalForTest =
   deterministicDraftFamilyForApproval
 
+/**
+ * A persisted REPAIR verdict survives approval even when the draft is not
+ * flagged `deterministic_intake`.
+ *
+ * deterministicDraftFamilyForApproval above honours a stored family only when
+ * `extraction.deterministic_intake === true`. Every other draft falls through to
+ * the approval-time fallback classifier, which re-decides from scratch — so a
+ * repair verdict already reached upstream was silently downgraded to
+ * general_makesafe. That is what happened to MLB-26303 on 2026-08-07.
+ *
+ * Deliberately REPAIR-ONLY. 'repair' is never any classifier's default or
+ * abstain answer (abstain yields null; the back-compat wrapper yields
+ * general_makesafe), so its presence in the extraction is positive evidence that
+ * something upstream concluded repair. Every other family keeps exactly today's
+ * gating, so the blast radius of this rescue is repair and nothing else.
+ *
+ * The split-obligation carve-out is preserved: on a combined split the PRIMARY
+ * is a physical make-safe and must never inherit the draft's family.
+ *
+ * The caller still runs assertReviewedFamilyConsistency afterwards, so a repair
+ * verdict sitting on a report-only draft is refused with a 400 rather than
+ * minting a contradiction.
+ */
+function repairFamilyVerdictForApproval(
+  extraction: any,
+  splitObligation: boolean,
+): string | null {
+  if (splitObligation) return null
+  const family = cleanReviewedString(extraction?.makesafe_job_family)
+  return String(family || '').trim().toLowerCase() === 'repair' ? 'repair' : null
+}
+export const _repairFamilyVerdictForApproval = repairFamilyVerdictForApproval
+
 async function loadExistingJobBindingForDraft(client: any, draft: any): Promise<{
   correction: any
   targetJob: any
@@ -23137,7 +23170,11 @@ async function approveIntakeDraft(client: any, body: any) {
     extraction,
     !!splitObligation,
   )
-  const authoritativeFamily = reviewedFamily || persistedDeterministicFamily
+  // The repair rescue sits LAST: a reviewer's explicit family and a flagged
+  // deterministic verdict both still win. It only catches the case where the
+  // extraction says repair and nothing else has claimed the draft.
+  const authoritativeFamily = reviewedFamily || persistedDeterministicFamily ||
+    repairFamilyVerdictForApproval(extraction, !!splitObligation)
   const requiredMintRoles = extraction?.deterministic_intake === true
     ? ['primary', ...(splitObligation ? ['secondary_report'] : [])]
     : []

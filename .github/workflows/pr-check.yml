@@ -212,6 +212,7 @@ jobs:
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/repair_intake_routing_test.ts \
+            supabase/functions/ops-api/repair_classifier_routing_test.ts \
             supabase/functions/ops-api/repair_stage_write_test.ts \
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
             supabase/functions/ops-api/insurance_repairs_pipeline_test.ts

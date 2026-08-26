@@ -134,6 +134,56 @@ BEGIN
     RAISE EXCEPTION 'makesafe_job_details accepted a patio job after the widening';
   END IF;
 
+  -- ── The money seal. This is the defect the risk assessment found. ──────────
+  -- The details-row inserts above fire trg_makesafe_details_seal_job ->
+  -- seal_makesafe_job_v1, which carried no type predicate at all. Live proof of
+  -- the consequence: 536 of 536 jobs holding a details row are sealed. The
+  -- repair route ALWAYS inserts a details row, so every repair job would have
+  -- been sealed at mint — permanently, the seal being write-once.
+  IF EXISTS (
+    SELECT 1 FROM public.jobs
+    WHERE id = repair_job AND ses_money_sealed_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION
+      'a repair job was auto-money-sealed by its details row; Captain Decision 4 is violated';
+  END IF;
+
+  -- CONTROL: a make-safe is still sealed by exactly the same write, with its
+  -- source and version intact. The exemption is repair-shaped, not a hole.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.jobs
+    WHERE id = makesafe_job
+      AND ses_money_sealed_at IS NOT NULL
+      AND ses_money_seal_source = 'makesafe_job_details'
+      AND ses_money_seal_version = 1
+  ) THEN
+    RAISE EXCEPTION
+      'the repair seal exemption stopped make-safe jobs being sealed by their details row';
+  END IF;
+
+  -- The seal function still refuses a job id that does not exist at all, so a
+  -- genuine fault stays loud rather than being silently exempted.
+  refused := false;
+  BEGIN
+    PERFORM public.seal_makesafe_job_v1(
+      'aaaaaaaa-0000-4000-8000-0000000000ee'::uuid, 'contract-probe');
+  EXCEPTION WHEN others THEN
+    refused := true;
+  END;
+  IF NOT refused THEN
+    RAISE EXCEPTION 'seal_makesafe_job_v1 stopped refusing a missing job';
+  END IF;
+
+  -- And a direct call on a repair job is a silent no-op, not an error: the job
+  -- exists, so the not-found guard must not fire.
+  PERFORM public.seal_makesafe_job_v1(repair_job, 'contract-probe');
+  IF EXISTS (
+    SELECT 1 FROM public.jobs
+    WHERE id = repair_job AND ses_money_sealed_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'a direct seal call sealed a repair job';
+  END IF;
+
   -- Intake case job_id link: allowed on repair, still refused on patio.
   INSERT INTO public.makesafe_intake_cases (org_id, state, job_id)
   VALUES (org, 'confirmed_live_job', repair_job);

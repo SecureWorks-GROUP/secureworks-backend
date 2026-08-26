@@ -34,6 +34,8 @@ ALTER TABLE public.jobs
   ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS legacy boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS ses_money_sealed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS ses_money_seal_source text,
+  ADD COLUMN IF NOT EXISTS ses_money_seal_version int,
   ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
@@ -147,6 +149,57 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+-- The SECOND auto-seal path, reproduced verbatim from
+-- 20260728050000_makesafe_ses_fence_hardening.sql:65-125. This is the one the
+-- migration patches: it carries NO type predicate, and the repair route always
+-- inserts a details row, so without §7 every repair job is sealed at mint.
+CREATE OR REPLACE FUNCTION public.seal_makesafe_job_v1(
+  p_job_id uuid,
+  p_source text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF p_job_id IS NULL THEN
+    RETURN;
+  END IF;
+  UPDATE public.jobs
+  SET
+    ses_money_sealed_at = clock_timestamp(),
+    ses_money_seal_source = COALESCE(NULLIF(btrim(p_source), ''), 'canonical_spine'),
+    ses_money_seal_version = 1
+  WHERE id = p_job_id
+    AND ses_money_sealed_at IS NULL;
+  IF NOT FOUND AND NOT EXISTS (
+    SELECT 1 FROM public.jobs WHERE id = p_job_id
+  ) THEN
+    RAISE EXCEPTION 'cannot seal missing SES job %', p_job_id
+      USING ERRCODE = 'P0002';
+  END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.seal_makesafe_child_job_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  PERFORM public.seal_makesafe_job_v1(NEW.job_id, TG_TABLE_NAME);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_makesafe_details_seal_job
+  ON public.makesafe_job_details;
+CREATE TRIGGER trg_makesafe_details_seal_job
+  AFTER INSERT OR UPDATE OF job_id ON public.makesafe_job_details
+  FOR EACH ROW EXECUTE FUNCTION public.seal_makesafe_child_job_v1();
 
 DROP TRIGGER IF EXISTS trg_makesafe_job_details_job_type
   ON public.makesafe_job_details;
