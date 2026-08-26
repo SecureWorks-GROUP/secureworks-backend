@@ -77,11 +77,22 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       if (insertRow) return applyInsert();
       if (updateRow) return applyUpdate();
       if (upsertRow) return applyUpsert();
+      const f = failure("select");
+      if (f) return f;
       const d = matching();
       return { data: single ? d[0] || null : d, error: null };
     };
     const b: any = {
-      select: () => b,
+      select: (cols?: string) => {
+        if (
+          table === "job_media" &&
+          String(cols || "").includes("cycle_number")
+        ) {
+          fail["job_media.select"] =
+            "column job_media.cycle_number does not exist";
+        }
+        return b;
+      },
       eq: (c: string, v: any) => {
         preds.push((r) => r?.[c] === v);
         return b;
@@ -888,4 +899,59 @@ Deno.test("render_roof_report: succeeds on a report_type='roof_report' job", asy
   assertEquals(res.success, true);
   assertEquals(res.document_id, "00000000-0000-0000-0000-0000000000aa");
   assertEquals(calls.length, 1);
+});
+
+Deno.test("render_roof_report: job_media read does not select cycle_number", async () => {
+  const { client } = makeClient(baseRows({
+    job_media: [{
+      job_id: "job-1",
+      type: "photo",
+      storage_url: "https://example.test/p.jpg",
+      label: "tile",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      reattend_count: 0,
+      external_ref: "MLB-17270PO-54939",
+      report_type: "roof_report",
+    }],
+  }));
+  const { deps } = stubRenderDeps();
+  const res: any = await _renderRoofReportActionForTest(
+    client,
+    { job_id: "job-1", fields: { findings: "Cracked tiles" } },
+    deps,
+  );
+  assertEquals(res.success, true);
+});
+
+Deno.test("render_roof_report: supplied fields persist onto the roof draft", async () => {
+  const { client, rows } = makeClient(baseRows());
+  const { deps } = stubRenderDeps();
+  const res: any = await _renderRoofReportActionForTest(
+    client,
+    {
+      job_id: "job-1",
+      fields: {
+        overall_findings: "Cracked tiles",
+        leak_cause: "siliconed both cracks",
+        storeys: STOREY_DOUBLE,
+        water_leak: true,
+      },
+    },
+    deps,
+  );
+  assertEquals(res.success, true);
+  assertEquals(rows.makesafe_roof_report_drafts.length, 1);
+  const draft = rows.makesafe_roof_report_drafts[0];
+  assertEquals(draft.pack_kind, "roof");
+  assertEquals(draft.fields_json.overall_findings, "Cracked tiles");
+  assertEquals(draft.fields_json.leak_cause, "siliconed both cracks");
+  assertEquals(draft.storey, "double");
 });

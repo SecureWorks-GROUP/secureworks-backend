@@ -40392,8 +40392,10 @@ async function resolveRoofReportPhotos(
 ): Promise<Array<{ url?: string; bytesBase64?: string; contentType?: string; label?: string }>> {
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
     .select('cycle_number, reattend_count, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
+  // job_media has no cycle_number column. Cycle-scope uses
+  // attendance_cycle_id + cycle_attribution (filterMediaForCurrentCycle).
   const { data: media, error: mediaErr } = await client.from('job_media')
-    .select('storage_url, label, type, phase, attendance_cycle_id, cycle_attribution, cycle_number')
+    .select('storage_url, label, type, phase, attendance_cycle_id, cycle_attribution')
     .eq('job_id', jobId).eq('type', 'photo').limit(20)
   if (detailErr || mediaErr) {
     throw new ApiError(
@@ -40906,6 +40908,17 @@ async function renderRoofReportAction(client: any, body: any, deps: RoofRenderDe
   const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
     ? existing.fields_json : {}
   const reqFields = (body.fields && typeof body.fields === 'object') ? body.fields : {}
+  // Persist supplied fields onto the roof draft so the SES assembler can see
+  // cycle_facts.roof_report_fields on the next prepare. Ops re-render is the
+  // path that can write those fields without a trade JWT.
+  if (Object.keys(reqFields).length > 0) {
+    await saveRoofReport(client, {
+      job_id: jobId,
+      fields: reqFields,
+      photos: body.photos ?? (reqFields as any).photos,
+      userId: body.userId || body.user_id || null,
+    })
+  }
   const mergedText = sanitiseRoofReportFields({ ...draftFields, ...reqFields })
   const draftPhotos = Array.isArray((draftFields as any).photos) ? (draftFields as any).photos : []
   const photosForRender = await resolveRoofReportPhotos(
