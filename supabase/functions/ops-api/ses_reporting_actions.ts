@@ -7112,12 +7112,17 @@ export async function executeSesReleaseRevisionAction(
   // Infer shape from the release's own route set (not live job state):
   //   AJS: report_invoice + photo (or legacy report+photo half-match)
   //   ruled roof-report (Captain 2026-08-06): invoice alone
+  //   own-letterhead roof (family photo_route=not_applicable, still owes a
+  //   real report email): report then invoice. commit_ses_release_revision_v1
+  //   already accepts this (own_letterhead_two). Execute must send it, not
+  //   demand a photo email the matrix never drafts. Live Gwelup SWMS-26980
+  //   died here after prepare succeeded: "all three required routes".
   //   universal: report + photo + invoice
-  // The invoice-only shape can only exist because prepare built it through
-  // requiredSesRouteKinds under the ruling, and the stored route set is pinned
-  // by the release content hash the approval signed — refusing it here would
-  // reject at SEND IT the exact release the Captain already approved, after
-  // money is AUTHORISED.
+  // The two-route and invoice-only shapes can only exist because prepare
+  // built them through requiredSesRouteKinds, and the stored route set is
+  // pinned by the release content hash the approval signed — refusing them
+  // here would reject at SEND IT the exact release the Captain already
+  // approved, after money is AUTHORISED.
   const routeKinds = routes.map((route: any) => String(route.route_kind || ""));
   const isAjsRelease = routeKinds.length === 2 &&
     routeKinds.includes("photo") &&
@@ -7125,18 +7130,25 @@ export async function executeSesReleaseRevisionAction(
     (routeKinds.includes("report_invoice") || routeKinds.includes("report"));
   const isInvoiceOnlyRelease = routeKinds.length === 1 &&
     routeKinds[0] === "invoice";
+  const isOwnLetterheadTwoRelease = routeKinds.length === 2 &&
+    routeKinds[0] === "report" &&
+    routeKinds[1] === "invoice";
   const requiredOrder = isAjsRelease
     ? (routeKinds.includes("report_invoice")
       ? sesReleaseRouteOrder("AJS")
       : (["report", "photo"] as typeof SES_ROUTE_ORDER))
     : isInvoiceOnlyRelease
     ? (["invoice"] as typeof SES_ROUTE_ORDER)
+    : isOwnLetterheadTwoRelease
+    ? (["report", "invoice"] as typeof SES_ROUTE_ORDER)
     : SES_ROUTE_ORDER;
   if (routes.length !== requiredOrder.length) {
     throw new SesActionError(409, {
       state: "refused",
       fact: isAjsRelease
         ? "The approved AJS release does not contain the exact report_invoice and photo routes."
+        : isOwnLetterheadTwoRelease
+        ? "The approved own-letterhead release does not contain the exact report and invoice routes."
         : "The approved release does not contain the exact member set and all three required routes.",
     });
   }
@@ -7674,6 +7686,10 @@ export async function executeSesReleaseRevisionAction(
       state: "refused",
       fact: isAjsRelease
         ? "Both AJS routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again."
+        : isOwnLetterheadTwoRelease
+        ? "Both own-letterhead routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again."
+        : isInvoiceOnlyRelease
+        ? "The invoice route is sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again."
         : "All three routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again.",
     });
   }

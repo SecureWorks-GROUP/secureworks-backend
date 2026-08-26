@@ -2734,6 +2734,11 @@ function releaseExecuteClient(routes: Array<Record<string, unknown>>): any {
                 size_bytes: 500_000,
                 object_key: "dockets/docket-fixture/invoice.pdf",
                 media_type: "application/pdf",
+              }, {
+                content_hash: "sha256:" + "4".repeat(64),
+                size_bytes: 400_000,
+                object_key: "dockets/docket-fixture/report.pdf",
+                media_type: "application/pdf",
               }],
               error: null,
             };
@@ -2863,6 +2868,41 @@ Deno.test("SEND IT executes a sealed one-route invoice-only release", async () =
   );
 });
 
+const OWN_LETTERHEAD_REPORT_ROUTE = {
+  ordinal: 0,
+  route_kind: "report",
+  recipients: ["makesafes@mlbuilders.com.au"],
+  cc: ["ses@secureworkswa.com.au"],
+  subject: "Report",
+  body: "Report body",
+  body_hash: "sha256:" + "2".repeat(64),
+  attachment_hashes: ["sha256:" + "4".repeat(64)],
+};
+
+Deno.test("SEND IT executes a sealed own-letterhead report then invoice release", async () => {
+  const sentSubjects: string[] = [];
+  const result: any = await executeSesReleaseRevisionAction(
+    releaseExecuteClient([
+      OWN_LETTERHEAD_REPORT_ROUTE,
+      { ...INVOICE_ONLY_ROUTE, ordinal: 1 },
+    ]),
+    { mode: "api_key", user: null },
+    {
+      org_id: "org-1",
+      release_revision_id: "release-fixture",
+      actor: "captain",
+    },
+    releaseExecuteMailGateway(sentSubjects),
+    { readAuthorised: () => Promise.resolve(true) } as any,
+  );
+  assertEquals(result.state, "released");
+  assertEquals(sentSubjects, ["Report", "Invoice"]);
+  assertEquals(
+    result.dispatch_previews.map((preview: any) => preview.route_kind),
+    ["report", "invoice"],
+  );
+});
+
 Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", async () => {
   const sentSubjects: string[] = [];
   const error = await assertRejects(
@@ -2871,10 +2911,11 @@ Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", asyn
         releaseExecuteClient([
           {
             ...INVOICE_ONLY_ROUTE,
-            ordinal: 1,
-            route_kind: "report",
+            ordinal: 0,
+            route_kind: "photo",
+            subject: "Photos",
           },
-          { ...INVOICE_ONLY_ROUTE, ordinal: 2 },
+          { ...INVOICE_ONLY_ROUTE, ordinal: 1 },
         ]),
         { mode: "api_key", user: null },
         {
