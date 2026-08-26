@@ -169,6 +169,8 @@ import {
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
 import {
+  INSURANCE_REPAIR_STAGES,
+  insuranceRepairStage,
   isInsuranceRepairFamily,
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
@@ -6753,6 +6755,15 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(cancelResult, cancelResult?.ok === false ? 409 : 200)
       }
       case 'update_job_status': return json(await updateJobStatus(client, body))
+      // Repairs board stage move. Guarded to staff operators and deliberately
+      // absent from ROUTINE_ALLOWED_ACTIONS, so the routine key is refused by
+      // the default-deny above: an autonomous loop may not reshuffle the board.
+      case 'update_repair_stage': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: update_repair_stage requires the privileged ops key or a staff session' }, 403)
+        }
+        return json(await updateRepairStage(client, body))
+      }
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
@@ -14688,6 +14699,21 @@ interface CanonicalMakesafeIntakeAuthority {
   mint_id: string
 }
 
+/**
+ * Repair intake pipeline: the creator is PARAMETERIZED rather than duplicated.
+ *
+ * A repair work order and a make-safe work order arrive through the same SES
+ * mailbox, pass the same identity/evidence floor, need the same idempotency
+ * chain, the same attachment staging, the same duplicate guard and the same
+ * make-safe overlay details row. The only things that differ are the job type,
+ * the number prefix, and the Repairs-board stage stamp. Forking the function
+ * would fork all fifteen of the guarantees they share, so the route is a single
+ * explicit option instead.
+ *
+ * 'makesafe' is the default and its behaviour is unchanged in every particular.
+ */
+type MakesafeCreatorJobRoute = 'makesafe' | 'repair'
+
 async function createMakesafeJob(
   client: any,
   body: any,
@@ -14696,8 +14722,13 @@ async function createMakesafeJob(
     familyClassifierContext?: _MakeSafeJobFamilyContext
     canonicalIntakeAuthority?: CanonicalMakesafeIntakeAuthority
     suppressGeocoding?: boolean
+    jobRoute?: MakesafeCreatorJobRoute
   } = {},
 ) {
+  const jobRoute: MakesafeCreatorJobRoute = internalOptions.jobRoute === 'repair'
+    ? 'repair'
+    : 'makesafe'
+  const isRepairRoute = jobRoute === 'repair'
   const {
     client_name, site_address, suburb, phone, mobile, email,
     requesting_company_slug, requesting_company_name, external_ref, description,
@@ -14749,6 +14780,32 @@ async function createMakesafeJob(
   // contract migration is applied. Fallback preserves the previous SWMS-26001
   // behaviour for review/test environments that have not run the migration yet.
   let jobNumber: string | null = null
+  if (isRepairRoute) {
+    // The repair route deliberately has NO invented-number fallback. A repair job
+    // is only lawful once 20260826000001_repair_job_type.sql is applied, and that
+    // same migration is what teaches next_job_number the SWR- prefix. Without it
+    // the RPC returns SW-26xxx, so a fallback here would either fabricate a number
+    // that collides with renovation/roofing or mask a missing migration behind a
+    // job the jobs_type_check would refuse two statements later. Fail closed and say why.
+    let repairCandidate = ''
+    try {
+      const { data: jnData } = await client.rpc('next_job_number', { job_type: 'repair' })
+      repairCandidate = String(jnData || '')
+    } catch (e) {
+      throw new ApiError(
+        `repair job numbering failed: ${(e as Error)?.message || e}`,
+        503,
+      )
+    }
+    if (!repairCandidate.toUpperCase().startsWith('SWR-')) {
+      throw new ApiError(
+        `repair job numbering returned '${repairCandidate || '(empty)'}' instead of an SWR- number; ` +
+        'the repair job type migration is not applied in this environment',
+        503,
+      )
+    }
+    jobNumber = repairCandidate
+  } else {
   try {
     const { data: jnData } = await client.rpc('next_job_number', { job_type: 'makesafe' })
     const candidate = String(jnData || '')
@@ -14773,6 +14830,7 @@ async function createMakesafeJob(
       if (!isNaN(num)) nextNum = num + 1
     }
     jobNumber = `SWMS-${nextNum}`
+  }
   }
 
   // Build metadata
@@ -14873,6 +14931,17 @@ async function createMakesafeJob(
     builder_email_received_at: builder_email_received_at || null,
     makesafe_job_family: reviewedJobFamily,
     makesafe_job_family_label: reviewedJobFamilyLabel,
+    // Repairs board entry column. WITHOUT this stamp a freshly minted repair job
+    // sits at status 'accepted', which insuranceRepairStage maps to the APPROVED
+    // column — a brand new work order would open three columns down the board.
+    // The stage is metadata, not a jobs column: the nine repair stages are a board
+    // vocabulary, and jobs.status stays the canonical money/lifecycle spine.
+    ...(isRepairRoute
+      ? {
+        repair_stage: INSURANCE_REPAIR_STAGES[0],
+        ses_family: 'repair',
+      }
+      : {}),
     ...(internalOptions.historicalBackfill
       ? {
         historical_backfill_key: internalOptions.historicalBackfill.recovery_key,
@@ -14895,7 +14964,7 @@ async function createMakesafeJob(
   // Create the job
   const { data: job, error: jobErr } = await client.from('jobs').insert({
     org_id: DEFAULT_ORG_ID,
-    type: 'makesafe',
+    type: jobRoute,
     status: 'accepted',
     client_name,
     client_phone: phone || mobile || null,
@@ -14925,6 +14994,9 @@ async function createMakesafeJob(
 
   // Make-safe overlay details: keeps requesting-company refs, substatus,
   // safety notes, report handoff and invoice notes out of patio/fencing scope.
+  // Repair jobs keep this row too — it is what holds them inside the SES
+  // evidence/pack machinery with no SES-engine change.
+  let repairDetailsError: string | null = null
   try {
     const { error: detailsInsertError } = await client.from('makesafe_job_details').insert({
       job_id: job.id,
@@ -14980,9 +15052,30 @@ async function createMakesafeJob(
         503,
       )
     }
+    if (isRepairRoute) {
+      // Diagnosis blocker B5. On the make-safe route this failure is a
+      // console.log and nothing else, which is survivable because a make-safe
+      // without a details row is still in the board population by jobs.type.
+      // A repair job is NOT: the MakeSafe board's population is
+      // type IN ('makesafe','insurance/restoration') plus the details-authority
+      // index, so a detail-less repair card silently leaves the SES
+      // evidence/pack/report/invoice surface AND becomes invisible to the fuzzy
+      // duplicate guard that scans makesafe_job_details.external_ref.
+      // Refuse to lose that quietly: shout in the logs and hand the caller a
+      // machine-readable fact on the result.
+      console.error(
+        '[ops-api] REPAIR makesafe_job_details insert FAILED for',
+        jobNumber,
+        job?.id,
+        '-- this repair card is missing its SES overlay row:',
+        e?.message || e,
+      )
+      repairDetailsError = String(e?.message || e)
+    } else {
     // Non-blocking until the migration is deployed everywhere. The base job
     // remains visible and the PR/migration note makes this gap explicit.
     console.log('[ops-api] makesafe_job_details insert skipped:', e?.message)
+    }
   }
 
   // Geocode address (fire-and-forget, non-blocking) only after the required
@@ -15037,6 +15130,13 @@ async function createMakesafeJob(
       ...(reviewedSyntheticLivefireMarker
         ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
         : {}),
+      // The event TYPE stays 'makesafe_created' on the repair route as well:
+      // downstream readers key on it for intake audit parity, and renaming it
+      // would silently drop repair mints out of every one of them. The route is
+      // recorded inside the detail instead.
+      ...(isRepairRoute
+        ? { job_route: 'repair', repair_stage: INSURANCE_REPAIR_STAGES[0] }
+        : {}),
     },
   })
 
@@ -15053,7 +15153,7 @@ async function createMakesafeJob(
   ) {
     const msSite = `${site_address || ''}${suburb ? ', ' + suburb : ''}`.trim()
     const msText = [
-      `New make-safe: ${jobNumber} - ${client_name || 'Client'}`.trim(),
+      `New ${isRepairRoute ? 'repair' : 'make-safe'}: ${jobNumber} - ${client_name || 'Client'}`.trim(),
       msSite ? `Site: ${msSite}` : '',
       reviewedCompanyName ? `Builder: ${reviewedCompanyName}` : '',
       external_ref ? `Ref: ${external_ref}` : '',
@@ -15062,7 +15162,13 @@ async function createMakesafeJob(
     await notifyVerticalManagersSms(client, 'makesafe', msText)
   }
 
-  return { ok: true, job }
+  return {
+    ok: true,
+    job,
+    // Only ever present on the repair route, and only when the overlay row did
+    // not land. Callers can machine-read it; the make-safe payload is unchanged.
+    ...(repairDetailsError ? { makesafe_details_error: repairDetailsError } : {}),
+  }
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _createMakesafeJob = createMakesafeJob
@@ -17041,6 +17147,101 @@ async function updateMakesafeSubstatus(
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
+
+// ══════════════════════════════════════════════════════════════
+// Repairs board — persisted stage moves
+// ══════════════════════════════════════════════════════════════
+//
+// Until now the nine Repairs columns were presentation-only: `repair_stage` had
+// a reader (insurance_repairs_board.ts) and no writer anywhere, so a card's
+// column was always derived from jobs.status and a drag could not persist.
+// This is that writer, and it is deliberately NOT update_job_status:
+//
+//   * the nine repair stages are a BOARD vocabulary (wo_in, scoping, quoted,
+//     variation, approved, materials, scheduled, on_site, complete). Pushing
+//     them through jobs.status would force the canonical money/lifecycle spine
+//     to carry presentation state and would put 'quoted'/'variation' moves in
+//     front of every status-driven guard in the system;
+//   * jobs.status stays the authority for money, stage-gate and reporting.
+//
+// So the stage is metadata (jobs.metadata.repair_stage) and this action is the
+// only supported way to move it. It refuses anything that is not a repair-family
+// job, so it can never be aimed at a patio or fencing card.
+async function updateRepairStage(client: any, body: any) {
+  const jobId = String(body?.jobId || body?.job_id || '').trim()
+  const requestedStage = String(body?.stage ?? body?.repair_stage ?? '')
+    .trim()
+    .toLowerCase()
+  const operatorEmail = cleanReviewedString(body?.operator_email) || null
+
+  if (!jobId) throw new ApiError('jobId required', 400)
+  if (!requestedStage) throw new ApiError('stage required', 400)
+  if (!(INSURANCE_REPAIR_STAGES as readonly string[]).includes(requestedStage)) {
+    throw new ApiError(
+      `unknown repair stage '${requestedStage}'; expected one of ${INSURANCE_REPAIR_STAGES.join(', ')}`,
+      400,
+    )
+  }
+
+  const { data: job, error: jobError } = await client.from('jobs')
+    .select('id, org_id, type, status, job_number, metadata')
+    .eq('id', jobId)
+    .maybeSingle()
+  if (jobError) throw jobError
+  if (!job) throw new ApiError(`Job ${jobId} not found`, 404)
+
+  // Repair authority is additive, exactly as the board reads it: a persisted
+  // jobs.type='repair', or one of the legacy correction-era markers that the
+  // three live repair cards carry instead. Read the overlay row too so a legacy
+  // card whose only marker is makesafe_job_details.report_type still moves.
+  const { data: details } = await client.from('makesafe_job_details')
+    .select('job_id, report_type')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  const authorityRow = { ...job, makesafe_details: details || null }
+  if (!isInsuranceRepairFamily(authorityRow)) {
+    throw new ApiError(
+      `job ${job.job_number || jobId} is not a repair-family job; its board stage cannot be moved from the Repairs board`,
+      409,
+    )
+  }
+
+  const previousStage = insuranceRepairStage(authorityRow)
+  const nextMetadata = { ...(job.metadata || {}), repair_stage: requestedStage }
+
+  const { data: updated, error: updateError } = await client.from('jobs')
+    .update({ metadata: nextMetadata })
+    .eq('id', jobId)
+    .select('id, job_number, type, status, metadata')
+    .maybeSingle()
+  if (updateError) throw updateError
+
+  // Audit trail, same shape and same fire-and-forget idiom as the make-safe
+  // substatus writer above. operator_email is auto-stamped onto every dashboard
+  // write by opsPost, so attribution costs the operator nothing.
+  await client.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'repair_stage_changed',
+    detail_json: {
+      from_stage: previousStage,
+      to_stage: requestedStage,
+      changed_at: new Date().toISOString(),
+      operator_email: operatorEmail,
+    },
+  }).then(() => {}).catch(() => {})
+
+  return {
+    success: true,
+    job: {
+      id: jobId,
+      job_number: updated?.job_number ?? job.job_number ?? null,
+      repair_stage: requestedStage,
+      previous_repair_stage: previousStage,
+    },
+  }
+}
+// Test-only export alias (mirrors the `_`-prefixed convention used across this file).
+export const _updateRepairStage = updateRepairStage
 
 // ── B4 (makesafe-report-types): "Report completed on builder portal" marker ──
 // Dedicated action per the adversarial review (reuse of submitMakesafeReport was
@@ -23371,6 +23572,14 @@ async function approveIntakeDraft(client: any, body: any) {
       }, {
         familyClassifierContext: approvedFamilyContext,
         suppressGeocoding: notificationSuppressionReason !== null,
+        // Repair intake slice 1: family 'repair' — and ONLY family 'repair' —
+        // routes to a true SWR- repair job. Every other family (general_makesafe,
+        // temp_fence_makesafe, roof_report, assessment_report_quote, restoration,
+        // and the abstaining null) reaches the identical make-safe route it
+        // reached before, because the option is simply absent for them.
+        // Quote-stage repairs never arrive here at all: the fate ladder parks
+        // them as a `repair_quote_stage` exception upstream and mints nothing.
+        ...(approvedJobFamily === 'repair' ? { jobRoute: 'repair' as const } : {}),
         ...(authority && primaryMint
           ? {
             canonicalIntakeAuthority: {
@@ -30388,7 +30597,10 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
   if (!jobNumber) missing.push('job_number')
 
   // Division — derived from job.type.
-  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general', 'makesafe'])
+  // 'repair' joins the list with the job type itself: without it an invoice
+  // preflight on a real repair job would report a missing division, which reads
+  // as a data fault rather than the truth that the division is simply new.
+  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general', 'makesafe', 'repair'])
   const divisionRaw = (job.type || '').toLowerCase().trim()
   const division = knownDivisions.has(divisionRaw) ? divisionRaw : null
   if (!division) missing.push('division')
@@ -30398,7 +30610,7 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
   const accountCode = accountCodeForJob(job.type)
 
   // Tracking option — derived from job_number prefix.
-  const trackingOption = trackingCategoryForJob(jobNumber || '')
+  const trackingOption = trackingCategoryForJob(jobNumber || '', job.type)
   if (!trackingOption && division !== 'general') missing.push('tracking_option_unresolvable')
 
   // Frozen quote / scope revisions. These are SOFT — invoices for ad-hoc
@@ -31839,7 +32051,7 @@ async function completeAndInvoice(
         const exactTotalExGST = scopePricing.totalExGST || scopePricing.subtotal || (scopePricing.totalIncGST ? scopePricing.totalIncGST / 1.1 : 0) || 0
         if (exactTotalExGST > 0) {
           lineItems = [{
-            description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number) || 'Construction'} works`),
+            description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number, job.type) || 'Construction'} works`),
             quantity: 1,
             unit_price: exactTotalExGST,
             account_code: accountCodeForJob(job.type),
@@ -31868,7 +32080,7 @@ async function completeAndInvoice(
           ? pricing.totalExGST
           : Math.round(((pricing.totalIncGST || pricing.total || pricing.amount || 0) / 1.1) * 100) / 100
         lineItems = [{
-          description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number) || 'Construction'} works`),
+          description: buildRichDescription(job, `${trackingCategoryForJob(job.job_number, job.type) || 'Construction'} works`),
           quantity: 1,
           unit_price: fallbackExGST,
           account_code: accountCodeForJob(job.type),
@@ -32700,8 +32912,20 @@ async function addPOEvent(client: any, body: any) {
 }
 
 // ── Tracking category helper ──
-// Maps job number prefix to Xero tracking category option name
-function trackingCategoryForJob(jobNumber: string): string {
+// Maps job number prefix to Xero tracking category option name.
+//
+// The optional jobType exists for exactly one reason: SWR- is a shared prefix.
+// renovation and roofing already mapped to it, and repair now does too, so the
+// prefix alone can no longer decide the business unit. An insurance repair is
+// SES insurance work and books to the SAME tracking category the make-safe/SES
+// insurance work books to today — NOT 'SW - PRIVATE ROOFING', which is private
+// roofing revenue and would silently misclassify every repair invoice.
+// >>> OPEN RISK #2 — the exact category name is inherited from the make-safe
+// route and needs captain confirmation. <<<
+// Callers with no job type in hand pass nothing and get the previous behaviour
+// byte for byte.
+function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
+  if (String(jobType || '').trim().toLowerCase() === 'repair') return 'SW - MAKESAFE'
   if (!jobNumber) return ''
   const upper = jobNumber.toUpperCase()
   if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
@@ -32715,8 +32939,8 @@ function trackingCategoryForJob(jobNumber: string): string {
 }
 
 // Builds Xero Tracking array for a line item
-function xeroTracking(jobNumber: string): any[] {
-  const option = trackingCategoryForJob(jobNumber)
+function xeroTracking(jobNumber: string, jobType?: string | null): any[] {
+  const option = trackingCategoryForJob(jobNumber, jobType)
   if (!option) return []
   return [{ Name: 'Business Unit', Option: option }]
 }
@@ -32733,11 +32957,21 @@ function accountCodeForJob(jobType: string, fallback = '200'): string {
     roofing: '209',
     insurance: '210',
     makesafe: '210',
+    // Insurance repair revenue books where the SES insurance work books today.
+    // This entry is EXPLICIT rather than left to the '200' fallback on purpose:
+    // repair cards were type='makesafe' (210) before this pipeline existed, so
+    // an unmapped 'repair' would have moved the revenue account silently the
+    // moment the type flipped, with no code change and no error to notice.
+    // >>> OPEN RISK #2 — inherited from make-safe, needs captain confirmation. <<<
+    repair: '210',
     renovation: '201',
     combo: '200',
   }
   return map[(jobType || '').toLowerCase()] || fallback
 }
+// Test-only export aliases (mirror the `_`-prefixed convention used across this file).
+export const _trackingCategoryForJob = trackingCategoryForJob
+export const _accountCodeForJob = accountCodeForJob
 
 // ── Rich line item description builder ──
 // Bakes job number, type, scope summary, client, and address into every
@@ -44838,7 +45072,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       // Change 4: include builder ref in Xero description when present
       const pmBuilderRef = job?.metadata?.external_ref
       const desc = [
-        (job.job_number || '') + ' | ' + (trackingCategoryForJob(job.job_number || '') || 'Construction'),
+        (job.job_number || '') + ' | ' + (trackingCategoryForJob(job.job_number || '', job.type) || 'Construction'),
         pmBuilderRef ? 'Builder Ref: ' + pmBuilderRef : null,
         [job.client_name, job.site_address, job.site_suburb].filter(Boolean).join(', '),
         `Fencing installation — ${metres}m @ $${pmRate}/m`,
@@ -44850,7 +45084,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         UnitAmount: pmRate,
         AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
         TaxType: stTaxType,
-        Tracking: xeroTracking(job.job_number || ''),
+        Tracking: xeroTracking(job.job_number || '', job.type),
       })
       // Per-metre work has no hours — record the cost and job attribution only,
       // so reconciliation never reads metres as if they were hours.
@@ -44882,7 +45116,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       const job = a.jobs as any
       const d = new Date(a.scheduled_date + 'T00:00:00Z')
       const dayLabel = `${dayNames[d.getUTCDay()]} ${d.getUTCDate()} ${monthNames[d.getUTCMonth()]}`
-      const division = trackingCategoryForJob(job?.job_number || '')
+      const division = trackingCategoryForJob(job?.job_number || '', job?.type)
       const roleLabel = a.role ? ` (${a.role})` : ''
       // Change 4: include builder ref in Xero description when present
       const hrBuilderRef = job?.metadata?.external_ref
@@ -44900,7 +45134,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         UnitAmount: rate,
         AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
         TaxType: stTaxType,
-        Tracking: xeroTracking(job?.job_number || ''),
+        Tracking: xeroTracking(job?.job_number || '', job?.type),
       })
       addJobLine(job?.id, job, hours, rate, amount, a.id, a.scheduled_date)
     }

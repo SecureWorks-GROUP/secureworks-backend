@@ -108,6 +108,12 @@ job_detail
 update_job_status
 log_business_event
 
+# ── Repairs board stage move ──
+# The ops dashboard Repairs kanban has no other way to persist a drag. Probed
+# source-only: it is a staff-guarded write and must never be fired at production
+# by a smoke run, even with an invalid bound.
+update_repair_stage       # probe=source-only
+
 # ── Trade authenticated surface ──
 # Post-deploy recognition uses API-key-only GET requests and must fail closed at
 # authTrade before any tenant read or invoice submission path can run.
