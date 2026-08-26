@@ -201,6 +201,21 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
 
+      # The repair intake pipeline routes SES work orders to a NEW jobs.type and
+      # a NEW money-path branch, so its suite is CI-guarded rather than left to
+      # the local-only `deno task test:ops-api`. These files also carry the
+      # controls proving the five untouched SES families, the MakeSafe board
+      # exclusions and the non-repair Xero categories still behave exactly as
+      # they did. --no-check matches the repo's known pre-existing type errors in
+      # sibling ops-api test files; the assertions themselves are fully executed.
+      - name: Check repair intake routing and stage-write contracts
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/repair_intake_routing_test.ts \
+            supabase/functions/ops-api/repair_stage_write_test.ts \
+            supabase/functions/ops-api/insurance_repairs_board_test.ts \
+            supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
+
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
