@@ -11,8 +11,13 @@ import {
   assertEquals,
   assertRejects,
   assertStringIncludes,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _createMakesafeJob } from "./index.ts";
+import {
+  _createMakesafeJob,
+  _makesafeJobRouteForFamily,
+  _requestedMakesafeJobRoute,
+} from "./index.ts";
 
 type Row = Record<string, any>;
 
@@ -188,6 +193,11 @@ function makeClient(store: Store) {
 }
 
 const MINT_ID = "00000000-0000-4000-8000-0000000009a1";
+
+/** Multi-line source anchors must match on a CRLF checkout as well as LF. */
+function normaliseLineEndings(source: string): string {
+  return source.split("\r\n").join("\n");
+}
 
 function workOrderBody(family: string) {
   return {
@@ -425,31 +435,172 @@ Deno.test("CONTROL: an explicit make-safe route is identical to no route at all"
   );
 });
 
-Deno.test("approveIntakeDraft routes to repair on the family and on nothing else", async () => {
-  // The approval seam has no test alias and driving it end to end would need the
-  // whole intake fixture. The claim under test is narrow and structural, so it is
-  // asserted against the source the same way the repair-exclusion contract is.
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+Deno.test("the approval seam routes to repair on the family and on nothing else", () => {
+  // EXECUTED, not grepped. The whole business outcome rests on this decision, so
+  // it lives in its own pure function and is driven with every value the
+  // classifier can produce rather than asserted as a string in the source.
+  assertEquals(_makesafeJobRouteForFamily("repair"), "repair");
 
-  const routeOptions = source.match(/jobRoute:\s*'repair'/g) || [];
-  assertEquals(
-    routeOptions.length,
-    1,
-    "exactly one approval-path site may select the repair route",
-  );
+  for (
+    const family of [
+      "general_makesafe",
+      "temp_fence_makesafe",
+      "roof_report",
+      "assessment_report_quote",
+      "restoration",
+      null,
+      undefined,
+      "",
+    ]
+  ) {
+    assertEquals(
+      _makesafeJobRouteForFamily(family),
+      "makesafe",
+      `${family} must keep the make-safe route`,
+    );
+  }
+
+  // Near-misses take the SAFE route rather than minting a repair on a typo.
+  for (const near of ["repairs", "Repair Quote", "rapid_repair", "repair_quote_stage"]) {
+    assertEquals(
+      _makesafeJobRouteForFamily(near),
+      "makesafe",
+      `'${near}' is not the repair family and must not mint a repair job`,
+    );
+  }
+
+  // Case and whitespace are the classifier's business, not ours.
+  assertEquals(_makesafeJobRouteForFamily("  REPAIR "), "repair");
+});
+
+Deno.test("the approval seam has exactly one route decision, and it is that function", async () => {
+  // Belt to the executed test above: prove the seam actually calls it, and that
+  // no second site quietly selects the repair route on its own.
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
 
   assertStringIncludes(
     source,
-    "...(approvedJobFamily === 'repair' ? { jobRoute: 'repair' as const } : {})",
-    "the repair route must be selected by the approved family and nothing else",
+    "jobRoute: _makesafeJobRouteForFamily(approvedJobFamily),",
+    "the approval seam must take its route from the tested decision function",
+  );
+  assertEquals(
+    (source.match(/jobRoute:\s*'repair'/g) || []).length,
+    0,
+    "no site may hard-code the repair route; the decision belongs to one function",
+  );
+});
+
+Deno.test("a quote-stage repair parks as an exception and never reaches a creator", async () => {
+  // The fate ladder is upstream of everything this branch touches and is byte
+  // unchanged by it. The assertion is scoped to the repair arm itself — an
+  // earlier version asserted `state = "exception"` on its own, which every
+  // exception fate in that file satisfies and which therefore proved nothing.
+  // Normalised so the multi-line anchors below match on a CRLF checkout too.
+  const intakeSource = normaliseLineEndings(
+    await Deno.readTextFile(
+      new URL("./makesafe_deterministic_intake.ts", import.meta.url),
+    ),
+  );
+  assertStringIncludes(
+    intakeSource,
+    [
+      "} else if (quoteStageRequest) {",
+      '        state = "exception";',
+      '        reasonCode = "repair_quote_stage";',
+    ].join("\n"),
+    "the quote-stage arm must set the exception state and its own reason code together",
   );
 
-  // The quote-stage fate never reaches the creator: it parks upstream as an
-  // exception with no job. Prove the reason code still exists and that no mint
-  // path references it.
-  const intakeSource = await Deno.readTextFile(
-    new URL("./makesafe_deterministic_intake.ts", import.meta.url),
+  // And an exception state cannot mint: the runtime creates a job for exactly
+  // two live states, neither of which is `exception`.
+  const runtimeSource = normaliseLineEndings(
+    await Deno.readTextFile(
+      new URL("./makesafe_deterministic_intake_runtime.ts", import.meta.url),
+    ),
   );
-  assertStringIncludes(intakeSource, 'reasonCode = "repair_quote_stage"');
-  assertStringIncludes(intakeSource, 'state = "exception"');
+  assertStringIncludes(
+    runtimeSource,
+    [
+      "const wantsJob = !jobId && !lifecycleReopen &&",
+      '        (effectivePlan.state === "confirmed_live_job" ||',
+      '          effectivePlan.state === "blocked_live_job");',
+    ].join("\n"),
+    "only confirmed/blocked live-job states may mint, so an exception mints nothing",
+  );
+});
+
+Deno.test("an operator can raise a repair job by hand, and a typo cannot", () => {
+  // Without this the intake-draft approval seam was the ONLY way a true repair
+  // job could exist. The classifier abstains on generic repair prose, work orders
+  // arrive by routes that produce no draft, and repairs sometimes simply have to
+  // be raised — so the operator's only option was to create a make-safe and
+  // reclassify it, permanently manufacturing the second class of repair card
+  // (type='makesafe' + SWMS- number + repair board stage) that this pipeline
+  // exists to stop creating.
+  assertEquals(_requestedMakesafeJobRoute({ job_route: "repair" }), "repair");
+  assertEquals(_requestedMakesafeJobRoute({ job_type: "repair" }), "repair");
+  assertEquals(_requestedMakesafeJobRoute({ job_route: " REPAIR " }), "repair");
+  assertEquals(_requestedMakesafeJobRoute({ job_route: "makesafe" }), "makesafe");
+
+  // CONTROL: no parameter is today's behaviour, exactly.
+  assertEquals(_requestedMakesafeJobRoute({}), "makesafe");
+  assertEquals(_requestedMakesafeJobRoute({ job_route: "" }), "makesafe");
+  assertEquals(_requestedMakesafeJobRoute(null), "makesafe");
+  assertEquals(_requestedMakesafeJobRoute({ client_name: "Someone" }), "makesafe");
+
+  // A typo is REFUSED, not quietly defaulted: minting a make-safe here would
+  // look to the operator exactly like the repair they asked for.
+  for (const typo of ["repairs", "Repair Job", "swr", "insurance"]) {
+    assertThrows(
+      () => _requestedMakesafeJobRoute({ job_route: typo }),
+      Error,
+      "unknown job_route",
+    );
+  }
+});
+
+Deno.test("create_makesafe_job takes its route from the caller, and the routine cannot", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(
+    source,
+    "jobRoute: _requestedMakesafeJobRoute(body),",
+    "the manual creation action must honour an explicit route",
+  );
+  // The routine key still cannot reach the live creator at all — it is diverted
+  // to a needs_review draft before any route is considered.
+  assertStringIncludes(source, "if (authMode === 'routine') {");
+});
+
+Deno.test("a hand-raised repair is a repair in its metadata too, not just its type", async () => {
+  // A manual caller supplies free text, and the family classifier abstains on
+  // generic repair prose or reads it as general_makesafe. A card that is
+  // type='repair' while its metadata says general_makesafe has two board-authority
+  // markers disagreeing with each other, so the ROUTE settles the family.
+  const store = makeStore();
+  const client = makeClient(store);
+
+  const body: any = workOrderBody("repair");
+  delete body.makesafe_job_family;
+  delete body.makesafe_job_family_label;
+
+  await _createMakesafeJob(client, body, {
+    jobRoute: "repair",
+    suppressGeocoding: true,
+  });
+
+  const job = store.tables.jobs[0];
+  assertEquals(job.type, "repair");
+  assertEquals(job.job_number, "SWR-261400");
+  assertEquals(job.metadata.makesafe_job_family, "repair");
+  assertEquals(job.metadata.ses_family, "repair");
+  assertEquals(job.metadata.repair_stage, "wo_in");
+
+  // CONTROL: the very same body with no route is still classified the old way.
+  const controlStore = makeStore();
+  await _createMakesafeJob(makeClient(controlStore), body, {
+    suppressGeocoding: true,
+  });
+  assertEquals(controlStore.tables.jobs[0].type, "makesafe");
+  assertEquals(controlStore.tables.jobs[0].job_number, "SWMS-261400");
+  assertEquals("repair_stage" in controlStore.tables.jobs[0].metadata, false);
 });

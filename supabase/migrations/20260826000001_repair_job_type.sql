@@ -232,7 +232,67 @@ END;
 $repair_intake_case_link$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 6) Post-conditions. Every promise this migration makes is asserted here so a
+-- 6) Repair revenue stays inside the P&L view.
+--
+-- job_financials (20260613000001:133-241) ends `AND j.type = 'makesafe'` — its
+-- own comment calls that "V1 SCOPE: remove at M6 to expand to all jobs". Today's
+-- repair cards are type='makesafe', so they ARE in that view. The moment the type
+-- flips they drop out, and the first SWR- job's revenue would be missing from the
+-- one P&L surface the ops job-financials panel reads. That is a month-end
+-- surprise, not a backlog item, so the view moves with the type.
+--
+-- Its cost lanes come from v_trade_charge_resolved directly (NOT from
+-- v_makesafe_charge_ledger), so admitting repair to the WHERE clause is the whole
+-- fix: labour and materials resolve for a repair job exactly as for a make-safe.
+--
+-- Patched in place for the same reason as §2 and §5 — the view body is ~110 lines
+-- of margin arithmetic and flag vocabulary that must not be retyped to change one
+-- predicate, and CREATE OR REPLACE VIEW would reject any accidental column drift
+-- anyway. The anchor is regex-matched so it tolerates however PostgreSQL chose to
+-- render the literal ('makesafe' vs 'makesafe'::text, with or without brackets),
+-- and it refuses unless it matches exactly once.
+-- ─────────────────────────────────────────────────────────────────────────────
+DO $repair_job_financials$
+DECLARE
+  view_body text;
+  makesafe_predicate_re constant text := '\(?\s*j\.type\s*=\s*''makesafe''(::text)?\s*\)?';
+  predicate_hits int;
+  patched_body text;
+BEGIN
+  IF to_regclass('public.job_financials') IS NULL THEN
+    RAISE NOTICE 'job_financials is not deployed here; nothing to widen';
+    RETURN;
+  END IF;
+
+  view_body := pg_get_viewdef('public.job_financials'::regclass, true);
+
+  -- Idempotent re-run.
+  IF view_body ~ '''repair''' THEN
+    RAISE NOTICE 'job_financials already admits repair; no change';
+    RETURN;
+  END IF;
+
+  SELECT count(*) INTO predicate_hits
+  FROM regexp_matches(view_body, makesafe_predicate_re, 'g');
+
+  IF predicate_hits <> 1 THEN
+    RAISE EXCEPTION
+      'job_financials contains % make-safe type predicates (expected exactly 1); refusing to patch blind',
+      predicate_hits;
+  END IF;
+
+  patched_body := regexp_replace(
+    view_body,
+    makesafe_predicate_re,
+    'j.type = ANY (ARRAY[''makesafe''::text, ''repair''::text])'
+  );
+
+  EXECUTE 'CREATE OR REPLACE VIEW public.job_financials AS ' || patched_body;
+END;
+$repair_job_financials$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 7) Post-conditions. Every promise this migration makes is asserted here so a
 -- partially applied file fails the transaction rather than deploying half a
 -- contract.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -241,6 +301,7 @@ DECLARE
   type_check_definition text;
   numbering_definition text;
   intake_case_definition text;
+  financials_definition text;
 BEGIN
   SELECT pg_get_constraintdef(oid) INTO type_check_definition
   FROM pg_constraint
@@ -269,6 +330,16 @@ BEGIN
     AND pg_get_function_identity_arguments(p.oid) = '';
   IF position('job.type IN (''makesafe'', ''repair'')' in intake_case_definition) = 0 THEN
     RAISE EXCEPTION 'intake case job_id guard still refuses repair jobs';
+  END IF;
+
+  IF to_regclass('public.job_financials') IS NOT NULL THEN
+    financials_definition := pg_get_viewdef('public.job_financials'::regclass, true);
+    IF financials_definition !~ '''repair''' THEN
+      RAISE EXCEPTION 'job_financials still excludes repair jobs from the P&L view';
+    END IF;
+    IF financials_definition !~ '''makesafe''' THEN
+      RAISE EXCEPTION 'job_financials lost make-safe jobs while admitting repair';
+    END IF;
   END IF;
 END;
 $repair_contract_assertions$;

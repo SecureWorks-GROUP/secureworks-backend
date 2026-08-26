@@ -32,6 +32,8 @@ ALTER TABLE public.jobs
   ADD COLUMN IF NOT EXISTS site_address text,
   ADD COLUMN IF NOT EXISTS site_suburb text,
   ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS legacy boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS ses_money_sealed_at timestamptz,
   ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
@@ -229,3 +231,24 @@ CREATE TRIGGER trg_makesafe_intake_cases_enforce
   ON public.makesafe_intake_cases
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_makesafe_intake_case_write();
+
+-- A deliberately REDUCED stand-in for public.job_financials. The production view
+-- is ~110 lines of revenue/cost CTEs and margin arithmetic over xero_invoices and
+-- v_trade_charge_resolved; none of that is what the migration touches. What the
+-- migration touches is the single trailing type predicate, and this stand-in
+-- carries the WHERE clause in exactly the production shape (org + legacy +
+-- not-cancelled + type) so the in-place regex patch is exercised against a real
+-- catalog definition, with the real rendering PostgreSQL chooses.
+CREATE OR REPLACE VIEW public.job_financials AS
+SELECT
+  j.id          AS job_id,
+  j.job_number,
+  j.client_name,
+  j.type        AS job_type,
+  j.status,
+  j.created_at
+FROM public.jobs j
+WHERE j.org_id  = '00000000-0000-0000-0000-000000000001'
+  AND j.legacy  = false
+  AND j.status <> 'cancelled'
+  AND j.type    = 'makesafe';

@@ -190,4 +190,57 @@ BEGIN
 END;
 $$;
 
+-- ── Repair revenue stays inside the P&L view, and nothing else moves. ────────
+-- Today's repair cards are type='makesafe' and are therefore already inside
+-- job_financials; the type flip alone would have dropped the first SWR- job's
+-- revenue out of the one P&L surface the ops panel reads.
+DO $$
+DECLARE
+  org constant uuid := '00000000-0000-0000-0000-000000000001';
+BEGIN
+  INSERT INTO public.jobs (id, org_id, status, type, client_name)
+  VALUES
+    ('bbbbbbbb-0000-4000-8000-000000000001', org, 'processing', 'repair',     'Repair Revenue'),
+    ('bbbbbbbb-0000-4000-8000-000000000002', org, 'processing', 'makesafe',   'Make-safe Revenue'),
+    ('bbbbbbbb-0000-4000-8000-000000000003', org, 'processing', 'patio',      'Patio Revenue'),
+    ('bbbbbbbb-0000-4000-8000-000000000004', org, 'processing', 'renovation', 'Renovation Revenue'),
+    ('bbbbbbbb-0000-4000-8000-000000000005', org, 'processing', 'roofing',    'Roofing Revenue'),
+    ('bbbbbbbb-0000-4000-8000-000000000006', org, 'cancelled',  'repair',     'Cancelled Repair');
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.job_financials
+    WHERE job_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+  ) THEN
+    RAISE EXCEPTION 'a repair job is missing from job_financials';
+  END IF;
+
+  -- CONTROL: make-safe is still in, and the three types that were out stay out.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.job_financials
+    WHERE job_id = 'bbbbbbbb-0000-4000-8000-000000000002'
+  ) THEN
+    RAISE EXCEPTION 'widening job_financials dropped make-safe jobs';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.job_financials
+    WHERE job_id IN (
+      'bbbbbbbb-0000-4000-8000-000000000003',
+      'bbbbbbbb-0000-4000-8000-000000000004',
+      'bbbbbbbb-0000-4000-8000-000000000005'
+    )
+  ) THEN
+    RAISE EXCEPTION 'widening job_financials admitted a type it should not have';
+  END IF;
+
+  -- CONTROL: the view's OTHER predicates survived the in-place patch. A
+  -- cancelled job stays excluded whatever its type.
+  IF EXISTS (
+    SELECT 1 FROM public.job_financials
+    WHERE job_id = 'bbbbbbbb-0000-4000-8000-000000000006'
+  ) THEN
+    RAISE EXCEPTION 'the in-place patch lost the cancelled-job exclusion';
+  END IF;
+END;
+$$;
+
 ROLLBACK;

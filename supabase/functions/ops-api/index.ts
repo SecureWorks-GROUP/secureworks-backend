@@ -5489,9 +5489,18 @@ if (import.meta.main) serve(async (req: Request) => {
       // drafts still become live jobs unchanged.
       case 'create_makesafe_job': {
         if (authMode === 'routine') {
+          // Unchanged: the routine key can only ever produce a needs_review
+          // draft, so it cannot reach the live creator and cannot pick a route.
           return json(await createMakesafeDraftFromProposal(client, body))
         }
-        return json(await createMakesafeJob(client, body))
+        // `job_route: 'repair'` (or the alias `job_type`) mints a true SWR-
+        // repair job by hand. Omitted, it is a make-safe exactly as before.
+        // Deliberately the same privilege as creating a make-safe: a repair IS
+        // an SES work order, so a caller trusted to raise one is trusted to
+        // raise the other.
+        return json(await createMakesafeJob(client, body, {
+          jobRoute: _requestedMakesafeJobRoute(body),
+        }))
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body, { authMode }))
@@ -14714,6 +14723,47 @@ interface CanonicalMakesafeIntakeAuthority {
  */
 type MakesafeCreatorJobRoute = 'makesafe' | 'repair'
 
+/**
+ * The one place that decides which creator route an SES family takes.
+ *
+ * Extracted so the decision is EXECUTABLE rather than only greppable: the whole
+ * business outcome rests on "family 'repair' and ONLY family 'repair' mints a
+ * repair job", and a source assertion proves a string is present, not that the
+ * branch behaves. Every family the classifier can emit — general_makesafe,
+ * temp_fence_makesafe, roof_report, assessment_report_quote, restoration — and
+ * the abstaining null all resolve to 'makesafe', which is the pre-change path.
+ */
+export function _makesafeJobRouteForFamily(
+  family: string | null | undefined,
+): MakesafeCreatorJobRoute {
+  return String(family ?? '').trim().toLowerCase() === 'repair' ? 'repair' : 'makesafe'
+}
+
+/**
+ * The route a CALLER explicitly asked for on create_makesafe_job.
+ *
+ * Manual creation matters because the intake-draft approval seam is not the only
+ * way a repair reaches the board: the classifier can abstain, a work order can
+ * arrive by a route that produces no draft, and a repair sometimes simply has to
+ * be raised by hand. Without this the operator's only option was to create a
+ * make-safe and reclassify the family afterwards — permanently manufacturing a
+ * second class of repair card (type='makesafe', SWMS- number, repair board
+ * stage), which is exactly the class this pipeline exists to stop creating.
+ *
+ * An absent parameter means 'makesafe', i.e. today's behaviour exactly. An
+ * unrecognised value is REFUSED rather than quietly defaulted: a typo'd
+ * 'repairs' must not mint a make-safe and look to the operator like it worked.
+ */
+export function _requestedMakesafeJobRoute(body: any): MakesafeCreatorJobRoute {
+  const requested = String(body?.job_route ?? body?.job_type ?? '').trim().toLowerCase()
+  if (!requested) return 'makesafe'
+  if (requested === 'makesafe' || requested === 'repair') return requested
+  throw new ApiError(
+    `unknown job_route '${requested}'; expected 'repair' or 'makesafe'`,
+    400,
+  )
+}
+
 async function createMakesafeJob(
   client: any,
   body: any,
@@ -14838,15 +14888,23 @@ async function createMakesafeJob(
   const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
   const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
   const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
-  const reviewedJobFamily = makesafe_job_family || _classifyMakeSafeJobFamily(
-    external_ref || null,
-    description || reviewedMakeSafeType || null,
-    null,
-    internalOptions.familyClassifierContext || {
-      builder: requesting_company_slug || requesting_company_name || null,
-      pdfDeclaredType: null,
-    },
-  )
+  // On the repair route the ROUTE is the family declaration. A hand-created
+  // repair would otherwise be handed to the text classifier, which abstains on
+  // generic repair prose (ambiguous_scope) or reads it as general_makesafe — and
+  // a job that is type='repair' while its metadata says general_makesafe is a
+  // card whose two board-authority markers disagree with each other. The intake
+  // path already passes 'repair' here, so this only ever settles manual input.
+  const reviewedJobFamily = isRepairRoute
+    ? 'repair'
+    : makesafe_job_family || _classifyMakeSafeJobFamily(
+      external_ref || null,
+      description || reviewedMakeSafeType || null,
+      null,
+      internalOptions.familyClassifierContext || {
+        builder: requesting_company_slug || requesting_company_name || null,
+        pdfDeclaredType: null,
+      },
+    )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
 
   if (reviewedJobFamily === 'roof_report') {
@@ -17184,8 +17242,9 @@ async function updateRepairStage(client: any, body: any) {
   }
 
   const { data: job, error: jobError } = await client.from('jobs')
-    .select('id, org_id, type, status, job_number, metadata')
+    .select('id, org_id, type, status, job_number, metadata, updated_at')
     .eq('id', jobId)
+    .eq('org_id', DEFAULT_ORG_ID)
     .maybeSingle()
   if (jobError) throw jobError
   if (!job) throw new ApiError(`Job ${jobId} not found`, 404)
@@ -17209,12 +17268,34 @@ async function updateRepairStage(client: any, body: any) {
   const previousStage = insuranceRepairStage(authorityRow)
   const nextMetadata = { ...(job.metadata || {}), repair_stage: requestedStage }
 
-  const { data: updated, error: updateError } = await client.from('jobs')
+  // jobs.metadata is a single jsonb blob and PostgREST has no partial-object
+  // patch, so this is a read-modify-write. On exactly these cards that blob is
+  // busy — intake_mint_id, makesafe_job_family, ses_family,
+  // builder_work_order_number, builder_po_number, repair_stage_source — and the
+  // dashboard fires optimistic moves, so two writes racing is plausible rather
+  // than theoretical.
+  //
+  // So the update carries the row version it read as a precondition
+  // (trg_jobs_updated stamps updated_at on every UPDATE). If anything else wrote
+  // to this job in between, zero rows match and the operator is told to retry
+  // instead of having the other write silently discarded. The org filter mirrors
+  // every sibling read; this is the one WRITE, so it matters most here.
+  let stageUpdate = client.from('jobs')
     .update({ metadata: nextMetadata })
     .eq('id', jobId)
+    .eq('org_id', DEFAULT_ORG_ID)
+  if (job.updated_at) stageUpdate = stageUpdate.eq('updated_at', job.updated_at)
+  const { data: updated, error: updateError } = await stageUpdate
     .select('id, job_number, type, status, metadata')
     .maybeSingle()
   if (updateError) throw updateError
+  if (!updated) {
+    throw new ApiError(
+      `job ${job.job_number || jobId} changed while its stage was being moved; ` +
+      'nothing was written. Refresh the board and try again.',
+      409,
+    )
+  }
 
   // Audit trail, same shape and same fire-and-forget idiom as the make-safe
   // substatus writer above. operator_email is auto-stamped onto every dashboard
@@ -23576,10 +23657,11 @@ async function approveIntakeDraft(client: any, body: any) {
         // routes to a true SWR- repair job. Every other family (general_makesafe,
         // temp_fence_makesafe, roof_report, assessment_report_quote, restoration,
         // and the abstaining null) reaches the identical make-safe route it
-        // reached before, because the option is simply absent for them.
+        // reached before. The decision lives in _makesafeJobRouteForFamily so it
+        // is unit-tested against every family rather than only grepped for.
         // Quote-stage repairs never arrive here at all: the fate ladder parks
         // them as a `repair_quote_stage` exception upstream and mints nothing.
-        ...(approvedJobFamily === 'repair' ? { jobRoute: 'repair' as const } : {}),
+        jobRoute: _makesafeJobRouteForFamily(approvedJobFamily),
         ...(authority && primaryMint
           ? {
             canonicalIntakeAuthority: {
@@ -31390,13 +31472,27 @@ async function createInvoice(
         .trim()
     }
   }
+  // The bound job's type, read once. Needed because an SWR- reference is
+  // ambiguous — renovation, roofing or repair — and this is the CLIENT revenue
+  // path, so guessing from the prefix would misfile a repair invoice as private
+  // roofing. Non-SWR references are unaffected either way.
+  let invoiceJobType: string | null = null
+  if (jIdForGate) {
+    const { data: invoiceJobRow } = await client.from('jobs')
+      .select('type')
+      .eq('id', jIdForGate)
+      .eq('org_id', DEFAULT_ORG_ID)
+      .maybeSingle()
+    invoiceJobType = invoiceJobRow?.type || null
+  }
+
   // Validate tracking category exists in Xero before including it
   let tracking: any[] = []
   try {
     const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
     const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
     if (divisionCat) {
-      const optionName = trackingCategoryForJob(ref)
+      const optionName = trackingCategoryForJob(ref, invoiceJobType)
       const validOption = (divisionCat.Options || []).find((o: any) => o.Name === optionName && o.Status === 'ACTIVE')
       if (validOption) tracking = [{ Name: 'Business Unit', Option: optionName }]
     }
@@ -31763,18 +31859,29 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
   // skip if Xero returns nothing or throws).
   let updateTracking: any[] = []
   try {
+    // job_id comes along so an SWR- reference resolves by type rather than by an
+    // ambiguous prefix — an edit to a repair invoice must not re-tag it as
+    // private roofing on its way back out.
     const { data: invForTracking } = await adminClient.from('xero_invoices')
-      .select('reference')
+      .select('reference, job_id')
       .eq('xero_invoice_id', xero_invoice_id)
       .maybeSingle()
     const updateRef = invForTracking?.reference || ''
+    let updateJobType: string | null = null
+    if (invForTracking?.job_id) {
+      const { data: updateJobRow } = await adminClient.from('jobs')
+        .select('type')
+        .eq('id', invForTracking.job_id)
+        .maybeSingle()
+      updateJobType = updateJobRow?.type || null
+    }
     if (updateRef) {
       const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
       const divisionCat = (trackingCats?.TrackingCategories || []).find(
         (tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE'
       )
       if (divisionCat) {
-        const optionName = trackingCategoryForJob(updateRef)
+        const optionName = trackingCategoryForJob(updateRef, updateJobType)
         const validOption = (divisionCat.Options || []).find(
           (o: any) => o.Name === optionName && o.Status === 'ACTIVE'
         )
@@ -32912,20 +33019,34 @@ async function addPOEvent(client: any, body: any) {
 }
 
 // ── Tracking category helper ──
-// Maps job number prefix to Xero tracking category option name.
+// Maps a job to its Xero "Business Unit" tracking option.
 //
-// The optional jobType exists for exactly one reason: SWR- is a shared prefix.
-// renovation and roofing already mapped to it, and repair now does too, so the
-// prefix alone can no longer decide the business unit. An insurance repair is
-// SES insurance work and books to the SAME tracking category the make-safe/SES
-// insurance work books to today — NOT 'SW - PRIVATE ROOFING', which is private
-// roofing revenue and would silently misclassify every repair invoice.
-// >>> OPEN RISK #2 — the exact category name is inherited from the make-safe
+// SWR- IS NOW AMBIGUOUS, AND THIS FUNCTION REFUSES TO GUESS.
+//
+// The prefix was already shared by renovation and roofing; repair makes it three
+// ways. An insurance repair is SES insurance work and books where the make-safe /
+// SES insurance work books — NOT 'SW - PRIVATE ROOFING', which is private
+// roofing revenue. So a bare SWR- number can no longer decide a business unit,
+// and returning a wrong category is worse than returning none: every caller
+// already handles the empty answer (they skip Tracking, or fall back to
+// 'Construction' in a description), whereas a wrong one silently misfiles
+// revenue and nobody notices until month end.
+//
+// Pass the job type wherever a job row is in hand and the answer is exact.
+// Callers holding only a job-number string (supplier bills, WO cost lines) get
+// '' for SWR-. Every OTHER prefix is untouched and answers exactly as before.
+//
+// Safe today because production holds zero renovation jobs, zero roofing jobs
+// and zero SWR- job numbers — see the pre-merge verification SELECT in
+// BUILD-REPORT.md, which must be run before this merges.
+//
+// >>> OPEN RISK #2 — 'SW - MAKESAFE' for repair is inherited from the make-safe
 // route and needs captain confirmation. <<<
-// Callers with no job type in hand pass nothing and get the previous behaviour
-// byte for byte.
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
-  if (String(jobType || '').trim().toLowerCase() === 'repair') return 'SW - MAKESAFE'
+  // An explicit type always wins, including when the job has no number yet.
+  const type = String(jobType || '').trim().toLowerCase()
+  if (type === 'repair') return 'SW - MAKESAFE'
+  if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''
   const upper = jobNumber.toUpperCase()
   if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
@@ -32933,8 +33054,8 @@ function trackingCategoryForJob(jobNumber: string, jobType?: string | null): str
   if (prefix === 'SWP') return 'SW - PATIOS'
   if (prefix === 'SWF') return 'SW - FENCING'
   if (prefix === 'SWD') return 'SW - DECKING'
-  if (prefix === 'SWR') return 'SW - PRIVATE ROOFING'
   if (prefix === 'SWI') return 'SW - INSURANCE WORK'
+  // 'SWR' deliberately falls through to '': renovation | roofing | repair.
   return ''
 }
 

@@ -33,12 +33,19 @@ function makeStageClient(input: {
   jobs?: Row[];
   details?: Row[];
   updateError?: { message: string };
+  /**
+   * Fires ONCE, immediately after the handler's first read of `jobs`, so a test
+   * can model somebody else committing in the window between the read and the
+   * write. Nothing else can reproduce a lost update honestly.
+   */
+  concurrentWriteAfterJobRead?: (row: Row) => void;
 } = {}) {
   const tables: Record<string, Row[]> = {
     jobs: input.jobs ? structuredClone(input.jobs) : [],
     makesafe_job_details: input.details ? structuredClone(input.details) : [],
     job_events: [],
   };
+  let jobReadsSeen = 0;
 
   function builder(table: string) {
     let operation: "select" | "insert" | "update" = "select";
@@ -54,7 +61,14 @@ function makeStageClient(input: {
       if (executed) return executed;
       executed = Promise.resolve().then(() => {
         if (operation === "select") {
-          return { data: matching().map((row) => ({ ...row })), error: null };
+          const rows = matching().map((row) => ({ ...row }));
+          if (table === "jobs") {
+            jobReadsSeen += 1;
+            if (jobReadsSeen === 1 && input.concurrentWriteAfterJobRead) {
+              for (const live of tables.jobs) input.concurrentWriteAfterJobRead(live);
+            }
+          }
+          return { data: rows, error: null };
         }
         if (operation === "insert") {
           const row = { ...(insertValue || {}) };
@@ -112,6 +126,7 @@ function typedRepairJob(extra: Row = {}): Row {
     type: "repair",
     status: "accepted",
     job_number: "SWR-261400",
+    updated_at: "2026-08-26T00:00:00Z",
     metadata: {
       repair_stage: "wo_in",
       makesafe_job_family: "repair",
@@ -210,6 +225,52 @@ Deno.test("a missing job and a missing bound are refused before any write", asyn
     Error,
   );
   assertEquals(client.tables.job_events.length, 0);
+});
+
+Deno.test("a concurrent write to the job is refused, not silently clobbered", async () => {
+  // jobs.metadata is one jsonb blob and PostgREST has no partial-object patch, so
+  // the stage move is a read-modify-write. On these cards that blob is busy —
+  // intake_mint_id, makesafe_job_family, ses_family, builder_work_order_number,
+  // builder_po_number — and the dashboard fires optimistic moves, so two writes
+  // racing is plausible. The update carries the row version it read, so a race
+  // writes nothing and says so instead of discarding the other write.
+  const client = makeStageClient({
+    jobs: [typedRepairJob()],
+    // Somebody else commits in the window between our read and our write.
+    concurrentWriteAfterJobRead: (row) => {
+      row.updated_at = "2026-08-26T00:05:00Z";
+      row.metadata.builder_po_number = "PO-WRITTEN-BY-SOMEONE-ELSE";
+    },
+  });
+
+  const error = await assertRejects(
+    () => _updateRepairStage(client, { jobId: REPAIR_JOB_ID, stage: "quoted" }),
+    Error,
+  );
+  assertStringIncludes(String(error.message), "changed while its stage was being moved");
+
+  // The other party's write survives untouched and ours did not land.
+  assertEquals(
+    client.tables.jobs[0].metadata.builder_po_number,
+    "PO-WRITTEN-BY-SOMEONE-ELSE",
+  );
+  assertEquals(client.tables.jobs[0].metadata.repair_stage, "wo_in");
+  assertEquals(client.tables.job_events.length, 0);
+});
+
+Deno.test("the stage move is scoped to the org on the read and on the write", async () => {
+  // Every sibling read scopes by org. This is the one WRITE, so it matters most.
+  const foreign = typedRepairJob({
+    org_id: "00000000-0000-0000-0000-0000000000ff",
+  });
+  const client = makeStageClient({ jobs: [foreign] });
+
+  await assertRejects(
+    () => _updateRepairStage(client, { jobId: REPAIR_JOB_ID, stage: "quoted" }),
+    Error,
+    "not found",
+  );
+  assertEquals(client.tables.jobs[0].metadata.repair_stage, "wo_in");
 });
 
 Deno.test("the three legacy repair vintages can be moved without being retyped", async () => {
@@ -430,18 +491,21 @@ Deno.test("the stage gate stops offering a repair job the patio money ladder", a
 
 // ── Xero — repair revenue is SES insurance work, not private roofing ──────────
 
-Deno.test("a SWR- repair job books to make-safe tracking, never private roofing", async () => {
-  // trackingCategoryForJob decides by prefix, and SWR- is shared by renovation,
-  // roofing and now repair. Prefix alone would book every repair invoice as
-  // 'SW - PRIVATE ROOFING'.
-  assertEquals(
-    _trackingCategoryForJob("SWR-261400", "repair"),
-    "SW - MAKESAFE",
-  );
+Deno.test("a SWR- repair job books to make-safe tracking, never private roofing", () => {
+  assertEquals(_trackingCategoryForJob("SWR-261400", "repair"), "SW - MAKESAFE");
   assertEquals(_accountCodeForJob("repair"), "210");
 
-  // CONTROLS: nothing else moved.
-  assertEquals(_trackingCategoryForJob("SWR-261400"), "SW - PRIVATE ROOFING");
+  // A repair job that has not been numbered yet still books correctly: the
+  // explicit type is checked before the number, and it is the better answer.
+  assertEquals(_trackingCategoryForJob("", "repair"), "SW - MAKESAFE");
+
+  // The SWR- PREFIX no longer decides anything on its own. It is shared by
+  // renovation, roofing and repair, so a bare number now gets NO category rather
+  // than a wrong one — every caller already handles the empty answer (skip
+  // Tracking, or fall back to 'Construction' in a description), whereas a wrong
+  // one misfiles revenue and nobody notices until month end.
+  assertEquals(_trackingCategoryForJob("SWR-261400"), "");
+  // Told the type, it answers exactly — including for the prefix's two prior owners.
   assertEquals(
     _trackingCategoryForJob("SWR-261400", "roofing"),
     "SW - PRIVATE ROOFING",
@@ -450,16 +514,37 @@ Deno.test("a SWR- repair job books to make-safe tracking, never private roofing"
     _trackingCategoryForJob("SWR-261400", "renovation"),
     "SW - PRIVATE ROOFING",
   );
+
+  // CONTROLS: every other prefix answers from the number exactly as before,
+  // with or without a type.
   assertEquals(_trackingCategoryForJob("SWMS-261400"), "SW - MAKESAFE");
+  assertEquals(_trackingCategoryForJob("SWMS-261400", "makesafe"), "SW - MAKESAFE");
+  assertEquals(_trackingCategoryForJob("AJBR-1234"), "SW - MAKESAFE");
   assertEquals(_trackingCategoryForJob("SWP-26100"), "SW - PATIOS");
+  assertEquals(_trackingCategoryForJob("SWP-26100", "patio"), "SW - PATIOS");
   assertEquals(_trackingCategoryForJob("SWF-26100"), "SW - FENCING");
+  assertEquals(_trackingCategoryForJob("SWF-26100", "fencing"), "SW - FENCING");
   assertEquals(_trackingCategoryForJob("SWD-26100"), "SW - DECKING");
   assertEquals(_trackingCategoryForJob("SWI-26100"), "SW - INSURANCE WORK");
   assertEquals(_trackingCategoryForJob(""), "");
+  assertEquals(_trackingCategoryForJob("", "patio"), "");
   assertEquals(_accountCodeForJob("makesafe"), "210");
   assertEquals(_accountCodeForJob("patio"), "208");
   assertEquals(_accountCodeForJob("fencing"), "207");
   assertEquals(_accountCodeForJob("roofing"), "209");
   assertEquals(_accountCodeForJob("renovation"), "201");
   assertEquals(_accountCodeForJob("something_new"), "200");
+});
+
+Deno.test("the client-revenue invoice paths resolve their category by job type", async () => {
+  // createInvoice and the invoice-update path both derived Tracking from the
+  // Xero REFERENCE alone, which for a repair job is an SWR- number. That is the
+  // ACCREC path — real client revenue — so both now read the bound job's type.
+  const source = (await Deno.readTextFile(new URL("./index.ts", import.meta.url)))
+    .split("\r\n").join("\n");
+  assertStringIncludes(source, "trackingCategoryForJob(ref, invoiceJobType)");
+  assertStringIncludes(source, "trackingCategoryForJob(updateRef, updateJobType)");
+  // No ACCREC site may still resolve from a bare reference.
+  assertEquals(source.includes("trackingCategoryForJob(ref)"), false);
+  assertEquals(source.includes("trackingCategoryForJob(updateRef)"), false);
 });
