@@ -19,6 +19,10 @@ import {
   excludeInsuranceRepairs,
   INSURANCE_REPAIR_STAGES,
 } from "./insurance_repairs_board.ts";
+import {
+  getStagesForType,
+  isLegalForType,
+} from "../_shared/stage-gate/job-state-machine.ts";
 
 type Row = Record<string, any>;
 
@@ -398,6 +402,30 @@ Deno.test("a true repair job is filtered off the external MakeSafe boards", asyn
     { id: "c", type: "makesafe", metadata: { makesafe_job_family: "repair" } },
   ];
   assertEquals(excludeInsuranceRepairs(rows).map((row: any) => row.id), ["b"]);
+});
+
+Deno.test("the stage gate stops offering a repair job the patio money ladder", async () => {
+  // Diagnosis blocker B12. 'repair' was not in the JobType union, so
+  // getStagesForType fell through to its patio default and a repair job was
+  // judged legal for approvals / awaiting_deposit / get_review — a patio money
+  // ladder on an insurance work order.
+  const repair = getStagesForType("repair");
+  const patio = getStagesForType("patio");
+  assertEquals(repair === patio, false);
+  assertEquals(isLegalForType("accepted", "repair"), true);
+  assertEquals(isLegalForType("processing", "repair"), true);
+  assertEquals(isLegalForType("complete", "repair"), true);
+  assertEquals(isLegalForType("approvals", "repair"), false);
+  assertEquals(isLegalForType("get_review", "repair"), false);
+  assertEquals(isLegalForType("awaiting_deposit", "repair"), false);
+
+  // CONTROLS: every other type is exactly as it was.
+  assertEquals(isLegalForType("approvals", "patio"), true);
+  assertEquals(isLegalForType("order_confirmed", "fencing"), true);
+  assertEquals(isLegalForType("accepted", "makesafe"), true);
+  assertEquals(isLegalForType("approvals", "makesafe"), false);
+  // An unknown type still gets the safe patio default.
+  assertEquals(getStagesForType("something_new"), patio);
 });
 
 // ── Xero — repair revenue is SES insurance work, not private roofing ──────────

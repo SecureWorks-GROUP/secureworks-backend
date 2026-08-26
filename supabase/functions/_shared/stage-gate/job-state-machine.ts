@@ -24,7 +24,7 @@
    Inherits: secureworks-docs/operations/phase-c-jobs-status-spec.md
    ════════════════════════════════════════════════════════════════ */
 
-export type JobType = 'fencing' | 'patio' | 'quick_quote' | 'decking' | 'makesafe';
+export type JobType = 'fencing' | 'patio' | 'quick_quote' | 'decking' | 'makesafe' | 'repair';
 
 /** Every value the live prod CHECK admits. Order is canonical board order. */
 export type CanonicalStatus =
@@ -147,6 +147,18 @@ export const MAKESAFE_STAGES: CanonicalStatus[] = [
   'cancelled', 'archived'
 ];
 
+/** Insurance repair jobs. These are jobs.status values, NOT the nine Repairs
+    board stages - those live in jobs.metadata.repair_stage and are written only
+    by update_repair_stage. Without this a repair job fell through to
+    PATIO_STAGES, which offered it approvals/deposit/get_review: a patio money
+    ladder on an insurance work order. Repair travels the same spine as make-safe
+    (both are minted at 'accepted' off an SES work order), plus 'processing',
+    where every live repair card currently sits. */
+export const REPAIR_STAGES: CanonicalStatus[] = [
+  'accepted', 'processing', 'scheduled', 'in_progress', 'complete', 'invoiced',
+  'cancelled', 'archived'
+];
+
 /** Type-stage validity — true if the status is allowed for the given type. */
 export function isLegalForType(status: string, type: JobType | string | null | undefined): boolean {
   const arr = getStagesForType(type);
@@ -160,6 +172,7 @@ export function getStagesForType(type: JobType | string | null | undefined): Can
     case 'decking':     return DECKING_STAGES;
     case 'quick_quote': return QUICK_QUOTE_STAGES;
     case 'makesafe':    return MAKESAFE_STAGES;
+    case 'repair':      return REPAIR_STAGES;
     default:            return PATIO_STAGES; // safest default
   }
 }
