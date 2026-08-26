@@ -37546,6 +37546,12 @@ async function attachMakesafeDocument(
     })
   }
 
+  // Own-letterhead roof PDFs must land on the main pack pointer. Without
+  // this, SEND IT shows "missing report" even when the typed document exists.
+  if (type === 'roof_report' && docId) {
+    await ensureCuratedReportPackPointer(client, jId, docId)
+  }
+
   // Dual-write to business_events (best-effort, mirrors confirmDocumentUpload).
   logBusinessEvent(client, {
     event_type: 'document.uploaded',

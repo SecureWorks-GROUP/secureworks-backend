@@ -971,6 +971,13 @@ Deno.test("a family whose report lives in the portal is not held for a report em
   );
 });
 
+Deno.test("own-letterhead roof owes report then invoice, never a photo email", () => {
+  assertEquals(
+    requiredSesRouteKinds("own_template_roof", false, "MLB", true),
+    ["report", "invoice"],
+  );
+});
+
 Deno.test("the ruled report-only question no longer parks any card", () => {
   // `report-only-email-applicability` was decided on 2026-08-06. A decided
   // question must stop holding cards: no blocker may carry that decision key,
