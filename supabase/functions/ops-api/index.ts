@@ -12412,6 +12412,31 @@ export function stripPipelinePricingAliases(row: any) {
   return leanRow
 }
 
+type PipelineEnrichmentResult = { data: any[]; error: any | null }
+
+// Pipeline boards can carry hundreds of UUIDs. Keep every enrichment read under
+// the shared encoded-URL budget (and the module-wide fan-out cap), paginate each
+// chunk, then merge the rows. Return the error alongside an empty local row set
+// so one failed enrichment does not take down the whole board; pipeline() logs
+// the detailed failure and marks the response degraded below.
+async function readPipelineEnrichmentRows(
+  jobIds: string[],
+  label: string,
+  buildQueryForChunk: (chunkIds: string[]) => any,
+): Promise<PipelineEnrichmentResult> {
+  try {
+    const data = await _fetchAllRowsInChunks<any>(
+      jobIds,
+      buildQueryForChunk,
+      `pipeline.${label}`,
+      'id',
+    )
+    return { data, error: null }
+  } catch (error) {
+    return { data: [], error }
+  }
+}
+
 async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
@@ -12501,32 +12526,66 @@ async function pipeline(client: any, params: URLSearchParams) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
-  // Only enrich non-draft jobs (drafts have no assignments/POs/invoices)
-  // This keeps the .in() query within PostgREST URL limits (~381 drafts would exceed it)
+  // Only enrich non-draft jobs (drafts have no assignments/POs/invoices).
+  // The shared reader below chunks this list by encoded URL budget; excluding
+  // drafts remains useful load-shedding, but is no longer the URL-safety guard.
   const nonDraftJobs = jobs.filter((j: any) => j.status !== 'draft')
   const jobIds = nonDraftJobs.map((j: any) => j.id)
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
-  let assignRes: any = { data: [] }, poRes: any = { data: [] }, woRes: any = { data: [] }
-  let councilRes: any = { data: [] }, emailRes: any = { data: [] }, invoiceRes: any = { data: [] }
-  let opsNotesRes: any = { data: [] }, neighbourContactRes: any = { data: [] }
-  let commsNotesRes: any = { data: [] }
+  let assignRes: PipelineEnrichmentResult = { data: [], error: null }
+  let poRes: PipelineEnrichmentResult = { data: [], error: null }
+  let woRes: PipelineEnrichmentResult = { data: [], error: null }
+  let councilRes: PipelineEnrichmentResult = { data: [], error: null }
+  let emailRes: PipelineEnrichmentResult = { data: [], error: null }
+  let invoiceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let opsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
+  let neighbourContactRes: PipelineEnrichmentResult = { data: [], error: null }
+  let commsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
 
   if (jobIds.length > 0) {
     ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes] = await Promise.all([
-      client.from('job_assignments').select('job_id, scheduled_date').in('job_id', jobIds).neq('status', 'cancelled'),
-      client.from('purchase_orders').select('job_id').in('job_id', jobIds).neq('status', 'deleted'),
-      client.from('work_orders').select('job_id').in('job_id', jobIds).neq('status', 'cancelled'),
-      client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', jobIds),
-      client.from('po_communications').select('job_id, direction, created_at').in('job_id', jobIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false }).limit(500),
-      client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', jobIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")'),
-      client.from('ops_notes').select('job_id').in('job_id', jobIds),
-      client.from('job_contacts').select('job_id').in('job_id', jobIds).eq('status', 'active').eq('is_primary', false),
+      readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
+        client.from('job_assignments').select('job_id, scheduled_date').in('job_id', chunkIds).neq('status', 'cancelled')),
+      readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
+        client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
+      readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled')),
+      readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
+        client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
+      readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
+        client.from('po_communications').select('job_id, direction, created_at').in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
+      readPipelineEnrichmentRows(jobIds, 'xero_invoices', (chunkIds) =>
+        client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', chunkIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")')),
+      readPipelineEnrichmentRows(jobIds, 'ops_notes', (chunkIds) =>
+        client.from('ops_notes').select('job_id').in('job_id', chunkIds)),
+      readPipelineEnrichmentRows(jobIds, 'job_contacts', (chunkIds) =>
+        client.from('job_contacts').select('job_id').in('job_id', chunkIds).eq('status', 'active').eq('is_primary', false)),
       // Trade<->ops comms thread notes (job_events). detail_json needed so system
       // markers can be excluded from the count (they must never light the badge).
-      client.from('job_events').select('job_id, detail_json').in('job_id', jobIds).in('event_type', ['note', 'note_added', 'site_note']),
+      readPipelineEnrichmentRows(jobIds, 'job_events', (chunkIds) =>
+        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', ['note', 'note_added', 'site_note'])),
     ])
   }
+
+  const enrichmentResults: Array<[string, PipelineEnrichmentResult]> = [
+    ['pipeline.job_assignments', assignRes],
+    ['pipeline.purchase_orders', poRes],
+    ['pipeline.work_orders', woRes],
+    ['pipeline.council_submissions', councilRes],
+    ['pipeline.po_communications', emailRes],
+    ['pipeline.xero_invoices', invoiceRes],
+    ['pipeline.ops_notes', opsNotesRes],
+    ['pipeline.job_contacts', neighbourContactRes],
+    ['pipeline.job_events', commsNotesRes],
+  ]
+  // Preserve the existing partial-board behaviour, but make a failed dimension
+  // loud in server logs and explicit in the response instead of publishing its
+  // zero/null fallbacks as if they were authoritative database facts.
+  logQueryErrors(enrichmentResults)
+  const enrichmentErrors = enrichmentResults
+    .filter(([, result]) => result.error)
+    .map(([label]) => label)
 
   const countMap = (rows: any[]) => {
     const m: Record<string, number> = {}
@@ -12689,7 +12748,13 @@ async function pipeline(client: any, params: URLSearchParams) {
     if (columns[col]) columns[col].push(j)
   }
 
-  return { columns, total: enriched.length }
+  return {
+    columns,
+    total: enriched.length,
+    ...(enrichmentErrors.length > 0
+      ? { degraded: true, enrichment_errors: enrichmentErrors }
+      : {}),
+  }
 }
 
 export const _pipelineForTest = pipeline
