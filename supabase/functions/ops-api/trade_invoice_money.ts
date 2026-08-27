@@ -1,0 +1,322 @@
+// Canonical subcontractor invoice money split.
+//
+// Statutory source (checked 2026-08-27): the Australian Taxation Office's
+// "Super guarantee percentage" table sets the general SG rate to 12.00% from
+// 1 July 2025, including 1 July 2026-30 June 2027 and 1 July 2027 onwards.
+// https://www.ato.gov.au/tax-rates-and-codes/key-superannuation-rates-and-thresholds/super-guarantee
+//
+// Keep rate resolution here. Callers must fail closed when this module cannot
+// resolve a rate; they must never guess or silently fall back to zero.
+
+export const TRADE_INVOICE_GST_RATE = 0.10;
+export const TRADE_INVOICE_SUPER_RATE = 0.12;
+export const TRADE_INVOICE_SUPER_EFFECTIVE_FROM = "2025-07-01";
+
+export type TradeInvoiceMoneyErrorCode =
+  | "GST_CHOICE_INVALID"
+  | "GST_CHOICE_REQUIRED"
+  | "GROSS_EARNED_INVALID"
+  | "SUPER_RATE_UNRESOLVED"
+  | "MONEY_SPLIT_MISSING"
+  | "MONEY_SPLIT_INVALID"
+  | "XERO_GROSS_MISMATCH";
+
+export class TradeInvoiceMoneyError extends Error {
+  readonly code: TradeInvoiceMoneyErrorCode;
+
+  constructor(code: TradeInvoiceMoneyErrorCode, message: string) {
+    super(message);
+    this.name = "TradeInvoiceMoneyError";
+    this.code = code;
+  }
+}
+
+export type TradeInvoiceMoney = {
+  gst_on: boolean;
+  super_rate: number;
+  gross_earned: number;
+  super_amount: number;
+  net_pay: number;
+  gst_amount: number;
+  trade_payable: number;
+  total_inc: number;
+};
+
+export type TradeInvoiceXeroLine = Record<string, unknown> & {
+  Description?: string;
+  Quantity?: number;
+  UnitAmount?: number;
+  AccountCode?: string;
+  TaxType?: "INPUT" | "NONE" | string;
+  Tracking?: unknown[];
+};
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
+const toCents = (value: number): number => Math.round(value * 100);
+const fromCents = (value: number): number => value / 100;
+const closeMoney = (left: number, right: number): boolean =>
+  Math.abs(left - right) <= 0.01;
+
+function validDateOnly(raw: unknown): string | null {
+  const text = String(raw ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 10) === text ? text : null;
+}
+
+export function resolveSuperGuaranteeRate(
+  earningsDate: unknown,
+): number | null {
+  const date = validDateOnly(earningsDate);
+  if (!date || date < TRADE_INVOICE_SUPER_EFFECTIVE_FROM) return null;
+  return TRADE_INVOICE_SUPER_RATE;
+}
+
+export function resolveTradeInvoiceGstOn(
+  request: unknown,
+  profileGstRegistered: unknown,
+): boolean {
+  const record = request && typeof request === "object"
+    ? request as Record<string, unknown>
+    : {};
+  for (const key of ["gst_on", "gst_registered", "gst"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    if (typeof record[key] !== "boolean") {
+      throw new TradeInvoiceMoneyError(
+        "GST_CHOICE_INVALID",
+        "GST choice must be true or false",
+      );
+    }
+    return record[key];
+  }
+  if (typeof profileGstRegistered === "boolean") {
+    return profileGstRegistered;
+  }
+  throw new TradeInvoiceMoneyError(
+    "GST_CHOICE_REQUIRED",
+    "GST choice is required before creating a trade invoice",
+  );
+}
+
+export function calculateTradeInvoiceMoney(input: {
+  grossEarned: unknown;
+  gstOn: unknown;
+  earningsDate: unknown;
+}): TradeInvoiceMoney {
+  const grossEarned = Number(input.grossEarned);
+  if (!Number.isFinite(grossEarned) || grossEarned < 0) {
+    throw new TradeInvoiceMoneyError(
+      "GROSS_EARNED_INVALID",
+      "Gross earned must be a finite amount of zero or more",
+    );
+  }
+  if (typeof input.gstOn !== "boolean") {
+    throw new TradeInvoiceMoneyError(
+      "GST_CHOICE_INVALID",
+      "GST choice must be true or false",
+    );
+  }
+
+  const superRate = resolveSuperGuaranteeRate(input.earningsDate);
+  if (superRate === null) {
+    throw new TradeInvoiceMoneyError(
+      "SUPER_RATE_UNRESOLVED",
+      `No statutory Superannuation Guarantee rate is configured for ${
+        String(input.earningsDate ?? "the invoice date")
+      }`,
+    );
+  }
+
+  const gross = round2(grossEarned);
+  const superAmount = round2(gross * superRate);
+  const netPay = round2(gross - superAmount);
+  // GST remains 10% of the original contractor supply (gross earned). Super is
+  // a split of that amount, not an extra taxable amount.
+  const gstAmount = input.gstOn ? round2(gross * TRADE_INVOICE_GST_RATE) : 0;
+
+  return {
+    gst_on: input.gstOn,
+    super_rate: superRate,
+    gross_earned: gross,
+    super_amount: superAmount,
+    net_pay: netPay,
+    gst_amount: gstAmount,
+    trade_payable: round2(netPay + gstAmount),
+    total_inc: round2(gross + gstAmount),
+  };
+}
+
+function requiredNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number {
+  if (record[key] === null || record[key] === undefined || record[key] === "") {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_MISSING",
+      "Trade invoice is missing its super/GST split and cannot be pushed to Xero",
+    );
+  }
+  const value = Number(record[key]);
+  if (!Number.isFinite(value)) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      `Trade invoice ${key} is invalid`,
+    );
+  }
+  return value;
+}
+
+export function validatePersistedTradeInvoiceMoney(
+  value: unknown,
+): TradeInvoiceMoney {
+  const record = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  if (typeof record.gst_on !== "boolean") {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_MISSING",
+      "Trade invoice is missing its super/GST split and cannot be pushed to Xero",
+    );
+  }
+
+  const superRate = requiredNumber(record, "super_rate");
+  const gross = requiredNumber(record, "gross_earned");
+  const superAmount = requiredNumber(record, "super_amount");
+  const netPay = requiredNumber(record, "net_pay");
+  const gstAmount = requiredNumber(record, "gst");
+  const totalInc = requiredNumber(record, "total_inc");
+  const subtotalEx = requiredNumber(record, "subtotal_ex");
+  const earningsDate = record.week_end ?? record.week_start ??
+    record.submitted_at ?? record.created_at;
+  const statutoryRate = resolveSuperGuaranteeRate(earningsDate);
+  if (statutoryRate === null) {
+    throw new TradeInvoiceMoneyError(
+      "SUPER_RATE_UNRESOLVED",
+      `No statutory Superannuation Guarantee rate is configured for ${
+        String(earningsDate ?? "the invoice date")
+      }`,
+    );
+  }
+
+  if (
+    !(superRate > 0 && superRate <= 1) || gross < 0 || superAmount < 0 ||
+    netPay < 0 || gstAmount < 0 ||
+    Math.abs(superRate - statutoryRate) > 0.000001 ||
+    !closeMoney(gross, subtotalEx) ||
+    !closeMoney(superAmount, round2(gross * superRate)) ||
+    !closeMoney(netPay, round2(gross - superAmount)) ||
+    !closeMoney(
+      gstAmount,
+      record.gst_on ? round2(gross * TRADE_INVOICE_GST_RATE) : 0,
+    ) ||
+    !closeMoney(totalInc, round2(gross + gstAmount))
+  ) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Trade invoice super/GST split does not reconcile and cannot be pushed to Xero",
+    );
+  }
+
+  return {
+    gst_on: record.gst_on,
+    super_rate: superRate,
+    gross_earned: round2(gross),
+    super_amount: round2(superAmount),
+    net_pay: round2(netPay),
+    gst_amount: round2(gstAmount),
+    trade_payable: round2(netPay + gstAmount),
+    total_inc: round2(totalInc),
+  };
+}
+
+function lineGrossCents(line: TradeInvoiceXeroLine): number {
+  const quantity = Number(line.Quantity ?? 1);
+  const unitAmount = Number(line.UnitAmount ?? 0);
+  if (!Number.isFinite(quantity) || !Number.isFinite(unitAmount)) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_GROSS_MISMATCH",
+      "Trade invoice has a non-numeric Xero line amount",
+    );
+  }
+  return toCents(quantity * unitAmount);
+}
+
+function rateLabel(rate: number): string {
+  return `${(rate * 100).toFixed(2)}%`;
+}
+
+function moneyLabel(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+export function splitTradeInvoiceXeroLines(
+  grossLines: TradeInvoiceXeroLine[],
+  money: TradeInvoiceMoney,
+  options: { superAccountCode: string },
+): TradeInvoiceXeroLine[] {
+  if (!Array.isArray(grossLines) || grossLines.length === 0) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_GROSS_MISMATCH",
+      "Trade invoice has no Xero lines to split",
+    );
+  }
+
+  const sourceCents = grossLines.map(lineGrossCents);
+  const sourceTotalCents = sourceCents.reduce((sum, amount) => sum + amount, 0);
+  const grossCents = toCents(money.gross_earned);
+  if (grossCents <= 0 || Math.abs(sourceTotalCents - grossCents) > 1) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_GROSS_MISMATCH",
+      `Xero gross lines ${
+        moneyLabel(fromCents(sourceTotalCents))
+      } do not match gross earned ${moneyLabel(money.gross_earned)}`,
+    );
+  }
+
+  const netCents = toCents(money.net_pay);
+  const allocations = sourceCents.map((amount) =>
+    Math.round(amount * netCents / grossCents)
+  );
+  const allocatedCents = allocations.reduce((sum, amount) => sum + amount, 0);
+  const remainder = netCents - allocatedCents;
+  if (remainder !== 0) {
+    const adjustmentIndex = sourceCents.findIndex((amount) => amount > 0);
+    allocations[adjustmentIndex >= 0 ? adjustmentIndex : 0] += remainder;
+  }
+
+  const taxType = money.gst_on ? "INPUT" : "NONE";
+  const netLines = grossLines.map((line, index) => {
+    const { LineAmount: _lineAmount, ...rest } = line;
+    const originalDescription = String(
+      line.Description || "Trade invoice line",
+    );
+    return {
+      ...rest,
+      Description: `Net earnings after ${
+        rateLabel(money.super_rate)
+      } super\n${originalDescription}`,
+      Quantity: 1,
+      UnitAmount: fromCents(allocations[index]),
+      TaxType: taxType,
+    };
+  });
+
+  // The super line is a reallocation of gross earned, not an amount added on
+  // top. Giving both portions the same tax treatment makes Xero calculate GST
+  // exactly once over net + super = gross, including the GST-off case.
+  netLines.push({
+    Description: `Superannuation Guarantee (${
+      rateLabel(money.super_rate)
+    }) | Gross earned ${
+      moneyLabel(money.gross_earned)
+    } | Amount reserved for super`,
+    Quantity: 1,
+    UnitAmount: money.super_amount,
+    AccountCode: options.superAccountCode,
+    TaxType: taxType,
+    Tracking: [],
+  });
+
+  return netLines;
+}

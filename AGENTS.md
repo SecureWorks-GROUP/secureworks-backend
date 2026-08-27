@@ -3336,6 +3336,18 @@ already 21 — board half only). Tests: `makesafe_cycle_evidence_test.ts`,
 `ses_assembler_input_adapter_test.ts`, `makesafe_board_read_model_test.ts`,
 `makesafe_render_report_action_test.ts`.
 
+## Trade Invoices Persist Gross, Super, Net Pay, And The GST Choice
+
+`supabase/functions/ops-api/trade_invoice_money.ts` is the one money owner for
+trade invoice creation and every ACCPAY push/retry. It resolves the dated ATO
+SG rate, computes gross earned / super / net pay / optional GST, and builds
+Xero net-earnings lines plus one labelled super line. Never derive this split
+in a UI or add super on top of gross. New rows must carry `gst_on`,
+`super_rate`, `super_amount`, `gross_earned`, and `net_pay`; legacy NULL rows
+must fail closed on Xero retry rather than inventing history. API fields,
+formulas, UI handoff, source, and deploy order:
+`docs/trade-invoice-super-gst-contract-2026-08-27.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

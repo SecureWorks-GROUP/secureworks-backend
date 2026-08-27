@@ -34,6 +34,7 @@ MAILER_OPS_SEND_MIGRATION="$REPO_ROOT/supabase/migrations/20260805020000_ses_mai
 ECHO_CODE_APPROVAL_MIGRATION="$REPO_ROOT/supabase/migrations/20260808010000_ses_echo_code_approval.sql"
 D1_RECONCILE_KILL_SWITCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql"
 STALE_ROUTE_DISPATCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql"
+TRADE_INVOICE_MONEY_MIGRATION="$REPO_ROOT/supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql"
 
 
 PASS_COUNT=0
@@ -164,6 +165,10 @@ stale_route_dispatch_migration_sha() {
   shasum -a 256 "$STALE_ROUTE_DISPATCH_MIGRATION" | awk '{print $1}'
 }
 
+trade_invoice_money_migration_sha() {
+  shasum -a 256 "$TRADE_INVOICE_MONEY_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -197,6 +202,7 @@ write_response() {
   ECHO_CODE_APPROVAL_EXPECTED_SHA="$(echo_code_approval_migration_sha)" \
   D1_RECONCILE_KILL_SWITCH_EXPECTED_SHA="$(d1_reconcile_kill_switch_migration_sha)" \
   STALE_ROUTE_DISPATCH_EXPECTED_SHA="$(stale_route_dispatch_migration_sha)" \
+  TRADE_INVOICE_MONEY_EXPECTED_SHA="$(trade_invoice_money_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -507,6 +513,17 @@ stale_route_dispatch_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+trade_invoice_money_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260827112928",
+    "expected_migration_name": "trade_invoice_super_gst_split",
+    "expected_statement_sha256": os.environ["TRADE_INVOICE_MONEY_EXPECTED_SHA"],
+    "actual_migration_version": "20260827112928",
+    "actual_migration_name": "trade_invoice_super_gst_split",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["TRADE_INVOICE_MONEY_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -537,6 +554,7 @@ with open(sys.argv[1], "w") as f:
             echo_code_approval_row,
             d1_reconcile_kill_switch_row,
             stale_route_dispatch_row,
+            trade_invoice_money_row,
         ],
         f,
     )
@@ -565,6 +583,7 @@ test_incident_dependency_is_declared() {
   local ses_recovery_expected='ops-api|supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
   local roof_initial_cycle_expected='ops-api|supabase/migrations/20260803080000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1'
   local stale_route_dispatch_expected='ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|settle_stale_ses_route_dispatch_v1'
+  local trade_invoice_money_expected='ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|trigger|trade_invoices.trg_trade_invoices_require_money_split'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
@@ -573,10 +592,11 @@ test_incident_dependency_is_declared() {
     grep -Fxq "$vault_sync_expected" "$MANIFEST" && \
     grep -Fxq "$ses_recovery_expected" "$MANIFEST" && \
     grep -Fxq "$roof_initial_cycle_expected" "$MANIFEST" && \
-    grep -Fxq "$stale_route_dispatch_expected" "$MANIFEST"; then
+    grep -Fxq "$stale_route_dispatch_expected" "$MANIFEST" && \
+    grep -Fxq "$trade_invoice_money_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, SES recovery, and stale-route dispatch markers are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, SES recovery, stale-route dispatch, and trade-invoice money markers are not permanent ops-api deploy requirements"
   fi
 }
 

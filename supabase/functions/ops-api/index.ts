@@ -343,6 +343,14 @@ import {
   _woNetMismatch,
   type WoLabourProblem,
 } from './wo_labour_fanout.ts'
+import {
+  calculateTradeInvoiceMoney,
+  resolveTradeInvoiceGstOn,
+  splitTradeInvoiceXeroLines,
+  TradeInvoiceMoneyError,
+  type TradeInvoiceMoney,
+  validatePersistedTradeInvoiceMoney,
+} from './trade_invoice_money.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -1357,6 +1365,65 @@ export class ApiError extends Error {
     super(message)
     this.status = status
     this.body = body
+  }
+}
+
+function tradeInvoiceMoneyApiError(error: unknown): never {
+  if (error instanceof TradeInvoiceMoneyError) {
+    throw new ApiError(error.message, 422, {
+      ok: false,
+      code: error.code,
+      error: error.message,
+      userMessage: error.message,
+    })
+  }
+  throw error
+}
+
+function tradeInvoiceGstOn(body: unknown, profileGstRegistered: unknown): boolean {
+  try {
+    return resolveTradeInvoiceGstOn(body, profileGstRegistered)
+  } catch (error) {
+    return tradeInvoiceMoneyApiError(error)
+  }
+}
+
+function tradeInvoiceMoney(
+  grossEarned: unknown,
+  gstOn: unknown,
+  earningsDate: unknown,
+): TradeInvoiceMoney {
+  try {
+    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate })
+  } catch (error) {
+    return tradeInvoiceMoneyApiError(error)
+  }
+}
+
+function persistedTradeInvoiceMoney(value: unknown): TradeInvoiceMoney {
+  try {
+    return validatePersistedTradeInvoiceMoney(value)
+  } catch (error) {
+    return tradeInvoiceMoneyApiError(error)
+  }
+}
+
+function tradeInvoiceMoneyFields(money: TradeInvoiceMoney) {
+  return {
+    gst_on: money.gst_on,
+    super_rate: money.super_rate,
+    super_amount: money.super_amount,
+    gross_earned: money.gross_earned,
+    net_pay: money.net_pay,
+  }
+}
+
+function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
+  return {
+    ...tradeInvoiceMoneyFields(money),
+    gst: money.gst_amount,
+    trade_payable: money.trade_payable,
+    total_inc: money.total_inc,
   }
 }
 
@@ -7429,11 +7496,12 @@ if (import.meta.main) serve(async (req: Request) => {
           const isLabour = hours > 0 && hRate > 0
           return sum + (isLabour ? hours * hRate : qty * uRate)
         }, 0)
-        const expectedSubtotal = Number(inv.subtotal_ex || 0)
+        const invMoney = persistedTradeInvoiceMoney(inv)
+        const expectedSubtotal = invMoney.gross_earned
         if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
           throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
         }
-        const xeroTax = _tradeInvoiceXeroTax(inv.gst)
+        const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
 
         // Past the guard. From here side effects are allowed.
         const { accessToken, tenantId } = await getToken(client)
@@ -7452,7 +7520,7 @@ if (import.meta.main) serve(async (req: Request) => {
         // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
         // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
         // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
-        const xeroLineItems = (lines || []).map((line: any) => {
+        const grossXeroLineItems = (lines || []).map((line: any) => {
           const hours = Number(line.total_hours || 0)
           const hRate = Number(line.hourly_rate || 0)
           const qty = Number(line.quantity || 0)
@@ -7481,6 +7549,11 @@ if (import.meta.main) serve(async (req: Request) => {
             Tracking: lineTracking,
           }
         })
+        const xeroLineItems = splitTradeInvoiceXeroLines(
+          grossXeroLineItems,
+          invMoney,
+          { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+        )
 
         // Resolve Xero contact for the trade. Name fallback is important for
         // Jean-style suppliers whose Supabase login email differs from the
@@ -7530,8 +7603,10 @@ if (import.meta.main) serve(async (req: Request) => {
             invoice_type: 'ACCPAY',
             status: bill.Status || 'DRAFT',
             reference: reference,
-            total: bill.Total || inv.total_inc,
-            amount_due: bill.AmountDue || inv.total_inc,
+            sub_total: invMoney.gross_earned,
+            total_tax: invMoney.gst_amount,
+            total: bill.Total || invMoney.total_inc,
+            amount_due: bill.AmountDue || invMoney.total_inc,
             due_date: dueDate,
             contact_name: tradeName,
           }, { onConflict: 'xero_invoice_id' })
@@ -8999,8 +9074,8 @@ if (import.meta.main) serve(async (req: Request) => {
             const woJobNum = woJob?.job_number || ''
             const woDivision = trackingCategoryForJob(woJobNum)
             const woClientLine = [woJob?.client_name, woJob?.site_address, woJob?.site_suburb].filter(Boolean).join(', ')
-            const woGstRegistered = tradeXeroUser?.trade_details?.gstRegistered !== false
-            const woTaxType = woGstRegistered ? 'INPUT' : 'NONE'
+            const woGstOn = tradeInvoiceGstOn(body, tradeXeroUser?.trade_details?.gstRegistered)
+            const woTaxType = woGstOn ? 'INPUT' : 'NONE'
 
             const lineItems = scopeItems.map((item: any) => {
               const { qty, price } = _resolveWorkOrderScopeLine(item)
@@ -9037,9 +9112,20 @@ if (import.meta.main) serve(async (req: Request) => {
               scopeItems,
               selectedNegativeCharges,
             )
-            const subtotal = invoiceTotals.subtotal_ex
-            const gst = invoiceTotals.gst
-            const total = invoiceTotals.total_inc
+            const woInvoiceDate = new Date().toISOString().slice(0, 10)
+            const woMoney = tradeInvoiceMoney(
+              invoiceTotals.subtotal_ex,
+              woGstOn,
+              woInvoiceDate,
+            )
+            const subtotal = woMoney.gross_earned
+            const gst = woMoney.gst_amount
+            const total = woMoney.total_inc
+            const woXeroLineItems = splitTradeInvoiceXeroLines(
+              lineItems,
+              woMoney,
+              { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+            )
 
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
@@ -9052,8 +9138,8 @@ if (import.meta.main) serve(async (req: Request) => {
                 Reference: `${tradeName} | ${wo.wo_number} | ${woJobNum}`,
                 DueDate: dueDate,
                 Status: 'DRAFT',
-                LineAmountTypes: woGstRegistered ? 'Exclusive' : 'NoTax',
-                LineItems: lineItems,
+                LineAmountTypes: woGstOn ? 'Exclusive' : 'NoTax',
+                LineItems: woXeroLineItems,
               }],
             }
 
@@ -9087,6 +9173,7 @@ if (import.meta.main) serve(async (req: Request) => {
               subtotal_ex: subtotal,
               gst,
               total_inc: total,
+              ...tradeInvoiceMoneyFields(woMoney),
               has_manual_overrides: selectedNegativeCharges.length > 0,
               override_details: selectedNegativeCharges.length > 0
                 ? {
@@ -9135,7 +9222,8 @@ if (import.meta.main) serve(async (req: Request) => {
               detail_json: {
                 work_order_id,
                 wo_number: wo.wo_number,
-                subtotal, gst, total,
+                subtotal, total,
+                ...tradeInvoiceMoneyResponse(woMoney),
                 work_order_subtotal_ex: invoiceTotals.work_order_subtotal_ex,
                 negative_charge_line_ids: selectedNegativeCharges.map((charge: any) => charge.line_id),
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
@@ -9155,6 +9243,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 success: true,
                 xero_bill_number: null,
                 total,
+                ...tradeInvoiceMoneyResponse(woMoney),
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 error: 'Xero push failed — contact admin',
               })
@@ -9165,6 +9254,7 @@ if (import.meta.main) serve(async (req: Request) => {
               success: true,
               xero_bill_number: xeroBillNumber,
               total,
+              ...tradeInvoiceMoneyResponse(woMoney),
               negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
             })
           }
@@ -9188,12 +9278,14 @@ if (import.meta.main) serve(async (req: Request) => {
               }
             }
 
-            // Calculate totals. GST must match the trade profile, not a frontend flag.
+            // Calculate totals. The preferred API field is gst_on; gst_registered
+            // and the legacy gst boolean remain accepted aliases. A stored profile
+            // choice is only the fallback when the request omits the per-invoice flag.
             const { data: draftUserProfile } = await client.from('users')
               .select('trade_details')
               .eq('id', tradeUser.id)
               .maybeSingle()
-            const draftGstRegistered = draftUserProfile?.trade_details?.gstRegistered === true
+            const draftGstOn = tradeInvoiceGstOn(body, draftUserProfile?.trade_details?.gstRegistered)
 
             let labourTotal = 0
             const labourLines = Array.isArray(draftLabour) ? draftLabour : []
@@ -9204,26 +9296,31 @@ if (import.meta.main) serve(async (req: Request) => {
               : []
             for (const e of extras) extraTotal += Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100
             const draftSubtotal = labourTotal + extraTotal
-            const draftGst = draftGstRegistered ? Math.round(draftSubtotal * 0.1 * 100) / 100 : 0
+            const draftWeekEnd = draftWeekStart
+              ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
+              : new Date().toISOString().slice(0, 10)
+            const draftMoney = tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd)
 
             if (draftId) {
               // Update existing draft
               await client.from('trade_invoices').update({
                 notes: draftNotes || null,
-                subtotal_ex: draftSubtotal,
-                gst: draftGst,
-                total_inc: Math.round((draftSubtotal + draftGst) * 100) / 100,
+                subtotal_ex: draftMoney.gross_earned,
+                gst: draftMoney.gst_amount,
+                total_inc: draftMoney.total_inc,
+                ...tradeInvoiceMoneyFields(draftMoney),
               }).eq('id', draftId)
             } else {
               // Create new draft
               const { data: newDraft, error: draftErr } = await client.from('trade_invoices').insert({
                 user_id: tradeUser.id,
                 week_start: draftWeekStart || null,
-                week_end: draftWeekStart ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10) : null,
+                week_end: draftWeekStart ? draftWeekEnd : null,
                 total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
-                subtotal_ex: draftSubtotal,
-                gst: draftGst,
-                total_inc: Math.round((draftSubtotal + draftGst) * 100) / 100,
+                subtotal_ex: draftMoney.gross_earned,
+                gst: draftMoney.gst_amount,
+                total_inc: draftMoney.total_inc,
+                ...tradeInvoiceMoneyFields(draftMoney),
                 notes: draftNotes || null,
                 status: 'draft',
               }).select('id').single()
@@ -9246,7 +9343,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 line_total_ex: Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100,
               })
             }
-            return json({ success: true, draft_id: draftId })
+            return json({ success: true, draft_id: draftId, ...tradeInvoiceMoneyResponse(draftMoney) })
           }
           case 'set_trade_rate': return json(await setTradeRate(client, tradeUser.id, body))
           case 'update_trade_profile': {
@@ -9509,13 +9606,14 @@ if (import.meta.main) serve(async (req: Request) => {
             if (assignments.length === 0 && !hasExtras) throw new ApiError('Nothing to invoice yet. Tick at least one job card, or add a line with hours, before submitting.', 400)
 
             // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below).
-            // GST registration is a server-side profile fact; do not trust a frontend boolean.
+            // The per-invoice GST choice is explicit when provided; the stored
+            // profile remains a compatibility fallback for older clients.
             const { data: userProfile } = await client.from('users')
               .select('default_hourly_rate, name, xero_contact_id, trade_details')
               .eq('id', tradeUser.id)
               .maybeSingle()
-            const gstRegistered = userProfile?.trade_details?.gstRegistered === true
-            const taxType = gstRegistered ? 'INPUT' : 'NONE'
+            const gstOn = tradeInvoiceGstOn(body, userProfile?.trade_details?.gstRegistered)
+            const taxType = gstOn ? 'INPUT' : 'NONE'
 
             // Group by job
             const jobGroups: Record<string, any[]> = {}
@@ -9838,8 +9936,10 @@ if (import.meta.main) serve(async (req: Request) => {
 
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
             const subtotal = labourSubtotal + extraSubtotal
-            const gst = gstRegistered ? Math.round(subtotal * 0.1 * 100) / 100 : 0
-            const totalInc = Math.round((subtotal + gst) * 100) / 100
+            const invoiceEarningsDate = weekEnd || new Date().toISOString().slice(0, 10)
+            const money = tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate)
+            const gst = money.gst_amount
+            const totalInc = money.total_inc
 
             // ── M0 CAPTURE ENFORCEMENT (2026-06-12) ──────────────────────────
             // Reject zero-line submissions, unattributed lines, and missing
@@ -9972,9 +10072,10 @@ if (import.meta.main) serve(async (req: Request) => {
               week_end: weekEnd,
               total_hours: Math.round(totalHours * 100) / 100,
               total_breaks_minutes: totalBreaks,
-              subtotal_ex: Math.round(subtotal * 100) / 100,
+              subtotal_ex: money.gross_earned,
               gst,
               total_inc: totalInc,
+              ...tradeInvoiceMoneyFields(money),
               has_manual_overrides: hasOverrides,
               override_details: hasOverrides ? overrideDetails : null,
               notes: invoiceNotes || null,
@@ -10233,7 +10334,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 source: 'ops-api/generate_trade_invoice',
                 entity_type: 'trade_invoice',
                 entity_id: invoice.id,
-                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, total_inc: totalInc, client_priced_lines: clientPricedExtraCount, possible_duplicate_extra_lines: duplicateExtraCount },
+                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, ...tradeInvoiceMoneyResponse(money), client_priced_lines: clientPricedExtraCount, possible_duplicate_extra_lines: duplicateExtraCount },
               })
             } catch (e) { /* non-blocking */ }
 
@@ -10321,7 +10422,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
 
                 // Build Xero line items with tracking + correct tax type + rich descriptions
-                const allLines = [...lineItems.map((l: any) => {
+                const grossXeroLines = [...lineItems.map((l: any) => {
                   // Change 4: include builder ref in Xero description when present (makesafe jobs)
                   const builderRef = jobMap[l.job_id]?._external_ref || jobMap[l.job_id]?.metadata?.external_ref
                   return {
@@ -10358,6 +10459,11 @@ if (import.meta.main) serve(async (req: Request) => {
                     Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                   }
                 })]
+                const allLines = splitTradeInvoiceXeroLines(
+                  grossXeroLines,
+                  money,
+                  { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+                )
 
                 // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
                 // so the insurer/builder ref appears in the bill header, not just the line descriptions.
@@ -10382,7 +10488,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
-                    LineAmountTypes: gstRegistered ? 'Exclusive' : 'NoTax',
+                    LineAmountTypes: gstOn ? 'Exclusive' : 'NoTax',
                     LineItems: allLines,
                   }],
                 }
@@ -10405,6 +10511,8 @@ if (import.meta.main) serve(async (req: Request) => {
                       invoice_type: 'ACCPAY',
                       status: 'DRAFT',
                       reference: invoiceNumber,
+                      sub_total: money.gross_earned,
+                      total_tax: money.gst_amount,
                       total: totalInc,
                       amount_due: totalInc,
                       due_date: dueDate,
@@ -10486,7 +10594,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 invoice_id: invoice.id,
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
-                total_inc: totalInc,
+                ...tradeInvoiceMoneyResponse(money),
                 line_count: lineItems.length + extraLineItems.length,
                 xero_bill_id: null,
                 xero_bill_number: null,
@@ -10504,7 +10612,7 @@ if (import.meta.main) serve(async (req: Request) => {
               invoice_id: invoice.id,
               invoice_number: invoiceNumber,
               total_hours: totalHours,
-              total_inc: totalInc,
+              ...tradeInvoiceMoneyResponse(money),
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
               xero_bill_number: xeroBillNumber,
@@ -44775,8 +44883,8 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .eq('id', userId)
     .single()
 
-  const stGstRegistered = tradeUser?.trade_details?.gstRegistered !== false
-  const stTaxType = stGstRegistered ? 'INPUT' : 'NONE'
+  const stGstOn = tradeInvoiceGstOn(body, tradeUser?.trade_details?.gstRegistered)
+  const stTaxType = stGstOn ? 'INPUT' : 'NONE'
 
   // Resolve Xero supplier contact — auto-create only if absent.
   // Exact name lookup handles suppliers whose Supabase login email differs from
@@ -44933,8 +45041,14 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     throw new Error('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
   }
   // ── END M0 LEGACY GUARD ──
-  const gst = Math.round(subtotal * 0.1 * 100) / 100
-  const total = Math.round((subtotal + gst) * 100) / 100
+  const stMoney = tradeInvoiceMoney(subtotal, stGstOn, week_ending)
+  const gst = stMoney.gst_amount
+  const total = stMoney.total_inc
+  const stXeroLineItems = splitTradeInvoiceXeroLines(
+    lineItems,
+    stMoney,
+    { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+  )
 
   // Build Xero payload
   const dueDate = new Date(new Date(week_ending + 'T00:00:00Z').getTime() + 14 * 86400000)
@@ -44947,8 +45061,8 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`,
       DueDate: dueDate,
       Status: 'DRAFT',
-      LineAmountTypes: stGstRegistered ? 'Exclusive' : 'NoTax',
-      LineItems: lineItems,
+      LineAmountTypes: stGstOn ? 'Exclusive' : 'NoTax',
+      LineItems: stXeroLineItems,
     }],
   }
 
@@ -44972,7 +45086,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         invoice_type: 'ACCPAY',
         status: 'DRAFT',
         reference: `${tradeName} | WE ${week_ending}`,
-        sub_total: subtotal,
+        sub_total: stMoney.gross_earned,
         total_tax: gst,
         total: total,
         amount_due: total,
@@ -44998,9 +45112,10 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     week_start: weekStart,
     week_end: week_ending,
     total_hours: Math.round(totalHours * 100) / 100,
-    subtotal_ex: subtotal,
+    subtotal_ex: stMoney.gross_earned,
     gst,
     total_inc: total,
+    ...tradeInvoiceMoneyFields(stMoney),
     notes: notes || null,
     xero_bill_id: billNumber || null,
     status: xeroInvId ? 'pushed_to_xero' : 'draft',
@@ -45026,14 +45141,19 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     if (lineErr) console.error('Non-blocking: failed to write trade invoice lines:', lineErr.message)
   }
 
-  return { success: true, xero_bill_number: billNumber, total }
+  return {
+    success: true,
+    xero_bill_number: billNumber,
+    total,
+    ...tradeInvoiceMoneyResponse(stMoney),
+  }
 }
 
 // ── my_trade_invoices: invoice history for a trade ──
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, total_inc, xero_bill_id, status, created_at')
+    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, xero_bill_id, status, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(20)
@@ -45092,7 +45212,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, total_inc, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_number, client_name, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit_rate)')
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_number, client_name, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit_rate)')
     .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 
