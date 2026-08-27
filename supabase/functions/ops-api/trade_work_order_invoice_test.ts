@@ -9,7 +9,6 @@ import {
   _canSubmitWorkOrderInvoice,
   _findBlockingWorkOrderInvoice,
   _selectWorkOrderNegativeCharges,
-  _workOrderInvoiceIdempotencyKey,
   handleTradeWorkOrdersAction,
   type TradeAuthContext,
   tradeWorkOrders,
@@ -477,51 +476,6 @@ Deno.test("only a live invoice or another trade's draft holds a work order", () 
   assertEquals(
     _findBlockingWorkOrderInvoice([live, foreignDraft], HENRY.id)?.id,
     "live",
-  );
-});
-
-Deno.test("the Xero idempotency key covers the submitter, work order, total and charge selection", () => {
-  const charges = [
-    { line_id: "line-b", amount_ex: -100 },
-    { line_id: "line-a", amount_ex: -50 },
-  ];
-  const key = _workOrderInvoiceIdempotencyKey("henry", "wo-1", charges, 961.9);
-
-  assertEquals(key.startsWith("wo-inv-henry-wo-1-"), true);
-  assertEquals(key.length <= 128, true);
-  assertEquals(
-    _workOrderInvoiceIdempotencyKey(
-      "henry",
-      "wo-1",
-      [charges[1], charges[0]],
-      961.9,
-    ),
-    key,
-  );
-  assertEquals(
-    _workOrderInvoiceIdempotencyKey("henry", "wo-1", [], 961.9) === key,
-    false,
-  );
-  assertEquals(
-    _workOrderInvoiceIdempotencyKey("henry", "wo-1", charges, 1000) === key,
-    false,
-  );
-  assertEquals(
-    _workOrderInvoiceIdempotencyKey(
-      "henry",
-      "wo-1",
-      [charges[0], { line_id: "line-a", amount_ex: -75 }],
-      961.9,
-    ) === key,
-    false,
-  );
-  assertEquals(
-    _workOrderInvoiceIdempotencyKey("other", "wo-1", charges, 961.9) === key,
-    false,
-  );
-  assertEquals(
-    _workOrderInvoiceIdempotencyKey("henry", "wo-2", charges, 961.9) === key,
-    false,
   );
 });
 

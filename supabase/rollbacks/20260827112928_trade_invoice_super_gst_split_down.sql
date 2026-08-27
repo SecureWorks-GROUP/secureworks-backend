@@ -1,5 +1,7 @@
 BEGIN;
 
+DROP FUNCTION IF EXISTS public.replace_trade_invoice_draft_v1(uuid, uuid, uuid, uuid[]);
+
 DROP TRIGGER IF EXISTS trg_trade_invoices_require_money_split
   ON public.trade_invoices;
 DROP FUNCTION IF EXISTS public.enforce_trade_invoice_money_split_v1();

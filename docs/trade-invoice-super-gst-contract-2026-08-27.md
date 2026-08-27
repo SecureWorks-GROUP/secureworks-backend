@@ -96,11 +96,25 @@ losing the Xero identity; only a reconciled response advances the row to
 The ops retry validates `trade_invoice_lines.line_total_ex` against stored
 hours/rate or quantity/rate. Historical work-order lines that predate those
 quantity/rate facts retry as one line from the validated extended amount; the
-system does not invent hours. New work-order and per-metre lines persist their
-reconstructable quantity/rate. Draft autosave builds a complete replacement and
-deletes the prior draft only after every replacement write succeeds.
+system does not invent hours, and null/undefined/empty extended amounts are
+refused before JavaScript numeric coercion can turn them into zero. New
+work-order and per-metre lines persist their reconstructable quantity/rate.
+
+Every create and office-retry route reconstructs the same Xero idempotency key
+from the persisted `trade_invoices.id`. A checkpointed external identity is
+reconciled against that exact Xero bill and blocks invoice rejection or
+deletion. Trade deletion is limited to unsubmitted `draft` rows so a retryable
+invoice cannot lose its operation key; this contract does not invent a voiding
+path.
+
+Draft autosave and submission build a complete replacement before touching the
+prior draft. `replace_trade_invoice_draft_v1` then atomically transfers only
+the replacement's assignment locks, releases any other stale prior-draft locks,
+and deletes the prior header only when it is still a same-user draft with no
+Xero identity. A failed guard rolls the entire transfer/delete back and the new
+replacement is cleaned up, preserving the prior draft.
 
 Apply `20260827112928_trade_invoice_super_gst_split.sql` before the matching
-`ops-api`. The insert trigger requires the full split for every new row while
-allowing pre-cutover rows to remain visibly null rather than fabricating
-historical withholding.
+`ops-api`. The insert trigger requires the full split for every new row, and
+the migration owns the guarded replacement RPC, while allowing pre-cutover rows
+to remain visibly null rather than fabricating historical withholding.

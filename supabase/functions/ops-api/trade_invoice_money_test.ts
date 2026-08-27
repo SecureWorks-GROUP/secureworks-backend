@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix
+// deno-lint-ignore-file no-import-prefix require-await
 
 import {
   assert,
@@ -258,20 +258,28 @@ Deno.test("checkpointed Xero retry accepts only the exact reconciled bill", () =
     { superAccountCode: "306" },
   );
   assertEquals(
-    assertExistingTradeInvoiceXeroBill({
-      InvoiceID: "bill-1",
-      InvoiceNumber: "BILL-1",
-      LineItems: lines,
-    }, "bill-1", money),
+    assertExistingTradeInvoiceXeroBill(
+      {
+        InvoiceID: "bill-1",
+        InvoiceNumber: "BILL-1",
+        LineItems: lines,
+      },
+      "bill-1",
+      money,
+    ),
     { xeroBillId: "bill-1", xeroBillNumber: "BILL-1" },
   );
   assertThrows(
     () =>
-      assertExistingTradeInvoiceXeroBill({
-        InvoiceID: "bill-2",
-        InvoiceNumber: "BILL-2",
-        LineItems: lines,
-      }, "bill-1", money),
+      assertExistingTradeInvoiceXeroBill(
+        {
+          InvoiceID: "bill-2",
+          InvoiceNumber: "BILL-2",
+          LineItems: lines,
+        },
+        "bill-1",
+        money,
+      ),
     TradeInvoiceMoneyError,
     "exact checkpointed trade bill",
   );
@@ -313,6 +321,23 @@ Deno.test("retry line recovery validates stored shapes and falls back to line_to
     TradeInvoiceMoneyError,
     "do not match line_total_ex",
   );
+});
+
+Deno.test("retry line recovery rejects absent and empty line_total_ex before numeric coercion", () => {
+  for (const lineTotalEx of [null, undefined, "", "   ", false]) {
+    assertThrows(
+      () =>
+        resolvePersistedTradeInvoiceLineAmount({
+          total_hours: 0,
+          hourly_rate: 0,
+          quantity: null,
+          unit_rate: null,
+          line_total_ex: lineTotalEx,
+        }),
+      TradeInvoiceMoneyError,
+      "missing a validated line_total_ex",
+    );
+  }
 });
 
 Deno.test("invoice presenter publishes server cash payable and leaves legacy history visibly unresolved", () => {

@@ -282,29 +282,6 @@ Deno.test("index.ts decides the lock before issuing the stamp UPDATE", () => {
   assertStringIncludes(INDEX, "if (!lockPlan.ok) {");
 });
 
-Deno.test("index.ts promotes a reused weekly draft by compare-and-swap", () => {
-  // The weekly draft row (and its id) is shared across submissions. Without a
-  // status='draft' CAS on the promotion UPDATE, two concurrent submits share
-  // invoice.id: the loser's rollback then unstamps the rows the winner just
-  // claimed while the winner pushes the Xero bill — unheld, re-billable
-  // assignments on a live pushed invoice (double pay).
-  const promoteAt = INDEX.indexOf(".update(invoicePayload)");
-  assert(promoteAt > 0, "reused-draft promotion must exist");
-  const promote = INDEX.slice(promoteAt, promoteAt + 300);
-  assertStringIncludes(promote, ".eq('status', 'draft')");
-  assertStringIncludes(promote, ".select('id')");
-  assertStringIncludes(INDEX, "This invoice is already being submitted.");
-  // The stale-line delete must run AFTER winning the CAS, or a losing
-  // concurrent submit deletes the winner's freshly inserted lines.
-  const lineClearAt = INDEX.indexOf(
-    "const { error: lineClearErr } = await client.from('trade_invoice_lines')",
-  );
-  assert(
-    lineClearAt > promoteAt,
-    "draft lines are cleared only after the CAS promotion",
-  );
-});
-
 Deno.test("index.ts treats the current invoice's own stamps as claimable", () => {
   // A failed rollback leaves invoiced_in = invoice.id while the invoice is
   // demoted to 'draft'. The retry reuses that draft and promotes it LIVE before

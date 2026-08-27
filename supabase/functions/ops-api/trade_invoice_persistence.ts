@@ -2,8 +2,53 @@ export type TradeInvoicePersistenceOps = {
   createInvoice: () => Promise<string>;
   insertLines: (invoiceId: string) => Promise<void>;
   deleteInvoice: (invoiceId: string) => Promise<void>;
-  deletePriorDraft?: (invoiceId: string) => Promise<void>;
+  replacePriorDraft?: (
+    priorDraftId: string,
+    replacementId: string,
+  ) => Promise<void>;
 };
+
+export function tradeInvoiceXeroIdempotencyKey(invoiceId: unknown): string {
+  const normalized = String(invoiceId ?? "").trim();
+  if (!normalized) {
+    throw new Error("Trade invoice ID is required for Xero idempotency");
+  }
+  return `trade-inv-${normalized}`;
+}
+
+export function tradeInvoiceHasExternalXeroIdentity(value: unknown): boolean {
+  const invoice = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  return String(invoice.xero_bill_id ?? "").trim() !== "" ||
+    String(invoice.xero_pushed_at ?? "").trim() !== "";
+}
+
+export async function replaceTradeInvoicePriorDraft(
+  client: {
+    rpc: (
+      name: string,
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+  },
+  priorDraftId: string,
+  replacementId: string,
+  userId: string,
+  assignmentIds: string[] = [],
+): Promise<void> {
+  const { data, error } = await client.rpc("replace_trade_invoice_draft_v1", {
+    p_prior_draft_id: priorDraftId,
+    p_replacement_id: replacementId,
+    p_user_id: userId,
+    p_assignment_ids: [...new Set(assignmentIds)],
+  });
+  if (error || String(data || "") !== replacementId) {
+    throw new Error(
+      "Failed to replace prior trade invoice draft: " +
+        (error?.message || "replacement identity was not confirmed"),
+    );
+  }
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -46,10 +91,12 @@ export async function replaceTradeInvoiceDraftKeepingPrior(
   if (!priorDraftId) return replacementId;
 
   try {
-    if (!ops.deletePriorDraft) {
-      throw new Error("Draft replacement requires a guarded prior-draft delete");
+    if (!ops.replacePriorDraft) {
+      throw new Error(
+        "Draft replacement requires a guarded replacement boundary",
+      );
     }
-    await ops.deletePriorDraft(priorDraftId);
+    await ops.replacePriorDraft(priorDraftId, replacementId);
   } catch (error) {
     return cleanupFailedInvoice(ops, replacementId, error);
   }

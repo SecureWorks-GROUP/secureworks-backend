@@ -270,7 +270,19 @@ export function resolvePersistedTradeInvoiceLineAmount(
   const line = value && typeof value === "object"
     ? value as Record<string, unknown>
     : {};
-  const lineTotalEx = Number(line.line_total_ex);
+  const rawLineTotalEx = line.line_total_ex;
+  if (
+    rawLineTotalEx === null || rawLineTotalEx === undefined ||
+    (typeof rawLineTotalEx === "string" && rawLineTotalEx.trim() === "") ||
+    (typeof rawLineTotalEx !== "number" &&
+      typeof rawLineTotalEx !== "string")
+  ) {
+    throw new TradeInvoiceMoneyError(
+      "LINE_AMOUNT_UNRESOLVED",
+      "Trade invoice line is missing a validated line_total_ex amount",
+    );
+  }
+  const lineTotalEx = Number(rawLineTotalEx);
   if (!Number.isFinite(lineTotalEx)) {
     throw new TradeInvoiceMoneyError(
       "LINE_AMOUNT_UNRESOLVED",

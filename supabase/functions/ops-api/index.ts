@@ -359,6 +359,9 @@ import {
 import {
   createTradeInvoiceBeforeExternalWrite,
   replaceTradeInvoiceDraftKeepingPrior,
+  replaceTradeInvoicePriorDraft,
+  tradeInvoiceHasExternalXeroIdentity,
+  tradeInvoiceXeroIdempotencyKey,
 } from './trade_invoice_persistence.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
@@ -7521,16 +7524,18 @@ if (import.meta.main) serve(async (req: Request) => {
         // it) and the trade can re-submit corrected hours.                    [D6]
         const { invoice_id: rejInvId, note: rejNote } = body
         if (!rejInvId) throw new ApiError('invoice_id required', 400)
-        const { data: rejInv } = await client.from('trade_invoices')
-          .select('id, status, xero_bill_id').eq('id', rejInvId).maybeSingle()
+        const { data: rejInv, error: rejLookupErr } = await client.from('trade_invoices')
+          .select('id, status, xero_bill_id, xero_pushed_at').eq('id', rejInvId).maybeSingle()
+        if (rejLookupErr) throw new Error('Failed to inspect trade invoice: ' + rejLookupErr.message)
         if (!rejInv) throw new ApiError('Invoice not found', 404)
-        if (rejInv.xero_bill_id || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
+        if (tradeInvoiceHasExternalXeroIdentity(rejInv) || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
         const { data: rejected, error: rejErr } = await client.from('trade_invoices')
           .update({ status: 'ops-reject', query_note: rejNote || 'Rejected by ops — re-submit corrected hours.' })
           .eq('id', rejInvId)
           .is('xero_bill_id', null)
+          .is('xero_pushed_at', null)
           .select('id')
           .maybeSingle()
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
@@ -7686,7 +7691,7 @@ if (import.meta.main) serve(async (req: Request) => {
           }],
         }
 
-        const idempotencyKey = 'trade-inv-' + invoice_id
+        const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
         const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
         const bill = xeroResult?.Invoices?.[0]
         const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
@@ -9285,18 +9290,13 @@ if (import.meta.main) serve(async (req: Request) => {
                   throw new Error('Failed to clean up work-order invoice: ' + (deleteErr?.message || 'invoice was not deleted'))
                 }
               },
-              deletePriorDraft: async (invoiceId) => {
-                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
-                  .delete()
-                  .eq('id', invoiceId)
-                  .eq('status', 'draft')
-                  .is('xero_bill_id', null)
-                  .select('id')
-                  .maybeSingle()
-                if (deleteErr || deleted?.id !== invoiceId) {
-                  throw new Error('Failed to clean up work-order invoice: ' + (deleteErr?.message || 'draft changed before deletion'))
-                }
-              },
+              replacePriorDraft: (priorDraftId, replacementId) =>
+                replaceTradeInvoicePriorDraft(
+                  client,
+                  priorDraftId,
+                  replacementId,
+                  tradeUser.id,
+                ),
             }, retryDrafts[0]?.id || null)
             const tradeInv = { id: tradeInvoiceId }
 
@@ -9340,14 +9340,10 @@ if (import.meta.main) serve(async (req: Request) => {
               }],
             }
 
-            // Stable key prevents duplicate bills — if previous push succeeded but we missed the response,
-            // Xero returns the cached success (same bill ID, no duplicate). Cached errors expire after 12hrs.
-            const woIdempotencyKey = _workOrderInvoiceIdempotencyKey(
-              tradeUser.id,
-              work_order_id,
-              selectedNegativeCharges,
-              total,
-            )
+            // The persisted local invoice ID owns the Xero operation key. Office
+            // retry reconstructs this exact key, so a lost create response can
+            // never cross into a second ACCPAY bill.
+            const woIdempotencyKey = tradeInvoiceXeroIdempotencyKey(tradeInv.id)
             let xeroSuccess = false
             let xeroBillId = ''
             let xeroBillNumber = ''
@@ -9443,6 +9439,11 @@ if (import.meta.main) serve(async (req: Request) => {
             const extras = Array.isArray(draftExtras)
               ? draftExtras.filter((e: any) => e?.source !== 'clock' && e?._source !== 'clock' && e?.source !== 'server_labour')
               : []
+            const draftAssignmentIds = [...new Set(
+              labourLines.flatMap((line: any) =>
+                Array.isArray(line?.assignment_ids) ? line.assignment_ids : []
+              ).filter(Boolean),
+            )]
             for (const e of extras) extraTotal += Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100
             const draftSubtotal = labourTotal + extraTotal
             const draftWeekEnd = draftWeekStart
@@ -9516,18 +9517,14 @@ if (import.meta.main) serve(async (req: Request) => {
                   throw new Error('Failed to delete replacement ' + invoiceId + ': ' + (deleteErr?.message || 'invoice row was not deleted'))
                 }
               },
-              deletePriorDraft: async (invoiceId) => {
-                const { data: deletedDraft, error: deleteErr } = await client.from('trade_invoices')
-                  .delete()
-                  .eq('id', invoiceId)
-                  .eq('status', 'draft')
-                  .is('xero_bill_id', null)
-                  .select('id')
-                  .maybeSingle()
-                if (deleteErr || deletedDraft?.id !== invoiceId) {
-                  throw new Error('Failed to delete draft ' + invoiceId + ': ' + (deleteErr?.message || 'draft row was not deleted'))
-                }
-              },
+              replacePriorDraft: (priorDraftId, replacementId) =>
+                replaceTradeInvoicePriorDraft(
+                  client,
+                  priorDraftId,
+                  replacementId,
+                  tradeUser.id,
+                  draftAssignmentIds,
+                ),
             }, existingDraftId)
             return json({ success: true, draft_id: draftId, ...tradeInvoiceMoneyResponse(draftMoney) })
           }
@@ -9594,15 +9591,37 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'delete_trade_invoice': {
             const { invoice_id: delInvId } = body
             if (!delInvId) throw new ApiError('invoice_id required', 400)
-            const { data: delInv } = await client.from('trade_invoices')
-              .select('id, status')
+            const { data: delInv, error: delLookupErr } = await client.from('trade_invoices')
+              .select('id, status, xero_bill_id, xero_pushed_at')
               .eq('id', delInvId)
               .eq('user_id', tradeUser.id)
-              .single()
+              .maybeSingle()
+            if (delLookupErr) throw new Error('Failed to inspect trade invoice: ' + delLookupErr.message)
             if (!delInv) throw new ApiError('Invoice not found', 404)
+            if (tradeInvoiceHasExternalXeroIdentity(delInv)) {
+              throw new ApiError('Cannot delete an invoice with an external Xero identity', 409)
+            }
             if (delInv.status === 'paid') throw new ApiError('Cannot delete a paid invoice', 400)
-            await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', delInvId)
-            await client.from('trade_invoices').delete().eq('id', delInvId)
+            if (delInv.status !== 'draft') {
+              throw new ApiError('Only an unsubmitted trade invoice draft can be deleted', 409)
+            }
+            // Delete only through the header CAS. Lines cascade from the owned
+            // invoice row, so a concurrent Xero checkpoint cannot leave the
+            // external identity behind after its reconciliation evidence was
+            // already deleted.
+            const { data: deleted, error: delErr } = await client.from('trade_invoices')
+              .delete()
+              .eq('id', delInvId)
+              .eq('user_id', tradeUser.id)
+              .eq('status', 'draft')
+              .is('xero_bill_id', null)
+              .is('xero_pushed_at', null)
+              .select('id')
+              .maybeSingle()
+            if (delErr) throw new Error('Failed to delete trade invoice: ' + delErr.message)
+            if (deleted?.id !== delInvId) {
+              throw new ApiError('Cannot delete an invoice while its external identity or status is changing', 409)
+            }
             return json({ success: true })
           }
           case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
@@ -10308,6 +10327,11 @@ if (import.meta.main) serve(async (req: Request) => {
                 wo_labour_lines: dbLine.wo_labour_lines ?? null,
               }
             }
+            const includedAssignmentIds = lineItems
+              .flatMap((line: any) =>
+                Array.isArray(line.assignment_ids) ? line.assignment_ids : []
+              )
+              .filter(Boolean)
             const invoiceId = await replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
@@ -10337,18 +10361,14 @@ if (import.meta.main) serve(async (req: Request) => {
                   throw new Error('Failed to clean up replacement invoice: ' + (deleteErr?.message || 'invoice was not deleted'))
                 }
               },
-              deletePriorDraft: async (invoiceIdToDelete) => {
-                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
-                  .delete()
-                  .eq('id', invoiceIdToDelete)
-                  .eq('status', 'draft')
-                  .is('xero_bill_id', null)
-                  .select('id')
-                  .maybeSingle()
-                if (deleteErr || deleted?.id !== invoiceIdToDelete) {
-                  throw new Error('Failed to replace draft invoice: ' + (deleteErr?.message || 'draft changed before deletion'))
-                }
-              },
+              replacePriorDraft: (priorDraftIdToReplace, replacementId) =>
+                replaceTradeInvoicePriorDraft(
+                  client,
+                  priorDraftIdToReplace,
+                  replacementId,
+                  tradeUser.id,
+                  includedAssignmentIds,
+                ),
             }, priorDraftId)
             const invoice = { id: invoiceId }
 
@@ -10356,9 +10376,6 @@ if (import.meta.main) serve(async (req: Request) => {
             // Marks each manual/clocked assignment as belonging to this invoice so
             // myHours() and the dup-assignment guard hide it from future weeks
             // (covers rescheduling across a week boundary). Must complete before Xero. [F3]
-            const includedAssignmentIds = lineItems
-              .flatMap((l: any) => Array.isArray(l.assignment_ids) ? l.assignment_ids : [])
-              .filter(Boolean)
             if (includedAssignmentIds.length > 0) {
               const expectedAssignmentIds = [...new Set(includedAssignmentIds)]
               // assignment id → job number, so a refusal names the offending job
@@ -10662,7 +10679,14 @@ if (import.meta.main) serve(async (req: Request) => {
                     LineItems: allLines,
                   }],
                 }
-                const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', 'trade-inv-' + invoice.id)
+                const xeroResult = await xeroPost(
+                  '/Invoices',
+                  accessToken,
+                  tenantId,
+                  xeroPayload,
+                  'PUT',
+                  tradeInvoiceXeroIdempotencyKey(invoice.id),
+                )
                 const bill = xeroResult?.Invoices?.[0]
                 createdXeroBillId = String(bill?.InvoiceID || '')
                 if (createdXeroBillId) {
@@ -12204,11 +12228,11 @@ export function _calculateWorkOrderInvoiceTotals(
 }
 
 // A work order is only free to invoice when no live invoice holds it. A stale
-// draft releases it for its OWN submitter only: the Xero idempotency key is
-// per submitter, so another trade's unresolved draft may still correspond to a
-// bill Xero created, and a second submitter would raise a duplicate. A live
-// invoice outranks a foreign draft, so the caller is always told the reason
-// that actually holds the work order.
+// draft releases it for its OWN submitter only: that caller can replace the
+// local draft before the persisted replacement ID becomes the one Xero
+// operation key. Another trade cannot safely adopt or delete that unresolved
+// ownership. A live invoice outranks a foreign draft, so the caller is always
+// told the reason that actually holds the work order.
 export function _findBlockingWorkOrderInvoice(
   invoices: any[],
   viewerId: string,
@@ -12222,31 +12246,6 @@ export function _findBlockingWorkOrderInvoice(
     String(invoice?.status || '') === 'draft' &&
     String(invoice?.user_id || '') !== String(viewerId)
   ) || null
-}
-
-// Xero replays the cached response for a repeated Idempotency-Key, so the key
-// must cover everything that determines the pushed amount — the invoice total
-// and the selected negative charges — not just the submitter and work order.
-export function _workOrderInvoiceIdempotencyKey(
-  userId: string,
-  workOrderId: string,
-  negativeCharges: Array<{ line_id?: string; amount_ex?: number }> = [],
-  totalInc = 0,
-): string {
-  const fingerprintSource = [
-    roundMoney(Number(totalInc) || 0).toFixed(2),
-    ...(negativeCharges || [])
-      .map((charge) =>
-        `${String(charge?.line_id || '')}:${roundMoney(Number(charge?.amount_ex) || 0).toFixed(2)}`
-      )
-      .sort(),
-  ].join('|')
-  let hash = 0x811c9dc5
-  for (let i = 0; i < fingerprintSource.length; i++) {
-    hash ^= fingerprintSource.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return `wo-inv-${userId}-${workOrderId}-${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
 async function readWorkOrderInvoiceRows(
@@ -45326,7 +45325,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   }
 
   // Push to Xero (reuse token from contact resolution above)
-  const idempotencyKey = `trade-inv-${insertedInvoice.id}`
+  const idempotencyKey = tradeInvoiceXeroIdempotencyKey(insertedInvoice.id)
   const result = await xeroPost('/Invoices', stAt, stTi, xeroPayload, 'PUT', idempotencyKey)
 
   const xeroInv = result?.Invoices?.[0]

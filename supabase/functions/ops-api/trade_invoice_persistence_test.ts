@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix
+// deno-lint-ignore-file no-import-prefix require-await
 
 import {
   assertEquals,
@@ -7,7 +7,79 @@ import {
 import {
   createTradeInvoiceBeforeExternalWrite,
   replaceTradeInvoiceDraftKeepingPrior,
+  replaceTradeInvoicePriorDraft,
+  tradeInvoiceHasExternalXeroIdentity,
+  tradeInvoiceXeroIdempotencyKey,
 } from "./trade_invoice_persistence.ts";
+
+Deno.test("trade invoice Xero idempotency key is reconstructable from the persisted invoice ID", () => {
+  assertEquals(
+    tradeInvoiceXeroIdempotencyKey("invoice-123"),
+    "trade-inv-invoice-123",
+  );
+  assertEquals(
+    tradeInvoiceXeroIdempotencyKey(" invoice-123 "),
+    "trade-inv-invoice-123",
+  );
+});
+
+Deno.test("any persisted Xero identity fences destructive invoice actions", () => {
+  assertEquals(tradeInvoiceHasExternalXeroIdentity({}), false);
+  assertEquals(
+    tradeInvoiceHasExternalXeroIdentity({ xero_bill_id: "bill-1" }),
+    true,
+  );
+  assertEquals(
+    tradeInvoiceHasExternalXeroIdentity({
+      xero_bill_id: null,
+      xero_pushed_at: "2026-08-27T12:00:00Z",
+    }),
+    true,
+  );
+});
+
+Deno.test("prior draft replacement delegates lock transfer and delete to one RPC", async () => {
+  const calls: unknown[] = [];
+  await replaceTradeInvoicePriorDraft(
+    {
+      rpc: async (name, args) => {
+        calls.push({ name, args });
+        return { data: "replacement", error: null };
+      },
+    },
+    "prior",
+    "replacement",
+    "trade-user",
+    ["asn-1", "asn-1", "asn-2"],
+  );
+
+  assertEquals(calls, [{
+    name: "replace_trade_invoice_draft_v1",
+    args: {
+      p_prior_draft_id: "prior",
+      p_replacement_id: "replacement",
+      p_user_id: "trade-user",
+      p_assignment_ids: ["asn-1", "asn-2"],
+    },
+  }]);
+});
+
+Deno.test("prior draft replacement refuses an unconfirmed RPC result", async () => {
+  await assertRejects(
+    () =>
+      replaceTradeInvoicePriorDraft(
+        {
+          rpc: async () => ({ data: null, error: null }),
+        },
+        "prior",
+        "replacement",
+        "trade-user",
+        [],
+      ),
+    Error,
+    "replacement identity was not confirmed",
+  );
+});
 
 Deno.test("trade invoice persistence refuses before external work when line tracking fails", async () => {
   const calls: string[] = [];
@@ -52,7 +124,7 @@ Deno.test("draft replacement keeps the prior draft when replacement lines fail",
         deleteInvoice: async (id) => {
           deleted.push(id);
         },
-        deletePriorDraft: async (id) => {
+        replacePriorDraft: async (id) => {
           deleted.push(id);
         },
       }, "prior"),
@@ -76,8 +148,8 @@ Deno.test("draft replacement deletes the prior draft only after the replacement 
     deleteInvoice: async (invoiceId) => {
       calls.push(`delete:${invoiceId}`);
     },
-    deletePriorDraft: async (invoiceId) => {
-      calls.push(`delete:${invoiceId}`);
+    replacePriorDraft: async (invoiceId, replacementId) => {
+      calls.push(`replace:${invoiceId}->${replacementId}`);
     },
   }, "prior");
 
@@ -85,11 +157,11 @@ Deno.test("draft replacement deletes the prior draft only after the replacement 
   assertEquals(calls, [
     "create:replacement",
     "lines:replacement",
-    "delete:prior",
+    "replace:prior->replacement",
   ]);
 });
 
-Deno.test("draft replacement cleanup never uses the guarded prior delete", async () => {
+Deno.test("draft replacement cleanup never re-enters the guarded replacement boundary", async () => {
   const calls: string[] = [];
   await assertRejects(
     () =>
@@ -99,13 +171,16 @@ Deno.test("draft replacement cleanup never uses the guarded prior delete", async
         deleteInvoice: async (invoiceId) => {
           calls.push(`cleanup:${invoiceId}`);
         },
-        deletePriorDraft: async (invoiceId) => {
-          calls.push(`guarded:${invoiceId}`);
+        replacePriorDraft: async (invoiceId, replacementId) => {
+          calls.push(`guarded:${invoiceId}->${replacementId}`);
           throw new Error("prior changed");
         },
       }, "prior"),
     Error,
     "prior changed",
   );
-  assertEquals(calls, ["guarded:prior", "cleanup:replacement"]);
+  assertEquals(calls, [
+    "guarded:prior->replacement",
+    "cleanup:replacement",
+  ]);
 });

@@ -78,3 +78,96 @@ CREATE TRIGGER trg_trade_invoices_require_money_split
   BEFORE INSERT ON public.trade_invoices
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_trade_invoice_money_split_v1();
+
+-- Replacing a retryable draft must not delete the header while assignments
+-- still point at it. This RPC owns the transfer + guarded delete in one
+-- database transaction, so any failed guard or FK write rolls the whole
+-- replacement boundary back and leaves the prior draft recoverable.
+CREATE OR REPLACE FUNCTION public.replace_trade_invoice_draft_v1(
+  p_prior_draft_id uuid,
+  p_replacement_id uuid,
+  p_user_id uuid,
+  p_assignment_ids uuid[] DEFAULT ARRAY[]::uuid[]
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_prior_user_id uuid;
+  v_prior_status text;
+  v_prior_xero_bill_id text;
+  v_prior_xero_pushed_at timestamptz;
+  v_replacement_user_id uuid;
+  v_replacement_xero_bill_id text;
+  v_replacement_xero_pushed_at timestamptz;
+  v_deleted_count integer;
+BEGIN
+  IF p_prior_draft_id IS NULL
+     OR p_replacement_id IS NULL
+     OR p_user_id IS NULL
+     OR p_prior_draft_id = p_replacement_id THEN
+    RAISE EXCEPTION 'invalid trade invoice draft replacement identity'
+      USING ERRCODE = '22023';
+  END IF;
+
+  SELECT user_id, status, xero_bill_id, xero_pushed_at
+    INTO v_prior_user_id, v_prior_status, v_prior_xero_bill_id,
+      v_prior_xero_pushed_at
+  FROM public.trade_invoices
+  WHERE id = p_prior_draft_id
+  FOR UPDATE;
+
+  IF NOT FOUND
+     OR v_prior_user_id <> p_user_id
+     OR v_prior_status <> 'draft'
+     OR v_prior_xero_bill_id IS NOT NULL
+     OR v_prior_xero_pushed_at IS NOT NULL THEN
+    RAISE EXCEPTION 'prior trade invoice is not a replaceable draft'
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  SELECT user_id, xero_bill_id, xero_pushed_at
+    INTO v_replacement_user_id, v_replacement_xero_bill_id,
+      v_replacement_xero_pushed_at
+  FROM public.trade_invoices
+  WHERE id = p_replacement_id
+  FOR UPDATE;
+
+  IF NOT FOUND
+     OR v_replacement_user_id <> p_user_id
+     OR v_replacement_xero_bill_id IS NOT NULL
+     OR v_replacement_xero_pushed_at IS NOT NULL THEN
+    RAISE EXCEPTION 'replacement trade invoice is not locally owned'
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  UPDATE public.job_assignments
+  SET invoiced_in = CASE
+    WHEN id = ANY(COALESCE(p_assignment_ids, ARRAY[]::uuid[]))
+      THEN p_replacement_id
+    ELSE NULL
+  END
+  WHERE invoiced_in = p_prior_draft_id;
+
+  DELETE FROM public.trade_invoices
+  WHERE id = p_prior_draft_id;
+  GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+
+  IF v_deleted_count <> 1 THEN
+    RAISE EXCEPTION 'prior trade invoice changed before replacement'
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  RETURN p_replacement_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.replace_trade_invoice_draft_v1(uuid, uuid, uuid, uuid[])
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.replace_trade_invoice_draft_v1(uuid, uuid, uuid, uuid[])
+  TO service_role;
+
+COMMENT ON FUNCTION public.replace_trade_invoice_draft_v1(uuid, uuid, uuid, uuid[]) IS
+  'Atomically transfers assignment locks present on a complete replacement, releases other stale prior-draft locks, and deletes only a same-user draft with no Xero identity.';
