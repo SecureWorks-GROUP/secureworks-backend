@@ -20,6 +20,7 @@ function intakeDraft(
     status?: string;
     receivedAt?: string;
     reportType?: string | null;
+    subject?: string;
     bodyPreview?: string;
     builderEmailTextForTrade?: string;
     attachmentName?: string;
@@ -45,7 +46,7 @@ function intakeDraft(
     external_ref: externalRef,
     client_name: "Fixture Client",
     site_address: `${id} Fixture Street`,
-    subject: `Work Order ${externalRef}`,
+    subject: options.subject || `Work Order ${externalRef}`,
     body_preview: options.bodyPreview || "Please attend and make safe.",
     report_type: options.reportType ?? null,
     extraction_json: {
@@ -317,12 +318,25 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
   });
   const missingExistingCompany = intakeDraft("61013");
   const conflictingExistingIdentity = intakeDraft("61014");
+  const fullEmailFamilyAbstention = intakeDraft("61015", {
+    family: "roof_report",
+    reportType: "roof_report",
+    bodyPreview: "Please complete the roof report.",
+    builderEmailTextForTrade: "For your records.",
+  });
+  const previewFamilyAbstention = intakeDraft("61016", {
+    family: "roof_report",
+    subject: "Claim correspondence",
+    bodyPreview: "For your records.",
+  });
   const { client, calls } = fakeClient(
     [
       missingExistingIdentity,
       fullEmailFamilyConflict,
       missingExistingCompany,
       conflictingExistingIdentity,
+      fullEmailFamilyAbstention,
+      previewFamilyAbstention,
     ],
     [
       obligationJob("61010", { workOrder: "", po: "" }),
@@ -332,6 +346,8 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
         workOrder: "MLB-61014PO-99999",
         po: "PO-61014",
       }),
+      obligationJob("61015", { family: "roof_report" }),
+      obligationJob("61016", { family: "roof_report" }),
     ],
   );
 
@@ -347,6 +363,8 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
       fullEmailFamilyConflict.id,
       missingExistingCompany.id,
       conflictingExistingIdentity.id,
+      fullEmailFamilyAbstention.id,
+      previewFamilyAbstention.id,
     ].sort(),
   );
   assertEquals(result.omitted_accounted_count, 0);
@@ -505,6 +523,17 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
   const missingExistingCompany = intakeDraft("63010");
   const conflictingExistingIdentity = intakeDraft("63011");
   const terminalMissingIdentity = intakeDraft("63012");
+  const fullEmailFamilyAbstention = intakeDraft("63013", {
+    family: "roof_report",
+    reportType: "roof_report",
+    bodyPreview: "Please complete the roof report.",
+    builderEmailTextForTrade: "For your records.",
+  });
+  const previewFamilyAbstention = intakeDraft("63014", {
+    family: "roof_report",
+    subject: "Claim correspondence",
+    bodyPreview: "For your records.",
+  });
   const ajWorkOrderConflict = intakeDraft("67001", {
     externalRef: "AJBR-67001",
     workOrder: "AJBR-67001",
@@ -519,6 +548,8 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       missingExistingCompany,
       conflictingExistingIdentity,
       terminalMissingIdentity,
+      fullEmailFamilyAbstention,
+      previewFamilyAbstention,
       ajWorkOrderConflict,
     ],
     [
@@ -534,6 +565,8 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
         po: "",
         status: "completed",
       }),
+      obligationJob("63013", { family: "roof_report" }),
+      obligationJob("63014", { family: "roof_report" }),
       obligationJob("67001", {
         externalRef: "AJBR-67001",
         workOrder: "AJBR-67999",
@@ -558,6 +591,8 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       [missingExistingCompany.id, "builder_identity_unproved"],
       [conflictingExistingIdentity.id, "builder_identity_unproved"],
       [terminalMissingIdentity.id, "builder_identity_unproved"],
+      [fullEmailFamilyAbstention.id, "family_unproved"],
+      [previewFamilyAbstention.id, "family_unproved"],
       [ajWorkOrderConflict.id, "builder_identity_unproved"],
     ].sort(),
   );

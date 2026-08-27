@@ -22357,13 +22357,19 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
       familyContextRefused = true
     }
   }
+  const previewInstructionText = [
+    draft?.body_preview,
+    draft?.description,
+    extraction.description,
+  ].filter(Boolean).join('\n')
+  const previewSignalPresent = !!(
+    cleanReviewedString(draft?.subject) ||
+    cleanReviewedString(previewInstructionText) ||
+    effectiveReportType
+  )
   const previewFamilyDecision = _decideDeterministicMakeSafeJobFamily(
     draft?.subject || null,
-    [
-      draft?.body_preview,
-      draft?.description,
-      extraction.description,
-    ].filter(Boolean).join('\n'),
+    previewInstructionText,
     effectiveReportType,
     familyContext,
   )
@@ -22378,6 +22384,11 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
       { builder },
     )
     : null
+  if (
+    familyContextRefused ||
+    (previewSignalPresent && !previewFamilyDecision.family) ||
+    (fullInstructionText && !fullInstructionFamilyDecision?.family)
+  ) return null
   const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
   const familySignals = [
     ...(storedFamilyRaw ? [{ makesafe_job_family: storedFamilyRaw }] : []),
@@ -22388,9 +22399,7 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
       ? [{ makesafe_job_family: fullInstructionFamilyDecision.family }]
       : []),
   ]
-  const canonicalFamily = familyContextRefused
-    ? null
-    : _resolveConsistentObligationFamily(familySignals)
+  const canonicalFamily = _resolveConsistentObligationFamily(familySignals)
   if (!canonicalFamily || canonicalFamily === 'unknown') return null
   return intakeFamilyFromCanonicalObligationFamily(canonicalFamily)
 }
