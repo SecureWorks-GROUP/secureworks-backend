@@ -475,6 +475,35 @@ Deno.test('unclassified trade lines block complete even when required lanes reso
   assertEquals(row.margin, null)
 })
 
+Deno.test('supplier materials facts and authorised trade materials lines both count', () => {
+  const job = fullyCostedJob()
+  job.materials_facts = [materialsFact('job-fully-costed', 1000)]
+  job.trade_lines = [
+    ...job.trade_lines,
+    tradeLine('job-fully-costed', 'materials', 100, 'SWF-FULL', {
+      override_amount: 200,
+    }),
+  ]
+  const row = assessJobProfitCompleteness(job)
+  assertEquals(row.lanes.materials.resolved, true)
+  if (row.lanes.materials.resolved) {
+    assertEquals(row.lanes.materials.amount_ex_gst, 1200)
+  }
+})
+
+Deno.test('unclassified +50 and -50 still block complete', () => {
+  const job = fullyCostedJob()
+  job.trade_lines = [
+    ...job.trade_lines,
+    tradeLine('job-fully-costed', 'mystery-kit', 50, 'SWF-FULL'),
+    tradeLine('job-fully-costed', 'mystery-kit', -50, 'SWF-FULL'),
+  ]
+  const row = assessJobProfitCompleteness(job)
+  assertEquals(row.unclassified_cost_ex_gst, 0)
+  assertEquals(row.profit_status, 'partial')
+  assertEquals(row.margin, null)
+})
+
 Deno.test('unclassified override of 50 on a stored zero is counted and blocks complete', () => {
   const job = fullyCostedJob()
   job.trade_lines = [

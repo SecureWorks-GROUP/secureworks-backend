@@ -372,23 +372,47 @@ function resolveMaterialsLane(job: JobProfitInput): LaneResolution {
     const lane = String(fact.lane || 'materials').trim().toLowerCase()
     return lane === 'materials' || lane === ''
   })
-  if (matching.length === 0) {
-    // Materials can also land on a trade invoice line. Prefer the materials
-    // fact table; fall back to classified trade lines so a source-backed
-    // figure is not dropped.
-    return resolveFromTradeLines(job, 'materials')
+  const trade = resolveFromTradeLines(job, 'materials')
+  const parts: { amount: number; source: LaneSource; count: number }[] = []
+  if (matching.length > 0) {
+    const amounts = matching.map((fact) => validMoney(fact.amount_ex_gst))
+    if (amounts.some((amount) => amount == null)) {
+      return {
+        resolved: false,
+        amount_ex_gst: null,
+        source: null,
+        confidence: null,
+        reason: 'source_unreadable',
+      }
+    }
+    const amount = sumMoney(amounts as number[])
+    if (amount > 0) {
+      parts.push({
+        amount,
+        source: 'job_materials_facts',
+        count: matching.length,
+      })
+    }
   }
-  const amounts = matching.map((fact) => validMoney(fact.amount_ex_gst))
-  if (amounts.some((amount) => amount == null)) {
+  if (trade.resolved) {
+    parts.push({
+      amount: trade.amount_ex_gst,
+      source: trade.source,
+      count: trade.line_count,
+    })
+  } else if (trade.reason === 'source_unreadable' && parts.length === 0) {
+    return trade
+  }
+  if (parts.length === 0) {
     return {
       resolved: false,
       amount_ex_gst: null,
       source: null,
       confidence: null,
-      reason: 'source_unreadable',
+      reason: 'no_source',
     }
   }
-  const amount = sumMoney(amounts as number[])
+  const amount = sumMoney(parts.map((part) => part.amount))
   if (amount <= 0) {
     return {
       resolved: false,
@@ -401,19 +425,22 @@ function resolveMaterialsLane(job: JobProfitInput): LaneResolution {
   return {
     resolved: true,
     amount_ex_gst: amount,
-    source: 'job_materials_facts',
+    source: parts[0].source,
     confidence: 'job_book',
-    line_count: matching.length,
+    line_count: parts.reduce((s, part) => s + part.count, 0),
   }
 }
 
+function unclassifiedLines(job: JobProfitInput): TradeLineFact[] {
+  if (job.trade_lines_unreadable) return []
+  return (job.trade_lines || []).filter((line) =>
+    tradeLineBelongsToJob(line, job) &&
+    classifyTradeCostLane(line.line_type) === 'unclassified'
+  )
+}
+
 function unclassifiedAmount(job: JobProfitInput): number {
-  if (job.trade_lines_unreadable) return 0
-  const amounts = (job.trade_lines || [])
-    .filter((line) =>
-      tradeLineBelongsToJob(line, job) &&
-      classifyTradeCostLane(line.line_type) === 'unclassified'
-    )
+  const amounts = unclassifiedLines(job)
     .map((line) => validMoney(tradeLineAmount(line)))
     .filter((amount): amount is number => amount != null)
   return sumMoney(amounts)
@@ -462,12 +489,13 @@ export function assessJobProfitCompleteness(job: JobProfitInput): JobProfitabili
     }))
 
   const unclassified_cost_ex_gst = unclassifiedAmount(jobForLanes)
+  const hasUnclassified = unclassifiedLines(jobForLanes).length > 0
   const lumps = untrustedLumps(jobForLanes)
 
   let profit_status: ProfitStatus
   if (resolvedLanes.length === 0) {
     profit_status = 'unknown'
-  } else if (missing_lanes.length > 0 || unclassified_cost_ex_gst !== 0) {
+  } else if (missing_lanes.length > 0 || hasUnclassified) {
     profit_status = 'partial'
   } else {
     profit_status = 'complete'

@@ -27,7 +27,7 @@ export const JOB_PROFIT_LIST_SELECT =
   'id, type, status, client_name, site_suburb, quote_ex:pricing_json->totalExGST, quote_inc:pricing_json->totalIncGST, expected_costs, created_at, job_number'
 
 export const TRADE_LINE_PROFIT_SELECT =
-  'id, job_id, job_number, line_type, line_total_ex, override_amount, trade_invoices!inner(status)'
+  'id, job_id, job_number, line_type, line_total_ex, override_amount, trade_invoices!inner(status, org_id)'
 
 export class JobProfitabilityReadError extends Error {
   constructor(message: string) {
@@ -42,8 +42,11 @@ export async function fetchProfitSourceRows(
   select: string,
   column: string,
   ids: string[],
+  opts: { orgColumn?: string; orderBy?: string } = {},
 ): Promise<{ rows: any[]; readFault: boolean }> {
   if (ids.length === 0) return { rows: [], readFault: false }
+  const orgColumn = opts.orgColumn ?? 'org_id'
+  const orderBy = opts.orderBy ?? 'id'
   const rows: any[] = []
   for (let i = 0; i < ids.length; i += PROFIT_SOURCE_IN_CHUNK) {
     const chunk = ids.slice(i, i + PROFIT_SOURCE_IN_CHUNK)
@@ -51,7 +54,9 @@ export async function fetchProfitSourceRows(
       const { data, error } = await sb
         .from(table)
         .select(select)
+        .eq(orgColumn, DEFAULT_ORG_ID)
         .in(column, chunk)
+        .order(orderBy, { ascending: true })
         .range(offset, offset + PROFIT_SOURCE_PAGE_SIZE - 1)
       if (error) {
         console.error(`job_profitability ${table}.${column} read failed`, error)
@@ -284,6 +289,7 @@ export async function loadJobProfitability(
       TRADE_LINE_PROFIT_SELECT,
       'job_id',
       jobIds,
+      { orgColumn: 'trade_invoices.org_id' },
     ),
     jobNumbers.length > 0
       ? fetchProfitSourceRows(
@@ -292,6 +298,7 @@ export async function loadJobProfitability(
         TRADE_LINE_PROFIT_SELECT,
         'job_number',
         jobNumbers,
+        { orgColumn: 'trade_invoices.org_id' },
       )
       : Promise.resolve({ rows: [] as any[], readFault: false }),
     fetchProfitSourceRows(

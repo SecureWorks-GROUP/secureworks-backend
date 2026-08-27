@@ -80,7 +80,14 @@ class MockChain {
     let rows = [...(this.state[this.table] || [])]
     for (const filter of this.filters) {
       if (filter.op === 'eq') {
-        rows = rows.filter((row) => row[filter.col] === filter.val)
+        rows = rows.filter((row) => {
+          if (String(filter.col).includes('.')) {
+            const [a, b] = String(filter.col).split('.')
+            const nested = row[a] as Record<string, unknown> | undefined
+            return nested?.[b] === filter.val
+          }
+          return row[filter.col] === filter.val
+        })
       } else if (filter.op === 'gte') {
         rows = rows.filter((row) =>
           String(row[filter.col] ?? '') >= String(filter.val)
@@ -115,17 +122,40 @@ class MockChain {
   }
 }
 
+const ORG_ID = '00000000-0000-0000-0000-000000000001'
+
+function withOrg(state: Record<string, Row[]>): Record<string, Row[]> {
+  const stamp = (rows: Row[] | undefined) =>
+    (rows || []).map((row) => ({ org_id: ORG_ID, ...row }))
+  return {
+    ...state,
+    xero_invoices: stamp(state.xero_invoices),
+    xero_projects: stamp(state.xero_projects),
+    job_materials_facts: stamp(state.job_materials_facts),
+    trade_invoice_lines: (state.trade_invoice_lines || []).map((row) => ({
+      ...row,
+      trade_invoices: {
+        org_id: ORG_ID,
+        ...((row.trade_invoices as Record<string, unknown> | undefined) || {}),
+      },
+    })),
+  }
+}
+
 function mockClient(
   state: Record<string, Row[]>,
   errorFor: Record<string, { message: string }> = {},
 ) {
+  state = withOrg(state)
   const selects: { table: string; select: string; type?: unknown; from?: unknown }[] =
     []
   const ranges: { table: string; from: number; to: number }[] = []
+  const orders: { table: string; col: string }[] = []
   const inFilters: { table: string; column: string; values: unknown[] }[] = []
   return {
     selects,
     ranges,
+    orders,
     inFilters,
     from(table: string) {
       const chain = new MockChain(table, state, errorFor)
@@ -138,6 +168,11 @@ function mockClient(
       chain.range = (from: number, to: number) => {
         ranges.push({ table, from, to })
         return originalRange(from, to)
+      }
+      const originalOrder = chain.order.bind(chain)
+      chain.order = (col: string, opts?: unknown) => {
+        orders.push({ table, col })
+        return originalOrder(col, opts)
       }
       const originalIn = chain.in.bind(chain)
       chain.in = (column: string, values: unknown) => {
@@ -401,6 +436,31 @@ Deno.test('loadJobProfitability accumulates invoice revenue in integer cents', a
   )
   assertEquals(report.jobs[0].invoiced, 0.3)
   assertEquals(String(report.jobs[0].invoiced), '0.3')
+})
+
+Deno.test('loadJobProfitability orders and tenant-scopes every paged source read', async () => {
+  const sb = mockClient({
+    jobs: [FULL_JOB],
+    xero_invoices: [{
+      job_id: 'job-full',
+      invoice_type: 'ACCREC',
+      sub_total: 10000.57,
+      total: 11000.63,
+      amount_paid: 0,
+    }],
+    xero_projects: [],
+    trade_invoice_lines: [],
+    job_materials_facts: [],
+  })
+  await loadJobProfitability(
+    sb,
+    new URLSearchParams(),
+    new Date('2026-08-27T00:00:00.000Z'),
+  )
+  const sourced = ['xero_invoices', 'xero_projects', 'trade_invoice_lines', 'job_materials_facts']
+  for (const table of sourced) {
+    assertEquals(sb.orders.some((o) => o.table === table && o.col === 'id'), true)
+  }
 })
 
 Deno.test('loadJobProfitability pages source reads past the 1000-row cap', async () => {
