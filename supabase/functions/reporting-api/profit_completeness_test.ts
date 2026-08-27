@@ -8,6 +8,7 @@ import {
   assert,
   assertEquals,
   assertNotEquals,
+  assertThrows,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 
 import {
@@ -15,6 +16,7 @@ import {
   PROFIT_COMPLETENESS_CONTRACT_VERSION,
   REQUIRED_COST_LANES,
   assessJobProfitCompleteness,
+  assertPublicMoneyValuesAreWholeCents,
   buildJobProfitabilityReport,
   classifyTradeCostLane,
   computeLegacyJobMargin,
@@ -530,6 +532,46 @@ Deno.test('override_amount is the authorised trade cost, not line_total_ex', () 
     assertEquals(row.lanes.labour.amount_ex_gst, COMPLETE_LABOUR)
   }
   assertEquals(row.margin, COMPLETE_MARGIN)
+})
+
+Deno.test('missing expected lane costs accumulate in integer cents', () => {
+  const job = fullyCostedJob()
+  job.trade_lines = job.trade_lines.filter((line) => line.line_type !== 'commission')
+  job.materials_facts = []
+  job.expected_lanes = {
+    materials: 0.1,
+    commission: 0.2,
+  }
+  const row = assessJobProfitCompleteness(job)
+  assertEquals(row.profit_status, 'partial')
+  assertEquals(row.missing_expected_ex_gst, 0.3)
+  assertEquals(String(row.missing_expected_ex_gst), '0.3')
+})
+
+Deno.test('public money guard walks job rows and summary shapes', () => {
+  assertThrows(
+    () =>
+      assertPublicMoneyValuesAreWholeCents({
+        jobs: [{
+          lanes: {
+            labour: { amount_ex_gst: 0.30000000000000004 },
+          },
+        }],
+      }),
+    Error,
+    '$.jobs[0].lanes.labour.amount_ex_gst',
+  )
+  assertThrows(
+    () =>
+      assertPublicMoneyValuesAreWholeCents({
+        summary: { total_invoiced: 0.30000000000000004 },
+      }),
+    Error,
+    '$.summary.total_invoiced',
+  )
+  assertPublicMoneyValuesAreWholeCents(
+    buildJobProfitabilityReport(fixtureCohort(), { now: NOW }),
+  )
 })
 
 Deno.test('a present job_id is authoritative; stale job_number does not steal the line', () => {

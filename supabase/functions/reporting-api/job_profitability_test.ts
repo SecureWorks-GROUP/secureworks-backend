@@ -7,6 +7,7 @@ import {
 } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 
 import {
+  fetchProfitSourceRows,
   JOB_PROFIT_LIST_SELECT,
   JobProfitabilityReadError,
   loadJobProfitability,
@@ -121,9 +122,11 @@ function mockClient(
   const selects: { table: string; select: string; type?: unknown; from?: unknown }[] =
     []
   const ranges: { table: string; from: number; to: number }[] = []
+  const inFilters: { table: string; column: string; values: unknown[] }[] = []
   return {
     selects,
     ranges,
+    inFilters,
     from(table: string) {
       const chain = new MockChain(table, state, errorFor)
       const originalSelect = chain.select.bind(chain)
@@ -135,6 +138,11 @@ function mockClient(
       chain.range = (from: number, to: number) => {
         ranges.push({ table, from, to })
         return originalRange(from, to)
+      }
+      const originalIn = chain.in.bind(chain)
+      chain.in = (column: string, values: unknown) => {
+        inFilters.push({ table, column, values: values as unknown[] })
+        return originalIn(column, values)
       }
       const originalEq = chain.eq.bind(chain)
       chain.eq = (col: string, val: unknown) => {
@@ -425,6 +433,83 @@ Deno.test('loadJobProfitability pages source reads past the 1000-row cap', async
   const lineRanges = sb.ranges.filter((r) => r.table === 'trade_invoice_lines')
   assertEquals(lineRanges.some((r) => r.from === 0), true)
   assertEquals(lineRanges.some((r) => r.from === 1000), true)
+})
+
+Deno.test('loadJobProfitability finds Xero project revenue beyond the first page', async () => {
+  const xeroProjects = Array.from({ length: 1001 }, (_, i) => ({
+    job_id: 'job-full',
+    project_name: `Project ${i}`,
+    job_number: 'SWF-FULL',
+    total_invoiced: i === 1000 ? 123.45 : 0,
+    total_expenses: 0,
+    total_to_be_invoiced: 0,
+    status: 'INPROGRESS',
+  }))
+  const sb = mockClient({
+    jobs: [FULL_JOB],
+    xero_invoices: [{
+      job_id: 'job-full',
+      invoice_type: 'ACCREC',
+      sub_total: 999,
+      total: 1098.9,
+      amount_paid: 0,
+    }],
+    xero_projects: xeroProjects,
+    trade_invoice_lines: [],
+    job_materials_facts: [],
+  })
+  const report = await loadJobProfitability(
+    sb,
+    new URLSearchParams(),
+    new Date('2026-08-27T00:00:00.000Z'),
+  )
+  assertEquals(report.jobs[0].invoiced, 123.45)
+  const projectRanges = sb.ranges.filter((r) => r.table === 'xero_projects')
+  assertEquals(projectRanges.some((r) => r.from === 0), true)
+  assertEquals(projectRanges.some((r) => r.from === 1000), true)
+})
+
+Deno.test('profit source boundary chunks ids at 25', async () => {
+  const ids = Array.from({ length: 26 }, (_, i) => `job-${i}`)
+  const sb = mockClient({
+    job_materials_facts: ids.map((job_id) => ({
+      job_id,
+      amount_ex_gst: 1,
+      lane: 'materials',
+    })),
+  })
+  const result = await fetchProfitSourceRows(
+    sb,
+    'job_materials_facts',
+    'job_id, amount_ex_gst, lane',
+    'job_id',
+    ids,
+  )
+  assertEquals(result.rows.length, 26)
+  assertEquals(sb.inFilters.map((filter) => filter.values.length), [25, 1])
+})
+
+Deno.test('loadJobProfitability throws when xero_projects is unreadable', async () => {
+  const sb = mockClient(
+    {
+      jobs: [FULL_JOB],
+      xero_invoices: [],
+      xero_projects: [],
+      trade_invoice_lines: [],
+      job_materials_facts: [],
+    },
+    { xero_projects: { message: 'boom' } },
+  )
+  await assertRejects(
+    () =>
+      loadJobProfitability(
+        sb,
+        new URLSearchParams(),
+        new Date('2026-08-27T00:00:00.000Z'),
+      ),
+    JobProfitabilityReadError,
+    'xero_projects',
+  )
 })
 
 Deno.test('loadJobProfitability loads fencing-month and quarter cohorts independently', async () => {

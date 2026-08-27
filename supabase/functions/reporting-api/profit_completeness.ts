@@ -170,7 +170,7 @@ export function computeLegacyJobMargin(
   invoiced: number,
   bills: number,
 ): { margin: number; margin_pct: number } {
-  const margin = (Math.round(invoiced * 100) - Math.round(bills * 100)) / 100
+  const margin = fromCents(sumMoneyCents([invoiced, -bills]))
   const margin_pct = invoiced > 0 ? Math.round((margin / invoiced) * 100) : 0
   return { margin, margin_pct }
 }
@@ -207,13 +207,61 @@ export function fromCents(cents: number): number {
   return cents / 100
 }
 
-export function sumMoney(values: number[]): number {
-  return fromCents(values.reduce((sum, value) => sum + toCents(value), 0))
+export function sumMoneyCents(values: readonly unknown[]): number {
+  return values.reduce((sum: number, value) => sum + toCents(value), 0)
+}
+
+export function sumMoney(values: readonly unknown[]): number {
+  return fromCents(sumMoneyCents(values))
+}
+
+export function normalizeMoney(value: unknown): number {
+  return fromCents(toCents(value))
+}
+
+function isPublicMoneyField(key: string): boolean {
+  return key === 'quote_value' ||
+    key === 'invoiced' ||
+    key === 'bills' ||
+    key === 'margin' ||
+    key === 'amount_at_risk' ||
+    key.endsWith('_ex_gst') ||
+    key.endsWith('_invoiced') ||
+    key.endsWith('_cost') ||
+    key.endsWith('_margin') ||
+    key.endsWith('_dollars') ||
+    key.endsWith('_bills')
+}
+
+export function assertPublicMoneyValuesAreWholeCents(
+  value: unknown,
+  path = '$',
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      assertPublicMoneyValuesAreWholeCents(item, `${path}[${index}]`)
+    )
+    return
+  }
+  if (value == null || typeof value !== 'object') return
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = `${path}.${key}`
+    if (isPublicMoneyField(key) && child != null) {
+      if (
+        typeof child !== 'number' ||
+        !Number.isFinite(child) ||
+        child !== normalizeMoney(child)
+      ) {
+        throw new Error(`job_profitability invalid money value at ${childPath}`)
+      }
+    }
+    assertPublicMoneyValuesAreWholeCents(child, childPath)
+  }
 }
 
 function dollarsAtRisk(invoiced: number, quoteValue: number): number {
-  if (invoiced > 0) return invoiced
-  if (quoteValue > 0) return quoteValue
+  if (invoiced > 0) return normalizeMoney(invoiced)
+  if (quoteValue > 0) return normalizeMoney(quoteValue)
   return 0
 }
 
@@ -377,7 +425,7 @@ function untrustedLumps(job: JobProfitInput): UntrustedCostLump[] {
   if (job.xero_projects_expenses != null && Number.isFinite(Number(job.xero_projects_expenses))) {
     lumps.push({
       source: 'xero_projects',
-      amount_ex_gst: xero,
+      amount_ex_gst: normalizeMoney(xero),
       confidence: 'low',
     })
   }
@@ -385,7 +433,7 @@ function untrustedLumps(job: JobProfitInput): UntrustedCostLump[] {
   if (job.accpay_bills != null && accpay !== 0) {
     lumps.push({
       source: 'accpay_invoices',
-      amount_ex_gst: accpay,
+      amount_ex_gst: normalizeMoney(accpay),
       confidence: 'low',
     })
   }
@@ -431,16 +479,14 @@ export function assessJobProfitCompleteness(job: JobProfitInput): JobProfitabili
 
   let missing_expected_ex_gst: number | null = null
   if (profit_status !== 'complete' && job.expected_lanes) {
-    let any = false
-    let sum = 0
+    const expectedAmounts: number[] = []
     for (const lane of missing_lanes) {
       const expected = job.expected_lanes[lane]
       if (typeof expected === 'number' && Number.isFinite(expected)) {
-        any = true
-        sum += expected
+        expectedAmounts.push(expected)
       }
     }
-    missing_expected_ex_gst = any ? sum : null
+    missing_expected_ex_gst = expectedAmounts.length > 0 ? sumMoney(expectedAmounts) : null
   }
 
   let margin: number | null = null
@@ -470,8 +516,8 @@ export function assessJobProfitCompleteness(job: JobProfitInput): JobProfitabili
     type: job.type,
     status: job.status ?? null,
     created_at: job.created_at,
-    quote_value: job.quote_value,
-    invoiced: job.invoiced,
+    quote_value: normalizeMoney(job.quote_value),
+    invoiced: normalizeMoney(job.invoiced),
     bills,
     margin,
     margin_pct,
@@ -501,7 +547,7 @@ export function expectedLanesFromSnapshot(
     const amount = lanes[lane]?.amount_ex_gst
     const n = typeof amount === 'string' ? parseFloat(amount) : Number(amount)
     if (typeof n === 'number' && Number.isFinite(n)) {
-      out[lane] = n
+      out[lane] = normalizeMoney(n)
       any = true
     }
   }
@@ -645,7 +691,7 @@ export function buildJobProfitabilityReport(
     profit_status_counts[row.profit_status] += 1
   }
 
-  return {
+  const report: JobProfitabilityReport = {
     jobs: rows,
     summary: {
       ...summaryRollup,
@@ -668,6 +714,8 @@ export function buildJobProfitabilityReport(
       ),
     },
   }
+  assertPublicMoneyValuesAreWholeCents(report)
+  return report
 }
 
 export function emptyLaneFacts(): {

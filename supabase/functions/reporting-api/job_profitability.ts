@@ -9,9 +9,10 @@ import {
   buildJobProfitabilityReport,
   expectedLanesFromSnapshot,
   fromCents,
+  normalizeMoney,
   perthMonthWindow,
   perthQuarterWindow,
-  toCents,
+  sumMoneyCents,
   tradeLineBelongsToJob,
   type JobProfitInput,
   type JobProfitabilityReport,
@@ -95,9 +96,9 @@ async function fetchJobsInWindow(
 
 function quoteValueFromJob(job: any): number {
   const ex = Number(job.quote_ex ?? job.pricing_json?.totalExGST)
-  if (Number.isFinite(ex) && ex) return ex
+  if (Number.isFinite(ex) && ex) return normalizeMoney(ex)
   const inc = Number(job.quote_inc ?? job.pricing_json?.totalIncGST)
-  return Number.isFinite(inc) ? inc : 0
+  return Number.isFinite(inc) ? normalizeMoney(inc) : 0
 }
 
 function invoiceStatusFromLine(row: any): string | null {
@@ -135,14 +136,14 @@ function toJobInput(
   const invoiced = xeroProject
     ? fromCents(xeroProject.total_invoiced_cents)
     : fromCents(
-      jobInvoices
+      sumMoneyCents(jobInvoices
         .filter((i: any) => i.invoice_type === 'ACCREC')
-        .reduce((s: number, i: any) => s + toCents(i.sub_total), 0),
+        .map((i: any) => i.sub_total)),
     )
   const accpayBills = fromCents(
-    jobInvoices
+    sumMoneyCents(jobInvoices
       .filter((i: any) => i.invoice_type === 'ACCPAY')
-      .reduce((s: number, i: any) => s + toCents(i.sub_total), 0),
+      .map((i: any) => i.sub_total)),
   )
   const legacyBills = xeroProject ? fromCents(xeroProject.total_expenses_cents) : accpayBills
   const input: JobProfitInput = {
@@ -246,35 +247,33 @@ export async function loadJobProfitability(
     invoicesByJob[inv.job_id].push(inv)
   }
 
-  const { data: xeroProjects, error: projectErr } = await sb
-    .from('xero_projects')
-    .select(
-      'job_id, project_name, job_number, total_invoiced, total_expenses, total_to_be_invoiced, status',
-    )
-    .eq('org_id', DEFAULT_ORG_ID)
-    .not('job_id', 'is', null)
-  if (projectErr) {
-    throw new JobProfitabilityReadError(
-      `job_profitability xero_projects read failed: ${projectErr.message || projectErr}`,
-    )
+  const projectRead = await fetchProfitSourceRows(
+    sb,
+    'xero_projects',
+    'job_id, project_name, job_number, total_invoiced, total_expenses, total_to_be_invoiced, status',
+    'job_id',
+    jobIds,
+  )
+  if (projectRead.readFault) {
+    throw new JobProfitabilityReadError('job_profitability xero_projects read failed')
   }
 
+  const projectsByJob: Record<string, any[]> = {}
+  for (const project of projectRead.rows) {
+    if (!project.job_id) continue
+    if (!projectsByJob[project.job_id]) projectsByJob[project.job_id] = []
+    projectsByJob[project.job_id].push(project)
+  }
   const projectByJob: Record<string, any> = {}
-  for (const proj of (xeroProjects || [])) {
-    if (!proj.job_id) continue
-    if (projectByJob[proj.job_id]) {
-      projectByJob[proj.job_id].total_invoiced_cents += toCents(proj.total_invoiced)
-      projectByJob[proj.job_id].total_expenses_cents += toCents(proj.total_expenses)
-      projectByJob[proj.job_id].to_be_invoiced_cents += toCents(proj.total_to_be_invoiced)
-    } else {
-      projectByJob[proj.job_id] = {
-        project_name: proj.project_name,
-        job_number: proj.job_number,
-        total_invoiced_cents: toCents(proj.total_invoiced),
-        total_expenses_cents: toCents(proj.total_expenses),
-        to_be_invoiced_cents: toCents(proj.total_to_be_invoiced),
-        project_status: proj.status,
-      }
+  for (const [jobId, projects] of Object.entries(projectsByJob)) {
+    const first = projects[0]
+    projectByJob[jobId] = {
+      project_name: first.project_name,
+      job_number: first.job_number,
+      total_invoiced_cents: sumMoneyCents(projects.map((p) => p.total_invoiced)),
+      total_expenses_cents: sumMoneyCents(projects.map((p) => p.total_expenses)),
+      to_be_invoiced_cents: sumMoneyCents(projects.map((p) => p.total_to_be_invoiced)),
+      project_status: first.status,
     }
   }
 
@@ -339,7 +338,7 @@ export async function loadJobProfitability(
 
   return buildJobProfitabilityReport(pageInputs, {
     now,
-    xeroProjectsMatched: (xeroProjects || []).length,
+    xeroProjectsMatched: projectRead.rows.length,
     rollupJobs: rollupInputs,
   })
 }
