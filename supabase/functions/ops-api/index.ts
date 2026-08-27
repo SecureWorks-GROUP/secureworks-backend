@@ -12552,17 +12552,15 @@ async function pipeline(client: any, params: URLSearchParams) {
   let commsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
   let reportRes: PipelineEnrichmentResult = { data: [], error: null }
   let assignEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let poEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let invoiceEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes] = await Promise.all([
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
         client.from('job_assignments').select('job_id, scheduled_date').in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
-        client.from('purchase_orders').select(
-          stageTruth
-            ? 'job_id, id, po_type, status, xero_po_id, confirmed_delivery_date, delivery_confirmed_at, delivery_date'
-            : 'job_id',
-        ).in('job_id', chunkIds).neq('status', 'deleted')),
+        client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
         client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
@@ -12600,6 +12598,19 @@ async function pipeline(client: any, params: URLSearchParams) {
             'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at, is_ghost, role',
           ).in('job_id', chunkIds))
         : Promise.resolve({ data: [], error: null }),
+      // Same NULL trap as assignments: .neq('status','deleted') drops status-null POs.
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'purchase_orders_evidence', (chunkIds) =>
+          client.from('purchase_orders').select(
+            'job_id, id, po_type, status, xero_po_id, confirmed_delivery_date, delivery_confirmed_at, delivery_date',
+          ).in('job_id', chunkIds))
+        : Promise.resolve({ data: [], error: null }),
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'xero_invoices_evidence', (chunkIds) =>
+          client.from('xero_invoices').select(
+            'job_id, status, invoice_type, reference, id, xero_invoice_id, amount_paid, fully_paid_on',
+          ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC'))
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -12615,6 +12626,8 @@ async function pipeline(client: any, params: URLSearchParams) {
     ['pipeline.job_events', commsNotesRes],
     ...(stageTruth ? [['pipeline.job_service_reports', reportRes] as [string, PipelineEnrichmentResult]] : []),
     ...(stageTruth ? [['pipeline.job_assignments_evidence', assignEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(stageTruth ? [['pipeline.purchase_orders_evidence', poEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(stageTruth ? [['pipeline.xero_invoices_evidence', invoiceEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
   ]
   // Preserve the existing partial-board behaviour, but make a failed dimension
   // loud in server logs and explicit in the response instead of publishing its
@@ -12626,15 +12639,15 @@ async function pipeline(client: any, params: URLSearchParams) {
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
-    if (poRes.error) stageTruthUnreadable.push('purchase_orders')
+    if (poEvidenceRes.error) stageTruthUnreadable.push('purchase_orders')
     if (emailRes.error) stageTruthUnreadable.push('po_communications')
-    if (invoiceRes.error) stageTruthUnreadable.push('xero_invoices')
+    if (invoiceEvidenceRes.error) stageTruthUnreadable.push('xero_invoices')
     if (reportRes.error) stageTruthUnreadable.push('job_service_reports')
   }
   const stageTruthRows = stageTruth
     ? {
-      invoices: invoiceRes.data || [],
-      purchaseOrders: poRes.data || [],
+      invoices: invoiceEvidenceRes.data || [],
+      purchaseOrders: poEvidenceRes.data || [],
       poCommunications: emailRes.data || [],
       assignments: assignEvidenceRes.data || [],
       serviceReports: reportRes.data || [],

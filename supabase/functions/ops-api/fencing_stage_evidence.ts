@@ -214,10 +214,18 @@ export function fencingExecutionEvidenceFromPipelineRows(
     .map(projectAssignment)
     .filter((assignment) => !isFencingAssignmentNonFieldWork(assignment));
 
+  const invoices = rows.invoices
+    .filter(matchJob)
+    .map(projectInvoice)
+    .filter((invoice) => {
+      const status = String(invoice.status || "").trim().toUpperCase();
+      return status !== "VOIDED" && status !== "DELETED";
+    });
+
   return {
     job_id: jobId,
     deposit_invoice_id: asText(depositInvoiceId),
-    invoices: rows.invoices.filter(matchJob).map(projectInvoice),
+    invoices,
     purchase_orders: purchaseOrders,
     po_communications: rows.poCommunications.filter(matchJob).map(projectComm),
     assignments,

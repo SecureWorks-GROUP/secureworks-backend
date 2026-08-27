@@ -291,7 +291,7 @@ function pipelineJob(id: string, status: string) {
 
 function makeClient(
   tables: Record<string, Array<Record<string, unknown>>>,
-  selectLog: Array<{ table: string; columns: string }> = [],
+  selectLog: Array<{ table: string; columns: string; neq?: string }> = [],
 ) {
   function from(table: string) {
     const eqFilters: Array<[string, unknown]> = [];
@@ -346,6 +346,11 @@ function makeClient(
       },
       neq: (column: string, value: unknown) => {
         neqFilters.push([column, value]);
+        selectLog.push({
+          table,
+          columns: selectSpec,
+          neq: `${column}!=${String(value)}`,
+        });
         return builder;
       },
       in: (column: string, values: unknown[]) => {
@@ -443,6 +448,26 @@ Deno.test("pipeline stage_truth=1: attaches diagnostic fields from the real engi
   assertEquals(Array.isArray(card.conflicts), true);
   assertEquals(Array.isArray(card.evidence_refs), true);
   assertEquals(card.status, "order_materials");
+});
+
+Deno.test("pipeline stage_truth=1: evidence reads do not neq-filter status", async () => {
+  const selectLog: Array<{ table: string; columns: string; neq?: string }> = [];
+  await _pipelineForTest(
+    makeClient(PIPELINE_TABLES, selectLog),
+    new URLSearchParams("type=fencing&stage_truth=1"),
+  );
+  const evidenceAssignNeq = selectLog.filter((entry) =>
+    entry.table === "job_assignments" &&
+    (entry.columns || "").includes("is_ghost") &&
+    entry.neq
+  );
+  assertEquals(evidenceAssignNeq, []);
+  const evidencePoNeq = selectLog.filter((entry) =>
+    entry.table === "purchase_orders" &&
+    (entry.columns || "").includes("po_type") &&
+    entry.neq
+  );
+  assertEquals(evidencePoNeq, []);
 });
 
 Deno.test("pipeline default vs stage_truth=1: default keys stay, truth keys are additive", async () => {
@@ -806,6 +831,21 @@ Deno.test("fencing stage truth: INDEPENDENT is not a deposit token", () => {
   assertEquals(referenceLooksLikeDeposit("SWF-26003-INDEPENDENT"), false);
   assertEquals(referenceLooksLikeDeposit("SWF-26003-DEP"), true);
   assertEquals(referenceLooksLikeDeposit("DEP-1234"), true);
+});
+
+Deno.test("fencing stage truth: null-status dated assignment keeps scheduling evidence", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-106"
+  );
+  assert(row);
+  const evidence = structuredClone(row.evidence);
+  evidence.assignments = evidence.assignments.map((assignment) => ({
+    ...assignment,
+    status: null,
+  }));
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "scheduled");
+  assertEquals(got.facts.assignment_dated, true);
 });
 
 Deno.test("fencing stage truth: null-status pending rectification still blocks archive", () => {

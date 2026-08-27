@@ -680,7 +680,9 @@ awaiting-supplier — read PO and invoice **status**, not existence counts.
 
 Assignment evidence is a denylist, not an allowlist: drop cancelled and ghost
 watcher rows (`is_ghost` or `role=observer`); every other status including
-`submitted`/`verified` is field work. Rectification is a re-entry overlay
+`submitted`/`verified` is field work. Stage-truth evidence reads must not
+`.neq` a nullable status (PostgREST/SQL three-valued logic drops NULL). Do
+the exclusion in code. Same trap on PO `deleted` and invoice VOIDED/DELETED. Rectification is a re-entry overlay
 (`rectification_pending`), not a ladder rung. A card with outstanding
 rectification must never archive. send-po-email stamps `sent_at` on dry runs;
 dispatch proof here requires a provider `message_id` the dry-run path does not
