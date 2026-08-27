@@ -5,10 +5,13 @@
 
 import {
   PROFIT_SOURCE_IN_CHUNK,
+  PROFIT_SOURCE_PAGE_SIZE,
   buildJobProfitabilityReport,
   expectedLanesFromSnapshot,
+  fromCents,
   perthMonthWindow,
   perthQuarterWindow,
+  toCents,
   tradeLineBelongsToJob,
   type JobProfitInput,
   type JobProfitabilityReport,
@@ -43,12 +46,19 @@ export async function fetchProfitSourceRows(
   const rows: any[] = []
   for (let i = 0; i < ids.length; i += PROFIT_SOURCE_IN_CHUNK) {
     const chunk = ids.slice(i, i + PROFIT_SOURCE_IN_CHUNK)
-    const { data, error } = await sb.from(table).select(select).in(column, chunk)
-    if (error) {
-      console.error(`job_profitability ${table}.${column} read failed`, error)
-      return { rows: [], readFault: true }
+    for (let offset = 0; ; offset += PROFIT_SOURCE_PAGE_SIZE) {
+      const { data, error } = await sb
+        .from(table)
+        .select(select)
+        .in(column, chunk)
+        .range(offset, offset + PROFIT_SOURCE_PAGE_SIZE - 1)
+      if (error) {
+        console.error(`job_profitability ${table}.${column} read failed`, error)
+        return { rows: [], readFault: true }
+      }
+      rows.push(...(data || []))
+      if (!data || data.length < PROFIT_SOURCE_PAGE_SIZE) break
     }
-    rows.push(...(data || []))
   }
   return { rows, readFault: false }
 }
@@ -123,12 +133,18 @@ function toJobInput(
   const jobInvoices = invoicesByJob[job.id] || []
   const xeroProject = projectByJob[job.id] || null
   const invoiced = xeroProject
-    ? xeroProject.total_invoiced
-    : jobInvoices.filter((i: any) => i.invoice_type === 'ACCREC')
-      .reduce((s: number, i: any) => s + (parseFloat(i.sub_total) || 0), 0)
-  const accpayBills = jobInvoices.filter((i: any) => i.invoice_type === 'ACCPAY')
-    .reduce((s: number, i: any) => s + (parseFloat(i.sub_total) || 0), 0)
-  const legacyBills = xeroProject ? xeroProject.total_expenses : accpayBills
+    ? fromCents(xeroProject.total_invoiced_cents)
+    : fromCents(
+      jobInvoices
+        .filter((i: any) => i.invoice_type === 'ACCREC')
+        .reduce((s: number, i: any) => s + toCents(i.sub_total), 0),
+    )
+  const accpayBills = fromCents(
+    jobInvoices
+      .filter((i: any) => i.invoice_type === 'ACCPAY')
+      .reduce((s: number, i: any) => s + toCents(i.sub_total), 0),
+  )
+  const legacyBills = xeroProject ? fromCents(xeroProject.total_expenses_cents) : accpayBills
   const input: JobProfitInput = {
     id: job.id,
     job_number: job.job_number || xeroProject?.job_number || null,
@@ -139,7 +155,9 @@ function toJobInput(
     quote_value: quoteValueFromJob(job),
     invoiced,
     legacy_bills: legacyBills,
-    xero_projects_expenses: xeroProject ? xeroProject.total_expenses : null,
+    xero_projects_expenses: xeroProject
+      ? fromCents(xeroProject.total_expenses_cents)
+      : null,
     accpay_bills: accpayBills,
     trade_lines: [],
     materials_facts: [],
@@ -245,15 +263,16 @@ export async function loadJobProfitability(
   for (const proj of (xeroProjects || [])) {
     if (!proj.job_id) continue
     if (projectByJob[proj.job_id]) {
-      projectByJob[proj.job_id].total_invoiced += parseFloat(proj.total_invoiced) || 0
-      projectByJob[proj.job_id].total_expenses += parseFloat(proj.total_expenses) || 0
+      projectByJob[proj.job_id].total_invoiced_cents += toCents(proj.total_invoiced)
+      projectByJob[proj.job_id].total_expenses_cents += toCents(proj.total_expenses)
+      projectByJob[proj.job_id].to_be_invoiced_cents += toCents(proj.total_to_be_invoiced)
     } else {
       projectByJob[proj.job_id] = {
         project_name: proj.project_name,
         job_number: proj.job_number,
-        total_invoiced: parseFloat(proj.total_invoiced) || 0,
-        total_expenses: parseFloat(proj.total_expenses) || 0,
-        to_be_invoiced: parseFloat(proj.total_to_be_invoiced) || 0,
+        total_invoiced_cents: toCents(proj.total_invoiced),
+        total_expenses_cents: toCents(proj.total_expenses),
+        to_be_invoiced_cents: toCents(proj.total_to_be_invoiced),
         project_status: proj.status,
       }
     }

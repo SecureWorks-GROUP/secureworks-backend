@@ -27,6 +27,7 @@ export const TRADE_LABOUR_LINE_TYPES = [
 export const TRADE_OTHER_LINE_TYPES = ['travel', 'equipment', 'other'] as const
 
 export const PROFIT_SOURCE_IN_CHUNK = 25
+export const PROFIT_SOURCE_PAGE_SIZE = 1000
 
 // Live trade_invoices.status CHECK (20260611000001): draft,
 // pending_acknowledgment, queried, acknowledged, pending_ops_review,
@@ -196,8 +197,18 @@ function validMoney(n: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-function sumMoney(values: number[]): number {
-  return values.reduce((sum, value) => sum + Math.round(value * 100), 0) / 100
+export function toCents(n: unknown): number {
+  const v = validMoney(n)
+  if (v == null) return 0
+  return Math.round(v * 100)
+}
+
+export function fromCents(cents: number): number {
+  return cents / 100
+}
+
+export function sumMoney(values: number[]): number {
+  return fromCents(values.reduce((sum, value) => sum + toCents(value), 0))
 }
 
 function dollarsAtRisk(invoiced: number, quoteValue: number): number {
@@ -350,12 +361,14 @@ function resolveMaterialsLane(job: JobProfitInput): LaneResolution {
 
 function unclassifiedAmount(job: JobProfitInput): number {
   if (job.trade_lines_unreadable) return 0
-  return (job.trade_lines || [])
+  const amounts = (job.trade_lines || [])
     .filter((line) =>
       tradeLineBelongsToJob(line, job) &&
       classifyTradeCostLane(line.line_type) === 'unclassified'
     )
-    .reduce((s, line) => s + money(line.line_total_ex), 0)
+    .map((line) => validMoney(tradeLineAmount(line)))
+    .filter((amount): amount is number => amount != null)
+  return sumMoney(amounts)
 }
 
 function untrustedLumps(job: JobProfitInput): UntrustedCostLump[] {
