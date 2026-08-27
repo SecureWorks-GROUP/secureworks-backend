@@ -2979,6 +2979,7 @@ const OBLIGATION_DEAD_STATUSES = new Set([
   "complete",
   "completed",
   "deleted",
+  "invoiced",
   "lost",
   "void",
   "voided",

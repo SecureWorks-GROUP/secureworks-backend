@@ -120,6 +120,65 @@ refuses with `pdf_extraction_pending`, and an email carrying multiple work order
 refused rather than selecting one document implicitly. This is forward-only for newly
 minted cards and does not reclassify existing cards.
 
+## Operator Intake queue and Advance contract
+
+The make-safe board reads its operator queue through
+`list_intake_drafts?status=draft,needs_review`. `ops-api` reads the complete matching
+draft set in bounded pages, classifies it, and only then applies the 50-card return
+limit. The list route is read-only: it does not approve, reject, delete or otherwise
+change a draft.
+
+A draft is omitted only when `readAccountedIntakeDraftObligations` proves all of the
+following from the canonical obligation rows and current identity/family grammar:
+
+1. the canonical external reference is exact;
+2. the builder instruction identity is proved and agrees;
+3. the canonical family resolves consistently; and
+4. exactly one live canonical SES job represents that obligation.
+
+Canonical SES scope includes make-safe jobs and insurance restoration jobs. A
+distinct-family work order remains visible. Conflicting top-level and extracted
+company sources, missing or one-sided WO/PO identity, conflicting stored identity
+evidence, unknown or conflicting family evidence, terminal bindings (including
+`invoiced`) and multiple live matches also remain visible. Stored family, stored
+report type, preview text, PDF context and full-email text are classified as separate
+present signals before agreement. If any present signal cannot be classified, family
+is unresolved and the draft remains operator work.
+
+The response distinguishes the queue from its returned slice:
+
+| Field | Meaning |
+| --- | --- |
+| `total_count` | Exact rows in the requested statuses before accounted filtering |
+| `visible_total_count` | Rows remaining after proved-accounted omission |
+| `omitted_count` / `omitted_accounted_count` | Proved-accounted rows omitted |
+| `returned_count` | Cards in this response, at most 50 |
+| `limit` | Current response cap |
+| `has_more` | More visible rows exist beyond the returned slice |
+| `accounted_filter_error` | Matcher failure; every draft stays visible |
+
+`auto_approve_clean_intake_drafts` uses the same classification before its existing
+cleanliness and approval gates. Proved-accounted drafts are skipped. Every uncertain,
+conflicted, terminal or multiple-match disposition is also skipped. Only
+`no_equivalent_live_obligation` may enter the existing clean-draft path. If the
+obligation read fails, the sweep fails closed and approves none of the checked rows.
+These are in-memory read decisions; no second Maybe state or persisted disposition is
+introduced.
+
+The focused regression contract is:
+
+```bash
+~/.deno/bin/deno test --allow-env --allow-read \
+  supabase/functions/ops-api/makesafe_intake_accounted_operator_filter_test.ts
+```
+
+It covers same-family omission, distinct-family retention, identity and family
+uncertainty, cross-source company conflict, independent preview/PDF family conflict,
+terminal/multiple bindings, canonical restoration scope, honest counts beyond the
+50-card cap, Advance skips, and genuine new roof/temporary-fencing eligibility. This
+change has local code and test evidence only; it performs no production writes and
+does not claim a post-deploy live queue count.
+
 ## Read-only diagnostic surface
 
 `makesafe_deterministic_intake_dark_observe` remains available for exact,

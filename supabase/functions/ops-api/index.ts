@@ -21573,11 +21573,11 @@ function intakeDraftObligationCandidate(
   const externalRef = cleanReviewedString(draft?.external_ref) ||
     cleanReviewedString(extraction.external_ref) ||
     cleanReviewedString(extraction.builder_claim_ref)
-  const requestingCompany = cleanReviewedString(draft?.requesting_company_slug) ||
-    cleanReviewedString(extraction.requesting_company_slug) ||
-    cleanReviewedString(draft?.requesting_company_name) ||
-    cleanReviewedString(extraction.requesting_company_name)
-  const jobFamily = resolvedIntakeDraftFamily(draft)
+  const requestingCompany = consistentIntakeDraftRequestingCompany(
+    draft,
+    extraction,
+  )
+  const jobFamily = resolvedIntakeDraftFamily(draft, true)
   const identity = _correlateIntakeApprovalIdentity({
     extraction,
     approved_external_ref: externalRef,
@@ -22315,15 +22315,33 @@ function intakeFamilyFromCanonicalObligationFamily(family: string): string | nul
   }
 }
 
-function resolvedIntakeDraftFamily(draft: any): string | null {
+function consistentIntakeDraftRequestingCompany(
+  draft: any,
+  extraction: Record<string, any>,
+): string | null {
+  // Slug remains authoritative over name within one stored source. Comparing
+  // slug and name to each other is the separate F7 company-agreement question.
+  const draftCompany = cleanReviewedString(draft?.requesting_company_slug) ||
+    cleanReviewedString(draft?.requesting_company_name)
+  const extractedCompany = cleanReviewedString(
+    extraction.requesting_company_slug,
+  ) || cleanReviewedString(extraction.requesting_company_name)
+  if (
+    draftCompany && extractedCompany &&
+    canonicalCompanyDedupeKey(draftCompany) !==
+      canonicalCompanyDedupeKey(extractedCompany)
+  ) return null
+  return draftCompany || extractedCompany || null
+}
+
+function resolvedIntakeDraftFamily(
+  draft: any,
+  requireIndependentSignals = false,
+): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
-  const builder = cleanReviewedString(draft?.requesting_company_slug) ||
-    cleanReviewedString(extraction.requesting_company_slug) ||
-    cleanReviewedString(draft?.requesting_company_name) ||
-    cleanReviewedString(extraction.requesting_company_name) ||
-    null
+  const builder = consistentIntakeDraftRequestingCompany(draft, extraction)
   const workOrderAttachments = draftWorkOrderAttachments(attachments)
   const workOrderNames = new Set(
     workOrderAttachments
@@ -22362,17 +22380,6 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
     draft?.description,
     extraction.description,
   ].filter(Boolean).join('\n')
-  const previewSignalPresent = !!(
-    cleanReviewedString(draft?.subject) ||
-    cleanReviewedString(previewInstructionText) ||
-    effectiveReportType
-  )
-  const previewFamilyDecision = _decideDeterministicMakeSafeJobFamily(
-    draft?.subject || null,
-    previewInstructionText,
-    effectiveReportType,
-    familyContext,
-  )
   const fullInstructionText = cleanReviewedString(
     extraction.builder_email_text_for_trade,
   )
@@ -22384,16 +22391,79 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
       { builder },
     )
     : null
+  const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
+  // The accounted-obligation boundary opts into independent proof because it
+  // can hide or Advance a draft. Other intake callers retain their established
+  // combined PDF/preview cleanliness classification.
+  if (!requireIndependentSignals) {
+    const combinedPreviewDecision = _decideDeterministicMakeSafeJobFamily(
+      draft?.subject || null,
+      previewInstructionText,
+      effectiveReportType,
+      familyContext,
+    )
+    const combinedSignals = [
+      ...(storedFamilyRaw ? [{ makesafe_job_family: storedFamilyRaw }] : []),
+      ...(combinedPreviewDecision.family
+        ? [{ makesafe_job_family: combinedPreviewDecision.family }]
+        : []),
+      ...(fullInstructionFamilyDecision?.family
+        ? [{ makesafe_job_family: fullInstructionFamilyDecision.family }]
+        : []),
+    ]
+    const combinedFamily = familyContextRefused
+      ? null
+      : _resolveConsistentObligationFamily(combinedSignals)
+    if (!combinedFamily || combinedFamily === 'unknown') return null
+    return intakeFamilyFromCanonicalObligationFamily(combinedFamily)
+  }
+  const previewSignalPresent = !!(
+    cleanReviewedString(draft?.subject) ||
+    cleanReviewedString(previewInstructionText)
+  )
+  const storedReportType = cleanReviewedString(draft?.report_type)
+  const reportTypeFamilyDecision = storedReportType
+    ? _decideDeterministicMakeSafeJobFamily(
+      null,
+      null,
+      storedReportType,
+      { builder },
+    )
+    : null
+  const previewFamilyDecision = previewSignalPresent
+    ? _decideDeterministicMakeSafeJobFamily(
+      draft?.subject || null,
+      previewInstructionText,
+      null,
+      { builder },
+    )
+    : null
+  const pdfSignalPresent = pdfDocuments.length > 0
+  const pdfFamilyDecision = pdfSignalPresent
+    ? _decideDeterministicMakeSafeJobFamily(
+      null,
+      null,
+      null,
+      familyContext,
+    )
+    : null
   if (
     familyContextRefused ||
-    (previewSignalPresent && !previewFamilyDecision.family) ||
+    (storedReportType && !reportTypeFamilyDecision?.family) ||
+    (previewSignalPresent && !previewFamilyDecision?.family) ||
+    (pdfSignalPresent && !pdfFamilyDecision?.family) ||
     (fullInstructionText && !fullInstructionFamilyDecision?.family)
   ) return null
-  const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
   const familySignals = [
     ...(storedFamilyRaw ? [{ makesafe_job_family: storedFamilyRaw }] : []),
-    ...(previewFamilyDecision.family
+    ...(reportTypeFamilyDecision?.family
+      ? [{ makesafe_job_family: reportTypeFamilyDecision.family }]
+      : []),
+    ...(previewFamilyDecision?.family
       ? [{ makesafe_job_family: previewFamilyDecision.family }]
+      : []),
+    ...(pdfFamilyDecision?.family
+      ? [{ makesafe_job_family: pdfFamilyDecision.family }]
       : []),
     ...(fullInstructionFamilyDecision?.family
       ? [{ makesafe_job_family: fullInstructionFamilyDecision.family }]
@@ -22432,8 +22502,8 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     confidence: draft?.confidence,
     missingFields: parseJsonArray(draft?.missing_fields),
     matchedCompany: {
-      slug: cleanReviewedString(draft?.requesting_company_slug) || cleanReviewedString(extraction.requesting_company_slug),
-      name: cleanReviewedString(draft?.requesting_company_name) || cleanReviewedString(extraction.requesting_company_name),
+      slug: consistentIntakeDraftRequestingCompany(draft, extraction),
+      name: null,
     },
     externalRef: cleanReviewedString(draft?.external_ref) || cleanReviewedString(extraction.external_ref),
     clientName: cleanReviewedString(draft?.client_name) || cleanReviewedString(extraction.client_name),

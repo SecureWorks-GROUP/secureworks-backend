@@ -25,6 +25,8 @@ function intakeDraft(
     builderEmailTextForTrade?: string;
     attachmentName?: string;
     company?: string;
+    extractionCompany?: string;
+    pdfText?: string;
   } = {},
 ) {
   const externalRef = options.externalRef ?? `MLB-${id}`;
@@ -35,6 +37,9 @@ function intakeDraft(
   const family = options.family === undefined
     ? "general_makesafe"
     : options.family;
+  const attachmentName = options.attachmentName === undefined
+    ? `work-order-${id}.pdf`
+    : options.attachmentName;
   return {
     id: `draft-${id}`,
     status: options.status || "needs_review",
@@ -46,19 +51,29 @@ function intakeDraft(
     external_ref: externalRef,
     client_name: "Fixture Client",
     site_address: `${id} Fixture Street`,
-    subject: options.subject || `Work Order ${externalRef}`,
-    body_preview: options.bodyPreview || "Please attend and make safe.",
+    subject: options.subject === undefined
+      ? `Work Order ${externalRef}`
+      : options.subject,
+    body_preview: options.bodyPreview === undefined
+      ? "Please attend and make safe."
+      : options.bodyPreview,
     report_type: options.reportType ?? null,
     extraction_json: {
       builder_work_order_number: workOrder,
       builder_po_number: po,
       makesafe_job_family: family,
       builder_email_text_for_trade: options.builderEmailTextForTrade,
+      requesting_company_slug: options.extractionCompany,
+      work_order_pdf_text: options.pdfText
+        ? [{
+          attachment_name: attachmentName,
+          status: "extracted",
+          text: options.pdfText,
+        }]
+        : undefined,
     },
     attachments_json: [{
-      file_name: options.attachmentName === undefined
-        ? `work-order-${id}.pdf`
-        : options.attachmentName,
+      file_name: attachmentName,
       pdf_url: `https://example.invalid/work-order-${id}.pdf`,
       is_work_order: true,
     }],
@@ -231,7 +246,8 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   const restoration = intakeDraft("61012", {
     family: "restoration",
     reportType: "restoration",
-    bodyPreview: "Complete the documented restoration works.",
+    subject: "",
+    bodyPreview: "",
   });
   const { client, calls } = fakeClient(
     [
@@ -329,6 +345,17 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
     subject: "Claim correspondence",
     bodyPreview: "For your records.",
   });
+  const companyConflict = intakeDraft("61017", {
+    company: "mlb",
+    extractionCompany: "aj",
+  });
+  const pdfPreviewFamilyConflict = intakeDraft("61018", {
+    family: "roof_report",
+    subject: "Assessment report required",
+    bodyPreview: "Please complete an assessment report and quote.",
+    pdfText: "Allocation Work Order\nRoof Reports\nEXTERNAL",
+  });
+  const invoiced = intakeDraft("61019");
   const { client, calls } = fakeClient(
     [
       missingExistingIdentity,
@@ -337,6 +364,9 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
       conflictingExistingIdentity,
       fullEmailFamilyAbstention,
       previewFamilyAbstention,
+      companyConflict,
+      pdfPreviewFamilyConflict,
+      invoiced,
     ],
     [
       obligationJob("61010", { workOrder: "", po: "" }),
@@ -348,6 +378,9 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
       }),
       obligationJob("61015", { family: "roof_report" }),
       obligationJob("61016", { family: "roof_report" }),
+      obligationJob("61017"),
+      obligationJob("61018", { family: "roof_report" }),
+      obligationJob("61019", { status: "invoiced" }),
     ],
   );
 
@@ -365,6 +398,9 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
       conflictingExistingIdentity.id,
       fullEmailFamilyAbstention.id,
       previewFamilyAbstention.id,
+      companyConflict.id,
+      pdfPreviewFamilyConflict.id,
+      invoiced.id,
     ].sort(),
   );
   assertEquals(result.omitted_accounted_count, 0);
@@ -534,6 +570,17 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
     subject: "Claim correspondence",
     bodyPreview: "For your records.",
   });
+  const companyConflict = intakeDraft("63015", {
+    company: "mlb",
+    extractionCompany: "aj",
+  });
+  const pdfPreviewFamilyConflict = intakeDraft("63016", {
+    family: "roof_report",
+    subject: "Assessment report required",
+    bodyPreview: "Please complete an assessment report and quote.",
+    pdfText: "Allocation Work Order\nRoof Reports\nEXTERNAL",
+  });
+  const invoiced = intakeDraft("63017");
   const ajWorkOrderConflict = intakeDraft("67001", {
     externalRef: "AJBR-67001",
     workOrder: "AJBR-67001",
@@ -550,6 +597,9 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       terminalMissingIdentity,
       fullEmailFamilyAbstention,
       previewFamilyAbstention,
+      companyConflict,
+      pdfPreviewFamilyConflict,
+      invoiced,
       ajWorkOrderConflict,
     ],
     [
@@ -567,6 +617,9 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       }),
       obligationJob("63013", { family: "roof_report" }),
       obligationJob("63014", { family: "roof_report" }),
+      obligationJob("63015"),
+      obligationJob("63016", { family: "roof_report" }),
+      obligationJob("63017", { status: "invoiced" }),
       obligationJob("67001", {
         externalRef: "AJBR-67001",
         workOrder: "AJBR-67999",
@@ -593,6 +646,9 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       [terminalMissingIdentity.id, "builder_identity_unproved"],
       [fullEmailFamilyAbstention.id, "family_unproved"],
       [previewFamilyAbstention.id, "family_unproved"],
+      [companyConflict.id, "requesting_company_unproved"],
+      [pdfPreviewFamilyConflict.id, "family_unproved"],
+      [invoiced.id, "terminal_job_binding"],
       [ajWorkOrderConflict.id, "builder_identity_unproved"],
     ].sort(),
   );
