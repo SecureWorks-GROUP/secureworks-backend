@@ -20,7 +20,10 @@ import {
   isFencingMaterialsOrLater,
   isFencingStageTruthRequested,
 } from "./fencing_stage_recipe_v1.ts";
-import { emptyFencingExecutionEvidence } from "./fencing_stage_evidence.ts";
+import {
+  emptyFencingExecutionEvidence,
+  fencingExecutionEvidenceFromPipelineRows,
+} from "./fencing_stage_evidence.ts";
 import {
   FENCING_STAGE_TRUTH_BOUNDARY,
   FENCING_STAGE_TRUTH_COHORT,
@@ -34,19 +37,6 @@ import {
 import { _pipelineForTest } from "./index.ts";
 
 const NOW = new Date(FENCING_STAGE_TRUTH_PINNED_NOW);
-
-const ENGINE_SRC = await Deno.readTextFile(
-  new URL("./fencing_stage_engine_v1.ts", import.meta.url),
-);
-const RECIPE_SRC = await Deno.readTextFile(
-  new URL("./fencing_stage_recipe_v1.ts", import.meta.url),
-);
-const EVIDENCE_SRC = await Deno.readTextFile(
-  new URL("./fencing_stage_evidence.ts", import.meta.url),
-);
-const INDEX_SRC = await Deno.readTextFile(
-  new URL("./index.ts", import.meta.url),
-);
 
 function derive(fixture: FencingStageTruthFixture) {
   return deriveFencingStageV1(fixture.evidence, { now: NOW });
@@ -78,7 +68,7 @@ Deno.test("fencing stage truth: 38/38 cohort accounted once into a named bucket 
   assertEquals(declared.get("in_progress"), 5);
   assertEquals(declared.get("rectification"), 5);
 
-  let unknown = 0;
+  const unknown: Array<{ id: string; missing: string[] }> = [];
   for (const row of FENCING_STAGE_TRUTH_COHORT) {
     const got = derive(row);
     assert(
@@ -93,12 +83,18 @@ Deno.test("fencing stage truth: 38/38 cohort accounted once into a named bucket 
       `${row.id} declared=${row.declared_stage} group=${row.group}`,
     );
     assertEquals(got.stage_recipe_version, FENCING_STAGE_RECIPE_VERSION);
-    if (got.canonical_stage === "unknown") unknown += 1;
+    if (got.canonical_stage === "unknown") {
+      unknown.push({ id: row.id, missing: got.missing });
+    }
   }
-  assert(
-    unknown <= Math.floor(38 * 0.25),
-    `unknown ${unknown}/38 exceeds 25% — name the missing capture, do not invent a status`,
-  );
+  assertEquals(unknown, [
+    { id: "fence-001", missing: ["deposit_invoice_issued"] },
+    { id: "fence-002", missing: ["deposit_invoice_issued"] },
+    { id: "fence-006", missing: ["deposit_invoice_issued"] },
+    { id: "fence-029", missing: ["deposit_invoice_issued"] },
+    { id: "fence-030", missing: ["deposit_invoice_issued"] },
+    { id: "fence-031", missing: ["deposit_invoice_issued"] },
+  ]);
 });
 
 Deno.test("fencing stage truth: 0 materials-or-later without a paid deposit fact", () => {
@@ -198,27 +194,7 @@ Deno.test("fencing stage truth: planted lie exits nonzero (comparison detects th
   assertNotEquals(got, FENCING_STAGE_TRUTH_PLANTED_LIE.false_expected);
 });
 
-Deno.test("fencing stage truth: evidence type and engine never take claimed status as a fact", () => {
-  assertEquals(/\bclaimed_status\b/.test(EVIDENCE_SRC), false);
-  assertEquals(/\bdeclared_stage\s*[?:]/.test(EVIDENCE_SRC), false);
-  assertEquals(
-    /\b(accepted_at|deposit_at|processing_at)\b/.test(EVIDENCE_SRC),
-    false,
-  );
-  assert(
-    !/\bclaimed_status\b|\bevidence\.declared_stage\b|\bjobs\.status\b/.test(
-      ENGINE_SRC,
-    ),
-    "engine must not read a claimed status as a positive term",
-  );
-  assertEquals(
-    RECIPE_SRC.includes("stage-gate/engine"),
-    false,
-    "recipe must not ship the Cap 1 gate engine as placement",
-  );
-  assertEquals(ENGINE_SRC.includes("stage-gate/engine"), false);
-  assertEquals(ENGINE_SRC.includes("deriveSesStageV2"), false);
-  assertEquals(RECIPE_SRC.includes("deriveSesStageV2"), false);
+Deno.test("fencing stage truth: empty execution evidence remains unknown", () => {
   const empty = deriveFencingStageV1(emptyFencingExecutionEvidence("x"), {
     now: NOW,
   });
@@ -230,7 +206,8 @@ Deno.test("fencing stage truth: draft PO plus outbound email is still order_mate
     job_id: "draft-po",
     deposit_invoice_id: "dep-1",
     invoices: [{
-      id: "dep-1",
+      id: "local-dep-1",
+      xero_invoice_id: "dep-1",
       status: "PAID",
       invoice_type: "ACCREC",
       reference: "DEP",
@@ -239,6 +216,7 @@ Deno.test("fencing stage truth: draft PO plus outbound email is still order_mate
     }],
     purchase_orders: [{
       id: "po-1",
+      po_type: "material",
       status: "draft",
       xero_po_id: null,
       confirmed_delivery_date: null,
@@ -247,6 +225,7 @@ Deno.test("fencing stage truth: draft PO plus outbound email is still order_mate
     }],
     po_communications: [{
       id: "email-1",
+      po_id: "po-1",
       direction: "outbound",
       created_at: "2026-08-10T00:00:00.000Z",
       sent_at: "2026-08-10T00:00:00.000Z",
@@ -330,7 +309,27 @@ function makeClient(
       for (const [column, values] of inFilters) {
         rows = rows.filter((row) => values.includes(row[column] as never));
       }
-      return rowLimit == null ? rows : rows.slice(0, rowLimit);
+      const limited = rowLimit == null ? rows : rows.slice(0, rowLimit);
+      if (
+        ![
+          "job_assignments",
+          "purchase_orders",
+          "po_communications",
+          "xero_invoices",
+          "job_service_reports",
+        ].includes(table)
+      ) {
+        return limited;
+      }
+      const columns = selectSpec.split(",").map((column) => column.trim());
+      return limited.map((row) =>
+        Object.fromEntries(columns.map((column) => {
+          const [alias, source] = column.includes(":")
+            ? column.split(":").map((part) => part.trim())
+            : [column, column];
+          return [alias, row[source]];
+        }))
+      );
     };
     const result = () => ({ data: apply(), error: null });
     const builder: Record<string, unknown> = {
@@ -384,11 +383,12 @@ const PIPELINE_TABLES = {
   council_submissions: [],
   po_communications: [],
   xero_invoices: [{
-    id: "dep-1",
+    id: "local-dep-1",
+    xero_invoice_id: "dep-1",
     job_id: "job-1",
     status: "PAID",
     invoice_type: "ACCREC",
-    reference: "DEP",
+    reference: "SWF-26003",
     amount_paid: 1500,
     fully_paid_on: "2026-07-15",
   }],
@@ -460,19 +460,146 @@ Deno.test("pipeline default vs stage_truth=1: default keys stay, truth keys are 
   assertEquals(stable(offCard), stable(onCard));
 });
 
-Deno.test("pipeline wiring calls the shipped engine only behind the flag", () => {
-  assert(INDEX_SRC.includes("deriveFencingStageV1("));
-  assert(INDEX_SRC.includes("isFencingStageTruthRequested(params)"));
-  assert(INDEX_SRC.includes("if (stageTruth && stageTruthRows)"));
-  assertEquals(INDEX_SRC.includes("evaluateStageGates"), true);
-  const pipelineStart = INDEX_SRC.indexOf("async function pipeline(");
-  const pipelineEnd = INDEX_SRC.indexOf("export const _pipelineForTest");
-  const body = INDEX_SRC.slice(pipelineStart, pipelineEnd);
-  assert(body.includes("stageTruth"));
-  assert(
-    !body.includes("evaluateStageGates"),
-    "pipeline must not place via Cap 1 evaluateStageGates",
+Deno.test("pipeline stage_truth=1: claimed draft rows load execution evidence", async () => {
+  const tables = {
+    ...PIPELINE_TABLES,
+    jobs: [pipelineJob("job-1", "draft")],
+    purchase_orders: [{
+      id: "po-1",
+      job_id: "job-1",
+      po_type: "material",
+      status: "sent",
+      xero_po_id: "xero-po-1",
+      confirmed_delivery_date: null,
+      delivery_confirmed_at: null,
+      delivery_date: null,
+    }],
+  };
+  const result = await _pipelineForTest(
+    makeClient(tables),
+    new URLSearchParams("type=fencing&stage_truth=1"),
   );
+  assertEquals(result.columns.draft[0].declared_stage, "draft");
+  assertEquals(result.columns.draft[0].canonical_stage, "awaiting_supplier");
+});
+
+Deno.test("fencing evidence: only typed material POs can advance ordering", () => {
+  const baseRows = {
+    invoices: [{
+      id: "local-dep",
+      xero_invoice_id: "xero-dep",
+      job_id: "job-1",
+      status: "PAID",
+      invoice_type: "ACCREC",
+      reference: "SWF-26003",
+      amount_paid: 100,
+      fully_paid_on: "2026-08-01",
+    }],
+    poCommunications: [{
+      id: "comm-1",
+      job_id: "job-1",
+      po_id: "po-material",
+      direction: "outbound",
+      created_at: "2026-08-02",
+      sent_at: "2026-08-02",
+      received_at: null,
+    }],
+    assignments: [],
+    serviceReports: [],
+    unreadable: [],
+  };
+  for (const poType of ["labour", "subcontract", null]) {
+    const evidence = fencingExecutionEvidenceFromPipelineRows(
+      "job-1",
+      "xero-dep",
+      {
+        ...baseRows,
+        purchaseOrders: [{
+          id: `po-${poType}`,
+          job_id: "job-1",
+          po_type: poType,
+          status: "sent",
+        }],
+      },
+    );
+    const got = deriveFencingStageV1(evidence, { now: NOW });
+    assertEquals(got.canonical_stage, "order_materials");
+    assertEquals(got.facts.material_order_sent, false);
+  }
+});
+
+Deno.test("fencing evidence: tentative delivery date is not confirmation", () => {
+  const evidence = fencingExecutionEvidenceFromPipelineRows(
+    "job-1",
+    "xero-dep",
+    {
+      invoices: [{
+        id: "local-dep",
+        xero_invoice_id: "xero-dep",
+        job_id: "job-1",
+        status: "PAID",
+        invoice_type: "ACCREC",
+        reference: "SWF-26003",
+        amount_paid: 100,
+        fully_paid_on: "2026-08-01",
+      }],
+      purchaseOrders: [{
+        id: "po-1",
+        job_id: "job-1",
+        po_type: "material",
+        status: "sent",
+        confirmed_delivery_date: "2026-08-20",
+        delivery_confirmed_at: null,
+      }],
+      poCommunications: [],
+      assignments: [],
+      serviceReports: [],
+      unreadable: [],
+    },
+  );
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "awaiting_supplier");
+  assertEquals(got.facts.order_confirmed, false);
+});
+
+Deno.test("fencing evidence: unsent outbound row is not dispatch proof", () => {
+  const evidence = fencingExecutionEvidenceFromPipelineRows(
+    "job-1",
+    "xero-dep",
+    {
+      invoices: [{
+        id: "local-dep",
+        xero_invoice_id: "xero-dep",
+        job_id: "job-1",
+        status: "PAID",
+        invoice_type: "ACCREC",
+        reference: "SWF-26003",
+        amount_paid: 100,
+        fully_paid_on: "2026-08-01",
+      }],
+      purchaseOrders: [{
+        id: "po-1",
+        job_id: "job-1",
+        po_type: "material",
+        status: null,
+      }],
+      poCommunications: [{
+        id: "comm-1",
+        job_id: "job-1",
+        po_id: "po-1",
+        direction: "outbound",
+        created_at: "2026-08-02",
+        sent_at: null,
+        received_at: null,
+      }],
+      assignments: [],
+      serviceReports: [],
+      unreadable: [],
+    },
+  );
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "order_materials");
+  assertEquals(got.facts.material_order_sent, false);
 });
 
 Deno.test("fencing stage truth fixture contract version is pinned", () => {

@@ -104,14 +104,19 @@ function finalInvoices(
 function outboundComms(
   evidence: FencingExecutionEvidence,
 ): FencingPoCommFact[] {
+  const materialPoIds = new Set(
+    evidence.purchase_orders.map((po) => po.id).filter((id) => id != null),
+  );
   return evidence.po_communications.filter((row) =>
-    normalizeStatusToken(row.direction) === "outbound"
+    normalizeStatusToken(row.direction) === "outbound" &&
+    hasStamp(row.sent_at) &&
+    row.po_id != null &&
+    materialPoIds.has(row.po_id)
   );
 }
 
 function poHasConfirmation(po: FencingPoFact): boolean {
   return isFencingPoConfirmedStatus(po.status) ||
-    hasStamp(po.confirmed_delivery_date) ||
     hasStamp(po.delivery_confirmed_at);
 }
 
@@ -180,9 +185,8 @@ function evaluateFacts(
     livePos.every((po) => isFencingPoDraftStatus(po.status));
   const poSent = livePos.some((po) => isFencingPoSentStatus(po.status));
   const outbound = outboundComms(evidence).length > 0;
-  // A draft PO must never classify as awaiting-supplier. Outbound email is a
-  // send fact only when no live PO row vetoes it as still-draft.
-  const materialOrderSent = poSent || (outbound && !draftOnly);
+  const materialOrderSent = poSent ||
+    (outbound && livePos.length > 0 && !draftOnly);
 
   const orderConfirmed = livePos.some((po) => poHasConfirmation(po));
 

@@ -14,6 +14,7 @@ import {
 
 export interface FencingInvoiceFact {
   id: string | null;
+  xero_invoice_id: string | null;
   status: string | null;
   invoice_type: string | null;
   reference: string | null;
@@ -23,6 +24,7 @@ export interface FencingInvoiceFact {
 
 export interface FencingPoFact {
   id: string | null;
+  po_type: string | null;
   status: string | null;
   xero_po_id: string | null;
   confirmed_delivery_date: string | null;
@@ -32,6 +34,7 @@ export interface FencingPoFact {
 
 export interface FencingPoCommFact {
   id: string | null;
+  po_id: string | null;
   direction: string | null;
   created_at: string | null;
   sent_at: string | null;
@@ -106,6 +109,7 @@ function asNumber(value: unknown): number | null {
 function projectInvoice(row: Record<string, unknown>): FencingInvoiceFact {
   return {
     id: asText(row.id),
+    xero_invoice_id: asText(row.xero_invoice_id),
     status: asText(row.status),
     invoice_type: asText(row.invoice_type),
     reference: asText(row.reference),
@@ -117,6 +121,7 @@ function projectInvoice(row: Record<string, unknown>): FencingInvoiceFact {
 function projectPo(row: Record<string, unknown>): FencingPoFact {
   return {
     id: asText(row.id),
+    po_type: asText(row.po_type),
     status: asText(row.status),
     xero_po_id: asText(row.xero_po_id),
     confirmed_delivery_date: asText(row.confirmed_delivery_date),
@@ -128,6 +133,7 @@ function projectPo(row: Record<string, unknown>): FencingPoFact {
 function projectComm(row: Record<string, unknown>): FencingPoCommFact {
   return {
     id: asText(row.id),
+    po_id: asText(row.po_id),
     direction: asText(row.direction),
     created_at: asText(row.created_at),
     sent_at: asText(row.sent_at),
@@ -185,6 +191,7 @@ export function fencingExecutionEvidenceFromPipelineRows(
   const purchaseOrders = rows.purchaseOrders
     .filter(matchJob)
     .map(projectPo)
+    .filter((po) => normalizeStatusToken(po.po_type) === "material")
     .filter((po) =>
       normalizeStatusToken(po.status) !== FENCING_PO_DELETED_STATUS
     );
@@ -216,7 +223,12 @@ export function isDepositInvoiceFact(
   ) {
     return false;
   }
-  if (depositInvoiceId && invoice.id === depositInvoiceId) return true;
+  if (
+    depositInvoiceId &&
+    asText(invoice.xero_invoice_id) === asText(depositInvoiceId)
+  ) {
+    return true;
+  }
   return referenceLooksLikeDeposit(invoice.reference);
 }
 

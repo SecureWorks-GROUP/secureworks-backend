@@ -62,6 +62,7 @@ function paidDeposit(
     deposit_invoice_id: invoiceId,
     invoices: [{
       id: invoiceId,
+      xero_invoice_id: invoiceId,
       status: "PAID",
       invoice_type: "ACCREC",
       reference: `${jobId}-DEP`,
@@ -79,6 +80,7 @@ function issuedDeposit(
     deposit_invoice_id: invoiceId,
     invoices: [{
       id: invoiceId,
+      xero_invoice_id: invoiceId,
       status: "AUTHORISED",
       invoice_type: "ACCREC",
       reference: `${jobId}-DEP`,
@@ -93,6 +95,7 @@ function outboundPoEmail(
 ): NonNullable<FencingExecutionEvidence["po_communications"]> {
   return [{
     id,
+    po_id: null,
     direction: "outbound",
     created_at: "2026-08-10T00:00:00.000Z",
     sent_at: "2026-08-10T00:00:00.000Z",
@@ -121,6 +124,7 @@ function sentPo(
 ): NonNullable<FencingExecutionEvidence["purchase_orders"]> {
   return [{
     id,
+    po_type: "material",
     status,
     xero_po_id: `xero-${id}`,
     confirmed_delivery_date: null,
@@ -201,6 +205,7 @@ function groupC(n: number): FencingStageTruthFixture {
       {
         invoices: [{
           id: `inv-${id}`,
+          xero_invoice_id: `xero-inv-${id}`,
           status: "AUTHORISED",
           invoice_type: "ACCREC",
           reference: `${id}-FINAL`,
@@ -241,7 +246,7 @@ export const FENCING_STAGE_TRUTH_COHORT: FencingStageTruthFixture[] = [
   job(
     7,
     "awaiting_supplier",
-    "awaiting_supplier",
+    "order_materials",
     "paid_deposit_outbound_email",
     merge(
       paidDeposit("fence-007", "dep-fence-007"),
@@ -251,7 +256,7 @@ export const FENCING_STAGE_TRUTH_COHORT: FencingStageTruthFixture[] = [
   job(
     8,
     "awaiting_supplier",
-    "awaiting_supplier",
+    "order_materials",
     "paid_deposit_outbound_email",
     merge(
       paidDeposit("fence-008", "dep-fence-008"),
@@ -261,7 +266,7 @@ export const FENCING_STAGE_TRUTH_COHORT: FencingStageTruthFixture[] = [
   job(
     9,
     "awaiting_supplier",
-    "awaiting_supplier",
+    "order_materials",
     "paid_deposit_outbound_email",
     merge(
       paidDeposit("fence-009", "dep-fence-009"),
@@ -338,6 +343,7 @@ export const FENCING_STAGE_TRUTH_COHORT: FencingStageTruthFixture[] = [
       {
         invoices: [{
           id: "inv-fence-027",
+          xero_invoice_id: "xero-inv-fence-027",
           status: "PAID",
           invoice_type: "ACCREC",
           reference: "fence-027-FINAL",
@@ -358,6 +364,7 @@ export const FENCING_STAGE_TRUTH_COHORT: FencingStageTruthFixture[] = [
       {
         invoices: [{
           id: "inv-fence-028",
+          xero_invoice_id: "xero-inv-fence-028",
           status: "PAID",
           invoice_type: "ACCREC",
           reference: "fence-028-FINAL",
@@ -442,6 +449,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-105",
+          po_type: "material",
           status: "confirmed",
           xero_po_id: "xero-po-fence-105",
           confirmed_delivery_date: "2026-08-20",
@@ -461,6 +469,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-106",
+          po_type: "material",
           status: "confirmed",
           xero_po_id: "xero-po-fence-106",
           confirmed_delivery_date: "2026-08-20",
@@ -485,6 +494,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-107",
+          po_type: "material",
           status: "confirmed",
           xero_po_id: "xero-po-fence-107",
           confirmed_delivery_date: "2026-08-26",
@@ -509,6 +519,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-108",
+          po_type: "material",
           status: "delivered",
           xero_po_id: "xero-po-fence-108",
           confirmed_delivery_date: "2026-08-01",
@@ -534,6 +545,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-109",
+          po_type: "material",
           status: "delivered",
           xero_po_id: "xero-po-fence-109",
           confirmed_delivery_date: "2026-08-01",
@@ -560,6 +572,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-110",
+          po_type: "material",
           status: "billed",
           xero_po_id: "xero-po-fence-110",
           confirmed_delivery_date: "2026-07-01",
@@ -577,6 +590,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         invoices: [{
           id: "inv-fence-110",
+          xero_invoice_id: "xero-inv-fence-110",
           status: "AUTHORISED",
           invoice_type: "ACCREC",
           reference: "fence-110-FINAL",
@@ -596,6 +610,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-111",
+          po_type: "material",
           status: "billed",
           xero_po_id: "xero-po-fence-111",
           confirmed_delivery_date: "2026-07-01",
@@ -613,6 +628,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         invoices: [{
           id: "inv-fence-111",
+          xero_invoice_id: "xero-inv-fence-111",
           status: "PAID",
           invoice_type: "ACCREC",
           reference: "fence-111-FINAL",
@@ -648,6 +664,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         purchase_orders: [{
           id: "po-fence-113",
+          po_type: "material",
           status: "billed",
           xero_po_id: "xero-po-fence-113",
           confirmed_delivery_date: "2026-07-01",
@@ -665,6 +682,7 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
       {
         invoices: [{
           id: "inv-fence-113",
+          xero_invoice_id: "xero-inv-fence-113",
           status: "PAID",
           invoice_type: "ACCREC",
           reference: "fence-113-FINAL",

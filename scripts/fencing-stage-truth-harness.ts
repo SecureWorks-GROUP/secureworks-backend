@@ -22,6 +22,7 @@ const plantedLie = Deno.args.includes("--planted-lie");
 
 const failures: string[] = [];
 const counts = new Map<string, number>();
+const unknowns: Array<{ id: string; missing: string[] }> = [];
 
 for (const row of FENCING_STAGE_TRUTH_COHORT) {
   const expected = plantedLie && row.id === FENCING_STAGE_TRUTH_PLANTED_LIE.id
@@ -29,6 +30,9 @@ for (const row of FENCING_STAGE_TRUTH_COHORT) {
     : row.expected_canonical;
   const got = deriveFencingStageV1(row.evidence, { now: NOW });
   counts.set(got.canonical_stage, (counts.get(got.canonical_stage) || 0) + 1);
+  if (got.canonical_stage === "unknown") {
+    unknowns.push({ id: row.id, missing: got.missing });
+  }
   if (got.canonical_stage !== expected) {
     failures.push(
       `${row.id}: got ${got.canonical_stage} expected ${expected}`,
@@ -81,6 +85,7 @@ if (emptyComplete.canonical_stage !== "unknown") {
 const unknown = counts.get("unknown") || 0;
 const classified = FENCING_STAGE_TRUTH_COHORT.length;
 console.log(`classified=${classified} unknown=${unknown}`);
+console.log(`unknowns=${JSON.stringify(unknowns)}`);
 console.log(`buckets=${JSON.stringify(Object.fromEntries(counts))}`);
 console.log(
   `perturbations=${FENCING_STAGE_TRUTH_PERTURBATIONS.length} boundary=${FENCING_STAGE_TRUTH_BOUNDARY.length}`,

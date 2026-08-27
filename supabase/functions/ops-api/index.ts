@@ -12535,11 +12535,10 @@ async function pipeline(client: any, params: URLSearchParams) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
-  // Only enrich non-draft jobs (drafts have no assignments/POs/invoices).
-  // The shared reader below chunks this list by encoded URL budget; excluding
-  // drafts remains useful load-shedding, but is no longer the URL-safety guard.
+  // The default response keeps its non-draft enrichment scope. Stage truth
+  // reads every returned row because the stored status is only a claim.
   const nonDraftJobs = jobs.filter((j: any) => j.status !== 'draft')
-  const jobIds = nonDraftJobs.map((j: any) => j.id)
+  const jobIds = (stageTruth ? jobs : nonDraftJobs).map((j: any) => j.id)
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -12564,7 +12563,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select(
           stageTruth
-            ? 'job_id, id, status, xero_po_id, confirmed_delivery_date, delivery_confirmed_at, delivery_date'
+            ? 'job_id, id, po_type, status, xero_po_id, confirmed_delivery_date, delivery_confirmed_at, delivery_date'
             : 'job_id',
         ).in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
@@ -12574,13 +12573,13 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
         client.from('po_communications').select(
           stageTruth
-            ? 'job_id, direction, created_at, id, sent_at, received_at'
+            ? 'job_id, po_id, direction, created_at, id, sent_at, received_at'
             : 'job_id, direction, created_at',
         ).in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
       readPipelineEnrichmentRows(jobIds, 'xero_invoices', (chunkIds) =>
         client.from('xero_invoices').select(
           stageTruth
-            ? 'job_id, status, invoice_type, reference, id, amount_paid, fully_paid_on'
+            ? 'job_id, status, invoice_type, reference, id, xero_invoice_id, amount_paid, fully_paid_on'
             : 'job_id, status, invoice_type, reference',
         ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")')),
       readPipelineEnrichmentRows(jobIds, 'ops_notes', (chunkIds) =>
