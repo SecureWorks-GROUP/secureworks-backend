@@ -29,6 +29,7 @@ import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 import { isReportOnlyType } from "./makesafe_intake_gate.ts";
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
+import { canonicalSesFamilyFromCard } from "./ses_family_matrix.ts";
 import {
   canonicalCompanyDedupeKey,
   canonicalExternalObligationRef,
@@ -3039,6 +3040,305 @@ interface ObligationBindingException {
   candidateJobNumbers: string[];
 }
 
+interface ExistingObligationIdentity {
+  externalRefCanonical: string | null;
+  builderWoCanonical: string | null;
+  builderPoCanonical: string | null;
+  builderCompany: string | null;
+  siteAddress: string | null;
+  jobFamily?: string | null;
+}
+
+interface ExistingObligationMatchOptions {
+  requireExactReference?: boolean;
+  requireEquivalentFamily?: boolean;
+  requireProvenBuilderIdentity?: boolean;
+}
+
+export interface IntakeDraftObligationCandidate {
+  draftId: string;
+  externalRef: string | null;
+  builderWorkOrderNumber: string | null;
+  builderPoNumber: string | null;
+  requestingCompany: string | null;
+  siteAddress: string | null;
+  jobFamily: string | null;
+}
+
+export type IntakeDraftObligationDisposition =
+  | {
+    kind: "accounted";
+    reason: "single_live_equivalent_obligation";
+    jobId: string;
+  }
+  | {
+    kind: "kept";
+    reason:
+      | "external_reference_unproved"
+      | "requesting_company_unproved"
+      | "builder_identity_unproved"
+      | "family_unproved"
+      | "no_equivalent_live_obligation"
+      | "terminal_job_binding"
+      | "multiple_live_jobs";
+    candidateJobIds: string[];
+  };
+
+async function readExistingObligationRows(client: any): Promise<any[]> {
+  // A truncated page would hide an existing obligation past the PostgREST
+  // 1000-row cap and let either intake path create or present a duplicate. Page
+  // this shared authority read to exhaustion for both deterministic intake and
+  // the operator draft queue.
+  const data: any[] = [];
+  for (let from = 0;; from += SOURCE_PAGE_SIZE) {
+    const { data: page, error } = await client.from("makesafe_job_details")
+      .select(
+        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(job_number,metadata,status,site_address,type)",
+      )
+      .order("job_id", { ascending: true })
+      .range(from, from + SOURCE_PAGE_SIZE - 1);
+    if (error) {
+      throw new Error(
+        `deterministic external-obligation dedupe read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    const rows = page || [];
+    data.push(...rows);
+    if (rows.length < SOURCE_PAGE_SIZE) break;
+  }
+  return data;
+}
+
+function matchingExistingObligationRows(
+  candidate: ExistingObligationIdentity,
+  data: readonly any[],
+  prefixes: readonly string[],
+  options: ExistingObligationMatchOptions = {},
+): any[] {
+  const targetRef = canonicalExternalObligationRef(
+    candidate.externalRefCanonical,
+    prefixes,
+  );
+  const targetCompany = canonicalCompanyDedupeKey(candidate.builderCompany);
+  const targetAddress = candidate.siteAddress;
+  const targetWo = canonicalExternalObligationRef(
+    candidate.builderWoCanonical,
+    prefixes,
+  );
+  const targetPo = canonicalObligationPoCore(candidate.builderPoCanonical) ||
+    canonicalObligationPoCore(candidate.builderWoCanonical, true) ||
+    canonicalObligationPoCore(candidate.externalRefCanonical, true);
+  const targetFamily = canonicalSesFamilyFromCard({
+    makesafe_job_family: candidate.jobFamily,
+  });
+
+  if (
+    !targetCompany ||
+    (!targetRef && !candidate.builderWoCanonical &&
+      !candidate.builderPoCanonical) ||
+    (options.requireExactReference && !targetRef) ||
+    (options.requireProvenBuilderIdentity && !targetWo && !targetPo) ||
+    (options.requireEquivalentFamily && targetFamily === "unknown")
+  ) return [];
+
+  const matchingRows = data.filter((row: any) => {
+    if (!row?.job_id) return false;
+    const existingCompany = canonicalCompanyDedupeKey(
+      row.requesting_company_slug || row.requesting_company_name,
+    );
+    if (!existingCompany || existingCompany !== targetCompany) return false;
+    const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+    if (existingJob?.type && existingJob.type !== "makesafe") return false;
+    const existingRef = canonicalExternalObligationRef(
+      row.external_ref,
+      prefixes,
+    );
+    const metadata = existingJob?.metadata &&
+        typeof existingJob.metadata === "object"
+      ? existingJob.metadata
+      : {};
+    const existingWo = canonicalExternalObligationRef(
+      metadata.builder_work_order_number,
+      prefixes,
+    );
+    const exactRefMatch = !!targetRef && existingRef === targetRef;
+    // Preserve the deterministic runtime's established raw-WO presence gate.
+    // Strict draft omission separately requires targetWo to canonicalise, so an
+    // invalid/raw-only token can never become board-hiding proof.
+    const exactWoMatch = !!candidate.builderWoCanonical &&
+      existingWo === targetWo;
+    const exactPoMatch = !!candidate.builderPoCanonical &&
+      canonicalObligationPoCore(metadata.builder_po_number) ===
+        canonicalObligationPoCore(candidate.builderPoCanonical);
+    const targetRefCore = obligationRefNumericCore(targetRef);
+    const builderScopedBareRefMatch = !!targetAddress &&
+      targetRefCore !== null &&
+      targetRefCore === obligationRefNumericCore(existingRef) &&
+      obligationAddressesMatch(targetAddress, existingJob?.site_address);
+    if (
+      !exactRefMatch && !exactWoMatch && !exactPoMatch &&
+      !builderScopedBareRefMatch
+    ) return false;
+    if (options.requireExactReference && !exactRefMatch) return false;
+
+    const existingPo = canonicalObligationPoCore(
+      metadata.builder_po_number,
+    ) ||
+      canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
+      canonicalObligationPoCore(row.external_ref, true);
+    if (!obligationCandidatePoMatches(targetPo, existingPo)) return false;
+    if (
+      options.requireProvenBuilderIdentity &&
+      !(targetPo ? existingPo === targetPo : exactWoMatch)
+    ) return false;
+
+    if (options.requireEquivalentFamily) {
+      const existingFamily = canonicalSesFamilyFromCard({
+        makesafe_job_family: metadata.makesafe_job_family || row.report_type,
+        insurance_job_type: metadata.insurance_job_type,
+        strata: metadata.strata,
+        own_template_requested: metadata.own_template_requested,
+        report_delivery: metadata.report_delivery,
+      });
+      if (existingFamily === "unknown" || existingFamily !== targetFamily) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  return [
+    ...new Map(
+      matchingRows.map((row: any) => [String(row.job_id), row]),
+    ).values(),
+  ];
+}
+
+/**
+ * Classify legacy operator drafts against the same obligation rows and identity
+ * grammar used by deterministic intake. Omission is deliberately stricter than
+ * mint dedupe: exact reference, proved builder WO/PO identity, and an equivalent
+ * canonical family must all agree. Anything uncertain or terminal stays visible.
+ */
+export async function readAccountedIntakeDraftObligations(
+  client: any,
+  candidates: readonly IntakeDraftObligationCandidate[],
+): Promise<Map<string, IntakeDraftObligationDisposition>> {
+  const dispositions = new Map<string, IntakeDraftObligationDisposition>();
+  if (!candidates.length) return dispositions;
+
+  const prefixes = await loadRefPrefixes(client);
+  const data = await readExistingObligationRows(client);
+  for (const candidate of candidates) {
+    const targetRef = canonicalExternalObligationRef(
+      candidate.externalRef,
+      prefixes,
+    );
+    const targetCompany = canonicalCompanyDedupeKey(
+      candidate.requestingCompany,
+    );
+    const targetWo = canonicalExternalObligationRef(
+      candidate.builderWorkOrderNumber,
+      prefixes,
+    );
+    const targetPo = canonicalObligationPoCore(candidate.builderPoNumber) ||
+      canonicalObligationPoCore(candidate.builderWorkOrderNumber, true) ||
+      canonicalObligationPoCore(candidate.externalRef, true);
+    const targetFamily = canonicalSesFamilyFromCard({
+      makesafe_job_family: candidate.jobFamily,
+    });
+    if (!targetRef) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "external_reference_unproved",
+        candidateJobIds: [],
+      });
+      continue;
+    }
+    if (!targetCompany) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "requesting_company_unproved",
+        candidateJobIds: [],
+      });
+      continue;
+    }
+    if (!targetWo && !targetPo) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "builder_identity_unproved",
+        candidateJobIds: [],
+      });
+      continue;
+    }
+    if (targetFamily === "unknown") {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "family_unproved",
+        candidateJobIds: [],
+      });
+      continue;
+    }
+
+    const matches = matchingExistingObligationRows(
+      {
+        externalRefCanonical: candidate.externalRef,
+        builderWoCanonical: candidate.builderWorkOrderNumber,
+        builderPoCanonical: candidate.builderPoNumber,
+        builderCompany: candidate.requestingCompany,
+        siteAddress: candidate.siteAddress,
+        jobFamily: candidate.jobFamily,
+      },
+      data,
+      prefixes,
+      {
+        requireExactReference: true,
+        requireEquivalentFamily: true,
+        requireProvenBuilderIdentity: true,
+      },
+    );
+    if (!matches.length) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "no_equivalent_live_obligation",
+        candidateJobIds: [],
+      });
+      continue;
+    }
+
+    const terminalMatches = matches.filter((row: any) => {
+      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      return isDeadObligationJobStatus(job?.status);
+    });
+    const candidateJobIds = matches.map((row: any) => String(row.job_id))
+      .sort();
+    if (terminalMatches.length) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "terminal_job_binding",
+        candidateJobIds,
+      });
+      continue;
+    }
+    if (matches.length > 1) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "multiple_live_jobs",
+        candidateJobIds,
+      });
+      continue;
+    }
+    dispositions.set(candidate.draftId, {
+      kind: "accounted",
+      reason: "single_live_equivalent_obligation",
+      jobId: String(matches[0].job_id),
+    });
+  }
+  return dispositions;
+}
+
 async function readObligationMatches(
   client: any,
   cases: readonly DeterministicCasePlan[],
@@ -3075,28 +3375,7 @@ async function readObligationMatches(
     };
   }
   const prefixes = await loadRefPrefixes(client);
-  // A truncated page would hide an existing obligation past the PostgREST
-  // 1000-row cap and let runDeterministicIntake create a duplicate live job for
-  // the same obligation, so the dedupe read is paged to exhaustion.
-  const data: any[] = [];
-  for (let from = 0;; from += SOURCE_PAGE_SIZE) {
-    const { data: page, error } = await client.from("makesafe_job_details")
-      .select(
-        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(job_number,metadata,status,site_address,type)",
-      )
-      .order("job_id", { ascending: true })
-      .range(from, from + SOURCE_PAGE_SIZE - 1);
-    if (error) {
-      throw new Error(
-        `deterministic external-obligation dedupe read failed: ${
-          error.message || error
-        }`,
-      );
-    }
-    const rows = page || [];
-    data.push(...rows);
-    if (rows.length < SOURCE_PAGE_SIZE) break;
-  }
+  const data = await readExistingObligationRows(client);
   const existingJobs = new Map<string, string>();
   const cancellationTargets = new Map<
     string,
@@ -3138,12 +3417,6 @@ async function readObligationMatches(
       item.state !== "confirmed_live_job" &&
       item.state !== "blocked_live_job"
     ) continue;
-    const targetRef = canonicalExternalObligationRef(
-      item.identity.externalRefCanonical,
-      prefixes,
-    );
-    const targetCompany = canonicalCompanyDedupeKey(item.identity.builderSlug);
-    const targetAddress = item.identity.siteAddress;
     const correctedTargetJobIds = new Set(
       item.sourcePostIds.flatMap((postId) => {
         const jobId = targetJobByPostId.get(postId);
@@ -3171,76 +3444,18 @@ async function readObligationMatches(
       continue;
     }
     const correctedTargetJobId = [...correctedTargetJobIds][0] || null;
-    // Mirror the existing/approve side: a distinct PO carried only in the work
-    // order field or the composite external ref still discriminates, so two
-    // explicitly-different POs are never over-deduped into one obligation.
-    const targetPo =
-      canonicalObligationPoCore(item.identity.builderPoCanonical) ||
-      canonicalObligationPoCore(item.identity.builderWoCanonical, true) ||
-      canonicalObligationPoCore(item.identity.externalRefCanonical, true);
-    if (
-      !targetCompany ||
-      (!targetRef && !item.identity.builderWoCanonical &&
-        !item.identity.builderPoCanonical)
-    ) continue;
-    const matchingRows = (data || []).filter((row: any) => {
-      if (!row?.job_id) return false;
-      const existingCompany = canonicalCompanyDedupeKey(
-        row.requesting_company_slug || row.requesting_company_name,
-      );
-      if (!existingCompany || existingCompany !== targetCompany) return false;
-      const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
-      if (existingJob?.type && existingJob.type !== "makesafe") return false;
-      const existingRef = canonicalExternalObligationRef(
-        row.external_ref,
-        prefixes,
-      );
-      const metadata = existingJob?.metadata &&
-          typeof existingJob.metadata === "object"
-        ? existingJob.metadata
-        : {};
-      const exactRefMatch = !!targetRef && existingRef === targetRef;
-      const exactWoMatch = !!item.identity.builderWoCanonical &&
-        canonicalExternalObligationRef(
-            metadata.builder_work_order_number,
-            prefixes,
-          ) ===
-          canonicalExternalObligationRef(
-            item.identity.builderWoCanonical,
-            prefixes,
-          );
-      const exactPoMatch = !!item.identity.builderPoCanonical &&
-        canonicalObligationPoCore(
-            metadata.builder_po_number,
-          ) === canonicalObligationPoCore(item.identity.builderPoCanonical);
-      // Direct-ops jobs can store the same builder-scoped obligation as a bare
-      // number (AJBR-70062 versus 70062). Accept that storage difference only
-      // when builder and address also agree; reference core alone is insufficient.
-      const targetRefCore = obligationRefNumericCore(targetRef);
-      const builderScopedBareRefMatch = !!targetAddress &&
-        targetRefCore !== null &&
-        targetRefCore === obligationRefNumericCore(existingRef) &&
-        obligationAddressesMatch(targetAddress, existingJob?.site_address);
-      if (
-        !exactRefMatch && !exactWoMatch && !exactPoMatch &&
-        !builderScopedBareRefMatch
-      ) return false;
-      // Distinct explicit PO stored only in builder_work_order_number still
-      // counts, so two explicitly-different POs are never over-deduped.
-      const existingPo =
-        canonicalObligationPoCore(metadata.builder_po_number) ||
-        canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
-        canonicalObligationPoCore(row.external_ref, true);
-      // One claim can carry distinct PO-backed instructions. Canonical claim
-      // matching dedupes storage variants only when the incoming PO is either
-      // absent or explicitly equal; a no-PO legacy job cannot absorb a proved PO.
-      return obligationCandidatePoMatches(targetPo, existingPo);
-    });
-    const uniqueMatches = [
-      ...new Map(
-        matchingRows.map((row: any) => [String(row.job_id), row]),
-      ).values(),
-    ];
+    const uniqueMatches = matchingExistingObligationRows(
+      {
+        externalRefCanonical: item.identity.externalRefCanonical,
+        builderWoCanonical: item.identity.builderWoCanonical,
+        builderPoCanonical: item.identity.builderPoCanonical,
+        builderCompany: item.identity.builderSlug,
+        siteAddress: item.identity.siteAddress,
+        jobFamily: item.identity.jobFamily,
+      },
+      data,
+      prefixes,
+    );
     if (cancellation) {
       if (
         correctedTargetJobId &&

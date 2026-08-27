@@ -384,8 +384,11 @@ import {
 } from './makesafe_intake_golden_replay.ts'
 import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
+  readAccountedIntakeDraftObligations as _readAccountedIntakeDraftObligations,
   resolveDeterministicDraftMintAuthority as _resolveDeterministicDraftMintAuthority,
   runDeterministicIntake as _runDeterministicIntake,
+  type IntakeDraftObligationCandidate as _IntakeDraftObligationCandidate,
+  type IntakeDraftObligationDisposition as _IntakeDraftObligationDisposition,
 } from './makesafe_deterministic_intake_runtime.ts'
 import {
   notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
@@ -21532,20 +21535,105 @@ async function makesafeMap(client: any, params: URLSearchParams) {
 }
 
 // ── Slice 7: list intake drafts ──
+const INTAKE_OPERATOR_PAGE_SIZE = 1000
+const INTAKE_OPERATOR_RETURN_LIMIT = 50
+
+async function loadIntakeDraftRows(
+  client: any,
+  statuses: string[],
+  ascending: boolean,
+): Promise<{ rows: any[]; totalCount: number }> {
+  const rows: any[] = []
+  let exactTotal: number | null = null
+  for (let from = 0;; from += INTAKE_OPERATOR_PAGE_SIZE) {
+    const { data, error, count } = await client.from('makesafe_intake_drafts')
+      .select('*', { count: 'exact' })
+      .in('status', statuses)
+      .order('received_at', { ascending })
+      .order('id', { ascending })
+      .range(from, from + INTAKE_OPERATOR_PAGE_SIZE - 1)
+    if (error) throw error
+    const page = data || []
+    rows.push(...page)
+    if (typeof count === 'number') exactTotal = count
+    if (
+      page.length < INTAKE_OPERATOR_PAGE_SIZE ||
+      (exactTotal !== null && rows.length >= exactTotal)
+    ) break
+  }
+  return { rows, totalCount: exactTotal ?? rows.length }
+}
+
+function intakeDraftObligationCandidate(
+  draft: any,
+): _IntakeDraftObligationCandidate {
+  const extraction = parseJsonObject(draft?.extraction_json)
+  return {
+    draftId: String(draft?.id || ''),
+    externalRef: cleanReviewedString(draft?.external_ref) ||
+      cleanReviewedString(extraction.external_ref) ||
+      cleanReviewedString(extraction.builder_claim_ref),
+    builderWorkOrderNumber:
+      cleanReviewedString(extraction.builder_work_order_number),
+    builderPoNumber: cleanReviewedString(extraction.builder_po_number),
+    requestingCompany: cleanReviewedString(draft?.requesting_company_slug) ||
+      cleanReviewedString(extraction.requesting_company_slug) ||
+      cleanReviewedString(draft?.requesting_company_name) ||
+      cleanReviewedString(extraction.requesting_company_name),
+    siteAddress: cleanReviewedString(draft?.site_address) ||
+      cleanReviewedString(extraction.site_address),
+    jobFamily: cleanReviewedString(extraction.makesafe_job_family) ||
+      cleanReviewedString(draft?.makesafe_job_family) ||
+      cleanReviewedString(draft?.report_type),
+  }
+}
+
+async function classifyAccountedIntakeDrafts(
+  client: any,
+  drafts: any[],
+): Promise<Map<string, _IntakeDraftObligationDisposition>> {
+  const candidates = drafts
+    .filter((draft: any) => ['draft', 'needs_review'].includes(String(draft?.status || '')))
+    .map(intakeDraftObligationCandidate)
+    .filter((candidate: _IntakeDraftObligationCandidate) => !!candidate.draftId)
+  return await _readAccountedIntakeDraftObligations(client, candidates)
+}
+
 async function listIntakeDrafts(client: any, params: URLSearchParams) {
   // reopen_candidate is included by default so the board INTAKE column surfaces
   // "matches job X — reopen it?" items alongside normal new-WO drafts.
   const status = params.get('status') || 'draft,needs_review,reopen_candidate'
-  const statuses = status.split(',').map((s: string) => s.trim())
-
-  const { data, error } = await client.from('makesafe_intake_drafts')
-    .select('*')
-    .in('status', statuses)
-    .order('received_at', { ascending: false })
-    .limit(50)
-  if (error) throw error
-  const drafts = (data || []).map((draft: any) => enrichIntakeDraftForReview(draft))
-  return { drafts }
+  const statuses = status.split(',').map((s: string) => s.trim()).filter(Boolean)
+  const loaded = await loadIntakeDraftRows(client, statuses, false)
+  let dispositions = new Map<string, _IntakeDraftObligationDisposition>()
+  let accountedFilterError: string | null = null
+  try {
+    dispositions = await classifyAccountedIntakeDrafts(client, loaded.rows)
+  } catch (error) {
+    // The operator queue fails visible: if obligation authority cannot be read,
+    // keep every draft on the board rather than hiding an uncertain real WO.
+    accountedFilterError = error instanceof Error ? error.message : String(error)
+    console.error('[ops-api] list_intake_drafts accounted filter unavailable:', accountedFilterError)
+  }
+  const omittedAccounted = loaded.rows.filter((draft: any) =>
+    dispositions.get(String(draft?.id || ''))?.kind === 'accounted'
+  )
+  const visible = loaded.rows.filter((draft: any) =>
+    dispositions.get(String(draft?.id || ''))?.kind !== 'accounted'
+  )
+  const drafts = visible.slice(0, INTAKE_OPERATOR_RETURN_LIMIT)
+    .map((draft: any) => enrichIntakeDraftForReview(draft))
+  return {
+    drafts,
+    total_count: loaded.totalCount,
+    visible_total_count: Math.max(0, loaded.totalCount - omittedAccounted.length),
+    omitted_count: omittedAccounted.length,
+    omitted_accounted_count: omittedAccounted.length,
+    returned_count: drafts.length,
+    limit: INTAKE_OPERATOR_RETURN_LIMIT,
+    has_more: visible.length > drafts.length,
+    accounted_filter_error: accountedFilterError,
+  }
 }
 
 function parseJsonObject(value: any): Record<string, any> {
@@ -22292,6 +22380,7 @@ export const _autoApproveCleanIntakeEnabledForTest = autoApproveCleanIntakeEnabl
 // and prove the M1 fail-loud banner is still written via the base-only retry.
 export const _writeIntakeHealthForTest = writeIntakeHealth
 export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
+export const _listIntakeDraftsForTest = listIntakeDrafts
 // Exported so the intent gate is proved through the REAL sweep rather than a stub:
 // the whole point of the 2026-08-06 ruling is that a render-path caller reaches
 // approveIntakeDraft zero times, and only the real wiring can show that.
@@ -22338,20 +22427,46 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     ? body.statuses.map((s: any) => String(s || '').trim()).filter(Boolean)
     : ['needs_review', 'draft']
 
-  const { data: drafts, error } = await client.from('makesafe_intake_drafts')
-    .select('*')
-    .in('status', statuses)
-    .order('received_at', { ascending: true })
-    .limit(limit)
-  if (error) throw error
-
-  const checked = drafts || []
+  const loaded = await loadIntakeDraftRows(client, statuses, true)
+  let dispositions = new Map<string, _IntakeDraftObligationDisposition>()
+  let accountedMatchError: string | null = null
+  try {
+    dispositions = await classifyAccountedIntakeDrafts(client, loaded.rows)
+  } catch (error) {
+    // Advancing is a write boundary. If the shared obligation authority cannot
+    // be read, every row remains reviewable and this sweep mints nothing.
+    accountedMatchError = error instanceof Error ? error.message : String(error)
+    console.error('[ops-api] auto_approve_clean_intake_drafts obligation match unavailable:', accountedMatchError)
+  }
+  const accountedSkipped = loaded.rows.flatMap((draft: any) => {
+    const disposition = dispositions.get(String(draft?.id || ''))
+    return disposition?.kind === 'accounted'
+      ? [{
+        draft_id: draft?.id || null,
+        external_ref: draft?.external_ref || null,
+        reason: 'existing_equivalent_obligation',
+        matched_job_id: disposition.jobId,
+      }]
+      : []
+  })
+  const unaccounted = loaded.rows.filter((draft: any) =>
+    dispositions.get(String(draft?.id || ''))?.kind !== 'accounted'
+  )
+  const checked = (accountedMatchError ? loaded.rows : unaccounted).slice(0, limit)
   const autoApproved: any[] = []
   const eligible: any[] = []
   const skipped: any[] = []
   const failed: any[] = []
 
   for (const draft of checked) {
+    if (accountedMatchError) {
+      skipped.push({
+        draft_id: draft?.id || null,
+        external_ref: draft?.external_ref || null,
+        reason: 'existing_obligation_check_unavailable',
+      })
+      continue
+    }
     const decision = shouldAutoApproveCleanIntakeDraftRow(draft)
     if (!decision.ok) {
       skipped.push({
@@ -22425,11 +22540,15 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     live_approval_authorised: trigger.liveAuthorised,
     trigger_refusal_reason: trigger.refusalReason,
     trigger_refusal: triggerRefusal,
+    total_count: loaded.totalCount,
     checked_count: checked.length,
     eligible_count: eligible.length,
     auto_approved: autoApproved,
     auto_approved_count: autoApproved.length,
     skipped_count: skipped.length,
+    accounted_skipped: accountedSkipped,
+    accounted_skipped_count: accountedSkipped.length,
+    accounted_match_error: accountedMatchError,
     failed,
     failed_count: failed.length,
     skipped,

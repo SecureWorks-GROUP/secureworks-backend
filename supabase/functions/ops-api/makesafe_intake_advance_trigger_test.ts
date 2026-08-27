@@ -135,6 +135,12 @@ function stubClient(rows: any[], calls: { singleReads: number }) {
       eq: () => chain,
       order: () => chain,
       limit: () => Promise.resolve({ data: rows, error: null }),
+      range: () =>
+        Promise.resolve({
+          data: table === "makesafe_intake_drafts" ? rows : [],
+          error: null,
+          count: table === "makesafe_intake_drafts" ? rows.length : 0,
+        }),
       maybeSingle: () =>
         table === "makesafe_cron_settings"
           // Auto-file brake left ON, so the intent gate is the only thing that can
@@ -176,7 +182,10 @@ Deno.test("REGRESSION: a render-path trigger previews the same drafts and approv
   assertEquals(result.requested_dry_run, false);
   assertEquals(result.live_approval_authorised, false);
   assertEquals(result.trigger_refusal_reason, "render_path_trigger");
-  assert(result.enabled, "the emergency brakes stay independent of the intent gate");
+  assert(
+    result.enabled,
+    "the emergency brakes stay independent of the intent gate",
+  );
 });
 
 Deno.test("CONTROL: an authorised trigger still reaches the approval path", async () => {
