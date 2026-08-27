@@ -68,6 +68,8 @@ export type FreezeMaterialsLineReport = {
 
 export type FreezeDriftReport = {
   compared: boolean
+  comparison: 'matched' | 'drifted' | 'not_comparable'
+  not_comparable_reasons: string[]
   scope_hash_match: boolean | null
   pricing_hash_match: boolean | null
   drifted: boolean
@@ -302,6 +304,23 @@ function unitCostOf(raw: Record<string, unknown>): number | null {
   )
 }
 
+function deliveryCostExGst(pricing: Record<string, unknown>): number | null {
+  let found = false
+  let total = 0
+  for (const item of asArray(pricing.line_items)) {
+    const raw = asObject(item)
+    if ((asText(raw.category) ?? '').toLowerCase() !== 'delivery') continue
+    const lineTotal = finiteNumber(raw.total_cost)
+    const unitCost = unitCostOf(raw)
+    const quantity = quantityOf(raw)
+    const cost = lineTotal ?? (unitCost != null && quantity != null ? unitCost * quantity : null)
+    if (cost == null) continue
+    found = true
+    total += cost
+  }
+  return found ? roundCents(total) : null
+}
+
 function lineSnapshotOf(raw: Record<string, unknown>): string | null {
   return pickFirstText(raw, [
     'price_snapshot_id',
@@ -336,14 +355,22 @@ function costExGst(pricing: Record<string, unknown> | null): number | null {
   const iCost = finiteNumber(internal.cost)
   const iLabour = finiteNumber(internal.labour)
   const iCommission = finiteNumber(internal.commission)
-  if (iCost != null || iLabour != null || iCommission != null) {
-    return roundCents((iCost ?? 0) + (iLabour ?? 0) + (iCommission ?? 0))
+  const iDelivery = finiteNumber(internal.delivery)
+    ?? finiteNumber(internal.delivery_cost)
+    ?? finiteNumber(internal.deliveryCost)
+    ?? deliveryCostExGst(pricing)
+  if (iCost != null || iLabour != null || iCommission != null || iDelivery != null) {
+    return roundCents((iCost ?? 0) + (iLabour ?? 0) + (iCommission ?? 0) + (iDelivery ?? 0))
   }
   const labour = finiteNumber(pricing.labourCostEstimate)
   const materials = finiteNumber(pricing.materialCostEstimate)
   const commission = finiteNumber(pricing.commissionCostEstimate)
-  if (labour != null || materials != null || commission != null) {
-    return roundCents((labour ?? 0) + (materials ?? 0) + (commission ?? 0))
+  const delivery = finiteNumber(pricing.deliveryCostEstimate)
+    ?? finiteNumber(pricing.delivery_cost)
+    ?? finiteNumber(pricing.deliveryCost)
+    ?? deliveryCostExGst(pricing)
+  if (labour != null || materials != null || commission != null || delivery != null) {
+    return roundCents((labour ?? 0) + (materials ?? 0) + (commission ?? 0) + (delivery ?? 0))
   }
   return null
 }
@@ -370,7 +397,10 @@ function reportLine(
     })(),
     unit: unitOf(raw) != null,
     supplier: supplierOf(raw) != null,
-    unit_cost_ex_gst: unitCostOf(raw) != null,
+    unit_cost_ex_gst: (() => {
+      const cost = unitCostOf(raw)
+      return cost != null && cost >= 0
+    })(),
     price_snapshot_id: snapshotBindingValid,
   }
   const missing: string[] = LINE_FIELD_KEYS.filter((k) => !fields[k])
@@ -447,6 +477,10 @@ export async function inspectFreezeOrderability(input: {
 
   let drift: FreezeDriftReport = {
     compared: false,
+    comparison: 'not_comparable',
+    not_comparable_reasons: [
+      input.live === undefined ? 'live_comparison_not_requested' : 'live_job_missing',
+    ],
     scope_hash_match: null,
     pricing_hash_match: null,
     drifted: false,
@@ -456,16 +490,33 @@ export async function inspectFreezeOrderability(input: {
   }
 
   if (input.live) {
+    const notComparableReasons: string[] = []
     const liveScope = coerceObject(input.live.scope_json)
     const livePricing = coerceObject(input.live.pricing_json)
+    if (input.live.scope_json == null) {
+      notComparableReasons.push('live_scope_missing')
+    } else if (liveScope == null) {
+      notComparableReasons.push('live_scope_malformed')
+    }
+    if (input.live.pricing_json == null) {
+      notComparableReasons.push('live_pricing_missing')
+    } else if (livePricing == null) {
+      notComparableReasons.push('live_pricing_malformed')
+    }
     const liveScopeHash = liveScope ? (await canonicalJsonAndHash(liveScope)).hash : null
     const livePricingHash = livePricing ? (await canonicalJsonAndHash(livePricing)).hash : null
     const storedScopeHash = asText(revision.scope_hash)
     const storedPricingHash = asText(revision.pricing_hash)
+    if (storedScopeHash == null) notComparableReasons.push('frozen_scope_hash_missing')
+    else if (!CONTENT_HASH_RE.test(storedScopeHash)) notComparableReasons.push('frozen_scope_hash_malformed')
+    if (storedPricingHash == null) notComparableReasons.push('frozen_pricing_hash_missing')
+    else if (!CONTENT_HASH_RE.test(storedPricingHash)) notComparableReasons.push('frozen_pricing_hash_malformed')
     const scope_hash_match = liveScope == null || liveScopeHash == null || storedScopeHash == null
+      || !CONTENT_HASH_RE.test(storedScopeHash)
       ? null
       : storedScopeHash === liveScopeHash
     const pricing_hash_match = livePricing == null || livePricingHash == null || storedPricingHash == null
+      || !CONTENT_HASH_RE.test(storedPricingHash)
       ? null
       : storedPricingHash === livePricingHash
     const liveCost = costExGst(livePricing)
@@ -473,11 +524,18 @@ export async function inspectFreezeOrderability(input: {
     const dollar_delta = liveCost != null && frozenCost != null
       ? roundCents(liveCost - frozenCost)
       : null
+    const comparison = notComparableReasons.length > 0
+      ? 'not_comparable'
+      : scope_hash_match === false || pricing_hash_match === false
+      ? 'drifted'
+      : 'matched'
     drift = {
-      compared: liveScope != null || livePricing != null,
+      compared: comparison !== 'not_comparable',
+      comparison,
+      not_comparable_reasons: notComparableReasons,
       scope_hash_match,
       pricing_hash_match,
-      drifted: scope_hash_match === false || pricing_hash_match === false,
+      drifted: comparison === 'drifted',
       frozen_cost_ex_gst: frozenCost,
       live_cost_ex_gst: liveCost,
       dollar_delta,

@@ -185,6 +185,18 @@ Deno.test('complete freeze with panels, posts, concrete, fixings is orderable', 
   }
 })
 
+Deno.test('negative unit cost is not_orderable and names the affected line', async () => {
+  const materials = completeMaterials.map((line) =>
+    line.line_id === 'mat-posts' ? { ...line, unit_cost_ex_gst: -1 } : line
+  )
+  const report = await inspectFreezeOrderability({
+    revision: await revisionFrom(siteScope, completePricing(materials)),
+  })
+  assertEquals(report.verdict, 'not_orderable')
+  assertEquals(report.missing, [{ field: 'unit_cost_ex_gst', line_id: 'mat-posts' }])
+  assertEquals(report.lines.find((line) => line.line_id === 'mat-posts')?.unit_cost_ex_gst, false)
+})
+
 Deno.test('complete line-level snapshot bindings need no freeze-wide snapshot', async () => {
   const { price_snapshot_id: _drop, ...pricing } = completePricing()
   const report = await inspectFreezeOrderability({
@@ -275,7 +287,7 @@ Deno.test('live pricing drift reports the exact dollar delta ($5,693 vs $4,902)'
   assertEquals(report.drift.dollar_delta, 791)
 })
 
-Deno.test('pricing-only live compare does not invent a scope-hash mismatch', async () => {
+Deno.test('missing live scope is not comparable even when pricing drift is observable', async () => {
   const frozenPricing = linealMetrePricing
   const livePricing = { ...linealMetrePricing, totalCostEstimate: 5693 }
   const revision = await revisionFrom(siteScope, frozenPricing)
@@ -283,10 +295,12 @@ Deno.test('pricing-only live compare does not invent a scope-hash mismatch', asy
     revision,
     live: { pricing_json: livePricing },
   })
-  assertEquals(report.drift.compared, true)
+  assertEquals(report.drift.compared, false)
+  assertEquals(report.drift.comparison, 'not_comparable')
+  assertEquals(report.drift.not_comparable_reasons, ['live_scope_missing'])
   assertEquals(report.drift.scope_hash_match, null)
   assertEquals(report.drift.pricing_hash_match, false)
-  assertEquals(report.drift.drifted, true)
+  assertEquals(report.drift.drifted, false)
   assertEquals(report.drift.dollar_delta, 791)
 })
 
@@ -296,10 +310,43 @@ Deno.test('matching live blobs report no drift and a zero dollar delta', async (
   const report = await inspectFreezeOrderability({ revision, live })
   assertEquals(report.verdict, 'orderable')
   assertEquals(report.drift.compared, true)
+  assertEquals(report.drift.comparison, 'matched')
+  assertEquals(report.drift.not_comparable_reasons, [])
   assertEquals(report.drift.scope_hash_match, true)
   assertEquals(report.drift.pricing_hash_match, true)
   assertEquals(report.drift.drifted, false)
   assertEquals(report.drift.dollar_delta, 0)
+})
+
+Deno.test('producer-shaped internal costs include delivery in dollar drift', async () => {
+  const frozenPricing = {
+    line_items: [{
+      description: 'Delivery',
+      quantity: 1,
+      unit: 'lot',
+      cost_price: 250,
+      total_cost: 250,
+      category: 'delivery',
+    }],
+    internal: { cost: 2200, labour: 2100 },
+  }
+  const livePricing = {
+    ...frozenPricing,
+    line_items: [{
+      ...frozenPricing.line_items[0],
+      cost_price: 350,
+      total_cost: 350,
+    }],
+  }
+  const revision = await revisionFrom(siteScope, frozenPricing)
+  const report = await inspectFreezeOrderability({
+    revision,
+    live: { scope_json: siteScope, pricing_json: livePricing },
+  })
+  assertEquals(report.drift.comparison, 'drifted')
+  assertEquals(report.drift.frozen_cost_ex_gst, 4550)
+  assertEquals(report.drift.live_cost_ex_gst, 4650)
+  assertEquals(report.drift.dollar_delta, 100)
 })
 
 Deno.test('freeze missing only its price-snapshot binding is not_orderable for that reason alone', async () => {

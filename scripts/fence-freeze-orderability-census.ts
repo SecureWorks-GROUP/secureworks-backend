@@ -131,15 +131,28 @@ export async function classifyCensusRows(rows: CensusRow[]): Promise<FreezeOrder
         scope_canonical_text: row.scope_canonical_text,
         pricing_canonical_text: row.pricing_canonical_text,
       },
-      live: row.live_scope_json == null && row.live_pricing_json == null
-        ? null
-        : {
-          scope_json: row.live_scope_json,
-          pricing_json: row.live_pricing_json,
-        },
+      live: {
+        scope_json: row.live_scope_json,
+        pricing_json: row.live_pricing_json,
+      },
     }));
   }
   return reports;
+}
+
+export function summariseDriftBuckets(reports: FreezeOrderabilityReport[]) {
+  const summary = {
+    matched: 0,
+    drifted: 0,
+    not_comparable: 0,
+  };
+  for (const report of reports) {
+    summary[report.drift.comparison] += 1;
+  }
+  if (summary.matched + summary.drifted + summary.not_comparable !== reports.length) {
+    throw new Error("drift bucket accounting does not equal examined revisions");
+  }
+  return summary;
 }
 
 async function main() {
@@ -155,7 +168,7 @@ async function main() {
   const rows = await query<CensusRow>(CENSUS_SQL, token);
   const reports = await classifyCensusRows(rows);
   const summary = summariseFreezeOrderability(reports);
-  const drifted = reports.filter((r) => r.drift.drifted).length
+  const drift = summariseDriftBuckets(reports);
   console.log(JSON.stringify({
     observed: true,
     contract_version: "freeze-orderability/v1",
@@ -163,7 +176,7 @@ async function main() {
     status: "frozen",
     cap: 100,
     ...summary,
-    drifted,
+    ...drift,
   }, null, 2));
 }
 
