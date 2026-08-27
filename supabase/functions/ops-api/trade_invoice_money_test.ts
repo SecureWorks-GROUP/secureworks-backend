@@ -3,12 +3,15 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   assertReturnedTradeInvoiceXeroSplit,
   calculateTradeInvoiceMoney,
+  checkpointAndAssertReturnedTradeInvoiceXeroSplit,
   presentTradeInvoiceMoney,
+  resolvePersistedTradeInvoiceLineAmount,
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
   TradeInvoiceMoneyError,
@@ -198,6 +201,80 @@ Deno.test("returned Xero bill must preserve the worked-out super split", () => {
       ),
     TradeInvoiceMoneyError,
     "without the reconciled net earnings and super split",
+  );
+});
+
+Deno.test("returned Xero identity is checkpointed before a gross-only bill is refused", async () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 1_000,
+    gstOn: false,
+    earningsDate: "2026-08-27",
+  });
+  const checkpoints: unknown[] = [];
+
+  await assertRejects(
+    () =>
+      checkpointAndAssertReturnedTradeInvoiceXeroSplit({
+        bill: {
+          InvoiceID: "xero-bill-1",
+          InvoiceNumber: "BILL-1",
+          LineItems: [{
+            Description: "Gross-only labour",
+            Quantity: 10,
+            UnitAmount: 100,
+            TaxType: "NONE",
+          }],
+        },
+        money,
+        checkpointIdentity: async (identity) => {
+          checkpoints.push(identity);
+        },
+      }),
+    TradeInvoiceMoneyError,
+    "without the reconciled net earnings and super split",
+  );
+
+  assertEquals(checkpoints, [{
+    xeroBillId: "xero-bill-1",
+    xeroBillNumber: "BILL-1",
+  }]);
+});
+
+Deno.test("retry line recovery validates stored shapes and falls back to line_total_ex without inventing hours", () => {
+  assertEquals(
+    resolvePersistedTradeInvoiceLineAmount({
+      total_hours: 0,
+      hourly_rate: 0,
+      quantity: null,
+      unit_rate: null,
+      line_total_ex: 275,
+    }),
+    {
+      quantity: 1,
+      unitAmount: 275,
+      lineTotalEx: 275,
+      basis: "line_total_ex",
+    },
+  );
+  assertEquals(
+    resolvePersistedTradeInvoiceLineAmount({
+      total_hours: 0,
+      hourly_rate: 0,
+      quantity: 5,
+      unit_rate: 55,
+      line_total_ex: 275,
+    }).basis,
+    "quantity_rate",
+  );
+  assertThrows(
+    () =>
+      resolvePersistedTradeInvoiceLineAmount({
+        total_hours: 5,
+        hourly_rate: 55,
+        line_total_ex: 300,
+      }),
+    TradeInvoiceMoneyError,
+    "do not match line_total_ex",
   );
 });
 

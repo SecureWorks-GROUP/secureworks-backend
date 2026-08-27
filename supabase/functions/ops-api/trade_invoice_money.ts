@@ -19,6 +19,7 @@ export type TradeInvoiceMoneyErrorCode =
   | "SUPER_RATE_UNRESOLVED"
   | "MONEY_SPLIT_MISSING"
   | "MONEY_SPLIT_INVALID"
+  | "LINE_AMOUNT_UNRESOLVED"
   | "XERO_GROSS_MISMATCH"
   | "XERO_RETURNED_SPLIT_INVALID";
 
@@ -50,6 +51,18 @@ export type TradeInvoiceXeroLine = Record<string, unknown> & {
   AccountCode?: string;
   TaxType?: "INPUT" | "NONE" | string;
   Tracking?: unknown[];
+};
+
+export type PersistedTradeInvoiceLineAmount = {
+  quantity: number;
+  unitAmount: number;
+  lineTotalEx: number;
+  basis: "hours_rate" | "quantity_rate" | "line_total_ex";
+};
+
+export type TradeInvoiceXeroIdentity = {
+  xeroBillId: string;
+  xeroBillNumber: string;
 };
 
 const round2 = (value: number): number => Math.round(value * 100) / 100;
@@ -255,6 +268,73 @@ export function presentTradeInvoiceMoney<
   };
 }
 
+export function resolvePersistedTradeInvoiceLineAmount(
+  value: unknown,
+): PersistedTradeInvoiceLineAmount {
+  const line = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  const lineTotalEx = Number(line.line_total_ex);
+  if (!Number.isFinite(lineTotalEx)) {
+    throw new TradeInvoiceMoneyError(
+      "LINE_AMOUNT_UNRESOLVED",
+      "Trade invoice line is missing a validated line_total_ex amount",
+    );
+  }
+
+  const hours = Number(line.total_hours);
+  const hourlyRate = Number(line.hourly_rate);
+  if (
+    Number.isFinite(hours) && hours > 0 && Number.isFinite(hourlyRate) &&
+    hourlyRate !== 0
+  ) {
+    const derived = round2(hours * hourlyRate);
+    if (!closeMoney(derived, lineTotalEx)) {
+      throw new TradeInvoiceMoneyError(
+        "LINE_AMOUNT_UNRESOLVED",
+        "Trade invoice hours and rate do not match line_total_ex",
+      );
+    }
+    return {
+      quantity: hours,
+      unitAmount: hourlyRate,
+      lineTotalEx: round2(lineTotalEx),
+      basis: "hours_rate",
+    };
+  }
+
+  const quantity = Number(line.quantity);
+  const unitRate = Number(line.unit_rate);
+  if (
+    Number.isFinite(quantity) && quantity > 0 && Number.isFinite(unitRate) &&
+    unitRate !== 0
+  ) {
+    const derived = round2(quantity * unitRate);
+    if (!closeMoney(derived, lineTotalEx)) {
+      throw new TradeInvoiceMoneyError(
+        "LINE_AMOUNT_UNRESOLVED",
+        "Trade invoice quantity and rate do not match line_total_ex",
+      );
+    }
+    return {
+      quantity,
+      unitAmount: unitRate,
+      lineTotalEx: round2(lineTotalEx),
+      basis: "quantity_rate",
+    };
+  }
+
+  // Older work-order rows persisted the authoritative extended amount but no
+  // reconstructable quantity/rate pair. Retry from that validated amount as a
+  // single line; never reinterpret metres as hours or invent a synthetic rate.
+  return {
+    quantity: 1,
+    unitAmount: round2(lineTotalEx),
+    lineTotalEx: round2(lineTotalEx),
+    basis: "line_total_ex",
+  };
+}
+
 function lineGrossCents(line: TradeInvoiceXeroLine): number {
   const quantity = Number(line.Quantity ?? 1);
   const unitAmount = Number(line.UnitAmount ?? 0);
@@ -386,4 +466,35 @@ export function assertReturnedTradeInvoiceXeroSplit(
       "Xero returned a trade bill without the reconciled net earnings and super split",
     );
   }
+}
+
+export async function checkpointAndAssertReturnedTradeInvoiceXeroSplit(
+  input: {
+    bill: unknown;
+    money: TradeInvoiceMoney;
+    checkpointIdentity: (
+      identity: TradeInvoiceXeroIdentity,
+    ) => Promise<void>;
+  },
+): Promise<TradeInvoiceXeroIdentity> {
+  const bill = input.bill && typeof input.bill === "object"
+    ? input.bill as Record<string, unknown>
+    : {};
+  const identity = {
+    xeroBillId: String(bill.InvoiceID || "").trim(),
+    xeroBillNumber: String(bill.InvoiceNumber || "").trim(),
+  };
+  if (!identity.xeroBillId) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_RETURNED_SPLIT_INVALID",
+      "Xero did not return an invoice ID for the trade bill",
+    );
+  }
+
+  // Xero has already created the bill at this boundary. Persist its identity
+  // before inspecting returned lines so a mixed-version/gross-only response is
+  // recoverable and can never become an invisible duplicate on retry.
+  await input.checkpointIdentity(identity);
+  assertReturnedTradeInvoiceXeroSplit(bill.LineItems, input.money);
+  return identity;
 }

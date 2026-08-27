@@ -86,6 +86,21 @@ The same builder is used by automatic generation, legacy submission, work-order
 submission, and the ops retry push. A legacy row without the persisted split is
 refused by the retry path rather than silently creating a gross-only Xero bill.
 
+All create paths finish line construction, money calculation, split validation,
+and local invoice/line persistence before resolving or creating a Xero supplier
+contact. Once Xero returns a bill ID, that identity is checkpointed locally in a
+recoverable `approved` state before the returned lines are reconciled. A mixed
+old/new deployment that returns a gross-only bill is therefore refused without
+losing the Xero identity; only a reconciled response advances the row to
+`pushed_to_xero`.
+
+The ops retry validates `trade_invoice_lines.line_total_ex` against stored
+hours/rate or quantity/rate. Historical work-order lines that predate those
+quantity/rate facts retry as one line from the validated extended amount; the
+system does not invent hours. New work-order and per-metre lines persist their
+reconstructable quantity/rate. Draft autosave builds a complete replacement and
+deletes the prior draft only after every replacement write succeeds.
+
 Apply `20260827112928_trade_invoice_super_gst_split.sql` before the matching
 `ops-api`. The insert trigger requires the full split for every new row while
 allowing pre-cutover rows to remain visibly null rather than fabricating
