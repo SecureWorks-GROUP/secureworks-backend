@@ -173,6 +173,12 @@ import {
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from './insurance_repairs_board.ts'
+import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
+import {
+  deriveFencingStageV1,
+  fencingStageTruthFields,
+} from './fencing_stage_engine_v1.ts'
+import { isFencingStageTruthRequested } from './fencing_stage_recipe_v1.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -12441,6 +12447,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
+  // Opt-in fencing stage-truth diagnostic. Default path (flag absent) must
+  // stay byte-identical: same selects, same enrichment, same row keys.
+  const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -12542,21 +12551,38 @@ async function pipeline(client: any, params: URLSearchParams) {
   let opsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
   let neighbourContactRes: PipelineEnrichmentResult = { data: [], error: null }
   let commsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
+  let reportRes: PipelineEnrichmentResult = { data: [], error: null }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes] = await Promise.all([
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
-        client.from('job_assignments').select('job_id, scheduled_date').in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('job_assignments').select(
+          stageTruth
+            ? 'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at'
+            : 'job_id, scheduled_date',
+        ).in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
-        client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
+        client.from('purchase_orders').select(
+          stageTruth
+            ? 'job_id, id, status, xero_po_id, confirmed_delivery_date, delivery_confirmed_at, delivery_date'
+            : 'job_id',
+        ).in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
         client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
-        client.from('po_communications').select('job_id, direction, created_at').in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
+        client.from('po_communications').select(
+          stageTruth
+            ? 'job_id, direction, created_at, id, sent_at, received_at'
+            : 'job_id, direction, created_at',
+        ).in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
       readPipelineEnrichmentRows(jobIds, 'xero_invoices', (chunkIds) =>
-        client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', chunkIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")')),
+        client.from('xero_invoices').select(
+          stageTruth
+            ? 'job_id, status, invoice_type, reference, id, amount_paid, fully_paid_on'
+            : 'job_id, status, invoice_type, reference',
+        ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")')),
       readPipelineEnrichmentRows(jobIds, 'ops_notes', (chunkIds) =>
         client.from('ops_notes').select('job_id').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'job_contacts', (chunkIds) =>
@@ -12565,6 +12591,10 @@ async function pipeline(client: any, params: URLSearchParams) {
       // markers can be excluded from the count (they must never light the badge).
       readPipelineEnrichmentRows(jobIds, 'job_events', (chunkIds) =>
         client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', ['note', 'note_added', 'site_note'])),
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'job_service_reports', (chunkIds) =>
+          client.from('job_service_reports').select('id, job_id, status, submitted_at').in('job_id', chunkIds))
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -12578,6 +12608,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     ['pipeline.ops_notes', opsNotesRes],
     ['pipeline.job_contacts', neighbourContactRes],
     ['pipeline.job_events', commsNotesRes],
+    ...(stageTruth ? [['pipeline.job_service_reports', reportRes] as [string, PipelineEnrichmentResult]] : []),
   ]
   // Preserve the existing partial-board behaviour, but make a failed dimension
   // loud in server logs and explicit in the response instead of publishing its
@@ -12586,6 +12617,24 @@ async function pipeline(client: any, params: URLSearchParams) {
   const enrichmentErrors = enrichmentResults
     .filter(([, result]) => result.error)
     .map(([label]) => label)
+  const stageTruthUnreadable: string[] = []
+  if (stageTruth) {
+    if (assignRes.error) stageTruthUnreadable.push('job_assignments')
+    if (poRes.error) stageTruthUnreadable.push('purchase_orders')
+    if (emailRes.error) stageTruthUnreadable.push('po_communications')
+    if (invoiceRes.error) stageTruthUnreadable.push('xero_invoices')
+    if (reportRes.error) stageTruthUnreadable.push('job_service_reports')
+  }
+  const stageTruthRows = stageTruth
+    ? {
+      invoices: invoiceRes.data || [],
+      purchaseOrders: poRes.data || [],
+      poCommunications: emailRes.data || [],
+      assignments: assignRes.data || [],
+      serviceReports: reportRes.data || [],
+      unreadable: stageTruthUnreadable,
+    }
+    : null
 
   const countMap = (rows: any[]) => {
     const m: Record<string, number> = {}
@@ -12694,6 +12743,21 @@ async function pipeline(client: any, params: URLSearchParams) {
       deposit_paid: invoiceMap[j.id]?.deposit_paid || false,
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
+    }
+    if (stageTruth && stageTruthRows) {
+      Object.assign(
+        pipelineRow,
+        fencingStageTruthFields(
+          j.status,
+          deriveFencingStageV1(
+            fencingExecutionEvidenceFromPipelineRows(
+              j.id,
+              j.deposit_invoice_id || null,
+              stageTruthRows,
+            ),
+          ),
+        ),
+      )
     }
     return typeFilter === 'repair'
       ? projectInsuranceRepairPipelineRow(pipelineRow)
