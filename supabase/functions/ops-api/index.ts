@@ -385,6 +385,7 @@ import {
 import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
   readAccountedIntakeDraftObligations as _readAccountedIntakeDraftObligations,
+  resolveConsistentObligationFamily as _resolveConsistentObligationFamily,
   resolveDeterministicDraftMintAuthority as _resolveDeterministicDraftMintAuthority,
   runDeterministicIntake as _runDeterministicIntake,
   type IntakeDraftObligationCandidate as _IntakeDraftObligationCandidate,
@@ -21568,21 +21569,40 @@ function intakeDraftObligationCandidate(
   draft: any,
 ): _IntakeDraftObligationCandidate {
   const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const externalRef = cleanReviewedString(draft?.external_ref) ||
+    cleanReviewedString(extraction.external_ref) ||
+    cleanReviewedString(extraction.builder_claim_ref)
+  const requestingCompany = cleanReviewedString(draft?.requesting_company_slug) ||
+    cleanReviewedString(extraction.requesting_company_slug) ||
+    cleanReviewedString(draft?.requesting_company_name) ||
+    cleanReviewedString(extraction.requesting_company_name)
+  const jobFamily = resolvedIntakeDraftFamily(draft)
+  const identity = _correlateIntakeApprovalIdentity({
+    extraction,
+    approved_external_ref: externalRef,
+    requesting_company_slug: requestingCompany,
+    family: jobFamily,
+    attachment_names: _intakeIdentityAttachmentNames(attachments),
+    document_texts: parseJsonArray(extraction.work_order_pdf_text)
+      .map((document: any) =>
+        typeof document?.text === 'string' && document.text.trim()
+          ? document.text
+          : null
+      )
+      .filter(Boolean),
+  })
   return {
     draftId: String(draft?.id || ''),
-    externalRef: cleanReviewedString(draft?.external_ref) ||
-      cleanReviewedString(extraction.external_ref) ||
-      cleanReviewedString(extraction.builder_claim_ref),
+    externalRef,
     builderWorkOrderNumber:
       cleanReviewedString(extraction.builder_work_order_number),
     builderPoNumber: cleanReviewedString(extraction.builder_po_number),
-    requestingCompany: cleanReviewedString(draft?.requesting_company_slug) ||
-      cleanReviewedString(extraction.requesting_company_slug) ||
-      cleanReviewedString(draft?.requesting_company_name) ||
-      cleanReviewedString(extraction.requesting_company_name),
+    identityProved: identity.action === 'ready',
+    requestingCompany,
     siteAddress: cleanReviewedString(draft?.site_address) ||
       cleanReviewedString(extraction.site_address),
-    jobFamily: resolvedIntakeDraftFamily(draft),
+    jobFamily,
   }
 }
 
@@ -22321,13 +22341,15 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
     familyContext,
   )
   const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
-  const storedFamily = _normaliseDedupJobFamily(storedFamilyRaw)
-  const decidedFamily = _normaliseDedupJobFamily(familyDecision.family)
   const jobFamily = familyContextRefused
     ? null
     : storedFamilyRaw
-    ? (storedFamily === decidedFamily ? storedFamily : null)
-    : (decidedFamily || null)
+    ? _resolveConsistentObligationFamily([
+      { makesafe_job_family: storedFamilyRaw },
+      { makesafe_job_family: familyDecision.family },
+    ])
+    : _normaliseDedupJobFamily(familyDecision.family)
+  if (jobFamily === 'unknown') return null
   return jobFamily
 }
 

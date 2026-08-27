@@ -3060,6 +3060,7 @@ export interface IntakeDraftObligationCandidate {
   externalRef: string | null;
   builderWorkOrderNumber: string | null;
   builderPoNumber: string | null;
+  identityProved: boolean;
   requestingCompany: string | null;
   siteAddress: string | null;
   jobFamily: string | null;
@@ -3111,6 +3112,23 @@ async function readExistingObligationRows(client: any): Promise<any[]> {
   return data;
 }
 
+export function resolveConsistentObligationFamily(
+  inputs: readonly {
+    makesafe_job_family?: unknown;
+    insurance_job_type?: unknown;
+    strata?: unknown;
+    own_template_requested?: unknown;
+    report_delivery?: unknown;
+  }[],
+): string {
+  const families = new Set(
+    inputs
+      .map((input) => canonicalSesFamilyFromCard(input))
+      .filter((family) => family !== "unknown"),
+  );
+  return families.size === 1 ? [...families][0] : "unknown";
+}
+
 function matchingExistingObligationRows(
   candidate: ExistingObligationIdentity,
   data: readonly any[],
@@ -3130,9 +3148,9 @@ function matchingExistingObligationRows(
   const targetPo = canonicalObligationPoCore(candidate.builderPoCanonical) ||
     canonicalObligationPoCore(candidate.builderWoCanonical, true) ||
     canonicalObligationPoCore(candidate.externalRefCanonical, true);
-  const targetFamily = canonicalSesFamilyFromCard({
+  const targetFamily = resolveConsistentObligationFamily([{
     makesafe_job_family: candidate.jobFamily,
-  });
+  }]);
 
   if (
     !targetCompany ||
@@ -3195,13 +3213,23 @@ function matchingExistingObligationRows(
     ) return false;
 
     if (options.requireEquivalentFamily) {
-      const existingFamily = canonicalSesFamilyFromCard({
-        makesafe_job_family: metadata.makesafe_job_family || row.report_type,
+      const familyContext = {
         insurance_job_type: metadata.insurance_job_type,
         strata: metadata.strata,
         own_template_requested: metadata.own_template_requested,
         report_delivery: metadata.report_delivery,
-      });
+      };
+      const existingFamily = resolveConsistentObligationFamily([
+        {
+          ...familyContext,
+          makesafe_job_family: metadata.makesafe_job_family,
+        },
+        {
+          ...familyContext,
+          makesafe_job_family: row.report_type,
+        },
+        familyContext,
+      ]);
       if (existingFamily === "unknown" || existingFamily !== targetFamily) {
         return false;
       }
@@ -3246,9 +3274,9 @@ export async function readAccountedIntakeDraftObligations(
     const targetPo = canonicalObligationPoCore(candidate.builderPoNumber) ||
       canonicalObligationPoCore(candidate.builderWorkOrderNumber, true) ||
       canonicalObligationPoCore(candidate.externalRef, true);
-    const targetFamily = canonicalSesFamilyFromCard({
+    const targetFamily = resolveConsistentObligationFamily([{
       makesafe_job_family: candidate.jobFamily,
-    });
+    }]);
     if (!targetRef) {
       dispositions.set(candidate.draftId, {
         kind: "kept",
@@ -3265,7 +3293,7 @@ export async function readAccountedIntakeDraftObligations(
       });
       continue;
     }
-    if (!targetWo && !targetPo) {
+    if (!candidate.identityProved || (!targetWo && !targetPo)) {
       dispositions.set(candidate.draftId, {
         kind: "kept",
         reason: "builder_identity_unproved",
@@ -3282,7 +3310,7 @@ export async function readAccountedIntakeDraftObligations(
       continue;
     }
 
-    const matches = matchingExistingObligationRows(
+    const identityMatches = matchingExistingObligationRows(
       {
         externalRefCanonical: candidate.externalRef,
         builderWoCanonical: candidate.builderWorkOrderNumber,
@@ -3292,6 +3320,56 @@ export async function readAccountedIntakeDraftObligations(
         jobFamily: candidate.jobFamily,
       },
       data,
+      prefixes,
+      {
+        requireExactReference: true,
+        requireProvenBuilderIdentity: true,
+      },
+    );
+    const unresolvedFamilyMatches = identityMatches.filter((row: any) => {
+      const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      const metadata = existingJob?.metadata &&
+          typeof existingJob.metadata === "object"
+        ? existingJob.metadata
+        : {};
+      const familyContext = {
+        insurance_job_type: metadata.insurance_job_type,
+        strata: metadata.strata,
+        own_template_requested: metadata.own_template_requested,
+        report_delivery: metadata.report_delivery,
+      };
+      return resolveConsistentObligationFamily([
+        {
+          ...familyContext,
+          makesafe_job_family: metadata.makesafe_job_family,
+        },
+        {
+          ...familyContext,
+          makesafe_job_family: row.report_type,
+        },
+        familyContext,
+      ]) === "unknown";
+    });
+    if (unresolvedFamilyMatches.length) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "family_unproved",
+        candidateJobIds: unresolvedFamilyMatches
+          .map((row: any) => String(row.job_id))
+          .sort(),
+      });
+      continue;
+    }
+    const matches = matchingExistingObligationRows(
+      {
+        externalRefCanonical: candidate.externalRef,
+        builderWoCanonical: candidate.builderWorkOrderNumber,
+        builderPoCanonical: candidate.builderPoNumber,
+        builderCompany: candidate.requestingCompany,
+        siteAddress: candidate.siteAddress,
+        jobFamily: candidate.jobFamily,
+      },
+      identityMatches,
       prefixes,
       {
         requireExactReference: true,

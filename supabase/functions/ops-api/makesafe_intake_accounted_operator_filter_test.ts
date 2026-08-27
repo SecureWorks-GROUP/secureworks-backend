@@ -66,15 +66,17 @@ function obligationJob(
     workOrder?: string;
     po?: string;
     status?: string;
+    reportType?: string | null;
+    company?: string;
   } = {},
 ) {
   const externalRef = options.externalRef ?? `MLB-${id}`;
   return {
     job_id: `job-${id}`,
     external_ref: externalRef,
-    requesting_company_slug: "mlb",
+    requesting_company_slug: options.company || "mlb",
     requesting_company_name: "Fixture Builder",
-    report_type: null,
+    report_type: options.reportType ?? null,
     jobs: {
       job_number: `SWMS-${id}`,
       status: options.status || "accepted",
@@ -208,6 +210,11 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
     reportType: "assessment_report",
     bodyPreview: "Please complete the assessment report and quote.",
   });
+  const identityConflict = intakeDraft("61007", {
+    workOrder: "MLB-61999PO-61999",
+    po: "PO-61999",
+  });
+  const existingFamilyConflict = intakeDraft("61008");
   const { client, calls } = fakeClient(
     [
       sameFamily,
@@ -216,6 +223,8 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       terminalConflict,
       multipleConflict,
       familyConflict,
+      identityConflict,
+      existingFamilyConflict,
     ],
     [
       obligationJob("61001"),
@@ -223,6 +232,14 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       obligationJob("61004", { status: "completed" }),
       obligationJob("61005"),
       obligationJob("61006", { family: "assessment_report_quote" }),
+      obligationJob("61007", {
+        workOrder: "MLB-61999PO-61999",
+        po: "PO-61999",
+      }),
+      obligationJob("61008", {
+        family: "general_makesafe",
+        reportType: "roof_report",
+      }),
       {
         ...obligationJob("61005"),
         job_id: "job-61005-sibling",
@@ -241,17 +258,51 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       distinctFamily.id,
       familyConflict.id,
       identityMaybe.id,
+      identityConflict.id,
+      existingFamilyConflict.id,
       multipleConflict.id,
       terminalConflict.id,
     ].sort(),
   );
-  assertEquals(result.total_count, 6);
-  assertEquals(result.visible_total_count, 5);
+  assertEquals(result.total_count, 8);
+  assertEquals(result.visible_total_count, 7);
   assertEquals(result.omitted_accounted_count, 1);
-  assertEquals(result.returned_count, 5);
+  assertEquals(result.returned_count, 7);
   assertEquals(result.has_more, false);
   assertEquals(result.accounted_filter_error, null);
   assertEquals(calls.writes, 0);
+});
+
+Deno.test("operator intake fails visible on unpersisted PO and accepts proved aliases", async () => {
+  const woFallback = intakeDraft("61101", { po: null });
+  const refFallback = intakeDraft("61102", {
+    externalRef: "MLB-61102PO-71102",
+    workOrder: null,
+    po: null,
+  });
+  const { client } = fakeClient(
+    [woFallback, refFallback],
+    [
+      obligationJob("61101", { po: "" }),
+      obligationJob("61102", {
+        externalRef: "MLB-61102PO-71102",
+        workOrder: "MLB-61102",
+        po: "PO-71102",
+        company: "majorloss",
+      }),
+    ],
+  );
+
+  const result: any = await _listIntakeDraftsForTest(
+    client,
+    new URLSearchParams({ status: "draft,needs_review" }),
+  );
+
+  assertEquals(
+    result.drafts.map((draft: any) => draft.id),
+    [woFallback.id],
+  );
+  assertEquals(result.omitted_accounted_count, 1);
 });
 
 Deno.test("operator intake reports the queue beyond its 50-row return cap", async () => {
@@ -310,11 +361,24 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
     reportType: "assessment_report",
     bodyPreview: "Please complete the assessment report and quote.",
   });
+  const existingFamilyConflict = intakeDraft("63004");
+  const identityConflict = intakeDraft("63005", {
+    workOrder: "MLB-63999PO-63999",
+    po: "PO-63999",
+  });
   const fake = fakeClient(
-    [identityMaybe, familyConflict],
+    [identityMaybe, familyConflict, existingFamilyConflict, identityConflict],
     [
       obligationJob("63002"),
       obligationJob("63003", { family: "assessment_report_quote" }),
+      obligationJob("63004", {
+        family: "general_makesafe",
+        reportType: "roof_report",
+      }),
+      obligationJob("63005", {
+        workOrder: "MLB-63999PO-63999",
+        po: "PO-63999",
+      }),
     ],
   );
 
@@ -322,7 +386,7 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
     triggered_by: "ses-reporting-skill",
   });
 
-  assertEquals(result.total_count, 2);
+  assertEquals(result.total_count, 4);
   assertEquals(result.checked_count, 0);
   assertEquals(result.eligible_count, 0);
   assertEquals(result.auto_approved_count, 0);
@@ -331,6 +395,8 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
     [
       [familyConflict.id, "family_unproved"],
       [identityMaybe.id, "builder_identity_unproved"],
+      [existingFamilyConflict.id, "family_unproved"],
+      [identityConflict.id, "builder_identity_unproved"],
     ].sort(),
   );
   assertEquals(fake.calls.singleReads, 0);
