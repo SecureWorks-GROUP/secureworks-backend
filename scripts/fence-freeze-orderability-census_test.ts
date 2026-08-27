@@ -44,10 +44,44 @@ Deno.test("classifyCensusRows measures a lineal-metres freeze as not_orderable",
     frozen_by_user_id: "user-1",
     scope_canonical_text,
     pricing_canonical_text,
+    live_scope_json: scope,
     live_pricing_json: { ...pricing, totalCostEstimate: 5693 },
   }]);
   assertEquals(reports.length, 1);
   assertEquals(reports[0].verdict, "not_orderable");
   assertEquals(reports[0].drift.dollar_delta, 791);
-  assertEquals(reports[0].drift.scope_hash_match, null);
+  assertEquals(reports[0].drift.scope_hash_match, true);
+});
+
+Deno.test("classifyCensusRows detects scope-only drift", async () => {
+  const scope = { job: { address: "1 Test St", suburb: "Fremantle" } };
+  const pricing = {
+    line_items: [{ description: "fence", quantity: 10, unit: "m", unit_price: 125 }],
+    totalCostEstimate: 4902,
+  };
+  const { canonical: scope_canonical_text, hash: scope_hash } = await canonicalJsonAndHash(scope);
+  const { canonical: pricing_canonical_text, hash: pricing_hash } = await canonicalJsonAndHash(pricing);
+  const [report] = await classifyCensusRows([{
+    id: "rev-scope-drift",
+    job_id: "job-1",
+    revision_number: 1,
+    status: "frozen",
+    tool_kind: "fencing",
+    tool_version: "fence-designer@test",
+    scope_hash,
+    pricing_hash,
+    frozen_at: "2026-08-01T00:00:00.000Z",
+    frozen_by_user_id: "user-1",
+    scope_canonical_text,
+    pricing_canonical_text,
+    live_scope_json: {
+      job: { address: "2 Changed St", suburb: "Fremantle" },
+    },
+    live_pricing_json: pricing,
+  }]);
+
+  assertEquals(report.drift.scope_hash_match, false);
+  assertEquals(report.drift.pricing_hash_match, true);
+  assertEquals(report.drift.drifted, true);
+  assertEquals(report.drift.dollar_delta, 0);
 });

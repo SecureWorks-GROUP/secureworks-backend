@@ -66,6 +66,7 @@ select
   r.frozen_by_user_id,
   r.scope_canonical_text,
   r.pricing_canonical_text,
+  j.scope_json as live_scope_json,
   j.pricing_json as live_pricing_json
 from scope_revisions r
 join jobs j on j.id = r.job_id
@@ -88,6 +89,7 @@ type CensusRow = {
   frozen_by_user_id: string | null
   scope_canonical_text: string | null
   pricing_canonical_text: string | null
+  live_scope_json: unknown
   live_pricing_json: unknown
 }
 
@@ -129,9 +131,12 @@ export async function classifyCensusRows(rows: CensusRow[]): Promise<FreezeOrder
         scope_canonical_text: row.scope_canonical_text,
         pricing_canonical_text: row.pricing_canonical_text,
       },
-      live: row.live_pricing_json == null
+      live: row.live_scope_json == null && row.live_pricing_json == null
         ? null
-        : { pricing_json: row.live_pricing_json },
+        : {
+          scope_json: row.live_scope_json,
+          pricing_json: row.live_pricing_json,
+        },
     }));
   }
   return reports;
@@ -143,7 +148,7 @@ async function main() {
     console.log(JSON.stringify({
       observed: false,
       reason: "SUPABASE_ACCESS_TOKEN missing",
-      query: "currently-frozen fencing scope_revisions joined to live jobs.pricing_json, classified by freeze-orderability/v1",
+      query: "currently-frozen fencing scope_revisions joined to live jobs scope and pricing, classified by freeze-orderability/v1",
     }, null, 2));
     Deno.exit(2);
   }
@@ -167,7 +172,7 @@ if (import.meta.main) {
     console.error(JSON.stringify({
       observed: false,
       reason: String((err as Error)?.message ?? err),
-      query: "currently-frozen fencing scope_revisions joined to live jobs.pricing_json, classified by freeze-orderability/v1",
+      query: "currently-frozen fencing scope_revisions joined to live jobs scope and pricing, classified by freeze-orderability/v1",
     }));
     Deno.exit(2);
   });
