@@ -21,6 +21,7 @@ function intakeDraft(
     receivedAt?: string;
     reportType?: string | null;
     bodyPreview?: string;
+    attachmentName?: string;
   } = {},
 ) {
   const externalRef = options.externalRef ?? `MLB-${id}`;
@@ -51,7 +52,9 @@ function intakeDraft(
       makesafe_job_family: family,
     },
     attachments_json: [{
-      file_name: `work-order-${id}.pdf`,
+      file_name: options.attachmentName === undefined
+        ? `work-order-${id}.pdf`
+        : options.attachmentName,
       pdf_url: `https://example.invalid/work-order-${id}.pdf`,
       is_work_order: true,
     }],
@@ -230,6 +233,10 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       obligationJob("61001"),
       obligationJob("61002"),
       obligationJob("61004", { status: "completed" }),
+      {
+        ...obligationJob("61004"),
+        job_id: "job-61004-active",
+      },
       obligationJob("61005"),
       obligationJob("61006", { family: "assessment_report_quote" }),
       obligationJob("61007", {
@@ -241,7 +248,7 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
         reportType: "roof_report",
       }),
       {
-        ...obligationJob("61005"),
+        ...obligationJob("61005", { family: "roof_report" }),
         job_id: "job-61005-sibling",
       },
     ],
@@ -273,15 +280,20 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   assertEquals(calls.writes, 0);
 });
 
-Deno.test("operator intake fails visible on unpersisted PO and accepts proved aliases", async () => {
+Deno.test("operator intake fails visible on unpersisted PO and accepts proved source identity", async () => {
   const woFallback = intakeDraft("61101", { po: null });
   const refFallback = intakeDraft("61102", {
     externalRef: "MLB-61102PO-71102",
     workOrder: null,
     po: null,
   });
+  const attachmentIdentity = intakeDraft("61103", {
+    workOrder: null,
+    po: null,
+    attachmentName: "MLB-61103PO-71103.pdf",
+  });
   const { client } = fakeClient(
-    [woFallback, refFallback],
+    [woFallback, refFallback, attachmentIdentity],
     [
       obligationJob("61101", { po: "" }),
       obligationJob("61102", {
@@ -289,6 +301,10 @@ Deno.test("operator intake fails visible on unpersisted PO and accepts proved al
         workOrder: "MLB-61102",
         po: "PO-71102",
         company: "majorloss",
+      }),
+      obligationJob("61103", {
+        workOrder: "MLB-61103PO-71103",
+        po: "PO-71103",
       }),
     ],
   );
@@ -302,7 +318,7 @@ Deno.test("operator intake fails visible on unpersisted PO and accepts proved al
     result.drafts.map((draft: any) => draft.id),
     [woFallback.id],
   );
-  assertEquals(result.omitted_accounted_count, 1);
+  assertEquals(result.omitted_accounted_count, 2);
 });
 
 Deno.test("operator intake reports the queue beyond its 50-row return cap", async () => {
@@ -355,6 +371,7 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
   const identityMaybe = intakeDraft("63002", {
     workOrder: null,
     po: null,
+    attachmentName: "",
   });
   const familyConflict = intakeDraft("63003", {
     family: "roof_report",

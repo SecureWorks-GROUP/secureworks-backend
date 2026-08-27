@@ -3326,6 +3326,29 @@ export async function readAccountedIntakeDraftObligations(
         requireProvenBuilderIdentity: true,
       },
     );
+    const candidateJobIds = identityMatches
+      .map((row: any) => String(row.job_id))
+      .sort();
+    const terminalMatches = identityMatches.filter((row: any) => {
+      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      return isDeadObligationJobStatus(job?.status);
+    });
+    if (terminalMatches.length) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "terminal_job_binding",
+        candidateJobIds,
+      });
+      continue;
+    }
+    if (identityMatches.length > 1) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "multiple_live_jobs",
+        candidateJobIds,
+      });
+      continue;
+    }
     const unresolvedFamilyMatches = identityMatches.filter((row: any) => {
       const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
       const metadata = existingJob?.metadata &&
@@ -3382,29 +3405,6 @@ export async function readAccountedIntakeDraftObligations(
         kind: "kept",
         reason: "no_equivalent_live_obligation",
         candidateJobIds: [],
-      });
-      continue;
-    }
-
-    const terminalMatches = matches.filter((row: any) => {
-      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
-      return isDeadObligationJobStatus(job?.status);
-    });
-    const candidateJobIds = matches.map((row: any) => String(row.job_id))
-      .sort();
-    if (terminalMatches.length) {
-      dispositions.set(candidate.draftId, {
-        kind: "kept",
-        reason: "terminal_job_binding",
-        candidateJobIds,
-      });
-      continue;
-    }
-    if (matches.length > 1) {
-      dispositions.set(candidate.draftId, {
-        kind: "kept",
-        reason: "multiple_live_jobs",
-        candidateJobIds,
       });
       continue;
     }

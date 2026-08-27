@@ -21592,12 +21592,16 @@ function intakeDraftObligationCandidate(
       )
       .filter(Boolean),
   })
+  const correlatedExtraction = identity.action === 'ready'
+    ? identity.extraction
+    : extraction
   return {
     draftId: String(draft?.id || ''),
     externalRef,
     builderWorkOrderNumber:
-      cleanReviewedString(extraction.builder_work_order_number),
-    builderPoNumber: cleanReviewedString(extraction.builder_po_number),
+      cleanReviewedString(correlatedExtraction.builder_work_order_number),
+    builderPoNumber:
+      cleanReviewedString(correlatedExtraction.builder_po_number),
     identityProved: identity.action === 'ready',
     requestingCompany,
     siteAddress: cleanReviewedString(draft?.site_address) ||
