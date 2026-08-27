@@ -2,6 +2,7 @@ export type TradeInvoicePersistenceOps = {
   createInvoice: () => Promise<string>;
   insertLines: (invoiceId: string) => Promise<void>;
   deleteInvoice: (invoiceId: string) => Promise<void>;
+  deletePriorDraft?: (invoiceId: string) => Promise<void>;
 };
 
 function errorMessage(error: unknown): string {
@@ -45,7 +46,10 @@ export async function replaceTradeInvoiceDraftKeepingPrior(
   if (!priorDraftId) return replacementId;
 
   try {
-    await ops.deleteInvoice(priorDraftId);
+    if (!ops.deletePriorDraft) {
+      throw new Error("Draft replacement requires a guarded prior-draft delete");
+    }
+    await ops.deletePriorDraft(priorDraftId);
   } catch (error) {
     return cleanupFailedInvoice(ops, replacementId, error);
   }

@@ -89,7 +89,6 @@ export function resolveSuperGuaranteeRate(
 
 export function resolveTradeInvoiceGstOn(
   request: unknown,
-  profileGstRegistered: unknown,
 ): boolean {
   const record = request && typeof request === "object"
     ? request as Record<string, unknown>
@@ -103,9 +102,6 @@ export function resolveTradeInvoiceGstOn(
       );
     }
     return record[key];
-  }
-  if (typeof profileGstRegistered === "boolean") {
-    return profileGstRegistered;
   }
   throw new TradeInvoiceMoneyError(
     "GST_CHOICE_REQUIRED",
@@ -466,6 +462,31 @@ export function assertReturnedTradeInvoiceXeroSplit(
       "Xero returned a trade bill without the reconciled net earnings and super split",
     );
   }
+}
+
+export function assertExistingTradeInvoiceXeroBill(
+  bill: unknown,
+  expectedBillId: unknown,
+  money: TradeInvoiceMoney,
+): TradeInvoiceXeroIdentity {
+  const record = bill && typeof bill === "object"
+    ? bill as Record<string, unknown>
+    : {};
+  const identity = {
+    xeroBillId: String(record.InvoiceID || "").trim(),
+    xeroBillNumber: String(record.InvoiceNumber || "").trim(),
+  };
+  if (
+    !identity.xeroBillId ||
+    identity.xeroBillId !== String(expectedBillId || "").trim()
+  ) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_RETURNED_SPLIT_INVALID",
+      "Xero did not return the exact checkpointed trade bill",
+    );
+  }
+  assertReturnedTradeInvoiceXeroSplit(record.LineItems, money);
+  return identity;
 }
 
 export async function checkpointAndAssertReturnedTradeInvoiceXeroSplit(

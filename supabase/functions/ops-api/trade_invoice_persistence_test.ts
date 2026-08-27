@@ -52,6 +52,9 @@ Deno.test("draft replacement keeps the prior draft when replacement lines fail",
         deleteInvoice: async (id) => {
           deleted.push(id);
         },
+        deletePriorDraft: async (id) => {
+          deleted.push(id);
+        },
       }, "prior"),
     Error,
     "replacement lines failed",
@@ -73,6 +76,9 @@ Deno.test("draft replacement deletes the prior draft only after the replacement 
     deleteInvoice: async (invoiceId) => {
       calls.push(`delete:${invoiceId}`);
     },
+    deletePriorDraft: async (invoiceId) => {
+      calls.push(`delete:${invoiceId}`);
+    },
   }, "prior");
 
   assertEquals(id, "replacement");
@@ -81,4 +87,25 @@ Deno.test("draft replacement deletes the prior draft only after the replacement 
     "lines:replacement",
     "delete:prior",
   ]);
+});
+
+Deno.test("draft replacement cleanup never uses the guarded prior delete", async () => {
+  const calls: string[] = [];
+  await assertRejects(
+    () =>
+      replaceTradeInvoiceDraftKeepingPrior({
+        createInvoice: async () => "replacement",
+        insertLines: async () => {},
+        deleteInvoice: async (invoiceId) => {
+          calls.push(`cleanup:${invoiceId}`);
+        },
+        deletePriorDraft: async (invoiceId) => {
+          calls.push(`guarded:${invoiceId}`);
+          throw new Error("prior changed");
+        },
+      }, "prior"),
+    Error,
+    "prior changed",
+  );
+  assertEquals(calls, ["guarded:prior", "cleanup:replacement"]);
 });

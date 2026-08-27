@@ -7,6 +7,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  assertExistingTradeInvoiceXeroBill,
   assertReturnedTradeInvoiceXeroSplit,
   calculateTradeInvoiceMoney,
   checkpointAndAssertReturnedTradeInvoiceXeroSplit,
@@ -74,21 +75,20 @@ Deno.test("trade invoice money: statutory rate is resolved by date and fails clo
   );
 });
 
-Deno.test("trade invoice money: explicit per-invoice GST choice overrides the stored profile", () => {
-  assertEquals(resolveTradeInvoiceGstOn({ gst_on: false }, true), false);
-  assertEquals(resolveTradeInvoiceGstOn({ gst_registered: true }, false), true);
-  assertEquals(resolveTradeInvoiceGstOn({ gst: false }, true), false);
-  assertEquals(resolveTradeInvoiceGstOn({}, true), true);
+Deno.test("trade invoice money: explicit per-invoice GST choice accepts supported fields", () => {
+  assertEquals(resolveTradeInvoiceGstOn({ gst_on: false }), false);
+  assertEquals(resolveTradeInvoiceGstOn({ gst_registered: true }), true);
+  assertEquals(resolveTradeInvoiceGstOn({ gst: false }), false);
 });
 
 Deno.test("trade invoice money: absent or malformed GST choice fails closed", () => {
   assertThrows(
-    () => resolveTradeInvoiceGstOn({}, null),
+    () => resolveTradeInvoiceGstOn({}),
     TradeInvoiceMoneyError,
     "GST choice is required",
   );
   assertThrows(
-    () => resolveTradeInvoiceGstOn({ gst_on: "yes" }, false),
+    () => resolveTradeInvoiceGstOn({ gst_on: "yes" }),
     TradeInvoiceMoneyError,
     "GST choice must be true or false",
   );
@@ -238,6 +238,43 @@ Deno.test("returned Xero identity is checkpointed before a gross-only bill is re
     xeroBillId: "xero-bill-1",
     xeroBillNumber: "BILL-1",
   }]);
+});
+
+Deno.test("checkpointed Xero retry accepts only the exact reconciled bill", () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 1_000,
+    gstOn: false,
+    earningsDate: "2026-08-27",
+  });
+  const lines = splitTradeInvoiceXeroLines(
+    [{
+      Description: "Labour",
+      Quantity: 10,
+      UnitAmount: 100,
+      AccountCode: "306",
+      TaxType: "NONE",
+    }],
+    money,
+    { superAccountCode: "306" },
+  );
+  assertEquals(
+    assertExistingTradeInvoiceXeroBill({
+      InvoiceID: "bill-1",
+      InvoiceNumber: "BILL-1",
+      LineItems: lines,
+    }, "bill-1", money),
+    { xeroBillId: "bill-1", xeroBillNumber: "BILL-1" },
+  );
+  assertThrows(
+    () =>
+      assertExistingTradeInvoiceXeroBill({
+        InvoiceID: "bill-2",
+        InvoiceNumber: "BILL-2",
+        LineItems: lines,
+      }, "bill-1", money),
+    TradeInvoiceMoneyError,
+    "exact checkpointed trade bill",
+  );
 });
 
 Deno.test("retry line recovery validates stored shapes and falls back to line_total_ex without inventing hours", () => {

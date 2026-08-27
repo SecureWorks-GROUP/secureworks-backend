@@ -344,6 +344,7 @@ import {
   type WoLabourProblem,
 } from './wo_labour_fanout.ts'
 import {
+  assertExistingTradeInvoiceXeroBill,
   calculateTradeInvoiceMoney,
   checkpointAndAssertReturnedTradeInvoiceXeroSplit,
   presentTradeInvoiceMoney,
@@ -1388,9 +1389,9 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
   throw error
 }
 
-function tradeInvoiceGstOn(body: unknown, profileGstRegistered: unknown): boolean {
+function tradeInvoiceGstOn(body: unknown): boolean {
   try {
-    return resolveTradeInvoiceGstOn(body, profileGstRegistered)
+    return resolveTradeInvoiceGstOn(body)
   } catch (error) {
     return tradeInvoiceMoneyApiError(error)
   }
@@ -1483,6 +1484,27 @@ async function markTradeInvoiceXeroSplitReconciled(
   }).eq('id', invoiceId).select('id').maybeSingle()
   if (error || data?.id !== invoiceId) {
     throw new Error(`Xero bill ${identity.xeroBillId} reconciled, but the local invoice could not be marked pushed: ${error?.message || 'trade invoice row was not updated'}`)
+  }
+}
+
+async function markTradeInvoiceRetryable(
+  client: any,
+  invoiceId: string,
+  queryNote: string,
+): Promise<void> {
+  const { data, error } = await client.from('trade_invoices').update({
+    status: 'approved',
+    query_note: queryNote.slice(0, 500),
+  })
+    .eq('id', invoiceId)
+    .is('xero_bill_id', null)
+    .select('id')
+    .maybeSingle()
+  if (error || data?.id !== invoiceId) {
+    throw new Error(
+      'Failed to mark trade invoice retryable: ' +
+        (error?.message || 'invoice state changed'),
+    )
   }
 }
 
@@ -7500,15 +7522,21 @@ if (import.meta.main) serve(async (req: Request) => {
         const { invoice_id: rejInvId, note: rejNote } = body
         if (!rejInvId) throw new ApiError('invoice_id required', 400)
         const { data: rejInv } = await client.from('trade_invoices')
-          .select('id, status').eq('id', rejInvId).maybeSingle()
+          .select('id, status, xero_bill_id').eq('id', rejInvId).maybeSingle()
         if (!rejInv) throw new ApiError('Invoice not found', 404)
-        if (rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
+        if (rejInv.xero_bill_id || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
-        const { error: rejErr } = await client.from('trade_invoices')
+        const { data: rejected, error: rejErr } = await client.from('trade_invoices')
           .update({ status: 'ops-reject', query_note: rejNote || 'Rejected by ops — re-submit corrected hours.' })
           .eq('id', rejInvId)
+          .is('xero_bill_id', null)
+          .select('id')
+          .maybeSingle()
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
+        if (rejected?.id !== rejInvId) {
+          throw new ApiError('Cannot reject an invoice while its Xero identity is being recorded', 409)
+        }
         return json({ success: true, invoice_id: rejInvId, status: 'ops-reject' })
       }
       case 'push_trade_invoice_to_xero': {
@@ -7522,7 +7550,6 @@ if (import.meta.main) serve(async (req: Request) => {
           .maybeSingle()
         if (!inv) throw new ApiError('Invoice not found', 404)
         if (inv.status !== 'acknowledged' && inv.status !== 'approved') throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
-        if (inv.xero_bill_id) throw new ApiError('Already pushed to Xero', 400)
 
         const { data: lines } = await client.from('trade_invoice_lines')
           .select('*')
@@ -7607,6 +7634,31 @@ if (import.meta.main) serve(async (req: Request) => {
           invMoney,
           { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
         )
+
+        if (inv.xero_bill_id) {
+          const existingResult = await xeroGet(
+            `/Invoices/${encodeURIComponent(inv.xero_bill_id)}`,
+            accessToken,
+            tenantId,
+          )
+          const existingBill = existingResult?.Invoices?.[0]
+          const existingIdentity = assertExistingTradeInvoiceXeroBill(
+            existingBill,
+            inv.xero_bill_id,
+            invMoney,
+          )
+          await markTradeInvoiceXeroSplitReconciled(
+            client,
+            invoice_id,
+            existingIdentity,
+          )
+          return json({
+            success: true,
+            xero_bill_id: existingIdentity.xeroBillId,
+            reference,
+            reconciled_existing: true,
+          })
+        }
 
         // Resolve Xero contact for the trade. Name fallback is important for
         // Jean-style suppliers whose Supabase login email differs from the
@@ -9064,6 +9116,9 @@ if (import.meta.main) serve(async (req: Request) => {
             const retryDrafts = (existingWoInvoices || []).filter((invoice: any) =>
               invoice.status === 'draft' && String(invoice.user_id || '') === String(tradeUser.id)
             )
+            if (retryDrafts.length > 1) {
+              throw new ApiError('Multiple work-order drafts need office review before retrying', 409)
+            }
 
             const requestedNegativeChargeIds: string[] = [
               ...new Set<string>(
@@ -9103,7 +9158,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const woJobNum = woJob?.job_number || ''
             const woDivision = trackingCategoryForJob(woJobNum)
             const woClientLine = [woJob?.client_name, woJob?.site_address, woJob?.site_suburb].filter(Boolean).join(', ')
-            const woGstOn = tradeInvoiceGstOn(body, tradeXeroUser?.trade_details?.gstRegistered)
+            const woGstOn = tradeInvoiceGstOn(body)
             const woTaxType = woGstOn ? 'INPUT' : 'NONE'
 
             const lineItems = scopeItems.map((item: any) => {
@@ -9156,19 +9211,10 @@ if (import.meta.main) serve(async (req: Request) => {
               { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
             )
 
-            // Money validation is the side-effect boundary. Invalid GST or an
-            // unreconciled split must leave retry drafts and Xero contacts alone.
-            for (const retryDraft of retryDrafts) {
-              const { error: retryDeleteErr } = await client.from('trade_invoices').delete().eq('id', retryDraft.id)
-              if (retryDeleteErr) {
-                throw new Error('Failed to clear prior work-order draft: ' + retryDeleteErr.message)
-              }
-            }
-
             // Persist the complete local invoice and reconstructable line facts
             // before any Xero token/contact/bill write. No external bill may be
             // reported as successful without an owned trade_invoices identity.
-            const tradeInvoiceId = await createTradeInvoiceBeforeExternalWrite({
+            const tradeInvoiceId = await replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: tradeInv, error: tradeInvErr } = await client.from('trade_invoices').insert({
                   org_id: tradeUser.orgId,
@@ -9230,10 +9276,28 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (linesErr) throw new Error('Failed to save work-order invoice lines before Xero: ' + linesErr.message)
               },
               deleteInvoice: async (invoiceId) => {
-                const { error: deleteErr } = await client.from('trade_invoices').delete().eq('id', invoiceId)
-                if (deleteErr) throw new Error('Failed to clean up work-order invoice: ' + deleteErr.message)
+                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
+                  .delete()
+                  .eq('id', invoiceId)
+                  .select('id')
+                  .maybeSingle()
+                if (deleteErr || deleted?.id !== invoiceId) {
+                  throw new Error('Failed to clean up work-order invoice: ' + (deleteErr?.message || 'invoice was not deleted'))
+                }
               },
-            })
+              deletePriorDraft: async (invoiceId) => {
+                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
+                  .delete()
+                  .eq('id', invoiceId)
+                  .eq('status', 'draft')
+                  .is('xero_bill_id', null)
+                  .select('id')
+                  .maybeSingle()
+                if (deleteErr || deleted?.id !== invoiceId) {
+                  throw new Error('Failed to clean up work-order invoice: ' + (deleteErr?.message || 'draft changed before deletion'))
+                }
+              },
+            }, retryDrafts[0]?.id || null)
             const tradeInv = { id: tradeInvoiceId }
 
             // Resolve Xero supplier contact — auto-create only after money truth
@@ -9314,6 +9378,13 @@ if (import.meta.main) serve(async (req: Request) => {
               if (createdXeroBillId) throw e
               console.error('[ops-api] WO invoice Xero push failed:', e.message)
             }
+            if (!xeroSuccess) {
+              await markTradeInvoiceRetryable(
+                client,
+                tradeInv.id,
+                'Work-order invoice is saved locally and awaiting Xero ACCPAY retry.',
+              )
+            }
 
             // Log event
             await client.from('job_events').insert({
@@ -9363,14 +9434,7 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'save_trade_invoice_draft': {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
 
-            // Calculate totals. The preferred API field is gst_on; gst_registered
-            // and the legacy gst boolean remain accepted aliases. A stored profile
-            // choice is only the fallback when the request omits the per-invoice flag.
-            const { data: draftUserProfile } = await client.from('users')
-              .select('trade_details')
-              .eq('id', tradeUser.id)
-              .maybeSingle()
-            const draftGstOn = tradeInvoiceGstOn(body, draftUserProfile?.trade_details?.gstRegistered)
+            const draftGstOn = tradeInvoiceGstOn(body)
 
             let labourTotal = 0
             const labourLines = Array.isArray(draftLabour) ? draftLabour : []
@@ -9444,7 +9508,22 @@ if (import.meta.main) serve(async (req: Request) => {
               },
               deleteInvoice: async (invoiceId) => {
                 const { data: deletedDraft, error: deleteErr } = await client.from('trade_invoices')
-                  .delete().eq('id', invoiceId).select('id').maybeSingle()
+                  .delete()
+                  .eq('id', invoiceId)
+                  .select('id')
+                  .maybeSingle()
+                if (deleteErr || deletedDraft?.id !== invoiceId) {
+                  throw new Error('Failed to delete replacement ' + invoiceId + ': ' + (deleteErr?.message || 'invoice row was not deleted'))
+                }
+              },
+              deletePriorDraft: async (invoiceId) => {
+                const { data: deletedDraft, error: deleteErr } = await client.from('trade_invoices')
+                  .delete()
+                  .eq('id', invoiceId)
+                  .eq('status', 'draft')
+                  .is('xero_bill_id', null)
+                  .select('id')
+                  .maybeSingle()
                 if (deleteErr || deletedDraft?.id !== invoiceId) {
                   throw new Error('Failed to delete draft ' + invoiceId + ': ' + (deleteErr?.message || 'draft row was not deleted'))
                 }
@@ -9713,13 +9792,11 @@ if (import.meta.main) serve(async (req: Request) => {
             if (assignments.length === 0 && !hasExtras) throw new ApiError('Nothing to invoice yet. Tick at least one job card, or add a line with hours, before submitting.', 400)
 
             // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below).
-            // The per-invoice GST choice is explicit when provided; the stored
-            // profile remains a compatibility fallback for older clients.
             const { data: userProfile } = await client.from('users')
               .select('default_hourly_rate, name, xero_contact_id, trade_details')
               .eq('id', tradeUser.id)
               .maybeSingle()
-            const gstOn = tradeInvoiceGstOn(body, userProfile?.trade_details?.gstRegistered)
+            const gstOn = tradeInvoiceGstOn(body)
             const taxType = gstOn ? 'INPUT' : 'NONE'
 
             // Group by job
@@ -10143,9 +10220,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const seq = String((totalCount || 0) + 1).padStart(3, '0')
             const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
 
-            // Create or promote invoice + line items. If the user saved a weekly draft, submit must
-            // update that same row; otherwise a plain INSERT creates a new invoice row.
-            let invoice: any = null
+            let priorDraftId: string | null = null
             if (draft_id) {
               const { data: draftToSubmit } = await client.from('trade_invoices')
                 .select('id, status, week_start')
@@ -10153,10 +10228,10 @@ if (import.meta.main) serve(async (req: Request) => {
                 .eq('user_id', tradeUser.id)
                 .maybeSingle()
               if (draftToSubmit?.status === 'draft') {
-                invoice = { id: draftToSubmit.id }
+                priorDraftId = draftToSubmit.id
               }
             }
-            if (!invoice && week_start) {
+            if (!priorDraftId && week_start) {
               const { data: existingDrafts, error: existingDraftErr } = await client.from('trade_invoices')
                 .select('id, status')
                 .eq('user_id', tradeUser.id)
@@ -10169,7 +10244,7 @@ if (import.meta.main) serve(async (req: Request) => {
               }
               const existingDraft = (existingDrafts || [])[0]
               if (existingDraft) {
-                invoice = { id: existingDraft.id }
+                priorDraftId = existingDraft.id
               }
             }
 
@@ -10191,44 +10266,7 @@ if (import.meta.main) serve(async (req: Request) => {
               status: 'pending_acknowledgment',
             }
 
-            if (invoice) {
-              // Compare-and-swap promotion: the weekly draft row (and its id) is
-              // shared across submissions, so promote it ONLY from 'draft'. Two
-              // concurrent submits (double-tap) would otherwise share invoice.id,
-              // and the loser's stamp rollback below would unstamp the rows the
-              // winner just claimed while the winner pushes the Xero bill.
-              const { data: promoted, error: updErr } = await client.from('trade_invoices')
-                .update(invoicePayload)
-                .eq('id', invoice.id)
-                .eq('status', 'draft')
-                .select('id')
-              if (updErr) throw new Error('Failed to submit draft invoice: ' + updErr.message)
-              if (!promoted || promoted.length === 0) {
-                throw new ApiError('This invoice is already being submitted. Wait a moment, then check your Pay tab before trying again.', 409)
-              }
-              // Clear stale draft lines only AFTER winning the promotion, so a
-              // losing concurrent submit can never delete the winner's lines.
-              const { error: lineClearErr } = await client.from('trade_invoice_lines')
-                .delete().eq('trade_invoice_id', invoice.id)
-              if (lineClearErr) {
-                const { error: markErr } = await client.from('trade_invoices').update({
-                  status: 'draft',
-                  query_note: ('Invoice line clear failed before Xero push: ' + lineClearErr.message).slice(0, 500),
-                }).eq('id', invoice.id)
-                if (markErr) {
-                  console.error('[ops-api] Failed to mark invoice line-clear failure:', markErr.message)
-                }
-                throw new Error('Failed to clear draft invoice line items: ' + lineClearErr.message)
-              }
-            } else {
-              const { data: newInvoice, error: invErr } = await client.from('trade_invoices').insert(invoicePayload).select('id').single()
-              if (invErr) {
-                throw new Error('Failed to create invoice: ' + invErr.message)
-              }
-              invoice = newInvoice
-            }
-
-            const toTradeInvoiceLineRow = (line: any, defaults: any = {}) => {
+            const toTradeInvoiceLineRow = (invoiceId: string, line: any, defaults: any = {}) => {
               // site_address is used for the Xero description below but is not
               // a trade_invoice_lines column. _hoursFlag/_woProblems are
               // memory-only metadata (_hoursFlag unpacks into the flag columns below;
@@ -10241,7 +10279,7 @@ if (import.meta.main) serve(async (req: Request) => {
               // the line actually flags. Non-make-safe lines carry nulls.
               const ff = (line?._hoursFlag ?? null) as HoursFlagOutcome | null
               return {
-                trade_invoice_id: invoice.id,
+                trade_invoice_id: invoiceId,
                 job_id: dbLine.job_id || null,
                 job_number: dbLine.job_number || null,
                 client_name: dbLine.client_name || null,
@@ -10270,29 +10308,49 @@ if (import.meta.main) serve(async (req: Request) => {
                 wo_labour_lines: dbLine.wo_labour_lines ?? null,
               }
             }
-            const lineRows = [
-              ...lineItems.map((line: any) => toTradeInvoiceLineRow(line, { line_type: 'labour' })),
-              ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow(extra)),
-            ]
-
-            // Insert all local accounting lines before touching Xero. A line-save failure
-            // leaves the invoice recoverable and prevents a Xero bill with no P&L lines.
-            const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
-            if (lineErr) {
-              // 'draft', not 'failed': `trade_invoices_status_check` does not
-              // permit 'failed', so the old write was silently rejected and the
-              // invoice stayed LIVE at 'pending_acknowledgment'. 'draft' is
-              // CHECK-legal, is in RELEASED_INVOICE_STATUSES, and is re-used by
-              // the next submission for this week rather than orphaned.
-              const { error: markErr } = await client.from('trade_invoices').update({
-                status: 'draft',
-                query_note: ('Invoice line save failed before Xero push: ' + lineErr.message).slice(0, 500),
-              }).eq('id', invoice.id)
-              if (markErr) {
-                console.error('[ops-api] Failed to mark invoice line-save failure:', markErr.message)
-              }
-              throw new Error('Failed to save invoice line items: ' + lineErr.message)
-            }
+            const invoiceId = await replaceTradeInvoiceDraftKeepingPrior({
+              createInvoice: async () => {
+                const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
+                  .insert(invoicePayload)
+                  .select('id')
+                  .single()
+                if (invErr || !newInvoice?.id) {
+                  throw new Error('Failed to create invoice: ' + (invErr?.message || 'no invoice id returned'))
+                }
+                return newInvoice.id
+              },
+              insertLines: async (replacementId) => {
+                const lineRows = [
+                  ...lineItems.map((line: any) => toTradeInvoiceLineRow(replacementId, line, { line_type: 'labour' })),
+                  ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow(replacementId, extra)),
+                ]
+                const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
+                if (lineErr) throw new Error('Failed to save invoice line items: ' + lineErr.message)
+              },
+              deleteInvoice: async (invoiceIdToDelete) => {
+                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
+                  .delete()
+                  .eq('id', invoiceIdToDelete)
+                  .select('id')
+                  .maybeSingle()
+                if (deleteErr || deleted?.id !== invoiceIdToDelete) {
+                  throw new Error('Failed to clean up replacement invoice: ' + (deleteErr?.message || 'invoice was not deleted'))
+                }
+              },
+              deletePriorDraft: async (invoiceIdToDelete) => {
+                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
+                  .delete()
+                  .eq('id', invoiceIdToDelete)
+                  .eq('status', 'draft')
+                  .is('xero_bill_id', null)
+                  .select('id')
+                  .maybeSingle()
+                if (deleteErr || deleted?.id !== invoiceIdToDelete) {
+                  throw new Error('Failed to replace draft invoice: ' + (deleteErr?.message || 'draft changed before deletion'))
+                }
+              },
+            }, priorDraftId)
+            const invoice = { id: invoiceId }
 
             // ── Layer B: stamp invoiced_in on every included assignment ──────
             // Marks each manual/clocked assignment as belonging to this invoice so
@@ -10507,7 +10565,11 @@ if (import.meta.main) serve(async (req: Request) => {
                 // already persisted. Land it in 'approved' (a clearly-recoverable state
                 // that push_trade_invoice_to_xero accepts) so admin can re-push once the
                 // contact is fixed. Do NOT silently drop it or treat it as success.
-                await client.from('trade_invoices').update({ status: 'approved' }).eq('id', invoice.id)
+                await markTradeInvoiceRetryable(
+                  client,
+                  invoice.id,
+                  'Trade invoice is saved locally and awaiting Xero ACCPAY retry.',
+                )
               }
 
               if (xeroContactId) {
@@ -10649,9 +10711,11 @@ if (import.meta.main) serve(async (req: Request) => {
               // it in 'approved' — a clearly-recoverable state that push_trade_invoice_to_xero
               // accepts — so admin can re-push once the Xero issue (token/API) is resolved.
               // (idempotencyKey 'trade-inv-<id>' means the re-push cannot create a duplicate.)
-              try {
-                await client.from('trade_invoices').update({ status: 'approved' }).eq('id', invoice.id)
-              } catch (stErr) { console.log('[ops-api] Failed to mark invoice recoverable:', (stErr as Error).message) }
+              await markTradeInvoiceRetryable(
+                client,
+                invoice.id,
+                'Trade invoice is saved locally and awaiting Xero ACCPAY retry.',
+              )
               // Persist the failure so admin has an audit trail (the user-visible
               // "Saved locally — admin will sync manually" message used to be the
               // ONLY signal that the push failed). Non-blocking — invoice insert is
@@ -45003,7 +45067,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .eq('id', userId)
     .single()
 
-  const stGstOn = tradeInvoiceGstOn(body, tradeUser?.trade_details?.gstRegistered)
+  const stGstOn = tradeInvoiceGstOn(body)
   const stTaxType = stGstOn ? 'INPUT' : 'NONE'
 
   const tradeName = tradeUser?.name || 'Trade'
@@ -45262,7 +45326,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   }
 
   // Push to Xero (reuse token from contact resolution above)
-  const idempotencyKey = `trade-inv-${userId}-${week_ending}`
+  const idempotencyKey = `trade-inv-${insertedInvoice.id}`
   const result = await xeroPost('/Invoices', stAt, stTi, xeroPayload, 'PUT', idempotencyKey)
 
   const xeroInv = result?.Invoices?.[0]

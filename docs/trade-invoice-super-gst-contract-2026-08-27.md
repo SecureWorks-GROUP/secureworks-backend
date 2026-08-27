@@ -41,9 +41,8 @@ Preferred request field for `generate_trade_invoice`, `submit_trade_invoice`,
 ```
 
 `gst_registered` and the existing boolean `gst` are accepted aliases. When all
-are omitted, the boolean `users.trade_details.gstRegistered` profile value is
-the compatibility fallback. If neither the invoice nor the profile provides a
-real boolean choice, the API returns `GST_CHOICE_REQUIRED` and creates nothing.
+are omitted, the API returns `GST_CHOICE_REQUIRED` and creates nothing. The
+stored profile value is not an invoice choice and is never used as a fallback.
 
 Create responses expose:
 
