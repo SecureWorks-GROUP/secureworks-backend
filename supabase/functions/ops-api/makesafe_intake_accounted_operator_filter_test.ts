@@ -218,6 +218,7 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
     po: "PO-61999",
   });
   const existingFamilyConflict = intakeDraft("61008");
+  const legacyExistingFamilyConflict = intakeDraft("61009");
   const { client, calls } = fakeClient(
     [
       sameFamily,
@@ -228,6 +229,7 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       familyConflict,
       identityConflict,
       existingFamilyConflict,
+      legacyExistingFamilyConflict,
     ],
     [
       obligationJob("61001"),
@@ -246,6 +248,10 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       obligationJob("61008", {
         family: "general_makesafe",
         reportType: "roof_report",
+      }),
+      obligationJob("61009", {
+        family: "roof",
+        reportType: "general_makesafe",
       }),
       {
         ...obligationJob("61005", { family: "roof_report" }),
@@ -267,14 +273,15 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       identityMaybe.id,
       identityConflict.id,
       existingFamilyConflict.id,
+      legacyExistingFamilyConflict.id,
       multipleConflict.id,
       terminalConflict.id,
     ].sort(),
   );
-  assertEquals(result.total_count, 8);
-  assertEquals(result.visible_total_count, 7);
+  assertEquals(result.total_count, 9);
+  assertEquals(result.visible_total_count, 8);
   assertEquals(result.omitted_accounted_count, 1);
-  assertEquals(result.returned_count, 7);
+  assertEquals(result.returned_count, 8);
   assertEquals(result.has_more, false);
   assertEquals(result.accounted_filter_error, null);
   assertEquals(calls.writes, 0);
@@ -416,6 +423,32 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
       [identityConflict.id, "builder_identity_unproved"],
     ].sort(),
   );
+  assertEquals(fake.calls.singleReads, 0);
+  assertEquals(fake.calls.writes, 0);
+});
+
+Deno.test("Advance clean keeps new roof and temporary-fencing drafts eligible", async () => {
+  const roof = intakeDraft("63006", {
+    family: "roof_report",
+    reportType: "roof_report",
+    bodyPreview: "Please complete the roof report.",
+  });
+  const temporaryFence = intakeDraft("63007", {
+    family: "temp_fence_makesafe",
+    bodyPreview: "Supply and install temporary fencing.",
+  });
+  const fake = fakeClient([roof, temporaryFence], []);
+
+  const result: any = await _autoApproveCleanIntakeDraftsForTest(fake.client, {
+    dry_run: true,
+    triggered_by: "ses-reporting-skill",
+  });
+
+  assertEquals(result.total_count, 2);
+  assertEquals(result.checked_count, 2);
+  assertEquals(result.eligible_count, 2);
+  assertEquals(result.skipped_count, 0);
+  assertEquals(result.auto_approved_count, 0);
   assertEquals(fake.calls.singleReads, 0);
   assertEquals(fake.calls.writes, 0);
 });

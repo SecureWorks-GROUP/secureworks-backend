@@ -22296,6 +22296,25 @@ function shouldAutoApproveCleanIntake(input: {
   return { ok: true, reason: 'clean_high_confidence_work_order' }
 }
 
+function intakeFamilyFromCanonicalObligationFamily(family: string): string | null {
+  switch (family) {
+    case 'assessment_quote':
+      return 'assessment_report_quote'
+    case 'ordinary_roof_portal':
+    case 'own_template_roof':
+      return 'roof_report'
+    case 'temporary_fencing':
+      return 'temp_fence_makesafe'
+    case 'physical_makesafe':
+      return 'general_makesafe'
+    case 'repair':
+    case 'restoration':
+      return family
+    default:
+      return null
+  }
+}
+
 function resolvedIntakeDraftFamily(draft: any): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
@@ -22345,16 +22364,18 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
     familyContext,
   )
   const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
-  const jobFamily = familyContextRefused
+  const canonicalFamily = familyContextRefused
     ? null
     : storedFamilyRaw
     ? _resolveConsistentObligationFamily([
       { makesafe_job_family: storedFamilyRaw },
       { makesafe_job_family: familyDecision.family },
     ])
-    : _normaliseDedupJobFamily(familyDecision.family)
-  if (jobFamily === 'unknown') return null
-  return jobFamily
+    : _resolveConsistentObligationFamily([
+      { makesafe_job_family: familyDecision.family },
+    ])
+  if (!canonicalFamily || canonicalFamily === 'unknown') return null
+  return intakeFamilyFromCanonicalObligationFamily(canonicalFamily)
 }
 
 function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason: string } {

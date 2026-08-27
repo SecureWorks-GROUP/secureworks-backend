@@ -28,6 +28,7 @@ import {
 import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 import { isReportOnlyType } from "./makesafe_intake_gate.ts";
+import { normaliseJobFamily } from "./makesafe_intake_dedup.ts";
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
 import { canonicalSesFamilyFromCard } from "./ses_family_matrix.ts";
 import {
@@ -3121,11 +3122,22 @@ export function resolveConsistentObligationFamily(
     report_delivery?: unknown;
   }[],
 ): string {
-  const families = new Set(
-    inputs
-      .map((input) => canonicalSesFamilyFromCard(input))
-      .filter((family) => family !== "unknown"),
-  );
+  const families = new Set<string>();
+  for (const input of inputs) {
+    let family = canonicalSesFamilyFromCard(input);
+    const rawFamily = typeof input.makesafe_job_family === "string"
+      ? input.makesafe_job_family.trim()
+      : "";
+    if (family === "unknown" && rawFamily) {
+      const legacyFamily = normaliseJobFamily(rawFamily);
+      if (!legacyFamily) return "unknown";
+      family = canonicalSesFamilyFromCard({
+        ...input,
+        makesafe_job_family: legacyFamily,
+      });
+    }
+    if (family !== "unknown") families.add(family);
+  }
   return families.size === 1 ? [...families][0] : "unknown";
 }
 
