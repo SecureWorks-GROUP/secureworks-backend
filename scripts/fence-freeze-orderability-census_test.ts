@@ -1,4 +1,8 @@
-import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
+// deno-lint-ignore-file no-import-prefix
+import {
+  assertEquals,
+  assertThrows,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   assertReadOnlySql,
   CENSUS_SQL,
@@ -18,7 +22,10 @@ Deno.test("census SQL write-verb guard refuses an update", () => {
     "non-SELECT",
   );
   assertThrows(
-    () => assertReadOnlySql("select id from scope_revisions; delete from scope_revisions"),
+    () =>
+      assertReadOnlySql(
+        "select id from scope_revisions; delete from scope_revisions",
+      ),
     Error,
     "write verb",
   );
@@ -27,11 +34,19 @@ Deno.test("census SQL write-verb guard refuses an update", () => {
 Deno.test("classifyCensusRows measures a lineal-metres freeze as not_orderable", async () => {
   const scope = { job: { address: "1 Test St", suburb: "Fremantle" } };
   const pricing = {
-    line_items: [{ description: "fence", quantity: 10, unit: "m", unit_price: 125, cost_price: null }],
+    line_items: [{
+      description: "fence",
+      quantity: 10,
+      unit: "m",
+      unit_price: 125,
+      cost_price: null,
+    }],
     totalCostEstimate: 4902,
   };
-  const { canonical: scope_canonical_text, hash: scope_hash } = await canonicalJsonAndHash(scope);
-  const { canonical: pricing_canonical_text, hash: pricing_hash } = await canonicalJsonAndHash(pricing);
+  const { canonical: scope_canonical_text, hash: scope_hash } =
+    await canonicalJsonAndHash(scope);
+  const { canonical: pricing_canonical_text, hash: pricing_hash } =
+    await canonicalJsonAndHash(pricing);
   const reports = await classifyCensusRows([{
     id: "rev-1",
     job_id: "job-1",
@@ -57,11 +72,18 @@ Deno.test("classifyCensusRows measures a lineal-metres freeze as not_orderable",
 Deno.test("classifyCensusRows detects scope-only drift", async () => {
   const scope = { job: { address: "1 Test St", suburb: "Fremantle" } };
   const pricing = {
-    line_items: [{ description: "fence", quantity: 10, unit: "m", unit_price: 125 }],
+    line_items: [{
+      description: "fence",
+      quantity: 10,
+      unit: "m",
+      unit_price: 125,
+    }],
     totalCostEstimate: 4902,
   };
-  const { canonical: scope_canonical_text, hash: scope_hash } = await canonicalJsonAndHash(scope);
-  const { canonical: pricing_canonical_text, hash: pricing_hash } = await canonicalJsonAndHash(pricing);
+  const { canonical: scope_canonical_text, hash: scope_hash } =
+    await canonicalJsonAndHash(scope);
+  const { canonical: pricing_canonical_text, hash: pricing_hash } =
+    await canonicalJsonAndHash(pricing);
   const [report] = await classifyCensusRows([{
     id: "rev-scope-drift",
     job_id: "job-1",
@@ -90,11 +112,18 @@ Deno.test("classifyCensusRows detects scope-only drift", async () => {
 Deno.test("census keeps missing live scope in a separate not_comparable bucket", async () => {
   const scope = { job: { address: "1 Test St", suburb: "Fremantle" } };
   const pricing = {
-    line_items: [{ description: "fence", quantity: 10, unit: "m", unit_price: 125 }],
+    line_items: [{
+      description: "fence",
+      quantity: 10,
+      unit: "m",
+      unit_price: 125,
+    }],
     totalCostEstimate: 4902,
   };
-  const { canonical: scope_canonical_text, hash: scope_hash } = await canonicalJsonAndHash(scope);
-  const { canonical: pricing_canonical_text, hash: pricing_hash } = await canonicalJsonAndHash(pricing);
+  const { canonical: scope_canonical_text, hash: scope_hash } =
+    await canonicalJsonAndHash(scope);
+  const { canonical: pricing_canonical_text, hash: pricing_hash } =
+    await canonicalJsonAndHash(pricing);
   const base = {
     job_id: "job-1",
     revision_number: 1,
@@ -118,7 +147,9 @@ Deno.test("census keeps missing live scope in a separate not_comparable bucket",
     {
       ...base,
       id: "drifted",
-      live_scope_json: { job: { address: "2 Changed St", suburb: "Fremantle" } },
+      live_scope_json: {
+        job: { address: "2 Changed St", suburb: "Fremantle" },
+      },
       live_pricing_json: pricing,
     },
     {
@@ -139,7 +170,10 @@ Deno.test("census keeps missing live scope in a separate not_comparable bucket",
   assertEquals(reports[2].drift.scope_hash_match, null);
   assertEquals(reports[2].drift.not_comparable_reasons, ["live_scope_missing"]);
   assertEquals(
-    Object.values(summariseDriftBuckets(reports)).reduce((sum, count) => sum + count, 0),
+    Object.values(summariseDriftBuckets(reports)).reduce(
+      (sum, count) => sum + count,
+      0,
+    ),
     reports.length,
   );
 });

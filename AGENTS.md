@@ -3336,19 +3336,6 @@ already 21 — board half only). Tests: `makesafe_cycle_evidence_test.ts`,
 `ses_assembler_input_adapter_test.ts`, `makesafe_board_read_model_test.ts`,
 `makesafe_render_report_action_test.ts`.
 
-## Frozen Fence Scope Orderability Is A Measurement, Not A Gate
-
-`inspectFreezeOrderability` in
-`supabase/functions/_shared/scope_freeze/freeze_orderability.ts` reports
-whether a frozen `scope_revisions` row carries a supplier-pickable materials
-list (SKU, description, specification, quantity, unit, supplier, unit cost ex
-GST bound to a named price snapshot) plus identity, site, and live-vs-frozen
-hash/dollar drift. It does **not** refuse `freeze_scope`. Today's fence freeze
-persists sell lineal metres; the panel/post/concrete list is throwaway HTML.
-Read-only census: `scripts/fence-freeze-orderability-census.ts`. Tests:
-`freeze_orderability_test.ts`. Do not turn this into an ingest refuse until a
-named slice measures the existing frozen population.
-
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

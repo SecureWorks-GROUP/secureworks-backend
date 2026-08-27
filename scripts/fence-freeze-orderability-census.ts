@@ -13,9 +13,9 @@
  * A missing or 401 token is "not observed", not a fabricated count.
  */
 import {
+  type FreezeOrderabilityReport,
   inspectFreezeOrderability,
   summariseFreezeOrderability,
-  type FreezeOrderabilityReport,
 } from "../supabase/functions/_shared/scope_freeze/freeze_orderability.ts";
 
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
@@ -77,21 +77,21 @@ limit 100
 `;
 
 type CensusRow = {
-  id: string
-  job_id: string
-  revision_number: number
-  status: string
-  tool_kind: string
-  tool_version: string | null
-  scope_hash: string | null
-  pricing_hash: string | null
-  frozen_at: string | null
-  frozen_by_user_id: string | null
-  scope_canonical_text: string | null
-  pricing_canonical_text: string | null
-  live_scope_json: unknown
-  live_pricing_json: unknown
-}
+  id: string;
+  job_id: string;
+  revision_number: number;
+  status: string;
+  tool_kind: string;
+  tool_version: string | null;
+  scope_hash: string | null;
+  pricing_hash: string | null;
+  frozen_at: string | null;
+  frozen_by_user_id: string | null;
+  scope_canonical_text: string | null;
+  pricing_canonical_text: string | null;
+  live_scope_json: unknown;
+  live_pricing_json: unknown;
+};
 
 async function query<T>(sql: string, token: string): Promise<T[]> {
   assertReadOnlySql(sql);
@@ -115,27 +115,31 @@ async function query<T>(sql: string, token: string): Promise<T[]> {
   return payload as T[];
 }
 
-export async function classifyCensusRows(rows: CensusRow[]): Promise<FreezeOrderabilityReport[]> {
+export async function classifyCensusRows(
+  rows: CensusRow[],
+): Promise<FreezeOrderabilityReport[]> {
   const reports: FreezeOrderabilityReport[] = [];
   for (const row of rows) {
-    reports.push(await inspectFreezeOrderability({
-      revision: {
-        id: row.id,
-        job_id: row.job_id,
-        tool_kind: row.tool_kind,
-        tool_version: row.tool_version,
-        scope_hash: row.scope_hash,
-        pricing_hash: row.pricing_hash,
-        frozen_at: row.frozen_at,
-        frozen_by_user_id: row.frozen_by_user_id,
-        scope_canonical_text: row.scope_canonical_text,
-        pricing_canonical_text: row.pricing_canonical_text,
-      },
-      live: {
-        scope_json: row.live_scope_json,
-        pricing_json: row.live_pricing_json,
-      },
-    }));
+    reports.push(
+      await inspectFreezeOrderability({
+        revision: {
+          id: row.id,
+          job_id: row.job_id,
+          tool_kind: row.tool_kind,
+          tool_version: row.tool_version,
+          scope_hash: row.scope_hash,
+          pricing_hash: row.pricing_hash,
+          frozen_at: row.frozen_at,
+          frozen_by_user_id: row.frozen_by_user_id,
+          scope_canonical_text: row.scope_canonical_text,
+          pricing_canonical_text: row.pricing_canonical_text,
+        },
+        live: {
+          scope_json: row.live_scope_json,
+          pricing_json: row.live_pricing_json,
+        },
+      }),
+    );
   }
   return reports;
 }
@@ -149,8 +153,13 @@ export function summariseDriftBuckets(reports: FreezeOrderabilityReport[]) {
   for (const report of reports) {
     summary[report.drift.comparison] += 1;
   }
-  if (summary.matched + summary.drifted + summary.not_comparable !== reports.length) {
-    throw new Error("drift bucket accounting does not equal examined revisions");
+  if (
+    summary.matched + summary.drifted + summary.not_comparable !==
+      reports.length
+  ) {
+    throw new Error(
+      "drift bucket accounting does not equal examined revisions",
+    );
   }
   return summary;
 }
@@ -158,26 +167,35 @@ export function summariseDriftBuckets(reports: FreezeOrderabilityReport[]) {
 async function main() {
   const token = Deno.env.get("SUPABASE_ACCESS_TOKEN")?.trim();
   if (!token) {
-    console.log(JSON.stringify({
-      observed: false,
-      reason: "SUPABASE_ACCESS_TOKEN missing",
-      query: "currently-frozen fencing scope_revisions joined to live jobs scope and pricing, classified by freeze-orderability/v1",
-    }, null, 2));
+    console.log(JSON.stringify(
+      {
+        observed: false,
+        reason: "SUPABASE_ACCESS_TOKEN missing",
+        query:
+          "currently-frozen fencing scope_revisions joined to live jobs scope and pricing, classified by freeze-orderability/v1",
+      },
+      null,
+      2,
+    ));
     Deno.exit(2);
   }
   const rows = await query<CensusRow>(CENSUS_SQL, token);
   const reports = await classifyCensusRows(rows);
   const summary = summariseFreezeOrderability(reports);
   const drift = summariseDriftBuckets(reports);
-  console.log(JSON.stringify({
-    observed: true,
-    contract_version: "freeze-orderability/v1",
-    tool_kind: "fencing",
-    status: "frozen",
-    cap: 100,
-    ...summary,
-    ...drift,
-  }, null, 2));
+  console.log(JSON.stringify(
+    {
+      observed: true,
+      contract_version: "freeze-orderability/v1",
+      tool_kind: "fencing",
+      status: "frozen",
+      cap: 100,
+      ...summary,
+      ...drift,
+    },
+    null,
+    2,
+  ));
 }
 
 if (import.meta.main) {
@@ -185,7 +203,8 @@ if (import.meta.main) {
     console.error(JSON.stringify({
       observed: false,
       reason: String((err as Error)?.message ?? err),
-      query: "currently-frozen fencing scope_revisions joined to live jobs scope and pricing, classified by freeze-orderability/v1",
+      query:
+        "currently-frozen fencing scope_revisions joined to live jobs scope and pricing, classified by freeze-orderability/v1",
     }));
     Deno.exit(2);
   });
