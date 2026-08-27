@@ -21602,7 +21602,7 @@ function intakeDraftObligationCandidate(
       cleanReviewedString(correlatedExtraction.builder_work_order_number),
     builderPoNumber:
       cleanReviewedString(correlatedExtraction.builder_po_number),
-    identityProved: identity.action === 'ready',
+    identityProved: identity.action === 'ready' && !!identity.instruction_key,
     requestingCompany,
     siteAddress: cleanReviewedString(draft?.site_address) ||
       cleanReviewedString(extraction.site_address),

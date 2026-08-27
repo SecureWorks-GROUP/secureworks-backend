@@ -205,6 +205,7 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   const identityMaybe = intakeDraft("61003", {
     workOrder: null,
     po: null,
+    attachmentName: "",
   });
   const terminalConflict = intakeDraft("61004");
   const multipleConflict = intakeDraft("61005");
