@@ -21582,9 +21582,7 @@ function intakeDraftObligationCandidate(
       cleanReviewedString(extraction.requesting_company_name),
     siteAddress: cleanReviewedString(draft?.site_address) ||
       cleanReviewedString(extraction.site_address),
-    jobFamily: cleanReviewedString(extraction.makesafe_job_family) ||
-      cleanReviewedString(draft?.makesafe_job_family) ||
-      cleanReviewedString(draft?.report_type),
+    jobFamily: resolvedIntakeDraftFamily(draft),
   }
 }
 
@@ -22274,7 +22272,7 @@ function shouldAutoApproveCleanIntake(input: {
   return { ok: true, reason: 'clean_high_confidence_work_order' }
 }
 
-function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason: string } {
+function resolvedIntakeDraftFamily(draft: any): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
@@ -22330,7 +22328,14 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     : storedFamilyRaw
     ? (storedFamily === decidedFamily ? storedFamily : null)
     : (decidedFamily || null)
+  return jobFamily
+}
 
+function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason: string } {
+  const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
+  const jobFamily = resolvedIntakeDraftFamily(draft)
   // Defence in depth for legacy rows created before scan-time cancellation/combined
   // flagging existed: recompute both signals directly from the stored draft so the sweep
   // can never auto-promote a cancellation twin or a make-safe that also owes a report.
@@ -22449,13 +22454,31 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
       }]
       : []
   })
-  const unaccounted = loaded.rows.filter((draft: any) =>
-    dispositions.get(String(draft?.id || ''))?.kind !== 'accounted'
-  )
-  const checked = (accountedMatchError ? loaded.rows : unaccounted).slice(0, limit)
+  const dispositionSkipped = accountedMatchError
+    ? []
+    : loaded.rows.flatMap((draft: any) => {
+      const disposition = dispositions.get(String(draft?.id || ''))
+      if (
+        disposition?.kind === 'kept' &&
+        disposition.reason === 'no_equivalent_live_obligation'
+      ) return []
+      return disposition?.kind === 'accounted'
+        ? []
+        : [{
+          draft_id: draft?.id || null,
+          external_ref: draft?.external_ref || null,
+          reason: disposition?.reason || 'existing_obligation_check_unavailable',
+        }]
+    })
+  const advanceable = loaded.rows.filter((draft: any) => {
+    const disposition = dispositions.get(String(draft?.id || ''))
+    return disposition?.kind === 'kept' &&
+      disposition.reason === 'no_equivalent_live_obligation'
+  })
+  const checked = (accountedMatchError ? loaded.rows : advanceable).slice(0, limit)
   const autoApproved: any[] = []
   const eligible: any[] = []
-  const skipped: any[] = []
+  const skipped: any[] = [...dispositionSkipped]
   const failed: any[] = []
 
   for (const draft of checked) {

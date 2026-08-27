@@ -19,6 +19,8 @@ function intakeDraft(
     po?: string | null;
     status?: string;
     receivedAt?: string;
+    reportType?: string | null;
+    bodyPreview?: string;
   } = {},
 ) {
   const externalRef = options.externalRef ?? `MLB-${id}`;
@@ -41,8 +43,8 @@ function intakeDraft(
     client_name: "Fixture Client",
     site_address: `${id} Fixture Street`,
     subject: `Work Order ${externalRef}`,
-    body_preview: "Please attend and make safe.",
-    report_type: null,
+    body_preview: options.bodyPreview || "Please attend and make safe.",
+    report_type: options.reportType ?? null,
     extraction_json: {
       builder_work_order_number: workOrder,
       builder_po_number: po,
@@ -192,6 +194,8 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   const sameFamily = intakeDraft("61001");
   const distinctFamily = intakeDraft("61002", {
     family: "assessment_report_quote",
+    reportType: "assessment_report",
+    bodyPreview: "Please complete the assessment report and quote.",
   });
   const identityMaybe = intakeDraft("61003", {
     workOrder: null,
@@ -199,6 +203,11 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   });
   const terminalConflict = intakeDraft("61004");
   const multipleConflict = intakeDraft("61005");
+  const familyConflict = intakeDraft("61006", {
+    family: "roof_report",
+    reportType: "assessment_report",
+    bodyPreview: "Please complete the assessment report and quote.",
+  });
   const { client, calls } = fakeClient(
     [
       sameFamily,
@@ -206,12 +215,14 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       identityMaybe,
       terminalConflict,
       multipleConflict,
+      familyConflict,
     ],
     [
       obligationJob("61001"),
       obligationJob("61002"),
       obligationJob("61004", { status: "completed" }),
       obligationJob("61005"),
+      obligationJob("61006", { family: "assessment_report_quote" }),
       {
         ...obligationJob("61005"),
         job_id: "job-61005-sibling",
@@ -228,15 +239,16 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
     result.drafts.map((draft: any) => draft.id).sort(),
     [
       distinctFamily.id,
+      familyConflict.id,
       identityMaybe.id,
       multipleConflict.id,
       terminalConflict.id,
     ].sort(),
   );
-  assertEquals(result.total_count, 5);
-  assertEquals(result.visible_total_count, 4);
+  assertEquals(result.total_count, 6);
+  assertEquals(result.visible_total_count, 5);
   assertEquals(result.omitted_accounted_count, 1);
-  assertEquals(result.returned_count, 4);
+  assertEquals(result.returned_count, 5);
   assertEquals(result.has_more, false);
   assertEquals(result.accounted_filter_error, null);
   assertEquals(calls.writes, 0);
@@ -284,6 +296,43 @@ Deno.test("Advance clean skips a proved accounted draft without entering approva
     matched_job_id: "job-63001",
   });
   assertEquals(result.accounted_match_error, null);
+  assertEquals(fake.calls.singleReads, 0);
+  assertEquals(fake.calls.writes, 0);
+});
+
+Deno.test("Advance clean skips unproved identity and conflicting family", async () => {
+  const identityMaybe = intakeDraft("63002", {
+    workOrder: null,
+    po: null,
+  });
+  const familyConflict = intakeDraft("63003", {
+    family: "roof_report",
+    reportType: "assessment_report",
+    bodyPreview: "Please complete the assessment report and quote.",
+  });
+  const fake = fakeClient(
+    [identityMaybe, familyConflict],
+    [
+      obligationJob("63002"),
+      obligationJob("63003", { family: "assessment_report_quote" }),
+    ],
+  );
+
+  const result: any = await _autoApproveCleanIntakeDraftsForTest(fake.client, {
+    triggered_by: "ses-reporting-skill",
+  });
+
+  assertEquals(result.total_count, 2);
+  assertEquals(result.checked_count, 0);
+  assertEquals(result.eligible_count, 0);
+  assertEquals(result.auto_approved_count, 0);
+  assertEquals(
+    result.skipped.map((item: any) => [item.draft_id, item.reason]).sort(),
+    [
+      [familyConflict.id, "family_unproved"],
+      [identityMaybe.id, "builder_identity_unproved"],
+    ].sort(),
+  );
   assertEquals(fake.calls.singleReads, 0);
   assertEquals(fake.calls.writes, 0);
 });
