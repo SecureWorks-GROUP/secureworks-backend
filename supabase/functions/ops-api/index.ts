@@ -12551,15 +12551,12 @@ async function pipeline(client: any, params: URLSearchParams) {
   let neighbourContactRes: PipelineEnrichmentResult = { data: [], error: null }
   let commsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
   let reportRes: PipelineEnrichmentResult = { data: [], error: null }
+  let assignEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes] = await Promise.all([
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
-        client.from('job_assignments').select(
-          stageTruth
-            ? 'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at, is_ghost, role'
-            : 'job_id, scheduled_date',
-        ).in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('job_assignments').select('job_id, scheduled_date').in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select(
           stageTruth
@@ -12594,6 +12591,15 @@ async function pipeline(client: any, params: URLSearchParams) {
         ? readPipelineEnrichmentRows(jobIds, 'job_service_reports', (chunkIds) =>
           client.from('job_service_reports').select('id, job_id, status, submitted_at').in('job_id', chunkIds))
         : Promise.resolve({ data: [], error: null }),
+      // Stage-truth evidence must not use .neq('status','cancelled'): PostgREST
+      // follows SQL NULL semantics and would drop a pending rectification with
+      // status NULL. Counts above keep the historical cancelled filter.
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'job_assignments_evidence', (chunkIds) =>
+          client.from('job_assignments').select(
+            'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at, is_ghost, role',
+          ).in('job_id', chunkIds))
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -12608,6 +12614,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     ['pipeline.job_contacts', neighbourContactRes],
     ['pipeline.job_events', commsNotesRes],
     ...(stageTruth ? [['pipeline.job_service_reports', reportRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(stageTruth ? [['pipeline.job_assignments_evidence', assignEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
   ]
   // Preserve the existing partial-board behaviour, but make a failed dimension
   // loud in server logs and explicit in the response instead of publishing its
@@ -12618,7 +12625,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     .map(([label]) => label)
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
-    if (assignRes.error) stageTruthUnreadable.push('job_assignments')
+    if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
     if (poRes.error) stageTruthUnreadable.push('purchase_orders')
     if (emailRes.error) stageTruthUnreadable.push('po_communications')
     if (invoiceRes.error) stageTruthUnreadable.push('xero_invoices')
@@ -12629,7 +12636,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       invoices: invoiceRes.data || [],
       purchaseOrders: poRes.data || [],
       poCommunications: emailRes.data || [],
-      assignments: assignRes.data || [],
+      assignments: assignEvidenceRes.data || [],
       serviceReports: reportRes.data || [],
       unreadable: stageTruthUnreadable,
     }

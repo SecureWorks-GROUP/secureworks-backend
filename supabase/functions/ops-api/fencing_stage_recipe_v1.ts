@@ -295,5 +295,7 @@ export function isFencingServiceReportSubmitted(status: unknown): boolean {
 }
 
 export function referenceLooksLikeDeposit(reference: unknown): boolean {
-  return String(reference || "").toUpperCase().includes("DEP");
+  const text = String(reference || "").toUpperCase();
+  // Token match, not substring: INDEPENDENT contains the letters DEP.
+  return /\bDEP(?:OSIT)?\b/.test(text);
 }

@@ -19,6 +19,7 @@ import {
   FENCING_STAGE_RECIPE_VERSION,
   isFencingMaterialsOrLater,
   isFencingStageTruthRequested,
+  referenceLooksLikeDeposit,
 } from "./fencing_stage_recipe_v1.ts";
 import {
   emptyFencingExecutionEvidence,
@@ -799,6 +800,60 @@ Deno.test("fencing stage truth: archive clock uses latest completion proof", () 
   });
   const got = deriveFencingStageV1(evidence, { now: NOW });
   assertEquals(got.canonical_stage, "get_review");
+});
+
+Deno.test("fencing stage truth: INDEPENDENT is not a deposit token", () => {
+  assertEquals(referenceLooksLikeDeposit("SWF-26003-INDEPENDENT"), false);
+  assertEquals(referenceLooksLikeDeposit("SWF-26003-DEP"), true);
+  assertEquals(referenceLooksLikeDeposit("DEP-1234"), true);
+});
+
+Deno.test("fencing stage truth: null-status pending rectification still blocks archive", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-113"
+  );
+  assert(row);
+  const evidence = fencingExecutionEvidenceFromPipelineRows(
+    row.evidence.job_id,
+    row.evidence.deposit_invoice_id,
+    {
+      invoices: row.evidence.invoices.map((invoice) => ({
+        ...invoice,
+        job_id: row.evidence.job_id,
+      })),
+      purchaseOrders: row.evidence.purchase_orders.map((po) => ({
+        ...po,
+        job_id: row.evidence.job_id,
+      })),
+      poCommunications: [],
+      assignments: [
+        ...row.evidence.assignments.map((assignment) => ({
+          ...assignment,
+          job_id: row.evidence.job_id,
+        })),
+        {
+          id: "asg-rectify-null",
+          job_id: row.evidence.job_id,
+          status: null,
+          assignment_type: "rectification",
+          scheduled_date: "2026-08-28",
+          started_at: null,
+          completed_at: null,
+          is_ghost: false,
+          role: null,
+        },
+      ],
+      serviceReports: [],
+      unreadable: [],
+    },
+  );
+  assertEquals(
+    evidence.assignments.some((row) => row.id === "asg-rectify-null"),
+    true,
+  );
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.rectification_pending?.assignment_id, "asg-rectify-null");
+  assertNotEquals(got.canonical_stage, "archived");
 });
 
 Deno.test("fencing stage truth fixture contract version is pinned", () => {
