@@ -83,8 +83,16 @@ if (emptyComplete.canonical_stage !== "unknown") {
 }
 
 const unknown = counts.get("unknown") || 0;
+const decisionRequired = counts.get("decision_required") || 0;
+let rectificationPending = 0;
+for (const row of FENCING_STAGE_TRUTH_COHORT) {
+  const got = deriveFencingStageV1(row.evidence, { now: NOW });
+  if (got.rectification_pending) rectificationPending += 1;
+}
 const classified = FENCING_STAGE_TRUTH_COHORT.length;
 console.log(`classified=${classified} unknown=${unknown}`);
+console.log(`decision_required=${decisionRequired}`);
+console.log(`rectification_pending=${rectificationPending}`);
 console.log(`unknowns=${JSON.stringify(unknowns)}`);
 console.log(`buckets=${JSON.stringify(Object.fromEntries(counts))}`);
 console.log(

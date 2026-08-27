@@ -12557,7 +12557,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
         client.from('job_assignments').select(
           stageTruth
-            ? 'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at'
+            ? 'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at, is_ghost, role'
             : 'job_id, scheduled_date',
         ).in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>

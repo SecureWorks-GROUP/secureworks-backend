@@ -8,7 +8,7 @@
 import {
   FENCING_PO_CANCELLED_STATUS,
   FENCING_PO_DELETED_STATUS,
-  isFencingAssignmentLiveStatus,
+  isFencingAssignmentNonFieldWork,
   normalizeStatusToken,
   referenceLooksLikeDeposit,
 } from "./fencing_stage_recipe_v1.ts";
@@ -50,6 +50,8 @@ export interface FencingAssignmentFact {
   scheduled_date: string | null;
   started_at: string | null;
   completed_at: string | null;
+  is_ghost: boolean | null;
+  role: string | null;
 }
 
 export interface FencingServiceReportFact {
@@ -154,6 +156,12 @@ function projectAssignment(
     scheduled_date: asText(row.scheduled_date),
     started_at: asText(row.started_at),
     completed_at: asText(row.completed_at),
+    is_ghost: row.is_ghost === true
+      ? true
+      : row.is_ghost === false
+      ? false
+      : null,
+    role: asText(row.role),
   };
 }
 
@@ -204,7 +212,7 @@ export function fencingExecutionEvidenceFromPipelineRows(
   const assignments = rows.assignments
     .filter(matchJob)
     .map(projectAssignment)
-    .filter((assignment) => isFencingAssignmentLiveStatus(assignment.status));
+    .filter((assignment) => !isFencingAssignmentNonFieldWork(assignment));
 
   return {
     job_id: jobId,

@@ -27,6 +27,7 @@ import {
   FENCING_STAGE_RECIPE_VERSION,
   type FencingCanonicalStage,
   type FencingFactId,
+  isFencingAssignmentNonFieldWork,
   isFencingInvoiceIssuedStatus,
   isFencingInvoicePaidStatus,
   isFencingPoConfirmedStatus,
@@ -35,6 +36,11 @@ import {
   isFencingServiceReportSubmitted,
   normalizeStatusToken,
 } from "./fencing_stage_recipe_v1.ts";
+
+export interface FencingRectificationPending {
+  assignment_id: string | null;
+  status: string | null;
+}
 
 export interface FencingStageDerivation {
   canonical_stage: FencingCanonicalStage;
@@ -45,6 +51,8 @@ export interface FencingStageDerivation {
   conflicts: string[];
   evidence_refs: FencingStageEvidenceRef[];
   facts: Record<FencingFactId, boolean>;
+  /** Re-entry overlay. Not a ladder position. */
+  rectification_pending: FencingRectificationPending | null;
 }
 
 export interface FencingStageDeriveOptions {
@@ -61,9 +69,9 @@ interface EvaluatedFacts {
   work_complete: boolean;
   final_issued: boolean;
   final_paid: boolean;
-  rectification_visit: boolean;
   draft_po_veto: boolean;
   archive_clock_elapsed: boolean;
+  rectification_pending: FencingRectificationPending | null;
 }
 
 function hasStamp(value: string | null | undefined): boolean {
@@ -80,7 +88,23 @@ function invoiceIsPaid(invoice: FencingInvoiceFact): boolean {
 function liveAssignments(
   evidence: FencingExecutionEvidence,
 ): FencingAssignmentFact[] {
-  return evidence.assignments;
+  return evidence.assignments.filter((row) =>
+    !isFencingAssignmentNonFieldWork(row)
+  );
+}
+
+function isRectificationAssignment(row: FencingAssignmentFact): boolean {
+  return normalizeStatusToken(row.assignment_type) ===
+    FENCING_RECTIFICATION_ASSIGNMENT_TYPE;
+}
+
+/** Forward-ladder field work. Re-entry visits are overlay, not rungs. */
+function forwardAssignments(
+  evidence: FencingExecutionEvidence,
+): FencingAssignmentFact[] {
+  return liveAssignments(evidence).filter((row) =>
+    !isRectificationAssignment(row)
+  );
 }
 
 function depositInvoices(
@@ -137,7 +161,7 @@ function latestCompletionMs(
   evidence: FencingExecutionEvidence,
 ): number | null {
   const stamps: number[] = [];
-  for (const assignment of liveAssignments(evidence)) {
+  for (const assignment of forwardAssignments(evidence)) {
     const completed = parseInstant(assignment.completed_at);
     if (completed != null) stamps.push(completed);
   }
@@ -156,7 +180,10 @@ function evaluateFacts(
   const deposits = depositInvoices(evidence);
   const finals = finalInvoices(evidence);
   const pos = evidence.purchase_orders;
-  const assignments = liveAssignments(evidence);
+  const assignments = forwardAssignments(evidence);
+  const rectificationAssignments = liveAssignments(evidence).filter(
+    isRectificationAssignment,
+  );
 
   const depositIssued = deposits.some((invoice) =>
     isFencingInvoiceIssuedStatus(invoice.status)
@@ -189,10 +216,11 @@ function evaluateFacts(
   );
   const finalPaid = finals.some((invoice) => invoiceIsPaid(invoice));
 
-  const rectificationVisit = assignments.some((row) =>
-    normalizeStatusToken(row.assignment_type) ===
-      FENCING_RECTIFICATION_ASSIGNMENT_TYPE
-  );
+  const pendingRectification =
+    rectificationAssignments.find((row) =>
+      normalizeStatusToken(row.status) !== "complete" &&
+      !hasStamp(row.completed_at)
+    ) ?? null;
 
   const completedAt = latestCompletionMs(evidence);
   const archiveClockElapsed = completedAt != null &&
@@ -208,9 +236,14 @@ function evaluateFacts(
     work_complete: workComplete,
     final_issued: finalIssued,
     final_paid: finalPaid,
-    rectification_visit: rectificationVisit,
     draft_po_veto: draftOnly,
     archive_clock_elapsed: archiveClockElapsed,
+    rectification_pending: pendingRectification
+      ? {
+        assignment_id: pendingRectification.id,
+        status: pendingRectification.status,
+      }
+      : null,
   };
 }
 
@@ -297,6 +330,7 @@ function result(args: {
   conflicts: string[];
   evidence: FencingExecutionEvidence;
   facts: Record<FencingFactId, boolean>;
+  rectification_pending: FencingRectificationPending | null;
 }): FencingStageDerivation {
   return {
     canonical_stage: args.stage,
@@ -307,6 +341,7 @@ function result(args: {
     conflicts: [...args.conflicts],
     evidence_refs: collectRefs(args.evidence),
     facts: args.facts,
+    rectification_pending: args.rectification_pending,
   };
 }
 
@@ -339,16 +374,21 @@ function waitingStage(
     };
   }
   if (firstGap < 0) {
-    if (evaluated.archive_clock_elapsed) {
+    if (
+      evaluated.archive_clock_elapsed && !evaluated.rectification_pending
+    ) {
       return {
         stage: "archived",
         reasons: ["final_paid_and_completion_older_than_seven_days"],
         missing: [],
       };
     }
+    const reasons = evaluated.rectification_pending
+      ? ["final_invoice_paid", "rectification_pending_blocks_archive"]
+      : ["final_invoice_paid"];
     return {
       stage: "get_review",
-      reasons: ["final_invoice_paid"],
+      reasons,
       missing: ["review_request_send_proof"],
     };
   }
@@ -388,55 +428,11 @@ export function deriveFencingStageV1(
       conflicts: evidence.unreadable.map((name) => `unreadable:${name}`),
       evidence,
       facts,
-    });
-  }
-
-  if (evaluated.rectification_visit && !evaluated.deposit_paid) {
-    return result({
-      stage: "decision_required",
-      reasons: ["rectification_assignment_without_paid_deposit"],
-      missing: ["deposit_paid"],
-      conflicts: ["rectification_without_paid_deposit"],
-      evidence,
-      facts,
+      rectification_pending: evaluated.rectification_pending,
     });
   }
 
   const firstGap = firstUnprovedIndex(facts);
-  const workCompleteIndex = FENCING_STAGE_LADDER.findIndex((step) =>
-    step.fact === "work_complete"
-  );
-  if (
-    evaluated.rectification_visit &&
-    firstGap >= 0 &&
-    firstGap < workCompleteIndex
-  ) {
-    const missing = firstGap >= 0
-      ? [FENCING_STAGE_LADDER[firstGap].missing_code]
-      : [];
-    return result({
-      stage: "decision_required",
-      reasons: ["later_fact_without_prefix:rectification_visit"],
-      missing,
-      conflicts: [
-        `rectification_visit_without_${
-          firstGap >= 0 ? FENCING_STAGE_LADDER[firstGap].fact : "prefix"
-        }`,
-      ],
-      evidence,
-      facts,
-    });
-  }
-  if (evaluated.rectification_visit && firstGap === workCompleteIndex) {
-    return result({
-      stage: "rectification",
-      reasons: ["rectification_visit_with_execution_prefix"],
-      missing: [FENCING_STAGE_LADDER[firstGap].missing_code],
-      conflicts: [],
-      evidence,
-      facts,
-    });
-  }
   const skipped = laterFactWithoutPrefix(facts, firstGap);
   if (skipped) {
     const missing = firstGap >= 0
@@ -453,6 +449,7 @@ export function deriveFencingStageV1(
       ],
       evidence,
       facts,
+      rectification_pending: evaluated.rectification_pending,
     });
   }
 
@@ -464,6 +461,7 @@ export function deriveFencingStageV1(
     conflicts: [],
     evidence,
     facts,
+    rectification_pending: evaluated.rectification_pending,
   });
 }
 
@@ -478,6 +476,7 @@ export function fencingStageTruthFields(
   missing: string[];
   conflicts: string[];
   evidence_refs: FencingStageEvidenceRef[];
+  rectification_pending: FencingRectificationPending | null;
 } {
   return {
     declared_stage: declaredStage == null || declaredStage === ""
@@ -489,5 +488,6 @@ export function fencingStageTruthFields(
     missing: derivation.missing,
     conflicts: derivation.conflicts,
     evidence_refs: derivation.evidence_refs,
+    rectification_pending: derivation.rectification_pending,
   };
 }

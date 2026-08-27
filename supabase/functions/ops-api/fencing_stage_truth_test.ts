@@ -716,16 +716,74 @@ Deno.test("fencing stage truth: scheduling waits only for a dated assignment", (
   assertEquals(derive(dated).canonical_stage, "scheduled");
 });
 
-Deno.test("fencing stage truth: rectification cannot skip the execution prefix", () => {
+Deno.test("fencing stage truth: rectification is an overlay, not a ladder rung", () => {
   const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
     item.id === "fence-112"
   );
   assert(row);
   const got = derive(row);
-  assertEquals(got.canonical_stage, "decision_required");
-  assertEquals(got.reasons, [
-    "later_fact_without_prefix:rectification_visit",
-  ]);
+  assertEquals(got.canonical_stage, "order_materials");
+  assertEquals(got.rectification_pending?.assignment_id, "asg-fence-112");
+});
+
+Deno.test("fencing stage truth: completed install with pending rectification never archives", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-113"
+  );
+  assert(row);
+  const evidence = structuredClone(row.evidence);
+  evidence.assignments.push({
+    id: "asg-rectify",
+    status: "scheduled",
+    assignment_type: "rectification",
+    scheduled_date: "2026-08-28",
+    started_at: null,
+    completed_at: null,
+    is_ghost: false,
+    role: null,
+  });
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "get_review");
+  assertNotEquals(got.canonical_stage, "archived");
+  assertEquals(got.rectification_pending?.assignment_id, "asg-rectify");
+  const withoutOverlay = derive(row);
+  assertEquals(withoutOverlay.canonical_stage, "archived");
+});
+
+Deno.test("fencing stage truth: ghost watcher rows are not field-work evidence", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-105"
+  );
+  assert(row);
+  const evidence = structuredClone(row.evidence);
+  evidence.assignments = [{
+    id: "asg-ghost",
+    status: "scheduled",
+    assignment_type: "install",
+    scheduled_date: "2026-09-15",
+    started_at: null,
+    completed_at: null,
+    is_ghost: true,
+    role: "observer",
+  }];
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "schedule_install");
+  assertEquals(got.facts.assignment_dated, false);
+});
+
+Deno.test("fencing stage truth: dated submitted assignment keeps scheduling evidence", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-106"
+  );
+  assert(row);
+  const evidence = structuredClone(row.evidence);
+  evidence.assignments = evidence.assignments.map((assignment) => ({
+    ...assignment,
+    status: "submitted",
+  }));
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "scheduled");
+  assertEquals(got.facts.assignment_dated, true);
 });
 
 Deno.test("fencing stage truth: archive clock uses latest completion proof", () => {

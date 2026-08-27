@@ -12,10 +12,11 @@
 // non-deposit ACCREC, rectification assignment type. Quote documents are
 // not read in v1, so quoted/accepted cannot be proved and stay `unknown`.
 
-export const FENCING_STAGE_RECIPE_VERSION = "fencing-stage-recipe/v1";
+export const FENCING_STAGE_RECIPE_VERSION =
+  "fencing-stage-recipe/v1-rectification-overlay";
 
 export const FENCING_STAGE_ENGINE_VERSION =
-  "fencing-stage-engine.v1-shadow-read";
+  "fencing-stage-engine.v1-rectification-overlay";
 
 /** Opt-in pipeline flag. Absent → today's byte-identical response. */
 export const FENCING_STAGE_TRUTH_PARAM = "stage_truth";
@@ -117,18 +118,11 @@ export const FENCING_INVOICE_ISSUED_STATUSES = [
 
 export const FENCING_INVOICE_PAID_STATUS = "PAID";
 
-export const FENCING_ASSIGNMENT_LIVE_STATUSES = [
-  "scheduled",
-  "confirmed",
-  "in_progress",
-  "complete",
-] as const;
+/** Status that proves the assignment is not field work. */
+export const FENCING_ASSIGNMENT_CANCELLED_STATUS = "cancelled";
 
-export const FENCING_ASSIGNMENT_CONFIRMED_STATUSES = [
-  "confirmed",
-  "in_progress",
-  "complete",
-] as const;
+/** Ghost watcher rows that mirror office staff onto a job. */
+export const FENCING_ASSIGNMENT_GHOST_ROLE = "observer";
 
 export const FENCING_SERVICE_REPORT_SUBMITTED_STATUSES = [
   "submitted",
@@ -221,6 +215,7 @@ export const FENCING_STAGE_PIPELINE_FIELDS = [
   "missing",
   "conflicts",
   "evidence_refs",
+  "rectification_pending",
 ] as const;
 
 export function isFencingStageTruthRequested(
@@ -271,12 +266,27 @@ export function isFencingInvoicePaidStatus(status: unknown): boolean {
   return normalizeInvoiceStatus(status) === FENCING_INVOICE_PAID_STATUS;
 }
 
-export function isFencingAssignmentLiveStatus(status: unknown): boolean {
-  const token = normalizeStatusToken(status);
-  if (!token) return true;
-  return (FENCING_ASSIGNMENT_LIVE_STATUSES as readonly string[]).includes(
-    token,
-  );
+/**
+ * Invert the old status allowlist. Live rows carry statuses the migration
+ * never declared (`submitted`, `verified`, …); a hand-kept good list keeps
+ * under-including. Only drop rows we can prove are not field work.
+ */
+export function isFencingAssignmentNonFieldWork(assignment: {
+  status?: unknown;
+  is_ghost?: boolean | null;
+  role?: unknown;
+}): boolean {
+  if (
+    normalizeStatusToken(assignment.status) ===
+      FENCING_ASSIGNMENT_CANCELLED_STATUS
+  ) {
+    return true;
+  }
+  if (assignment.is_ghost === true) return true;
+  if (normalizeStatusToken(assignment.role) === FENCING_ASSIGNMENT_GHOST_ROLE) {
+    return true;
+  }
+  return false;
 }
 
 export function isFencingServiceReportSubmitted(status: unknown): boolean {

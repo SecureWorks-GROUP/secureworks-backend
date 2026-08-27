@@ -115,6 +115,8 @@ function datedAssignment(
     scheduled_date: scheduledDate,
     started_at: extras.started_at ?? null,
     completed_at: extras.completed_at ?? null,
+    is_ghost: extras.is_ghost ?? false,
+    role: extras.role ?? null,
   }];
 }
 
@@ -641,8 +643,8 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
   job(
     112,
     "rectification",
-    "decision_required",
-    "boundary_rectification_without_prefix",
+    "order_materials",
+    "boundary_rectification_overlay_not_ladder",
     merge(
       paidDeposit("fence-112", "dep-fence-112"),
       { po_communications: outboundPoEmail("email-fence-112") },
