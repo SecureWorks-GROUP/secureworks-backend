@@ -3336,6 +3336,19 @@ already 21 — board half only). Tests: `makesafe_cycle_evidence_test.ts`,
 `ses_assembler_input_adapter_test.ts`, `makesafe_board_read_model_test.ts`,
 `makesafe_render_report_action_test.ts`.
 
+## Job Profitability Never Reports 100% On Empty Cost
+
+`reporting-api` `job_profitability` is an honesty read, not a Xero Projects
+margin. Required lanes are labour, materials, commission, other. Each must
+resolve to a source-backed job-book figure (`trade_invoice_lines` /
+`job_materials_facts`). Missing lanes suppress `margin` / `margin_pct` and
+stamp `profit_status: unknown|partial` with `missing_lanes[]` and
+`amount_at_risk`. Zero cost is a missing measurement, not a free job. Xero
+Projects `total_expenses` is a low-confidence lump and never completes a lane.
+Roll-ups average only `complete` jobs and publish the excluded count and
+dollars. Owner: `profit_completeness.ts`. Proof:
+`profit_completeness_test.ts`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
