@@ -3268,20 +3268,30 @@ function matchingExistingObligationRows(
   ];
 }
 
-function sameReferenceRowsWithUnprovedIdentity(
+function matchingExistingObligationRowsWithUnprovedIdentity(
   candidate: ExistingObligationIdentity,
   data: readonly any[],
   prefixes: readonly string[],
+  options: Pick<ExistingObligationMatchOptions, "requireExactReference"> = {},
 ): any[] {
   const targetRef = canonicalExternalObligationRef(
     candidate.externalRefCanonical,
     prefixes,
   );
   const targetCompany = canonicalCompanyDedupeKey(candidate.builderCompany);
+  const targetAddress = candidate.siteAddress;
+  const targetWo = canonicalExternalObligationRef(
+    candidate.builderWoCanonical,
+    prefixes,
+  );
   const targetPo = canonicalObligationPoCore(candidate.builderPoCanonical) ||
     canonicalObligationPoCore(candidate.builderWoCanonical, true) ||
     canonicalObligationPoCore(candidate.externalRefCanonical, true);
-  if (!targetRef || !targetCompany) return [];
+  if (
+    !targetCompany ||
+    (!targetRef && !targetWo && !targetPo) ||
+    (options.requireExactReference && !targetRef)
+  ) return [];
 
   return [
     ...new Map(
@@ -3292,15 +3302,11 @@ function sameReferenceRowsWithUnprovedIdentity(
         );
         if (existingCompany && existingCompany !== targetCompany) return false;
         const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
-        if (
-          !isCanonicalSeedScopeJob(existingJob || {}) ||
-          isDeadObligationJobStatus(existingJob?.status)
-        ) return false;
+        if (!isCanonicalSeedScopeJob(existingJob || {})) return false;
         const existingRef = canonicalExternalObligationRef(
           row.external_ref,
           prefixes,
         );
-        if (existingRef !== targetRef) return false;
         const metadata = existingJob?.metadata &&
             typeof existingJob.metadata === "object"
           ? existingJob.metadata
@@ -3312,10 +3318,35 @@ function sameReferenceRowsWithUnprovedIdentity(
         const existingPoEvidence = [
           ...new Set(existingObligationPoEvidence(row, metadata)),
         ];
-        if (!existingCompany) return true;
+        const exactRefMatch = !!targetRef && existingRef === targetRef;
+        const exactWoMatch = !!targetWo && existingWo === targetWo;
+        const exactPoMatch = !!targetPo &&
+          canonicalObligationPoCore(metadata.builder_po_number) === targetPo;
+        const targetRefCore = obligationRefNumericCore(targetRef);
+        const builderScopedBareRefMatch = !!targetAddress &&
+          targetRefCore !== null &&
+          targetRefCore === obligationRefNumericCore(existingRef) &&
+          obligationAddressesMatch(targetAddress, existingJob?.site_address);
+        if (
+          !exactRefMatch && !exactWoMatch && !exactPoMatch &&
+          !builderScopedBareRefMatch
+        ) return false;
+        if (options.requireExactReference && !exactRefMatch) return false;
+
+        // Conflicting identity sources can match on any established coordinate,
+        // but may never be selected by precedence. Keep the row available for
+        // the runtime's existing binding exception instead.
         if (existingPoEvidence.length > 1) return true;
+
+        // Missing or one-sided evidence is only uncertainty at the exact
+        // external-reference grain. Broader address/WO/PO fallbacks retain the
+        // established matcher semantics for genuinely new instructions.
+        if (!exactRefMatch) return false;
+        if (!existingCompany) return true;
         const existingPo = existingPoEvidence[0] || null;
-        return targetPo ? !existingPo : !existingWo;
+        if (targetPo) return !existingPo;
+        if (targetWo) return !existingWo || existingWo !== targetWo;
+        return !existingPo && !existingWo;
       }).map((row: any) => [String(row.job_id), row]),
     ).values(),
   ];
@@ -3387,18 +3418,20 @@ export async function readAccountedIntakeDraftObligations(
       continue;
     }
 
-    const unprovedIdentityMatches = sameReferenceRowsWithUnprovedIdentity(
-      {
-        externalRefCanonical: candidate.externalRef,
-        builderWoCanonical: candidate.builderWorkOrderNumber,
-        builderPoCanonical: candidate.builderPoNumber,
-        builderCompany: candidate.requestingCompany,
-        siteAddress: candidate.siteAddress,
-        jobFamily: candidate.jobFamily,
-      },
-      data,
-      prefixes,
-    );
+    const unprovedIdentityMatches =
+      matchingExistingObligationRowsWithUnprovedIdentity(
+        {
+          externalRefCanonical: candidate.externalRef,
+          builderWoCanonical: candidate.builderWorkOrderNumber,
+          builderPoCanonical: candidate.builderPoNumber,
+          builderCompany: candidate.requestingCompany,
+          siteAddress: candidate.siteAddress,
+          jobFamily: candidate.jobFamily,
+        },
+        data,
+        prefixes,
+        { requireExactReference: true },
+      );
     if (unprovedIdentityMatches.length) {
       dispositions.set(candidate.draftId, {
         kind: "kept",
@@ -3622,6 +3655,20 @@ async function readObligationMatches(
       continue;
     }
     const correctedTargetJobId = [...correctedTargetJobIds][0] || null;
+    const unprovedIdentityMatches = cancellation
+      ? []
+      : matchingExistingObligationRowsWithUnprovedIdentity(
+        {
+          externalRefCanonical: item.identity.externalRefCanonical,
+          builderWoCanonical: item.identity.builderWoCanonical,
+          builderPoCanonical: item.identity.builderPoCanonical,
+          builderCompany: item.identity.builderSlug,
+          siteAddress: item.identity.siteAddress,
+          jobFamily: item.identity.jobFamily,
+        },
+        data,
+        prefixes,
+      );
     const uniqueMatches = matchingExistingObligationRows(
       {
         externalRefCanonical: item.identity.externalRefCanonical,
@@ -3673,6 +3720,32 @@ async function readObligationMatches(
         candidateJobIds: [String(row.job_id)],
         matchBasis: ["builder", "deliverable", "exact_wo_po_or_reference"],
       });
+      continue;
+    }
+    const unprovedTerminalMatches = unprovedIdentityMatches.filter((row) => {
+      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      return isDeadObligationJobStatus(job?.status);
+    });
+    if (unprovedTerminalMatches.length) {
+      bindingExceptions.set(
+        item.instructionKey,
+        bindingException("terminal_job_binding", [
+          ...unprovedIdentityMatches.map((row) => String(row.job_id)),
+          ...uniqueMatches.map((row) => String(row.job_id)),
+          ...(correctedTargetJobId ? [correctedTargetJobId] : []),
+        ]),
+      );
+      continue;
+    }
+    if (unprovedIdentityMatches.length) {
+      bindingExceptions.set(
+        item.instructionKey,
+        bindingException("multiple_live_jobs", [
+          ...unprovedIdentityMatches.map((row) => String(row.job_id)),
+          ...uniqueMatches.map((row) => String(row.job_id)),
+          ...(correctedTargetJobId ? [correctedTargetJobId] : []),
+        ]),
+      );
       continue;
     }
     const correctedMatch = correctedTargetJobId

@@ -23,6 +23,7 @@ function intakeDraft(
     bodyPreview?: string;
     builderEmailTextForTrade?: string;
     attachmentName?: string;
+    company?: string;
   } = {},
 ) {
   const externalRef = options.externalRef ?? `MLB-${id}`;
@@ -39,7 +40,7 @@ function intakeDraft(
     received_at: options.receivedAt || "2026-08-27T00:00:00.000Z",
     confidence: "high",
     missing_fields: [],
-    requesting_company_slug: "mlb",
+    requesting_company_slug: options.company || "mlb",
     requesting_company_name: "Fixture Builder",
     external_ref: externalRef,
     client_name: "Fixture Client",
@@ -226,7 +227,11 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   });
   const existingFamilyConflict = intakeDraft("61008");
   const legacyExistingFamilyConflict = intakeDraft("61009");
-  const restoration = intakeDraft("61012", { family: "restoration" });
+  const restoration = intakeDraft("61012", {
+    family: "restoration",
+    reportType: "restoration",
+    bodyPreview: "Complete the documented restoration works.",
+  });
   const { client, calls } = fakeClient(
     [
       sameFamily,
@@ -499,12 +504,22 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
   });
   const missingExistingCompany = intakeDraft("63010");
   const conflictingExistingIdentity = intakeDraft("63011");
+  const terminalMissingIdentity = intakeDraft("63012");
+  const ajWorkOrderConflict = intakeDraft("67001", {
+    externalRef: "AJBR-67001",
+    workOrder: "AJBR-67001",
+    po: null,
+    attachmentName: "AJBR-67001.pdf",
+    company: "aj",
+  });
   const fake = fakeClient(
     [
       missingExistingIdentity,
       fullEmailFamilyConflict,
       missingExistingCompany,
       conflictingExistingIdentity,
+      terminalMissingIdentity,
+      ajWorkOrderConflict,
     ],
     [
       obligationJob("63008", { workOrder: "", po: "" }),
@@ -513,6 +528,17 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       obligationJob("63011", {
         workOrder: "MLB-63011PO-99999",
         po: "PO-63011",
+      }),
+      obligationJob("63012", {
+        workOrder: "",
+        po: "",
+        status: "completed",
+      }),
+      obligationJob("67001", {
+        externalRef: "AJBR-67001",
+        workOrder: "AJBR-67999",
+        po: "",
+        company: "aj",
       }),
     ],
   );
@@ -531,6 +557,8 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
       [fullEmailFamilyConflict.id, "family_unproved"],
       [missingExistingCompany.id, "builder_identity_unproved"],
       [conflictingExistingIdentity.id, "builder_identity_unproved"],
+      [terminalMissingIdentity.id, "builder_identity_unproved"],
+      [ajWorkOrderConflict.id, "builder_identity_unproved"],
     ].sort(),
   );
   assertEquals(fake.calls.singleReads, 0);
