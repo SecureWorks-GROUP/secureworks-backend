@@ -117,6 +117,7 @@ export type JobProfitabilityRow = {
 export type ProfitabilityRollup = {
   label: string
   job_count: number
+  total_invoiced: number
   complete_count: number
   partial_count: number
   unknown_count: number
@@ -153,7 +154,7 @@ export function computeLegacyJobMargin(
   invoiced: number,
   bills: number,
 ): { margin: number; margin_pct: number } {
-  const margin = invoiced - bills
+  const margin = (Math.round(invoiced * 100) - Math.round(bills * 100)) / 100
   const margin_pct = invoiced > 0 ? Math.round((margin / invoiced) * 100) : 0
   return { margin, margin_pct }
 }
@@ -172,6 +173,16 @@ export function classifyTradeCostLane(
 function money(n: unknown): number {
   const v = typeof n === 'string' ? parseFloat(n) : Number(n)
   return Number.isFinite(v) ? v : 0
+}
+
+function validMoney(n: unknown): number | null {
+  if (n == null || (typeof n === 'string' && n.trim() === '')) return null
+  const v = typeof n === 'string' ? Number(n) : n
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function sumMoney(values: number[]): number {
+  return values.reduce((sum, value) => sum + Math.round(value * 100), 0) / 100
 }
 
 function dollarsAtRisk(invoiced: number, quoteValue: number): number {
@@ -226,7 +237,26 @@ function resolveFromTradeLines(
       reason: 'no_source',
     }
   }
-  const amount = matching.reduce((s, line) => s + money(line.line_total_ex), 0)
+  const amounts = matching.map((line) => validMoney(line.line_total_ex))
+  if (amounts.some((amount) => amount == null)) {
+    return {
+      resolved: false,
+      amount_ex_gst: null,
+      source: null,
+      confidence: null,
+      reason: 'source_unreadable',
+    }
+  }
+  const amount = sumMoney(amounts as number[])
+  if (amount <= 0) {
+    return {
+      resolved: false,
+      amount_ex_gst: null,
+      source: null,
+      confidence: null,
+      reason: 'no_source',
+    }
+  }
   return {
     resolved: true,
     amount_ex_gst: amount,
@@ -257,7 +287,26 @@ function resolveMaterialsLane(job: JobProfitInput): LaneResolution {
     // figure is not dropped.
     return resolveFromTradeLines(job, 'materials')
   }
-  const amount = matching.reduce((s, fact) => s + money(fact.amount_ex_gst), 0)
+  const amounts = matching.map((fact) => validMoney(fact.amount_ex_gst))
+  if (amounts.some((amount) => amount == null)) {
+    return {
+      resolved: false,
+      amount_ex_gst: null,
+      source: null,
+      confidence: null,
+      reason: 'source_unreadable',
+    }
+  }
+  const amount = sumMoney(amounts as number[])
+  if (amount <= 0) {
+    return {
+      resolved: false,
+      amount_ex_gst: null,
+      source: null,
+      confidence: null,
+      reason: 'no_source',
+    }
+  }
   return {
     resolved: true,
     amount_ex_gst: amount,
@@ -314,10 +363,10 @@ export function assessJobProfitCompleteness(job: JobProfitInput): JobProfitabili
   const resolvedLanes = REQUIRED_COST_LANES.filter((lane) => lanes[lane].resolved)
   const resolved_cost_ex_gst = resolvedLanes.length === 0
     ? null
-    : resolvedLanes.reduce((s, lane) => {
+    : sumMoney(resolvedLanes.map((lane) => {
       const r = lanes[lane]
-      return r.resolved ? s + r.amount_ex_gst : s
-    }, 0)
+      return r.resolved ? r.amount_ex_gst : 0
+    }))
 
   const unclassified_cost_ex_gst = unclassifiedAmount(jobForLanes)
   const lumps = untrustedLumps(jobForLanes)
@@ -421,24 +470,29 @@ export function rollUpJobProfitability(
   let complete_count = 0
   let partial_count = 0
   let unknown_count = 0
-  let complete_invoiced = 0
-  let complete_cost = 0
-  let complete_margin = 0
-  let excluded_from_margin_dollars = 0
+  const completeInvoiced: number[] = []
+  const completeCosts: number[] = []
+  const completeMargins: number[] = []
+  const excludedDollars: number[] = []
 
   for (const row of rows) {
     if (row.profit_status === 'complete') {
       complete_count += 1
-      complete_invoiced += row.invoiced
-      complete_cost += row.resolved_cost_ex_gst ?? 0
-      complete_margin += row.margin ?? 0
+      completeInvoiced.push(row.invoiced)
+      completeCosts.push(row.resolved_cost_ex_gst ?? 0)
+      completeMargins.push(row.margin ?? 0)
     } else {
       if (row.profit_status === 'partial') partial_count += 1
       else unknown_count += 1
-      excluded_from_margin_dollars += row.amount_at_risk
+      excludedDollars.push(row.amount_at_risk)
     }
   }
 
+  const complete_invoiced = sumMoney(completeInvoiced)
+  const complete_cost = sumMoney(completeCosts)
+  const complete_margin = sumMoney(completeMargins)
+  const excluded_from_margin_dollars = sumMoney(excludedDollars)
+  const total_invoiced = sumMoney(rows.map((row) => row.invoiced))
   const excluded_from_margin_count = partial_count + unknown_count
   const avg_margin_pct = complete_count === 0 || complete_invoiced <= 0
     ? null
@@ -447,6 +501,7 @@ export function rollUpJobProfitability(
   return {
     label,
     job_count: rows.length,
+    total_invoiced,
     complete_count,
     partial_count,
     unknown_count,
@@ -478,18 +533,23 @@ function inWindow(iso: string, from: string, to: string): boolean {
 
 export function buildJobProfitabilityReport(
   jobs: JobProfitInput[],
-  opts: { now?: Date; xeroProjectsMatched?: number } = {},
+  opts: {
+    now?: Date
+    xeroProjectsMatched?: number
+    rollupJobs?: JobProfitInput[]
+  } = {},
 ): JobProfitabilityReport {
   const now = opts.now ?? new Date()
   const rows = jobs.map(assessJobProfitCompleteness)
+  const rollupRows = (opts.rollupJobs ?? jobs).map(assessJobProfitCompleteness)
   const summaryRollup = rollUpJobProfitability(rows, 'returned_cohort')
   const month = utcMonthWindow(now)
   const quarter = utcQuarterWindow(now)
 
-  const fencingThisMonth = rows.filter((r) =>
+  const fencingThisMonth = rollupRows.filter((r) =>
     r.type === 'fencing' && inWindow(r.created_at, month.from, month.to)
   )
-  const allFamiliesThisQuarter = rows.filter((r) =>
+  const allFamiliesThisQuarter = rollupRows.filter((r) =>
     inWindow(r.created_at, quarter.from, quarter.to)
   )
 
@@ -509,7 +569,6 @@ export function buildJobProfitabilityReport(
     summary: {
       ...summaryRollup,
       total_jobs: rows.length,
-      total_invoiced: summaryRollup.complete_invoiced,
       total_bills: summaryRollup.complete_count === 0 ? null : summaryRollup.complete_cost,
       total_margin: summaryRollup.complete_count === 0 ? null : summaryRollup.complete_margin,
       data_sources,

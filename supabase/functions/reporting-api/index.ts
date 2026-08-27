@@ -24,6 +24,7 @@ import {
   PROFIT_SOURCE_IN_CHUNK,
   buildJobProfitabilityReport,
   expectedLanesFromSnapshot,
+  utcQuarterWindow,
   type JobProfitInput,
 } from './profit_completeness.ts'
 
@@ -820,7 +821,29 @@ async function fetchProfitSourceRows(
   return { rows, readFault: false }
 }
 
+async function fetchProfitRollupJobs(sb: any, now: Date): Promise<any[]> {
+  const PAGE_SIZE = 1000
+  const quarter = utcQuarterWindow(now)
+  const rows: any[] = []
+  for (let offset = 0;; offset += PAGE_SIZE) {
+    const { data, error } = await sb
+      .from('jobs')
+      .select('id, type, status, client_name, site_suburb, pricing_json, expected_costs, created_at, job_number')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('legacy', false)
+      .gte('created_at', quarter.from)
+      .lt('created_at', quarter.to)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) throw error
+    rows.push(...(data || []))
+    if ((data || []).length < PAGE_SIZE) return rows
+  }
+}
+
 async function jobProfitability(sb: any, params: URLSearchParams) {
+  const now = new Date()
   const dateFrom = params.get('from') || null
   const dateTo = params.get('to') || null
   const jobType = params.get('type') || null
@@ -845,10 +868,19 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
   const { data: jobs, error: jobErr } = await query
   if (jobErr) throw jobErr
 
-  // Get all invoices linked to these jobs
-  const jobIds = (jobs || []).map((j: any) => j.id)
+  const rollupJobs = await fetchProfitRollupJobs(sb, now)
+  const sourceJobsById = new Map<string, any>()
+  for (const job of [...(jobs || []), ...rollupJobs]) {
+    sourceJobsById.set(job.id, job)
+  }
+  const sourceJobs = [...sourceJobsById.values()]
+
+  // Get all invoices linked to the returned and aggregate-cohort jobs
+  const pageJobIds = (jobs || []).map((j: any) => j.id)
+  const rollupJobIds = rollupJobs.map((j: any) => j.id)
+  const jobIds = sourceJobs.map((j: any) => j.id)
   const jobNumbers = [...new Set(
-    (jobs || []).map((j: any) => j.job_number).filter((n: unknown) => typeof n === 'string' && n.length > 0),
+    sourceJobs.map((j: any) => j.job_number).filter((n: unknown) => typeof n === 'string' && n.length > 0),
   )] as string[]
   let invoicesByJob: Record<string, any[]> = {}
 
@@ -930,7 +962,7 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
   const tradeLines = [...tradeById.values()]
   const tradeLinesUnreadable = tradeByJobId.readFault || tradeByJobNumber.readFault
 
-  const inputs: JobProfitInput[] = (jobs || []).map((job: any) => {
+  const inputs: JobProfitInput[] = sourceJobs.map((job: any) => {
     const quoteValue = job.pricing_json?.totalExGST || job.pricing_json?.totalIncGST || 0
     const jobInvoices = invoicesByJob[job.id] || []
     const xeroProject = projectByJob[job.id] || null
@@ -971,8 +1003,20 @@ async function jobProfitability(sb: any, params: URLSearchParams) {
     }
   })
 
-  return buildJobProfitabilityReport(inputs, {
+  const inputsById = new Map(inputs.map((input) => [input.id, input]))
+  const pageInputs = pageJobIds.flatMap((id: string) => {
+    const input = inputsById.get(id)
+    return input ? [input] : []
+  })
+  const rollupInputs = rollupJobIds.flatMap((id: string) => {
+    const input = inputsById.get(id)
+    return input ? [input] : []
+  })
+
+  return buildJobProfitabilityReport(pageInputs, {
+    now,
     xeroProjectsMatched: (xeroProjects || []).length,
+    rollupJobs: rollupInputs,
   })
 }
 

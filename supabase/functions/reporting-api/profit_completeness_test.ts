@@ -24,14 +24,13 @@ import {
 const NOW = new Date('2026-08-27T00:00:00.000Z')
 
 // Fully costed control: these numbers are the "as today" formula.
-// invoiced 10000, bills 7000 → margin 3000, 30%.
-const COMPLETE_INVOICED = 10000
-const COMPLETE_LABOUR = 3000
-const COMPLETE_MATERIALS = 3000
-const COMPLETE_COMMISSION = 800
-const COMPLETE_OTHER = 200
-const COMPLETE_BILLS =
-  COMPLETE_LABOUR + COMPLETE_MATERIALS + COMPLETE_COMMISSION + COMPLETE_OTHER
+const COMPLETE_INVOICED = 10000.57
+const COMPLETE_LABOUR = 3000.11
+const COMPLETE_MATERIALS = 3000.06
+const COMPLETE_COMMISSION = 800.04
+const COMPLETE_OTHER = 200.03
+const COMPLETE_BILLS = 7000.24
+const COMPLETE_MARGIN = 3000.33
 
 function tradeLine(
   jobId: string,
@@ -244,9 +243,10 @@ Deno.test('3. fully costed job computes margin exactly as today, to the cent', (
   assertEquals(row.cost_authority, 'job_book')
 
   // Independent copy of today's formula — not a stub of the helper under test.
-  const todayMargin = COMPLETE_INVOICED - COMPLETE_BILLS
+  const todayMargin =
+    (Math.round(COMPLETE_INVOICED * 100) - Math.round(COMPLETE_BILLS * 100)) / 100
   const todayPct = Math.round((todayMargin / COMPLETE_INVOICED) * 100)
-  assertEquals(todayMargin, 3000)
+  assertEquals(todayMargin, COMPLETE_MARGIN)
   assertEquals(todayPct, 30)
   assertEquals(row.margin, todayMargin)
   assertEquals(row.margin_pct, todayPct)
@@ -287,9 +287,10 @@ Deno.test('4. aggregates exclude unknown/partial from margin and report excluded
   assertEquals(fencing.unknown_count, 1)
   assertEquals(fencing.excluded_from_margin_count, 2)
   assertEquals(fencing.excluded_from_margin_dollars, 12000 + 8000)
+  assertEquals(fencing.total_invoiced, 30000.57)
   assertEquals(fencing.complete_invoiced, COMPLETE_INVOICED)
   assertEquals(fencing.complete_cost, COMPLETE_BILLS)
-  assertEquals(fencing.complete_margin, 3000)
+  assertEquals(fencing.complete_margin, COMPLETE_MARGIN)
   assertEquals(fencing.avg_margin_pct, 30)
 
   const quarter = report.rollups.all_families_this_quarter
@@ -299,8 +300,9 @@ Deno.test('4. aggregates exclude unknown/partial from margin and report excluded
   assertEquals(quarter.unknown_count, 1)
   assertEquals(quarter.excluded_from_margin_count, 3)
   assertEquals(quarter.excluded_from_margin_dollars, 12000 + 8000 + 15000)
+  assertEquals(quarter.total_invoiced, 45000.57)
   assertEquals(quarter.avg_margin_pct, 30)
-  assertEquals(quarter.complete_margin, 3000)
+  assertEquals(quarter.complete_margin, COMPLETE_MARGIN)
 })
 
 Deno.test('5. perturbation: drop a resolved lane and the job flips to partial', () => {
@@ -368,7 +370,8 @@ Deno.test('acceptance: cohort counts and zero empty-cost 100% margins', () => {
 
   // Incomplete jobs must not be averaged into the headline margin.
   assertEquals(report.summary.avg_margin_pct, 30)
-  assertEquals(report.summary.total_margin, 3000)
+  assertEquals(report.summary.total_margin, COMPLETE_MARGIN)
+  assertEquals(report.summary.total_invoiced, 54000.57)
   assertEquals(report.summary.excluded_from_margin_count, 4)
 })
 
@@ -378,7 +381,7 @@ Deno.test('job book wins over a mismatched xero projects lump', () => {
   job.legacy_bills = 0
   const row = assessJobProfitCompleteness(job)
   assertEquals(row.profit_status, 'complete')
-  assertEquals(row.margin, 3000)
+  assertEquals(row.margin, COMPLETE_MARGIN)
   assertEquals(row.margin_pct, 30)
   const todayIfXeroOwned = computeLegacyJobMargin(COMPLETE_INVOICED, 0)
   assertEquals(todayIfXeroOwned.margin_pct, 100)
@@ -396,6 +399,41 @@ Deno.test('unreadable materials source fails closed, never resolves to zero', ()
   }
   assertEquals(row.profit_status, 'unknown')
   assertEquals(row.margin_pct, null)
+})
+
+Deno.test('zero and invalid lane totals remain unresolved', () => {
+  const zero = fullyCostedJob()
+  zero.trade_lines = zero.trade_lines.map((line) =>
+    line.line_type === 'labour' ? { ...line, line_total_ex: 0 } : line
+  )
+  const zeroRow = assessJobProfitCompleteness(zero)
+  assertEquals(zeroRow.lanes.labour.resolved, false)
+  assertEquals(zeroRow.profit_status, 'partial')
+  assertEquals(zeroRow.margin, null)
+
+  const invalid = fullyCostedJob()
+  invalid.materials_facts = [{
+    job_id: invalid.id,
+    amount_ex_gst: 'not-money',
+    lane: 'materials',
+  }]
+  const invalidRow = assessJobProfitCompleteness(invalid)
+  assertEquals(invalidRow.lanes.materials.resolved, false)
+  assertEquals(invalidRow.profit_status, 'partial')
+  assertEquals(invalidRow.margin, null)
+})
+
+Deno.test('rollups use their full cohort independently of the returned page', () => {
+  const report = buildJobProfitabilityReport([fullyCostedJob()], {
+    now: NOW,
+    rollupJobs: fixtureCohort(),
+  })
+  assertEquals(report.jobs.length, 1)
+  assertEquals(report.summary.total_invoiced, COMPLETE_INVOICED)
+  assertEquals(report.rollups.fencing_this_month.job_count, 3)
+  assertEquals(report.rollups.all_families_this_quarter.job_count, 4)
+  assertEquals(report.rollups.all_families_this_quarter.partial_count, 2)
+  assertEquals(report.rollups.all_families_this_quarter.unknown_count, 1)
 })
 
 Deno.test('duplicate trade line ids are counted once', () => {
