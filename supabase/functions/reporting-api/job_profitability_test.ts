@@ -120,14 +120,21 @@ function mockClient(
 ) {
   const selects: { table: string; select: string; type?: unknown; from?: unknown }[] =
     []
+  const ranges: { table: string; from: number; to: number }[] = []
   return {
     selects,
+    ranges,
     from(table: string) {
       const chain = new MockChain(table, state, errorFor)
       const originalSelect = chain.select.bind(chain)
       chain.select = (cols: string) => {
         selects.push({ table, select: cols })
         return originalSelect(cols)
+      }
+      const originalRange = chain.range.bind(chain)
+      chain.range = (from: number, to: number) => {
+        ranges.push({ table, from, to })
+        return originalRange(from, to)
       }
       const originalEq = chain.eq.bind(chain)
       chain.eq = (col: string, val: unknown) => {
@@ -162,15 +169,34 @@ const FULL_JOB = {
   expected_costs: null,
 }
 
-Deno.test('list select projects pricing paths and never the full blob', () => {
+Deno.test('loadJobProfitability uses projected quote totals, not a planted pricing blob', async () => {
+  const sb = mockClient({
+    jobs: [{
+      ...FULL_JOB,
+      quote_ex: 10000.57,
+      pricing_json: { totalExGST: 1, totalIncGST: 1 },
+    }],
+    xero_invoices: [{
+      job_id: 'job-full',
+      invoice_type: 'ACCREC',
+      sub_total: 10000.57,
+      total: 11000.63,
+      amount_paid: 0,
+    }],
+    xero_projects: [],
+    trade_invoice_lines: [],
+    job_materials_facts: [],
+  })
+  const report = await loadJobProfitability(
+    sb,
+    new URLSearchParams(),
+    new Date('2026-08-27T00:00:00.000Z'),
+  )
   assertEquals(
-    JOB_PROFIT_LIST_SELECT.includes('pricing_json->totalExGST'),
+    sb.selects.every((s) => s.table !== 'jobs' || s.select === JOB_PROFIT_LIST_SELECT),
     true,
   )
-  assertEquals(
-    /\bpricing_json\b(?!->)/.test(JOB_PROFIT_LIST_SELECT),
-    false,
-  )
+  assertEquals(report.jobs[0].quote_value, 10000.57)
 })
 
 Deno.test('loadJobProfitability: empty-cost job is unknown, not 100%', async () => {
@@ -335,6 +361,70 @@ Deno.test('loadJobProfitability throws when xero_invoices is unreadable', async 
     JobProfitabilityReadError,
     'xero_invoices',
   )
+})
+
+Deno.test('loadJobProfitability accumulates invoice revenue in integer cents', async () => {
+  const sb = mockClient({
+    jobs: [{ ...FULL_JOB, quote_ex: 0.3 }],
+    xero_invoices: [
+      {
+        job_id: 'job-full',
+        invoice_type: 'ACCREC',
+        sub_total: 0.1,
+        total: 0.11,
+        amount_paid: 0,
+      },
+      {
+        job_id: 'job-full',
+        invoice_type: 'ACCREC',
+        sub_total: 0.2,
+        total: 0.22,
+        amount_paid: 0,
+      },
+    ],
+    xero_projects: [],
+    trade_invoice_lines: [],
+    job_materials_facts: [],
+  })
+  const report = await loadJobProfitability(
+    sb,
+    new URLSearchParams(),
+    new Date('2026-08-27T00:00:00.000Z'),
+  )
+  assertEquals(report.jobs[0].invoiced, 0.3)
+  assertEquals(String(report.jobs[0].invoiced), '0.3')
+})
+
+Deno.test('loadJobProfitability pages source reads past the 1000-row cap', async () => {
+  const lines = Array.from({ length: 1001 }, (_, i) => ({
+    id: `l-${i}`,
+    job_id: 'job-full',
+    job_number: 'SWF-FULL',
+    line_type: 'labour',
+    line_total_ex: 1,
+    trade_invoices: { status: 'paid' },
+  }))
+  const sb = mockClient({
+    jobs: [FULL_JOB],
+    xero_invoices: [{
+      job_id: 'job-full',
+      invoice_type: 'ACCREC',
+      sub_total: 10000.57,
+      total: 11000.63,
+      amount_paid: 0,
+    }],
+    xero_projects: [],
+    trade_invoice_lines: lines,
+    job_materials_facts: [],
+  })
+  await loadJobProfitability(
+    sb,
+    new URLSearchParams(),
+    new Date('2026-08-27T00:00:00.000Z'),
+  )
+  const lineRanges = sb.ranges.filter((r) => r.table === 'trade_invoice_lines')
+  assertEquals(lineRanges.some((r) => r.from === 0), true)
+  assertEquals(lineRanges.some((r) => r.from === 1000), true)
 })
 
 Deno.test('loadJobProfitability loads fencing-month and quarter cohorts independently', async () => {

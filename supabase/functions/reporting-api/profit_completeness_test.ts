@@ -473,6 +473,31 @@ Deno.test('unclassified trade lines block complete even when required lanes reso
   assertEquals(row.margin, null)
 })
 
+Deno.test('unclassified override of 50 on a stored zero is counted and blocks complete', () => {
+  const job = fullyCostedJob()
+  job.trade_lines = [
+    ...job.trade_lines,
+    tradeLine('job-fully-costed', 'mystery-kit', 0, 'SWF-FULL', {
+      override_amount: 50,
+    }),
+  ]
+  const row = assessJobProfitCompleteness(job)
+  assertEquals(row.unclassified_cost_ex_gst, 50)
+  assertEquals(row.profit_status, 'partial')
+  assertEquals(row.margin, null)
+  const onlyOverride: JobProfitInput = {
+    ...emptyCostJob(),
+    trade_lines: [
+      tradeLine('job-empty-cost', 'mystery-kit', 0, 'SWF-EMPTY', {
+        override_amount: 50,
+      }),
+    ],
+  }
+  const onlyRow = assessJobProfitCompleteness(onlyOverride)
+  assertEquals(onlyRow.profit_status === 'complete', false)
+  assertEquals(onlyRow.unclassified_cost_ex_gst, 50)
+})
+
 Deno.test('draft, rejected and voided trade invoices leave the lane unresolved', () => {
   assertEquals([...AUTHORISED_TRADE_INVOICE_STATUSES], [
     'approved',
