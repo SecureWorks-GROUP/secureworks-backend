@@ -21,6 +21,7 @@ function intakeDraft(
     receivedAt?: string;
     reportType?: string | null;
     bodyPreview?: string;
+    builderEmailTextForTrade?: string;
     attachmentName?: string;
   } = {},
 ) {
@@ -50,6 +51,7 @@ function intakeDraft(
       builder_work_order_number: workOrder,
       builder_po_number: po,
       makesafe_job_family: family,
+      builder_email_text_for_trade: options.builderEmailTextForTrade,
     },
     attachments_json: [{
       file_name: options.attachmentName === undefined
@@ -288,6 +290,33 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   assertEquals(calls.writes, 0);
 });
 
+Deno.test("operator intake retains same-reference identity gaps and full-email family conflicts", async () => {
+  const missingExistingIdentity = intakeDraft("61010");
+  const fullEmailFamilyConflict = intakeDraft("61011", {
+    builderEmailTextForTrade:
+      "Supply and install temporary fencing around the affected area.",
+  });
+  const { client, calls } = fakeClient(
+    [missingExistingIdentity, fullEmailFamilyConflict],
+    [
+      obligationJob("61010", { workOrder: "", po: "" }),
+      obligationJob("61011"),
+    ],
+  );
+
+  const result: any = await _listIntakeDraftsForTest(
+    client,
+    new URLSearchParams({ status: "draft,needs_review" }),
+  );
+
+  assertEquals(
+    result.drafts.map((draft: any) => draft.id).sort(),
+    [missingExistingIdentity.id, fullEmailFamilyConflict.id].sort(),
+  );
+  assertEquals(result.omitted_accounted_count, 0);
+  assertEquals(calls.writes, 0);
+});
+
 Deno.test("operator intake fails visible on unpersisted PO and accepts proved source identity", async () => {
   const woFallback = intakeDraft("61101", { po: null });
   const refFallback = intakeDraft("61102", {
@@ -422,6 +451,38 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
       [identityMaybe.id, "builder_identity_unproved"],
       [existingFamilyConflict.id, "family_unproved"],
       [identityConflict.id, "builder_identity_unproved"],
+    ].sort(),
+  );
+  assertEquals(fake.calls.singleReads, 0);
+  assertEquals(fake.calls.writes, 0);
+});
+
+Deno.test("Advance clean skips same-reference identity gaps and full-email family conflicts", async () => {
+  const missingExistingIdentity = intakeDraft("63008");
+  const fullEmailFamilyConflict = intakeDraft("63009", {
+    builderEmailTextForTrade:
+      "Supply and install temporary fencing around the affected area.",
+  });
+  const fake = fakeClient(
+    [missingExistingIdentity, fullEmailFamilyConflict],
+    [
+      obligationJob("63008", { workOrder: "", po: "" }),
+      obligationJob("63009"),
+    ],
+  );
+
+  const result: any = await _autoApproveCleanIntakeDraftsForTest(fake.client, {
+    triggered_by: "ses-reporting-skill",
+  });
+
+  assertEquals(result.checked_count, 0);
+  assertEquals(result.eligible_count, 0);
+  assertEquals(result.auto_approved_count, 0);
+  assertEquals(
+    result.skipped.map((item: any) => [item.draft_id, item.reason]).sort(),
+    [
+      [missingExistingIdentity.id, "builder_identity_unproved"],
+      [fullEmailFamilyConflict.id, "family_unproved"],
     ].sort(),
   );
   assertEquals(fake.calls.singleReads, 0);

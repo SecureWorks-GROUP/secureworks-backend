@@ -3256,6 +3256,58 @@ function matchingExistingObligationRows(
   ];
 }
 
+function sameReferenceRowsWithUnprovedIdentity(
+  candidate: ExistingObligationIdentity,
+  data: readonly any[],
+  prefixes: readonly string[],
+): any[] {
+  const targetRef = canonicalExternalObligationRef(
+    candidate.externalRefCanonical,
+    prefixes,
+  );
+  const targetCompany = canonicalCompanyDedupeKey(candidate.builderCompany);
+  const targetPo = canonicalObligationPoCore(candidate.builderPoCanonical) ||
+    canonicalObligationPoCore(candidate.builderWoCanonical, true) ||
+    canonicalObligationPoCore(candidate.externalRefCanonical, true);
+  if (!targetRef || !targetCompany) return [];
+
+  return [
+    ...new Map(
+      data.filter((row: any) => {
+        if (!row?.job_id) return false;
+        const existingCompany = canonicalCompanyDedupeKey(
+          row.requesting_company_slug || row.requesting_company_name,
+        );
+        if (existingCompany !== targetCompany) return false;
+        const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+        if (
+          existingJob?.type && existingJob.type !== "makesafe" ||
+          isDeadObligationJobStatus(existingJob?.status)
+        ) return false;
+        const existingRef = canonicalExternalObligationRef(
+          row.external_ref,
+          prefixes,
+        );
+        if (existingRef !== targetRef) return false;
+        const metadata = existingJob?.metadata &&
+            typeof existingJob.metadata === "object"
+          ? existingJob.metadata
+          : {};
+        const existingWo = canonicalExternalObligationRef(
+          metadata.builder_work_order_number,
+          prefixes,
+        );
+        const existingPo = canonicalObligationPoCore(
+          metadata.builder_po_number,
+        ) ||
+          canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
+          canonicalObligationPoCore(row.external_ref, true);
+        return targetPo ? !existingPo : !existingWo;
+      }).map((row: any) => [String(row.job_id), row]),
+    ).values(),
+  ];
+}
+
 /**
  * Classify legacy operator drafts against the same obligation rows and identity
  * grammar used by deterministic intake. Omission is deliberately stricter than
@@ -3318,6 +3370,29 @@ export async function readAccountedIntakeDraftObligations(
         kind: "kept",
         reason: "family_unproved",
         candidateJobIds: [],
+      });
+      continue;
+    }
+
+    const unprovedIdentityMatches = sameReferenceRowsWithUnprovedIdentity(
+      {
+        externalRefCanonical: candidate.externalRef,
+        builderWoCanonical: candidate.builderWorkOrderNumber,
+        builderPoCanonical: candidate.builderPoNumber,
+        builderCompany: candidate.requestingCompany,
+        siteAddress: candidate.siteAddress,
+        jobFamily: candidate.jobFamily,
+      },
+      data,
+      prefixes,
+    );
+    if (unprovedIdentityMatches.length) {
+      dispositions.set(candidate.draftId, {
+        kind: "kept",
+        reason: "builder_identity_unproved",
+        candidateJobIds: unprovedIdentityMatches
+          .map((row: any) => String(row.job_id))
+          .sort(),
       });
       continue;
     }

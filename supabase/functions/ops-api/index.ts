@@ -22359,7 +22359,12 @@ function resolvedIntakeDraftFamily(draft: any): string | null {
   }
   const familyDecision = _decideDeterministicMakeSafeJobFamily(
     draft?.subject || null,
-    [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
+    [
+      draft?.body_preview,
+      draft?.description,
+      extraction.description,
+      extraction.builder_email_text_for_trade,
+    ].filter(Boolean).join('\n'),
     effectiveReportType,
     familyContext,
   )
