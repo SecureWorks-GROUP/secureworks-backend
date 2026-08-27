@@ -20,6 +20,7 @@ import {
   sealedSesMoneyRefusal,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
+import { loadJobProfitability } from './job_profitability.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -794,134 +795,7 @@ async function getTargets(sb: any) {
 // ════════════════════════════════════════════════════════════
 
 async function jobProfitability(sb: any, params: URLSearchParams) {
-  const dateFrom = params.get('from') || null
-  const dateTo = params.get('to') || null
-  const jobType = params.get('type') || null
-  const status = params.get('status') || null
-  const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 5000)
-
-  // Get jobs with pricing
-  let query = sb
-    .from('jobs')
-    .select('id, type, status, client_name, site_suburb, pricing_json, created_at, job_number')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .eq('legacy', false)
-    .order('created_at', { ascending: false })
-
-  if (jobType) query = query.eq('type', jobType)
-  if (status) query = query.eq('status', status)
-  if (dateFrom) query = query.gte('created_at', dateFrom)
-  if (dateTo) query = query.lte('created_at', dateTo)
-  query = query.limit(limit)
-
-  const { data: jobs, error: jobErr } = await query
-  if (jobErr) throw jobErr
-
-  // Get all invoices linked to these jobs
-  const jobIds = (jobs || []).map((j: any) => j.id)
-  let invoicesByJob: Record<string, any[]> = {}
-
-  if (jobIds.length > 0) {
-    const { data: invoices } = await sb
-      .from('xero_invoices')
-      .select('job_id, invoice_type, sub_total, total, amount_paid')
-      .eq('org_id', DEFAULT_ORG_ID)
-      .in('job_id', jobIds)
-
-    for (const inv of (invoices || [])) {
-      if (!invoicesByJob[inv.job_id]) invoicesByJob[inv.job_id] = []
-      invoicesByJob[inv.job_id].push(inv)
-    }
-  }
-
-  // ── Xero Projects data — per-job revenue + expenses (most accurate source) ──
-  const { data: xeroProjects } = await sb
-    .from('xero_projects')
-    .select('job_id, project_name, job_number, total_invoiced, total_expenses, total_to_be_invoiced, status')
-    .eq('org_id', DEFAULT_ORG_ID)
-    .not('job_id', 'is', null)
-
-  // Build lookup: job_id → xero project financials
-  const projectByJob: Record<string, any> = {}
-  for (const proj of (xeroProjects || [])) {
-    if (proj.job_id) {
-      // If multiple projects map to same job, sum them
-      if (projectByJob[proj.job_id]) {
-        projectByJob[proj.job_id].total_invoiced += parseFloat(proj.total_invoiced) || 0
-        projectByJob[proj.job_id].total_expenses += parseFloat(proj.total_expenses) || 0
-      } else {
-        projectByJob[proj.job_id] = {
-          project_name: proj.project_name,
-          job_number: proj.job_number,
-          total_invoiced: parseFloat(proj.total_invoiced) || 0,
-          total_expenses: parseFloat(proj.total_expenses) || 0,
-          to_be_invoiced: parseFloat(proj.total_to_be_invoiced) || 0,
-          project_status: proj.status,
-        }
-      }
-    }
-  }
-
-  // Build profitability rows — prefer Xero Projects data, fall back to invoice matching
-  const rows = (jobs || []).map((job: any) => {
-    const quoteValue = job.pricing_json?.totalExGST || job.pricing_json?.totalIncGST || 0
-    const jobInvoices = invoicesByJob[job.id] || []
-    const xeroProject = projectByJob[job.id] || null
-
-    // Revenue: prefer Xero Projects invoiced amount, fall back to ACCREC invoices
-    const invoiced = xeroProject
-      ? xeroProject.total_invoiced
-      : jobInvoices.filter((i: any) => i.invoice_type === 'ACCREC')
-          .reduce((s: number, i: any) => s + (parseFloat(i.sub_total) || 0), 0)
-
-    // Costs: prefer Xero Projects expenses (includes ALL costs logged to project),
-    // fall back to ACCPAY invoices matched by contact
-    const bills = xeroProject
-      ? xeroProject.total_expenses
-      : jobInvoices.filter((i: any) => i.invoice_type === 'ACCPAY')
-          .reduce((s: number, i: any) => s + (parseFloat(i.sub_total) || 0), 0)
-
-    const margin = invoiced - bills
-    const marginPct = invoiced > 0 ? Math.round((margin / invoiced) * 100) : 0
-
-    return {
-      id: job.id,
-      job_number: job.job_number || xeroProject?.job_number || null,
-      client_name: job.client_name,
-      type: job.type,
-      status: job.status,
-      quote_value: quoteValue,
-      invoiced,
-      bills,
-      margin,
-      margin_pct: marginPct,
-      data_source: xeroProject ? 'xero_projects' : (jobInvoices.length > 0 ? 'invoice_match' : 'none'),
-    }
-  })
-
-  // Summary stats
-  const totalInvoiced = rows.reduce((s: number, r: any) => s + r.invoiced, 0)
-  const totalBills = rows.reduce((s: number, r: any) => s + r.bills, 0)
-  const avgMargin = totalInvoiced > 0 ? Math.round(((totalInvoiced - totalBills) / totalInvoiced) * 100) : 0
-
-  // Data source breakdown
-  const dataSourceCounts = rows.reduce((acc: Record<string, number>, r: any) => {
-    acc[r.data_source] = (acc[r.data_source] || 0) + 1
-    return acc
-  }, {})
-
-  return {
-    jobs: rows,
-    summary: {
-      total_jobs: rows.length,
-      total_invoiced: totalInvoiced,
-      total_bills: totalBills,
-      total_margin: totalInvoiced - totalBills,
-      avg_margin_pct: avgMargin,
-      data_sources: dataSourceCounts,
-      xero_projects_matched: (xeroProjects || []).length,
-    },
-  }
+  return await loadJobProfitability(sb, params)
 }
 
 
