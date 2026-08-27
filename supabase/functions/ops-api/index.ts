@@ -344,7 +344,9 @@ import {
   type WoLabourProblem,
 } from './wo_labour_fanout.ts'
 import {
+  assertReturnedTradeInvoiceXeroSplit,
   calculateTradeInvoiceMoney,
+  presentTradeInvoiceMoney,
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
   TradeInvoiceMoneyError,
@@ -1424,6 +1426,16 @@ function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
     gst: money.gst_amount,
     trade_payable: money.trade_payable,
     total_inc: money.total_inc,
+  }
+}
+
+function presentTradeInvoice<T extends Record<string, unknown>>(
+  invoice: T,
+): T & { trade_payable: number | null } {
+  try {
+    return presentTradeInvoiceMoney(invoice)
+  } catch (error) {
+    return tradeInvoiceMoneyApiError(error)
   }
 }
 
@@ -7586,6 +7598,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const bill = xeroResult?.Invoices?.[0]
 
         if (!bill?.InvoiceID) throw new Error('Xero did not return an invoice ID')
+        assertReturnedTradeInvoiceXeroSplit(bill.LineItems, invMoney)
 
         // Update trade_invoice
         await client.from('trade_invoices').update({
@@ -7643,7 +7656,7 @@ if (import.meta.main) serve(async (req: Request) => {
           .order('week_start', { ascending: false })
           .limit(50)
         if (ntiErr) throw new Error(ntiErr.message)
-        return json({ invoices: ntiData || [] })
+        return json({ invoices: (ntiData || []).map((invoice: any) => presentTradeInvoice(invoice)) })
       }
 
       case 'acknowledge_invoice_line': {
@@ -8895,7 +8908,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (l?.job_id && refByJob[l.job_id]) l.external_ref = refByJob[l.job_id]
               }
             }
-            return json({ invoice: inv })
+            return json({ invoice: presentTradeInvoice(inv) })
           }
           case 'search_all_jobs':
             return json(await searchAllJobs(client, url.searchParams, tradeUser, isDispatcher))
@@ -9008,10 +9021,6 @@ if (import.meta.main) serve(async (req: Request) => {
             const retryDrafts = (existingWoInvoices || []).filter((invoice: any) =>
               invoice.status === 'draft' && String(invoice.user_id || '') === String(tradeUser.id)
             )
-            for (const retryDraft of retryDrafts) {
-              await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', retryDraft.id)
-              await client.from('trade_invoices').delete().eq('id', retryDraft.id)
-            }
 
             const requestedNegativeChargeIds: string[] = [
               ...new Set<string>(
@@ -9045,29 +9054,6 @@ if (import.meta.main) serve(async (req: Request) => {
               .select('xero_contact_id, name, email, abn, trade_details')
               .eq('id', tradeUser.id)
               .single()
-
-            // Resolve Xero supplier contact — auto-create if not linked
-            let woXeroContactId = tradeXeroUser?.xero_contact_id || null
-            const { accessToken: woAt, tenantId: woTi } = await getToken(client)
-            if (!woXeroContactId) {
-              const woTradeEmail = tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || ''
-              if (woTradeEmail) {
-                try {
-                  const woContacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(woTradeEmail) + '%22', woAt, woTi)
-                  if (woContacts?.Contacts?.length > 0) woXeroContactId = woContacts.Contacts[0].ContactID
-                } catch { /* fallback to create */ }
-              }
-              if (!woXeroContactId) {
-                const woCreateRes = await xeroPost('/Contacts', woAt, woTi, {
-                  Contacts: [{ Name: tradeXeroUser?.name || 'Trade', EmailAddress: tradeXeroUser?.email || undefined, IsSupplier: true }]
-                }, 'PUT')
-                woXeroContactId = woCreateRes?.Contacts?.[0]?.ContactID
-              }
-              if (woXeroContactId) {
-                await client.from('users').update({ xero_contact_id: woXeroContactId }).eq('id', tradeUser.id)
-              }
-              if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
-            }
 
             // Build line items from scope_items — rich descriptions, correct codes
             const scopeItems = wo.scope_items || []
@@ -9127,6 +9113,37 @@ if (import.meta.main) serve(async (req: Request) => {
               { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
             )
 
+            // Money validation is the side-effect boundary. Invalid GST or an
+            // unreconciled split must leave retry drafts and Xero contacts alone.
+            for (const retryDraft of retryDrafts) {
+              await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', retryDraft.id)
+              await client.from('trade_invoices').delete().eq('id', retryDraft.id)
+            }
+
+            // Resolve Xero supplier contact — auto-create only after money truth
+            // is complete and the invoice can safely cross the Xero boundary.
+            let woXeroContactId = tradeXeroUser?.xero_contact_id || null
+            const { accessToken: woAt, tenantId: woTi } = await getToken(client)
+            if (!woXeroContactId) {
+              const woTradeEmail = tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || ''
+              if (woTradeEmail) {
+                try {
+                  const woContacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(woTradeEmail) + '%22', woAt, woTi)
+                  if (woContacts?.Contacts?.length > 0) woXeroContactId = woContacts.Contacts[0].ContactID
+                } catch { /* fallback to create */ }
+              }
+              if (!woXeroContactId) {
+                const woCreateRes = await xeroPost('/Contacts', woAt, woTi, {
+                  Contacts: [{ Name: tradeXeroUser?.name || 'Trade', EmailAddress: tradeXeroUser?.email || undefined, IsSupplier: true }]
+                }, 'PUT')
+                woXeroContactId = woCreateRes?.Contacts?.[0]?.ContactID
+              }
+              if (woXeroContactId) {
+                await client.from('users').update({ xero_contact_id: woXeroContactId }).eq('id', tradeUser.id)
+              }
+              if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
+            }
+
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
             const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
@@ -9157,10 +9174,15 @@ if (import.meta.main) serve(async (req: Request) => {
             try {
               const xeroResult = await xeroPost('/Invoices', woAt, woTi, xeroPayload, 'PUT', woIdempotencyKey)
               const xeroInv = xeroResult?.Invoices?.[0]
+              if (!xeroInv?.InvoiceID) throw new Error('Xero did not return an invoice ID')
+              assertReturnedTradeInvoiceXeroSplit(xeroInv.LineItems, woMoney)
               xeroBillId = xeroInv?.InvoiceID || ''
               xeroBillNumber = xeroInv?.InvoiceNumber || ''
               xeroSuccess = !!xeroBillId
             } catch (e: any) {
+              if (e instanceof TradeInvoiceMoneyError && e.code === 'XERO_RETURNED_SPLIT_INVALID') {
+                return tradeInvoiceMoneyApiError(e)
+              }
               console.error('[ops-api] WO invoice Xero push failed:', e.message)
             }
 
@@ -9262,22 +9284,6 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'save_trade_invoice_draft': {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
 
-            // Check for existing draft this week
-            let draftId: string | null = null
-            if (draftWeekStart) {
-              const { data: existingDraft } = await client.from('trade_invoices')
-                .select('id')
-                .eq('user_id', tradeUser.id)
-                .eq('week_start', draftWeekStart)
-                .eq('status', 'draft')
-                .maybeSingle()
-              if (existingDraft) {
-                draftId = existingDraft.id
-                // Clear old lines
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', draftId)
-              }
-            }
-
             // Calculate totals. The preferred API field is gst_on; gst_registered
             // and the legacy gst boolean remain accepted aliases. A stored profile
             // choice is only the fallback when the request omits the per-invoice flag.
@@ -9300,6 +9306,23 @@ if (import.meta.main) serve(async (req: Request) => {
               ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
               : new Date().toISOString().slice(0, 10)
             const draftMoney = tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd)
+
+            // Only inspect or replace an existing draft after the complete money
+            // split has validated. A missing/invalid GST choice must leave every
+            // recoverable draft and its lines untouched.
+            let draftId: string | null = null
+            if (draftWeekStart) {
+              const { data: existingDraft } = await client.from('trade_invoices')
+                .select('id')
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', draftWeekStart)
+                .eq('status', 'draft')
+                .maybeSingle()
+              if (existingDraft) {
+                draftId = existingDraft.id
+                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', draftId)
+              }
+            }
 
             if (draftId) {
               // Update existing draft
@@ -10495,6 +10518,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', 'trade-inv-' + invoice.id)
                 const bill = xeroResult?.Invoices?.[0]
                 if (bill?.InvoiceID) {
+                  assertReturnedTradeInvoiceXeroSplit(bill.LineItems, money)
                   xeroBillId = bill.InvoiceID
                   xeroBillNumber = bill.InvoiceNumber || ''
                   await client.from('trade_invoices').update({
@@ -10635,7 +10659,7 @@ if (import.meta.main) serve(async (req: Request) => {
               .limit(20)
 
             if (error) throw new Error(error.message)
-            return json({ invoices: data || [] })
+            return json({ invoices: (data || []).map((invoice: any) => presentTradeInvoice(invoice)) })
           }
 
           case 'acknowledge_invoice_line': {
@@ -45073,6 +45097,8 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
   const billNumber = xeroInv?.InvoiceNumber
+  if (!xeroInvId) throw new Error('Xero did not return an invoice ID')
+  assertReturnedTradeInvoiceXeroSplit(xeroInv.LineItems, stMoney)
 
   // Cache in xero_invoices table
   if (xeroInvId) {
@@ -45160,7 +45186,7 @@ async function myTradeInvoices(client: any, userId: string) {
 
   if (error) throw error
   const invoices = (data || []).map((inv: any) => ({
-    ...inv,
+    ...presentTradeInvoice(inv),
     week_ending: inv.week_end,
     total: inv.total_inc ?? 0,
     subtotal: inv.subtotal_ex ?? 0,
@@ -45228,7 +45254,10 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     .is('effective_to', null)
     .order('effective_from', { ascending: false })
 
-  return { invoices: data || [], rates: rates || [] }
+  return {
+    invoices: (data || []).map((invoice: any) => presentTradeInvoice(invoice)),
+    rates: rates || [],
+  }
 }
 
 // ── labour_reconciliation: labour PO budget vs trade hours per job ──

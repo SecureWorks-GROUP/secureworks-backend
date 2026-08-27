@@ -19,7 +19,8 @@ export type TradeInvoiceMoneyErrorCode =
   | "SUPER_RATE_UNRESOLVED"
   | "MONEY_SPLIT_MISSING"
   | "MONEY_SPLIT_INVALID"
-  | "XERO_GROSS_MISMATCH";
+  | "XERO_GROSS_MISMATCH"
+  | "XERO_RETURNED_SPLIT_INVALID";
 
 export class TradeInvoiceMoneyError extends Error {
   readonly code: TradeInvoiceMoneyErrorCode;
@@ -230,6 +231,30 @@ export function validatePersistedTradeInvoiceMoney(
   };
 }
 
+const PERSISTED_SPLIT_FIELDS = [
+  "gst_on",
+  "super_rate",
+  "super_amount",
+  "gross_earned",
+  "net_pay",
+] as const;
+
+export function presentTradeInvoiceMoney<
+  T extends Record<string, unknown>,
+>(invoice: T): T & { trade_payable: number | null } {
+  const hasPersistedSplit = PERSISTED_SPLIT_FIELDS.some((field) =>
+    invoice[field] !== null && invoice[field] !== undefined
+  );
+  if (!hasPersistedSplit) {
+    return { ...invoice, trade_payable: null };
+  }
+
+  return {
+    ...invoice,
+    trade_payable: validatePersistedTradeInvoiceMoney(invoice).trade_payable,
+  };
+}
+
 function lineGrossCents(line: TradeInvoiceXeroLine): number {
   const quantity = Number(line.Quantity ?? 1);
   const unitAmount = Number(line.UnitAmount ?? 0);
@@ -319,4 +344,46 @@ export function splitTradeInvoiceXeroLines(
   });
 
   return netLines;
+}
+
+export function assertReturnedTradeInvoiceXeroSplit(
+  value: unknown,
+  money: TradeInvoiceMoney,
+): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_RETURNED_SPLIT_INVALID",
+      "Xero did not return trade invoice lines to verify the super split",
+    );
+  }
+
+  const lines = value as TradeInvoiceXeroLine[];
+  const superLines = lines.filter((line) =>
+    String(line.Description || "").startsWith("Superannuation Guarantee (")
+  );
+  const expectedTaxType = money.gst_on ? "INPUT" : "NONE";
+  const totalCents = lines.reduce(
+    (sum, line) => sum + lineGrossCents(line),
+    0,
+  );
+  const superCents = superLines.reduce(
+    (sum, line) => sum + lineGrossCents(line),
+    0,
+  );
+  const grossCents = toCents(money.gross_earned);
+  const expectedSuperCents = toCents(money.super_amount);
+  const expectedNetCents = toCents(money.net_pay);
+
+  if (
+    superLines.length !== 1 ||
+    Math.abs(totalCents - grossCents) > 1 ||
+    Math.abs(superCents - expectedSuperCents) > 1 ||
+    Math.abs(totalCents - superCents - expectedNetCents) > 1 ||
+    lines.some((line) => line.TaxType !== expectedTaxType)
+  ) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_RETURNED_SPLIT_INVALID",
+      "Xero returned a trade bill without the reconciled net earnings and super split",
+    );
+  }
 }

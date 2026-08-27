@@ -3341,8 +3341,10 @@ already 21 — board half only). Tests: `makesafe_cycle_evidence_test.ts`,
 `supabase/functions/ops-api/trade_invoice_money.ts` is the one money owner for
 trade invoice creation and every ACCPAY push/retry. It resolves the dated ATO
 SG rate, computes gross earned / super / net pay / optional GST, and builds
-Xero net-earnings lines plus one labelled super line. Never derive this split
-in a UI or add super on top of gross. New rows must carry `gst_on`,
+Xero net-earnings lines plus one labelled super line; returned Xero lines are
+reconciled before their bill is recorded. The same module presents server cash
+payable on every invoice read/list surface. Never derive this split in a UI or
+add super on top of gross. New rows must carry `gst_on`,
 `super_rate`, `super_amount`, `gross_earned`, and `net_pay`; legacy NULL rows
 must fail closed on Xero retry rather than inventing history. API fields,
 formulas, UI handoff, source, and deploy order:

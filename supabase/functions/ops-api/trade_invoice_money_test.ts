@@ -6,7 +6,9 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  assertReturnedTradeInvoiceXeroSplit,
   calculateTradeInvoiceMoney,
+  presentTradeInvoiceMoney,
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
   TradeInvoiceMoneyError,
@@ -161,6 +163,72 @@ Deno.test("trade invoice Xero lines use NoTax when GST is off", () => {
   assertEquals(lines.map((line) => line.TaxType), ["NONE", "NONE"]);
   assertEquals(lines[0].UnitAmount, 108.64);
   assertEquals(lines[1].UnitAmount, 14.81);
+});
+
+Deno.test("returned Xero bill must preserve the worked-out super split", () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 1_000,
+    gstOn: true,
+    earningsDate: "2026-08-27",
+  });
+  const splitLines = splitTradeInvoiceXeroLines(
+    [{
+      Description: "Labour",
+      Quantity: 10,
+      UnitAmount: 100,
+      AccountCode: "306",
+      TaxType: "INPUT",
+    }],
+    money,
+    { superAccountCode: "306" },
+  );
+
+  assertReturnedTradeInvoiceXeroSplit(splitLines, money);
+  assertThrows(
+    () =>
+      assertReturnedTradeInvoiceXeroSplit(
+        [{
+          Description: "Labour",
+          Quantity: 10,
+          UnitAmount: 100,
+          AccountCode: "306",
+          TaxType: "INPUT",
+        }],
+        money,
+      ),
+    TradeInvoiceMoneyError,
+    "without the reconciled net earnings and super split",
+  );
+});
+
+Deno.test("invoice presenter publishes server cash payable and leaves legacy history visibly unresolved", () => {
+  const persisted = {
+    week_end: "2026-08-27",
+    subtotal_ex: 1_000,
+    gst: 100,
+    gst_on: true,
+    super_rate: 0.12,
+    super_amount: 120,
+    gross_earned: 1_000,
+    net_pay: 880,
+    total_inc: 1_100,
+  };
+
+  assertEquals(presentTradeInvoiceMoney(persisted).trade_payable, 980);
+  assertEquals(
+    presentTradeInvoiceMoney({
+      week_end: "2025-06-30",
+      subtotal_ex: 500,
+      gst: 0,
+      total_inc: 500,
+    }).trade_payable,
+    null,
+  );
+  assertThrows(
+    () => presentTradeInvoiceMoney({ ...persisted, super_amount: null }),
+    TradeInvoiceMoneyError,
+    "missing its super/GST split",
+  );
 });
 
 Deno.test("persisted money validation rejects legacy or partial rows before Xero", () => {

@@ -583,7 +583,6 @@ test_incident_dependency_is_declared() {
   local ses_recovery_expected='ops-api|supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
   local roof_initial_cycle_expected='ops-api|supabase/migrations/20260803080000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1'
   local stale_route_dispatch_expected='ops-api|supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql|function|settle_stale_ses_route_dispatch_v1'
-  local trade_invoice_money_expected='ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|trigger|trade_invoices.trg_trade_invoices_require_money_split'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
@@ -592,11 +591,10 @@ test_incident_dependency_is_declared() {
     grep -Fxq "$vault_sync_expected" "$MANIFEST" && \
     grep -Fxq "$ses_recovery_expected" "$MANIFEST" && \
     grep -Fxq "$roof_initial_cycle_expected" "$MANIFEST" && \
-    grep -Fxq "$stale_route_dispatch_expected" "$MANIFEST" && \
-    grep -Fxq "$trade_invoice_money_expected" "$MANIFEST"; then
+    grep -Fxq "$stale_route_dispatch_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, SES recovery, stale-route dispatch, and trade-invoice money markers are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, SES recovery, and stale-route dispatch markers are not permanent ops-api deploy requirements"
   fi
 }
 
@@ -613,6 +611,33 @@ test_missing_migration_refuses_before_deploy() {
     pass "$name"
   else
     fail "$name" "missing migration did not stop deployment: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+  fi
+}
+
+test_missing_trade_invoice_requirement_refuses_before_deploy() {
+  local name="test_missing_trade_invoice_requirement_refuses_before_deploy"
+  local response="$TEST_TMP/missing-trade-invoice-money.json"
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  python3 - "$response" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as source:
+    rows = json.load(source)
+with open(path, "w") as target:
+    json.dump(
+        [row for row in rows if row.get("migration_version") != "20260827112928"],
+        target,
+    )
+PY
+  run_preflight "$response" ops-api
+  if [[ "$PREFLIGHT_RC" -ne 0 ]] && \
+    grep -q 'ops-api requires 20260827112928_trade_invoice_super_gst_split: no catalog result returned' <<<"$PREFLIGHT_OUTPUT" && \
+    grep -q 'Refusing Edge Function deploy' <<<"$PREFLIGHT_OUTPUT"; then
+    pass "$name"
+  else
+    fail "$name" "missing trade-invoice schema fixture did not stop deployment: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
   fi
 }
 
@@ -772,6 +797,7 @@ main() {
   else
     test_incident_dependency_is_declared
     test_missing_migration_refuses_before_deploy
+    test_missing_trade_invoice_requirement_refuses_before_deploy
     test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
     test_raw_statement_checksum_drift_is_advisory

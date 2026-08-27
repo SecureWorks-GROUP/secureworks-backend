@@ -60,10 +60,13 @@ Create responses expose:
 }
 ```
 
-`get_trade_invoice`, `my_trade_invoices`, and the ops list return the persisted
-split fields. The sibling UI should present: gross earned, less super, net pay,
-then GST and the cash payable to the trade. It must send the explicit `gst_on`
-choice on every create/draft request instead of deriving a second money path.
+`get_trade_invoice`, `my_trade_invoices`, `my_invoices`,
+`list_new_trade_invoices`, and `list_trade_invoices` return the persisted split
+fields plus server-computed `trade_payable`. Historical invoices created before
+the split expose `trade_payable: null`; partial or contradictory split data is
+refused. The sibling UI should present: gross earned, less super, net pay, then
+GST and the cash payable to the trade. It must send the explicit `gst_on` choice
+on every create/draft request instead of deriving a second money path.
 
 ## Xero ACCPAY mapping
 
