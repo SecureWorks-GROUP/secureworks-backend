@@ -28,6 +28,19 @@ export const TRADE_OTHER_LINE_TYPES = ['travel', 'equipment', 'other'] as const
 
 export const PROFIT_SOURCE_IN_CHUNK = 25
 
+// Live trade_invoices.status CHECK (20260611000001): draft,
+// pending_acknowledgment, queried, acknowledged, pending_ops_review,
+// approved, pushed_to_xero, paid, ops-reject.
+// Only costs ops has accepted may resolve a lane. Named for the PR.
+export const AUTHORISED_TRADE_INVOICE_STATUSES = [
+  'approved',
+  'pushed_to_xero',
+  'paid',
+] as const
+
+export const PROFIT_BUSINESS_TIMEZONE = 'Australia/Perth'
+export const PERTH_OFFSET = '+08:00'
+
 export type ProfitStatus = 'complete' | 'partial' | 'unknown'
 
 export type LaneSource = 'trade_invoice_lines' | 'job_materials_facts'
@@ -60,6 +73,8 @@ export type TradeLineFact = {
   job_number?: string | null
   line_type?: string | null
   line_total_ex?: number | string | null
+  override_amount?: number | string | null
+  invoice_status?: string | null
 }
 
 export type MaterialsFact = {
@@ -191,6 +206,18 @@ function dollarsAtRisk(invoiced: number, quoteValue: number): number {
   return 0
 }
 
+export function isAuthorisedTradeInvoiceStatus(status: unknown): boolean {
+  const s = String(status ?? '').trim()
+  return (AUTHORISED_TRADE_INVOICE_STATUSES as readonly string[]).includes(s)
+}
+
+export function tradeLineAmount(line: TradeLineFact): unknown {
+  if (line.override_amount !== null && line.override_amount !== undefined) {
+    return line.override_amount
+  }
+  return line.line_total_ex
+}
+
 function uniqueTradeLines(lines: TradeLineFact[]): TradeLineFact[] {
   const seen = new Set<string>()
   const out: TradeLineFact[] = []
@@ -205,8 +232,13 @@ function uniqueTradeLines(lines: TradeLineFact[]): TradeLineFact[] {
   return out
 }
 
-function tradeLineBelongsToJob(line: TradeLineFact, job: JobProfitInput): boolean {
-  if (line.job_id && line.job_id === job.id) return true
+export function tradeLineBelongsToJob(line: TradeLineFact, job: JobProfitInput): boolean {
+  if (line.invoice_status != null && line.invoice_status !== '') {
+    if (!isAuthorisedTradeInvoiceStatus(line.invoice_status)) return false
+  }
+  if (line.job_id != null && String(line.job_id).trim() !== '') {
+    return line.job_id === job.id
+  }
   const jobNumber = (job.job_number || '').trim()
   const lineNumber = String(line.job_number || '').trim()
   return jobNumber.length > 0 && lineNumber.length > 0 && jobNumber === lineNumber
@@ -237,7 +269,7 @@ function resolveFromTradeLines(
       reason: 'no_source',
     }
   }
-  const amounts = matching.map((line) => validMoney(line.line_total_ex))
+  const amounts = matching.map((line) => validMoney(tradeLineAmount(line)))
   if (amounts.some((amount) => amount == null)) {
     return {
       resolved: false,
@@ -527,6 +559,42 @@ export function utcQuarterWindow(now: Date): { from: string; to: string } {
   return { from: from.toISOString(), to: to.toISOString() }
 }
 
+function perthYmd(now: Date): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: PROFIT_BUSINESS_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now)
+  const num = (type: string) =>
+    Number(parts.find((part) => part.type === type)?.value)
+  return { year: num('year'), month: num('month'), day: num('day') }
+}
+
+function perthLocalMidnightUtc(year: number, month: number, day: number): string {
+  const mm = String(month).padStart(2, '0')
+  const dd = String(day).padStart(2, '0')
+  return new Date(`${year}-${mm}-${dd}T00:00:00${PERTH_OFFSET}`).toISOString()
+}
+
+export function perthMonthWindow(now: Date): { from: string; to: string } {
+  const { year, month } = perthYmd(now)
+  const from = perthLocalMidnightUtc(year, month, 1)
+  const nextMonth = month === 12 ? 1 : month + 1
+  const nextYear = month === 12 ? year + 1 : year
+  return { from, to: perthLocalMidnightUtc(nextYear, nextMonth, 1) }
+}
+
+export function perthQuarterWindow(now: Date): { from: string; to: string } {
+  const { year, month } = perthYmd(now)
+  const startMonth = Math.floor((month - 1) / 3) * 3 + 1
+  const from = perthLocalMidnightUtc(year, startMonth, 1)
+  const endMonth = startMonth + 3
+  const nextYear = endMonth > 12 ? year + 1 : year
+  const nextMonth = endMonth > 12 ? endMonth - 12 : endMonth
+  return { from, to: perthLocalMidnightUtc(nextYear, nextMonth, 1) }
+}
+
 function inWindow(iso: string, from: string, to: string): boolean {
   return iso >= from && iso < to
 }
@@ -543,8 +611,8 @@ export function buildJobProfitabilityReport(
   const rows = jobs.map(assessJobProfitCompleteness)
   const rollupRows = (opts.rollupJobs ?? jobs).map(assessJobProfitCompleteness)
   const summaryRollup = rollUpJobProfitability(rows, 'returned_cohort')
-  const month = utcMonthWindow(now)
-  const quarter = utcQuarterWindow(now)
+  const month = perthMonthWindow(now)
+  const quarter = perthQuarterWindow(now)
 
   const fencingThisMonth = rollupRows.filter((r) =>
     r.type === 'fencing' && inWindow(r.created_at, month.from, month.to)
