@@ -6,6 +6,7 @@
 // stage claim.
 
 import {
+  FENCING_PO_CANCELLED_STATUS,
   FENCING_PO_DELETED_STATUS,
   isFencingAssignmentLiveStatus,
   normalizeStatusToken,
@@ -38,6 +39,7 @@ export interface FencingPoCommFact {
   direction: string | null;
   created_at: string | null;
   sent_at: string | null;
+  message_id?: string | null;
   received_at: string | null;
 }
 
@@ -137,6 +139,7 @@ function projectComm(row: Record<string, unknown>): FencingPoCommFact {
     direction: asText(row.direction),
     created_at: asText(row.created_at),
     sent_at: asText(row.sent_at),
+    message_id: asText(row.message_id),
     received_at: asText(row.received_at),
   };
 }
@@ -192,9 +195,11 @@ export function fencingExecutionEvidenceFromPipelineRows(
     .filter(matchJob)
     .map(projectPo)
     .filter((po) => normalizeStatusToken(po.po_type) === "material")
-    .filter((po) =>
-      normalizeStatusToken(po.status) !== FENCING_PO_DELETED_STATUS
-    );
+    .filter((po) => {
+      const status = normalizeStatusToken(po.status);
+      return status !== FENCING_PO_DELETED_STATUS &&
+        status !== FENCING_PO_CANCELLED_STATUS;
+    });
 
   const assignments = rows.assignments
     .filter(matchJob)

@@ -442,8 +442,8 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
   job(
     105,
     "order_confirmed",
-    "order_confirmed",
-    "boundary_order_confirmed",
+    "schedule_install",
+    "boundary_schedule_install",
     merge(
       paidDeposit("fence-105", "dep-fence-105"),
       {
@@ -487,8 +487,8 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
   job(
     107,
     "schedule_install",
-    "schedule_install",
-    "boundary_schedule_install_window",
+    "scheduled",
+    "boundary_scheduled_near_term",
     merge(
       paidDeposit("fence-107", "dep-fence-107"),
       {
@@ -641,8 +641,8 @@ export const FENCING_STAGE_TRUTH_BOUNDARY: FencingStageTruthFixture[] = [
   job(
     112,
     "rectification",
-    "rectification",
-    "boundary_rectification",
+    "decision_required",
+    "boundary_rectification_without_prefix",
     merge(
       paidDeposit("fence-112", "dep-fence-112"),
       { po_communications: outboundPoEmail("email-fence-112") },
@@ -757,7 +757,7 @@ export const FENCING_STAGE_TRUTH_PERTURBATIONS:
     },
     {
       id: "blank_assignment_date",
-      description: "Blanking the assignment date must leave scheduled",
+      description: "Blanking the assignment date must require scheduling",
       base_id: "fence-106",
       mutate: (evidence) => {
         const next = cloneEvidence(evidence);
@@ -768,7 +768,7 @@ export const FENCING_STAGE_TRUTH_PERTURBATIONS:
         return next;
       },
       must_not_remain: "scheduled",
-      expected_canonical: "order_confirmed",
+      expected_canonical: "schedule_install",
     },
     {
       id: "echo_claimed_complete_on_empty",

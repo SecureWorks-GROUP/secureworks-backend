@@ -12573,7 +12573,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
         client.from('po_communications').select(
           stageTruth
-            ? 'job_id, po_id, direction, created_at, id, sent_at, received_at'
+            ? 'job_id, po_id, direction, created_at, id, sent_at, message_id, received_at'
             : 'job_id, direction, created_at',
         ).in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
       readPipelineEnrichmentRows(jobIds, 'xero_invoices', (chunkIds) =>

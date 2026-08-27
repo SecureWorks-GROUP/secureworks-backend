@@ -25,7 +25,6 @@ import {
   FENCING_STAGE_EVIDENCE_REFS_CAP,
   FENCING_STAGE_LADDER,
   FENCING_STAGE_RECIPE_VERSION,
-  FENCING_STAGE_SCHEDULE_INSTALL_WINDOW_DAYS,
   type FencingCanonicalStage,
   type FencingFactId,
   isFencingInvoiceIssuedStatus,
@@ -64,7 +63,6 @@ interface EvaluatedFacts {
   final_paid: boolean;
   rectification_visit: boolean;
   draft_po_veto: boolean;
-  assignment_in_install_window: boolean;
   archive_clock_elapsed: boolean;
 }
 
@@ -110,6 +108,7 @@ function outboundComms(
   return evidence.po_communications.filter((row) =>
     normalizeStatusToken(row.direction) === "outbound" &&
     hasStamp(row.sent_at) &&
+    hasStamp(row.message_id) &&
     row.po_id != null &&
     materialPoIds.has(row.po_id)
   );
@@ -134,21 +133,7 @@ function parseInstant(value: string | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function startOfUtcDay(ms: number): number {
-  const date = new Date(ms);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-}
-
-function daysUntilDate(now: Date, dateValue: string): number | null {
-  const target = parseInstant(
-    /T/.test(dateValue) ? dateValue : `${dateValue}T00:00:00.000Z`,
-  );
-  if (target == null) return null;
-  const delta = startOfUtcDay(target) - startOfUtcDay(now.getTime());
-  return Math.round(delta / 86_400_000);
-}
-
-function earliestCompletionMs(
+function latestCompletionMs(
   evidence: FencingExecutionEvidence,
 ): number | null {
   const stamps: number[] = [];
@@ -161,7 +146,7 @@ function earliestCompletionMs(
     if (submitted != null) stamps.push(submitted);
   }
   if (stamps.length === 0) return null;
-  return Math.min(...stamps);
+  return Math.max(...stamps);
 }
 
 function evaluateFacts(
@@ -209,14 +194,7 @@ function evaluateFacts(
       FENCING_RECTIFICATION_ASSIGNMENT_TYPE
   );
 
-  const assignmentInInstallWindow = datedAssignments.some((row) => {
-    const days = daysUntilDate(now, row.scheduled_date as string);
-    return days != null &&
-      days >= 0 &&
-      days <= FENCING_STAGE_SCHEDULE_INSTALL_WINDOW_DAYS;
-  });
-
-  const completedAt = earliestCompletionMs(evidence);
+  const completedAt = latestCompletionMs(evidence);
   const archiveClockElapsed = completedAt != null &&
     (now.getTime() - completedAt) >= FENCING_STAGE_ARCHIVE_AFTER_MS;
 
@@ -232,7 +210,6 @@ function evaluateFacts(
     final_paid: finalPaid,
     rectification_visit: rectificationVisit,
     draft_po_veto: draftOnly,
-    assignment_in_install_window: assignmentInInstallWindow,
     archive_clock_elapsed: archiveClockElapsed,
   };
 }
@@ -376,18 +353,9 @@ function waitingStage(
     };
   }
   const reached = FENCING_STAGE_LADDER[firstGap - 1];
-  let stage = reached.reached_stage;
+  const stage = reached.reached_stage;
   const reasons = [`proved_${reached.fact}`];
   const missing = [FENCING_STAGE_LADDER[firstGap].missing_code];
-
-  if (
-    stage === "scheduled" &&
-    evaluated.assignment_in_install_window &&
-    !evaluated.install_started
-  ) {
-    stage = "schedule_install";
-    reasons.push("assignment_within_two_day_install_window");
-  }
 
   if (evaluated.draft_po_veto && stage === "awaiting_supplier") {
     return {
@@ -434,26 +402,41 @@ export function deriveFencingStageV1(
     });
   }
 
-  // A typed rectification visit is itself the later-stage fact. It still
-  // requires a paid deposit; it does not require the supplier-confirmation
-  // prefix (that signal is almost absent on the live fencing cohort).
-  if (evaluated.rectification_visit && evaluated.deposit_paid) {
-    const missing: string[] = [];
-    if (!evaluated.order_confirmed) missing.push("supplier_confirmation");
-    if (!evaluated.work_complete) {
-      missing.push("work_complete_clock_or_report");
-    }
+  const firstGap = firstUnprovedIndex(facts);
+  const workCompleteIndex = FENCING_STAGE_LADDER.findIndex((step) =>
+    step.fact === "work_complete"
+  );
+  if (
+    evaluated.rectification_visit &&
+    firstGap >= 0 &&
+    firstGap < workCompleteIndex
+  ) {
+    const missing = firstGap >= 0
+      ? [FENCING_STAGE_LADDER[firstGap].missing_code]
+      : [];
+    return result({
+      stage: "decision_required",
+      reasons: ["later_fact_without_prefix:rectification_visit"],
+      missing,
+      conflicts: [
+        `rectification_visit_without_${
+          firstGap >= 0 ? FENCING_STAGE_LADDER[firstGap].fact : "prefix"
+        }`,
+      ],
+      evidence,
+      facts,
+    });
+  }
+  if (evaluated.rectification_visit && firstGap === workCompleteIndex) {
     return result({
       stage: "rectification",
-      reasons: ["rectification_assignment_and_paid_deposit"],
-      missing,
+      reasons: ["rectification_visit_with_execution_prefix"],
+      missing: [FENCING_STAGE_LADDER[firstGap].missing_code],
       conflicts: [],
       evidence,
       facts,
     });
   }
-
-  const firstGap = firstUnprovedIndex(facts);
   const skipped = laterFactWithoutPrefix(facts, firstGap);
   if (skipped) {
     const missing = firstGap >= 0

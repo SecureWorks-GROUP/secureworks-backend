@@ -23,7 +23,6 @@ export const FENCING_STAGE_TRUTH_ON = "1";
 
 export const FENCING_STAGE_EVIDENCE_REFS_CAP = 8;
 
-export const FENCING_STAGE_SCHEDULE_INSTALL_WINDOW_DAYS = 2;
 export const FENCING_STAGE_ARCHIVE_AFTER_MS = 7 * 86_400_000;
 
 export type FencingCanonicalStage =
@@ -107,6 +106,7 @@ export const FENCING_PO_CONFIRMED_STATUSES = [
 ] as const;
 
 export const FENCING_PO_DELETED_STATUS = "deleted";
+export const FENCING_PO_CANCELLED_STATUS = "cancelled";
 
 /** Xero ACCREC statuses that can take payment. DRAFT is not among them. */
 export const FENCING_INVOICE_ISSUED_STATUSES = [
@@ -183,7 +183,7 @@ export const FENCING_STAGE_LADDER: readonly FencingLadderStep[] = [
   },
   {
     fact: "order_confirmed",
-    reached_stage: "order_confirmed",
+    reached_stage: "schedule_install",
     missing_code: "supplier_confirmation",
   },
   {

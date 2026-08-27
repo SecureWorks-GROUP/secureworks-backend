@@ -229,6 +229,7 @@ Deno.test("fencing stage truth: draft PO plus outbound email is still order_mate
       direction: "outbound",
       created_at: "2026-08-10T00:00:00.000Z",
       sent_at: "2026-08-10T00:00:00.000Z",
+      message_id: "resend-1",
       received_at: null,
     }],
     assignments: [],
@@ -590,6 +591,7 @@ Deno.test("fencing evidence: unsent outbound row is not dispatch proof", () => {
         direction: "outbound",
         created_at: "2026-08-02",
         sent_at: null,
+        message_id: "resend-1",
         received_at: null,
       }],
       assignments: [],
@@ -600,6 +602,145 @@ Deno.test("fencing evidence: unsent outbound row is not dispatch proof", () => {
   const got = deriveFencingStageV1(evidence, { now: NOW });
   assertEquals(got.canonical_stage, "order_materials");
   assertEquals(got.facts.material_order_sent, false);
+});
+
+Deno.test("fencing evidence: dry-run communication row is not dispatch proof", () => {
+  const rows = {
+    invoices: [{
+      id: "local-dep",
+      xero_invoice_id: "xero-dep",
+      job_id: "job-1",
+      status: "PAID",
+      invoice_type: "ACCREC",
+      reference: "SWF-26003",
+      amount_paid: 100,
+      fully_paid_on: "2026-08-01",
+    }],
+    purchaseOrders: [{
+      id: "po-1",
+      job_id: "job-1",
+      po_type: "material",
+      status: null,
+    }],
+    poCommunications: [{
+      id: "comm-1",
+      job_id: "job-1",
+      po_id: "po-1",
+      direction: "outbound",
+      created_at: "2026-08-02",
+      sent_at: "2026-08-02",
+      message_id: null,
+      received_at: null,
+    }],
+    assignments: [],
+    serviceReports: [],
+    unreadable: [],
+  };
+  const dryRunEvidence = fencingExecutionEvidenceFromPipelineRows(
+    "job-1",
+    "xero-dep",
+    rows,
+  );
+  const dryRun = deriveFencingStageV1(dryRunEvidence, { now: NOW });
+  assertEquals(dryRun.canonical_stage, "order_materials");
+  assertEquals(dryRun.facts.material_order_sent, false);
+
+  const dispatchedEvidence = fencingExecutionEvidenceFromPipelineRows(
+    "job-1",
+    "xero-dep",
+    {
+      ...rows,
+      poCommunications: [{
+        ...rows.poCommunications[0],
+        message_id: "resend-1",
+      }],
+    },
+  );
+  const dispatched = deriveFencingStageV1(dispatchedEvidence, { now: NOW });
+  assertEquals(dispatched.canonical_stage, "awaiting_supplier");
+  assertEquals(dispatched.facts.material_order_sent, true);
+});
+
+Deno.test("fencing evidence: cancelled material PO cannot advance ordering", () => {
+  const evidence = fencingExecutionEvidenceFromPipelineRows(
+    "job-1",
+    "xero-dep",
+    {
+      invoices: [{
+        id: "local-dep",
+        xero_invoice_id: "xero-dep",
+        job_id: "job-1",
+        status: "PAID",
+        invoice_type: "ACCREC",
+        reference: "SWF-26003",
+        amount_paid: 100,
+        fully_paid_on: "2026-08-01",
+      }],
+      purchaseOrders: [{
+        id: "po-1",
+        job_id: "job-1",
+        po_type: "material",
+        status: "cancelled",
+      }],
+      poCommunications: [{
+        id: "comm-1",
+        job_id: "job-1",
+        po_id: "po-1",
+        direction: "outbound",
+        created_at: "2026-08-02",
+        sent_at: "2026-08-02",
+        message_id: "resend-1",
+        received_at: null,
+      }],
+      assignments: [],
+      serviceReports: [],
+      unreadable: [],
+    },
+  );
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(evidence.purchase_orders, []);
+  assertEquals(got.canonical_stage, "order_materials");
+  assertEquals(got.facts.material_order_sent, false);
+});
+
+Deno.test("fencing stage truth: scheduling waits only for a dated assignment", () => {
+  const waiting = FENCING_STAGE_TRUTH_BOUNDARY.find((row) =>
+    row.id === "fence-105"
+  );
+  const dated = FENCING_STAGE_TRUTH_BOUNDARY.find((row) =>
+    row.id === "fence-107"
+  );
+  assert(waiting);
+  assert(dated);
+  assertEquals(derive(waiting).canonical_stage, "schedule_install");
+  assertEquals(derive(dated).canonical_stage, "scheduled");
+});
+
+Deno.test("fencing stage truth: rectification cannot skip the execution prefix", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-112"
+  );
+  assert(row);
+  const got = derive(row);
+  assertEquals(got.canonical_stage, "decision_required");
+  assertEquals(got.reasons, [
+    "later_fact_without_prefix:rectification_visit",
+  ]);
+});
+
+Deno.test("fencing stage truth: archive clock uses latest completion proof", () => {
+  const row = FENCING_STAGE_TRUTH_BOUNDARY.find((item) =>
+    item.id === "fence-113"
+  );
+  assert(row);
+  const evidence = structuredClone(row.evidence);
+  evidence.service_reports.push({
+    id: "report-newer",
+    status: "submitted",
+    submitted_at: "2026-08-25T16:00:00.000Z",
+  });
+  const got = deriveFencingStageV1(evidence, { now: NOW });
+  assertEquals(got.canonical_stage, "get_review");
 });
 
 Deno.test("fencing stage truth fixture contract version is pinned", () => {
