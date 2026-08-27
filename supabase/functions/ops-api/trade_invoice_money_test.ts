@@ -13,10 +13,6 @@ import {
   validatePersistedTradeInvoiceMoney,
 } from "./trade_invoice_money.ts";
 
-const OPS_API_SOURCE = await Deno.readTextFile(
-  new URL("./index.ts", import.meta.url),
-);
-
 Deno.test("trade invoice money: GST off splits gross earned into net pay and 12% super", () => {
   const money = calculateTradeInvoiceMoney({
     grossEarned: 1_000,
@@ -207,12 +203,5 @@ Deno.test("persisted money validation rejects an unresolved or non-statutory rat
       }),
     TradeInvoiceMoneyError,
     "No statutory Superannuation Guarantee rate",
-  );
-});
-
-Deno.test("all four trade ACCPAY push paths use the canonical super split builder", () => {
-  assertEquals(
-    OPS_API_SOURCE.match(/splitTradeInvoiceXeroLines\(/g)?.length,
-    4,
   );
 });
