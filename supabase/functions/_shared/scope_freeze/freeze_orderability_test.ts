@@ -103,7 +103,7 @@ const completeMaterials = [
   },
 ]
 
-function completePricing(materials = completeMaterials) {
+function completePricing(materials: Array<Record<string, unknown>> = completeMaterials) {
   return {
     source: 'fence-designer',
     price_snapshot_id: SNAPSHOT_ID,
@@ -180,8 +180,84 @@ Deno.test('complete freeze with panels, posts, concrete, fixings is orderable', 
     assertEquals(line.supplier, true)
     assertEquals(line.unit_cost_ex_gst, true)
     assertEquals(line.price_snapshot_id, true)
+    assertEquals(line.price_snapshot_override, null)
     assertEquals(line.missing, [])
   }
+})
+
+Deno.test('complete line-level snapshot bindings need no freeze-wide snapshot', async () => {
+  const { price_snapshot_id: _drop, ...pricing } = completePricing()
+  const report = await inspectFreezeOrderability({
+    revision: await revisionFrom(siteScope, pricing),
+  })
+  assertEquals(report.verdict, 'orderable')
+  assertEquals(report.missing, [])
+  for (const line of report.lines) {
+    assertEquals(line.price_snapshot_id, true)
+    assertEquals(line.price_snapshot_override, null)
+  }
+})
+
+Deno.test('partial line-level snapshot binding names the unbound line', async () => {
+  const materials = completeMaterials.map((line) => {
+    if (line.line_id !== 'mat-posts') return line
+    const { price_snapshot_id: _drop, ...unbound } = line
+    return unbound
+  })
+  const { price_snapshot_id: _drop, ...pricing } = completePricing(materials)
+  const report = await inspectFreezeOrderability({
+    revision: await revisionFrom(siteScope, pricing),
+  })
+  assertEquals(report.verdict, 'not_orderable')
+  assertEquals(report.missing, [{ field: 'price_snapshot_id', line_id: 'mat-posts' }])
+  assertEquals(report.lines.find((line) => line.line_id === 'mat-posts')?.price_snapshot_id, false)
+  for (const line of report.lines) {
+    if (line.line_id === 'mat-posts') continue
+    assertEquals(line.missing, [])
+  }
+})
+
+Deno.test('different line snapshot requires a complete explicit override', async () => {
+  const materials = completeMaterials.map((line) =>
+    line.line_id === 'mat-posts'
+      ? {
+        ...line,
+        price_snapshot_id: 'supplier-quote-2026-08-02',
+        price_snapshot_override: {
+          approved: true,
+          approved_by: 'Marnin Stobbe',
+          reason: 'Named supplier quote supersedes the freeze-wide snapshot',
+        },
+      }
+      : line
+  )
+  const report = await inspectFreezeOrderability({
+    revision: await revisionFrom(siteScope, completePricing(materials)),
+  })
+  assertEquals(report.verdict, 'orderable')
+  assertEquals(report.missing, [])
+  assertEquals(report.lines.find((line) => line.line_id === 'mat-posts')?.price_snapshot_override, true)
+})
+
+Deno.test('incomplete override for a different line snapshot names its defects', async () => {
+  const materials = completeMaterials.map((line) =>
+    line.line_id === 'mat-posts'
+      ? {
+        ...line,
+        price_snapshot_id: 'supplier-quote-2026-08-02',
+        price_snapshot_override: { approved: true },
+      }
+      : line
+  )
+  const report = await inspectFreezeOrderability({
+    revision: await revisionFrom(siteScope, completePricing(materials)),
+  })
+  assertEquals(report.verdict, 'not_orderable')
+  assertEquals(report.missing, [
+    { field: 'price_snapshot_id', line_id: 'mat-posts' },
+    { field: 'price_snapshot_override.approved_by', line_id: 'mat-posts' },
+    { field: 'price_snapshot_override.reason', line_id: 'mat-posts' },
+  ])
 })
 
 Deno.test('live pricing drift reports the exact dollar delta ($5,693 vs $4,902)', async () => {
@@ -240,7 +316,10 @@ Deno.test('freeze missing only its price-snapshot binding is not_orderable for t
   const report = await inspectFreezeOrderability({ revision })
   assertEquals(report.verdict, 'not_orderable')
   assertEquals(new Set(report.missing.map((m) => m.field)), new Set(['price_snapshot_id']))
-  assert(report.missing.some((m) => m.field === 'price_snapshot_id' && m.line_id == null))
+  assertEquals(
+    new Set(report.missing.map((m) => m.line_id)),
+    new Set(completeMaterials.map((line) => line.line_id)),
+  )
   for (const line of report.lines) {
     assertEquals(line.sku, true)
     assertEquals(line.supplier, true)

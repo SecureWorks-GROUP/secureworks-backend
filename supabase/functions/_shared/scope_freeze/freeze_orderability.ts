@@ -62,6 +62,7 @@ export type FreezeMaterialsLineReport = {
   supplier: boolean
   unit_cost_ex_gst: boolean
   price_snapshot_id: boolean
+  price_snapshot_override: boolean | null
   missing: string[]
 }
 
@@ -311,6 +312,22 @@ function lineSnapshotOf(raw: Record<string, unknown>): string | null {
   ])
 }
 
+function snapshotOverrideOf(raw: Record<string, unknown>): {
+  valid: boolean
+  missing: string[]
+} {
+  const override = asObject(raw.price_snapshot_override ?? raw.priceSnapshotOverride)
+  const missing: string[] = []
+  if (override.approved !== true) missing.push('price_snapshot_override.approved')
+  const approvedBy = ['approved_by', 'approvedBy', 'authorised_by', 'authorisedBy']
+    .some((key) => typeof override[key] === 'string' && override[key].trim().length > 0)
+  if (!approvedBy) {
+    missing.push('price_snapshot_override.approved_by')
+  }
+  if (!asText(override.reason)) missing.push('price_snapshot_override.reason')
+  return { valid: missing.length === 0, missing }
+}
+
 function costExGst(pricing: Record<string, unknown> | null): number | null {
   if (!pricing) return null
   const total = finiteNumber(pricing.totalCostEstimate)
@@ -338,7 +355,11 @@ function reportLine(
   freezeSnapshot: string | null,
 ): FreezeMaterialsLineReport {
   const line_id = lineIdOf(raw, fallbackId)
-  const boundSnapshot = lineSnapshotOf(raw) ?? freezeSnapshot
+  const lineSnapshot = lineSnapshotOf(raw)
+  const snapshotDiffers = freezeSnapshot != null && lineSnapshot != null && lineSnapshot !== freezeSnapshot
+  const snapshotOverride = snapshotDiffers ? snapshotOverrideOf(raw) : null
+  const snapshotBindingValid = (lineSnapshot ?? freezeSnapshot) != null &&
+    (!snapshotDiffers || snapshotOverride?.valid === true)
   const fields: Record<LineField, boolean> = {
     sku: skuOf(raw) != null,
     description: pickFirstText(raw, ['description', 'name', 'label']) != null,
@@ -350,10 +371,19 @@ function reportLine(
     unit: unitOf(raw) != null,
     supplier: supplierOf(raw) != null,
     unit_cost_ex_gst: unitCostOf(raw) != null,
-    price_snapshot_id: boundSnapshot != null,
+    price_snapshot_id: snapshotBindingValid,
   }
-  const missing = LINE_FIELD_KEYS.filter((k) => !fields[k])
-  return { line_id, source, ...fields, missing: [...missing] }
+  const missing: string[] = LINE_FIELD_KEYS.filter((k) => !fields[k])
+  if (snapshotOverride && !snapshotOverride.valid) {
+    missing.push(...snapshotOverride.missing)
+  }
+  return {
+    line_id,
+    source,
+    ...fields,
+    price_snapshot_override: snapshotOverride?.valid ?? null,
+    missing: [...missing],
+  }
 }
 
 export async function inspectFreezeOrderability(input: {
@@ -409,7 +439,6 @@ export async function inspectFreezeOrderability(input: {
   if (!site.address) missing.push({ field: 'site.address' })
   if (!site.suburb) missing.push({ field: 'site.suburb' })
   if (lines.length === 0) missing.push({ field: 'materials_lines' })
-  if (!freezeSnapshot) missing.push({ field: 'price_snapshot_id' })
   for (const line of lines) {
     for (const field of line.missing) {
       missing.push({ field, line_id: line.line_id })
