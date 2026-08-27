@@ -11,12 +11,15 @@ import {
 } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 
 import {
+  AUTHORISED_TRADE_INVOICE_STATUSES,
   PROFIT_COMPLETENESS_CONTRACT_VERSION,
   REQUIRED_COST_LANES,
   assessJobProfitCompleteness,
   buildJobProfitabilityReport,
   classifyTradeCostLane,
   computeLegacyJobMargin,
+  perthMonthWindow,
+  utcMonthWindow,
   type JobProfitInput,
   type JobProfitabilityRow,
 } from './profit_completeness.ts'
@@ -37,12 +40,15 @@ function tradeLine(
   lineType: string,
   amount: number,
   jobNumber?: string,
+  extra: Record<string, unknown> = {},
 ) {
   return {
     job_id: jobId,
     job_number: jobNumber ?? null,
     line_type: lineType,
     line_total_ex: amount,
+    invoice_status: 'paid',
+    ...extra,
   }
 }
 
@@ -467,18 +473,73 @@ Deno.test('unclassified trade lines block complete even when required lanes reso
   assertEquals(row.margin, null)
 })
 
-Deno.test('reporting-api job_profitability is wired to the completeness module', async () => {
-  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  assert(
-    src.includes("from './profit_completeness.ts'"),
-    'job_profitability must import profit_completeness.ts',
+Deno.test('draft, rejected and voided trade invoices leave the lane unresolved', () => {
+  assertEquals([...AUTHORISED_TRADE_INVOICE_STATUSES], [
+    'approved',
+    'pushed_to_xero',
+    'paid',
+  ])
+  for (const status of ['draft', 'ops-reject', 'pending_ops_review', 'queried']) {
+    const job = fullyCostedJob()
+    job.trade_lines = job.trade_lines.map((line) => ({
+      ...line,
+      invoice_status: status,
+    }))
+    const row = assessJobProfitCompleteness(job)
+    assertEquals(row.lanes.labour.resolved, false, status)
+    assertEquals(row.profit_status, 'partial')
+    assertEquals(row.margin, null)
+  }
+})
+
+Deno.test('override_amount is the authorised trade cost, not line_total_ex', () => {
+  const job = fullyCostedJob()
+  job.trade_lines = job.trade_lines.map((line) =>
+    line.line_type === 'labour'
+      ? { ...line, line_total_ex: 100, override_amount: COMPLETE_LABOUR }
+      : line
   )
-  assert(
-    src.includes('buildJobProfitabilityReport'),
-    'job_profitability must call buildJobProfitabilityReport',
+  const row = assessJobProfitCompleteness(job)
+  assertEquals(row.profit_status, 'complete')
+  if (row.lanes.labour.resolved) {
+    assertEquals(row.lanes.labour.amount_ex_gst, COMPLETE_LABOUR)
+  }
+  assertEquals(row.margin, COMPLETE_MARGIN)
+})
+
+Deno.test('a present job_id is authoritative; stale job_number does not steal the line', () => {
+  const job = fullyCostedJob()
+  job.trade_lines = job.trade_lines.map((line) =>
+    line.line_type === 'labour'
+      ? { ...line, job_id: 'other-job', job_number: job.job_number }
+      : line
   )
-  assert(
-    !/Costs: prefer Xero Projects expenses/.test(src),
-    'must not still prefer Xero Projects as the cost owner',
-  )
+  const row = assessJobProfitCompleteness(job)
+  assertEquals(row.lanes.labour.resolved, false)
+  assertEquals(row.profit_status, 'partial')
+  assertEquals(row.margin, null)
+})
+
+Deno.test('fencing this month uses Australia/Perth midnight, not UTC', () => {
+  const now = new Date('2026-08-31T16:30:00.000Z') // 00:30 1 Sep Perth
+  const perth = perthMonthWindow(now)
+  const utc = utcMonthWindow(now)
+  assertEquals(perth.from, '2026-08-31T16:00:00.000Z')
+  assertNotEquals(perth.from, utc.from)
+  assertEquals(utc.from, '2026-08-01T00:00:00.000Z')
+
+  const septemberJob: JobProfitInput = {
+    ...fullyCostedJob(),
+    created_at: '2026-08-31T16:10:00.000Z',
+  }
+  const augustJob: JobProfitInput = {
+    ...emptyCostJob(),
+    created_at: '2026-08-31T15:59:00.000Z',
+  }
+  const report = buildJobProfitabilityReport([septemberJob], {
+    now,
+    rollupJobs: [septemberJob, augustJob],
+  })
+  assertEquals(report.rollups.fencing_this_month.job_count, 1)
+  assertEquals(report.rollups.fencing_this_month.complete_count, 1)
 })

@@ -3345,9 +3345,13 @@ resolve to a source-backed job-book figure (`trade_invoice_lines` /
 stamp `profit_status: unknown|partial` with `missing_lanes[]` and
 `amount_at_risk`. Zero cost is a missing measurement, not a free job. Xero
 Projects `total_expenses` is a low-confidence lump and never completes a lane.
-Roll-ups average only `complete` jobs and publish the excluded count and
-dollars. Owner: `profit_completeness.ts`. Proof:
-`profit_completeness_test.ts`.
+Trade cost is accepted only for parent `trade_invoices.status` in
+`approved` / `pushed_to_xero` / `paid`; draft, ops-reject and review states
+leave the lane unresolved. Roll-ups use Australia/Perth month and quarter
+windows, average only `complete` jobs, and keep cohort invoiced revenue
+separate from the complete-only margin denominator. Owner:
+`profit_completeness.ts` + `job_profitability.ts`. Proof:
+`profit_completeness_test.ts`, `job_profitability_test.ts`.
 
 ## Maintaining this file
 
