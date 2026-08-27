@@ -318,7 +318,7 @@ Deno.test('matching live blobs report no drift and a zero dollar delta', async (
   assertEquals(report.drift.dollar_delta, 0)
 })
 
-Deno.test('producer-shaped internal costs include delivery in dollar drift', async () => {
+Deno.test('partial producer internal costs use per-lane fallbacks and delivery', async () => {
   const frozenPricing = {
     line_items: [{
       description: 'Delivery',
@@ -328,7 +328,9 @@ Deno.test('producer-shaped internal costs include delivery in dollar drift', asy
       total_cost: 250,
       category: 'delivery',
     }],
-    internal: { cost: 2200, labour: 2100 },
+    internal: { cost: 2200 },
+    labourCostEstimate: 2100,
+    commissionCostEstimate: 602,
   }
   const livePricing = {
     ...frozenPricing,
@@ -344,8 +346,8 @@ Deno.test('producer-shaped internal costs include delivery in dollar drift', asy
     live: { scope_json: siteScope, pricing_json: livePricing },
   })
   assertEquals(report.drift.comparison, 'drifted')
-  assertEquals(report.drift.frozen_cost_ex_gst, 4550)
-  assertEquals(report.drift.live_cost_ex_gst, 4650)
+  assertEquals(report.drift.frozen_cost_ex_gst, 5152)
+  assertEquals(report.drift.live_cost_ex_gst, 5252)
   assertEquals(report.drift.dollar_delta, 100)
 })
 
