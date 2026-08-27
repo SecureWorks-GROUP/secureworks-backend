@@ -72,26 +72,30 @@ function obligationJob(
     po?: string;
     status?: string;
     reportType?: string | null;
-    company?: string;
+    company?: string | null;
+    type?: string;
+    insuranceJobType?: string;
   } = {},
 ) {
   const externalRef = options.externalRef ?? `MLB-${id}`;
+  const company = options.company === undefined ? "mlb" : options.company;
   return {
     job_id: `job-${id}`,
     external_ref: externalRef,
-    requesting_company_slug: options.company || "mlb",
-    requesting_company_name: "Fixture Builder",
+    requesting_company_slug: company,
+    requesting_company_name: company ? "Fixture Builder" : null,
     report_type: options.reportType ?? null,
     jobs: {
       job_number: `SWMS-${id}`,
       status: options.status || "accepted",
       site_address: `${id} Fixture Street`,
-      type: "makesafe",
+      type: options.type || "makesafe",
       metadata: {
         builder_work_order_number: options.workOrder ??
           `${externalRef}PO-${id}`,
         builder_po_number: options.po ?? `PO-${id}`,
         makesafe_job_family: options.family || "general_makesafe",
+        insurance_job_type: options.insuranceJobType,
       },
     },
   };
@@ -222,6 +226,7 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
   });
   const existingFamilyConflict = intakeDraft("61008");
   const legacyExistingFamilyConflict = intakeDraft("61009");
+  const restoration = intakeDraft("61012", { family: "restoration" });
   const { client, calls } = fakeClient(
     [
       sameFamily,
@@ -233,6 +238,7 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       identityConflict,
       existingFamilyConflict,
       legacyExistingFamilyConflict,
+      restoration,
     ],
     [
       obligationJob("61001"),
@@ -255,6 +261,11 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       obligationJob("61009", {
         family: "roof",
         reportType: "general_makesafe",
+      }),
+      obligationJob("61012", {
+        family: "restoration",
+        type: "insurance",
+        insuranceJobType: "restoration",
       }),
       {
         ...obligationJob("61005", { family: "roof_report" }),
@@ -281,9 +292,9 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
       terminalConflict.id,
     ].sort(),
   );
-  assertEquals(result.total_count, 9);
+  assertEquals(result.total_count, 10);
   assertEquals(result.visible_total_count, 8);
-  assertEquals(result.omitted_accounted_count, 1);
+  assertEquals(result.omitted_accounted_count, 2);
   assertEquals(result.returned_count, 8);
   assertEquals(result.has_more, false);
   assertEquals(result.accounted_filter_error, null);
@@ -293,14 +304,29 @@ Deno.test("operator intake omits only proved same-ref same-family accounted draf
 Deno.test("operator intake retains same-reference identity gaps and full-email family conflicts", async () => {
   const missingExistingIdentity = intakeDraft("61010");
   const fullEmailFamilyConflict = intakeDraft("61011", {
+    family: "roof_report",
+    reportType: "roof_report",
+    bodyPreview: "Please complete the roof report.",
     builderEmailTextForTrade:
-      "Supply and install temporary fencing around the affected area.",
+      "Please complete an assessment report and provide a quotation.",
   });
+  const missingExistingCompany = intakeDraft("61013");
+  const conflictingExistingIdentity = intakeDraft("61014");
   const { client, calls } = fakeClient(
-    [missingExistingIdentity, fullEmailFamilyConflict],
+    [
+      missingExistingIdentity,
+      fullEmailFamilyConflict,
+      missingExistingCompany,
+      conflictingExistingIdentity,
+    ],
     [
       obligationJob("61010", { workOrder: "", po: "" }),
-      obligationJob("61011"),
+      obligationJob("61011", { family: "roof_report" }),
+      obligationJob("61013", { company: null }),
+      obligationJob("61014", {
+        workOrder: "MLB-61014PO-99999",
+        po: "PO-61014",
+      }),
     ],
   );
 
@@ -311,7 +337,12 @@ Deno.test("operator intake retains same-reference identity gaps and full-email f
 
   assertEquals(
     result.drafts.map((draft: any) => draft.id).sort(),
-    [missingExistingIdentity.id, fullEmailFamilyConflict.id].sort(),
+    [
+      missingExistingIdentity.id,
+      fullEmailFamilyConflict.id,
+      missingExistingCompany.id,
+      conflictingExistingIdentity.id,
+    ].sort(),
   );
   assertEquals(result.omitted_accounted_count, 0);
   assertEquals(calls.writes, 0);
@@ -460,14 +491,29 @@ Deno.test("Advance clean skips unproved identity and conflicting family", async 
 Deno.test("Advance clean skips same-reference identity gaps and full-email family conflicts", async () => {
   const missingExistingIdentity = intakeDraft("63008");
   const fullEmailFamilyConflict = intakeDraft("63009", {
+    family: "roof_report",
+    reportType: "roof_report",
+    bodyPreview: "Please complete the roof report.",
     builderEmailTextForTrade:
-      "Supply and install temporary fencing around the affected area.",
+      "Please complete an assessment report and provide a quotation.",
   });
+  const missingExistingCompany = intakeDraft("63010");
+  const conflictingExistingIdentity = intakeDraft("63011");
   const fake = fakeClient(
-    [missingExistingIdentity, fullEmailFamilyConflict],
+    [
+      missingExistingIdentity,
+      fullEmailFamilyConflict,
+      missingExistingCompany,
+      conflictingExistingIdentity,
+    ],
     [
       obligationJob("63008", { workOrder: "", po: "" }),
-      obligationJob("63009"),
+      obligationJob("63009", { family: "roof_report" }),
+      obligationJob("63010", { company: null }),
+      obligationJob("63011", {
+        workOrder: "MLB-63011PO-99999",
+        po: "PO-63011",
+      }),
     ],
   );
 
@@ -483,6 +529,8 @@ Deno.test("Advance clean skips same-reference identity gaps and full-email famil
     [
       [missingExistingIdentity.id, "builder_identity_unproved"],
       [fullEmailFamilyConflict.id, "family_unproved"],
+      [missingExistingCompany.id, "builder_identity_unproved"],
+      [conflictingExistingIdentity.id, "builder_identity_unproved"],
     ].sort(),
   );
   assertEquals(fake.calls.singleReads, 0);

@@ -31,6 +31,7 @@ import { isReportOnlyType } from "./makesafe_intake_gate.ts";
 import { normaliseJobFamily } from "./makesafe_intake_dedup.ts";
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
 import { canonicalSesFamilyFromCard } from "./ses_family_matrix.ts";
+import { isCanonicalSeedScopeJob } from "./makesafe_state_seed_scope.ts";
 import {
   canonicalCompanyDedupeKey,
   canonicalExternalObligationRef,
@@ -3023,6 +3024,17 @@ function obligationCandidatePoMatches(
   return !targetPo || existingPo === targetPo;
 }
 
+function existingObligationPoEvidence(
+  row: any,
+  metadata: Record<string, any>,
+): string[] {
+  return [
+    canonicalObligationPoCore(metadata.builder_po_number),
+    canonicalObligationPoCore(metadata.builder_work_order_number, true),
+    canonicalObligationPoCore(row.external_ref, true),
+  ].filter((value): value is string => !!value);
+}
+
 export interface CancellationTargetResolution {
   kind: "not_found" | "ambiguous" | "matched";
   targetJobId: string | null;
@@ -3180,7 +3192,7 @@ function matchingExistingObligationRows(
     );
     if (!existingCompany || existingCompany !== targetCompany) return false;
     const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
-    if (existingJob?.type && existingJob.type !== "makesafe") return false;
+    if (!isCanonicalSeedScopeJob(existingJob || {})) return false;
     const existingRef = canonicalExternalObligationRef(
       row.external_ref,
       prefixes,
@@ -3213,11 +3225,11 @@ function matchingExistingObligationRows(
     ) return false;
     if (options.requireExactReference && !exactRefMatch) return false;
 
-    const existingPo = canonicalObligationPoCore(
-      metadata.builder_po_number,
-    ) ||
-      canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
-      canonicalObligationPoCore(row.external_ref, true);
+    const existingPoEvidence = [
+      ...new Set(existingObligationPoEvidence(row, metadata)),
+    ];
+    if (existingPoEvidence.length > 1) return false;
+    const existingPo = existingPoEvidence[0] || null;
     if (!obligationCandidatePoMatches(targetPo, existingPo)) return false;
     if (
       options.requireProvenBuilderIdentity &&
@@ -3278,10 +3290,10 @@ function sameReferenceRowsWithUnprovedIdentity(
         const existingCompany = canonicalCompanyDedupeKey(
           row.requesting_company_slug || row.requesting_company_name,
         );
-        if (existingCompany !== targetCompany) return false;
+        if (existingCompany && existingCompany !== targetCompany) return false;
         const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
         if (
-          existingJob?.type && existingJob.type !== "makesafe" ||
+          !isCanonicalSeedScopeJob(existingJob || {}) ||
           isDeadObligationJobStatus(existingJob?.status)
         ) return false;
         const existingRef = canonicalExternalObligationRef(
@@ -3297,11 +3309,12 @@ function sameReferenceRowsWithUnprovedIdentity(
           metadata.builder_work_order_number,
           prefixes,
         );
-        const existingPo = canonicalObligationPoCore(
-          metadata.builder_po_number,
-        ) ||
-          canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
-          canonicalObligationPoCore(row.external_ref, true);
+        const existingPoEvidence = [
+          ...new Set(existingObligationPoEvidence(row, metadata)),
+        ];
+        if (!existingCompany) return true;
+        if (existingPoEvidence.length > 1) return true;
+        const existingPo = existingPoEvidence[0] || null;
         return targetPo ? !existingPo : !existingWo;
       }).map((row: any) => [String(row.job_id), row]),
     ).values(),
