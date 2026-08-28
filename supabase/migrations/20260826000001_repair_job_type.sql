@@ -293,10 +293,15 @@ BEGIN
       predicate_hits;
   END IF;
 
+  -- The anchor's leading \s* consumes the whitespace between the preceding
+  -- keyword (AND / WHERE) and `j.type`, so the replacement MUST re-emit a
+  -- leading space or the patched body reads `ANDj.type` — a syntax error the
+  -- contract's first CI run caught on 2026-08-28. A doubled space (when the
+  -- match began at a paren instead) is harmless.
   patched_body := regexp_replace(
     view_body,
     makesafe_predicate_re,
-    'j.type = ANY (ARRAY[''makesafe''::text, ''repair''::text])'
+    ' j.type = ANY (ARRAY[''makesafe''::text, ''repair''::text])'
   );
 
   EXECUTE 'CREATE OR REPLACE VIEW public.job_financials AS ' || patched_body;
