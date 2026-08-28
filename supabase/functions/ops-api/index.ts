@@ -707,6 +707,7 @@ import {
   reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   decideDeterministicMakeSafeJobFamily as _decideDeterministicMakeSafeJobFamily,
+  detectRepairLegSignal as _detectRepairLegSignal,
   hasExplicitRapidRepairSignal as _hasExplicitRapidRepairSignal,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
@@ -22435,6 +22436,13 @@ function shouldAutoApproveCleanIntake(input: {
   if (!_normaliseDedupJobFamily(input.jobFamily)) {
     return { ok: false, reason: 'work_order_family_needs_review' }
   }
+  // Ruled 2026-08-28: the repair lane runs SUPERVISED. An SWR- mint is
+  // irreversible (update_makesafe_job_family refuses non-makesafe types and can
+  // never change jobs.type or the number), so a repair-family draft never
+  // auto-files — a human taps every one until the captains release this brake.
+  if (_normaliseDedupJobFamily(input.jobFamily) === 'repair') {
+    return { ok: false, reason: 'repair_family_supervised_review' }
+  }
 
   const attachments = input.attachments || []
   const available = availableIntakeAttachments(attachments)
@@ -24786,6 +24794,23 @@ async function _reextractExtractFields(
   extraction.makesafe_job_family_evidence = familyDecision.evidence
   if (!draftJobFamily && !missingFields.includes('work_order_family_needs_review')) {
     missingFields.push('work_order_family_needs_review')
+  }
+  // Ruling 5 (2026-08-28, two-card dual scope): same stamp as the scanner pass,
+  // here with the full PDF scope context so a replacement leg buried in the WO
+  // PDF is seen too.
+  {
+    const repairLeg = _detectRepairLegSignal(
+      subject,
+      [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
+      draftFamilyContext,
+    )
+    if (draftJobFamily !== 'repair' && repairLeg.detected) {
+      extraction.repair_leg_detected = true
+      extraction.repair_leg_evidence = repairLeg.evidence
+      if (!missingFields.includes('repair_leg_needs_review')) {
+        missingFields.push('repair_leg_needs_review')
+      }
+    }
   }
   extraction.reextracted_at = new Date().toISOString()
   // Item 3: flag a combined make-safe + report so the reextracted draft never auto-files
@@ -27760,6 +27785,25 @@ async function retiredPaidAiIntakeImplementation(client: any) {
     extraction.makesafe_job_family_evidence = familyDecision.evidence
     if (!draftJobFamily && !missingFields.includes('work_order_family_needs_review')) {
       missingFields.push('work_order_family_needs_review')
+    }
+
+    // Ruling 5 (2026-08-28, two-card dual scope): a non-repair draft whose scope
+    // ALSO carries the replacement verbs owes a SEPARATE linked SWR- repair child
+    // card. Stamp the evidence and park the draft — the human approves the
+    // make-safe card and spawns the child by hand (the spawn action ships with
+    // the quote-stage lane). The family itself never moves here.
+    {
+      const repairLeg = _detectRepairLegSignal(
+        subject,
+        [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
+      )
+      if (draftJobFamily !== 'repair' && repairLeg.detected) {
+        extraction.repair_leg_detected = true
+        extraction.repair_leg_evidence = repairLeg.evidence
+        if (!missingFields.includes('repair_leg_needs_review')) {
+          missingFields.push('repair_leg_needs_review')
+        }
+      }
     }
 
     // Item 3 (one email -> two cards): a make-safe WO that ALSO owes a roof/assessment

@@ -291,7 +291,11 @@ Deno.test("clean intake board sweep blocks a legacy family conflicting with AJS 
   });
 });
 
-Deno.test("clean intake board sweep accepts a PDF-declared repair family", () => {
+// Ruled 2026-08-28 (repair-siphon taxonomy): the repair lane runs SUPERVISED.
+// An SWR- mint is irreversible, so even a perfectly clean, PDF-declared repair
+// draft parks for a human tap instead of auto-filing. These two tests
+// previously asserted auto-approval; they now pin the brake.
+Deno.test("clean intake board sweep parks a PDF-declared repair family for a human", () => {
   const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
     status: "needs_review",
     confidence: "high",
@@ -321,12 +325,12 @@ Deno.test("clean intake board sweep accepts a PDF-declared repair family", () =>
     }],
   });
   assertEquals(decision, {
-    ok: true,
-    reason: "clean_high_confidence_work_order",
+    ok: false,
+    reason: "repair_family_supervised_review",
   });
 });
 
-Deno.test("clean intake board sweep preserves deterministic AJS Rapid Repair family", () => {
+Deno.test("clean intake board sweep parks a deterministic AJS Rapid Repair draft too", () => {
   const decision = _shouldAutoApproveCleanIntakeDraftRowForTest({
     status: "needs_review",
     confidence: "high",
@@ -354,8 +358,8 @@ Deno.test("clean intake board sweep preserves deterministic AJS Rapid Repair fam
     }],
   });
   assertEquals(decision, {
-    ok: true,
-    reason: "clean_high_confidence_work_order",
+    ok: false,
+    reason: "repair_family_supervised_review",
   });
 });
 

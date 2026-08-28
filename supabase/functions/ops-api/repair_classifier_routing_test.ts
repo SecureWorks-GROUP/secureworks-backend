@@ -24,8 +24,13 @@ import {
   classifyMakeSafeJobFamily,
   decideDeterministicMakeSafeJobFamily,
   decideMakeSafeJobFamily,
+  detectRepairLegSignal,
 } from "./makesafe_intake_gate.ts";
-import { _repairFamilyVerdictForApproval } from "./index.ts";
+import { extractPdfDeclaredType } from "./makesafe_pdf_declared_type.ts";
+import {
+  _repairFamilyVerdictForApproval,
+  _shouldAutoApproveCleanIntakeForTest,
+} from "./index.ts";
 
 // ── The two real shapes from the assessment ──────────────────────────────────
 
@@ -223,4 +228,148 @@ Deno.test("CONTROL: the repair rescue claims nothing else", () => {
     _repairFamilyVerdictForApproval({ makesafe_job_family: "repair" }, true),
     null,
   );
+});
+
+// ── Ruled 2026-08-28 (repair-siphon taxonomy): verbs decide, nouns do not ────
+//
+// The corpus test behind these fixtures: 394 deliverable work orders over 61
+// days held exactly 8 repairs, every one a fence/gate/sheet REPLACEMENT. The
+// replacement verbs identified all of them and nothing else; the bare words
+// "repair" (17% precision), "carpentry" (0%) and "shed" (5%) identified noise.
+// Sealed alongside: dual-scope work orders mint the MAKE-SAFE card first and
+// flag a repair LEG for a human-spawned child (Ruling 5, two-card dual scope).
+
+// MLB-24659 shape: a pure replacement scope with no emergency leg.
+const REPLACEMENT_SCOPE_BODY = [
+  "NEW WORK ORDER attached.",
+  "Remove and dispose of damaged 1800mm Hardieflex fencing, supply and",
+  "install 1800mm Colorbond fencing to match, remove and replace metal gate.",
+].join("\n");
+
+// MLB-24481 shape: an emergency temp-fence leg AND a replacement leg in one
+// work order. The make-safe card wins; the replacement rides as a leg flag.
+const DUAL_SCOPE_BODY = [
+  "Please attend to make safe. Install temporary fencing to secure the",
+  "property, approx 8 panels.",
+  "Quote to remove and replace storm damaged fence panels with 1800H Colorbond.",
+].join("\n");
+
+const TEMP_FENCE_ONLY_BODY =
+  "Please attend to supply and install temporary fencing around the pool, approx 10 metres.";
+
+Deno.test("a replacement scope with no emergency leg routes to repair", () => {
+  const decision = decideMakeSafeJobFamily(
+    "NEW WORK ORDER - MLB-24659",
+    REPLACEMENT_SCOPE_BODY,
+  );
+  assertEquals(decision.family, "repair");
+  assertEquals(decision.evidence, "repair_replacement_scope");
+  assertEquals(
+    classifyMakeSafeJobFamily("NEW WORK ORDER - MLB-24659", REPLACEMENT_SCOPE_BODY),
+    "repair",
+  );
+});
+
+Deno.test("the Fencing EXTERNAL declared header reads as repair", () => {
+  // MLB-24319 PO-56427 — a real MLB allocation header the grammar did not know,
+  // observed on a confirmed fence replacement.
+  const parsed = extractPdfDeclaredType([
+    "Work Order",
+    "Work Order Assigned SecureWorks Group Work Order Number MLB-24319PO-56427",
+    "Allocation Work Order",
+    "Site contact 0400 000 000",
+    "Fencing EXTERNAL",
+    "Material for remove, dispose and replace hardies fibre cement fencing",
+  ].join("\n"));
+  assertEquals(parsed.declaredType, "repair");
+  assertEquals(parsed.fenceSubtype, false);
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "NEW WORK ORDER - MLB-24319",
+      "See attached work order.",
+      null,
+      { pdfDeclaredType: parsed },
+    ),
+    "repair",
+  );
+});
+
+Deno.test("CONTROL: the Temporary Fencing header is untouched by the Fencing pattern", () => {
+  const parsed = extractPdfDeclaredType([
+    "Allocation Work Order",
+    "Site contact 0400 000 000",
+    "Temporary Fencing",
+    "Make Safe",
+  ].join("\n"));
+  assertEquals(parsed.declaredType, "makesafe");
+  assertEquals(parsed.fenceSubtype, true);
+});
+
+Deno.test("Ruling 5: a dual-scope work order stays make-safe and flags the repair leg", () => {
+  // The emergency leg wins the card — Hugo and Ryan's temp fence must never
+  // leave the MakeSafe board because a replacement leg rode along.
+  assertEquals(
+    classifyMakeSafeJobFamily("NEW WORK ORDER - MLB-24481", DUAL_SCOPE_BODY),
+    "temp_fence_makesafe",
+  );
+  const leg = detectRepairLegSignal("NEW WORK ORDER - MLB-24481", DUAL_SCOPE_BODY);
+  assertEquals(leg.detected, true);
+  assertEquals(leg.evidence, "remove and replace");
+});
+
+Deno.test("CONTROL: a plain temp-fence install is not a repair leg", () => {
+  assertEquals(
+    classifyMakeSafeJobFamily("NEW WORK ORDER - AJBR-67081", TEMP_FENCE_ONLY_BODY),
+    "temp_fence_makesafe",
+  );
+  assertEquals(
+    detectRepairLegSignal("NEW WORK ORDER - AJBR-67081", TEMP_FENCE_ONLY_BODY)
+      .detected,
+    false,
+  );
+});
+
+Deno.test("CONTROL: the corpus-measured noise words never reach repair", () => {
+  // "carpentry" is AJ's trade dispatch label (0% precision) ...
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "MAKE SAFE REQUEST - Carpentry",
+      "MAKE SAFE REQUEST - Carpentry BUSINESS HOURS. Please attend the property to conduct make safe to a double storey ceiling.",
+      null,
+      { builder: "ajbr" },
+    ),
+    "general_makesafe",
+  );
+  // ... "shed" is make-safe TO a damaged shed (5%) ...
+  const shed =
+    "Make safe to shed. Tarp damaged roof sheeting and secure the property.";
+  assertEquals(
+    classifyMakeSafeJobFamily("NEW WORK ORDER - MLB-25387", shed),
+    "general_makesafe",
+  );
+  assertEquals(detectRepairLegSignal(null, shed).detected, false);
+  // ... and "repair" inside make-safe phrasing (17%) moves nothing.
+  const tempRepair =
+    "Identify area where water is entering and make temporary repair to make water tight.";
+  assertEquals(
+    classifyMakeSafeJobFamily("NEW WORK ORDER - AJBR-67870", tempRepair),
+    "general_makesafe",
+  );
+  assertEquals(detectRepairLegSignal(null, tempRepair).detected, false);
+});
+
+Deno.test("Ruled 2026-08-28: a repair-family draft never auto-approves (supervised lane)", () => {
+  // An SWR- mint is irreversible, so the lane runs with a human tap on every
+  // repair draft until the captains release the brake.
+  assertEquals(
+    _shouldAutoApproveCleanIntakeForTest({ jobFamily: "repair" } as any),
+    { ok: false, reason: "repair_family_supervised_review" },
+  );
+  // CONTROL: the brake is repair-specific — every other family proceeds to the
+  // ordinary evidence gates and fails on those, never on the brake.
+  const control = _shouldAutoApproveCleanIntakeForTest(
+    { jobFamily: "general_makesafe" } as any,
+  );
+  assertEquals(control.ok, false);
+  assertEquals(control.reason, "missing_work_order_pdf");
 });
