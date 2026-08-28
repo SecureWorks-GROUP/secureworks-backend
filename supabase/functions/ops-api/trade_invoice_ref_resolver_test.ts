@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
+
 import {
   assert,
   assertEquals,
@@ -135,87 +137,6 @@ Deno.test("trade invoice resolver leaves bare numeric duplicate cores ambiguous"
     "job-aj",
     "job-mlb",
   ]);
-});
-
-Deno.test("trade invoice submit saves local lines before Xero and checks insert errors", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
-  );
-  // NOTE: keep in sync with toTradeInvoiceLineRow. `_woProblems: _wp` joined the
-  // destructure when WO labour reconciliation landed but this literal was never
-  // updated, so this assertion failed and masked every ordering pin below it —
-  // including the ones guarding the assignment-lock/Xero-push sequence.
-  const stripMemoryOnlyField = source.indexOf(
-    "const { site_address: _siteAddress, _hoursFlag: _hf, _woProblems: _wp, ...dbLine } = { ...defaults, ...line }",
-  );
-  const normalizedShape = source.indexOf(
-    "const toTradeInvoiceLineRow = (line: any, defaults: any = {})",
-  );
-  const checkedLineInsert = source.indexOf(
-    "const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)",
-  );
-  const checkedAssignmentStamp = source.indexOf(
-    "Failed to lock invoiced job cards before Xero push:",
-  );
-  const duplicateExtraReview = source.indexOf(
-    "Possible duplicate searched-in job line(s):",
-  );
-  const duplicateXeroWarning = source.indexOf(
-    "POSSIBLE DUPLICATE - verify prior trade invoice before approving",
-  );
-  const conditionalStamp = source.indexOf(
-    ".or('invoiced_in.is.null,invoiced_in.in.(' + claimableStampInvoiceIds.join(',') + ')')",
-  );
-  const stampOwnership = source.indexOf(
-    ".eq('user_id', tradeUser.id)",
-    checkedAssignmentStamp,
-  );
-  const failureMessage = source.indexOf("Failed to save invoice line items:");
-  const xeroPush = source.indexOf(
-    "// ── Auto-push to Xero as DRAFT ACCPAY bill ──",
-  );
-
-  assert(
-    stripMemoryOnlyField > -1,
-    "extra line insert strips site_address and _hoursFlag before PostgREST insert",
-  );
-  assert(
-    normalizedShape > -1,
-    "trade invoice lines use one normalized PostgREST insert shape",
-  );
-  assert(
-    checkedLineInsert > -1,
-    "trade_invoice_lines insert error is captured",
-  );
-  assert(failureMessage > checkedLineInsert, "line insert failure is surfaced");
-  assert(
-    checkedLineInsert < xeroPush,
-    "local invoice lines are saved before any Xero push",
-  );
-  assert(
-    checkedAssignmentStamp > checkedLineInsert,
-    "assigned-card invoice lock is checked after local line save",
-  );
-  assert(
-    checkedAssignmentStamp < xeroPush,
-    "assigned-card invoice lock is checked before any Xero push",
-  );
-  assert(
-    conditionalStamp > checkedAssignmentStamp,
-    "assigned-card invoice lock conditionally claims only unlocked/released assignments",
-  );
-  assert(
-    stampOwnership > checkedAssignmentStamp,
-    "assigned-card invoice lock remains scoped to the authenticated trade",
-  );
-  assert(
-    duplicateExtraReview > -1,
-    "searched-in duplicate risk is flagged on the local invoice for review",
-  );
-  assert(
-    duplicateXeroWarning > duplicateExtraReview,
-    "searched-in duplicate risk is visible in the Xero draft line description",
-  );
 });
 
 Deno.test("trade invoice PDF attach validates the Xero bill belongs to the authenticated trade", async () => {

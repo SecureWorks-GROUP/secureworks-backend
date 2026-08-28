@@ -34,6 +34,7 @@ MAILER_OPS_SEND_MIGRATION="$REPO_ROOT/supabase/migrations/20260805020000_ses_mai
 ECHO_CODE_APPROVAL_MIGRATION="$REPO_ROOT/supabase/migrations/20260808010000_ses_echo_code_approval.sql"
 D1_RECONCILE_KILL_SWITCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql"
 STALE_ROUTE_DISPATCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql"
+TRADE_INVOICE_MONEY_MIGRATION="$REPO_ROOT/supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql"
 
 
 PASS_COUNT=0
@@ -164,6 +165,10 @@ stale_route_dispatch_migration_sha() {
   shasum -a 256 "$STALE_ROUTE_DISPATCH_MIGRATION" | awk '{print $1}'
 }
 
+trade_invoice_money_migration_sha() {
+  shasum -a 256 "$TRADE_INVOICE_MONEY_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -197,6 +202,7 @@ write_response() {
   ECHO_CODE_APPROVAL_EXPECTED_SHA="$(echo_code_approval_migration_sha)" \
   D1_RECONCILE_KILL_SWITCH_EXPECTED_SHA="$(d1_reconcile_kill_switch_migration_sha)" \
   STALE_ROUTE_DISPATCH_EXPECTED_SHA="$(stale_route_dispatch_migration_sha)" \
+  TRADE_INVOICE_MONEY_EXPECTED_SHA="$(trade_invoice_money_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -507,6 +513,17 @@ stale_route_dispatch_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+trade_invoice_money_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260827112928",
+    "expected_migration_name": "trade_invoice_super_gst_split",
+    "expected_statement_sha256": os.environ["TRADE_INVOICE_MONEY_EXPECTED_SHA"],
+    "actual_migration_version": "20260827112928",
+    "actual_migration_name": "trade_invoice_super_gst_split",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["TRADE_INVOICE_MONEY_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -537,6 +554,7 @@ with open(sys.argv[1], "w") as f:
             echo_code_approval_row,
             d1_reconcile_kill_switch_row,
             stale_route_dispatch_row,
+            trade_invoice_money_row,
         ],
         f,
     )
@@ -593,6 +611,33 @@ test_missing_migration_refuses_before_deploy() {
     pass "$name"
   else
     fail "$name" "missing migration did not stop deployment: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+  fi
+}
+
+test_missing_trade_invoice_requirement_refuses_before_deploy() {
+  local name="test_missing_trade_invoice_requirement_refuses_before_deploy"
+  local response="$TEST_TMP/missing-trade-invoice-money.json"
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  python3 - "$response" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as source:
+    rows = json.load(source)
+with open(path, "w") as target:
+    json.dump(
+        [row for row in rows if row.get("migration_version") != "20260827112928"],
+        target,
+    )
+PY
+  run_preflight "$response" ops-api
+  if [[ "$PREFLIGHT_RC" -ne 0 ]] && \
+    grep -q 'ops-api requires 20260827112928_trade_invoice_super_gst_split: no catalog result returned' <<<"$PREFLIGHT_OUTPUT" && \
+    grep -q 'Refusing Edge Function deploy' <<<"$PREFLIGHT_OUTPUT"; then
+    pass "$name"
+  else
+    fail "$name" "missing trade-invoice schema fixture did not stop deployment: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
   fi
 }
 
@@ -752,6 +797,7 @@ main() {
   else
     test_incident_dependency_is_declared
     test_missing_migration_refuses_before_deploy
+    test_missing_trade_invoice_requirement_refuses_before_deploy
     test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
     test_raw_statement_checksum_drift_is_advisory
