@@ -173,6 +173,12 @@ import {
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from './insurance_repairs_board.ts'
+import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
+import {
+  deriveFencingStageV1,
+  fencingStageTruthFields,
+} from './fencing_stage_engine_v1.ts'
+import { isFencingStageTruthRequested } from './fencing_stage_recipe_v1.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -12736,6 +12742,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
+  // Opt-in fencing stage-truth diagnostic. Default path (flag absent) must
+  // stay byte-identical: same selects, same enrichment, same row keys.
+  const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -12821,11 +12830,10 @@ async function pipeline(client: any, params: URLSearchParams) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
 
-  // Only enrich non-draft jobs (drafts have no assignments/POs/invoices).
-  // The shared reader below chunks this list by encoded URL budget; excluding
-  // drafts remains useful load-shedding, but is no longer the URL-safety guard.
+  // The default response keeps its non-draft enrichment scope. Stage truth
+  // reads every returned row because the stored status is only a claim.
   const nonDraftJobs = jobs.filter((j: any) => j.status !== 'draft')
-  const jobIds = nonDraftJobs.map((j: any) => j.id)
+  const jobIds = (stageTruth ? jobs : nonDraftJobs).map((j: any) => j.id)
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -12837,9 +12845,13 @@ async function pipeline(client: any, params: URLSearchParams) {
   let opsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
   let neighbourContactRes: PipelineEnrichmentResult = { data: [], error: null }
   let commsNotesRes: PipelineEnrichmentResult = { data: [], error: null }
+  let reportRes: PipelineEnrichmentResult = { data: [], error: null }
+  let assignEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let poEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let invoiceEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
 
   if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes] = await Promise.all([
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
         client.from('job_assignments').select('job_id, scheduled_date').in('job_id', chunkIds).neq('status', 'cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
@@ -12849,9 +12861,17 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
-        client.from('po_communications').select('job_id, direction, created_at').in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
+        client.from('po_communications').select(
+          stageTruth
+            ? 'job_id, po_id, direction, created_at, id, sent_at, message_id, received_at'
+            : 'job_id, direction, created_at',
+        ).in('job_id', chunkIds).eq('communication_type', 'purchase_order').order('created_at', { ascending: false })),
       readPipelineEnrichmentRows(jobIds, 'xero_invoices', (chunkIds) =>
-        client.from('xero_invoices').select('job_id, status, invoice_type, reference').in('job_id', chunkIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")')),
+        client.from('xero_invoices').select(
+          stageTruth
+            ? 'job_id, status, invoice_type, reference, id, xero_invoice_id, amount_paid, fully_paid_on'
+            : 'job_id, status, invoice_type, reference',
+        ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC').not('status', 'in', '("VOIDED","DELETED")')),
       readPipelineEnrichmentRows(jobIds, 'ops_notes', (chunkIds) =>
         client.from('ops_notes').select('job_id').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'job_contacts', (chunkIds) =>
@@ -12860,6 +12880,32 @@ async function pipeline(client: any, params: URLSearchParams) {
       // markers can be excluded from the count (they must never light the badge).
       readPipelineEnrichmentRows(jobIds, 'job_events', (chunkIds) =>
         client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', ['note', 'note_added', 'site_note'])),
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'job_service_reports', (chunkIds) =>
+          client.from('job_service_reports').select('id, job_id, status, submitted_at').in('job_id', chunkIds))
+        : Promise.resolve({ data: [], error: null }),
+      // Stage-truth evidence must not use .neq('status','cancelled'): PostgREST
+      // follows SQL NULL semantics and would drop a pending rectification with
+      // status NULL. Counts above keep the historical cancelled filter.
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'job_assignments_evidence', (chunkIds) =>
+          client.from('job_assignments').select(
+            'job_id, scheduled_date, id, status, assignment_type, started_at, completed_at, is_ghost, role',
+          ).in('job_id', chunkIds))
+        : Promise.resolve({ data: [], error: null }),
+      // Same NULL trap as assignments: .neq('status','deleted') drops status-null POs.
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'purchase_orders_evidence', (chunkIds) =>
+          client.from('purchase_orders').select(
+            'job_id, id, po_type, status, xero_po_id, confirmed_delivery_date, delivery_confirmed_at, delivery_date',
+          ).in('job_id', chunkIds))
+        : Promise.resolve({ data: [], error: null }),
+      stageTruth
+        ? readPipelineEnrichmentRows(jobIds, 'xero_invoices_evidence', (chunkIds) =>
+          client.from('xero_invoices').select(
+            'job_id, status, invoice_type, reference, id, xero_invoice_id, amount_paid, fully_paid_on',
+          ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC'))
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -12873,6 +12919,10 @@ async function pipeline(client: any, params: URLSearchParams) {
     ['pipeline.ops_notes', opsNotesRes],
     ['pipeline.job_contacts', neighbourContactRes],
     ['pipeline.job_events', commsNotesRes],
+    ...(stageTruth ? [['pipeline.job_service_reports', reportRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(stageTruth ? [['pipeline.job_assignments_evidence', assignEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(stageTruth ? [['pipeline.purchase_orders_evidence', poEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(stageTruth ? [['pipeline.xero_invoices_evidence', invoiceEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
   ]
   // Preserve the existing partial-board behaviour, but make a failed dimension
   // loud in server logs and explicit in the response instead of publishing its
@@ -12881,6 +12931,24 @@ async function pipeline(client: any, params: URLSearchParams) {
   const enrichmentErrors = enrichmentResults
     .filter(([, result]) => result.error)
     .map(([label]) => label)
+  const stageTruthUnreadable: string[] = []
+  if (stageTruth) {
+    if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
+    if (poEvidenceRes.error) stageTruthUnreadable.push('purchase_orders')
+    if (emailRes.error) stageTruthUnreadable.push('po_communications')
+    if (invoiceEvidenceRes.error) stageTruthUnreadable.push('xero_invoices')
+    if (reportRes.error) stageTruthUnreadable.push('job_service_reports')
+  }
+  const stageTruthRows = stageTruth
+    ? {
+      invoices: invoiceEvidenceRes.data || [],
+      purchaseOrders: poEvidenceRes.data || [],
+      poCommunications: emailRes.data || [],
+      assignments: assignEvidenceRes.data || [],
+      serviceReports: reportRes.data || [],
+      unreadable: stageTruthUnreadable,
+    }
+    : null
 
   const countMap = (rows: any[]) => {
     const m: Record<string, number> = {}
@@ -12989,6 +13057,21 @@ async function pipeline(client: any, params: URLSearchParams) {
       deposit_paid: invoiceMap[j.id]?.deposit_paid || false,
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
+    }
+    if (stageTruth && stageTruthRows) {
+      Object.assign(
+        pipelineRow,
+        fencingStageTruthFields(
+          j.status,
+          deriveFencingStageV1(
+            fencingExecutionEvidenceFromPipelineRows(
+              j.id,
+              j.deposit_invoice_id || null,
+              stageTruthRows,
+            ),
+          ),
+        ),
+      )
     }
     return typeFilter === 'repair'
       ? projectInsuranceRepairPipelineRow(pipelineRow)

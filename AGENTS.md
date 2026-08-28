@@ -668,6 +668,34 @@ untyped PL/pgSQL records must be protected by nested `FOUND`/owner guards, never
 `55000`. Legacy non-fence create endpoints remain unchanged until separately
 migrated.
 
+## Fencing Stage Truth Is An Opt-In Read, Not Placement
+
+`GET ops-api?action=pipeline&type=fencing&stage_truth=1` publishes a
+server-derived shadow stage on each card. Absent the flag, the response is
+byte-identical to today. `jobs.status` is a CLAIM (`declared_stage`) and is
+never an input to derivation. Empty evidence is `unknown` or an earlier proved
+stage, never an echo of the claim; a later fact without its prefix is
+`decision_required`, never a skip into a plausible column. A draft PO is not
+awaiting-supplier — read PO and invoice **status**, not existence counts.
+
+Assignment evidence is a denylist, not an allowlist: drop cancelled and ghost
+watcher rows (`is_ghost` or `role=observer`); every other status including
+`submitted`/`verified` is field work. Stage-truth evidence reads must not
+`.neq` a nullable status (PostgREST/SQL three-valued logic drops NULL). Do
+the exclusion in code. Same trap on PO `deleted` and invoice VOIDED/DELETED. Rectification is a re-entry overlay
+(`rectification_pending`), not a ladder rung. A card with outstanding
+rectification must never archive. send-po-email stamps `sent_at` on dry runs;
+dispatch proof here requires a provider `message_id` the dry-run path does not
+produce. Do not "fix" that by editing send-po-email in this slice.
+
+Recipe and engine are siblings of the pipeline, not of the make-safe engine:
+`fencing_stage_recipe_v1.ts`, `fencing_stage_engine_v1.ts`,
+`fencing_stage_evidence.ts`. Do not generalise `deriveSesStageV2`. Do not ship
+Cap 1 `evaluateStageGates` as placement. No schema, no status write, no send.
+Proof: `fencing_stage_truth_test.ts` plus
+`scripts/fencing-stage-truth-harness.ts` (real recipe, frozen 38-job cohort,
+perturbations must move, `--planted-lie` exits 1).
+
 ## Assessment Cards Require The Prime Triad And Invoice Only
 
 Assessment/quote cards require the work order plus three typed Prime links:
