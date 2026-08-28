@@ -104,17 +104,21 @@ function cleanDraftRow() {
     missing_fields: [],
     requesting_company_slug: "mlb",
     requesting_company_name: "Fixture Builder",
-    external_ref: "FIXTURE-PO-1",
+    external_ref: "MLB-64001",
     client_name: "Fixture Client",
     site_address: "1 Fixture Street",
-    subject: "Work Order FIXTURE-PO-1",
+    subject: "Work Order MLB-64001",
     body_preview: "Please attend and make safe.",
     report_type: null,
-    extraction_json: {},
+    extraction_json: {
+      builder_work_order_number: "MLB-64001PO-74001",
+      builder_po_number: "PO-74001",
+      makesafe_job_family: "general_makesafe",
+    },
     attachments_json: [
       {
-        file_name: "work-order-FIXTURE-PO-1.pdf",
-        pdf_url: "https://example.invalid/work-order-FIXTURE-PO-1.pdf",
+        file_name: "MLB-64001PO-74001.pdf",
+        pdf_url: "https://example.invalid/MLB-64001PO-74001.pdf",
         is_work_order: true,
       },
     ],
@@ -135,6 +139,12 @@ function stubClient(rows: any[], calls: { singleReads: number }) {
       eq: () => chain,
       order: () => chain,
       limit: () => Promise.resolve({ data: rows, error: null }),
+      range: () =>
+        Promise.resolve({
+          data: table === "makesafe_intake_drafts" ? rows : [],
+          error: null,
+          count: table === "makesafe_intake_drafts" ? rows.length : 0,
+        }),
       maybeSingle: () =>
         table === "makesafe_cron_settings"
           // Auto-file brake left ON, so the intent gate is the only thing that can
@@ -176,7 +186,10 @@ Deno.test("REGRESSION: a render-path trigger previews the same drafts and approv
   assertEquals(result.requested_dry_run, false);
   assertEquals(result.live_approval_authorised, false);
   assertEquals(result.trigger_refusal_reason, "render_path_trigger");
-  assert(result.enabled, "the emergency brakes stay independent of the intent gate");
+  assert(
+    result.enabled,
+    "the emergency brakes stay independent of the intent gate",
+  );
 });
 
 Deno.test("CONTROL: an authorised trigger still reaches the approval path", async () => {

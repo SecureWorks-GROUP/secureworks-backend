@@ -93,6 +93,143 @@ Deno.test("the matcher excludes the case-owned no-PO counterfactual and preserve
   );
 });
 
+Deno.test("the matcher binds conflicting stored PO evidence instead of minting past it", async () => {
+  const store = baseStore();
+  store.makesafe_job_details.push({
+    job_id: "conflicting-po-job",
+    external_ref: "MLB-61001",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    report_type: null,
+    jobs: {
+      job_number: "SWMS-61001",
+      status: "accepted",
+      metadata: {
+        builder_work_order_number: "MLB-61001PO-99999",
+        builder_po_number: "PO-61001",
+      },
+      site_address: "1 Fixture Street",
+      type: "makesafe",
+    },
+  });
+  const targetPlan = {
+    instructionKey: "MLB:PO-61001/cycle:1",
+    targetRelation: null,
+    state: "confirmed_live_job",
+    sourcePostIds: ["conflicting-po-source"],
+    identity: {
+      externalRefCanonical: "MLB-61001",
+      builderWoCanonical: "MLB-61001PO-61001",
+      builderPoCanonical: "PO-61001",
+      builderSlug: "mlb",
+      siteAddress: "1 Fixture Street",
+    },
+  } as any;
+
+  const result = await _readExistingObligationJobsForTest(
+    fakeClient(store),
+    [targetPlan],
+    new Map(),
+  );
+
+  assertEquals(result.existingJobs.size, 0);
+  assertEquals(result.bindingExceptions.get(targetPlan.instructionKey), {
+    kind: "multiple_live_jobs",
+    candidateJobIds: ["conflicting-po-job"],
+    candidateJobNumbers: ["SWMS-61001"],
+  });
+});
+
+Deno.test("the matcher keeps terminal same-reference identity gaps as terminal bindings", async () => {
+  const store = baseStore();
+  store.makesafe_job_details.push({
+    job_id: "terminal-identity-gap",
+    external_ref: "MLB-61002",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    report_type: null,
+    jobs: {
+      job_number: "SWMS-61002",
+      status: "completed",
+      metadata: {},
+      site_address: "2 Fixture Street",
+      type: "makesafe",
+    },
+  });
+  const targetPlan = {
+    instructionKey: "MLB:PO-61002/cycle:1",
+    targetRelation: null,
+    state: "confirmed_live_job",
+    sourcePostIds: ["terminal-identity-source"],
+    identity: {
+      externalRefCanonical: "MLB-61002",
+      builderWoCanonical: "MLB-61002PO-61002",
+      builderPoCanonical: "PO-61002",
+      builderSlug: "mlb",
+      siteAddress: "2 Fixture Street",
+    },
+  } as any;
+
+  const result = await _readExistingObligationJobsForTest(
+    fakeClient(store),
+    [targetPlan],
+    new Map(),
+  );
+
+  assertEquals(result.existingJobs.size, 0);
+  assertEquals(result.bindingExceptions.get(targetPlan.instructionKey), {
+    kind: "terminal_job_binding",
+    candidateJobIds: ["terminal-identity-gap"],
+    candidateJobNumbers: ["SWMS-61002"],
+  });
+});
+
+Deno.test("the matcher keeps conflicting stored AJ work orders unbound", async () => {
+  const store = baseStore();
+  store.makesafe_job_details.push({
+    job_id: "aj-wo-conflict",
+    external_ref: "AJBR-67001",
+    requesting_company_slug: "aj",
+    requesting_company_name: "AJ Building Restoration",
+    report_type: null,
+    jobs: {
+      job_number: "SWMS-67001",
+      status: "accepted",
+      metadata: {
+        builder_work_order_number: "AJBR-67999",
+      },
+      site_address: "3 Fixture Street",
+      type: "makesafe",
+    },
+  });
+  const targetPlan = {
+    instructionKey: "AJ:JOB-67001/cycle:1",
+    targetRelation: null,
+    state: "confirmed_live_job",
+    sourcePostIds: ["aj-wo-conflict-source"],
+    identity: {
+      externalRefCanonical: "AJBR-67001",
+      builderWoCanonical: "AJBR-67001",
+      builderPoCanonical: null,
+      builderSlug: "aj",
+      siteAddress: "3 Fixture Street",
+    },
+  } as any;
+
+  const result = await _readExistingObligationJobsForTest(
+    fakeClient(store),
+    [targetPlan],
+    new Map(),
+  );
+
+  assertEquals(result.existingJobs.size, 0);
+  assertEquals(result.bindingExceptions.get(targetPlan.instructionKey), {
+    kind: "multiple_live_jobs",
+    candidateJobIds: ["aj-wo-conflict"],
+    candidateJobNumbers: ["SWMS-67001"],
+  });
+});
+
 function digitalWorkOrderPdf(
   lines: readonly string[] = [
     "Work Order Number MLB-26770PO-55296",
@@ -5598,6 +5735,7 @@ Deno.test("deterministic selection links a canonical MLB ref to its composite-re
     jobs: {
       status: "accepted",
       metadata: { builder_po_number: "PO-56866" },
+      type: "makesafe",
     },
   }, {
     job_id: "manual-recovery-job",
@@ -5608,6 +5746,7 @@ Deno.test("deterministic selection links a canonical MLB ref to its composite-re
     jobs: {
       status: "accepted",
       metadata: { builder_po_number: "PO-56922" },
+      type: "makesafe",
     },
   });
   const client = fakeClient(store);

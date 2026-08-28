@@ -404,8 +404,12 @@ import {
 } from './makesafe_intake_golden_replay.ts'
 import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
+  readAccountedIntakeDraftObligations as _readAccountedIntakeDraftObligations,
+  resolveConsistentObligationFamily as _resolveConsistentObligationFamily,
   resolveDeterministicDraftMintAuthority as _resolveDeterministicDraftMintAuthority,
   runDeterministicIntake as _runDeterministicIntake,
+  type IntakeDraftObligationCandidate as _IntakeDraftObligationCandidate,
+  type IntakeDraftObligationDisposition as _IntakeDraftObligationDisposition,
 } from './makesafe_deterministic_intake_runtime.ts'
 import {
   notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
@@ -21823,20 +21827,126 @@ async function makesafeMap(client: any, params: URLSearchParams) {
 }
 
 // ── Slice 7: list intake drafts ──
+const INTAKE_OPERATOR_PAGE_SIZE = 1000
+const INTAKE_OPERATOR_RETURN_LIMIT = 50
+
+async function loadIntakeDraftRows(
+  client: any,
+  statuses: string[],
+  ascending: boolean,
+): Promise<{ rows: any[]; totalCount: number }> {
+  const rows: any[] = []
+  let exactTotal: number | null = null
+  for (let from = 0;; from += INTAKE_OPERATOR_PAGE_SIZE) {
+    const { data, error, count } = await client.from('makesafe_intake_drafts')
+      .select('*', { count: 'exact' })
+      .in('status', statuses)
+      .order('received_at', { ascending })
+      .order('id', { ascending })
+      .range(from, from + INTAKE_OPERATOR_PAGE_SIZE - 1)
+    if (error) throw error
+    const page = data || []
+    rows.push(...page)
+    if (typeof count === 'number') exactTotal = count
+    if (
+      page.length < INTAKE_OPERATOR_PAGE_SIZE ||
+      (exactTotal !== null && rows.length >= exactTotal)
+    ) break
+  }
+  return { rows, totalCount: exactTotal ?? rows.length }
+}
+
+function intakeDraftObligationCandidate(
+  draft: any,
+): _IntakeDraftObligationCandidate {
+  const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const externalRef = cleanReviewedString(draft?.external_ref) ||
+    cleanReviewedString(extraction.external_ref) ||
+    cleanReviewedString(extraction.builder_claim_ref)
+  const requestingCompany = consistentIntakeDraftRequestingCompany(
+    draft,
+    extraction,
+  )
+  const jobFamily = resolvedIntakeDraftFamily(draft, true)
+  const identity = _correlateIntakeApprovalIdentity({
+    extraction,
+    approved_external_ref: externalRef,
+    requesting_company_slug: requestingCompany,
+    family: jobFamily,
+    attachment_names: _intakeIdentityAttachmentNames(attachments),
+    document_texts: parseJsonArray(extraction.work_order_pdf_text)
+      .map((document: any) =>
+        typeof document?.text === 'string' && document.text.trim()
+          ? document.text
+          : null
+      )
+      .filter(Boolean),
+  })
+  const correlatedExtraction = identity.action === 'ready'
+    ? identity.extraction
+    : extraction
+  return {
+    draftId: String(draft?.id || ''),
+    externalRef,
+    builderWorkOrderNumber:
+      cleanReviewedString(correlatedExtraction.builder_work_order_number),
+    builderPoNumber:
+      cleanReviewedString(correlatedExtraction.builder_po_number),
+    identityProved: identity.action === 'ready' && !!identity.instruction_key,
+    requestingCompany,
+    siteAddress: cleanReviewedString(draft?.site_address) ||
+      cleanReviewedString(extraction.site_address),
+    jobFamily,
+  }
+}
+
+async function classifyAccountedIntakeDrafts(
+  client: any,
+  drafts: any[],
+): Promise<Map<string, _IntakeDraftObligationDisposition>> {
+  const candidates = drafts
+    .filter((draft: any) => ['draft', 'needs_review'].includes(String(draft?.status || '')))
+    .map(intakeDraftObligationCandidate)
+    .filter((candidate: _IntakeDraftObligationCandidate) => !!candidate.draftId)
+  return await _readAccountedIntakeDraftObligations(client, candidates)
+}
+
 async function listIntakeDrafts(client: any, params: URLSearchParams) {
   // reopen_candidate is included by default so the board INTAKE column surfaces
   // "matches job X — reopen it?" items alongside normal new-WO drafts.
   const status = params.get('status') || 'draft,needs_review,reopen_candidate'
-  const statuses = status.split(',').map((s: string) => s.trim())
-
-  const { data, error } = await client.from('makesafe_intake_drafts')
-    .select('*')
-    .in('status', statuses)
-    .order('received_at', { ascending: false })
-    .limit(50)
-  if (error) throw error
-  const drafts = (data || []).map((draft: any) => enrichIntakeDraftForReview(draft))
-  return { drafts }
+  const statuses = status.split(',').map((s: string) => s.trim()).filter(Boolean)
+  const loaded = await loadIntakeDraftRows(client, statuses, false)
+  let dispositions = new Map<string, _IntakeDraftObligationDisposition>()
+  let accountedFilterError: string | null = null
+  try {
+    dispositions = await classifyAccountedIntakeDrafts(client, loaded.rows)
+  } catch (error) {
+    // The operator queue fails visible: if obligation authority cannot be read,
+    // keep every draft on the board rather than hiding an uncertain real WO.
+    accountedFilterError = error instanceof Error ? error.message : String(error)
+    console.error('[ops-api] list_intake_drafts accounted filter unavailable:', accountedFilterError)
+  }
+  const omittedAccounted = loaded.rows.filter((draft: any) =>
+    dispositions.get(String(draft?.id || ''))?.kind === 'accounted'
+  )
+  const visible = loaded.rows.filter((draft: any) =>
+    dispositions.get(String(draft?.id || ''))?.kind !== 'accounted'
+  )
+  const drafts = visible.slice(0, INTAKE_OPERATOR_RETURN_LIMIT)
+    .map((draft: any) => enrichIntakeDraftForReview(draft))
+  return {
+    drafts,
+    total_count: loaded.totalCount,
+    visible_total_count: Math.max(0, loaded.totalCount - omittedAccounted.length),
+    omitted_count: omittedAccounted.length,
+    omitted_accounted_count: omittedAccounted.length,
+    returned_count: drafts.length,
+    limit: INTAKE_OPERATOR_RETURN_LIMIT,
+    has_more: visible.length > drafts.length,
+    accounted_filter_error: accountedFilterError,
+  }
 }
 
 function parseJsonObject(value: any): Record<string, any> {
@@ -22477,15 +22587,52 @@ function shouldAutoApproveCleanIntake(input: {
   return { ok: true, reason: 'clean_high_confidence_work_order' }
 }
 
-function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason: string } {
+function intakeFamilyFromCanonicalObligationFamily(family: string): string | null {
+  switch (family) {
+    case 'assessment_quote':
+      return 'assessment_report_quote'
+    case 'ordinary_roof_portal':
+    case 'own_template_roof':
+      return 'roof_report'
+    case 'temporary_fencing':
+      return 'temp_fence_makesafe'
+    case 'physical_makesafe':
+      return 'general_makesafe'
+    case 'repair':
+    case 'restoration':
+      return family
+    default:
+      return null
+  }
+}
+
+function consistentIntakeDraftRequestingCompany(
+  draft: any,
+  extraction: Record<string, any>,
+): string | null {
+  // Slug remains authoritative over name within one stored source. Comparing
+  // slug and name to each other is the separate F7 company-agreement question.
+  const draftCompany = cleanReviewedString(draft?.requesting_company_slug) ||
+    cleanReviewedString(draft?.requesting_company_name)
+  const extractedCompany = cleanReviewedString(
+    extraction.requesting_company_slug,
+  ) || cleanReviewedString(extraction.requesting_company_name)
+  if (
+    draftCompany && extractedCompany &&
+    canonicalCompanyDedupeKey(draftCompany) !==
+      canonicalCompanyDedupeKey(extractedCompany)
+  ) return null
+  return draftCompany || extractedCompany || null
+}
+
+function resolvedIntakeDraftFamily(
+  draft: any,
+  requireIndependentSignals = false,
+): string | null {
   const extraction = parseJsonObject(draft?.extraction_json)
   const attachments = parseJsonArray(draft?.attachments_json)
   const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
-  const builder = cleanReviewedString(draft?.requesting_company_slug) ||
-    cleanReviewedString(extraction.requesting_company_slug) ||
-    cleanReviewedString(draft?.requesting_company_name) ||
-    cleanReviewedString(extraction.requesting_company_name) ||
-    null
+  const builder = consistentIntakeDraftRequestingCompany(draft, extraction)
   const workOrderAttachments = draftWorkOrderAttachments(attachments)
   const workOrderNames = new Set(
     workOrderAttachments
@@ -22519,21 +22666,110 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
       familyContextRefused = true
     }
   }
-  const familyDecision = _decideDeterministicMakeSafeJobFamily(
-    draft?.subject || null,
-    [draft?.body_preview, draft?.description, extraction.description].filter(Boolean).join('\n'),
-    effectiveReportType,
-    familyContext,
+  const previewInstructionText = [
+    draft?.body_preview,
+    draft?.description,
+    extraction.description,
+  ].filter(Boolean).join('\n')
+  const fullInstructionText = cleanReviewedString(
+    extraction.builder_email_text_for_trade,
   )
+  const fullInstructionFamilyDecision = fullInstructionText
+    ? _decideDeterministicMakeSafeJobFamily(
+      null,
+      fullInstructionText,
+      null,
+      { builder },
+    )
+    : null
   const storedFamilyRaw = cleanReviewedString(extraction.makesafe_job_family)
-  const storedFamily = _normaliseDedupJobFamily(storedFamilyRaw)
-  const decidedFamily = _normaliseDedupJobFamily(familyDecision.family)
-  const jobFamily = familyContextRefused
-    ? null
-    : storedFamilyRaw
-    ? (storedFamily === decidedFamily ? storedFamily : null)
-    : (decidedFamily || null)
+  // The accounted-obligation boundary opts into independent proof because it
+  // can hide or Advance a draft. Other intake callers retain their established
+  // combined PDF/preview cleanliness classification.
+  if (!requireIndependentSignals) {
+    const combinedPreviewDecision = _decideDeterministicMakeSafeJobFamily(
+      draft?.subject || null,
+      previewInstructionText,
+      effectiveReportType,
+      familyContext,
+    )
+    const combinedSignals = [
+      ...(storedFamilyRaw ? [{ makesafe_job_family: storedFamilyRaw }] : []),
+      ...(combinedPreviewDecision.family
+        ? [{ makesafe_job_family: combinedPreviewDecision.family }]
+        : []),
+      ...(fullInstructionFamilyDecision?.family
+        ? [{ makesafe_job_family: fullInstructionFamilyDecision.family }]
+        : []),
+    ]
+    const combinedFamily = familyContextRefused
+      ? null
+      : _resolveConsistentObligationFamily(combinedSignals)
+    if (!combinedFamily || combinedFamily === 'unknown') return null
+    return intakeFamilyFromCanonicalObligationFamily(combinedFamily)
+  }
+  const previewSignalPresent = !!(
+    cleanReviewedString(draft?.subject) ||
+    cleanReviewedString(previewInstructionText)
+  )
+  const storedReportType = cleanReviewedString(draft?.report_type)
+  const reportTypeFamilyDecision = storedReportType
+    ? _decideDeterministicMakeSafeJobFamily(
+      null,
+      null,
+      storedReportType,
+      { builder },
+    )
+    : null
+  const previewFamilyDecision = previewSignalPresent
+    ? _decideDeterministicMakeSafeJobFamily(
+      draft?.subject || null,
+      previewInstructionText,
+      null,
+      { builder },
+    )
+    : null
+  const pdfSignalPresent = pdfDocuments.length > 0
+  const pdfFamilyDecision = pdfSignalPresent
+    ? _decideDeterministicMakeSafeJobFamily(
+      null,
+      null,
+      null,
+      familyContext,
+    )
+    : null
+  if (
+    familyContextRefused ||
+    (storedReportType && !reportTypeFamilyDecision?.family) ||
+    (previewSignalPresent && !previewFamilyDecision?.family) ||
+    (pdfSignalPresent && !pdfFamilyDecision?.family) ||
+    (fullInstructionText && !fullInstructionFamilyDecision?.family)
+  ) return null
+  const familySignals = [
+    ...(storedFamilyRaw ? [{ makesafe_job_family: storedFamilyRaw }] : []),
+    ...(reportTypeFamilyDecision?.family
+      ? [{ makesafe_job_family: reportTypeFamilyDecision.family }]
+      : []),
+    ...(previewFamilyDecision?.family
+      ? [{ makesafe_job_family: previewFamilyDecision.family }]
+      : []),
+    ...(pdfFamilyDecision?.family
+      ? [{ makesafe_job_family: pdfFamilyDecision.family }]
+      : []),
+    ...(fullInstructionFamilyDecision?.family
+      ? [{ makesafe_job_family: fullInstructionFamilyDecision.family }]
+      : []),
+  ]
+  const canonicalFamily = _resolveConsistentObligationFamily(familySignals)
+  if (!canonicalFamily || canonicalFamily === 'unknown') return null
+  return intakeFamilyFromCanonicalObligationFamily(canonicalFamily)
+}
 
+function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason: string } {
+  const extraction = parseJsonObject(draft?.extraction_json)
+  const attachments = parseJsonArray(draft?.attachments_json)
+  const effectiveReportType = effectiveIntakeReportType(draft) || cleanReviewedString(draft?.report_type)
+  const jobFamily = resolvedIntakeDraftFamily(draft)
   // Defence in depth for legacy rows created before scan-time cancellation/combined
   // flagging existed: recompute both signals directly from the stored draft so the sweep
   // can never auto-promote a cancellation twin or a make-safe that also owes a report.
@@ -22557,8 +22793,8 @@ function shouldAutoApproveCleanIntakeDraftRow(draft: any): { ok: boolean; reason
     confidence: draft?.confidence,
     missingFields: parseJsonArray(draft?.missing_fields),
     matchedCompany: {
-      slug: cleanReviewedString(draft?.requesting_company_slug) || cleanReviewedString(extraction.requesting_company_slug),
-      name: cleanReviewedString(draft?.requesting_company_name) || cleanReviewedString(extraction.requesting_company_name),
+      slug: consistentIntakeDraftRequestingCompany(draft, extraction),
+      name: null,
     },
     externalRef: cleanReviewedString(draft?.external_ref) || cleanReviewedString(extraction.external_ref),
     clientName: cleanReviewedString(draft?.client_name) || cleanReviewedString(extraction.client_name),
@@ -22583,6 +22819,7 @@ export const _autoApproveCleanIntakeEnabledForTest = autoApproveCleanIntakeEnabl
 // and prove the M1 fail-loud banner is still written via the base-only retry.
 export const _writeIntakeHealthForTest = writeIntakeHealth
 export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
+export const _listIntakeDraftsForTest = listIntakeDrafts
 // Exported so the intent gate is proved through the REAL sweep rather than a stub:
 // the whole point of the 2026-08-06 ruling is that a render-path caller reaches
 // approveIntakeDraft zero times, and only the real wiring can show that.
@@ -22629,20 +22866,64 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     ? body.statuses.map((s: any) => String(s || '').trim()).filter(Boolean)
     : ['needs_review', 'draft']
 
-  const { data: drafts, error } = await client.from('makesafe_intake_drafts')
-    .select('*')
-    .in('status', statuses)
-    .order('received_at', { ascending: true })
-    .limit(limit)
-  if (error) throw error
-
-  const checked = drafts || []
+  const loaded = await loadIntakeDraftRows(client, statuses, true)
+  let dispositions = new Map<string, _IntakeDraftObligationDisposition>()
+  let accountedMatchError: string | null = null
+  try {
+    dispositions = await classifyAccountedIntakeDrafts(client, loaded.rows)
+  } catch (error) {
+    // Advancing is a write boundary. If the shared obligation authority cannot
+    // be read, every row remains reviewable and this sweep mints nothing.
+    accountedMatchError = error instanceof Error ? error.message : String(error)
+    console.error('[ops-api] auto_approve_clean_intake_drafts obligation match unavailable:', accountedMatchError)
+  }
+  const accountedSkipped = loaded.rows.flatMap((draft: any) => {
+    const disposition = dispositions.get(String(draft?.id || ''))
+    return disposition?.kind === 'accounted'
+      ? [{
+        draft_id: draft?.id || null,
+        external_ref: draft?.external_ref || null,
+        reason: 'existing_equivalent_obligation',
+        matched_job_id: disposition.jobId,
+      }]
+      : []
+  })
+  const dispositionSkipped = accountedMatchError
+    ? []
+    : loaded.rows.flatMap((draft: any) => {
+      const disposition = dispositions.get(String(draft?.id || ''))
+      if (
+        disposition?.kind === 'kept' &&
+        disposition.reason === 'no_equivalent_live_obligation'
+      ) return []
+      return disposition?.kind === 'accounted'
+        ? []
+        : [{
+          draft_id: draft?.id || null,
+          external_ref: draft?.external_ref || null,
+          reason: disposition?.reason || 'existing_obligation_check_unavailable',
+        }]
+    })
+  const advanceable = loaded.rows.filter((draft: any) => {
+    const disposition = dispositions.get(String(draft?.id || ''))
+    return disposition?.kind === 'kept' &&
+      disposition.reason === 'no_equivalent_live_obligation'
+  })
+  const checked = (accountedMatchError ? loaded.rows : advanceable).slice(0, limit)
   const autoApproved: any[] = []
   const eligible: any[] = []
-  const skipped: any[] = []
+  const skipped: any[] = [...dispositionSkipped]
   const failed: any[] = []
 
   for (const draft of checked) {
+    if (accountedMatchError) {
+      skipped.push({
+        draft_id: draft?.id || null,
+        external_ref: draft?.external_ref || null,
+        reason: 'existing_obligation_check_unavailable',
+      })
+      continue
+    }
     const decision = shouldAutoApproveCleanIntakeDraftRow(draft)
     if (!decision.ok) {
       skipped.push({
@@ -22716,11 +22997,15 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     live_approval_authorised: trigger.liveAuthorised,
     trigger_refusal_reason: trigger.refusalReason,
     trigger_refusal: triggerRefusal,
+    total_count: loaded.totalCount,
     checked_count: checked.length,
     eligible_count: eligible.length,
     auto_approved: autoApproved,
     auto_approved_count: autoApproved.length,
     skipped_count: skipped.length,
+    accounted_skipped: accountedSkipped,
+    accounted_skipped_count: accountedSkipped.length,
+    accounted_match_error: accountedMatchError,
     failed,
     failed_count: failed.length,
     skipped,

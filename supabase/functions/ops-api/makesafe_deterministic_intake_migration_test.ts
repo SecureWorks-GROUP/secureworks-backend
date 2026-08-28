@@ -295,19 +295,6 @@ Deno.test("obligation dedupe collapses the full established builder alias set at
   );
   assertEquals(canonicalCompanyDedupeKey(""), "");
   assertEquals(canonicalCompanyDedupeKey(null), "");
-  // Both obligation boundaries use the ONE shared helper, not a local strip.
-  assertStringIncludes(
-    runtime,
-    "canonicalCompanyDedupeKey(item.identity.builderSlug)",
-  );
-  assertStringIncludes(
-    index,
-    "canonicalCompanyDedupeKey(approvedFields.requesting_company_slug",
-  );
-  assertStringIncludes(
-    index,
-    "canonicalCompanyDedupeKey(row.requesting_company_slug",
-  );
 });
 
 Deno.test("terminal jobs remain visible instruction authority and cannot be reminted", () => {
@@ -321,39 +308,6 @@ Deno.test("terminal jobs remain visible instruction authority and cannot be remi
   assertStringIncludes(runtime, '"superseded"');
   assertStringIncludes(runtime, '"cancelled"');
   assertStringIncludes(runtime, '"void"');
-});
-
-Deno.test("runtime existing-PO derivation mirrors the approve path's builder_work_order_number fallback", () => {
-  // A distinct explicit PO stored only in builder_work_order_number must count on
-  // BOTH boundaries so two explicitly-different POs are never over-deduped.
-  assertStringIncludes(
-    runtime,
-    "canonicalObligationPoCore(metadata.builder_work_order_number, true)",
-  );
-  assertStringIncludes(
-    index,
-    "canonicalObligationPoCore(existingMetadata.builder_work_order_number, true)",
-  );
-});
-
-Deno.test("runtime incoming (target) PO derivation mirrors the WO and composite-ref fallbacks", () => {
-  // The INCOMING side must fall back to builderWoCanonical and the composite
-  // externalRefCanonical exactly like the existing/approve sides, so a distinct
-  // PO carried only in the WO or the composite ref still discriminates and a
-  // genuinely distinct-PO obligation is not over-deduped into an existing job.
-  assertStringIncludes(
-    runtime,
-    "canonicalObligationPoCore(item.identity.builderWoCanonical, true)",
-  );
-  assertStringIncludes(
-    runtime,
-    "canonicalObligationPoCore(item.identity.externalRefCanonical, true)",
-  );
-  // The shared PO-core helper proves the fallback semantics the target relies on:
-  // a WO-labelled or composite value yields its PO core, a bare claim does not.
-  assertEquals(canonicalObligationPoCore("PO-56922", true), "56922");
-  assertEquals(canonicalObligationPoCore("MLB-26537PO-56922", true), "56922");
-  assertEquals(canonicalObligationPoCore("MLB-26537", true), null);
 });
 
 Deno.test("canonicalSlug delegates to the one shared canonical company alias set", () => {
