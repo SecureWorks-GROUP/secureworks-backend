@@ -292,6 +292,14 @@ CREATE TRIGGER trg_makesafe_intake_cases_enforce
 -- carries the WHERE clause in exactly the production shape (org + legacy +
 -- not-cancelled + type) so the in-place regex patch is exercised against a real
 -- catalog definition, with the real rendering PostgreSQL chooses.
+--
+-- The LEFT JOIN below is load-bearing, not decoration. pg_get_viewdef drops the
+-- range-table alias when a view reads a SINGLE table, rendering the predicate as
+-- bare `type = 'makesafe'::text` — which the migration's `j.type` anchor cannot
+-- match (found by this contract's first CI run, 2026-08-28: section 6 aborted
+-- with 0 hits while production matched exactly once). Production job_financials
+-- is multi-table, so its vars stay alias-qualified; a second range table here
+-- reproduces that rendering faithfully (verified on PostgreSQL 17.6: 1 hit).
 CREATE OR REPLACE VIEW public.job_financials AS
 SELECT
   j.id          AS job_id,
@@ -301,6 +309,7 @@ SELECT
   j.status,
   j.created_at
 FROM public.jobs j
+LEFT JOIN public.makesafe_job_details d ON d.job_id = j.id
 WHERE j.org_id  = '00000000-0000-0000-0000-000000000001'
   AND j.legacy  = false
   AND j.status <> 'cancelled'
