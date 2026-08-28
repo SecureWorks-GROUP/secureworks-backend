@@ -300,6 +300,66 @@ const GENERIC_WORK_ORDER_RE = /\b(new\s+work\s+order|work\s+order)\b/i;
 const RESTORATION_TEXT_RE =
   /\b(restoration\s+(work|works|services?|scope)|building\s+restoration|water\s+damage\s+restoration|fire\s+damage\s+restoration|restore\s+(the\s+)?(property|building|dwelling|premises))\b/i;
 
+// Ruled 2026-08-28 (repair-siphon taxonomy, CAPTAIN-RULINGS-2026-08-28): the
+// replacement VERBS are the deterministic repair signal. Measured on the full
+// 61-day corpus (394 deliverables) these patterns hit true fence/gate/sheet
+// replacements and nothing else, where the bare word "repair" is 17% precise
+// (contaminated by the `Makesafe/Emergency Repairs` header and "make temporary
+// repair" phrasing), "carpentry" is 0% (an AJ trade dispatch label) and "shed"
+// is 5% (make-safe TO a damaged shed). Nouns stay out; verbs decide.
+const REPAIR_REPLACEMENT_SCOPE_RE =
+  /\bremove\s+and\s+replace\b|\bremove,?(?:\s+and)?\s+dispose\b[^.]{0,120}?\b(?:install|replace)\b|\bsupply\s+and\s+install\b[^.]{0,80}?\b(?:colou?r\s*bond\w*|fenc\w*|gates?|panels?|sheets?|sheeting)\b/i;
+const TEMP_FENCE_SNIPPET_RE = /temp(?:orary)?\s*fenc/i;
+
+/**
+ * First replacement-verb match whose snippet is not itself about TEMPORARY
+ * fencing ("supply and install temp fencing" is the make-safe fence subtype,
+ * never a replacement signal). Returns the matched snippet as the evidence
+ * trail, or null.
+ */
+function matchRepairReplacementScope(text: string): string | null {
+  const re = new RegExp(REPAIR_REPLACEMENT_SCOPE_RE.source, "gi");
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (!TEMP_FENCE_SNIPPET_RE.test(match[0])) {
+      return match[0].slice(0, 160);
+    }
+    if (match.index === re.lastIndex) re.lastIndex++;
+  }
+  return null;
+}
+
+export interface RepairLegSignal {
+  detected: boolean;
+  /** The matched scope snippet (or the rapid-repair label) — evidence trail. */
+  evidence: string | null;
+}
+
+/**
+ * Ruling 5 (sealed 2026-08-28, two-card dual scope): a work order carrying an
+ * emergency leg PLUS a replacement leg ("install temp fence" + "supply and
+ * install 1800H Colorbond fence") mints the make-safe card first and owes a
+ * SEPARATE linked SWR- repair child. This detector is family-independent: it
+ * reports that a replacement leg exists so intake can park the draft for the
+ * human who approves the make-safe card and spawns the child. It never moves
+ * the family itself — the make-safe card must keep a make-safe family or the
+ * board exclusion filter hides it from the crew.
+ */
+export function detectRepairLegSignal(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  context: MakeSafeJobFamilyContext = {},
+): RepairLegSignal {
+  const text = [body || "", context.pdfScopeText || ""].join("\n")
+    .toLowerCase();
+  const snippet = matchRepairReplacementScope(text);
+  if (snippet) return { detected: true, evidence: snippet };
+  if (hasExplicitRapidRepairSignal(subject, body)) {
+    return { detected: true, evidence: "rapid_repair_signal" };
+  }
+  return { detected: false, evidence: null };
+}
+
 export interface MakeSafeJobFamilyContext {
   /** Deterministically extracted work-order PDF text. */
   pdfScopeText?: string | null;
@@ -325,6 +385,7 @@ export interface MakeSafeJobFamilyDecision {
     | "ajs_restoration_park"
     | "pdf_declared_type_header"
     | "repair_quote_stage"
+    | "repair_replacement_scope"
     | "typed_restoration"
     | "text_restoration_park"
     | "typed_roof_report"
@@ -459,6 +520,20 @@ export function decideMakeSafeJobFamily(
     return { family: null, evidence: "text_restoration_park" };
   }
 
+  // Ruled 2026-08-28: a replacement scope ("remove and replace", "remove and
+  // dispose ... install", "supply and install ... Colorbond/fence/gate/panel")
+  // with NO make-safe language of its own is a repair deliverable. When
+  // make-safe language co-fires the rung falls through instead — the emergency
+  // leg wins the card and the replacement leg rides as detectRepairLegSignal
+  // evidence for a human-spawned child card (Ruling 5, two-card dual scope).
+  if (
+    matchRepairReplacementScope(text) &&
+    !STRONG_PHYSICAL_MAKESAFE_RE.test(text) &&
+    !GENERIC_PHYSICAL_MAKESAFE_RE.test(text)
+  ) {
+    return { family: "repair", evidence: "repair_replacement_scope" };
+  }
+
   // Concrete protective work outranks a report phrase. A scope that says to
   // tarp a roof and provide a report is still physical make-safe work; the
   // report is a secondary obligation, not a report-only family.
@@ -527,6 +602,27 @@ export function decideDeterministicMakeSafeJobFamily(
  * Back-compatible classifier for callers whose existing contract requires one
  * of the known families. New intake code should use decideMakeSafeJobFamily so
  * genuine ambiguity stays visible.
+ *
+ * It wraps the DETERMINISTIC variant, and that is load-bearing rather than
+ * tidiness. It previously wrapped decideMakeSafeJobFamily, which carries no
+ * rapid-repair upgrade — so on the approval fallback path a work order whose
+ * subject reads `**RAPID REPAIR**` was STRUCTURALLY INCAPABLE of becoming a
+ * repair job. Not hypothetical: a 90-day sweep found exactly two such subjects
+ * and both were approved as general_makesafe, and neither of the two
+ * intake-born live repair cards was classified repair at mint.
+ *
+ * This adds NO new business rule. It gives the fallback exactly the repair
+ * signals the deterministic layer already seals — the RAPID REPAIR subject and
+ * the labelled `Dispatch Class: Rapid Repairs` line — and the upgrade still
+ * fires only when the ladder returned general_makesafe or abstained, so no
+ * other family can be overwritten by it. The declared repair PDF header
+ * (`Rapid Repairs`, `Scaffolding/Access Equipment`) already reached repair
+ * through the shared ladder and is unaffected.
+ *
+ * Deliberately NOT included: MLB's `Makesafe/Emergency Repairs` work-order
+ * category, which is 242 of the last 90 days' headers and which the grammar
+ * maps to make-safe on purpose. Reading that label as repair is a captain
+ * decision and is not taken here.
  */
 export function classifyMakeSafeJobFamily(
   subject: string | null | undefined,
@@ -534,8 +630,8 @@ export function classifyMakeSafeJobFamily(
   reportType?: string | null,
   context: MakeSafeJobFamilyContext = {},
 ): MakeSafeJobFamily {
-  return decideMakeSafeJobFamily(subject, body, reportType, context).family ||
-    "general_makesafe";
+  return decideDeterministicMakeSafeJobFamily(subject, body, reportType, context)
+    .family || "general_makesafe";
 }
 
 // ── M-G FIX 2 — top-down taxonomy (Marnin's Emergency-Insurance-Work model) ────
