@@ -255,7 +255,8 @@ function makeClient(tables: Record<string, any[]>) {
       then: (
         resolve: (value: unknown) => unknown,
         reject?: (reason: unknown) => unknown,
-      ) => Promise.resolve({ data: apply(), error: null }).then(resolve, reject),
+      ) =>
+        Promise.resolve({ data: apply(), error: null }).then(resolve, reject),
     };
     return builder;
   }
@@ -278,17 +279,55 @@ Deno.test("pipeline: next/last_scheduled_date ride the card while first_schedule
     job_assignments: [
       // Real past visits — the earliest stays first_scheduled_date, the most
       // recent becomes last_scheduled_date.
-      { id: "a1", job_id: JOB, scheduled_date: "2020-01-05", status: "completed" },
-      { id: "a7", job_id: JOB, scheduled_date: "2021-02-03", status: "completed" },
+      {
+        id: "a1",
+        job_id: JOB,
+        scheduled_date: "2020-01-05",
+        status: "completed",
+      },
+      {
+        id: "a7",
+        job_id: JOB,
+        scheduled_date: "2021-02-03",
+        status: "completed",
+      },
       // Ghost + observer rows carry nearer future dates and must not win the
       // next date, while still counting in assignment_count as they always have.
-      { id: "a2", job_id: JOB, scheduled_date: "2098-01-01", is_ghost: true, role: "observer", status: "scheduled" },
-      { id: "a3", job_id: JOB, scheduled_date: "2098-06-01", role: "observer", status: "scheduled" },
+      {
+        id: "a2",
+        job_id: JOB,
+        scheduled_date: "2098-01-01",
+        is_ghost: true,
+        role: "observer",
+        status: "scheduled",
+      },
+      {
+        id: "a3",
+        job_id: JOB,
+        scheduled_date: "2098-06-01",
+        role: "observer",
+        status: "scheduled",
+      },
       // The crew's genuine return visits.
-      { id: "a4", job_id: JOB, scheduled_date: "2099-03-01", status: "scheduled" },
-      { id: "a5", job_id: JOB, scheduled_date: "2099-09-01", status: "scheduled" },
+      {
+        id: "a4",
+        job_id: JOB,
+        scheduled_date: "2099-03-01",
+        status: "scheduled",
+      },
+      {
+        id: "a5",
+        job_id: JOB,
+        scheduled_date: "2099-09-01",
+        status: "scheduled",
+      },
       // Cancelled rows stay excluded from everything, as before.
-      { id: "a6", job_id: JOB, scheduled_date: "2099-01-01", status: "cancelled" },
+      {
+        id: "a6",
+        job_id: JOB,
+        scheduled_date: "2099-01-01",
+        status: "cancelled",
+      },
     ],
   });
 
@@ -319,8 +358,18 @@ Deno.test("pipeline: an all-past job carries the most recent past visit and no n
       created_at: "2026-07-01T00:00:00.000Z",
     }],
     job_assignments: [
-      { id: "b1", job_id: JOB, scheduled_date: "2020-04-14", status: "completed" },
-      { id: "b2", job_id: JOB, scheduled_date: "2020-05-27", status: "completed" },
+      {
+        id: "b1",
+        job_id: JOB,
+        scheduled_date: "2020-04-14",
+        status: "completed",
+      },
+      {
+        id: "b2",
+        job_id: JOB,
+        scheduled_date: "2020-05-27",
+        status: "completed",
+      },
     ],
   });
 
@@ -349,7 +398,12 @@ Deno.test("pipeline: a NULL-status upcoming visit reaches next_scheduled_date wh
       created_at: "2026-07-01T00:00:00.000Z",
     }],
     job_assignments: [
-      { id: "c1", job_id: JOB, scheduled_date: "2020-08-05", status: "completed" },
+      {
+        id: "c1",
+        job_id: JOB,
+        scheduled_date: "2020-08-05",
+        status: "completed",
+      },
       // The booked return visit, stored with no status at all. A `.neq` read
       // drops it (SQL three-valued logic) and the chip goes stale on 2020-08-05.
       { id: "c2", job_id: JOB, scheduled_date: "2099-09-04", status: null },

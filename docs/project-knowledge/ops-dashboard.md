@@ -35,10 +35,13 @@ See edge-functions.md for full list. Key ones:
   (`is_ghost`) / `role:'observer'` rows, so a reschedule moves them and a stale
   watcher row can never pin them. `next_scheduled_date` is the earliest visit
   on or after today (Perth calendar day); `last_scheduled_date` is the most
-  recent visit before today. The OpsDash card date chip for Scheduled /
-  In Progress reads `next_scheduled_date`, falling back to
+  recent visit before today. The ruled contract for the OpsDash card date chip
+  on Scheduled / In Progress cards is `next_scheduled_date`, falling back to
   `last_scheduled_date` when nothing is ahead (a job awaiting closeout) —
   never a blank chip. Both `null` only when the job has no dated real visits.
+  Only the server side of that ruling is here; pointing the chip at the new
+  fields is a separate `ops.html` change in the `dashboard` submodule (see
+  AGENTS.md — that UI ships from `secureworks-ux`, not from this repo).
   `job_assignments.status` is nullable, so the read excludes cancelled rows with
   `or('status.is.null,status.neq.cancelled')` rather than a `.neq` that SQL
   three-valued logic would use to drop a booked NULL-status visit; the frozen
