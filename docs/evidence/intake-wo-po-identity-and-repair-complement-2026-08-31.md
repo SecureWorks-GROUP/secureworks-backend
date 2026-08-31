@@ -194,8 +194,9 @@ earlier rounds had not closed.
 `needs_review`) when the FINAL `approvedJobFamily` is repair AND the caller
 carries the module-private `UNATTENDED_INTAKE_APPROVAL` marker. Every in-repo
 automation lane stamps it — the clean-intake sweep, the re-extract auto-file,
-the Auto-Intake v2 scan, and all three deterministic-runtime `approveDraft`
-wirings (standing scan, fresh-source scan, source-persist recovery). Human and
+the Auto-Intake v2 scan, the late-work-order-PDF auto-file, the legacy-drain
+wiring, and all three deterministic-runtime `approveDraft` wirings (standing
+scan, fresh-source scan, source-persist recovery). Human and
 API-operator approvals through the route are unchanged. The Symbol follows the
 `SOURCE_PERSIST_NO_SEND_RECOVERY` precedent so no request body can forge it and
 a new automation lane that omits it is a reviewable omission. The deterministic
@@ -222,7 +223,27 @@ draft. Everything upstream of the first check either links an existing job or
 refuses on its own terms. Pinned in both directions by
 `repair_intake_routing_test.ts`: an unattended NEW repair mint is still refused
 and the draft stays reviewable, while an already-minted repair card's settlement
-retry passes the brake and reaches its claim.
+retry runs to completion — no refusal, no second card, and the intake case bound
+onto the job that is already live. That second test fails if EITHER brake is
+un-gated, so the recovery path cannot silently start 409ing again.
+
+### Accepted limitation: the brake enumerates its callers
+
+The brake works because every unattended caller stamps the marker, and the eight
+in-repo lanes that do are listed above. That is an ENUMERATION, not a property:
+a NEW call site added later that forgets to stamp reaches approval unbraked. The
+module-private Symbol makes the omission visible in review rather than forgeable
+from a request body, and the deterministic runtime's
+`deterministicPlanNeedsSupervisedRepairReview` park is an independent second
+layer — but only for the deterministic lane.
+
+The architecturally stronger answer is a default-deny inversion: refuse a repair
+mint unless a positively identified operator approved it, so a new lane is
+refused by default instead of admitted by default. That needs an operator-identity
+decision (which callers count as identified, and how an API-key operator proves
+it) that belongs to the Captain, so it is deliberately filed as a follow-up and
+NOT taken in this change. A maintainer adding an automation lane here must stamp
+the marker until that inversion lands.
 
 ## Evidence — the 23 currently-untyped review-queue drafts
 

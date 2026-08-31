@@ -6310,7 +6310,11 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await _drainLegacyIntakeDrafts(client, {
           maxDrafts: Number(body?.max_drafts ?? body?.maxDrafts ?? 100),
-          approveDraft: approveIntakeDraft,
+          approveDraft: (approvalClient: any, approvalBody: any) =>
+            approveIntakeDraft(approvalClient, {
+              ...approvalBody,
+              ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+            }),
           applyBuilderCancellation: (command) =>
             applyDeterministicBuilderCancellation(client, command),
         }))
@@ -26031,6 +26035,7 @@ async function landLateWorkOrderPdfOntoDraft(
   if (enabled && decision.ok) {
     try {
       const approved = await approve(client, {
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
         draft_id: target.id,
         approved_by: 'auto-intake-late-pdf',
         review_notes: 'Auto-filed after a late work-order PDF landed on an existing intake draft (two-email MLB sequence): high-confidence, required fields + servable WO PDF now present. Draft-only intake promotion; no invoice/send/authorise/close action.',

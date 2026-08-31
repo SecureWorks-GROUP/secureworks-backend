@@ -131,12 +131,26 @@ function makeClient(store: Store) {
         filters.push((row) => row[column] === value);
         return chain;
       },
+      neq: (column: string, value: unknown) => {
+        filters.push((row) => row[column] !== value);
+        return chain;
+      },
       is: (column: string, value: unknown) => {
         filters.push((row) => row[column] == value);
         return chain;
       },
+      in: (column: string, values: unknown[]) => {
+        filters.push((row) => (values || []).includes(row[column]));
+        return chain;
+      },
+      not: () => chain,
+      contains: () => chain,
+      or: () => chain,
+      gte: () => chain,
+      lte: () => chain,
       ilike: () => chain,
       order: () => chain,
+      range: () => chain,
       limit: () => chain,
       maybeSingle: async () => {
         const result = await execute();
@@ -188,6 +202,22 @@ function makeClient(store: Store) {
           },
           error: null,
         };
+      }
+      if (name === "complete_makesafe_intake_job_mint") {
+        const mint = (store.tables.makesafe_intake_job_mints || []).find(
+          (row) => row.id === args.p_mint_id,
+        );
+        if (!mint) return { data: [], error: null };
+        mint.job_id = args.p_job_id;
+        return { data: [mint], error: null };
+      }
+      if (name === "reserve_makesafe_intake_job_mint") {
+        const existing = (store.tables.makesafe_intake_job_mints || []).find(
+          (row) =>
+            row.draft_id === args.p_draft_id &&
+            row.mint_role === args.p_mint_role,
+        );
+        return { data: existing ? [existing] : [], error: null };
       }
       return { data: null, error: null };
     },
@@ -679,16 +709,23 @@ function legacyRepairDraftRow(): Row {
 
 function approvalClient(
   draft: Row,
-  seed: { mints?: Row[]; jobs?: Row[]; caseSources?: Row[] } = {},
+  seed: {
+    mints?: Row[];
+    jobs?: Row[];
+    caseSources?: Row[];
+    cases?: Row[];
+  } = {},
 ) {
   const drafts = [draft];
   const rpcCalls: string[] = [];
   const draftUpdates: Row[] = [];
+  const caseUpdates: Row[] = [];
   const mints = seed.mints || [];
   return {
     drafts,
     rpcCalls,
     draftUpdates,
+    caseUpdates,
     client: {
       rpc(name: string) {
         rpcCalls.push(name);
@@ -698,12 +735,50 @@ function approvalClient(
         return Promise.resolve({ data: null, error: null });
       },
       from(table: string) {
+        if (table === "makesafe_intake_cases") {
+          let payload: Row | null = null;
+          let targetId: string | null = null;
+          let requireUnbound = false;
+          const query: any = {
+            select: () => query,
+            eq: (_column: string, value: string) => {
+              if (_column === "id") targetId = value;
+              return query;
+            },
+            is: () => {
+              requireUnbound = true;
+              return query;
+            },
+            in: () => query,
+            order: () =>
+              Promise.resolve({ data: seed.cases || [], error: null }),
+            then: (resolve: (value: any) => unknown) =>
+              resolve({ data: seed.cases || [], error: null }),
+            update: (next: Row) => {
+              payload = next;
+              return query;
+            },
+            maybeSingle: () => {
+              const row = (seed.cases || []).find((c) => c.id === targetId);
+              if (!row || (requireUnbound && row.job_id)) {
+                return Promise.resolve({ data: null, error: null });
+              }
+              Object.assign(row, payload);
+              caseUpdates.push({ id: targetId, ...payload });
+              return Promise.resolve({ data: { id: targetId }, error: null });
+            },
+          };
+          return query;
+        }
         if (table === "makesafe_intake_case_sources") {
           const query: any = {
             select: () => query,
             eq: () => query,
-            in: () =>
+            in: () => query,
+            order: () =>
               Promise.resolve({ data: seed.caseSources || [], error: null }),
+            then: (resolve: (value: any) => unknown) =>
+              resolve({ data: seed.caseSources || [], error: null }),
           };
           return query;
         }
@@ -792,64 +867,88 @@ Deno.test("an unattended lane may not mint a card that resolves to repair only a
 // job is a settlement RETRY — the deterministic runtime re-enters approval for
 // exactly this reason after a mint-role release — and refusing it stranded a live
 // repair card with no reachable settlement on any automated lane.
-Deno.test("settlement recovery of an already-minted repair card is not refused as an unattended mint", async () => {
+Deno.test("settlement recovery of an already-minted repair card completes rather than 409ing", async () => {
   // The production shape the finding names: a deterministic repair draft whose
   // job already exists, released back to `needs_review` by a mint-role reset
   // while `approved_job_id` still points at the live card. The deterministic
   // runtime re-enters approval for exactly this, carrying the unattended marker.
-  const minted = legacyRepairDraftRow();
-  minted.approved_job_id = "job-already-minted";
-  minted.deterministic_key = "draft:MLB:PO-61000/cycle:1";
-  minted.extraction_json = {
-    ...minted.extraction_json,
+  // `recoverIntakeMintJob` returns the existing job and `createMakesafeJob`
+  // never runs, so NEITHER brake may fire — the run must reach settlement and
+  // bind the intake case onto the job that is already live.
+  const draft = legacyRepairDraftRow();
+  draft.approved_job_id = "job-already-minted";
+  draft.deterministic_key = "draft:MLB:PO-61000/cycle:1";
+  draft.extraction_json = {
+    ...draft.extraction_json,
     deterministic_intake: true,
     intake_source_post_ids: ["src-1"],
   };
-  const db = approvalClient(minted, {
-    mints: [{
-      id: "mint-1",
-      draft_id: "draft-legacy-repair",
-      mint_role: "primary",
-      case_id: "case-1",
-      source_post_ids: ["src-1"],
-      job_id: "job-already-minted",
-      state: "minted",
-      evidence_attached_at: null,
-      board_observed_at: null,
-      notification_accepted_at: null,
-    }],
-    jobs: [{
-      id: "job-already-minted",
-      type: "repair",
-      job_number: "SWR-26001",
-    }],
-    caseSources: [{ post_id: "src-1", case_id: "case-1" }],
+  const store = makeStore({
+    tables: {
+      makesafe_intake_drafts: [draft],
+      makesafe_intake_job_mints: [{
+        id: "mint-1",
+        draft_id: "draft-legacy-repair",
+        mint_role: "primary",
+        case_id: "case-1",
+        source_post_ids: ["src-1"],
+        job_id: "job-already-minted",
+        state: "minted",
+        evidence_attached_at: null,
+        board_observed_at: null,
+        // The retry shape: the post-board notification already succeeded on the
+        // first pass, so settlement repairs the mint row instead of re-notifying.
+        notification_accepted_at: "2026-08-31T00:00:00.000Z",
+      }],
+      jobs: [{
+        id: "job-already-minted",
+        type: "repair",
+        job_number: "SWR-26001",
+        status: "accepted",
+        metadata: {},
+      }],
+      makesafe_intake_case_sources: [{
+        org_id: ORG_ID,
+        post_id: "src-1",
+        case_id: "case-1",
+      }],
+      makesafe_intake_cases: [{
+        org_id: ORG_ID,
+        id: "case-1",
+        instruction_key: "MLB:PO-61000/cycle:1",
+        cycle: 1,
+        parent_relation: null,
+        source_fingerprint: null,
+        state: "exception",
+        reason_code: "awaiting_job_creation",
+        job_id: null,
+        blocked_reasons: [],
+      }],
+    },
   });
 
-  const error = await assertRejects(
-    () =>
-      _approveIntakeDraftForTest(db.client, {
-        ..._unattendedIntakeApprovalMarkerForTest,
-        draft_id: "draft-legacy-repair",
-        approved_by: "auto-intake",
-      }),
-    Error,
+  const result = await _approveIntakeDraftForTest(makeClient(store), {
+    ..._unattendedIntakeApprovalMarkerForTest,
+    draft_id: "draft-legacy-repair",
+    approved_by: "auto-intake",
+  });
+
+  // No refusal, and no SECOND card: the run adopted the job that already exists.
+  assertEquals(result.ok, true);
+  assertEquals(result.job.id, "job-already-minted");
+  assertEquals(
+    store.tables.jobs.map((row) => row.id),
+    ["job-already-minted"],
   );
-  assert(
-    !String((error as Error).message).includes(
-      "Repair intake requires a human tick",
-    ),
-    `a settlement retry must not hit the mint brake, got: ${
-      (error as Error).message
-    }`,
+  // Settlement ran and bound the intake case, so the card can still resolve its
+  // case for the pack path.
+  assertEquals(
+    store.tables.makesafe_intake_cases[0].job_id,
+    "job-already-minted",
   );
-  // Proof it got PAST the pre-claim brake rather than failing earlier for an
-  // unrelated reason: the atomic claim, which sits immediately after that brake,
-  // actually ran. (A later step on this thin fixture then throws and the
-  // post-claim catch requeues the draft, which is the correct safety behaviour.)
-  assert(
-    db.draftUpdates.some((update) => update.status === "approved"),
-    "the atomic claim must have run, proving the pre-claim brake was passed",
+  assertEquals(
+    store.tables.makesafe_intake_cases[0].state,
+    "confirmed_live_job",
   );
 });
 
