@@ -12759,6 +12759,63 @@ async function readPipelineEnrichmentRows(
   }
 }
 
+// ── OpsDash date chip: next upcoming visit (Captain ruling 2026-08-31) ──────
+// For Scheduled / In Progress cards the chip must show the next visit that has
+// not happened yet, following reschedules — not the first visit ever booked.
+// `first_scheduled_date` keeps its historical MIN(scheduled_date) meaning
+// because other surfaces read it; `next_scheduled_date` is the additive field
+// the chip switches to, and `last_scheduled_date` (most recent past visit) is
+// its ruled fallback for a card with nothing ahead — never a blank chip.
+// A visit dated today still counts as upcoming.
+//
+// Ghost watcher rows (`is_ghost`, `role:'observer'`) mirror office staff onto a
+// job and keep the job's OLD scheduled_date after a reschedule (see the my_jobs
+// GHOST ROWS note), so they must never influence this value — the same
+// exclusion the stage-truth evidence path applies via the sibling
+// `isFencingAssignmentNonFieldWork` (fencing_stage_recipe_v1.ts), which is
+// fencing-scoped by name while `pipeline` serves every job type.
+// "Today" is the Perth calendar day: the edge runtime clock is UTC, and a UTC
+// day boundary would keep showing yesterday's visit until 8am Perth time.
+export function _perthTodayYmd(now: Date = new Date()): string {
+  const parts = perthYmd(now)
+  if (!parts) return new Date().toISOString().slice(0, 10)
+  return `${parts.y}-${String(parts.m).padStart(2, '0')}-${String(parts.d).padStart(2, '0')}`
+}
+
+// `next` is the earliest visit on or after today; `last` (Captain ruling
+// 2026-08-31, option a) is the most recent visit strictly before today — the
+// chip's fallback when a Scheduled / In Progress job has nothing ahead of it
+// and is only waiting to be closed out. Both exclude ghost/observer rows.
+//
+// Cancelled rows are excluded here in CODE rather than trusted to the read's
+// `.neq`, because `job_assignments.status` is nullable and SQL three-valued
+// logic drops a NULL-status row from a `.neq` — which would hide a genuinely
+// booked upcoming visit and reproduce the stale chip this field exists to fix.
+// The read therefore keeps NULL-status rows and this filter is the only
+// cancelled exclusion the new fields rely on.
+export function _pipelineVisitDateMaps(
+  assignments: Array<{ job_id?: string; scheduled_date?: string | null; is_ghost?: boolean | null; role?: string | null; status?: string | null }>,
+  todayYmd: string,
+): { next: Record<string, string>; last: Record<string, string> } {
+  const next: Record<string, string> = {}
+  const last: Record<string, string> = {}
+  for (const a of assignments || []) {
+    const date = a?.scheduled_date
+    if (!a?.job_id || typeof date !== 'string' || !date) continue
+    if (String(a.status || '').trim().toLowerCase() === 'cancelled') continue
+    if (a.is_ghost === true) continue
+    if (String(a.role || '').trim().toLowerCase() === 'observer') continue
+    // scheduled_date is a DATE column serialised YYYY-MM-DD, so lexicographic
+    // comparison is date comparison.
+    if (date >= todayYmd) {
+      if (!next[a.job_id] || date < next[a.job_id]) next[a.job_id] = date
+    } else {
+      if (!last[a.job_id] || date > last[a.job_id]) last[a.job_id] = date
+    }
+  }
+  return { next, last }
+}
+
 async function pipeline(client: any, params: URLSearchParams) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
@@ -12873,8 +12930,15 @@ async function pipeline(client: any, params: URLSearchParams) {
 
   if (jobIds.length > 0) {
     ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes] = await Promise.all([
+      // is_ghost/role feed next_scheduled_date only; assignment_count and
+      // first_scheduled_date deliberately keep counting ghost rows as before.
+      // `status` is nullable, so a `.neq` would drop NULL-status rows (SQL
+      // three-valued logic) and hide a booked upcoming visit from
+      // next_scheduled_date. Exclude cancelled rows with an explicit OR that
+      // keeps NULL, and re-apply the old exclusion in code for the two legacy
+      // fields so their values stay exactly what they were.
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
-        client.from('job_assignments').select('job_id, scheduled_date').in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status').in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
@@ -12976,14 +13040,23 @@ async function pipeline(client: any, params: URLSearchParams) {
     for (const r of rows) m[r.job_id] = (m[r.job_id] || 0) + 1
     return m
   }
-  const assignMap = countMap(assignRes.data || [])
+  // assignment_count and first_scheduled_date are frozen: they see exactly the
+  // rows the old `.neq('status','cancelled')` read returned, so a NULL-status
+  // row is excluded here even though the read now delivers it.
+  const statusFilteredAssignments = (assignRes.data || []).filter((a: any) =>
+    a?.status != null && String(a.status).trim().toLowerCase() !== 'cancelled')
+  const assignMap = countMap(statusFilteredAssignments)
   // Earliest scheduled_date per job
   const schedDateMap: Record<string, string> = {}
-  for (const a of (assignRes.data || [])) {
+  for (const a of statusFilteredAssignments) {
     if (a.scheduled_date && (!schedDateMap[a.job_id] || a.scheduled_date < schedDateMap[a.job_id])) {
       schedDateMap[a.job_id] = a.scheduled_date
     }
   }
+  // Earliest not-yet-happened visit per job, plus the most recent past visit
+  // as the no-upcoming fallback (ghost/observer rows excluded from both) —
+  // the OpsDash date chip's values for Scheduled / In Progress cards.
+  const { next: nextSchedDateMap, last: lastSchedDateMap } = _pipelineVisitDateMaps(assignRes.data || [], _perthTodayYmd())
   const poMap = countMap(poRes.data || [])
   const woMap = countMap(woRes.data || [])
   const opsNotesMap = countMap(opsNotesRes.data || [])
@@ -13063,6 +13136,8 @@ async function pipeline(client: any, params: URLSearchParams) {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
       first_scheduled_date: schedDateMap[j.id] || null,
+      next_scheduled_date: nextSchedDateMap[j.id] || null,
+      last_scheduled_date: lastSchedDateMap[j.id] || null,
       po_count: poMap[j.id] || 0,
       wo_count: woMap[j.id] || 0,
       ops_notes_count: opsNotesMap[j.id] || 0,
