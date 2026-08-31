@@ -725,6 +725,34 @@ and assemble on the physical labour/materials pack path — matrix rows in
 `job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
 ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
+## Repair Mints As A Real SWR- Job Type, Supervised, With No Backfill
+
+`jobs.type = 'repair'` with SWR- numbering is live (PR #771, deployed 2026-08-28;
+migration `20260826000001_repair_job_type.sql` — type CHECK, `next_job_number`
+branch, `makesafe_job_details` + intake-case triggers widened to admit repair,
+`job_financials` view, and §7 keeping repair OFF the auto money-seal path). The
+mint branch is `_makesafeJobRouteForFamily` in `approveIntakeDraft`; the repair
+route in `createMakesafeJob` fails closed (503) without the migration — never add
+an invented-number fallback. Classification is sealed by the Captain's 2026-08-28
+repair-siphon rulings (wiki
+`missions/harden-ses-2026-08/CAPTAIN-RULINGS-2026-08-28-repair-siphon-taxonomy.md`):
+Fencing declared headers + the replacement-verb ladder route to repair; temp
+fencing and MLB's "Makesafe/Emergency Repairs" header stay make-safe; a
+dual-scope WO stays make-safe and flags `repair_leg_detected` (child SWR- spawn
+is a human tap); NO repair draft auto-approves
+(`repair_family_supervised_review` brake) so every SWR- mint is a human tick; and
+the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
+(ruling 6 — reversing needs a new ruling, not a script run). Xero: repair books
+tracking `SW - MAKESAFE` (type-aware `trackingCategoryForJob`; bare `SWR` prefix
+deliberately resolves to nothing); `accountCodeForJob` maps repair to 210,
+inherited from make-safe and marked OPEN RISK #2 pending Captain confirmation.
+The Repairs card carries the builder WO + PO refs lifted off `jobs.metadata` in
+`projectInsuranceRepairPipelineRow` (external_ref outranks the fused
+`builder_work_order_number` vintage). Ruling 4's quote-stage repair mint is a
+declared follow-up PR, not yet built. Tests: `repair_intake_routing_test.ts`,
+`repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
+`insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that
