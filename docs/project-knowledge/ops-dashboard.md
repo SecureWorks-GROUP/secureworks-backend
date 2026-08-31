@@ -27,16 +27,19 @@ See edge-functions.md for full list. Key ones:
 - `schedule`, `update_assignment`, `delete_assignment` — calendar CRUD
 - `create_assignment` — CP1: rejects `user_id` null for crew work with a 400 (name-only rows are invisible to Trade `my_jobs`, which filters on `user_id`); `meeting`/`reminder` types are exempt. Guard is create-only — existing rows are never rewritten. Accepts optional `duration_days` (positive integer; omitted → DB default 1). The create_assignment confirm paths in BOTH ops-ai and agent-runner satisfy the guard by resolving `user_id` from `crew_name` server-side (exact match against installer/trade/subcontractor users; unknown or ambiguous name → clear 400 naming it, never a guess)
 - CP1 drag-to-reschedule (calendar): `update_assignment` accepts `duration_days`/`durationDays` so a drag/resize round-trips `scheduled_date` + `scheduled_end` + `duration_days` together (coerced to a positive integer, else dropped); the calendar light column list includes `duration_days` as the drag UI's duration source. The reschedule popup's explicit Yes calls `send_client_update` with the `install_rescheduled` trigger (see SPINE_CONTRACT.md for its dedup/wording rules) — nothing sends it automatically
-- `pipeline` — kanban board rows. Each card carries two visit-date fields off
+- `pipeline` — kanban board rows. Each card carries three visit-date fields off
   `job_assignments` (non-cancelled rows): `first_scheduled_date` is the
   historical MIN(scheduled_date) including ghost/observer watcher rows — its
-  meaning is frozen, existing consumers read it — and `next_scheduled_date`
-  (Captain ruling 2026-08-31) is the earliest visit on or after today (Perth
-  calendar day) EXCLUDING ghost (`is_ghost`) / `role:'observer'` rows, so a
-  reschedule moves it and a stale watcher row can never pin it. The OpsDash
-  card date chip for Scheduled / In Progress reads `next_scheduled_date`.
-  `null` means no not-yet-happened visit exists. Regressions:
-  `pipeline_next_scheduled_date_test.ts`.
+  meaning is frozen, existing consumers read it — while `next_scheduled_date` /
+  `last_scheduled_date` (Captain rulings 2026-08-31) EXCLUDE ghost
+  (`is_ghost`) / `role:'observer'` rows, so a reschedule moves them and a stale
+  watcher row can never pin them. `next_scheduled_date` is the earliest visit
+  on or after today (Perth calendar day); `last_scheduled_date` is the most
+  recent visit before today. The OpsDash card date chip for Scheduled /
+  In Progress reads `next_scheduled_date`, falling back to
+  `last_scheduled_date` when nothing is ahead (a job awaiting closeout) —
+  never a blank chip. Both `null` only when the job has no dated real visits.
+  Regressions: `pipeline_next_scheduled_date_test.ts`.
 - `create_po`, `update_po`, `push_po_to_xero` — purchase orders
 - `create_wo`, `update_wo` — work orders
 - `job_detail` — full job data with assignments, POs, WOs, scope, invoices

@@ -12764,7 +12764,9 @@ async function readPipelineEnrichmentRows(
 // not happened yet, following reschedules — not the first visit ever booked.
 // `first_scheduled_date` keeps its historical MIN(scheduled_date) meaning
 // because other surfaces read it; `next_scheduled_date` is the additive field
-// the chip switches to. A visit dated today still counts as upcoming.
+// the chip switches to, and `last_scheduled_date` (most recent past visit) is
+// its ruled fallback for a card with nothing ahead — never a blank chip.
+// A visit dated today still counts as upcoming.
 //
 // Ghost watcher rows (`is_ghost`, `role:'observer'`) mirror office staff onto a
 // job and keep the job's OLD scheduled_date after a reschedule (see the my_jobs
@@ -12778,11 +12780,16 @@ export function _perthTodayYmd(now: Date = new Date()): string {
   return `${parts.y}-${String(parts.m).padStart(2, '0')}-${String(parts.d).padStart(2, '0')}`
 }
 
-export function _pipelineNextScheduledDateMap(
+// `next` is the earliest visit on or after today; `last` (Captain ruling
+// 2026-08-31, option a) is the most recent visit strictly before today — the
+// chip's fallback when a Scheduled / In Progress job has nothing ahead of it
+// and is only waiting to be closed out. Both exclude ghost/observer rows.
+export function _pipelineVisitDateMaps(
   assignments: Array<{ job_id?: string; scheduled_date?: string | null; is_ghost?: boolean | null; role?: string | null }>,
   todayYmd: string,
-): Record<string, string> {
-  const map: Record<string, string> = {}
+): { next: Record<string, string>; last: Record<string, string> } {
+  const next: Record<string, string> = {}
+  const last: Record<string, string> = {}
   for (const a of assignments || []) {
     const date = a?.scheduled_date
     if (!a?.job_id || typeof date !== 'string' || !date) continue
@@ -12790,10 +12797,13 @@ export function _pipelineNextScheduledDateMap(
     if (String(a.role || '').trim().toLowerCase() === 'observer') continue
     // scheduled_date is a DATE column serialised YYYY-MM-DD, so lexicographic
     // comparison is date comparison.
-    if (date < todayYmd) continue
-    if (!map[a.job_id] || date < map[a.job_id]) map[a.job_id] = date
+    if (date >= todayYmd) {
+      if (!next[a.job_id] || date < next[a.job_id]) next[a.job_id] = date
+    } else {
+      if (!last[a.job_id] || date > last[a.job_id]) last[a.job_id] = date
+    }
   }
-  return map
+  return { next, last }
 }
 
 async function pipeline(client: any, params: URLSearchParams) {
@@ -13023,9 +13033,10 @@ async function pipeline(client: any, params: URLSearchParams) {
       schedDateMap[a.job_id] = a.scheduled_date
     }
   }
-  // Earliest not-yet-happened visit per job (ghost/observer rows excluded) —
-  // the OpsDash date chip's value for Scheduled / In Progress cards.
-  const nextSchedDateMap = _pipelineNextScheduledDateMap(assignRes.data || [], _perthTodayYmd())
+  // Earliest not-yet-happened visit per job, plus the most recent past visit
+  // as the no-upcoming fallback (ghost/observer rows excluded from both) —
+  // the OpsDash date chip's values for Scheduled / In Progress cards.
+  const { next: nextSchedDateMap, last: lastSchedDateMap } = _pipelineVisitDateMaps(assignRes.data || [], _perthTodayYmd())
   const poMap = countMap(poRes.data || [])
   const woMap = countMap(woRes.data || [])
   const opsNotesMap = countMap(opsNotesRes.data || [])
@@ -13106,6 +13117,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       assignment_count: assignMap[j.id] || 0,
       first_scheduled_date: schedDateMap[j.id] || null,
       next_scheduled_date: nextSchedDateMap[j.id] || null,
+      last_scheduled_date: lastSchedDateMap[j.id] || null,
       po_count: poMap[j.id] || 0,
       wo_count: woMap[j.id] || 0,
       ops_notes_count: opsNotesMap[j.id] || 0,
