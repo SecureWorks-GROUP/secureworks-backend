@@ -846,6 +846,8 @@ import {
 import {
   applyParsedWorkOrderReferenceToExtraction as _applyParsedWorkOrderReferenceToExtraction,
   builderInstructionKeysForCard as _builderInstructionKeysForCard,
+  declaredBuilderInstructionKeysForCard as
+    _declaredBuilderInstructionKeysForCard,
   distinctBuilderInstructionKeys as _distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity as _extractBuilderWorkOrderIdentity,
   isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
@@ -23995,22 +23997,33 @@ async function approveIntakeDraft(client: any, body: any) {
   // keys. The family is the only input that varies between the three consumers
   // (the repair-grain probe below, the F9 conflict decision and the mint
   // reservation), so the card facts cannot drift between them.
+  const instructionKeyIdentity = (family: string | null) => ({
+    requestingCompanySlug: approvedFields.requesting_company_slug,
+    family,
+    metadata: {
+      external_ref: approvedFields.external_ref,
+      builder_claim_ref: extraction?.builder_claim_ref,
+      builder_work_order_number: extraction?.builder_work_order_number,
+      builder_po_number: extraction?.builder_po_number,
+    },
+    detailExternalRef: approvedFields.external_ref,
+  })
   const instructionKeysForFamily = (family: string | null) =>
     _builderInstructionKeysForCard({
-      requestingCompanySlug: approvedFields.requesting_company_slug,
-      family,
-      metadata: {
-        external_ref: approvedFields.external_ref,
-        builder_claim_ref: extraction?.builder_claim_ref,
-        builder_work_order_number: extraction?.builder_work_order_number,
-        builder_po_number: extraction?.builder_po_number,
-      },
-      detailExternalRef: approvedFields.external_ref,
+      ...instructionKeyIdentity(family),
       attachmentNames: availableAttachments.map((attachment: any) =>
         attachment.file_name || attachment.filename || attachment.name ||
           attachment.pdf_url || attachment.storage_url
       ),
     })
+  // The WO-fallback collapse may only be authorised by a PO this card DECLARES.
+  // A purchase order read off an attached filename belongs to whichever job that
+  // PDF was written for, and MLB attaches every PDF of a claim to every card.
+  const distinctInstructionKeysForFamily = (family: string | null) =>
+    _distinctBuilderInstructionKeys(
+      instructionKeysForFamily(family),
+      _declaredBuilderInstructionKeysForCard(instructionKeyIdentity(family)),
+    )
 
   // Fallback family for a draft carrying no authoritative family, under the
   // captain's 2026-08-31 identified-work-order complement: when the classifier
@@ -24034,9 +24047,7 @@ async function approveIntakeDraft(client: any, body: any) {
       approvedFamilyContext,
     )
     if (decision.family) return decision.family
-    const repairGrainKeys = _distinctBuilderInstructionKeys(
-      instructionKeysForFamily('repair'),
-    )
+    const repairGrainKeys = distinctInstructionKeysForFamily('repair')
     return _applyIdentifiedWorkOrderRepairComplement(decision, {
       scopeReadable: !!approvedFamilyContext.pdfScopeText &&
         !approvedFamilyContext.pdfOnlyBoilerplate,
@@ -24192,8 +24203,8 @@ async function approveIntakeDraft(client: any, body: any) {
     // routinely hosts several POs. The EXISTING-card side
     // (`matchExistingInstructionCards`) keeps the full enumeration, so a
     // re-send showing only the WO reference still finds the card it has.
-    const instructionKeys = _distinctBuilderInstructionKeys(
-      instructionKeysForFamily(approvedJobFamily || null),
+    const instructionKeys = distinctInstructionKeysForFamily(
+      approvedJobFamily || null,
     )
     if (instructionKeys.length > 1) {
       throw new ApiError(
@@ -24222,8 +24233,8 @@ async function approveIntakeDraft(client: any, body: any) {
   // The reservation reserves THIS card's instructions, so it takes the same
   // distinct-instruction set the availability probe compared on — reserving the
   // claim-grain WO fallback would lock every other purchase order on the claim.
-  const canonicalInstructionKeys = _distinctBuilderInstructionKeys(
-    instructionKeysForFamily(approvedJobFamily || null),
+  const canonicalInstructionKeys = distinctInstructionKeysForFamily(
+    approvedJobFamily || null,
   )
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before

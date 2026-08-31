@@ -332,9 +332,31 @@ Deno.test("approval correlation still refuses two PO-grain obligations on a repa
       "work_order_MLB-24645PO-59876.pdf",
     ],
   });
+  // Neither purchase order is declared by the card — both are read off attached
+  // filenames — so the card's own work-order key is not subsumed either, and all
+  // three unresolved readings are named in the refusal.
   assertEquals(decision, {
     action: "refuse",
     reason: "multiple_instruction_keys",
-    instruction_keys: ["MLB:PO-59875", "MLB:PO-59876"],
+    instruction_keys: ["MLB:PO-59875", "MLB:PO-59876", "MLB:WO-24645"],
   });
+});
+
+Deno.test("approval correlation refuses a sibling's attached PO rather than adopting it", () => {
+  // MLB attaches every PDF of a claim to every card in that family, so a
+  // neighbouring job's work order on this claim-only repair draft enumerates a
+  // purchase order the card does not own. Collapsing the card's own WO key onto
+  // that observed PO would mint one card for two instructions and then stamp the
+  // sibling's PO as this card's money reference, so it stays a human decision.
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: { builder_claim_ref: "MLB-26344" },
+    approved_external_ref: "MLB-26344",
+    requesting_company_slug: "mlb",
+    family: "repair",
+    attachment_names: ["work_order_PO-57087_Other_Job.pdf"],
+  });
+  assertEquals(decision.action, "refuse");
+  if (decision.action !== "refuse") return;
+  assertEquals(decision.reason, "multiple_instruction_keys");
+  assertEquals(decision.instruction_keys, ["MLB:PO-57087", "MLB:WO-26344"]);
 });

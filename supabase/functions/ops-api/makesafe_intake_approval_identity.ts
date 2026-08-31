@@ -10,6 +10,7 @@ import {
   builderInstructionKey,
   builderInstructionKeysForCard,
   type BuilderWorkOrderIdentity,
+  declaredBuilderInstructionKeysForCard,
   distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity,
   hasUnparseablePoRemainder,
@@ -193,9 +194,16 @@ export function correlateIntakeApprovalIdentity(input: {
   // and its repair WO-fallback key (a work order carrying BOTH numbers, read
   // from sources of unequal completeness). Conflict decisions and the single
   // instruction key run on the distinct-instruction set; the WO fallback is
-  // subsumed by its own scope's PO key, never by anything else.
+  // subsumed only by a PO this card DECLARES in the same scope, never by a PO
+  // token observed on an attached filename or in ambient source text.
   const sortedInstructionKeys = distinctBuilderInstructionKeys(
     [...instructionKeys].sort(),
+    declaredBuilderInstructionKeysForCard({
+      requestingCompanySlug: input.requesting_company_slug,
+      family: input.family,
+      metadata: input.extraction,
+      detailExternalRef: input.approved_external_ref,
+    }),
   );
   if (
     input.attachment_names.length > 0 &&

@@ -17,6 +17,7 @@ import {
   builderInstructionKey,
   builderInstructionKeysForCard,
   builderInstructionScope,
+  declaredBuilderInstructionKeysForCard,
   distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity,
 } from "./makesafe_builder_work_order_identity.ts";
@@ -216,19 +217,23 @@ Deno.test("po grain: a card carrying two purchase orders enumerates both keys", 
 // MLB-24645 / PO-59875 (22 Pitt Street, Pingelly) enumerated `MLB:PO-59875`
 // from its structured triple and `MLB:WO-24645` from its bare external_ref,
 // and Approve refused one work order as two instructions. The WO-grain key is
-// the repair FALLBACK for having no PO (probe 7), so a same-scope PO key
-// subsumes it; nothing else does.
+// the repair FALLBACK for having no PO (probe 7), so a DECLARED same-scope PO
+// key subsumes it; nothing else does.
+const pingellyIdentity = {
+  requestingCompanySlug: "mlb",
+  family: "repair",
+  metadata: {
+    external_ref: "MLB-24645",
+    builder_claim_ref: "MLB-24645",
+    builder_work_order_number: "MLB-24645",
+    builder_po_number: "PO-59875",
+  },
+  detailExternalRef: "MLB-24645",
+};
+
 Deno.test("po grain: a repair WO carrying both numbers collapses to its one PO key", () => {
   const enumerated = builderInstructionKeysForCard({
-    requestingCompanySlug: "mlb",
-    family: "repair",
-    metadata: {
-      external_ref: "MLB-24645",
-      builder_claim_ref: "MLB-24645",
-      builder_work_order_number: "MLB-24645",
-      builder_po_number: "PO-59875",
-    },
-    detailExternalRef: "MLB-24645",
+    ...pingellyIdentity,
     attachmentNames: [
       "work_order_MLB-24645PO-59875_Secureworks_Group_Pty_Ltd.pdf",
     ],
@@ -236,41 +241,103 @@ Deno.test("po grain: a repair WO carrying both numbers collapses to its one PO k
   // The enumeration itself deliberately still carries both readings — existing
   // -card matching needs the WO fallback so a WO-only re-send finds its card.
   assertEquals(enumerated, ["MLB:PO-59875", "MLB:WO-24645"]);
-  // The distinct-instruction view is what conflict decisions run on.
-  assertEquals(distinctBuilderInstructionKeys(enumerated), ["MLB:PO-59875"]);
+  // Pingelly DECLARES its purchase order in the typed triple, so a PO scope is
+  // present in the declared set and authorises the collapse.
+  assertEquals(
+    declaredBuilderInstructionKeysForCard(pingellyIdentity),
+    ["MLB:PO-59875", "MLB:WO-24645"],
+  );
+  assertEquals(
+    distinctBuilderInstructionKeys(
+      enumerated,
+      declaredBuilderInstructionKeysForCard(pingellyIdentity),
+    ),
+    ["MLB:PO-59875"],
+  );
 });
 
-Deno.test("po grain: the collapse subsumes ONLY a same-scope WO fallback", () => {
+// PROBE 9b — an OBSERVED purchase order is not ownership. MLB attaches every
+// PDF of a claim to every card in that family, so a sibling job's work order
+// sitting on this card yields a PO key the card does not own. Letting that key
+// subsume the card's own work-order grain would collapse two instructions into
+// one and then stamp the sibling's PO as this card's money reference, so the
+// collapse requires the card's OWN DECLARED PO and this shape keeps refusing.
+Deno.test("po grain: a PO read only off a sibling's attached filename never collapses the card's own WO", () => {
+  const claimOnlyIdentity = {
+    requestingCompanySlug: "mlb",
+    family: "repair",
+    metadata: {
+      external_ref: "MLB-26344",
+      builder_claim_ref: "MLB-26344",
+    },
+    detailExternalRef: "MLB-26344",
+  };
+  const enumerated = builderInstructionKeysForCard({
+    ...claimOnlyIdentity,
+    attachmentNames: ["work_order_PO-57087_Other_Job.pdf"],
+  });
+  assertEquals(enumerated, ["MLB:PO-57087", "MLB:WO-26344"]);
+  // Nothing about this card declares a purchase order.
+  assertEquals(declaredBuilderInstructionKeysForCard(claimOnlyIdentity), [
+    "MLB:WO-26344",
+  ]);
+  assertEquals(
+    distinctBuilderInstructionKeys(
+      enumerated,
+      declaredBuilderInstructionKeysForCard(claimOnlyIdentity),
+    ),
+    ["MLB:PO-57087", "MLB:WO-26344"],
+  );
+});
+
+Deno.test("po grain: the collapse subsumes ONLY a same-scope DECLARED WO fallback", () => {
+  const declared = (...keys: string[]) => keys;
   // Two purchase orders are still two instructions.
   assertEquals(
-    distinctBuilderInstructionKeys(["MLB:PO-53995", "MLB:PO-54000"]),
+    distinctBuilderInstructionKeys(
+      ["MLB:PO-53995", "MLB:PO-54000"],
+      declared("MLB:PO-53995", "MLB:PO-54000"),
+    ),
     ["MLB:PO-53995", "MLB:PO-54000"],
   );
   // A WO fallback under a DIFFERENT builder scope is another builder's
   // instruction and still conflicts.
   assertEquals(
-    distinctBuilderInstructionKeys(["MLB:PO-59875", "WB:WO-69684"]),
+    distinctBuilderInstructionKeys(
+      ["MLB:PO-59875", "WB:WO-69684"],
+      declared("MLB:PO-59875"),
+    ),
     ["MLB:PO-59875", "WB:WO-69684"],
   );
-  // Drifted group references beside one PO collapse onto the PO — the same
-  // direction probe 1 pins for the composite string form.
+  // Drifted group references beside one declared PO collapse onto the PO — the
+  // same direction probe 1 pins for the composite string form.
   assertEquals(
-    distinctBuilderInstructionKeys([
-      "MLB:PO-59875",
-      "MLB:WO-24645",
-      "MLB:WO-24646",
-    ]),
+    distinctBuilderInstructionKeys(
+      ["MLB:PO-59875", "MLB:WO-24645", "MLB:WO-24646"],
+      declared("MLB:PO-59875"),
+    ),
     ["MLB:PO-59875"],
   );
   // A repair card with NO PO anywhere keeps its WO-grain identity untouched.
   assertEquals(
-    distinctBuilderInstructionKeys(["MLB:WO-24645"]),
+    distinctBuilderInstructionKeys(
+      ["MLB:WO-24645"],
+      declared("MLB:WO-24645"),
+    ),
     ["MLB:WO-24645"],
   );
   // AJ's job-number grain is not a WO fallback and is never subsumed.
   assertEquals(
-    distinctBuilderInstructionKeys(["AJ:JOB-67009", "MLB:PO-54000"]),
+    distinctBuilderInstructionKeys(
+      ["AJ:JOB-67009", "MLB:PO-54000"],
+      declared("AJ:JOB-67009", "MLB:PO-54000"),
+    ),
     ["AJ:JOB-67009", "MLB:PO-54000"],
+  );
+  // Fail closed: a caller that proves no declared provenance gets no collapse.
+  assertEquals(
+    distinctBuilderInstructionKeys(["MLB:PO-59875", "MLB:WO-24645"]),
+    ["MLB:PO-59875", "MLB:WO-24645"],
   );
 });
 
@@ -289,19 +356,23 @@ function candidateKeysFor(input: {
   poNumber?: string;
   attachmentNames?: string[];
 }): string[] {
+  const identity = {
+    requestingCompanySlug: "mlb",
+    family: "repair",
+    metadata: {
+      external_ref: input.externalRef,
+      builder_claim_ref: input.claimRef,
+      builder_work_order_number: input.workOrderNumber,
+      builder_po_number: input.poNumber,
+    },
+    detailExternalRef: input.externalRef,
+  };
   return distinctBuilderInstructionKeys(
     builderInstructionKeysForCard({
-      requestingCompanySlug: "mlb",
-      family: "repair",
-      metadata: {
-        external_ref: input.externalRef,
-        builder_claim_ref: input.claimRef,
-        builder_work_order_number: input.workOrderNumber,
-        builder_po_number: input.poNumber,
-      },
-      detailExternalRef: input.externalRef,
+      ...identity,
       attachmentNames: input.attachmentNames || [],
     }),
+    declaredBuilderInstructionKeysForCard(identity),
   );
 }
 

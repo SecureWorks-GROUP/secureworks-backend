@@ -33,13 +33,42 @@ specified this grain for the single-string form ("the work-order grain is the
 fallback for having no PO, not an override"); this change applies the same
 grain at the card level.
 
-Two consumers decide conflicts on the distinct set: the F9 guard in
-`approveIntakeDraft` (`index.ts`) and `correlateIntakeApprovalIdentity`.
-`matchExistingInstructionCards` / `assertInstructionCardMintAvailable` and the
-mint reservation deliberately keep the FULL enumeration, so a WO-keyed
-existing card still blocks a twin of the same instruction, and a WO-only
-re-send still finds its card. `recoveredPrimaryMint` and the atomic draft
-claim are untouched.
+**The subsuming PO must be DECLARED.** `builderInstructionKeysForCard`
+enumerates purchase orders out of attachment FILENAMES as well as the typed
+triple, and MLB attaches every PDF of a claim to every card in that family
+(AGENTS.md: DECLARED PO coverage 62/440 against OBSERVED 274/440 — "an observed
+token is not ownership"). So the collapse takes its authority from
+`declaredBuilderInstructionKeysForCard`, which reads the card's typed identity
+(`builder_work_order_number` / `builder_claim_ref` / `builder_po_number`) and
+its own stored external reference and deliberately ignores attachment names.
+Pingelly is unaffected — its PO IS declared in `builder_po_number`. A claim-only
+repair card carrying a sibling job's `work_order_PO-57087_*.pdf` keeps refusing
+`multiple_instruction_keys` for human adjudication, instead of collapsing to one
+key and then stamping the neighbour's PO as this card's money reference.
+`declaredKeys` defaults to empty, so a caller that proves no provenance gets no
+collapse.
+
+### Which side of the mint gate reads which grain
+
+This card's OWN identity reads the DISTINCT set with declared-PO-only
+subsumption: the F9 conflict decision and `correlateIntakeApprovalIdentity`, the
+availability probe's `candidateKeys`, and the mint reservation. The EXISTING
+card's enumeration (`matchExistingInstructionCards`) stays FULL, so a re-send
+showing only the work-order reference still finds the card it already has.
+`recoveredPrimaryMint` and the atomic draft claim are untouched.
+
+That asymmetry is a change from this branch's first pass, which kept the
+candidate and reservation sides on the full enumeration too. Reserving the
+claim-grain `MLB:WO-<claim>` key would DURABLY false-block every other purchase
+order on that claim, because `makesafe_instruction_key_mints` rows persist after
+a successful mint — and one MLB claim routinely hosts several POs, each its own
+card (MLB-26183 carried three). The distinct set gives up one thing in exchange:
+inside the narrow window where two drafts of the SAME instruction are approved
+concurrently, one carrying WO+PO and the other carrying only the WO, the two
+reserve different keys and no longer collide. **The trade is accepted
+deliberately: a permanent wrong refusal is worse than a rare transient twin, and
+the transient one is detectable and recoverable.** The race is not engineered
+away in this change.
 
 ## Defect 2 — captain ruling 2026-08-31, the identified-WO repair complement
 
@@ -81,6 +110,40 @@ been passed. Implementation:
   `job_creation_deferred`/parked, and a human approves it from the review queue.
   Pinned by the parked/CONTROL pair in
   `makesafe_deterministic_intake_runtime_test.ts`.
+
+  **Measured exposure of the gap while it was open:** a read-only authenticated
+  check on 2026-08-31 found ZERO `SWR-` jobs in the system — the three
+  repair-marked cards are pre-type `SWMS-` rows. So the absent brake never fired
+  live, most likely because Pingelly was the first arrival that qualified and
+  the identity conflict of Defect 1 blocked it before it could mint. The gap was
+  real and is closed here; nothing has to be unwound.
+
+### Supervision must not cost the pack path
+
+Parking the repair draft moves the mint onto the human lane, and that lane did
+not bind the intake case. `makesafe_intake_cases.job_id` was written ONLY by the
+deterministic runtime's own second `insertCaseAndSources(..., jobId)`, which
+runs after the approval the brake now withholds; nothing else in the codebase
+writes it, and the case cannot self-heal on a later sweep because its
+`makesafe_intake_case_sources` row already makes the source a FINAL fate. A
+caseless repair card is refused at `prepare_ses_docket_revision` with
+`spine_missing_source` / `spine_missing_lineage`, so the whole pack path would
+have been blocked for a physical-shaped family.
+
+`bindIntakeCasesToMintedJobs` (`makesafe_intake_settlement.ts`) closes that at
+the one shared seam that already holds both coordinates —
+`makesafe_intake_job_mints` carries `case_id` from
+`resolveDeterministicDraftMintAuthority` and `job_id` from `completeIntakeMint`
+— so the binding now happens whichever lane approved the draft. It is a
+compare-and-set on `job_id IS NULL` (never re-points a bound case), it promotes
+only in the census-permitted `exception -> live` direction (`blocked_live_job`
+when the case still carries blockers, otherwise `confirmed_live_job`), and it
+checks the job TYPE itself rather than letting
+`enforce_makesafe_intake_case_write` decide: that trigger admits make-safe and
+repair but RAISES for a restoration (`insurance`) job, so an unscoped write
+would fail settlement for that family. The runtime is deliberately NOT allowed
+to re-approve; that would restore the unsupervised `SWR-` mint through a side
+door. Pinned by the four binding cases in `makesafe_intake_settlement_test.ts`.
 
 ## Evidence — the 23 currently-untyped review-queue drafts
 

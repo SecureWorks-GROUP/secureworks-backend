@@ -87,6 +87,138 @@ export async function completeIntakeMint(
   return row as IntakeMint;
 }
 
+/**
+ * `enforce_makesafe_intake_case_write` refuses `makesafe_intake_cases.job_id`
+ * unless the job is one of these types (widened from make-safe alone by
+ * `20260826000001_repair_job_type.sql`). A restoration card is `insurance` and
+ * would RAISE, so the type is checked here rather than left to the trigger:
+ * settlement must never fail for a family this binding does not cover.
+ */
+const INTAKE_CASE_LINKABLE_JOB_TYPES = new Set(["makesafe", "repair"]);
+
+/**
+ * Only these states may be promoted onto a job. `accounted_non_wo` is excluded
+ * because `makesafe_intake_case_transition_allowed` permits it to reach
+ * `exception` only — it is not work awaiting a card.
+ */
+const INTAKE_CASE_BINDABLE_STATES = new Set([
+  "exception",
+  "blocked_live_job",
+  "confirmed_live_job",
+]);
+
+/**
+ * Bind each settled mint's intake case to the job that mint created.
+ *
+ * This is the ONE place the binding happens for every lane, because it is the
+ * only shared seam that already holds both coordinates: `reserveIntakeMint`
+ * persists `makesafe_intake_job_mints.case_id` from the draft's canonical
+ * source authority, and `completeIntakeMint` stamps `job_id` on the same row.
+ *
+ * It exists because the deterministic runtime's own
+ * `insertCaseAndSources(..., jobId)` runs only when the runtime itself
+ * advanced the draft. Any draft a HUMAN approves from the review queue — which
+ * is now every repair-family draft, under the 2026-08-28 supervised-repair
+ * ruling — would otherwise keep `job_id` NULL forever: the case cannot
+ * self-heal on a later sweep (its `makesafe_intake_case_sources` row already
+ * makes the source a FINAL fate, so the recent lane skips it), and a caseless
+ * card is refused at `prepare_ses_docket_revision` with `spine_missing_source`
+ * / `spine_missing_lineage`, blocking the whole pack path.
+ *
+ * The write is a compare-and-set on `job_id IS NULL`, so it never re-points a
+ * case that is already bound and a concurrent binder simply wins.
+ */
+export async function bindIntakeCasesToMintedJobs(
+  client: any,
+  mints: readonly IntakeMint[],
+  actor: string,
+): Promise<string[]> {
+  const jobByCaseId = new Map<string, string>();
+  for (const mint of mints) {
+    const caseId = String(mint.case_id || "").trim();
+    const jobId = String(mint.job_id || "").trim();
+    if (caseId && jobId && !jobByCaseId.has(caseId)) {
+      jobByCaseId.set(caseId, jobId);
+    }
+  }
+  if (!jobByCaseId.size) return [];
+
+  const { data: caseRows, error: caseError } = await client
+    .from("makesafe_intake_cases")
+    .select("id,state,job_id,blocked_reasons")
+    .in("id", [...jobByCaseId.keys()]);
+  if (caseError) {
+    throw new Error(
+      `intake case binding read failed: ${caseError.message || caseError}`,
+    );
+  }
+  const unbound = (caseRows || []).filter((row: any) =>
+    jobByCaseId.has(String(row?.id)) && !row?.job_id &&
+    INTAKE_CASE_BINDABLE_STATES.has(String(row?.state || ""))
+  );
+  if (!unbound.length) return [];
+
+  const { data: jobRows, error: jobError } = await client
+    .from("jobs")
+    .select("id,type")
+    .in(
+      "id",
+      [...new Set(unbound.map((row: any) => jobByCaseId.get(String(row.id))))],
+    );
+  if (jobError) {
+    throw new Error(
+      `intake case binding job read failed: ${jobError.message || jobError}`,
+    );
+  }
+  const linkableJobIds = new Set(
+    (jobRows || [])
+      .filter((row: any) =>
+        INTAKE_CASE_LINKABLE_JOB_TYPES.has(
+          String(row?.type || "").trim().toLowerCase(),
+        )
+      )
+      .map((row: any) => String(row.id)),
+  );
+
+  const bound: string[] = [];
+  for (const row of unbound) {
+    const caseId = String(row.id);
+    const jobId = String(jobByCaseId.get(caseId));
+    if (!linkableJobIds.has(jobId)) continue;
+    // The runtime's own rule: outstanding blockers mean the job is live but
+    // still short of evidence. A parked case carries none, and a human tick
+    // plus a minted job is exactly a confirmed live job.
+    const nextState = Array.isArray(row.blocked_reasons) &&
+        row.blocked_reasons.length
+      ? "blocked_live_job"
+      : "confirmed_live_job";
+    const { data, error } = await client
+      .from("makesafe_intake_cases")
+      .update({
+        job_id: jobId,
+        state: nextState,
+        reason_code: null,
+        last_decision_provenance: "deterministic",
+        last_decision_actor: actor,
+        last_decision_reason:
+          `intake approval settlement bound ${nextState} job ${jobId}`,
+      })
+      .eq("id", caseId)
+      .is("job_id", null)
+      .select("id")
+      .maybeSingle();
+    if (error) {
+      throw new Error(
+        `intake case job binding failed for case ${caseId}: ${
+          error.message || error
+        }`,
+      );
+    }
+    if (data?.id) bound.push(String(data.id));
+  }
+  return bound;
+}
+
 export async function ensureIntakeWorkOrderEvidence(
   client: any,
   jobIds: readonly string[],
@@ -207,6 +339,8 @@ export async function settleApprovedIntakeDraft(
       jobId: string;
     }) => Promise<boolean>;
     refreshIdentity?: typeof refreshMakesafeIdentityAfterWorkOrderAttach;
+    /** Recorded as the intake case's `last_decision_actor` when it binds. */
+    caseBindingActor?: string;
   },
 ): Promise<{
   jobIds: string[];
@@ -246,6 +380,11 @@ export async function settleApprovedIntakeDraft(
     input.attachments,
     input.extraction,
     { refreshIdentity: input.refreshIdentity },
+  );
+  await bindIntakeCasesToMintedJobs(
+    client,
+    minted,
+    input.caseBindingActor || "intake_approval_settlement",
   );
 
   let notificationsAccepted = 0;
