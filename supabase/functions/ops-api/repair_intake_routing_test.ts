@@ -604,36 +604,3 @@ Deno.test("a hand-raised repair is a repair in its metadata too, not just its ty
   assertEquals(controlStore.tables.jobs[0].job_number, "SWMS-261400");
   assertEquals("repair_stage" in controlStore.tables.jobs[0].metadata, false);
 });
-
-Deno.test("the approval fallback runs the 2026-08-31 complement behind the F9 grain collapse", async () => {
-  // The complement and the WO/PO key collapse are unit-tested in
-  // repair_classifier_routing_test.ts, makesafe_deterministic_intake_test.ts
-  // and makesafe_instruction_key_po_grain_test.ts; these anchors prove the
-  // approval seam actually consumes them (the same convention as the route
-  // anchor above, because approveIntakeDraft cannot run against a mock store).
-  const source = normaliseLineEndings(
-    await Deno.readTextFile(new URL("./index.ts", import.meta.url)),
-  );
-  assertStringIncludes(
-    source,
-    "_applyIdentifiedWorkOrderRepairComplement(decision, {",
-    "the approval fallback must apply the identified-WO repair complement",
-  );
-  assertStringIncludes(
-    source,
-    [
-      "    const distinctInstructionKeys = _distinctBuilderInstructionKeys(",
-      "      instructionKeys,",
-      "    )",
-      "    if (distinctInstructionKeys.length > 1) {",
-    ].join("\n"),
-    "the F9 identity conflict must be decided on the distinct-instruction set",
-  );
-  // The availability probe against existing cards keeps the FULL enumeration:
-  // a WO-keyed existing card must still block a twin of the same instruction.
-  assertStringIncludes(
-    source,
-    "candidateKeys: instructionKeys,",
-    "the mint-availability check must keep the full key enumeration",
-  );
-});

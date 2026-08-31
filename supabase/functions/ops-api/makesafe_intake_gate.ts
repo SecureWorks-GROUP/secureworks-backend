@@ -612,8 +612,11 @@ export function decideMakeSafeJobFamily(
  * unknown builders, quote-stage enquiries, conflicts, identity shortfalls and
  * parse failures have all already fired — so nothing below the quality floor
  * can reach the complement there either. A complement-classified draft still
- * never auto-mints: the `repair_family_supervised_review` brake parks every
- * repair draft for a human tick.
+ * never auto-mints, on either lane: the sweep/board lane is held by
+ * `shouldAutoApproveCleanIntake`'s `repair_family_supervised_review` brake, and
+ * the deterministic lane by `deterministicPlanNeedsSupervisedRepairReview`
+ * (`makesafe_deterministic_intake_runtime.ts`), which withholds the guarded
+ * approval call and parks the draft for a human tick.
  */
 export function applyIdentifiedWorkOrderRepairComplement(
   decision: MakeSafeJobFamilyDecision,

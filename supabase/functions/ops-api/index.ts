@@ -23991,6 +23991,27 @@ async function approveIntakeDraft(client: any, body: any) {
       null,
   )
 
+  // One producer for every reading of this draft's canonical builder instruction
+  // keys. The family is the only input that varies between the three consumers
+  // (the repair-grain probe below, the F9 conflict decision and the mint
+  // reservation), so the card facts cannot drift between them.
+  const instructionKeysForFamily = (family: string | null) =>
+    _builderInstructionKeysForCard({
+      requestingCompanySlug: approvedFields.requesting_company_slug,
+      family,
+      metadata: {
+        external_ref: approvedFields.external_ref,
+        builder_claim_ref: extraction?.builder_claim_ref,
+        builder_work_order_number: extraction?.builder_work_order_number,
+        builder_po_number: extraction?.builder_po_number,
+      },
+      detailExternalRef: approvedFields.external_ref,
+      attachmentNames: availableAttachments.map((attachment: any) =>
+        attachment.file_name || attachment.filename || attachment.name ||
+          attachment.pdf_url || attachment.storage_url
+      ),
+    })
+
   // Fallback family for a draft carrying no authoritative family, under the
   // captain's 2026-08-31 identified-work-order complement: when the classifier
   // genuinely ABSTAINS (`ambiguous_scope` — never a restoration park, which
@@ -24014,21 +24035,7 @@ async function approveIntakeDraft(client: any, body: any) {
     )
     if (decision.family) return decision.family
     const repairGrainKeys = _distinctBuilderInstructionKeys(
-      _builderInstructionKeysForCard({
-        requestingCompanySlug: approvedFields.requesting_company_slug,
-        family: 'repair',
-        metadata: {
-          external_ref: approvedFields.external_ref,
-          builder_claim_ref: extraction?.builder_claim_ref,
-          builder_work_order_number: extraction?.builder_work_order_number,
-          builder_po_number: extraction?.builder_po_number,
-        },
-        detailExternalRef: approvedFields.external_ref,
-        attachmentNames: availableAttachments.map((attachment: any) =>
-          attachment.file_name || attachment.filename || attachment.name ||
-            attachment.pdf_url || attachment.storage_url
-        ),
-      }),
+      instructionKeysForFamily('repair'),
     )
     return _applyIdentifiedWorkOrderRepairComplement(decision, {
       scopeReadable: !!approvedFamilyContext.pdfScopeText &&
@@ -24174,32 +24181,23 @@ async function approveIntakeDraft(client: any, body: any) {
   // draft claim. It deliberately scans terminal cards and work-order filenames;
   // a match leaves this draft visible/reviewable and never reaches job minting.
   if (!recoveredPrimaryMint) {
-    const instructionKeys = _builderInstructionKeysForCard({
-      requestingCompanySlug: approvedFields.requesting_company_slug,
-      family: approvedJobFamily || null,
-      metadata: {
-        external_ref: approvedFields.external_ref,
-        builder_claim_ref: extraction?.builder_claim_ref,
-        builder_work_order_number: extraction?.builder_work_order_number,
-        builder_po_number: extraction?.builder_po_number,
-      },
-      detailExternalRef: approvedFields.external_ref,
-      attachmentNames: availableAttachments.map((attachment: any) =>
-        attachment.file_name || attachment.filename || attachment.name ||
-          attachment.pdf_url || attachment.storage_url
-      ),
-    })
     // One work order carrying BOTH its WO number and its PO enumerates two keys
-    // for one instruction (the PO-grain key plus the repair WO fallback). The
-    // conflict decision runs on the distinct-instruction set; the availability
-    // check below deliberately keeps the FULL enumeration so a WO-keyed
-    // existing card still blocks a twin.
-    const distinctInstructionKeys = _distinctBuilderInstructionKeys(
-      instructionKeys,
+    // for one instruction (the PO-grain key plus the repair WO fallback). This
+    // side of the comparison is THIS draft's identity, so it runs on the
+    // distinct-instruction set: the conflict decision, the availability probe's
+    // candidate keys and the mint reservation all ask "which instructions is
+    // this one card?" and the answer is the PO. Enumerating the claim-grain WO
+    // fallback here would make a second genuinely distinct PO on the same claim
+    // collide with the first card's group reference, and one MLB claim
+    // routinely hosts several POs. The EXISTING-card side
+    // (`matchExistingInstructionCards`) keeps the full enumeration, so a
+    // re-send showing only the WO reference still finds the card it has.
+    const instructionKeys = _distinctBuilderInstructionKeys(
+      instructionKeysForFamily(approvedJobFamily || null),
     )
-    if (distinctInstructionKeys.length > 1) {
+    if (instructionKeys.length > 1) {
       throw new ApiError(
-        `Instruction identity conflict: draft carries multiple canonical keys (${distinctInstructionKeys.join(', ')}); review required and no card was minted`,
+        `Instruction identity conflict: draft carries multiple canonical keys (${instructionKeys.join(', ')}); review required and no card was minted`,
         409,
       )
     }
@@ -24221,21 +24219,12 @@ async function approveIntakeDraft(client: any, body: any) {
       throw error
     }
   }
-  const canonicalInstructionKeys = _builderInstructionKeysForCard({
-    requestingCompanySlug: approvedFields.requesting_company_slug,
-    family: approvedJobFamily || null,
-    metadata: {
-      external_ref: approvedFields.external_ref,
-      builder_claim_ref: extraction?.builder_claim_ref,
-      builder_work_order_number: extraction?.builder_work_order_number,
-      builder_po_number: extraction?.builder_po_number,
-    },
-    detailExternalRef: approvedFields.external_ref,
-    attachmentNames: availableAttachments.map((attachment: any) =>
-      attachment.file_name || attachment.filename || attachment.name ||
-        attachment.pdf_url || attachment.storage_url
-    ),
-  })
+  // The reservation reserves THIS card's instructions, so it takes the same
+  // distinct-instruction set the availability probe compared on — reserving the
+  // claim-grain WO fallback would lock every other purchase order on the claim.
+  const canonicalInstructionKeys = _distinctBuilderInstructionKeys(
+    instructionKeysForFamily(approvedJobFamily || null),
+  )
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)

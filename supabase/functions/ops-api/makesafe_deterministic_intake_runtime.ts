@@ -3993,6 +3993,26 @@ function approvalPrevalidationMissingFields(
   return missing;
 }
 
+/**
+ * Ruled 2026-08-28: the repair lane runs SUPERVISED. An SWR- mint is
+ * irreversible (`update_makesafe_job_family` refuses non-makesafe types and can
+ * never change `jobs.type` or the number), so a human taps every one.
+ *
+ * That brake lives in `shouldAutoApproveCleanIntake` (index.ts), which ONLY the
+ * sweep/board lane calls. The deterministic lane reaches `approveIntakeDraft`
+ * directly with its own `reviewed_fields.makesafe_job_family`, so without this
+ * second reading of the same rule a repair-family plan auto-mints an SWR- card
+ * with nobody's tick on it. The family the deterministic lane would HAND to
+ * approval is the exact input to judge: a combined-split plan sends no family
+ * at all (its primary is physical work) and is unaffected.
+ */
+export function deterministicPlanNeedsSupervisedRepairReview(
+  reviewedFields: { makesafe_job_family?: string | null },
+): boolean {
+  return String(reviewedFields?.makesafe_job_family ?? "").trim()
+    .toLowerCase() === "repair";
+}
+
 async function ensureDraftAndJob(
   client: any,
   caseId: string,
@@ -4180,7 +4200,13 @@ async function ensureDraftAndJob(
       "approved deterministic draft has no job link; reconciliation required",
     );
   }
-  if (!advanceDrafts) {
+  // The draft above is written and left `needs_review` either way; only the
+  // guarded approval call is withheld. A parked repair card is picked up from
+  // the review queue by a human, which is the whole of the 2026-08-28 ruling.
+  if (
+    !advanceDrafts ||
+    deterministicPlanNeedsSupervisedRepairReview(reviewedFields)
+  ) {
     return {
       jobId: null,
       draftCreated,

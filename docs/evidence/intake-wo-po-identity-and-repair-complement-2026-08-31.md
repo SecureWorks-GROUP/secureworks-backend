@@ -65,9 +65,22 @@ been passed. Implementation:
 - Approval fallback (`approveIntakeDraft`): the same complement replaces the
   blanket `|| "general_makesafe"` default, floor-gated identically. Reviewed
   and persisted deterministic families still win outright.
-- No auto-mint widening: the `repair_family_supervised_review` brake already
-  parks every repair-family draft for a human tick, complement-classified
-  drafts included.
+- No auto-mint widening — but NOT for the reason first written here. The
+  `repair_family_supervised_review` brake (`shouldAutoApproveCleanIntake`,
+  `index.ts`) covers only the SWEEP/BOARD lane; it has no call site on the
+  deterministic lane, which reaches `approveIntakeDraft` directly with its own
+  `reviewed_fields.makesafe_job_family`. So since PR #771 the deterministic lane
+  has auto-approved repair-family cases (declared-repair headers and
+  replacement-verb classifications alike) with nobody's tick on them, and the
+  complement would have widened the population reaching that gap. THIS change
+  extends supervision to the deterministic lane:
+  `deterministicPlanNeedsSupervisedRepairReview`
+  (`makesafe_deterministic_intake_runtime.ts`) withholds the guarded approval
+  call for any plan whose reviewed family is `repair`. The draft is still
+  written and stamped and left `needs_review`, the run accounts the case as
+  `job_creation_deferred`/parked, and a human approves it from the review queue.
+  Pinned by the parked/CONTROL pair in
+  `makesafe_deterministic_intake_runtime_test.ts`.
 
 ## Evidence — the 23 currently-untyped review-queue drafts
 

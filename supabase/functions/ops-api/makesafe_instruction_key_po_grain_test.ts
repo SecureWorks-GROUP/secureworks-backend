@@ -273,3 +273,97 @@ Deno.test("po grain: the collapse subsumes ONLY a same-scope WO fallback", () =>
     ["AJ:JOB-67009", "MLB:PO-54000"],
   );
 });
+
+// PROBE 10 — the two SIDES of the mint gate deliberately read different grains.
+// This card's own identity (the F9 conflict decision, the availability probe's
+// candidate keys, and the mint reservation) is the DISTINCT set, so a card is
+// only ever claimed at the grain that is genuinely its own instruction. The
+// EXISTING-card side keeps the full enumeration, so a card that stored only its
+// group reference is still findable. One MLB claim routinely hosts several
+// purchase orders (MLB-26183 carried three, each its own card), so reserving
+// the claim-grain WO fallback would lock every sibling PO out of the board.
+function candidateKeysFor(input: {
+  externalRef: string;
+  claimRef?: string;
+  workOrderNumber?: string;
+  poNumber?: string;
+  attachmentNames?: string[];
+}): string[] {
+  return distinctBuilderInstructionKeys(
+    builderInstructionKeysForCard({
+      requestingCompanySlug: "mlb",
+      family: "repair",
+      metadata: {
+        external_ref: input.externalRef,
+        builder_claim_ref: input.claimRef,
+        builder_work_order_number: input.workOrderNumber,
+        builder_po_number: input.poNumber,
+      },
+      detailExternalRef: input.externalRef,
+      attachmentNames: input.attachmentNames || [],
+    }),
+  );
+}
+
+const pingellyCardRow = {
+  job_id: "job-pingelly",
+  external_ref: "MLB-24645",
+  requesting_company_slug: "mlb",
+  jobs: {
+    job_number: "SWR-26001",
+    status: "active",
+    metadata: {
+      makesafe_job_family: "repair",
+      builder_claim_ref: "MLB-24645",
+      builder_work_order_number: "MLB-24645",
+      builder_po_number: "PO-59875",
+    },
+  },
+};
+
+Deno.test("po grain: a second distinct PO on the same claim is NOT blocked by the first repair card", () => {
+  const sibling = candidateKeysFor({
+    externalRef: "MLB-24645",
+    claimRef: "MLB-24645",
+    workOrderNumber: "MLB-24645",
+    poNumber: "PO-60112",
+  });
+  assertEquals(sibling, ["MLB:PO-60112"]);
+  assertEquals(
+    matchExistingInstructionCards(sibling, [pingellyCardRow], []),
+    [],
+  );
+});
+
+Deno.test("po grain: a WO-only re-send of the SAME instruction still finds its card", () => {
+  const resend = candidateKeysFor({
+    externalRef: "MLB-24645",
+    claimRef: "MLB-24645",
+    workOrderNumber: "MLB-24645",
+  });
+  assertEquals(resend, ["MLB:WO-24645"]);
+  const matches = matchExistingInstructionCards(
+    resend,
+    [pingellyCardRow],
+    [],
+  );
+  assertEquals(matches.length, 1);
+  assertEquals(matches[0].jobNumber, "SWR-26001");
+});
+
+Deno.test("po grain: a re-send carrying both numbers still finds the same card on its PO", () => {
+  const resend = candidateKeysFor({
+    externalRef: "MLB-24645",
+    claimRef: "MLB-24645",
+    workOrderNumber: "MLB-24645",
+    poNumber: "PO-59875",
+  });
+  assertEquals(resend, ["MLB:PO-59875"]);
+  const matches = matchExistingInstructionCards(
+    resend,
+    [pingellyCardRow],
+    [],
+  );
+  assertEquals(matches.length, 1);
+  assertEquals(matches[0].jobNumber, "SWR-26001");
+});

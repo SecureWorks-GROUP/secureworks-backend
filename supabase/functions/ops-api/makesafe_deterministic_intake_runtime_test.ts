@@ -831,7 +831,13 @@ Deno.test("readInputs admits only a valid short-lived synthetic own-mail token",
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });
 
-Deno.test("RAPID REPAIR family reaches the guarded mint callback", async () => {
+// Ruled 2026-08-28: the repair lane runs SUPERVISED — an SWR- mint is
+// irreversible, so a human taps every one. The brake in
+// `shouldAutoApproveCleanIntake` only covers the sweep/board lane, so the
+// deterministic lane carries its own reading of the same rule. The card is
+// still fully prepared (draft written, family stamped, `needs_review`); only
+// the guarded approval call is withheld, and the run accounts it as parked.
+Deno.test("a repair-family plan carries its family to a draft and is PARKED, never auto-minted", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "rapid-repair-mint",
@@ -866,29 +872,93 @@ Deno.test("RAPID REPAIR family reaches the guarded mint callback", async () => {
     inputs.profiles,
   ).cases[0];
   assertEquals(plan.identity.jobFamily, "repair");
+  // Either live-job state reaches the guarded approval callback, so both are
+  // brake-relevant; this fixture lands on the blocked one.
+  assertEquals(plan.state, "blocked_live_job");
 
-  let approvalBody: any = null;
+  let approvalCalls = 0;
   const result = await _ensureDraftAndJobForTest(
     client,
     "rapid-repair-case",
     plan,
     new Map(inputs.sources.map((source) => [source.postId, source])),
-    (_client, body) => {
-      approvalBody = body;
+    () => {
+      approvalCalls++;
       return Promise.resolve({ job: { id: "rapid-repair-job" } });
     },
     () => {},
     () => {},
   );
 
-  assertEquals(result.jobId, "rapid-repair-job");
-  assertEquals(
-    approvalBody?.reviewed_fields?.makesafe_job_family,
-    "repair",
-  );
+  assertEquals(approvalCalls, 0);
+  assertEquals(result.jobId, null);
+  assertEquals(result.jobCreated, false);
+  assertEquals(result.parked, true);
+  assertEquals(result.draftCreated, true);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
   assertEquals(
     store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
     "repair",
+  );
+});
+
+// CONTROL: the brake is family-scoped. A general make-safe plan of the same
+// shape still advances through the guarded approval callback unchanged.
+Deno.test("CONTROL: a general make-safe plan still reaches the guarded mint callback", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "general-makesafe-mint",
+    subject: "NEW WORK ORDER - MLB-261193 - Work Order: MLB-261193",
+    body_content: [
+      "Client: Fixture Client",
+      "Site Address: 1 Fixture Road, Perth",
+      "Scope of Works: Install temporary roof tarps and make the property safe.",
+    ].join("\n"),
+  }));
+  store.email_attachments.push({
+    id: "general-makesafe-mint-pdf",
+    email_id: "general-makesafe-mint",
+    name: "Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/general-makesafe-mint.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["general-makesafe-mint"],
+    cursor: null,
+  });
+  const plan = buildDeterministicIntakePlan(
+    inputs.sources,
+    inputs.profiles,
+  ).cases[0];
+  assertEquals(plan.identity.jobFamily, "general_makesafe");
+
+  let approvalBody: any = null;
+  const result = await _ensureDraftAndJobForTest(
+    client,
+    "general-makesafe-case",
+    plan,
+    new Map(inputs.sources.map((source) => [source.postId, source])),
+    (_client, body) => {
+      approvalBody = body;
+      return Promise.resolve({ job: { id: "general-makesafe-job" } });
+    },
+    () => {},
+    () => {},
+  );
+
+  assertEquals(result.jobId, "general-makesafe-job");
+  assertEquals(result.parked, false);
+  assertEquals(
+    approvalBody?.reviewed_fields?.makesafe_job_family,
+    "general_makesafe",
   );
 });
 

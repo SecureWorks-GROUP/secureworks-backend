@@ -763,10 +763,14 @@ export function builderInstructionKeysForCard(input: {
  * two instructions, a WO key under a DIFFERENT builder scope still conflicts,
  * and AJ's `AJ:JOB-n` grain is untouched.
  *
- * Use this only to decide whether ONE CARD carries one instruction. Matching
- * against EXISTING cards (`matchExistingInstructionCards`) must keep the full
- * enumeration, or a re-send that shows only the WO reference stops finding the
- * card it already has.
+ * Use this only to decide whether ONE CARD carries one instruction — which is
+ * every reading of the CANDIDATE side of the mint gate: the conflict decision,
+ * the availability probe's candidate keys, and the mint reservation. Claiming
+ * the claim-grain WO fallback there would lock a claim's other purchase orders
+ * out of the board, and one MLB claim routinely hosts several. The EXISTING
+ * card's own enumeration (`matchExistingInstructionCards`) must keep the full
+ * set, or a re-send that shows only the WO reference stops finding the card it
+ * already has.
  */
 export function distinctBuilderInstructionKeys(
   keys: readonly string[],
