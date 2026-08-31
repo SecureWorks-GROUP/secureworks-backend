@@ -23332,6 +23332,7 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
 
     try {
       const approved = await approveIntakeDraft(client, {
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
         draft_id: draft.id,
         // The note names NO caller: authoritative per-row provenance is approved_by
         // (the actual trigger). A note describing a deleted code path (the removed
@@ -23639,6 +23640,10 @@ async function settleIntakeApproval(
   notificationSuppressionReason:
     | typeof SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION
     | null = null,
+  approval: { unattended: boolean; approvedBy: string | null } = {
+    unattended: true,
+    approvedBy: null,
+  },
 ) {
   return await settleApprovedIntakeDraft(client, {
     draftId: draft.id,
@@ -23647,6 +23652,8 @@ async function settleIntakeApproval(
     extraction,
     requiredMintRoles,
     notificationSuppressionReason,
+    caseBindingProvenance: approval.unattended ? 'deterministic' : 'human',
+    caseBindingActor: approval.approvedBy || 'intake_approval_settlement',
     ...(notificationSuppressionReason
       ? {
         verifyNotificationSuppression: async (input: { jobId: string }) => {
@@ -23795,9 +23802,26 @@ const SOURCE_PERSIST_NO_SEND_RECOVERY = Symbol(
   'sourcePersistNoSendRecovery',
 )
 
+// Ruled 2026-08-28: the repair lane runs SUPERVISED — an SWR- mint is
+// irreversible, so a human taps every one. Every in-repo automation lane that
+// reaches approveIntakeDraft without an operator stamps this marker, and the
+// brake below judges the family that will ACTUALLY be created. The upstream
+// sweep brake reads `resolvedIntakeDraftFamily` (subject + preview + stored
+// family) while approval derives its own from the full instruction text and
+// then applies the identified-work-order complement, so the two can legitimately
+// disagree and only the mint-time reading cannot be outflanked. A module-private
+// Symbol is used so no request body can forge it, and so a new automation lane
+// that forgets it is a reviewable omission rather than a silent bypass.
+const UNATTENDED_INTAKE_APPROVAL = Symbol('unattendedIntakeApproval')
+const UNATTENDED_INTAKE_APPROVAL_MARKER = {
+  [UNATTENDED_INTAKE_APPROVAL]: UNATTENDED_INTAKE_APPROVAL,
+} as Record<symbol, symbol>
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
+  const unattendedApproval =
+    body?.[UNATTENDED_INTAKE_APPROVAL] === UNATTENDED_INTAKE_APPROVAL
   const notificationSuppressionReason =
     body?.[SOURCE_PERSIST_NO_SEND_RECOVERY] ===
         SOURCE_PERSIST_NO_SEND_RECOVERY
@@ -23953,6 +23977,7 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
       requiredMintRoles,
       notificationSuppressionReason,
+      { unattended: unattendedApproval, approvedBy: approved_by || null },
     )
     const settledExtraction = {
       ...extraction,
@@ -24066,6 +24091,12 @@ async function approveIntakeDraft(client: any, body: any) {
       approvedFamilyContext,
     )
     : approvalFallbackJobFamily())
+  if (unattendedApproval && _normaliseDedupJobFamily(approvedJobFamily) === 'repair') {
+    throw new ApiError(
+      'Repair intake requires a human tick: this instruction resolves to the repair family, which no unattended lane may mint. The draft stays in the review queue for an operator to approve.',
+      409,
+    )
+  }
   const approvalDocumentTexts = parseJsonArray(extraction?.work_order_pdf_text)
     .map((document: any) =>
       typeof document?.text === 'string' && document.text.trim()
@@ -24168,6 +24199,7 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
       [],
       notificationSuppressionReason,
+      { unattended: unattendedApproval, approvedBy: approved_by || null },
     )
 
     return {
@@ -24600,6 +24632,7 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
       requiredMintRoles,
       notificationSuppressionReason,
+      { unattended: unattendedApproval, approvedBy: approved_by || null },
     )
     const { error: settlementError } = await client
       .from('makesafe_intake_drafts')
@@ -24671,6 +24704,9 @@ async function approveIntakeDraft(client: any, body: any) {
     throw postClaimErr
   }
 }
+export const _approveIntakeDraftForTest = approveIntakeDraft
+export const _unattendedIntakeApprovalMarkerForTest =
+  UNATTENDED_INTAKE_APPROVAL_MARKER
 
 // ── Slice 7: reject intake draft ──
 async function rejectIntakeDraft(client: any, body: any) {
@@ -25656,6 +25692,7 @@ export async function reextractIntakeDraft(
   if (autoDecision.ok) {
     try {
       const approved = await approveIntakeDraft(client, {
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
         draft_id: draftId,
         approved_by: 'auto-intake-reextract',
         review_notes: 'Auto-filed after in-place re-extraction (reextract_intake_draft): high-confidence, required fields + servable WO PDF present.',
@@ -26023,7 +26060,11 @@ async function scanSesMakesafes(
     allowSourcePostIds: rollout.sourcePostIds,
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
-    approveDraft: approveIntakeDraft,
+    approveDraft: (approvalClient: any, approvalBody: any) =>
+      approveIntakeDraft(approvalClient, {
+        ...approvalBody,
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      }),
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
@@ -26057,16 +26098,17 @@ async function scanFreshMakesafeSource(
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
-  const approveExactDraft = options.approvalReviewNote
-    ? (approvalClient: any, approvalBody: any) => approveIntakeDraft(
-      approvalClient,
-      {
-        ...approvalBody,
-        review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
-          .filter(Boolean).join(' '),
-      },
-    )
-    : approveIntakeDraft
+  const approveExactDraft = (approvalClient: any, approvalBody: any) =>
+    approveIntakeDraft(approvalClient, {
+      ...approvalBody,
+      ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      ...(options.approvalReviewNote
+        ? {
+          review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
+            .filter(Boolean).join(' '),
+        }
+        : {}),
+    })
   const report = await _runDeterministicIntake(client, {
     dryRun: false,
     selectionMode: 'exact',
@@ -26559,6 +26601,7 @@ async function sourcePersistRecoveryAction(client: any, body: any) {
           approveDraft: (approvalClient: any, approvalBody: any) =>
             approveIntakeDraft(approvalClient, {
               ...approvalBody,
+              ...UNATTENDED_INTAKE_APPROVAL_MARKER,
               [SOURCE_PERSIST_NO_SEND_RECOVERY]:
                 SOURCE_PERSIST_NO_SEND_RECOVERY,
               suppress_manager_notification: true,
@@ -29060,6 +29103,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         // called at the function level, NOT through the route (the Wave-0 rule that the
         // routine key can't call approve_intake_draft stays intact).
         const approved = await approveIntakeDraft(client, {
+          ...UNATTENDED_INTAKE_APPROVAL_MARKER,
           draft_id: inserted.id,
           approved_by: 'auto-intake',
           review_notes: 'Auto-filed clean make-safe intake (Auto-Intake v2): high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',

@@ -107,6 +107,55 @@ const INTAKE_CASE_BINDABLE_STATES = new Set([
   "confirmed_live_job",
 ]);
 
+export type IntakeCaseDecisionProvenance = "deterministic" | "human";
+
+/**
+ * `makesafe_intake_field_names_valid`, which every `blocked_reasons` write must
+ * satisfy. Filtering here rather than trusting the stored array keeps a legacy
+ * draft's free-text `missing_fields` from failing the whole settlement.
+ */
+const INTAKE_FIELD_NAME_RE = /^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?$/;
+
+/**
+ * Recover the plan's blocked reasons for a case that was PARKED before its job
+ * existed.
+ *
+ * They cannot be read back off the case row: `makesafe_intake_cases_exception_
+ * shape_check` forces `cardinality(blocked_reasons) = 0` on an unbound case, so
+ * `casePayload` stores `[]` on every parked row whatever the plan said. The
+ * coordinate that survives the park is the DRAFT — the deterministic runtime
+ * writes `missing_fields: plan.blockedReasons` when it creates it — and only a
+ * deterministic draft ever reaches this binding, because `intakeMintAuthority`
+ * yields no `case_id` without `extraction.deterministic_intake === true`.
+ *
+ * Losing this would silently promote a `blocked_live_job` plan (missing portal
+ * or secondary evidence — the common repair shape) to `confirmed_live_job`, and
+ * the gap-fill queue and the intake exception desk both read that signal.
+ */
+async function readParkedPlanBlockedReasons(
+  client: any,
+  draftId: string,
+): Promise<string[]> {
+  const { data, error } = await client
+    .from("makesafe_intake_drafts")
+    .select("missing_fields")
+    .eq("id", draftId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(
+      `intake case binding draft read failed: ${error.message || error}`,
+    );
+  }
+  const stored = Array.isArray(data?.missing_fields) ? data.missing_fields : [];
+  return [
+    ...new Set(
+      stored
+        .map((value: unknown) => String(value ?? "").trim())
+        .filter((value: string) => INTAKE_FIELD_NAME_RE.test(value)),
+    ),
+  ].sort() as string[];
+}
+
 /**
  * Bind each settled mint's intake case to the job that mint created.
  *
@@ -131,7 +180,11 @@ const INTAKE_CASE_BINDABLE_STATES = new Set([
 export async function bindIntakeCasesToMintedJobs(
   client: any,
   mints: readonly IntakeMint[],
-  actor: string,
+  decision: {
+    draftId: string;
+    actor: string;
+    provenance: IntakeCaseDecisionProvenance;
+  },
 ): Promise<string[]> {
   const jobByCaseId = new Map<string, string>();
   for (const mint of mints) {
@@ -180,16 +233,17 @@ export async function bindIntakeCasesToMintedJobs(
       .map((row: any) => String(row.id)),
   );
 
+  const blockedReasons = await readParkedPlanBlockedReasons(
+    client,
+    decision.draftId,
+  );
+
   const bound: string[] = [];
   for (const row of unbound) {
     const caseId = String(row.id);
     const jobId = String(jobByCaseId.get(caseId));
     if (!linkableJobIds.has(jobId)) continue;
-    // The runtime's own rule: outstanding blockers mean the job is live but
-    // still short of evidence. A parked case carries none, and a human tick
-    // plus a minted job is exactly a confirmed live job.
-    const nextState = Array.isArray(row.blocked_reasons) &&
-        row.blocked_reasons.length
+    const nextState = blockedReasons.length
       ? "blocked_live_job"
       : "confirmed_live_job";
     const { data, error } = await client
@@ -198,8 +252,9 @@ export async function bindIntakeCasesToMintedJobs(
         job_id: jobId,
         state: nextState,
         reason_code: null,
-        last_decision_provenance: "deterministic",
-        last_decision_actor: actor,
+        blocked_reasons: blockedReasons,
+        last_decision_provenance: decision.provenance,
+        last_decision_actor: decision.actor,
         last_decision_reason:
           `intake approval settlement bound ${nextState} job ${jobId}`,
       })
@@ -339,8 +394,15 @@ export async function settleApprovedIntakeDraft(
       jobId: string;
     }) => Promise<boolean>;
     refreshIdentity?: typeof refreshMakesafeIdentityAfterWorkOrderAttach;
-    /** Recorded as the intake case's `last_decision_actor` when it binds. */
+    /**
+     * Recorded as the intake case's `last_decision_actor` /
+     * `last_decision_provenance` when it binds, and copied by
+     * `record_makesafe_intake_case_event` into the append-only case-event
+     * ledger — so a Captain approving a parked repair draft is attributed to
+     * the human, not to the deterministic runtime.
+     */
     caseBindingActor?: string;
+    caseBindingProvenance?: IntakeCaseDecisionProvenance;
   },
 ): Promise<{
   jobIds: string[];
@@ -381,11 +443,11 @@ export async function settleApprovedIntakeDraft(
     input.extraction,
     { refreshIdentity: input.refreshIdentity },
   );
-  await bindIntakeCasesToMintedJobs(
-    client,
-    minted,
-    input.caseBindingActor || "intake_approval_settlement",
-  );
+  await bindIntakeCasesToMintedJobs(client, minted, {
+    draftId: input.draftId,
+    actor: input.caseBindingActor || "intake_approval_settlement",
+    provenance: input.caseBindingProvenance || "deterministic",
+  });
 
   let notificationsAccepted = 0;
   const notificationJobIds: string[] = [];

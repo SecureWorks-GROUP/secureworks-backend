@@ -559,6 +559,7 @@ function caseBindingClient(input: {
   mints: any[];
   cases: any[];
   jobs: any[];
+  draftMissingFields?: string[];
 }) {
   const updates: any[] = [];
   return {
@@ -608,6 +609,18 @@ function caseBindingClient(input: {
           const query: any = {
             select: () => query,
             in: () => Promise.resolve({ data: input.jobs, error: null }),
+          };
+          return query;
+        }
+        if (table === "makesafe_intake_drafts") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            maybeSingle: () =>
+              Promise.resolve({
+                data: { missing_fields: input.draftMissingFields || [] },
+                error: null,
+              }),
           };
           return query;
         }
@@ -664,7 +677,10 @@ function repairMint(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const settleRepair = (client: any) =>
+const settleRepair = (
+  client: any,
+  approval: { actor?: string; provenance?: "deterministic" | "human" } = {},
+) =>
   settleApprovedIntakeDraft(client, {
     draftId: "draft-repair",
     approvedJobId: "job-repair",
@@ -674,6 +690,10 @@ const settleRepair = (client: any) =>
     }],
     extraction: { deterministic_intake: true },
     refreshIdentity: noIdentityRefresh as any,
+    ...(approval.actor ? { caseBindingActor: approval.actor } : {}),
+    ...(approval.provenance
+      ? { caseBindingProvenance: approval.provenance }
+      : {}),
     notify: async () => ({
       accepted: true,
       reason: "accepted",
@@ -703,16 +723,24 @@ Deno.test("a parked repair draft approved by a human leaves its intake case boun
   assertEquals(db.updates[0].reason_code, null);
 });
 
-Deno.test("a case whose plan still carries blockers binds as a blocked live job, not a confirmed one", async () => {
+// The REAL parked shape: `makesafe_intake_cases_exception_shape_check` forces
+// `cardinality(blocked_reasons) = 0` on an unbound case, so a parked row can
+// never carry them however blocked its plan was. The coordinate that survives
+// the park is the draft's `missing_fields`, which the deterministic runtime
+// writes from `plan.blockedReasons` — losing it would silently promote a
+// blocked_live_job plan to confirmed and drop the card off the gap-fill queue
+// and the intake exception desk.
+Deno.test("a parked blocked_live_job plan binds as blocked, with its reasons recovered from the draft", async () => {
   const db = caseBindingClient({
     mints: [repairMint()],
     cases: [{
       id: "case-repair",
-      state: "blocked_live_job",
+      state: "exception",
       job_id: null,
-      blocked_reasons: ["portal_evidence"],
+      blocked_reasons: [],
     }],
     jobs: [{ id: "job-repair", type: "repair" }],
+    draftMissingFields: ["missing:portal_evidence", "missing:report_pdf"],
   });
 
   await settleRepair(db.client);
@@ -720,6 +748,56 @@ Deno.test("a case whose plan still carries blockers binds as a blocked live job,
   assertEquals(db.updates.length, 1);
   assertEquals(db.updates[0].job_id, "job-repair");
   assertEquals(db.updates[0].state, "blocked_live_job");
+  assertEquals(db.updates[0].blocked_reasons, [
+    "missing:portal_evidence",
+    "missing:report_pdf",
+  ]);
+  assertEquals(db.updates[0].reason_code, null);
+});
+
+Deno.test("draft field names the case CHECK would reject never reach the blocked set", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    draftMissingFields: ["Missing Portal Evidence", "  "],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].state, "confirmed_live_job");
+  assertEquals(db.updates[0].blocked_reasons, []);
+});
+
+Deno.test("a Captain approval is attributed to the human in the case-event ledger", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client, {
+    actor: "captain@secureworkswa.com.au",
+    provenance: "human",
+  });
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].last_decision_provenance, "human");
+  assertEquals(
+    db.updates[0].last_decision_actor,
+    "captain@secureworkswa.com.au",
+  );
 });
 
 Deno.test("settlement never re-points an already bound intake case", async () => {

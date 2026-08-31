@@ -136,14 +136,61 @@ the one shared seam that already holds both coordinates —
 `resolveDeterministicDraftMintAuthority` and `job_id` from `completeIntakeMint`
 — so the binding now happens whichever lane approved the draft. It is a
 compare-and-set on `job_id IS NULL` (never re-points a bound case), it promotes
-only in the census-permitted `exception -> live` direction (`blocked_live_job`
-when the case still carries blockers, otherwise `confirmed_live_job`), and it
+only in the census-permitted `exception -> live` direction, and it
 checks the job TYPE itself rather than letting
 `enforce_makesafe_intake_case_write` decide: that trigger admits make-safe and
 repair but RAISES for a restoration (`insurance`) job, so an unscoped write
 would fail settlement for that family. The runtime is deliberately NOT allowed
 to re-approve; that would restore the unsupervised `SWR-` mint through a side
-door. Pinned by the four binding cases in `makesafe_intake_settlement_test.ts`.
+door. Pinned by the binding cases in `makesafe_intake_settlement_test.ts`.
+
+Two follow-on constraints that are easy to get wrong:
+
+- **The blocked-live signal cannot be read off the parked case row.**
+  `makesafe_intake_cases_exception_shape_check` forces
+  `cardinality(blocked_reasons) = 0` on an unbound case, so `casePayload` stores
+  `[]` on EVERY parked row however blocked its plan was — and a
+  `blocked_live_job` plan (missing portal or secondary evidence) is the common
+  repair shape. The coordinate that survives the park is the DRAFT's
+  `missing_fields`, which the runtime writes from `plan.blockedReasons`, and the
+  bind reads it back so the gap-fill queue and the intake exception desk keep
+  seeing "live but short of evidence". Only a deterministic draft reaches this
+  binding, because `intakeMintAuthority` yields no `case_id` without
+  `extraction.deterministic_intake === true`.
+- **The runtime must re-read the case it is about to re-decide.** Settlement
+  runs INSIDE the guarded approval, so by the time the deterministic lane issues
+  its own second `insertCaseAndSources` the row is already bound. Re-deciding
+  against the stale pre-approval row computes `decisionChanged = true` and emits
+  an UPDATE whose only real difference is the decision metadata — which
+  `enforce_makesafe_intake_case_write` refuses ("decision metadata may change
+  only with an audited case decision"), failing the case, degrading the run and
+  permanently skipping its post-board notification. The second call therefore
+  omits `knownExisting` entirely; the trigger branch is modelled by the `fail`
+  hook in `makesafe_deterministic_intake_runtime_test.ts`.
+
+### The brake that closes the property: the FINAL family, at the mint
+
+The supervised-repair rule was being read at two different places from two
+different inputs. `shouldAutoApproveCleanIntake` judges
+`resolvedIntakeDraftFamily` (subject + preview + stored family); approval
+derives its own from the full instruction text and only then applies the
+complement, and `deterministicDraftFamilyForApproval` honours a stored family
+only when `extraction.deterministic_intake === true`. A legacy-vintage draft
+could therefore pass the sweep as `general_makesafe` and resolve to `repair` at
+the moment of minting — an `SWR-` card with nobody's tick, on the one lane the
+earlier rounds had not closed.
+
+`approveIntakeDraft` now refuses (409, nothing written, draft left
+`needs_review`) when the FINAL `approvedJobFamily` is repair AND the caller
+carries the module-private `UNATTENDED_INTAKE_APPROVAL` marker. Every in-repo
+automation lane stamps it — the clean-intake sweep, the re-extract auto-file,
+the Auto-Intake v2 scan, and all three deterministic-runtime `approveDraft`
+wirings (standing scan, fresh-source scan, source-persist recovery). Human and
+API-operator approvals through the route are unchanged. The Symbol follows the
+`SOURCE_PERSIST_NO_SEND_RECOVERY` precedent so no request body can forge it and
+a new automation lane that omits it is a reviewable omission. The deterministic
+lane's earlier park stays as belt-and-braces. Pinned by the paired
+unattended/operator tests in `repair_intake_routing_test.ts`.
 
 ## Evidence — the 23 currently-untyped review-queue drafts
 

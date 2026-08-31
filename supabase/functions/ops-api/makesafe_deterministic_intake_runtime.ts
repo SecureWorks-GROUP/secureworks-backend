@@ -5554,13 +5554,21 @@ export async function runDeterministicIntake(
         resumedCase = resumedCase || live.resumed;
         if (jobId) {
           // Sources were already accounted by the pre-job hop above, so this call
-          // only moves the case onto its job.
+          // only moves the case onto its job. `knownExisting` is deliberately
+          // OMITTED so the row is re-read: the guarded approval runs the shared
+          // settlement seam, which may already have bound this case, and
+          // re-deciding against the stale pre-approval row would compute
+          // decisionChanged=true and issue an UPDATE whose only difference is
+          // the decision metadata — which `enforce_makesafe_intake_case_write`
+          // refuses ("decision metadata may change only with an audited case
+          // decision"), failing the case and skipping its post-board
+          // notification.
           saved = await insertCaseAndSources(
             client,
             effectivePlan,
             jobId,
             sourceMap,
-            saved.caseRow,
+            undefined,
             true,
           );
           // Backstop: a card minted without a suburb is invisible to every

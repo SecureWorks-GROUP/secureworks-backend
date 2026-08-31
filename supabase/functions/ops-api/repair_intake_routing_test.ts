@@ -14,9 +14,11 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _approveIntakeDraftForTest,
   _createMakesafeJob,
   _makesafeJobRouteForFamily,
   _requestedMakesafeJobRoute,
+  _unattendedIntakeApprovalMarkerForTest,
 } from "./index.ts";
 
 type Row = Record<string, any>;
@@ -603,4 +605,180 @@ Deno.test("a hand-raised repair is a repair in its metadata too, not just its ty
   assertEquals(controlStore.tables.jobs[0].type, "makesafe");
   assertEquals(controlStore.tables.jobs[0].job_number, "SWMS-261400");
   assertEquals("repair_stage" in controlStore.tables.jobs[0].metadata, false);
+});
+
+// ── The final-family brake: no unattended lane may mint a repair card ────────
+//
+// Ruled 2026-08-28: every SWR- mint is a human tick. The upstream sweep brake
+// reads `resolvedIntakeDraftFamily` (subject + preview + stored family), while
+// approval derives its own family from the full instruction text and then
+// applies the 2026-08-31 identified-work-order complement — so a legacy-vintage
+// draft can pass the sweep as one family and resolve to `repair` only at the
+// moment of minting. Judging the family that will ACTUALLY be created is the
+// only check that cannot be outflanked upstream.
+
+const LEGACY_REPAIR_SCOPE =
+  "Repaint the hallway ceiling and patch minor plaster cracking.";
+
+const LEGACY_REPAIR_WO_TEXT = `Work Order Number
+MLB-27150PO-61000
+Policyholders Name
+Neutral Client
+Mobile: 0422 000 111
+Site Address
+30 Neutral Street, Perth, WA 6000
+Scope of Works
+Repaint the hallway ceiling and patch minor plaster cracking.
+Totals
+Subtotal $1,000.00`;
+
+function legacyRepairDraftRow(): Row {
+  return {
+    id: "draft-legacy-repair",
+    org_id: ORG_ID,
+    status: "needs_review",
+    // Legacy vintage: NOT deterministic_intake, and no stored family — so
+    // `deterministicDraftFamilyForApproval` yields null and approval takes the
+    // fallback classifier plus the complement.
+    graph_message_id: "legacy-graph-message-1",
+    subject: "MLB-27150",
+    body_preview: LEGACY_REPAIR_SCOPE,
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    external_ref: "MLB-27150",
+    client_name: "Neutral Client",
+    client_phone: "0422 000 111",
+    client_email: null,
+    site_address: "30 Neutral Street, Perth",
+    site_suburb: "Perth",
+    description: LEGACY_REPAIR_SCOPE,
+    report_type: null,
+    confidence: "high",
+    missing_fields: [],
+    approved_job_id: null,
+    attachments_json: [{
+      id: "legacy-repair-attachment",
+      file_name: "MLB Work Order.pdf",
+      is_work_order: true,
+      storage_url: "storage/legacy-repair-wo.pdf",
+      pdf_url: "storage/legacy-repair-wo.pdf",
+    }],
+    extraction_json: {
+      builder_claim_ref: "MLB-27150",
+      builder_po_number: "PO-61000",
+      builder_email_text_for_trade: LEGACY_REPAIR_SCOPE,
+      work_order_pdf_text: [{
+        attachment_id: "legacy-repair-attachment",
+        attachment_name: "MLB Work Order.pdf",
+        status: "extracted",
+        text: LEGACY_REPAIR_WO_TEXT,
+      }],
+    },
+  };
+}
+
+function approvalClient(draft: Row) {
+  const drafts = [draft];
+  const rpcCalls: string[] = [];
+  return {
+    drafts,
+    rpcCalls,
+    client: {
+      rpc(name: string) {
+        rpcCalls.push(name);
+        return Promise.resolve({ data: null, error: null });
+      },
+      from(table: string) {
+        if (table === "makesafe_intake_drafts") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            in: () => query,
+            update: (payload: Row) => {
+              Object.assign(drafts[0], payload);
+              return query;
+            },
+            single: () => Promise.resolve({ data: drafts[0], error: null }),
+            maybeSingle: () =>
+              Promise.resolve({ data: drafts[0], error: null }),
+            then: (resolve: (value: any) => unknown) =>
+              resolve({ data: drafts, error: null }),
+          };
+          return query;
+        }
+        if (table === "makesafe_intake_job_mints") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            order: () => Promise.resolve({ data: [], error: null }),
+          };
+          return query;
+        }
+        const empty: any = {
+          select: () => empty,
+          eq: () => empty,
+          in: () => empty,
+          is: () => empty,
+          not: () => empty,
+          ilike: () => empty,
+          or: () => empty,
+          gte: () => empty,
+          lte: () => empty,
+          contains: () => empty,
+          neq: () => empty,
+          order: () => empty,
+          limit: () => empty,
+          range: () => Promise.resolve({ data: [], error: null }),
+          single: () => Promise.resolve({ data: null, error: null }),
+          maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          then: (resolve: (value: any) => unknown) =>
+            resolve({ data: [], error: null }),
+        };
+        return empty;
+      },
+    },
+  };
+}
+
+Deno.test("an unattended lane may not mint a card that resolves to repair only at approval", async () => {
+  const db = approvalClient(legacyRepairDraftRow());
+
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(db.client, {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        draft_id: "draft-legacy-repair",
+        approved_by: "auto-intake",
+      }),
+    Error,
+    "Repair intake requires a human tick",
+  );
+  assertEquals((error as any).status, 409);
+  // Nothing written: the draft is still reviewable for an operator.
+  assertEquals(db.drafts[0].status, "needs_review");
+  assertEquals(db.drafts[0].approved_job_id, null);
+});
+
+Deno.test("CONTROL: the same draft approved by an identified operator passes the brake", async () => {
+  const db = approvalClient(legacyRepairDraftRow());
+
+  // Identical client and draft; the ONLY difference is the absent unattended
+  // marker. The operator path must get past the supervision brake — it stops
+  // later, at a different gate, on this deliberately thin fixture.
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(db.client, {
+        draft_id: "draft-legacy-repair",
+        approved_by: "captain@secureworkswa.com.au",
+      }),
+    Error,
+  );
+  assert(
+    !String((error as Error).message).includes(
+      "Repair intake requires a human tick",
+    ),
+    `operator approval must not hit the unattended brake, got: ${
+      (error as Error).message
+    }`,
+  );
 });
