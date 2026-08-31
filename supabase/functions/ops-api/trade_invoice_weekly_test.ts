@@ -11,9 +11,13 @@ import {
 
 type ScopeLine = {
   description: string;
-  quantity: number;
-  unit: string;
-  unit_price: number;
+  quantity?: number | string;
+  metres?: number | string;
+  qty?: number | string;
+  unit?: string;
+  unit_price?: number | string;
+  rate?: number | string;
+  price?: number | string;
 };
 
 type CrewDeduction = {
@@ -227,6 +231,11 @@ Deno.test("Henry invoice 31 weekly blocks are server-totalled exactly", () => {
     invoice.job_blocks.map((block) => block.subtotal),
     [164.6, 244.2, 48.6, 2510, 274, 35, 842, 640, 405],
   );
+  assertEquals(
+    invoice.job_blocks.map((block) => block.source_work_order_id),
+    ["wo-1", "wo-2", "wo-3", "wo-4", "wo-5", "wo-6", "wo-7", "wo-8", "wo-9"],
+  );
+  assertEquals(invoice.job_blocks[0].site_address, "1 Test Street, Perth WA");
   assertEquals(invoice.grand_total, 5163.4);
   assertEquals(invoice.final_deductions_total, 350);
   assertEquals(invoice.to_be_paid, 4813.4);
@@ -301,4 +310,62 @@ Deno.test("weekly invoice refuses unsigned deductions and client total claims", 
     WeeklyInvoiceError,
     "final deduction rate must be positive",
   );
+});
+
+Deno.test("weekly blocks keep distinct work orders on the same job", () => {
+  const first = jobBlock(10, "SWF-200", [scope("Install", 2, "m", 35)]);
+  const second = jobBlock(11, "SWF-200", [scope("Gate", 1, "ea", 250)]);
+  first.work_order.completed_at = "2026-08-25T08:00:00Z";
+  second.work_order.completed_at = "2026-08-26T08:00:00Z";
+  first.work_order.site_address = "10 First Street, Balcatta";
+  second.work_order.job_id = first.work_order.job_id;
+  second.work_order.jobs = first.work_order.jobs;
+  second.work_order.site_address = "20 Second Street, Balcatta";
+
+  const invoice = buildWeeklyWorkOrderInvoice({
+    job_blocks: [first, second],
+  });
+
+  assertEquals(
+    invoice.job_blocks.map((block) => ({
+      source_work_order_id: block.source_work_order_id,
+      job_id: block.job_id,
+      line_date: block.line_date,
+      site_address: block.site_address,
+      subtotal: block.subtotal,
+    })),
+    [{
+      source_work_order_id: "wo-10",
+      job_id: "job-10",
+      line_date: "2026-08-25",
+      site_address: "10 First Street, Balcatta",
+      subtotal: 70,
+    }, {
+      source_work_order_id: "wo-11",
+      job_id: "job-10",
+      line_date: "2026-08-26",
+      site_address: "20 Second Street, Balcatta",
+      subtotal: 250,
+    }],
+  );
+});
+
+Deno.test("weekly scope lines skip blank numeric candidates", () => {
+  const block = jobBlock(12, "SWF-201", [{
+    description: "Fence Installation",
+    quantity: "",
+    metres: 12,
+    unit: "m",
+    unit_price: "",
+    rate: 35,
+  }]);
+  block.work_order.site_address = "10 Main St, Balcatta";
+  block.work_order.jobs.site_suburb = "Balcatta";
+
+  const invoice = buildWeeklyWorkOrderInvoice({ job_blocks: [block] });
+
+  assertEquals(invoice.lines[0].quantity, 12);
+  assertEquals(invoice.lines[0].unit_rate, 35);
+  assertEquals(invoice.lines[0].line_total_ex, 420);
+  assertEquals(invoice.job_blocks[0].site_address, "10 Main St, Balcatta");
 });

@@ -30,6 +30,7 @@ export type WeeklyInvoiceLine = {
 };
 
 export type WeeklyInvoiceJobBlock = {
+  source_work_order_id: string;
   job_id: string;
   job_number: string;
   client_name: string | null;
@@ -60,6 +61,13 @@ export class WeeklyInvoiceError extends Error {
 const roundMoney = (value: number): number =>
   Math.round((value + Number.EPSILON) * 100) / 100;
 
+const perthDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Australia/Perth",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 function requiredText(value: unknown, label: string): string {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) throw new WeeklyInvoiceError(`${label} is required`);
@@ -74,10 +82,35 @@ function positiveNumber(value: unknown, label: string): number {
   return numeric;
 }
 
-function lineDate(workOrder: Record<string, unknown>): string | null {
-  const candidate = String(
-    workOrder.completed_at || workOrder.scheduled_date || "",
-  ).slice(0, 10);
+export function firstWorkOrderNumericValue(
+  candidates: unknown[],
+  fallback: number,
+): number {
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined) continue;
+    if (typeof candidate === "string" && candidate.trim() === "") continue;
+    const numeric = Number(candidate);
+    if (!Number.isFinite(numeric)) continue;
+    return numeric;
+  }
+  return fallback;
+}
+
+export function weeklyWorkOrderBusinessDate(
+  workOrder: Record<string, unknown>,
+): string | null {
+  const completedAt = String(workOrder.completed_at ?? "").trim();
+  if (completedAt) {
+    const completed = new Date(completedAt);
+    if (!Number.isNaN(completed.getTime())) {
+      const parts = perthDateFormatter.formatToParts(completed);
+      const value = (type: string) =>
+        parts.find((part) => part.type === type)?.value || "";
+      const candidate = `${value("year")}-${value("month")}-${value("day")}`;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return candidate;
+    }
+  }
+  const candidate = String(workOrder.scheduled_date ?? "").slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? candidate : null;
 }
 
@@ -178,14 +211,15 @@ export function calculateWeeklyInvoiceBreakdown(
       finalDeductions.push(line);
       continue;
     }
-    if (!line.job_id || !line.job_number) {
+    if (!line.job_id || !line.job_number || !line.source_work_order_id) {
       throw new WeeklyInvoiceError(
-        "every non-final weekly line requires a job",
+        "every non-final weekly line requires a work order and job",
       );
     }
-    let block = blocks.get(line.job_id);
+    let block = blocks.get(line.source_work_order_id);
     if (!block) {
       block = {
+        source_work_order_id: line.source_work_order_id,
         job_id: line.job_id,
         job_number: line.job_number,
         client_name: line.client_name,
@@ -194,7 +228,11 @@ export function calculateWeeklyInvoiceBreakdown(
         subtotal: 0,
         lines: [],
       };
-      blocks.set(line.job_id, block);
+      blocks.set(line.source_work_order_id, block);
+    } else if (block.job_id !== line.job_id) {
+      throw new WeeklyInvoiceError(
+        "a weekly work order cannot contain lines from multiple jobs",
+      );
     }
     block.lines.push(line);
     block.subtotal = roundMoney(block.subtotal + line.line_total_ex);
@@ -246,6 +284,7 @@ export function calculateWeeklyInvoiceBreakdown(
 export function buildWeeklyWorkOrderInvoice(input: {
   job_blocks: Array<{
     work_order: Record<string, unknown>;
+    work_date?: string | null;
     crew_deductions?: Array<Record<string, unknown>>;
     labour_deductions?: Array<Record<string, unknown>>;
   }>;
@@ -275,11 +314,15 @@ export function buildWeeklyWorkOrderInvoice(input: {
     const jobId = requiredText(workOrder.job_id || job.id, "job id");
     const jobNumber = requiredText(job.job_number, "job number");
     const clientName = String(job.client_name || "").trim() || null;
-    const address = [
-      workOrder.site_address || job.site_address,
-      job.site_suburb,
-    ].filter(Boolean).join(", ") || null;
-    const workDate = lineDate(workOrder);
+    const workOrderAddress = String(workOrder.site_address ?? "").trim();
+    const jobAddress = String(job.site_address ?? "").trim();
+    const jobSuburb = String(job.site_suburb ?? "").trim();
+    const fallbackAddress = [jobAddress, jobSuburb].filter(Boolean).join(", ");
+    const address = workOrderAddress || fallbackAddress || null;
+    const requestedWorkDate = String(block.work_date ?? "");
+    const workDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedWorkDate)
+      ? requestedWorkDate
+      : weeklyWorkOrderBusinessDate(workOrder);
     const division = String(job.type || "").trim() || null;
     const scopeItems = Array.isArray(workOrder.scope_items)
       ? workOrder.scope_items as Array<Record<string, unknown>>
@@ -292,11 +335,17 @@ export function buildWeeklyWorkOrderInvoice(input: {
 
     for (const item of scopeItems) {
       const quantity = positiveNumber(
-        item.quantity ?? item.metres ?? item.qty ?? 1,
+        firstWorkOrderNumericValue(
+          [item.quantity, item.metres, item.qty],
+          1,
+        ),
         `${jobNumber} scope quantity`,
       );
       const unitRate = positiveNumber(
-        item.unit_price ?? item.rate ?? item.price,
+        firstWorkOrderNumericValue(
+          [item.unit_price, item.rate, item.price],
+          0,
+        ),
         `${jobNumber} scope rate`,
       );
       lines.push({

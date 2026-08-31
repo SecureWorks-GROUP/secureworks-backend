@@ -7,6 +7,7 @@ import {
 import {
   _calculateWorkOrderInvoiceTotals,
   _canSubmitWorkOrderInvoice,
+  _claimWorkOrderInvoiceBeforeXero,
   _findBlockingWorkOrderInvoice,
   _selectWorkOrderNegativeCharges,
   handleTradeWorkOrdersAction,
@@ -676,21 +677,33 @@ Deno.test("negative charges cannot reduce a work-order invoice to zero or below"
 });
 
 Deno.test("single-work-order submit claims its source atomically before Xero", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
+  const events: string[] = [];
+  const fakeClient = { boundary: "fake" };
+  const result = await _claimWorkOrderInvoiceBeforeXero(
+    fakeClient,
+    { invoice_source: "work_order" },
+    [{ line_total_ex: 100 }],
+    null,
+    {
+      persistWorkOrderInvoice: async (client) => {
+        assertEquals(client, fakeClient);
+        events.push("persist:start");
+        await Promise.resolve();
+        events.push("persist:done");
+        return "invoice-1";
+      },
+      openXeroBoundary: async (client) => {
+        assertEquals(client, fakeClient);
+        events.push("xero:open");
+        return { accessToken: "token", tenantId: "tenant" };
+      },
+    },
   );
-  const routeStart = source.indexOf("case 'submit_work_order_invoice':");
-  const routeEnd = source.indexOf(
-    "case 'save_trade_invoice_draft':",
-    routeStart,
-  );
-  const route = source.slice(routeStart, routeEnd);
-  const persistAt = route.indexOf("await _persistWorkOrderInvoice(");
-  const xeroAt = route.indexOf("await getToken(client)");
 
-  assertEquals(routeStart >= 0, true);
-  assertEquals(routeEnd > routeStart, true);
-  assertEquals(persistAt >= 0, true);
-  assertEquals(xeroAt > persistAt, true);
-  assertEquals(route.includes("client.from('trade_invoices').insert"), false);
+  assertEquals(events, ["persist:start", "persist:done", "xero:open"]);
+  assertEquals(result, {
+    invoiceId: "invoice-1",
+    accessToken: "token",
+    tenantId: "tenant",
+  });
 });

@@ -178,6 +178,92 @@ CREATE INDEX IF NOT EXISTS idx_trade_invoice_lines_deduction_trade_rate
   ON public.trade_invoice_lines(deduction_trade_rate_id)
   WHERE deduction_trade_rate_id IS NOT NULL;
 
+CREATE OR REPLACE FUNCTION public.trade_invoice_first_numeric_candidate_v1(
+  p_values jsonb,
+  p_fallback numeric
+)
+RETURNS numeric
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $$
+  SELECT COALESCE(
+    (
+      SELECT candidate.value_text::numeric
+      FROM jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(p_values) = 'array' THEN p_values ELSE '[]'::jsonb END
+      ) WITH ORDINALITY AS candidate(value_text, ordinality)
+      WHERE NULLIF(BTRIM(candidate.value_text), '') IS NOT NULL
+        AND candidate.value_text ~ '^\s*-?([0-9]+(\.[0-9]*)?|\.[0-9]+)\s*$'
+      ORDER BY candidate.ordinality
+      LIMIT 1
+    ),
+    p_fallback
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.trade_invoice_work_order_scope_lines_v1(
+  p_scope_items jsonb
+)
+RETURNS TABLE (
+  line_type text,
+  description text,
+  quantity numeric,
+  unit text,
+  unit_rate numeric,
+  line_total_ex numeric
+)
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $$
+  SELECT
+    CASE
+      WHEN LOWER(CONCAT_WS(' ', item->>'line_type', item->>'type', item->>'category', item->>'description', item->>'name'))
+        ~ '(travel|logistics|disposal|pickup)' THEN 'travel'
+      WHEN LOWER(CONCAT_WS(' ', item->>'line_type', item->>'type', item->>'category', item->>'description', item->>'name'))
+        ~ '(material|plinth|tube|lattice)' THEN 'materials'
+      WHEN LOWER(CONCAT_WS(' ', item->>'line_type', item->>'type', item->>'category', item->>'description', item->>'name'))
+        ~ 'patio' THEN 'patio'
+      WHEN LOWER(CONCAT_WS(' ', item->>'line_type', item->>'type', item->>'category', item->>'description', item->>'name'))
+        ~ '(fence|removal|install|gate|labour|labor)' THEN 'labour'
+      ELSE 'other'
+    END,
+    COALESCE(
+      NULLIF(BTRIM(regexp_replace(item->>'description', '\s+', ' ', 'g')), ''),
+      NULLIF(BTRIM(regexp_replace(item->>'name', '\s+', ' ', 'g')), ''),
+      'Work order item'
+    ),
+    quantity.value,
+    COALESCE(NULLIF(item->>'unit', ''), CASE WHEN item ? 'metres' THEN 'm' ELSE 'ea' END),
+    round(unit_rate.value, 2),
+    round(quantity.value * unit_rate.value, 2)
+  FROM jsonb_array_elements(
+    CASE WHEN jsonb_typeof(p_scope_items) = 'array' THEN p_scope_items ELSE '[]'::jsonb END
+  ) AS input(item)
+  CROSS JOIN LATERAL (
+    SELECT public.trade_invoice_first_numeric_candidate_v1(
+      jsonb_build_array(item->'quantity', item->'metres', item->'qty'),
+      1
+    )
+  ) AS quantity(value)
+  CROSS JOIN LATERAL (
+    SELECT public.trade_invoice_first_numeric_candidate_v1(
+      jsonb_build_array(item->'unit_price', item->'rate', item->'price'),
+      0
+    )
+  ) AS unit_rate(value);
+$$;
+
+REVOKE ALL ON FUNCTION public.trade_invoice_first_numeric_candidate_v1(jsonb, numeric)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trade_invoice_work_order_scope_lines_v1(jsonb)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.trade_invoice_first_numeric_candidate_v1(jsonb, numeric)
+  TO service_role, postgres;
+GRANT EXECUTE ON FUNCTION public.trade_invoice_work_order_scope_lines_v1(jsonb)
+  TO service_role, postgres;
+
 COMMENT ON COLUMN public.trade_invoice_lines.source_work_order_id IS
   'Work order whose stored scope/rates produced this weekly invoice line.';
 COMMENT ON COLUMN public.trade_invoice_lines.source_trade_invoice_line_id IS
@@ -218,6 +304,9 @@ DECLARE
   v_draft_count integer;
   v_deleted_count integer;
   v_line_sum numeric(12,2);
+  v_work_order_status text;
+  v_work_order_date date;
+  v_scope_items jsonb;
 BEGIN
   IF p_invoice IS NULL
      OR p_lines IS NULL
@@ -234,8 +323,8 @@ BEGIN
   IF v_org_id IS NULL
      OR v_user_id IS NULL
      OR v_work_order_id IS NULL
-     OR p_invoice->>'invoice_source' <> 'work_order'
-     OR p_invoice->>'status' <> 'draft' THEN
+     OR p_invoice->>'invoice_source' IS DISTINCT FROM 'work_order'
+     OR p_invoice->>'status' IS DISTINCT FROM 'draft' THEN
     RAISE EXCEPTION 'invalid work-order invoice persistence identity'
       USING ERRCODE = '22023';
   END IF;
@@ -244,17 +333,91 @@ BEGIN
     hashtextextended('weekly-trade-invoice:' || v_org_id::text, 0)
   );
 
-  SELECT job_id
-  INTO v_job_id
+  SELECT
+    job_id,
+    status,
+    COALESCE((completed_at AT TIME ZONE 'Australia/Perth')::date, scheduled_date),
+    scope_items
+  INTO v_job_id, v_work_order_status, v_work_order_date, v_scope_items
   FROM public.work_orders
   WHERE id = v_work_order_id
     AND org_id = v_org_id
-  FOR SHARE;
+  FOR UPDATE;
   IF v_job_id IS NULL
      OR v_job_id IS DISTINCT FROM NULLIF(p_invoice->>'job_id', '')::uuid THEN
     RAISE EXCEPTION 'work-order invoice source does not belong to the requested tenant and job'
       USING ERRCODE = '23503';
   END IF;
+  IF v_work_order_status IS DISTINCT FROM 'complete'
+     OR v_work_order_date IS NULL
+     OR v_work_order_date IS DISTINCT FROM NULLIF(p_invoice->>'source_work_order_date', '')::date THEN
+    RAISE EXCEPTION 'work-order invoice source is no longer complete in the selected business date'
+      USING ERRCODE = '23503';
+  END IF;
+
+  IF EXISTS (
+    WITH expected AS (
+      SELECT
+        v_job_id AS job_id,
+        description,
+        quantity,
+        unit,
+        unit_rate,
+        line_total_ex,
+        v_work_order_date AS line_date,
+        count(*) AS line_count
+      FROM public.trade_invoice_work_order_scope_lines_v1(v_scope_items)
+      GROUP BY description, quantity, unit, unit_rate, line_total_ex
+    ),
+    actual AS (
+      SELECT
+        NULLIF(line->>'job_id', '')::uuid AS job_id,
+        NULLIF(BTRIM(regexp_replace(line->>'description', '\s+', ' ', 'g')), '') AS description,
+        NULLIF(line->>'quantity', '')::numeric AS quantity,
+        NULLIF(line->>'unit', '') AS unit,
+        round(NULLIF(line->>'unit_rate', '')::numeric, 2) AS unit_rate,
+        round((line->>'line_total_ex')::numeric, 2) AS line_total_ex,
+        NULLIF(line->>'line_date', '')::date AS line_date,
+        count(*) AS line_count
+      FROM jsonb_array_elements(p_lines) AS input(line)
+      WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NULL
+        AND COALESCE(NULLIF(line->>'line_type', ''), 'labour') NOT IN (
+          'crew_work_order_deduction',
+          'labour_deduction',
+          'travel_logistics_deduction',
+          'materials_deduction',
+          'final_payout_deduction'
+        )
+      GROUP BY
+        NULLIF(line->>'job_id', '')::uuid,
+        NULLIF(BTRIM(regexp_replace(line->>'description', '\s+', ' ', 'g')), ''),
+        NULLIF(line->>'quantity', '')::numeric,
+        NULLIF(line->>'unit', ''),
+        round(NULLIF(line->>'unit_rate', '')::numeric, 2),
+        round((line->>'line_total_ex')::numeric, 2),
+        NULLIF(line->>'line_date', '')::date
+    ),
+    mismatches AS (
+      (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+      UNION ALL
+      (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+    )
+    SELECT 1 FROM mismatches
+  ) THEN
+    RAISE EXCEPTION 'work-order invoice source scope changed before persistence'
+      USING ERRCODE = '23503';
+  END IF;
+
+  PERFORM 1
+  FROM public.trade_invoice_lines source_line
+  JOIN public.trade_invoices source_invoice
+    ON source_invoice.id = source_line.trade_invoice_id
+  WHERE source_line.id IN (
+    SELECT NULLIF(line->>'source_trade_invoice_line_id', '')::uuid
+    FROM jsonb_array_elements(p_lines) AS input(line)
+    WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NOT NULL
+  )
+  FOR UPDATE OF source_line, source_invoice;
 
   SELECT count(*)
   INTO v_draft_count
@@ -311,8 +474,8 @@ BEGIN
   INTO v_line_sum
   FROM jsonb_array_elements(p_lines) AS input(line);
   IF v_line_sum <= 0
-     OR v_line_sum <> round((p_invoice->>'subtotal_ex')::numeric, 2)
-     OR v_line_sum <> round((p_invoice->>'gross_earned')::numeric, 2) THEN
+     OR v_line_sum IS DISTINCT FROM round((p_invoice->>'subtotal_ex')::numeric, 2)
+     OR v_line_sum IS DISTINCT FROM round((p_invoice->>'gross_earned')::numeric, 2) THEN
     RAISE EXCEPTION 'work-order invoice header does not equal its server-resolved lines'
       USING ERRCODE = '23514';
   END IF;
@@ -425,7 +588,7 @@ BEGIN
     NULLIF(line->>'hourly_rate', '')::numeric,
     (line->>'line_total_ex')::numeric,
     'pending',
-    NULLIF(line->>'line_type', ''),
+    COALESCE(NULLIF(line->>'line_type', ''), 'labour'),
     NULLIF(line->>'description', ''),
     NULLIF(line->>'quantity', '')::numeric,
     NULLIF(line->>'unit', ''),
@@ -475,6 +638,7 @@ DECLARE
   v_org_id uuid;
   v_user_id uuid;
   v_week_start date;
+  v_week_end date;
   v_status text;
   v_prior_draft_id uuid;
   v_prior_xero_bill_id text;
@@ -497,11 +661,16 @@ BEGIN
   v_org_id := NULLIF(p_invoice->>'org_id', '')::uuid;
   v_user_id := NULLIF(p_invoice->>'user_id', '')::uuid;
   v_week_start := NULLIF(p_invoice->>'week_start', '')::date;
+  v_week_end := NULLIF(p_invoice->>'week_end', '')::date;
   v_status := NULLIF(p_invoice->>'status', '');
   IF v_org_id IS NULL
      OR v_user_id IS NULL
      OR v_week_start IS NULL
-     OR p_invoice->>'invoice_source' <> 'weekly_work_order'
+     OR v_week_end IS NULL
+     OR v_week_end <> v_week_start + 6
+     OR EXTRACT(ISODOW FROM v_week_start) <> 1
+     OR p_invoice->>'invoice_source' IS DISTINCT FROM 'weekly_work_order'
+     OR v_status IS NULL
      OR v_status NOT IN ('draft', 'pending_acknowledgment') THEN
     RAISE EXCEPTION 'invalid weekly invoice persistence identity'
       USING ERRCODE = '22023';
@@ -510,6 +679,45 @@ BEGIN
   PERFORM pg_advisory_xact_lock(
     hashtextextended('weekly-trade-invoice:' || v_org_id::text, 0)
   );
+
+  PERFORM 1
+  FROM public.work_orders wo
+  JOIN (
+    SELECT DISTINCT NULLIF(line->>'source_work_order_id', '')::uuid AS source_id
+    FROM jsonb_array_elements(p_lines) AS input(line)
+    WHERE COALESCE(line->>'line_type', '') <> 'final_payout_deduction'
+  ) sources
+    ON sources.source_id = wo.id
+  WHERE wo.org_id = v_org_id
+  FOR UPDATE OF wo;
+
+  PERFORM 1
+  FROM public.trade_invoice_lines source_line
+  JOIN public.trade_invoices source_invoice
+    ON source_invoice.id = source_line.trade_invoice_id
+  WHERE source_line.id IN (
+    SELECT NULLIF(line->>'source_trade_invoice_line_id', '')::uuid
+    FROM jsonb_array_elements(p_lines) AS input(line)
+    WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NOT NULL
+  )
+  FOR UPDATE OF source_line, source_invoice;
+
+  PERFORM 1
+  FROM public.job_assignments assignment
+  WHERE assignment.id IN (
+    SELECT NULLIF(line->>'deduction_assignment_id', '')::uuid
+    FROM jsonb_array_elements(p_lines) AS input(line)
+    WHERE NULLIF(line->>'deduction_assignment_id', '') IS NOT NULL
+  )
+  FOR UPDATE;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(p_lines) AS input(line)
+    WHERE input.line->>'line_type' = 'labour_deduction'
+  ) THEN
+    LOCK TABLE public.trade_rates IN SHARE MODE;
+  END IF;
 
   SELECT count(*)
   INTO v_draft_count
@@ -559,10 +767,10 @@ BEGIN
   INTO v_line_sum, v_job_grand_total, v_final_deductions_total
   FROM jsonb_array_elements(p_lines) AS input(line);
 
-  IF v_line_sum <> round((p_invoice->>'subtotal_ex')::numeric, 2)
-     OR v_job_grand_total <> round((p_invoice->>'job_grand_total_ex')::numeric, 2)
-     OR v_final_deductions_total <> round((p_invoice->>'final_deductions_total_ex')::numeric, 2)
-     OR v_line_sum <> round((p_invoice->>'to_be_paid_ex')::numeric, 2) THEN
+  IF v_line_sum IS DISTINCT FROM round((p_invoice->>'subtotal_ex')::numeric, 2)
+     OR v_job_grand_total IS DISTINCT FROM round((p_invoice->>'job_grand_total_ex')::numeric, 2)
+     OR v_final_deductions_total IS DISTINCT FROM round((p_invoice->>'final_deductions_total_ex')::numeric, 2)
+     OR v_line_sum IS DISTINCT FROM round((p_invoice->>'to_be_paid_ex')::numeric, 2) THEN
     RAISE EXCEPTION 'weekly invoice header does not equal its server-resolved lines'
       USING ERRCODE = '23514';
   END IF;
@@ -572,14 +780,96 @@ BEGIN
     FROM jsonb_array_elements(p_lines) AS input(line)
     LEFT JOIN public.work_orders wo
       ON wo.id = NULLIF(input.line->>'source_work_order_id', '')::uuid
-    WHERE NULLIF(input.line->>'source_work_order_id', '') IS NOT NULL
+    WHERE COALESCE(input.line->>'line_type', '') <> 'final_payout_deduction'
       AND (
-        wo.id IS NULL
+        NULLIF(input.line->>'source_work_order_id', '') IS NULL
+        OR wo.id IS NULL
         OR wo.org_id <> v_org_id
         OR wo.job_id IS DISTINCT FROM NULLIF(input.line->>'job_id', '')::uuid
+        OR wo.status IS DISTINCT FROM 'complete'
+        OR COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date) IS NULL
+        OR COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
+          NOT BETWEEN v_week_start AND v_week_end
+        OR COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
+          IS DISTINCT FROM NULLIF(input.line->>'line_date', '')::date
       )
   ) THEN
     RAISE EXCEPTION 'weekly invoice contains an invalid work-order source'
+      USING ERRCODE = '23503';
+  END IF;
+
+  IF EXISTS (
+    WITH expected AS (
+      SELECT
+        wo.id AS source_work_order_id,
+        wo.job_id,
+        scope.line_type,
+        scope.description,
+        scope.quantity,
+        scope.unit,
+        scope.unit_rate,
+        scope.line_total_ex,
+        COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date) AS line_date,
+        count(*) AS line_count
+      FROM public.work_orders wo
+      JOIN (
+        SELECT DISTINCT NULLIF(line->>'source_work_order_id', '')::uuid AS source_id
+        FROM jsonb_array_elements(p_lines) AS input(line)
+        WHERE COALESCE(line->>'line_type', '') <> 'final_payout_deduction'
+      ) sources
+        ON sources.source_id = wo.id
+      CROSS JOIN LATERAL public.trade_invoice_work_order_scope_lines_v1(wo.scope_items) scope
+      WHERE wo.org_id = v_org_id
+      GROUP BY
+        wo.id,
+        wo.job_id,
+        scope.line_type,
+        scope.description,
+        scope.quantity,
+        scope.unit,
+        scope.unit_rate,
+        scope.line_total_ex,
+        COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
+    ),
+    actual AS (
+      SELECT
+        NULLIF(line->>'source_work_order_id', '')::uuid AS source_work_order_id,
+        NULLIF(line->>'job_id', '')::uuid AS job_id,
+        NULLIF(line->>'line_type', '') AS line_type,
+        NULLIF(BTRIM(regexp_replace(line->>'description', '\s+', ' ', 'g')), '') AS description,
+        NULLIF(line->>'quantity', '')::numeric AS quantity,
+        NULLIF(line->>'unit', '') AS unit,
+        round(NULLIF(line->>'unit_rate', '')::numeric, 2) AS unit_rate,
+        round((line->>'line_total_ex')::numeric, 2) AS line_total_ex,
+        NULLIF(line->>'line_date', '')::date AS line_date,
+        count(*) AS line_count
+      FROM jsonb_array_elements(p_lines) AS input(line)
+      WHERE COALESCE(line->>'line_type', '') NOT IN (
+        'crew_work_order_deduction',
+        'labour_deduction',
+        'travel_logistics_deduction',
+        'materials_deduction',
+        'final_payout_deduction'
+      )
+      GROUP BY
+        NULLIF(line->>'source_work_order_id', '')::uuid,
+        NULLIF(line->>'job_id', '')::uuid,
+        NULLIF(line->>'line_type', ''),
+        NULLIF(BTRIM(regexp_replace(line->>'description', '\s+', ' ', 'g')), ''),
+        NULLIF(line->>'quantity', '')::numeric,
+        NULLIF(line->>'unit', ''),
+        round(NULLIF(line->>'unit_rate', '')::numeric, 2),
+        round((line->>'line_total_ex')::numeric, 2),
+        NULLIF(line->>'line_date', '')::date
+    ),
+    mismatches AS (
+      (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+      UNION ALL
+      (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+    )
+    SELECT 1 FROM mismatches
+  ) THEN
+    RAISE EXCEPTION 'weekly invoice source scope changed before persistence'
       USING ERRCODE = '23503';
   END IF;
 
@@ -595,7 +885,7 @@ BEGIN
       ON parent.id = existing.trade_invoice_id
     WHERE sources.source_id IS NOT NULL
       AND parent.id IS DISTINCT FROM v_prior_draft_id
-      AND parent.status NOT IN ('ops-reject', 'failed')
+      AND (parent.status IS NULL OR parent.status NOT IN ('ops-reject', 'failed'))
   ) OR EXISTS (
     SELECT 1
     FROM (
@@ -606,7 +896,7 @@ BEGIN
       ON parent.work_order_id = sources.source_id
     WHERE sources.source_id IS NOT NULL
       AND parent.id IS DISTINCT FROM v_prior_draft_id
-      AND parent.status NOT IN ('ops-reject', 'failed')
+      AND (parent.status IS NULL OR parent.status NOT IN ('ops-reject', 'failed'))
   ) THEN
     RAISE EXCEPTION 'a weekly work order is already held by another invoice'
       USING ERRCODE = '23505';
@@ -663,7 +953,7 @@ BEGIN
       ON parent.id = existing.trade_invoice_id
     WHERE sources.source_id IS NOT NULL
       AND parent.id IS DISTINCT FROM v_prior_draft_id
-      AND parent.status NOT IN ('ops-reject', 'failed')
+      AND (parent.status IS NULL OR parent.status NOT IN ('ops-reject', 'failed'))
   ) THEN
     RAISE EXCEPTION 'a crew charge is already held by another invoice'
       USING ERRCODE = '23505';
@@ -687,11 +977,24 @@ BEGIN
         OR rate.id IS NULL
         OR rate.org_id IS DISTINCT FROM v_org_id
         OR rate.user_id IS DISTINCT FROM NULLIF(input.line->>'deduction_user_id', '')::uuid
-        OR COALESCE(wo.completed_at::date, wo.scheduled_date) IS NULL
-        OR rate.effective_from > COALESCE(wo.completed_at::date, wo.scheduled_date)
+        OR COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date) IS NULL
+        OR rate.effective_from > COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
         OR (
           rate.effective_to IS NOT NULL
-          AND rate.effective_to < COALESCE(wo.completed_at::date, wo.scheduled_date)
+          AND rate.effective_to < COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
+        )
+        OR rate.id IS DISTINCT FROM (
+          SELECT latest_rate.id
+          FROM public.trade_rates latest_rate
+          WHERE latest_rate.org_id = v_org_id
+            AND latest_rate.user_id = NULLIF(input.line->>'deduction_user_id', '')::uuid
+            AND latest_rate.effective_from <= COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
+            AND (
+              latest_rate.effective_to IS NULL
+              OR latest_rate.effective_to >= COALESCE((wo.completed_at AT TIME ZONE 'Australia/Perth')::date, wo.scheduled_date)
+            )
+          ORDER BY latest_rate.effective_from DESC, latest_rate.id DESC
+          LIMIT 1
         )
         OR round(-rate.hourly_rate, 2) <> round((input.line->>'unit_rate')::numeric, 2)
         OR round((input.line->>'quantity')::numeric * -rate.hourly_rate, 2)
@@ -755,7 +1058,7 @@ BEGIN
     NULLIF(line->>'hourly_rate', '')::numeric,
     (line->>'line_total_ex')::numeric,
     'pending',
-    NULLIF(line->>'line_type', ''),
+    COALESCE(NULLIF(line->>'line_type', ''), 'labour'),
     NULLIF(line->>'description', ''),
     NULLIF(line->>'quantity', '')::numeric,
     NULLIF(line->>'unit', ''),

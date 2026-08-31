@@ -374,7 +374,9 @@ import {
 import {
   buildWeeklyWorkOrderInvoice,
   calculateWeeklyInvoiceBreakdown,
+  firstWorkOrderNumericValue,
   WeeklyInvoiceError,
+  weeklyWorkOrderBusinessDate,
   type WeeklyInvoiceLine,
   type WeeklyWorkOrderInvoice,
 } from './trade_invoice_weekly.ts'
@@ -9170,7 +9172,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // orders, but tenant and canonical job vertical remain hard server
             // boundaries at submission time too.
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, org_id, job_id, wo_number, status, scope_items, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
+              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
               .eq('id', work_order_id)
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
@@ -9304,6 +9306,7 @@ if (import.meta.main) serve(async (req: Request) => {
               scopeItems,
               selectedNegativeCharges,
             )
+            const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
             const woInvoiceDate = new Date().toISOString().slice(0, 10)
             const woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
@@ -9329,8 +9332,10 @@ if (import.meta.main) serve(async (req: Request) => {
                 total_hours: 0,
                 hourly_rate: 0,
                 quantity: resolved.qty,
+                unit: String(item.unit || (item.metres !== undefined ? 'm' : 'ea')),
                 unit_rate: resolved.price,
                 line_total_ex: resolved.amount_ex,
+                line_date: sourceWorkOrderDate,
               }
             })
             for (const charge of selectedNegativeCharges) {
@@ -9343,8 +9348,10 @@ if (import.meta.main) serve(async (req: Request) => {
                 total_hours: 0,
                 hourly_rate: 0,
                 quantity: 1,
+                unit: 'ea',
                 unit_rate: charge.amount_ex,
                 line_total_ex: charge.amount_ex,
+                line_date: sourceWorkOrderDate,
                 source_trade_invoice_line_id: charge.line_id,
               })
             }
@@ -9353,7 +9360,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // the same organization-scoped transaction as weekly invoices.
             // No competing route can pass the source check before this commit,
             // and no Xero work starts until that local identity is durable.
-            const tradeInvoiceId = await _persistWorkOrderInvoice(
+            const workOrderBoundary = await _claimWorkOrderInvoiceBeforeXero(
               client,
               {
                 org_id: tradeUser.orgId,
@@ -9361,6 +9368,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 work_order_id,
                 invoice_source: 'work_order',
                 job_id: wo.job_id,
+                source_work_order_date: sourceWorkOrderDate,
                 subtotal_ex: subtotal,
                 gst,
                 total_inc: total,
@@ -9378,12 +9386,13 @@ if (import.meta.main) serve(async (req: Request) => {
               workOrderLines,
               retryDrafts[0]?.id || null,
             )
+            const tradeInvoiceId = workOrderBoundary.invoiceId
             const tradeInv = { id: tradeInvoiceId }
 
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
             let woXeroContactId = tradeXeroUser?.xero_contact_id || null
-            const { accessToken: woAt, tenantId: woTi } = await getToken(client)
+            const { accessToken: woAt, tenantId: woTi } = workOrderBoundary
             if (!woXeroContactId) {
               const woTradeEmail = tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || ''
               if (woTradeEmail) {
@@ -12314,25 +12323,14 @@ function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100
 }
 
-function firstNumericValue(candidates: unknown[], fallback: number): number {
-  for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined) continue
-    if (typeof candidate === 'string' && candidate.trim() === '') continue
-    const numeric = Number(candidate)
-    if (!Number.isFinite(numeric)) continue
-    return numeric
-  }
-  return fallback
-}
-
 // The only reader of a scope item's quantity and price. The Xero line items,
 // the invoice totals and the saved invoice lines all resolve through this, so
 // the pushed bill, the trade_invoices record and the audit event agree.
 export function _resolveWorkOrderScopeLine(
   item: any,
 ): { qty: number; price: number; amount_ex: number } {
-  const qty = firstNumericValue([item?.quantity, item?.metres, item?.qty], 1)
-  const price = firstNumericValue([item?.unit_price, item?.rate, item?.price], 0)
+  const qty = firstWorkOrderNumericValue([item?.quantity, item?.metres, item?.qty], 1)
+  const price = firstWorkOrderNumericValue([item?.unit_price, item?.rate, item?.price], 0)
   return { qty, price, amount_ex: roundMoney(qty * price) }
 }
 
@@ -12524,6 +12522,25 @@ export async function _persistWorkOrderInvoice(
   return invoiceId
 }
 
+export async function _claimWorkOrderInvoiceBeforeXero(
+  client: any,
+  invoicePayload: Record<string, unknown>,
+  lineRows: Array<Record<string, unknown>>,
+  requestedPriorDraftId: string | null,
+  dependencies: {
+    persistWorkOrderInvoice?: typeof _persistWorkOrderInvoice
+    openXeroBoundary?: typeof getToken
+  } = {},
+): Promise<{ invoiceId: string; accessToken: string; tenantId: string }> {
+  const invoiceId = await (
+    dependencies.persistWorkOrderInvoice || _persistWorkOrderInvoice
+  )(client, invoicePayload, lineRows, requestedPriorDraftId)
+  const { accessToken, tenantId } = await (
+    dependencies.openXeroBoundary || getToken
+  )(client)
+  return { invoiceId, accessToken, tenantId }
+}
+
 function weeklyInvoiceSourceUseAllowed(
   parent: any,
   viewerId: string,
@@ -12595,6 +12612,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
     throw new ApiError('One or more weekly work orders were not found in your business', 404)
   }
   const workOrderById = new Map((workOrders || []).map((row: any) => [String(row.id), row]))
+  const workDateById = new Map<string, string>()
   for (const workOrder of workOrders || []) {
     const job = Array.isArray(workOrder.jobs) ? workOrder.jobs[0] : workOrder.jobs
     if (!_canSubmitWorkOrderInvoice(tradeUser, { ...workOrder, jobs: job }, isDispatcher)) {
@@ -12603,10 +12621,11 @@ export async function _resolveWeeklyWorkOrderInvoice(
     if (String(workOrder.status || '') !== 'complete') {
       throw new ApiError('Every weekly work order must be complete before invoicing', 422)
     }
-    const workDate = String(workOrder.completed_at || workOrder.scheduled_date || '').slice(0, 10)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(workDate) || workDate < weekStart || workDate > weekEnd) {
+    const workDate = weeklyWorkOrderBusinessDate(workOrder)
+    if (!workDate || workDate < weekStart || workDate > weekEnd) {
       throw new ApiError('Every weekly work order must have a completion or scheduled date inside the selected week', 422)
     }
+    workDateById.set(String(workOrder.id), workDate)
   }
 
   const requestedChargeIds = requestedBlocks.flatMap((block: any) =>
@@ -12667,7 +12686,8 @@ export async function _resolveWeeklyWorkOrderInvoice(
         .in('user_id', labourUserIds)
         .lte('effective_from', weekEnd)
         .or(`effective_to.is.null,effective_to.gte.${weekStart}`)
-        .order('effective_from', { ascending: false }),
+        .order('effective_from', { ascending: false })
+        .order('id', { ascending: false }),
       client.from('job_assignments')
         .select('id, job_id, user_id, status')
         .in('job_id', jobIds)
@@ -12725,7 +12745,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
         const directLabour = labourRequests.filter((line: any) => line.work_order_id === String(block.work_order_id)).map((line: any) => {
           const userId = String(line.user_id || '')
           const user = labourUserById.get(userId)
-          const workDate = String(workOrder?.completed_at || workOrder?.scheduled_date || '').slice(0, 10)
+          const workDate = workDateById.get(String(block.work_order_id)) || ''
           const rate = labourRates.find((candidate: any) =>
             String(candidate.user_id || '') === userId &&
             String(candidate.effective_from || '') <= workDate &&
@@ -12753,6 +12773,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
         })
         return {
           work_order: { ...workOrder, jobs: job },
+          work_date: workDateById.get(String(block.work_order_id)) || null,
           crew_deductions: crewDeductions,
           labour_deductions: directLabour,
         }

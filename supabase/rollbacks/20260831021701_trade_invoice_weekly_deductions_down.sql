@@ -3,6 +3,8 @@
 
 DROP FUNCTION IF EXISTS public.persist_weekly_trade_invoice_v1(jsonb, jsonb, uuid);
 DROP FUNCTION IF EXISTS public.persist_trade_work_order_invoice_v1(jsonb, jsonb, uuid);
+DROP FUNCTION IF EXISTS public.trade_invoice_work_order_scope_lines_v1(jsonb);
+DROP FUNCTION IF EXISTS public.trade_invoice_first_numeric_candidate_v1(jsonb, numeric);
 
 ALTER TABLE public.trade_invoice_lines
   DROP CONSTRAINT IF EXISTS trade_invoice_lines_source_work_order_fk,

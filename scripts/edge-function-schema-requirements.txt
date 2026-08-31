@@ -16,6 +16,7 @@
 #   index       public index name
 #   policy      table.policy
 #   trigger     table.trigger
+#   function    public function name
 #
 # Add a complete requirement set in the same PR as schema-dependent edge code.
 # This manifest never applies SQL. It only drives a read-only production check.
@@ -263,5 +264,7 @@ ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|c
 ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_final_deduction_scope_check
 ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_deduction_assignment_fk
 ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_deduction_trade_rate_fk
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|trade_invoice_first_numeric_candidate_v1
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|trade_invoice_work_order_scope_lines_v1
 ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|persist_trade_work_order_invoice_v1
 ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|persist_weekly_trade_invoice_v1

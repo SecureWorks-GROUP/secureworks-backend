@@ -11,8 +11,11 @@ CREATE TABLE IF NOT EXISTS public.work_orders (
   id uuid PRIMARY KEY,
   org_id uuid NOT NULL,
   job_id uuid NOT NULL REFERENCES public.jobs(id),
+  status text,
+  scope_items jsonb,
   scheduled_date date,
-  completed_at timestamptz
+  completed_at timestamptz,
+  site_address text
 );
 
 CREATE TABLE IF NOT EXISTS public.job_assignments (

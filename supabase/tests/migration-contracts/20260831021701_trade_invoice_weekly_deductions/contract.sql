@@ -31,6 +31,16 @@ BEGIN
   ) IS NULL THEN
     RAISE EXCEPTION 'single-work-order invoice persistence function missing';
   END IF;
+  IF to_regprocedure(
+    'public.trade_invoice_first_numeric_candidate_v1(jsonb,numeric)'
+  ) IS NULL THEN
+    RAISE EXCEPTION 'weekly invoice numeric helper function missing';
+  END IF;
+  IF to_regprocedure(
+    'public.trade_invoice_work_order_scope_lines_v1(jsonb)'
+  ) IS NULL THEN
+    RAISE EXCEPTION 'weekly invoice scope helper function missing';
+  END IF;
 END;
 $$;
 
@@ -41,10 +51,74 @@ INSERT INTO public.users (id, org_id, name) VALUES
 INSERT INTO public.jobs (id, org_id, status, type, job_number) VALUES
   ('20000000-0000-4000-8000-000000000010', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'SWF-TEST-31');
 
-INSERT INTO public.work_orders (id, org_id, job_id) VALUES
-  ('20000000-0000-4000-8000-000000000020', '00000000-0000-0000-0000-000000000001', '20000000-0000-4000-8000-000000000010'),
-  ('20000000-0000-4000-8000-000000000021', '00000000-0000-0000-0000-000000000001', '20000000-0000-4000-8000-000000000010'),
-  ('20000000-0000-4000-8000-000000000022', '00000000-0000-0000-0000-000000000001', '20000000-0000-4000-8000-000000000010');
+INSERT INTO public.work_orders (
+  id, org_id, job_id, status, scope_items, scheduled_date, completed_at
+) VALUES
+(
+  '20000000-0000-4000-8000-000000000020',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":100}]',
+  '2026-08-18',
+  NULL
+), (
+  '20000000-0000-4000-8000-000000000021',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":100}]',
+  '2026-08-18',
+  NULL
+), (
+  '20000000-0000-4000-8000-000000000022',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":100}]',
+  '2026-08-18',
+  NULL
+), (
+  '20000000-0000-4000-8000-000000000023',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":"","metres":12,"unit_price":"","rate":35}]',
+  '2026-08-18',
+  NULL
+), (
+  '20000000-0000-4000-8000-000000000024',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":120}]',
+  '2026-08-25',
+  NULL
+), (
+  '20000000-0000-4000-8000-000000000025',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":100}]',
+  NULL,
+  '2026-08-30T16:30:00Z'
+), (
+  '20000000-0000-4000-8000-000000000026',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'complete',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":100}]',
+  '2026-09-08',
+  NULL
+), (
+  '20000000-0000-4000-8000-000000000027',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000010',
+  'accepted',
+  '[{"description":"Fence Installation","quantity":1,"unit":"ea","unit_price":100}]',
+  '2026-09-15',
+  NULL
+);
 
 INSERT INTO public.job_assignments (id, job_id, user_id) VALUES
   ('20000000-0000-4000-8000-000000000030', '20000000-0000-4000-8000-000000000010', '20000000-0000-4000-8000-000000000002');
@@ -57,6 +131,12 @@ INSERT INTO public.trade_rates (
   '20000000-0000-4000-8000-000000000002',
   40,
   '2026-01-01'
+), (
+  '20000000-0000-4000-8000-000000000041',
+  '00000000-0000-0000-0000-000000000001',
+  '20000000-0000-4000-8000-000000000002',
+  45,
+  '2026-08-01'
 );
 
 -- Invoice #31's server-owned header arithmetic is accepted exactly.
@@ -232,6 +312,7 @@ BEGIN
     'unit_rate', 100,
     'line_total_ex', 100,
     'source_work_order_id', '20000000-0000-4000-8000-000000000021',
+    'line_date', '2026-08-18',
     'line_position', 0
   ));
 
@@ -293,6 +374,7 @@ BEGIN
     'user_id', '20000000-0000-4000-8000-000000000001',
     'work_order_id', '20000000-0000-4000-8000-000000000021',
     'job_id', '20000000-0000-4000-8000-000000000010',
+    'source_work_order_date', '2026-08-18',
     'invoice_source', 'work_order',
     'subtotal_ex', 100,
     'gst', 0,
@@ -309,8 +391,10 @@ BEGIN
     'job_number', 'SWF-TEST-31',
     'description', 'Fence Installation',
     'quantity', 1,
+    'unit', 'ea',
     'unit_rate', 100,
-    'line_total_ex', 100
+    'line_total_ex', 100,
+    'line_date', '2026-08-18'
   ));
 
   BEGIN
@@ -339,8 +423,33 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'single-work-order source claim was not persisted';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.trade_invoice_lines
+    WHERE trade_invoice_id = v_single_invoice
+      AND description = 'Fence Installation'
+      AND line_type = 'labour'
+  ) THEN
+    RAISE EXCEPTION 'single-work-order positive line did not preserve labour classification';
+  END IF;
 
-  v_header := v_header || jsonb_build_object('week_start', '2026-08-10');
+  v_single_header := v_single_header || jsonb_build_object(
+    'work_order_id', '20000000-0000-4000-8000-000000000024',
+    'source_work_order_date', '2026-08-25'
+  );
+  v_single_lines := jsonb_build_array((v_single_lines->0) || jsonb_build_object(
+    'line_date', '2026-08-25'
+  ));
+  BEGIN
+    PERFORM public.persist_trade_work_order_invoice_v1(
+      v_single_header,
+      v_single_lines,
+      NULL
+    );
+    RAISE EXCEPTION 'stale single-work-order source scope was accepted';
+  EXCEPTION WHEN foreign_key_violation THEN
+    NULL;
+  END;
+
   v_lines := jsonb_build_array((v_lines->0) || jsonb_build_object(
     'source_work_order_id', '20000000-0000-4000-8000-000000000022'
   ));
@@ -348,6 +457,167 @@ BEGIN
     PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
     RAISE EXCEPTION 'weekly route claimed a live single-work-order source';
   EXCEPTION WHEN unique_violation THEN
+    NULL;
+  END;
+
+  v_header := jsonb_build_object(
+    'org_id', '00000000-0000-0000-0000-000000000001',
+    'user_id', '20000000-0000-4000-8000-000000000001',
+    'week_start', '2026-08-17',
+    'week_end', '2026-08-23',
+    'total_hours', 0,
+    'total_breaks_minutes', 0,
+    'subtotal_ex', 420,
+    'gst', 0,
+    'total_inc', 420,
+    'gst_on', false,
+    'super_rate', 0.12,
+    'super_amount', 50.40,
+    'gross_earned', 420,
+    'net_pay', 369.60,
+    'invoice_source', 'weekly_work_order',
+    'job_grand_total_ex', 420,
+    'final_deductions_total_ex', 0,
+    'to_be_paid_ex', 420,
+    'status', 'draft'
+  );
+  v_lines := jsonb_build_array(jsonb_build_object(
+    'job_id', '20000000-0000-4000-8000-000000000010',
+    'job_number', 'SWF-TEST-31',
+    'client_name', 'Test Client',
+    'line_type', 'labour',
+    'description', 'Fence Installation',
+    'quantity', 12,
+    'unit', 'm',
+    'unit_rate', 35,
+    'line_total_ex', 420,
+    'source_work_order_id', '20000000-0000-4000-8000-000000000023',
+    'line_date', '2026-08-18'
+  ));
+  PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+
+  v_header := v_header || jsonb_build_object(
+    'week_start', '2026-08-24',
+    'week_end', '2026-08-30',
+    'subtotal_ex', 100,
+    'total_inc', 100,
+    'gross_earned', 100,
+    'net_pay', 88,
+    'job_grand_total_ex', 100,
+    'to_be_paid_ex', 100,
+    'super_amount', 12
+  );
+  v_lines := jsonb_build_array(jsonb_build_object(
+    'job_id', '20000000-0000-4000-8000-000000000010',
+    'job_number', 'SWF-TEST-31',
+    'line_type', 'labour',
+    'description', 'Fence Installation',
+    'quantity', 1,
+    'unit', 'ea',
+    'unit_rate', 100,
+    'line_total_ex', 100,
+    'source_work_order_id', '20000000-0000-4000-8000-000000000024',
+    'line_date', '2026-08-25'
+  ));
+  BEGIN
+    PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+    RAISE EXCEPTION 'stale weekly source scope was accepted';
+  EXCEPTION WHEN foreign_key_violation THEN
+    NULL;
+  END;
+
+  v_header := v_header || jsonb_build_object(
+    'week_start', '2026-08-31',
+    'week_end', '2026-09-06'
+  );
+  v_lines := jsonb_build_array(jsonb_build_object(
+    'job_id', '20000000-0000-4000-8000-000000000010',
+    'job_number', 'SWF-TEST-31',
+    'line_type', 'labour',
+    'description', 'Fence Installation',
+    'quantity', 1,
+    'unit', 'ea',
+    'unit_rate', 100,
+    'line_total_ex', 100,
+    'source_work_order_id', '20000000-0000-4000-8000-000000000025',
+    'line_date', '2026-08-31'
+  ));
+  PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+
+  v_header := v_header || jsonb_build_object(
+    'week_start', '2026-09-07',
+    'week_end', '2026-09-13',
+    'subtotal_ex', 60,
+    'total_inc', 60,
+    'gross_earned', 60,
+    'net_pay', 52.80,
+    'job_grand_total_ex', 60,
+    'to_be_paid_ex', 60,
+    'super_amount', 7.20
+  );
+  v_lines := jsonb_build_array(
+    jsonb_build_object(
+      'job_id', '20000000-0000-4000-8000-000000000010',
+      'job_number', 'SWF-TEST-31',
+      'line_type', 'labour',
+      'description', 'Fence Installation',
+      'quantity', 1,
+      'unit', 'ea',
+      'unit_rate', 100,
+      'line_total_ex', 100,
+      'source_work_order_id', '20000000-0000-4000-8000-000000000026',
+      'line_date', '2026-09-08'
+    ),
+    jsonb_build_object(
+      'job_id', '20000000-0000-4000-8000-000000000010',
+      'job_number', 'SWF-TEST-31',
+      'line_type', 'labour_deduction',
+      'description', 'Labour - Isaac',
+      'quantity', 1,
+      'unit', 'hr',
+      'unit_rate', -40,
+      'line_total_ex', -40,
+      'source_work_order_id', '20000000-0000-4000-8000-000000000026',
+      'line_date', '2026-09-08',
+      'deduction_user_id', '20000000-0000-4000-8000-000000000002',
+      'deduction_assignment_id', '20000000-0000-4000-8000-000000000030',
+      'deduction_trade_rate_id', '20000000-0000-4000-8000-000000000040'
+    )
+  );
+  BEGIN
+    PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+    RAISE EXCEPTION 'stale labour deduction rate was accepted';
+  EXCEPTION WHEN foreign_key_violation THEN
+    NULL;
+  END;
+
+  v_header := v_header || jsonb_build_object(
+    'week_start', '2026-09-14',
+    'week_end', '2026-09-20',
+    'subtotal_ex', 100,
+    'total_inc', 100,
+    'gross_earned', 100,
+    'net_pay', 88,
+    'job_grand_total_ex', 100,
+    'to_be_paid_ex', 100,
+    'super_amount', 12
+  );
+  v_lines := jsonb_build_array(jsonb_build_object(
+    'job_id', '20000000-0000-4000-8000-000000000010',
+    'job_number', 'SWF-TEST-31',
+    'line_type', 'labour',
+    'description', 'Fence Installation',
+    'quantity', 1,
+    'unit', 'ea',
+    'unit_rate', 100,
+    'line_total_ex', 100,
+    'source_work_order_id', '20000000-0000-4000-8000-000000000027',
+    'line_date', '2026-09-15'
+  ));
+  BEGIN
+    PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+    RAISE EXCEPTION 'incomplete weekly work order was accepted';
+  EXCEPTION WHEN foreign_key_violation THEN
     NULL;
   END;
 END;

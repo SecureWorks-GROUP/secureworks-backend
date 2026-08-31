@@ -183,6 +183,11 @@ Deno.test("weekly resolver ignores client money and pins every deduction to serv
   );
 
   assertEquals(invoice.job_blocks.map((block) => block.subtotal), [490]);
+  assertEquals(
+    invoice.job_blocks[0].source_work_order_id,
+    completedWorkOrder().id,
+  );
+  assertEquals(invoice.job_blocks[0].site_address, "10 Test Street");
   assertEquals(invoice.grand_total, 490);
   assertEquals(invoice.final_deductions_total, 50);
   assertEquals(invoice.to_be_paid, 440);
@@ -222,6 +227,26 @@ Deno.test("weekly resolver refuses a completed work order outside the selected w
       ),
     Error,
     "inside the selected week",
+  );
+});
+
+Deno.test("weekly resolver assigns late UTC completion to the Perth week", async () => {
+  const workOrder = completedWorkOrder("2026-08-30T16:30:00Z");
+  const invoice = await _resolveWeeklyWorkOrderInvoice(
+    resolverClient({ workOrders: [workOrder] }),
+    HENRY,
+    false,
+    "2026-08-31",
+    "2026-09-06",
+    {
+      work_order_blocks: [{ work_order_id: workOrder.id }],
+    },
+  );
+
+  assertEquals(invoice.job_blocks[0].line_date, "2026-08-31");
+  assertEquals(
+    new Set(invoice.lines.map((line) => line.line_date)),
+    new Set(["2026-08-31"]),
   );
 });
 

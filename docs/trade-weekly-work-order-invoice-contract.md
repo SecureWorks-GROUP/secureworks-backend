@@ -140,6 +140,10 @@ The response contains only server-calculated invoice shape:
 }
 ```
 
+Each `job_blocks` object includes its `source_work_order_id`. Use that value as
+the render key: separate work orders for the same job remain separate blocks
+with their own date, address, lines, and subtotal.
+
 ### 3. Submit the reconstructed weekly invoice
 
 Send the same source-selection fields to the existing submit action, adding the
