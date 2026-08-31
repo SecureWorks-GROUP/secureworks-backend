@@ -163,6 +163,14 @@ function detailCompanyRow(detail: any): any {
  * `makesafe_job_details.report_type='repair'` may carry no metadata at all.
  * Company resolves detail-first, matching the make-safe board.
  *
+ * The two instruction numbers are ONE pair, so a split-derived purchase order
+ * is only ever taken from the SAME candidate that supplied the work-order slot.
+ * A PO read out of a candidate the card did not choose belongs to a different
+ * claim, and a work order from one claim beside a purchase order from another
+ * is two jobs presented as one instruction. Only the dedicated
+ * `metadata.builder_po_number` key is trusted independently: it is the card's
+ * own stored PO, not a number parsed out of some other reference.
+ *
  * Absent fields project null; the card simply has nothing to show for them, and
  * nothing is ever fabricated on a reconciliation surface.
  */
@@ -191,13 +199,11 @@ export function projectInsuranceRepairPipelineRow(
     splitBuilderRef(meta.builder_work_order_number),
     splitBuilderRef(meta.builder_claim_ref),
   ];
-  const workOrderRef =
-    candidates.map((part) => part.work_order).find((value) => value !== null) ??
-      null;
+  const selected = candidates.find((part) => part.work_order !== null) ??
+    { work_order: null, purchase_order: null };
+  const workOrderRef = selected.work_order;
   const purchaseOrder = cleanRef(meta.builder_po_number) ??
-    candidates.map((part) => part.purchase_order).find((value) =>
-      value !== null
-    ) ?? null;
+    selected.purchase_order;
   return {
     ...projected,
     source_type: row?.type || null,
@@ -287,9 +293,14 @@ export const INSURANCE_REPAIR_DETAIL_SELECT =
  * has no row in that `report_type='repair'` query, yet may still hold the only
  * populated `external_ref` and issuing company in `makesafe_job_details`.
  *
- * Fails loud for the same reason the id read does: a card silently missing an
- * instruction number is a false reconciliation surface, and a PostgREST 400
- * degrades to `data: null` rather than throwing.
+ * DEGRADES, unlike `loadInsuranceRepairJobIds`, and the asymmetry is deliberate:
+ * the id read decides the row SET, so an error there would paint a false empty
+ * board and must fail loud. This one is enrichment behind `jobs.metadata` — it
+ * backfills the ~9% of cards whose metadata is unpopulated — so a transient
+ * fault or column drift must not 500 the whole Repairs tab and take the ~91%
+ * of cards that never needed it down with it. A failed chunk is logged loudly
+ * and skipped; the cards it covered fall back to metadata and, failing that,
+ * project null. Nothing is fabricated either way.
  */
 export async function loadInsuranceRepairJobDetails(
   client: any,
@@ -301,16 +312,22 @@ export async function loadInsuranceRepairJobDetails(
   ];
   for (let i = 0; i < ids.length; i += REPAIR_DETAIL_ID_CHUNK) {
     const chunk = ids.slice(i, i + REPAIR_DETAIL_ID_CHUNK);
-    const { data, error } = await client
-      .from("makesafe_job_details")
-      .select(INSURANCE_REPAIR_DETAIL_SELECT)
-      .in("job_id", chunk);
-    if (error) {
-      throw new Error(
-        `insurance repairs detail read failed: ${error.message || error}`,
+    let rows: any[] = [];
+    try {
+      const { data, error } = await client
+        .from("makesafe_job_details")
+        .select(INSURANCE_REPAIR_DETAIL_SELECT)
+        .in("job_id", chunk);
+      if (error) throw error;
+      rows = data || [];
+    } catch (error) {
+      console.error(
+        "[ops-api] insurance repairs detail read failed (cards fall back to jobs.metadata):",
+        (error as { message?: string })?.message || error,
       );
+      continue;
     }
-    for (const row of data || []) {
+    for (const row of rows) {
       const id = String(row?.job_id || "");
       if (id) details.set(id, row);
     }

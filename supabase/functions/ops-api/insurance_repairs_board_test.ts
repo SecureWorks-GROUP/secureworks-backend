@@ -164,6 +164,55 @@ Deno.test("a fused WO+PO value never reaches the work-order slot", () => {
   assertEquals(stamped.builder_po_number, "PO-99999");
 });
 
+Deno.test("a PO is never paired with a work order from another claim", () => {
+  // external_ref names MLB-27249; the fused builder_work_order_number names a
+  // DIFFERENT claim (MLB-25147). Its PO belongs to that other job, so the card
+  // shows the reference it chose and no purchase order at all.
+  const contradictory = projectInsuranceRepairPipelineRow({
+    id: "contradictory",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-25147PO-56236",
+    },
+  });
+  assertEquals(contradictory.builder_work_order_ref, "MLB-27249");
+  assertEquals(contradictory.builder_po_number, null);
+
+  // Same shape, but the card carries its OWN stored PO key: that one is the
+  // card's own purchase order and is trusted independently.
+  const ownPo = projectInsuranceRepairPipelineRow({
+    id: "own-po",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-25147PO-56236",
+      builder_po_number: "PO-60002",
+    },
+  });
+  assertEquals(ownPo.builder_work_order_ref, "MLB-27249");
+  assertEquals(ownPo.builder_po_number, "PO-60002");
+
+  // A metadata external_ref that is not a builder reference at all still wins
+  // the slot, and the fused fallback's PO stays off the card.
+  const opaque = projectInsuranceRepairPipelineRow({
+    id: "opaque",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "JOB REF 8891",
+      builder_claim_ref: "MLB-25147PO-56236",
+    },
+  });
+  assertEquals(opaque.builder_work_order_ref, "JOB REF 8891");
+  assertEquals(opaque.builder_po_number, null);
+});
+
 Deno.test("makesafe_job_details supplies ref and company when metadata is empty", () => {
   // Legacy card admitted by makesafe_job_details.report_type='repair' with no
   // jobs.metadata at all: the detail row is the only identity it has.
@@ -318,7 +367,9 @@ Deno.test("repair id discovery fails loud instead of painting a false empty boar
   );
 });
 
-function repairDetailClient(options: { fail?: boolean } = {}) {
+function repairDetailClient(
+  options: { fail?: boolean; failChunkIndex?: number } = {},
+) {
   const chunks: string[][] = [];
   return {
     chunks,
@@ -332,7 +383,9 @@ function repairDetailClient(options: { fail?: boolean } = {}) {
           return query;
         },
         then(resolve: (value: any) => unknown) {
-          if (options.fail) {
+          if (
+            options.fail || options.failChunkIndex === chunks.length - 1
+          ) {
             return Promise.resolve(resolve({
               data: null,
               error: { message: "column drift" },
@@ -367,11 +420,58 @@ Deno.test("repair detail read is de-duplicated, chunked and keyed by job id", as
   assertEquals(client.chunks.flat().includes(""), false);
 });
 
-Deno.test("repair detail read fails loud instead of dropping builder identity", async () => {
-  await assertRejects(
-    () =>
-      loadInsuranceRepairJobDetails(repairDetailClient({ fail: true }), ["a"]),
-    Error,
-    "insurance repairs detail read failed",
+Deno.test("repair detail read degrades instead of taking the Repairs tab down", async () => {
+  const errors: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    const details = await loadInsuranceRepairJobDetails(
+      repairDetailClient({ fail: true }),
+      ["a", "b"],
+    );
+    assertEquals(details.size, 0);
+  } finally {
+    console.error = original;
+  }
+  assertEquals(errors.length, 1);
+  assertEquals(
+    String(errors[0][0]).includes("insurance repairs detail read failed"),
+    true,
   );
+
+  // A card whose metadata IS populated is unaffected by the failed read: the
+  // projection still serves both instruction numbers off jobs.metadata.
+  const card = projectInsuranceRepairPipelineRow({
+    id: "a",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-24645",
+      builder_po_number: "PO-59875",
+      requesting_company: { slug: "mlb", name: "ML Builders" },
+    },
+  }, undefined);
+  assertEquals(card.builder_work_order_ref, "MLB-24645");
+  assertEquals(card.builder_po_number, "PO-59875");
+  assertEquals(card.builder_company_name, "ML Builders");
+});
+
+Deno.test("repair detail read keeps the chunks that did succeed", async () => {
+  const client = repairDetailClient({ failChunkIndex: 0 });
+  const original = console.error;
+  console.error = () => {};
+  let details: Map<string, any>;
+  try {
+    details = await loadInsuranceRepairJobDetails(
+      client,
+      Array.from({ length: 51 }, (_, i) => `job-${i}`),
+    );
+  } finally {
+    console.error = original;
+  }
+  assertEquals(details.size, 1);
+  assertEquals(details.get("job-50")?.external_ref, "MLB-job-50");
 });

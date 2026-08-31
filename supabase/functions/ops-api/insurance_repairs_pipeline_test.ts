@@ -17,6 +17,8 @@ type Call = {
   filters: Array<{ method: string; column: string; value: unknown }>;
 };
 
+const DETAIL_ONLY_REPAIR_ID = "4a1c6d38-52ef-4b90-8a77-2f0b9e6d41cc";
+
 function pipelineClient() {
   const calls: Call[] = [];
   const repairId = "0993f001-9e5e-420f-afdd-1cd1415084a1";
@@ -49,7 +51,20 @@ function pipelineClient() {
 
       function resultFor(current: Call) {
         if (current.table === "makesafe_job_details") {
-          return { data: [], error: null };
+          // The id-authority read asks for job_id alone; the detail-store read
+          // asks for the identity columns. They are different queries.
+          if (current.select === "job_id") {
+            return { data: [{ job_id: DETAIL_ONLY_REPAIR_ID }], error: null };
+          }
+          return {
+            data: [{
+              job_id: DETAIL_ONLY_REPAIR_ID,
+              external_ref: "MLB-24645PO-59875",
+              requesting_company_slug: "mlb",
+              requesting_company_name: "ML Builders",
+            }],
+            error: null,
+          };
         }
         if (current.table === "jobs" && current.select === "id") {
           const family = current.filters.find((filter) =>
@@ -98,6 +113,36 @@ function pipelineClient() {
                 builder_po_number: "PO-56236",
                 requesting_company: { slug: "mlb", name: "ML Builders" },
               },
+            }, {
+              // Legacy card admitted by makesafe_job_details.report_type only:
+              // jobs.metadata was never populated, so the detail store is the
+              // ONLY place its builder identity exists.
+              id: DETAIL_ONLY_REPAIR_ID,
+              type: "makesafe",
+              status: "accepted",
+              client_name: "Pingelly Resident",
+              client_phone: null,
+              site_address: null,
+              site_suburb: "Pingelly",
+              pj_total_inc: null,
+              pj_total: null,
+              pj_split_neighbours: null,
+              pj_job_neighbours: null,
+              ghl_contact_id: null,
+              ghl_opportunity_id: null,
+              job_number: "SWMS-261192",
+              accepted_at: "2026-08-07T00:00:00Z",
+              approvals_at: null,
+              deposit_at: null,
+              processing_at: null,
+              scheduled_at: null,
+              completed_at: null,
+              created_at: "2026-07-21T00:00:00Z",
+              updated_at: "2026-08-07T00:00:00Z",
+              deposit_invoice_id: null,
+              deposit_amount: null,
+              council_required: null,
+              metadata: null,
             }],
             error: null,
           };
@@ -117,7 +162,7 @@ Deno.test("pipeline?type=repair feeds Midland through the merged Repairs contrac
     new URLSearchParams("type=repair"),
   );
 
-  assertEquals(result.total, 1);
+  assertEquals(result.total, 2);
   assertEquals(result.columns.processing.length, 1);
   const row = result.columns.processing[0];
   assertEquals(row.job_number, "SWMS-261029");
@@ -142,6 +187,38 @@ Deno.test("pipeline?type=repair feeds Midland through the merged Repairs contrac
     baseRead.filters.some((filter) =>
       filter.method === "in" && filter.column === "id" &&
       Array.isArray(filter.value) && filter.value.includes(row.id)
+    ),
+    true,
+  );
+});
+
+Deno.test("pipeline?type=repair serves a metadata-less card off the detail store", async () => {
+  const client = pipelineClient();
+  const result = await _pipelineForTest(
+    client,
+    new URLSearchParams("type=repair"),
+  );
+
+  assertEquals(result.columns.accepted.length, 1);
+  const row = result.columns.accepted[0];
+  assertEquals(row.job_number, "SWMS-261192");
+  assertEquals(row.type, "repair");
+  // jobs.metadata is null on this card, so every field below can only have come
+  // from the makesafe_job_details read the pipeline wires into the projection.
+  assertEquals(row.builder_work_order_ref, "MLB-24645");
+  assertEquals(row.builder_po_number, "PO-59875");
+  assertEquals(row.builder_company_name, "ML Builders");
+  assertEquals(row.builder_company_slug, "mlb");
+
+  const detailRead = client.calls.find((call) =>
+    call.table === "makesafe_job_details" && call.select !== "job_id"
+  );
+  assert(detailRead);
+  assertEquals(
+    detailRead.filters.some((filter) =>
+      filter.method === "in" && filter.column === "job_id" &&
+      Array.isArray(filter.value) &&
+      filter.value.includes(DETAIL_ONLY_REPAIR_ID)
     ),
     true,
   );
@@ -282,6 +359,12 @@ function boardFixture() {
     makesafe_status_holds: [],
     makesafe_intake_cases: [],
     makesafe_board_status_current: [],
+    makesafe_state_projection_config: [{
+      singleton: true,
+      default_contract_version: "v1",
+      compare_enabled: true,
+      authority_flipped: false,
+    }],
   });
 }
 
@@ -308,6 +391,22 @@ Deno.test("ops MakeSafe board serves the make-safe card and never the repair car
     "Repairs is a sibling pipeline and must not appear on the ops MakeSafe board",
   );
   assertEquals(body.column_counts.new, 1);
+});
+
+Deno.test("privileged v2 comparison serves the make-safe card and never the repair card", async () => {
+  const response = await _makesafeBoardActionForTest(
+    boardFixture(),
+    "api_key",
+    null,
+    "ops",
+    { generatedAt: "2026-08-31T00:00:00Z", contractVersion: "v2" },
+  );
+  const body = JSON.parse(await response.text());
+
+  assertEquals(response.status, 200);
+  const ids = boardCardIds(body.columns);
+  assertEquals(ids.includes(MAKESAFE_BOARD_JOB), true);
+  assertEquals(ids.includes(REPAIR_BOARD_JOB), false);
 });
 
 Deno.test("trade MakeSafe board serves the make-safe card and never the repair card", async () => {
