@@ -61,10 +61,16 @@ export function findMatchingSenderCompany<T extends SenderPatternCompany>(
 // later 500'd sw_attach_email_attachment_to_job. This floor is merged with the DB
 // patterns by BOTH the ses monitor (attachment sync) and the ops-api intake
 // scanner, so a first-class watched sender can never be reintroduced as a silent
-// gap. The make-safe WO gate (isGenuineNewWorkOrder) + the non-WO subject
-// exclusion still run downstream, so an ordinary Prime notification is not drafted.
+// gap. The direct builder domains below close the same gap for human-sent
+// messages: production exclusions from June-July 2026 contained unreviewed mail
+// from every one of these domains. The make-safe WO gate still guards draft
+// creation; deterministic intake accounts non-work and ambiguous messages.
 export const WATCHED_SENDER_FLOOR: readonly string[] = [
   "notifications.primeeco.tech", // Prime Notification Centre (noreply@…)
+  "mlbuilders.com.au", // ML Builders direct/human mail
+  "ajs.build", // AJ Building & Restoration direct/human mail
+  "builderwest.com.au", // Builderwest direct/human mail
+  "westernbuild.com.au", // Western Building direct/human mail
 ];
 
 // True when the sender matches any code-level watched-sender floor pattern (same
