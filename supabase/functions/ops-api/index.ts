@@ -4797,6 +4797,7 @@ if (import.meta.main) serve(async (req: Request) => {
         // canonical board; callers cannot choose a convenient subset. A live
         // run is accepted only when the v2 projector is complete and the
         // deployed U4 SWMS-26980 canary has no correlation-spine blocker.
+        // Migration 20260729040000 repairs the seed's case-candidate alias.
         if (authMode !== 'api_key') {
           return json({ error: 'makesafe_state_seed requires ops privilege' }, 403)
         }
@@ -4836,31 +4837,30 @@ if (import.meta.main) serve(async (req: Request) => {
               error: 'seed chunks did not cover the exact server-selected board',
             }, 503)
           }
-          const chunks: any[] = []
-          for (const [chunkIndex, jobChunk] of jobChunks.entries()) {
-            const chunkRunKey = `${runKey}:chunk-${chunkIndex + 1}-of-${jobChunks.length}`
-            const { data, error } = await client.rpc(
-              'seed_makesafe_state_authority_scoped_v2',
-              {
-                p_run_key: chunkRunKey,
-                p_applied_by: 'makesafe-state.v2-seeder',
-                p_selection_hash: selectionHash,
-                p_job_ids: jobChunk,
-              },
-            )
-            if (error) {
-              return json({
-                ok: false,
-                dry_run: false,
-                selection_hash: selectionHash,
-                requested: jobIds.length,
-                completed_chunks: chunks.length,
-                chunk_count: jobChunks.length,
-                error: error.message || String(error),
-              }, 409)
-            }
-            chunks.push(data)
+          const { data: atomicSeed, error } = await client.rpc(
+            'seed_makesafe_state_authority_atomic_v1',
+            {
+              p_run_key: runKey,
+              p_applied_by: 'makesafe-state.v2-seeder',
+              p_selection_hash: selectionHash,
+              p_job_ids: jobIds,
+            },
+          )
+          if (error) {
+            return json({
+              ok: false,
+              dry_run: false,
+              state: 'seed_failed',
+              committed: false,
+              retry_same_run_key: true,
+              selection_hash: selectionHash,
+              requested: jobIds.length,
+              completed_chunks: 0,
+              chunk_count: jobChunks.length,
+              error: error.message || String(error),
+            }, 409)
           }
+          const chunks: any[] = atomicSeed?.chunks || []
           const summary = summarizeMakesafeStateSeedChunks(
             chunks,
             jobIds.length,
@@ -4869,6 +4869,9 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({
               ok: false,
               dry_run: false,
+              state: 'seed_committed_accounting_pending',
+              committed: true,
+              retry_same_run_key: true,
               selection_hash: selectionHash,
               requested: jobIds.length,
               accounted: summary.accounted,
@@ -4877,7 +4880,7 @@ if (import.meta.main) serve(async (req: Request) => {
               completed_chunks: chunks.length,
               chunk_count: jobChunks.length,
               error: summary.error,
-            }, 503)
+            }, 202)
           }
           seedResult = {
             requested: jobIds.length,
@@ -4944,10 +4947,20 @@ if (import.meta.main) serve(async (req: Request) => {
             : []
         })
         const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0
+        const liveAcceptancePending = !dryRun && !acceptancePassed
         return json({
           ok: acceptancePassed,
           dry_run: dryRun,
           projection_basis: comparison.projection_basis || 'persisted',
+          ...(dryRun
+            ? {}
+            : {
+              state: acceptancePassed
+                ? 'seed_accepted'
+                : 'seed_committed_acceptance_pending',
+              committed: true,
+              retry_same_run_key: liveAcceptancePending,
+            }),
           selection_hash: selectionHash,
           requested: jobIds.length,
           seed_result: dryRun
@@ -4968,7 +4981,7 @@ if (import.meta.main) serve(async (req: Request) => {
             u4_spine_missing_blockers: spineBlockers,
             passed: acceptancePassed,
           },
-        }, acceptancePassed || dryRun ? 200 : 409)
+        }, acceptancePassed || dryRun ? 200 : 202)
       }
       case 'makesafe_state_seed_scoped': {
         // Scoped route to the SAME U2 identity-spine producer the full-board
