@@ -707,6 +707,7 @@ Deno.test("a parked repair draft approved by a human leaves its intake case boun
     cases: [{
       id: "case-repair",
       state: "exception",
+      reason_code: "awaiting_job_creation",
       job_id: null,
       blocked_reasons: [],
     }],
@@ -736,6 +737,7 @@ Deno.test("a parked blocked_live_job plan binds as blocked, with its reasons rec
     cases: [{
       id: "case-repair",
       state: "exception",
+      reason_code: "awaiting_job_creation",
       job_id: null,
       blocked_reasons: [],
     }],
@@ -761,6 +763,7 @@ Deno.test("draft field names the case CHECK would reject never reach the blocked
     cases: [{
       id: "case-repair",
       state: "exception",
+      reason_code: "awaiting_job_creation",
       job_id: null,
       blocked_reasons: [],
     }],
@@ -781,6 +784,7 @@ Deno.test("a Captain approval is attributed to the human in the case-event ledge
     cases: [{
       id: "case-repair",
       state: "exception",
+      reason_code: "awaiting_job_creation",
       job_id: null,
       blocked_reasons: [],
     }],
@@ -825,10 +829,53 @@ Deno.test("a restoration job is left unbound: the case-write trigger admits make
     cases: [{
       id: "case-repair",
       state: "exception",
+      reason_code: "awaiting_job_creation",
       job_id: null,
       blocked_reasons: [],
     }],
     jobs: [{ id: "job-repair", type: "insurance" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+});
+
+// A repair draft can now wait days in the review queue for its human tick, and
+// the case can move to a different reason-coded exception in that window. This
+// binding was written only for the `awaiting_job_creation` park; promoting any
+// other reason clears an exception nobody resolved, and a `cancellation` case
+// gaining a job_id RAISES `makesafe_intake_cases_cancellation_no_job_check`
+// AFTER the job has already minted, which every re-approval then reproduces.
+Deno.test("a case that became a cancellation while the draft waited is skipped, not promoted", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "cancellation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+});
+
+Deno.test("a case carrying any other exception reason keeps that reason", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "ambiguous_scope",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
   });
 
   await settleRepair(db.client);

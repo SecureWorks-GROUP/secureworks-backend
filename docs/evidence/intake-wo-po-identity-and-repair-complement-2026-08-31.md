@@ -146,6 +146,16 @@ door. Pinned by the binding cases in `makesafe_intake_settlement_test.ts`.
 
 Two follow-on constraints that are easy to get wrong:
 
+- **The bind only ever promotes the park it was written for.** It requires
+  `reason_code = 'awaiting_job_creation'`, the one reason `casePayload` stamps on
+  a case accounted ahead of its guarded job creation. A repair draft can now wait
+  days for its human tick and the case can move to another reason-coded exception
+  in that window; `cancellation` is the sharp one, because
+  `makesafe_intake_cases_cancellation_no_job_check` RAISES on a cancellation case
+  that gains a `job_id` and the throw would land AFTER `createMakesafeJob` had
+  already run, leaving a live job whose every re-approval reproduces the failure.
+  Any other reason would be silently cleared and the case promoted on a decision
+  nobody made. Such a case is skipped instead.
 - **The blocked-live signal cannot be read off the parked case row.**
   `makesafe_intake_cases_exception_shape_check` forces
   `cardinality(blocked_reasons) = 0` on an unbound case, so `casePayload` stores
@@ -189,8 +199,30 @@ wirings (standing scan, fresh-source scan, source-persist recovery). Human and
 API-operator approvals through the route are unchanged. The Symbol follows the
 `SOURCE_PERSIST_NO_SEND_RECOVERY` precedent so no request body can forge it and
 a new automation lane that omits it is a reviewable omission. The deterministic
-lane's earlier park stays as belt-and-braces. Pinned by the paired
-unattended/operator tests in `repair_intake_routing_test.ts`.
+lane's earlier park stays as belt-and-braces.
+
+**The brake guards CREATION, not completion**, and the distinction is load
+bearing. `approveIntakeDraft` is re-entered for several reasons that mint
+nothing: the guarded source-authority binding only LINKS a draft to an
+already-live job, the F9 `matchExistingInstructionCards` refusal is its own
+answer, and the deterministic runtime re-enters approval as a settlement RETRY
+whenever a mint-role release put the draft back to `needs_review` while
+`approved_job_id` still names a live card. Refusing those would have stranded a
+live repair card whose settlement — work-order evidence attach, case bind,
+post-board notification — could never complete on any automated lane, reported
+per run as `source_persist_failed` / `cases_failed` and on the fresh-source lane
+as a hard `fresh source deterministic settlement incomplete`.
+
+So the refusal sits at the two points where a new card can actually be minted:
+once immediately BEFORE the atomic claim (skipped when `approved_job_id` or a
+bound primary mint already names a live job, so nothing at all is written on the
+refusing path), and once at the `createMakesafeJob` ternary itself, where the
+post-claim catch releases the instruction-mint reservation and requeues the
+draft. Everything upstream of the first check either links an existing job or
+refuses on its own terms. Pinned in both directions by
+`repair_intake_routing_test.ts`: an unattended NEW repair mint is still refused
+and the draft stays reviewable, while an already-minted repair card's settlement
+retry passes the brake and reaches its claim.
 
 ## Evidence — the 23 currently-untyped review-queue drafts
 

@@ -24091,7 +24091,14 @@ async function approveIntakeDraft(client: any, body: any) {
       approvedFamilyContext,
     )
     : approvalFallbackJobFamily())
-  if (unattendedApproval && _normaliseDedupJobFamily(approvedJobFamily) === 'repair') {
+  // The 2026-08-28 ruling forbids an unattended lane CREATING an SWR- card; it
+  // says nothing about finishing one a human already ticked. This is the family
+  // half of that test — the refusal itself is placed at the two points where a
+  // new card can actually be minted, so a settlement retry, a guarded
+  // source-authority link and the F9 refusal all stay reachable.
+  const unattendedRepairMint = unattendedApproval &&
+    _normaliseDedupJobFamily(approvedJobFamily) === 'repair'
+  const refuseUnattendedRepairMint = (): never => {
     throw new ApiError(
       'Repair intake requires a human tick: this instruction resolves to the repair family, which no unattended lane may mint. The draft stays in the review queue for an operator to approve.',
       409,
@@ -24342,6 +24349,15 @@ async function approveIntakeDraft(client: any, body: any) {
   // from either 'needs_review' or 'draft', so the claim allows both (the narrowest
   // set that does not break the happy path); any other current status (approved,
   // approving-n/a, rejected, superseded) yields zero rows -> concurrent/invalid block.
+  // Refuse an unattended repair mint here, before the claim, so nothing at all is
+  // written. Everything above this line either links to a job that already exists
+  // (the guarded source-authority binding) or refuses on its own terms (F9, the
+  // duplicate guard), and a draft that already names a live job is a settlement
+  // RETRY rather than a mint, so it must reach the recovery below.
+  if (unattendedRepairMint && !approvedJobId && !recoveredPrimaryMint) {
+    refuseUnattendedRepairMint()
+  }
+
   const { data: claimed, error: claimErr } = await client.from('makesafe_intake_drafts')
     .update({ status: 'approved', updated_at: new Date().toISOString() })
     .eq('id', draft_id)
@@ -24397,6 +24413,14 @@ async function approveIntakeDraft(client: any, body: any) {
     const recoveredPrimaryJob = primaryMint
       ? await recoverIntakeMintJob(client, primaryMint)
       : null
+    // The one place a NEW card is actually minted. The pre-claim check above lets a
+    // settlement retry through on the coordinates it can see; if recovery still
+    // failed to name a live job the fall-through would create one, so the ruling is
+    // re-applied here. The post-claim catch releases the reservation and requeues
+    // the draft, so this refusal also leaves nothing behind.
+    if (!recoveredPrimaryJob && unattendedRepairMint) {
+      refuseUnattendedRepairMint()
+    }
     const jobResult = recoveredPrimaryJob
       ? { job: recoveredPrimaryJob }
       : await createMakesafeJob(client, {

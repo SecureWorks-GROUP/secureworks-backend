@@ -107,6 +107,21 @@ const INTAKE_CASE_BINDABLE_STATES = new Set([
   "confirmed_live_job",
 ]);
 
+/**
+ * The ONE exception reason this binding was written for: `casePayload` stamps it
+ * on a case accounted ahead of its guarded job creation, and the shape checks
+ * mean an unbound case can only ever be an `exception`.
+ *
+ * A repair draft can now wait days in the review queue for its human tick, and
+ * the case can move to a different reason-coded exception in that window.
+ * `cancellation` is the sharp one: `makesafe_intake_cases_cancellation_no_job_check`
+ * RAISES on a cancellation case that gains a `job_id`, and the throw would land
+ * AFTER `createMakesafeJob` had already run — a live job whose every re-approval
+ * reproduces the failure. Any other reason would likewise be silently cleared and
+ * the case promoted to live on a decision nobody made. Skip instead.
+ */
+const INTAKE_CASE_BINDABLE_REASON = "awaiting_job_creation";
+
 export type IntakeCaseDecisionProvenance = "deterministic" | "human";
 
 /**
@@ -198,7 +213,7 @@ export async function bindIntakeCasesToMintedJobs(
 
   const { data: caseRows, error: caseError } = await client
     .from("makesafe_intake_cases")
-    .select("id,state,job_id,blocked_reasons")
+    .select("id,state,job_id,reason_code,blocked_reasons")
     .in("id", [...jobByCaseId.keys()]);
   if (caseError) {
     throw new Error(
@@ -207,7 +222,8 @@ export async function bindIntakeCasesToMintedJobs(
   }
   const unbound = (caseRows || []).filter((row: any) =>
     jobByCaseId.has(String(row?.id)) && !row?.job_id &&
-    INTAKE_CASE_BINDABLE_STATES.has(String(row?.state || ""))
+    INTAKE_CASE_BINDABLE_STATES.has(String(row?.state || "")) &&
+    String(row?.reason_code || "") === INTAKE_CASE_BINDABLE_REASON
   );
   if (!unbound.length) return [];
 

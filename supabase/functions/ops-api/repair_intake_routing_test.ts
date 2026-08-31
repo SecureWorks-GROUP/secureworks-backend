@@ -677,24 +677,53 @@ function legacyRepairDraftRow(): Row {
   };
 }
 
-function approvalClient(draft: Row) {
+function approvalClient(
+  draft: Row,
+  seed: { mints?: Row[]; jobs?: Row[]; caseSources?: Row[] } = {},
+) {
   const drafts = [draft];
   const rpcCalls: string[] = [];
+  const draftUpdates: Row[] = [];
+  const mints = seed.mints || [];
   return {
     drafts,
     rpcCalls,
+    draftUpdates,
     client: {
       rpc(name: string) {
         rpcCalls.push(name);
+        if (name === "reserve_makesafe_intake_job_mint") {
+          return Promise.resolve({ data: mints, error: null });
+        }
         return Promise.resolve({ data: null, error: null });
       },
       from(table: string) {
+        if (table === "makesafe_intake_case_sources") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            in: () =>
+              Promise.resolve({ data: seed.caseSources || [], error: null }),
+          };
+          return query;
+        }
+        if (table === "jobs" && seed.jobs) {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            contains: () => query,
+            maybeSingle: () =>
+              Promise.resolve({ data: seed.jobs![0] || null, error: null }),
+          };
+          return query;
+        }
         if (table === "makesafe_intake_drafts") {
           const query: any = {
             select: () => query,
             eq: () => query,
             in: () => query,
             update: (payload: Row) => {
+              draftUpdates.push(payload);
               Object.assign(drafts[0], payload);
               return query;
             },
@@ -710,7 +739,7 @@ function approvalClient(draft: Row) {
           const query: any = {
             select: () => query,
             eq: () => query,
-            order: () => Promise.resolve({ data: [], error: null }),
+            order: () => Promise.resolve({ data: mints, error: null }),
           };
           return query;
         }
@@ -757,6 +786,71 @@ Deno.test("an unattended lane may not mint a card that resolves to repair only a
   // Nothing written: the draft is still reviewable for an operator.
   assertEquals(db.drafts[0].status, "needs_review");
   assertEquals(db.drafts[0].approved_job_id, null);
+});
+
+// The brake guards CREATION, not completion. A draft that already names a live
+// job is a settlement RETRY — the deterministic runtime re-enters approval for
+// exactly this reason after a mint-role release — and refusing it stranded a live
+// repair card with no reachable settlement on any automated lane.
+Deno.test("settlement recovery of an already-minted repair card is not refused as an unattended mint", async () => {
+  // The production shape the finding names: a deterministic repair draft whose
+  // job already exists, released back to `needs_review` by a mint-role reset
+  // while `approved_job_id` still points at the live card. The deterministic
+  // runtime re-enters approval for exactly this, carrying the unattended marker.
+  const minted = legacyRepairDraftRow();
+  minted.approved_job_id = "job-already-minted";
+  minted.deterministic_key = "draft:MLB:PO-61000/cycle:1";
+  minted.extraction_json = {
+    ...minted.extraction_json,
+    deterministic_intake: true,
+    intake_source_post_ids: ["src-1"],
+  };
+  const db = approvalClient(minted, {
+    mints: [{
+      id: "mint-1",
+      draft_id: "draft-legacy-repair",
+      mint_role: "primary",
+      case_id: "case-1",
+      source_post_ids: ["src-1"],
+      job_id: "job-already-minted",
+      state: "minted",
+      evidence_attached_at: null,
+      board_observed_at: null,
+      notification_accepted_at: null,
+    }],
+    jobs: [{
+      id: "job-already-minted",
+      type: "repair",
+      job_number: "SWR-26001",
+    }],
+    caseSources: [{ post_id: "src-1", case_id: "case-1" }],
+  });
+
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(db.client, {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        draft_id: "draft-legacy-repair",
+        approved_by: "auto-intake",
+      }),
+    Error,
+  );
+  assert(
+    !String((error as Error).message).includes(
+      "Repair intake requires a human tick",
+    ),
+    `a settlement retry must not hit the mint brake, got: ${
+      (error as Error).message
+    }`,
+  );
+  // Proof it got PAST the pre-claim brake rather than failing earlier for an
+  // unrelated reason: the atomic claim, which sits immediately after that brake,
+  // actually ran. (A later step on this thin fixture then throws and the
+  // post-claim catch requeues the draft, which is the correct safety behaviour.)
+  assert(
+    db.draftUpdates.some((update) => update.status === "approved"),
+    "the atomic claim must have run, proving the pre-claim brake was passed",
+  );
 });
 
 Deno.test("CONTROL: the same draft approved by an identified operator passes the brake", async () => {
