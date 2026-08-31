@@ -167,7 +167,11 @@ for its tick), and a job type the case-write trigger does not admit — write th
 same best-effort marker under `makesafe_intake_case_not_bindable`, naming the
 observed reason or job type. An already-bound case stays a silent no-op, because
 that is the ordinary deterministic-lane shape and a marker there would alarm on
-every healthy run.
+every healthy run. The gap therefore stays audible, and a caseless card still
+surfaces operationally as `spine_missing_source` / `spine_missing_lineage` on
+the pack path. This is the repository's own flag-never-block pattern — the
+suburb backstop, the audible substatus-gate fail-open, and audit writes that
+never change an action's response.
 
 **The split primary is clamped to make-safe.** The combined-split branch derives
 its own family, and that classifier can say `repair` (the replacement-verb
@@ -184,11 +188,7 @@ clamp keeps the derived family honest if that gate is ever relaxed; the brake is
 deliberately untouched, because on a split the runtime sends
 `reviewed_fields: {}` and its own park would have no family to park on. Pinned by
 the split-gate test in `repair_intake_routing_test.ts`, which fails if the
-refusal ever stops being the split gate''s. The gap therefore stays audible, and a caseless card still
-surfaces operationally as `spine_missing_source` / `spine_missing_lineage` on
-the pack path. This is the repository's own flag-never-block pattern — the
-suburb backstop, the audible substatus-gate fail-open, and audit writes that
-never change an action's response.
+refusal ever stops being the split gate's.
 
 A combined split gives BOTH mints the same `case_id`, so the bind prefers the
 `primary` mint by stated rule rather than relying on `loadIntakeMints`'s

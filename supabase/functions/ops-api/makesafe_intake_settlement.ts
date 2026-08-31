@@ -171,42 +171,7 @@ async function readParkedPlanBlockedReasons(
   ].sort() as string[];
 }
 
-/**
- * Bind each settled mint's intake case to the job that mint created.
- *
- * This is the ONE place the binding happens for every lane, because it is the
- * only shared seam that already holds both coordinates: `reserveIntakeMint`
- * persists `makesafe_intake_job_mints.case_id` from the draft's canonical
- * source authority, and `completeIntakeMint` stamps `job_id` on the same row.
- *
- * It exists because the deterministic runtime's own
- * `insertCaseAndSources(..., jobId)` runs only when the runtime itself
- * advanced the draft. Any draft a HUMAN approves from the review queue — which
- * is now every repair-family draft, under the 2026-08-28 supervised-repair
- * ruling — would otherwise keep `job_id` NULL forever: the case cannot
- * self-heal on a later sweep (its `makesafe_intake_case_sources` row already
- * makes the source a FINAL fate, so the recent lane skips it), and a caseless
- * card is refused at `prepare_ses_docket_revision` with `spine_missing_source`
- * / `spine_missing_lineage`, blocking the whole pack path.
- *
- * The write is a compare-and-set on `job_id IS NULL`, so it never re-points a
- * case that is already bound and a concurrent binder simply wins.
- *
- * ERROR CONTRACT — RECORD AND CONTINUE. This function never throws. By the time
- * it runs the job is already minted, live and settled, so failing loud protects
- * nothing: it would only strand a correctly created card in a draft loop that
- * can never be approved (the post-claim catch requeues the draft to
- * `needs_review`, the retry skips every guard because the mint is recovered, and
- * a PERMANENT refusal — `uq_makesafe_intake_cases_live_identity`, the
- * live-identity floor check — raises again on every press) while degrading whole
- * deterministic runs. A recoverable gap beats an unrecoverable block. The gap
- * stays AUDIBLE: every fault writes a durable `makesafe_intake_case_bind_failed`
- * job event naming the case, the job and the error fact, and a caseless card
- * still surfaces operationally as `spine_missing_source` /
- * `spine_missing_lineage` on the pack path. This is the repository's own
- * flag-never-block pattern — the suburb backstop, the audible substatus-gate
- * fail-open, and audit writes that never change an action's response.
- */
+/** Durable marker for a bind FAULT; see `bindIntakeCasesToMintedJobs`. */
 const INTAKE_CASE_BIND_FAILED_EVENT = "makesafe_intake_case_bind_failed";
 
 const INTAKE_CASE_NOT_BINDABLE_EVENT = "makesafe_intake_case_not_bindable";
@@ -306,6 +271,42 @@ async function recordIntakeCaseBindFailure(
   }
 }
 
+/**
+ * Bind each settled mint's intake case to the job that mint created.
+ *
+ * This is the ONE place the binding happens for every lane, because it is the
+ * only shared seam that already holds both coordinates: `reserveIntakeMint`
+ * persists `makesafe_intake_job_mints.case_id` from the draft's canonical
+ * source authority, and `completeIntakeMint` stamps `job_id` on the same row.
+ *
+ * It exists because the deterministic runtime's own
+ * `insertCaseAndSources(..., jobId)` runs only when the runtime itself
+ * advanced the draft. Any draft a HUMAN approves from the review queue — which
+ * is now every repair-family draft, under the 2026-08-28 supervised-repair
+ * ruling — would otherwise keep `job_id` NULL forever: the case cannot
+ * self-heal on a later sweep (its `makesafe_intake_case_sources` row already
+ * makes the source a FINAL fate, so the recent lane skips it), and a caseless
+ * card is refused at `prepare_ses_docket_revision` with `spine_missing_source`
+ * / `spine_missing_lineage`, blocking the whole pack path.
+ *
+ * The write is a compare-and-set on `job_id IS NULL`, so it never re-points a
+ * case that is already bound and a concurrent binder simply wins.
+ *
+ * ERROR CONTRACT — RECORD AND CONTINUE. This function never throws. By the time
+ * it runs the job is already minted, live and settled, so failing loud protects
+ * nothing: it would only strand a correctly created card in a draft loop that
+ * can never be approved (the post-claim catch requeues the draft to
+ * `needs_review`, the retry skips every guard because the mint is recovered, and
+ * a PERMANENT refusal — `uq_makesafe_intake_cases_live_identity`, the
+ * live-identity floor check — raises again on every press) while degrading whole
+ * deterministic runs. A recoverable gap beats an unrecoverable block. The gap
+ * stays AUDIBLE: every fault writes a durable `makesafe_intake_case_bind_failed`
+ * job event naming the case, the job and the error fact, and a caseless card
+ * still surfaces operationally as `spine_missing_source` /
+ * `spine_missing_lineage` on the pack path. This is the repository's own
+ * flag-never-block pattern — the suburb backstop, the audible substatus-gate
+ * fail-open, and audit writes that never change an action's response.
+ */
 export async function bindIntakeCasesToMintedJobs(
   client: any,
   mints: readonly IntakeMint[],
