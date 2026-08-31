@@ -213,6 +213,50 @@ Deno.test("a PO is never paired with a work order from another claim", () => {
   assertEquals(opaque.builder_po_number, null);
 });
 
+Deno.test("a same-claim PO is recovered from a candidate the slot did not pick", () => {
+  // Bare external_ref wins the work-order slot; the fused fallback names the
+  // SAME claim, so its purchase order is unambiguously this card's own.
+  const sameClaim = projectInsuranceRepairPipelineRow({
+    id: "same-claim",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-27249PO-56481",
+    },
+  });
+  assertEquals(sameClaim.builder_work_order_ref, "MLB-27249");
+  assertEquals(sameClaim.builder_po_number, "PO-56481");
+
+  // The detail store is a candidate on the same terms.
+  const fromDetail = projectInsuranceRepairPipelineRow({
+    id: "same-claim-detail",
+    type: "repair",
+    status: "processing",
+    metadata: { makesafe_job_family: "repair", external_ref: "MLB-27249" },
+  }, {
+    job_id: "same-claim-detail",
+    external_ref: "MLB-27249PO-56481",
+  });
+  assertEquals(fromDetail.builder_work_order_ref, "MLB-27249");
+  assertEquals(fromDetail.builder_po_number, "PO-56481");
+
+  // CONTROL: one digit apart is a different claim and still refuses.
+  const nearMiss = projectInsuranceRepairPipelineRow({
+    id: "near-miss",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-27248PO-56481",
+    },
+  });
+  assertEquals(nearMiss.builder_work_order_ref, "MLB-27249");
+  assertEquals(nearMiss.builder_po_number, null);
+});
+
 Deno.test("makesafe_job_details supplies ref and company when metadata is empty", () => {
   // Legacy card admitted by makesafe_job_details.report_type='repair' with no
   // jobs.metadata at all: the detail row is the only identity it has.

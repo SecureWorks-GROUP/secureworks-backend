@@ -12774,13 +12774,6 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (repairJobIds && repairJobIds.length === 0) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
-  // Detail-store half of the Repairs card identity. `jobs.metadata` is ~91%
-  // populated; makesafe_job_details.external_ref is 100%, and it also carries
-  // the issuing company a legacy/backfilled card may have nowhere else.
-  const repairDetails = repairJobIds
-    ? await loadInsuranceRepairJobDetails(client, repairJobIds)
-    : null
-
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
   const applyJobFilters = (q: any) => {
@@ -12825,12 +12818,20 @@ async function pipeline(client: any, params: URLSearchParams) {
     .order('updated_at', { ascending: false })
     .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
 
-  const [{ data: jobs, error }, malformedPricingRes] = await Promise.all([
+  const [{ data: jobs, error }, malformedPricingRes, repairDetails] = await Promise.all([
     query,
     // A non-fencing endpoint filter can skip the defensive query entirely.
     typeFilter && typeFilter !== 'fencing'
       ? Promise.resolve({ data: [], error: null })
       : malformedPricingQuery,
+    // Detail-store half of the Repairs card identity. `jobs.metadata` is ~91%
+    // populated; makesafe_job_details.external_ref is 100%, and it also carries
+    // the issuing company a legacy/backfilled card may have nowhere else. It
+    // rides this wave rather than a serial read of its own so the Repairs tab
+    // pays no extra round-trip; it degrades internally and never rejects.
+    repairJobIds
+      ? loadInsuranceRepairJobDetails(client, repairJobIds)
+      : Promise.resolve(null),
   ])
   if (error) throw error
 

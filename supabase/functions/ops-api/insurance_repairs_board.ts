@@ -164,10 +164,12 @@ function detailCompanyRow(detail: any): any {
  * Company resolves detail-first, matching the make-safe board.
  *
  * The two instruction numbers are ONE pair, so a split-derived purchase order
- * is only ever taken from the SAME candidate that supplied the work-order slot.
- * A PO read out of a candidate the card did not choose belongs to a different
- * claim, and a work order from one claim beside a purchase order from another
- * is two jobs presented as one instruction. Only the dedicated
+ * is only ever taken from a candidate whose claim half EXACTLY equals the
+ * chosen work-order ref — the selected candidate itself, or another naming the
+ * same claim. A work order from one claim beside a purchase order from another
+ * is two jobs presented as one instruction, so cross-claim pairing is refused
+ * outright and anything short of an exact claim match projects null: a missing
+ * purchase order is recoverable, a wrong one is not. Only the dedicated
  * `metadata.builder_po_number` key is trusted independently: it is the card's
  * own stored PO, not a number parsed out of some other reference.
  *
@@ -199,11 +201,14 @@ export function projectInsuranceRepairPipelineRow(
     splitBuilderRef(meta.builder_work_order_number),
     splitBuilderRef(meta.builder_claim_ref),
   ];
-  const selected = candidates.find((part) => part.work_order !== null) ??
-    { work_order: null, purchase_order: null };
-  const workOrderRef = selected.work_order;
+  const workOrderRef =
+    candidates.find((part) => part.work_order !== null)?.work_order ?? null;
+  const sameClaimPurchaseOrder = workOrderRef === null ? null : (candidates
+    .find((part) =>
+      part.purchase_order !== null && part.work_order === workOrderRef
+    )?.purchase_order ?? null);
   const purchaseOrder = cleanRef(meta.builder_po_number) ??
-    selected.purchase_order;
+    sameClaimPurchaseOrder;
   return {
     ...projected,
     source_type: row?.type || null,
