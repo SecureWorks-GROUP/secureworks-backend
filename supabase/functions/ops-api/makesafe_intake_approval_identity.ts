@@ -10,6 +10,7 @@ import {
   builderInstructionKey,
   builderInstructionKeysForCard,
   type BuilderWorkOrderIdentity,
+  distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity,
   hasUnparseablePoRemainder,
   isSelfGeneratedMakesafeWorkOrder,
@@ -188,7 +189,14 @@ export function correlateIntakeApprovalIdentity(input: {
       if (key) instructionKeys.add(key);
     }
   }
-  const sortedInstructionKeys = [...instructionKeys].sort();
+  // One instruction may legitimately be enumerated under both its PO-grain key
+  // and its repair WO-fallback key (a work order carrying BOTH numbers, read
+  // from sources of unequal completeness). Conflict decisions and the single
+  // instruction key run on the distinct-instruction set; the WO fallback is
+  // subsumed by its own scope's PO key, never by anything else.
+  const sortedInstructionKeys = distinctBuilderInstructionKeys(
+    [...instructionKeys].sort(),
+  );
   if (
     input.attachment_names.length > 0 &&
     input.attachment_names.some((name) => !text(name))

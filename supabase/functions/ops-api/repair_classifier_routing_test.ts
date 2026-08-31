@@ -373,3 +373,80 @@ Deno.test("Ruled 2026-08-28: a repair-family draft never auto-approves (supervis
   assertEquals(control.ok, false);
   assertEquals(control.reason, "missing_work_order_pdf");
 });
+
+// ── Captain ruling 2026-08-31: the identified-work-order repair complement ───
+//
+// "A properly identified, readable work order that is NOT general make-safe,
+// NOT a roof report, NOT an assessment/quote report, and NOT a temporary fence
+// make-safe is repair." The complement applies ONLY to a genuine abstention
+// (`ambiguous_scope`) over a readable scope with settled instruction identity —
+// the floor the 2026-08-25 scout report said a bare not-one-of-three test
+// lacks. Every boundary the captain set explicitly is a control below.
+
+import { applyIdentifiedWorkOrderRepairComplement } from "./makesafe_intake_gate.ts";
+
+const FLOOR_PASSED = { scopeReadable: true, identityProved: true };
+
+Deno.test("the complement turns an identified readable abstention into repair", () => {
+  assertEquals(
+    applyIdentifiedWorkOrderRepairComplement(
+      { family: null, evidence: "ambiguous_scope" },
+      FLOOR_PASSED,
+    ),
+    { family: "repair", evidence: "identified_wo_repair_complement" },
+  );
+});
+
+Deno.test("CONTROL: the complement never fires below the quality floor", () => {
+  // An unreadable or boilerplate-only work order is not a readable work order.
+  assertEquals(
+    applyIdentifiedWorkOrderRepairComplement(
+      { family: null, evidence: "ambiguous_scope" },
+      { scopeReadable: false, identityProved: true },
+    ).family,
+    null,
+  );
+  // An unknown builder / insufficient identity yields no canonical key.
+  assertEquals(
+    applyIdentifiedWorkOrderRepairComplement(
+      { family: null, evidence: "ambiguous_scope" },
+      { scopeReadable: true, identityProved: false },
+    ).family,
+    null,
+  );
+});
+
+Deno.test("CONTROL: restoration parks stay parked — the complement reads only ambiguous_scope", () => {
+  for (
+    const evidence of ["text_restoration_park", "ajs_restoration_park"] as const
+  ) {
+    assertEquals(
+      applyIdentifiedWorkOrderRepairComplement(
+        { family: null, evidence },
+        FLOOR_PASSED,
+      ),
+      { family: null, evidence },
+      `${evidence} must keep parking`,
+    );
+  }
+});
+
+Deno.test("CONTROL: the complement can never move a positively classified family", () => {
+  const positives = [
+    { family: "general_makesafe", evidence: "physical_makesafe" },
+    { family: "temp_fence_makesafe", evidence: "text_temp_fence" },
+    { family: "temp_fence_makesafe", evidence: "typed_temp_fence" },
+    { family: "roof_report", evidence: "typed_roof_report" },
+    { family: "assessment_report_quote", evidence: "text_assessment_report" },
+    { family: "restoration", evidence: "typed_restoration" },
+    { family: "general_makesafe", evidence: "ajs_make_safe_floor" },
+    { family: "repair", evidence: "pdf_declared_type_header" },
+  ] as const;
+  for (const decision of positives) {
+    assertEquals(
+      applyIdentifiedWorkOrderRepairComplement(decision as any, FLOOR_PASSED),
+      decision,
+      `${decision.family}/${decision.evidence} must pass through unchanged`,
+    );
+  }
+});

@@ -735,6 +735,7 @@ import {
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
   reportTypeForJobFamily as _reportTypeForJobFamily,
+  applyIdentifiedWorkOrderRepairComplement as _applyIdentifiedWorkOrderRepairComplement,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   decideDeterministicMakeSafeJobFamily as _decideDeterministicMakeSafeJobFamily,
   detectRepairLegSignal as _detectRepairLegSignal,
@@ -845,6 +846,7 @@ import {
 import {
   applyParsedWorkOrderReferenceToExtraction as _applyParsedWorkOrderReferenceToExtraction,
   builderInstructionKeysForCard as _builderInstructionKeysForCard,
+  distinctBuilderInstructionKeys as _distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity as _extractBuilderWorkOrderIdentity,
   isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
@@ -23989,8 +23991,55 @@ async function approveIntakeDraft(client: any, body: any) {
       null,
   )
 
+  // Fallback family for a draft carrying no authoritative family, under the
+  // captain's 2026-08-31 identified-work-order complement: when the classifier
+  // genuinely ABSTAINS (`ambiguous_scope` — never a restoration park, which
+  // keeps today's behaviour) over a readable extracted scope block on a card
+  // that resolves exactly ONE canonical builder instruction key at the repair
+  // grain, the work order is repair rather than the old blanket
+  // general_makesafe default. loadDraftFamilyClassifierContext has already
+  // refused any draft without exactly one extracted work-order PDF, so the
+  // scope-readability floor here is the scope block itself (a boilerplate-only
+  // PDF still falls back to general_makesafe exactly as before).
+  const approvalFallbackJobFamily = () => {
+    const decision = _decideDeterministicMakeSafeJobFamily(
+      draft?.subject || approvedFields.external_ref || '',
+      [
+        extraction?.builder_email_text_for_trade,
+        approvedFields.description,
+        approvedFields.makesafe_type,
+      ].filter(Boolean).join('\n'),
+      effectiveReportType || null,
+      approvedFamilyContext,
+    )
+    if (decision.family) return decision.family
+    const repairGrainKeys = _distinctBuilderInstructionKeys(
+      _builderInstructionKeysForCard({
+        requestingCompanySlug: approvedFields.requesting_company_slug,
+        family: 'repair',
+        metadata: {
+          external_ref: approvedFields.external_ref,
+          builder_claim_ref: extraction?.builder_claim_ref,
+          builder_work_order_number: extraction?.builder_work_order_number,
+          builder_po_number: extraction?.builder_po_number,
+        },
+        detailExternalRef: approvedFields.external_ref,
+        attachmentNames: availableAttachments.map((attachment: any) =>
+          attachment.file_name || attachment.filename || attachment.name ||
+            attachment.pdf_url || attachment.storage_url
+        ),
+      }),
+    )
+    return _applyIdentifiedWorkOrderRepairComplement(decision, {
+      scopeReadable: !!approvedFamilyContext.pdfScopeText &&
+        !approvedFamilyContext.pdfOnlyBoilerplate,
+      identityProved: repairGrainKeys.length === 1,
+    }).family || 'general_makesafe'
+  }
+
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
-  // draft's roof/assessment family (that belongs to the secondary report card).
+  // draft's roof/assessment family (that belongs to the secondary report card),
+  // and never apply the repair complement (the split primary IS physical work).
   const approvedJobFamily = authoritativeFamily || (splitObligation
     ? _classifyMakeSafeJobFamily(
       draft?.subject || approvedFields.external_ref || '',
@@ -23998,16 +24047,7 @@ async function approveIntakeDraft(client: any, body: any) {
       null,
       approvedFamilyContext,
     )
-    : _classifyMakeSafeJobFamily(
-    draft?.subject || approvedFields.external_ref || '',
-    [
-      extraction?.builder_email_text_for_trade,
-      approvedFields.description,
-      approvedFields.makesafe_type,
-    ].filter(Boolean).join('\n'),
-    effectiveReportType || null,
-    approvedFamilyContext,
-  ))
+    : approvalFallbackJobFamily())
   const approvalDocumentTexts = parseJsonArray(extraction?.work_order_pdf_text)
     .map((document: any) =>
       typeof document?.text === 'string' && document.text.trim()
@@ -24149,9 +24189,17 @@ async function approveIntakeDraft(client: any, body: any) {
           attachment.pdf_url || attachment.storage_url
       ),
     })
-    if (instructionKeys.length > 1) {
+    // One work order carrying BOTH its WO number and its PO enumerates two keys
+    // for one instruction (the PO-grain key plus the repair WO fallback). The
+    // conflict decision runs on the distinct-instruction set; the availability
+    // check below deliberately keeps the FULL enumeration so a WO-keyed
+    // existing card still blocks a twin.
+    const distinctInstructionKeys = _distinctBuilderInstructionKeys(
+      instructionKeys,
+    )
+    if (distinctInstructionKeys.length > 1) {
       throw new ApiError(
-        `Instruction identity conflict: draft carries multiple canonical keys (${instructionKeys.join(', ')}); review required and no card was minted`,
+        `Instruction identity conflict: draft carries multiple canonical keys (${distinctInstructionKeys.join(', ')}); review required and no card was minted`,
         409,
       )
     }

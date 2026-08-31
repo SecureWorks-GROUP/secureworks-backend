@@ -17,6 +17,7 @@ import {
   builderInstructionKey,
   builderInstructionKeysForCard,
   builderInstructionScope,
+  distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity,
 } from "./makesafe_builder_work_order_identity.ts";
 import { matchExistingInstructionCards } from "./makesafe_instruction_mint_gate.ts";
@@ -194,8 +195,8 @@ Deno.test("po grain: repair keys on the work order and cannot be reached without
 });
 
 // PROBE 8 — multi-instruction input is enumerated, never silently reduced to one.
-// The approval path refuses a draft carrying more than one canonical key
-// (`index.ts`, "Instruction identity conflict"), which is what makes this
+// The approval path refuses a draft carrying more than one DISTINCT canonical
+// key (`index.ts`, "Instruction identity conflict"), which is what makes this
 // enumeration a refusal rather than a guess.
 Deno.test("po grain: a card carrying two purchase orders enumerates both keys", () => {
   const keys = builderInstructionKeysForCard({
@@ -208,4 +209,67 @@ Deno.test("po grain: a card carrying two purchase orders enumerates both keys", 
     ],
   });
   assertEquals(keys, ["MLB:PO-53995", "MLB:PO-54000"]);
+});
+
+// PROBE 9 — one instruction carrying BOTH its work-order number and its PO is
+// ONE identity, not a conflict. The live failure (2026-08-31): repair draft
+// MLB-24645 / PO-59875 (22 Pitt Street, Pingelly) enumerated `MLB:PO-59875`
+// from its structured triple and `MLB:WO-24645` from its bare external_ref,
+// and Approve refused one work order as two instructions. The WO-grain key is
+// the repair FALLBACK for having no PO (probe 7), so a same-scope PO key
+// subsumes it; nothing else does.
+Deno.test("po grain: a repair WO carrying both numbers collapses to its one PO key", () => {
+  const enumerated = builderInstructionKeysForCard({
+    requestingCompanySlug: "mlb",
+    family: "repair",
+    metadata: {
+      external_ref: "MLB-24645",
+      builder_claim_ref: "MLB-24645",
+      builder_work_order_number: "MLB-24645",
+      builder_po_number: "PO-59875",
+    },
+    detailExternalRef: "MLB-24645",
+    attachmentNames: [
+      "work_order_MLB-24645PO-59875_Secureworks_Group_Pty_Ltd.pdf",
+    ],
+  });
+  // The enumeration itself deliberately still carries both readings — existing
+  // -card matching needs the WO fallback so a WO-only re-send finds its card.
+  assertEquals(enumerated, ["MLB:PO-59875", "MLB:WO-24645"]);
+  // The distinct-instruction view is what conflict decisions run on.
+  assertEquals(distinctBuilderInstructionKeys(enumerated), ["MLB:PO-59875"]);
+});
+
+Deno.test("po grain: the collapse subsumes ONLY a same-scope WO fallback", () => {
+  // Two purchase orders are still two instructions.
+  assertEquals(
+    distinctBuilderInstructionKeys(["MLB:PO-53995", "MLB:PO-54000"]),
+    ["MLB:PO-53995", "MLB:PO-54000"],
+  );
+  // A WO fallback under a DIFFERENT builder scope is another builder's
+  // instruction and still conflicts.
+  assertEquals(
+    distinctBuilderInstructionKeys(["MLB:PO-59875", "WB:WO-69684"]),
+    ["MLB:PO-59875", "WB:WO-69684"],
+  );
+  // Drifted group references beside one PO collapse onto the PO — the same
+  // direction probe 1 pins for the composite string form.
+  assertEquals(
+    distinctBuilderInstructionKeys([
+      "MLB:PO-59875",
+      "MLB:WO-24645",
+      "MLB:WO-24646",
+    ]),
+    ["MLB:PO-59875"],
+  );
+  // A repair card with NO PO anywhere keeps its WO-grain identity untouched.
+  assertEquals(
+    distinctBuilderInstructionKeys(["MLB:WO-24645"]),
+    ["MLB:WO-24645"],
+  );
+  // AJ's job-number grain is not a WO fallback and is never subsumed.
+  assertEquals(
+    distinctBuilderInstructionKeys(["AJ:JOB-67009", "MLB:PO-54000"]),
+    ["AJ:JOB-67009", "MLB:PO-54000"],
+  );
 });

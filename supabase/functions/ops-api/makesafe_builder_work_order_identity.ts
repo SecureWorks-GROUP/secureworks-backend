@@ -748,6 +748,40 @@ export function builderInstructionKeysForCard(input: {
   return [...new Set(keys)].sort();
 }
 
+/**
+ * Collapse one card's enumerated keys onto the genuinely-distinct instruction
+ * set, under the same 2026-08-02 ruling `builderInstructionKey` implements: the
+ * purchase order is the job and the work-order / claim reference is the GROUP.
+ * A `SCOPE:WO-n` key exists only as the repair fallback for an instruction that
+ * carries no PO, so when the same card also proves a `SCOPE:PO-m` key under the
+ * same builder scope, the WO key is that instruction's group reference read
+ * from a source that happened not to carry the PO — one more identifier of the
+ * SAME instruction, never a second instruction. (Live case 2026-08-31: repair
+ * draft MLB-24645 / PO-59875 enumerated `MLB:PO-59875` from its structured
+ * triple and `MLB:WO-24645` from its bare external_ref, and approval refused
+ * one work order as two.) Everything else is preserved: two PO keys are still
+ * two instructions, a WO key under a DIFFERENT builder scope still conflicts,
+ * and AJ's `AJ:JOB-n` grain is untouched.
+ *
+ * Use this only to decide whether ONE CARD carries one instruction. Matching
+ * against EXISTING cards (`matchExistingInstructionCards`) must keep the full
+ * enumeration, or a re-send that shows only the WO reference stops finding the
+ * card it already has.
+ */
+export function distinctBuilderInstructionKeys(
+  keys: readonly string[],
+): string[] {
+  const poScopes = new Set(
+    keys
+      .map((key) => key.match(/^([A-Z]+):PO-\d/)?.[1])
+      .filter((scope): scope is string => Boolean(scope)),
+  );
+  return keys.filter((key) => {
+    const wo = key.match(/^([A-Z]+):WO-\d/);
+    return !(wo && poScopes.has(wo[1]));
+  });
+}
+
 export function mergeBuilderWorkOrderIdentity(
   extraction: Record<string, any>,
   identity: BuilderWorkOrderIdentity,
