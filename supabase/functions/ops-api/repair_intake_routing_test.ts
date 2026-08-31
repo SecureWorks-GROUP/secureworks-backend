@@ -952,26 +952,28 @@ Deno.test("settlement recovery of an already-minted repair card completes rather
   );
 });
 
-Deno.test("CONTROL: the same draft approved by an identified operator passes the brake", async () => {
-  const db = approvalClient(legacyRepairDraftRow());
+Deno.test("CONTROL: an identified operator approving the same draft mints the SWR- repair card", async () => {
+  // The branch's headline acceptance criterion, end to end: the SAME legacy
+  // repair draft that an unattended lane is refused, approved with NO unattended
+  // marker, must actually create a `type: 'repair'` job with an SWR- number.
+  const draft = legacyRepairDraftRow();
+  const store = makeStore({
+    tables: { makesafe_intake_drafts: [draft] },
+  });
 
-  // Identical client and draft; the ONLY difference is the absent unattended
-  // marker. The operator path must get past the supervision brake — it stops
-  // later, at a different gate, on this deliberately thin fixture.
-  const error = await assertRejects(
-    () =>
-      _approveIntakeDraftForTest(db.client, {
-        draft_id: "draft-legacy-repair",
-        approved_by: "captain@secureworkswa.com.au",
-      }),
-    Error,
+  const result = await _approveIntakeDraftForTest(makeClient(store), {
+    draft_id: "draft-legacy-repair",
+    approved_by: "captain@secureworkswa.com.au",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.job_created, true);
+  assertEquals(store.tables.jobs.length, 1);
+  assertEquals(store.tables.jobs[0].type, "repair");
+  assertEquals(store.tables.jobs[0].job_number, "SWR-261400");
+  assertEquals(
+    store.tables.jobs[0].metadata.makesafe_job_family,
+    "repair",
   );
-  assert(
-    !String((error as Error).message).includes(
-      "Repair intake requires a human tick",
-    ),
-    `operator approval must not hit the unattended brake, got: ${
-      (error as Error).message
-    }`,
-  );
+  assertEquals(store.tables.makesafe_intake_drafts[0].status, "approved");
 });

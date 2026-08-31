@@ -611,12 +611,23 @@ export function decideMakeSafeJobFamily(
  * rung (`makesafe_deterministic_intake.ts`), where chatter, cancellations,
  * unknown builders, quote-stage enquiries, conflicts, identity shortfalls and
  * parse failures have all already fired — so nothing below the quality floor
- * can reach the complement there either. A complement-classified draft still
- * never auto-mints, on either lane: the sweep/board lane is held by
- * `shouldAutoApproveCleanIntake`'s `repair_family_supervised_review` brake, and
- * the deterministic lane by `deterministicPlanNeedsSupervisedRepairReview`
- * (`makesafe_deterministic_intake_runtime.ts`), which withholds the guarded
- * approval call and parks the draft for a human tick.
+ * can reach the complement there either.
+ *
+ * A complement-classified draft still never auto-mints, and the guarantee rests
+ * on the MINT-TIME brake, not on the sweep. `approveIntakeDraft`'s
+ * `UNATTENDED_INTAKE_APPROVAL` refusal (`index.ts`) judges the FINAL
+ * `approvedJobFamily` — the one that will actually be created — and refuses any
+ * caller carrying the unattended marker. That is the only reading that cannot be
+ * outflanked upstream: `shouldAutoApproveCleanIntake`'s
+ * `repair_family_supervised_review` check runs on `resolvedIntakeDraftFamily`
+ * (subject + body preview + stored family), while the approval fallback
+ * classifies from the full instruction text and only then applies THIS
+ * complement, so the two legitimately disagree on a legacy-vintage draft that
+ * passes the sweep as `general_makesafe` and resolves `repair` at the mint.
+ * Treat the sweep check and the deterministic lane's
+ * `deterministicPlanNeedsSupervisedRepairReview` park
+ * (`makesafe_deterministic_intake_runtime.ts`) as earlier, weaker layers that
+ * park most of the population sooner — never as the guarantee.
  */
 export function applyIdentifiedWorkOrderRepairComplement(
   decision: MakeSafeJobFamilyDecision,

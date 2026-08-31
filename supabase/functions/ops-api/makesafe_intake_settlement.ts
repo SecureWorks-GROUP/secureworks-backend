@@ -459,12 +459,6 @@ export async function settleApprovedIntakeDraft(
     input.extraction,
     { refreshIdentity: input.refreshIdentity },
   );
-  await bindIntakeCasesToMintedJobs(client, minted, {
-    draftId: input.draftId,
-    actor: input.caseBindingActor || "intake_approval_settlement",
-    provenance: input.caseBindingProvenance || "deterministic",
-  });
-
   let notificationsAccepted = 0;
   const notificationJobIds: string[] = [];
   for (const mint of minted) {
@@ -627,6 +621,22 @@ export async function settleApprovedIntakeDraft(
     notificationsAccepted++;
     notificationJobIds.push(String(mint.job_id));
   }
+
+  // LAST, deliberately. The bind is the least critical step here and is
+  // idempotent on retry (compare-and-set on `job_id IS NULL`), while the
+  // post-board notification is never retried once the case carries its job.
+  // Running it earlier put a new throwing step in front of that notification for
+  // EVERY intake family: a case that cannot legally go live — two clusters on one
+  // `wo_po_identity_key` refused by `uq_makesafe_intake_cases_live_identity` — would
+  // fail settlement for a card that minted correctly, and the fresh-source lane
+  // would report `fresh source deterministic settlement incomplete`. Placed here,
+  // that refusal costs only the binding, which the next approval re-attempts.
+  await bindIntakeCasesToMintedJobs(client, minted, {
+    draftId: input.draftId,
+    actor: input.caseBindingActor || "intake_approval_settlement",
+    provenance: input.caseBindingProvenance || "deterministic",
+  });
+
   return {
     jobIds: evidenceJobIds,
     notificationJobIds,

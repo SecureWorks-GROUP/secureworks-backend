@@ -560,6 +560,8 @@ function caseBindingClient(input: {
   cases: any[];
   jobs: any[];
   draftMissingFields?: string[];
+  /** Models a CHECK/unique refusal on the case-bind UPDATE. */
+  caseUpdateError?: any;
 }) {
   const updates: any[] = [];
   return {
@@ -647,6 +649,12 @@ function caseBindingClient(input: {
               const row = input.cases.find((c: any) => c.id === targetId);
               if (!row || (requireUnbound && row.job_id)) {
                 return Promise.resolve({ data: null, error: null });
+              }
+              if (input.caseUpdateError) {
+                return Promise.resolve({
+                  data: null,
+                  error: input.caseUpdateError,
+                });
               }
               Object.assign(row, payload);
               updates.push({ id: targetId, ...payload });
@@ -880,5 +888,62 @@ Deno.test("a case carrying any other exception reason keeps that reason", async 
 
   await settleRepair(db.client);
 
+  assertEquals(db.updates, []);
+});
+
+// Ordering, pinned rather than incidental. The case bind runs LAST because it is
+// the least critical step and is idempotent on retry, while the post-board
+// notification is never retried once the case carries its job. A case that
+// cannot legally go live — two clusters on one `wo_po_identity_key`, refused by
+// `uq_makesafe_intake_cases_live_identity` — must therefore cost the binding
+// alone, never the notification, for a card that minted correctly.
+Deno.test("a refused case bind still leaves the mint settled and the notification sent", async () => {
+  const notified: string[] = [];
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    caseUpdateError: {
+      code: "23505",
+      message:
+        'duplicate key value violates unique constraint "uq_makesafe_intake_cases_live_identity"',
+    },
+  });
+
+  await assertRejects(
+    () =>
+      settleApprovedIntakeDraft(db.client, {
+        draftId: "draft-repair",
+        approvedJobId: "job-repair",
+        attachments: [{
+          file_name: "work-order.pdf",
+          storage_url: "storage/work-order.pdf",
+        }],
+        extraction: { deterministic_intake: true },
+        refreshIdentity: noIdentityRefresh as any,
+        notify: async (input) => {
+          notified.push(input.jobId);
+          return {
+            accepted: true,
+            reason: "accepted",
+            auditId: "audit-repair",
+          };
+        },
+      }),
+    Error,
+    "intake case job binding failed",
+  );
+
+  // The notification went out and the mint reached `settled` BEFORE the bind was
+  // attempted, so the refusal costs only the binding the next approval re-tries.
+  assertEquals(notified, ["job-repair"]);
+  assertEquals(mint.state, "settled");
   assertEquals(db.updates, []);
 });
