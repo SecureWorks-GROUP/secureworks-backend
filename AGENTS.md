@@ -768,9 +768,9 @@ on one claim is a pending Captain product decision, deliberately not attempted
 here. The ONE ungrammared input is `metadata.builder_po_number`, trusted by
 explicit direction as the card's own stated PO and projected verbatim past every
 pairing and conflict rule — `create_makesafe_job` stamps it straight off the
-request body (`index.ts:15370`, no validation), so that caller is the whole
-trust boundary and the only remaining route by which a wrong or fused PO reaches
-the card.
+request body (the `metadata` literal in `createMakesafeJob`, `index.ts`; no
+validation), so that caller is the whole trust boundary and the only remaining
+route by which a wrong or fused PO reaches the card.
 
 Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,

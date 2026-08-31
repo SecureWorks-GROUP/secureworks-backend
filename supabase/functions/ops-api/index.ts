@@ -33791,9 +33791,11 @@ async function addPOEvent(client: any, body: any) {
 // Callers holding only a job-number string (supplier bills, WO cost lines) get
 // '' for SWR-. Every OTHER prefix is untouched and answers exactly as before.
 //
-// Safe today because production holds zero renovation jobs, zero roofing jobs
-// and zero SWR- job numbers — see the pre-merge verification SELECT in
-// BUILD-REPORT.md, which must be run before this merges.
+// The pre-merge premise (PR #771) was that production held zero renovation
+// jobs, zero roofing jobs and zero SWR- job numbers, so no existing row changed
+// answer. That premise is spent: the repair SWR- mint lane went live 2026-08-28,
+// which is exactly why a bare SWR- number must keep resolving to '' rather than
+// being taught a default. Re-measure production before assuming any count here.
 //
 // 'SW - MAKESAFE' for repair is inherited from the make-safe route and was
 // CONFIRMED by the captain on 2026-08-31: repair revenue books as make-safe /
