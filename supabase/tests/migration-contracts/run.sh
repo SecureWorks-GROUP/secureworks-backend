@@ -44,6 +44,11 @@ for case_directory in "${case_directories[@]}"; do
       exit 2
     fi
   done
+  if [ -f "$case_directory/rollback-contract.sql" ] \
+    && [ ! -f "$REPO_ROOT/supabase/rollbacks/${case_name}_down.sql" ]; then
+    echo "error: missing rollback for $case_directory/rollback-contract.sql" >&2
+    exit 2
+  fi
 done
 
 drop_contract_database() {
@@ -114,6 +119,23 @@ apply_registered_stack() {
   done
 }
 
+apply_registered_stack_through() {
+  local stop_after=$1
+  local case_directory
+  local case_name
+
+  for case_directory in "${case_directories[@]}"; do
+    case_name=$(basename "$case_directory")
+    run_sql_file "$case_name prerequisites" "$case_directory/setup.sql"
+    run_sql_file "$case_name migration" "$REPO_ROOT/supabase/migrations/$case_name.sql"
+    if [ "$case_name" = "$stop_after" ]; then
+      return
+    fi
+  done
+  echo "error: rollback contract case not registered: $stop_after" >&2
+  exit 2
+}
+
 # Prove migrations fail closed when their documented pre-existing invalid state
 # exists. Each proof starts from a fresh database and stops immediately before
 # the migration under test.
@@ -141,6 +163,20 @@ apply_registered_stack
 for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
   run_sql_file "$case_name contract" "$case_directory/contract.sql"
+done
+
+# Prove an optional down migration executes cleanly against the exact forward
+# stack it reverses, then assert the promised legacy surface is restored.
+for case_directory in "${case_directories[@]}"; do
+  case_name=$(basename "$case_directory")
+  if [ -f "$case_directory/rollback-contract.sql" ]; then
+    reset_contract_database
+    apply_registered_stack_through "$case_name"
+    run_sql_file \
+      "$case_name rollback" \
+      "$REPO_ROOT/supabase/rollbacks/${case_name}_down.sql"
+    run_sql_file "$case_name rollback contract" "$case_directory/rollback-contract.sql"
+  fi
 done
 
 # Meta-test the contract itself. Deliberately remove the constraint, then prove

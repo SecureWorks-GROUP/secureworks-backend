@@ -369,3 +369,25 @@ Deno.test("weekly scope lines skip blank numeric candidates", () => {
   assertEquals(invoice.lines[0].line_total_ex, 420);
   assertEquals(invoice.job_blocks[0].site_address, "10 Main St, Balcatta");
 });
+
+Deno.test("weekly money is calculated from the two-decimal values that are stored", () => {
+  const invoice = buildWeeklyWorkOrderInvoice({
+    job_blocks: [jobBlock(13, "SWF-202", [
+      scope("Fence Installation", 1.005, "m", 100),
+    ])],
+    final_deductions: [{
+      description: "Equipment repayment",
+      quantity: 1.005,
+      unit: "ea",
+      unit_rate: 10,
+    }],
+  });
+
+  assertEquals(invoice.lines[0].quantity, 1.01);
+  assertEquals(invoice.lines[0].unit_rate, 100);
+  assertEquals(invoice.lines[0].line_total_ex, 101);
+  assertEquals(invoice.job_blocks[0].subtotal, 101);
+  assertEquals(invoice.final_deductions[0].quantity, 1.01);
+  assertEquals(invoice.final_deductions[0].line_total_ex, -10.1);
+  assertEquals(invoice.to_be_paid, 90.9);
+});

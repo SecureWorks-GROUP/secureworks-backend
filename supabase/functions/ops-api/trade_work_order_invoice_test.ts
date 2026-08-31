@@ -9,6 +9,7 @@ import {
   _canSubmitWorkOrderInvoice,
   _claimWorkOrderInvoiceBeforeXero,
   _findBlockingWorkOrderInvoice,
+  _resolveWorkOrderScopeLine,
   _selectWorkOrderNegativeCharges,
   handleTradeWorkOrdersAction,
   type TradeAuthContext,
@@ -446,6 +447,14 @@ Deno.test("the caller's own stale draft still leaves the work order invoiceable"
   assertEquals(result.work_orders[0].already_invoiced, false);
   assertEquals(result.work_orders[0].invoice_block_reason, null);
   assertEquals(result.work_orders[0].can_invoice, true);
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, false);
+});
+
+Deno.test("single work-order totals use the values persisted at two-decimal precision", () => {
+  assertEquals(
+    _resolveWorkOrderScopeLine({ quantity: 1.005, unit_price: 100 }),
+    { qty: 1.01, price: 100, amount_ex: 101 },
+  );
 });
 
 Deno.test("the caller can reopen their weekly draft without offering a duplicate single-WO invoice", async () => {
@@ -692,10 +701,10 @@ Deno.test("single-work-order submit claims its source atomically before Xero", a
         events.push("persist:done");
         return "invoice-1";
       },
-      openXeroBoundary: async (client) => {
+      openXeroBoundary: (client) => {
         assertEquals(client, fakeClient);
         events.push("xero:open");
-        return { accessToken: "token", tenantId: "tenant" };
+        return Promise.resolve({ accessToken: "token", tenantId: "tenant" });
       },
     },
   );

@@ -6,48 +6,28 @@ DROP FUNCTION IF EXISTS public.persist_trade_work_order_invoice_v1(jsonb, jsonb,
 DROP FUNCTION IF EXISTS public.trade_invoice_work_order_scope_lines_v1(jsonb);
 DROP FUNCTION IF EXISTS public.trade_invoice_first_numeric_candidate_v1(jsonb, numeric);
 
-ALTER TABLE public.trade_invoice_lines
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_source_work_order_fk,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_source_trade_line_fk,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_deduction_user_fk,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_deduction_assignment_fk,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_deduction_trade_rate_fk,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_typed_deduction_sign_check,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_final_deduction_scope_check,
-  DROP CONSTRAINT IF EXISTS trade_invoice_lines_line_position_check;
-
-DROP INDEX IF EXISTS public.idx_trade_invoice_lines_source_work_order;
-DROP INDEX IF EXISTS public.idx_trade_invoice_lines_source_trade_line;
-DROP INDEX IF EXISTS public.idx_trade_invoice_lines_deduction_user;
-DROP INDEX IF EXISTS public.idx_trade_invoice_lines_deduction_assignment;
-DROP INDEX IF EXISTS public.idx_trade_invoice_lines_deduction_trade_rate;
-
-ALTER TABLE public.trade_invoice_lines
-  DROP COLUMN IF EXISTS source_work_order_id,
-  DROP COLUMN IF EXISTS source_trade_invoice_line_id,
-  DROP COLUMN IF EXISTS deduction_user_id,
-  DROP COLUMN IF EXISTS deduction_assignment_id,
-  DROP COLUMN IF EXISTS deduction_trade_rate_id,
-  DROP COLUMN IF EXISTS site_address,
-  DROP COLUMN IF EXISTS line_position;
-
-ALTER TABLE public.trade_invoices
-  DROP CONSTRAINT IF EXISTS trade_invoices_weekly_totals_check,
-  DROP COLUMN IF EXISTS job_grand_total_ex,
-  DROP COLUMN IF EXISTS final_deductions_total_ex,
-  DROP COLUMN IF EXISTS to_be_paid_ex;
-
-ALTER TABLE public.trade_invoices
-  DROP CONSTRAINT IF EXISTS trade_invoices_invoice_source_check;
-ALTER TABLE public.trade_invoices
-  ADD CONSTRAINT trade_invoices_invoice_source_check CHECK (
-    invoice_source IN ('hourly', 'work_order', 'per_metre', 'misc')
-  );
-
+-- Replace the dependent view before removing columns from its til.* source.
+-- PostgreSQL records that whole-row dependency even though the legacy output
+-- does not expose the weekly provenance columns.
 CREATE OR REPLACE VIEW public.v_trade_charge_resolved AS
 WITH line_base AS (
   SELECT
-    til.*,
+    til.id,
+    til.trade_invoice_id,
+    til.job_id,
+    til.job_number,
+    til.line_type,
+    til.description,
+    til.total_hours,
+    til.hourly_rate,
+    til.line_total_ex,
+    til.line_date,
+    til.division,
+    til.flag_type,
+    til.baseline_hours,
+    til.baseline_source,
+    til.hours_justification,
+    til.flagged_at,
     NULLIF(BTRIM(til.job_number), '') AS line_job_number,
     NULLIF(
       substring(
@@ -118,3 +98,41 @@ COMMENT ON VIEW public.v_trade_charge_resolved IS
   'CP2 canonical trade-cost resolver + M4 U4 hours-flag facts.';
 REVOKE ALL ON public.v_trade_charge_resolved FROM anon, authenticated;
 GRANT SELECT ON public.v_trade_charge_resolved TO service_role, postgres;
+
+ALTER TABLE public.trade_invoice_lines
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_source_work_order_fk,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_source_trade_line_fk,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_deduction_user_fk,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_deduction_assignment_fk,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_deduction_trade_rate_fk,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_typed_deduction_sign_check,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_final_deduction_scope_check,
+  DROP CONSTRAINT IF EXISTS trade_invoice_lines_line_position_check;
+
+DROP INDEX IF EXISTS public.idx_trade_invoice_lines_source_work_order;
+DROP INDEX IF EXISTS public.idx_trade_invoice_lines_source_trade_line;
+DROP INDEX IF EXISTS public.idx_trade_invoice_lines_deduction_user;
+DROP INDEX IF EXISTS public.idx_trade_invoice_lines_deduction_assignment;
+DROP INDEX IF EXISTS public.idx_trade_invoice_lines_deduction_trade_rate;
+
+ALTER TABLE public.trade_invoice_lines
+  DROP COLUMN IF EXISTS source_work_order_id,
+  DROP COLUMN IF EXISTS source_trade_invoice_line_id,
+  DROP COLUMN IF EXISTS deduction_user_id,
+  DROP COLUMN IF EXISTS deduction_assignment_id,
+  DROP COLUMN IF EXISTS deduction_trade_rate_id,
+  DROP COLUMN IF EXISTS site_address,
+  DROP COLUMN IF EXISTS line_position;
+
+ALTER TABLE public.trade_invoices
+  DROP CONSTRAINT IF EXISTS trade_invoices_weekly_totals_check,
+  DROP COLUMN IF EXISTS job_grand_total_ex,
+  DROP COLUMN IF EXISTS final_deductions_total_ex,
+  DROP COLUMN IF EXISTS to_be_paid_ex;
+
+ALTER TABLE public.trade_invoices
+  DROP CONSTRAINT IF EXISTS trade_invoices_invoice_source_check;
+ALTER TABLE public.trade_invoices
+  ADD CONSTRAINT trade_invoices_invoice_source_check CHECK (
+    invoice_source IN ('hourly', 'work_order', 'per_metre', 'misc')
+  );

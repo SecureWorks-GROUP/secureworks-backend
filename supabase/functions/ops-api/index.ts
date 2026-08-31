@@ -375,6 +375,7 @@ import {
   buildWeeklyWorkOrderInvoice,
   calculateWeeklyInvoiceBreakdown,
   firstWorkOrderNumericValue,
+  WEEKLY_INVOICE_DEDUCTION_LINE_TYPES,
   WeeklyInvoiceError,
   weeklyWorkOrderBusinessDate,
   type WeeklyInvoiceLine,
@@ -9549,17 +9550,25 @@ if (import.meta.main) serve(async (req: Request) => {
 
             let labourTotal = 0
             const labourLines = weeklyInvoice ? [] : (Array.isArray(draftLabour) ? draftLabour : [])
-            for (const l of labourLines) labourTotal += Number(l.line_total_ex || 0)
+            for (const l of labourLines) labourTotal += roundMoney(Number(l.line_total_ex || 0))
             let extraTotal = 0
             const extras = !weeklyInvoice && Array.isArray(draftExtras)
-              ? draftExtras.filter((e: any) => e?.source !== 'clock' && e?._source !== 'clock' && e?.source !== 'server_labour')
+              ? draftExtras.filter((e: any) => {
+                if (e?.source === 'clock' || e?._source === 'clock' || e?.source === 'server_labour') return false
+                _resolveWeeklyInvoiceLineTrust(null, e)
+                return true
+              })
               : []
             const draftAssignmentIds = [...new Set(
               labourLines.flatMap((line: any) =>
                 Array.isArray(line?.assignment_ids) ? line.assignment_ids : []
               ).filter(Boolean),
             )]
-            for (const e of extras) extraTotal += Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100
+            for (const e of extras) {
+              extraTotal += roundMoney(
+                roundMoney(Number(e.quantity || 1)) * roundMoney(Number(e.rate || 0)),
+              )
+            }
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
             const draftMoney = tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd)
 
@@ -9581,6 +9590,66 @@ if (import.meta.main) serve(async (req: Request) => {
             // Build a complete replacement beside the old draft. The old header
             // (and its cascading lines) is deleted only after every replacement
             // write succeeds, so any PostgREST error leaves the prior draft intact.
+            const hourlyDraftLineRows: Array<Record<string, unknown>> = [
+              ...labourLines.map((line: any) => ({
+                job_id: line.job_id || null,
+                job_number: line.job_number || null,
+                client_name: line.client_name || null,
+                total_hours: line.total_hours ?? null,
+                hourly_rate: line.hourly_rate ?? null,
+                line_total_ex: roundMoney(Number(line.line_total_ex ?? 0)),
+                work_order_hours: line.work_order_hours ?? null,
+                days_worked: line.days_worked ?? null,
+                assignment_ids: Array.isArray(line.assignment_ids) ? line.assignment_ids : null,
+                acknowledgment_status: line.acknowledgment_status || 'pending',
+                query_note: line.query_note || null,
+                line_type: 'labour',
+                description: line.description || null,
+                quantity: line.quantity ?? null,
+                unit: line.unit || null,
+                unit_rate: line.unit_rate ?? null,
+                line_date: line.line_date || null,
+                division: line.division || null,
+                flag_type: line.flag_type || null,
+                baseline_hours: line.baseline_hours ?? null,
+                baseline_source: line.baseline_source || null,
+                hours_justification: line.hours_justification || null,
+                flagged_at: line.flagged_at || null,
+                wo_allocated: line.wo_allocated ?? null,
+                wo_labour_deduction: line.wo_labour_deduction ?? null,
+                wo_labour_lines: Array.isArray(line.wo_labour_lines) ? line.wo_labour_lines : null,
+              })),
+              ...extras.map((extra: any) => {
+                const quantity = roundMoney(Number(extra.quantity || 1))
+                const unitRate = roundMoney(Number(extra.rate || 0))
+                return {
+                  line_type: (extra.type || 'other').toLowerCase(),
+                  description: extra.description || extra.type || 'Extra item',
+                  quantity,
+                  unit: extra.unit || 'ea',
+                  unit_rate: unitRate,
+                  line_total_ex: roundMoney(quantity * unitRate),
+                }
+              }),
+            ]
+            const hourlyDraftPayload = {
+              org_id: tradeUser.orgId,
+              user_id: tradeUser.id,
+              week_start: draftWeekStart || null,
+              week_end: draftWeekStart ? draftWeekEnd : null,
+              total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
+              total_breaks_minutes: 0,
+              subtotal_ex: draftMoney.gross_earned,
+              gst: draftMoney.gst_amount,
+              total_inc: draftMoney.total_inc,
+              ...tradeInvoiceMoneyFields(draftMoney),
+              invoice_source: 'hourly',
+              job_grand_total_ex: null,
+              final_deductions_total_ex: null,
+              to_be_paid_ex: null,
+              notes: draftNotes || null,
+              status: 'draft',
+            }
             const draftId = weeklyInvoice
               ? await _persistWeeklyTradeInvoice(
                 client,
@@ -9605,42 +9674,27 @@ if (import.meta.main) serve(async (req: Request) => {
                 weeklyInvoice,
                 existingDraftId,
               )
+              : draftWeekStart
+              ? await _persistTradeInvoiceWeekDraft(
+                client,
+                hourlyDraftPayload,
+                hourlyDraftLineRows,
+                existingDraftId,
+              )
               : await replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
-                const { data: newDraft, error: draftErr } = await client.from('trade_invoices').insert({
-                  user_id: tradeUser.id,
-                  week_start: draftWeekStart || null,
-                  week_end: draftWeekStart ? draftWeekEnd : null,
-                  total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
-                  subtotal_ex: draftMoney.gross_earned,
-                  gst: draftMoney.gst_amount,
-                  total_inc: draftMoney.total_inc,
-                  ...tradeInvoiceMoneyFields(draftMoney),
-                  invoice_source: 'hourly',
-                  job_grand_total_ex: null,
-                  final_deductions_total_ex: null,
-                  to_be_paid_ex: null,
-                  notes: draftNotes || null,
-                  status: 'draft',
-                }).select('id').single()
+                const { data: newDraft, error: draftErr } = await client.from('trade_invoices')
+                  .insert(hourlyDraftPayload).select('id').single()
                 if (draftErr || !newDraft?.id) {
                   throw new Error('Failed to save replacement draft: ' + (draftErr?.message || 'no draft id returned'))
                 }
                 return newDraft.id
               },
               insertLines: async (replacementId) => {
-                const draftLineRows = [
-                  ...labourLines.map((l: any) => ({ ...l, trade_invoice_id: replacementId, line_type: 'labour' })),
-                  ...extras.map((e: any) => ({
-                    trade_invoice_id: replacementId,
-                    line_type: (e.type || 'other').toLowerCase(),
-                    description: e.description || e.type || 'Extra item',
-                    quantity: Number(e.quantity || 1),
-                    unit: e.unit || 'ea',
-                    unit_rate: Number(e.rate || 0),
-                    line_total_ex: Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100,
-                  })),
-                ]
+                const draftLineRows = hourlyDraftLineRows.map((line) => ({
+                  ...line,
+                  trade_invoice_id: replacementId,
+                }))
                 if (draftLineRows.length === 0) return
                 const { error: draftLinesErr } = await client.from('trade_invoice_lines').insert(draftLineRows)
                 if (draftLinesErr) throw new Error('Failed to save replacement draft lines: ' + draftLinesErr.message)
@@ -9830,7 +9884,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 type: line.line_type,
                 rate: line.unit_rate,
                 date: line.line_date,
-                _weekly_server_resolved: true,
               }))
               : extra_items
 
@@ -10200,7 +10253,10 @@ if (import.meta.main) serve(async (req: Request) => {
                 if (item?.source === 'clock' || item?._source === 'clock' || item?.source === 'server_labour') continue
                 const qty = Number(item.quantity || 0)
                 const rate = Number(item.rate || 0)
-                const serverResolvedWeeklyLine = item?._weekly_server_resolved === true
+                const serverResolvedWeeklyLine = _resolveWeeklyInvoiceLineTrust(
+                  weeklyInvoice,
+                  item,
+                )
                 if (week_start) {
                   if (!serverResolvedWeeklyLine && !item.job_id && !item.job_number) throw new ApiError('Add a job number to the extra line before submitting.', 422)
                   if (!item.description) throw new ApiError(`Add a description of works for the ${item.job_number || item.job_id || 'extra'} line before submitting.`, 422)
@@ -12329,8 +12385,8 @@ function roundMoney(value: number): number {
 export function _resolveWorkOrderScopeLine(
   item: any,
 ): { qty: number; price: number; amount_ex: number } {
-  const qty = firstWorkOrderNumericValue([item?.quantity, item?.metres, item?.qty], 1)
-  const price = firstWorkOrderNumericValue([item?.unit_price, item?.rate, item?.price], 0)
+  const qty = roundMoney(firstWorkOrderNumericValue([item?.quantity, item?.metres, item?.qty], 1))
+  const price = roundMoney(firstWorkOrderNumericValue([item?.unit_price, item?.rate, item?.price], 0))
   return { qty, price, amount_ex: roundMoney(qty * price) }
 }
 
@@ -12464,6 +12520,35 @@ function hasWeeklyWorkOrderInvoiceShape(body: any): boolean {
   return Array.isArray(body?.work_order_blocks)
 }
 
+const WEEKLY_INVOICE_PROVENANCE_FIELDS = [
+  'source_work_order_id',
+  'source_trade_invoice_line_id',
+  'deduction_user_id',
+  'deduction_assignment_id',
+  'deduction_trade_rate_id',
+] as const
+
+export function _resolveWeeklyInvoiceLineTrust(
+  weeklyInvoice: WeeklyWorkOrderInvoice | null,
+  item: any,
+): boolean {
+  if (weeklyInvoice) return true
+  const lineType = String(item?.type || item?.line_type || '').trim().toLowerCase()
+  const hasWeeklyOnlyProvenance = WEEKLY_INVOICE_PROVENANCE_FIELDS.some((field) =>
+    item?.[field] !== null && item?.[field] !== undefined && String(item[field]).trim() !== ''
+  )
+  if (
+    WEEKLY_INVOICE_DEDUCTION_LINE_TYPES.includes(lineType as any) ||
+    hasWeeklyOnlyProvenance
+  ) {
+    throw new ApiError(
+      'Weekly deduction lines must be selected from server-resolved work-order sources',
+      422,
+    )
+  }
+  return false
+}
+
 function weeklyInvoiceResponse(invoice: WeeklyWorkOrderInvoice) {
   return {
     job_blocks: invoice.job_blocks,
@@ -12489,14 +12574,31 @@ export async function _persistWeeklyTradeInvoice(
   invoice: WeeklyWorkOrderInvoice,
   requestedPriorDraftId: string | null,
 ): Promise<string> {
+  return await _persistTradeInvoiceWeekDraft(
+    client,
+    invoicePayload,
+    weeklyInvoiceLineRows(invoice),
+    requestedPriorDraftId,
+  )
+}
+
+export async function _persistTradeInvoiceWeekDraft(
+  client: any,
+  invoicePayload: Record<string, unknown>,
+  lineRows: Array<Record<string, unknown>>,
+  requestedPriorDraftId: string | null,
+): Promise<string> {
   const { data, error } = await client.rpc('persist_weekly_trade_invoice_v1', {
     p_invoice: invoicePayload,
-    p_lines: weeklyInvoiceLineRows(invoice),
+    p_lines: lineRows.map((line, linePosition) => ({
+      ...line,
+      line_position: line.line_position ?? linePosition,
+    })),
     p_requested_prior_draft_id: requestedPriorDraftId,
   })
   const invoiceId = String(data || '')
   if (error || !invoiceId) {
-    throw new Error('Failed to persist weekly invoice: ' + (error?.message || 'no invoice id returned'))
+    throw new Error('Failed to persist weekly/hourly draft invoice: ' + (error?.message || 'no invoice id returned'))
   }
   return invoiceId
 }
@@ -13021,6 +13123,13 @@ export async function tradeWorkOrders(
     )
     const canReopenWeeklyDraft = !!weeklyDraft && !existingBlocker &&
       String(weeklyDraft.user_id || '') === String(viewer.id)
+    const weeklyBuilderBlocker = workOrderInvoices.find((invoice: any) => {
+      const status = String(invoice?.status || '')
+      if (status === 'failed' || status === 'ops-reject') return false
+      const isOwnWeeklyDraft = invoice?.weekly_work_order_line === true &&
+        status === 'draft' && String(invoice?.user_id || '') === String(viewer.id)
+      return !isOwnWeeklyDraft
+    })
     const blockingInvoice = existingBlocker || weeklyDraft
     const alreadyInvoiced = !!blockingInvoice &&
       !RELEASED_INVOICE_STATUS_SET.has(String(blockingInvoice.status || ''))
@@ -13055,9 +13164,7 @@ export async function tradeWorkOrders(
       weekly_draft_id: canReopenWeeklyDraft
         ? weeklyDraft.id
         : null,
-      can_add_to_weekly_invoice: workOrder.status === 'complete' && (
-        !blockingInvoice || canReopenWeeklyDraft
-      ),
+      can_add_to_weekly_invoice: workOrder.status === 'complete' && !weeklyBuilderBlocker,
       can_invoice: workOrder.status === 'complete' && !blockingInvoice,
     }
   })

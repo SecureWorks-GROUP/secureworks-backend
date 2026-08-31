@@ -161,8 +161,8 @@ function sourceDeductionBasis(
   source: Record<string, unknown>,
   amountEx: number,
 ) {
-  const quantity = Number(source.quantity);
-  const rate = Number(source.source_unit_rate);
+  const quantity = roundMoney(Number(source.quantity));
+  const rate = roundMoney(Number(source.source_unit_rate));
   if (
     Number.isFinite(quantity) && quantity > 0 && Number.isFinite(rate) &&
     rate > 0 &&
@@ -171,7 +171,7 @@ function sourceDeductionBasis(
     return {
       quantity,
       unit: String(source.unit || "ea"),
-      unit_rate: -roundMoney(rate),
+      unit_rate: -rate,
     };
   }
   // An acknowledged override/extended amount outranks stale display quantity
@@ -334,20 +334,20 @@ export function buildWeeklyWorkOrderInvoice(input: {
     }
 
     for (const item of scopeItems) {
-      const quantity = positiveNumber(
+      const quantity = roundMoney(positiveNumber(
         firstWorkOrderNumericValue(
           [item.quantity, item.metres, item.qty],
           1,
         ),
         `${jobNumber} scope quantity`,
-      );
-      const unitRate = positiveNumber(
+      ));
+      const unitRate = roundMoney(positiveNumber(
         firstWorkOrderNumericValue(
           [item.unit_price, item.rate, item.price],
           0,
         ),
         `${jobNumber} scope rate`,
-      );
+      ));
       lines.push({
         line_type: weeklyScopeLineType(item),
         description: requiredText(
@@ -356,7 +356,7 @@ export function buildWeeklyWorkOrderInvoice(input: {
         ),
         quantity,
         unit: String(item.unit || (item.metres !== undefined ? "m" : "ea")),
-        unit_rate: roundMoney(unitRate),
+        unit_rate: unitRate,
         line_total_ex: roundMoney(quantity * unitRate),
         job_id: jobId,
         job_number: jobNumber,
@@ -427,14 +427,18 @@ export function buildWeeklyWorkOrderInvoice(input: {
         labour.trade_rate_id,
         `${jobNumber} labour trade rate id`,
       );
-      const hours = positiveNumber(labour.hours, `${jobNumber} labour hours`);
-      const rate = positiveNumber(labour.rate, `${jobNumber} labour rate`);
+      const hours = roundMoney(
+        positiveNumber(labour.hours, `${jobNumber} labour hours`),
+      );
+      const rate = roundMoney(
+        positiveNumber(labour.rate, `${jobNumber} labour rate`),
+      );
       lines.push({
         line_type: "labour_deduction",
         description: `Labour - ${userName}`,
         quantity: hours,
         unit: "hr",
-        unit_rate: -roundMoney(rate),
+        unit_rate: -rate,
         line_total_ex: -roundMoney(hours * rate),
         job_id: jobId,
         job_number: jobNumber,
@@ -456,20 +460,20 @@ export function buildWeeklyWorkOrderInvoice(input: {
       deduction.description,
       "final deduction description",
     );
-    const quantity = positiveNumber(
+    const quantity = roundMoney(positiveNumber(
       deduction.quantity ?? 1,
       `${description} quantity`,
-    );
-    const rate = positiveNumber(
+    ));
+    const rate = roundMoney(positiveNumber(
       deduction.unit_rate ?? deduction.rate,
       `${description} final deduction rate`,
-    );
+    ));
     lines.push({
       line_type: "final_payout_deduction",
       description,
       quantity,
       unit: String(deduction.unit || "ea"),
-      unit_rate: -roundMoney(rate),
+      unit_rate: -rate,
       line_total_ex: -roundMoney(quantity * rate),
       job_id: null,
       job_number: null,

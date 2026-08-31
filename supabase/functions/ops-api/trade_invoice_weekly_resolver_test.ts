@@ -3,10 +3,13 @@
 import {
   assertEquals,
   assertRejects,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _persistTradeInvoiceWeekDraft,
   _persistWeeklyTradeInvoice,
   _persistWorkOrderInvoice,
+  _resolveWeeklyInvoiceLineTrust,
   _resolveWeeklyWorkOrderInvoice,
   type TradeAuthContext,
 } from "./index.ts";
@@ -360,6 +363,99 @@ Deno.test("weekly persistence sends one complete server-owned invoice to the dat
       },
     ],
   );
+});
+
+Deno.test("client weekly trust markers cannot create server-resolved deduction lines", () => {
+  assertEquals(
+    _resolveWeeklyInvoiceLineTrust(null, {
+      _weekly_server_resolved: true,
+      type: "other",
+      description: "Client extra",
+    }),
+    false,
+  );
+  assertThrows(
+    () =>
+      _resolveWeeklyInvoiceLineTrust(null, {
+        _weekly_server_resolved: true,
+        type: "crew_work_order_deduction",
+      }),
+    Error,
+    "must be selected from server-resolved work-order sources",
+  );
+  assertThrows(
+    () =>
+      _resolveWeeklyInvoiceLineTrust(null, {
+        type: "labour",
+        source_work_order_id: completedWorkOrder().id,
+      }),
+    Error,
+    "must be selected from server-resolved work-order sources",
+  );
+  assertEquals(
+    _resolveWeeklyInvoiceLineTrust({} as any, {
+      type: "crew_work_order_deduction",
+    }),
+    true,
+  );
+});
+
+Deno.test("dated hourly drafts use the weekly lock boundary without losing audit facts", async () => {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const line = {
+    job_id: completedWorkOrder().job_id,
+    line_type: "labour",
+    total_hours: 2.5,
+    hourly_rate: 40,
+    line_total_ex: 100,
+    work_order_hours: 3,
+    days_worked: 1,
+    assignment_ids: ["00000000-0000-0000-0000-000000000400"],
+    query_note: "Preserve me",
+    wo_allocated: 140,
+    wo_labour_deduction: 40,
+    wo_labour_lines: [{ trade_name: "Isaac", hours: 1, rate: 40 }],
+  };
+  const invoiceId = await _persistTradeInvoiceWeekDraft(
+    {
+      rpc(name: string, args: Record<string, unknown>) {
+        calls.push({ name, args });
+        return Promise.resolve({
+          data: "00000000-0000-0000-0000-000000000902",
+          error: null,
+        });
+      },
+    },
+    {
+      org_id: ORG_ID,
+      user_id: HENRY.id,
+      week_start: "2026-08-24",
+      week_end: "2026-08-30",
+      invoice_source: "hourly",
+      status: "draft",
+      subtotal_ex: 100,
+    },
+    [line],
+    "00000000-0000-0000-0000-000000000800",
+  );
+
+  assertEquals(invoiceId, "00000000-0000-0000-0000-000000000902");
+  assertEquals(calls, [{
+    name: "persist_weekly_trade_invoice_v1",
+    args: {
+      p_invoice: {
+        org_id: ORG_ID,
+        user_id: HENRY.id,
+        week_start: "2026-08-24",
+        week_end: "2026-08-30",
+        invoice_source: "hourly",
+        status: "draft",
+        subtotal_ex: 100,
+      },
+      p_lines: [{ ...line, line_position: 0 }],
+      p_requested_prior_draft_id: "00000000-0000-0000-0000-000000000800",
+    },
+  }]);
 });
 
 Deno.test("single-work-order persistence uses the same atomic source-claim boundary", async () => {

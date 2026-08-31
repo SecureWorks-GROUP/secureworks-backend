@@ -4,7 +4,9 @@
 CREATE TABLE IF NOT EXISTS public.users (
   id uuid PRIMARY KEY,
   org_id uuid NOT NULL,
-  name text NOT NULL
+  name text NOT NULL,
+  role text,
+  managed_verticals text[] DEFAULT ARRAY[]::text[]
 );
 
 CREATE TABLE IF NOT EXISTS public.work_orders (
@@ -12,6 +14,7 @@ CREATE TABLE IF NOT EXISTS public.work_orders (
   org_id uuid NOT NULL,
   job_id uuid NOT NULL REFERENCES public.jobs(id),
   status text,
+  assigned_user_id uuid REFERENCES public.users(id),
   scope_items jsonb,
   scheduled_date date,
   completed_at timestamptz,
@@ -70,9 +73,16 @@ CREATE TABLE IF NOT EXISTS public.trade_invoice_lines (
   quantity numeric(10,2),
   unit text,
   unit_rate numeric(12,2),
+  work_order_hours numeric(6,2),
+  days_worked integer,
+  assignment_ids uuid[],
+  query_note text,
   flag_type text,
   baseline_hours numeric(10,2),
   baseline_source text,
   hours_justification text,
-  flagged_at timestamptz
+  flagged_at timestamptz,
+  wo_allocated numeric,
+  wo_labour_deduction numeric,
+  wo_labour_lines jsonb
 );
