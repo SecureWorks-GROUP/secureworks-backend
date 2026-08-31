@@ -635,7 +635,13 @@ BEGIN
     'line_date', '2026-08-25'
   ));
   BEGIN
-    PERFORM public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+    -- Invoice #31 is the selected draft for this fixture week. Pass its
+    -- compare-and-swap identity so source-scope validation is the tested gate.
+    PERFORM public.persist_weekly_trade_invoice_v1(
+      v_header,
+      v_lines,
+      '20000000-0000-4000-8000-000000000050'
+    );
     RAISE EXCEPTION 'stale weekly source scope was accepted';
   EXCEPTION WHEN foreign_key_violation THEN
     NULL;
