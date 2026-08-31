@@ -742,11 +742,16 @@ dual-scope WO stays make-safe and flags `repair_leg_detected` (child SWR- spawn
 is a human tap); NO repair draft auto-approves
 (`repair_family_supervised_review` brake) so every SWR- mint is a human tick; and
 the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
-(ruling 6 — reversing needs a new ruling, not a script run). Xero: repair books
+(ruling 6 — reversing needs a new ruling, not a script run). Xero, Captain-confirmed
+2026-08-31: **repair revenue books as make-safe / insurance work** — account `210`
+(`accountCodeForJob`, inherited from make-safe, never the `200` fallback) and
 tracking `SW - MAKESAFE` (type-aware `trackingCategoryForJob`; bare `SWR` prefix
-deliberately resolves to nothing); `accountCodeForJob` maps repair to 210,
-inherited from make-safe and Captain-confirmed 2026-08-31 (repair revenue books
-as make-safe/insurance work; never the `200` fallback).
+deliberately resolves to nothing). Read the intent, not the digit: a future
+account split follows where SES insurance work goes, not where a `repair` label
+sounds like it belongs. That ruling closes what those two functions carried as
+OPEN RISK #2; **OPEN RISK #1 — captain signoff on the money-seal path — remains
+OPEN** in the header of `20260826000001_repair_job_type.sql` and is untouched by
+it.
 The Repairs card carries the builder WO + PO refs in
 `projectInsuranceRepairPipelineRow`: every candidate ref is split through the
 sealed grammar (`extractBuilderWorkOrderIdentity`) so the fused WO+PO vintage

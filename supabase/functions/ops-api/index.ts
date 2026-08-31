@@ -33797,9 +33797,13 @@ async function addPOEvent(client: any, body: any) {
 // which is exactly why a bare SWR- number must keep resolving to '' rather than
 // being taught a default. Re-measure production before assuming any count here.
 //
-// 'SW - MAKESAFE' for repair is inherited from the make-safe route and was
-// CONFIRMED by the captain on 2026-08-31: repair revenue books as make-safe /
-// insurance work. (Closes what this comment carried as OPEN RISK #2.)
+// 'SW - MAKESAFE' for repair is inherited from the make-safe route, and the
+// captain confirmed the intent behind it on 2026-08-31: repair revenue books as
+// make-safe / insurance work, so it tracks where SES insurance work already
+// tracks. Read that intent, not the string — a future tracking split follows the
+// insurance work, not the 'repair' label. (Closes what this comment carried as
+// OPEN RISK #2; OPEN RISK #1, captain signoff on the money-seal path, is a
+// different question and stays open in the 20260826000001 migration header.)
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
@@ -33841,8 +33845,13 @@ function accountCodeForJob(jobType: string, fallback = '200'): string {
     // repair cards were type='makesafe' (210) before this pipeline existed, so
     // an unmapped 'repair' would have moved the revenue account silently the
     // moment the type flipped, with no code change and no error to notice.
-    // Inherited from make-safe and CONFIRMED by the captain on 2026-08-31:
-    // repair books to 210, never the '200' fallback.
+    // Inherited from make-safe, and the captain confirmed the intent on
+    // 2026-08-31: repair revenue books as make-safe / insurance work — which is
+    // account 210, where both of those already book, never the '200' fallback.
+    // So if the bookkeeper ever splits these accounts, repair follows wherever
+    // insurance/make-safe revenue goes, not wherever 'repair' sounds like it
+    // belongs. (Closes what this carried as OPEN RISK #2; OPEN RISK #1 in the
+    // 20260826000001 migration header is a separate, still-open question.)
     repair: '210',
     renovation: '201',
     combo: '200',

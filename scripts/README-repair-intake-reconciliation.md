@@ -35,8 +35,17 @@ Four result sets.
 ### The alarm is: A has more rows than B has jobs
 
 That means a work order arrived carrying a repair signal and did not become a
-repair card. Take the row from A, find the job it became, and correct it (see
-BUILD-REPORT.md §7 and the correction notes in OPEN RISKS).
+repair card. Take the row from A and find the job it became.
+
+The correction procedure itself is **not in this repository**. It lives in the
+PR #771 task report (`BUILD-REPORT.md` §7), which is an out-of-repo artifact, so
+you will not find it by searching here — ask for that report before correcting a
+card by hand. Of the two open risks it referred to, **#2 (the Xero account and
+tracking for repair) is now CLOSED** — the captain confirmed on 2026-08-31 that
+repair revenue books as make-safe / insurance work; see the repair section of
+`AGENTS.md`. **#1 remains OPEN**: captain signoff on the money-seal path, still
+recorded in the header of
+`supabase/migrations/20260826000001_repair_job_type.sql`.
 
 On 90-day historical volumes section A returns roughly **two rows a quarter**, so
 an empty A on most days is the expected reading, not a broken query.
