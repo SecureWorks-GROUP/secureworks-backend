@@ -91,10 +91,36 @@ export function insuranceRepairStage(row: any): InsuranceRepairStage {
   }
 }
 
-/** The pipeline card shape consumed by the merged Repairs UX tab. */
+function cleanRef(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
+/**
+ * The pipeline card shape consumed by the merged Repairs UX tab.
+ *
+ * A repair operator reconciles the card against the builder's paperwork, so the
+ * card must carry BOTH instruction numbers (captain requirement, 2026-08-31):
+ * the builder's work-order reference (e.g. MLB-24645) and the purchase order
+ * (e.g. PO-59875). Those live only in `jobs.metadata`, which this projection
+ * deliberately strips — so they are lifted onto named card fields first.
+ *
+ * `external_ref` outranks `builder_work_order_number` for the work-order slot
+ * because one live vintage fuses WO and PO into the latter ("MLB-25147PO-56236"
+ * on SWMS-261029) while `external_ref` carries the bare reference. Absent
+ * fields project null; the card simply has nothing to show for them.
+ */
 export function projectInsuranceRepairPipelineRow(row: any): any {
   const projected = { ...row };
   delete projected.metadata;
+  const meta = row?.metadata && typeof row.metadata === "object" &&
+      !Array.isArray(row.metadata)
+    ? row.metadata
+    : {};
+  const company =
+    meta.requesting_company && typeof meta.requesting_company === "object"
+      ? meta.requesting_company
+      : null;
   return {
     ...projected,
     source_type: row?.type || null,
@@ -103,6 +129,12 @@ export function projectInsuranceRepairPipelineRow(row: any): any {
     family: "repair",
     ses_family: "repair",
     repair_stage: insuranceRepairStage(row),
+    builder_work_order_ref: cleanRef(meta.external_ref) ??
+      cleanRef(meta.builder_work_order_number) ??
+      cleanRef(meta.builder_claim_ref),
+    builder_po_number: cleanRef(meta.builder_po_number),
+    builder_company_name: cleanRef(company?.name),
+    builder_company_slug: cleanRef(company?.slug),
   };
 }
 

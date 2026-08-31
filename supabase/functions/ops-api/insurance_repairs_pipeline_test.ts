@@ -87,7 +87,13 @@ function pipelineClient() {
               deposit_invoice_id: null,
               deposit_amount: null,
               council_required: null,
-              metadata: { makesafe_job_family: "repair" },
+              metadata: {
+                makesafe_job_family: "repair",
+                external_ref: "MLB-25147",
+                builder_work_order_number: "MLB-25147PO-56236",
+                builder_po_number: "PO-56236",
+                requesting_company: { slug: "mlb", name: "ML Builders" },
+              },
             }],
             error: null,
           };
@@ -116,6 +122,12 @@ Deno.test("pipeline?type=repair feeds Midland through the merged Repairs contrac
   assertEquals(row.repair_stage, "on_site");
   assertEquals(row.source_type, "makesafe");
   assertEquals("metadata" in row, false);
+  // The card carries both builder instruction numbers, lifted off the stripped
+  // metadata: the bare work-order reference (not the fused WO+PO vintage) and
+  // the purchase order, labelled by the issuing company.
+  assertEquals(row.builder_work_order_ref, "MLB-25147");
+  assertEquals(row.builder_po_number, "PO-56236");
+  assertEquals(row.builder_company_name, "ML Builders");
 
   const baseRead = client.calls.find((call) =>
     call.table === "jobs" && call.select.startsWith("id, type, status")
