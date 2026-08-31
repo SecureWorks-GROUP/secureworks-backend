@@ -209,6 +209,55 @@ async function readParkedPlanBlockedReasons(
  */
 const INTAKE_CASE_BIND_FAILED_EVENT = "makesafe_intake_case_bind_failed";
 
+const INTAKE_CASE_NOT_BINDABLE_EVENT = "makesafe_intake_case_not_bindable";
+
+/**
+ * A deliberate SKIP is as operationally consequential as a fault: the card ends
+ * up caseless either way, and is refused later at `prepare_ses_docket_revision`
+ * with `spine_missing_source` / `spine_missing_lineage`. For a parked repair
+ * card this seam is the ONLY binder, so a silent skip is an unrecorded
+ * permanent gap. The skip itself stays a skip — this only makes it audible.
+ */
+async function recordIntakeCaseBindSkip(
+  client: any,
+  input: {
+    caseId: string;
+    jobId: string;
+    detail: Record<string, unknown>;
+  },
+): Promise<void> {
+  console.error(
+    `[ops-api] intake case not bindable (case ${input.caseId}, job ${input.jobId}): ${
+      JSON.stringify(input.detail)
+    }`,
+  );
+  try {
+    const { error } = await client.from("job_events").insert({
+      job_id: input.jobId,
+      event_type: INTAKE_CASE_NOT_BINDABLE_EVENT,
+      detail_json: {
+        case_id: input.caseId,
+        job_id: input.jobId,
+        stage: "case_not_bindable",
+        ...input.detail,
+      },
+    });
+    if (error) {
+      console.error(
+        `[ops-api] intake case not-bindable marker unwritten (case ${input.caseId}, job ${input.jobId}): ${
+          error.message || error
+        }`,
+      );
+    }
+  } catch (eventError) {
+    console.error(
+      `[ops-api] intake case not-bindable marker unwritten (case ${input.caseId}, job ${input.jobId}): ${
+        (eventError as Error)?.message || eventError
+      }`,
+    );
+  }
+}
+
 async function recordIntakeCaseBindFailure(
   client: any,
   input: {
@@ -303,6 +352,28 @@ export async function bindIntakeCasesToMintedJobs(
     INTAKE_CASE_BINDABLE_STATES.has(String(row?.state || "")) &&
     String(row?.reason_code || "") === INTAKE_CASE_BINDABLE_REASON
   );
+
+  // A deliberate SKIP produces the same operational outcome as a fault — a
+  // caseless card refused later at `prepare_ses_docket_revision` — so it must be
+  // just as audible. An already-bound case is the ordinary deterministic-lane
+  // no-op and is NOT recorded; a case that moved to a different reason-coded
+  // exception while its repair draft waited days for a human tick IS.
+  const byCaseId = new Map<string, any>(
+    (caseRows || []).map((row: any) => [String(row?.id), row]),
+  );
+  const boundSet = new Set(unbound.map((row: any) => String(row.id)));
+  for (const [caseId, jobId] of jobByCaseId) {
+    if (boundSet.has(caseId)) continue;
+    const row = byCaseId.get(caseId);
+    if (row?.job_id) continue;
+    await recordIntakeCaseBindSkip(client, {
+      caseId,
+      jobId,
+      detail: row
+        ? { state: row.state ?? null, reason_code: row.reason_code ?? null }
+        : { case_row: "not_found" },
+    });
+  }
   if (!unbound.length) return [];
 
   const { data: jobRows, error: jobError } = await client
@@ -321,14 +392,15 @@ export async function bindIntakeCasesToMintedJobs(
     });
     return [];
   }
+  const jobTypeById = new Map<string, string>(
+    (jobRows || []).map((
+      row: any,
+    ) => [String(row?.id), String(row?.type || "").trim().toLowerCase()]),
+  );
   const linkableJobIds = new Set(
-    (jobRows || [])
-      .filter((row: any) =>
-        INTAKE_CASE_LINKABLE_JOB_TYPES.has(
-          String(row?.type || "").trim().toLowerCase(),
-        )
-      )
-      .map((row: any) => String(row.id)),
+    [...jobTypeById.entries()]
+      .filter(([, type]) => INTAKE_CASE_LINKABLE_JOB_TYPES.has(type))
+      .map(([id]) => id),
   );
 
   let blockedReasons: string[];
@@ -351,7 +423,17 @@ export async function bindIntakeCasesToMintedJobs(
   for (const row of unbound) {
     const caseId = String(row.id);
     const jobId = String(jobByCaseId.get(caseId));
-    if (!linkableJobIds.has(jobId)) continue;
+    if (!linkableJobIds.has(jobId)) {
+      await recordIntakeCaseBindSkip(client, {
+        caseId,
+        jobId,
+        detail: {
+          job_type: jobTypeById.get(jobId) ?? null,
+          linkable_job_types: [...INTAKE_CASE_LINKABLE_JOB_TYPES],
+        },
+      });
+      continue;
+    }
     const nextState = blockedReasons.length
       ? "blocked_live_job"
       : "confirmed_live_job";

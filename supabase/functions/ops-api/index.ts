@@ -24087,14 +24087,35 @@ async function approveIntakeDraft(client: any, body: any) {
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
   // draft's roof/assessment family (that belongs to the secondary report card),
   // and never apply the repair complement (the split primary IS physical work).
-  const approvedJobFamily = authoritativeFamily || (splitObligation
-    ? _classifyMakeSafeJobFamily(
+  //
+  // The split classifier can still say `repair` on its own (the replacement-verb
+  // ladder, or the rapid-repair upgrade), which would contradict the sentence
+  // above, so it is CLAMPED here. Captain ruling 2026-08-28, Ruling 5: a
+  // dual-scope work order stays make-safe and flags the repair LEG; the child
+  // SWR- spawn is a human tap. No signal is lost — the leg still reaches a human
+  // through the `repair_leg_detected` stamp and its review flag.
+  //
+  // This is alignment, not a live fix: `combinedSplitRecoveryDecision` above
+  // refuses a split outright until BOTH mint roles already carry a job, so the
+  // split primary is never created here and a `repair` reading could not reach
+  // the unattended brake either (both brake sites are skipped once
+  // `recoveredPrimaryMint` exists). The clamp keeps the derived family honest if
+  // that gate is ever relaxed — and the brake itself stays untouched, because on
+  // a split the runtime sends `reviewed_fields: {}` and its own park would not
+  // see a family to park on.
+  const splitPrimaryJobFamily = () => {
+    const classified = _classifyMakeSafeJobFamily(
       draft?.subject || approvedFields.external_ref || '',
       [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
       null,
       approvedFamilyContext,
     )
-    : approvalFallbackJobFamily())
+    return _normaliseDedupJobFamily(classified) === 'repair'
+      ? 'general_makesafe'
+      : classified
+  }
+  const approvedJobFamily = authoritativeFamily ||
+    (splitObligation ? splitPrimaryJobFamily() : approvalFallbackJobFamily())
   // The 2026-08-28 ruling forbids an unattended lane CREATING an SWR- card; it
   // says nothing about finishing one a human already ticked. This is the family
   // half of that test — the refusal itself is placed at the two points where a

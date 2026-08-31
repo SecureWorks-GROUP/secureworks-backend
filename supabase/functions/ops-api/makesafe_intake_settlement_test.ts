@@ -1110,3 +1110,96 @@ Deno.test("a REFUSED failure marker is logged and still never fails the approval
     console.error = originalError;
   }
 });
+
+// A deliberate SKIP leaves exactly the outcome the marker exists to make
+// diagnosable — a caseless card refused later at `prepare_ses_docket_revision`.
+// For a parked repair card this seam is the ONLY binder, so a silent skip is an
+// unrecorded permanent gap.
+Deno.test("a case whose reason moved on records a not-bindable marker and still settles", async () => {
+  const notified: string[] = [];
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "cancellation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleApprovedIntakeDraft(db.client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    notify: async (input) => {
+      notified.push(input.jobId);
+      return { accepted: true, reason: "accepted", auditId: "audit-repair" };
+    },
+  });
+
+  // The skip stays a skip: no case row is written.
+  assertEquals(db.updates, []);
+  assertEquals(notified, ["job-repair"]);
+  assertEquals(mint.state, "settled");
+  // ...but it is audible, and it names the reason that made it unbindable.
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(
+    db.jobEvents[0].event_type,
+    "makesafe_intake_case_not_bindable",
+  );
+  assertEquals(db.jobEvents[0].detail_json.case_id, "case-repair");
+  assertEquals(db.jobEvents[0].detail_json.reason_code, "cancellation");
+});
+
+Deno.test("a non-linkable job type records a not-bindable marker naming the type", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "insurance" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(
+    db.jobEvents[0].event_type,
+    "makesafe_intake_case_not_bindable",
+  );
+  assertEquals(db.jobEvents[0].detail_json.job_type, "insurance");
+});
+
+Deno.test("an already-bound case is a silent no-op, not a recorded gap", async () => {
+  // The ordinary deterministic-lane shape: the runtime bound the case first.
+  // Recording a marker here would alarm on every healthy run.
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "confirmed_live_job",
+      reason_code: null,
+      job_id: "job-repair",
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+  assertEquals(db.jobEvents, []);
+});

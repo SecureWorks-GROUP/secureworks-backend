@@ -161,7 +161,30 @@ load-bearing half of the contract, so its own write is checked the way AGENTS.md
 requires — PostgREST RETURNS errors rather than throwing, so the insert
 destructures `{ error }` and logs a refusal instead of leaving a dead `catch`
 and a silently caseless card. It stays best-effort either way: a refused marker
-never fails the approval. The gap therefore stays audible, and a caseless card still
+never fails the approval. The two deliberate SKIPS — a case whose `reason_code`
+moved off `awaiting_job_creation` (a `cancellation` while the repair draft waited
+for its tick), and a job type the case-write trigger does not admit — write the
+same best-effort marker under `makesafe_intake_case_not_bindable`, naming the
+observed reason or job type. An already-bound case stays a silent no-op, because
+that is the ordinary deterministic-lane shape and a marker there would alarm on
+every healthy run.
+
+**The split primary is clamped to make-safe.** The combined-split branch derives
+its own family, and that classifier can say `repair` (the replacement-verb
+ladder, the rapid-repair upgrade) — contradicting the branch's own contract that
+the split primary is physical work. Captain ruling 2026-08-28, Ruling 5: a
+dual-scope work order stays make-safe and flags the repair LEG; the child SWR-
+spawn is a human tap, and the leg still reaches a human through the
+`repair_leg_detected` stamp. This is ALIGNMENT, not a live fix, and the
+distinction matters: `combinedSplitRecoveryDecision` refuses a combined split
+outright until BOTH mint roles already carry a job, so the split primary is never
+created at this seam and a `repair` reading could not reach the unattended brake
+either — once `recoveredPrimaryMint` exists both brake sites are skipped. The
+clamp keeps the derived family honest if that gate is ever relaxed; the brake is
+deliberately untouched, because on a split the runtime sends
+`reviewed_fields: {}` and its own park would have no family to park on. Pinned by
+the split-gate test in `repair_intake_routing_test.ts`, which fails if the
+refusal ever stops being the split gate''s. The gap therefore stays audible, and a caseless card still
 surfaces operationally as `spine_missing_source` / `spine_missing_lineage` on
 the pack path. This is the repository's own flag-never-block pattern — the
 suburb backstop, the audible substatus-gate fail-open, and audit writes that

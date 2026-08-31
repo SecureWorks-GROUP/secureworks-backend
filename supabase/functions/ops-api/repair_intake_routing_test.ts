@@ -977,3 +977,51 @@ Deno.test("CONTROL: an identified operator approving the same draft mints the SW
   );
   assertEquals(store.tables.makesafe_intake_drafts[0].status, "approved");
 });
+
+// Captain ruling 2026-08-28, Ruling 5: a dual-scope work order stays MAKE-SAFE
+// and flags the repair leg; the child SWR- spawn is a human tap. This pins the
+// gate that makes that true at the approval seam and, in passing, why the
+// unattended repair brake can never fire on a split: `combinedSplitRecoveryDecision`
+// refuses a combined split outright until BOTH mint roles already carry a job,
+// so the split primary is never CREATED here — it is only ever settled, with
+// `recoveredPrimaryMint` present, which skips both brake sites. If that gate is
+// ever relaxed, this test fails and the brake interaction must be re-reasoned.
+Deno.test("a combined split whose classifier says repair is refused before any family is minted", async () => {
+  const draft = legacyRepairDraftRow();
+  draft.subject = "NEW WORK ORDER - MLB-24659";
+  draft.extraction_json = {
+    ...draft.extraction_json,
+    builder_email_text_for_trade: [
+      "NEW WORK ORDER attached.",
+      "Remove and dispose of damaged 1800mm Hardieflex fencing, supply and",
+      "install 1800mm Colorbond fencing to match, remove and replace metal gate.",
+    ].join("\n"),
+    secondary_obligation: {
+      reason: "combined_makesafe_and_report",
+      type: "roof_report",
+    },
+  };
+  const store = makeStore({
+    tables: { makesafe_intake_drafts: [draft] },
+  });
+
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(makeClient(store), {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        draft_id: "draft-legacy-repair",
+        approved_by: "auto-intake",
+      }),
+    Error,
+    "Multiple builder instructions require existing reviewed bindings",
+  );
+  // NOT the repair brake: the split gate owns this refusal, so an unattended
+  // split never reaches the mint-time family test at all.
+  assert(
+    !String((error as Error).message).includes(
+      "Repair intake requires a human tick",
+    ),
+    `the split gate must own this refusal, got: ${(error as Error).message}`,
+  );
+  assertEquals(store.tables.jobs.length, 0);
+});
