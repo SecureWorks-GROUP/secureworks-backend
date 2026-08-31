@@ -37,7 +37,8 @@ and non-SES patio, fencing, and general jobs retain the normal link path.
 - **SWP-25001** = Patio
 - **SWF-25002** = Fencing
 - **SWD-25003** = Decking
-- **SWR-25004** = Renovation or Roofing
+- **SWR-25004** = Renovation, Roofing or insurance Repair (the prefix does not
+  identify a type on its own — see `20260826000001_repair_job_type.sql`)
 - **SWI-25005** = Insurance
 - **SW-25006** = Other/unknown type
 - Sequence starts at 25000 (above existing Tradify max ~SW23324)

@@ -725,6 +725,63 @@ and assemble on the physical labour/materials pack path — matrix rows in
 `job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
 ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
+## Repair Mints As A Real SWR- Job Type, Supervised, With No Backfill
+
+`jobs.type = 'repair'` with SWR- numbering is live (PR #771, deployed 2026-08-28;
+migration `20260826000001_repair_job_type.sql` — type CHECK, `next_job_number`
+branch, `makesafe_job_details` + intake-case triggers widened to admit repair,
+`job_financials` view, and §7 keeping repair OFF the auto money-seal path). The
+mint branch is `_makesafeJobRouteForFamily` in `approveIntakeDraft`; the repair
+route in `createMakesafeJob` fails closed (503) without the migration — never add
+an invented-number fallback. Classification is sealed by the Captain's 2026-08-28
+repair-siphon rulings (wiki
+`missions/harden-ses-2026-08/CAPTAIN-RULINGS-2026-08-28-repair-siphon-taxonomy.md`):
+Fencing declared headers + the replacement-verb ladder route to repair; temp
+fencing and MLB's "Makesafe/Emergency Repairs" header stay make-safe; a
+dual-scope WO stays make-safe and flags `repair_leg_detected` (child SWR- spawn
+is a human tap); NO repair draft auto-approves
+(`repair_family_supervised_review` brake) so every SWR- mint is a human tick; and
+the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
+(ruling 6 — reversing needs a new ruling, not a script run). Xero, Captain-confirmed
+2026-08-31: **repair revenue books as make-safe / insurance work** — account `210`
+(`accountCodeForJob`, inherited from make-safe, never the `200` fallback) and
+tracking `SW - MAKESAFE` (type-aware `trackingCategoryForJob`; bare `SWR` prefix
+deliberately resolves to nothing). Read the intent, not the digit: a future
+account split follows where SES insurance work goes, not where a `repair` label
+sounds like it belongs. That ruling closes what those two functions carried as
+OPEN RISK #2; **OPEN RISK #1 — captain signoff on the money-seal path — remains
+OPEN** in the header of `20260826000001_repair_job_type.sql` and is untouched by
+it.
+The Repairs card carries the builder WO + PO refs in
+`projectInsuranceRepairPipelineRow`: every candidate ref is split through the
+sealed grammar (`extractBuilderWorkOrderIdentity`) so the fused WO+PO vintage
+("MLB-25147PO-56236") can never reach the work-order slot, with
+`makesafe_job_details` (external_ref, issuing company) as the fallback store for
+cards whose `jobs.metadata` was never populated. Absent fields project null.
+
+A BLANK PO ON A CARD WHOSE METADATA HOLDS ONE IS USUALLY THE DESIGNED ANSWER,
+not a bug, and "just take the first PO found" is exactly the guard being
+deleted. The two instruction numbers are one pair, so a split-derived PO counts
+only when its own candidate names the selected claim (compared through the
+shared `normaliseRef`, so "mlb 24645" still pairs with "MLB-24645PO-59875") or
+is claimless and contests nothing; candidates naming DIFFERENT POs for that
+claim project null, because MLB routinely issues several POs against one claim
+and array order must never pick which live PO an operator reconciles against;
+and a candidate the grammar reads as PO-only never fills the work-order slot,
+which falls to the next candidate or null. Choosing between several genuine POs
+on one claim is a pending Captain product decision, deliberately not attempted
+here. The ONE ungrammared input is `metadata.builder_po_number`, trusted by
+explicit direction as the card's own stated PO and projected verbatim past every
+pairing and conflict rule — `create_makesafe_job` stamps it straight off the
+request body (the `metadata` literal in `createMakesafeJob`, `index.ts`; no
+validation), so that caller is the whole trust boundary and the only remaining
+route by which a wrong or fused PO reaches the card.
+
+Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
+Tests: `repair_intake_routing_test.ts`,
+`repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
+`insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that

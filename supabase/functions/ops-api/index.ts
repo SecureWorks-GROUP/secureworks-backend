@@ -172,6 +172,7 @@ import {
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
+  loadInsuranceRepairJobDetails,
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from './insurance_repairs_board.ts'
@@ -12830,7 +12831,6 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (repairJobIds && repairJobIds.length === 0) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
-
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
   const applyJobFilters = (q: any) => {
@@ -12875,12 +12875,20 @@ async function pipeline(client: any, params: URLSearchParams) {
     .order('updated_at', { ascending: false })
     .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
 
-  const [{ data: jobs, error }, malformedPricingRes] = await Promise.all([
+  const [{ data: jobs, error }, malformedPricingRes, repairDetails] = await Promise.all([
     query,
     // A non-fencing endpoint filter can skip the defensive query entirely.
     typeFilter && typeFilter !== 'fencing'
       ? Promise.resolve({ data: [], error: null })
       : malformedPricingQuery,
+    // Detail-store half of the Repairs card identity. `jobs.metadata` is ~91%
+    // populated; makesafe_job_details.external_ref is 100%, and it also carries
+    // the issuing company a legacy/backfilled card may have nowhere else. It
+    // rides this wave rather than a serial read of its own so the Repairs tab
+    // pays no extra round-trip; it degrades internally and never rejects.
+    repairJobIds
+      ? loadInsuranceRepairJobDetails(client, repairJobIds)
+      : Promise.resolve(null),
   ])
   if (error) throw error
 
@@ -13016,6 +13024,10 @@ async function pipeline(client: any, params: URLSearchParams) {
   const enrichmentErrors = enrichmentResults
     .filter(([, result]) => result.error)
     .map(([label]) => label)
+  // A repair card's builder identity is allowed to be absent, so a failed
+  // detail read must be published rather than served as an indistinguishable
+  // null on the very fields the card exists to reconcile.
+  if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -13170,7 +13182,10 @@ async function pipeline(client: any, params: URLSearchParams) {
       )
     }
     return typeFilter === 'repair'
-      ? projectInsuranceRepairPipelineRow(pipelineRow)
+      ? projectInsuranceRepairPipelineRow(
+        pipelineRow,
+        repairDetails?.details.get(String(j.id)) || null,
+      )
       : pipelineRow
   }).filter((j: any) => {
     // Filter out test records
@@ -33851,12 +33866,19 @@ async function addPOEvent(client: any, body: any) {
 // Callers holding only a job-number string (supplier bills, WO cost lines) get
 // '' for SWR-. Every OTHER prefix is untouched and answers exactly as before.
 //
-// Safe today because production holds zero renovation jobs, zero roofing jobs
-// and zero SWR- job numbers — see the pre-merge verification SELECT in
-// BUILD-REPORT.md, which must be run before this merges.
+// The pre-merge premise (PR #771) was that production held zero renovation
+// jobs, zero roofing jobs and zero SWR- job numbers, so no existing row changed
+// answer. That premise is spent: the repair SWR- mint lane went live 2026-08-28,
+// which is exactly why a bare SWR- number must keep resolving to '' rather than
+// being taught a default. Re-measure production before assuming any count here.
 //
-// >>> OPEN RISK #2 — 'SW - MAKESAFE' for repair is inherited from the make-safe
-// route and needs captain confirmation. <<<
+// 'SW - MAKESAFE' for repair is inherited from the make-safe route, and the
+// captain confirmed the intent behind it on 2026-08-31: repair revenue books as
+// make-safe / insurance work, so it tracks where SES insurance work already
+// tracks. Read that intent, not the string — a future tracking split follows the
+// insurance work, not the 'repair' label. (Closes what this comment carried as
+// OPEN RISK #2; OPEN RISK #1, captain signoff on the money-seal path, is a
+// different question and stays open in the 20260826000001 migration header.)
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
@@ -33898,7 +33920,13 @@ function accountCodeForJob(jobType: string, fallback = '200'): string {
     // repair cards were type='makesafe' (210) before this pipeline existed, so
     // an unmapped 'repair' would have moved the revenue account silently the
     // moment the type flipped, with no code change and no error to notice.
-    // >>> OPEN RISK #2 — inherited from make-safe, needs captain confirmation. <<<
+    // Inherited from make-safe, and the captain confirmed the intent on
+    // 2026-08-31: repair revenue books as make-safe / insurance work — which is
+    // account 210, where both of those already book, never the '200' fallback.
+    // So if the bookkeeper ever splits these accounts, repair follows wherever
+    // insurance/make-safe revenue goes, not wherever 'repair' sounds like it
+    // belongs. (Closes what this carried as OPEN RISK #2; OPEN RISK #1 in the
+    // 20260826000001 migration header is a separate, still-open question.)
     repair: '210',
     renovation: '201',
     combo: '200',

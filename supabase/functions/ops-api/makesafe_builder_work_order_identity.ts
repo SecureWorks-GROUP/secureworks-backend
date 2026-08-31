@@ -233,7 +233,12 @@ function addSource(sources: string[], source: string): void {
   if (!sources.includes(source)) sources.push(source);
 }
 
-function normaliseRef(value: string | null | undefined): string {
+/**
+ * Comparison form for a builder reference: uppercase, punctuation stripped. The
+ * one owner of that normalisation, so a consumer comparing two references never
+ * re-derives it and never compares a canonical claim against a raw stored one.
+ */
+export function normaliseRef(value: string | null | undefined): string {
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
