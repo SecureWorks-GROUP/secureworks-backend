@@ -2621,14 +2621,14 @@ export function buildDeterministicIntakePlan(
           item.parseWarnings.includes("job_family:ambiguous_scope")
         ) &&
         applyIdentifiedWorkOrderRepairComplement(
-          { family: null, evidence: "ambiguous_scope" },
-          {
-            scopeReadable: instructionItems.some((item) =>
-              !!pdfScopeText(item.source, item.adapterId)
-            ),
-            identityProved: !!merged.identity.woPoIdentityKey,
-          },
-        ).family === "repair";
+            { family: null, evidence: "ambiguous_scope" },
+            {
+              scopeReadable: instructionItems.some((item) =>
+                !!pdfScopeText(item.source, item.adapterId)
+              ),
+              identityProved: !!merged.identity.woPoIdentityKey,
+            },
+          ).family === "repair";
       let state: MakesafeCaseState;
       let reasonCode: MakesafeReasonCode | null = null;
       if (intent === "chatter") {

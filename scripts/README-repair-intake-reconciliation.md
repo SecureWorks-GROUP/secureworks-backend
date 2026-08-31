@@ -38,6 +38,14 @@ That means a work order arrived carrying a repair signal and did not become a
 repair card. Take the row from A, find the job it became, and correct it (see
 BUILD-REPORT.md §7 and the correction notes in OPEN RISKS).
 
+**Check section D first.** No unattended lane may mint a repair card any more —
+a repair-family plan is parked as a `needs_review` draft for a human tick, so a
+repair signal arriving today legitimately shows in A and not yet in B until an
+operator approves it. A > B is a miss only when A's work order has no draft
+still waiting in D and no exception in C. The supervision rule is owned by
+`docs/makesafe-intake-terminal-hook.md` ("Repair family is supervised on every
+lane").
+
 On 90-day historical volumes section A returns roughly **two rows a quarter**, so
 an empty A on most days is the expected reading, not a broken query.
 

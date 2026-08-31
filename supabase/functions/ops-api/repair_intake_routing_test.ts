@@ -20,6 +20,12 @@ import {
   _requestedMakesafeJobRoute,
   _unattendedIntakeApprovalMarkerForTest,
 } from "./index.ts";
+import {
+  excludeInsuranceRepairs,
+  insuranceRepairStage,
+  isInsuranceRepairFamily,
+  projectInsuranceRepairPipelineRow,
+} from "./insurance_repairs_board.ts";
 
 type Row = Record<string, any>;
 
@@ -1024,4 +1030,156 @@ Deno.test("a combined split whose classifier says repair is refused before any f
     `the split gate must own this refusal, got: ${(error as Error).message}`,
   );
   assertEquals(store.tables.jobs.length, 0);
+});
+
+// ── The captain's live card, end to end ─────────────────────────────────────
+//
+// MLB-24645 / PO-59875, 22 Pitt Street Pingelly (draft
+// 815eea5e-1b6f-43ad-b955-ed79d55f356a). This is the exact shape that produced
+// the live refusal "Instruction identity conflict: draft carries multiple
+// canonical keys (MLB:PO-59875, MLB:WO-24645)": one work order carrying BOTH a
+// claim/WO number and a purchase order. It asserts the whole acceptance
+// criterion in one place — the approval succeeds, a `type: 'repair'` job with
+// an SWR- number is created carrying both builder references, and that card
+// lands on the Repairs board while being excluded from the MakeSafe
+// projections.
+const PINGELLY_SCOPE =
+  "Remove and dispose of damaged fencing, supply and install 1800mm Colorbond fencing to match existing.";
+
+const PINGELLY_WO_TEXT = `Work Order Number
+MLB-24645PO-59875
+Policyholders Name
+Pingelly Client
+Mobile: 0422 000 111
+Site Address
+22 Pitt Street, Pingelly, WA 6308
+Scope of Works
+${PINGELLY_SCOPE}
+Totals
+Subtotal $2,400.00`;
+
+function pingellyRepairDraftRow(): Row {
+  return {
+    id: "815eea5e-1b6f-43ad-b955-ed79d55f356a",
+    org_id: ORG_ID,
+    status: "needs_review",
+    graph_message_id: "pingelly-graph-message-1",
+    subject: "NEW WORK ORDER - MLB-24645",
+    body_preview: PINGELLY_SCOPE,
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    external_ref: "MLB-24645",
+    client_name: "Pingelly Client",
+    client_phone: "0422 000 111",
+    client_email: null,
+    site_address: "22 Pitt Street, Pingelly",
+    site_suburb: "Pingelly",
+    description: PINGELLY_SCOPE,
+    report_type: null,
+    confidence: "high",
+    missing_fields: [],
+    approved_job_id: null,
+    attachments_json: [{
+      id: "pingelly-attachment",
+      file_name: "work_order_MLB-24645PO-59875_Secureworks_Group_Pty_Ltd.pdf",
+      is_work_order: true,
+      storage_url: "storage/pingelly-wo.pdf",
+      pdf_url: "storage/pingelly-wo.pdf",
+    }],
+    extraction_json: {
+      builder_claim_ref: "MLB-24645",
+      builder_work_order_number: "MLB-24645",
+      builder_po_number: "PO-59875",
+      builder_email_text_for_trade: PINGELLY_SCOPE,
+      work_order_pdf_text: [{
+        attachment_id: "pingelly-attachment",
+        attachment_name:
+          "work_order_MLB-24645PO-59875_Secureworks_Group_Pty_Ltd.pdf",
+        status: "extracted",
+        text: PINGELLY_WO_TEXT,
+      }],
+    },
+  };
+}
+
+Deno.test("the Pingelly work order approves into an SWR- repair card on the Repairs board", async () => {
+  const store = makeStore({
+    tables: { makesafe_intake_drafts: [pingellyRepairDraftRow()] },
+  });
+
+  const result: any = await _approveIntakeDraftForTest(makeClient(store), {
+    draft_id: "815eea5e-1b6f-43ad-b955-ed79d55f356a",
+    approved_by: "captain@secureworkswa.com.au",
+  });
+
+  // Defect 1: one instruction carrying two identifiers no longer refuses.
+  assertEquals(result.ok, true);
+  assertEquals(result.job_created, true);
+  assertEquals(store.tables.jobs.length, 1);
+  const job = store.tables.jobs[0];
+
+  // The acceptance criterion: a repair job with an SWR- number.
+  assertEquals(job.type, "repair");
+  assertEquals(job.job_number, "SWR-261400");
+  assertEquals(job.metadata.makesafe_job_family, "repair");
+
+  // …carrying BOTH builder references, which is what the identity conflict
+  // used to make impossible.
+  assertEquals(job.metadata.builder_po_number, "PO-59875");
+  assertStringIncludes(
+    `${job.metadata.builder_work_order_number ?? ""} ${
+      job.metadata.builder_claim_ref ?? ""
+    } ${store.tables.makesafe_job_details[0]?.external_ref ?? ""}`,
+    "MLB-24645",
+  );
+
+  // …on the Repairs board, in its entry column.
+  assertEquals(isInsuranceRepairFamily(job), true);
+  assertEquals(insuranceRepairStage(job), "wo_in");
+  assertEquals(projectInsuranceRepairPipelineRow(job).repair_stage, "wo_in");
+
+  // …and absent from the MakeSafe pipeline projection.
+  assertEquals(excludeInsuranceRepairs([job]).length, 0);
+
+  assertEquals(store.tables.makesafe_intake_drafts[0].status, "approved");
+
+  console.log(
+    "\nPRODUCT STATE after approving draft 815eea5e (MLB-24645 / PO-59875):\n" +
+      JSON.stringify(
+        {
+          approve_response: {
+            ok: result.ok,
+            job_created: result.job_created,
+            job_number: job.job_number,
+          },
+          job_row: {
+            type: job.type,
+            job_number: job.job_number,
+            status: job.status,
+            client_name: job.client_name,
+            site_address: job.site_address,
+            metadata: {
+              makesafe_job_family: job.metadata.makesafe_job_family,
+              ses_family: job.metadata.ses_family,
+              repair_stage: job.metadata.repair_stage,
+              builder_work_order_number:
+                job.metadata.builder_work_order_number ?? null,
+              builder_claim_ref: job.metadata.builder_claim_ref ?? null,
+              builder_po_number: job.metadata.builder_po_number,
+            },
+          },
+          ses_overlay_external_ref:
+            store.tables.makesafe_job_details[0]?.external_ref ?? null,
+          repairs_board: {
+            is_repair_family: isInsuranceRepairFamily(job),
+            stage: insuranceRepairStage(job),
+          },
+          makesafe_pipeline_rows_after_exclusion:
+            excludeInsuranceRepairs([job]).length,
+          draft_status: store.tables.makesafe_intake_drafts[0].status,
+        },
+        null,
+        2,
+      ),
+  );
 });

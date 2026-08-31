@@ -2327,9 +2327,7 @@ Deno.test("shared WO with distinct POs keeps separate family ownership", () => {
   );
   assertEquals(
     new Set(
-      plan.cases.map((intakeCase) =>
-        intakeCase.identity.builderPoCanonical
-      ),
+      plan.cases.map((intakeCase) => intakeCase.identity.builderPoCanonical),
     ),
     new Set(["PO-54176", "PO-54177"]),
   );
@@ -2471,8 +2469,7 @@ Subtotal $1,000.00`,
 Deno.test("an identified readable WO whose scope matches no family becomes a repair live case", () => {
   const item = neutralScopeWorkOrder({
     postId: "mlb-neutral-complement",
-    scopeLine:
-      "Repaint the hallway ceiling and patch minor plaster cracking.",
+    scopeLine: "Repaint the hallway ceiling and patch minor plaster cracking.",
   });
   const plan = buildDeterministicIntakePlan([item], PROFILES);
   assertEquals(plan.cases.length, 1);
@@ -2518,8 +2515,7 @@ Deno.test("CONTROL: an unknown builder with the same neutral scope still parks a
   const item = neutralScopeWorkOrder({
     postId: "unknown-neutral-complement",
     fromEmail: "dispatch@unknown.test",
-    scopeLine:
-      "Repaint the hallway ceiling and patch minor plaster cracking.",
+    scopeLine: "Repaint the hallway ceiling and patch minor plaster cracking.",
   });
   const plan = buildDeterministicIntakePlan([item], PROFILES);
   assertEquals(plan.cases[0].state, "exception");
