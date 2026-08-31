@@ -90,7 +90,7 @@ async function classifyEmail(
     const resp = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 200,
-      system: `You classify business emails for a Perth outdoor construction company (SecureWorks WA).
+      system: `You classify business emails for a Perth outdoor construction company (SecureWorks Group).
 Return JSON only: { "classification": "...", "priority": "...", "action_needed": "..." or null, "job_ref": "SWP-XXXXX" or null }
 
 Classifications: client_reply, supplier_quote, supplier_response, council, invoice, complaint, urgent, newsletter, spam, other
