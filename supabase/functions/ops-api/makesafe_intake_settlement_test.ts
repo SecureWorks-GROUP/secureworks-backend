@@ -3,6 +3,7 @@
 import {
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ensureIntakeWorkOrderEvidence,
@@ -562,10 +563,14 @@ function caseBindingClient(input: {
   draftMissingFields?: string[];
   /** Models a CHECK/unique refusal on the case-bind UPDATE. */
   caseUpdateError?: any;
+  /** Models a PostgREST fault on the case-bind READ. */
+  caseReadError?: any;
 }) {
   const updates: any[] = [];
+  const jobEvents: any[] = [];
   return {
     updates,
+    jobEvents,
     client: {
       from(table: string) {
         if (table === "makesafe_intake_job_mints") {
@@ -626,13 +631,25 @@ function caseBindingClient(input: {
           };
           return query;
         }
+        if (table === "job_events") {
+          return {
+            insert(row: any) {
+              jobEvents.push(row);
+              return Promise.resolve({ data: [row], error: null });
+            },
+          } as any;
+        }
         if (table === "makesafe_intake_cases") {
           let payload: any = null;
           let targetId: string | null = null;
           let requireUnbound = false;
           const query: any = {
             select: () => query,
-            in: () => Promise.resolve({ data: input.cases, error: null }),
+            in: () =>
+              Promise.resolve({
+                data: input.caseReadError ? null : input.cases,
+                error: input.caseReadError || null,
+              }),
             update(next: any) {
               payload = next;
               return query;
@@ -917,33 +934,111 @@ Deno.test("a refused case bind still leaves the mint settled and the notificatio
     },
   });
 
-  await assertRejects(
-    () =>
-      settleApprovedIntakeDraft(db.client, {
-        draftId: "draft-repair",
-        approvedJobId: "job-repair",
-        attachments: [{
-          file_name: "work-order.pdf",
-          storage_url: "storage/work-order.pdf",
-        }],
-        extraction: { deterministic_intake: true },
-        refreshIdentity: noIdentityRefresh as any,
-        notify: async (input) => {
-          notified.push(input.jobId);
-          return {
-            accepted: true,
-            reason: "accepted",
-            auditId: "audit-repair",
-          };
-        },
-      }),
-    Error,
-    "intake case job binding failed",
-  );
+  const result = await settleApprovedIntakeDraft(db.client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    notify: async (input) => {
+      notified.push(input.jobId);
+      return {
+        accepted: true,
+        reason: "accepted",
+        auditId: "audit-repair",
+      };
+    },
+  });
 
-  // The notification went out and the mint reached `settled` BEFORE the bind was
-  // attempted, so the refusal costs only the binding the next approval re-tries.
+  // Settlement COMPLETES: the job is already live, so a refusal here must not
+  // strand a correctly minted card in a draft loop that can never be approved.
+  assertEquals(result.notificationJobIds, ["job-repair"]);
   assertEquals(notified, ["job-repair"]);
   assertEquals(mint.state, "settled");
   assertEquals(db.updates, []);
+  // ...and the gap is AUDIBLE: a durable marker names the case, the job and the
+  // underlying constraint.
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(
+    db.jobEvents[0].event_type,
+    "makesafe_intake_case_bind_failed",
+  );
+  assertEquals(db.jobEvents[0].job_id, "job-repair");
+  assertEquals(db.jobEvents[0].detail_json.case_id, "case-repair");
+  assertEquals(db.jobEvents[0].detail_json.stage, "case_bind");
+  assertStringIncludes(
+    db.jobEvents[0].detail_json.error,
+    "uq_makesafe_intake_cases_live_identity",
+  );
+});
+
+Deno.test("a case-bind READ fault is recorded and the approval still settles", async () => {
+  const notified: string[] = [];
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    caseReadError: { code: "42703", message: "column does not exist" },
+  });
+
+  await settleApprovedIntakeDraft(db.client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    notify: async (input) => {
+      notified.push(input.jobId);
+      return { accepted: true, reason: "accepted", auditId: "audit-repair" };
+    },
+  });
+
+  assertEquals(notified, ["job-repair"]);
+  assertEquals(mint.state, "settled");
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(db.jobEvents[0].detail_json.stage, "case_read");
+});
+
+Deno.test("a combined split binds the case to the PHYSICAL primary, not the report card", async () => {
+  // Both mints carry the same `case_id`; the primary must win by stated rule,
+  // not because `mint_role` collation puts 'primary' before 'secondary_report'.
+  const db = caseBindingClient({
+    mints: [
+      repairMint({
+        id: "mint-secondary",
+        mint_role: "secondary_report",
+        job_id: "job-report",
+        notification_accepted_at: "2026-08-31T00:00:00.000Z",
+      }),
+      repairMint({
+        id: "mint-primary",
+        mint_role: "primary",
+        job_id: "job-repair",
+        notification_accepted_at: "2026-08-31T00:00:00.000Z",
+      }),
+    ],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [
+      { id: "job-repair", type: "repair" },
+      { id: "job-report", type: "makesafe" },
+    ],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].job_id, "job-repair");
 });

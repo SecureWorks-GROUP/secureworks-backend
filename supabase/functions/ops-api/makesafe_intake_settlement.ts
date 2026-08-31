@@ -191,7 +191,62 @@ async function readParkedPlanBlockedReasons(
  *
  * The write is a compare-and-set on `job_id IS NULL`, so it never re-points a
  * case that is already bound and a concurrent binder simply wins.
+ *
+ * ERROR CONTRACT — RECORD AND CONTINUE. This function never throws. By the time
+ * it runs the job is already minted, live and settled, so failing loud protects
+ * nothing: it would only strand a correctly created card in a draft loop that
+ * can never be approved (the post-claim catch requeues the draft to
+ * `needs_review`, the retry skips every guard because the mint is recovered, and
+ * a PERMANENT refusal — `uq_makesafe_intake_cases_live_identity`, the
+ * live-identity floor check — raises again on every press) while degrading whole
+ * deterministic runs. A recoverable gap beats an unrecoverable block. The gap
+ * stays AUDIBLE: every fault writes a durable `makesafe_intake_case_bind_failed`
+ * job event naming the case, the job and the error fact, and a caseless card
+ * still surfaces operationally as `spine_missing_source` /
+ * `spine_missing_lineage` on the pack path. This is the repository's own
+ * flag-never-block pattern — the suburb backstop, the audible substatus-gate
+ * fail-open, and audit writes that never change an action's response.
  */
+const INTAKE_CASE_BIND_FAILED_EVENT = "makesafe_intake_case_bind_failed";
+
+async function recordIntakeCaseBindFailure(
+  client: any,
+  input: {
+    caseId: string | null;
+    jobId: string | null;
+    stage: string;
+    error: unknown;
+  },
+): Promise<void> {
+  const fact = String(
+    (input.error as any)?.message || input.error || "unknown",
+  );
+  console.error(
+    `[ops-api] intake case bind ${input.stage} failed (case ${
+      input.caseId || "unknown"
+    }, job ${input.jobId || "unknown"}): ${fact}`,
+  );
+  try {
+    await client.from("job_events").insert({
+      job_id: input.jobId,
+      event_type: INTAKE_CASE_BIND_FAILED_EVENT,
+      detail_json: {
+        case_id: input.caseId,
+        job_id: input.jobId,
+        stage: input.stage,
+        error: fact,
+      },
+    });
+  } catch (eventError) {
+    // Same rule one level down: an audit write never changes the outcome.
+    console.error(
+      `[ops-api] intake case bind failure marker unwritten: ${
+        (eventError as Error)?.message || eventError
+      }`,
+    );
+  }
+}
+
 export async function bindIntakeCasesToMintedJobs(
   client: any,
   mints: readonly IntakeMint[],
@@ -201,8 +256,16 @@ export async function bindIntakeCasesToMintedJobs(
     provenance: IntakeCaseDecisionProvenance;
   },
 ): Promise<string[]> {
+  // A combined split gives BOTH mints the same `case_id`, so the physical
+  // primary is chosen by stated rule rather than by `loadIntakeMints`'s
+  // `mint_role` collation happening to sort 'primary' before 'secondary_report'.
+  // The deterministic runtime binds the primary; this seam must agree with it.
   const jobByCaseId = new Map<string, string>();
-  for (const mint of mints) {
+  const byRolePreference = [
+    ...mints.filter((mint) => mint.mint_role === "primary"),
+    ...mints.filter((mint) => mint.mint_role !== "primary"),
+  ];
+  for (const mint of byRolePreference) {
     const caseId = String(mint.case_id || "").trim();
     const jobId = String(mint.job_id || "").trim();
     if (caseId && jobId && !jobByCaseId.has(caseId)) {
@@ -210,15 +273,20 @@ export async function bindIntakeCasesToMintedJobs(
     }
   }
   if (!jobByCaseId.size) return [];
+  const anyJobId = [...jobByCaseId.values()][0] ?? null;
 
   const { data: caseRows, error: caseError } = await client
     .from("makesafe_intake_cases")
     .select("id,state,job_id,reason_code,blocked_reasons")
     .in("id", [...jobByCaseId.keys()]);
   if (caseError) {
-    throw new Error(
-      `intake case binding read failed: ${caseError.message || caseError}`,
-    );
+    await recordIntakeCaseBindFailure(client, {
+      caseId: [...jobByCaseId.keys()][0] ?? null,
+      jobId: anyJobId,
+      stage: "case_read",
+      error: caseError,
+    });
+    return [];
   }
   const unbound = (caseRows || []).filter((row: any) =>
     jobByCaseId.has(String(row?.id)) && !row?.job_id &&
@@ -235,9 +303,13 @@ export async function bindIntakeCasesToMintedJobs(
       [...new Set(unbound.map((row: any) => jobByCaseId.get(String(row.id))))],
     );
   if (jobError) {
-    throw new Error(
-      `intake case binding job read failed: ${jobError.message || jobError}`,
-    );
+    await recordIntakeCaseBindFailure(client, {
+      caseId: String(unbound[0]?.id ?? "") || null,
+      jobId: anyJobId,
+      stage: "job_read",
+      error: jobError,
+    });
+    return [];
   }
   const linkableJobIds = new Set(
     (jobRows || [])
@@ -249,10 +321,21 @@ export async function bindIntakeCasesToMintedJobs(
       .map((row: any) => String(row.id)),
   );
 
-  const blockedReasons = await readParkedPlanBlockedReasons(
-    client,
-    decision.draftId,
-  );
+  let blockedReasons: string[];
+  try {
+    blockedReasons = await readParkedPlanBlockedReasons(
+      client,
+      decision.draftId,
+    );
+  } catch (draftError) {
+    await recordIntakeCaseBindFailure(client, {
+      caseId: String(unbound[0]?.id ?? "") || null,
+      jobId: anyJobId,
+      stage: "draft_read",
+      error: draftError,
+    });
+    return [];
+  }
 
   const bound: string[] = [];
   for (const row of unbound) {
@@ -279,11 +362,13 @@ export async function bindIntakeCasesToMintedJobs(
       .select("id")
       .maybeSingle();
     if (error) {
-      throw new Error(
-        `intake case job binding failed for case ${caseId}: ${
-          error.message || error
-        }`,
-      );
+      await recordIntakeCaseBindFailure(client, {
+        caseId,
+        jobId,
+        stage: "case_bind",
+        error,
+      });
+      continue;
     }
     if (data?.id) bound.push(String(data.id));
   }
@@ -622,15 +707,16 @@ export async function settleApprovedIntakeDraft(
     notificationJobIds.push(String(mint.job_id));
   }
 
-  // LAST, deliberately. The bind is the least critical step here and is
-  // idempotent on retry (compare-and-set on `job_id IS NULL`), while the
+  // LAST, deliberately, and it never throws (see its own error contract). The
+  // bind is the least critical step here and is idempotent on retry, while the
   // post-board notification is never retried once the case carries its job.
-  // Running it earlier put a new throwing step in front of that notification for
-  // EVERY intake family: a case that cannot legally go live — two clusters on one
-  // `wo_po_identity_key` refused by `uq_makesafe_intake_cases_live_identity` — would
-  // fail settlement for a card that minted correctly, and the fresh-source lane
-  // would report `fresh source deterministic settlement incomplete`. Placed here,
-  // that refusal costs only the binding, which the next approval re-attempts.
+  // Running it earlier put a throwing step in front of that notification for
+  // EVERY intake family, so a case that cannot legally go live — two clusters on
+  // one `wo_po_identity_key` refused by `uq_makesafe_intake_cases_live_identity`
+  // — failed settlement for a card that minted correctly. Placed here and made
+  // record-and-continue, such a refusal costs only the binding: the draft still
+  // reaches `approved`, the mint stays settled, and the gap is recorded as a
+  // durable `makesafe_intake_case_bind_failed` job event.
   await bindIntakeCasesToMintedJobs(client, minted, {
     draftId: input.draftId,
     actor: input.caseBindingActor || "intake_approval_settlement",

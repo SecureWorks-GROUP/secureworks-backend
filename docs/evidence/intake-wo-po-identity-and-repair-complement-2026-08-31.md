@@ -144,6 +144,30 @@ would fail settlement for that family. The runtime is deliberately NOT allowed
 to re-approve; that would restore the unsupervised `SWR-` mint through a side
 door. Pinned by the binding cases in `makesafe_intake_settlement_test.ts`.
 
+**The bind RECORDS AND CONTINUES; it never throws.** It runs last in
+`settleApprovedIntakeDraft`, after the mint has settled and the post-board
+notification has gone out, and by then the job is already live. Failing loud
+there protects nothing: `approveIntakeDraft`'s post-claim catch would requeue the
+draft to `needs_review` while the job stayed live, the retry would skip every
+guard (the mint is recovered), and a PERMANENT refusal — two clusters on one
+`wo_po_identity_key` hitting `uq_makesafe_intake_cases_live_identity`, or the
+live-identity floor check — would raise again on every press, stranding a
+correctly minted card in a loop that can never be approved and degrading whole
+deterministic runs. A recoverable gap beats an unrecoverable block. Every fault
+(case read, job read, draft read, and the bind update itself) is caught,
+`console.error`d, and written as a durable `makesafe_intake_case_bind_failed`
+job event naming the case, the job and the error fact; that audit write is
+itself best-effort. The gap therefore stays audible, and a caseless card still
+surfaces operationally as `spine_missing_source` / `spine_missing_lineage` on
+the pack path. This is the repository's own flag-never-block pattern — the
+suburb backstop, the audible substatus-gate fail-open, and audit writes that
+never change an action's response.
+
+A combined split gives BOTH mints the same `case_id`, so the bind prefers the
+`primary` mint by stated rule rather than relying on `loadIntakeMints`'s
+`mint_role` ordering happening to sort `primary` before `secondary_report` — the
+deterministic runtime binds the physical primary, and this seam must agree.
+
 Two follow-on constraints that are easy to get wrong:
 
 - **The bind only ever promotes the park it was written for.** It requires
