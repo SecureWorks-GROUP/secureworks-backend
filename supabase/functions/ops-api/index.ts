@@ -12771,7 +12771,9 @@ async function readPipelineEnrichmentRows(
 // Ghost watcher rows (`is_ghost`, `role:'observer'`) mirror office staff onto a
 // job and keep the job's OLD scheduled_date after a reschedule (see the my_jobs
 // GHOST ROWS note), so they must never influence this value — the same
-// exclusion the stage-truth evidence path applies via isFencingAssignmentGhost.
+// exclusion the stage-truth evidence path applies via the sibling
+// `isFencingAssignmentNonFieldWork` (fencing_stage_recipe_v1.ts), which is
+// fencing-scoped by name while `pipeline` serves every job type.
 // "Today" is the Perth calendar day: the edge runtime clock is UTC, and a UTC
 // day boundary would keep showing yesterday's visit until 8am Perth time.
 export function _perthTodayYmd(now: Date = new Date()): string {
@@ -12784,8 +12786,15 @@ export function _perthTodayYmd(now: Date = new Date()): string {
 // 2026-08-31, option a) is the most recent visit strictly before today — the
 // chip's fallback when a Scheduled / In Progress job has nothing ahead of it
 // and is only waiting to be closed out. Both exclude ghost/observer rows.
+//
+// Cancelled rows are excluded here in CODE rather than trusted to the read's
+// `.neq`, because `job_assignments.status` is nullable and SQL three-valued
+// logic drops a NULL-status row from a `.neq` — which would hide a genuinely
+// booked upcoming visit and reproduce the stale chip this field exists to fix.
+// The read therefore keeps NULL-status rows and this filter is the only
+// cancelled exclusion the new fields rely on.
 export function _pipelineVisitDateMaps(
-  assignments: Array<{ job_id?: string; scheduled_date?: string | null; is_ghost?: boolean | null; role?: string | null }>,
+  assignments: Array<{ job_id?: string; scheduled_date?: string | null; is_ghost?: boolean | null; role?: string | null; status?: string | null }>,
   todayYmd: string,
 ): { next: Record<string, string>; last: Record<string, string> } {
   const next: Record<string, string> = {}
@@ -12793,6 +12802,7 @@ export function _pipelineVisitDateMaps(
   for (const a of assignments || []) {
     const date = a?.scheduled_date
     if (!a?.job_id || typeof date !== 'string' || !date) continue
+    if (String(a.status || '').trim().toLowerCase() === 'cancelled') continue
     if (a.is_ghost === true) continue
     if (String(a.role || '').trim().toLowerCase() === 'observer') continue
     // scheduled_date is a DATE column serialised YYYY-MM-DD, so lexicographic
@@ -12922,8 +12932,13 @@ async function pipeline(client: any, params: URLSearchParams) {
     ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes] = await Promise.all([
       // is_ghost/role feed next_scheduled_date only; assignment_count and
       // first_scheduled_date deliberately keep counting ghost rows as before.
+      // `status` is nullable, so a `.neq` would drop NULL-status rows (SQL
+      // three-valued logic) and hide a booked upcoming visit from
+      // next_scheduled_date. Exclude cancelled rows with an explicit OR that
+      // keeps NULL, and re-apply the old exclusion in code for the two legacy
+      // fields so their values stay exactly what they were.
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
-        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role').in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status').in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
@@ -13025,10 +13040,15 @@ async function pipeline(client: any, params: URLSearchParams) {
     for (const r of rows) m[r.job_id] = (m[r.job_id] || 0) + 1
     return m
   }
-  const assignMap = countMap(assignRes.data || [])
+  // assignment_count and first_scheduled_date are frozen: they see exactly the
+  // rows the old `.neq('status','cancelled')` read returned, so a NULL-status
+  // row is excluded here even though the read now delivers it.
+  const statusFilteredAssignments = (assignRes.data || []).filter((a: any) =>
+    a?.status != null && String(a.status).trim().toLowerCase() !== 'cancelled')
+  const assignMap = countMap(statusFilteredAssignments)
   // Earliest scheduled_date per job
   const schedDateMap: Record<string, string> = {}
-  for (const a of (assignRes.data || [])) {
+  for (const a of statusFilteredAssignments) {
     if (a.scheduled_date && (!schedDateMap[a.job_id] || a.scheduled_date < schedDateMap[a.job_id])) {
       schedDateMap[a.job_id] = a.scheduled_date
     }

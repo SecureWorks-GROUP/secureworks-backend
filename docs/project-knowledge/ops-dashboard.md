@@ -39,7 +39,12 @@ See edge-functions.md for full list. Key ones:
   In Progress reads `next_scheduled_date`, falling back to
   `last_scheduled_date` when nothing is ahead (a job awaiting closeout) —
   never a blank chip. Both `null` only when the job has no dated real visits.
-  Regressions: `pipeline_next_scheduled_date_test.ts`.
+  `job_assignments.status` is nullable, so the read excludes cancelled rows with
+  `or('status.is.null,status.neq.cancelled')` rather than a `.neq` that SQL
+  three-valued logic would use to drop a booked NULL-status visit; the frozen
+  pair re-applies the old non-null exclusion in code, so a NULL-status visit is
+  visible to `next`/`last` only. Regressions:
+  `pipeline_next_scheduled_date_test.ts`.
 - `create_po`, `update_po`, `push_po_to_xero` — purchase orders
 - `create_wo`, `update_wo` — work orders
 - `job_detail` — full job data with assignments, POs, WOs, scope, invoices
