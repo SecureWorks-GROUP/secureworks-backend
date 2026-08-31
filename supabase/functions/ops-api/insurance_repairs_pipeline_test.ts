@@ -19,7 +19,7 @@ type Call = {
 
 const DETAIL_ONLY_REPAIR_ID = "4a1c6d38-52ef-4b90-8a77-2f0b9e6d41cc";
 
-function pipelineClient() {
+function pipelineClient(options: { failDetailRead?: boolean } = {}) {
   const calls: Call[] = [];
   const repairId = "0993f001-9e5e-420f-afdd-1cd1415084a1";
   return {
@@ -55,6 +55,14 @@ function pipelineClient() {
           // asks for the identity columns. They are different queries.
           if (current.select === "job_id") {
             return { data: [{ job_id: DETAIL_ONLY_REPAIR_ID }], error: null };
+          }
+          if (options.failDetailRead) {
+            return {
+              data: null,
+              error: {
+                message: "column makesafe_job_details.x does not exist",
+              },
+            };
           }
           return {
             data: [{
@@ -220,6 +228,35 @@ Deno.test("pipeline?type=repair serves a metadata-less card off the detail store
       Array.isArray(filter.value) &&
       filter.value.includes(DETAIL_ONLY_REPAIR_ID)
     ),
+    true,
+  );
+});
+
+Deno.test("an unreadable detail store is published, not served as absent data", async () => {
+  const original = console.error;
+  console.error = () => {};
+  let result: any;
+  try {
+    result = await _pipelineForTest(
+      pipelineClient({ failDetailRead: true }),
+      new URLSearchParams("type=repair"),
+    );
+  } finally {
+    console.error = original;
+  }
+
+  // The tab still renders every card...
+  assertEquals(result.total, 2);
+  const metadataCard = result.columns.processing[0];
+  assertEquals(metadataCard.builder_work_order_ref, "MLB-25147");
+  // ...but the card that depended on the detail store shows nulls, and the
+  // response says why, so a read fault is not mistaken for absent paperwork.
+  const detailCard = result.columns.accepted[0];
+  assertEquals(detailCard.builder_work_order_ref, null);
+  assertEquals(detailCard.builder_company_name, null);
+  assertEquals(result.degraded, true);
+  assertEquals(
+    result.enrichment_errors.includes("pipeline.makesafe_job_details"),
     true,
   );
 });

@@ -2,7 +2,10 @@
 // The ops-api Supabase client and canonical board rows are intentionally
 // untyped at this boundary, matching the sibling board read-model modules.
 
-import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
+import {
+  extractBuilderWorkOrderIdentity,
+  normaliseRef as normaliseBuilderRef,
+} from "./makesafe_builder_work_order_identity.ts";
 
 export const INSURANCE_REPAIR_STAGES = [
   "wo_in",
@@ -119,12 +122,17 @@ interface BuilderRefParts {
  * captain's worked Pingelly card (bare MLB-24645 stamped beside PO-59875).
  * Splitting is strictly stronger — it answers the fused case AND keeps the bare
  * one — and nothing is invented: both halves are read out of the stored string.
+ *
+ * A value the grammar reads as a purchase order with NO claim supplies no work
+ * order at all. `external_ref` is only usually the claim, and projecting a bare
+ * "PO-59875" into the work-order slot would both mislabel it and throw away the
+ * purchase order it actually is.
  */
 function splitBuilderRef(value: unknown): BuilderRefParts {
   const text = cleanRef(value);
   if (!text) return { work_order: null, purchase_order: null };
   const identity = extractBuilderWorkOrderIdentity({ externalRef: text });
-  if (identity.builder_po_number && identity.builder_claim_ref) {
+  if (identity.builder_po_number) {
     return {
       work_order: identity.builder_claim_ref,
       purchase_order: identity.builder_po_number,
@@ -164,14 +172,25 @@ function detailCompanyRow(detail: any): any {
  * Company resolves detail-first, matching the make-safe board.
  *
  * The two instruction numbers are ONE pair, so a split-derived purchase order
- * is only ever taken from a candidate whose claim half EXACTLY equals the
- * chosen work-order ref — the selected candidate itself, or another naming the
- * same claim. A work order from one claim beside a purchase order from another
- * is two jobs presented as one instruction, so cross-claim pairing is refused
- * outright and anything short of an exact claim match projects null: a missing
- * purchase order is recoverable, a wrong one is not. Only the dedicated
- * `metadata.builder_po_number` key is trusted independently: it is the card's
- * own stored PO, not a number parsed out of some other reference.
+ * only counts when its candidate names the chosen claim — compared in the
+ * shared normalised form, so a hand-typed "mlb 24645" still pairs with its own
+ * fused "MLB-24645PO-59875" — or when the candidate is claimless and therefore
+ * contests nothing. A work order from one claim beside a purchase order from
+ * another is two jobs presented as one instruction, so cross-claim pairing is
+ * refused outright.
+ *
+ * Where the surviving candidates name DIFFERENT purchase orders the card shows
+ * none: MLB routinely issues several POs against one claim, so two stores
+ * disagreeing is real ambiguity, and array order must never be what decides
+ * which of two live purchase orders an operator reconciles against. Agreeing
+ * duplicates are not a conflict. A missing number is recoverable, a wrong one
+ * is not. Only the dedicated `metadata.builder_po_number` key is trusted
+ * independently: it is the card's own stored PO, not a number parsed out of
+ * some other reference.
+ *
+ * Choosing BETWEEN several genuine purchase orders on one claim is deliberately
+ * not attempted here; that is a product question, and a blank is the honest
+ * placeholder for it.
  *
  * Absent fields project null; the card simply has nothing to show for them, and
  * nothing is ever fabricated on a reconciliation surface.
@@ -203,12 +222,19 @@ export function projectInsuranceRepairPipelineRow(
   ];
   const workOrderRef =
     candidates.find((part) => part.work_order !== null)?.work_order ?? null;
-  const sameClaimPurchaseOrder = workOrderRef === null ? null : (candidates
-    .find((part) =>
-      part.purchase_order !== null && part.work_order === workOrderRef
-    )?.purchase_order ?? null);
+  const workOrderClaim = normaliseBuilderRef(workOrderRef);
+  const pairedPurchaseOrders = new Set(
+    candidates
+      .filter((part) =>
+        part.purchase_order !== null &&
+        (part.work_order === null ||
+          (workOrderRef !== null &&
+            normaliseBuilderRef(part.work_order) === workOrderClaim))
+      )
+      .map((part) => part.purchase_order as string),
+  );
   const purchaseOrder = cleanRef(meta.builder_po_number) ??
-    sameClaimPurchaseOrder;
+    (pairedPurchaseOrders.size === 1 ? [...pairedPurchaseOrders][0] : null);
   return {
     ...projected,
     source_type: row?.type || null,
@@ -292,6 +318,12 @@ export const INSURANCE_REPAIR_DETAIL_SELECT =
   "job_id, external_ref, requesting_company_slug, requesting_company_name, " +
   "makesafe_companies:requesting_company_id(slug, name)";
 
+export interface InsuranceRepairJobDetails {
+  details: Map<string, any>;
+  /** True when any chunk failed, so an absent detail row may be a read fault. */
+  degraded: boolean;
+}
+
 /**
  * The detail-store half of the card's builder identity. Kept separate from the
  * id read because a repair card admitted by `jobs.type` or the metadata family
@@ -306,12 +338,18 @@ export const INSURANCE_REPAIR_DETAIL_SELECT =
  * of cards that never needed it down with it. A failed chunk is logged loudly
  * and skipped; the cards it covered fall back to metadata and, failing that,
  * project null. Nothing is fabricated either way.
+ *
+ * The degrade is REPORTED, not just logged: on this surface a null field means
+ * "the builder never gave us one", so a read fault that quietly produces the
+ * same null is indistinguishable from fact. `degraded` is what lets the caller
+ * publish it through the pipeline's `degraded` / `enrichment_errors` channel.
  */
 export async function loadInsuranceRepairJobDetails(
   client: any,
   jobIds: readonly string[],
-): Promise<Map<string, any>> {
+): Promise<InsuranceRepairJobDetails> {
   const details = new Map<string, any>();
+  let degraded = false;
   const ids = [
     ...new Set((jobIds || []).map((id) => String(id || "")).filter(Boolean)),
   ];
@@ -326,6 +364,7 @@ export async function loadInsuranceRepairJobDetails(
       if (error) throw error;
       rows = data || [];
     } catch (error) {
+      degraded = true;
       console.error(
         "[ops-api] insurance repairs detail read failed (cards fall back to jobs.metadata):",
         (error as { message?: string })?.message || error,
@@ -337,5 +376,5 @@ export async function loadInsuranceRepairJobDetails(
       if (id) details.set(id, row);
     }
   }
-  return details;
+  return { details, degraded };
 }

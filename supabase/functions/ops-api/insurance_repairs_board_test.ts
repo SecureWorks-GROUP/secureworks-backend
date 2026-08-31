@@ -257,6 +257,138 @@ Deno.test("a same-claim PO is recovered from a candidate the slot did not pick",
   assertEquals(nearMiss.builder_po_number, null);
 });
 
+Deno.test("disagreeing same-claim purchase orders project null, agreeing ones do not", () => {
+  // Both stores name the selected claim but DIFFERENT purchase orders. MLB
+  // issues several POs per claim, so this is real ambiguity: array order must
+  // not decide which live PO the operator reconciles against.
+  const conflicting = projectInsuranceRepairPipelineRow({
+    id: "conflicting",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-27249PO-56481",
+    },
+  }, {
+    job_id: "conflicting",
+    external_ref: "MLB-27249PO-99999",
+  });
+  assertEquals(conflicting.builder_work_order_ref, "MLB-27249");
+  assertEquals(conflicting.builder_po_number, null);
+
+  // The same two stores AGREEING is not a conflict.
+  const agreeing = projectInsuranceRepairPipelineRow({
+    id: "agreeing",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-27249PO-56481",
+    },
+  }, {
+    job_id: "agreeing",
+    external_ref: "MLB-27249PO-56481",
+  });
+  assertEquals(agreeing.builder_work_order_ref, "MLB-27249");
+  assertEquals(agreeing.builder_po_number, "PO-56481");
+
+  // The card's own stored PO key is trusted independently and outranks the
+  // ambiguity: it is a stated fact, not a number parsed out of another ref.
+  const stated = projectInsuranceRepairPipelineRow({
+    id: "stated",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_work_order_number: "MLB-27249PO-56481",
+      builder_po_number: "PO-60003",
+    },
+  }, {
+    job_id: "stated",
+    external_ref: "MLB-27249PO-99999",
+  });
+  assertEquals(stated.builder_po_number, "PO-60003");
+});
+
+Deno.test("a non-canonical claim spelling still pairs with its own PO", () => {
+  for (const spelling of ["mlb-24645", "MLB 24645", "  MLB#24645 "]) {
+    const card = projectInsuranceRepairPipelineRow({
+      id: `spelling-${spelling}`,
+      type: "repair",
+      status: "processing",
+      metadata: {
+        makesafe_job_family: "repair",
+        external_ref: spelling,
+        builder_work_order_number: "MLB-24645PO-59875",
+      },
+    });
+    assertEquals(card.builder_work_order_ref, spelling.trim());
+    assertEquals(card.builder_po_number, "PO-59875");
+  }
+
+  // CONTROL: normalising the spelling must not blur two different claims.
+  const crossClaim = projectInsuranceRepairPipelineRow({
+    id: "cross-claim-spelling",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "mlb 24645",
+      builder_work_order_number: "MLB-24646PO-59875",
+    },
+  });
+  assertEquals(crossClaim.builder_work_order_ref, "mlb 24645");
+  assertEquals(crossClaim.builder_po_number, null);
+});
+
+Deno.test("a PO-only reference never fills the work-order slot", () => {
+  // external_ref is only USUALLY the claim. A bare purchase order stored there
+  // is a purchase order in both slots' eyes: it labels neither as a work order
+  // nor throws itself away.
+  const poOnly = projectInsuranceRepairPipelineRow({
+    id: "po-only",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "PO-59875",
+      builder_work_order_number: "MLB-24645",
+    },
+  });
+  assertEquals(poOnly.builder_work_order_ref, "MLB-24645");
+  assertEquals(poOnly.builder_po_number, "PO-59875");
+
+  // With nothing else to fall to, the work order is simply absent.
+  const poAlone = projectInsuranceRepairPipelineRow({
+    id: "po-alone",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "Purchase Order 59875",
+    },
+  });
+  assertEquals(poAlone.builder_work_order_ref, null);
+  assertEquals(poAlone.builder_po_number, "PO-59875");
+
+  // A claimless PO still obeys the conflict rule against a claim-bearing one.
+  const poOnlyConflict = projectInsuranceRepairPipelineRow({
+    id: "po-only-conflict",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "PO-59875",
+      builder_work_order_number: "MLB-24645PO-56481",
+    },
+  });
+  assertEquals(poOnlyConflict.builder_work_order_ref, "MLB-24645");
+  assertEquals(poOnlyConflict.builder_po_number, null);
+});
+
 Deno.test("makesafe_job_details supplies ref and company when metadata is empty", () => {
   // Legacy card admitted by makesafe_job_details.report_type='repair' with no
   // jobs.metadata at all: the detail row is the only identity it has.
@@ -453,11 +585,12 @@ function repairDetailClient(
 Deno.test("repair detail read is de-duplicated, chunked and keyed by job id", async () => {
   const client = repairDetailClient();
   const ids = Array.from({ length: 51 }, (_, i) => `job-${i}`);
-  const details = await loadInsuranceRepairJobDetails(
+  const { details, degraded } = await loadInsuranceRepairJobDetails(
     client,
     [...ids, ids[0], "", ids[1]],
   );
 
+  assertEquals(degraded, false);
   assertEquals(details.size, 51);
   assertEquals(details.get("job-0")?.external_ref, "MLB-job-0");
   assertEquals(client.chunks.map((chunk) => chunk.length), [50, 1]);
@@ -471,11 +604,14 @@ Deno.test("repair detail read degrades instead of taking the Repairs tab down", 
     errors.push(args);
   };
   try {
-    const details = await loadInsuranceRepairJobDetails(
+    const { details, degraded } = await loadInsuranceRepairJobDetails(
       repairDetailClient({ fail: true }),
       ["a", "b"],
     );
     assertEquals(details.size, 0);
+    // The caller publishes this through the pipeline's degraded channel, so an
+    // unreadable detail row is never served as an indistinguishable null.
+    assertEquals(degraded, true);
   } finally {
     console.error = original;
   }
@@ -507,15 +643,16 @@ Deno.test("repair detail read keeps the chunks that did succeed", async () => {
   const client = repairDetailClient({ failChunkIndex: 0 });
   const original = console.error;
   console.error = () => {};
-  let details: Map<string, any>;
+  let loaded: Awaited<ReturnType<typeof loadInsuranceRepairJobDetails>>;
   try {
-    details = await loadInsuranceRepairJobDetails(
+    loaded = await loadInsuranceRepairJobDetails(
       client,
       Array.from({ length: 51 }, (_, i) => `job-${i}`),
     );
   } finally {
     console.error = original;
   }
-  assertEquals(details.size, 1);
-  assertEquals(details.get("job-50")?.external_ref, "MLB-job-50");
+  assertEquals(loaded.details.size, 1);
+  assertEquals(loaded.details.get("job-50")?.external_ref, "MLB-job-50");
+  assertEquals(loaded.degraded, true);
 });

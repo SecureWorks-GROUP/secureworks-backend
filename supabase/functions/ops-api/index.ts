@@ -12960,6 +12960,10 @@ async function pipeline(client: any, params: URLSearchParams) {
   const enrichmentErrors = enrichmentResults
     .filter(([, result]) => result.error)
     .map(([label]) => label)
+  // A repair card's builder identity is allowed to be absent, so a failed
+  // detail read must be published rather than served as an indistinguishable
+  // null on the very fields the card exists to reconcile.
+  if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -13105,7 +13109,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     return typeFilter === 'repair'
       ? projectInsuranceRepairPipelineRow(
         pipelineRow,
-        repairDetails?.get(String(j.id)) || null,
+        repairDetails?.details.get(String(j.id)) || null,
       )
       : pipelineRow
   }).filter((j: any) => {
