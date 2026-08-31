@@ -745,11 +745,16 @@ the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
 (ruling 6 — reversing needs a new ruling, not a script run). Xero: repair books
 tracking `SW - MAKESAFE` (type-aware `trackingCategoryForJob`; bare `SWR` prefix
 deliberately resolves to nothing); `accountCodeForJob` maps repair to 210,
-inherited from make-safe and marked OPEN RISK #2 pending Captain confirmation.
-The Repairs card carries the builder WO + PO refs lifted off `jobs.metadata` in
-`projectInsuranceRepairPipelineRow` (external_ref outranks the fused
-`builder_work_order_number` vintage). Ruling 4's quote-stage repair mint is a
-declared follow-up PR, not yet built. Tests: `repair_intake_routing_test.ts`,
+inherited from make-safe and Captain-confirmed 2026-08-31 (repair revenue books
+as make-safe/insurance work; never the `200` fallback).
+The Repairs card carries the builder WO + PO refs in
+`projectInsuranceRepairPipelineRow`: every candidate ref is split through the
+sealed grammar (`extractBuilderWorkOrderIdentity`) so the fused WO+PO vintage
+("MLB-25147PO-56236") can never reach the work-order slot, with
+`makesafe_job_details` (external_ref, issuing company) as the fallback store for
+cards whose `jobs.metadata` was never populated. Absent fields project null.
+Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet
+built. Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 

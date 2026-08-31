@@ -8,6 +8,7 @@ import {
   excludeInsuranceRepairs,
   insuranceRepairStage,
   isInsuranceRepairFamily,
+  loadInsuranceRepairJobDetails,
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from "./insurance_repairs_board.ts";
@@ -120,6 +121,120 @@ Deno.test("repair card ref fields fall back and fail to null, never fabricate", 
   assertEquals(noMeta.builder_company_slug, null);
 });
 
+Deno.test("a fused WO+PO value never reaches the work-order slot", () => {
+  // The fused vintage stamped with NO external_ref: the preference alone does
+  // not defend the slot, the split does. Both numbers still land, separately.
+  const fusedOnly = projectInsuranceRepairPipelineRow({
+    id: "fused-only",
+    type: "makesafe",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      builder_work_order_number: "MLB-25147PO-56236",
+    },
+  });
+  assertEquals(fusedOnly.builder_work_order_ref, "MLB-25147");
+  assertEquals(fusedOnly.builder_po_number, "PO-56236");
+
+  // SWMS-261118 vintage: external_ref itself carries the fused form.
+  const fusedExternal = projectInsuranceRepairPipelineRow({
+    id: "fused-external",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-26344PO-57087",
+    },
+  });
+  assertEquals(fusedExternal.builder_work_order_ref, "MLB-26344");
+  assertEquals(fusedExternal.builder_po_number, "PO-57087");
+
+  // A stored PO always outranks one read back out of a fused string.
+  const stamped = projectInsuranceRepairPipelineRow({
+    id: "stamped-po",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      builder_work_order_number: "MLB-25147PO-56236",
+      builder_po_number: "PO-99999",
+    },
+  });
+  assertEquals(stamped.builder_work_order_ref, "MLB-25147");
+  assertEquals(stamped.builder_po_number, "PO-99999");
+});
+
+Deno.test("makesafe_job_details supplies ref and company when metadata is empty", () => {
+  // Legacy card admitted by makesafe_job_details.report_type='repair' with no
+  // jobs.metadata at all: the detail row is the only identity it has.
+  const detailOnly = projectInsuranceRepairPipelineRow({
+    id: "detail-only",
+    type: "makesafe",
+    status: "processing",
+  }, {
+    job_id: "detail-only",
+    external_ref: "MLB-24645PO-59875",
+    requesting_company_name: "ML Builders",
+    requesting_company_slug: "mlb",
+  });
+  assertEquals(detailOnly.builder_work_order_ref, "MLB-24645");
+  assertEquals(detailOnly.builder_po_number, "PO-59875");
+  assertEquals(detailOnly.builder_company_name, "ML Builders");
+  assertEquals(detailOnly.builder_company_slug, "mlb");
+
+  // Company falls through the joined makesafe_companies row, mirroring the
+  // make-safe board's detail-first resolution.
+  const joined = projectInsuranceRepairPipelineRow({
+    id: "joined",
+    type: "repair",
+    status: "processing",
+    metadata: { makesafe_job_family: "repair" },
+  }, {
+    job_id: "joined",
+    makesafe_companies: { slug: "ajs", name: "AJS Build" },
+  });
+  assertEquals(joined.builder_company_name, "AJS Build");
+  assertEquals(joined.builder_company_slug, "ajs");
+  assertEquals(joined.builder_work_order_ref, null);
+
+  // Metadata still wins for the reference when it is populated.
+  const both = projectInsuranceRepairPipelineRow({
+    id: "both",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: "MLB-27249",
+      builder_po_number: "PO-60001",
+    },
+  }, {
+    job_id: "both",
+    external_ref: "MLB-00000",
+    requesting_company_name: "ML Builders",
+  });
+  assertEquals(both.builder_work_order_ref, "MLB-27249");
+  assertEquals(both.builder_po_number, "PO-60001");
+});
+
+Deno.test("non-scalar stored refs project null rather than [object Object]", () => {
+  const junk = projectInsuranceRepairPipelineRow({
+    id: "junk",
+    type: "repair",
+    status: "processing",
+    metadata: {
+      makesafe_job_family: "repair",
+      external_ref: { value: "MLB-24645" },
+      builder_work_order_number: ["MLB-24645"],
+      builder_po_number: { value: "PO-59875" },
+      requesting_company: { name: { first: "ML" }, slug: 7 },
+    },
+  });
+  assertEquals(junk.builder_work_order_ref, null);
+  assertEquals(junk.builder_po_number, null);
+  assertEquals(junk.builder_company_name, null);
+  assertEquals(junk.builder_company_slug, "7");
+});
+
 Deno.test("explicit Repairs stage wins and lawful job statuses cover all nine lanes", () => {
   assertEquals(
     insuranceRepairStage({
@@ -200,5 +315,63 @@ Deno.test("repair id discovery fails loud instead of painting a false empty boar
       ),
     Error,
     "insurance repairs authority read failed",
+  );
+});
+
+function repairDetailClient(options: { fail?: boolean } = {}) {
+  const chunks: string[][] = [];
+  return {
+    chunks,
+    from(_table: string) {
+      const query: any = {
+        select() {
+          return query;
+        },
+        in(_column: string, values: string[]) {
+          chunks.push(values);
+          return query;
+        },
+        then(resolve: (value: any) => unknown) {
+          if (options.fail) {
+            return Promise.resolve(resolve({
+              data: null,
+              error: { message: "column drift" },
+            }));
+          }
+          return Promise.resolve(resolve({
+            data: chunks.at(-1)!.map((id) => ({
+              job_id: id,
+              external_ref: `MLB-${id}`,
+              requesting_company_name: "ML Builders",
+            })),
+            error: null,
+          }));
+        },
+      };
+      return query;
+    },
+  };
+}
+
+Deno.test("repair detail read is de-duplicated, chunked and keyed by job id", async () => {
+  const client = repairDetailClient();
+  const ids = Array.from({ length: 51 }, (_, i) => `job-${i}`);
+  const details = await loadInsuranceRepairJobDetails(
+    client,
+    [...ids, ids[0], "", ids[1]],
+  );
+
+  assertEquals(details.size, 51);
+  assertEquals(details.get("job-0")?.external_ref, "MLB-job-0");
+  assertEquals(client.chunks.map((chunk) => chunk.length), [50, 1]);
+  assertEquals(client.chunks.flat().includes(""), false);
+});
+
+Deno.test("repair detail read fails loud instead of dropping builder identity", async () => {
+  await assertRejects(
+    () =>
+      loadInsuranceRepairJobDetails(repairDetailClient({ fail: true }), ["a"]),
+    Error,
+    "insurance repairs detail read failed",
   );
 });

@@ -5,7 +5,11 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _pipelineForTest } from "./index.ts";
+import {
+  _makesafeBoardActionForTest,
+  _makesafeBoardTradeRouteForTest,
+  _pipelineForTest,
+} from "./index.ts";
 
 type Call = {
   table: string;
@@ -143,12 +147,187 @@ Deno.test("pipeline?type=repair feeds Midland through the merged Repairs contrac
   );
 });
 
-Deno.test("both MakeSafe projections opt into the repair-family exclusion", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
+/**
+ * Join-capable PostgREST fixture for the canonical board loader. Mirrors the
+ * make-safe intake fixture: nested `.eq('jobs.type', …)` reads the embedded
+ * relation, and every unseeded table answers empty.
+ */
+function boardFixtureClient(
+  profiles: Record<string, any>,
+  rowsByTable: Record<string, any[]>,
+) {
+  function builder(table: string) {
+    const rows =
+      (table === "users" ? Object.values(profiles) : rowsByTable[table] || [])
+        .slice();
+    const predicates: Array<(row: any) => boolean> = [];
+    const query: any = {
+      select: () => query,
+      eq: (column: string, value: any) => {
+        predicates.push((row) => {
+          if (Object.prototype.hasOwnProperty.call(row ?? {}, column)) {
+            return row?.[column] === value;
+          }
+          if (column.includes(".")) {
+            let cursor: any = row;
+            for (const part of column.split(".")) cursor = cursor?.[part];
+            return cursor === value;
+          }
+          return row?.[column] === value;
+        });
+        return query;
+      },
+      neq: (column: string, value: any) => {
+        predicates.push((row) => row?.[column] !== value);
+        return query;
+      },
+      not: (column: string, operator: string, value: string) => {
+        if (operator === "in") {
+          const excluded = String(value).slice(1, -1).split(",").map((item) =>
+            item.replaceAll('"', "")
+          );
+          predicates.push((row) => !excluded.includes(String(row?.[column])));
+        }
+        return query;
+      },
+      gte: (column: string, value: any) => {
+        predicates.push((row) => String(row?.[column] || "") >= String(value));
+        return query;
+      },
+      in: (column: string, values: any[]) => {
+        predicates.push((row) => values.includes(row?.[column]));
+        return query;
+      },
+      lte: () => query,
+      lt: () => query,
+      is: () => query,
+      or: () => query,
+      filter: () => query,
+      order: () => query,
+      limit: () => query,
+      range: (from: number, to: number) =>
+        Promise.resolve({
+          data: rows.filter((row) => predicates.every((test) => test(row)))
+            .slice(from, to + 1),
+          error: null,
+        }),
+      maybeSingle: () =>
+        Promise.resolve({
+          data: rows.filter((row) =>
+            predicates.every((test) => test(row))
+          )[0] ||
+            null,
+          error: null,
+        }),
+      then: (resolve: (value: any) => any) =>
+        resolve({
+          data: rows.filter((row) => predicates.every((test) => test(row))),
+          error: null,
+        }),
+    };
+    return query;
+  }
+  return {
+    from: (table: string) => builder(table),
+    rpc: () => Promise.resolve({ data: [], error: null }),
+  };
+}
+
+const REPAIR_BOARD_JOB = "0993f001-9e5e-420f-afdd-1cd1415084a1";
+const MAKESAFE_BOARD_JOB = "6b7d9a2c-1f43-4a58-9c21-a0f7ce55d310";
+
+function boardFixture() {
+  return boardFixtureClient({
+    "ops-manager-fixture": {
+      id: "ops-manager-fixture",
+      name: "Ops Fixture",
+      role: "ops_manager",
+      managed_verticals: ["makesafe"],
+    },
+  }, {
+    jobs: [{
+      id: REPAIR_BOARD_JOB,
+      job_number: "SWMS-261029",
+      type: "makesafe",
+      status: "accepted",
+      client_name: "Midland Resident",
+      site_suburb: "Midland",
+      created_at: "2026-07-21T00:00:00Z",
+      metadata: { makesafe_job_family: "repair" },
+    }, {
+      id: MAKESAFE_BOARD_JOB,
+      job_number: "SWMS-261179",
+      type: "makesafe",
+      status: "accepted",
+      client_name: "Physical Resident",
+      site_suburb: "Morley",
+      created_at: "2026-07-21T00:00:00Z",
+      metadata: { makesafe_job_family: "general_makesafe" },
+    }],
+    makesafe_job_details: [{
+      job_id: REPAIR_BOARD_JOB,
+      substatus: "company_contact_required",
+    }, {
+      job_id: MAKESAFE_BOARD_JOB,
+      substatus: "company_contact_required",
+    }],
+    job_service_reports: [],
+    xero_invoices: [],
+    job_documents: [],
+    makesafe_report_packs: [],
+    job_assignments: [],
+    job_events: [],
+    job_media: [],
+    job_contacts: [],
+    makesafe_status_holds: [],
+    makesafe_intake_cases: [],
+    makesafe_board_status_current: [],
+  });
+}
+
+function boardCardIds(columns: Record<string, any[]>): string[] {
+  return Object.values(columns || {}).flat().map((row: any) => row?.id);
+}
+
+Deno.test("ops MakeSafe board serves the make-safe card and never the repair card", async () => {
+  const response = await _makesafeBoardActionForTest(
+    boardFixture(),
+    "api_key",
+    null,
+    "ops",
+    { generatedAt: "2026-08-31T00:00:00Z" },
   );
-  assert(
-    source.match(/excludeInsuranceRepairs: true/g)?.length === 3,
-    "ops v1, ops v2, and trade MakeSafe projections must all exclude repairs",
+  const body = JSON.parse(await response.text());
+
+  assertEquals(response.status, 200);
+  const ids = boardCardIds(body.columns);
+  assertEquals(ids.includes(MAKESAFE_BOARD_JOB), true);
+  assertEquals(
+    ids.includes(REPAIR_BOARD_JOB),
+    false,
+    "Repairs is a sibling pipeline and must not appear on the ops MakeSafe board",
   );
+  assertEquals(body.column_counts.new, 1);
+});
+
+Deno.test("trade MakeSafe board serves the make-safe card and never the repair card", async () => {
+  const response = await _makesafeBoardTradeRouteForTest(
+    boardFixture(),
+    "jwt",
+    {
+      id: "ops-manager-fixture",
+      email: "ops.fixture@example.invalid",
+      orgId: "fixture-org",
+      role: "ops_manager",
+      managedVerticals: ["makesafe"],
+    },
+    { generatedAt: "2026-08-31T00:00:00Z" },
+  );
+  const body = JSON.parse(await response.text());
+
+  assertEquals(response.status, 200);
+  assertEquals(body.projection, "trade");
+  const ids = boardCardIds(body.columns);
+  assertEquals(ids.includes(MAKESAFE_BOARD_JOB), true);
+  assertEquals(ids.includes(REPAIR_BOARD_JOB), false);
 });

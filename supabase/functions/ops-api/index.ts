@@ -172,6 +172,7 @@ import {
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
+  loadInsuranceRepairJobDetails,
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from './insurance_repairs_board.ts'
@@ -12773,6 +12774,12 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (repairJobIds && repairJobIds.length === 0) {
     return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
   }
+  // Detail-store half of the Repairs card identity. `jobs.metadata` is ~91%
+  // populated; makesafe_job_details.external_ref is 100%, and it also carries
+  // the issuing company a legacy/backfilled card may have nowhere else.
+  const repairDetails = repairJobIds
+    ? await loadInsuranceRepairJobDetails(client, repairJobIds)
+    : null
 
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -13095,7 +13102,10 @@ async function pipeline(client: any, params: URLSearchParams) {
       )
     }
     return typeFilter === 'repair'
-      ? projectInsuranceRepairPipelineRow(pipelineRow)
+      ? projectInsuranceRepairPipelineRow(
+        pipelineRow,
+        repairDetails?.get(String(j.id)) || null,
+      )
       : pipelineRow
   }).filter((j: any) => {
     // Filter out test records
@@ -33780,8 +33790,9 @@ async function addPOEvent(client: any, body: any) {
 // and zero SWR- job numbers — see the pre-merge verification SELECT in
 // BUILD-REPORT.md, which must be run before this merges.
 //
-// >>> OPEN RISK #2 — 'SW - MAKESAFE' for repair is inherited from the make-safe
-// route and needs captain confirmation. <<<
+// 'SW - MAKESAFE' for repair is inherited from the make-safe route and was
+// CONFIRMED by the captain on 2026-08-31: repair revenue books as make-safe /
+// insurance work. (Closes what this comment carried as OPEN RISK #2.)
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
@@ -33823,7 +33834,8 @@ function accountCodeForJob(jobType: string, fallback = '200'): string {
     // repair cards were type='makesafe' (210) before this pipeline existed, so
     // an unmapped 'repair' would have moved the revenue account silently the
     // moment the type flipped, with no code change and no error to notice.
-    // >>> OPEN RISK #2 — inherited from make-safe, needs captain confirmation. <<<
+    // Inherited from make-safe and CONFIRMED by the captain on 2026-08-31:
+    // repair books to 210, never the '200' fallback.
     repair: '210',
     renovation: '201',
     combo: '200',
