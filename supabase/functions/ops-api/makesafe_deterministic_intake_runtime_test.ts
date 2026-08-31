@@ -7485,3 +7485,75 @@ Deno.test("a case the settlement seam already bound is not re-decided by the run
   assertEquals(caseRow.last_decision_provenance, "human");
   assertEquals(caseRow.last_decision_actor, "captain@secureworkswa.com.au");
 });
+
+// `findCase` reads `{ data }` only, so a degraded PostgREST read is
+// indistinguishable from "no such case" — and `insertCaseAndSources` treats an
+// absent row as "create it". The re-read must therefore fall back to the row the
+// caller already holds: a transient fault must decide against that row (no
+// update, no throw) and can NEVER route into case CREATION, which would collide
+// with `UNIQUE (org_id, instruction_key)` and cost the post-board notification
+// for a card that minted correctly.
+Deno.test("a degraded case re-read decides against the known row instead of creating one", async () => {
+  const store = settlementBoundCaseFixture();
+  let approved = false;
+  let notified = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      undefined,
+      (table, operation) =>
+        approved && table === "makesafe_intake_cases" && operation === "select"
+          ? { code: "57014", message: "canceling statement due to timeout" }
+          : null,
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["settlement-bound-source"],
+      maxCases: 1,
+      nowIso: NOW,
+      approveDraft: () => {
+        Object.assign(store.makesafe_intake_cases[0], {
+          job_id: "settlement-bound-job",
+          state: "confirmed_live_job",
+          reason_code: null,
+          blocked_reasons: [],
+          last_decision_provenance: "human",
+          last_decision_actor: "captain@secureworkswa.com.au",
+          last_decision_reason:
+            "intake approval settlement bound job settlement-bound-job",
+        });
+        approved = true;
+        return Promise.resolve({
+          job: { id: "settlement-bound-job" },
+          notification_job_ids: ["settlement-bound-job"],
+        });
+      },
+      notifyPhysicalJob: () => {
+        notified++;
+        return Promise.resolve({
+          accepted: true,
+          reason: "accepted",
+          auditId: "audit-degraded-reread",
+        });
+      },
+    },
+  );
+
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.write_failure_reasons, {});
+  // No second case row: the degraded read never became a create.
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  // The notification still ran — it is never retried once the case has its job.
+  assertEquals(notified, 1);
+  // The settlement seam's bind and its human attribution are untouched: the
+  // runtime wrote nothing rather than deciding against a stale row.
+  const caseRow = store.makesafe_intake_cases[0];
+  assertEquals(caseRow.job_id, "settlement-bound-job");
+  assertEquals(caseRow.state, "confirmed_live_job");
+  assertEquals(caseRow.last_decision_provenance, "human");
+  assertEquals(caseRow.last_decision_actor, "captain@secureworkswa.com.au");
+});

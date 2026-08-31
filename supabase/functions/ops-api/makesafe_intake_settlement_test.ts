@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 
 import {
+  assert,
   assertEquals,
   assertRejects,
   assertStringIncludes,
@@ -565,6 +566,8 @@ function caseBindingClient(input: {
   caseUpdateError?: any;
   /** Models a PostgREST fault on the case-bind READ. */
   caseReadError?: any;
+  /** Models a PostgREST refusal of the durable failure marker INSERT. */
+  jobEventError?: any;
 }) {
   const updates: any[] = [];
   const jobEvents: any[] = [];
@@ -635,7 +638,11 @@ function caseBindingClient(input: {
           return {
             insert(row: any) {
               jobEvents.push(row);
-              return Promise.resolve({ data: [row], error: null });
+              // PostgREST RETURNS errors; it does not throw.
+              return Promise.resolve({
+                data: input.jobEventError ? null : [row],
+                error: input.jobEventError || null,
+              });
             },
           } as any;
         }
@@ -1041,4 +1048,65 @@ Deno.test("a combined split binds the case to the PHYSICAL primary, not the repo
 
   assertEquals(db.updates.length, 1);
   assertEquals(db.updates[0].job_id, "job-repair");
+});
+
+// The durable marker is the load-bearing half of the record-and-continue
+// contract, and PostgREST REFUSES an insert by returning `error` rather than
+// throwing — so a refused marker must still be visible in the edge log and must
+// still never fail the approval. Without the destructure the refusal is silent.
+Deno.test("a REFUSED failure marker is logged and still never fails the approval", async () => {
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map((value) => String(value)).join(" "));
+  };
+  try {
+    const notified: string[] = [];
+    const mint = repairMint();
+    const db = caseBindingClient({
+      mints: [mint],
+      cases: [{
+        id: "case-repair",
+        state: "exception",
+        reason_code: "awaiting_job_creation",
+        job_id: null,
+        blocked_reasons: [],
+      }],
+      jobs: [{ id: "job-repair", type: "repair" }],
+      caseUpdateError: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "uq_makesafe_intake_cases_live_identity"',
+      },
+      jobEventError: { code: "42501", message: "permission denied" },
+    });
+
+    const result = await settleApprovedIntakeDraft(db.client, {
+      draftId: "draft-repair",
+      approvedJobId: "job-repair",
+      attachments: [{
+        file_name: "work-order.pdf",
+        storage_url: "storage/work-order.pdf",
+      }],
+      extraction: { deterministic_intake: true },
+      refreshIdentity: noIdentityRefresh as any,
+      notify: async (input) => {
+        notified.push(input.jobId);
+        return { accepted: true, reason: "accepted", auditId: "audit-repair" };
+      },
+    });
+
+    assertEquals(result.notificationJobIds, ["job-repair"]);
+    assertEquals(notified, ["job-repair"]);
+    assertEquals(mint.state, "settled");
+    assertEquals(db.updates, []);
+    assert(
+      logged.some((line) =>
+        line.includes("marker unwritten") && line.includes("permission denied")
+      ),
+      `a refused marker insert must be logged, got: ${logged.join(" | ")}`,
+    );
+  } finally {
+    console.error = originalError;
+  }
 });

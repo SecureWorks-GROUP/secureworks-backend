@@ -226,8 +226,22 @@ async function recordIntakeCaseBindFailure(
       input.caseId || "unknown"
     }, job ${input.jobId || "unknown"}): ${fact}`,
   );
+  const unwritten = (reason: unknown) =>
+    console.error(
+      `[ops-api] intake case bind failure marker unwritten (case ${
+        input.caseId || "unknown"
+      }, job ${input.jobId || "unknown"}): ${
+        (reason as any)?.message || reason
+      }`,
+    );
   try {
-    await client.from("job_events").insert({
+    // PostgREST RETURNS errors, it does not throw, so the catch below covers
+    // only a transport fault. This marker is the load-bearing half of the
+    // record-and-continue contract above — without it a refused bind leaves a
+    // silently caseless card — so a refused INSERT must be visible in the edge
+    // log too. Still best-effort either way: an audit write never changes the
+    // outcome of the approval.
+    const { error } = await client.from("job_events").insert({
       job_id: input.jobId,
       event_type: INTAKE_CASE_BIND_FAILED_EVENT,
       detail_json: {
@@ -237,13 +251,9 @@ async function recordIntakeCaseBindFailure(
         error: fact,
       },
     });
+    if (error) unwritten(error);
   } catch (eventError) {
-    // Same rule one level down: an audit write never changes the outcome.
-    console.error(
-      `[ops-api] intake case bind failure marker unwritten: ${
-        (eventError as Error)?.message || eventError
-      }`,
-    );
+    unwritten(eventError);
   }
 }
 

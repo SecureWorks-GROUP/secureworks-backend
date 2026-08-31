@@ -156,8 +156,12 @@ correctly minted card in a loop that can never be approved and degrading whole
 deterministic runs. A recoverable gap beats an unrecoverable block. Every fault
 (case read, job read, draft read, and the bind update itself) is caught,
 `console.error`d, and written as a durable `makesafe_intake_case_bind_failed`
-job event naming the case, the job and the error fact; that audit write is
-itself best-effort. The gap therefore stays audible, and a caseless card still
+job event naming the case, the job and the error fact. That marker is the
+load-bearing half of the contract, so its own write is checked the way AGENTS.md
+requires — PostgREST RETURNS errors rather than throwing, so the insert
+destructures `{ error }` and logs a refusal instead of leaving a dead `catch`
+and a silently caseless card. It stays best-effort either way: a refused marker
+never fails the approval. The gap therefore stays audible, and a caseless card still
 surfaces operationally as `spine_missing_source` / `spine_missing_lineage` on
 the pack path. This is the repository's own flag-never-block pattern — the
 suburb backstop, the audible substatus-gate fail-open, and audit writes that
@@ -199,8 +203,21 @@ Two follow-on constraints that are easy to get wrong:
   `enforce_makesafe_intake_case_write` refuses ("decision metadata may change
   only with an audited case decision"), failing the case, degrading the run and
   permanently skipping its post-board notification. The second call therefore
-  omits `knownExisting` entirely; the trigger branch is modelled by the `fail`
-  hook in `makesafe_deterministic_intake_runtime_test.ts`.
+  re-reads the row first; the trigger branch is modelled by the `fail` hook in
+  `makesafe_deterministic_intake_runtime_test.ts`.
+
+  The re-read is done AT THE CALLER, never by passing `undefined` through.
+  `findCase` reads `{ data }` only, so a degraded PostgREST read is
+  indistinguishable from "no such case", and `insertCaseAndSources` treats an
+  absent row as "create it" — which would collide with
+  `UNIQUE (org_id, instruction_key)` and cost the notification for a card that
+  minted correctly. The case provably exists at that point, so a null read is a
+  fault or a race, never a real absence, and the call is SKIPPED outright: its
+  only effect is the case-onto-job move (`skipSources` is true) and the
+  settlement seam already performs that on every lane, while deciding against
+  the stale pre-approval row would re-raise the very trigger this re-read
+  exists to avoid. Doing nothing is the safe answer to "I could not read it",
+  and it is pinned by the degraded-read case in the same test file.
 
 ### The brake that closes the property: the FINAL family, at the mint
 
