@@ -753,8 +753,27 @@ sealed grammar (`extractBuilderWorkOrderIdentity`) so the fused WO+PO vintage
 ("MLB-25147PO-56236") can never reach the work-order slot, with
 `makesafe_job_details` (external_ref, issuing company) as the fallback store for
 cards whose `jobs.metadata` was never populated. Absent fields project null.
-Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet
-built. Tests: `repair_intake_routing_test.ts`,
+
+A BLANK PO ON A CARD WHOSE METADATA HOLDS ONE IS USUALLY THE DESIGNED ANSWER,
+not a bug, and "just take the first PO found" is exactly the guard being
+deleted. The two instruction numbers are one pair, so a split-derived PO counts
+only when its own candidate names the selected claim (compared through the
+shared `normaliseRef`, so "mlb 24645" still pairs with "MLB-24645PO-59875") or
+is claimless and contests nothing; candidates naming DIFFERENT POs for that
+claim project null, because MLB routinely issues several POs against one claim
+and array order must never pick which live PO an operator reconciles against;
+and a candidate the grammar reads as PO-only never fills the work-order slot,
+which falls to the next candidate or null. Choosing between several genuine POs
+on one claim is a pending Captain product decision, deliberately not attempted
+here. The ONE ungrammared input is `metadata.builder_po_number`, trusted by
+explicit direction as the card's own stated PO and projected verbatim past every
+pairing and conflict rule — `create_makesafe_job` stamps it straight off the
+request body (`index.ts:15370`, no validation), so that caller is the whole
+trust boundary and the only remaining route by which a wrong or fused PO reaches
+the card.
+
+Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
+Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 
