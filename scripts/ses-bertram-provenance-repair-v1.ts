@@ -79,6 +79,10 @@ async function commandText(command: string, args: string[]): Promise<string> {
   return new TextDecoder().decode(result.stdout);
 }
 
+export function normalizeExtractedPdfText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 async function verifyRenderedContent(path: string): Promise<{
   pages: number;
   photo_labels: number;
@@ -87,14 +91,16 @@ async function verifyRenderedContent(path: string): Promise<{
   const info = await commandText("pdfinfo", [path]);
   const pages = Number(info.match(/^Pages:\s+(\d+)$/m)?.[1] || 0);
   const reportText = await commandText("pdftotext", ["-layout", path, "-"]);
+  const normalizedReportText = normalizeExtractedPdfText(reportText);
   const photoLabels =
     reportText.match(/Photo evidence \d+ - Site photo \d+/g) || [];
   const commercialTokens =
     reportText.match(new RegExp(COMMERCIAL_TEXT_RE.source, "gi")) || [];
   if (
     pages !== EXPECTED_PAGES || photoLabels.length !== EXPECTED_PHOTOS ||
-    !reportText.includes(EXPECTED_MATERIALS) ||
-    !reportText.includes(EXPECTED_FINDINGS) || commercialTokens.length !== 0
+    !normalizedReportText.includes(EXPECTED_MATERIALS) ||
+    !normalizedReportText.includes(EXPECTED_FINDINGS) ||
+    commercialTokens.length !== 0
   ) {
     throw new Error(
       "protected Bertram PDF failed the 36-page, 35-photo, narrative, materials, or zero-commercial-token contract",
