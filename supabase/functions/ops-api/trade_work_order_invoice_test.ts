@@ -447,6 +447,73 @@ Deno.test("the caller's own stale draft still leaves the work order invoiceable"
   assertEquals(result.work_orders[0].can_invoice, true);
 });
 
+Deno.test("the caller can reopen their weekly draft without offering a duplicate single-WO invoice", async () => {
+  const wo = workOrder("weekly-retry", { assigned: HENRY.id });
+  const { client } = makeClient({
+    workOrders: [wo],
+    charges: [{
+      source_work_order_id: wo.id,
+      trade_invoices: {
+        id: "invoice-own-weekly-draft",
+        org_id: TENANT_A,
+        user_id: HENRY.id,
+        status: "draft",
+        xero_bill_id: null,
+      },
+    }],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders[0].invoice_block_reason, "weekly_draft");
+  assertEquals(
+    result.work_orders[0].weekly_draft_id,
+    "invoice-own-weekly-draft",
+  );
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, true);
+  assertEquals(result.work_orders[0].can_invoice, false);
+});
+
+Deno.test("a live invoice outranks an inconsistent own weekly draft", async () => {
+  const wo = workOrder("weekly-race", { assigned: HENRY.id });
+  const { client } = makeClient({
+    workOrders: [wo],
+    invoices: [{
+      id: "invoice-live",
+      org_id: TENANT_A,
+      user_id: HENRY.id,
+      work_order_id: wo.id,
+      status: "pushed_to_xero",
+      xero_bill_id: "xero-live",
+    }],
+    charges: [{
+      source_work_order_id: wo.id,
+      trade_invoices: {
+        id: "invoice-own-weekly-draft",
+        org_id: TENANT_A,
+        user_id: HENRY.id,
+        status: "draft",
+        xero_bill_id: null,
+      },
+    }],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders[0].invoice_block_reason, "invoiced");
+  assertEquals(result.work_orders[0].weekly_draft_id, null);
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, false);
+  assertEquals(result.work_orders[0].can_invoice, false);
+});
+
 Deno.test("only a live invoice or another trade's draft holds a work order", () => {
   const ownDraft = { id: "own-draft", user_id: HENRY.id, status: "draft" };
   const foreignDraft = {
@@ -544,6 +611,10 @@ Deno.test("negative work-order charges are server-selected from acknowledged sam
     job_id: "job-1",
     trade_name: "Crew Other",
     description: "Crew labour",
+    source_line_type: "labour",
+    quantity: 1,
+    unit: "ea",
+    source_unit_rate: 100,
     source_amount_ex: 100,
     amount_ex: -100,
     override_applied: true,
@@ -602,4 +673,24 @@ Deno.test("negative charges cannot reduce a work-order invoice to zero or below"
     error = caught;
   }
   assertEquals(error?.status, 422);
+});
+
+Deno.test("single-work-order submit claims its source atomically before Xero", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const routeStart = source.indexOf("case 'submit_work_order_invoice':");
+  const routeEnd = source.indexOf(
+    "case 'save_trade_invoice_draft':",
+    routeStart,
+  );
+  const route = source.slice(routeStart, routeEnd);
+  const persistAt = route.indexOf("await _persistWorkOrderInvoice(");
+  const xeroAt = route.indexOf("await getToken(client)");
+
+  assertEquals(routeStart >= 0, true);
+  assertEquals(routeEnd > routeStart, true);
+  assertEquals(persistAt >= 0, true);
+  assertEquals(xeroAt > persistAt, true);
+  assertEquals(route.includes("client.from('trade_invoices').insert"), false);
 });
