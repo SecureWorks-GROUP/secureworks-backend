@@ -7,7 +7,9 @@ import {
 import {
   _calculateWorkOrderInvoiceTotals,
   _canSubmitWorkOrderInvoice,
+  _claimWorkOrderInvoiceBeforeXero,
   _findBlockingWorkOrderInvoice,
+  _resolveWorkOrderScopeLine,
   _selectWorkOrderNegativeCharges,
   handleTradeWorkOrdersAction,
   type TradeAuthContext,
@@ -445,6 +447,81 @@ Deno.test("the caller's own stale draft still leaves the work order invoiceable"
   assertEquals(result.work_orders[0].already_invoiced, false);
   assertEquals(result.work_orders[0].invoice_block_reason, null);
   assertEquals(result.work_orders[0].can_invoice, true);
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, false);
+});
+
+Deno.test("single work-order totals use the values persisted at two-decimal precision", () => {
+  assertEquals(
+    _resolveWorkOrderScopeLine({ quantity: 1.005, unit_price: 100 }),
+    { qty: 1.01, price: 100, amount_ex: 101 },
+  );
+});
+
+Deno.test("the caller can reopen their weekly draft without offering a duplicate single-WO invoice", async () => {
+  const wo = workOrder("weekly-retry", { assigned: HENRY.id });
+  const { client } = makeClient({
+    workOrders: [wo],
+    charges: [{
+      source_work_order_id: wo.id,
+      trade_invoices: {
+        id: "invoice-own-weekly-draft",
+        org_id: TENANT_A,
+        user_id: HENRY.id,
+        status: "draft",
+        xero_bill_id: null,
+      },
+    }],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders[0].invoice_block_reason, "weekly_draft");
+  assertEquals(
+    result.work_orders[0].weekly_draft_id,
+    "invoice-own-weekly-draft",
+  );
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, true);
+  assertEquals(result.work_orders[0].can_invoice, false);
+});
+
+Deno.test("a live invoice outranks an inconsistent own weekly draft", async () => {
+  const wo = workOrder("weekly-race", { assigned: HENRY.id });
+  const { client } = makeClient({
+    workOrders: [wo],
+    invoices: [{
+      id: "invoice-live",
+      org_id: TENANT_A,
+      user_id: HENRY.id,
+      work_order_id: wo.id,
+      status: "pushed_to_xero",
+      xero_bill_id: "xero-live",
+    }],
+    charges: [{
+      source_work_order_id: wo.id,
+      trade_invoices: {
+        id: "invoice-own-weekly-draft",
+        org_id: TENANT_A,
+        user_id: HENRY.id,
+        status: "draft",
+        xero_bill_id: null,
+      },
+    }],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders[0].invoice_block_reason, "invoiced");
+  assertEquals(result.work_orders[0].weekly_draft_id, null);
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, false);
+  assertEquals(result.work_orders[0].can_invoice, false);
 });
 
 Deno.test("only a live invoice or another trade's draft holds a work order", () => {
@@ -544,6 +621,10 @@ Deno.test("negative work-order charges are server-selected from acknowledged sam
     job_id: "job-1",
     trade_name: "Crew Other",
     description: "Crew labour",
+    source_line_type: "labour",
+    quantity: 1,
+    unit: "ea",
+    source_unit_rate: 100,
     source_amount_ex: 100,
     amount_ex: -100,
     override_applied: true,
@@ -602,4 +683,36 @@ Deno.test("negative charges cannot reduce a work-order invoice to zero or below"
     error = caught;
   }
   assertEquals(error?.status, 422);
+});
+
+Deno.test("single-work-order submit claims its source atomically before Xero", async () => {
+  const events: string[] = [];
+  const fakeClient = { boundary: "fake" };
+  const result = await _claimWorkOrderInvoiceBeforeXero(
+    fakeClient,
+    { invoice_source: "work_order" },
+    [{ line_total_ex: 100 }],
+    null,
+    {
+      persistWorkOrderInvoice: async (client) => {
+        assertEquals(client, fakeClient);
+        events.push("persist:start");
+        await Promise.resolve();
+        events.push("persist:done");
+        return "invoice-1";
+      },
+      openXeroBoundary: (client) => {
+        assertEquals(client, fakeClient);
+        events.push("xero:open");
+        return Promise.resolve({ accessToken: "token", tenantId: "tenant" });
+      },
+    },
+  );
+
+  assertEquals(events, ["persist:start", "persist:done", "xero:open"]);
+  assertEquals(result, {
+    invoiceId: "invoice-1",
+    accessToken: "token",
+    tenantId: "tenant",
+  });
 });

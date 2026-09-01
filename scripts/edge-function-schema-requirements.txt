@@ -16,6 +16,7 @@
 #   index       public index name
 #   policy      table.policy
 #   trigger     table.trigger
+#   function    public function name
 #
 # Add a complete requirement set in the same PR as schema-dependent edge code.
 # This manifest never applies SQL. It only drives a read-only production check.
@@ -245,3 +246,25 @@ ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|col
 ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|constraint|trade_invoices_super_gst_split_check
 ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|trigger|trade_invoices.trg_trade_invoices_require_money_split
 ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|function|replace_trade_invoice_draft_v1
+# Weekly work-order invoice blocks select and insert these fields. The header
+# constraint owns Grand Total - final deductions = TO BE PAID, while typed line
+# constraints keep deductions negative and final deductions non-job-scoped.
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoices.job_grand_total_ex
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoices.final_deductions_total_ex
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoices.to_be_paid_ex
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoices_weekly_totals_check
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.source_work_order_id
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.source_trade_invoice_line_id
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.deduction_user_id
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.deduction_assignment_id
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.deduction_trade_rate_id
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.site_address
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|column|trade_invoice_lines.line_position
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_typed_deduction_sign_check
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_final_deduction_scope_check
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_deduction_assignment_fk
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|constraint|trade_invoice_lines_deduction_trade_rate_fk
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|trade_invoice_first_numeric_candidate_v1
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|trade_invoice_work_order_scope_lines_v1
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|persist_trade_work_order_invoice_v1
+ops-api|supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql|function|persist_weekly_trade_invoice_v1

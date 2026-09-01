@@ -145,6 +145,44 @@ Deno.test("trade invoice Xero lines carry net earnings plus one worked-out super
   );
 });
 
+Deno.test("Xero split preserves a final deduction while keeping invoice 31 TO BE PAID", () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 4_813.40,
+    gstOn: false,
+    earningsDate: "2026-08-27",
+  });
+  const lines = splitTradeInvoiceXeroLines(
+    [
+      {
+        Description: "Invoice 31 job blocks",
+        Quantity: 1,
+        UnitAmount: 5_163.40,
+        AccountCode: "306",
+        TaxType: "NONE",
+      },
+      {
+        Description: "Final deduction - Car Loan",
+        Quantity: 1,
+        UnitAmount: -350,
+        AccountCode: "306",
+        TaxType: "NONE",
+      },
+    ],
+    money,
+    { superAccountCode: "306" },
+  );
+
+  assertEquals(lines[1].UnitAmount, -350);
+  assertEquals(lines[2].UnitAmount, 577.61);
+  assertEquals(
+    lines.reduce(
+      (sum, line) => sum + Number(line.Quantity) * Number(line.UnitAmount),
+      0,
+    ),
+    4_813.40,
+  );
+});
+
 Deno.test("trade invoice Xero lines use NoTax when GST is off", () => {
   const money = calculateTradeInvoiceMoney({
     grossEarned: 123.45,

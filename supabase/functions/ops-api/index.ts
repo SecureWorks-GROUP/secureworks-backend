@@ -372,6 +372,16 @@ import {
   tradeInvoiceHasExternalXeroIdentity,
   tradeInvoiceXeroIdempotencyKey,
 } from './trade_invoice_persistence.ts'
+import {
+  buildWeeklyWorkOrderInvoice,
+  calculateWeeklyInvoiceBreakdown,
+  firstWorkOrderNumericValue,
+  WEEKLY_INVOICE_DEDUCTION_LINE_TYPES,
+  WeeklyInvoiceError,
+  weeklyWorkOrderBusinessDate,
+  type WeeklyInvoiceLine,
+  type WeeklyWorkOrderInvoice,
+} from './trade_invoice_weekly.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -1463,10 +1473,57 @@ function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
 
 function presentTradeInvoice<T extends Record<string, unknown>>(
   invoice: T,
-): T & { trade_payable: number | null } {
+): T & { trade_payable: number | null } & Record<string, unknown> {
   try {
-    return presentTradeInvoiceMoney(invoice)
+    const presented = presentTradeInvoiceMoney(invoice)
+    if (String(invoice.invoice_source || '') !== 'weekly_work_order') {
+      return presented
+    }
+    const headerShape = {
+      grand_total: Number(invoice.job_grand_total_ex),
+      final_deductions_total: Number(invoice.final_deductions_total_ex),
+      to_be_paid: Number(invoice.to_be_paid_ex),
+    }
+    if (!Array.isArray(invoice.lines)) return { ...presented, ...headerShape }
+    const normalizedLines = [...invoice.lines]
+      .sort((left: any, right: any) => Number(left?.line_position ?? 0) - Number(right?.line_position ?? 0))
+      .map((line: any): WeeklyInvoiceLine => ({
+        line_type: String(line.line_type || ''),
+        description: String(line.description || ''),
+        quantity: Number(line.quantity),
+        unit: String(line.unit || 'ea'),
+        unit_rate: Number(line.unit_rate),
+        line_total_ex: Number(line.line_total_ex),
+        job_id: line.job_id ? String(line.job_id) : null,
+        job_number: line.job_number ? String(line.job_number) : null,
+        client_name: line.client_name ? String(line.client_name) : null,
+        site_address: line.site_address ? String(line.site_address) : null,
+        line_date: line.line_date ? String(line.line_date) : null,
+        division: line.division ? String(line.division) : null,
+        source_work_order_id: line.source_work_order_id ? String(line.source_work_order_id) : null,
+        source_trade_invoice_line_id: line.source_trade_invoice_line_id ? String(line.source_trade_invoice_line_id) : null,
+        deduction_user_id: line.deduction_user_id ? String(line.deduction_user_id) : null,
+        deduction_assignment_id: line.deduction_assignment_id ? String(line.deduction_assignment_id) : null,
+        deduction_trade_rate_id: line.deduction_trade_rate_id ? String(line.deduction_trade_rate_id) : null,
+      }))
+    const calculated = calculateWeeklyInvoiceBreakdown(normalizedLines)
+    if (
+      Math.abs(calculated.grand_total - headerShape.grand_total) > 0.01 ||
+      Math.abs(calculated.final_deductions_total - headerShape.final_deductions_total) > 0.01 ||
+      Math.abs(calculated.to_be_paid - headerShape.to_be_paid) > 0.01
+    ) {
+      throw new ApiError('Stored weekly invoice lines do not match the invoice totals', 500)
+    }
+    return {
+      ...presented,
+      lines: normalizedLines,
+      ...weeklyInvoiceResponse(calculated),
+    }
   } catch (error) {
+    if (error instanceof ApiError) throw error
+    if (error instanceof WeeklyInvoiceError) {
+      throw new ApiError('Stored weekly invoice is invalid: ' + error.message, 500)
+    }
     return tradeInvoiceMoneyApiError(error)
   }
 }
@@ -9117,7 +9174,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // orders, but tenant and canonical job vertical remain hard server
             // boundaries at submission time too.
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, org_id, job_id, wo_number, status, scope_items, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
+              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
               .eq('id', work_order_id)
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
@@ -9141,6 +9198,24 @@ if (import.meta.main) serve(async (req: Request) => {
               .eq('org_id', tradeUser.orgId)
               .eq('work_order_id', work_order_id)
             if (existingWoInvErr) throw existingWoInvErr
+            const { data: weeklyWoUses, error: weeklyWoUseErr } = await client.from('trade_invoice_lines')
+              .select('trade_invoices!inner(id, user_id, status)')
+              .eq('source_work_order_id', work_order_id)
+              .eq('trade_invoices.org_id', tradeUser.orgId)
+            if (weeklyWoUseErr) throw weeklyWoUseErr
+            const weeklyWoHolder = (weeklyWoUses || []).map((line: any) =>
+              Array.isArray(line.trade_invoices) ? line.trade_invoices[0] : line.trade_invoices
+            ).find((invoice: any) =>
+              invoice && String(invoice.status || '') !== 'ops-reject' && String(invoice.status || '') !== 'failed'
+            )
+            if (weeklyWoHolder) {
+              throw new ApiError(
+                String(weeklyWoHolder.status || '') === 'draft'
+                  ? 'This work order is already part of a weekly invoice draft'
+                  : 'This work order has already been invoiced on a weekly invoice',
+                409,
+              )
+            }
             const blockingWoInvoice = _findBlockingWorkOrderInvoice(existingWoInvoices || [], tradeUser.id)
             if (blockingWoInvoice) {
               throw new ApiError(
@@ -9172,7 +9247,7 @@ if (import.meta.main) serve(async (req: Request) => {
             if (requestedNegativeChargeIds.length > 0) {
               const { data: selectedChargeRows, error: selectedChargeErr } = await client
                 .from('trade_invoice_lines')
-                .select('id, job_id, line_total_ex, override_amount, acknowledgment_status, description, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+                .select('id, job_id, line_type, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
                 .in('id', requestedNegativeChargeIds)
                 .eq('trade_invoices.org_id', tradeUser.orgId)
               if (selectedChargeErr) throw selectedChargeErr
@@ -9233,6 +9308,7 @@ if (import.meta.main) serve(async (req: Request) => {
               scopeItems,
               selectedNegativeCharges,
             )
+            const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
             const woInvoiceDate = new Date().toISOString().slice(0, 10)
             const woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
@@ -9248,94 +9324,77 @@ if (import.meta.main) serve(async (req: Request) => {
               { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
             )
 
-            // Persist the complete local invoice and reconstructable line facts
-            // before any Xero token/contact/bill write. No external bill may be
-            // reported as successful without an owned trade_invoices identity.
-            const tradeInvoiceId = await replaceTradeInvoiceDraftKeepingPrior({
-              createInvoice: async () => {
-                const { data: tradeInv, error: tradeInvErr } = await client.from('trade_invoices').insert({
-                  org_id: tradeUser.orgId,
-                  user_id: tradeUser.id,
-                  work_order_id: work_order_id,
-                  invoice_source: 'work_order',
-                  subtotal_ex: subtotal,
-                  gst,
-                  total_inc: total,
-                  ...tradeInvoiceMoneyFields(woMoney),
-                  has_manual_overrides: selectedNegativeCharges.length > 0,
-                  override_details: selectedNegativeCharges.length > 0
-                    ? {
-                      negative_charge_line_ids: selectedNegativeCharges.map((charge: any) => charge.line_id),
-                      negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
-                    }
-                    : null,
-                  status: 'draft',
-                  xero_bill_id: null,
-                  xero_pushed_at: null,
-                  submitted_at: new Date().toISOString(),
-                }).select('id').single()
-                if (tradeInvErr || !tradeInv?.id) {
-                  throw new Error('Failed to save work-order invoice before Xero: ' + (tradeInvErr?.message || 'no invoice id returned'))
-                }
-                return tradeInv.id
-              },
-              insertLines: async (invoiceId) => {
-                const workOrderLines = scopeItems.map((item: any) => {
-                  const resolved = _resolveWorkOrderScopeLine(item)
-                  return {
-                    trade_invoice_id: invoiceId,
-                    job_id: wo.job_id,
-                    job_number: woJobNum,
-                    client_name: woJob?.client_name || '',
-                    description: item.description || item.name || 'Work order item',
-                    total_hours: 0,
-                    hourly_rate: 0,
-                    quantity: resolved.qty,
-                    unit_rate: resolved.price,
-                    line_total_ex: resolved.amount_ex,
+            const workOrderLines: Array<Record<string, unknown>> = scopeItems.map((item: any) => {
+              const resolved = _resolveWorkOrderScopeLine(item)
+              return {
+                job_id: wo.job_id,
+                job_number: woJobNum,
+                client_name: woJob?.client_name || '',
+                description: item.description || item.name || 'Work order item',
+                total_hours: 0,
+                hourly_rate: 0,
+                quantity: resolved.qty,
+                unit: String(item.unit || (item.metres !== undefined ? 'm' : 'ea')),
+                unit_rate: resolved.price,
+                line_total_ex: resolved.amount_ex,
+                line_date: sourceWorkOrderDate,
+              }
+            })
+            for (const charge of selectedNegativeCharges) {
+              workOrderLines.push({
+                job_id: wo.job_id,
+                job_number: woJobNum,
+                client_name: woJob?.client_name || '',
+                line_type: 'crew_work_order_deduction',
+                description: `Less: ${charge.description} (${charge.trade_name})`,
+                total_hours: 0,
+                hourly_rate: 0,
+                quantity: 1,
+                unit: 'ea',
+                unit_rate: charge.amount_ex,
+                line_total_ex: charge.amount_ex,
+                line_date: sourceWorkOrderDate,
+                source_trade_invoice_line_id: charge.line_id,
+              })
+            }
+
+            // Persist the complete local invoice and its source claims inside
+            // the same organization-scoped transaction as weekly invoices.
+            // No competing route can pass the source check before this commit,
+            // and no Xero work starts until that local identity is durable.
+            const workOrderBoundary = await _claimWorkOrderInvoiceBeforeXero(
+              client,
+              {
+                org_id: tradeUser.orgId,
+                user_id: tradeUser.id,
+                work_order_id,
+                invoice_source: 'work_order',
+                job_id: wo.job_id,
+                source_work_order_date: sourceWorkOrderDate,
+                subtotal_ex: subtotal,
+                gst,
+                total_inc: total,
+                ...tradeInvoiceMoneyFields(woMoney),
+                has_manual_overrides: selectedNegativeCharges.length > 0,
+                override_details: selectedNegativeCharges.length > 0
+                  ? {
+                    negative_charge_line_ids: selectedNegativeCharges.map((charge: any) => charge.line_id),
+                    negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                   }
-                })
-                for (const charge of selectedNegativeCharges) {
-                  workOrderLines.push({
-                    trade_invoice_id: invoiceId,
-                    job_id: wo.job_id,
-                    job_number: woJobNum,
-                    client_name: woJob?.client_name || '',
-                    description: `Less: ${charge.description} (${charge.trade_name})`,
-                    total_hours: 0,
-                    hourly_rate: 0,
-                    quantity: 1,
-                    unit_rate: charge.amount_ex,
-                    line_total_ex: charge.amount_ex,
-                  })
-                }
-                const { error: linesErr } = await client.from('trade_invoice_lines').insert(workOrderLines)
-                if (linesErr) throw new Error('Failed to save work-order invoice lines before Xero: ' + linesErr.message)
+                  : null,
+                status: 'draft',
+                submitted_at: new Date().toISOString(),
               },
-              deleteInvoice: async (invoiceId) => {
-                const { data: deleted, error: deleteErr } = await client.from('trade_invoices')
-                  .delete()
-                  .eq('id', invoiceId)
-                  .select('id')
-                  .maybeSingle()
-                if (deleteErr || deleted?.id !== invoiceId) {
-                  throw new Error('Failed to clean up work-order invoice: ' + (deleteErr?.message || 'invoice was not deleted'))
-                }
-              },
-              replacePriorDraft: (priorDraftId, replacementId) =>
-                replaceTradeInvoicePriorDraft(
-                  client,
-                  priorDraftId,
-                  replacementId,
-                  tradeUser.id,
-                ),
-            }, retryDrafts[0]?.id || null)
+              workOrderLines,
+              retryDrafts[0]?.id || null,
+            )
+            const tradeInvoiceId = workOrderBoundary.invoiceId
             const tradeInv = { id: tradeInvoiceId }
 
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
             let woXeroContactId = tradeXeroUser?.xero_contact_id || null
-            const { accessToken: woAt, tenantId: woTi } = await getToken(client)
+            const { accessToken: woAt, tenantId: woTi } = workOrderBoundary
             if (!woXeroContactId) {
               const woTradeEmail = tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || ''
               if (woTradeEmail) {
@@ -9463,31 +9522,60 @@ if (import.meta.main) serve(async (req: Request) => {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
 
             const draftGstOn = tradeInvoiceGstOn(body)
+            const weeklyShape = hasWeeklyWorkOrderInvoiceShape(body)
+            if (weeklyShape && !draftWeekStart) {
+              throw new ApiError('week_start is required for a weekly work-order draft', 422)
+            }
+            if (weeklyShape) {
+              const weekDate = new Date(draftWeekStart + 'T00:00:00Z')
+              if (Number.isNaN(weekDate.getTime()) || weekDate.getUTCDay() !== 1) {
+                throw new ApiError('week_start must be a Monday', 422)
+              }
+            }
+            const draftWeekEnd = draftWeekStart
+              ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
+              : new Date().toISOString().slice(0, 10)
+            let existingDraftId = weeklyShape && draftWeekStart
+              ? await loadReplaceableWeeklyDraftId(client, tradeUser.id, draftWeekStart)
+              : null
+            const weeklyInvoice = weeklyShape
+              ? await _resolveWeeklyWorkOrderInvoice(
+                client,
+                tradeUser,
+                isDispatcher,
+                draftWeekStart,
+                draftWeekEnd,
+                body,
+              )
+              : null
 
             let labourTotal = 0
-            const labourLines = Array.isArray(draftLabour) ? draftLabour : []
-            for (const l of labourLines) labourTotal += Number(l.line_total_ex || 0)
+            const labourLines = weeklyInvoice ? [] : (Array.isArray(draftLabour) ? draftLabour : [])
+            for (const l of labourLines) labourTotal += roundMoney(Number(l.line_total_ex || 0))
             let extraTotal = 0
-            const extras = Array.isArray(draftExtras)
-              ? draftExtras.filter((e: any) => e?.source !== 'clock' && e?._source !== 'clock' && e?.source !== 'server_labour')
+            const extras = !weeklyInvoice && Array.isArray(draftExtras)
+              ? draftExtras.filter((e: any) => {
+                if (e?.source === 'clock' || e?._source === 'clock' || e?.source === 'server_labour') return false
+                _resolveWeeklyInvoiceLineTrust(null, e)
+                return true
+              })
               : []
             const draftAssignmentIds = [...new Set(
               labourLines.flatMap((line: any) =>
                 Array.isArray(line?.assignment_ids) ? line.assignment_ids : []
               ).filter(Boolean),
             )]
-            for (const e of extras) extraTotal += Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100
-            const draftSubtotal = labourTotal + extraTotal
-            const draftWeekEnd = draftWeekStart
-              ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
-              : new Date().toISOString().slice(0, 10)
+            for (const e of extras) {
+              extraTotal += roundMoney(
+                roundMoney(Number(e.quantity || 1)) * roundMoney(Number(e.rate || 0)),
+              )
+            }
+            const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
             const draftMoney = tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd)
 
-            // Only inspect or replace an existing draft after the complete money
-            // split has validated. A missing/invalid GST choice must leave every
-            // recoverable draft and its lines untouched.
-            let existingDraftId: string | null = null
-            if (draftWeekStart) {
+            // Preserve the legacy draft lookup exactly for hourly invoices.
+            // Weekly work-order drafts use the stricter one-draft resolver above.
+            if (!weeklyShape && draftWeekStart) {
               const { data: existingDraft, error: existingDraftErr } = await client.from('trade_invoices')
                 .select('id')
                 .eq('user_id', tradeUser.id)
@@ -9503,38 +9591,111 @@ if (import.meta.main) serve(async (req: Request) => {
             // Build a complete replacement beside the old draft. The old header
             // (and its cascading lines) is deleted only after every replacement
             // write succeeds, so any PostgREST error leaves the prior draft intact.
-            const draftId = await replaceTradeInvoiceDraftKeepingPrior({
-              createInvoice: async () => {
-                const { data: newDraft, error: draftErr } = await client.from('trade_invoices').insert({
+            const hourlyDraftLineRows: Array<Record<string, unknown>> = [
+              ...labourLines.map((line: any) => ({
+                job_id: line.job_id || null,
+                job_number: line.job_number || null,
+                client_name: line.client_name || null,
+                total_hours: line.total_hours ?? null,
+                hourly_rate: line.hourly_rate ?? null,
+                line_total_ex: roundMoney(Number(line.line_total_ex ?? 0)),
+                work_order_hours: line.work_order_hours ?? null,
+                days_worked: line.days_worked ?? null,
+                assignment_ids: Array.isArray(line.assignment_ids) ? line.assignment_ids : null,
+                acknowledgment_status: line.acknowledgment_status || 'pending',
+                query_note: line.query_note || null,
+                line_type: 'labour',
+                description: line.description || null,
+                quantity: line.quantity ?? null,
+                unit: line.unit || null,
+                unit_rate: line.unit_rate ?? null,
+                line_date: line.line_date || null,
+                division: line.division || null,
+                flag_type: line.flag_type || null,
+                baseline_hours: line.baseline_hours ?? null,
+                baseline_source: line.baseline_source || null,
+                hours_justification: line.hours_justification || null,
+                flagged_at: line.flagged_at || null,
+                wo_allocated: line.wo_allocated ?? null,
+                wo_labour_deduction: line.wo_labour_deduction ?? null,
+                wo_labour_lines: Array.isArray(line.wo_labour_lines) ? line.wo_labour_lines : null,
+              })),
+              ...extras.map((extra: any) => {
+                const quantity = roundMoney(Number(extra.quantity || 1))
+                const unitRate = roundMoney(Number(extra.rate || 0))
+                return {
+                  line_type: (extra.type || 'other').toLowerCase(),
+                  description: extra.description || extra.type || 'Extra item',
+                  quantity,
+                  unit: extra.unit || 'ea',
+                  unit_rate: unitRate,
+                  line_total_ex: roundMoney(quantity * unitRate),
+                }
+              }),
+            ]
+            const hourlyDraftPayload = {
+              org_id: tradeUser.orgId,
+              user_id: tradeUser.id,
+              week_start: draftWeekStart || null,
+              week_end: draftWeekStart ? draftWeekEnd : null,
+              total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
+              total_breaks_minutes: 0,
+              subtotal_ex: draftMoney.gross_earned,
+              gst: draftMoney.gst_amount,
+              total_inc: draftMoney.total_inc,
+              ...tradeInvoiceMoneyFields(draftMoney),
+              invoice_source: 'hourly',
+              job_grand_total_ex: null,
+              final_deductions_total_ex: null,
+              to_be_paid_ex: null,
+              notes: draftNotes || null,
+              status: 'draft',
+            }
+            const draftId = weeklyInvoice
+              ? await _persistWeeklyTradeInvoice(
+                client,
+                {
+                  org_id: tradeUser.orgId,
                   user_id: tradeUser.id,
-                  week_start: draftWeekStart || null,
-                  week_end: draftWeekStart ? draftWeekEnd : null,
-                  total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
+                  week_start: draftWeekStart,
+                  week_end: draftWeekEnd,
+                  total_hours: 0,
+                  total_breaks_minutes: 0,
                   subtotal_ex: draftMoney.gross_earned,
                   gst: draftMoney.gst_amount,
                   total_inc: draftMoney.total_inc,
                   ...tradeInvoiceMoneyFields(draftMoney),
+                  invoice_source: 'weekly_work_order',
+                  job_grand_total_ex: weeklyInvoice.grand_total,
+                  final_deductions_total_ex: weeklyInvoice.final_deductions_total,
+                  to_be_paid_ex: weeklyInvoice.to_be_paid,
                   notes: draftNotes || null,
                   status: 'draft',
-                }).select('id').single()
+                },
+                weeklyInvoice,
+                existingDraftId,
+              )
+              : draftWeekStart
+              ? await _persistTradeInvoiceWeekDraft(
+                client,
+                hourlyDraftPayload,
+                hourlyDraftLineRows,
+                existingDraftId,
+              )
+              : await replaceTradeInvoiceDraftKeepingPrior({
+              createInvoice: async () => {
+                const { data: newDraft, error: draftErr } = await client.from('trade_invoices')
+                  .insert(hourlyDraftPayload).select('id').single()
                 if (draftErr || !newDraft?.id) {
                   throw new Error('Failed to save replacement draft: ' + (draftErr?.message || 'no draft id returned'))
                 }
                 return newDraft.id
               },
               insertLines: async (replacementId) => {
-                const draftLineRows = [
-                  ...labourLines.map((l: any) => ({ ...l, trade_invoice_id: replacementId, line_type: 'labour' })),
-                  ...extras.map((e: any) => ({
-                    trade_invoice_id: replacementId,
-                    line_type: (e.type || 'other').toLowerCase(),
-                    description: e.description || e.type || 'Extra item',
-                    quantity: Number(e.quantity || 1),
-                    unit: e.unit || 'ea',
-                    unit_rate: Number(e.rate || 0),
-                    line_total_ex: Math.round((Number(e.quantity || 1) * Number(e.rate || 0)) * 100) / 100,
-                  })),
-                ]
+                const draftLineRows = hourlyDraftLineRows.map((line) => ({
+                  ...line,
+                  trade_invoice_id: replacementId,
+                }))
                 if (draftLineRows.length === 0) return
                 const { error: draftLinesErr } = await client.from('trade_invoice_lines').insert(draftLineRows)
                 if (draftLinesErr) throw new Error('Failed to save replacement draft lines: ' + draftLinesErr.message)
@@ -9557,8 +9718,13 @@ if (import.meta.main) serve(async (req: Request) => {
                   tradeUser.id,
                   draftAssignmentIds,
                 ),
-            }, existingDraftId)
-            return json({ success: true, draft_id: draftId, ...tradeInvoiceMoneyResponse(draftMoney) })
+              }, existingDraftId)
+            return json({
+              success: true,
+              draft_id: draftId,
+              ...tradeInvoiceMoneyResponse(draftMoney),
+              ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
+            })
           }
           case 'set_trade_rate': return json(await setTradeRate(client, tradeUser.id, body))
           case 'update_trade_profile': {
@@ -9665,6 +9831,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
           case 'generate_trade_invoice': {
             const { week_start, extra_items, notes: invoiceNotes, draft_id, manual_assignments } = body
+            const weeklyShape = hasWeeklyWorkOrderInvoiceShape(body)
 
             // ── Manual-assignment money-path guards ──────────────────────────
             // manual_assignments is the job-centric prefill payload. Trades may
@@ -9699,13 +9866,34 @@ if (import.meta.main) serve(async (req: Request) => {
               // supplemental submissions). The DB unique index was also dropped.
               // Per-assignment duplicate protection remains via invoiced_in. [F3]
             }
+            if (weeklyShape && (!week_start || !weekEnd)) {
+              throw new ApiError('week_start is required for a weekly work-order invoice', 422)
+            }
+            const weeklyInvoice = weeklyShape
+              ? await _resolveWeeklyWorkOrderInvoice(
+                client,
+                tradeUser,
+                isDispatcher,
+                week_start,
+                weekEnd!,
+                body,
+              )
+              : null
+            const invoiceExtraItems = weeklyInvoice
+              ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
+                ...line,
+                type: line.line_type,
+                rate: line.unit_rate,
+                date: line.line_date,
+              }))
+              : extra_items
 
             // Resolve the server-side hourly rate for this trade for this week.
             // trade_rates is the ONLY live rate source (job_assignments.hourly_rate
             // and users.default_hourly_rate are NULL for every trade). rate==0
             // (missing/corrupt window) blocks any hours-bearing submission.   [F2/F5]
             let resolvedRate = 0
-            if (week_start && weekEnd) {
+            if (!weeklyInvoice && week_start && weekEnd) {
               const { data: rateRow } = await client.from('trade_rates')
                 .select('hourly_rate, effective_from')
                 .eq('user_id', tradeUser.id)
@@ -9723,7 +9911,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // Client-entered rates are allowed for manual rows and flagged below.
             let assignments: any[] = []
             let reviewFlag: string | null = null
-            if (week_start && weekEnd && hasManualAssignments) {
+            if (!weeklyInvoice && week_start && weekEnd && hasManualAssignments) {
               // Rate guard: reject only if server rate is missing AND no client rate provided.
               // If the trade enters their own rate, allow it — it flags pending_ops_review below.
               const anyClientRate = manualAssignmentsIn.some((m: any) => Number(m.rate) > 0)
@@ -9795,7 +9983,7 @@ if (import.meta.main) serve(async (req: Request) => {
               if ((asn || []).length !== wantedIds.length) {
                 throw new ApiError('One of your job cards could not be found. It may have been removed or reassigned. Reload and try again, and tell the office if it keeps happening.', 422)
               }
-            } else if (week_start && weekEnd) {
+            } else if (!weeklyInvoice && week_start && weekEnd) {
               // Legacy clocked path: re-query completed assignments server-side.
               const { data: asn } = await client.from('job_assignments')
                 .select('id, job_id, clocked_on_at, clocked_off_at, hours_worked, hourly_rate, break_minutes, manual_override_flag, scheduled_date, status, invoiced_in')
@@ -9839,7 +10027,7 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             // Must have either hours or extra items
-            const hasExtras = Array.isArray(extra_items) && extra_items.length > 0
+            const hasExtras = Array.isArray(invoiceExtraItems) && invoiceExtraItems.length > 0
             if (assignments.length === 0 && !hasExtras) throw new ApiError('Nothing to invoice yet. Tick at least one job card, or add a line with hours, before submitting.', 400)
 
             // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below).
@@ -9963,8 +10151,8 @@ if (import.meta.main) serve(async (req: Request) => {
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
             if (hasExtras) {
-              const requestedJobIds = [...new Set((extra_items || []).map((i: any) => i?.job_id).filter(Boolean))]
-              const requestedJobNumbers = [...new Set((extra_items || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
+              const requestedJobIds = [...new Set((invoiceExtraItems || []).map((i: any) => i?.job_id).filter(Boolean))]
+              const requestedJobNumbers = [...new Set((invoiceExtraItems || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
               // Change 3: removed complete/completed/invoiced so WO/commission extra-item rows on completed
               // make-safes still resolve job_id (fixes null job_id on audit log for finished jobs)
@@ -10060,27 +10248,38 @@ if (import.meta.main) serve(async (req: Request) => {
                 }
               }
 
-              for (const item of extra_items) {
+              for (const item of invoiceExtraItems) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
                 if (item?.source === 'clock' || item?._source === 'clock' || item?.source === 'server_labour') continue
                 const qty = Number(item.quantity || 0)
                 const rate = Number(item.rate || 0)
+                const serverResolvedWeeklyLine = _resolveWeeklyInvoiceLineTrust(
+                  weeklyInvoice,
+                  item,
+                )
                 if (week_start) {
-                  if (!item.job_id && !item.job_number) throw new ApiError('Add a job number to the extra line before submitting.', 422)
+                  if (!serverResolvedWeeklyLine && !item.job_id && !item.job_number) throw new ApiError('Add a job number to the extra line before submitting.', 422)
                   if (!item.description) throw new ApiError(`Add a description of works for the ${item.job_number || item.job_id || 'extra'} line before submitting.`, 422)
                   if (qty <= 0) throw new ApiError(`Enter the hours on the ${item.job_number || item.job_id || 'extra'} line (more than 0).`, 422)
-                  if (rate <= 0) throw new ApiError(`Enter a rate on the ${item.job_number || item.job_id || 'extra'} line (more than 0).`, 422)
+                  if (serverResolvedWeeklyLine ? rate === 0 : rate <= 0) throw new ApiError(`Enter a rate on the ${item.job_number || item.job_id || 'extra'} line (more than 0).`, 422)
                 }
                 const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
-                if (week_start && !resolvedJob) throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
-                const rateSource = item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
+                if (week_start && !resolvedJob && item.type !== 'final_payout_deduction') throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
+                const rateSource = serverResolvedWeeklyLine
+                  ? 'server_resolved'
+                  : item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
+                if (serverResolvedWeeklyLine && Math.abs(amt - Number(item.line_total_ex)) > 0.01) {
+                  throw new ApiError('A server-resolved weekly line no longer matches its quantity and rate', 422)
+                }
                 extraSubtotal += amt
-                const extraHours = Number(item.quantity ?? item.qty ?? item.hours ?? 0)
+                const extraHours = serverResolvedWeeklyLine ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
                 const extraRateNote = rateSource === 'client_entered'
                   ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                  : serverResolvedWeeklyLine
+                  ? 'Server-resolved from work order, acknowledged crew line, or dated trade rate.'
                   : 'Server-resolved rate from trade_rates.'
 
                 // ── M4 U1: make-safe hours flag (searched-in extras path) ────
@@ -10088,7 +10287,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 // never the SWMS- prefix. Same resolver + evaluator as the
                 // assigned path; soft, never blocks, never touches $/hours.
                 let extraHoursFlag: HoursFlagOutcome | null = null
-                if (isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
+                if (!serverResolvedWeeklyLine && isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
                   extraHoursFlag = evaluateHoursFlag({
                     chargedHours: extraHours,
                     candidates: resolvedJob?.id ? candidatesForJob(resolvedJob.id) : [],
@@ -10145,12 +10344,20 @@ if (import.meta.main) serve(async (req: Request) => {
                   job_id: resolvedJob?.id || item.job_id || null,
                   job_number: resolvedJob?.job_number || item.job_number || null,
                   client_name: resolvedJob?.client_name || item.client_name || null,
-                  site_address: resolvedJob
+                  site_address: item.site_address || (resolvedJob
                     ? [resolvedJob.site_address, resolvedJob.site_suburb].filter(Boolean).join(', ')
-                    : (item.site_address || null),
-                  query_note: extraHoursFlag?.flagged
+                    : null),
+                  query_note: serverResolvedWeeklyLine
+                    ? null
+                    : extraHoursFlag?.flagged
                     ? extraHoursFlag.queryNote + ' | ' + extraRateNote
                     : extraRateNote,
+                  source_work_order_id: item.source_work_order_id || null,
+                  source_trade_invoice_line_id: item.source_trade_invoice_line_id || null,
+                  deduction_user_id: item.deduction_user_id || null,
+                  deduction_assignment_id: item.deduction_assignment_id || null,
+                  deduction_trade_rate_id: item.deduction_trade_rate_id || null,
+                  line_position: item.line_position ?? null,
                   // WO facts — persisted (migration 20260730000002) so the deduction
                   // is queryable for the future office reconciliation system.
                   wo_allocated: isWoRow ? (Number(item.wo_allocated) || 0) : null,
@@ -10161,6 +10368,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   // Internal — consumed by toTradeInvoiceLineRow + Xero builders; stripped before insert.
                   _hoursFlag: extraHoursFlag,
                   _woProblems: woProblems,
+                  _weeklyServerResolved: serverResolvedWeeklyLine,
                 })
               }
             }
@@ -10183,7 +10391,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // kills the lump-sum/zero-line class of submission.
             {
               const HOURLY_TYPES = new Set(['labour', 'fencing', 'patio', 'make safe', 'general labour'])
-              const NON_JOB_TYPES = new Set(['adjustment']) // narrow allowlist — no job attribution required
+              const NON_JOB_TYPES = new Set(['adjustment', 'final_payout_deduction']) // narrow allowlist — no job attribution required
               const allLines = [...lineItems, ...extraLineItems]
 
               // 1. Zero-line check: sum of per-line totals must match invoice subtotal
@@ -10212,7 +10420,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   }
                 }
                 // Hours > 0 on hourly-type lines
-                if (HOURLY_TYPES.has(lt)) {
+                if (HOURLY_TYPES.has(lt) && line._weeklyServerResolved !== true) {
                   const hrs = Number(line.total_hours || 0)
                   if (hrs <= 0) {
                     throw new ApiError(`Invoice rejected: labour line "${line.description || lt}" has zero or missing hours. Enter hours greater than 0.`, 422)
@@ -10223,7 +10431,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // ── END M0 GUARD ─────────────────────────────────────────────────
 
             let duplicateExtraMatches: any[] = []
-            if (extraLineItems.length > 0) {
+            if (extraLineItems.length > 0 && !weeklyInvoice) {
               const extraJobIds = [...new Set(extraLineItems.map((e: any) => e.job_id).filter(Boolean))]
               const extraJobNumbers = [...new Set(extraLineItems.map((e: any) => String(e.job_number || '').trim()).filter(Boolean))]
               const duplicateLineReads: PromiseLike<any>[] = []
@@ -10272,7 +10480,13 @@ if (import.meta.main) serve(async (req: Request) => {
             const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
 
             let priorDraftId: string | null = null
-            if (draft_id) {
+            if (weeklyInvoice && week_start) {
+              const weeklyDraftId = await loadReplaceableWeeklyDraftId(client, tradeUser.id, week_start)
+              if (draft_id && String(draft_id) !== String(weeklyDraftId || '')) {
+                throw new ApiError('The selected weekly draft is no longer the replaceable draft for this week', 409)
+              }
+              priorDraftId = weeklyDraftId
+            } else if (draft_id) {
               const { data: draftToSubmit } = await client.from('trade_invoices')
                 .select('id, status, week_start')
                 .eq('id', draft_id)
@@ -10282,7 +10496,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 priorDraftId = draftToSubmit.id
               }
             }
-            if (!priorDraftId && week_start) {
+            if (!weeklyInvoice && !priorDraftId && week_start) {
               const { data: existingDrafts, error: existingDraftErr } = await client.from('trade_invoices')
                 .select('id, status')
                 .eq('user_id', tradeUser.id)
@@ -10300,6 +10514,7 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             const invoicePayload = {
+              ...(weeklyInvoice ? { org_id: tradeUser.orgId } : {}),
               user_id: tradeUser.id,
               week_start: week_start || null,
               week_end: weekEnd,
@@ -10309,8 +10524,23 @@ if (import.meta.main) serve(async (req: Request) => {
               gst,
               total_inc: totalInc,
               ...tradeInvoiceMoneyFields(money),
-              has_manual_overrides: hasOverrides,
-              override_details: hasOverrides ? overrideDetails : null,
+              invoice_source: weeklyInvoice ? 'weekly_work_order' : 'hourly',
+              job_grand_total_ex: weeklyInvoice?.grand_total ?? null,
+              final_deductions_total_ex: weeklyInvoice?.final_deductions_total ?? null,
+              to_be_paid_ex: weeklyInvoice?.to_be_paid ?? null,
+              has_manual_overrides: weeklyInvoice
+                ? weeklyInvoice.final_deductions_total > 0 || weeklyInvoice.lines.some((line) => line.line_total_ex < 0)
+                : hasOverrides,
+              override_details: weeklyInvoice
+                ? {
+                  work_order_ids: [...new Set(weeklyInvoice.lines.map((line) => line.source_work_order_id).filter(Boolean))],
+                  crew_charge_line_ids: [...new Set(weeklyInvoice.lines.map((line) => line.source_trade_invoice_line_id).filter(Boolean))],
+                  deduction_user_ids: [...new Set(weeklyInvoice.lines.map((line) => line.deduction_user_id).filter(Boolean))],
+                  grand_total: weeklyInvoice.grand_total,
+                  final_deductions_total: weeklyInvoice.final_deductions_total,
+                  to_be_paid: weeklyInvoice.to_be_paid,
+                }
+                : hasOverrides ? overrideDetails : null,
               notes: invoiceNotes || null,
               invoice_number: invoiceNumber,
               submitted_at: new Date().toISOString(),
@@ -10318,12 +10548,11 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             const toTradeInvoiceLineRow = (invoiceId: string, line: any, defaults: any = {}) => {
-              // site_address is used for the Xero description below but is not
-              // a trade_invoice_lines column. _hoursFlag/_woProblems are
+              // _hoursFlag/_woProblems/_weeklyServerResolved are
               // memory-only metadata (_hoursFlag unpacks into the flag columns below;
               // _woProblems feeds the unresolved-line audit event). Never send
               // memory-only fields to PostgREST.
-              const { site_address: _siteAddress, _hoursFlag: _hf, _woProblems: _wp, ...dbLine } = { ...defaults, ...line }
+              const { _hoursFlag: _hf, _woProblems: _wp, _weeklyServerResolved: _wsr, ...dbLine } = { ...defaults, ...line }
               // M4 U1: land the flag-fact fields (U4 contract) from the resolver
               // outcome. baseline_hours/baseline_source are recorded for EVERY
               // make-safe line; flag_type/hours_justification/flagged_at only when
@@ -10349,6 +10578,13 @@ if (import.meta.main) serve(async (req: Request) => {
                 unit_rate: dbLine.unit_rate ?? null,
                 line_date: dbLine.line_date || null,
                 division: dbLine.division || null,
+                site_address: dbLine.site_address || null,
+                source_work_order_id: dbLine.source_work_order_id || null,
+                source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
+                deduction_user_id: dbLine.deduction_user_id || null,
+                deduction_assignment_id: dbLine.deduction_assignment_id || null,
+                deduction_trade_rate_id: dbLine.deduction_trade_rate_id || null,
+                line_position: dbLine.line_position ?? null,
                 flag_type: ff?.lineFields.flag_type ?? null,
                 baseline_hours: ff?.lineFields.baseline_hours ?? null,
                 baseline_source: ff?.lineFields.baseline_source ?? null,
@@ -10364,7 +10600,14 @@ if (import.meta.main) serve(async (req: Request) => {
                 Array.isArray(line.assignment_ids) ? line.assignment_ids : []
               )
               .filter(Boolean)
-            const invoiceId = await replaceTradeInvoiceDraftKeepingPrior({
+            const invoiceId = weeklyInvoice
+              ? await _persistWeeklyTradeInvoice(
+                client,
+                invoicePayload,
+                weeklyInvoice,
+                priorDraftId,
+              )
+              : await replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
                   .insert(invoicePayload)
@@ -10401,7 +10644,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   tradeUser.id,
                   includedAssignmentIds,
                 ),
-            }, priorDraftId)
+              }, priorDraftId)
             const invoice = { id: invoiceId }
 
             // ── Layer B: stamp invoiced_in on every included assignment ──────
@@ -10548,7 +10791,15 @@ if (import.meta.main) serve(async (req: Request) => {
                 source: 'ops-api/generate_trade_invoice',
                 entity_type: 'trade_invoice',
                 entity_id: invoice.id,
-                payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, ...tradeInvoiceMoneyResponse(money), client_priced_lines: clientPricedExtraCount, possible_duplicate_extra_lines: duplicateExtraCount },
+                payload: {
+                  user_name: userProfile?.name,
+                  week_start,
+                  total_hours: totalHours,
+                  ...tradeInvoiceMoneyResponse(money),
+                  ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
+                  client_priced_lines: clientPricedExtraCount,
+                  possible_duplicate_extra_lines: duplicateExtraCount,
+                },
               })
             } catch (e) { /* non-blocking */ }
 
@@ -10666,7 +10917,9 @@ if (import.meta.main) serve(async (req: Request) => {
                     Description: [
                       possibleDuplicate ? 'POSSIBLE DUPLICATE - verify prior trade invoice before approving' : null,
                       e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
-                      (e.description || e.line_type || 'Extra') + (e.quantity > 1 ? ' (' + e.quantity + ' × $' + (e.unit_rate || 0) + ')' : ''),
+                      (Number(e.line_total_ex) < 0 ? 'Less: ' : '') +
+                        (e.description || e.line_type || 'Extra') +
+                        (e.quantity > 1 ? ' (' + e.quantity + ' × $' + Math.abs(e.unit_rate || 0) + ')' : ''),
                       // M4 U1: inline hours-flag on a searched-in make-safe extra line.
                       e._hoursFlag?.xeroDescriptionLine || null,
                       e.client_name ? [e.client_name, e.site_address].filter(Boolean).join(', ') : '',
@@ -10688,7 +10941,9 @@ if (import.meta.main) serve(async (req: Request) => {
                 // so the insurer/builder ref appears in the bill header, not just the line descriptions.
                 // _external_ref is already on jobMap entries (enriched above at Change 4 / L3464-3472).
                 const xeroExternalRefs = [...new Set(lineItems.map((l: any) => jobMap[l.job_id]?._external_ref).filter(Boolean))].join(', ')
-                const xeroInternalJobNums = [...new Set(lineItems.map((l: any) => l.job_number).filter(Boolean))].join(', ')
+                const xeroInternalJobNums = [...new Set(
+                  [...lineItems, ...extraLineItems].map((l: any) => l.job_number).filter(Boolean),
+                )].join(', ')
                 // M4 U1: append the EXACT `| HOURS-FLAG` marker when any line on
                 // this invoice flagged, so finance can spot flagged bills in the
                 // Xero invoice list without opening each one (finding #7 verbatim).
@@ -10835,6 +11090,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
                 xero_bill_id: null,
                 xero_bill_number: null,
@@ -10853,6 +11109,7 @@ if (import.meta.main) serve(async (req: Request) => {
               invoice_number: invoiceNumber,
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
+              ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
               xero_bill_number: xeroBillNumber,
@@ -12123,25 +12380,14 @@ function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100
 }
 
-function firstNumericValue(candidates: unknown[], fallback: number): number {
-  for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined) continue
-    if (typeof candidate === 'string' && candidate.trim() === '') continue
-    const numeric = Number(candidate)
-    if (!Number.isFinite(numeric)) continue
-    return numeric
-  }
-  return fallback
-}
-
 // The only reader of a scope item's quantity and price. The Xero line items,
 // the invoice totals and the saved invoice lines all resolve through this, so
 // the pushed bill, the trade_invoices record and the audit event agree.
 export function _resolveWorkOrderScopeLine(
   item: any,
 ): { qty: number; price: number; amount_ex: number } {
-  const qty = firstNumericValue([item?.quantity, item?.metres, item?.qty], 1)
-  const price = firstNumericValue([item?.unit_price, item?.rate, item?.price], 0)
+  const qty = roundMoney(firstWorkOrderNumericValue([item?.quantity, item?.metres, item?.qty], 1))
+  const price = roundMoney(firstWorkOrderNumericValue([item?.unit_price, item?.rate, item?.price], 0))
   return { qty, price, amount_ex: roundMoney(qty * price) }
 }
 
@@ -12204,6 +12450,18 @@ export function _selectWorkOrderNegativeCharges(
       job_id: String(row.job_id),
       trade_name: parent?.users?.name || 'Trade',
       description: row.description || 'Trade charge',
+      source_line_type: row.line_type || 'labour',
+      quantity: Number(row.quantity) > 0
+        ? Number(row.quantity)
+        : Number(row.total_hours) > 0
+        ? Number(row.total_hours)
+        : 1,
+      unit: row.unit || (Number(row.total_hours) > 0 ? 'hr' : 'ea'),
+      source_unit_rate: Number(row.unit_rate) > 0
+        ? Number(row.unit_rate)
+        : Number(row.hourly_rate) > 0
+        ? Number(row.hourly_rate)
+        : sourceAmount,
       source_amount_ex: roundMoney(sourceAmount),
       amount_ex: -roundMoney(sourceAmount),
       override_applied: overrideApplied,
@@ -12259,6 +12517,379 @@ export function _calculateWorkOrderInvoiceTotals(
   }
 }
 
+function hasWeeklyWorkOrderInvoiceShape(body: any): boolean {
+  return Array.isArray(body?.work_order_blocks)
+}
+
+const WEEKLY_INVOICE_PROVENANCE_FIELDS = [
+  'source_work_order_id',
+  'source_trade_invoice_line_id',
+  'deduction_user_id',
+  'deduction_assignment_id',
+  'deduction_trade_rate_id',
+] as const
+
+export function _resolveWeeklyInvoiceLineTrust(
+  weeklyInvoice: WeeklyWorkOrderInvoice | null,
+  item: any,
+): boolean {
+  if (weeklyInvoice) return true
+  const lineType = String(item?.type || item?.line_type || '').trim().toLowerCase()
+  const hasWeeklyOnlyProvenance = WEEKLY_INVOICE_PROVENANCE_FIELDS.some((field) =>
+    item?.[field] !== null && item?.[field] !== undefined && String(item[field]).trim() !== ''
+  )
+  if (
+    WEEKLY_INVOICE_DEDUCTION_LINE_TYPES.includes(lineType as any) ||
+    hasWeeklyOnlyProvenance
+  ) {
+    throw new ApiError(
+      'Weekly deduction lines must be selected from server-resolved work-order sources',
+      422,
+    )
+  }
+  return false
+}
+
+function weeklyInvoiceResponse(invoice: WeeklyWorkOrderInvoice) {
+  return {
+    job_blocks: invoice.job_blocks,
+    final_deductions: invoice.final_deductions,
+    grand_total: invoice.grand_total,
+    final_deductions_total: invoice.final_deductions_total,
+    to_be_paid: invoice.to_be_paid,
+  }
+}
+
+function weeklyInvoiceLineRows(invoice: WeeklyWorkOrderInvoice): any[] {
+  return invoice.lines.map((line, linePosition) => ({
+    ...line,
+    line_position: linePosition,
+    total_hours: null,
+    hourly_rate: null,
+  }))
+}
+
+export async function _persistWeeklyTradeInvoice(
+  client: any,
+  invoicePayload: Record<string, unknown>,
+  invoice: WeeklyWorkOrderInvoice,
+  requestedPriorDraftId: string | null,
+): Promise<string> {
+  return await _persistTradeInvoiceWeekDraft(
+    client,
+    invoicePayload,
+    weeklyInvoiceLineRows(invoice),
+    requestedPriorDraftId,
+  )
+}
+
+export async function _persistTradeInvoiceWeekDraft(
+  client: any,
+  invoicePayload: Record<string, unknown>,
+  lineRows: Array<Record<string, unknown>>,
+  requestedPriorDraftId: string | null,
+): Promise<string> {
+  const { data, error } = await client.rpc('persist_weekly_trade_invoice_v1', {
+    p_invoice: invoicePayload,
+    p_lines: lineRows.map((line, linePosition) => ({
+      ...line,
+      line_position: line.line_position ?? linePosition,
+    })),
+    p_requested_prior_draft_id: requestedPriorDraftId,
+  })
+  const invoiceId = String(data || '')
+  if (error || !invoiceId) {
+    throw new Error('Failed to persist weekly/hourly draft invoice: ' + (error?.message || 'no invoice id returned'))
+  }
+  return invoiceId
+}
+
+export async function _persistWorkOrderInvoice(
+  client: any,
+  invoicePayload: Record<string, unknown>,
+  lineRows: Array<Record<string, unknown>>,
+  requestedPriorDraftId: string | null,
+): Promise<string> {
+  const { data, error } = await client.rpc('persist_trade_work_order_invoice_v1', {
+    p_invoice: invoicePayload,
+    p_lines: lineRows.map((line, linePosition) => ({
+      ...line,
+      line_position: linePosition,
+    })),
+    p_requested_prior_draft_id: requestedPriorDraftId,
+  })
+  const invoiceId = String(data || '')
+  if (error || !invoiceId) {
+    throw new Error('Failed to persist work-order invoice: ' + (error?.message || 'no invoice id returned'))
+  }
+  return invoiceId
+}
+
+export async function _claimWorkOrderInvoiceBeforeXero(
+  client: any,
+  invoicePayload: Record<string, unknown>,
+  lineRows: Array<Record<string, unknown>>,
+  requestedPriorDraftId: string | null,
+  dependencies: {
+    persistWorkOrderInvoice?: typeof _persistWorkOrderInvoice
+    openXeroBoundary?: typeof getToken
+  } = {},
+): Promise<{ invoiceId: string; accessToken: string; tenantId: string }> {
+  const invoiceId = await (
+    dependencies.persistWorkOrderInvoice || _persistWorkOrderInvoice
+  )(client, invoicePayload, lineRows, requestedPriorDraftId)
+  const { accessToken, tenantId } = await (
+    dependencies.openXeroBoundary || getToken
+  )(client)
+  return { invoiceId, accessToken, tenantId }
+}
+
+function weeklyInvoiceSourceUseAllowed(
+  parent: any,
+  viewerId: string,
+  weekStart: string,
+): boolean {
+  return String(parent?.status || '') === 'draft' &&
+    String(parent?.user_id || '') === String(viewerId) &&
+    String(parent?.week_start || '') === weekStart
+}
+
+async function loadReplaceableWeeklyDraftId(
+  client: any,
+  userId: string,
+  weekStart: string,
+): Promise<string | null> {
+  const { data, error } = await client.from('trade_invoices')
+    .select('id, xero_bill_id, xero_pushed_at')
+    .eq('user_id', userId)
+    .eq('week_start', weekStart)
+    .eq('status', 'draft')
+    .order('created_at', { ascending: true })
+    .limit(2)
+  if (error) throw new Error('Failed to load existing weekly draft: ' + error.message)
+  const drafts = data || []
+  if (drafts.length > 1) {
+    throw new ApiError('Multiple weekly drafts need office review before this week can be edited', 409)
+  }
+  const draft = drafts[0]
+  if (draft && tradeInvoiceHasExternalXeroIdentity(draft)) {
+    throw new ApiError('The weekly draft already has an external Xero identity and cannot be replaced', 409)
+  }
+  return draft?.id || null
+}
+
+export async function _resolveWeeklyWorkOrderInvoice(
+  client: any,
+  tradeUser: TradeAuthContext,
+  isDispatcher: boolean,
+  weekStart: string,
+  weekEnd: string,
+  body: any,
+): Promise<WeeklyWorkOrderInvoice> {
+  const requestedBlocks = Array.isArray(body?.work_order_blocks)
+    ? body.work_order_blocks
+    : []
+  if (requestedBlocks.length === 0) {
+    throw new ApiError('Select at least one completed work order for the weekly invoice', 422)
+  }
+  if (
+    (Array.isArray(body?.manual_assignments) && body.manual_assignments.length > 0) ||
+    (Array.isArray(body?.extra_items) && body.extra_items.length > 0) ||
+    (Array.isArray(body?.labour_lines) && body.labour_lines.length > 0)
+  ) {
+    throw new ApiError('Weekly work-order blocks cannot be mixed with legacy invoice lines', 422)
+  }
+
+  const workOrderIds = requestedBlocks.map((block: any) => String(block?.work_order_id || '')).filter(Boolean)
+  if (workOrderIds.length !== requestedBlocks.length || new Set(workOrderIds).size !== workOrderIds.length) {
+    throw new ApiError('Every weekly job block requires one distinct work_order_id', 422)
+  }
+
+  const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
+    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
+    .eq('org_id', tradeUser.orgId)
+    .eq('jobs.org_id', tradeUser.orgId)
+    .in('id', workOrderIds)
+  if (workOrderErr) throw new Error('Failed to load weekly work orders: ' + workOrderErr.message)
+  if ((workOrders || []).length !== workOrderIds.length) {
+    throw new ApiError('One or more weekly work orders were not found in your business', 404)
+  }
+  const workOrderById = new Map((workOrders || []).map((row: any) => [String(row.id), row]))
+  const workDateById = new Map<string, string>()
+  for (const workOrder of workOrders || []) {
+    const job = Array.isArray(workOrder.jobs) ? workOrder.jobs[0] : workOrder.jobs
+    if (!_canSubmitWorkOrderInvoice(tradeUser, { ...workOrder, jobs: job }, isDispatcher)) {
+      throw new ApiError('Not authorised — a weekly work order is outside your assigned or managed work', 403)
+    }
+    if (String(workOrder.status || '') !== 'complete') {
+      throw new ApiError('Every weekly work order must be complete before invoicing', 422)
+    }
+    const workDate = weeklyWorkOrderBusinessDate(workOrder)
+    if (!workDate || workDate < weekStart || workDate > weekEnd) {
+      throw new ApiError('Every weekly work order must have a completion or scheduled date inside the selected week', 422)
+    }
+    workDateById.set(String(workOrder.id), workDate)
+  }
+
+  const requestedChargeIds = requestedBlocks.flatMap((block: any) =>
+    Array.isArray(block?.crew_charge_line_ids) ? block.crew_charge_line_ids : []
+  ).map((id: unknown) => String(id || '')).filter(Boolean)
+  const chargeIds = [...new Set(requestedChargeIds)]
+  if (chargeIds.length !== requestedChargeIds.length) {
+    throw new ApiError('A crew charge can only be deducted once on a weekly invoice', 422)
+  }
+  const labourRequests = requestedBlocks.flatMap((block: any) => {
+    const workOrder = workOrderById.get(String(block?.work_order_id || '')) as any
+    const job = Array.isArray(workOrder?.jobs) ? workOrder.jobs[0] : workOrder?.jobs
+    return (Array.isArray(block?.labour_deductions) ? block.labour_deductions : []).map((line: any) => ({
+      ...line,
+      work_order_id: String(block.work_order_id),
+      job_id: String(workOrder?.job_id || job?.id || ''),
+    }))
+  })
+  const labourUserIds = [...new Set(labourRequests.map((line: any) => String(line?.user_id || '')).filter(Boolean))]
+  if (labourRequests.some((line: any) => !line.user_id || !(Number(line.hours) > 0))) {
+    throw new ApiError('Every labour deduction requires a crew user and positive hours', 422)
+  }
+  const labourRequestKeys = labourRequests.map((line: any) => `${line.work_order_id}|${line.user_id}`)
+  if (new Set(labourRequestKeys).size !== labourRequestKeys.length) {
+    throw new ApiError('Enter one combined labour deduction per crew user and work order', 422)
+  }
+  if (labourUserIds.includes(String(tradeUser.id))) {
+    throw new ApiError('A trade cannot deduct their own labour from a weekly invoice', 422)
+  }
+
+  const jobIds = [...new Set((workOrders || []).map((workOrder: any) => String(workOrder.job_id || '')).filter(Boolean))]
+  const reads: PromiseLike<any>[] = [
+    client.from('trade_invoice_lines')
+      .select('source_work_order_id, trade_invoices!inner(id, user_id, week_start, status)')
+      .in('source_work_order_id', workOrderIds),
+    client.from('trade_invoices')
+      .select('id, user_id, status, work_order_id')
+      .eq('org_id', tradeUser.orgId)
+      .in('work_order_id', workOrderIds),
+  ]
+  if (chargeIds.length > 0) {
+    reads.push(
+      client.from('trade_invoice_lines')
+        .select('id, job_id, line_type, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+        .in('id', chargeIds)
+        .eq('trade_invoices.org_id', tradeUser.orgId),
+      client.from('trade_invoice_lines')
+        .select('source_trade_invoice_line_id, trade_invoices!inner(id, user_id, week_start, status)')
+        .in('source_trade_invoice_line_id', chargeIds),
+    )
+  }
+  if (labourUserIds.length > 0) {
+    reads.push(
+      client.from('users').select('id, org_id, name').eq('org_id', tradeUser.orgId).in('id', labourUserIds),
+      client.from('trade_rates')
+        .select('id, user_id, hourly_rate, effective_from, effective_to')
+        .eq('org_id', tradeUser.orgId)
+        .in('user_id', labourUserIds)
+        .lte('effective_from', weekEnd)
+        .or(`effective_to.is.null,effective_to.gte.${weekStart}`)
+        .order('effective_from', { ascending: false })
+        .order('id', { ascending: false }),
+      client.from('job_assignments')
+        .select('id, job_id, user_id, status')
+        .in('job_id', jobIds)
+        .in('user_id', labourUserIds),
+    )
+  }
+  const results = await Promise.all(reads)
+  const readError = results.find((result: any) => result.error)?.error
+  if (readError) throw new Error('Failed to resolve weekly invoice sources: ' + readError.message)
+
+  let resultIndex = 0
+  const workOrderLineUses = results[resultIndex++]?.data || []
+  const headerWorkOrderUses = results[resultIndex++]?.data || []
+  const chargeRows = chargeIds.length > 0 ? (results[resultIndex++]?.data || []) : []
+  const chargeLineUses = chargeIds.length > 0 ? (results[resultIndex++]?.data || []) : []
+  const labourUsers = labourUserIds.length > 0 ? (results[resultIndex++]?.data || []) : []
+  const labourRates = labourUserIds.length > 0 ? (results[resultIndex++]?.data || []) : []
+  const labourAssignments = labourUserIds.length > 0 ? (results[resultIndex++]?.data || []) : []
+
+  for (const use of workOrderLineUses) {
+    const parent = Array.isArray(use.trade_invoices) ? use.trade_invoices[0] : use.trade_invoices
+    if (!weeklyInvoiceSourceUseAllowed(parent, tradeUser.id, weekStart)) {
+      throw new ApiError('A selected work order is already held by another trade invoice', 409)
+    }
+  }
+  for (const invoice of headerWorkOrderUses) {
+    if (String(invoice.status || '') !== 'ops-reject' && String(invoice.status || '') !== 'failed') {
+      throw new ApiError('A selected work order already has an individual invoice or draft', 409)
+    }
+  }
+  for (const use of chargeLineUses) {
+    const parent = Array.isArray(use.trade_invoices) ? use.trade_invoices[0] : use.trade_invoices
+    if (!weeklyInvoiceSourceUseAllowed(parent, tradeUser.id, weekStart)) {
+      throw new ApiError('A selected crew charge has already been deducted on another invoice', 409)
+    }
+  }
+
+  const labourUserById = new Map<string, any>(
+    labourUsers.map((user: any): [string, any] => [String(user.id), user]),
+  )
+  try {
+    return buildWeeklyWorkOrderInvoice({
+      job_blocks: requestedBlocks.map((block: any) => {
+        const workOrder = workOrderById.get(String(block.work_order_id)) as any
+        const job = Array.isArray(workOrder?.jobs) ? workOrder.jobs[0] : workOrder?.jobs
+        const selectedChargeIds: string[] = [...new Set<string>((Array.isArray(block.crew_charge_line_ids)
+          ? block.crew_charge_line_ids
+          : []).map((id: unknown) => String(id || '')).filter(Boolean))]
+        const crewDeductions = _selectWorkOrderNegativeCharges(chargeRows, {
+          jobId: String(workOrder?.job_id || job?.id || ''),
+          orgId: tradeUser.orgId,
+          viewerId: tradeUser.id,
+          selectedIds: selectedChargeIds,
+        })
+        const directLabour = labourRequests.filter((line: any) => line.work_order_id === String(block.work_order_id)).map((line: any) => {
+          const userId = String(line.user_id || '')
+          const user = labourUserById.get(userId)
+          const workDate = workDateById.get(String(block.work_order_id)) || ''
+          const rate = labourRates.find((candidate: any) =>
+            String(candidate.user_id || '') === userId &&
+            String(candidate.effective_from || '') <= workDate &&
+            (!candidate.effective_to || String(candidate.effective_to) >= workDate)
+          )
+          const assignment = labourAssignments.find((candidate: any) =>
+            String(candidate.user_id || '') === userId &&
+            String(candidate.job_id || '') === String(workOrder?.job_id || '') &&
+            String(candidate.status || '') !== 'cancelled'
+          )
+          if (!user || !rate) {
+            throw new ApiError('A labour deduction has no same-business dated trade rate', 422)
+          }
+          if (!assignment) {
+            throw new ApiError('A labour deduction user is not assigned to that job', 422)
+          }
+          return {
+            user_id: userId,
+            user_name: user.name,
+            hours: Number(line.hours),
+            rate: Number(rate.hourly_rate),
+            assignment_id: assignment.id,
+            trade_rate_id: rate.id,
+          }
+        })
+        return {
+          work_order: { ...workOrder, jobs: job },
+          work_date: workDateById.get(String(block.work_order_id)) || null,
+          crew_deductions: crewDeductions,
+          labour_deductions: directLabour,
+        }
+      }),
+      final_deductions: Array.isArray(body?.final_deductions) ? body.final_deductions : [],
+    })
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    if (error instanceof WeeklyInvoiceError) throw new ApiError(error.message, error.status)
+    throw error
+  }
+}
+
 // A work order is only free to invoice when no live invoice holds it. A stale
 // draft releases it for its OWN submitter only: that caller can replace the
 // local draft before the persisted replacement ID becomes the one Xero
@@ -12288,15 +12919,26 @@ async function readWorkOrderInvoiceRows(
   const rows: any[] = []
   for (let i = 0; i < workOrderIds.length; i += WORK_ORDER_ID_CHUNK) {
     const ids = workOrderIds.slice(i, i + WORK_ORDER_ID_CHUNK)
-    const { data, error } = await client
-      .from('trade_invoices')
-      .select('id, org_id, user_id, work_order_id, status, xero_bill_id')
-      .eq('org_id', orgId)
-      .in('work_order_id', ids)
-    if (error) throw error
-    rows.push(...(data || []))
+    const [headerResult, weeklyLineResult] = await Promise.all([
+      client.from('trade_invoices')
+        .select('id, org_id, user_id, work_order_id, status, xero_bill_id')
+        .eq('org_id', orgId)
+        .in('work_order_id', ids),
+      client.from('trade_invoice_lines')
+        .select('source_work_order_id, trade_invoices!inner(id, org_id, user_id, status, xero_bill_id)')
+        .in('source_work_order_id', ids)
+        .eq('trade_invoices.org_id', orgId),
+    ])
+    if (headerResult.error) throw headerResult.error
+    if (weeklyLineResult.error) throw weeklyLineResult.error
+    rows.push(...(headerResult.data || []))
+    for (const line of weeklyLineResult.data || []) {
+      const parent = Array.isArray(line.trade_invoices) ? line.trade_invoices[0] : line.trade_invoices
+      if (!parent) continue
+      rows.push({ ...parent, work_order_id: line.source_work_order_id, weekly_work_order_line: true })
+    }
   }
-  return rows
+  return [...new Map(rows.map((row: any) => [`${row.id}|${row.work_order_id}`, row])).values()]
 }
 
 async function readWorkOrderChargeRows(
@@ -12310,7 +12952,7 @@ async function readWorkOrderChargeRows(
     const ids = jobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
     const { data, error } = await client
       .from('trade_invoice_lines')
-      .select('id, job_id, line_total_ex, override_amount, acknowledgment_status, description, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+      .select('id, job_id, line_type, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
       .in('job_id', ids)
       .eq('trade_invoices.org_id', orgId)
       .neq('trade_invoices.user_id', viewerId)
@@ -12472,10 +13114,24 @@ export async function tradeWorkOrders(
     const subtotal = workOrderScopeSubtotal(scopeItems)
     const gst = roundMoney(subtotal * 0.1)
     const negativeCharges = negativeChargesByJob.get(String(workOrder.job_id || '')) || []
-    const blockingInvoice = _findBlockingWorkOrderInvoice(
-      invoiceRowsByWorkOrder.get(String(workOrder.id)) || [],
+    const workOrderInvoices = invoiceRowsByWorkOrder.get(String(workOrder.id)) || []
+    const weeklyDraft = workOrderInvoices.find((invoice: any) =>
+      invoice.weekly_work_order_line === true && String(invoice.status || '') === 'draft'
+    )
+    const existingBlocker = _findBlockingWorkOrderInvoice(
+      workOrderInvoices,
       viewer.id,
     )
+    const canReopenWeeklyDraft = !!weeklyDraft && !existingBlocker &&
+      String(weeklyDraft.user_id || '') === String(viewer.id)
+    const weeklyBuilderBlocker = workOrderInvoices.find((invoice: any) => {
+      const status = String(invoice?.status || '')
+      if (status === 'failed' || status === 'ops-reject') return false
+      const isOwnWeeklyDraft = invoice?.weekly_work_order_line === true &&
+        status === 'draft' && String(invoice?.user_id || '') === String(viewer.id)
+      return !isOwnWeeklyDraft
+    })
+    const blockingInvoice = existingBlocker || weeklyDraft
     const alreadyInvoiced = !!blockingInvoice &&
       !RELEASED_INVOICE_STATUS_SET.has(String(blockingInvoice.status || ''))
     return {
@@ -12492,6 +13148,7 @@ export async function tradeWorkOrders(
       site_address: workOrder.site_address || workOrder.jobs?.site_address || '',
       site_suburb: workOrder.jobs?.site_suburb || '',
       scheduled_date: workOrder.scheduled_date,
+      completed_at: workOrder.completed_at,
       scope_items: scopeItems,
       subtotal,
       gst,
@@ -12503,8 +13160,12 @@ export async function tradeWorkOrders(
       )),
       already_invoiced: alreadyInvoiced,
       invoice_block_reason: blockingInvoice
-        ? (alreadyInvoiced ? 'invoiced' : 'other_trade_draft')
+        ? (canReopenWeeklyDraft ? 'weekly_draft' : alreadyInvoiced ? 'invoiced' : 'other_trade_draft')
         : null,
+      weekly_draft_id: canReopenWeeklyDraft
+        ? weeklyDraft.id
+        : null,
+      can_add_to_weekly_invoice: workOrder.status === 'complete' && !weeklyBuilderBlocker,
       can_invoice: workOrder.status === 'complete' && !blockingInvoice,
     }
   })
@@ -46286,7 +46947,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, xero_bill_id, status, created_at')
+    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, status, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(20)
@@ -46345,7 +47006,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_number, client_name, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit_rate)')
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position)')
     .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 

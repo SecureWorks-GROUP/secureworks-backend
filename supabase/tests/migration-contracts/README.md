@@ -18,7 +18,12 @@ To register a new migration contract:
 5. When practical, add `break-contract.sql` and `break-contract.expected` to
    deliberately remove the promised behavior and prove the contract detects
    the break.
-6. Run `bash supabase/tests/migration-contracts/run.sh` against disposable
+6. When a down migration exists, add `rollback-contract.sql`. The runner
+   applies the forward stack through that case, executes
+   `supabase/rollbacks/<case>_down.sql`, and then asserts the restored legacy
+   surface. This catches dependency-order failures that static SQL review does
+   not.
+7. Run `bash supabase/tests/migration-contracts/run.sh` against disposable
    localhost PostgreSQL using the command below. CI runs the same entrypoint.
 
 The required directory shape is:
@@ -39,6 +44,10 @@ Two optional pairs make failure behaviour executable:
 - `break-contract.sql` plus `break-contract.expected` deliberately removes the
   promised behaviour and proves that `contract.sql` fails for the expected
   reason.
+
+An optional `rollback-contract.sql` executes after the matching down migration
+and proves both that it ran cleanly and that the promised legacy schema remains
+queryable.
 
 Run the suite locally only against disposable localhost PostgreSQL:
 

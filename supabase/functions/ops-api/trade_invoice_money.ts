@@ -388,14 +388,39 @@ export function splitTradeInvoiceXeroLines(
   }
 
   const netCents = toCents(money.net_pay);
-  const allocations = sourceCents.map((amount) =>
-    Math.round(amount * netCents / grossCents)
+  const negativeCents = sourceCents.reduce(
+    (sum, amount) => sum + (amount < 0 ? amount : 0),
+    0,
   );
-  const allocatedCents = allocations.reduce((sum, amount) => sum + amount, 0);
-  const remainder = netCents - allocatedCents;
+  const positiveCents = sourceCents.reduce(
+    (sum, amount) => sum + (amount > 0 ? amount : 0),
+    0,
+  );
+  if (positiveCents <= 0) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_GROSS_MISMATCH",
+      "Trade invoice requires a positive earnings line before deductions",
+    );
+  }
+  // Deductions are exact liabilities such as a car-loan repayment or an
+  // acknowledged crew pass-through. They must remain recognisable at their
+  // approved amount in Xero. Allocate the super reserve only across positive
+  // earnings lines; leaving negatives untouched still makes net + super equal
+  // the persisted TO BE PAID total.
+  const positiveTargetCents = netCents - negativeCents;
+  const allocations = sourceCents.map((amount) => {
+    if (amount < 0) return amount;
+    if (amount === 0) return 0;
+    return Math.round(amount * positiveTargetCents / positiveCents);
+  });
+  const allocatedPositiveCents = allocations.reduce(
+    (sum, amount) => sum + (amount > 0 ? amount : 0),
+    0,
+  );
+  const remainder = positiveTargetCents - allocatedPositiveCents;
   if (remainder !== 0) {
     const adjustmentIndex = sourceCents.findIndex((amount) => amount > 0);
-    allocations[adjustmentIndex >= 0 ? adjustmentIndex : 0] += remainder;
+    allocations[adjustmentIndex] += remainder;
   }
 
   const taxType = money.gst_on ? "INPUT" : "NONE";
