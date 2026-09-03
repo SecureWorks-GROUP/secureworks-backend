@@ -394,6 +394,7 @@ export interface MakeSafeJobFamilyDecision {
     | "text_assessment_report"
     | "physical_makesafe"
     | "rapid_repair_signal"
+    | "identified_wo_repair_complement"
     | "ambiguous_scope";
   /**
    * Ruling 1 quote-stage marker: a builder "please price this" request is a
@@ -580,6 +581,62 @@ export function decideMakeSafeJobFamily(
   }
 
   return { family: null, evidence: "ambiguous_scope" };
+}
+
+/**
+ * Captain ruling 2026-08-31 (the specification, verbatim): "A properly
+ * identified, readable work order that is NOT general make-safe, NOT a roof
+ * report, NOT an assessment/quote report, and NOT a temporary fence make-safe
+ * IS repair."
+ *
+ * This is the negative complement the 2026-08-25 scout report warned was
+ * unsafe as a bare test, answered: the complement is correct ONLY once the
+ * identity and evidence floor has already been passed. It therefore applies
+ * strictly to a decision whose abstention evidence is `ambiguous_scope` — a
+ * readable scope that matched no family — and never to any other abstention:
+ *
+ * - `text_restoration_park` / `ajs_restoration_park` stay parked (restoration
+ *   stays as it is — Ruling 15 / Ruling 9 are untouched).
+ * - Every positive classification (temp fence, general make-safe, roof,
+ *   assessment, restoration, declared-type repair) is returned unchanged, so
+ *   the complement can never move a classified family.
+ * - The caller asserts the floor: `scopeReadable` means an extracted work-order
+ *   PDF produced a real scope block (a parse failure, boilerplate-only PDF, or
+ *   unreadable document is NOT a readable work order and must keep parking);
+ *   `identityProved` means the card resolves exactly one canonical builder
+ *   instruction key when read at the repair grain (an unknown builder or
+ *   insufficient identity yields no key and must keep parking).
+ *
+ * The deterministic fate ladder applies the same rule at its LAST exception
+ * rung (`makesafe_deterministic_intake.ts`), where chatter, cancellations,
+ * unknown builders, quote-stage enquiries, conflicts, identity shortfalls and
+ * parse failures have all already fired — so nothing below the quality floor
+ * can reach the complement there either.
+ *
+ * A complement-classified draft still never auto-mints, and the guarantee rests
+ * on the MINT-TIME brake, not on the sweep. `approveIntakeDraft`'s
+ * `UNATTENDED_INTAKE_APPROVAL` refusal (`index.ts`) judges the FINAL
+ * `approvedJobFamily` — the one that will actually be created — and refuses any
+ * caller carrying the unattended marker. That is the only reading that cannot be
+ * outflanked upstream: `shouldAutoApproveCleanIntake`'s
+ * `repair_family_supervised_review` check runs on `resolvedIntakeDraftFamily`
+ * (subject + body preview + stored family), while the approval fallback
+ * classifies from the full instruction text and only then applies THIS
+ * complement, so the two legitimately disagree on a legacy-vintage draft that
+ * passes the sweep as `general_makesafe` and resolves `repair` at the mint.
+ * Treat the sweep check and the deterministic lane's
+ * `deterministicPlanNeedsSupervisedRepairReview` park
+ * (`makesafe_deterministic_intake_runtime.ts`) as earlier, weaker layers that
+ * park most of the population sooner — never as the guarantee.
+ */
+export function applyIdentifiedWorkOrderRepairComplement(
+  decision: MakeSafeJobFamilyDecision,
+  floor: { scopeReadable: boolean; identityProved: boolean },
+): MakeSafeJobFamilyDecision {
+  if (decision.family !== null) return decision;
+  if (decision.evidence !== "ambiguous_scope") return decision;
+  if (!floor.scopeReadable || !floor.identityProved) return decision;
+  return { family: "repair", evidence: "identified_wo_repair_complement" };
 }
 
 export function decideDeterministicMakeSafeJobFamily(

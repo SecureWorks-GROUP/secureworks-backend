@@ -746,6 +746,7 @@ import {
   slugFromRefPrefix as _slugFromRefPrefix,
   isReportOnlyType as _isReportOnlyType,
   reportTypeForJobFamily as _reportTypeForJobFamily,
+  applyIdentifiedWorkOrderRepairComplement as _applyIdentifiedWorkOrderRepairComplement,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   decideDeterministicMakeSafeJobFamily as _decideDeterministicMakeSafeJobFamily,
   detectRepairLegSignal as _detectRepairLegSignal,
@@ -856,6 +857,9 @@ import {
 import {
   applyParsedWorkOrderReferenceToExtraction as _applyParsedWorkOrderReferenceToExtraction,
   builderInstructionKeysForCard as _builderInstructionKeysForCard,
+  declaredBuilderInstructionKeysForCard as
+    _declaredBuilderInstructionKeysForCard,
+  distinctBuilderInstructionKeys as _distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity as _extractBuilderWorkOrderIdentity,
   isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
@@ -6364,7 +6368,11 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await _drainLegacyIntakeDrafts(client, {
           maxDrafts: Number(body?.max_drafts ?? body?.maxDrafts ?? 100),
-          approveDraft: approveIntakeDraft,
+          approveDraft: (approvalClient: any, approvalBody: any) =>
+            approveIntakeDraft(approvalClient, {
+              ...approvalBody,
+              ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+            }),
           applyBuilderCancellation: (command) =>
             applyDeterministicBuilderCancellation(client, command),
         }))
@@ -24079,6 +24087,7 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
 
     try {
       const approved = await approveIntakeDraft(client, {
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
         draft_id: draft.id,
         // The note names NO caller: authoritative per-row provenance is approved_by
         // (the actual trigger). A note describing a deleted code path (the removed
@@ -24386,6 +24395,10 @@ async function settleIntakeApproval(
   notificationSuppressionReason:
     | typeof SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION
     | null = null,
+  approval: { unattended: boolean; approvedBy: string | null } = {
+    unattended: true,
+    approvedBy: null,
+  },
 ) {
   return await settleApprovedIntakeDraft(client, {
     draftId: draft.id,
@@ -24394,6 +24407,8 @@ async function settleIntakeApproval(
     extraction,
     requiredMintRoles,
     notificationSuppressionReason,
+    caseBindingProvenance: approval.unattended ? 'deterministic' : 'human',
+    caseBindingActor: approval.approvedBy || 'intake_approval_settlement',
     ...(notificationSuppressionReason
       ? {
         verifyNotificationSuppression: async (input: { jobId: string }) => {
@@ -24542,9 +24557,26 @@ const SOURCE_PERSIST_NO_SEND_RECOVERY = Symbol(
   'sourcePersistNoSendRecovery',
 )
 
+// Ruled 2026-08-28: the repair lane runs SUPERVISED — an SWR- mint is
+// irreversible, so a human taps every one. Every in-repo automation lane that
+// reaches approveIntakeDraft without an operator stamps this marker, and the
+// brake below judges the family that will ACTUALLY be created. The upstream
+// sweep brake reads `resolvedIntakeDraftFamily` (subject + preview + stored
+// family) while approval derives its own from the full instruction text and
+// then applies the identified-work-order complement, so the two can legitimately
+// disagree and only the mint-time reading cannot be outflanked. A module-private
+// Symbol is used so no request body can forge it, and so a new automation lane
+// that forgets it is a reviewable omission rather than a silent bypass.
+const UNATTENDED_INTAKE_APPROVAL = Symbol('unattendedIntakeApproval')
+const UNATTENDED_INTAKE_APPROVAL_MARKER = {
+  [UNATTENDED_INTAKE_APPROVAL]: UNATTENDED_INTAKE_APPROVAL,
+} as Record<symbol, symbol>
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
+  const unattendedApproval =
+    body?.[UNATTENDED_INTAKE_APPROVAL] === UNATTENDED_INTAKE_APPROVAL
   const notificationSuppressionReason =
     body?.[SOURCE_PERSIST_NO_SEND_RECOVERY] ===
         SOURCE_PERSIST_NO_SEND_RECOVERY
@@ -24700,6 +24732,7 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
       requiredMintRoles,
       notificationSuppressionReason,
+      { unattended: unattendedApproval, approvedBy: approved_by || null },
     )
     const settledExtraction = {
       ...extraction,
@@ -24740,25 +24773,113 @@ async function approveIntakeDraft(client: any, body: any) {
       null,
   )
 
+  // One producer for every reading of this draft's canonical builder instruction
+  // keys. The family is the only input that varies between the three consumers
+  // (the repair-grain probe below, the F9 conflict decision and the mint
+  // reservation), so the card facts cannot drift between them.
+  const instructionKeyIdentity = (family: string | null) => ({
+    requestingCompanySlug: approvedFields.requesting_company_slug,
+    family,
+    metadata: {
+      external_ref: approvedFields.external_ref,
+      builder_claim_ref: extraction?.builder_claim_ref,
+      builder_work_order_number: extraction?.builder_work_order_number,
+      builder_po_number: extraction?.builder_po_number,
+    },
+    detailExternalRef: approvedFields.external_ref,
+  })
+  const instructionKeysForFamily = (family: string | null) =>
+    _builderInstructionKeysForCard({
+      ...instructionKeyIdentity(family),
+      attachmentNames: availableAttachments.map((attachment: any) =>
+        attachment.file_name || attachment.filename || attachment.name ||
+          attachment.pdf_url || attachment.storage_url
+      ),
+    })
+  // The WO-fallback collapse may only be authorised by a PO this card DECLARES.
+  // A purchase order read off an attached filename belongs to whichever job that
+  // PDF was written for, and MLB attaches every PDF of a claim to every card.
+  const distinctInstructionKeysForFamily = (family: string | null) =>
+    _distinctBuilderInstructionKeys(
+      instructionKeysForFamily(family),
+      _declaredBuilderInstructionKeysForCard(instructionKeyIdentity(family)),
+    )
+
+  // Fallback family for a draft carrying no authoritative family, under the
+  // captain's 2026-08-31 identified-work-order complement: when the classifier
+  // genuinely ABSTAINS (`ambiguous_scope` — never a restoration park, which
+  // keeps today's behaviour) over a readable extracted scope block on a card
+  // that resolves exactly ONE canonical builder instruction key at the repair
+  // grain, the work order is repair rather than the old blanket
+  // general_makesafe default. loadDraftFamilyClassifierContext has already
+  // refused any draft without exactly one extracted work-order PDF, so the
+  // scope-readability floor here is the scope block itself (a boilerplate-only
+  // PDF still falls back to general_makesafe exactly as before).
+  const approvalFallbackJobFamily = () => {
+    const decision = _decideDeterministicMakeSafeJobFamily(
+      draft?.subject || approvedFields.external_ref || '',
+      [
+        extraction?.builder_email_text_for_trade,
+        approvedFields.description,
+        approvedFields.makesafe_type,
+      ].filter(Boolean).join('\n'),
+      effectiveReportType || null,
+      approvedFamilyContext,
+    )
+    if (decision.family) return decision.family
+    const repairGrainKeys = distinctInstructionKeysForFamily('repair')
+    return _applyIdentifiedWorkOrderRepairComplement(decision, {
+      scopeReadable: !!approvedFamilyContext.pdfScopeText &&
+        !approvedFamilyContext.pdfOnlyBoilerplate,
+      identityProved: repairGrainKeys.length === 1,
+    }).family || 'general_makesafe'
+  }
+
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
-  // draft's roof/assessment family (that belongs to the secondary report card).
-  const approvedJobFamily = authoritativeFamily || (splitObligation
-    ? _classifyMakeSafeJobFamily(
+  // draft's roof/assessment family (that belongs to the secondary report card),
+  // and never apply the repair complement (the split primary IS physical work).
+  //
+  // The split classifier can still say `repair` on its own (the replacement-verb
+  // ladder, or the rapid-repair upgrade), which would contradict the sentence
+  // above, so it is CLAMPED here. Captain ruling 2026-08-28, Ruling 5: a
+  // dual-scope work order stays make-safe and flags the repair LEG; the child
+  // SWR- spawn is a human tap. No signal is lost — the leg still reaches a human
+  // through the `repair_leg_detected` stamp and its review flag.
+  //
+  // This is alignment, not a live fix: `combinedSplitRecoveryDecision` above
+  // refuses a split outright until BOTH mint roles already carry a job, so the
+  // split primary is never created here and a `repair` reading could not reach
+  // the unattended brake either (both brake sites are skipped once
+  // `recoveredPrimaryMint` exists). The clamp keeps the derived family honest if
+  // that gate is ever relaxed — and the brake itself stays untouched, because on
+  // a split the runtime sends `reviewed_fields: {}` and its own park would not
+  // see a family to park on.
+  const splitPrimaryJobFamily = () => {
+    const classified = _classifyMakeSafeJobFamily(
       draft?.subject || approvedFields.external_ref || '',
       [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
       null,
       approvedFamilyContext,
     )
-    : _classifyMakeSafeJobFamily(
-    draft?.subject || approvedFields.external_ref || '',
-    [
-      extraction?.builder_email_text_for_trade,
-      approvedFields.description,
-      approvedFields.makesafe_type,
-    ].filter(Boolean).join('\n'),
-    effectiveReportType || null,
-    approvedFamilyContext,
-  ))
+    return _normaliseDedupJobFamily(classified) === 'repair'
+      ? 'general_makesafe'
+      : classified
+  }
+  const approvedJobFamily = authoritativeFamily ||
+    (splitObligation ? splitPrimaryJobFamily() : approvalFallbackJobFamily())
+  // The 2026-08-28 ruling forbids an unattended lane CREATING an SWR- card; it
+  // says nothing about finishing one a human already ticked. This is the family
+  // half of that test — the refusal itself is placed at the two points where a
+  // new card can actually be minted, so a settlement retry, a guarded
+  // source-authority link and the F9 refusal all stay reachable.
+  const unattendedRepairMint = unattendedApproval &&
+    _normaliseDedupJobFamily(approvedJobFamily) === 'repair'
+  const refuseUnattendedRepairMint = (): never => {
+    throw new ApiError(
+      'Repair intake requires a human tick: this instruction resolves to the repair family, which no unattended lane may mint. The draft stays in the review queue for an operator to approve.',
+      409,
+    )
+  }
   const approvalDocumentTexts = parseJsonArray(extraction?.work_order_pdf_text)
     .map((document: any) =>
       typeof document?.text === 'string' && document.text.trim()
@@ -24861,6 +24982,7 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
       [],
       notificationSuppressionReason,
+      { unattended: unattendedApproval, approvedBy: approved_by || null },
     )
 
     return {
@@ -24885,21 +25007,20 @@ async function approveIntakeDraft(client: any, body: any) {
   // draft claim. It deliberately scans terminal cards and work-order filenames;
   // a match leaves this draft visible/reviewable and never reaches job minting.
   if (!recoveredPrimaryMint) {
-    const instructionKeys = _builderInstructionKeysForCard({
-      requestingCompanySlug: approvedFields.requesting_company_slug,
-      family: approvedJobFamily || null,
-      metadata: {
-        external_ref: approvedFields.external_ref,
-        builder_claim_ref: extraction?.builder_claim_ref,
-        builder_work_order_number: extraction?.builder_work_order_number,
-        builder_po_number: extraction?.builder_po_number,
-      },
-      detailExternalRef: approvedFields.external_ref,
-      attachmentNames: availableAttachments.map((attachment: any) =>
-        attachment.file_name || attachment.filename || attachment.name ||
-          attachment.pdf_url || attachment.storage_url
-      ),
-    })
+    // One work order carrying BOTH its WO number and its PO enumerates two keys
+    // for one instruction (the PO-grain key plus the repair WO fallback). This
+    // side of the comparison is THIS draft's identity, so it runs on the
+    // distinct-instruction set: the conflict decision, the availability probe's
+    // candidate keys and the mint reservation all ask "which instructions is
+    // this one card?" and the answer is the PO. Enumerating the claim-grain WO
+    // fallback here would make a second genuinely distinct PO on the same claim
+    // collide with the first card's group reference, and one MLB claim
+    // routinely hosts several POs. The EXISTING-card side
+    // (`matchExistingInstructionCards`) keeps the full enumeration, so a
+    // re-send showing only the WO reference still finds the card it has.
+    const instructionKeys = distinctInstructionKeysForFamily(
+      approvedJobFamily || null,
+    )
     if (instructionKeys.length > 1) {
       throw new ApiError(
         `Instruction identity conflict: draft carries multiple canonical keys (${instructionKeys.join(', ')}); review required and no card was minted`,
@@ -24924,21 +25045,12 @@ async function approveIntakeDraft(client: any, body: any) {
       throw error
     }
   }
-  const canonicalInstructionKeys = _builderInstructionKeysForCard({
-    requestingCompanySlug: approvedFields.requesting_company_slug,
-    family: approvedJobFamily || null,
-    metadata: {
-      external_ref: approvedFields.external_ref,
-      builder_claim_ref: extraction?.builder_claim_ref,
-      builder_work_order_number: extraction?.builder_work_order_number,
-      builder_po_number: extraction?.builder_po_number,
-    },
-    detailExternalRef: approvedFields.external_ref,
-    attachmentNames: availableAttachments.map((attachment: any) =>
-      attachment.file_name || attachment.filename || attachment.name ||
-        attachment.pdf_url || attachment.storage_url
-    ),
-  })
+  // The reservation reserves THIS card's instructions, so it takes the same
+  // distinct-instruction set the availability probe compared on — reserving the
+  // claim-grain WO fallback would lock every other purchase order on the claim.
+  const canonicalInstructionKeys = distinctInstructionKeysForFamily(
+    approvedJobFamily || null,
+  )
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
@@ -25013,6 +25125,15 @@ async function approveIntakeDraft(client: any, body: any) {
   // from either 'needs_review' or 'draft', so the claim allows both (the narrowest
   // set that does not break the happy path); any other current status (approved,
   // approving-n/a, rejected, superseded) yields zero rows -> concurrent/invalid block.
+  // Refuse an unattended repair mint here, before the claim, so nothing at all is
+  // written. Everything above this line either links to a job that already exists
+  // (the guarded source-authority binding) or refuses on its own terms (F9, the
+  // duplicate guard), and a draft that already names a live job is a settlement
+  // RETRY rather than a mint, so it must reach the recovery below.
+  if (unattendedRepairMint && !approvedJobId && !recoveredPrimaryMint) {
+    refuseUnattendedRepairMint()
+  }
+
   const { data: claimed, error: claimErr } = await client.from('makesafe_intake_drafts')
     .update({ status: 'approved', updated_at: new Date().toISOString() })
     .eq('id', draft_id)
@@ -25068,6 +25189,14 @@ async function approveIntakeDraft(client: any, body: any) {
     const recoveredPrimaryJob = primaryMint
       ? await recoverIntakeMintJob(client, primaryMint)
       : null
+    // The one place a NEW card is actually minted. The pre-claim check above lets a
+    // settlement retry through on the coordinates it can see; if recovery still
+    // failed to name a live job the fall-through would create one, so the ruling is
+    // re-applied here. The post-claim catch releases the reservation and requeues
+    // the draft, so this refusal also leaves nothing behind.
+    if (!recoveredPrimaryJob && unattendedRepairMint) {
+      refuseUnattendedRepairMint()
+    }
     const jobResult = recoveredPrimaryJob
       ? { job: recoveredPrimaryJob }
       : await createMakesafeJob(client, {
@@ -25303,6 +25432,7 @@ async function approveIntakeDraft(client: any, body: any) {
       extraction,
       requiredMintRoles,
       notificationSuppressionReason,
+      { unattended: unattendedApproval, approvedBy: approved_by || null },
     )
     const { error: settlementError } = await client
       .from('makesafe_intake_drafts')
@@ -25374,6 +25504,9 @@ async function approveIntakeDraft(client: any, body: any) {
     throw postClaimErr
   }
 }
+export const _approveIntakeDraftForTest = approveIntakeDraft
+export const _unattendedIntakeApprovalMarkerForTest =
+  UNATTENDED_INTAKE_APPROVAL_MARKER
 
 // ── Slice 7: reject intake draft ──
 async function rejectIntakeDraft(client: any, body: any) {
@@ -26359,6 +26492,7 @@ export async function reextractIntakeDraft(
   if (autoDecision.ok) {
     try {
       const approved = await approveIntakeDraft(client, {
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
         draft_id: draftId,
         approved_by: 'auto-intake-reextract',
         review_notes: 'Auto-filed after in-place re-extraction (reextract_intake_draft): high-confidence, required fields + servable WO PDF present.',
@@ -26673,6 +26807,7 @@ async function landLateWorkOrderPdfOntoDraft(
   if (enabled && decision.ok) {
     try {
       const approved = await approve(client, {
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
         draft_id: target.id,
         approved_by: 'auto-intake-late-pdf',
         review_notes: 'Auto-filed after a late work-order PDF landed on an existing intake draft (two-email MLB sequence): high-confidence, required fields + servable WO PDF now present. Draft-only intake promotion; no invoice/send/authorise/close action.',
@@ -26726,7 +26861,11 @@ async function scanSesMakesafes(
     allowSourcePostIds: rollout.sourcePostIds,
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
-    approveDraft: approveIntakeDraft,
+    approveDraft: (approvalClient: any, approvalBody: any) =>
+      approveIntakeDraft(approvalClient, {
+        ...approvalBody,
+        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      }),
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
@@ -26760,16 +26899,17 @@ async function scanFreshMakesafeSource(
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
-  const approveExactDraft = options.approvalReviewNote
-    ? (approvalClient: any, approvalBody: any) => approveIntakeDraft(
-      approvalClient,
-      {
-        ...approvalBody,
-        review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
-          .filter(Boolean).join(' '),
-      },
-    )
-    : approveIntakeDraft
+  const approveExactDraft = (approvalClient: any, approvalBody: any) =>
+    approveIntakeDraft(approvalClient, {
+      ...approvalBody,
+      ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      ...(options.approvalReviewNote
+        ? {
+          review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
+            .filter(Boolean).join(' '),
+        }
+        : {}),
+    })
   const report = await _runDeterministicIntake(client, {
     dryRun: false,
     selectionMode: 'exact',
@@ -27262,6 +27402,7 @@ async function sourcePersistRecoveryAction(client: any, body: any) {
           approveDraft: (approvalClient: any, approvalBody: any) =>
             approveIntakeDraft(approvalClient, {
               ...approvalBody,
+              ...UNATTENDED_INTAKE_APPROVAL_MARKER,
               [SOURCE_PERSIST_NO_SEND_RECOVERY]:
                 SOURCE_PERSIST_NO_SEND_RECOVERY,
               suppress_manager_notification: true,
@@ -29763,6 +29904,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
         // called at the function level, NOT through the route (the Wave-0 rule that the
         // routine key can't call approve_intake_draft stays intact).
         const approved = await approveIntakeDraft(client, {
+          ...UNATTENDED_INTAKE_APPROVAL_MARKER,
           draft_id: inserted.id,
           approved_by: 'auto-intake',
           review_notes: 'Auto-filed clean make-safe intake (Auto-Intake v2): high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',

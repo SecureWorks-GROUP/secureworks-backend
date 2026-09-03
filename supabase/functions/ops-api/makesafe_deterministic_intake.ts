@@ -17,6 +17,7 @@ import {
   type TemplateParsingRules,
 } from "./makesafe_template_parser.ts";
 import {
+  applyIdentifiedWorkOrderRepairComplement,
   decideDeterministicMakeSafeJobFamily,
   subjectIsExcludedNonWorkOrder,
   subjectIsKnownBuilderNoise,
@@ -2601,6 +2602,33 @@ export function buildDeterministicIntakePlan(
         !instructionItems.some((i) =>
           isLifecycleReopenText(lifecycleText(i.source))
         );
+      // Captain ruling 2026-08-31: a properly identified, readable work order
+      // that is not general make-safe, not a roof report, not an
+      // assessment/quote report and not a temporary fence make-safe IS repair.
+      // The complement is computed here but consumed only at the ladder's LAST
+      // exception rung, where every quality floor above (chatter, cancellation,
+      // unknown builder, quote-stage, conflicting fields, identity floor,
+      // parse failure) has already fired. It additionally requires:
+      // - every source item genuinely ABSTAINED (`job_family:ambiguous_scope`),
+      //   so a restoration park (`text_restoration_park`/`ajs_restoration_park`)
+      //   and a cross-source family CONFLICT (whose items carry positive
+      //   evidence) both keep parking exactly as today;
+      // - a real extracted scope block (a boilerplate-only or unextracted PDF
+      //   is not a readable work order);
+      // - the settled WO+PO identity key (properly identified).
+      const identifiedWoRepair = merged.identity.jobFamily === "unclassified" &&
+        instructionItems.every((item) =>
+          item.parseWarnings.includes("job_family:ambiguous_scope")
+        ) &&
+        applyIdentifiedWorkOrderRepairComplement(
+            { family: null, evidence: "ambiguous_scope" },
+            {
+              scopeReadable: instructionItems.some((item) =>
+                !!pdfScopeText(item.source, item.adapterId)
+              ),
+              identityProved: !!merged.identity.woPoIdentityKey,
+            },
+          ).family === "repair";
       let state: MakesafeCaseState;
       let reasonCode: MakesafeReasonCode | null = null;
       if (intent === "chatter") {
@@ -2663,13 +2691,26 @@ export function buildDeterministicIntakePlan(
         // scope never parsed, not because a parsed scope was ambiguous (D6).
         state = "exception";
         reasonCode = "adapter_parse_failure";
-      } else if (merged.identity.jobFamily === "unclassified") {
+      } else if (
+        merged.identity.jobFamily === "unclassified" && !identifiedWoRepair
+      ) {
         state = "exception";
         reasonCode = "ambiguous_scope";
       } else if (missingPortalEvidence.length || missingSecondary.length) {
         state = "blocked_live_job";
       } else {
         state = "confirmed_live_job";
+      }
+      // The complement stamps the family only on a case that actually wants a
+      // live job. An earlier rung firing (a chatter-only cluster can still
+      // satisfy the complement's own terms) keeps its exception untouched.
+      // Precedent for a fate-time family stamp with unchanged instruction and
+      // lineage keys: the `repair_quote_stage` rung above.
+      if (
+        identifiedWoRepair &&
+        (state === "blocked_live_job" || state === "confirmed_live_job")
+      ) {
+        merged.identity = { ...merged.identity, jobFamily: "repair" };
       }
 
       let relation: DeterministicCasePlan["parentRelation"] = null;

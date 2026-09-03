@@ -14,10 +14,18 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _approveIntakeDraftForTest,
   _createMakesafeJob,
   _makesafeJobRouteForFamily,
   _requestedMakesafeJobRoute,
+  _unattendedIntakeApprovalMarkerForTest,
 } from "./index.ts";
+import {
+  excludeInsuranceRepairs,
+  insuranceRepairStage,
+  isInsuranceRepairFamily,
+  projectInsuranceRepairPipelineRow,
+} from "./insurance_repairs_board.ts";
 
 type Row = Record<string, any>;
 
@@ -129,12 +137,26 @@ function makeClient(store: Store) {
         filters.push((row) => row[column] === value);
         return chain;
       },
+      neq: (column: string, value: unknown) => {
+        filters.push((row) => row[column] !== value);
+        return chain;
+      },
       is: (column: string, value: unknown) => {
         filters.push((row) => row[column] == value);
         return chain;
       },
+      in: (column: string, values: unknown[]) => {
+        filters.push((row) => (values || []).includes(row[column]));
+        return chain;
+      },
+      not: () => chain,
+      contains: () => chain,
+      or: () => chain,
+      gte: () => chain,
+      lte: () => chain,
       ilike: () => chain,
       order: () => chain,
+      range: () => chain,
       limit: () => chain,
       maybeSingle: async () => {
         const result = await execute();
@@ -186,6 +208,22 @@ function makeClient(store: Store) {
           },
           error: null,
         };
+      }
+      if (name === "complete_makesafe_intake_job_mint") {
+        const mint = (store.tables.makesafe_intake_job_mints || []).find(
+          (row) => row.id === args.p_mint_id,
+        );
+        if (!mint) return { data: [], error: null };
+        mint.job_id = args.p_job_id;
+        return { data: [mint], error: null };
+      }
+      if (name === "reserve_makesafe_intake_job_mint") {
+        const existing = (store.tables.makesafe_intake_job_mints || []).find(
+          (row) =>
+            row.draft_id === args.p_draft_id &&
+            row.mint_role === args.p_mint_role,
+        );
+        return { data: existing ? [existing] : [], error: null };
       }
       return { data: null, error: null };
     },
@@ -603,4 +641,545 @@ Deno.test("a hand-raised repair is a repair in its metadata too, not just its ty
   assertEquals(controlStore.tables.jobs[0].type, "makesafe");
   assertEquals(controlStore.tables.jobs[0].job_number, "SWMS-261400");
   assertEquals("repair_stage" in controlStore.tables.jobs[0].metadata, false);
+});
+
+// ── The final-family brake: no unattended lane may mint a repair card ────────
+//
+// Ruled 2026-08-28: every SWR- mint is a human tick. The upstream sweep brake
+// reads `resolvedIntakeDraftFamily` (subject + preview + stored family), while
+// approval derives its own family from the full instruction text and then
+// applies the 2026-08-31 identified-work-order complement — so a legacy-vintage
+// draft can pass the sweep as one family and resolve to `repair` only at the
+// moment of minting. Judging the family that will ACTUALLY be created is the
+// only check that cannot be outflanked upstream.
+
+const LEGACY_REPAIR_SCOPE =
+  "Repaint the hallway ceiling and patch minor plaster cracking.";
+
+const LEGACY_REPAIR_WO_TEXT = `Work Order Number
+MLB-27150PO-61000
+Policyholders Name
+Neutral Client
+Mobile: 0422 000 111
+Site Address
+30 Neutral Street, Perth, WA 6000
+Scope of Works
+Repaint the hallway ceiling and patch minor plaster cracking.
+Totals
+Subtotal $1,000.00`;
+
+function legacyRepairDraftRow(): Row {
+  return {
+    id: "draft-legacy-repair",
+    org_id: ORG_ID,
+    status: "needs_review",
+    // Legacy vintage: NOT deterministic_intake, and no stored family — so
+    // `deterministicDraftFamilyForApproval` yields null and approval takes the
+    // fallback classifier plus the complement.
+    graph_message_id: "legacy-graph-message-1",
+    subject: "MLB-27150",
+    body_preview: LEGACY_REPAIR_SCOPE,
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    external_ref: "MLB-27150",
+    client_name: "Neutral Client",
+    client_phone: "0422 000 111",
+    client_email: null,
+    site_address: "30 Neutral Street, Perth",
+    site_suburb: "Perth",
+    description: LEGACY_REPAIR_SCOPE,
+    report_type: null,
+    confidence: "high",
+    missing_fields: [],
+    approved_job_id: null,
+    attachments_json: [{
+      id: "legacy-repair-attachment",
+      file_name: "MLB Work Order.pdf",
+      is_work_order: true,
+      storage_url: "storage/legacy-repair-wo.pdf",
+      pdf_url: "storage/legacy-repair-wo.pdf",
+    }],
+    extraction_json: {
+      builder_claim_ref: "MLB-27150",
+      builder_po_number: "PO-61000",
+      builder_email_text_for_trade: LEGACY_REPAIR_SCOPE,
+      work_order_pdf_text: [{
+        attachment_id: "legacy-repair-attachment",
+        attachment_name: "MLB Work Order.pdf",
+        status: "extracted",
+        text: LEGACY_REPAIR_WO_TEXT,
+      }],
+    },
+  };
+}
+
+function approvalClient(
+  draft: Row,
+  seed: {
+    mints?: Row[];
+    jobs?: Row[];
+    caseSources?: Row[];
+    cases?: Row[];
+  } = {},
+) {
+  const drafts = [draft];
+  const rpcCalls: string[] = [];
+  const draftUpdates: Row[] = [];
+  const caseUpdates: Row[] = [];
+  const mints = seed.mints || [];
+  return {
+    drafts,
+    rpcCalls,
+    draftUpdates,
+    caseUpdates,
+    client: {
+      rpc(name: string) {
+        rpcCalls.push(name);
+        if (name === "reserve_makesafe_intake_job_mint") {
+          return Promise.resolve({ data: mints, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+      from(table: string) {
+        if (table === "makesafe_intake_cases") {
+          let payload: Row | null = null;
+          let targetId: string | null = null;
+          let requireUnbound = false;
+          const query: any = {
+            select: () => query,
+            eq: (_column: string, value: string) => {
+              if (_column === "id") targetId = value;
+              return query;
+            },
+            is: () => {
+              requireUnbound = true;
+              return query;
+            },
+            in: () => query,
+            order: () =>
+              Promise.resolve({ data: seed.cases || [], error: null }),
+            then: (resolve: (value: any) => unknown) =>
+              resolve({ data: seed.cases || [], error: null }),
+            update: (next: Row) => {
+              payload = next;
+              return query;
+            },
+            maybeSingle: () => {
+              const row = (seed.cases || []).find((c) => c.id === targetId);
+              if (!row || (requireUnbound && row.job_id)) {
+                return Promise.resolve({ data: null, error: null });
+              }
+              Object.assign(row, payload);
+              caseUpdates.push({ id: targetId, ...payload });
+              return Promise.resolve({ data: { id: targetId }, error: null });
+            },
+          };
+          return query;
+        }
+        if (table === "makesafe_intake_case_sources") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            in: () => query,
+            order: () =>
+              Promise.resolve({ data: seed.caseSources || [], error: null }),
+            then: (resolve: (value: any) => unknown) =>
+              resolve({ data: seed.caseSources || [], error: null }),
+          };
+          return query;
+        }
+        if (table === "jobs" && seed.jobs) {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            contains: () => query,
+            maybeSingle: () =>
+              Promise.resolve({ data: seed.jobs![0] || null, error: null }),
+          };
+          return query;
+        }
+        if (table === "makesafe_intake_drafts") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            in: () => query,
+            update: (payload: Row) => {
+              draftUpdates.push(payload);
+              Object.assign(drafts[0], payload);
+              return query;
+            },
+            single: () => Promise.resolve({ data: drafts[0], error: null }),
+            maybeSingle: () =>
+              Promise.resolve({ data: drafts[0], error: null }),
+            then: (resolve: (value: any) => unknown) =>
+              resolve({ data: drafts, error: null }),
+          };
+          return query;
+        }
+        if (table === "makesafe_intake_job_mints") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            order: () => Promise.resolve({ data: mints, error: null }),
+          };
+          return query;
+        }
+        const empty: any = {
+          select: () => empty,
+          eq: () => empty,
+          in: () => empty,
+          is: () => empty,
+          not: () => empty,
+          ilike: () => empty,
+          or: () => empty,
+          gte: () => empty,
+          lte: () => empty,
+          contains: () => empty,
+          neq: () => empty,
+          order: () => empty,
+          limit: () => empty,
+          range: () => Promise.resolve({ data: [], error: null }),
+          single: () => Promise.resolve({ data: null, error: null }),
+          maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          then: (resolve: (value: any) => unknown) =>
+            resolve({ data: [], error: null }),
+        };
+        return empty;
+      },
+    },
+  };
+}
+
+Deno.test("an unattended lane may not mint a card that resolves to repair only at approval", async () => {
+  const db = approvalClient(legacyRepairDraftRow());
+
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(db.client, {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        draft_id: "draft-legacy-repair",
+        approved_by: "auto-intake",
+      }),
+    Error,
+    "Repair intake requires a human tick",
+  );
+  assertEquals((error as any).status, 409);
+  // Nothing written: the draft is still reviewable for an operator.
+  assertEquals(db.drafts[0].status, "needs_review");
+  assertEquals(db.drafts[0].approved_job_id, null);
+});
+
+// The brake guards CREATION, not completion. A draft that already names a live
+// job is a settlement RETRY — the deterministic runtime re-enters approval for
+// exactly this reason after a mint-role release — and refusing it stranded a live
+// repair card with no reachable settlement on any automated lane.
+Deno.test("settlement recovery of an already-minted repair card completes rather than 409ing", async () => {
+  // The production shape the finding names: a deterministic repair draft whose
+  // job already exists, released back to `needs_review` by a mint-role reset
+  // while `approved_job_id` still points at the live card. The deterministic
+  // runtime re-enters approval for exactly this, carrying the unattended marker.
+  // `recoverIntakeMintJob` returns the existing job and `createMakesafeJob`
+  // never runs, so NEITHER brake may fire — the run must reach settlement and
+  // bind the intake case onto the job that is already live.
+  const draft = legacyRepairDraftRow();
+  draft.approved_job_id = "job-already-minted";
+  draft.deterministic_key = "draft:MLB:PO-61000/cycle:1";
+  draft.extraction_json = {
+    ...draft.extraction_json,
+    deterministic_intake: true,
+    intake_source_post_ids: ["src-1"],
+  };
+  const store = makeStore({
+    tables: {
+      makesafe_intake_drafts: [draft],
+      makesafe_intake_job_mints: [{
+        id: "mint-1",
+        draft_id: "draft-legacy-repair",
+        mint_role: "primary",
+        case_id: "case-1",
+        source_post_ids: ["src-1"],
+        job_id: "job-already-minted",
+        state: "minted",
+        evidence_attached_at: null,
+        board_observed_at: null,
+        // The retry shape: the post-board notification already succeeded on the
+        // first pass, so settlement repairs the mint row instead of re-notifying.
+        notification_accepted_at: "2026-08-31T00:00:00.000Z",
+      }],
+      jobs: [{
+        id: "job-already-minted",
+        type: "repair",
+        job_number: "SWR-26001",
+        status: "accepted",
+        metadata: {},
+      }],
+      makesafe_intake_case_sources: [{
+        org_id: ORG_ID,
+        post_id: "src-1",
+        case_id: "case-1",
+      }],
+      makesafe_intake_cases: [{
+        org_id: ORG_ID,
+        id: "case-1",
+        instruction_key: "MLB:PO-61000/cycle:1",
+        cycle: 1,
+        parent_relation: null,
+        source_fingerprint: null,
+        state: "exception",
+        reason_code: "awaiting_job_creation",
+        job_id: null,
+        blocked_reasons: [],
+      }],
+    },
+  });
+
+  const result = await _approveIntakeDraftForTest(makeClient(store), {
+    ..._unattendedIntakeApprovalMarkerForTest,
+    draft_id: "draft-legacy-repair",
+    approved_by: "auto-intake",
+  });
+
+  // No refusal, and no SECOND card: the run adopted the job that already exists.
+  assertEquals(result.ok, true);
+  assertEquals(result.job.id, "job-already-minted");
+  assertEquals(
+    store.tables.jobs.map((row) => row.id),
+    ["job-already-minted"],
+  );
+  // Settlement ran and bound the intake case, so the card can still resolve its
+  // case for the pack path.
+  assertEquals(
+    store.tables.makesafe_intake_cases[0].job_id,
+    "job-already-minted",
+  );
+  assertEquals(
+    store.tables.makesafe_intake_cases[0].state,
+    "confirmed_live_job",
+  );
+});
+
+Deno.test("CONTROL: an identified operator approving the same draft mints the SWR- repair card", async () => {
+  // The branch's headline acceptance criterion, end to end: the SAME legacy
+  // repair draft that an unattended lane is refused, approved with NO unattended
+  // marker, must actually create a `type: 'repair'` job with an SWR- number.
+  const draft = legacyRepairDraftRow();
+  const store = makeStore({
+    tables: { makesafe_intake_drafts: [draft] },
+  });
+
+  const result = await _approveIntakeDraftForTest(makeClient(store), {
+    draft_id: "draft-legacy-repair",
+    approved_by: "captain@secureworkswa.com.au",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.job_created, true);
+  assertEquals(store.tables.jobs.length, 1);
+  assertEquals(store.tables.jobs[0].type, "repair");
+  assertEquals(store.tables.jobs[0].job_number, "SWR-261400");
+  assertEquals(
+    store.tables.jobs[0].metadata.makesafe_job_family,
+    "repair",
+  );
+  assertEquals(store.tables.makesafe_intake_drafts[0].status, "approved");
+});
+
+// Captain ruling 2026-08-28, Ruling 5: a dual-scope work order stays MAKE-SAFE
+// and flags the repair leg; the child SWR- spawn is a human tap. This pins the
+// gate that makes that true at the approval seam and, in passing, why the
+// unattended repair brake can never fire on a split: `combinedSplitRecoveryDecision`
+// refuses a combined split outright until BOTH mint roles already carry a job,
+// so the split primary is never CREATED here — it is only ever settled, with
+// `recoveredPrimaryMint` present, which skips both brake sites. If that gate is
+// ever relaxed, this test fails and the brake interaction must be re-reasoned.
+Deno.test("a combined split whose classifier says repair is refused before any family is minted", async () => {
+  const draft = legacyRepairDraftRow();
+  draft.subject = "NEW WORK ORDER - MLB-24659";
+  draft.extraction_json = {
+    ...draft.extraction_json,
+    builder_email_text_for_trade: [
+      "NEW WORK ORDER attached.",
+      "Remove and dispose of damaged 1800mm Hardieflex fencing, supply and",
+      "install 1800mm Colorbond fencing to match, remove and replace metal gate.",
+    ].join("\n"),
+    secondary_obligation: {
+      reason: "combined_makesafe_and_report",
+      type: "roof_report",
+    },
+  };
+  const store = makeStore({
+    tables: { makesafe_intake_drafts: [draft] },
+  });
+
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(makeClient(store), {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        draft_id: "draft-legacy-repair",
+        approved_by: "auto-intake",
+      }),
+    Error,
+    "Multiple builder instructions require existing reviewed bindings",
+  );
+  // NOT the repair brake: the split gate owns this refusal, so an unattended
+  // split never reaches the mint-time family test at all.
+  assert(
+    !String((error as Error).message).includes(
+      "Repair intake requires a human tick",
+    ),
+    `the split gate must own this refusal, got: ${(error as Error).message}`,
+  );
+  assertEquals(store.tables.jobs.length, 0);
+});
+
+// ── The captain's live card, end to end ─────────────────────────────────────
+//
+// MLB-24645 / PO-59875, 22 Pitt Street Pingelly (draft
+// 815eea5e-1b6f-43ad-b955-ed79d55f356a). This is the exact shape that produced
+// the live refusal "Instruction identity conflict: draft carries multiple
+// canonical keys (MLB:PO-59875, MLB:WO-24645)": one work order carrying BOTH a
+// claim/WO number and a purchase order. It asserts the whole acceptance
+// criterion in one place — the approval succeeds, a `type: 'repair'` job with
+// an SWR- number is created carrying both builder references, and that card
+// lands on the Repairs board while being excluded from the MakeSafe
+// projections.
+const PINGELLY_SCOPE =
+  "Remove and dispose of damaged fencing, supply and install 1800mm Colorbond fencing to match existing.";
+
+const PINGELLY_WO_TEXT = `Work Order Number
+MLB-24645PO-59875
+Policyholders Name
+Pingelly Client
+Mobile: 0422 000 111
+Site Address
+22 Pitt Street, Pingelly, WA 6308
+Scope of Works
+${PINGELLY_SCOPE}
+Totals
+Subtotal $2,400.00`;
+
+function pingellyRepairDraftRow(): Row {
+  return {
+    id: "815eea5e-1b6f-43ad-b955-ed79d55f356a",
+    org_id: ORG_ID,
+    status: "needs_review",
+    graph_message_id: "pingelly-graph-message-1",
+    subject: "NEW WORK ORDER - MLB-24645",
+    body_preview: PINGELLY_SCOPE,
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    external_ref: "MLB-24645",
+    client_name: "Pingelly Client",
+    client_phone: "0422 000 111",
+    client_email: null,
+    site_address: "22 Pitt Street, Pingelly",
+    site_suburb: "Pingelly",
+    description: PINGELLY_SCOPE,
+    report_type: null,
+    confidence: "high",
+    missing_fields: [],
+    approved_job_id: null,
+    attachments_json: [{
+      id: "pingelly-attachment",
+      file_name: "work_order_MLB-24645PO-59875_Secureworks_Group_Pty_Ltd.pdf",
+      is_work_order: true,
+      storage_url: "storage/pingelly-wo.pdf",
+      pdf_url: "storage/pingelly-wo.pdf",
+    }],
+    extraction_json: {
+      builder_claim_ref: "MLB-24645",
+      builder_work_order_number: "MLB-24645",
+      builder_po_number: "PO-59875",
+      builder_email_text_for_trade: PINGELLY_SCOPE,
+      work_order_pdf_text: [{
+        attachment_id: "pingelly-attachment",
+        attachment_name:
+          "work_order_MLB-24645PO-59875_Secureworks_Group_Pty_Ltd.pdf",
+        status: "extracted",
+        text: PINGELLY_WO_TEXT,
+      }],
+    },
+  };
+}
+
+Deno.test("the Pingelly work order approves into an SWR- repair card on the Repairs board", async () => {
+  const store = makeStore({
+    tables: { makesafe_intake_drafts: [pingellyRepairDraftRow()] },
+  });
+
+  const result: any = await _approveIntakeDraftForTest(makeClient(store), {
+    draft_id: "815eea5e-1b6f-43ad-b955-ed79d55f356a",
+    approved_by: "captain@secureworkswa.com.au",
+  });
+
+  // Defect 1: one instruction carrying two identifiers no longer refuses.
+  assertEquals(result.ok, true);
+  assertEquals(result.job_created, true);
+  assertEquals(store.tables.jobs.length, 1);
+  const job = store.tables.jobs[0];
+
+  // The acceptance criterion: a repair job with an SWR- number.
+  assertEquals(job.type, "repair");
+  assertEquals(job.job_number, "SWR-261400");
+  assertEquals(job.metadata.makesafe_job_family, "repair");
+
+  // …carrying BOTH builder references, which is what the identity conflict
+  // used to make impossible.
+  assertEquals(job.metadata.builder_po_number, "PO-59875");
+  assertStringIncludes(
+    `${job.metadata.builder_work_order_number ?? ""} ${
+      job.metadata.builder_claim_ref ?? ""
+    } ${store.tables.makesafe_job_details[0]?.external_ref ?? ""}`,
+    "MLB-24645",
+  );
+
+  // …on the Repairs board, in its entry column.
+  assertEquals(isInsuranceRepairFamily(job), true);
+  assertEquals(insuranceRepairStage(job), "wo_in");
+  assertEquals(projectInsuranceRepairPipelineRow(job).repair_stage, "wo_in");
+
+  // …and absent from the MakeSafe pipeline projection.
+  assertEquals(excludeInsuranceRepairs([job]).length, 0);
+
+  assertEquals(store.tables.makesafe_intake_drafts[0].status, "approved");
+
+  console.log(
+    "\nPRODUCT STATE after approving draft 815eea5e (MLB-24645 / PO-59875):\n" +
+      JSON.stringify(
+        {
+          approve_response: {
+            ok: result.ok,
+            job_created: result.job_created,
+            job_number: job.job_number,
+          },
+          job_row: {
+            type: job.type,
+            job_number: job.job_number,
+            status: job.status,
+            client_name: job.client_name,
+            site_address: job.site_address,
+            metadata: {
+              makesafe_job_family: job.metadata.makesafe_job_family,
+              ses_family: job.metadata.ses_family,
+              repair_stage: job.metadata.repair_stage,
+              builder_work_order_number:
+                job.metadata.builder_work_order_number ?? null,
+              builder_claim_ref: job.metadata.builder_claim_ref ?? null,
+              builder_po_number: job.metadata.builder_po_number,
+            },
+          },
+          ses_overlay_external_ref:
+            store.tables.makesafe_job_details[0]?.external_ref ?? null,
+          repairs_board: {
+            is_repair_family: isInsuranceRepairFamily(job),
+            stage: insuranceRepairStage(job),
+          },
+          makesafe_pipeline_rows_after_exclusion:
+            excludeInsuranceRepairs([job]).length,
+          draft_status: store.tables.makesafe_intake_drafts[0].status,
+        },
+        null,
+        2,
+      ),
+  );
 });

@@ -87,6 +87,387 @@ export async function completeIntakeMint(
   return row as IntakeMint;
 }
 
+/**
+ * `enforce_makesafe_intake_case_write` refuses `makesafe_intake_cases.job_id`
+ * unless the job is one of these types (widened from make-safe alone by
+ * `20260826000001_repair_job_type.sql`). A restoration card is `insurance` and
+ * would RAISE, so the type is checked here rather than left to the trigger:
+ * settlement must never fail for a family this binding does not cover.
+ */
+const INTAKE_CASE_LINKABLE_JOB_TYPES = new Set(["makesafe", "repair"]);
+
+/**
+ * Only these states may be promoted onto a job. `accounted_non_wo` is excluded
+ * because `makesafe_intake_case_transition_allowed` permits it to reach
+ * `exception` only — it is not work awaiting a card.
+ */
+const INTAKE_CASE_BINDABLE_STATES = new Set([
+  "exception",
+  "blocked_live_job",
+  "confirmed_live_job",
+]);
+
+/**
+ * The ONE exception reason this binding was written for: `casePayload` stamps it
+ * on a case accounted ahead of its guarded job creation, and the shape checks
+ * mean an unbound case can only ever be an `exception`.
+ *
+ * A repair draft can now wait days in the review queue for its human tick, and
+ * the case can move to a different reason-coded exception in that window.
+ * `cancellation` is the sharp one: `makesafe_intake_cases_cancellation_no_job_check`
+ * RAISES on a cancellation case that gains a `job_id`, and the throw would land
+ * AFTER `createMakesafeJob` had already run — a live job whose every re-approval
+ * reproduces the failure. Any other reason would likewise be silently cleared and
+ * the case promoted to live on a decision nobody made. Skip instead.
+ */
+const INTAKE_CASE_BINDABLE_REASON = "awaiting_job_creation";
+
+export type IntakeCaseDecisionProvenance = "deterministic" | "human";
+
+/**
+ * `makesafe_intake_field_names_valid`, which every `blocked_reasons` write must
+ * satisfy. Filtering here rather than trusting the stored array keeps a legacy
+ * draft's free-text `missing_fields` from failing the whole settlement.
+ */
+const INTAKE_FIELD_NAME_RE = /^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?$/;
+
+/**
+ * Recover the plan's blocked reasons for a case that was PARKED before its job
+ * existed.
+ *
+ * They cannot be read back off the case row: `makesafe_intake_cases_exception_
+ * shape_check` forces `cardinality(blocked_reasons) = 0` on an unbound case, so
+ * `casePayload` stores `[]` on every parked row whatever the plan said. The
+ * coordinate that survives the park is the DRAFT — the deterministic runtime
+ * writes `missing_fields: plan.blockedReasons` when it creates it — and only a
+ * deterministic draft ever reaches this binding, because `intakeMintAuthority`
+ * yields no `case_id` without `extraction.deterministic_intake === true`.
+ *
+ * Losing this would silently promote a `blocked_live_job` plan (missing portal
+ * or secondary evidence — the common repair shape) to `confirmed_live_job`, and
+ * the gap-fill queue and the intake exception desk both read that signal.
+ */
+async function readParkedPlanBlockedReasons(
+  client: any,
+  draftId: string,
+): Promise<string[]> {
+  const { data, error } = await client
+    .from("makesafe_intake_drafts")
+    .select("missing_fields")
+    .eq("id", draftId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(
+      `intake case binding draft read failed: ${error.message || error}`,
+    );
+  }
+  const stored = Array.isArray(data?.missing_fields) ? data.missing_fields : [];
+  return [
+    ...new Set(
+      stored
+        .map((value: unknown) => String(value ?? "").trim())
+        .filter((value: string) => INTAKE_FIELD_NAME_RE.test(value)),
+    ),
+  ].sort() as string[];
+}
+
+/** Durable marker for a bind FAULT; see `bindIntakeCasesToMintedJobs`. */
+const INTAKE_CASE_BIND_FAILED_EVENT = "makesafe_intake_case_bind_failed";
+
+const INTAKE_CASE_NOT_BINDABLE_EVENT = "makesafe_intake_case_not_bindable";
+
+/**
+ * A deliberate SKIP is as operationally consequential as a fault: the card ends
+ * up caseless either way, and is refused later at `prepare_ses_docket_revision`
+ * with `spine_missing_source` / `spine_missing_lineage`. For a parked repair
+ * card this seam is the ONLY binder, so a silent skip is an unrecorded
+ * permanent gap. The skip itself stays a skip — this only makes it audible.
+ */
+async function recordIntakeCaseBindSkip(
+  client: any,
+  input: {
+    caseId: string;
+    jobId: string;
+    detail: Record<string, unknown>;
+  },
+): Promise<void> {
+  console.error(
+    `[ops-api] intake case not bindable (case ${input.caseId}, job ${input.jobId}): ${
+      JSON.stringify(input.detail)
+    }`,
+  );
+  try {
+    const { error } = await client.from("job_events").insert({
+      job_id: input.jobId,
+      event_type: INTAKE_CASE_NOT_BINDABLE_EVENT,
+      detail_json: {
+        case_id: input.caseId,
+        job_id: input.jobId,
+        stage: "case_not_bindable",
+        ...input.detail,
+      },
+    });
+    if (error) {
+      console.error(
+        `[ops-api] intake case not-bindable marker unwritten (case ${input.caseId}, job ${input.jobId}): ${
+          error.message || error
+        }`,
+      );
+    }
+  } catch (eventError) {
+    console.error(
+      `[ops-api] intake case not-bindable marker unwritten (case ${input.caseId}, job ${input.jobId}): ${
+        (eventError as Error)?.message || eventError
+      }`,
+    );
+  }
+}
+
+async function recordIntakeCaseBindFailure(
+  client: any,
+  input: {
+    caseId: string | null;
+    jobId: string | null;
+    stage: string;
+    error: unknown;
+  },
+): Promise<void> {
+  const fact = String(
+    (input.error as any)?.message || input.error || "unknown",
+  );
+  console.error(
+    `[ops-api] intake case bind ${input.stage} failed (case ${
+      input.caseId || "unknown"
+    }, job ${input.jobId || "unknown"}): ${fact}`,
+  );
+  const unwritten = (reason: unknown) =>
+    console.error(
+      `[ops-api] intake case bind failure marker unwritten (case ${
+        input.caseId || "unknown"
+      }, job ${input.jobId || "unknown"}): ${
+        (reason as any)?.message || reason
+      }`,
+    );
+  try {
+    // PostgREST RETURNS errors, it does not throw, so the catch below covers
+    // only a transport fault. This marker is the load-bearing half of the
+    // record-and-continue contract above — without it a refused bind leaves a
+    // silently caseless card — so a refused INSERT must be visible in the edge
+    // log too. Still best-effort either way: an audit write never changes the
+    // outcome of the approval.
+    const { error } = await client.from("job_events").insert({
+      job_id: input.jobId,
+      event_type: INTAKE_CASE_BIND_FAILED_EVENT,
+      detail_json: {
+        case_id: input.caseId,
+        job_id: input.jobId,
+        stage: input.stage,
+        error: fact,
+      },
+    });
+    if (error) unwritten(error);
+  } catch (eventError) {
+    unwritten(eventError);
+  }
+}
+
+/**
+ * Bind each settled mint's intake case to the job that mint created.
+ *
+ * This is the ONE place the binding happens for every lane, because it is the
+ * only shared seam that already holds both coordinates: `reserveIntakeMint`
+ * persists `makesafe_intake_job_mints.case_id` from the draft's canonical
+ * source authority, and `completeIntakeMint` stamps `job_id` on the same row.
+ *
+ * It exists because the deterministic runtime's own
+ * `insertCaseAndSources(..., jobId)` runs only when the runtime itself
+ * advanced the draft. Any draft a HUMAN approves from the review queue — which
+ * is now every repair-family draft, under the 2026-08-28 supervised-repair
+ * ruling — would otherwise keep `job_id` NULL forever: the case cannot
+ * self-heal on a later sweep (its `makesafe_intake_case_sources` row already
+ * makes the source a FINAL fate, so the recent lane skips it), and a caseless
+ * card is refused at `prepare_ses_docket_revision` with `spine_missing_source`
+ * / `spine_missing_lineage`, blocking the whole pack path.
+ *
+ * The write is a compare-and-set on `job_id IS NULL`, so it never re-points a
+ * case that is already bound and a concurrent binder simply wins.
+ *
+ * ERROR CONTRACT — RECORD AND CONTINUE. This function never throws. By the time
+ * it runs the job is already minted, live and settled, so failing loud protects
+ * nothing: it would only strand a correctly created card in a draft loop that
+ * can never be approved (the post-claim catch requeues the draft to
+ * `needs_review`, the retry skips every guard because the mint is recovered, and
+ * a PERMANENT refusal — `uq_makesafe_intake_cases_live_identity`, the
+ * live-identity floor check — raises again on every press) while degrading whole
+ * deterministic runs. A recoverable gap beats an unrecoverable block. The gap
+ * stays AUDIBLE: every fault writes a durable `makesafe_intake_case_bind_failed`
+ * job event naming the case, the job and the error fact, and a caseless card
+ * still surfaces operationally as `spine_missing_source` /
+ * `spine_missing_lineage` on the pack path. This is the repository's own
+ * flag-never-block pattern — the suburb backstop, the audible substatus-gate
+ * fail-open, and audit writes that never change an action's response.
+ */
+export async function bindIntakeCasesToMintedJobs(
+  client: any,
+  mints: readonly IntakeMint[],
+  decision: {
+    draftId: string;
+    actor: string;
+    provenance: IntakeCaseDecisionProvenance;
+  },
+): Promise<string[]> {
+  // A combined split gives BOTH mints the same `case_id`, so the physical
+  // primary is chosen by stated rule rather than by `loadIntakeMints`'s
+  // `mint_role` collation happening to sort 'primary' before 'secondary_report'.
+  // The deterministic runtime binds the primary; this seam must agree with it.
+  const jobByCaseId = new Map<string, string>();
+  const byRolePreference = [
+    ...mints.filter((mint) => mint.mint_role === "primary"),
+    ...mints.filter((mint) => mint.mint_role !== "primary"),
+  ];
+  for (const mint of byRolePreference) {
+    const caseId = String(mint.case_id || "").trim();
+    const jobId = String(mint.job_id || "").trim();
+    if (caseId && jobId && !jobByCaseId.has(caseId)) {
+      jobByCaseId.set(caseId, jobId);
+    }
+  }
+  if (!jobByCaseId.size) return [];
+  const anyJobId = [...jobByCaseId.values()][0] ?? null;
+
+  const { data: caseRows, error: caseError } = await client
+    .from("makesafe_intake_cases")
+    .select("id,state,job_id,reason_code,blocked_reasons")
+    .in("id", [...jobByCaseId.keys()]);
+  if (caseError) {
+    await recordIntakeCaseBindFailure(client, {
+      caseId: [...jobByCaseId.keys()][0] ?? null,
+      jobId: anyJobId,
+      stage: "case_read",
+      error: caseError,
+    });
+    return [];
+  }
+  const unbound = (caseRows || []).filter((row: any) =>
+    jobByCaseId.has(String(row?.id)) && !row?.job_id &&
+    INTAKE_CASE_BINDABLE_STATES.has(String(row?.state || "")) &&
+    String(row?.reason_code || "") === INTAKE_CASE_BINDABLE_REASON
+  );
+
+  // A deliberate SKIP produces the same operational outcome as a fault — a
+  // caseless card refused later at `prepare_ses_docket_revision` — so it must be
+  // just as audible. An already-bound case is the ordinary deterministic-lane
+  // no-op and is NOT recorded; a case that moved to a different reason-coded
+  // exception while its repair draft waited days for a human tick IS.
+  const byCaseId = new Map<string, any>(
+    (caseRows || []).map((row: any) => [String(row?.id), row]),
+  );
+  const boundSet = new Set(unbound.map((row: any) => String(row.id)));
+  for (const [caseId, jobId] of jobByCaseId) {
+    if (boundSet.has(caseId)) continue;
+    const row = byCaseId.get(caseId);
+    if (row?.job_id) continue;
+    await recordIntakeCaseBindSkip(client, {
+      caseId,
+      jobId,
+      detail: row
+        ? { state: row.state ?? null, reason_code: row.reason_code ?? null }
+        : { case_row: "not_found" },
+    });
+  }
+  if (!unbound.length) return [];
+
+  const { data: jobRows, error: jobError } = await client
+    .from("jobs")
+    .select("id,type")
+    .in(
+      "id",
+      [...new Set(unbound.map((row: any) => jobByCaseId.get(String(row.id))))],
+    );
+  if (jobError) {
+    await recordIntakeCaseBindFailure(client, {
+      caseId: String(unbound[0]?.id ?? "") || null,
+      jobId: anyJobId,
+      stage: "job_read",
+      error: jobError,
+    });
+    return [];
+  }
+  const jobTypeById = new Map<string, string>(
+    (jobRows || []).map((
+      row: any,
+    ) => [String(row?.id), String(row?.type || "").trim().toLowerCase()]),
+  );
+  const linkableJobIds = new Set(
+    [...jobTypeById.entries()]
+      .filter(([, type]) => INTAKE_CASE_LINKABLE_JOB_TYPES.has(type))
+      .map(([id]) => id),
+  );
+
+  let blockedReasons: string[];
+  try {
+    blockedReasons = await readParkedPlanBlockedReasons(
+      client,
+      decision.draftId,
+    );
+  } catch (draftError) {
+    await recordIntakeCaseBindFailure(client, {
+      caseId: String(unbound[0]?.id ?? "") || null,
+      jobId: anyJobId,
+      stage: "draft_read",
+      error: draftError,
+    });
+    return [];
+  }
+
+  const bound: string[] = [];
+  for (const row of unbound) {
+    const caseId = String(row.id);
+    const jobId = String(jobByCaseId.get(caseId));
+    if (!linkableJobIds.has(jobId)) {
+      await recordIntakeCaseBindSkip(client, {
+        caseId,
+        jobId,
+        detail: {
+          job_type: jobTypeById.get(jobId) ?? null,
+          linkable_job_types: [...INTAKE_CASE_LINKABLE_JOB_TYPES],
+        },
+      });
+      continue;
+    }
+    const nextState = blockedReasons.length
+      ? "blocked_live_job"
+      : "confirmed_live_job";
+    const { data, error } = await client
+      .from("makesafe_intake_cases")
+      .update({
+        job_id: jobId,
+        state: nextState,
+        reason_code: null,
+        blocked_reasons: blockedReasons,
+        last_decision_provenance: decision.provenance,
+        last_decision_actor: decision.actor,
+        last_decision_reason:
+          `intake approval settlement bound ${nextState} job ${jobId}`,
+      })
+      .eq("id", caseId)
+      .is("job_id", null)
+      .select("id")
+      .maybeSingle();
+    if (error) {
+      await recordIntakeCaseBindFailure(client, {
+        caseId,
+        jobId,
+        stage: "case_bind",
+        error,
+      });
+      continue;
+    }
+    if (data?.id) bound.push(String(data.id));
+  }
+  return bound;
+}
+
 export async function ensureIntakeWorkOrderEvidence(
   client: any,
   jobIds: readonly string[],
@@ -207,6 +588,15 @@ export async function settleApprovedIntakeDraft(
       jobId: string;
     }) => Promise<boolean>;
     refreshIdentity?: typeof refreshMakesafeIdentityAfterWorkOrderAttach;
+    /**
+     * Recorded as the intake case's `last_decision_actor` /
+     * `last_decision_provenance` when it binds, and copied by
+     * `record_makesafe_intake_case_event` into the append-only case-event
+     * ledger — so a Captain approving a parked repair draft is attributed to
+     * the human, not to the deterministic runtime.
+     */
+    caseBindingActor?: string;
+    caseBindingProvenance?: IntakeCaseDecisionProvenance;
   },
 ): Promise<{
   jobIds: string[];
@@ -247,7 +637,6 @@ export async function settleApprovedIntakeDraft(
     input.extraction,
     { refreshIdentity: input.refreshIdentity },
   );
-
   let notificationsAccepted = 0;
   const notificationJobIds: string[] = [];
   for (const mint of minted) {
@@ -410,6 +799,23 @@ export async function settleApprovedIntakeDraft(
     notificationsAccepted++;
     notificationJobIds.push(String(mint.job_id));
   }
+
+  // LAST, deliberately, and it never throws (see its own error contract). The
+  // bind is the least critical step here and is idempotent on retry, while the
+  // post-board notification is never retried once the case carries its job.
+  // Running it earlier put a throwing step in front of that notification for
+  // EVERY intake family, so a case that cannot legally go live — two clusters on
+  // one `wo_po_identity_key` refused by `uq_makesafe_intake_cases_live_identity`
+  // — failed settlement for a card that minted correctly. Placed here and made
+  // record-and-continue, such a refusal costs only the binding: the draft still
+  // reaches `approved`, the mint stays settled, and the gap is recorded as a
+  // durable `makesafe_intake_case_bind_failed` job event.
+  await bindIntakeCasesToMintedJobs(client, minted, {
+    draftId: input.draftId,
+    actor: input.caseBindingActor || "intake_approval_settlement",
+    provenance: input.caseBindingProvenance || "deterministic",
+  });
+
   return {
     jobIds: evidenceJobIds,
     notificationJobIds,

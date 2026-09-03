@@ -831,7 +831,13 @@ Deno.test("readInputs admits only a valid short-lived synthetic own-mail token",
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });
 
-Deno.test("RAPID REPAIR family reaches the guarded mint callback", async () => {
+// Ruled 2026-08-28: the repair lane runs SUPERVISED — an SWR- mint is
+// irreversible, so a human taps every one. The brake in
+// `shouldAutoApproveCleanIntake` only covers the sweep/board lane, so the
+// deterministic lane carries its own reading of the same rule. The card is
+// still fully prepared (draft written, family stamped, `needs_review`); only
+// the guarded approval call is withheld, and the run accounts it as parked.
+Deno.test("a repair-family plan carries its family to a draft and is PARKED, never auto-minted", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "rapid-repair-mint",
@@ -866,29 +872,93 @@ Deno.test("RAPID REPAIR family reaches the guarded mint callback", async () => {
     inputs.profiles,
   ).cases[0];
   assertEquals(plan.identity.jobFamily, "repair");
+  // Either live-job state reaches the guarded approval callback, so both are
+  // brake-relevant; this fixture lands on the blocked one.
+  assertEquals(plan.state, "blocked_live_job");
 
-  let approvalBody: any = null;
+  let approvalCalls = 0;
   const result = await _ensureDraftAndJobForTest(
     client,
     "rapid-repair-case",
     plan,
     new Map(inputs.sources.map((source) => [source.postId, source])),
-    (_client, body) => {
-      approvalBody = body;
+    () => {
+      approvalCalls++;
       return Promise.resolve({ job: { id: "rapid-repair-job" } });
     },
     () => {},
     () => {},
   );
 
-  assertEquals(result.jobId, "rapid-repair-job");
-  assertEquals(
-    approvalBody?.reviewed_fields?.makesafe_job_family,
-    "repair",
-  );
+  assertEquals(approvalCalls, 0);
+  assertEquals(result.jobId, null);
+  assertEquals(result.jobCreated, false);
+  assertEquals(result.parked, true);
+  assertEquals(result.draftCreated, true);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
   assertEquals(
     store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
     "repair",
+  );
+});
+
+// CONTROL: the brake is family-scoped. A general make-safe plan of the same
+// shape still advances through the guarded approval callback unchanged.
+Deno.test("CONTROL: a general make-safe plan still reaches the guarded mint callback", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "general-makesafe-mint",
+    subject: "NEW WORK ORDER - MLB-261193 - Work Order: MLB-261193",
+    body_content: [
+      "Client: Fixture Client",
+      "Site Address: 1 Fixture Road, Perth",
+      "Scope of Works: Install temporary roof tarps and make the property safe.",
+    ].join("\n"),
+  }));
+  store.email_attachments.push({
+    id: "general-makesafe-mint-pdf",
+    email_id: "general-makesafe-mint",
+    name: "Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/general-makesafe-mint.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["general-makesafe-mint"],
+    cursor: null,
+  });
+  const plan = buildDeterministicIntakePlan(
+    inputs.sources,
+    inputs.profiles,
+  ).cases[0];
+  assertEquals(plan.identity.jobFamily, "general_makesafe");
+
+  let approvalBody: any = null;
+  const result = await _ensureDraftAndJobForTest(
+    client,
+    "general-makesafe-case",
+    plan,
+    new Map(inputs.sources.map((source) => [source.postId, source])),
+    (_client, body) => {
+      approvalBody = body;
+      return Promise.resolve({ job: { id: "general-makesafe-job" } });
+    },
+    () => {},
+    () => {},
+  );
+
+  assertEquals(result.jobId, "general-makesafe-job");
+  assertEquals(result.parked, false);
+  assertEquals(
+    approvalBody?.reviewed_fields?.makesafe_job_family,
+    "general_makesafe",
   );
 });
 
@@ -7252,4 +7322,238 @@ Deno.test("a failed flag write stays visible without failing or degrading the co
       "committed_without_site_suburb_flag_unwritten",
     ),
   );
+});
+
+// ── The settlement seam binds the case; the runtime must not re-decide it ────
+//
+// `approveIntakeDraft` runs the shared settlement seam, which binds
+// `makesafe_intake_cases.job_id` and promotes the case. When control returns,
+// the runtime's second `insertCaseAndSources` must re-read the CURRENT row: if
+// it re-decides against the stale pre-approval row it computes
+// decisionChanged=true and issues an UPDATE whose ONLY difference is decision
+// metadata, which `enforce_makesafe_intake_case_write` refuses with "decision
+// metadata may change only with an audited case decision". That failure is
+// recorded as source_persist_failed, degrades the run, and permanently skips
+// the post-board notification for a card that minted correctly.
+//
+// The `fail` hook below models that exact trigger branch.
+function settlementBoundCaseFixture(): Store {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "settlement-bound-source",
+    subject: "NEW WORK ORDER - MLB-261501 - Work Order: MLB-261501",
+    body_content: [
+      "Client: Fixture Client",
+      "Site Address: 9 Settlement Street, Perth",
+      "Scope of Works: Install temporary roof tarps and make the property safe.",
+    ].join("\n"),
+  }));
+  store.email_attachments.push({
+    id: "settlement-bound-pdf",
+    email_id: "settlement-bound-source",
+    name: "Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/settlement-bound.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  return store;
+}
+
+function auditedCaseDecisionTrigger(store: Store) {
+  const DECISION_FACTS = [
+    "state",
+    "reason_code",
+    "job_id",
+    "blocked_reasons",
+    "client_name",
+    "client_phone",
+    "client_email",
+    "site_address",
+    "site_suburb",
+    "missing_fields",
+    "conflicting_fields",
+    "side_effects_suppressed",
+    "is_authoritative",
+  ] as const;
+  const DECISION_METADATA = [
+    "last_decision_provenance",
+    "last_decision_actor",
+    "last_decision_reason",
+  ] as const;
+  const same = (a: unknown, b: unknown) =>
+    JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  return (table: string, operation: string, payload: any) => {
+    if (table !== "makesafe_intake_cases" || operation !== "update") {
+      return null;
+    }
+    const old = (store.makesafe_intake_cases || [])[0];
+    if (!old) return null;
+    const factsChanged = DECISION_FACTS.some((column) =>
+      column in payload && !same(payload[column], old[column])
+    );
+    const metadataChanged = DECISION_METADATA.some((column) =>
+      column in payload && !same(payload[column], old[column])
+    );
+    if (!factsChanged && metadataChanged) {
+      return {
+        code: "P0001",
+        message:
+          "decision metadata may change only with an audited case decision",
+      };
+    }
+    return null;
+  };
+}
+
+Deno.test("a case the settlement seam already bound is not re-decided by the runtime", async () => {
+  const store = settlementBoundCaseFixture();
+  let notified = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      undefined,
+      auditedCaseDecisionTrigger(store),
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["settlement-bound-source"],
+      maxCases: 1,
+      nowIso: NOW,
+      // Stand in for approveIntakeDraft: mint the job AND run the shared
+      // settlement bind, exactly as the real approval does before returning.
+      approveDraft: () => {
+        const caseRow = store.makesafe_intake_cases[0];
+        // Mirror bindIntakeCasesToMintedJobs exactly: the blocked set is
+        // recovered from the DRAFT's missing_fields, because the parked case row
+        // is forbidden to carry it.
+        const blockedReasons = [
+          ...new Set(
+            (store.makesafe_intake_drafts[0]?.missing_fields || [])
+              .map((value: unknown) => String(value ?? "").trim())
+              .filter((value: string) =>
+                /^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?$/.test(value)
+              ),
+          ),
+        ].sort();
+        Object.assign(caseRow, {
+          job_id: "settlement-bound-job",
+          state: blockedReasons.length
+            ? "blocked_live_job"
+            : "confirmed_live_job",
+          reason_code: null,
+          blocked_reasons: blockedReasons,
+          last_decision_provenance: "human",
+          last_decision_actor: "captain@secureworkswa.com.au",
+          last_decision_reason:
+            "intake approval settlement bound job settlement-bound-job",
+        });
+        return Promise.resolve({
+          job: { id: "settlement-bound-job" },
+          notification_job_ids: ["settlement-bound-job"],
+        });
+      },
+      notifyPhysicalJob: () => {
+        notified++;
+        return Promise.resolve({
+          accepted: true,
+          reason: "accepted",
+          auditId: "audit-settlement-bound",
+        });
+      },
+    },
+  );
+
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.write_failure_reasons, {});
+  // The post-board notification is never retried once the case carries its job,
+  // so a degraded run here would lose it permanently.
+  assertEquals(notified, 1);
+  const caseRow = store.makesafe_intake_cases[0];
+  assertEquals(caseRow.job_id, "settlement-bound-job");
+  assert(
+    caseRow.state === "confirmed_live_job" ||
+      caseRow.state === "blocked_live_job",
+    `the bound case must be live, got ${caseRow.state}`,
+  );
+  // The settlement seam's human attribution survives: the runtime issued no
+  // second decision over the top of it.
+  assertEquals(caseRow.last_decision_provenance, "human");
+  assertEquals(caseRow.last_decision_actor, "captain@secureworkswa.com.au");
+});
+
+// `findCase` reads `{ data }` only, so a degraded PostgREST read is
+// indistinguishable from "no such case" — and `insertCaseAndSources` treats an
+// absent row as "create it". The re-read must therefore fall back to the row the
+// caller already holds: a transient fault must decide against that row (no
+// update, no throw) and can NEVER route into case CREATION, which would collide
+// with `UNIQUE (org_id, instruction_key)` and cost the post-board notification
+// for a card that minted correctly.
+Deno.test("a degraded case re-read decides against the known row instead of creating one", async () => {
+  const store = settlementBoundCaseFixture();
+  let approved = false;
+  let notified = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      undefined,
+      (table, operation) =>
+        approved && table === "makesafe_intake_cases" && operation === "select"
+          ? { code: "57014", message: "canceling statement due to timeout" }
+          : null,
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["settlement-bound-source"],
+      maxCases: 1,
+      nowIso: NOW,
+      approveDraft: () => {
+        Object.assign(store.makesafe_intake_cases[0], {
+          job_id: "settlement-bound-job",
+          state: "confirmed_live_job",
+          reason_code: null,
+          blocked_reasons: [],
+          last_decision_provenance: "human",
+          last_decision_actor: "captain@secureworkswa.com.au",
+          last_decision_reason:
+            "intake approval settlement bound job settlement-bound-job",
+        });
+        approved = true;
+        return Promise.resolve({
+          job: { id: "settlement-bound-job" },
+          notification_job_ids: ["settlement-bound-job"],
+        });
+      },
+      notifyPhysicalJob: () => {
+        notified++;
+        return Promise.resolve({
+          accepted: true,
+          reason: "accepted",
+          auditId: "audit-degraded-reread",
+        });
+      },
+    },
+  );
+
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.write_failure_reasons, {});
+  // No second case row: the degraded read never became a create.
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  // The notification still ran — it is never retried once the case has its job.
+  assertEquals(notified, 1);
+  // The settlement seam's bind and its human attribution are untouched: the
+  // runtime wrote nothing rather than deciding against a stale row.
+  const caseRow = store.makesafe_intake_cases[0];
+  assertEquals(caseRow.job_id, "settlement-bound-job");
+  assertEquals(caseRow.state, "confirmed_live_job");
+  assertEquals(caseRow.last_decision_provenance, "human");
+  assertEquals(caseRow.last_decision_actor, "captain@secureworkswa.com.au");
 });

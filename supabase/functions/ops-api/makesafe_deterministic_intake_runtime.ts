@@ -3993,6 +3993,26 @@ function approvalPrevalidationMissingFields(
   return missing;
 }
 
+/**
+ * Ruled 2026-08-28: the repair lane runs SUPERVISED. An SWR- mint is
+ * irreversible (`update_makesafe_job_family` refuses non-makesafe types and can
+ * never change `jobs.type` or the number), so a human taps every one.
+ *
+ * That brake lives in `shouldAutoApproveCleanIntake` (index.ts), which ONLY the
+ * sweep/board lane calls. The deterministic lane reaches `approveIntakeDraft`
+ * directly with its own `reviewed_fields.makesafe_job_family`, so without this
+ * second reading of the same rule a repair-family plan auto-mints an SWR- card
+ * with nobody's tick on it. The family the deterministic lane would HAND to
+ * approval is the exact input to judge: a combined-split plan sends no family
+ * at all (its primary is physical work) and is unaffected.
+ */
+export function deterministicPlanNeedsSupervisedRepairReview(
+  reviewedFields: { makesafe_job_family?: string | null },
+): boolean {
+  return String(reviewedFields?.makesafe_job_family ?? "").trim()
+    .toLowerCase() === "repair";
+}
+
 async function ensureDraftAndJob(
   client: any,
   caseId: string,
@@ -4180,7 +4200,13 @@ async function ensureDraftAndJob(
       "approved deterministic draft has no job link; reconciliation required",
     );
   }
-  if (!advanceDrafts) {
+  // The draft above is written and left `needs_review` either way; only the
+  // guarded approval call is withheld. A parked repair card is picked up from
+  // the review queue by a human, which is the whole of the 2026-08-28 ruling.
+  if (
+    !advanceDrafts ||
+    deterministicPlanNeedsSupervisedRepairReview(reviewedFields)
+  ) {
     return {
       jobId: null,
       draftCreated,
@@ -5528,15 +5554,44 @@ export async function runDeterministicIntake(
         resumedCase = resumedCase || live.resumed;
         if (jobId) {
           // Sources were already accounted by the pre-job hop above, so this call
-          // only moves the case onto its job.
-          saved = await insertCaseAndSources(
+          // only moves the case onto its job. The row is RE-READ first: the
+          // guarded approval runs the shared settlement seam, which may already
+          // have bound this case, and re-deciding against the stale
+          // pre-approval row would compute decisionChanged=true and issue an
+          // UPDATE whose only difference is the decision metadata — which
+          // `enforce_makesafe_intake_case_write` refuses ("decision metadata
+          // may change only with an audited case decision"), failing the case
+          // and skipping its post-board notification.
+          //
+          // The re-read is done HERE, never by passing `undefined` through.
+          // `findCase` reads `{ data }` only, so a degraded PostgREST read is
+          // indistinguishable from "no such case", and `insertCaseAndSources`
+          // treats an absent row as "create it" — which would collide with
+          // `UNIQUE (org_id, instruction_key)` and cost the post-board
+          // notification for a card that minted correctly. The case provably
+          // exists (we wrote it moments ago), so a null here is a fault or a
+          // race, never a real absence.
+          //
+          // On a null read this call is SKIPPED outright. Its only effect is the
+          // case-onto-job move (`skipSources` is true), and the settlement seam
+          // already performs that on every lane — while deciding against the
+          // stale pre-approval row we still hold would issue an UPDATE whose
+          // only real difference is the decision metadata, which the trigger
+          // refuses. Doing nothing is the safe answer to "I could not read it".
+          const currentCaseRow = await findCase(
             client,
-            effectivePlan,
-            jobId,
-            sourceMap,
-            saved.caseRow,
-            true,
+            effectivePlan.instructionKey,
           );
+          if (currentCaseRow) {
+            saved = await insertCaseAndSources(
+              client,
+              effectivePlan,
+              jobId,
+              sourceMap,
+              currentCaseRow,
+              true,
+            );
+          }
           // Backstop: a card minted without a suburb is invisible to every
           // suburb-keyed view. Flag it rather than refuse it - the job is
           // already live and must stay actionable; the point is that a human

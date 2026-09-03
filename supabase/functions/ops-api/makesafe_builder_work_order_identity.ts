@@ -704,14 +704,18 @@ export function builderInstructionKey(
   return null;
 }
 
-/** Read every canonical key already declared by one card, source by source. */
-export function builderInstructionKeysForCard(input: {
+export interface BuilderInstructionCardKeyInput {
   requestingCompanySlug?: string | null;
   family?: string | null;
   metadata?: Record<string, any> | null;
   detailExternalRef?: string | null;
   attachmentNames?: Array<string | null | undefined>;
-}): string[] {
+}
+
+function instructionKeysFromCardSources(
+  input: BuilderInstructionCardKeyInput,
+  includeAttachmentNames: boolean,
+): string[] {
   const metadata = input.metadata || {};
   const options: BuilderInstructionKeyOptions = {
     requestingCompanySlug: input.requestingCompanySlug,
@@ -737,20 +741,96 @@ export function builderInstructionKeysForCard(input: {
     );
     return key ? [key] : [];
   });
-  for (const attachmentName of input.attachmentNames || []) {
-    if (!attachmentName || isSelfGeneratedMakesafeWorkOrder(attachmentName)) {
-      continue;
+  if (includeAttachmentNames) {
+    for (const attachmentName of input.attachmentNames || []) {
+      if (!attachmentName || isSelfGeneratedMakesafeWorkOrder(attachmentName)) {
+        continue;
+      }
+      const key = builderInstructionKey(
+        extractBuilderWorkOrderIdentity({
+          requestingCompanySlug: input.requestingCompanySlug,
+          attachmentNames: [attachmentName],
+        }),
+        options,
+      );
+      if (key) keys.push(key);
     }
-    const key = builderInstructionKey(
-      extractBuilderWorkOrderIdentity({
-        requestingCompanySlug: input.requestingCompanySlug,
-        attachmentNames: [attachmentName],
-      }),
-      options,
-    );
-    if (key) keys.push(key);
   }
   return [...new Set(keys)].sort();
+}
+
+/** Read every canonical key already declared by one card, source by source. */
+export function builderInstructionKeysForCard(
+  input: BuilderInstructionCardKeyInput,
+): string[] {
+  return instructionKeysFromCardSources(input, true);
+}
+
+/**
+ * The subset of `builderInstructionKeysForCard` proved by the card's OWN
+ * DECLARED identity — its typed triple (`builder_work_order_number` /
+ * `builder_claim_ref` / `builder_po_number`) and its own stored external
+ * reference — with attachment FILENAMES excluded.
+ *
+ * The exclusion is the whole point. MLB attaches every PDF of a claim to every
+ * card in that family (AGENTS.md: DECLARED purchase-order coverage 62/440
+ * against OBSERVED 274/440), so a purchase order read off a filename is an
+ * observed token, never proof of ownership. Only a declared PO may be used to
+ * decide that a card's own work-order key is the same instruction.
+ */
+export function declaredBuilderInstructionKeysForCard(
+  input: Omit<BuilderInstructionCardKeyInput, "attachmentNames">,
+): string[] {
+  return instructionKeysFromCardSources(input, false);
+}
+
+/**
+ * Collapse one card's enumerated keys onto the genuinely-distinct instruction
+ * set, under the same 2026-08-02 ruling `builderInstructionKey` implements: the
+ * purchase order is the job and the work-order / claim reference is the GROUP.
+ * A `SCOPE:WO-n` key exists only as the repair fallback for an instruction that
+ * carries no PO, so when the same card also proves a `SCOPE:PO-m` key under the
+ * same builder scope, the WO key is that instruction's group reference read
+ * from a source that happened not to carry the PO — one more identifier of the
+ * SAME instruction, never a second instruction. (Live case 2026-08-31: repair
+ * draft MLB-24645 / PO-59875 enumerated `MLB:PO-59875` from its structured
+ * triple and `MLB:WO-24645` from its bare external_ref, and approval refused
+ * one work order as two.) Everything else is preserved: two PO keys are still
+ * two instructions, a WO key under a DIFFERENT builder scope still conflicts,
+ * and AJ's `AJ:JOB-n` grain is untouched.
+ *
+ * The subsuming PO must be DECLARED — supply `declaredKeys` from
+ * `declaredBuilderInstructionKeysForCard`, which reads the card's typed
+ * identity and its own external reference and deliberately ignores attachment
+ * filenames. A neighbouring job's work order attached to this card yields a PO
+ * key the card does not own, and taking that as authority to drop the card's
+ * own work-order key would let a sibling's purchase order become this card's
+ * money grain. `declaredKeys` therefore defaults to EMPTY, so a caller that
+ * supplies no provenance gets no subsumption and the pre-existing refusal.
+ *
+ * Use this only to decide whether ONE CARD carries one instruction — which is
+ * every reading of the CANDIDATE side of the mint gate: the conflict decision,
+ * the availability probe's candidate keys, and the mint reservation. Claiming
+ * the claim-grain WO fallback there would lock a claim's other purchase orders
+ * out of the board, and one MLB claim routinely hosts several. The EXISTING
+ * card's own enumeration (`matchExistingInstructionCards`) must keep the full
+ * set, or a re-send that shows only the WO reference stops finding the card it
+ * already has.
+ */
+export function distinctBuilderInstructionKeys(
+  keys: readonly string[],
+  declaredKeys: readonly string[] = [],
+): string[] {
+  const declaredPoScopes = new Set(
+    declaredKeys
+      .map((key) => key.match(/^([A-Z]+):PO-\d/)?.[1])
+      .filter((scope): scope is string => Boolean(scope)),
+  );
+  if (!declaredPoScopes.size) return [...keys];
+  return keys.filter((key) => {
+    const wo = key.match(/^([A-Z]+):WO-\d/);
+    return !(wo && declaredPoScopes.has(wo[1]));
+  });
 }
 
 export function mergeBuilderWorkOrderIdentity(

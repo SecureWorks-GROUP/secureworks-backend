@@ -1,8 +1,10 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 
 import {
+  assert,
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ensureIntakeWorkOrderEvidence,
@@ -280,6 +282,25 @@ Deno.test("an explicit no-send settlement records suppression without calling th
         };
         return query;
       }
+      if (table === "makesafe_intake_cases") {
+        const query: any = {
+          select() {
+            return query;
+          },
+          in() {
+            return Promise.resolve({
+              data: [{
+                id: "case-no-send",
+                state: "confirmed_live_job",
+                job_id: "job-no-send",
+                blocked_reasons: [],
+              }],
+              error: null,
+            });
+          },
+        };
+        return query;
+      }
       if (table !== "makesafe_intake_job_mints") {
         throw new Error(`unexpected table ${table}`);
       }
@@ -525,4 +546,660 @@ Deno.test("a stale failed settlement cannot regress accepted authority", async (
 
   assertEquals(result.notificationsAccepted, 1);
   assertEquals(mintReads, 2);
+});
+
+// ── Intake case → job binding at the shared settlement seam ─────────────────
+//
+// The deterministic runtime binds `makesafe_intake_cases.job_id` only on the
+// runs it advances itself. Every draft a HUMAN approves from the review queue —
+// which since the 2026-08-28 supervised-repair ruling is every repair-family
+// draft — reaches its job through `settleApprovedIntakeDraft` instead, and a
+// case left unbound is a caseless card that `prepare_ses_docket_revision`
+// refuses with `spine_missing_source` / `spine_missing_lineage`.
+
+function caseBindingClient(input: {
+  mints: any[];
+  cases: any[];
+  jobs: any[];
+  draftMissingFields?: string[];
+  /** Models a CHECK/unique refusal on the case-bind UPDATE. */
+  caseUpdateError?: any;
+  /** Models a PostgREST fault on the case-bind READ. */
+  caseReadError?: any;
+  /** Models a PostgREST refusal of the durable failure marker INSERT. */
+  jobEventError?: any;
+}) {
+  const updates: any[] = [];
+  const jobEvents: any[] = [];
+  return {
+    updates,
+    jobEvents,
+    client: {
+      from(table: string) {
+        if (table === "makesafe_intake_job_mints") {
+          let payload: any = null;
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            neq: () => query,
+            is: () => query,
+            update(next: any) {
+              payload = next;
+              return query;
+            },
+            maybeSingle() {
+              Object.assign(input.mints[0], payload);
+              return Promise.resolve({
+                data: { id: input.mints[0].id },
+                error: null,
+              });
+            },
+            order: () => Promise.resolve({ data: input.mints, error: null }),
+          };
+          return query;
+        }
+        if (table === "job_documents") {
+          const query: any = {
+            select: () => query,
+            in: () => query,
+            eq: () => query,
+            is: () =>
+              Promise.resolve({
+                data: input.mints.map((mint: any) => ({
+                  job_id: mint.job_id,
+                  storage_url: "storage/work-order.pdf",
+                  pdf_url: "storage/work-order.pdf",
+                })),
+                error: null,
+              }),
+          };
+          return query;
+        }
+        if (table === "jobs") {
+          const query: any = {
+            select: () => query,
+            in: () => Promise.resolve({ data: input.jobs, error: null }),
+          };
+          return query;
+        }
+        if (table === "makesafe_intake_drafts") {
+          const query: any = {
+            select: () => query,
+            eq: () => query,
+            maybeSingle: () =>
+              Promise.resolve({
+                data: { missing_fields: input.draftMissingFields || [] },
+                error: null,
+              }),
+          };
+          return query;
+        }
+        if (table === "job_events") {
+          return {
+            insert(row: any) {
+              jobEvents.push(row);
+              // PostgREST RETURNS errors; it does not throw.
+              return Promise.resolve({
+                data: input.jobEventError ? null : [row],
+                error: input.jobEventError || null,
+              });
+            },
+          } as any;
+        }
+        if (table === "makesafe_intake_cases") {
+          let payload: any = null;
+          let targetId: string | null = null;
+          let requireUnbound = false;
+          const query: any = {
+            select: () => query,
+            in: () =>
+              Promise.resolve({
+                data: input.caseReadError ? null : input.cases,
+                error: input.caseReadError || null,
+              }),
+            update(next: any) {
+              payload = next;
+              return query;
+            },
+            eq(_column: string, value: string) {
+              targetId = value;
+              return query;
+            },
+            is() {
+              requireUnbound = true;
+              return query;
+            },
+            maybeSingle() {
+              const row = input.cases.find((c: any) => c.id === targetId);
+              if (!row || (requireUnbound && row.job_id)) {
+                return Promise.resolve({ data: null, error: null });
+              }
+              if (input.caseUpdateError) {
+                return Promise.resolve({
+                  data: null,
+                  error: input.caseUpdateError,
+                });
+              }
+              Object.assign(row, payload);
+              updates.push({ id: targetId, ...payload });
+              return Promise.resolve({ data: { id: targetId }, error: null });
+            },
+          };
+          return query;
+        }
+        throw new Error(`unexpected table ${table}`);
+      },
+    },
+  };
+}
+
+function repairMint(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "mint-repair",
+    draft_id: "draft-repair",
+    mint_role: "primary",
+    case_id: "case-repair",
+    source_post_ids: ["post-repair"],
+    job_id: "job-repair",
+    state: "minted",
+    evidence_attached_at: null,
+    board_observed_at: null,
+    notification_accepted_at: null,
+    ...overrides,
+  };
+}
+
+const settleRepair = (
+  client: any,
+  approval: { actor?: string; provenance?: "deterministic" | "human" } = {},
+) =>
+  settleApprovedIntakeDraft(client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    ...(approval.actor ? { caseBindingActor: approval.actor } : {}),
+    ...(approval.provenance
+      ? { caseBindingProvenance: approval.provenance }
+      : {}),
+    notify: async () => ({
+      accepted: true,
+      reason: "accepted",
+      auditId: "audit-repair",
+    }),
+  });
+
+Deno.test("a parked repair draft approved by a human leaves its intake case bound to the minted job", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].job_id, "job-repair");
+  // exception -> confirmed_live_job is the one promotion direction the census
+  // invariants and the case transition table both allow.
+  assertEquals(db.updates[0].state, "confirmed_live_job");
+  assertEquals(db.updates[0].reason_code, null);
+});
+
+// The REAL parked shape: `makesafe_intake_cases_exception_shape_check` forces
+// `cardinality(blocked_reasons) = 0` on an unbound case, so a parked row can
+// never carry them however blocked its plan was. The coordinate that survives
+// the park is the draft's `missing_fields`, which the deterministic runtime
+// writes from `plan.blockedReasons` — losing it would silently promote a
+// blocked_live_job plan to confirmed and drop the card off the gap-fill queue
+// and the intake exception desk.
+Deno.test("a parked blocked_live_job plan binds as blocked, with its reasons recovered from the draft", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    draftMissingFields: ["missing:portal_evidence", "missing:report_pdf"],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].job_id, "job-repair");
+  assertEquals(db.updates[0].state, "blocked_live_job");
+  assertEquals(db.updates[0].blocked_reasons, [
+    "missing:portal_evidence",
+    "missing:report_pdf",
+  ]);
+  assertEquals(db.updates[0].reason_code, null);
+});
+
+Deno.test("draft field names the case CHECK would reject never reach the blocked set", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    draftMissingFields: ["Missing Portal Evidence", "  "],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].state, "confirmed_live_job");
+  assertEquals(db.updates[0].blocked_reasons, []);
+});
+
+Deno.test("a Captain approval is attributed to the human in the case-event ledger", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client, {
+    actor: "captain@secureworkswa.com.au",
+    provenance: "human",
+  });
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].last_decision_provenance, "human");
+  assertEquals(
+    db.updates[0].last_decision_actor,
+    "captain@secureworkswa.com.au",
+  );
+});
+
+Deno.test("settlement never re-points an already bound intake case", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "confirmed_live_job",
+      job_id: "job-earlier",
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+});
+
+Deno.test("a restoration job is left unbound: the case-write trigger admits make-safe and repair only", async () => {
+  // `enforce_makesafe_intake_case_write` RAISES for any other job type, so
+  // attempting the link would fail the whole settlement for that family.
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "insurance" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+});
+
+// A repair draft can now wait days in the review queue for its human tick, and
+// the case can move to a different reason-coded exception in that window. This
+// binding was written only for the `awaiting_job_creation` park; promoting any
+// other reason clears an exception nobody resolved, and a `cancellation` case
+// gaining a job_id RAISES `makesafe_intake_cases_cancellation_no_job_check`
+// AFTER the job has already minted, which every re-approval then reproduces.
+Deno.test("a case that became a cancellation while the draft waited is skipped, not promoted", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "cancellation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+});
+
+Deno.test("a case carrying any other exception reason keeps that reason", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "ambiguous_scope",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+});
+
+// Ordering, pinned rather than incidental. The case bind runs LAST because it is
+// the least critical step and is idempotent on retry, while the post-board
+// notification is never retried once the case carries its job. A case that
+// cannot legally go live — two clusters on one `wo_po_identity_key`, refused by
+// `uq_makesafe_intake_cases_live_identity` — must therefore cost the binding
+// alone, never the notification, for a card that minted correctly.
+Deno.test("a refused case bind still leaves the mint settled and the notification sent", async () => {
+  const notified: string[] = [];
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    caseUpdateError: {
+      code: "23505",
+      message:
+        'duplicate key value violates unique constraint "uq_makesafe_intake_cases_live_identity"',
+    },
+  });
+
+  const result = await settleApprovedIntakeDraft(db.client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    notify: async (input) => {
+      notified.push(input.jobId);
+      return {
+        accepted: true,
+        reason: "accepted",
+        auditId: "audit-repair",
+      };
+    },
+  });
+
+  // Settlement COMPLETES: the job is already live, so a refusal here must not
+  // strand a correctly minted card in a draft loop that can never be approved.
+  assertEquals(result.notificationJobIds, ["job-repair"]);
+  assertEquals(notified, ["job-repair"]);
+  assertEquals(mint.state, "settled");
+  assertEquals(db.updates, []);
+  // ...and the gap is AUDIBLE: a durable marker names the case, the job and the
+  // underlying constraint.
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(
+    db.jobEvents[0].event_type,
+    "makesafe_intake_case_bind_failed",
+  );
+  assertEquals(db.jobEvents[0].job_id, "job-repair");
+  assertEquals(db.jobEvents[0].detail_json.case_id, "case-repair");
+  assertEquals(db.jobEvents[0].detail_json.stage, "case_bind");
+  assertStringIncludes(
+    db.jobEvents[0].detail_json.error,
+    "uq_makesafe_intake_cases_live_identity",
+  );
+});
+
+Deno.test("a case-bind READ fault is recorded and the approval still settles", async () => {
+  const notified: string[] = [];
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [],
+    jobs: [{ id: "job-repair", type: "repair" }],
+    caseReadError: { code: "42703", message: "column does not exist" },
+  });
+
+  await settleApprovedIntakeDraft(db.client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    notify: async (input) => {
+      notified.push(input.jobId);
+      return { accepted: true, reason: "accepted", auditId: "audit-repair" };
+    },
+  });
+
+  assertEquals(notified, ["job-repair"]);
+  assertEquals(mint.state, "settled");
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(db.jobEvents[0].detail_json.stage, "case_read");
+});
+
+Deno.test("a combined split binds the case to the PHYSICAL primary, not the report card", async () => {
+  // Both mints carry the same `case_id`; the primary must win by stated rule,
+  // not because `mint_role` collation puts 'primary' before 'secondary_report'.
+  const db = caseBindingClient({
+    mints: [
+      repairMint({
+        id: "mint-secondary",
+        mint_role: "secondary_report",
+        job_id: "job-report",
+        notification_accepted_at: "2026-08-31T00:00:00.000Z",
+      }),
+      repairMint({
+        id: "mint-primary",
+        mint_role: "primary",
+        job_id: "job-repair",
+        notification_accepted_at: "2026-08-31T00:00:00.000Z",
+      }),
+    ],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [
+      { id: "job-repair", type: "repair" },
+      { id: "job-report", type: "makesafe" },
+    ],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates.length, 1);
+  assertEquals(db.updates[0].job_id, "job-repair");
+});
+
+// The durable marker is the load-bearing half of the record-and-continue
+// contract, and PostgREST REFUSES an insert by returning `error` rather than
+// throwing — so a refused marker must still be visible in the edge log and must
+// still never fail the approval. Without the destructure the refusal is silent.
+Deno.test("a REFUSED failure marker is logged and still never fails the approval", async () => {
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map((value) => String(value)).join(" "));
+  };
+  try {
+    const notified: string[] = [];
+    const mint = repairMint();
+    const db = caseBindingClient({
+      mints: [mint],
+      cases: [{
+        id: "case-repair",
+        state: "exception",
+        reason_code: "awaiting_job_creation",
+        job_id: null,
+        blocked_reasons: [],
+      }],
+      jobs: [{ id: "job-repair", type: "repair" }],
+      caseUpdateError: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "uq_makesafe_intake_cases_live_identity"',
+      },
+      jobEventError: { code: "42501", message: "permission denied" },
+    });
+
+    const result = await settleApprovedIntakeDraft(db.client, {
+      draftId: "draft-repair",
+      approvedJobId: "job-repair",
+      attachments: [{
+        file_name: "work-order.pdf",
+        storage_url: "storage/work-order.pdf",
+      }],
+      extraction: { deterministic_intake: true },
+      refreshIdentity: noIdentityRefresh as any,
+      notify: async (input) => {
+        notified.push(input.jobId);
+        return { accepted: true, reason: "accepted", auditId: "audit-repair" };
+      },
+    });
+
+    assertEquals(result.notificationJobIds, ["job-repair"]);
+    assertEquals(notified, ["job-repair"]);
+    assertEquals(mint.state, "settled");
+    assertEquals(db.updates, []);
+    assert(
+      logged.some((line) =>
+        line.includes("marker unwritten") && line.includes("permission denied")
+      ),
+      `a refused marker insert must be logged, got: ${logged.join(" | ")}`,
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+// A deliberate SKIP leaves exactly the outcome the marker exists to make
+// diagnosable — a caseless card refused later at `prepare_ses_docket_revision`.
+// For a parked repair card this seam is the ONLY binder, so a silent skip is an
+// unrecorded permanent gap.
+Deno.test("a case whose reason moved on records a not-bindable marker and still settles", async () => {
+  const notified: string[] = [];
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "cancellation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleApprovedIntakeDraft(db.client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    notify: async (input) => {
+      notified.push(input.jobId);
+      return { accepted: true, reason: "accepted", auditId: "audit-repair" };
+    },
+  });
+
+  // The skip stays a skip: no case row is written.
+  assertEquals(db.updates, []);
+  assertEquals(notified, ["job-repair"]);
+  assertEquals(mint.state, "settled");
+  // ...but it is audible, and it names the reason that made it unbindable.
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(
+    db.jobEvents[0].event_type,
+    "makesafe_intake_case_not_bindable",
+  );
+  assertEquals(db.jobEvents[0].detail_json.case_id, "case-repair");
+  assertEquals(db.jobEvents[0].detail_json.reason_code, "cancellation");
+});
+
+Deno.test("a non-linkable job type records a not-bindable marker naming the type", async () => {
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "exception",
+      reason_code: "awaiting_job_creation",
+      job_id: null,
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "insurance" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+  assertEquals(db.jobEvents.length, 1);
+  assertEquals(
+    db.jobEvents[0].event_type,
+    "makesafe_intake_case_not_bindable",
+  );
+  assertEquals(db.jobEvents[0].detail_json.job_type, "insurance");
+});
+
+Deno.test("an already-bound case is a silent no-op, not a recorded gap", async () => {
+  // The ordinary deterministic-lane shape: the runtime bound the case first.
+  // Recording a marker here would alarm on every healthy run.
+  const db = caseBindingClient({
+    mints: [repairMint()],
+    cases: [{
+      id: "case-repair",
+      state: "confirmed_live_job",
+      reason_code: null,
+      job_id: "job-repair",
+      blocked_reasons: [],
+    }],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+
+  await settleRepair(db.client);
+
+  assertEquals(db.updates, []);
+  assertEquals(db.jobEvents, []);
 });

@@ -2327,9 +2327,7 @@ Deno.test("shared WO with distinct POs keeps separate family ownership", () => {
   );
   assertEquals(
     new Set(
-      plan.cases.map((intakeCase) =>
-        intakeCase.identity.builderPoCanonical
-      ),
+      plan.cases.map((intakeCase) => intakeCase.identity.builderPoCanonical),
     ),
     new Set(["PO-54176", "PO-54177"]),
   );
@@ -2421,4 +2419,105 @@ Deno.test("D5 guard: an ordinary MLB instruction subject never matches the relay
   const adapted = adaptDeterministicSource(item, PROFILES);
   assertEquals(adapted.adapterId, "mlb");
   assertEquals(adapted.intent, "work");
+});
+
+// ── Captain ruling 2026-08-31: identified-work-order repair complement ───────
+//
+// "A properly identified, readable work order that is NOT general make-safe,
+// NOT a roof report, NOT an assessment/quote report, and NOT a temporary fence
+// make-safe is repair." Implemented at the fate ladder's LAST exception rung,
+// after every quality floor (chatter, cancellation, unknown builder,
+// quote-stage, conflicting fields, identity floor, parse failure) has already
+// fired — the point the 2026-08-25 scout report said makes the complement safe.
+
+function neutralScopeWorkOrder(input: {
+  postId: string;
+  fromEmail?: string;
+  scopeLine: string;
+}) {
+  return source({
+    postId: input.postId,
+    fromEmail: input.fromEmail,
+    subject: "NEW WORK ORDER",
+    body: "Please attend as instructed. Documents attached.",
+    attachments: [pdf(input.postId, `${input.postId}-attachment`)],
+    pdfDocuments: [{
+      sourcePostId: input.postId,
+      attachmentId: `${input.postId}-attachment`,
+      attachmentName: "MLB Work Order.pdf",
+      status: "extracted",
+      text: `Work Order Number
+MLB-27150PO-61000
+Policyholders Name
+Neutral Client
+Mobile: 0422 000 111
+Site Address
+30 Neutral Street, Perth, WA 6000
+Scope of Works
+${input.scopeLine}
+Totals
+Subtotal $1,000.00`,
+      charCount: 300,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+}
+
+Deno.test("an identified readable WO whose scope matches no family becomes a repair live case", () => {
+  const item = neutralScopeWorkOrder({
+    postId: "mlb-neutral-complement",
+    scopeLine: "Repaint the hallway ceiling and patch minor plaster cracking.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].identity.jobFamily, "repair");
+  assertEquals(plan.cases[0].state, "confirmed_live_job");
+  assertEquals(plan.cases[0].reasonCode, null);
+  assertEquals(plan.aiCalls, 0);
+});
+
+Deno.test("CONTROL: a temporary-fence scope on the same shape keeps its own lane", () => {
+  const item = neutralScopeWorkOrder({
+    postId: "mlb-neutral-temp-fence",
+    scopeLine: "Supply and install temporary fencing to the front boundary.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.jobFamily, "temp_fence_makesafe");
+  assertEquals(plan.cases[0].state, "confirmed_live_job");
+});
+
+Deno.test("CONTROL: a make-safe scope on the same shape stays general make-safe", () => {
+  const item = neutralScopeWorkOrder({
+    postId: "mlb-neutral-makesafe",
+    scopeLine: "Install temporary roof tarps and make the property safe.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.jobFamily, "general_makesafe");
+  assertEquals(plan.cases[0].state, "confirmed_live_job");
+});
+
+Deno.test("CONTROL: a restoration-flavoured scope still parks — the complement reads only genuine abstention", () => {
+  const item = neutralScopeWorkOrder({
+    postId: "mlb-neutral-restoration",
+    scopeLine:
+      "Water damage restoration works to be completed by the restoration builder.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+});
+
+Deno.test("CONTROL: an unknown builder with the same neutral scope still parks as unknown_builder", () => {
+  const item = neutralScopeWorkOrder({
+    postId: "unknown-neutral-complement",
+    fromEmail: "dispatch@unknown.test",
+    scopeLine: "Repaint the hallway ceiling and patch minor plaster cracking.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "unknown_builder");
 });

@@ -120,6 +120,28 @@ refuses with `pdf_extraction_pending`, and an email carrying multiple work order
 refused rather than selecting one document implicitly. This is forward-only for newly
 minted cards and does not reclassify existing cards.
 
+### Repair family is supervised on every lane
+
+An `SWR-` mint is irreversible, so a human taps every one. Advance-what-passes
+stops at the repair family: `approveIntakeDraft` refuses (409) whenever the
+family that would actually be created is `repair` and the caller carries the
+module-private unattended marker every in-repo automation lane stamps (the
+sweep, the legacy drain and the deterministic scan lanes among them). The
+deterministic runtime additionally withholds its own guarded approval for a
+repair-family plan and leaves the draft written and `needs_review`, and the
+sweep skips it earlier with `repair_family_supervised_review`; those are
+earlier, weaker layers, not the guarantee. A parked repair draft is ordinary
+review-queue work for an operator.
+
+Which work orders resolve to repair widened with the captain's 2026-08-31
+ruling: a properly identified, readable work order that is not general make-safe,
+not a roof report, not an assessment/quote report and not a temporary fence
+make-safe is repair. The complement applies only after the quality floor above
+has passed, so an unparseable, cancelled, chatter, unknown-builder,
+insufficient-identity or quote-stage draft still parks as a reviewable exception
+exactly as before. Contract and measured effect:
+[intake WO+PO identity and the repair complement](evidence/intake-wo-po-identity-and-repair-complement-2026-08-31.md).
+
 ## Operator Intake queue and Advance contract
 
 The make-safe board reads its operator queue through
