@@ -366,6 +366,19 @@ import {
   validatePersistedTradeInvoiceMoney,
 } from './trade_invoice_money.ts'
 import {
+  attachPdfBase64ToXeroInvoice,
+  XeroPdfAttachError,
+} from './xero_attachment.ts'
+import {
+  attachSupplierBillPdf,
+  createSupplierBill,
+  createSupplierCreditNote,
+  getSupplierBill,
+  listSupplierBills,
+  SupplierBillError,
+  updateSupplierBill,
+} from './xero_accpay_books.ts'
+import {
   createTradeInvoiceBeforeExternalWrite,
   replaceTradeInvoiceDraftKeepingPrior,
   replaceTradeInvoicePriorDraft,
@@ -1411,6 +1424,17 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
       code: error.code,
       error: error.message,
       userMessage: error.message,
+    })
+  }
+  throw error
+}
+
+function supplierBillApiError(error: unknown): never {
+  if (error instanceof SupplierBillError || error instanceof XeroPdfAttachError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      code: error.code,
+      error: error.message,
     })
   }
   throw error
@@ -6706,6 +6730,48 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'submit_makesafe_report':
         return json(await dispatchMakesafeReport(client, body, authMode, authUser))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
+      case 'list_supplier_bills': {
+        try {
+          return json(await listSupplierBills(client, url.searchParams, { getToken, xeroGet }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'get_supplier_bill': {
+        try {
+          return json(await getSupplierBill(client, url.searchParams, { getToken, xeroGet }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'create_supplier_bill': {
+        try {
+          return json(await createSupplierBill(client, body, { getToken, xeroGet, xeroPost }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'update_supplier_bill': {
+        try {
+          return json(await updateSupplierBill(client, body, { getToken, xeroGet, xeroPost }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'attach_supplier_bill_pdf': {
+        try {
+          return json(await attachSupplierBillPdf(client, body, { getToken, xeroGet }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'create_supplier_credit_note': {
+        try {
+          return json(await createSupplierCreditNote(client, body, { getToken, xeroGet, xeroPost }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
       // ── Job P&L (M3) — pairs with ops.html #119 + M1 migration ──
       case 'job_financials': return json(await listJobFinancials(client))
       case 'job_financials_detail': {
@@ -7657,7 +7723,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const cachedContactId: string | null = inv.user?.xero_contact_id || null
 
         const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
-        const reference = `${inv.invoice_number || 'TRADE'} | ${distinctJobNums}`
+        const reference = [tradeName, inv.invoice_number || 'TRADE', distinctJobNums].filter(Boolean).join(' | ')
 
         const paymentDays = inv.user?.payment_terms_days || 7
         const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
@@ -7726,7 +7792,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const xeroLineItems = splitTradeInvoiceXeroLines(
           grossXeroLineItems,
           invMoney,
-          { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+          { tradeName, superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
         )
 
         if (inv.xero_bill_id) {
@@ -7805,14 +7871,29 @@ if (import.meta.main) serve(async (req: Request) => {
             invoice_type: 'ACCPAY',
             status: bill.Status || 'DRAFT',
             reference: reference,
-            sub_total: invMoney.gross_earned,
+            sub_total: invMoney.net_pay,
             total_tax: invMoney.gst_amount,
-            total: bill.Total || invMoney.total_inc,
-            amount_due: bill.AmountDue || invMoney.total_inc,
+            total: bill.Total || invMoney.trade_payable,
+            amount_due: bill.AmountDue || invMoney.trade_payable,
             due_date: dueDate,
             contact_name: tradeName,
+            xero_contact_id: xeroContactId,
           }, { onConflict: 'xero_invoice_id' })
         } catch (e) { /* non-blocking */ }
+
+        if (body.pdf_base64) {
+          try {
+            await attachPdfBase64ToXeroInvoice({
+              invoiceId: billIdentity.xeroBillId,
+              filename: inv.invoice_number || reference || 'trade-invoice',
+              pdfBase64: body.pdf_base64,
+              accessToken,
+              tenantId,
+            })
+          } catch (attachErr) {
+            console.log('[ops-api] retry trade invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
+          }
+        }
 
         return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference })
       }
@@ -9321,7 +9402,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const woXeroLineItems = splitTradeInvoiceXeroLines(
               lineItems,
               woMoney,
-              { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+              { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
             )
 
             const workOrderLines: Array<Record<string, unknown>> = scopeItems.map((item: any) => {
@@ -9458,6 +9539,19 @@ if (import.meta.main) serve(async (req: Request) => {
               xeroBillId = identity.xeroBillId
               xeroBillNumber = identity.xeroBillNumber
               xeroSuccess = !!xeroBillId
+              if (xeroBillId && body.pdf_base64) {
+                try {
+                  await attachPdfBase64ToXeroInvoice({
+                    invoiceId: xeroBillId,
+                    filename: `${tradeName}-${wo.wo_number || 'work-order'}`,
+                    pdfBase64: body.pdf_base64,
+                    accessToken: woAt,
+                    tenantId: woTi,
+                  })
+                } catch (attachErr) {
+                  console.log('[ops-api] WO invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
+                }
+              }
             } catch (e: any) {
               if (e instanceof TradeInvoiceMoneyError && e.code === 'XERO_RETURNED_SPLIT_INVALID') {
                 tradeInvoiceMoneyApiError(e)
@@ -10457,7 +10551,10 @@ if (import.meta.main) serve(async (req: Request) => {
                   .in('id', duplicateInvoiceIds)
                 if (duplicateInvErr) throw duplicateInvErr
                 const liveDuplicateInvoices = new Map((duplicateInvoices || [])
-                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
+                  .filter((ti: any) =>
+                    !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')) &&
+                    String(ti.user_id || '') === String(tradeUser.id)
+                  )
                   .map((ti: any) => [ti.id, ti]))
                 duplicateExtraMatches = [...duplicateLineMap.values()]
                   .filter((line: any) => liveDuplicateInvoices.has(line.trade_invoice_id))
@@ -10840,6 +10937,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // Declared outside the try so the catch block can record which phase failed.
             let xeroContactId: string | null = null
             let createdXeroBillId = ''
+            let pdfAttached = false
             try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
@@ -10891,7 +10989,12 @@ if (import.meta.main) serve(async (req: Request) => {
                   return option ? [{ Name: 'Business Unit', Option: option }] : []
                 }
 
-                // Build Xero line items with tracking + correct tax type + rich descriptions
+                const tradeName = userProfile?.name || 'Trade'
+
+                // Build Xero line items with tracking + correct tax type + human wording.
+                // Duplicate warnings stay on the local query_note; they must never
+                // land on the Xero bill (holder work-order lines share job numbers
+                // with crew labour invoices and were false-positiving POSSIBLE DUPLICATE).
                 const grossXeroLines = [...lineItems.map((l: any) => {
                   // Change 4: include builder ref in Xero description when present (makesafe jobs)
                   const builderRef = jobMap[l.job_id]?._external_ref || jobMap[l.job_id]?.metadata?.external_ref
@@ -10911,11 +11014,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   Tracking: xeroTracking(l.job_number || ''),
                   }
                 }), ...extraLineItems.map((e: any) => {
-                  const possibleDuplicate = (e.job_id && duplicateExtraJobIds.has(e.job_id)) ||
-                    (e.job_number && duplicateExtraJobNumbers.has(String(e.job_number)))
                   return {
                     Description: [
-                      possibleDuplicate ? 'POSSIBLE DUPLICATE - verify prior trade invoice before approving' : null,
                       e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
                       (Number(e.line_total_ex) < 0 ? 'Less: ' : '') +
                         (e.description || e.line_type || 'Extra') +
@@ -10934,7 +11034,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 const allLines = splitTradeInvoiceXeroLines(
                   grossXeroLines,
                   money,
-                  { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+                  { tradeName, superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
                 )
 
                 // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
@@ -10948,9 +11048,9 @@ if (import.meta.main) serve(async (req: Request) => {
                 // this invoice flagged, so finance can spot flagged bills in the
                 // Xero invoice list without opening each one (finding #7 verbatim).
                 const xeroReference = appendHoursFlagMarker(
-                  invoiceNumber
-                    + (xeroInternalJobNums ? ' | ' + xeroInternalJobNums : '')
-                    + (xeroExternalRefs ? ' | ' + xeroExternalRefs : ''),
+                  [tradeName, invoiceNumber, xeroInternalJobNums, xeroExternalRefs]
+                    .filter(Boolean)
+                    .join(' | '),
                   anyHoursFlag,
                 )
 
@@ -10991,21 +11091,36 @@ if (import.meta.main) serve(async (req: Request) => {
                   await markTradeInvoiceXeroSplitReconciled(client, invoice.id, identity)
                   xeroBillId = identity.xeroBillId
                   xeroBillNumber = identity.xeroBillNumber
+                  if (body.pdf_base64) {
+                    try {
+                      await attachPdfBase64ToXeroInvoice({
+                        invoiceId: identity.xeroBillId,
+                        filename: invoiceNumber || 'trade-invoice',
+                        pdfBase64: body.pdf_base64,
+                        accessToken,
+                        tenantId,
+                      })
+                      pdfAttached = true
+                    } catch (attachErr) {
+                      console.log('[ops-api] trade invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
+                    }
+                  }
                   // Cache
                   try {
                     await client.from('xero_invoices').upsert({
                       org_id: DEFAULT_ORG_ID,
                       xero_invoice_id: identity.xeroBillId,
+                      xero_contact_id: xeroContactId,
                       invoice_number: identity.xeroBillNumber,
                       invoice_type: 'ACCPAY',
                       status: 'DRAFT',
-                      reference: invoiceNumber,
-                      sub_total: money.gross_earned,
+                      reference: xeroReference,
+                      sub_total: money.net_pay,
                       total_tax: money.gst_amount,
-                      total: totalInc,
-                      amount_due: totalInc,
+                      total: money.trade_payable,
+                      amount_due: money.trade_payable,
                       due_date: dueDate,
-                      contact_name: userProfile?.name || 'Trade',
+                      contact_name: tradeName,
                     }, { onConflict: 'xero_invoice_id' })
                   } catch (e) { /* non-blocking */ }
                 }
@@ -11094,6 +11209,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 line_count: lineItems.length + extraLineItems.length,
                 xero_bill_id: null,
                 xero_bill_number: null,
+                pdf_attached: false,
                 pending_ops_review: false,
                 soft_review_flag: softReviewFlag,
                 review_flag: reviewFlag,
@@ -11113,6 +11229,7 @@ if (import.meta.main) serve(async (req: Request) => {
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
               xero_bill_number: xeroBillNumber,
+              pdf_attached: pdfAttached,
               // Change 6 (Q18): no in-app hold anymore — every passing invoice goes
               // straight to a Xero draft. pending_ops_review is retained as a field for
               // backward-compat with any UI reading it, but is always false now.
@@ -14093,6 +14210,8 @@ async function listInvoices(client: any, params: URLSearchParams) {
   const offset = parseInt(params.get('offset') || '0')
   const dateFrom = params.get('date_from')
   const dateTo = params.get('date_to')
+  const contactName = (params.get('contact') || params.get('contact_name') || '').trim()
+  const invoiceRef = (params.get('reference') || params.get('invoice_ref') || params.get('invoice_number') || '').trim()
 
   // Resolve job_id — accept UUID or job_number (e.g. SWF-26037)
   let jobId = params.get('job_id') || ''
@@ -14121,6 +14240,10 @@ async function listInvoices(client: any, params: URLSearchParams) {
   }
   if (dateFrom) query = query.gte('invoice_date', dateFrom)
   if (dateTo) query = query.lte('invoice_date', dateTo)
+  if (contactName) query = query.ilike('contact_name', `%${contactName}%`)
+  if (invoiceRef) {
+    query = query.or(`reference.ilike.%${invoiceRef}%,invoice_number.ilike.%${invoiceRef}%`)
+  }
 
   const { data, error, count } = await query
   if (error) throw error
@@ -46802,7 +46925,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const stXeroLineItems = splitTradeInvoiceXeroLines(
     lineItems,
     stMoney,
-    { superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+    { tradeName, superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
   )
 
   const persistedLineSubtotal = Object.values(jobLines).reduce(
@@ -46911,6 +47034,20 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   await markTradeInvoiceXeroSplitReconciled(client, insertedInvoice.id, xeroIdentity)
   const billNumber = xeroIdentity.xeroBillNumber
 
+  if (body.pdf_base64) {
+    try {
+      await attachPdfBase64ToXeroInvoice({
+        invoiceId: xeroIdentity.xeroBillId,
+        filename: billNumber || `${tradeName}-WE-${week_ending}`,
+        pdfBase64: body.pdf_base64,
+        accessToken: stAt,
+        tenantId: stTi,
+      })
+    } catch (attachErr) {
+      console.log('[ops-api] submit_trade_invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
+    }
+  }
+
   // Cache in xero_invoices table
   try {
     await client.from('xero_invoices').upsert({
@@ -46922,10 +47059,10 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       invoice_type: 'ACCPAY',
       status: 'DRAFT',
       reference: `${tradeName} | WE ${week_ending}`,
-      sub_total: stMoney.gross_earned,
+      sub_total: stMoney.net_pay,
       total_tax: gst,
-      total: total,
-      amount_due: total,
+      total: stMoney.trade_payable,
+      amount_due: stMoney.trade_payable,
       amount_paid: 0,
       invoice_date: new Date().toISOString().slice(0, 10),
       due_date: dueDate,

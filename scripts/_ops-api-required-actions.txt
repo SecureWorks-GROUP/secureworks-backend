@@ -239,3 +239,12 @@ makesafe_state_seed
 # refused with 405 before any selection is read, so the default probe is safe.
 makesafe_state_seed_scoped
 makesafe_state_reconcile
+
+# ── Books supplier bills (ACCPAY). Stay DRAFT. Never approve/void/pay. ──
+# Live Xero reads/writes: never fire a bare deploy-smoke call at production.
+list_supplier_bills # probe=source-only
+get_supplier_bill # probe=source-only
+create_supplier_bill # probe=source-only
+update_supplier_bill # probe=source-only
+attach_supplier_bill_pdf # probe=source-only
+create_supplier_credit_note # probe=source-only

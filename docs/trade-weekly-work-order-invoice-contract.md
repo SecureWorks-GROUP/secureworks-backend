@@ -58,8 +58,9 @@ to_be_paid_ex = subtotal_ex
 ```
 
 The existing super/GST calculation still operates on `subtotal_ex`, and Xero
-keeps negative lines at their exact stored amount. Its net lines plus the
-worked-out super line therefore still equal TO BE PAID.
+keeps negative lines at their exact stored amount. Labour stays at those work
+amounts; super is a minus line so the bill total equals cash payable to the
+trade (TO BE PAID less super). Super is paid to the fund separately.
 
 ## Trade app API contract
 
