@@ -390,7 +390,7 @@ export function formatTradeInvoiceSuperWithheldDescription(
     `Submitted total ${moneyLabel(money.gross_earned)}. Super ${
       moneyLabel(money.super_amount)
     }. Amount payable ${moneyLabel(money.net_pay)}.`,
-    `Paid to the super fund separately — not part of the amount payable to ${name}`,
+    `Paid to the super fund separately - not part of the amount payable to ${name}`,
   ].join("\n");
 }
 
