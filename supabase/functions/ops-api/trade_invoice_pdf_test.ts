@@ -6,6 +6,7 @@ import {
   buildTradeInvoiceAuditText,
   pdfFromTextLines,
   renderTradeInvoiceAuditPdf,
+  wrapPdfText,
 } from "./trade_invoice_pdf.ts";
 import { buildTradeInvoiceAuditModel } from "./trade_invoice_money.ts";
 
@@ -17,12 +18,14 @@ Deno.test("audit PDF keeps submitted line amounts and shows one 12%-of-total sup
   });
   const submitted = [
     {
-      Description: "SWF-261132 Matthew Dunne",
+      Description:
+        "SWF-261132 Matthew Dunne Work order $1058.20. Less labour: Ayden 8.5h x $30 = $255.00. 4 Chepstow Way Butler.",
       Quantity: 1,
       UnitAmount: 803.20,
     },
     {
-      Description: "SWF-26824 Hannah Crugnale",
+      Description:
+        "SWF-26824 Hannah Crugnale Work order $2830.00. Less labour deducted $1,425.00. 24 Wychcross St Westminster.",
       Quantity: 1,
       UnitAmount: 1_405.00,
     },
@@ -49,10 +52,19 @@ Deno.test("audit PDF keeps submitted line amounts and shows one 12%-of-total sup
     tradeName: "Isaac Belcher",
     invoiceNumber: "SW-INV-I-260828-001",
   });
-  const pdfText = new TextDecoder().decode(pdf.bytes);
+  const pdfText = new TextDecoder("latin1").decode(pdf.bytes);
   assertEquals(pdfText.startsWith("%PDF-"), true);
   assert(pdfText.includes("Submitted total $2208.20"));
   assert(pdfText.includes("Amount payable $1943.22"));
+  assert(
+    pdfText.includes("= $803.20") || pdfText.includes("$803.20"),
+    "rendered PDF must show the full submitted line total, not a clipped $803.",
+  );
+  assert(pdfText.includes("$1405.00"), "rendered PDF must show the full $1405.00 line total");
+  assert(
+    pdfText.includes("$-264.98"),
+    "rendered PDF bytes must contain the super minus amount, not a clipped Amount payable $1943.22. P",
+  );
   assertEquals(pdfText.includes("Net earnings after"), false);
   assertEquals(pdf.filename, "SW-INV-I-260828-001-audit.pdf");
   assertEquals(pdfText.includes("\u2014"), false);
@@ -101,6 +113,29 @@ Deno.test("audit PDF xref offsets and /Length are UTF-8 byte-accurate even if a 
   assertEquals(ascii.includes("\u2014"), false);
   assert(ascii.includes("TAX INVOICE - labour at submitted amounts"));
   assert(ascii.includes("Amount payable $1943.22"));
+  assertPdfXrefByteAccurate(bytes);
+});
+
+Deno.test("wrapPdfText keeps super minus and line totals instead of slicing at 118 chars", () => {
+  const superLine =
+    "Isaac Belcher Superannuation Guarantee 12.00% of submitted total Submitted total $2208.20. Super $264.98. Amount payable $1943.22. Paid to the super fund separately - not part of the amount payable to Isaac Belcher  $-264.98";
+  assert(superLine.length > 118);
+  const wrapped = wrapPdfText(superLine);
+  assert(wrapped.length > 1);
+  assertEquals(wrapped.some((row) => row.length > 118), false);
+  assertEquals(wrapped.join(" ").includes("$-264.98"), true);
+  assertEquals(wrapped.join(" ").includes("$1943.22"), true);
+
+  const labour =
+    "SWF-261132 Matthew Dunne Work order $1058.20. Less labour: Ayden 8.5h x $30 = $255.00. 4 Chepstow Way Butler.  qty 1 x $803.20 = $803.20";
+  assert(labour.length > 118);
+  const labourRows = wrapPdfText(labour);
+  assertEquals(labourRows.join(" ").includes("= $803.20"), true);
+
+  const bytes = pdfFromTextLines([labour, superLine]);
+  const rendered = new TextDecoder("latin1").decode(bytes);
+  assert(rendered.includes("$-264.98"));
+  assert(rendered.includes("= $803.20") || rendered.includes("$803.20"));
   assertPdfXrefByteAccurate(bytes);
 });
 

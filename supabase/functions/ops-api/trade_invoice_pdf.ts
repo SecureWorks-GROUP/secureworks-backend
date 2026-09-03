@@ -65,6 +65,41 @@ function toAsciiPdfText(text: string): string {
   return text.replace(/[\u2014\u2013\u2212]/g, "-");
 }
 
+export const PDF_LINE_WIDTH = 90;
+const PAGE_TOP = 760;
+const PAGE_BOTTOM = 48;
+const LINE_HEIGHT = 14;
+const ROWS_PER_PAGE = Math.floor((PAGE_TOP - PAGE_BOTTOM) / LINE_HEIGHT);
+
+/** Word-wrap so money amounts are never sliced off a PDF line. */
+export function wrapPdfText(text: string, width = PDF_LINE_WIDTH): string[] {
+  const ascii = toAsciiPdfText(String(text || "")).replace(/\s+/g, " ").trim();
+  if (!ascii) return [""];
+  const words = ascii.split(" ");
+  const rows: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= width) {
+      current = next;
+      continue;
+    }
+    if (current) rows.push(current);
+    if (word.length <= width) {
+      current = word;
+      continue;
+    }
+    let rest = word;
+    while (rest.length > width) {
+      rows.push(rest.slice(0, width));
+      rest = rest.slice(width);
+    }
+    current = rest;
+  }
+  if (current) rows.push(current);
+  return rows;
+}
+
 function utf8(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
@@ -80,32 +115,49 @@ function concatPdfBytes(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-/** Build a one-page PDF. /Length and xref offsets are UTF-8 byte lengths. */
+/** Build a PDF. Long lines wrap; /Length and xref offsets are UTF-8 byte lengths. */
 export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
-  const ops = ["BT", "/F1 11 Tf"];
-  let y = 760;
-  for (const line of lines) {
-    const clipped = toAsciiPdfText(line).slice(0, 118);
-    ops.push(`1 0 0 1 36 ${y} Tm (${pdfEscape(clipped)}) Tj`);
-    y -= 14;
-    if (y < 48) break;
+  const rows = lines.flatMap((line) => wrapPdfText(line));
+  const pages: string[][] = [];
+  for (let i = 0; i < rows.length; i += ROWS_PER_PAGE) {
+    pages.push(rows.slice(i, i + ROWS_PER_PAGE));
   }
-  ops.push("ET");
-  const stream = utf8(ops.join("\n"));
-  const objects: Uint8Array[] = [
-    utf8("<< /Type /Catalog /Pages 2 0 R >>"),
-    utf8("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-    utf8(
-      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-    ),
-    concatPdfBytes([
-      utf8(`<< /Length ${stream.byteLength} >>\nstream\n`),
-      stream,
-      utf8("\nendstream"),
-    ]),
-    utf8("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
-  ];
+  if (pages.length === 0) pages.push([""]);
 
+  const contentStreams = pages.map((pageRows) => {
+    const ops = ["BT", "/F1 11 Tf"];
+    let y = PAGE_TOP;
+    for (const row of pageRows) {
+      ops.push(`1 0 0 1 36 ${y} Tm (${pdfEscape(row)}) Tj`);
+      y -= LINE_HEIGHT;
+    }
+    ops.push("ET");
+    return utf8(ops.join("\n"));
+  });
+
+  const pageCount = contentStreams.length;
+  const pageIds = contentStreams.map((_, i) => 4 + i * 2);
+  const contentIds = contentStreams.map((_, i) => 5 + i * 2);
+  const byNumber: Uint8Array[] = [];
+  byNumber[1] = utf8("<< /Type /Catalog /Pages 2 0 R >>");
+  byNumber[2] = utf8(
+    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageCount} >>`,
+  );
+  byNumber[3] = utf8(
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  );
+  for (let i = 0; i < pageCount; i++) {
+    byNumber[pageIds[i]] = utf8(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentIds[i]} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
+    );
+    byNumber[contentIds[i]] = concatPdfBytes([
+      utf8(`<< /Length ${contentStreams[i].byteLength} >>\nstream\n`),
+      contentStreams[i],
+      utf8("\nendstream"),
+    ]);
+  }
+
+  const objects = byNumber.slice(1);
   const chunks: Uint8Array[] = [utf8("%PDF-1.4\n")];
   const offsets = [0];
   let pos = chunks[0].byteLength;
