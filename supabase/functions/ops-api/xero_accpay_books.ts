@@ -321,6 +321,59 @@ export async function getSupplierBill(
   return { ok: true, bill: presentBill(inv) };
 }
 
+function readParamOrBody(
+  params: URLSearchParams | Record<string, string>,
+  body: Record<string, unknown> | null | undefined,
+  key: string,
+): string {
+  const fromParams = params instanceof URLSearchParams
+    ? params.get(key)
+    : (params as Record<string, string>)[key];
+  if (fromParams) return String(fromParams);
+  const fromBody = body?.[key];
+  return fromBody == null ? "" : String(fromBody);
+}
+
+/**
+ * Read-only point-get of one Xero invoice by InvoiceID.
+ * Returns Type (ACCPAY or ACCREC), Status, and LineItems so classify is not
+ * fail-closed. Never approves, voids, pays, emails, or rewrites a draft.
+ */
+export async function getXeroInvoice(
+  client: any,
+  params: URLSearchParams | Record<string, string>,
+  deps: { getToken: GetTokenFn; xeroGet: XeroGetFn },
+  body?: Record<string, unknown> | null,
+) {
+  const xeroInvoiceId = String(
+    readParamOrBody(params, body, "xero_invoice_id") ||
+      readParamOrBody(params, body, "invoice_id") ||
+      readParamOrBody(params, body, "xero_id") ||
+      "",
+  ).trim();
+  if (!xeroInvoiceId) {
+    throw new SupplierBillError("xero_invoice_id required", 400);
+  }
+  const { accessToken, tenantId } = await deps.getToken(client);
+  const result = await deps.xeroGet(
+    `/Invoices/${encodeURIComponent(xeroInvoiceId)}`,
+    accessToken,
+    tenantId,
+  );
+  const inv = result?.Invoices?.[0];
+  if (!inv?.InvoiceID) {
+    throw new SupplierBillError("Xero invoice not found", 404, "NOT_FOUND");
+  }
+  const presented = presentBill(inv);
+  return {
+    ok: true,
+    invoice: {
+      ...presented,
+      type: presented.invoice_type,
+    },
+  };
+}
+
 export async function listSupplierBills(
   client: any,
   params: URLSearchParams | Record<string, string>,

@@ -10,6 +10,7 @@ import {
   createSupplierBill,
   createSupplierCreditNote,
   getSupplierBill,
+  getXeroInvoice,
   listSupplierBills,
   mapSupplierBillStatusFilter,
   SupplierBillError,
@@ -122,6 +123,57 @@ Deno.test("get_supplier_bill reads the live Xero ACCPAY and refuses a sales invo
     SupplierBillError,
     "not a supplier bill",
   );
+});
+
+Deno.test("get_xero_invoice is a read-only point-get that returns ACCPAY or ACCREC type", async () => {
+  const calls: string[] = [];
+  const xeroGet = async (path: string) => {
+    calls.push(path);
+    if (path.includes("accrec-1")) {
+      return {
+        Invoices: [{
+          InvoiceID: "accrec-1",
+          Type: "ACCREC",
+          Status: "DRAFT",
+          InvoiceNumber: "INV-9",
+          LineItems: [{ Description: "Job SWF-1", Quantity: 1, UnitAmount: 100 }],
+        }],
+      };
+    }
+    return {
+      Invoices: [{
+        InvoiceID: "bill-1",
+        Type: "ACCPAY",
+        Status: "DRAFT",
+        InvoiceNumber: "BILL-1",
+        LineItems: [{ Description: "Labour", Quantity: 1, UnitAmount: 50 }],
+      }],
+    };
+  };
+  const deps = {
+    getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+    xeroGet: xeroGet as any,
+  };
+
+  const sale = await getXeroInvoice(
+    makeClient(),
+    {},
+    deps,
+    { invoice_id: "accrec-1" },
+  );
+  assertEquals(sale.invoice.type, "ACCREC");
+  assertEquals(sale.invoice.status, "DRAFT");
+  assertEquals(sale.invoice.line_items[0].description, "Job SWF-1");
+  assertEquals(calls.every((path) => path.startsWith("/Invoices/")), true);
+
+  const bill = await getXeroInvoice(
+    makeClient(),
+    { xero_invoice_id: "bill-1" },
+    deps,
+  );
+  assertEquals(bill.invoice.type, "ACCPAY");
+  assertEquals(bill.invoice.status, "DRAFT");
+  assertEquals(bill.invoice.line_items.length, 1);
 });
 
 Deno.test("list_supplier_bills searches invoice_ref against Reference OR InvoiceNumber", async () => {

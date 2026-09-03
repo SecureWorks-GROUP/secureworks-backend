@@ -380,6 +380,7 @@ import {
   createSupplierBill,
   createSupplierCreditNote,
   getSupplierBill,
+  getXeroInvoice,
   listSupplierBills,
   SupplierBillError,
   updateSupplierBill,
@@ -6799,44 +6800,57 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'submit_makesafe_report':
         return json(await dispatchMakesafeReport(client, body, authMode, authUser))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
-      case 'list_supplier_bills': {
+      case 'list_supplier_bills':
+      case 'list_xero_bills': {
         try {
           return json(await listSupplierBills(client, url.searchParams, { getToken, xeroGet }))
         } catch (error) {
           return supplierBillApiError(error)
         }
       }
-      case 'get_supplier_bill': {
+      case 'get_supplier_bill':
+      case 'get_xero_bill': {
         try {
           return json(await getSupplierBill(client, url.searchParams, { getToken, xeroGet }))
         } catch (error) {
           return supplierBillApiError(error)
         }
       }
-      case 'create_supplier_bill': {
+      case 'create_supplier_bill':
+      case 'create_xero_bill': {
         try {
           return json(await createSupplierBill(client, body, { getToken, xeroGet, xeroPost }))
         } catch (error) {
           return supplierBillApiError(error)
         }
       }
-      case 'update_supplier_bill': {
+      case 'update_supplier_bill':
+      case 'update_xero_bill': {
         try {
           return json(await updateSupplierBill(client, body, { getToken, xeroGet, xeroPost }))
         } catch (error) {
           return supplierBillApiError(error)
         }
       }
-      case 'attach_supplier_bill_pdf': {
+      case 'attach_supplier_bill_pdf':
+      case 'attach_xero_bill_pdf': {
         try {
           return json(await attachSupplierBillPdf(client, body, { getToken, xeroGet }))
         } catch (error) {
           return supplierBillApiError(error)
         }
       }
-      case 'create_supplier_credit_note': {
+      case 'create_supplier_credit_note':
+      case 'create_xero_credit_note': {
         try {
           return json(await createSupplierCreditNote(client, body, { getToken, xeroGet, xeroPost }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'get_xero_invoice': {
+        try {
+          return json(await getXeroInvoice(client, url.searchParams, { getToken, xeroGet }, body))
         } catch (error) {
           return supplierBillApiError(error)
         }

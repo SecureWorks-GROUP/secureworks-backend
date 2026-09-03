@@ -136,6 +136,42 @@ Deno.test("Books supplier-bill doors exist and stay DRAFT", () => {
   assertEquals(INDEX.includes("case 'void_supplier_bill':"), false);
 });
 
+Deno.test("Jarvis xero_* action names alias onto supplier-bill doors; get_xero_invoice is a type-agnostic read", () => {
+  const pairs: Array<[string, string]> = [
+    ["list_xero_bills", "list_supplier_bills"],
+    ["get_xero_bill", "get_supplier_bill"],
+    ["create_xero_bill", "create_supplier_bill"],
+    ["update_xero_bill", "update_supplier_bill"],
+    ["attach_xero_bill_pdf", "attach_supplier_bill_pdf"],
+    ["create_xero_credit_note", "create_supplier_credit_note"],
+  ];
+  for (const [alias, existing] of pairs) {
+    assert(INDEX.includes(`case '${alias}':`), `missing Jarvis alias ${alias}`);
+    const aliasAt = INDEX.indexOf(`case '${alias}':`);
+    const existingAt = INDEX.indexOf(`case '${existing}':`);
+    assert(
+      Math.abs(aliasAt - existingAt) < 80,
+      `${alias} must fall through onto ${existing}`,
+    );
+  }
+  assert(
+    INDEX.includes("case 'get_xero_invoice':"),
+    "get_xero_invoice must exist so classify can read ACCPAY vs ACCREC",
+  );
+  const getInvoice = INDEX.slice(
+    INDEX.indexOf("case 'get_xero_invoice':"),
+    INDEX.indexOf("case 'job_financials':"),
+  );
+  assert(
+    getInvoice.includes("getXeroInvoice"),
+    "get_xero_invoice must use the type-agnostic reader, not the ACCPAY-only bill door",
+  );
+  assertEquals(getInvoice.includes("getSupplierBill"), false);
+  assertEquals(INDEX.includes("case 'approve_xero_bill':"), false);
+  assertEquals(INDEX.includes("case 'void_xero_invoice':"), false);
+  assertEquals(INDEX.includes("case 'send_xero_invoice':"), false);
+});
+
 Deno.test("audit and client PDFs use distinct Xero attachment names so PUT cannot overwrite the audit file", () => {
   const helper = INDEX.slice(
     INDEX.indexOf("async function attachTradeInvoiceBillPdfs"),
