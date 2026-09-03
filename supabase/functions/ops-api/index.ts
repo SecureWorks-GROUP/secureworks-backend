@@ -98,7 +98,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 // Pin the CDN dependency so CI import-resolution does not first resolve the
 // moving @2 tag through esm.sh's package metadata endpoint.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.99.3'
-import { logQueryErrors } from '../_shared/pgrest.ts'
+import { logQueryErrors, pgrestIlikeOrContains } from '../_shared/pgrest.ts'
 import {
   xeroAccrecReferenceContainsWhere,
   xeroContactNameContainsWhere,
@@ -14242,7 +14242,7 @@ async function listInvoices(client: any, params: URLSearchParams) {
   if (dateTo) query = query.lte('invoice_date', dateTo)
   if (contactName) query = query.ilike('contact_name', `%${contactName}%`)
   if (invoiceRef) {
-    query = query.or(`reference.ilike.%${invoiceRef}%,invoice_number.ilike.%${invoiceRef}%`)
+    query = query.or(pgrestIlikeOrContains(['reference', 'invoice_number'], invoiceRef))
   }
 
   const { data, error, count } = await query
