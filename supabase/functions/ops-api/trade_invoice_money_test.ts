@@ -8,6 +8,7 @@ import {
 import {
   assertExistingTradeInvoiceXeroBill,
   assertReturnedTradeInvoiceXeroSplit,
+  buildTradeInvoiceAuditModel,
   calculateTradeInvoiceMoney,
   checkpointAndAssertReturnedTradeInvoiceXeroSplit,
   presentTradeInvoiceMoney,
@@ -133,7 +134,11 @@ Deno.test("trade invoice Xero lines keep labour at work amounts and withhold sup
     false,
   );
   assertEquals(
-    String(lines[2].Description).includes("Superannuation Guarantee 12.00%"),
+    String(lines[2].Description).includes("Superannuation Guarantee 12.00% of submitted total"),
+    true,
+  );
+  assertEquals(
+    String(lines[2].Description).includes("Amount payable $880.00"),
     true,
   );
   assertEquals(
@@ -513,4 +518,39 @@ Deno.test("Israel-style work-order nets keep labour at work amounts; super is mi
     String(lines[0].Description).includes("Net earnings after"),
     false,
   );
+  assertEquals(
+    String(lines[2].Description).includes("of submitted total"),
+    true,
+  );
+  assertEquals(
+    String(lines[2].Description).includes("Amount payable $1943.22"),
+    true,
+  );
+});
+
+Deno.test("audit model does not shrink labour per line; super is 12% of submitted total once", () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 2_208.20,
+    gstOn: false,
+    earningsDate: "2026-08-28",
+  });
+  const submitted = [
+    { Description: "SWF-261132", Quantity: 1, UnitAmount: 803.20 },
+    { Description: "SWF-26824", Quantity: 1, UnitAmount: 1_405.00 },
+  ];
+  const model = buildTradeInvoiceAuditModel(submitted, money, "Isaac Belcher");
+  assertEquals(model.submitted_lines[0].unit_amount, 803.20);
+  assertEquals(model.submitted_lines[1].unit_amount, 1_405.00);
+  assertEquals(model.submitted_lines[0].unit_amount === 706.82, false);
+  assertEquals(model.header.submitted_total, 2_208.20);
+  assertEquals(model.header.super_amount, 264.98);
+  assertEquals(model.header.amount_payable, 1_943.22);
+  assertEquals(
+    Math.round(
+      (model.header.submitted_total - model.header.super_amount) * 100,
+    ) / 100,
+    model.header.amount_payable,
+  );
+  assertEquals(model.super_line.kind, "super");
+  assertEquals(model.super_line.unit_amount, -264.98);
 });

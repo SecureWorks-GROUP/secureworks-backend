@@ -363,12 +363,15 @@ import {
   TradeInvoiceMoneyError,
   type TradeInvoiceMoney,
   type TradeInvoiceXeroIdentity,
+  type TradeInvoiceXeroLine,
   validatePersistedTradeInvoiceMoney,
 } from './trade_invoice_money.ts'
 import {
-  attachPdfBase64ToXeroInvoice,
+  attachPdfToXeroInvoiceUntilAttached,
+  attachTradeInvoicePdfIfPresent,
   XeroPdfAttachError,
 } from './xero_attachment.ts'
+import { renderTradeInvoiceAuditPdf } from './trade_invoice_pdf.ts'
 import {
   attachSupplierBillPdf,
   createSupplierBill,
@@ -1440,6 +1443,52 @@ function supplierBillApiError(error: unknown): never {
   throw error
 }
 
+async function attachTradeInvoiceBillPdfs(input: {
+  xeroBillId: string
+  accessToken: string
+  tenantId: string
+  filename: string
+  clientPdfBase64: unknown
+  submittedLines: TradeInvoiceXeroLine[]
+  money: TradeInvoiceMoney
+  tradeName?: string | null
+}): Promise<boolean> {
+  try {
+    const audit = renderTradeInvoiceAuditPdf({
+      submittedLines: input.submittedLines,
+      money: input.money,
+      tradeName: input.tradeName,
+      invoiceNumber: input.filename,
+    })
+    await attachPdfToXeroInvoiceUntilAttached({
+      invoiceId: input.xeroBillId,
+      filename: audit.filename,
+      pdfBytes: audit.bytes,
+      accessToken: input.accessToken,
+      tenantId: input.tenantId,
+    })
+    await attachTradeInvoicePdfIfPresent({
+      invoiceId: input.xeroBillId,
+      filename: input.filename,
+      pdfBase64: input.clientPdfBase64,
+      accessToken: input.accessToken,
+      tenantId: input.tenantId,
+    })
+    return true
+  } catch (error) {
+    if (error instanceof XeroPdfAttachError) {
+      throw new ApiError(error.message, error.status, {
+        ok: false,
+        code: error.code,
+        error: error.message,
+        pdf_attached: false,
+        xero_bill_id: input.xeroBillId,
+      })
+    }
+    throw error
+  }
+}
+
 function tradeInvoiceGstOn(body: unknown): boolean {
   try {
     return resolveTradeInvoiceGstOn(body)
@@ -1492,6 +1541,8 @@ function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
     gst: money.gst_amount,
     trade_payable: money.trade_payable,
     total_inc: money.total_inc,
+    submitted_total: money.gross_earned,
+    amount_payable: money.net_pay,
   }
 }
 
@@ -7812,11 +7863,22 @@ if (import.meta.main) serve(async (req: Request) => {
             invoice_id,
             existingIdentity,
           )
+          const pdfAttached = await attachTradeInvoiceBillPdfs({
+            xeroBillId: existingIdentity.xeroBillId,
+            accessToken,
+            tenantId,
+            filename: inv.invoice_number || reference || 'trade-invoice',
+            clientPdfBase64: body.pdf_base64,
+            submittedLines: grossXeroLineItems,
+            money: invMoney,
+            tradeName,
+          })
           return json({
             success: true,
             xero_bill_id: existingIdentity.xeroBillId,
             reference,
             reconciled_existing: true,
+            pdf_attached: pdfAttached,
           })
         }
 
@@ -7881,21 +7943,18 @@ if (import.meta.main) serve(async (req: Request) => {
           }, { onConflict: 'xero_invoice_id' })
         } catch (e) { /* non-blocking */ }
 
-        if (body.pdf_base64) {
-          try {
-            await attachPdfBase64ToXeroInvoice({
-              invoiceId: billIdentity.xeroBillId,
-              filename: inv.invoice_number || reference || 'trade-invoice',
-              pdfBase64: body.pdf_base64,
-              accessToken,
-              tenantId,
-            })
-          } catch (attachErr) {
-            console.log('[ops-api] retry trade invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
-          }
-        }
+        const pdfAttached = await attachTradeInvoiceBillPdfs({
+          xeroBillId: billIdentity.xeroBillId,
+          accessToken,
+          tenantId,
+          filename: inv.invoice_number || reference || 'trade-invoice',
+          clientPdfBase64: body.pdf_base64,
+          submittedLines: grossXeroLineItems,
+          money: invMoney,
+          tradeName,
+        })
 
-        return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference })
+        return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
       }
 
       case 'list_trade_invoice_lines': {
@@ -9520,6 +9579,7 @@ if (import.meta.main) serve(async (req: Request) => {
             let xeroBillId = ''
             let xeroBillNumber = ''
             let createdXeroBillId = ''
+            let woPdfAttached = false
             try {
               const xeroResult = await xeroPost('/Invoices', woAt, woTi, xeroPayload, 'PUT', woIdempotencyKey)
               const xeroInv = xeroResult?.Invoices?.[0]
@@ -9539,18 +9599,17 @@ if (import.meta.main) serve(async (req: Request) => {
               xeroBillId = identity.xeroBillId
               xeroBillNumber = identity.xeroBillNumber
               xeroSuccess = !!xeroBillId
-              if (xeroBillId && body.pdf_base64) {
-                try {
-                  await attachPdfBase64ToXeroInvoice({
-                    invoiceId: xeroBillId,
-                    filename: `${tradeName}-${wo.wo_number || 'work-order'}`,
-                    pdfBase64: body.pdf_base64,
-                    accessToken: woAt,
-                    tenantId: woTi,
-                  })
-                } catch (attachErr) {
-                  console.log('[ops-api] WO invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
-                }
+              if (xeroBillId) {
+                woPdfAttached = await attachTradeInvoiceBillPdfs({
+                  xeroBillId,
+                  accessToken: woAt,
+                  tenantId: woTi,
+                  filename: `${tradeName}-${wo.wo_number || 'work-order'}`,
+                  clientPdfBase64: body.pdf_base64,
+                  submittedLines: lineItems,
+                  money: woMoney,
+                  tradeName,
+                })
               }
             } catch (e: any) {
               if (e instanceof TradeInvoiceMoneyError && e.code === 'XERO_RETURNED_SPLIT_INVALID') {
@@ -9599,6 +9658,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 ...tradeInvoiceMoneyResponse(woMoney),
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 error: 'Xero push failed — contact admin',
+                pdf_attached: false,
               })
             }
 
@@ -9609,6 +9669,7 @@ if (import.meta.main) serve(async (req: Request) => {
               total,
               ...tradeInvoiceMoneyResponse(woMoney),
               negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+              pdf_attached: woPdfAttached,
             })
           }
 
@@ -11091,20 +11152,16 @@ if (import.meta.main) serve(async (req: Request) => {
                   await markTradeInvoiceXeroSplitReconciled(client, invoice.id, identity)
                   xeroBillId = identity.xeroBillId
                   xeroBillNumber = identity.xeroBillNumber
-                  if (body.pdf_base64) {
-                    try {
-                      await attachPdfBase64ToXeroInvoice({
-                        invoiceId: identity.xeroBillId,
-                        filename: invoiceNumber || 'trade-invoice',
-                        pdfBase64: body.pdf_base64,
-                        accessToken,
-                        tenantId,
-                      })
-                      pdfAttached = true
-                    } catch (attachErr) {
-                      console.log('[ops-api] trade invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
-                    }
-                  }
+                  pdfAttached = await attachTradeInvoiceBillPdfs({
+                    xeroBillId: identity.xeroBillId,
+                    accessToken,
+                    tenantId,
+                    filename: invoiceNumber || 'trade-invoice',
+                    clientPdfBase64: body.pdf_base64,
+                    submittedLines: grossXeroLines,
+                    money,
+                    tradeName,
+                  })
                   // Cache
                   try {
                     await client.from('xero_invoices').upsert({
@@ -47034,19 +47091,16 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   await markTradeInvoiceXeroSplitReconciled(client, insertedInvoice.id, xeroIdentity)
   const billNumber = xeroIdentity.xeroBillNumber
 
-  if (body.pdf_base64) {
-    try {
-      await attachPdfBase64ToXeroInvoice({
-        invoiceId: xeroIdentity.xeroBillId,
-        filename: billNumber || `${tradeName}-WE-${week_ending}`,
-        pdfBase64: body.pdf_base64,
-        accessToken: stAt,
-        tenantId: stTi,
-      })
-    } catch (attachErr) {
-      console.log('[ops-api] submit_trade_invoice PDF attach failed (non-blocking):', (attachErr as Error).message)
-    }
-  }
+  const pdfAttached = await attachTradeInvoiceBillPdfs({
+    xeroBillId: xeroIdentity.xeroBillId,
+    accessToken: stAt,
+    tenantId: stTi,
+    filename: billNumber || `${tradeName}-WE-${week_ending}`,
+    clientPdfBase64: body.pdf_base64,
+    submittedLines: lineItems,
+    money: stMoney,
+    tradeName,
+  })
 
   // Cache in xero_invoices table
   try {
@@ -47077,6 +47131,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     xero_bill_number: billNumber,
     total,
     ...tradeInvoiceMoneyResponse(stMoney),
+    pdf_attached: pdfAttached,
   }
 }
 

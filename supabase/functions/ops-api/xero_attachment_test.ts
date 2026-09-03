@@ -5,13 +5,20 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   attachPdfBase64ToXeroInvoice,
+  attachPdfToXeroInvoiceUntilAttached,
   decodePdfBase64,
+  hasXeroPdfBase64Payload,
   MAX_XERO_PDF_BYTES,
   sanitizeXeroPdfFilename,
   XeroPdfAttachError,
 } from "./xero_attachment.ts";
 
-const PDF_BYTES = new TextEncoder().encode("%PDF-1.4\n1 0 obj\nendobj\n");
+const PDF_BYTES = (() => {
+  const encoded = new TextEncoder().encode("%PDF-1.4\n1 0 obj\nendobj\n");
+  const bytes = new Uint8Array(encoded.byteLength);
+  bytes.set(encoded);
+  return bytes;
+})();
 const PDF_B64 = btoa(String.fromCharCode(...PDF_BYTES));
 
 Deno.test("decodePdfBase64 accepts a bounded PDF and rejects junk", () => {
@@ -70,3 +77,47 @@ Deno.test("attachPdfBase64ToXeroInvoice PUTs the PDF onto the Xero bill", async 
   assertEquals(calls[0].contentType, "application/pdf");
   assertEquals(calls[0].url.includes("/Invoices/bill-1/Attachments/"), true);
 });
+
+Deno.test("hasXeroPdfBase64Payload is false when there were never any bytes", () => {
+  assertEquals(hasXeroPdfBase64Payload(undefined), false);
+  assertEquals(hasXeroPdfBase64Payload(""), false);
+  assertEquals(hasXeroPdfBase64Payload("   "), false);
+  assertEquals(hasXeroPdfBase64Payload(PDF_B64), true);
+});
+
+Deno.test("PDF attach retries transient Xero failures then succeeds", async () => {
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    if (calls < 3) return new Response("busy", { status: 502 });
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  await attachPdfToXeroInvoiceUntilAttached({
+    invoiceId: "bill-1",
+    filename: "audit.pdf",
+    pdfBytes: PDF_BYTES,
+    accessToken: "token",
+    tenantId: "tenant",
+    fetchImpl,
+  });
+  assertEquals(calls, 3);
+});
+
+Deno.test("PDF attach does not retry an invalid payload as success", async () => {
+  const fetchImpl = (async () => new Response("bad", { status: 400 })) as typeof fetch;
+  try {
+    await attachPdfBase64ToXeroInvoice({
+      invoiceId: "bill-1",
+      filename: "audit.pdf",
+      pdfBase64: PDF_B64,
+      accessToken: "token",
+      tenantId: "tenant",
+      fetchImpl,
+    });
+    throw new Error("expected throw");
+  } catch (error) {
+    assertEquals(error instanceof XeroPdfAttachError, true);
+    assertEquals((error as XeroPdfAttachError).status, 400);
+  }
+});
+

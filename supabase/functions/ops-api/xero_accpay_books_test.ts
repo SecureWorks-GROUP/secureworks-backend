@@ -43,9 +43,15 @@ Deno.test("supplier bill where-clause is ACCPAY-only and null-guards optional fi
   assertEquals(
     buildSupplierBillWhere({
       status: "AUTHORISED",
-      reference: "SW-INV",
-    }).includes('Reference!=null AND Reference.Contains("SW-INV")'),
+      invoiceRef: "SW-INV",
+    }).includes(
+      '(InvoiceNumber=="SW-INV" OR (Reference!=null AND Reference.Contains("SW-INV")))',
+    ),
     true,
+  );
+  assertEquals(
+    buildSupplierBillWhere({ invoiceRef: "INV-81742" }),
+    'Type=="ACCPAY" AND (InvoiceNumber=="INV-81742" OR (Reference!=null AND Reference.Contains("INV-81742")))',
   );
 });
 
@@ -115,6 +121,48 @@ Deno.test("get_supplier_bill reads the live Xero ACCPAY and refuses a sales invo
     SupplierBillError,
     "not a supplier bill",
   );
+});
+
+Deno.test("list_supplier_bills searches invoice_ref against Reference OR InvoiceNumber", async () => {
+  let where = "";
+  await listSupplierBills(
+    makeClient(),
+    { invoice_ref: "INV-81742", status: "draft" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async (_path: string, _a: string, _t: string, params?: Record<string, string>) => {
+        where = params?.where || "";
+        return { Invoices: [] };
+      }) as any,
+    },
+  );
+  assertEquals(
+    where.includes(
+      '(InvoiceNumber=="INV-81742" OR (Reference!=null AND Reference.Contains("INV-81742")))',
+    ),
+    true,
+  );
+
+  await listSupplierBills(
+    makeClient(),
+    { invoice_ref: "SW-INV-I-260828-001" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async (_path: string, _a: string, _t: string, params?: Record<string, string>) => {
+        where = params?.where || "";
+        return { Invoices: [] };
+      }) as any,
+    },
+  );
+  assertEquals(
+    where.includes('InvoiceNumber=="SW-INV-I-260828-001"'),
+    true,
+  );
+  assertEquals(
+    where.includes('Reference.Contains("SW-INV-I-260828-001")'),
+    true,
+  );
+  assertEquals(where.includes(" OR "), true);
 });
 
 Deno.test("list_supplier_bills searches Xero by contact and draft status", async () => {

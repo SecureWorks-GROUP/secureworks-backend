@@ -9,7 +9,7 @@ import {
   attachPdfBase64ToXeroInvoice,
   XeroPdfAttachError,
 } from "./xero_attachment.ts";
-import { xeroOptionalContains } from "./xero_where_clause.ts";
+import { xeroInvoiceRefOrNumberWhere } from "./xero_where_clause.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const ACCPAY_ACCOUNT_DEFAULT = "306";
@@ -270,19 +270,18 @@ async function loadAccpayFromXero(
 
 export function buildSupplierBillWhere(input: {
   contactName?: string | null;
+  invoiceRef?: string | null;
   invoiceNumber?: string | null;
   reference?: string | null;
   status?: AccpayStatusFilter | null;
 }): string {
   const parts = ['Type=="ACCPAY"'];
   if (input.status) parts.push(`Status=="${input.status}"`);
-  const invoiceNumber = String(input.invoiceNumber || "").trim();
-  if (invoiceNumber) {
-    parts.push(`InvoiceNumber=="${escapeXeroLiteral(invoiceNumber)}"`);
-  }
-  const reference = String(input.reference || "").trim();
-  if (reference) {
-    parts.push(xeroOptionalContains("Reference", escapeXeroLiteral(reference)));
+  const invoiceRef = String(
+    input.invoiceRef || input.invoiceNumber || input.reference || "",
+  ).trim();
+  if (invoiceRef) {
+    parts.push(xeroInvoiceRefOrNumberWhere(escapeXeroLiteral(invoiceRef)));
   }
   const contactName = String(input.contactName || "").trim();
   if (contactName) {
@@ -333,15 +332,14 @@ export async function listSupplierBills(
   const status = mapSupplierBillStatusFilter(read("status"));
   const contactName = String(read("contact") || read("contact_name") || "")
     .trim();
-  const invoiceNumber = String(
-    read("invoice_number") || read("invoice_ref") || "",
+  const invoiceRef = String(
+    read("invoice_ref") || read("invoice_number") || read("reference") ||
+      read("ref") || "",
   ).trim();
-  const reference = String(read("reference") || read("ref") || "").trim();
   const page = Math.max(1, Number(read("page") || 1) || 1);
   const where = buildSupplierBillWhere({
     contactName,
-    invoiceNumber: invoiceNumber || null,
-    reference: reference && reference !== invoiceNumber ? reference : null,
+    invoiceRef: invoiceRef || null,
     status,
   });
   const { accessToken, tenantId } = await deps.getToken(client);

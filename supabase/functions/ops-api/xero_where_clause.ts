@@ -34,3 +34,11 @@ export function xeroAccrecReferenceContainsWhere(safeToken: string): string {
 export function xeroContactNameContainsWhere(safeName: string): string {
   return xeroOptionalContains("Name", safeName)
 }
+
+/**
+ * Supplier-bill search token: trade ACCPAY stores the SW number on Reference,
+ * R&R-style bills use InvoiceNumber (e.g. INV-81742). Match either field.
+ */
+export function xeroInvoiceRefOrNumberWhere(safeToken: string): string {
+  return `(InvoiceNumber=="${safeToken}" OR (${xeroOptionalContains("Reference", safeToken)}))`
+}

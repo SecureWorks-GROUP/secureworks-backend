@@ -34,6 +34,27 @@ Deno.test("new trade ACCPAY bills never stamp POSSIBLE DUPLICATE or machine net-
     generate.includes("pdf_attached"),
     "generate_trade_invoice must report whether the PDF landed on the draft",
   );
+  assert(
+    generate.includes("attachTradeInvoiceBillPdfs"),
+    "generate_trade_invoice must attach the audit PDF and fail if attach fails",
+  );
+});
+
+Deno.test("trade PDF attach is not swallowed and retry attaches onto existing xero_bill_id", () => {
+  assertEquals(INDEX.includes("PDF attach failed (non-blocking)"), false);
+  const pushStart = INDEX.lastIndexOf("case 'push_trade_invoice_to_xero':");
+  const push = INDEX.slice(
+    pushStart,
+    INDEX.indexOf("case 'list_trade_invoice_lines':", pushStart),
+  );
+  assert(
+    push.includes("if (inv.xero_bill_id)"),
+    "retry still reconcilies an existing Xero bill",
+  );
+  const existingReturn = push.indexOf("reconciled_existing: true");
+  const attachOnExisting = push.indexOf("attachTradeInvoiceBillPdfs");
+  assert(attachOnExisting >= 0 && existingReturn > attachOnExisting, "existing-bill retry must attach before returning");
+  assert(push.includes("pdf_attached"), "retry reports pdf_attached truthfully");
 });
 
 Deno.test("Books supplier-bill doors exist and stay DRAFT", () => {

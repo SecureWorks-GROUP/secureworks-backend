@@ -27,6 +27,15 @@ export function sanitizeXeroPdfFilename(raw: unknown, fallback = "invoice"): str
   return base.toLowerCase().endsWith(".pdf") ? base : `${base}.pdf`;
 }
 
+export function hasXeroPdfBase64Payload(raw: unknown): boolean {
+  const pdfBase64 = String(raw || "")
+    .replace(/^data:application\/pdf;base64,/i, "")
+    .replace(/\s/g, "");
+  return pdfBase64.length > 0;
+}
+
+export const XERO_PDF_ATTACH_ATTEMPTS = 3;
+
 export function decodePdfBase64(raw: unknown): Uint8Array<ArrayBuffer> {
   const pdfBase64 = String(raw || "")
     .replace(/^data:application\/pdf;base64,/i, "")
@@ -93,6 +102,33 @@ export async function attachPdfToXeroInvoice(input: {
   }
 }
 
+function isRetryablePdfAttachError(error: unknown): boolean {
+  if (!(error instanceof XeroPdfAttachError)) return true;
+  if (error.status === 429) return true;
+  return error.status >= 500 || error.status === 0;
+}
+
+export async function attachPdfToXeroInvoiceUntilAttached(
+  input: Parameters<typeof attachPdfToXeroInvoice>[0] & {
+    attempts?: number;
+  },
+): Promise<void> {
+  const attempts = Math.max(1, input.attempts ?? XERO_PDF_ATTACH_ATTEMPTS);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await attachPdfToXeroInvoice(input);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryablePdfAttachError(error) || attempt === attempts) {
+        throw error;
+      }
+    }
+  }
+  throw lastError;
+}
+
 export async function attachPdfBase64ToXeroInvoice(input: {
   invoiceId: string;
   filename: string;
@@ -103,10 +139,24 @@ export async function attachPdfBase64ToXeroInvoice(input: {
 }): Promise<{ filename: string; bytes: number }> {
   const pdfBytes = decodePdfBase64(input.pdfBase64);
   const filename = sanitizeXeroPdfFilename(input.filename);
-  await attachPdfToXeroInvoice({
+  await attachPdfToXeroInvoiceUntilAttached({
     ...input,
     filename,
     pdfBytes,
   });
   return { filename, bytes: pdfBytes.length };
+}
+
+/** Attach when bytes exist. Returns false when there were never any bytes. Throws if bytes exist but attach fails. */
+export async function attachTradeInvoicePdfIfPresent(input: {
+  invoiceId: string;
+  filename: string;
+  pdfBase64: unknown;
+  accessToken: string;
+  tenantId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  if (!hasXeroPdfBase64Payload(input.pdfBase64)) return false;
+  await attachPdfBase64ToXeroInvoice(input);
+  return true;
 }
