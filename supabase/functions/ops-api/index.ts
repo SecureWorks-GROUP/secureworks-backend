@@ -369,7 +369,9 @@ import {
 import {
   attachPdfToXeroInvoiceUntilAttached,
   attachTradeInvoicePdfIfPresent,
+  canEnterPushTradeInvoiceToXero,
   distinctXeroPdfFilenames,
+  mustReuseExistingXeroBillForPdfRetry,
   XeroPdfAttachError,
 } from './xero_attachment.ts'
 import { renderTradeInvoiceAuditPdf } from './trade_invoice_pdf.ts'
@@ -1489,6 +1491,20 @@ async function attachTradeInvoiceBillPdfs(input: {
     }
     throw error
   }
+}
+
+async function attachTradeInvoicePdfsThenMarkReconciled(
+  client: any,
+  invoiceId: string,
+  identity: TradeInvoiceXeroIdentity,
+  attachInput: Omit<Parameters<typeof attachTradeInvoiceBillPdfs>[0], 'xeroBillId'>,
+): Promise<boolean> {
+  const pdfAttached = await attachTradeInvoiceBillPdfs({
+    xeroBillId: identity.xeroBillId,
+    ...attachInput,
+  })
+  await markTradeInvoiceXeroSplitReconciled(client, invoiceId, identity)
+  return pdfAttached
 }
 
 function tradeInvoiceGstOn(body: unknown): boolean {
@@ -7762,7 +7778,9 @@ if (import.meta.main) serve(async (req: Request) => {
           .eq('id', invoice_id)
           .maybeSingle()
         if (!inv) throw new ApiError('Invoice not found', 404)
-        if (inv.status !== 'acknowledged' && inv.status !== 'approved') throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
+        if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
+          throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
+        }
 
         const { data: lines } = await client.from('trade_invoice_lines')
           .select('*')
@@ -7860,21 +7878,20 @@ if (import.meta.main) serve(async (req: Request) => {
             inv.xero_bill_id,
             invMoney,
           )
-          await markTradeInvoiceXeroSplitReconciled(
+          const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
             client,
             invoice_id,
             existingIdentity,
+            {
+              accessToken,
+              tenantId,
+              filename: inv.invoice_number || reference || 'trade-invoice',
+              clientPdfBase64: body.pdf_base64,
+              submittedLines: grossXeroLineItems,
+              money: invMoney,
+              tradeName,
+            },
           )
-          const pdfAttached = await attachTradeInvoiceBillPdfs({
-            xeroBillId: existingIdentity.xeroBillId,
-            accessToken,
-            tenantId,
-            filename: inv.invoice_number || reference || 'trade-invoice',
-            clientPdfBase64: body.pdf_base64,
-            submittedLines: grossXeroLineItems,
-            money: invMoney,
-            tradeName,
-          })
           return json({
             success: true,
             xero_bill_id: existingIdentity.xeroBillId,
@@ -7882,6 +7899,13 @@ if (import.meta.main) serve(async (req: Request) => {
             reconciled_existing: true,
             pdf_attached: pdfAttached,
           })
+        }
+
+        if (mustReuseExistingXeroBillForPdfRetry(inv.status)) {
+          throw new ApiError(
+            'PDF attach must reuse the existing Xero bill; a second ACCPAY is not allowed',
+            409,
+          )
         }
 
         // Resolve Xero contact for the trade. Name fallback is important for
@@ -7924,7 +7948,20 @@ if (import.meta.main) serve(async (req: Request) => {
               'push_trade_invoice_to_xero',
             ),
         }).catch((error) => tradeInvoiceMoneyApiError(error))
-        await markTradeInvoiceXeroSplitReconciled(client, invoice_id, billIdentity)
+        const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+          client,
+          invoice_id,
+          billIdentity,
+          {
+            accessToken,
+            tenantId,
+            filename: inv.invoice_number || reference || 'trade-invoice',
+            clientPdfBase64: body.pdf_base64,
+            submittedLines: grossXeroLineItems,
+            money: invMoney,
+            tradeName,
+          },
+        )
 
         // Cache in xero_invoices
         try {
@@ -7944,17 +7981,6 @@ if (import.meta.main) serve(async (req: Request) => {
             xero_contact_id: xeroContactId,
           }, { onConflict: 'xero_invoice_id' })
         } catch (e) { /* non-blocking */ }
-
-        const pdfAttached = await attachTradeInvoiceBillPdfs({
-          xeroBillId: billIdentity.xeroBillId,
-          accessToken,
-          tenantId,
-          filename: inv.invoice_number || reference || 'trade-invoice',
-          clientPdfBase64: body.pdf_base64,
-          submittedLines: grossXeroLineItems,
-          money: invMoney,
-          tradeName,
-        })
 
         return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
       }
@@ -9597,13 +9623,11 @@ if (import.meta.main) serve(async (req: Request) => {
                     'submit_work_order_invoice',
                   ),
               })
-              await markTradeInvoiceXeroSplitReconciled(client, tradeInv.id, identity)
-              xeroBillId = identity.xeroBillId
-              xeroBillNumber = identity.xeroBillNumber
-              xeroSuccess = !!xeroBillId
-              if (xeroBillId) {
-                woPdfAttached = await attachTradeInvoiceBillPdfs({
-                  xeroBillId,
+              woPdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+                client,
+                tradeInv.id,
+                identity,
+                {
                   accessToken: woAt,
                   tenantId: woTi,
                   filename: `${tradeName}-${wo.wo_number || 'work-order'}`,
@@ -9611,8 +9635,11 @@ if (import.meta.main) serve(async (req: Request) => {
                   submittedLines: lineItems,
                   money: woMoney,
                   tradeName,
-                })
-              }
+                },
+              )
+              xeroBillId = identity.xeroBillId
+              xeroBillNumber = identity.xeroBillNumber
+              xeroSuccess = !!xeroBillId
             } catch (e: any) {
               if (e instanceof TradeInvoiceMoneyError && e.code === 'XERO_RETURNED_SPLIT_INVALID') {
                 tradeInvoiceMoneyApiError(e)
@@ -11151,19 +11178,22 @@ if (import.meta.main) serve(async (req: Request) => {
                         'generate_trade_invoice',
                       ),
                   })
-                  await markTradeInvoiceXeroSplitReconciled(client, invoice.id, identity)
+                  pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+                    client,
+                    invoice.id,
+                    identity,
+                    {
+                      accessToken,
+                      tenantId,
+                      filename: invoiceNumber || 'trade-invoice',
+                      clientPdfBase64: body.pdf_base64,
+                      submittedLines: grossXeroLines,
+                      money,
+                      tradeName,
+                    },
+                  )
                   xeroBillId = identity.xeroBillId
                   xeroBillNumber = identity.xeroBillNumber
-                  pdfAttached = await attachTradeInvoiceBillPdfs({
-                    xeroBillId: identity.xeroBillId,
-                    accessToken,
-                    tenantId,
-                    filename: invoiceNumber || 'trade-invoice',
-                    clientPdfBase64: body.pdf_base64,
-                    submittedLines: grossXeroLines,
-                    money,
-                    tradeName,
-                  })
                   // Cache
                   try {
                     await client.from('xero_invoices').upsert({
@@ -47090,19 +47120,21 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         'submit_trade_invoice',
       ),
   }).catch((error) => tradeInvoiceMoneyApiError(error))
-  await markTradeInvoiceXeroSplitReconciled(client, insertedInvoice.id, xeroIdentity)
+  const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+    client,
+    insertedInvoice.id,
+    xeroIdentity,
+    {
+      accessToken: stAt,
+      tenantId: stTi,
+      filename: xeroIdentity.xeroBillNumber || `${tradeName}-WE-${week_ending}`,
+      clientPdfBase64: body.pdf_base64,
+      submittedLines: lineItems,
+      money: stMoney,
+      tradeName,
+    },
+  )
   const billNumber = xeroIdentity.xeroBillNumber
-
-  const pdfAttached = await attachTradeInvoiceBillPdfs({
-    xeroBillId: xeroIdentity.xeroBillId,
-    accessToken: stAt,
-    tenantId: stTi,
-    filename: billNumber || `${tradeName}-WE-${week_ending}`,
-    clientPdfBase64: body.pdf_base64,
-    submittedLines: lineItems,
-    money: stMoney,
-    tradeName,
-  })
 
   // Cache in xero_invoices table
   try {

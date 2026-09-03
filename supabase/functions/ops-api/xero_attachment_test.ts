@@ -6,10 +6,12 @@ import {
 import {
   attachPdfBase64ToXeroInvoice,
   attachPdfToXeroInvoiceUntilAttached,
+  canEnterPushTradeInvoiceToXero,
   decodePdfBase64,
   distinctXeroPdfFilenames,
   hasXeroPdfBase64Payload,
   MAX_XERO_PDF_BYTES,
+  mustReuseExistingXeroBillForPdfRetry,
   sanitizeXeroPdfFilename,
   XeroPdfAttachError,
 } from "./xero_attachment.ts";
@@ -130,5 +132,16 @@ Deno.test("PDF attach does not retry an invalid payload as success", async () =>
     assertEquals(error instanceof XeroPdfAttachError, true);
     assertEquals((error as XeroPdfAttachError).status, 400);
   }
+});
+
+Deno.test("push can retry PDF attach onto an existing bill after pushed_to_xero", () => {
+  assertEquals(canEnterPushTradeInvoiceToXero("acknowledged", null), true);
+  assertEquals(canEnterPushTradeInvoiceToXero("approved", ""), true);
+  assertEquals(canEnterPushTradeInvoiceToXero("pushed_to_xero", "bill-1"), true);
+  assertEquals(canEnterPushTradeInvoiceToXero("pushed_to_xero", "  "), false);
+  assertEquals(canEnterPushTradeInvoiceToXero("pushed_to_xero", null), false);
+  assertEquals(canEnterPushTradeInvoiceToXero("paid", "bill-1"), false);
+  assertEquals(mustReuseExistingXeroBillForPdfRetry("pushed_to_xero"), true);
+  assertEquals(mustReuseExistingXeroBillForPdfRetry("approved"), false);
 });
 

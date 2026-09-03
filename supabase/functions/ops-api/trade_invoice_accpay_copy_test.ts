@@ -35,8 +35,13 @@ Deno.test("new trade ACCPAY bills never stamp POSSIBLE DUPLICATE or machine net-
     "generate_trade_invoice must report whether the PDF landed on the draft",
   );
   assert(
-    generate.includes("attachTradeInvoiceBillPdfs"),
-    "generate_trade_invoice must attach the audit PDF and fail if attach fails",
+    generate.includes("attachTradeInvoicePdfsThenMarkReconciled"),
+    "generate_trade_invoice must attach PDFs before marking pushed_to_xero",
+  );
+  assertEquals(
+    generate.includes("await markTradeInvoiceXeroSplitReconciled"),
+    false,
+    "generate must not mark pushed_to_xero before attach",
   );
 });
 
@@ -52,9 +57,62 @@ Deno.test("trade PDF attach is not swallowed and retry attaches onto existing xe
     "retry still reconcilies an existing Xero bill",
   );
   const existingReturn = push.indexOf("reconciled_existing: true");
-  const attachOnExisting = push.indexOf("attachTradeInvoiceBillPdfs");
+  const attachOnExisting = push.indexOf("attachTradeInvoicePdfsThenMarkReconciled");
   assert(attachOnExisting >= 0 && existingReturn > attachOnExisting, "existing-bill retry must attach before returning");
   assert(push.includes("pdf_attached"), "retry reports pdf_attached truthfully");
+  assert(
+    push.includes("canEnterPushTradeInvoiceToXero"),
+    "push must accept pushed_to_xero when xero_bill_id is already set",
+  );
+  const createPost = push.indexOf("xeroPost('/Invoices'");
+  const reuseLock = push.indexOf("mustReuseExistingXeroBillForPdfRetry");
+  assert(reuseLock >= 0 && createPost > reuseLock, "pushed_to_xero retry must not mint a second ACCPAY");
+});
+
+Deno.test("PDF attach happens before pushed_to_xero so a failed attach is retryable onto the same bill", () => {
+  const helper = INDEX.slice(
+    INDEX.indexOf("async function attachTradeInvoicePdfsThenMarkReconciled"),
+    INDEX.indexOf("function tradeInvoiceGstOn"),
+  );
+  const attachCall = helper.indexOf("attachTradeInvoiceBillPdfs");
+  const markCall = helper.indexOf("markTradeInvoiceXeroSplitReconciled");
+  assert(attachCall >= 0 && markCall > attachCall, "bytes that exist must attach before status becomes pushed_to_xero");
+
+  const wo = sliceCase("submit_work_order_invoice", "save_trade_invoice_draft");
+  assert(
+    wo.includes("attachTradeInvoicePdfsThenMarkReconciled"),
+    "work-order submit must attach before marking pushed_to_xero",
+  );
+  assertEquals(
+    wo.includes("await markTradeInvoiceXeroSplitReconciled"),
+    false,
+    "work-order submit must not mark pushed_to_xero before attach",
+  );
+
+  const submitFn = INDEX.slice(
+    INDEX.indexOf("async function submitTradeInvoice"),
+    INDEX.indexOf("async function setTradeRate"),
+  );
+  assert(
+    submitFn.includes("attachTradeInvoicePdfsThenMarkReconciled"),
+    "submit_trade_invoice must attach before marking pushed_to_xero",
+  );
+  assertEquals(
+    submitFn.includes("await markTradeInvoiceXeroSplitReconciled"),
+    false,
+    "submit_trade_invoice must not mark pushed_to_xero before attach",
+  );
+
+  assertEquals(
+    INDEX.split("await markTradeInvoiceXeroSplitReconciled").length - 1,
+    1,
+    "only the attach-then-mark helper may set pushed_to_xero",
+  );
+  assertEquals(
+    INDEX.split("await attachTradeInvoiceBillPdfs").length - 1,
+    1,
+    "only the attach-then-mark helper may PUT trade PDFs",
+  );
 });
 
 Deno.test("Books supplier-bill doors exist and stay DRAFT", () => {

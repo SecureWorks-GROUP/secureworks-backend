@@ -44,6 +44,18 @@ export function distinctXeroPdfFilenames(invoiceNumber: unknown): {
   };
 }
 
+/** Push may create/reuse an ACCPAY from acknowledged|approved, or retry PDF attach onto an existing bill. */
+export function canEnterPushTradeInvoiceToXero(status: unknown, xeroBillId?: unknown): boolean {
+  const current = String(status || "");
+  if (current === "acknowledged" || current === "approved") return true;
+  return current === "pushed_to_xero" && Boolean(String(xeroBillId || "").trim());
+}
+
+/** Rows already pushed_to_xero must attach onto the existing xero_bill_id — never mint a second ACCPAY. */
+export function mustReuseExistingXeroBillForPdfRetry(status: unknown): boolean {
+  return String(status || "") === "pushed_to_xero";
+}
+
 export function hasXeroPdfBase64Payload(raw: unknown): boolean {
   const pdfBase64 = String(raw || "")
     .replace(/^data:application\/pdf;base64,/i, "")
