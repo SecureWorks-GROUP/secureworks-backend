@@ -7,6 +7,7 @@
 
 import {
   attachPdfBase64ToXeroInvoice,
+  hasXeroPdfBase64Payload,
   XeroPdfAttachError,
 } from "./xero_attachment.ts";
 import { xeroInvoiceRefOrNumberWhere } from "./xero_where_clause.ts";
@@ -470,24 +471,17 @@ export async function createSupplierBill(
   let pdf: { attached: boolean; filename?: string; error?: string } = {
     attached: false,
   };
-  if (body?.pdf_base64) {
-    try {
-      const attached = await attachPdfBase64ToXeroInvoice({
-        invoiceId: inv.InvoiceID,
-        filename: body.pdf_filename || reference || inv.InvoiceNumber ||
-          "supplier-bill",
-        pdfBase64: body.pdf_base64,
-        accessToken,
-        tenantId,
-        fetchImpl: deps.fetchImpl,
-      });
-      pdf = { attached: true, filename: attached.filename };
-    } catch (error) {
-      pdf = {
-        attached: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+  if (hasXeroPdfBase64Payload(body?.pdf_base64)) {
+    const attached = await attachPdfBase64ToXeroInvoice({
+      invoiceId: inv.InvoiceID,
+      filename: body.pdf_filename || reference || inv.InvoiceNumber ||
+        "supplier-bill",
+      pdfBase64: body.pdf_base64,
+      accessToken,
+      tenantId,
+      fetchImpl: deps.fetchImpl,
+    });
+    pdf = { attached: true, filename: attached.filename };
   }
 
   return {

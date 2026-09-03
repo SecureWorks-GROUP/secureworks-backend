@@ -77,3 +77,27 @@ Deno.test("Books supplier-bill doors exist and stay DRAFT", () => {
   assertEquals(INDEX.includes("case 'pay_supplier_bill':"), false);
   assertEquals(INDEX.includes("case 'void_supplier_bill':"), false);
 });
+
+Deno.test("audit and client PDFs use distinct Xero attachment names so PUT cannot overwrite the audit file", () => {
+  const helper = INDEX.slice(
+    INDEX.indexOf("async function attachTradeInvoiceBillPdfs"),
+    INDEX.indexOf("function tradeInvoiceGstOn"),
+  );
+  assert(
+    helper.includes("distinctXeroPdfFilenames"),
+    "trade attach must derive audit and client names that cannot collide",
+  );
+  assert(
+    helper.includes("names.audit"),
+    "audit PDF must attach under the audit filename",
+  );
+  assert(
+    helper.includes("names.client"),
+    "client pdf_base64 must attach under a different filename than the audit PDF",
+  );
+  assertEquals(
+    helper.includes("filename: input.filename"),
+    false,
+    "client attach must not reuse the invoice-number filename that would replace the audit PDF",
+  );
+});

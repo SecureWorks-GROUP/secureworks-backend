@@ -53,4 +53,5 @@ Deno.test("audit PDF keeps submitted line amounts and shows one 12%-of-total sup
   assert(pdfText.includes("Submitted total $2208.20"));
   assert(pdfText.includes("Amount payable $1943.22"));
   assertEquals(pdfText.includes("Net earnings after"), false);
+  assertEquals(pdf.filename, "SW-INV-I-260828-001-audit.pdf");
 });

@@ -27,6 +27,23 @@ export function sanitizeXeroPdfFilename(raw: unknown, fallback = "invoice"): str
   return base.toLowerCase().endsWith(".pdf") ? base : `${base}.pdf`;
 }
 
+/**
+ * Xero PUT /Attachments/{name} replaces any prior file of that name.
+ * Audit and client PDFs must never share a stem, or Books only sees the last PUT.
+ */
+export function distinctXeroPdfFilenames(invoiceNumber: unknown): {
+  audit: string;
+  client: string;
+} {
+  const stem = sanitizeXeroPdfFilename(invoiceNumber || "trade-invoice")
+    .replace(/\.pdf$/i, "")
+    .slice(0, 100) || "trade-invoice";
+  return {
+    audit: `${stem}-audit.pdf`,
+    client: `${stem}-submitted.pdf`,
+  };
+}
+
 export function hasXeroPdfBase64Payload(raw: unknown): boolean {
   const pdfBase64 = String(raw || "")
     .replace(/^data:application\/pdf;base64,/i, "")

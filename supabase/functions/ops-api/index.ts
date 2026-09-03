@@ -369,6 +369,7 @@ import {
 import {
   attachPdfToXeroInvoiceUntilAttached,
   attachTradeInvoicePdfIfPresent,
+  distinctXeroPdfFilenames,
   XeroPdfAttachError,
 } from './xero_attachment.ts'
 import { renderTradeInvoiceAuditPdf } from './trade_invoice_pdf.ts'
@@ -1454,6 +1455,7 @@ async function attachTradeInvoiceBillPdfs(input: {
   tradeName?: string | null
 }): Promise<boolean> {
   try {
+    const names = distinctXeroPdfFilenames(input.filename)
     const audit = renderTradeInvoiceAuditPdf({
       submittedLines: input.submittedLines,
       money: input.money,
@@ -1462,14 +1464,14 @@ async function attachTradeInvoiceBillPdfs(input: {
     })
     await attachPdfToXeroInvoiceUntilAttached({
       invoiceId: input.xeroBillId,
-      filename: audit.filename,
+      filename: names.audit,
       pdfBytes: audit.bytes,
       accessToken: input.accessToken,
       tenantId: input.tenantId,
     })
     await attachTradeInvoicePdfIfPresent({
       invoiceId: input.xeroBillId,
-      filename: input.filename,
+      filename: names.client,
       pdfBase64: input.clientPdfBase64,
       accessToken: input.accessToken,
       tenantId: input.tenantId,

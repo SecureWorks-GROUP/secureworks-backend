@@ -8,7 +8,7 @@ import {
   type TradeInvoiceXeroLine,
   buildTradeInvoiceAuditModel,
 } from "./trade_invoice_money.ts";
-import { sanitizeXeroPdfFilename } from "./xero_attachment.ts";
+import { distinctXeroPdfFilenames } from "./xero_attachment.ts";
 
 const moneyLabel = (value: number): string => `$${value.toFixed(2)}`;
 
@@ -113,9 +113,7 @@ export function renderTradeInvoiceAuditPdf(input: {
     tradeName: input.tradeName,
   });
   return {
-    filename: sanitizeXeroPdfFilename(
-      input.invoiceNumber || "trade-invoice-audit",
-    ),
+    filename: distinctXeroPdfFilenames(input.invoiceNumber).audit,
     bytes: pdfFromTextLines(text),
     text,
   };

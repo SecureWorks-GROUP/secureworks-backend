@@ -7,6 +7,7 @@ import {
   attachPdfBase64ToXeroInvoice,
   attachPdfToXeroInvoiceUntilAttached,
   decodePdfBase64,
+  distinctXeroPdfFilenames,
   hasXeroPdfBase64Payload,
   MAX_XERO_PDF_BYTES,
   sanitizeXeroPdfFilename,
@@ -50,6 +51,16 @@ Deno.test("decodePdfBase64 rejects an oversized payload", () => {
 Deno.test("sanitizeXeroPdfFilename keeps a safe .pdf name", () => {
   assertEquals(sanitizeXeroPdfFilename("SW-INV Israel.pdf"), "SW-INV_Israel.pdf");
   assertEquals(sanitizeXeroPdfFilename("tax invoice"), "tax_invoice.pdf");
+});
+
+Deno.test("audit and client PDFs never share a Xero attachment name", () => {
+  const names = distinctXeroPdfFilenames("SW-INV-I-260828-001");
+  assertEquals(names.audit, "SW-INV-I-260828-001-audit.pdf");
+  assertEquals(names.client, "SW-INV-I-260828-001-submitted.pdf");
+  assertEquals(names.audit === names.client, false);
+  const sameAsSanitize = sanitizeXeroPdfFilename("SW-INV-I-260828-001");
+  assertEquals(names.audit === sameAsSanitize, false);
+  assertEquals(names.client === sameAsSanitize, false);
 });
 
 Deno.test("attachPdfBase64ToXeroInvoice PUTs the PDF onto the Xero bill", async () => {

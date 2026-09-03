@@ -15,6 +15,7 @@ import {
   SupplierBillError,
   updateSupplierBill,
 } from "./xero_accpay_books.ts";
+import { XeroPdfAttachError } from "./xero_attachment.ts";
 
 const PDF_B64 = btoa("%PDF-1.4\n");
 
@@ -246,6 +247,83 @@ Deno.test("create_supplier_bill always mints DRAFT ACCPAY and can attach a PDF",
   assertEquals(posts[1].body.Invoices[0].Status, "DRAFT");
   assertEquals(posts[1].body.Invoices[0].Type, "ACCPAY");
   assertEquals(fetches[0].includes("/Invoices/new-bill/Attachments/"), true);
+});
+
+Deno.test("create_supplier_bill fails when PDF bytes exist but attach does not land", async () => {
+  await assertRejects(
+    () =>
+      createSupplierBill(
+        makeClient(),
+        {
+          contact_name: "Israel",
+          reference: "SW-INV-I-260828-001",
+          gst_on: false,
+          line_items: [{
+            description: "Labour",
+            quantity: 1,
+            unit_price: 100,
+          }],
+          pdf_base64: PDF_B64,
+        },
+        {
+          getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+          xeroGet: (async () => ({ Contacts: [] })) as any,
+          xeroPost: (async (path: string, _a: string, _t: string, body: any) => {
+            if (path === "/Contacts") {
+              return { Contacts: [{ ContactID: "c-israel" }] };
+            }
+            return {
+              Invoices: [{
+                InvoiceID: "new-bill",
+                InvoiceNumber: "BILL-9",
+                Type: "ACCPAY",
+                Status: "DRAFT",
+                Contact: { ContactID: "c-israel", Name: "Israel" },
+                LineItems: body.Invoices[0].LineItems,
+                Total: 100,
+              }],
+            };
+          }) as any,
+          fetchImpl: (async () => new Response("busy", { status: 502 })) as typeof fetch,
+        },
+      ),
+    XeroPdfAttachError,
+    "Xero attachment failed",
+  );
+});
+
+Deno.test("create_supplier_bill may return pdf.attached=false only when there were never any bytes", async () => {
+  const created = await createSupplierBill(
+    makeClient(),
+    {
+      contact_name: "Israel",
+      reference: "SW-INV-I-260828-001",
+      gst_on: false,
+      line_items: [{ description: "Labour", quantity: 1, unit_price: 100 }],
+    },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async () => ({ Contacts: [] })) as any,
+      xeroPost: (async (path: string, _a: string, _t: string, body: any) => {
+        if (path === "/Contacts") {
+          return { Contacts: [{ ContactID: "c-israel" }] };
+        }
+        return {
+          Invoices: [{
+            InvoiceID: "new-bill",
+            InvoiceNumber: "BILL-9",
+            Type: "ACCPAY",
+            Status: "DRAFT",
+            Contact: { ContactID: "c-israel", Name: "Israel" },
+            LineItems: body.Invoices[0].LineItems,
+            Total: 100,
+          }],
+        };
+      }) as any,
+    },
+  );
+  assertEquals(created.status, "DRAFT");
+  assertEquals(created.pdf.attached, false);
 });
 
 Deno.test("create_supplier_bill refuses an approve/authorise request", async () => {
