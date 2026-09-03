@@ -36,6 +36,10 @@ import {
   type SealedSesJobRecord,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
+import {
+  ageBucketDaysOverdue,
+  resolveXeroInvoiceDueDate,
+} from './xero_age.ts'
 
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 const XERO_CLIENT_SECRET = Deno.env.get('XERO_CLIENT_SECRET') || ''
@@ -2690,13 +2694,19 @@ async function syncAgedPayables(sb: any) {
   const nowIso = now.toISOString()
   const today = nowIso.split('T')[0]
 
-  // Get outstanding ACCPAY invoices (bills from suppliers) directly from Xero
-  const data = await xeroGet('/Invoices', accessToken, tenantId, {
-    where: 'Type=="ACCPAY"&&Status=="AUTHORISED"',
-    order: 'DueDate',
-  })
-
-  const invoices = data.Invoices || []
+  // Page every outstanding AUTHORISED ACCPAY bill. A single unpaged GET stops
+  // at Xero's 100-row page and under-reads aged payables vs the live ledger.
+  const invoices: any[] = []
+  for (let page = 1; page <= 50; page++) {
+    const data = await xeroGet('/Invoices', accessToken, tenantId, {
+      where: 'Type=="ACCPAY"&&Status=="AUTHORISED"',
+      order: 'DueDate',
+      page: String(page),
+    })
+    const batch = data.Invoices || []
+    invoices.push(...batch)
+    if (batch.length < 100) break
+  }
 
   // Clear previous sync
   await sb.from('xero_aged_payables')
@@ -2710,15 +2720,10 @@ async function syncAgedPayables(sb: any) {
     const amountDue = Number(inv.AmountDue || 0)
     if (amountDue <= 0) continue
 
-    const dueDate = inv.DueDateString || inv.DueDate || ''
-    const dueDateObj = dueDate ? new Date(dueDate) : now
+    const dueDateObj = resolveXeroInvoiceDueDate(inv, now)
     const daysOverdue = Math.floor((now.getTime() - dueDateObj.getTime()) / 86400000)
-
-    let bucket = 'current'
-    if (daysOverdue > 90) bucket = '90+'
-    else if (daysOverdue > 60) bucket = '61-90'
-    else if (daysOverdue > 30) bucket = '31-60'
-    else if (daysOverdue > 0) bucket = '1-30'
+    const bucket = ageBucketDaysOverdue(daysOverdue)
+    const dueDate = inv.DueDateString || dueDateObj.toISOString()
 
     await sb.from('xero_aged_payables').insert({
       org_id: DEFAULT_ORG_ID,

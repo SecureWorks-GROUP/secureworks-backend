@@ -69,17 +69,31 @@ on every create/draft request instead of deriving a second money path.
 
 ## Xero ACCPAY mapping
 
-Every gross job line is converted into its proportional net-earnings portion,
-then one line is appended:
+Labour lines stay at the **submitted amounts**. Super is **one** 12%-of-submitted-total
+**minus** line so the bill total equals cash payable to the trade
+(`trade_payable` / OSCO payout). Super is paid to the fund separately and
+is never added on top of labour. Lines are not scaled to 88%.
 
-`Superannuation Guarantee (12.00%) | Gross earned $... | Amount reserved for super`
+The super line description is human wording:
 
-The net lines sum to `net_pay`; the super line equals `super_amount`; together
-they sum to `gross_earned`. Both portions keep the same Xero GST treatment, so
-`INPUT` produces exactly 10% GST over the original gross supply and `NONE`
-produces zero. Both currently use account 306, the existing governed trade
-ACCPAY account; the distinct description and amount give ops the worked-out
-super figure without inventing an unapproved chart-of-accounts code.
+`Superannuation Guarantee 12.00% of submitted total`
+`Submitted total $X. Super $Y. Amount payable $Z.`
+
+The labour lines plus the negative super line sum to `net_pay`. Labour keeps the
+invoice GST treatment (`INPUT` or `NONE`); the super withholding is always
+`NONE` so GST stays 10% of gross earned once and is not calculated on the
+withholding. Both currently use account 306, the existing governed trade
+ACCPAY account.
+
+The canonical audit PDF uses the same numbers: submitted lines unchanged, one
+super line, header Submitted total / Super 12% / Amount payable agreeing with
+TOTAL. That PDF is attached to the DRAFT. If the trade also sent `pdf_base64`,
+that file is attached too; attach failure is not treated as success.
+
+The live Israel draft `4fb56498-14a9-4204-989a-38a92b0d8ba5` (28 Aug 2026) is
+the pre-fix shape: labour already netted, super added, no PDF, machine wording.
+This generator change applies to **new** submissions only and does not rewrite
+that draft.
 
 The same builder is used by automatic generation, legacy submission, work-order
 submission, and the ops retry push. A legacy row without the persisted split is

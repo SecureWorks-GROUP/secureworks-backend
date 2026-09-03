@@ -23,6 +23,7 @@ import {
 import {
   xeroAccrecReferenceContainsWhere,
   xeroContactNameContainsWhere,
+  xeroInvoiceRefOrNumberWhere,
   xeroOptionalContains,
 } from "./xero_where_clause.ts";
 
@@ -58,6 +59,13 @@ Deno.test("xeroContactNameContainsWhere guards optional Name", () => {
   assertEquals(
     xeroContactNameContainsWhere("Acme Pty"),
     'Name!=null AND Name.Contains("Acme Pty")',
+  );
+});
+
+Deno.test("xeroInvoiceRefOrNumberWhere matches InvoiceNumber or Reference", () => {
+  assertEquals(
+    xeroInvoiceRefOrNumberWhere("INV-81742"),
+    '(InvoiceNumber=="INV-81742" OR (Reference!=null AND Reference.Contains("INV-81742")))',
   );
 });
 

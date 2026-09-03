@@ -67,7 +67,6 @@ export type TradeInvoiceXeroIdentity = {
 
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 const toCents = (value: number): number => Math.round(value * 100);
-const fromCents = (value: number): number => value / 100;
 const closeMoney = (left: number, right: number): boolean =>
   Math.abs(left - right) <= 0.01;
 
@@ -363,100 +362,189 @@ function moneyLabel(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
-export function splitTradeInvoiceXeroLines(
-  grossLines: TradeInvoiceXeroLine[],
+export function isTradeInvoiceSuperXeroLine(
+  line: TradeInvoiceXeroLine | null | undefined,
+): boolean {
+  return /superannuation guarantee/i.test(String(line?.Description || ""));
+}
+
+export function withTradeIdentityOnXeroDescription(
+  description: unknown,
+  tradeName: unknown,
+): string {
+  const text = String(description || "").trim() || "Trade invoice line";
+  const name = String(tradeName || "").trim();
+  if (!name) return text;
+  const firstLine = text.split(/\r?\n/, 1)[0] || "";
+  if (firstLine.toLowerCase() === name.toLowerCase()) return text;
+  return `${name}\n${text}`;
+}
+
+export function formatTradeInvoiceSuperWithheldDescription(
   money: TradeInvoiceMoney,
-  options: { superAccountCode: string },
-): TradeInvoiceXeroLine[] {
-  if (!Array.isArray(grossLines) || grossLines.length === 0) {
+  tradeName?: unknown,
+): string {
+  const name = String(tradeName || "").trim() || "the trade";
+  return [
+    `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
+    `Submitted total ${moneyLabel(money.gross_earned)}. Super ${
+      moneyLabel(money.super_amount)
+    }. Amount payable ${moneyLabel(money.net_pay)}.`,
+    `Paid to the super fund separately - not part of the amount payable to ${name}`,
+  ].join("\n");
+}
+
+export type TradeInvoiceAuditLine = {
+  description: string;
+  quantity: number;
+  unit_amount: number;
+  line_total: number;
+  kind: "submitted" | "super";
+};
+
+export type TradeInvoiceAuditModel = {
+  submitted_lines: TradeInvoiceAuditLine[];
+  super_line: TradeInvoiceAuditLine;
+  submitted_total: number;
+  super_rate: number;
+  super_amount: number;
+  amount_payable: number;
+  gst_amount: number;
+  trade_payable: number;
+  header: {
+    submitted_total: number;
+    super_amount: number;
+    amount_payable: number;
+  };
+};
+
+export function buildTradeInvoiceAuditModel(
+  submittedLines: TradeInvoiceXeroLine[],
+  money: TradeInvoiceMoney,
+  tradeName?: string | null,
+): TradeInvoiceAuditModel {
+  if (!Array.isArray(submittedLines) || submittedLines.length === 0) {
     throw new TradeInvoiceMoneyError(
       "XERO_GROSS_MISMATCH",
       "Trade invoice has no Xero lines to split",
     );
   }
 
-  const sourceCents = grossLines.map(lineGrossCents);
-  const sourceTotalCents = sourceCents.reduce((sum, amount) => sum + amount, 0);
-  const grossCents = toCents(money.gross_earned);
-  if (grossCents <= 0 || Math.abs(sourceTotalCents - grossCents) > 1) {
-    throw new TradeInvoiceMoneyError(
-      "XERO_GROSS_MISMATCH",
-      `Xero gross lines ${
-        moneyLabel(fromCents(sourceTotalCents))
-      } do not match gross earned ${moneyLabel(money.gross_earned)}`,
-    );
-  }
-
-  const netCents = toCents(money.net_pay);
-  const negativeCents = sourceCents.reduce(
-    (sum, amount) => sum + (amount < 0 ? amount : 0),
-    0,
-  );
-  const positiveCents = sourceCents.reduce(
-    (sum, amount) => sum + (amount > 0 ? amount : 0),
-    0,
-  );
-  if (positiveCents <= 0) {
-    throw new TradeInvoiceMoneyError(
-      "XERO_GROSS_MISMATCH",
-      "Trade invoice requires a positive earnings line before deductions",
-    );
-  }
-  // Deductions are exact liabilities such as a car-loan repayment or an
-  // acknowledged crew pass-through. They must remain recognisable at their
-  // approved amount in Xero. Allocate the super reserve only across positive
-  // earnings lines; leaving negatives untouched still makes net + super equal
-  // the persisted TO BE PAID total.
-  const positiveTargetCents = netCents - negativeCents;
-  const allocations = sourceCents.map((amount) => {
-    if (amount < 0) return amount;
-    if (amount === 0) return 0;
-    return Math.round(amount * positiveTargetCents / positiveCents);
+  const submitted = submittedLines.map((line) => {
+    const quantity = Number(line.Quantity ?? 1);
+    const unitAmount = Number(line.UnitAmount ?? 0);
+    if (!Number.isFinite(quantity) || !Number.isFinite(unitAmount)) {
+      throw new TradeInvoiceMoneyError(
+        "XERO_GROSS_MISMATCH",
+        "Trade invoice has a non-numeric Xero line amount",
+      );
+    }
+    return {
+      description: withTradeIdentityOnXeroDescription(
+        line.Description || "Trade invoice line",
+        tradeName,
+      ),
+      quantity,
+      unit_amount: unitAmount,
+      line_total: round2(quantity * unitAmount),
+      kind: "submitted" as const,
+    };
   });
-  const allocatedPositiveCents = allocations.reduce(
-    (sum, amount) => sum + (amount > 0 ? amount : 0),
-    0,
+  const submittedTotal = round2(
+    submitted.reduce((sum, line) => sum + line.line_total, 0),
   );
-  const remainder = positiveTargetCents - allocatedPositiveCents;
-  if (remainder !== 0) {
-    const adjustmentIndex = sourceCents.findIndex((amount) => amount > 0);
-    allocations[adjustmentIndex] += remainder;
+  if (!closeMoney(submittedTotal, money.gross_earned)) {
+    throw new TradeInvoiceMoneyError(
+      "XERO_GROSS_MISMATCH",
+      `Xero gross lines ${moneyLabel(submittedTotal)} do not match gross earned ${
+        moneyLabel(money.gross_earned)
+      }`,
+    );
+  }
+  if (!closeMoney(money.super_amount, round2(money.gross_earned * money.super_rate))) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Super must be 12% of the submitted total, calculated once",
+    );
+  }
+  if (!closeMoney(money.net_pay, round2(money.gross_earned - money.super_amount))) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Amount payable must equal submitted total minus super",
+    );
   }
 
+  const superLine: TradeInvoiceAuditLine = {
+    description: formatTradeInvoiceSuperWithheldDescription(money, tradeName),
+    quantity: 1,
+    unit_amount: -round2(money.super_amount),
+    line_total: -round2(money.super_amount),
+    kind: "super",
+  };
+
+  return {
+    submitted_lines: submitted,
+    super_line: superLine,
+    submitted_total: money.gross_earned,
+    super_rate: money.super_rate,
+    super_amount: money.super_amount,
+    amount_payable: money.net_pay,
+    gst_amount: money.gst_amount,
+    trade_payable: money.trade_payable,
+    header: {
+      submitted_total: money.gross_earned,
+      super_amount: money.super_amount,
+      amount_payable: money.net_pay,
+    },
+  };
+}
+
+export function splitTradeInvoiceXeroLines(
+  grossLines: TradeInvoiceXeroLine[],
+  money: TradeInvoiceMoney,
+  options: { superAccountCode: string; tradeName?: string | null },
+): TradeInvoiceXeroLine[] {
+  const model = buildTradeInvoiceAuditModel(
+    grossLines,
+    money,
+    options.tradeName,
+  );
   const taxType = money.gst_on ? "INPUT" : "NONE";
-  const netLines = grossLines.map((line, index) => {
+  // Labour stays at the submitted amounts. Super is one 12%-of-total MINUS
+  // so the bill total is the cash payable to the trade (OSCO payout). Super
+  // is paid to the fund separately and is not a taxable supply, so it is
+  // always TaxType NONE. Never scale or rewrite unit rates per line.
+  const labourLines = grossLines.map((line, index) => {
+    const submitted = model.submitted_lines[index];
     const { LineAmount: _lineAmount, ...rest } = line;
-    const originalDescription = String(
-      line.Description || "Trade invoice line",
-    );
+    if (
+      Number(rest.Quantity ?? 1) !== submitted.quantity ||
+      Number(rest.UnitAmount ?? 0) !== submitted.unit_amount
+    ) {
+      throw new TradeInvoiceMoneyError(
+        "XERO_GROSS_MISMATCH",
+        "Trade invoice labour lines must stay at the submitted amounts",
+      );
+    }
     return {
       ...rest,
-      Description: `Net earnings after ${
-        rateLabel(money.super_rate)
-      } super\n${originalDescription}`,
-      Quantity: 1,
-      UnitAmount: fromCents(allocations[index]),
+      Description: submitted.description,
+      Quantity: submitted.quantity,
+      UnitAmount: submitted.unit_amount,
       TaxType: taxType,
     };
   });
 
-  // The super line is a reallocation of gross earned, not an amount added on
-  // top. Giving both portions the same tax treatment makes Xero calculate GST
-  // exactly once over net + super = gross, including the GST-off case.
-  netLines.push({
-    Description: `Superannuation Guarantee (${
-      rateLabel(money.super_rate)
-    }) | Gross earned ${
-      moneyLabel(money.gross_earned)
-    } | Amount reserved for super`,
-    Quantity: 1,
-    UnitAmount: money.super_amount,
+  labourLines.push({
+    Description: model.super_line.description,
+    Quantity: model.super_line.quantity,
+    UnitAmount: model.super_line.unit_amount,
     AccountCode: options.superAccountCode,
-    TaxType: taxType,
+    TaxType: "NONE",
     Tracking: [],
   });
 
-  return netLines;
+  return labourLines;
 }
 
 export function assertReturnedTradeInvoiceXeroSplit(
@@ -471,11 +559,14 @@ export function assertReturnedTradeInvoiceXeroSplit(
   }
 
   const lines = value as TradeInvoiceXeroLine[];
-  const superLines = lines.filter((line) =>
-    String(line.Description || "").startsWith("Superannuation Guarantee (")
-  );
-  const expectedTaxType = money.gst_on ? "INPUT" : "NONE";
+  const superLines = lines.filter((line) => isTradeInvoiceSuperXeroLine(line));
+  const labourLines = lines.filter((line) => !isTradeInvoiceSuperXeroLine(line));
+  const expectedLabourTaxType = money.gst_on ? "INPUT" : "NONE";
   const totalCents = lines.reduce(
+    (sum, line) => sum + lineGrossCents(line),
+    0,
+  );
+  const labourCents = labourLines.reduce(
     (sum, line) => sum + lineGrossCents(line),
     0,
   );
@@ -483,20 +574,21 @@ export function assertReturnedTradeInvoiceXeroSplit(
     (sum, line) => sum + lineGrossCents(line),
     0,
   );
-  const grossCents = toCents(money.gross_earned);
-  const expectedSuperCents = toCents(money.super_amount);
+  const expectedSuperCents = -toCents(money.super_amount);
   const expectedNetCents = toCents(money.net_pay);
+  const expectedGrossCents = toCents(money.gross_earned);
 
   if (
     superLines.length !== 1 ||
-    Math.abs(totalCents - grossCents) > 1 ||
+    Math.abs(labourCents - expectedGrossCents) > 1 ||
     Math.abs(superCents - expectedSuperCents) > 1 ||
-    Math.abs(totalCents - superCents - expectedNetCents) > 1 ||
-    lines.some((line) => line.TaxType !== expectedTaxType)
+    Math.abs(totalCents - expectedNetCents) > 1 ||
+    superLines.some((line) => line.TaxType !== "NONE") ||
+    labourLines.some((line) => line.TaxType !== expectedLabourTaxType)
   ) {
     throw new TradeInvoiceMoneyError(
       "XERO_RETURNED_SPLIT_INVALID",
-      "Xero returned a trade bill without the reconciled net earnings and super split",
+      "Xero returned a trade bill without labour at the work amounts and super withheld as a minus",
     );
   }
 }
