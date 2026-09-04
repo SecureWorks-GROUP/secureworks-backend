@@ -82,10 +82,13 @@ remains false to prevent a duplicate single-work-order invoice.
 `status=complete` means invoice-ready, not a literal work-order status. Live
 fencing crew-pay WOs stay `sent` after the job archives (SWF-26041 /
 WO-373349). The server therefore also returns `sent` / `accepted` rows whose
-job is finished (`complete` / `invoiced` / `archived` / `paid`) and marks
-those `can_add_to_weekly_invoice`. Draft quote/material WOs stay out. Scope
-lines resolve `qty`/`item`/`rate` (never `unit_price_ex`); a `$0` supplied
-material is omitted, not a refusal of the whole order.
+job is in `JOB_STATUS_FINISHED` (`complete` / `completed` / `invoiced` /
+`paid` / `closed` / `archived`). `can_add_to_weekly_invoice` and `can_invoice`
+still require priced scope (`workOrderHasPricedScope`): invoice-ready is not
+enough when the only lines are `$0` materials or quote-only `unit_price_ex`.
+Draft quote/material WOs stay out. Scope lines resolve `qty`/`item`/`rate`
+(never `unit_price_ex`); a `$0` supplied material is omitted, not a refusal
+of the whole order.
 
 UX 287 already loads this list and requires `can_add_to_weekly_invoice`.
 Henry must pick the week of `scheduled_date` / `completed_at` (WO-373349 is
