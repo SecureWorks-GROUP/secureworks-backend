@@ -211,6 +211,69 @@ Deno.test("weekly resolver ignores client money and pins every deduction to serv
   assertEquals(invoice.final_deductions[0].line_total_ex, -50);
 });
 
+Deno.test("weekly resolver accepts a sent work order on an archived job", async () => {
+  const workOrder = {
+    ...completedWorkOrder(),
+    status: "sent",
+    completed_at: null,
+    scheduled_date: "2026-08-26",
+    assigned_user_id: null,
+    scope_items: [
+      {
+        qty: 59,
+        item: "Colorbond fence install — 59m",
+        rate: 30,
+        unit: "m",
+        total: 1770,
+      },
+      { qty: 54, item: "Kwikset", rate: 0, unit: "bags", total: 0 },
+    ],
+    jobs: {
+      ...completedWorkOrder().jobs,
+      status: "archived",
+    },
+  };
+  const invoice = await _resolveWeeklyWorkOrderInvoice(
+    resolverClient({ workOrders: [workOrder] }),
+    HENRY,
+    false,
+    "2026-08-24",
+    "2026-08-30",
+    {
+      work_order_blocks: [{ work_order_id: workOrder.id }],
+    },
+  );
+
+  assertEquals(invoice.job_blocks[0].subtotal, 1770);
+  assertEquals(invoice.lines.length, 1);
+  assertEquals(invoice.lines[0].description, "Colorbond fence install — 59m");
+  assertEquals(invoice.lines[0].unit_rate, 30);
+  assertEquals(invoice.to_be_paid, 1770);
+});
+
+Deno.test("weekly resolver refuses a sent work order on an unfinished job", async () => {
+  const workOrder = {
+    ...completedWorkOrder(),
+    status: "sent",
+    jobs: { ...completedWorkOrder().jobs, status: "in_progress" },
+  };
+  await assertRejects(
+    () =>
+      _resolveWeeklyWorkOrderInvoice(
+        resolverClient({ workOrders: [workOrder] }),
+        HENRY,
+        false,
+        "2026-08-24",
+        "2026-08-30",
+        {
+          work_order_blocks: [{ work_order_id: workOrder.id }],
+        },
+      ),
+    Error,
+    "sent/accepted on a finished job",
+  );
+});
+
 Deno.test("weekly resolver refuses a completed work order outside the selected week", async () => {
   await assertRejects(
     () =>

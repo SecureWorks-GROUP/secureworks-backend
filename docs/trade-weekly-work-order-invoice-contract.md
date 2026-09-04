@@ -79,6 +79,24 @@ for the weekly builder when `can_add_to_weekly_invoice` is true. An existing
 same-user draft exposes `weekly_draft_id` so it can be reopened; `can_invoice`
 remains false to prevent a duplicate single-work-order invoice.
 
+`status=complete` means invoice-ready, not a literal work-order status. Live
+fencing crew-pay WOs stay `sent` after the job archives (SWF-26041 /
+WO-373349). The server therefore also returns `sent` / `accepted` rows whose
+job is in `JOB_STATUS_FINISHED` (`complete` / `completed` / `invoiced` /
+`paid` / `closed` / `archived`). `can_add_to_weekly_invoice` and `can_invoice`
+still require priced scope (`workOrderHasPricedScope`): invoice-ready is not
+enough when the only lines are `$0` materials or quote-only `unit_price_ex`.
+Draft quote/material WOs stay out. Scope lines resolve `qty`/`item`/`rate`
+(never `unit_price_ex`); a `$0` supplied material is omitted, not a refusal
+of the whole order.
+
+UX 287 already loads this list and requires `can_add_to_weekly_invoice`.
+Henry must pick the week of `scheduled_date` / `completed_at` (WO-373349 is
+2026-04-07). Remaining UX follow-up, not this repo: job-detail Cost Breakdown
+still calls `submit_work_order_invoice` without `gst_on` and without the
+weekly deduct/net UI — route per-metre users through
+`openWeeklyWorkOrderInvoice` instead.
+
 For direct labour names, the existing job detail route returns the assigned
 crew without exposing their pay rate:
 
@@ -102,7 +120,7 @@ Content-Type: application/json
   "gst_on": false,
   "work_order_blocks": [
     {
-      "work_order_id": "<completed work order id>",
+      "work_order_id": "<invoice-ready work order id>",
       "crew_charge_line_ids": ["<negative_charges[].line_id>"],
       "labour_deductions": [
         { "user_id": "<crew user id>", "hours": 2 }

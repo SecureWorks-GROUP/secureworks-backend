@@ -395,10 +395,15 @@ import {
 import {
   buildWeeklyWorkOrderInvoice,
   calculateWeeklyInvoiceBreakdown,
-  firstWorkOrderNumericValue,
+  JOB_STATUS_FINISHED,
+  pricedWorkOrderScopeLines,
+  resolveWorkOrderScopeLine,
   WEEKLY_INVOICE_DEDUCTION_LINE_TYPES,
   WeeklyInvoiceError,
   weeklyWorkOrderBusinessDate,
+  workOrderHasPricedScope,
+  WORK_ORDER_INVOICE_LIST_STATUSES,
+  workOrderIsInvoiceReady,
   type WeeklyInvoiceLine,
   type WeeklyWorkOrderInvoice,
 } from './trade_invoice_weekly.ts'
@@ -9364,7 +9369,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // orders, but tenant and canonical job vertical remain hard server
             // boundaries at submission time too.
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
+              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb)')
               .eq('id', work_order_id)
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
@@ -9378,7 +9383,9 @@ if (import.meta.main) serve(async (req: Request) => {
             )) {
               throw new ApiError('Not authorised — this work order is outside your assigned or managed work', 403)
             }
-            if (wo.status !== 'complete') throw new ApiError('Work order must be complete before invoicing', 400)
+            if (!workOrderIsInvoiceReady({ ...wo, jobs: woJob })) {
+              throw new ApiError('Work order must be complete, or sent/accepted on a finished job, before invoicing', 400)
+            }
 
             // One live invoice per work order across the tenant, regardless of
             // which authorised manager/trade submitted it. The caller's own
@@ -9463,17 +9470,16 @@ if (import.meta.main) serve(async (req: Request) => {
             const woGstOn = tradeInvoiceGstOn(body)
             const woTaxType = woGstOn ? 'INPUT' : 'NONE'
 
-            const lineItems = scopeItems.map((item: any) => {
-              const { qty, price } = _resolveWorkOrderScopeLine(item)
-              const desc = item.description || item.name || 'Work order item'
+            const pricedScope = _pricedWorkOrderInvoiceScopeLines(scopeItems, woJobNum)
+            const lineItems = pricedScope.map((item) => {
               return {
                 Description: [
                   `${wo.wo_number} | ${woJobNum} | ${woDivision || 'Construction'}`,
-                  desc + (qty > 1 ? ` (${qty} × $${price.toFixed(2)})` : ''),
+                  item.description + (item.qty > 1 ? ` (${item.qty} × $${item.price.toFixed(2)})` : ''),
                   woClientLine,
                 ].filter(Boolean).join('\n'),
-                Quantity: qty,
-                UnitAmount: price,
+                Quantity: item.qty,
+                UnitAmount: item.price,
                 AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors (matches submitTradeInvoice/generate_trade_invoice/push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax on ACCPAY)
                 TaxType: woTaxType,
                 Tracking: xeroTracking(woJobNum),
@@ -9514,19 +9520,18 @@ if (import.meta.main) serve(async (req: Request) => {
               { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
             )
 
-            const workOrderLines: Array<Record<string, unknown>> = scopeItems.map((item: any) => {
-              const resolved = _resolveWorkOrderScopeLine(item)
+            const workOrderLines: Array<Record<string, unknown>> = pricedScope.map((item) => {
               return {
                 job_id: wo.job_id,
                 job_number: woJobNum,
                 client_name: woJob?.client_name || '',
-                description: item.description || item.name || 'Work order item',
+                description: item.description,
                 total_hours: 0,
                 hourly_rate: 0,
-                quantity: resolved.qty,
-                unit: String(item.unit || (item.metres !== undefined ? 'm' : 'ea')),
-                unit_rate: resolved.price,
-                line_total_ex: resolved.amount_ex,
+                quantity: item.qty,
+                unit: item.unit,
+                unit_rate: item.price,
+                line_total_ex: item.amount_ex,
                 line_date: sourceWorkOrderDate,
               }
             })
@@ -12614,9 +12619,31 @@ function roundMoney(value: number): number {
 export function _resolveWorkOrderScopeLine(
   item: any,
 ): { qty: number; price: number; amount_ex: number } {
-  const qty = roundMoney(firstWorkOrderNumericValue([item?.quantity, item?.metres, item?.qty], 1))
-  const price = roundMoney(firstWorkOrderNumericValue([item?.unit_price, item?.rate, item?.price], 0))
-  return { qty, price, amount_ex: roundMoney(qty * price) }
+  return resolveWorkOrderScopeLine(item)
+}
+
+export function _pricedWorkOrderInvoiceScopeLines(
+  scopeItems: any[],
+  jobNumber = '',
+): Array<{
+  description: string
+  qty: number
+  price: number
+  amount_ex: number
+  unit: string
+}> {
+  try {
+    return pricedWorkOrderScopeLines(scopeItems, jobNumber || 'Work order').map((line) => ({
+      description: line.description,
+      qty: line.qty,
+      price: line.price,
+      amount_ex: line.amount_ex,
+      unit: line.unit,
+    }))
+  } catch (error) {
+    if (error instanceof WeeklyInvoiceError) throw new ApiError(error.message, error.status)
+    throw error
+  }
 }
 
 function workOrderScopeSubtotal(scopeItems: any[]): number {
@@ -12934,7 +12961,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, site_address, site_suburb)')
+    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)
@@ -12949,8 +12976,8 @@ export async function _resolveWeeklyWorkOrderInvoice(
     if (!_canSubmitWorkOrderInvoice(tradeUser, { ...workOrder, jobs: job }, isDispatcher)) {
       throw new ApiError('Not authorised — a weekly work order is outside your assigned or managed work', 403)
     }
-    if (String(workOrder.status || '') !== 'complete') {
-      throw new ApiError('Every weekly work order must be complete before invoicing', 422)
+    if (!workOrderIsInvoiceReady({ ...workOrder, jobs: job })) {
+      throw new ApiError('Every weekly work order must be complete, or sent/accepted on a finished job, before invoicing', 422)
     }
     const workDate = weeklyWorkOrderBusinessDate(workOrder)
     if (!workDate || workDate < weekStart || workDate > weekEnd) {
@@ -13270,7 +13297,14 @@ export async function tradeWorkOrders(
       .order('id', { ascending: true })
       .range(readOffset, readOffset + WORK_ORDER_READ_PAGE - 1)
     if (mode === 'mine') query = query.eq('assigned_user_id', viewer.id)
-    if (status) query = query.eq('status', status)
+    if (status === 'complete') {
+      // UX 287 asks status=complete. Live crew-pay WOs stay sent after the job
+      // finishes, so the complete filter also returns sent/accepted rows and
+      // the invoice-ready predicate below drops the ones whose job is still open.
+      query = query.in('status', [...WORK_ORDER_INVOICE_LIST_STATUSES])
+    } else if (status) {
+      query = query.eq('status', status)
+    }
     if (verticals.length > 0) {
       query = query.or(workOrderVerticalFilter, { referencedTable: 'jobs' })
     }
@@ -13285,6 +13319,9 @@ export async function tradeWorkOrders(
   // Defensive de-duplication protects external offset paging if a database view
   // or retry ever repeats a row at a page boundary.
   let authorizedRows = [...new Map(allRows.map((row: any) => [String(row.id), row])).values()]
+  if (status === 'complete') {
+    authorizedRows = authorizedRows.filter((row: any) => workOrderIsInvoiceReady(row))
+  }
   if (search) {
     authorizedRows = authorizedRows.filter((row: any) => [
       row.wo_number,
@@ -13393,8 +13430,10 @@ export async function tradeWorkOrders(
       weekly_draft_id: canReopenWeeklyDraft
         ? weeklyDraft.id
         : null,
-      can_add_to_weekly_invoice: workOrder.status === 'complete' && !weeklyBuilderBlocker,
-      can_invoice: workOrder.status === 'complete' && !blockingInvoice,
+      can_add_to_weekly_invoice: workOrderIsInvoiceReady(workOrder) &&
+        workOrderHasPricedScope(scopeItems) && !weeklyBuilderBlocker,
+      can_invoice: workOrderIsInvoiceReady(workOrder) &&
+        workOrderHasPricedScope(scopeItems) && !blockingInvoice,
     }
   })
   const hasMore = requestedOffset + mapped.length < total
@@ -35887,9 +35926,7 @@ export function _isAllocatableMakesafePoolDetailForTest(detail: any): boolean {
 export const _JOB_STATUS_DEAD = [
   'cancelled', 'canceled', 'lost', 'deleted', 'duplicate', 'duplicated', 'void', 'voided',
 ] as const
-export const _JOB_STATUS_FINISHED = [
-  'complete', 'completed', 'invoiced', 'paid', 'closed', 'archived',
-] as const
+export const _JOB_STATUS_FINISHED = JOB_STATUS_FINISHED
 export const _MAKESAFE_SUBSTATUS_FINISHED = [
   'complete', 'completed', 'ready_to_invoice', 'admin_to_send_report', 'invoiced',
 ] as const

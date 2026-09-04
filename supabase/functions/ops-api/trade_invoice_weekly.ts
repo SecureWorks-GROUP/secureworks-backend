@@ -96,6 +96,126 @@ export function firstWorkOrderNumericValue(
   return fallback;
 }
 
+// Live fencing crew-pay lines use qty/item/rate/total. Quote/material drafts
+// use quantity/description/unit_price_ex. Never read unit_price_ex as trade pay.
+export const WORK_ORDER_INVOICE_LIST_STATUSES = [
+  "complete",
+  "sent",
+  "accepted",
+] as const;
+
+// Same finished set as `_JOB_STATUS_FINISHED` in index.ts — one vocabulary.
+export const JOB_STATUS_FINISHED = [
+  "complete",
+  "completed",
+  "invoiced",
+  "paid",
+  "closed",
+  "archived",
+] as const;
+
+const FINISHED_JOB_STATUSES = new Set<string>(JOB_STATUS_FINISHED);
+
+export function workOrderScopeLineDescription(
+  item: Record<string, unknown> | null | undefined,
+): string {
+  for (const candidate of [item?.description, item?.name, item?.item]) {
+    const text = String(candidate ?? "").replace(/\s+/g, " ").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+export function resolveWorkOrderScopeLine(
+  item: Record<string, unknown> | null | undefined,
+): { qty: number; price: number; amount_ex: number } {
+  const qty = roundMoney(firstWorkOrderNumericValue(
+    [item?.quantity, item?.metres, item?.qty],
+    1,
+  ));
+  const price = roundMoney(firstWorkOrderNumericValue(
+    [item?.unit_price, item?.rate, item?.price],
+    0,
+  ));
+  return { qty, price, amount_ex: roundMoney(qty * price) };
+}
+
+export function workOrderHasPricedScope(scopeItems: unknown): boolean {
+  return (Array.isArray(scopeItems) ? scopeItems : []).some((raw) => {
+    const item = raw && typeof raw === "object"
+      ? raw as Record<string, unknown>
+      : {};
+    const { price, amount_ex } = resolveWorkOrderScopeLine(item);
+    return price > 0 && amount_ex > 0;
+  });
+}
+
+export type PricedWorkOrderScopeLine = {
+  item: Record<string, unknown>;
+  qty: number;
+  price: number;
+  amount_ex: number;
+  description: string;
+  unit: string;
+};
+
+export function pricedWorkOrderScopeLines(
+  scopeItems: unknown,
+  jobNumber: string,
+): PricedWorkOrderScopeLine[] {
+  const items = Array.isArray(scopeItems) ? scopeItems : [];
+  if (items.length === 0) {
+    throw new WeeklyInvoiceError(
+      `${jobNumber} has no work order scope items`,
+    );
+  }
+  const priced: PricedWorkOrderScopeLine[] = [];
+  for (const raw of items) {
+    const item = raw && typeof raw === "object"
+      ? raw as Record<string, unknown>
+      : {};
+    const { qty, price, amount_ex } = resolveWorkOrderScopeLine(item);
+    if (!(price > 0) || !(amount_ex > 0)) continue;
+    priced.push({
+      item,
+      qty: roundMoney(positiveNumber(qty, `${jobNumber} scope quantity`)),
+      price: roundMoney(positiveNumber(price, `${jobNumber} scope rate`)),
+      amount_ex,
+      description: requiredText(
+        workOrderScopeLineDescription(item),
+        `${jobNumber} scope description`,
+      ),
+      unit: String(item.unit || (item.metres !== undefined ? "m" : "ea")),
+    });
+  }
+  if (priced.length === 0) {
+    throw new WeeklyInvoiceError(
+      `${jobNumber} has no priced work-order scope items`,
+    );
+  }
+  return priced;
+}
+
+function workOrderJob(
+  workOrder: Record<string, unknown>,
+): Record<string, unknown> {
+  const raw = workOrder.jobs;
+  if (Array.isArray(raw)) return (raw[0] || {}) as Record<string, unknown>;
+  return raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+}
+
+export function workOrderIsInvoiceReady(
+  workOrder: Record<string, unknown> | null | undefined,
+): boolean {
+  const status = String(workOrder?.status || "").trim().toLowerCase();
+  if (status === "complete") return true;
+  if (status !== "sent" && status !== "accepted") return false;
+  const job = workOrderJob(workOrder || {});
+  return FINISHED_JOB_STATUSES.has(
+    String(job.status || "").trim().toLowerCase(),
+  );
+}
+
 export function weeklyWorkOrderBusinessDate(
   workOrder: Record<string, unknown>,
 ): string | null {
@@ -125,6 +245,7 @@ export function weeklyScopeLineType(item: Record<string, unknown>): string {
     item.category,
     item.description,
     item.name,
+    item.item,
   );
   if (/travel|logistics|disposal|pickup/.test(hint)) return "travel";
   if (/material|plinth|tube|lattice/.test(hint)) return "materials";
@@ -147,14 +268,6 @@ export function weeklyCrewDeductionLineType(
     return "materials_deduction";
   }
   return "crew_work_order_deduction";
-}
-
-function workOrderJob(
-  workOrder: Record<string, unknown>,
-): Record<string, unknown> {
-  const raw = workOrder.jobs;
-  if (Array.isArray(raw)) return (raw[0] || {}) as Record<string, unknown>;
-  return raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
 }
 
 function sourceDeductionBasis(
@@ -305,9 +418,9 @@ export function buildWeeklyWorkOrderInvoice(input: {
       );
     }
     seenWorkOrders.add(workOrderId);
-    if (String(workOrder.status || "") !== "complete") {
+    if (!workOrderIsInvoiceReady(workOrder)) {
       throw new WeeklyInvoiceError(
-        "work order must be complete before invoicing",
+        "work order must be complete, or sent/accepted on a finished job, before invoicing",
       );
     }
     const job = workOrderJob(workOrder);
@@ -327,37 +440,14 @@ export function buildWeeklyWorkOrderInvoice(input: {
     const scopeItems = Array.isArray(workOrder.scope_items)
       ? workOrder.scope_items as Array<Record<string, unknown>>
       : [];
-    if (scopeItems.length === 0) {
-      throw new WeeklyInvoiceError(
-        `${jobNumber} has no work order scope items`,
-      );
-    }
-
-    for (const item of scopeItems) {
-      const quantity = roundMoney(positiveNumber(
-        firstWorkOrderNumericValue(
-          [item.quantity, item.metres, item.qty],
-          1,
-        ),
-        `${jobNumber} scope quantity`,
-      ));
-      const unitRate = roundMoney(positiveNumber(
-        firstWorkOrderNumericValue(
-          [item.unit_price, item.rate, item.price],
-          0,
-        ),
-        `${jobNumber} scope rate`,
-      ));
+    for (const priced of pricedWorkOrderScopeLines(scopeItems, jobNumber)) {
       lines.push({
-        line_type: weeklyScopeLineType(item),
-        description: requiredText(
-          item.description || item.name,
-          `${jobNumber} scope description`,
-        ),
-        quantity,
-        unit: String(item.unit || (item.metres !== undefined ? "m" : "ea")),
-        unit_rate: unitRate,
-        line_total_ex: roundMoney(quantity * unitRate),
+        line_type: weeklyScopeLineType(priced.item),
+        description: priced.description,
+        quantity: priced.qty,
+        unit: priced.unit,
+        unit_rate: priced.price,
+        line_total_ex: priced.amount_ex,
         job_id: jobId,
         job_number: jobNumber,
         client_name: clientName,

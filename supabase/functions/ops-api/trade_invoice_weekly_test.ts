@@ -6,18 +6,26 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildWeeklyWorkOrderInvoice,
+  JOB_STATUS_FINISHED,
+  pricedWorkOrderScopeLines,
   WeeklyInvoiceError,
+  workOrderHasPricedScope,
+  workOrderIsInvoiceReady,
 } from "./trade_invoice_weekly.ts";
 
 type ScopeLine = {
-  description: string;
+  description?: string;
+  item?: string;
+  name?: string;
   quantity?: number | string;
   metres?: number | string;
   qty?: number | string;
   unit?: string;
   unit_price?: number | string;
+  unit_price_ex?: number | string;
   rate?: number | string;
   price?: number | string;
+  total?: number | string;
 };
 
 type CrewDeduction = {
@@ -60,6 +68,7 @@ function jobBlock(
         job_number: jobNumber,
         client_name: `Client ${sequence}`,
         type: jobNumber.startsWith("SWP-") ? "patio" : "fencing",
+        status: "complete",
         site_address: `${sequence} Test Street`,
         site_suburb: "Perth",
       },
@@ -368,6 +377,183 @@ Deno.test("weekly scope lines skip blank numeric candidates", () => {
   assertEquals(invoice.lines[0].unit_rate, 35);
   assertEquals(invoice.lines[0].line_total_ex, 420);
   assertEquals(invoice.job_blocks[0].site_address, "10 Main St, Balcatta");
+});
+
+Deno.test("crew-pay qty/item/rate lines invoice submitted amounts and skip $0 materials", () => {
+  const block = jobBlock(14, "SWF-26041", [
+    {
+      qty: 59,
+      item: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      rate: 30,
+      unit: "m",
+      total: 1770,
+    },
+    {
+      qty: 27,
+      item: "Retaining plinth install",
+      rate: 10,
+      unit: "ea",
+      total: 270,
+    },
+    {
+      qty: 20,
+      item: "Timber fence removal & disposal",
+      rate: 10,
+      unit: "m",
+      total: 200,
+    },
+    {
+      qty: 54,
+      item: "Kwikset (2 bags per post, 27 posts)",
+      rate: 0,
+      unit: "bags",
+      total: 0,
+    },
+  ]);
+  block.work_order.status = "sent";
+  block.work_order.completed_at = "";
+  block.work_order.scheduled_date = "2026-04-07";
+  block.work_order.jobs.status = "archived";
+
+  const invoice = buildWeeklyWorkOrderInvoice({ job_blocks: [block] });
+
+  assertEquals(
+    invoice.lines.map((line) => ({
+      description: line.description,
+      quantity: line.quantity,
+      unit_rate: line.unit_rate,
+      line_total_ex: line.line_total_ex,
+    })),
+    [
+      {
+        description: "Colorbond fence install — 59m Sameside Monument 1800mm",
+        quantity: 59,
+        unit_rate: 30,
+        line_total_ex: 1770,
+      },
+      {
+        description: "Retaining plinth install",
+        quantity: 27,
+        unit_rate: 10,
+        line_total_ex: 270,
+      },
+      {
+        description: "Timber fence removal & disposal",
+        quantity: 20,
+        unit_rate: 10,
+        line_total_ex: 200,
+      },
+    ],
+  );
+  assertEquals(invoice.job_blocks[0].subtotal, 2240);
+  assertEquals(invoice.to_be_paid, 2240);
+});
+
+Deno.test("quote unit_price_ex lines are not trade pay and refuse an unpriced order", () => {
+  const block = jobBlock(15, "SWF-quote", [{
+    quantity: 6,
+    description: "Basalt Trimclad fencing — 6.0m",
+    unit: "m",
+    unit_price_ex: 81,
+  }]);
+  assertThrows(
+    () => buildWeeklyWorkOrderInvoice({ job_blocks: [block] }),
+    WeeklyInvoiceError,
+    "has no priced work-order scope items",
+  );
+});
+
+Deno.test("sent work orders are invoice-ready only on a finished job", () => {
+  assertEquals(
+    [...JOB_STATUS_FINISHED],
+    ["complete", "completed", "invoiced", "paid", "closed", "archived"],
+  );
+  assertEquals(workOrderIsInvoiceReady({ status: "complete" }), true);
+  assertEquals(
+    workOrderIsInvoiceReady({
+      status: "sent",
+      jobs: { status: "archived" },
+    }),
+    true,
+  );
+  assertEquals(
+    workOrderIsInvoiceReady({
+      status: "accepted",
+      jobs: { status: "invoiced" },
+    }),
+    true,
+  );
+  assertEquals(
+    workOrderIsInvoiceReady({
+      status: "sent",
+      jobs: { status: "closed" },
+    }),
+    true,
+  );
+  assertEquals(
+    workOrderIsInvoiceReady({
+      status: "sent",
+      jobs: { status: "in_progress" },
+    }),
+    false,
+  );
+  assertEquals(
+    workOrderIsInvoiceReady({
+      status: "draft",
+      jobs: { status: "archived" },
+    }),
+    false,
+  );
+});
+
+Deno.test("priced-scope helper shares crew-pay grammar and refuses unpriced work", () => {
+  const crewPay = [
+    {
+      qty: 59,
+      item: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      rate: 30,
+      unit: "m",
+      total: 1770,
+    },
+    { qty: 54, item: "Kwikset (2 bags per post, 27 posts)", rate: 0, unit: "bags", total: 0 },
+  ];
+  assertEquals(workOrderHasPricedScope(crewPay), true);
+  assertEquals(
+    pricedWorkOrderScopeLines(crewPay, "SWF-26041").map((line) => ({
+      description: line.description,
+      qty: line.qty,
+      price: line.price,
+      amount_ex: line.amount_ex,
+    })),
+    [{
+      description: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      qty: 59,
+      price: 30,
+      amount_ex: 1770,
+    }],
+  );
+  assertEquals(
+    workOrderHasPricedScope([{
+      quantity: 6,
+      description: "Basalt Trimclad fencing — 6.0m",
+      unit_price_ex: 81,
+    }]),
+    false,
+  );
+  assertEquals(
+    workOrderHasPricedScope([{ qty: 54, item: "Kwikset", rate: 0, total: 0 }]),
+    false,
+  );
+  assertThrows(
+    () =>
+      pricedWorkOrderScopeLines([{
+        quantity: 6,
+        description: "Basalt Trimclad fencing — 6.0m",
+        unit_price_ex: 81,
+      }], "SWF-quote"),
+    WeeklyInvoiceError,
+    "has no priced work-order scope items",
+  );
 });
 
 Deno.test("weekly money is calculated from the two-decimal values that are stored", () => {
