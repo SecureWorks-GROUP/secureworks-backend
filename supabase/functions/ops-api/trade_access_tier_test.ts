@@ -363,7 +363,13 @@ Deno.test("quote rule: exactly office and division_manager see the quote", () =>
 
 function quoteLeakProbe(payload: any): string[] {
   const leaks: string[] = [];
-  const text = JSON.stringify(payload);
+  const clone = payload && typeof payload === "object" ? structuredClone(payload) : payload;
+  if (clone && Array.isArray(clone.quote_packs)) {
+    for (const pack of clone.quote_packs) {
+      if (pack && typeof pack === "object") delete pack.quote_number;
+    }
+  }
+  const text = JSON.stringify(clone);
   for (
     const needle of [
       "_pricing_json",
@@ -397,6 +403,7 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.job.id, JOB_FENCE);
   assertEquals(p.workOrders.length, 1);
   assertEquals(p.purchaseOrders.length, 1);
+  assertEquals(p.quote_packs || [], [], "unsent quotes do not become a trade pack");
   assertEquals(quoteLeakProbe(p), [], "no quote coordinate anywhere in the allocated payload");
   // Documents: flagged-visible non-quote docs only. The visible-flagged QUOTE and
   // the client INVOICE are gone; the supplier quote (a supplier's price to us)
@@ -406,6 +413,26 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.job.scope_json.pricing, { labour: { trades: 2, days: 3, dayRate: 400 } });
   assertEquals(p.job.scope_json.notes, { noteWorkOrder: "Use 90x90 posts", noteInternal: "Client is a repeat customer" });
   assertEquals(p.job.scope_json.config.totalMetres, 42);
+});
+
+Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, never the PDF or sell", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.sent_at = "2026-09-01T00:00:00Z";
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.access_tier, "allocated");
+  assertEquals(p.quote_visible, false);
+  assertEquals(p.quote_packs.length, 1);
+  assertEquals(p.quote_packs[0].quote_number, "Q-1");
+  assertEquals(p.quote_packs[0].status, "sent");
+  assertEquals(p.quote_packs[0].source, "live_fallback");
+  const install = (p.quote_packs[0].items || []).find((i: any) => i.kind === "install_m");
+  assertEquals(install?.quantity, 10);
+  assertEquals(install?.unit_price, 30);
+  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
+  assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
+  assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
+  assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell and PDF are not");
 });
 
 Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", async () => {

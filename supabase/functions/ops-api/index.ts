@@ -120,6 +120,10 @@ import {
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
+import {
+  assembleQuotePacksForTrade,
+  isHenryInstaller,
+} from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
 import {
   buildV2Augmentation,
@@ -38285,9 +38289,9 @@ async function tradeJobDetail(
   })
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
-  const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes] = await Promise.all([
+  const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes, quoteDocsRes] = await Promise.all([
     client.from('jobs')
-      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id, metadata')
+      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, pricing_json, ghl_opportunity_id, ghl_contact_id, metadata')
       .eq('id', jobId).eq('org_id', viewer.orgId).single(),
     client.from('job_documents')
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
@@ -38320,6 +38324,11 @@ async function tradeJobDetail(
       .select('id, po_number, supplier_name, status, delivery_date, line_items')
       .eq('job_id', jobId).neq('status', 'deleted')
       .order('delivery_date', { ascending: true }),
+    client.from('job_documents')
+      .select('id, type, quote_number, sent_at, accepted_at, superseded_at, trade_pack_json, created_at')
+      .eq('job_id', jobId)
+      .eq('type', 'quote')
+      .order('created_at', { ascending: false }),
   ])
 
   if (jobRes.error) throw jobRes.error
@@ -38413,7 +38422,20 @@ async function tradeJobDetail(
     }
   }
 
-  const { metadata: _tradeJobMetadata, ...tradeSafeJob } = jobRes.data || {}
+  // Pack from the live row BEFORE quote redaction mutates scope_json in place.
+  // pricing_json is selected only for this packer, then stripped off the payload.
+  if (quoteDocsRes.error) {
+    console.error('[ops-api] trade quote packs read failed:', quoteDocsRes.error.message)
+  }
+  const quotePacks = assembleQuotePacksForTrade({
+    documents: quoteDocsRes.error ? [] : (quoteDocsRes.data || []),
+    jobType: jobRes.data?.type,
+    liveScopeJson: jobRes.data?.scope_json,
+    livePricingJson: jobRes.data?.pricing_json,
+    isHenry: isHenryInstaller(viewer.email),
+  })
+
+  const { metadata: _tradeJobMetadata, pricing_json: _tradePricingJson, ...tradeSafeJob } = jobRes.data || {}
   const currentServiceReport = makesafeDetails
     ? selectCurrentCycleReport(
       reportRes.data || [],
@@ -38513,6 +38535,7 @@ async function tradeJobDetail(
     leadInstaller: _tradeLeadInstaller(tradeCrew),
     purchaseOrders: safePOs,
     makesafe_details: makesafeDetails,
+    quote_packs: quotePacks,
   }
 }
 
