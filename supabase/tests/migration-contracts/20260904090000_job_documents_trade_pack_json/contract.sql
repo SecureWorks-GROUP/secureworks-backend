@@ -16,12 +16,4 @@ BEGIN
 END;
 $$;
 
-INSERT INTO public.job_documents (id, type, quote_number, trade_pack_json)
-VALUES (
-  '20000000-0000-4000-8000-000000000001',
-  'quote',
-  'SWF-26001-Q1',
-  '{"quote_number":"SWF-26001-Q1","items":[],"source":"frozen"}'::jsonb
-);
-
 ROLLBACK;
