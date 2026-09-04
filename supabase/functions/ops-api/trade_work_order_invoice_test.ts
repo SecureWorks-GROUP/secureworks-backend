@@ -3,18 +3,23 @@
 import {
   assertEquals,
   assertRejects,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  ApiError,
   _calculateWorkOrderInvoiceTotals,
   _canSubmitWorkOrderInvoice,
   _claimWorkOrderInvoiceBeforeXero,
   _findBlockingWorkOrderInvoice,
+  _JOB_STATUS_FINISHED,
+  _pricedWorkOrderInvoiceScopeLines,
   _resolveWorkOrderScopeLine,
   _selectWorkOrderNegativeCharges,
   handleTradeWorkOrdersAction,
   type TradeAuthContext,
   tradeWorkOrders,
 } from "./index.ts";
+import { JOB_STATUS_FINISHED } from "./trade_invoice_weekly.ts";
 
 const TENANT_A = "00000000-0000-0000-0000-000000000001";
 const TENANT_B = "00000000-0000-0000-0000-000000000002";
@@ -484,6 +489,132 @@ Deno.test("crew-pay scope lines resolve qty/item/rate and ignore unit_price_ex",
     }),
     { qty: 6, price: 0, amount_ex: 0 },
   );
+});
+
+Deno.test("submit-path priced lines reuse shared grammar and skip $0 materials", () => {
+  assertEquals(
+    [..._JOB_STATUS_FINISHED],
+    [...JOB_STATUS_FINISHED],
+  );
+  const priced = _pricedWorkOrderInvoiceScopeLines([
+    {
+      qty: 59,
+      item: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      rate: 30,
+      unit: "m",
+      total: 1770,
+    },
+    { qty: 27, item: "Retaining plinth install", rate: 10, unit: "ea", total: 270 },
+    { qty: 54, item: "Kwikset (2 bags per post, 27 posts)", rate: 0, unit: "bags", total: 0 },
+  ], "SWF-26041");
+  assertEquals(
+    priced.map((line) => ({
+      description: line.description,
+      qty: line.qty,
+      price: line.price,
+      amount_ex: line.amount_ex,
+    })),
+    [
+      {
+        description: "Colorbond fence install — 59m Sameside Monument 1800mm",
+        qty: 59,
+        price: 30,
+        amount_ex: 1770,
+      },
+      {
+        description: "Retaining plinth install",
+        qty: 27,
+        price: 10,
+        amount_ex: 270,
+      },
+    ],
+  );
+  assertEquals(
+    priced.some((line) => line.description === "Work order item"),
+    false,
+  );
+  const unpriced = assertThrows(
+    () =>
+      _pricedWorkOrderInvoiceScopeLines([{
+        quantity: 6,
+        description: "Basalt Trimclad fencing — 6.0m",
+        unit_price_ex: 81,
+      }], "SWF-quote"),
+    ApiError,
+    "has no priced work-order scope items",
+  );
+  assertEquals((unpriced as ApiError).status, 422);
+  const zeros = assertThrows(
+    () =>
+      _pricedWorkOrderInvoiceScopeLines([{
+        qty: 54,
+        item: "Kwikset",
+        rate: 0,
+        total: 0,
+      }], "SWF-zeros"),
+    ApiError,
+    "has no priced work-order scope items",
+  );
+  assertEquals((zeros as ApiError).status, 422);
+});
+
+Deno.test("a sent work order on a closed job is invoice-ready", async () => {
+  const wo = workOrder("closed-sent", {
+    assigned: "",
+    status: "sent",
+    jobStatus: "closed",
+    scheduledDate: "2026-04-07",
+    scopeItems: [
+      { qty: 20, item: "Timber fence removal & disposal", rate: 10, unit: "m", total: 200 },
+    ],
+  });
+  const { client } = makeClient({ workOrders: [wo] });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing", status: "complete" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders.length, 1);
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, true);
+  assertEquals(result.work_orders[0].can_invoice, true);
+  assertEquals(result.work_orders[0].subtotal, 200);
+});
+
+Deno.test("invoice-ready work orders with only unpriced scope are not actionable", async () => {
+  const onlyZeros = workOrder("zeros-only", {
+    assigned: "",
+    status: "sent",
+    jobStatus: "archived",
+    scheduledDate: "2026-04-07",
+    scopeItems: [{ qty: 54, item: "Kwikset", rate: 0, unit: "bags", total: 0 }],
+  });
+  const quoteGrammar = workOrder("quote-only", {
+    assigned: "",
+    status: "complete",
+    jobStatus: "complete",
+    scopeItems: [{
+      quantity: 6,
+      description: "Basalt Trimclad fencing — 6.0m",
+      unit: "m",
+      unit_price_ex: 81,
+    }],
+  });
+  const { client } = makeClient({ workOrders: [onlyZeros, quoteGrammar] });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing", status: "complete" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders.length, 2);
+  for (const row of result.work_orders) {
+    assertEquals(row.can_add_to_weekly_invoice, false);
+    assertEquals(row.can_invoice, false);
+    assertEquals(row.subtotal, 0);
+  }
 });
 
 Deno.test("a sent work order on an archived job is weekly-invoice ready", async () => {

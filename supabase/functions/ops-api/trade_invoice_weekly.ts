@@ -104,13 +104,17 @@ export const WORK_ORDER_INVOICE_LIST_STATUSES = [
   "accepted",
 ] as const;
 
-const FINISHED_JOB_STATUSES = new Set([
+// Same finished set as `_JOB_STATUS_FINISHED` in index.ts — one vocabulary.
+export const JOB_STATUS_FINISHED = [
   "complete",
   "completed",
   "invoiced",
-  "archived",
   "paid",
-]);
+  "closed",
+  "archived",
+] as const;
+
+const FINISHED_JOB_STATUSES = new Set<string>(JOB_STATUS_FINISHED);
 
 export function workOrderScopeLineDescription(
   item: Record<string, unknown> | null | undefined,
@@ -134,6 +138,62 @@ export function resolveWorkOrderScopeLine(
     0,
   ));
   return { qty, price, amount_ex: roundMoney(qty * price) };
+}
+
+export function workOrderHasPricedScope(scopeItems: unknown): boolean {
+  return (Array.isArray(scopeItems) ? scopeItems : []).some((raw) => {
+    const item = raw && typeof raw === "object"
+      ? raw as Record<string, unknown>
+      : {};
+    const { price, amount_ex } = resolveWorkOrderScopeLine(item);
+    return price > 0 && amount_ex > 0;
+  });
+}
+
+export type PricedWorkOrderScopeLine = {
+  item: Record<string, unknown>;
+  qty: number;
+  price: number;
+  amount_ex: number;
+  description: string;
+  unit: string;
+};
+
+export function pricedWorkOrderScopeLines(
+  scopeItems: unknown,
+  jobNumber: string,
+): PricedWorkOrderScopeLine[] {
+  const items = Array.isArray(scopeItems) ? scopeItems : [];
+  if (items.length === 0) {
+    throw new WeeklyInvoiceError(
+      `${jobNumber} has no work order scope items`,
+    );
+  }
+  const priced: PricedWorkOrderScopeLine[] = [];
+  for (const raw of items) {
+    const item = raw && typeof raw === "object"
+      ? raw as Record<string, unknown>
+      : {};
+    const { qty, price, amount_ex } = resolveWorkOrderScopeLine(item);
+    if (!(price > 0) || !(amount_ex > 0)) continue;
+    priced.push({
+      item,
+      qty: roundMoney(positiveNumber(qty, `${jobNumber} scope quantity`)),
+      price: roundMoney(positiveNumber(price, `${jobNumber} scope rate`)),
+      amount_ex,
+      description: requiredText(
+        workOrderScopeLineDescription(item),
+        `${jobNumber} scope description`,
+      ),
+      unit: String(item.unit || (item.metres !== undefined ? "m" : "ea")),
+    });
+  }
+  if (priced.length === 0) {
+    throw new WeeklyInvoiceError(
+      `${jobNumber} has no priced work-order scope items`,
+    );
+  }
+  return priced;
 }
 
 function workOrderJob(
@@ -380,34 +440,14 @@ export function buildWeeklyWorkOrderInvoice(input: {
     const scopeItems = Array.isArray(workOrder.scope_items)
       ? workOrder.scope_items as Array<Record<string, unknown>>
       : [];
-    if (scopeItems.length === 0) {
-      throw new WeeklyInvoiceError(
-        `${jobNumber} has no work order scope items`,
-      );
-    }
-
-    let pricedScopeLines = 0;
-    for (const item of scopeItems) {
-      const { qty, price, amount_ex } = resolveWorkOrderScopeLine(item);
-      if (!(price > 0) || !(amount_ex > 0)) continue;
-      const quantity = roundMoney(positiveNumber(
-        qty,
-        `${jobNumber} scope quantity`,
-      ));
-      const unitRate = roundMoney(positiveNumber(
-        price,
-        `${jobNumber} scope rate`,
-      ));
+    for (const priced of pricedWorkOrderScopeLines(scopeItems, jobNumber)) {
       lines.push({
-        line_type: weeklyScopeLineType(item),
-        description: requiredText(
-          workOrderScopeLineDescription(item),
-          `${jobNumber} scope description`,
-        ),
-        quantity,
-        unit: String(item.unit || (item.metres !== undefined ? "m" : "ea")),
-        unit_rate: unitRate,
-        line_total_ex: amount_ex,
+        line_type: weeklyScopeLineType(priced.item),
+        description: priced.description,
+        quantity: priced.qty,
+        unit: priced.unit,
+        unit_rate: priced.price,
+        line_total_ex: priced.amount_ex,
         job_id: jobId,
         job_number: jobNumber,
         client_name: clientName,
@@ -420,12 +460,6 @@ export function buildWeeklyWorkOrderInvoice(input: {
         deduction_assignment_id: null,
         deduction_trade_rate_id: null,
       });
-      pricedScopeLines += 1;
-    }
-    if (pricedScopeLines === 0) {
-      throw new WeeklyInvoiceError(
-        `${jobNumber} has no priced work-order scope items`,
-      );
     }
 
     for (const source of block.crew_deductions || []) {

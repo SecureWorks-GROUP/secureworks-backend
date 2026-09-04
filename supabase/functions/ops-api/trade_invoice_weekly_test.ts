@@ -6,7 +6,10 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildWeeklyWorkOrderInvoice,
+  JOB_STATUS_FINISHED,
+  pricedWorkOrderScopeLines,
   WeeklyInvoiceError,
+  workOrderHasPricedScope,
   workOrderIsInvoiceReady,
 } from "./trade_invoice_weekly.ts";
 
@@ -461,6 +464,10 @@ Deno.test("quote unit_price_ex lines are not trade pay and refuse an unpriced or
 });
 
 Deno.test("sent work orders are invoice-ready only on a finished job", () => {
+  assertEquals(
+    [...JOB_STATUS_FINISHED],
+    ["complete", "completed", "invoiced", "paid", "closed", "archived"],
+  );
   assertEquals(workOrderIsInvoiceReady({ status: "complete" }), true);
   assertEquals(
     workOrderIsInvoiceReady({
@@ -479,6 +486,13 @@ Deno.test("sent work orders are invoice-ready only on a finished job", () => {
   assertEquals(
     workOrderIsInvoiceReady({
       status: "sent",
+      jobs: { status: "closed" },
+    }),
+    true,
+  );
+  assertEquals(
+    workOrderIsInvoiceReady({
+      status: "sent",
       jobs: { status: "in_progress" },
     }),
     false,
@@ -489,6 +503,56 @@ Deno.test("sent work orders are invoice-ready only on a finished job", () => {
       jobs: { status: "archived" },
     }),
     false,
+  );
+});
+
+Deno.test("priced-scope helper shares crew-pay grammar and refuses unpriced work", () => {
+  const crewPay = [
+    {
+      qty: 59,
+      item: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      rate: 30,
+      unit: "m",
+      total: 1770,
+    },
+    { qty: 54, item: "Kwikset (2 bags per post, 27 posts)", rate: 0, unit: "bags", total: 0 },
+  ];
+  assertEquals(workOrderHasPricedScope(crewPay), true);
+  assertEquals(
+    pricedWorkOrderScopeLines(crewPay, "SWF-26041").map((line) => ({
+      description: line.description,
+      qty: line.qty,
+      price: line.price,
+      amount_ex: line.amount_ex,
+    })),
+    [{
+      description: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      qty: 59,
+      price: 30,
+      amount_ex: 1770,
+    }],
+  );
+  assertEquals(
+    workOrderHasPricedScope([{
+      quantity: 6,
+      description: "Basalt Trimclad fencing — 6.0m",
+      unit_price_ex: 81,
+    }]),
+    false,
+  );
+  assertEquals(
+    workOrderHasPricedScope([{ qty: 54, item: "Kwikset", rate: 0, total: 0 }]),
+    false,
+  );
+  assertThrows(
+    () =>
+      pricedWorkOrderScopeLines([{
+        quantity: 6,
+        description: "Basalt Trimclad fencing — 6.0m",
+        unit_price_ex: 81,
+      }], "SWF-quote"),
+    WeeklyInvoiceError,
+    "has no priced work-order scope items",
   );
 });
 
