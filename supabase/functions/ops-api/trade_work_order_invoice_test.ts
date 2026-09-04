@@ -203,12 +203,18 @@ function workOrder(
     orgId = TENANT_A,
     scheduledDate = null,
     createdAt = "2026-07-01T00:00:00Z",
+    status = "complete",
+    jobStatus = "complete",
+    scopeItems,
   }: {
     assigned?: string;
     type?: string;
     orgId?: string;
     scheduledDate?: string | null;
     createdAt?: string;
+    status?: string;
+    jobStatus?: string;
+    scopeItems?: any[];
   } = {},
 ): any {
   return {
@@ -217,8 +223,9 @@ function workOrder(
     job_id: `job-${id}`,
     assigned_user_id: assigned,
     wo_number: `WO-${id}`,
-    status: "complete",
-    scope_items: [{ description: "Install", quantity: 2, unit_price: 500 }],
+    status,
+    scope_items: scopeItems ||
+      [{ description: "Install", quantity: 2, unit_price: 500 }],
     site_address: `${id} Test Street`,
     scheduled_date: scheduledDate,
     created_at: createdAt,
@@ -228,7 +235,7 @@ function workOrder(
       job_number: `SW${type === "fencing" ? "F" : "P"}-${id}`,
       client_name: `Client ${id}`,
       type,
-      status: "complete",
+      status: jobStatus,
       site_address: `${id} Test Street`,
       site_suburb: "Perth",
     },
@@ -455,6 +462,108 @@ Deno.test("single work-order totals use the values persisted at two-decimal prec
     _resolveWorkOrderScopeLine({ quantity: 1.005, unit_price: 100 }),
     { qty: 1.01, price: 100, amount_ex: 101 },
   );
+});
+
+Deno.test("crew-pay scope lines resolve qty/item/rate and ignore unit_price_ex", () => {
+  assertEquals(
+    _resolveWorkOrderScopeLine({
+      qty: 59,
+      item: "Colorbond fence install — 59m Sameside Monument 1800mm",
+      rate: 30,
+      unit: "m",
+      total: 1770,
+    }),
+    { qty: 59, price: 30, amount_ex: 1770 },
+  );
+  assertEquals(
+    _resolveWorkOrderScopeLine({
+      unit: "m",
+      quantity: 6,
+      description: "Basalt Trimclad fencing — 6.0m",
+      unit_price_ex: 81,
+    }),
+    { qty: 6, price: 0, amount_ex: 0 },
+  );
+});
+
+Deno.test("a sent work order on an archived job is weekly-invoice ready", async () => {
+  const wo = workOrder("louisa", {
+    assigned: "",
+    status: "sent",
+    jobStatus: "archived",
+    scheduledDate: "2026-04-07",
+    scopeItems: [
+      { qty: 59, item: "Colorbond fence install", rate: 30, unit: "m", total: 1770 },
+      { qty: 54, item: "Kwikset", rate: 0, unit: "bags", total: 0 },
+    ],
+  });
+  const { client } = makeClient({ workOrders: [wo] });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing", status: "complete" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(result.work_orders.length, 1);
+  assertEquals(result.work_orders[0].can_add_to_weekly_invoice, true);
+  assertEquals(result.work_orders[0].can_invoice, true);
+  assertEquals(result.work_orders[0].subtotal, 1770);
+});
+
+Deno.test("a sent work order on an open job is not invoice-ready", async () => {
+  const wo = workOrder("open-sent", {
+    status: "sent",
+    jobStatus: "in_progress",
+    scheduledDate: "2026-09-01",
+  });
+  const { client } = makeClient({ workOrders: [wo] });
+  const unfiltered = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+  const completeFilter = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing", status: "complete" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(unfiltered.work_orders[0].can_add_to_weekly_invoice, false);
+  assertEquals(unfiltered.work_orders[0].can_invoice, false);
+  assertEquals(completeFilter.work_orders.length, 0);
+});
+
+Deno.test("a draft work order on a finished job stays out of the complete filter", async () => {
+  const wo = workOrder("draft-quote", {
+    status: "draft",
+    jobStatus: "archived",
+    scopeItems: [{
+      unit: "m",
+      quantity: 6,
+      description: "Basalt Trimclad fencing — 6.0m",
+      unit_price_ex: 81,
+    }],
+  });
+  const { client } = makeClient({ workOrders: [wo] });
+  const completeFilter = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing", status: "complete" }),
+    HENRY,
+    false,
+  );
+  const unfiltered = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+
+  assertEquals(completeFilter.work_orders.length, 0);
+  assertEquals(unfiltered.work_orders[0].can_add_to_weekly_invoice, false);
+  assertEquals(unfiltered.work_orders[0].subtotal, 0);
 });
 
 Deno.test("the caller can reopen their weekly draft without offering a duplicate single-WO invoice", async () => {
