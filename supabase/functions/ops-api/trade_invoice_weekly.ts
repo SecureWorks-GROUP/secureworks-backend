@@ -581,3 +581,218 @@ export function buildWeeklyWorkOrderInvoice(input: {
 
   return calculateWeeklyInvoiceBreakdown(lines);
 }
+
+// ── Per-metre weekly work orders (Henry-class fencing managers) ────────────
+//
+// A per-metre trade is paid per metre of fence installed, minus the crew
+// work-order charges and labour on the same job. The weekly builder only reads
+// `work_orders` rows, so a completed fencing job with no ops-issued work order
+// has nothing to invoice from. These helpers let the trade materialise that
+// work order himself: metres are the trade's declared quantity (like hours on
+// an hourly invoice), the rate is server-owned, and the row lands as a normal
+// complete work order so eligibility, deductions, super and Xero run unchanged.
+
+export const PER_METRE_FENCING_RATE = 35;
+export const PER_METRE_WORK_ORDER_MARKER = "trade-app:per-metre-weekly";
+export const PER_METRE_WORK_ORDER_DESCRIPTION = "Fencing installation";
+export const PER_METRE_MAX_METRES = 5000;
+
+function runLengthMetres(run: Record<string, unknown>): number {
+  for (const candidate of [run.length, run.lengthM, run.totalLength]) {
+    const numeric = Number(candidate);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return 0;
+}
+
+/** Sum of fence run lengths recorded by the scoping tool. 0 when unknown. */
+export function perMetreScopeMetres(scopeJson: unknown): number {
+  let scope: unknown = scopeJson;
+  if (typeof scope === "string") {
+    try {
+      scope = JSON.parse(scope);
+    } catch {
+      return 0;
+    }
+  }
+  if (!scope || typeof scope !== "object") return 0;
+  const root = scope as Record<string, unknown>;
+  const job = (root.job && typeof root.job === "object")
+    ? root.job as Record<string, unknown>
+    : (root.config && typeof root.config === "object")
+    ? root.config as Record<string, unknown>
+    : root;
+  const runs = Array.isArray(job.runs) ? job.runs : [];
+  let total = 0;
+  for (const raw of runs) {
+    if (raw && typeof raw === "object") {
+      total += runLengthMetres(raw as Record<string, unknown>);
+    }
+  }
+  if (total === 0) {
+    for (const candidate of [job.totalLength, job.totalMetres]) {
+      const numeric = Number(candidate);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        total = numeric;
+        break;
+      }
+    }
+  }
+  return roundMoney(total);
+}
+
+export function perMetreQuantity(value: unknown): number {
+  const metres = Number(value);
+  if (!Number.isFinite(metres) || metres <= 0) {
+    throw new WeeklyInvoiceError("Enter the metres installed (more than zero)");
+  }
+  if (metres > PER_METRE_MAX_METRES) {
+    throw new WeeklyInvoiceError(
+      `Metres installed cannot exceed ${PER_METRE_MAX_METRES}`,
+    );
+  }
+  return roundMoney(metres);
+}
+
+/** Scope in the crew-pay grammar the weekly builder already prices. */
+export function buildPerMetreWorkOrderScope(
+  metres: unknown,
+  rate: number = PER_METRE_FENCING_RATE,
+): Array<Record<string, unknown>> {
+  const quantity = perMetreQuantity(metres);
+  const unitRate = roundMoney(positiveNumber(rate, "per-metre rate"));
+  return [{
+    description: PER_METRE_WORK_ORDER_DESCRIPTION,
+    quantity,
+    unit: "m",
+    rate: unitRate,
+    total: roundMoney(quantity * unitRate),
+  }];
+}
+
+export function isPerMetreWorkOrder(
+  workOrder: Record<string, unknown> | null | undefined,
+): boolean {
+  return String(workOrder?.special_instructions || "").includes(
+    PER_METRE_WORK_ORDER_MARKER,
+  );
+}
+
+export type PerMetreWorkOrderPlan = {
+  mode: "create" | "update";
+  existing_work_order_id: string | null;
+  work_date: string;
+  metres: number;
+  rate: number;
+  scope_items: Array<Record<string, unknown>>;
+  amount_ex: number;
+};
+
+/**
+ * Decide whether a per-metre trade may create (or re-measure) the work order
+ * for one job. Pure: every fact is passed in, nothing is read here.
+ */
+export function planPerMetreWorkOrder(input: {
+  viewer: { id: string; orgId: string; managedVerticals: string[] };
+  isPerMetreUser: boolean;
+  job: Record<string, unknown> | null | undefined;
+  jobVertical: string;
+  assignments: Array<Record<string, unknown>>;
+  existingWorkOrders: Array<Record<string, unknown>>;
+  existingWorkOrderInvoiceUses: Array<Record<string, unknown>>;
+  metres: unknown;
+  work_date?: unknown;
+  rate?: number;
+}): PerMetreWorkOrderPlan {
+  if (!input.isPerMetreUser) {
+    throw new WeeklyInvoiceError(
+      "Only per-metre trades can create a weekly work order for a job",
+    );
+  }
+  const job = input.job;
+  if (!job || String(job.org_id || "") !== String(input.viewer.orgId)) {
+    throw new WeeklyInvoiceError("Job not found in your business");
+  }
+  const vertical = String(input.jobVertical || "").trim().toLowerCase();
+  const managed = (input.viewer.managedVerticals || []).map((value) =>
+    String(value || "").trim().toLowerCase()
+  );
+  if (!vertical || !managed.includes(vertical)) {
+    throw new WeeklyInvoiceError(
+      "This job is outside the work you manage, so it cannot be invoiced per metre",
+    );
+  }
+  const ownAssignments = input.assignments.filter((assignment) =>
+    String(assignment.user_id || "") === String(input.viewer.id) &&
+    String(assignment.status || "").toLowerCase() !== "cancelled"
+  );
+  if (ownAssignments.length === 0) {
+    throw new WeeklyInvoiceError(
+      "You are not assigned to this job, so it cannot be invoiced per metre. Ask the office to add the assignment.",
+    );
+  }
+  const requestedDate = String(input.work_date ?? "").slice(0, 10);
+  let workDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate) ? requestedDate : "";
+  if (!workDate) {
+    const dates = ownAssignments
+      .map((assignment) => String(assignment.scheduled_date || "").slice(0, 10))
+      .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value))
+      .sort();
+    workDate = dates[dates.length - 1] || "";
+  }
+  if (!workDate) {
+    throw new WeeklyInvoiceError("A work date is required for this job");
+  }
+  const metres = perMetreQuantity(input.metres);
+  const rate = roundMoney(positiveNumber(
+    input.rate ?? PER_METRE_FENCING_RATE,
+    "per-metre rate",
+  ));
+  const scopeItems = buildPerMetreWorkOrderScope(metres, rate);
+
+  const live = input.existingWorkOrders.filter((workOrder) => {
+    const status = String(workOrder.status || "").toLowerCase();
+    return status !== "cancelled" && status !== "deleted";
+  });
+  if (live.length === 0) {
+    return {
+      mode: "create",
+      existing_work_order_id: null,
+      work_date: workDate,
+      metres,
+      rate,
+      scope_items: scopeItems,
+      amount_ex: roundMoney(metres * rate),
+    };
+  }
+  const own = live.find((workOrder) =>
+    isPerMetreWorkOrder(workOrder) &&
+    String(workOrder.assigned_user_id || "") === String(input.viewer.id)
+  );
+  if (!own || live.length > 1) {
+    throw new WeeklyInvoiceError(
+      "This job already has a work order. Use that work order on the weekly invoice, or ask the office to fix it.",
+    );
+  }
+  const heldByInvoice = input.existingWorkOrderInvoiceUses.some((use) =>
+    String(use.source_work_order_id || use.work_order_id || "") ===
+      String(own.id || "") &&
+    String(use.status || "").toLowerCase() !== "draft" &&
+    String(use.status || "").toLowerCase() !== "ops-reject" &&
+    String(use.status || "").toLowerCase() !== "failed"
+  );
+  if (heldByInvoice) {
+    throw new WeeklyInvoiceError(
+      "This work order has already been invoiced, so its metres cannot change",
+    );
+  }
+  return {
+    mode: "update",
+    existing_work_order_id: String(own.id || ""),
+    work_date: workDate,
+    metres,
+    rate,
+    scope_items: scopeItems,
+    amount_ex: roundMoney(metres * rate),
+  };
+}

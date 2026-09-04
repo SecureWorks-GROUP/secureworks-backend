@@ -878,6 +878,74 @@ Deno.test("negative work-order charges are server-selected from acknowledged sam
   }]);
 });
 
+Deno.test("a vertical manager may deduct pending crew work-order charges; an ordinary trade may not", () => {
+  const parent = {
+    org_id: TENANT_A,
+    user_id: "crew-other",
+    status: "pushed_to_xero",
+    users: { name: "Anthony" },
+  };
+  const rows = [
+    {
+      id: "pending-wo",
+      job_id: "job-1",
+      line_type: "work order",
+      line_total_ex: 969.5,
+      acknowledgment_status: "pending",
+      description: "Work order $1477.00. Less labour: Sonny 14.5h x $35 = $507.50.",
+      trade_invoices: parent,
+    },
+    {
+      id: "queried-wo",
+      job_id: "job-1",
+      line_type: "work order",
+      line_total_ex: 200,
+      acknowledgment_status: "queried",
+      trade_invoices: parent,
+    },
+  ];
+
+  // Listing view (no selection): the manager sees the pending charge, never a queried one.
+  const managerVisible = _selectWorkOrderNegativeCharges(rows, {
+    jobId: "job-1",
+    orgId: TENANT_A,
+    viewerId: HENRY.id,
+    allowPending: true,
+  });
+  assertEquals(managerVisible.map((row: any) => row.line_id), ["pending-wo"]);
+  assertEquals(managerVisible[0].amount_ex, -969.5);
+  assertEquals(managerVisible[0].trade_name, "Anthony");
+
+  // Selection on save/generate honours the same rule.
+  const managerSelected = _selectWorkOrderNegativeCharges(rows, {
+    jobId: "job-1",
+    orgId: TENANT_A,
+    viewerId: HENRY.id,
+    selectedIds: ["pending-wo"],
+    allowPending: true,
+  });
+  assertEquals(managerSelected.length, 1);
+
+  // Without the manager flag the pending line stays invisible and unselectable.
+  assertEquals(_selectWorkOrderNegativeCharges(rows, {
+    jobId: "job-1",
+    orgId: TENANT_A,
+    viewerId: HENRY.id,
+  }), []);
+  let error: any = null;
+  try {
+    _selectWorkOrderNegativeCharges(rows, {
+      jobId: "job-1",
+      orgId: TENANT_A,
+      viewerId: HENRY.id,
+      selectedIds: ["pending-wo"],
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assertEquals(error?.status, 422);
+});
+
 Deno.test("invalid or stale negative-charge selection fails closed", () => {
   const rows = [{
     id: "pending",
