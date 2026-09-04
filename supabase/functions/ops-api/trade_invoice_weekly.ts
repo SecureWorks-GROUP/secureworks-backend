@@ -151,7 +151,9 @@ export function workOrderIsInvoiceReady(
   if (status === "complete") return true;
   if (status !== "sent" && status !== "accepted") return false;
   const job = workOrderJob(workOrder || {});
-  return FINISHED_JOB_STATUSES.has(String(job.status || "").trim().toLowerCase());
+  return FINISHED_JOB_STATUSES.has(
+    String(job.status || "").trim().toLowerCase(),
+  );
 }
 
 export function weeklyWorkOrderBusinessDate(

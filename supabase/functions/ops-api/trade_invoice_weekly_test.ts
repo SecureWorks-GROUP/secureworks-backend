@@ -65,6 +65,7 @@ function jobBlock(
         job_number: jobNumber,
         client_name: `Client ${sequence}`,
         type: jobNumber.startsWith("SWP-") ? "patio" : "fencing",
+        status: "complete",
         site_address: `${sequence} Test Street`,
         site_suburb: "Perth",
       },
@@ -413,31 +414,34 @@ Deno.test("crew-pay qty/item/rate lines invoice submitted amounts and skip $0 ma
 
   const invoice = buildWeeklyWorkOrderInvoice({ job_blocks: [block] });
 
-  assertEquals(invoice.lines.map((line) => ({
-    description: line.description,
-    quantity: line.quantity,
-    unit_rate: line.unit_rate,
-    line_total_ex: line.line_total_ex,
-  })), [
-    {
-      description: "Colorbond fence install — 59m Sameside Monument 1800mm",
-      quantity: 59,
-      unit_rate: 30,
-      line_total_ex: 1770,
-    },
-    {
-      description: "Retaining plinth install",
-      quantity: 27,
-      unit_rate: 10,
-      line_total_ex: 270,
-    },
-    {
-      description: "Timber fence removal & disposal",
-      quantity: 20,
-      unit_rate: 10,
-      line_total_ex: 200,
-    },
-  ]);
+  assertEquals(
+    invoice.lines.map((line) => ({
+      description: line.description,
+      quantity: line.quantity,
+      unit_rate: line.unit_rate,
+      line_total_ex: line.line_total_ex,
+    })),
+    [
+      {
+        description: "Colorbond fence install — 59m Sameside Monument 1800mm",
+        quantity: 59,
+        unit_rate: 30,
+        line_total_ex: 1770,
+      },
+      {
+        description: "Retaining plinth install",
+        quantity: 27,
+        unit_rate: 10,
+        line_total_ex: 270,
+      },
+      {
+        description: "Timber fence removal & disposal",
+        quantity: 20,
+        unit_rate: 10,
+        line_total_ex: 200,
+      },
+    ],
+  );
   assertEquals(invoice.job_blocks[0].subtotal, 2240);
   assertEquals(invoice.to_be_paid, 2240);
 });

@@ -493,7 +493,13 @@ Deno.test("a sent work order on an archived job is weekly-invoice ready", async 
     jobStatus: "archived",
     scheduledDate: "2026-04-07",
     scopeItems: [
-      { qty: 59, item: "Colorbond fence install", rate: 30, unit: "m", total: 1770 },
+      {
+        qty: 59,
+        item: "Colorbond fence install",
+        rate: 30,
+        unit: "m",
+        total: 1770,
+      },
       { qty: 54, item: "Kwikset", rate: 0, unit: "bags", total: 0 },
     ],
   });
