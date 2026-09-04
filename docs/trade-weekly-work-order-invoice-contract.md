@@ -38,7 +38,7 @@ invoice table or rates table.
 | Line | Authoritative source | Stored provenance |
 | --- | --- | --- |
 | Positive job line | Selected completed `work_orders.scope_items` quantity and rate | `source_work_order_id` |
-| Crew work-order deduction | A selected, acknowledged, same-job/same-business live `trade_invoice_lines` amount; an approved override outranks stale quantity/rate display facts | `source_trade_invoice_line_id`, `source_work_order_id` |
+| Crew work-order deduction | A selected, same-job/same-business live `trade_invoice_lines` amount; acknowledged for any trade, acknowledged **or pending** when the viewer manages the job's vertical (Henry on fencing). Selecting a pending charge is the manager's acknowledgement and `generate_trade_invoice` stamps it `acknowledged` once the weekly invoice row exists. An approved override outranks stale quantity/rate display facts | `source_trade_invoice_line_id`, `source_work_order_id` |
 | Direct labour deduction | Positive hours from the request, a non-cancelled same-job `job_assignments` row, and the `trade_rates` row effective on the work-order date | `deduction_user_id`, `deduction_assignment_id`, `deduction_trade_rate_id`, `source_work_order_id` |
 | Travel/logistics or materials deduction | The same acknowledged crew source, classified from its stored line type/description | crew provenance above |
 | Final payout deduction | Description, positive quantity, and positive rate explicitly entered for the payout obligation; the server signs and totals it | no job/source identity by design |
@@ -211,3 +211,50 @@ the returned `grand_total`, `final_deductions_total`, and `to_be_paid`. Do not
 call `submit_work_order_invoice` for selected weekly blocks, and do not send any
 client-computed total or deduction rate other than the explicit final payout
 obligation.
+
+## Per-metre managers without ops-issued work orders (2026-09-04)
+
+Live truth on 2026-09-04: Henry (`invoice_type = per_metre`, manages
+`fencing`) had ~60 completed fencing assignments in the prior month and zero
+rows in `work_orders`, so the weekly builder rendered its empty state with no
+save path. Crew "work order" lines on his jobs were all `pending`, so even with
+work orders no deduction would have appeared.
+
+Two additions, both under the existing Trade JWT profile scope:
+
+```http
+GET /functions/v1/ops-api?action=weekly_invoice_job_candidates&week_start=YYYY-MM-DD&week_end=YYYY-MM-DD
+```
+
+Returns, for a per-metre user only, the distinct jobs of that user's
+`status = complete` assignments inside the week whose vertical the user
+manages, each with `suggested_metres` (sum of scoping-tool `job.runs[].length`,
+0 when unknown), `can_create` (no live work order on the job), `can_update`
+(the user's own per-metre work order that no submitted invoice holds), and
+`rate` (server constant `PER_METRE_FENCING_RATE = 35`). Hourly users receive
+an empty list.
+
+```http
+POST /functions/v1/ops-api?action=create_weekly_job_work_order
+{ "job_id": "<uuid>", "metres": 12.5, "work_date": "YYYY-MM-DD" }
+```
+
+`planPerMetreWorkOrder` (pure, `trade_invoice_weekly.ts`) fails closed unless
+the caller is per-metre, the job is in the caller's business and managed
+vertical, and the caller holds a non-cancelled assignment on it. It refuses any
+job that already has a live ops-issued work order and never duplicates one. It
+inserts a `status = complete` `work_orders` row assigned to the caller with
+`scope_items = [{ description: "Fencing installation", quantity: metres,
+unit: "m", rate: 35, total }]`, `completed_at` at Perth midday on the work
+date, and `special_instructions` carrying `trade-app:per-metre-weekly`. The
+caller's own uninvoiced per-metre work order may be re-measured through the
+same action (`mode: "update"`). The browser sends metres only; it never sends a
+rate, an amount, or scope.
+
+From there the existing weekly contract applies unchanged: the row is eligible
+through `my_work_orders?status=complete`, `negative_charges` come from the
+same-job crew lines, `save_trade_invoice_draft` and `generate_trade_invoice`
+reconstruct and persist every line, super is 12% of TO BE PAID, and the audit
+PDF on the Xero DRAFT shows submitted total, super and amount payable.
+`trade.html` renders the same super and amount-payable figures under TO BE
+PAID from the response only.

@@ -400,6 +400,11 @@ import {
   buildWeeklyWorkOrderInvoice,
   calculateWeeklyInvoiceBreakdown,
   JOB_STATUS_FINISHED,
+  PER_METRE_FENCING_RATE,
+  PER_METRE_WORK_ORDER_MARKER,
+  perMetreScopeMetres,
+  planPerMetreWorkOrder,
+  isPerMetreWorkOrder,
   pricedWorkOrderScopeLines,
   resolveWorkOrderScopeLine,
   WEEKLY_INVOICE_DEDUCTION_LINE_TYPES,
@@ -3911,6 +3916,8 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'my_trade_invoices',
   'get_trade_invoice',
   'save_trade_invoice_draft',
+  'weekly_invoice_job_candidates',
+  'create_weekly_job_work_order',
   'set_trade_rate',
   'update_trade_profile',
   'attach_invoice_pdf',
@@ -9163,6 +9170,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // (Deno check: unreachable get_trade_invoice / save_trade_invoice_draft).
       case 'get_trade_invoice':
       case 'save_trade_invoice_draft':
+      case 'weekly_invoice_job_candidates':
+      case 'create_weekly_job_work_order':
       case 'set_trade_rate':
       case 'update_trade_profile':
       case 'attach_invoice_pdf':
@@ -9941,6 +9950,13 @@ if (import.meta.main) serve(async (req: Request) => {
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
             })
           }
+          // Per-metre weekly work orders: a fencing manager materialises the
+          // work order for a completed job he was assigned to, so the weekly
+          // builder has server-owned lines to price and deduct against.
+          case 'weekly_invoice_job_candidates':
+            return json(await weeklyInvoiceJobCandidates(client, tradeUser, url.searchParams))
+          case 'create_weekly_job_work_order':
+            return json(await createWeeklyJobWorkOrder(client, tradeUser, body))
           case 'set_trade_rate': return json(await setTradeRate(client, tradeUser.id, body))
           case 'update_trade_profile': {
             const { fullName, phone, email, abn, bsb, accountNo, accountName, licence, gstRegistered } = body
@@ -10864,6 +10880,29 @@ if (import.meta.main) serve(async (req: Request) => {
                 ),
               }, priorDraftId)
             const invoice = { id: invoiceId }
+
+            // Weekly deductions of crew work-order charges: the manager's
+            // selection is the acknowledgement. Stamp it now that the invoice
+            // holding the deduction exists. Non-blocking: the deduction line is
+            // already persisted and locked to the source charge id.
+            if (weeklyInvoice) {
+              const deductedChargeIds = [...new Set(
+                weeklyInvoice.lines
+                  .map((line) => line.source_trade_invoice_line_id)
+                  .filter((id): id is string => !!id),
+              )]
+              if (deductedChargeIds.length > 0) {
+                const { error: ackErr } = await client.from('trade_invoice_lines')
+                  .update({
+                    acknowledgment_status: 'acknowledged',
+                    acknowledged_by: tradeUser.id,
+                    acknowledged_at: new Date().toISOString(),
+                  })
+                  .in('id', deductedChargeIds)
+                  .eq('acknowledgment_status', 'pending')
+                if (ackErr) console.log('[ops-api] weekly crew charge acknowledgement failed (non-blocking):', ackErr.message)
+              }
+            }
 
             // ── Layer B: stamp invoiced_in on every included assignment ──────
             // Marks each manual/clocked assignment as belonging to this invoice so
@@ -12680,6 +12719,11 @@ export function _selectWorkOrderNegativeCharges(
     orgId: string
     viewerId: string
     selectedIds?: string[]
+    // A vertical manager (Henry on fencing) deducts crew work-order charges
+    // that the crew have submitted but nobody has acknowledged yet. Selecting
+    // the charge on the weekly invoice IS the manager's acknowledgement; the
+    // submit path stamps it. Never widened for an ordinary trade.
+    allowPending?: boolean
   },
 ): any[] {
   const selectedIds = args.selectedIds
@@ -12696,7 +12740,8 @@ export function _selectWorkOrderNegativeCharges(
     if (String(row.job_id || '') !== String(args.jobId)) continue
     if (String(parent.org_id || '') !== String(args.orgId)) continue
     if (String(parent.user_id || '') === String(args.viewerId)) continue
-    if (String(row.acknowledgment_status || '') !== 'acknowledged') continue
+    const ackStatus = String(row.acknowledgment_status || '')
+    if (ackStatus !== 'acknowledged' && !(args.allowPending === true && ackStatus === 'pending')) continue
     if (RELEASED_INVOICE_STATUS_SET.has(String(parent.status || ''))) continue
 
     const overrideApplied = row.override_amount !== null && row.override_amount !== undefined
@@ -13103,6 +13148,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
           orgId: tradeUser.orgId,
           viewerId: tradeUser.id,
           selectedIds: selectedChargeIds,
+          allowPending: _normalizeManagedVerticals(tradeUser.managedVerticals).includes(_jobVertical(job)),
         })
         const directLabour = labourRequests.filter((line: any) => line.work_order_id === String(block.work_order_id)).map((line: any) => {
           const userId = String(line.user_id || '')
@@ -13219,6 +13265,303 @@ async function readWorkOrderChargeRows(
     rows.push(...(data || []))
   }
   return rows
+}
+
+
+// ── Per-metre weekly work orders (Henry-class fencing managers) ───────────
+// The weekly builder prices only `work_orders` rows. A per-metre manager whose
+// completed fencing jobs never received an ops-issued work order can create one
+// per job here: metres are his declared quantity, the rate is server-owned
+// (PER_METRE_FENCING_RATE), and the row lands as a normal complete work order so
+// eligibility, crew deductions, super and the Xero draft run unchanged.
+
+async function isPerMetreTradeUser(client: any, userId: string): Promise<boolean> {
+  const { data } = await client.from('users').select('invoice_type').eq('id', userId).maybeSingle()
+  return data?.invoice_type === 'per_metre'
+}
+
+function _isoDateOnly(value: unknown): string {
+  const text = String(value ?? '').slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+function _perMetreScopeMetresOf(scopeItems: unknown): number {
+  const items = Array.isArray(scopeItems) ? scopeItems : []
+  return roundMoney(items.reduce((sum: number, item: any) => {
+    const { qty, price } = resolveWorkOrderScopeLine(item || {})
+    return price > 0 ? sum + qty : sum
+  }, 0))
+}
+
+export async function weeklyInvoiceJobCandidates(
+  client: any,
+  viewer: TradeAuthContext,
+  params: URLSearchParams,
+): Promise<any> {
+  const weekStart = _isoDateOnly(params.get('week_start'))
+  const weekEnd = _isoDateOnly(params.get('week_end'))
+  if (!weekStart || !weekEnd || weekEnd < weekStart) {
+    throw new ApiError('week_start and week_end (YYYY-MM-DD) are required', 400)
+  }
+  const base = {
+    schema: 'trade-weekly-job-candidates.v1',
+    week_start: weekStart,
+    week_end: weekEnd,
+    rate: PER_METRE_FENCING_RATE,
+    unit: 'm',
+  }
+  const perMetre = await isPerMetreTradeUser(client, viewer.id)
+  const managed = _normalizeManagedVerticals(viewer.managedVerticals)
+  if (!perMetre || managed.length === 0) return { ...base, per_metre: perMetre, jobs: [] }
+
+  const { data: assignments, error: asnErr } = await client.from('job_assignments')
+    .select('id, job_id, status, scheduled_date, jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, scope_json)')
+    .eq('user_id', viewer.id)
+    .eq('jobs.org_id', viewer.orgId)
+    .gte('scheduled_date', weekStart)
+    .lte('scheduled_date', weekEnd)
+    .eq('status', 'complete')
+    .order('scheduled_date', { ascending: true })
+  if (asnErr) throw new ApiError('Failed to load completed jobs: ' + asnErr.message, 500)
+
+  const jobsById = new Map<string, any>()
+  for (const assignment of assignments || []) {
+    const job = Array.isArray(assignment.jobs) ? assignment.jobs[0] : assignment.jobs
+    if (!job?.id || !managed.includes(_jobVertical(job))) continue
+    const entry = jobsById.get(String(job.id)) || { job, work_date: '' }
+    const date = _isoDateOnly(assignment.scheduled_date)
+    if (date > entry.work_date) entry.work_date = date
+    jobsById.set(String(job.id), entry)
+  }
+  const jobIds = [...jobsById.keys()]
+  if (jobIds.length === 0) return { ...base, per_metre: true, jobs: [] }
+
+  const { data: workOrders, error: woErr } = await client.from('work_orders')
+    .select('id, job_id, wo_number, status, assigned_user_id, special_instructions, scope_items')
+    .eq('org_id', viewer.orgId)
+    .in('job_id', jobIds)
+    .not('status', 'in', '("cancelled","deleted")')
+  if (woErr) throw new ApiError('Failed to load work orders: ' + woErr.message, 500)
+  const workOrderIds = (workOrders || []).map((row: any) => String(row.id))
+  let heldWorkOrderIds = new Set<string>()
+  if (workOrderIds.length > 0) {
+    const [lineUses, headerUses] = await Promise.all([
+      client.from('trade_invoice_lines')
+        .select('source_work_order_id, trade_invoices!inner(status)')
+        .in('source_work_order_id', workOrderIds),
+      client.from('trade_invoices')
+        .select('work_order_id, status')
+        .eq('org_id', viewer.orgId)
+        .in('work_order_id', workOrderIds),
+    ])
+    const useErr = lineUses.error || headerUses.error
+    if (useErr) throw new ApiError('Failed to load work order invoices: ' + useErr.message, 500)
+    const held = (id: unknown, status: unknown) => {
+      const s = String(status || '').toLowerCase()
+      if (s && s !== 'draft' && s !== 'ops-reject' && s !== 'failed') heldWorkOrderIds.add(String(id || ''))
+    }
+    for (const use of lineUses.data || []) {
+      const parent = Array.isArray(use.trade_invoices) ? use.trade_invoices[0] : use.trade_invoices
+      held(use.source_work_order_id, parent?.status)
+    }
+    for (const use of headerUses.data || []) held(use.work_order_id, use.status)
+  }
+  const workOrdersByJob = new Map<string, any[]>()
+  for (const row of workOrders || []) {
+    const bucket = workOrdersByJob.get(String(row.job_id)) || []
+    bucket.push(row)
+    workOrdersByJob.set(String(row.job_id), bucket)
+  }
+
+  const jobs = jobIds.map((jobId) => {
+    const { job, work_date } = jobsById.get(jobId)
+    const existing = workOrdersByJob.get(jobId) || []
+    const own = existing.find((row: any) =>
+      isPerMetreWorkOrder(row) && String(row.assigned_user_id || '') === String(viewer.id)
+    )
+    const other = existing.find((row: any) => row !== own)
+    return {
+      job_id: String(job.id),
+      job_number: String(job.job_number || ''),
+      client_name: job.client_name || '',
+      site_address: [job.site_address, job.site_suburb].filter(Boolean).join(', '),
+      job_status: job.status || '',
+      work_date,
+      suggested_metres: perMetreScopeMetres(job.scope_json),
+      work_order_id: own ? String(own.id) : null,
+      wo_number: own ? String(own.wo_number || '') : null,
+      metres: own ? _perMetreScopeMetresOf(own.scope_items) : null,
+      can_create: !own && !other,
+      can_update: !!own && !other && !heldWorkOrderIds.has(String(own.id)),
+      blocked_reason: other
+        ? 'other_work_order'
+        : own && heldWorkOrderIds.has(String(own.id))
+        ? 'invoiced'
+        : null,
+    }
+  })
+  return { ...base, per_metre: true, jobs }
+}
+
+export async function createWeeklyJobWorkOrder(
+  client: any,
+  viewer: TradeAuthContext,
+  body: any,
+): Promise<any> {
+  const jobId = String(body?.job_id || '')
+  if (!jobId) throw new ApiError('job_id required', 400)
+  const perMetre = await isPerMetreTradeUser(client, viewer.id)
+  const [jobRead, assignmentRead, workOrderRead, profileRead] = await Promise.all([
+    client.from('jobs')
+      .select('id, org_id, job_number, client_name, type, status, site_address, site_suburb')
+      .eq('id', jobId)
+      .maybeSingle(),
+    client.from('job_assignments')
+      .select('id, user_id, status, scheduled_date')
+      .eq('job_id', jobId)
+      .eq('user_id', viewer.id),
+    client.from('work_orders')
+      .select('id, wo_number, status, assigned_user_id, special_instructions, scope_items')
+      .eq('org_id', viewer.orgId)
+      .eq('job_id', jobId),
+    client.from('users').select('name, phone, email').eq('id', viewer.id).maybeSingle(),
+  ])
+  const readErr = jobRead.error || assignmentRead.error || workOrderRead.error || profileRead.error
+  if (readErr) throw new ApiError('Failed to load the job: ' + readErr.message, 500)
+  const job = jobRead.data
+  const existingWorkOrders = workOrderRead.data || []
+  const existingIds = existingWorkOrders.map((row: any) => String(row.id))
+  const uses: Array<Record<string, unknown>> = []
+  if (existingIds.length > 0) {
+    const [lineUses, headerUses] = await Promise.all([
+      client.from('trade_invoice_lines')
+        .select('source_work_order_id, trade_invoices!inner(status)')
+        .in('source_work_order_id', existingIds),
+      client.from('trade_invoices')
+        .select('work_order_id, status')
+        .eq('org_id', viewer.orgId)
+        .in('work_order_id', existingIds),
+    ])
+    const useErr = lineUses.error || headerUses.error
+    if (useErr) throw new ApiError('Failed to load work order invoices: ' + useErr.message, 500)
+    for (const use of lineUses.data || []) {
+      const parent = Array.isArray(use.trade_invoices) ? use.trade_invoices[0] : use.trade_invoices
+      uses.push({ source_work_order_id: use.source_work_order_id, status: parent?.status })
+    }
+    for (const use of headerUses.data || []) uses.push(use)
+  }
+
+  let plan
+  try {
+    plan = planPerMetreWorkOrder({
+      viewer: { id: viewer.id, orgId: viewer.orgId, managedVerticals: viewer.managedVerticals },
+      isPerMetreUser: perMetre,
+      job,
+      jobVertical: job ? _jobVertical(job) : '',
+      assignments: assignmentRead.data || [],
+      existingWorkOrders,
+      existingWorkOrderInvoiceUses: uses,
+      metres: body?.metres,
+      work_date: body?.work_date,
+    })
+  } catch (e) {
+    if (e instanceof WeeklyInvoiceError) throw new ApiError(e.message, 422)
+    throw e
+  }
+
+  const tradeName = String(profileRead.data?.name || viewer.email || 'Trade')
+  // Perth midday on the work date, so the weekly business-date projection lands
+  // on the day the trade declares regardless of viewer timezone.
+  const completedAt = `${plan.work_date}T04:00:00.000Z`
+  const siteAddress = [job.site_address, job.site_suburb].filter(Boolean).join(', ') || null
+
+  if (plan.mode === 'update' && plan.existing_work_order_id) {
+    const { data: updated, error: updateErr } = await client.from('work_orders')
+      .update({
+        scope_items: plan.scope_items,
+        scheduled_date: plan.work_date,
+        completed_at: completedAt,
+        status: 'complete',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', plan.existing_work_order_id)
+      .eq('assigned_user_id', viewer.id)
+      .select('id, wo_number')
+      .maybeSingle()
+    if (updateErr || !updated?.id) {
+      throw new ApiError('Failed to update the work order: ' + (updateErr?.message || 'no row updated'), 500)
+    }
+    return {
+      success: true,
+      mode: 'update',
+      work_order_id: updated.id,
+      wo_number: updated.wo_number,
+      metres: plan.metres,
+      rate: plan.rate,
+      amount_ex: plan.amount_ex,
+    }
+  }
+
+  const woNumber = `WO-${String(Date.now()).slice(-6)}`
+  const { data: created, error: insertErr } = await client.from('work_orders')
+    .insert({
+      org_id: viewer.orgId,
+      job_id: jobId,
+      wo_number: woNumber,
+      trade_name: tradeName,
+      trade_phone: profileRead.data?.phone || null,
+      trade_email: profileRead.data?.email || viewer.email || null,
+      assigned_user_id: viewer.id,
+      scope_items: plan.scope_items,
+      special_instructions: `${PER_METRE_WORK_ORDER_MARKER}: per-metre weekly invoice work order created by ${tradeName} in the Trade app`,
+      scheduled_date: plan.work_date,
+      site_address: siteAddress,
+      status: 'complete',
+      completed_at: completedAt,
+      created_by: viewer.id,
+    })
+    .select('id, wo_number')
+    .single()
+  if (insertErr || !created?.id) {
+    throw new ApiError('Failed to create the work order: ' + (insertErr?.message || 'no row returned'), 500)
+  }
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'wo_created',
+      detail_json: { wo_number: woNumber, trade: tradeName, source: 'trade_app_per_metre_weekly', metres: plan.metres, rate: plan.rate },
+    })
+  } catch (eventErr) {
+    console.log('[ops-api] per-metre wo_created job_event failed (non-blocking):', (eventErr as Error).message)
+  }
+  logBusinessEvent(client, {
+    event_type: 'wo.created',
+    entity_type: 'work_order',
+    entity_id: created.id,
+    job_id: jobId,
+    correlation_id: jobId,
+    payload: {
+      entity: { id: created.id, name: woNumber },
+      related_entities: [
+        { type: 'job', id: jobId },
+        { type: 'trade', id: viewer.id, name: tradeName },
+      ],
+      source: 'trade_app_per_metre_weekly',
+      metres: plan.metres,
+      rate: plan.rate,
+      amount_ex: plan.amount_ex,
+    },
+    metadata: { operator: viewer.email || null },
+  })
+  return {
+    success: true,
+    mode: 'create',
+    work_order_id: created.id,
+    wo_number: created.wo_number,
+    metres: plan.metres,
+    rate: plan.rate,
+    amount_ex: plan.amount_ex,
+  }
 }
 
 // Actual authenticated boundary for the Trade work-order selector. Authorization
@@ -13366,6 +13709,10 @@ export async function tradeWorkOrders(
     if (bucket) bucket.push(row)
     else chargeRowsByJob.set(chargeJobId, [row])
   }
+  const viewerManagedVerticals = _normalizeManagedVerticals(viewer.managedVerticals)
+  const managedJobIds = new Set<string>(pageRows
+    .filter((row: any) => viewerManagedVerticals.includes(_jobVertical(row.jobs)))
+    .map((row: any) => String(row.job_id || '')))
   const negativeChargesByJob = new Map<string, any[]>()
   for (const jobId of jobIds) {
     negativeChargesByJob.set(
@@ -13374,6 +13721,7 @@ export async function tradeWorkOrders(
         jobId,
         orgId: viewer.orgId,
         viewerId: viewer.id,
+        allowPending: managedJobIds.has(jobId),
       }),
     )
   }
