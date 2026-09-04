@@ -29,6 +29,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
+import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
   buildV2Augmentation,
@@ -865,6 +866,34 @@ serve(async (req: Request) => {
 
       // sent_to_client was already set to true by the atomic claim above
       // (before the email send). No redundant update needed.
+
+      // Freeze a trade-safe SOW onto this quote document on EVERY successful
+      // send (not only the first draft→quoted flip). Crew triages by quote number.
+      if (doc.job_id) {
+        try {
+          const { data: jobForPack } = await sb.from('jobs')
+            .select('type, scope_json, pricing_json')
+            .eq('id', doc.job_id)
+            .single()
+          await persistTradePackOnDocuments(sb, {
+            documents: [{
+              id: document_id,
+              quote_number: doc.quote_number || null,
+              sent_at: new Date().toISOString(),
+            }],
+            jobType: jobForPack?.type || doc.jobs?.type,
+            scopeJson: jobForPack?.scope_json,
+            pricingJson: jobForPack?.pricing_json || doc.jobs?.pricing_json,
+          })
+        } catch (e) {
+          console.error('[trade-pack-persist-fail]', JSON.stringify({
+            job_id: doc.job_id,
+            document_id,
+            handler: 'send-quote/send',
+            error: (e as Error).message,
+          }))
+        }
+      }
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
       if (doc.job_id) {
@@ -2428,6 +2457,27 @@ serve(async (req: Request) => {
           }
         } catch (e: any) {
           console.log(`[send-runs] Failed to email ${email}:`, e.message)
+        }
+      }
+
+      if (emailsSent > 0 && createdDocs.length > 0) {
+        try {
+          await persistTradePackOnDocuments(sb, {
+            documents: createdDocs.map((d: any) => ({
+              id: d.id,
+              quote_number: d.quote_number || null,
+              sent_at: d.sent_at || new Date().toISOString(),
+            })),
+            jobType: job.type,
+            scopeJson: job.scope_json,
+            pricingJson: pj,
+          })
+        } catch (e) {
+          console.error('[trade-pack-persist-fail]', JSON.stringify({
+            job_id: job.id,
+            handler: 'send-quote/send-runs',
+            error: (e as Error).message,
+          }))
         }
       }
 

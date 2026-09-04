@@ -36,6 +36,7 @@ D1_RECONCILE_KILL_SWITCH_MIGRATION="$REPO_ROOT/supabase/migrations/2026080900000
 STALE_ROUTE_DISPATCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260825034944_ses_stale_route_dispatch_recovery.sql"
 TRADE_INVOICE_MONEY_MIGRATION="$REPO_ROOT/supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql"
 TRADE_INVOICE_WEEKLY_MIGRATION="$REPO_ROOT/supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql"
+TRADE_PACK_MIGRATION="$REPO_ROOT/supabase/migrations/20260904090000_job_documents_trade_pack_json.sql"
 
 
 PASS_COUNT=0
@@ -174,6 +175,10 @@ trade_invoice_weekly_migration_sha() {
   shasum -a 256 "$TRADE_INVOICE_WEEKLY_MIGRATION" | awk '{print $1}'
 }
 
+trade_pack_migration_sha() {
+  shasum -a 256 "$TRADE_PACK_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -209,6 +214,7 @@ write_response() {
   STALE_ROUTE_DISPATCH_EXPECTED_SHA="$(stale_route_dispatch_migration_sha)" \
   TRADE_INVOICE_MONEY_EXPECTED_SHA="$(trade_invoice_money_migration_sha)" \
   TRADE_INVOICE_WEEKLY_EXPECTED_SHA="$(trade_invoice_weekly_migration_sha)" \
+  TRADE_PACK_EXPECTED_SHA="$(trade_pack_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -541,6 +547,17 @@ trade_invoice_weekly_row = {
     "actual_statement_sha256": os.environ["TRADE_INVOICE_WEEKLY_EXPECTED_SHA"],
     "missing_markers": [],
 }
+trade_pack_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260904090000",
+    "expected_migration_name": "job_documents_trade_pack_json",
+    "expected_statement_sha256": os.environ["TRADE_PACK_EXPECTED_SHA"],
+    "actual_migration_version": "20260904090000",
+    "actual_migration_name": "job_documents_trade_pack_json",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["TRADE_PACK_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -573,6 +590,7 @@ with open(sys.argv[1], "w") as f:
             stale_route_dispatch_row,
             trade_invoice_money_row,
             trade_invoice_weekly_row,
+            trade_pack_row,
         ],
         f,
     )
