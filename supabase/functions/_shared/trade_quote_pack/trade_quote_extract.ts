@@ -88,7 +88,7 @@ function extractProse(value: unknown): string | null {
   return failClosedText(value, (raw) => stripTradePackMoney(raw).trim() || null);
 }
 
-/** payment_terms only. Sealed leftover after strip is kept; other money fails closed. */
+/** payment_terms only. Exact sealed leftover after strip; any other leftover drops. */
 function extractPaymentTerms(value: unknown): string | null {
   const kept = allocatedPaymentTerms(value);
   if (!kept) return null;
@@ -387,12 +387,29 @@ const EXTRACT_HTML_SEALED_PAYMENT_TERMS_ROW =
 const EXTRACT_HTML_FOOTER_DISCLAIMER = /It does not include prices, rates, or totals\./g;
 const EXTRACT_HTML_STYLE_BLOCK = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
 
+const EXTRACT_HTML_PAYMENT_TERMS_ROW =
+  /<div><dt>Payment terms<\/dt><dd>([\s\S]*?)<\/dd><\/div>/gi;
+
+/** Payment terms `<dd>` may carry only the exact sealed phrase. */
+export function tradeQuoteExtractHtmlPaymentTermsAllowlistLeaks(html: string): string[] {
+  const leaks: string[] = [];
+  const re = new RegExp(EXTRACT_HTML_PAYMENT_TERMS_ROW.source, "gi");
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(String(html || ""))) !== null) {
+    const text = String(match[1] || "").replace(/<[^>]+>/g, "").trim();
+    if (!text) continue;
+    if (!isSealedPaymentTermsPhrase(text)) leaks.push("html.payment_terms");
+  }
+  return [...new Set(leaks)];
+}
+
 export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
+  const paymentTermsLeaks = tradeQuoteExtractHtmlPaymentTermsAllowlistLeaks(html);
   const stripped = String(html || "")
     .replace(EXTRACT_HTML_STYLE_BLOCK, "")
     .replace(EXTRACT_HTML_SEALED_PAYMENT_TERMS_ROW, "$1$2")
     .replace(EXTRACT_HTML_FOOTER_DISCLAIMER, "");
-  const hits: string[] = [];
+  const hits: string[] = [...paymentTermsLeaks];
   if (stripped.includes("$")) hits.push("$");
   if (/%|percent(?:age)?/i.test(stripped)) hits.push("percent");
   if (/\bGST\b/i.test(stripped)) hits.push("GST");
@@ -403,14 +420,17 @@ export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
     hits.push("payment-language");
   }
   if (tradeTextHasMoneyToken(stripped)) hits.push("money-token");
-  return hits;
+  return [...new Set(hits)];
 }
 
 function extractStringLeafMoneyLeaks(value: unknown, path = ""): string[] {
   const leaks: string[] = [];
   const walk = (node: unknown, at: string) => {
     if (typeof node === "string") {
-      if (isTradePaymentTermsFieldPath(at) && isSealedPaymentTermsPhrase(node)) return;
+      if (isTradePaymentTermsFieldPath(at)) {
+        if (!isSealedPaymentTermsPhrase(node)) leaks.push(at || "root");
+        return;
+      }
       if (extractFieldHasMoney(node)) leaks.push(at || "root");
       return;
     }

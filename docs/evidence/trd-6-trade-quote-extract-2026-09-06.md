@@ -103,3 +103,22 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
 - **Publication stamp failure reverts the /send claim.** After Resend
   accepts, a failed `sent_to_client`/`sent_at` write clears `send_claimed_at`
   and returns 500 so retry is not stranded on `already_sent`.
+
+## Review-5 locks (2026-09-06)
+
+- **payment_terms is the exact sealed phrase only.** After strip,
+  `allocatedPaymentTerms` keeps `50% deposit + 50% on completion` and drops
+  every other leftover (`Payment on completion`, `Net 30` included).
+  Allocated projection leaks and extract HTML Payment terms `<dd>` use that
+  same allowlist. Item leftovers such as `Install Deposit` stay allowed.
+- **Document send claims expire.** `send_claimed_at` is exclusive while
+  fresh (`QUOTE_SEND_CLAIM_TTL_MS` = 15 minutes) and unpublished. A stale
+  unpublished claim is reclaimable. A published row stays `already_sent`.
+- **send-runs fails closed on publication stamp failure.** After Resend
+  succeeds, a failed `sent_to_client`/`sent_at` stamp reverts in-flight
+  claims and returns 500. The handler does not flip `draft` → `quoted` or
+  report success without durable publication for the successful recipients.
+- **send-runs is claimed and idempotent per job/run.** `jobs.send_runs_claimed_at`
+  fences concurrent create+send. Existing published job+run+contact docs are
+  reused, not reminted; unpublished docs are reclaimed and republished. A
+  retry after stamp failure publishes the same documents.

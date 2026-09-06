@@ -852,8 +852,9 @@ export function allocatedTradePackProse(value: unknown): string | null {
 
 /**
  * payment_terms only. Strip billed amounts, then keep the exact sealed
- * leftover. Any other leftover with money / percent / payment-language
- * fails closed. Do not use for customer, items, notes, or summary.
+ * leftover. Any other leftover is dropped — "Payment on completion" /
+ * "Net 30" are not the sealed phrase. Do not use for customer, items,
+ * notes, or summary.
  */
 export function allocatedPaymentTerms(value: unknown): string | null {
   if (typeof value !== 'string') return null
@@ -861,9 +862,7 @@ export function allocatedPaymentTerms(value: unknown): string | null {
   if (!trimmed) return ''
   const cleaned = stripTradePackMoney(value)
   if (!cleaned) return ''
-  if (isSealedPaymentTermsPhrase(cleaned)) return cleaned
-  if (tradeTextHasMoneyToken(cleaned)) return null
-  return cleaned
+  return isSealedPaymentTermsPhrase(cleaned) ? cleaned : null
 }
 
 /** Phone / email / dates keep digits. Drop the field if a money token is present. */
@@ -906,7 +905,10 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
     for (const key of ALLOCATED_PACK_TERMS_STRINGS) {
       const value = (terms as Record<string, unknown>)[key]
       if (typeof value !== 'string') continue
-      if (key === 'payment_terms' && isSealedPaymentTermsPhrase(value)) continue
+      if (key === 'payment_terms') {
+        if (!isSealedPaymentTermsPhrase(value)) leaks.push('terms.payment_terms')
+        continue
+      }
       if (tradeTextHasMoneyToken(value)) leaks.push(`terms.${key}`)
     }
   }

@@ -16,12 +16,19 @@ import { assert, assertEquals, assertExists } from "https://deno.land/std@0.208.
 import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts"
 import { buildMinimalReleaseManifest } from "../_shared/release_packet/build_minimal_manifest.ts"
 import {
+  QUOTE_SEND_CLAIM_TTL_MS,
+  claimJobSendRuns,
   claimQuoteDocumentSend,
+  clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   publishQuoteDocumentSendOrRevert,
+  publishQuoteDocumentsSendOrRevert,
+  quoteSendClaimIsStale,
   quoteSendClaimPayload,
   quoteSendPublicationPayload,
+  resolveSendRunDocument,
   sendRunQuoteNumberFallback,
+  sendRunsPublicationFailureBlocksSuccess,
 } from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
@@ -663,6 +670,8 @@ function makeClaimMockSb(claimResult: { id: string } | null) {
         chain.eq = () => chain;
         chain.is = () => chain;
         chain.not = () => chain;
+        chain.lt = () => chain;
+        chain.in = () => chain;
         chain.select = () => ({
           maybeSingle: () => Promise.resolve({ data: claimResult, error: null }),
         });
@@ -784,6 +793,198 @@ Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async 
   }
   assertEquals(updates[0], quoteSendPublicationPayload(new Date(updates[0].sent_at as string)))
   assertEquals(updates[1], { send_claimed_at: null })
+})
+
+Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  assertEquals(quoteSendClaimIsStale(null, now), false)
+  assertEquals(quoteSendClaimIsStale("2026-09-06T11:50:00.000Z", now), false)
+  assertEquals(
+    quoteSendClaimIsStale(new Date(now.getTime() - QUOTE_SEND_CLAIM_TTL_MS).toISOString(), now),
+    true,
+  )
+  assertEquals(quoteSendClaimIsStale("not-a-date", now), true)
+
+  let call = 0
+  const staleFilters: string[] = []
+  const sb = {
+    from: (_table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        const chain: Record<string, unknown> = {}
+        chain.eq = () => chain
+        chain.is = (col: string) => {
+          staleFilters.push(`is:${col}`)
+          return chain
+        }
+        chain.not = () => chain
+        chain.lt = (col: string) => {
+          staleFilters.push(`lt:${col}`)
+          return chain
+        }
+        chain.select = () => ({
+          maybeSingle: () => {
+            call += 1
+            return Promise.resolve({
+              data: call === 1 ? null : { id: "doc-stale" },
+              error: null,
+            })
+          },
+        })
+        assertEquals(Object.keys(payload).sort(), ["send_claimed_at"])
+        return chain
+      },
+    }),
+  }
+  const claimed = await claimQuoteDocumentSend(sb, "doc-stale", now)
+  assertEquals(claimed, { id: "doc-stale" })
+  assertEquals(call, 2)
+  assert(staleFilters.includes("lt:send_claimed_at"))
+})
+
+Deno.test("R5-002 fresh claim stays exclusive after exclusive miss", async () => {
+  const sb = makeClaimMockSb(null)
+  const claimed = await claimQuoteDocumentSend(sb, "doc-fresh")
+  assertEquals(claimed, null)
+})
+
+Deno.test("R5-001 send-runs stamp failure after Resend blocks success and quoted flip", () => {
+  assertEquals(
+    sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: true, publicationSucceeded: false }),
+    { failHandler: true, flipQuoted: false },
+  )
+  assertEquals(
+    sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: true, publicationSucceeded: true }),
+    { failHandler: false, flipQuoted: true },
+  )
+  assertEquals(
+    sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: false, publicationSucceeded: false }),
+    { failHandler: false, flipQuoted: false },
+  )
+})
+
+Deno.test("R5-001 send-runs batch stamp failure reverts unpublished claims", async () => {
+  const updates: Record<string, unknown>[] = []
+  const sb = {
+    from: (_table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        updates.push(payload)
+        const resolved = {
+          error: "sent_to_client" in payload ? { message: "stamp failed" } : null,
+        }
+        const chain: Record<string, unknown> = {
+          in: () => chain,
+          not: () => chain,
+          then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+            Promise.resolve(resolved).then(onFulfilled, onRejected),
+        }
+        return chain
+      },
+    }),
+  }
+  const result = await publishQuoteDocumentsSendOrRevert(sb, ["doc-a", "doc-b"])
+  assertEquals(result.published, false)
+  if (result.published === false) {
+    assertEquals(result.error, "stamp failed")
+  }
+  assertEquals(updates[1], { send_claimed_at: null })
+})
+
+Deno.test("R5-003 send-runs reuses unpublished docs and skips already published packs", () => {
+  const docs = [
+    {
+      id: "doc-published",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-06T00:00:00.000Z",
+    },
+    {
+      id: "doc-open",
+      type: "quote",
+      run_label: "LHS",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+    },
+  ]
+  assertEquals(
+    resolveSendRunDocument(docs, { runLabel: "REAR", jobContactId: "c-1" }).action,
+    "use_published",
+  )
+  assertEquals(
+    resolveSendRunDocument(docs, { runLabel: "LHS", jobContactId: "c-1" }).action,
+    "reuse_unpublished",
+  )
+  assertEquals(
+    resolveSendRunDocument(docs, { runLabel: "FRONT", jobContactId: "c-1" }).action,
+    "create",
+  )
+  const publishedTwin = resolveSendRunDocument([
+    ...docs,
+    {
+      id: "doc-twin-open",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(publishedTwin.action, "use_published")
+  if (publishedTwin.action === "use_published") {
+    assertEquals(publishedTwin.document.id, "doc-published")
+  }
+})
+
+Deno.test("R5-003 send-runs job claim is exclusive then reclaimable when stale", async () => {
+  let call = 0
+  const updates: Record<string, unknown>[] = []
+  const sb = {
+    from: (table: string) => {
+      assertEquals(table, "jobs")
+      return {
+        update: (payload: Record<string, unknown>) => {
+          updates.push(payload)
+          const chain: Record<string, unknown> = {}
+          chain.eq = () => chain
+          chain.is = () => chain
+          chain.lt = () => chain
+          chain.select = () => ({
+            maybeSingle: () => {
+              call += 1
+              return Promise.resolve({
+                data: call === 1 ? null : { id: "job-1" },
+                error: null,
+              })
+            },
+          })
+          return chain
+        },
+      }
+    },
+  }
+  const claimed = await claimJobSendRuns(sb, "job-1", new Date("2026-09-06T12:00:00.000Z"))
+  assertEquals(claimed?.id, "job-1")
+  assertEquals(call, 2)
+  assertEquals(Object.keys(updates[0]), ["send_runs_claimed_at"])
+  const cleared = await clearJobSendRunsClaim({
+    from: (table: string) => {
+      assertEquals(table, "jobs")
+      return {
+        update: (payload: Record<string, unknown>) => {
+          assertEquals(payload, { send_runs_claimed_at: null })
+          const chain: Record<string, unknown> = {
+            eq: () => chain,
+            then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+              Promise.resolve({ error: null }).then(onFulfilled, onRejected),
+          }
+          return chain
+        },
+      }
+    },
+  }, "job-1", claimed!.claimed_at)
+  assertEquals(cleared.error, null)
 })
 
 // ════════════════════════════════════════════════════════════════════════════

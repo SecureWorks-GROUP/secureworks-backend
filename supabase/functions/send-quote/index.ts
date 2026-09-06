@@ -31,12 +31,18 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 import {
+  claimJobSendRuns,
   claimQuoteDocumentSend,
+  clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   mintSendRunQuoteNumber,
   publishQuoteDocumentSendOrRevert,
+  publishQuoteDocumentsSendOrRevert,
+  resolveSendRunDocument,
   revertQuoteDocumentSendClaim,
+  revertQuoteDocumentSendClaims,
   sendRunQuoteNumberFallback,
+  type SendRunExistingDocument,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -2279,47 +2285,128 @@ serve(async (req: Request) => {
       const contacts = job.job_contacts || []
       const primaryContact = contacts.find((c: any) => c.is_primary) || { client_name: job.client_name, client_email: job.client_email }
 
-      // Create one job_document per run per party (client doc + neighbour doc)
+      const jobClaim = await claimJobSendRuns(sb, job.id)
+      if (!jobClaim) {
+        return jsonResponse({
+          error: 'Quote send already in progress for this job',
+          code: 'send_runs_in_progress',
+        }, 409, corsHeaders)
+      }
+
+      try {
+      const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number')
+        .eq('job_id', job.id)
+        .eq('type', 'quote')
+      if (existingQuoteError) {
+        console.error('[send-quote] send-runs existing quote read failed:', existingQuoteError.message || String(existingQuoteError))
+        return jsonResponse({ error: 'Failed to load existing quote documents' }, 500, corsHeaders)
+      }
+      const existingQuoteDocs: SendRunExistingDocument[] = Array.isArray(existingQuoteRows)
+        ? existingQuoteRows.filter((row: SendRunExistingDocument) => typeof row?.id === 'string' && row.id)
+        : []
+
+      // One job_document per run per party. Reuse an existing published or
+      // unpublished row for that job+run+contact so a retry cannot mint a
+      // second pack. Concurrent callers are fenced by the job claim above.
       const createdDocs: any[] = []
+      const publishedExistingDocs: any[] = []
+      const claimedDocIds: string[] = []
       const emailsByRecipient: Record<string, { name: string, email: string, docs: any[], runs: any[] }> = {}
+
+      const rememberExisting = (doc: SendRunExistingDocument) => {
+        if (!existingQuoteDocs.some((row) => row.id === doc.id)) existingQuoteDocs.push(doc)
+      }
+      const addRecipientDoc = (
+        email: string | null | undefined,
+        name: string | null | undefined,
+        doc: { id?: string; share_token?: string | null; quote_number?: string | null },
+        run: any,
+      ) => {
+        const dest = String(email || '').trim()
+        if (!dest || !doc?.id) return
+        if (!emailsByRecipient[dest]) {
+          emailsByRecipient[dest] = { name: name || '', email: dest, docs: [], runs: [] }
+        }
+        emailsByRecipient[dest].docs.push(doc)
+        emailsByRecipient[dest].runs.push(run)
+      }
+      const claimWorkingDoc = async (doc: { id?: string }): Promise<boolean> => {
+        if (typeof doc?.id !== 'string' || !doc.id) return false
+        const claimed = await claimQuoteDocumentSend(sb, doc.id)
+        if (!claimed) return false
+        claimedDocIds.push(doc.id)
+        createdDocs.push(doc)
+        return true
+      }
 
       for (const run of runs) {
         const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(run.run_label)) : null
 
         // Client document for this run
         const runPdfUrl = run_pdfs?.[run.run_label] || null
-        const clientQuoteNumber = await mintSendRunQuoteNumber(
-          sb,
-          sendRunQuoteNumberFallback({
-            jobNumber: job.job_number,
-            runLabel: run.run_label,
-            party: 'client',
-          }),
-        )
-        const { data: clientDoc } = await sb.from('job_documents').insert({
-          job_id: job.id,
-          type: 'quote',
-          run_label: run.run_label,
-          job_contact_id: primaryContact.id || null,
-          quote_number: clientQuoteNumber,
-          pdf_url: runPdfUrl,
-          sent_to_client: false,
-          sent_at: null,
-          data_snapshot_json: { run },
-        }).select('id, share_token, quote_number').single()
+        const clientKey = { runLabel: String(run.run_label || ''), jobContactId: primaryContact.id || null }
+        const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
+        let clientDoc: any = null
+        if (clientResolution.action === 'use_published') {
+          clientDoc = clientResolution.document
+          publishedExistingDocs.push(clientDoc)
+        } else if (clientResolution.action === 'reuse_unpublished') {
+          clientDoc = clientResolution.document
+          if (!await claimWorkingDoc(clientDoc)) {
+            await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+            return jsonResponse({
+              error: 'Quote send already in progress for this job',
+              code: 'send_runs_in_progress',
+            }, 409, corsHeaders)
+          }
+          const clientEmail = primaryContact.client_email || job.client_email
+          addRecipientDoc(clientEmail, primaryContact.client_name || job.client_name, clientDoc, run)
+        } else {
+          const clientQuoteNumber = await mintSendRunQuoteNumber(
+            sb,
+            sendRunQuoteNumberFallback({
+              jobNumber: job.job_number,
+              runLabel: run.run_label,
+              party: 'client',
+            }),
+          )
+          const { data: insertedClient } = await sb.from('job_documents').insert({
+            job_id: job.id,
+            type: 'quote',
+            run_label: run.run_label,
+            job_contact_id: primaryContact.id || null,
+            quote_number: clientQuoteNumber,
+            pdf_url: runPdfUrl,
+            sent_to_client: false,
+            sent_at: null,
+            data_snapshot_json: { run },
+          }).select('id, share_token, quote_number').single()
+          clientDoc = insertedClient
+          if (clientDoc) {
+            rememberExisting({
+              id: clientDoc.id,
+              type: 'quote',
+              run_label: run.run_label,
+              job_contact_id: primaryContact.id || null,
+              sent_to_client: false,
+              sent_at: null,
+              share_token: clientDoc.share_token,
+              quote_number: clientDoc.quote_number,
+            })
+            if (!await claimWorkingDoc(clientDoc)) {
+              await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+              return jsonResponse({
+                error: 'Quote send already in progress for this job',
+                code: 'send_runs_in_progress',
+              }, 409, corsHeaders)
+            }
+            const clientEmail = primaryContact.client_email || job.client_email
+            addRecipientDoc(clientEmail, primaryContact.client_name || job.client_name, clientDoc, run)
+          }
+        }
 
         if (clientDoc) {
-          createdDocs.push(clientDoc)
-          const clientEmail = primaryContact.client_email || job.client_email
-          if (clientEmail) {
-            if (!emailsByRecipient[clientEmail]) {
-              emailsByRecipient[clientEmail] = { name: primaryContact.client_name || job.client_name, email: clientEmail, docs: [], runs: [] }
-            }
-            emailsByRecipient[clientEmail].docs.push(clientDoc)
-            emailsByRecipient[clientEmail].runs.push(run)
-          }
-
-          // Create run_acceptance for client
           await sb.from('run_acceptances').upsert({
             job_id: job.id,
             job_contact_id: primaryContact.id || contacts[0]?.id,
@@ -2331,35 +2418,66 @@ serve(async (req: Request) => {
 
         // Neighbour document for this run (if neighbour exists)
         if (neighbour && neighbour.client_email) {
-          const neighbourQuoteNumber = await mintSendRunQuoteNumber(
-            sb,
-            sendRunQuoteNumberFallback({
-              jobNumber: job.job_number,
-              runLabel: run.run_label,
-              party: 'neighbour',
-            }),
-          )
-          const { data: nbDoc } = await sb.from('job_documents').insert({
-            job_id: job.id,
-            type: 'quote',
-            run_label: run.run_label,
-            job_contact_id: neighbour.id,
-            quote_number: neighbourQuoteNumber,
-            pdf_url: runPdfUrl,
-            sent_to_client: false,
-            sent_at: null,
-            data_snapshot_json: { run },
-          }).select('id, share_token, quote_number').single()
+          const neighbourKey = { runLabel: String(run.run_label || ''), jobContactId: neighbour.id || null }
+          const neighbourResolution = resolveSendRunDocument(existingQuoteDocs, neighbourKey)
+          let nbDoc: any = null
+          if (neighbourResolution.action === 'use_published') {
+            nbDoc = neighbourResolution.document
+            publishedExistingDocs.push(nbDoc)
+          } else if (neighbourResolution.action === 'reuse_unpublished') {
+            nbDoc = neighbourResolution.document
+            if (!await claimWorkingDoc(nbDoc)) {
+              await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+              return jsonResponse({
+                error: 'Quote send already in progress for this job',
+                code: 'send_runs_in_progress',
+              }, 409, corsHeaders)
+            }
+            addRecipientDoc(neighbour.client_email, neighbour.client_name, nbDoc, run)
+          } else {
+            const neighbourQuoteNumber = await mintSendRunQuoteNumber(
+              sb,
+              sendRunQuoteNumberFallback({
+                jobNumber: job.job_number,
+                runLabel: run.run_label,
+                party: 'neighbour',
+              }),
+            )
+            const { data: insertedNeighbour } = await sb.from('job_documents').insert({
+              job_id: job.id,
+              type: 'quote',
+              run_label: run.run_label,
+              job_contact_id: neighbour.id,
+              quote_number: neighbourQuoteNumber,
+              pdf_url: runPdfUrl,
+              sent_to_client: false,
+              sent_at: null,
+              data_snapshot_json: { run },
+            }).select('id, share_token, quote_number').single()
+            nbDoc = insertedNeighbour
+            if (nbDoc) {
+              rememberExisting({
+                id: nbDoc.id,
+                type: 'quote',
+                run_label: run.run_label,
+                job_contact_id: neighbour.id,
+                sent_to_client: false,
+                sent_at: null,
+                share_token: nbDoc.share_token,
+                quote_number: nbDoc.quote_number,
+              })
+              if (!await claimWorkingDoc(nbDoc)) {
+                await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+                return jsonResponse({
+                  error: 'Quote send already in progress for this job',
+                  code: 'send_runs_in_progress',
+                }, 409, corsHeaders)
+              }
+              addRecipientDoc(neighbour.client_email, neighbour.client_name, nbDoc, run)
+            }
+          }
 
           if (nbDoc) {
-            createdDocs.push(nbDoc)
-            if (!emailsByRecipient[neighbour.client_email]) {
-              emailsByRecipient[neighbour.client_email] = { name: neighbour.client_name, email: neighbour.client_email, docs: [], runs: [] }
-            }
-            emailsByRecipient[neighbour.client_email].docs.push(nbDoc)
-            emailsByRecipient[neighbour.client_email].runs.push(run)
-
-            // Create run_acceptance for neighbour
             await sb.from('run_acceptances').upsert({
               job_id: job.id,
               job_contact_id: neighbour.id,
@@ -2401,7 +2519,7 @@ serve(async (req: Request) => {
       // jobs.status flip), not pre-Resend. This precomputes the per-run scope
       // summary + neighbour flag + first-client-doc reference that the
       // post-flip recordReleasedQuoteRevision call needs.
-      const firstClientDocForRev = createdDocs[0] || null
+      const firstClientDocForRev = createdDocs[0] || publishedExistingDocs[0] || null
       const anyRunPdfUrl = (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
       const runsScopeSummary = runs.map((r: any) => ({
         run_label: String(r.run_label),
@@ -2491,54 +2609,48 @@ serve(async (req: Request) => {
       // Stamp sent_at / sent_to_client per successful recipient, not from
       // the primary result alone. Neighbour docs stay unpublished when that
       // email failed; a neighbour-only success still publishes those docs.
-      // Job draft→quoted still requires primarySent (ADR).
-      const createdDocIds = createdDocs.map((d: any) => d.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+      // Job draft→quoted still requires primarySent (ADR). A stamp failure
+      // after Resend success fails the handler and reverts in-flight claims
+      // so a retry publishes the same documents instead of minting twins.
       const publishedDocIds = documentIdsPublishedForSuccessfulSends(
         Object.values(emailsByRecipient),
         successfulEmails,
       )
       if (publishedDocIds.length > 0) {
         const sentAt = new Date().toISOString()
-        const { error: stampError } = await sb.from('job_documents')
-          .update({ sent_to_client: true, sent_at: sentAt })
-          .in('id', publishedDocIds)
-        if (stampError) {
-          console.error('[send-quote] send-runs stamp failed:', stampError.message || String(stampError))
-        } else {
-          const publishedDocs = createdDocs.filter((d: any) => publishedDocIds.includes(d.id))
-          try {
-            await persistTradePackOnDocuments(sb, {
-              documents: publishedDocs.map((d: any) => ({
-                id: d.id,
-                quote_number: d.quote_number || null,
-                sent_at: sentAt,
-              })),
-              jobType: job.type,
-              scopeJson: job.scope_json,
-              pricingJson: pj,
-              customer: {
-                name: job.client_name,
-                phone: job.client_phone,
-                email: job.client_email,
-                site_address: job.site_address,
-                site_suburb: job.site_suburb,
-              },
-            })
-          } catch (e) {
-            console.error('[trade-pack-persist-fail]', JSON.stringify({
-              job_id: job.id,
-              handler: 'send-quote/send-runs',
-              error: (e as Error).message,
-            }))
-          }
+        const published = await publishQuoteDocumentsSendOrRevert(sb, publishedDocIds, new Date(sentAt))
+        if (!published.published) {
+          await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+          return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
         }
-      } else if (createdDocIds.length > 0) {
-        const { error: revertError } = await sb.from('job_documents')
-          .update({ sent_to_client: false, sent_at: null })
-          .in('id', createdDocIds)
-        if (revertError) {
-          console.error('[send-quote] send-runs revert failed:', revertError.message || String(revertError))
+        const publishedDocs = createdDocs.filter((d: any) => publishedDocIds.includes(d.id))
+        try {
+          await persistTradePackOnDocuments(sb, {
+            documents: publishedDocs.map((d: any) => ({
+              id: d.id,
+              quote_number: d.quote_number || null,
+              sent_at: sentAt,
+            })),
+            jobType: job.type,
+            scopeJson: job.scope_json,
+            pricingJson: pj,
+            customer: {
+              name: job.client_name,
+              phone: job.client_phone,
+              email: job.client_email,
+              site_address: job.site_address,
+              site_suburb: job.site_suburb,
+            },
+          })
+        } catch (e) {
+          console.error('[trade-pack-persist-fail]', JSON.stringify({
+            job_id: job.id,
+            handler: 'send-quote/send-runs',
+            error: (e as Error).message,
+          }))
         }
+      } else if (claimedDocIds.length > 0) {
+        await revertQuoteDocumentSendClaims(sb, claimedDocIds)
       }
 
       // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.
@@ -2740,13 +2852,17 @@ serve(async (req: Request) => {
         }, { handler: 'send-quote/send-runs', job_id: job.id })
       }
 
+      const responseDocs = [...publishedExistingDocs, ...createdDocs]
       return jsonResponse({
         success: true,
         runs_sent: runs.length,
         documents_created: createdDocs.length,
         emails_sent: emailsSent,
-        documents: createdDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
+        documents: responseDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
       }, 200, corsHeaders)
+      } finally {
+        await clearJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
+      }
     }
 
     // ── SEND BRANDED INVOICE EMAIL ──

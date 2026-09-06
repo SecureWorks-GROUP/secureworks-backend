@@ -310,6 +310,8 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion"), "50% deposit + 50% on completion");
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion $9,999"), "50% deposit + 50% on completion");
   assertEquals(allocatedPaymentTerms("50% upfront"), null);
+  assertEquals(allocatedPaymentTerms("Payment on completion"), null);
+  assertEquals(allocatedPaymentTerms("Net 30"), null);
   assertEquals(isSealedPaymentTermsPhrase("50% deposit + 50% on completion"), true);
   assertEquals(isTradePaymentTermsFieldPath("extract.terms.payment_terms"), true);
   assertEquals(isTradePaymentTermsFieldPath("customer.name"), false);
@@ -318,6 +320,12 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
     terms: { payment_terms: "50% upfront" },
     items: [{ description: "balance due on site" }],
   }).sort(), ["items[0].description", "terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    terms: { payment_terms: "Payment on completion" },
+  }), ["terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    terms: { payment_terms: "Net 30" },
+  }), ["terms.payment_terms"]);
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     customer: { name: "50% deposit + 50% on completion" },
     terms: { payment_terms: "50% deposit + 50% on completion" },

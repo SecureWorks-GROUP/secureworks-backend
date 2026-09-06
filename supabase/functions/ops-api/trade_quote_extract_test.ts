@@ -16,6 +16,7 @@ import {
   tradeQuoteExtractArtifactLeaks,
   tradeQuoteExtractFilename,
   tradeQuoteExtractHtmlMoneyNeedles,
+  tradeQuoteExtractHtmlPaymentTermsAllowlistLeaks,
   tradeQuoteExtractIsEligible,
   tradeQuoteExtractMoneyLeakKeys,
 } from "../_shared/trade_quote_pack/trade_quote_extract.ts";
@@ -238,6 +239,14 @@ Deno.test("extract fail-closes ad-hoc percent and payment-language outside seale
   });
   const extract = assembleTradeQuoteExtract({ pack: dirty, job: { job_number: "SWF-25101" } });
   assertEquals(extract.terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "Payment on completion" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "Net 30" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
   assertEquals(extract.customer.name, null);
   assertEquals(extract.notes, []);
   assertEquals(extract.scope.some((row) => /percent|%|upfront|balance/i.test(row.description)), false);
@@ -300,4 +309,13 @@ Deno.test("assertTradeQuoteExtractArtifact covers JSON projection and rendered H
   const leaks = tradeQuoteExtractArtifactLeaks(dirtyExtract, dirtyHtml);
   assert(leaks.length > 0);
   assert(leaks.some((hit) => hit.includes("$") || hit.includes("extract.customer.phone")));
+
+  const leftover = assembleTradeQuoteExtract({ pack: PACK, job: { job_number: "SWF-25101" } });
+  leftover.terms.payment_terms = "Payment on completion";
+  const leftoverHtml = renderTradeQuoteExtractHtml(leftover);
+  assertEquals(tradeQuoteExtractHtmlPaymentTermsAllowlistLeaks(leftoverHtml), ["html.payment_terms"]);
+  assert(tradeQuoteExtractHtmlMoneyNeedles(leftoverHtml).includes("html.payment_terms"));
+  leftover.terms.payment_terms = "Net 30";
+  const netHtml = renderTradeQuoteExtractHtml(leftover);
+  assertEquals(tradeQuoteExtractHtmlPaymentTermsAllowlistLeaks(netHtml), ["html.payment_terms"]);
 });

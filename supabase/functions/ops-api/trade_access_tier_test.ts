@@ -2011,6 +2011,14 @@ Deno.test("redactTradeQuotePackMoney fail-closes money tokens on every customer 
     valid_until: null,
   });
   assertAllocatedTradeQuotePackProjection(out[0]);
+  assertEquals(redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    terms: { payment_terms: "Payment on completion", valid_days: 30 },
+  }])[0].terms?.payment_terms, null);
+  assertEquals(redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    terms: { payment_terms: "Net 30", valid_days: 30 },
+  }])[0].terms?.payment_terms, null);
 });
 
 Deno.test("redactTradeQuotePackMoney keeps sealed phrase only on payment_terms", () => {
