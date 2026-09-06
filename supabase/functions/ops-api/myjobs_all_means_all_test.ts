@@ -38,6 +38,8 @@ type Job = {
   client_name?: string;
   site_suburb?: string;
   created_at?: string;
+  notes?: unknown;
+  metadata?: Record<string, unknown>;
 };
 type Assignment = {
   id: string;
@@ -47,12 +49,17 @@ type Assignment = {
   scheduled_date: string | null;
   scheduled_end?: string | null;
   job_id: string;
+  notes?: unknown;
 };
 type Detail = {
   job_id: string;
   substatus?: string;
   last_reattend_at?: string;
   external_ref?: string;
+  invoice_notes?: string;
+  billing_rules?: unknown;
+  invoice_ready_at?: string;
+  cycle_number?: number;
 };
 type Fixtures = {
   assignments: Assignment[];
@@ -221,6 +228,7 @@ function resolve(
           status: a.status,
           role: "lead",
           assignment_type: "install",
+          ...(a.notes !== undefined ? { notes: a.notes } : {}),
           jobs: { ...job },
           ...(isAdminSelect
             ? { user: { id: a.user_id, name: a.user_name ?? a.user_id } }
@@ -1698,4 +1706,138 @@ Deno.test("allocated crew (lead AND crew) see a still-on-site allocation that st
     }
     assertEquals(poolJobIds(g), [], "no pool is opened for a crew member");
   }
+});
+
+const QUOTE_NOTE = "Park on the verge. Extra $9,999. Charge 85 dollars each.";
+const SANITIZED_NOTE = "Park on the verge. Extra . Charge .";
+
+function quoteLeakFixtures(): Fixtures {
+  return {
+    assignments: [
+      {
+        id: "a-quote",
+        user_id: "u-alyx",
+        status: "scheduled",
+        scheduled_date: isoOffsetDays(2),
+        job_id: "job-quote-leak",
+        notes: QUOTE_NOTE,
+      },
+    ],
+    jobs: [
+      {
+        id: "job-quote-leak",
+        type: "makesafe",
+        status: "in_progress",
+        job_number: "SWMS-261199",
+        created_at: "2026-07-01T00:00:00Z",
+        notes: QUOTE_NOTE,
+        metadata: { builder_po_number: "PO-54000", external_ref: "MLB-27000", sell: 9999 },
+      },
+    ],
+    details: [
+      {
+        job_id: "job-quote-leak",
+        external_ref: "MLB-27000",
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+        invoice_notes: "Bill $9,999. Rate 85.",
+        billing_rules: { rate: 85, amount: 9999 },
+        invoice_ready_at: "2026-08-01T00:00:00Z",
+      },
+    ],
+  };
+}
+
+Deno.test("my_jobs: allocated personal cards project assignment + job notes; office keeps raw wording", async () => {
+  const allocated = await myJobs(
+    makeClient(quoteLeakFixtures()),
+    "u-alyx",
+    false,
+    ALYX.isDispatcher,
+    ALYX.isMakesafeManager,
+    ALYX.poolVerticals,
+    [],
+    TENANT_A,
+  );
+  const allocatedCard = nonPool(allocated).find((a: { jobs?: { id?: string } }) =>
+    a.jobs?.id === "job-quote-leak"
+  );
+  assertEquals(Boolean(allocatedCard), true, "allocated crew still see their card");
+  assertEquals(allocatedCard.notes, SANITIZED_NOTE);
+  assertEquals(allocatedCard.jobs.notes, SANITIZED_NOTE);
+  assertEquals(String(allocatedCard.notes).includes("9999"), false);
+  assertEquals(String(allocatedCard.notes).includes("85"), false);
+
+  const office = await myJobs(
+    makeClient(quoteLeakFixtures()),
+    "u-marnin",
+    true,
+    MARNIN.isDispatcher,
+    MARNIN.isMakesafeManager,
+    MARNIN.poolVerticals,
+    [],
+    TENANT_A,
+  );
+  const officeCard = nonPool(office).find((a: { jobs?: { id?: string } }) =>
+    a.jobs?.id === "job-quote-leak"
+  );
+  assertEquals(officeCard.notes, QUOTE_NOTE);
+  assertEquals(officeCard.jobs.notes, QUOTE_NOTE);
+});
+
+Deno.test("search_all_jobs: allocated / makesafe_open drop notes, metadata, and MakeSafe billing", async () => {
+  const recorded: RecordedQuery[] = [];
+  const res = await searchAllJobs(
+    makeClient(quoteLeakFixtures(), recorded),
+    new URLSearchParams("q=swms-261199"),
+    viewer({ id: "u-alyx", role: "installer", managedVerticals: [] }),
+    false,
+  );
+  assertEquals(res.jobs.length, 1);
+  const job = res.jobs[0];
+  assertEquals(job.id, "job-quote-leak");
+  assertEquals(job.notes, SANITIZED_NOTE);
+  assertEquals("metadata" in job, false, "raw metadata never reaches quote-ineligible search");
+  assertEquals(job.external_ref, "MLB-27000");
+  assertEquals(job.makesafe_details?.invoice_notes, undefined);
+  assertEquals(job.makesafe_details?.billing_rules, undefined);
+  assertEquals(job.makesafe_details?.invoice_ready_at, undefined);
+  assertEquals(job.makesafe_details?.external_ref, "MLB-27000");
+  assertEquals(JSON.stringify(job).includes("9999"), false);
+  assertEquals(JSON.stringify(job).includes("PO-54000"), false);
+  const jobQuery = recorded.find((q) => q.table === "jobs" && !q.head);
+  assertEquals(
+    jobQuery?.select.includes("notes"),
+    false,
+    "allocated job-feed select omits notes",
+  );
+  assertEquals(
+    jobQuery?.select.includes("metadata"),
+    false,
+    "allocated job-feed select omits metadata",
+  );
+  const detailQuery = recorded.find((q) => q.table === "makesafe_job_details");
+  assertEquals(detailQuery?.select.includes("*"), false);
+  assertEquals(detailQuery?.select.includes("invoice_notes"), false);
+});
+
+Deno.test("search_all_jobs: office / DM keep notes, metadata, and full MakeSafe details", async () => {
+  const recorded: RecordedQuery[] = [];
+  const res = await searchAllJobs(
+    makeClient(quoteLeakFixtures(), recorded),
+    new URLSearchParams("q=swms-261199"),
+    viewer(),
+    true,
+  );
+  assertEquals(res.jobs.length, 1);
+  const job = res.jobs[0];
+  assertEquals(job.notes, QUOTE_NOTE);
+  assertEquals(job.metadata?.builder_po_number, "PO-54000");
+  assertEquals(job.makesafe_details?.invoice_notes, "Bill $9,999. Rate 85.");
+  assertEquals(job.makesafe_details?.billing_rules, { rate: 85, amount: 9999 });
+  const jobQuery = recorded.find((q) => q.table === "jobs" && !q.head);
+  assertEquals(jobQuery?.select.includes("notes"), true);
+  assertEquals(jobQuery?.select.includes("metadata"), true);
+  const detailQuery = recorded.find((q) => q.table === "makesafe_job_details");
+  assertEquals(detailQuery?.select.startsWith("*"), true);
 });

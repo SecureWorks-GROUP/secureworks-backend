@@ -36300,7 +36300,10 @@ export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], conta
   return openMakesafes
 }
 
-async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
+const TRADE_MAKESAFE_FEED_SELECT_ALLOCATED =
+  'job_id, external_ref, substatus, report_type, cycle_number, last_reattend_at, requesting_company_id, makesafe_companies:requesting_company_id(slug, name)'
+
+async function enrichTradeMakesafeJobs(client: any, jobs: any[], quoteVisible = true) {
   const list = (jobs || []).filter(Boolean)
   const jobIds = collectUniqueStringIds(list.map((job: any) => job?.id))
   if (jobIds.length === 0) return list
@@ -36314,16 +36317,22 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
     for (let i = 0; i < jobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
       detailChunks.push(jobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
     }
+    const detailSelect = quoteVisible
+      ? '*, makesafe_companies:requesting_company_id(slug, name)'
+      : TRADE_MAKESAFE_FEED_SELECT_ALLOCATED
     const detailPages = await Promise.all(detailChunks.map(async (chunk) => {
       const { data } = await client.from('makesafe_job_details')
-        .select('*, makesafe_companies:requesting_company_id(slug, name)')
+        .select(detailSelect)
         .in('job_id', chunk)
       return data || []
     }))
     const details = detailPages.flat()
     for (const row of (details || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
     for (const job of list) {
-      if (job?.id && detailByJobId[job.id]) job.makesafe_details = detailByJobId[job.id]
+      if (!job?.id || !detailByJobId[job.id]) continue
+      job.makesafe_details = quoteVisible
+        ? detailByJobId[job.id]
+        : projectTradeAllocatedMakesafeDetails(detailByJobId[job.id])
     }
   } catch (e: any) {
     console.log('[ops-api] trade MakeSafe detail enrichment skipped:', e?.message)
@@ -36371,6 +36380,22 @@ export const TRADE_JOB_FEED_PAGE_MAX = 500
 export const TRADE_JOB_SEARCH_RESULT_CAP = 500
 export const TRADE_JOB_FEED_SELECT =
   'id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at'
+export const TRADE_JOB_FEED_SELECT_ALLOCATED =
+  'id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, created_at, updated_at, completed_at'
+
+function tradeJobFeedSelect(quoteVisible: boolean): string {
+  return quoteVisible ? TRADE_JOB_FEED_SELECT : TRADE_JOB_FEED_SELECT_ALLOCATED
+}
+
+function projectTradeAllocatedJobFeedRow(job: any): void {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return
+  if ('notes' in job) job.notes = sanitizeTradeAllocatedJobNotes(job.notes)
+  if (!job.external_ref && job.metadata && typeof job.metadata === 'object') {
+    const metaRef = (job.metadata as { external_ref?: unknown }).external_ref
+    if (typeof metaRef === 'string' && metaRef.trim()) job.external_ref = metaRef
+  }
+  delete job.metadata
+}
 
 // Records that are operationally unsafe or noisy to surface at all: hard
 // deletes, voids and known duplicates. Deliberately NOT a visibility window —
@@ -36407,11 +36432,13 @@ export async function searchAllJobs(
   isDispatcher = false,
 ) {
   const q = (params.get('q') || '').toLowerCase().trim()
-  const { lens } = _resolveTradeJobFeedLens({
+  const { lens, canSeeCompany } = _resolveTradeJobFeedLens({
     isDispatcher,
     managedVerticals: viewer.managedVerticals,
     q,
   })
+  const quoteVisible = canSeeCompany
+  const jobFeedSelect = tradeJobFeedSelect(quoteVisible)
 
   const requestedPageSize = Number(params.get('page_size') || TRADE_JOB_FEED_PAGE_DEFAULT)
   const requestedOffset = Number(params.get('offset') || 0)
@@ -36430,7 +36457,7 @@ export async function searchAllJobs(
   let seedJobs: any[] = []
   if (lens === 'assigned') {
     const { data: assignedRows, error: assignedErr } = await client.from('job_assignments')
-      .select('jobs:job_id(id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
+      .select(`jobs:job_id(${jobFeedSelect})`)
       .eq('user_id', viewer.id)
     if (assignedErr) throw assignedErr
     seedJobs = (assignedRows || [])
@@ -36465,13 +36492,13 @@ export async function searchAllJobs(
       client,
       [q],
       _GLOBAL_SEARCH_STATUS_EXCLUDE,
-      TRADE_JOB_FEED_SELECT,
+      jobFeedSelect,
     )
     const externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
       /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
       String(job?.org_id || viewer.orgId) === String(viewer.orgId)
     )
-    const { data: baseRows, error: baseErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+    const { data: baseRows, error: baseErr } = await buildJobQuery(jobFeedSelect)
       .order('created_at', { ascending: false })
       .order('id', { ascending: true })
       .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
@@ -36494,7 +36521,7 @@ export async function searchAllJobs(
     const capped = ranked.length > TRADE_JOB_SEARCH_RESULT_CAP || (baseRows || []).length > TRADE_JOB_SEARCH_RESULT_CAP
     const materialized = ranked.slice(0, TRADE_JOB_SEARCH_RESULT_CAP)
     const pageJobs = materialized.slice(offset, offset + pageSize)
-    const jobs = await enrichTradeMakesafeJobs(client, pageJobs)
+    const jobs = await enrichTradeMakesafeJobs(client, pageJobs, quoteVisible)
     for (const job of jobs) {
       if (!job.external_ref && job.makesafe_details?.external_ref) {
         job.external_ref = job.makesafe_details.external_ref
@@ -36503,6 +36530,7 @@ export async function searchAllJobs(
         job.external_ref = job.metadata?.external_ref || null
       }
       delete job.org_id
+      if (!quoteVisible) projectTradeAllocatedJobFeedRow(job)
     }
     const canFetchMore = offset + jobs.length < materialized.length
     return {
@@ -36529,7 +36557,7 @@ export async function searchAllJobs(
   }
 
   // created_at is not unique, so paging needs the id tiebreak for a total order.
-  const { data: allJobs, error: allJobsErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+  const { data: allJobs, error: allJobsErr } = await buildJobQuery(jobFeedSelect)
     .order('created_at', { ascending: false })
     .order('id', { ascending: true })
     .range(offset, offset + pageSize - 1)
@@ -36545,7 +36573,7 @@ export async function searchAllJobs(
 
   // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
   // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
-  const jobs = await enrichTradeMakesafeJobs(client, merged)
+  const jobs = await enrichTradeMakesafeJobs(client, merged, quoteVisible)
   // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
   for (const job of jobs) {
     if (!job.external_ref && job.makesafe_details?.external_ref) {
@@ -36555,6 +36583,7 @@ export async function searchAllJobs(
       job.external_ref = job.metadata?.external_ref || null
     }
     delete job.org_id
+    if (!quoteVisible) projectTradeAllocatedJobFeedRow(job)
   }
 
   // `total` counts the paged job query only; the assigned seed and external-ref
@@ -37099,6 +37128,12 @@ export async function myJobs(
   // every crew, not just this user's — scoped strictly to these verticals. Never
   // set for a dispatcher (they use showAll) or the personal view.
   const managerScope = !showAll ? _normalizeManagedVerticals(managerScopeVerticals) : []
+  // Office / DM keep raw assignment + job notes. Ordinary allocated Mine
+  // cards go through the same notes projection as trade_job_detail.
+  const quoteVisible = isDispatcher ||
+    isMakesafeManager ||
+    managerScope.length > 0 ||
+    _normalizeManagedVerticals(poolVerticals).length > 0
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -37879,6 +37914,7 @@ export async function myJobs(
   // job select does not change the my_jobs payload (including Everyone/history).
   for (const assignment of (assignments || [])) {
     if (assignment?.jobs) delete assignment.jobs.archived
+    if (!quoteVisible) projectTradeAllocatedMyJobsCard(assignment)
   }
 
   // Flag so frontend knows this is admin/all-jobs view
@@ -38264,6 +38300,18 @@ export function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
     return walked === undefined ? null : walked
   }
   return value
+}
+
+function projectTradeAllocatedMyJobsCard(assignment: any): void {
+  if (!assignment || typeof assignment !== 'object' || Array.isArray(assignment)) return
+  if ('notes' in assignment) {
+    assignment.notes = sanitizeTradeAllocatedJobNotes(assignment.notes)
+  }
+  if (assignment.jobs && typeof assignment.jobs === 'object' && !Array.isArray(assignment.jobs)) {
+    if ('notes' in assignment.jobs) {
+      assignment.jobs.notes = sanitizeTradeAllocatedJobNotes(assignment.jobs.notes)
+    }
+  }
 }
 
 /** Array elements have no own key. Apply the parent's keep/drop policy so

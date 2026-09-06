@@ -465,6 +465,8 @@ function item(kind: TradePackItemKind, description: string, quantity: number, un
 const TRADE_PACK_MONEY_AMOUNT = '-?[\\d,]+(?:\\.\\d+)?'
 const TRADE_PACK_CURRENCY_PREFIX = '(?:\\bAUD\\s*|AU\\$\\s*|A\\$\\s*|\\$\\s*)'
 const TRADE_PACK_CURRENCY_SUFFIX = '(?:AUD\\b|AU\\$|A\\$|\\$)'
+const TRADE_PACK_CURRENCY_WORD = '(?:dollars?|bucks|usd|aud)'
+const TRADE_PACK_CURRENCY_MID = `(?:\\s+${TRADE_PACK_CURRENCY_WORD})?`
 const TRADE_PACK_TAX_WORD = '(?:GST|tax)\\b'
 const TRADE_PACK_TAX_QUALIFIER =
   '(?:ex(?:cl(?:uding|usive)?)?|inc(?:l(?:uding|usive)?)?|excluding|including|exclusive|inclusive|plus|\\+)'
@@ -484,7 +486,8 @@ const TRADE_PACK_REF_PREFIX =
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
  *  1200/m, 85 per day, 85/day, 85 per trade, 85 per panel, 85 each,
- *  85 per item, 85 per gate, 85 per material, 85 per linear metre).
+ *  85 dollars each, 85 USD each, 85 per item, 85 per gate, 85 per material,
+ *  85 per linear metre).
  *  Contextual words also catch two-digit marks (Deposit 85, Deposit of 85,
  *  Price of 85, 12 panels at 85, Balance due 85, Paid 85, Due 85)
  *  without eating construction counts (2 trades, 19m). Leftover
@@ -542,14 +545,22 @@ export function stripTradePackMoney(text: unknown): string {
     )
     .replace(
       new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}\\s+each\\b`,
+        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s+each\\b`,
         'gi',
       ),
       '',
     )
     .replace(
       new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}\\s*(?:/\\s*|\\bper\\s+)(?:[A-Za-z]+(?:\\s+[A-Za-z]+)?)\\b`,
+        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s*(?:/\\s*|\\bper\\s+)(?:[A-Za-z]+(?:\\s+[A-Za-z]+)?)\\b`,
+        'gi',
+      ),
+      '',
+    )
+    // "85 dollars" / "85 USD" with no unit still reads as a price.
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_CURRENCY_WORD}\\b`,
         'gi',
       ),
       '',
