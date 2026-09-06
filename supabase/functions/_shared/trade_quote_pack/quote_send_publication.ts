@@ -9,11 +9,7 @@
  */
 
 export type QuoteSendPublicationClient = {
-  from: (table: string) => {
-    update: (payload: Record<string, unknown>) => {
-      eq: (column: string, value: unknown) => any
-    }
-  }
+  from: (table: string) => any
 }
 
 export function quoteSendClaimPayload(now = new Date()): { send_claimed_at: string } {

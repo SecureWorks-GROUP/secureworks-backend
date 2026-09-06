@@ -227,7 +227,7 @@ Deno.test("extract fail-closes ad-hoc percent and payment-language outside seale
   const dirty = structuredClone(PACK);
   dirty.terms.payment_terms = "50% upfront";
   dirty.customer.name = "balance due client";
-  dirty.notes = ["owing on completion"];
+  dirty.notes = "owing on completion";
   dirty.items.push({
     kind: "info",
     description: "Pay 40 percent now",
