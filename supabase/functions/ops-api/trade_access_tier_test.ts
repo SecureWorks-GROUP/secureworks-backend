@@ -6,8 +6,9 @@
 //                                              everything on that trade's jobs,
 //                                              quote included, allocation rights.
 //   3. Allocated trade (job_assignments row, is_lead TRUE OR FALSE — no
-//      difference)                             everything on the job EXCEPT the
-//                                              quote.
+//      difference)                             everything on the job EXCEPT
+//                                              quote MONEY. TRD-4 keeps quote
+//                                              writing + quote numbers.
 //
 // One predicate carries the decision (resolveTradeJobAccessTier); one rule
 // carries the quote fence (tradeQuoteVisibleForTier). This suite proves both
@@ -27,7 +28,9 @@ import {
   _tradeDocumentsForAllocatedTrade,
   _tradeJobDetailForTest,
   _tradeLabourBudgetForTest,
+  redactTradeQuotePackMoney,
   redactTradeScopeQuote,
+  redactTradeWorkOrderScopeItems,
   tradeLabourCostVisibleForTier,
   resolveTradeJobAccessTier,
   TRADE_QUOTE_DOCUMENT_TYPES,
@@ -109,9 +112,28 @@ function makeClient(tables: Tables, recorded: any[] = []) {
       },
       then: (res: any, rej: any) => Promise.resolve(run()).then(res, rej),
     };
+      insert: (row: any) => {
+        const rec = { id: row?.id || `${table}-${(tables[table] || []).length + 1}`, ...row };
+        (tables[table] ||= []).push(rec);
+        return Promise.resolve({ data: rec, error: null });
+      },
+    };
     return api;
   }
-  return { from: (t: string) => builder(t) };
+  return {
+    from: (t: string) => builder(t),
+    storage: {
+      createBucket: async () => ({}),
+      from(bucket: string) {
+        return {
+          upload: async () => ({ error: null }),
+          getPublicUrl: (path: string) => ({
+            data: { publicUrl: `https://storage.test/${bucket}/${path}` },
+          }),
+        };
+      },
+    },
+  };
 }
 
 const ORG_A = "00000000-0000-0000-0000-00000000000a";
@@ -155,7 +177,16 @@ const QUOTE_SCOPE = {
   // job.pricePerMetre (x runs[].length = the quoted total), patio writes a
   // top-level job_costs.
   job_costs: { labour: 2400, materials: 3100, total: 5500 },
-  job: { _pricing_json: { totalExGST: 5000 }, pricePerMetre: 125, runs: [{ length: 10 }] },
+  job: {
+    _pricing_json: { totalExGST: 5000 },
+    pricePerMetre: 125,
+    runs: [{ length: 10 }],
+    quote: {
+      quote_number: "Q-NARR",
+      description: "Supply and install Monument fencing with a gate on the left.",
+      materials: [{ name: "90x90 posts", qty: 12, unit_price: 45, total: 540 }],
+    },
+  },
 };
 
 function seed(): Tables {
@@ -220,7 +251,20 @@ function seed(): Tables {
     job_media: [],
     job_events: [],
     job_service_reports: [],
-    work_orders: [{ id: "wo-1", job_id: JOB_FENCE, wo_number: "WO-1", scope_items: [{ description: "Install fence" }], status: "sent" }],
+    work_orders: [{
+      id: "wo-1",
+      job_id: JOB_FENCE,
+      wo_number: "WO-1",
+      scope_items: [{
+        description: "Install fence",
+        quantity: 10,
+        unit: "m",
+        rate: 85,
+        unit_price: 85,
+        total: 850,
+      }],
+      status: "sent",
+    }],
     purchase_orders: [{ id: "po-1", job_id: JOB_FENCE, status: "sent", total: 1000, line_items: [{ description: "Labour install", quantity: 2, unit_price: 300 }] }],
     makesafe_job_details: [],
     makesafe_roof_report_drafts: [],
@@ -377,9 +421,8 @@ function quoteLeakProbe(payload: any): string[] {
       "totalExGST",
       "marginPct",
       "pricingNotes",
-      "noteQuote",
       "\"sell\"",
-      "Q-1",
+      "dayRate",
       "Q-2",
       "quote.pdf",
       "inv.pdf",
@@ -389,6 +432,8 @@ function quoteLeakProbe(payload: any): string[] {
       "pricePerMetre",
       "job_costs",
       "5500",
+      "540",
+      "850",
     ]
   ) {
     if (text.includes(needle)) leaks.push(needle);
@@ -404,15 +449,32 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.workOrders.length, 1);
   assertEquals(p.purchaseOrders.length, 1);
   assertEquals(p.quote_packs || [], [], "unsent quotes do not become a trade pack");
-  assertEquals(quoteLeakProbe(p), [], "no quote coordinate anywhere in the allocated payload");
+  assertEquals(quoteLeakProbe(p), [], "no sell price, rate, or quote PDF in the allocated payload");
   // Documents: flagged-visible non-quote docs only. The visible-flagged QUOTE and
   // the client INVOICE are gone; the supplier quote (a supplier's price to us)
-  // and the work order stay.
+  // and the work order stay. Quote numbers on remaining rows are kept.
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
-  // The installer's own labour budget inputs survive the redaction.
-  assertEquals(p.job.scope_json.pricing, { labour: { trades: 2, days: 3, dayRate: 400 } });
-  assertEquals(p.job.scope_json.notes, { noteWorkOrder: "Use 90x90 posts", noteInternal: "Client is a repeat customer" });
+  // Labour headcount/days survive; dayRate is a price and is stripped.
+  assertEquals(p.job.scope_json.pricing, { labour: { trades: 2, days: 3 } });
+  assertEquals(p.job.scope_json.notes, {
+    noteQuote: "Quote note text",
+    noteWorkOrder: "Use 90x90 posts",
+    noteInternal: "Client is a repeat customer",
+  });
   assertEquals(p.job.scope_json.config.totalMetres, 42);
+  assertEquals(p.job.scope_json.job.quote, {
+    quote_number: "Q-NARR",
+    description: "Supply and install Monument fencing with a gate on the left.",
+    materials: [{ name: "90x90 posts", qty: 12 }],
+  });
+  assertEquals(p.workOrders[0].scope_items, [{
+    description: "Install fence",
+    quantity: 10,
+    unit: "m",
+  }]);
+  assertEquals(p.workOrder.scope_items[0].rate, undefined);
+  assertEquals(p.workOrder.scope_items[0].total, undefined);
+  assertEquals(p.workOrder.scope_items[0].unit_price, undefined);
 });
 
 Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, never the PDF or sell", async () => {
@@ -428,11 +490,12 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(p.quote_packs[0].source, "live_fallback");
   const install = (p.quote_packs[0].items || []).find((i: any) => i.kind === "install_m");
   assertEquals(install?.quantity, 10);
-  assertEquals(install?.unit_price, 30);
+  assertEquals(install?.unit_price, null, "allocated trades never see installer or sell rates");
+  assertEquals(install?.line_total, null);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
   assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
   assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
-  assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell and PDF are not");
+  assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell, rates and PDF are not");
 });
 
 Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", async () => {
@@ -441,12 +504,83 @@ Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", a
   assertEquals(crew, lead);
 });
 
+const WALKTHROUGH_URL = "https://cdn.example.test/jobs/swf-26101/walkthrough.mp4";
+
+Deno.test("trade_job_detail: promotes a job.scopeMedia walkthrough even when scope photos already exist", async () => {
+  const t = seed();
+  const job = t.jobs.find((j: any) => j.id === JOB_FENCE);
+  job.scope_json = {
+    ...job.scope_json,
+    scopeMedia: {
+      photos: [{ label: "Front", url: "https://cdn.example.test/jobs/swf-26101/front.jpg" }],
+    },
+    job: {
+      ...job.scope_json.job,
+      scopeMedia: {
+        videoWalkthrough: WALKTHROUGH_URL,
+        videoFileName: "site-walkthrough.mov",
+        videoSize: 18432000,
+      },
+    },
+  };
+  t.job_media = [{
+    id: "photo-scope",
+    job_id: JOB_FENCE,
+    phase: "scope",
+    type: "photo",
+    storage_url: "https://cdn.example.test/jobs/swf-26101/front.jpg",
+    label: "Front",
+  }];
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  const videos = (p.media || []).filter((m: any) => m.type === "video");
+  assertEquals(videos.length, 1);
+  assertEquals(videos[0].storage_url, WALKTHROUGH_URL);
+  assertEquals(videos[0].phase, "scope");
+  assertEquals(videos[0].label, "Walkthrough");
+  assertEquals((p.currentCycleMedia || []).some((m: any) => m.type === "video"), true);
+  assertEquals(quoteLeakProbe(p), []);
+});
+
+Deno.test("trade_job_detail: reattend cycle filter still returns the unbound walkthrough", async () => {
+  const t = seed();
+  t.jobs.find((j: any) => j.id === JOB_FENCE).type = "makesafe";
+  t.makesafe_job_details = [{
+    job_id: JOB_FENCE,
+    attendance_cycle_id: "cycle-2",
+    cycle_number: 2,
+    reattend_count: 1,
+    last_reattend_at: "2026-09-01T00:00:00Z",
+  }];
+  t.job_media = [
+    {
+      id: "new-photo",
+      job_id: JOB_FENCE,
+      type: "photo",
+      phase: "completion",
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: "bound",
+    },
+    {
+      id: "walk",
+      job_id: JOB_FENCE,
+      type: "video",
+      phase: "scope",
+      label: "Walkthrough",
+      storage_url: WALKTHROUGH_URL,
+    },
+  ];
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals((p.media || []).map((m: any) => m.id).sort(), ["new-photo", "walk"]);
+  assertEquals(p.currentCyclePhotoCount, 1);
+});
+
 Deno.test("trade_job_detail: the fencing division manager sees the quote docs and the raw scope (office parity within the trade)", async () => {
   const p = await detail(seed(), viewer(HENRY, "lead_installer", ["fencing"]));
   assertEquals(p.access_tier, "division_manager");
   assertEquals(p.quote_visible, true);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-internal", "d-invoice", "d-quote-hid", "d-quote-vis", "d-supplier-quote", "d-wo"]);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
+  assertEquals(p.workOrders[0].scope_items[0].rate, 85);
 });
 
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
@@ -495,13 +629,16 @@ Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the r
   assertEquals(r.job._pricing_json, undefined);
   assertEquals(r.job.runs, [{ length: 10 }]);
   assertEquals(r.patios[0].options[0]._pricing_json, undefined);
-  assertEquals(r.patios[0].options[0].pricing, { labour: { days: 2, dayRate: 400 } });
+  assertEquals(r.patios[0].options[0].pricing, { labour: { days: 2 } });
   assertEquals(r.patios[0].options[0].label, "Standard");
-  assertEquals(r.pricing, { labour: { trades: 2, days: 3, dayRate: 400 } });
+  assertEquals(r.pricing, { labour: { trades: 2, days: 3 } });
   assertEquals(r.notes.pricingNotes, undefined);
-  assertEquals(r.notes.noteQuote, undefined);
+  assertEquals(r.notes.noteQuote, "Quote note text");
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.client, { notes: "Gate on the left" });
+  assertEquals(r.job.quote.quote_number, "Q-NARR");
+  assertEquals(r.job.quote.description.includes("Monument"), true);
+  assertEquals(r.job.quote.materials, [{ name: "90x90 posts", qty: 12 }]);
   assertEquals(quoteLeakProbe(r), []);
 });
 
@@ -544,8 +681,43 @@ Deno.test("redactTradeScopeQuote: a pricing block with no labour becomes empty, 
 Deno.test("_tradeDocumentsForAllocatedTrade: honours the flag AND drops quote-bearing types whatever the flag says", () => {
   const docs = seed().job_documents;
   assertEquals(_tradeDocumentsForAllocatedTrade(docs).map((d) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
-  assertEquals(_tradeDocumentsForAllocatedTrade(docs).some((d) => "quote_number" in d), false);
   assertEquals([...TRADE_QUOTE_DOCUMENT_TYPES].sort(), ["invoice", "quote"]);
+});
+
+Deno.test("_tradeDocumentsForAllocatedTrade keeps quote_number on a remaining non-quote row", () => {
+  const docs = [
+    { id: "d-wo", type: "work_order", visible_to_trades: true, quote_number: "Q-KEEP" },
+    { id: "d-quote", type: "quote", visible_to_trades: true, quote_number: "Q-HIDE" },
+  ];
+  const out = _tradeDocumentsForAllocatedTrade(docs);
+  assertEquals(out.map((d) => d.id), ["d-wo"]);
+  assertEquals(out[0].quote_number, "Q-KEEP");
+});
+
+Deno.test("redactTradeWorkOrderScopeItems drops rate/total/unit_price and keeps the writing", () => {
+  assertEquals(
+    redactTradeWorkOrderScopeItems([
+      { description: "Posts", quantity: 4, unit: "ea", rate: 20, unit_price: 20, total: 80, price: 20 },
+    ]),
+    [{ description: "Posts", quantity: 4, unit: "ea" }],
+  );
+});
+
+Deno.test("redactTradeQuotePackMoney nulls unit_price and line_total only", () => {
+  const out = redactTradeQuotePackMoney([
+    {
+      quote_number: "Q-1",
+      items: [{ kind: "install_m", description: "Install", quantity: 10, unit_price: 30, line_total: 300 }],
+    },
+  ]);
+  assertEquals(out[0].quote_number, "Q-1");
+  assertEquals(out[0].items[0], {
+    kind: "install_m",
+    description: "Install",
+    quantity: 10,
+    unit_price: null,
+    line_total: null,
+  });
 });
 
 // ── Lead designation reads is_lead, never role ──────────────────────────────

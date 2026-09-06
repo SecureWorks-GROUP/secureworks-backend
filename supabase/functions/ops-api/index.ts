@@ -261,6 +261,7 @@ import {
   projectCycleScopedEvidence,
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
+import { extractScopeMedia, selectTradeJobMedia } from './trade_scope_media.ts'
 import {
   currentMakesafeReceivableInvoicesByJobId,
   makesafeHasQualifyingCurrentDraftInvoice,
@@ -37866,69 +37867,6 @@ export async function myJobs(
   return grouped
 }
 
-// ── Scope Photo Extraction ──────────────────────────────────────────────
-// Fencing scope tool captures photos as BASE64 inside scope_json.scopeMedia.photos.
-// This extracts them to Supabase Storage + job_media so the trade app can display them.
-async function extractScopePhotos(client: any, jobId: string, scopeJson: any): Promise<number> {
-  // Guard: nothing to extract
-  const photos = scopeJson?.scopeMedia?.photos
-  if (!Array.isArray(photos) || photos.length === 0) return 0
-
-  // Check if already extracted
-  const { data: existing } = await client.from('job_media')
-    .select('id')
-    .eq('job_id', jobId)
-    .eq('phase', 'scope')
-    .limit(1)
-  if (existing && existing.length > 0) return 0
-
-  // Ensure bucket exists (idempotent)
-  try { await client.storage.createBucket('job-photos', { public: true }) } catch { /* exists */ }
-
-  let count = 0
-  for (let i = 0; i < photos.length; i++) {
-    const photo = photos[i]
-    if (!photo?.dataUrl || typeof photo.dataUrl !== 'string') continue
-
-    try {
-      // Strip data URL prefix — handle jpeg, png, webp etc
-      const base64 = photo.dataUrl.split(',')[1]
-      if (!base64) continue
-
-      const mimeMatch = photo.dataUrl.match(/data:([^;]+);/)
-      const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg'
-      const ext = mime.includes('png') ? 'png' : 'jpg'
-      const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0))
-
-      const path = `${DEFAULT_ORG_ID}/${jobId}/scope/${i}.${ext}`
-
-      const { error: uploadError } = await client.storage
-        .from('job-photos')
-        .upload(path, bytes, { contentType: mime, upsert: true })
-      if (uploadError) { console.log(`[ops-api] scope photo ${i} upload failed:`, uploadError.message); continue }
-
-      const { data: urlData } = client.storage.from('job-photos').getPublicUrl(path)
-
-      const { error: insertError } = await client.from('job_media').insert({
-        job_id: jobId,
-        phase: 'scope',
-        type: 'photo',
-        storage_url: urlData.publicUrl,
-        label: photo.label || `Scope photo ${i + 1}`,
-        created_at: new Date().toISOString(),
-      })
-      if (insertError) { console.log(`[ops-api] scope photo ${i} insert failed:`, insertError.message); continue }
-
-      count++
-    } catch (err: any) {
-      console.log(`[ops-api] scope photo ${i} error:`, err?.message)
-    }
-  }
-
-  console.log(`[ops-api] extracted ${count} scope photos for job ${jobId}`)
-  return count
-}
-
 type TradeMakesafeCompletionHandoff =
   | 'physical'
   | 'builder_portal'
@@ -38089,23 +38027,23 @@ export const TRADE_QUOTE_DOCUMENT_TYPES = new Set(['quote', 'invoice'])
 export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
   return _tradeVisibleDocuments(docs)
     .filter((d: any) => !TRADE_QUOTE_DOCUMENT_TYPES.has(String(d?.type || '').toLowerCase()))
-    .map((d: any) => {
-      // quote_number is a quote coordinate; nothing an installer needs.
-      const { quote_number: _qn, ...rest } = d || {}
-      return rest
-    })
 }
 
 // ── scope_json quote redaction (allocated-trade tiers) ──────────────────────
 // The scoping tools write the QUOTE into jobs.scope_json: `_pricing_json` (the
 // full quote blob — totals, margin, sell), `pricing` (addon/extras sell rows,
-// labour sell), `notes.pricingNotes` / `notes.noteQuote`, nested per patio /
-// option (`scope_json.patios[].options[]`, `scope_json.job`). trade_job_detail
+// labour sell), `notes.pricingNotes`, nested per patio / option
+// (`scope_json.patios[].options[]`, `scope_json.job`). trade_job_detail
 // used to ship the raw blob and rely on trade.html not rendering the price.
-// This strips it server-side at every depth. What survives is what the trade
-// app already deliberately shows an installer: `pricing.labour.{trades,days,
-// dayRate}` (their own days/day-rate, not the customer's price) — `sell` under
-// labour goes too. Keys are matched exactly (case-sensitive) so a structural
+// This strips it server-side at every depth.
+//
+// TRD-4 (2026-09-06): allocated trades and makesafe_open MUST see the quote
+// WRITING — descriptions, scope text, `job.quote` narrative, `notes.noteQuote`,
+// and quote numbers — and MUST NEVER see money. So `quote` / `quotes` are
+// walked (they are ~1 kB narrative blobs), not dropped; a numeric `quote`
+// key is still stripped. `dayRate` is a price and goes with the money set.
+// What survives of labour is headcount/days only (`trades`, `days`,
+// `labourers`). Keys are matched exactly (case-sensitive) so a structural
 // key like `totalMetres` is untouched; the pure helper is exported and pinned.
 //
 // The blob's shape is owned by the scoping tools, so the list is grounded in the
@@ -38123,9 +38061,6 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   'pricing_json',
   'pricing_json_public',
   'pricingNotes',
-  'noteQuote',
-  'quote',
-  'quotes',
   'quoteTotal',
   'quote_total',
   'totalSell',
@@ -38147,7 +38082,38 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   'materialCostEstimate',
   'commissionCostEstimate',
 ])
-export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'dayRate', 'labourers'])
+// Walked, never dropped as objects: the quote narrative + quote-number pack.
+// A bare numeric/money value on these keys is still stripped.
+export const TRADE_SCOPE_NARRATIVE_QUOTE_KEYS = new Set(['quote', 'quotes'])
+export const TRADE_SCOPE_MONEY_KEYS = new Set([
+  'unit_price',
+  'unitPrice',
+  'unit_price_ex',
+  'unitPriceEx',
+  'line_total',
+  'lineTotal',
+  'line_total_ex',
+  'price',
+  'rate',
+  'amount',
+  'amount_ex',
+  'amountEx',
+  'total',
+  'gst',
+  'deposit',
+  'cost',
+  'cost_price',
+  'costPrice',
+  'dayRate',
+  'day_rate',
+])
+export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'labourers'])
+
+function tradeScopeBareMoneyValue(value: unknown): boolean {
+  if (typeof value === 'number' && Number.isFinite(value)) return true
+  if (typeof value !== 'string') return false
+  return /^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(value.trim())
+}
 
 // The recursion cap is a guard against a pathological blob, not a licence to
 // stop redacting: past it the branch is DROPPED, never returned verbatim. A
@@ -38166,7 +38132,8 @@ export function redactTradeScopeQuote(scope: any): any {
     if (typeof node !== 'object') return node
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key)) continue
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) continue
       if (key === 'pricing') {
         // Keep only the installer's own labour budget inputs.
         const labour = value && typeof value === 'object' && !Array.isArray(value)
@@ -38191,6 +38158,49 @@ export function redactTradeScopeQuote(scope: any): any {
     try { return walk(JSON.parse(scope), 0) } catch { return null }
   }
   return walk(scope, 0)
+}
+
+const TRADE_WO_SCOPE_ITEM_MONEY_KEYS = new Set([
+  'rate',
+  'total',
+  'unit_price',
+  'unitPrice',
+  'line_total',
+  'lineTotal',
+  'price',
+  'amount',
+  'gst',
+])
+
+export function redactTradeWorkOrderScopeItems(items: any): any {
+  if (!Array.isArray(items)) return items
+  return items.map((item: any) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(item)) {
+      if (TRADE_WO_SCOPE_ITEM_MONEY_KEYS.has(key)) continue
+      out[key] = value
+    }
+    return out
+  })
+}
+
+export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
+  return (orders || []).map((wo: any) => ({
+    ...wo,
+    scope_items: redactTradeWorkOrderScopeItems(wo?.scope_items),
+  }))
+}
+
+export function redactTradeQuotePackMoney(packs: any[]): any[] {
+  return (packs || []).map((pack: any) => ({
+    ...pack,
+    items: (pack?.items || []).map((item: any) =>
+      item && typeof item === 'object'
+        ? { ...item, unit_price: null, line_total: null }
+        : item
+    ),
+  }))
 }
 
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
@@ -38343,10 +38353,18 @@ async function tradeJobDetail(
     })),
   }))
 
-  // Fire-and-forget: extract scope photos if not already done
-  if (jobRes.data?.scope_json?.scopeMedia?.photos?.length > 0) {
-    extractScopePhotos(client, jobId, jobRes.data.scope_json)
-      .catch(e => console.log('[ops-api] scope photo extraction failed:', e?.message))
+  // Promote scope walkthroughs (and missing photos) into job_media so the
+  // trade player gets a real storage_url. Awaits so this response includes
+  // the just-registered rows. No-op when collect is empty (no storage/insert).
+  let extractedScopeMedia: Awaited<ReturnType<typeof extractScopeMedia>> = {
+    photos: 0,
+    videos: 0,
+    rows: [],
+  }
+  try {
+    extractedScopeMedia = await extractScopeMedia(client, jobId, jobRes.data?.scope_json)
+  } catch (e) {
+    console.log('[ops-api] scope media extraction failed:', (e as Error)?.message)
   }
 
   // Make-safe overlay details for trade view
@@ -38443,13 +38461,28 @@ async function tradeJobDetail(
       makesafeDetails.attendance_cycle_id || null,
     )
     : (reportRes.data || [])[0] || null
+  const mediaByKey = new Map<string, any>()
+  for (const row of [...(mediaRes.data || []), ...extractedScopeMedia.rows]) {
+    const key = String(row?.id || row?.storage_url || '')
+    if (key) mediaByKey.set(key, row)
+  }
+  const allMedia = mediaByKey.size > 0
+    ? [...mediaByKey.values()]
+    : [...(mediaRes.data || []), ...extractedScopeMedia.rows]
   const currentCycleMedia = makesafeDetails
     ? filterMediaForCurrentCycle(
-      mediaRes.data || [],
+      allMedia,
       makesafeDetails,
       makesafeDetails.attendance_cycle_id || null,
     )
-    : mediaRes.data || []
+    : allMedia
+  // Reattend cycle filter must not hide the only walkthrough. Trade list =
+  // current-cycle rows plus every job video (scope walkthroughs included).
+  const tradeMedia = selectTradeJobMedia(
+    allMedia,
+    makesafeDetails,
+    makesafeDetails?.attendance_cycle_id || null,
+  )
 
   // A wrong/absent column comes back from PostgREST as a 400 with data:null,
   // which `|| []` would turn into a silently empty crew list — the exact failure
@@ -38473,13 +38506,20 @@ async function tradeJobDetail(
   const visibleDocuments = quoteVisible
     ? (docsRes.data || [])
     : _tradeDocumentsForAllocatedTrade(docsRes.data || [])
-  const workOrders = woRes.data || []
+  const workOrders = quoteVisible
+    ? (woRes.data || [])
+    : redactTradeWorkOrdersForAllocated(woRes.data || [])
   // scope_json carries the scoping tools' quote (pricing, _pricing_json, sell
-  // rows, quote notes). It is redacted server-side for every non-quote tier;
-  // the labour days/rate the app already shows installers survives.
+  // rows). It is redacted server-side for every non-quote tier. TRD-4 keeps
+  // narrative scope + quote numbers and strips every money key, including
+  // labour dayRate. Quote packs keep descriptions/qty/quote_number; unit
+  // prices are nulled for allocated viewers.
   if (!quoteVisible && tradeSafeJob && 'scope_json' in tradeSafeJob) {
     tradeSafeJob.scope_json = redactTradeScopeQuote(tradeSafeJob.scope_json)
   }
+  const tradeQuotePacks = quoteVisible
+    ? quotePacks
+    : redactTradeQuotePackMoney(quotePacks)
 
   return {
     job: tradeSafeJob,
@@ -38497,7 +38537,7 @@ async function tradeJobDetail(
       authority: 'typed_job_metadata',
     }),
     documents: visibleDocuments,
-    media: currentCycleMedia,
+    media: tradeMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
     // notes thread. The markers stay in job_events untouched.
@@ -38507,7 +38547,7 @@ async function tradeJobDetail(
     // every visit's report, not just the latest. serviceReport is the current
     // attendance only once a reattend boundary exists.
     serviceReports: reportRes.data || [],
-    currentCycleMedia,
+    currentCycleMedia: tradeMedia,
     currentCyclePhotoCount: currentCycleMedia.filter((m: any) =>
       !m?.type || m.type === 'photo'
     ).length,
@@ -38535,7 +38575,7 @@ async function tradeJobDetail(
     leadInstaller: _tradeLeadInstaller(tradeCrew),
     purchaseOrders: safePOs,
     makesafe_details: makesafeDetails,
-    quote_packs: quotePacks,
+    quote_packs: tradeQuotePacks,
   }
 }
 
