@@ -21,6 +21,7 @@ import {
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
+  tradeTextHasMoneyToken,
 } from "./pack_trade_quote.ts";
 
 export const TRADE_QUOTE_EXTRACT_DOC_TYPE = "trade_quote_extract" as const;
@@ -69,12 +70,7 @@ export type TradeQuoteExtractJobOverlay = {
 };
 
 function extractFieldHasMoney(text: string): boolean {
-  if (text.includes("$")) return true;
-  if (/\bA\$|\bAU\$/i.test(text)) return true;
-  if (/\bAUD\b/i.test(text)) return true;
-  if (/\bGST\b/i.test(text)) return true;
-  if (/\b(?:subtotal|line total|unit price|totalIncGST|totalExGST)\b/i.test(text)) return true;
-  return false;
+  return tradeTextHasMoneyToken(text);
 }
 
 function failClosedText(value: unknown, scrub: (raw: string) => string | null): string | null {
@@ -376,11 +372,20 @@ export const TRADE_QUOTE_EXTRACT_FORBIDDEN_KEYS = new Set([
   "amount",
 ]);
 
+const EXTRACT_HTML_SEALED_TERMS = /50%\s*deposit\s*\+\s*50%\s*on\s+completion/gi;
+const EXTRACT_HTML_FOOTER_DISCLAIMER = /It does not include prices, rates, or totals\./g;
+
 export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
+  const stripped = String(html || "")
+    .replace(EXTRACT_HTML_SEALED_TERMS, "")
+    .replace(EXTRACT_HTML_FOOTER_DISCLAIMER, "");
   const hits: string[] = [];
-  if (html.includes("$")) hits.push("$");
-  if (/\bGST\b/i.test(html)) hits.push("GST");
-  if (/\b(AUD|inc GST|ex GST|subtotal|line total|unit price)\b/i.test(html)) hits.push("money-phrase");
+  if (stripped.includes("$")) hits.push("$");
+  if (/\bGST\b/i.test(stripped)) hits.push("GST");
+  if (/\b(?:AUD|USD)\b/i.test(stripped)) hits.push("currency");
+  if (/\b(?:inc GST|ex GST|subtotal|line total|unit price)\b/i.test(stripped)) hits.push("money-phrase");
+  if (/\b(?:rate|price|amount|cost|fee|deposit)\b/i.test(stripped)) hits.push("money-word");
+  if (tradeTextHasMoneyToken(stripped)) hits.push("money-token");
   return hits;
 }
 

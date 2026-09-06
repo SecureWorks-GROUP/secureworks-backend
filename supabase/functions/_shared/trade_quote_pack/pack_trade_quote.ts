@@ -160,10 +160,35 @@ export type QuoteDocRow = {
   type?: string | null
   quote_number?: string | null
   sent_at?: string | null
+  sent_to_client?: boolean | null
   accepted_at?: string | null
   superseded_at?: string | null
   trade_pack_json?: unknown
   created_at?: string | null
+}
+
+/** Sealed default terms language. Not a billed amount. */
+export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+completion\s*$/i
+
+/**
+ * Conservative money-token predicate for every extract / allocated-pack
+ * string leaf, including identity fields. Fail closed: any hit drops the
+ * field rather than copying it. Sealed payment-terms language is exempt.
+ */
+export function tradeTextHasMoneyToken(value: string): boolean {
+  const text = String(value || '')
+  if (!text.trim()) return false
+  if (TRADE_SEALED_PAYMENT_TERMS.test(text.trim())) return false
+  if (/\$/.test(text)) return true
+  if (/\b(?:A\$|AU\$|AUD|USD|GST)\b/i.test(text)) return true
+  if (
+    /\b(?:rate|price|amount|cost|fee|subtotal|quoted|charged|unit\s+price|line\s+total|totalIncGST|totalExGST)\b/i
+      .test(text)
+  ) {
+    return true
+  }
+  if (/\bdeposit\b/i.test(text)) return true
+  return false
 }
 
 export function assembleQuotePacksForTrade(input: {
@@ -252,7 +277,12 @@ export async function persistTradePackOnDocuments(
 }
 
 export function quoteDocumentHasClientSend(doc: QuoteDocRow | null | undefined): boolean {
-  return !!(doc?.sent_at || doc?.accepted_at)
+  if (doc?.accepted_at) return true
+  if (!doc?.sent_at) return false
+  // Pre-send inserts stamp sent_to_client=false. An explicit false is
+  // unpublished even if sent_at leaked. Historical rows omit the flag.
+  if (doc.sent_to_client === false) return false
+  return true
 }
 
 export function quoteDocumentHasFrozenPack(doc: QuoteDocRow | null | undefined): boolean {
@@ -780,6 +810,51 @@ export function allocatedTradePackProse(value: unknown): string | null {
   if (!trimmed) return ''
   if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
   return stripTradePackMoney(value)
+}
+
+/** Phone / email / dates keep digits. Drop the field if a money token is present. */
+export function allocatedTradePackIdentity(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (tradeTextHasMoneyToken(trimmed)) return null
+  return trimmed
+}
+
+const ALLOCATED_PACK_CUSTOMER_STRINGS = [
+  'name',
+  'phone',
+  'email',
+  'site_address',
+  'site_suburb',
+] as const
+const ALLOCATED_PACK_TERMS_STRINGS = ['payment_terms', 'valid_until'] as const
+
+/** Customer / terms leaks on an allocated quote-pack projection. Item
+ *  leftover words ("Install Deposit") are out of scope — REV2-001 is the
+ *  snapshot strings that were copied verbatim. */
+export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] {
+  if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return []
+  const row = pack as Record<string, unknown>
+  const leaks: string[] = []
+  const blob = JSON.stringify(row)
+  if (blob.includes('$')) leaks.push('$')
+  leaks.push(...tradePackMoneyLeakKeys(row as TradeQuotePack).map((key) => `key.${key}`))
+  const customer = row.customer
+  if (customer && typeof customer === 'object' && !Array.isArray(customer)) {
+    for (const key of ALLOCATED_PACK_CUSTOMER_STRINGS) {
+      const value = (customer as Record<string, unknown>)[key]
+      if (typeof value === 'string' && tradeTextHasMoneyToken(value)) leaks.push(`customer.${key}`)
+    }
+  }
+  const terms = row.terms
+  if (terms && typeof terms === 'object' && !Array.isArray(terms)) {
+    for (const key of ALLOCATED_PACK_TERMS_STRINGS) {
+      const value = (terms as Record<string, unknown>)[key]
+      if (typeof value === 'string' && tradeTextHasMoneyToken(value)) leaks.push(`terms.${key}`)
+    }
+  }
+  return [...new Set(leaks)]
 }
 
 /** Closed installer-pack kinds that may ride an allocated quote pack.

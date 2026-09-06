@@ -122,12 +122,15 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
+  allocatedTradePackIdentity,
   allocatedTradePackProse,
+  allocatedTradeQuotePackProjectionLeaks,
   assembleQuotePacksForTrade,
   isHenryInstaller,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
+  tradeTextHasMoneyToken,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
@@ -38875,18 +38878,24 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
   })
 }
 
+function failClosedAllocatedSnapshotString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  if (tradeTextHasMoneyToken(value)) return null
+  return value
+}
+
 function redactAllocatedTradeQuoteCustomer(customer: any): Record<string, unknown> | undefined {
   if (!customer || typeof customer !== 'object' || Array.isArray(customer)) return undefined
   return {
-    name: customer.name == null ? customer.name : allocatedTradePackProse(customer.name),
-    phone: typeof customer.phone === 'string' ? customer.phone : null,
-    email: typeof customer.email === 'string' ? customer.email : null,
+    name: customer.name == null ? customer.name : failClosedAllocatedSnapshotString(allocatedTradePackProse(customer.name)),
+    phone: allocatedTradePackIdentity(customer.phone),
+    email: allocatedTradePackIdentity(customer.email),
     site_address: customer.site_address == null
       ? customer.site_address
-      : allocatedTradePackProse(customer.site_address),
+      : failClosedAllocatedSnapshotString(allocatedTradePackProse(customer.site_address)),
     site_suburb: customer.site_suburb == null
       ? customer.site_suburb
-      : allocatedTradePackProse(customer.site_suburb),
+      : failClosedAllocatedSnapshotString(allocatedTradePackProse(customer.site_suburb)),
   }
 }
 
@@ -38895,11 +38904,18 @@ function redactAllocatedTradeQuoteTerms(terms: any): Record<string, unknown> | u
   return {
     payment_terms: terms.payment_terms == null
       ? terms.payment_terms
-      : allocatedTradePackProse(terms.payment_terms),
+      : failClosedAllocatedSnapshotString(allocatedTradePackProse(terms.payment_terms)),
     valid_days: typeof terms.valid_days === 'number' && Number.isFinite(terms.valid_days)
       ? terms.valid_days
       : null,
-    valid_until: typeof terms.valid_until === 'string' ? terms.valid_until : null,
+    valid_until: allocatedTradePackIdentity(terms.valid_until),
+  }
+}
+
+export function assertAllocatedTradeQuotePackProjection(pack: unknown): void {
+  const leaks = allocatedTradeQuotePackProjectionLeaks(pack)
+  if (leaks.length) {
+    throw new Error(`allocated quote pack money leak: ${leaks.join(',')}`)
   }
 }
 
@@ -39051,7 +39067,7 @@ async function tradeJobDetail(
       .eq('job_id', jobId).neq('status', 'deleted')
       .order('delivery_date', { ascending: true }),
     client.from('job_documents')
-      .select('id, type, quote_number, sent_at, accepted_at, superseded_at, trade_pack_json, created_at')
+      .select('id, type, quote_number, sent_at, sent_to_client, accepted_at, superseded_at, trade_pack_json, created_at')
       .eq('job_id', jobId)
       .eq('type', 'quote')
       .order('created_at', { ascending: false }),
@@ -39401,7 +39417,7 @@ async function tradeQuoteExtractAction(
       .eq('org_id', viewer.orgId)
       .single(),
     client.from('job_documents')
-      .select('id, type, quote_number, sent_at, accepted_at, superseded_at, trade_pack_json, created_at')
+      .select('id, type, quote_number, sent_at, sent_to_client, accepted_at, superseded_at, trade_pack_json, created_at')
       .eq('job_id', jobId)
       .eq('type', 'quote')
       .order('created_at', { ascending: false }),

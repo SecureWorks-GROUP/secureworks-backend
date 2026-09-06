@@ -2293,8 +2293,8 @@ serve(async (req: Request) => {
           run_label: run.run_label,
           job_contact_id: primaryContact.id || null,
           pdf_url: runPdfUrl,
-          sent_to_client: true,
-          sent_at: new Date().toISOString(),
+          sent_to_client: false,
+          sent_at: null,
           data_snapshot_json: { run },
         }).select('id, share_token').single()
 
@@ -2327,8 +2327,8 @@ serve(async (req: Request) => {
             run_label: run.run_label,
             job_contact_id: neighbour.id,
             pdf_url: runPdfUrl,
-            sent_to_client: true,
-            sent_at: new Date().toISOString(),
+            sent_to_client: false,
+            sent_at: null,
             data_snapshot_json: { run },
           }).select('id, share_token').single()
 
@@ -2467,15 +2467,24 @@ serve(async (req: Request) => {
         }
       }
 
-      // Persist the frozen trade pack only after the primary client send
-      // succeeds. A CC/BCC-only success must not mint an extractable pack.
-      if (primarySent && createdDocs.length > 0) {
+      // Stamp sent_at / sent_to_client only after the primary client send
+      // succeeds. Pre-send inserts stay unpublished so a Resend failure
+      // cannot expose quote_packs while the job is still draft.
+      const createdDocIds = createdDocs.map((d: any) => d.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+      if (primarySent && createdDocIds.length > 0) {
+        const sentAt = new Date().toISOString()
+        const { error: stampError } = await sb.from('job_documents')
+          .update({ sent_to_client: true, sent_at: sentAt })
+          .in('id', createdDocIds)
+        if (stampError) {
+          console.error('[send-quote] send-runs stamp failed:', stampError.message || String(stampError))
+        }
         try {
           await persistTradePackOnDocuments(sb, {
             documents: createdDocs.map((d: any) => ({
               id: d.id,
               quote_number: d.quote_number || null,
-              sent_at: d.sent_at || new Date().toISOString(),
+              sent_at: sentAt,
             })),
             jobType: job.type,
             scopeJson: job.scope_json,
@@ -2494,6 +2503,13 @@ serve(async (req: Request) => {
             handler: 'send-quote/send-runs',
             error: (e as Error).message,
           }))
+        }
+      } else if (createdDocIds.length > 0) {
+        const { error: revertError } = await sb.from('job_documents')
+          .update({ sent_to_client: false, sent_at: null })
+          .in('id', createdDocIds)
+        if (revertError) {
+          console.error('[send-quote] send-runs revert failed:', revertError.message || String(revertError))
         }
       }
 

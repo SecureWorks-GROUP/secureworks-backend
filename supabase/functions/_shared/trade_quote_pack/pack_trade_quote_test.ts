@@ -1,16 +1,20 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  allocatedTradePackIdentity,
   allocatedTradePackProse,
+  allocatedTradeQuotePackProjectionLeaks,
   applyInstallerRates,
   assembleQuotePacksForTrade,
   frozenTradePackForExtract,
   packTradeQuote,
   overlayTradePackSnapshots,
   persistTradePackOnDocuments,
+  quoteDocumentHasClientSend,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
+  tradeTextHasMoneyToken,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
 } from "./pack_trade_quote.ts";
@@ -201,6 +205,72 @@ Deno.test("assembleQuotePacksForTrade ignores a stored pack until the quote is s
     }],
   });
   assertEquals(packs, []);
+});
+
+Deno.test("quote packs require authoritative primary-send state, not a pre-send stamp", () => {
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-pre",
+    type: "quote",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    sent_to_client: false,
+  }), false);
+  assertEquals(assembleQuotePacksForTrade({
+    jobType: "fencing",
+    liveScopeJson: FENCE_SCOPE,
+    livePricingJson: FENCE_PRICING,
+    documents: [{
+      id: "d-pre",
+      type: "quote",
+      quote_number: "Q-PRE",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      sent_to_client: false,
+    }],
+  }), []);
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-hist",
+    type: "quote",
+    sent_at: "2026-09-01T00:00:00.000Z",
+  }), true);
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-acc",
+    type: "quote",
+    sent_to_client: false,
+    accepted_at: "2026-09-01T12:00:00.000Z",
+  }), true);
+  const historical = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    liveScopeJson: FENCE_SCOPE,
+    livePricingJson: FENCE_PRICING,
+    documents: [{
+      id: "d-hist",
+      type: "quote",
+      quote_number: "Q-HIST",
+      sent_at: "2026-09-01T00:00:00.000Z",
+    }],
+  });
+  assertEquals(historical.length, 1);
+  assertEquals(historical[0].source, "live_fallback");
+});
+
+Deno.test("tradeTextHasMoneyToken is conservative across identity and date strings", () => {
+  assertEquals(tradeTextHasMoneyToken("0412 000 111"), false);
+  assertEquals(tradeTextHasMoneyToken("pat@example.test"), false);
+  assertEquals(tradeTextHasMoneyToken("2026-10-01"), false);
+  assertEquals(tradeTextHasMoneyToken("50% deposit + 50% on completion"), false);
+  assertEquals(tradeTextHasMoneyToken("0412 $18,400"), true);
+  assertEquals(tradeTextHasMoneyToken("USD 12"), true);
+  assertEquals(tradeTextHasMoneyToken("rate@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("price@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("amount@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("cost@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("deposit@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("fee@example.test"), true);
+  assertEquals(allocatedTradePackIdentity("0412 000 111"), "0412 000 111");
+  assertEquals(allocatedTradePackIdentity("fee@example.test"), null);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { phone: "0412 $18,400", email: "usd@example.test" },
+    terms: { valid_until: "valid until price review" },
+  }).sort(), ["$", "customer.email", "customer.phone", "terms.valid_until"]);
 });
 
 Deno.test("frozenTradePackForExtract refuses live_fallback and unsent packs", () => {

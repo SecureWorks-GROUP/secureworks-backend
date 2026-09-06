@@ -168,6 +168,30 @@ Deno.test("extract fail-closes money in phone, email, and units without eating a
   const clean = assembleTradeQuoteExtract({ pack: PACK, job: { job_number: "SWF-25101" } });
   assertEquals(clean.customer.phone, "0412 000 111");
   assertEquals(clean.customer.email, "pat@example.test");
+  assertEquals(clean.terms.payment_terms, "50% deposit + 50% on completion");
+});
+
+Deno.test("extract fail-closes USD and contextual money words on identity and dates", () => {
+  const dirty = structuredClone(PACK);
+  dirty.customer.phone = "USD 12";
+  dirty.customer.email = "rate@example.test";
+  dirty.customer.name = "amount due client";
+  dirty.terms.valid_until = "price review 2026-10-01";
+  dirty.customer.site_address = "12 cost street";
+  dirty.notes = "fee on arrival";
+  const extract = assembleTradeQuoteExtract({ pack: dirty, job: { job_number: "deposit SWF-25101" } });
+  assertEquals(extract.customer.phone, null);
+  assertEquals(extract.customer.email, null);
+  assertEquals(extract.customer.name, null);
+  assertEquals(extract.terms.valid_until, null);
+  assertEquals(extract.customer.site_address, null);
+  assertEquals(extract.notes, []);
+  assertEquals(extract.job_number, null);
+  assertEquals(extract.terms.payment_terms, "50% deposit + 50% on completion");
+  const html = renderTradeQuoteExtractHtml(extract);
+  assertEquals(tradeQuoteExtractArtifactLeaks(extract, html), []);
+  assertTradeQuoteExtractArtifact(extract, html);
+  assertEquals(tradeQuoteExtractHtmlMoneyNeedles(html), []);
 });
 
 Deno.test("assembleFrozenQuoteExtractPacks never synthesizes a live fallback extract", () => {

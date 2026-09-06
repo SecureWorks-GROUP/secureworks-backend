@@ -34,6 +34,7 @@ import {
   _tradeScopeSummary,
   ApiError,
   projectTradePurchaseOrders,
+  assertAllocatedTradeQuotePackProjection,
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
@@ -619,6 +620,7 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals(p.workOrderDocuments, []);
   assertEquals(p.quote_extracts, [], "sent quote without a frozen pack has no extract");
+  assertAllocatedTradeQuotePackProjection(p.quote_packs[0]);
   assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
   assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
   assertEquals(JSON.stringify(p.quote_extracts).includes("quote.pdf"), false);
@@ -721,6 +723,16 @@ Deno.test("trade_quote_extract: frozen pack without client send is 404", async (
   const p = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(p.quote_packs || [], [], "unsent frozen pack is not a trade pack");
   assertEquals(p.quote_extracts || [], [], "unsent frozen pack is not an extract");
+});
+
+Deno.test("trade_job_detail: pre-send sent_to_client=false stays unpublished even with sent_at", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.sent_at = "2026-09-01T00:00:00Z";
+  vis.sent_to_client = false;
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs || [], [], "pre-send quote rows are not trade packs");
+  assertEquals(p.quote_extracts || [], [], "pre-send quote rows are not extracts");
 });
 
 Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {
@@ -1935,6 +1947,38 @@ Deno.test("redactTradeQuotePackMoney allowlists customer and terms without money
   assertEquals("deposit_percent" in (out[0].terms || {}), false);
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("4400"), false);
+  assertAllocatedTradeQuotePackProjection(out[0]);
+});
+
+Deno.test("redactTradeQuotePackMoney fail-closes money tokens on every customer and terms string", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: {
+      name: "USD Client",
+      phone: "0412 $18,400",
+      email: "fee@example.test",
+      site_address: "12 cost street",
+      site_suburb: "rate suburb",
+    },
+    terms: {
+      payment_terms: "Pay the deposit now",
+      valid_days: 30,
+      valid_until: "valid until price review",
+    },
+  }]);
+  assertEquals(out[0].customer, {
+    name: null,
+    phone: null,
+    email: null,
+    site_address: null,
+    site_suburb: null,
+  });
+  assertEquals(out[0].terms, {
+    payment_terms: null,
+    valid_days: 30,
+    valid_until: null,
+  });
+  assertAllocatedTradeQuotePackProjection(out[0]);
 });
 
 Deno.test("redactTradeQuotePackMoney nulls a nested quantity object instead of copying it", () => {
