@@ -31,6 +31,7 @@ import {
   _tradeJobDetailForTest,
   _tradeLabourBudgetForTest,
   _tradeScopeSummary,
+  projectTradePurchaseOrders,
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
@@ -1090,6 +1091,66 @@ Deno.test("_tradeScopeSummary strips money only when asked — office full-quote
   assertEquals(_tradeScopeSummary(job, { sanitizeMoney: true }), "10m, Colorbond Monument, 1800mm high");
 });
 
+Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized; office keeps raw wording", async () => {
+  const t = seed();
+  t.purchase_orders = [{
+    id: "po-money",
+    job_id: JOB_FENCE,
+    po_number: "PO-99",
+    supplier_name: "Acme Sheets $99.50",
+    status: "sent",
+    notes: "Charge 1200 extra. Total 9999.",
+    delivery_date: "2026-08-20",
+    line_items: [{
+      description: "Sheets $99.50. Total 9999.",
+      quantity: 12,
+      unit_price: 99.5,
+    }],
+  }];
+  const allocated = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(allocated.quote_visible, false);
+  const allocatedLine = allocated.purchaseOrders[0].line_items[0];
+  assertEquals(allocatedLine.description, "Sheets . Total.");
+  assertEquals(allocatedLine.quantity, 12);
+  assertEquals(allocatedLine.unit_price, undefined);
+  assertEquals(allocated.purchaseOrders[0].supplier_name, "Acme Sheets");
+  assertEquals(allocated.purchaseOrders[0].notes, "Charge extra. Total.");
+  assertEquals(JSON.stringify(allocated.purchaseOrders).includes("99.50"), false);
+  assertEquals(JSON.stringify(allocated.purchaseOrders).includes("9999"), false);
+  assertEquals(JSON.stringify(allocated.purchaseOrders).includes("1200"), false);
+  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  assertEquals(office.quote_visible, true);
+  assertEquals(office.purchaseOrders[0].line_items[0].description, "Sheets $99.50. Total 9999.");
+  assertEquals(office.purchaseOrders[0].supplier_name, "Acme Sheets $99.50");
+  assertEquals(office.purchaseOrders[0].notes, "Charge 1200 extra. Total 9999.");
+  assertEquals(office.purchaseOrders[0].line_items[0].unit_price, undefined);
+  assertEquals(
+    projectTradePurchaseOrders(t.purchase_orders, false)[0].line_items[0].description,
+    "Sheets . Total.",
+  );
+  assertEquals(
+    projectTradePurchaseOrders(t.purchase_orders, true)[0].line_items[0].description,
+    "Sheets $99.50. Total 9999.",
+  );
+  t.purchase_orders = [{
+    id: "po-ms",
+    job_id: JOB_MS,
+    supplier_name: "Acme Sheets $99.50",
+    status: "sent",
+    line_items: [{ description: "Sheets $99.50. Total 9999.", quantity: 12, unit_price: 99.5 }],
+  }];
+  const open = await _tradeJobDetailForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_MS }),
+    viewer(STRANGER, "crew") as any,
+    false,
+  );
+  assertEquals(open.access_tier, "makesafe_open");
+  assertEquals(open.quote_visible, false);
+  assertEquals(open.purchaseOrders[0].line_items[0].description, "Sheets . Total.");
+  assertEquals(open.purchaseOrders[0].supplier_name, "Acme Sheets");
+});
+
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
   const p = await detail(seed(), viewer(OFFICE, "ops_manager"));
   assertEquals(p.access_tier, "office");
@@ -1287,6 +1348,30 @@ Deno.test("redactTradeScopeQuote: a pricing block with no labour becomes empty, 
   assertEquals(redactTradeScopeQuote(JSON.stringify({ a: 1, _pricing_json: {} })), {});
   assertEquals(redactTradeScopeQuote(null), null);
   assertEquals(redactTradeScopeQuote("not json"), null);
+});
+
+Deno.test("redactTradeScopeQuote walks nested labour keep-key values so money cannot fail open", () => {
+  const r = redactTradeScopeQuote({
+    pricing: {
+      labour: {
+        trades: 2,
+        days: { count: 3, rate: 400, billed: 9999, sell: 3200 },
+        labourers: "2 at $85/hour",
+      },
+    },
+  });
+  assertEquals(r.pricing, {
+    labour: {
+      trades: 2,
+      days: { count: 3 },
+      labourers: "2 at /hour",
+    },
+  });
+  assertEquals(JSON.stringify(r).includes("400"), false);
+  assertEquals(JSON.stringify(r).includes("9999"), false);
+  assertEquals(JSON.stringify(r).includes("3200"), false);
+  assertEquals(JSON.stringify(r).includes("85"), false);
+  assertEquals(JSON.stringify(r).includes("$"), false);
 });
 
 Deno.test("redactTradeScopeQuote drops unlisted numeric money keys and keeps construction quantities", () => {

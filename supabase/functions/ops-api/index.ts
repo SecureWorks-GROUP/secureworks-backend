@@ -38366,6 +38366,47 @@ function presentTradeServiceReport(report: any, quoteVisible: boolean): any {
   return quoteVisible ? report : projectTradeAllocatedServiceReport(report)
 }
 
+// PO rows stay price-stripped for every trade tier. Allocated / makesafe_open
+// also money-sanitize free-text (line descriptions + row notes). Office and
+// division-manager keep the raw wording (full-quote). TRD4-REV15-002.
+const TRADE_PO_ROW_TEXT_KEYS = [
+  'supplier_name',
+  'notes',
+  'reference',
+  'name',
+  'label',
+  'title',
+] as const
+
+export function projectTradePurchaseOrders(
+  pos: unknown[] | null | undefined,
+  quoteVisible: boolean,
+): any[] {
+  return (pos || []).map((raw: any) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+    const lines = Array.isArray(raw.line_items) ? raw.line_items : []
+    const po: Record<string, any> = {
+      ...raw,
+      line_items: lines.map((li: any) => {
+        const rawDesc = String(li?.description || li?.Description || '')
+        return {
+          description: quoteVisible ? rawDesc : sanitizeTradeAllocatedStringLeaf(rawDesc),
+          quantity: li?.quantity ?? li?.Quantity ?? 0,
+          unit: li?.unit || (li?.UnitAmount ? undefined : undefined),
+        }
+      }),
+    }
+    if (!quoteVisible) {
+      for (const key of TRADE_PO_ROW_TEXT_KEYS) {
+        if (typeof po[key] === 'string') {
+          po[key] = sanitizeTradeAllocatedStringLeaf(po[key])
+        }
+      }
+    }
+    return po
+  })
+}
+
 // Operational job_service_reports columns for every trade-path read/return.
 // Never select('*') here: an unknown money column would fail open before
 // projection. Office / division-manager get these same columns unsanitized.
@@ -38482,14 +38523,25 @@ export function redactTradeScopeQuote(scope: any): any {
         continue
       }
       if (key === 'pricing') {
-        // Keep only the installer's own labour budget inputs.
+        // Keep only the installer's own labour budget inputs. Walk each
+        // retained keep-key value so nested money cannot fail open through
+        // trades / days / labourers (TRD4-REV15-001).
         const labour = value && typeof value === 'object' && !Array.isArray(value)
           ? (value as any).labour
           : null
         const keptLabour: Record<string, any> = {}
         if (labour && typeof labour === 'object' && !Array.isArray(labour)) {
           for (const [lk, lv] of Object.entries(labour)) {
-            if (TRADE_SCOPE_LABOUR_KEEP_KEYS.has(lk)) keptLabour[lk] = lv
+            if (!TRADE_SCOPE_LABOUR_KEEP_KEYS.has(lk)) continue
+            const walked = walk(lv, depth + 1, lk)
+            if (walked === undefined) continue
+            if (
+              walked &&
+              typeof walked === 'object' &&
+              !Array.isArray(walked) &&
+              Object.keys(walked).length === 0
+            ) continue
+            keptLabour[lk] = walked
           }
         }
         out.pricing = Object.keys(keptLabour).length > 0 ? { labour: keptLabour } : {}
@@ -38764,15 +38816,9 @@ async function tradeJobDetail(
 
   if (jobRes.error) throw jobRes.error
 
-  // Strip pricing from PO line items — trades only see descriptions and quantities
-  const safePOs = (posRes.data || []).map((po: any) => ({
-    ...po,
-    line_items: (po.line_items || []).map((li: any) => ({
-      description: li.description || li.Description || '',
-      quantity: li.quantity || li.Quantity || 0,
-      unit: li.unit || li.UnitAmount ? undefined : undefined,
-    })),
-  }))
+  // Strip pricing from PO line items — trades only see descriptions and quantities.
+  // Allocated / makesafe_open also money-sanitize free-text (TRD4-REV15-002).
+  const safePOs = projectTradePurchaseOrders(posRes.data, quoteVisible)
 
   // Promote scope walkthroughs (and missing photos) into job_media so the
   // trade player gets a real storage_url. Awaits so this response includes
