@@ -17,10 +17,12 @@
  * both dispatch. send-runs takes a job-level claim
  * (`jobs.send_runs_claimed_at`) with the same TTL so concurrent/retry
  * calls cannot mint a second published pack. A grouped send-runs email
- * heartbeats every owned document claim in that recipient set before
- * Resend and again through pack persist / publication — refreshing
- * only the first, or only pre-Resend, leaves secondary claims stale so
- * direct `/send` can reclaim them with a distinct Idempotency-Key.
+ * heartbeats every still-held document claim for the job — including
+ * earlier successful groups — before each Resend and again through
+ * pack persist / publication. Refreshing only the current recipient
+ * lets a successful group's unpublished claims expire so `/send` can
+ * reclaim them with a distinct per-document Idempotency-Key after the
+ * grouped email already used the group key.
  * Exclusive key-stamp updates must return the owned row; a zero-row
  * stamp is not a claim and must not dispatch. send-runs recipient keys
  * are trim + lowercase so case-variant addresses are one group. The
@@ -430,8 +432,10 @@ export async function touchQuoteDocumentSendClaims(
 }
 
 /**
- * Heartbeat every claim that belongs to a grouped recipient. A document
- * in the group with no owned claim is ownership loss — do not dispatch.
+ * Heartbeat every claim in `documentIds`. send-runs passes every
+ * still-held job claim plus the current recipient so an earlier
+ * successful group cannot expire mid-loop. A wanted document with no
+ * owned claim is ownership loss — do not dispatch.
  */
 export async function touchGroupedQuoteDocumentSendClaims(
   sb: QuoteSendPublicationClient,

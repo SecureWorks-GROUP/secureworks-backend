@@ -448,3 +448,26 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-21 locks (2026-09-06)
+
+- **Payment-schedule remnants include at/by.** Review-20 still drops
+  leftover `on|upon|after|before|following` plus the named events.
+  Review-21 also drops leftover `at completion` / `by delivery`
+  (`50 dollars at completion`, `50 dollars by delivery`) or the bare
+  remnant. Work notes that already said those words with no amount
+  stay. Sealed phrase stays exempt only on `terms.payment_terms`.
+- **Money-token fence covers grand and uncommaed k shorthand.**
+  `10 grand` / leftover `grand` and `1000k` fail closed.
+  `10k` / `2.5K` stay covered. `10m` stays a held construction count.
+  `grand` is not added to the strip list.
+- **send-runs heartbeats every still-held claim before each Resend.**
+  The grouped heartbeat set is every owned job claim plus the current
+  recipient docs. An earlier successful group's unpublished claims
+  stay fenced through later recipient sends and publication. Current
+  recipient ownership is still required to dispatch. Definitive
+  pre-send 4xx still retires the group key.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.

@@ -177,9 +177,9 @@ const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
 const TRADE_CURRENCY_WORD_RE =
-  /\b(?:dollars?|bucks?|euros?|cents?|pounds?|pence|pennies|yen|yuan|rupees?|francs?|quid)\b/i
-/** 10k / 2.5K. Not `10m` — that is held construction metres. */
-const TRADE_AMOUNT_SHORTHAND_RE = /\b-?\d{1,3}(?:,\d{3})*(?:\.\d+)?[kK]\b/
+  /\b(?:dollars?|bucks?|euros?|cents?|pounds?|pence|pennies|yen|yuan|rupees?|francs?|quid|grands?)\b/i
+/** 10k / 2.5K / 1000k. Not `10m` — that is held construction metres. */
+const TRADE_AMOUNT_SHORTHAND_RE = /\b-?\d+(?:,\d{3})*(?:\.\d+)?[kK]\b/
 const TRADE_CURRENCY_SYMBOL_RE = /[€£¥₹₩₽₪₱₫₴₡₦฿₭₮¢￥＄﹩]/
 const TRADE_UNICODE_CURRENCY_RE = /\p{Sc}/u
 const TRADE_CURRENCY_CODE_RE =
@@ -933,17 +933,19 @@ export function tradeOriginalHasNonFigureMoneyLanguage(value: string): boolean {
 }
 
 /** Payment-schedule leftover after a figure strip (`$50 on completion`
- *  → `on completion`, `$50 on delivery` → `on delivery`). Not the
- *  sealed terms phrase. Work notes that already said the same schedule
- *  words with no amount stay. */
+ *  → `on completion`, `50 dollars at completion` → `at completion`,
+ *  `50 dollars by delivery` → `by delivery`). Not the sealed terms
+ *  phrase. Work notes that already said the same schedule words with
+ *  no amount stay. */
 const TRADE_PAYMENT_SCHEDULE_EVENT =
   '(?:completion|delivery|approval|acceptance|install(?:ation)?|invoice|receipt|sign(?:-|\\s*)off|handover)'
+const TRADE_PAYMENT_SCHEDULE_PREP = '(?:on|upon|after|before|following|at|by)'
 const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = new RegExp(
-  `\\b(?:on|upon|after|before|following)\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
+  `\\b${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
   'i',
 )
 const TRADE_PAYMENT_SCHEDULE_BARE_RE = new RegExp(
-  `^(?:on|upon|after|before|following)\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}$`,
+  `^${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}$`,
   'i',
 )
 

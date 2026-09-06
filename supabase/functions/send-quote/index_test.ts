@@ -2104,6 +2104,18 @@ Deno.test("R16-001 send-runs source heartbeats the grouped claims before Resend"
   assert(!preDispatch.includes("claimedDocs.find("))
 })
 
+Deno.test("R21-003 send-runs heartbeats every held claim before each Resend", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const preDispatch = src.slice(start, provider)
+  const lastTouch = preDispatch.lastIndexOf("touchGroupedQuoteDocumentSendClaims(")
+  const touchCall = preDispatch.slice(lastTouch, provider)
+  assert(start >= 0 && provider > start && lastTouch >= 0)
+  assert(touchCall.includes("claimedDocs.map"))
+  assert(touchCall.includes("recipient.docs.map"))
+})
+
 Deno.test("R16-002 quote and invoice lease errors are 5xx before already_sent", () => {
   const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
   const quoteTouch = src.indexOf("touchQuoteDocumentSendClaim(sb, document_id, claimed.token)")

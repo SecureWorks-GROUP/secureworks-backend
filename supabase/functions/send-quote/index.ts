@@ -2716,7 +2716,10 @@ serve(async (req: Request) => {
           const groupedLease = await touchGroupedQuoteDocumentSendClaims(
             sb,
             claimedDocs,
-            recipient.docs.map((doc: { id?: string }) => doc?.id),
+            [
+              ...claimedDocs.map((claim) => claim.id),
+              ...recipient.docs.map((doc: { id?: string }) => doc?.id),
+            ],
           )
           if (groupedLease.outcome === 'error') {
             console.error(
