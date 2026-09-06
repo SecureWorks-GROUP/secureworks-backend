@@ -178,3 +178,19 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   `use_published` / `reuse_unpublished`. A `/send` revision mint must
   create a fresh run document instead of claiming the superseded pack
   was already sent. Extract exclusion of superseded packs stays in force.
+
+## Review-9 locks (2026-09-06)
+
+- **Revision supersession uses extract-durable publication.**
+  `supersede_prior` stamps every current-scope prior row that
+  `quoteDocumentHasClientSend` would treat as published: `sent_to_client=true`,
+  historical omitted-flag + `sent_at`, or `accepted_at`. Explicit
+  `sent_to_client=false` and in-flight claims stay unpublished. A read or
+  write fault returns 500 `quote_supersede_failed` (not a silent 200). An
+  already-published retry with `supersede_prior` re-runs the stamp so a
+  failed first write cannot leave a stale extract current.
+- **Accepted is published for send-runs reuse.** Existing-document reads
+  carry `accepted_at`. `quoteSendIsPublished` is the extract predicate, so
+  an accepted historical/run row with a false or omitted sent marker is
+  `use_published`, not claimed or re-emailed. Claim exclusive/reclaim also
+  require `accepted_at IS NULL`.

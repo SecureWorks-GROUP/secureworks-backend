@@ -32,6 +32,7 @@ import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_min
 import {
   persistTradePackOnDocuments,
   persistTradePackWriteConfirmed,
+  quoteDocumentHasClientSend,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 import {
   claimJobSendRuns,
@@ -49,6 +50,7 @@ import {
   sendRunQuoteNumberFallback,
   sendRunsPrimaryClientPublicationSatisfied,
   sendRunsSendOutcome,
+  supersedePriorPublishedQuoteDocuments,
   type QuoteSendDocumentClaim,
   type SendRunExistingDocument,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
@@ -764,6 +766,21 @@ serve(async (req: Request) => {
       if (claimed.status !== 'claimed') {
         // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
+        if (supersede_prior === true && doc.job_id && quoteDocumentHasClientSend(doc)) {
+          const retrySupersede = await supersedePriorPublishedQuoteDocuments(sb, {
+            jobId: doc.job_id,
+            currentDocumentId: doc.id,
+            currentVersion: doc.version || 1,
+            jobContactId: doc.job_contact_id ?? null,
+            runLabel: doc.run_label ?? null,
+          })
+          if (!retrySupersede.ok) {
+            return jsonResponse({
+              error: 'Failed to supersede prior quote documents',
+              code: 'quote_supersede_failed',
+            }, 500, corsHeaders)
+          }
+        }
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
       }
       {
@@ -1125,32 +1142,32 @@ serve(async (req: Request) => {
           }
         }
 
-        // (M4 G-B2) Supersede prior sent quote versions so old client links show the
-        // branded "quote was updated" page (see /view + G-B1). Gated on the caller
-        // explicitly passing supersede_prior:true — a plain or multi-option send must NOT
-        // supersede coexisting option docs; only the fence "Make a revision" flow sets
-        // the flag. Scope key = (job_id, job_contact_id, run_label); only lower versions
-        // matched. Best-effort: a failure here must not fail the send (email already went).
+        // (M4 G-B2) Supersede prior published quote versions so old client
+        // links show the branded "quote was updated" page (see /view + G-B1)
+        // and stale frozen extracts leave allocated trades. Gated on
+        // supersede_prior:true — a plain or multi-option send must NOT
+        // supersede coexisting option docs. Scope key = (job_id,
+        // job_contact_id, run_label); only lower versions matched. Uses the
+        // same durable-publication predicate as extract eligibility. A
+        // failed write is loud (500) so a retry can finish supersession on
+        // the already_sent path instead of leaving stale extracts current.
         if (supersede_prior === true) {
-          try {
-            const curVersion = doc.version || 1
-            let supSel = sb.from('job_documents')
-              .update({ superseded_at: new Date().toISOString(), superseded_by_revision_id: releasedRevisionId ?? null })
-              .eq('job_id', doc.job_id)
-              .eq('type', 'quote')
-              .eq('sent_to_client', true)
-              .is('superseded_at', null)
-              .lt('version', curVersion)
-              .neq('id', doc.id)
-            // Match the scope exactly: null-to-null on job_contact_id and run_label.
-            supSel = (doc.job_contact_id == null) ? supSel.is('job_contact_id', null) : supSel.eq('job_contact_id', doc.job_contact_id)
-            supSel = (doc.run_label == null) ? supSel.is('run_label', null) : supSel.eq('run_label', doc.run_label)
-            const { data: superseded } = await supSel.select('id')
-            if (superseded && superseded.length) {
-              console.log(`[send-quote] G-B2 superseded ${superseded.length} prior sent quote(s) for job ${doc.job_id}`)
-            }
-          } catch (e) {
-            console.error('[send-quote] G-B2 supersede-prior failed (non-blocking):', (e as Error).message)
+          const superseded = await supersedePriorPublishedQuoteDocuments(sb, {
+            jobId: doc.job_id,
+            currentDocumentId: doc.id,
+            currentVersion: doc.version || 1,
+            jobContactId: doc.job_contact_id ?? null,
+            runLabel: doc.run_label ?? null,
+            supersededByRevisionId: releasedRevisionId ?? null,
+          })
+          if (!superseded.ok) {
+            return jsonResponse({
+              error: 'Failed to supersede prior quote documents',
+              code: 'quote_supersede_failed',
+            }, 500, corsHeaders)
+          }
+          if (superseded.supersededIds.length) {
+            console.log(`[send-quote] G-B2 superseded ${superseded.supersededIds.length} prior sent quote(s) for job ${doc.job_id}`)
           }
         }
       }
@@ -2293,7 +2310,7 @@ serve(async (req: Request) => {
 
       try {
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
-        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at, accepted_at')
         .eq('job_id', job.id)
         .eq('type', 'quote')
         .is('superseded_at', null)
@@ -2400,6 +2417,7 @@ serve(async (req: Request) => {
               share_token: clientDoc.share_token,
               quote_number: clientDoc.quote_number,
               superseded_at: null,
+              accepted_at: null,
             })
             const insertedClientClaim = await claimWorkingDoc(clientDoc)
             if (insertedClientClaim !== 'claimed') return await refuseWorkingClaim(insertedClientClaim)
@@ -2463,6 +2481,7 @@ serve(async (req: Request) => {
                 share_token: nbDoc.share_token,
                 quote_number: nbDoc.quote_number,
                 superseded_at: null,
+                accepted_at: null,
               })
               const insertedNeighbourClaim = await claimWorkingDoc(nbDoc)
               if (insertedNeighbourClaim !== 'claimed') return await refuseWorkingClaim(insertedNeighbourClaim)

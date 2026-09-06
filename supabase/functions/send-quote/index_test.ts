@@ -36,6 +36,9 @@ import {
   sendRunsPrimaryClientPublicationSatisfied,
   sendRunsPublicationFailureBlocksSuccess,
   sendRunsSendOutcome,
+  priorPublishedQuoteIdsToSupersede,
+  quoteSendIsPublished,
+  supersedePriorPublishedQuoteDocuments,
 } from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
@@ -1295,6 +1298,93 @@ Deno.test("R8-002 superseded documents are not current published runs", () => {
   )
 })
 
+Deno.test("R9-001 supersession uses extract-durable publication, not sent_to_client alone", () => {
+  assertEquals(priorPublishedQuoteIdsToSupersede([
+    { id: "hist", sent_at: "2026-09-01T00:00:00.000Z" },
+    { id: "accepted", accepted_at: "2026-09-02T00:00:00.000Z", sent_to_client: false },
+    { id: "flagged", sent_at: "2026-09-01T00:00:00.000Z", sent_to_client: true },
+    { id: "unsent", sent_to_client: false },
+    { id: "inflight", sent_at: "2026-09-01T00:00:00.000Z", send_claimed_at: "2026-09-06T00:00:00.000Z" },
+    { id: "already", sent_at: "2026-09-01T00:00:00.000Z", sent_to_client: true, superseded_at: "2026-09-06T00:00:00.000Z" },
+  ]).sort(), ["accepted", "flagged", "hist"])
+})
+
+Deno.test("R9-001 supersede write failure is loud, not a silent skip", async () => {
+  const sb = {
+    from: () => ({
+      select: () => {
+        const chain: Record<string, unknown> = {}
+        chain.eq = () => chain
+        chain.is = () => chain
+        chain.lt = () => chain
+        chain.neq = () => chain
+        chain.then = (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+          Promise.resolve({
+            data: [{ id: "hist", sent_at: "2026-09-01T00:00:00.000Z" }],
+            error: null,
+          }).then(onFulfilled, onRejected)
+        return chain
+      },
+      update: () => {
+        const chain: Record<string, unknown> = {}
+        chain.in = () => chain
+        chain.is = () => chain
+        chain.select = () => Promise.resolve({ data: null, error: { message: "stamp failed" } })
+        return chain
+      },
+    }),
+  }
+  const result = await supersedePriorPublishedQuoteDocuments(sb, {
+    jobId: "job-1",
+    currentDocumentId: "doc-new",
+    currentVersion: 2,
+    jobContactId: null,
+    runLabel: null,
+  })
+  assertEquals(result, { ok: false, error: "stamp failed" })
+})
+
+Deno.test("R9-002 accepted documents are already published for send-runs reuse", () => {
+  assertEquals(quoteSendIsPublished({
+    accepted_at: "2026-09-06T00:00:00.000Z",
+    sent_to_client: false,
+    sent_at: null,
+  }), true)
+  assertEquals(quoteSendIsPublished({
+    sent_at: "2026-09-01T00:00:00.000Z",
+  }), true)
+  assertEquals(quoteSendIsPublished({
+    sent_to_client: false,
+    sent_at: "2026-09-01T00:00:00.000Z",
+  }), false)
+  const accepted = resolveSendRunDocument([{
+    id: "doc-acc",
+    type: "quote",
+    run_label: "REAR",
+    job_contact_id: "c-1",
+    sent_to_client: false,
+    sent_at: null,
+    accepted_at: "2026-09-06T00:00:00.000Z",
+    superseded_at: null,
+  }], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(accepted.action, "use_published")
+  if (accepted.action === "use_published") {
+    assertEquals(accepted.document.id, "doc-acc")
+  }
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "c-1",
+        accepted_at: "2026-09-06T00:00:00.000Z",
+        sent_to_client: false,
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    true,
+  )
+})
+
 Deno.test("R6-005 claim database errors are not already_sent", async () => {
   const sb = {
     from: (_table: string) => ({
@@ -1321,9 +1411,8 @@ Deno.test("R6-005 claim database errors are not already_sent", async () => {
 // G-B2 SUPERSESSION SCOPE-MATCH — manual test documentation
 // ════════════════════════════════════════════════════════════════════════════
 //
-// The G-B2 supersession logic is inline in the /send handler and not extracted
-// into a unit-testable helper, so we document the manual test here rather than
-// forcing a refactor. Verify in Supabase directly after a resend:
+// G-B2 candidate matching is unit-tested via priorPublishedQuoteIdsToSupersede
+// (R9-001). Scope isolation against live rows is still a manual check:
 //
 //   1. Send version 1 of a quote (doc A, version=1, job_contact_id=X, run_label=Y).
 //      Confirm: doc A has sent_to_client=true, superseded_at IS NULL.

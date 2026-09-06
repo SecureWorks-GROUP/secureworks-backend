@@ -16,6 +16,11 @@
  * same TTL so concurrent/retry calls cannot mint a second published pack.
  */
 
+import {
+  quoteDocumentHasClientSend,
+  quoteDocumentIsSuperseded,
+} from './pack_trade_quote.ts'
+
 export const QUOTE_SEND_CLAIM_TTL_MS = 15 * 60 * 1000
 
 export type QuoteSendPublicationClient = {
@@ -97,10 +102,10 @@ export function quoteSendClaimIsStale(
 export function quoteSendIsPublished(row: {
   sent_to_client?: boolean | null
   sent_at?: string | null
+  accepted_at?: string | null
+  send_claimed_at?: string | null
 }): boolean {
-  return row.sent_to_client === true &&
-    typeof row.sent_at === 'string' &&
-    row.sent_at.trim().length > 0
+  return quoteDocumentHasClientSend(row)
 }
 
 function uniqueDocumentIds(documentIds: Iterable<string | null | undefined>): string[] {
@@ -152,6 +157,7 @@ async function claimQuoteDocumentSendExclusive(
     .eq('id', documentId)
     .is('send_claimed_at', null)
     .is('sent_at', null)
+    .is('accepted_at', null)
     .not('sent_to_client', 'is', true)
     .select('id')
     .maybeSingle()
@@ -175,6 +181,7 @@ async function reclaimStaleQuoteDocumentSend(
     .update(payload)
     .eq('id', documentId)
     .is('sent_at', null)
+    .is('accepted_at', null)
     .not('sent_to_client', 'is', true)
     .lt('send_claimed_at', quoteSendClaimStaleBefore(now))
     .select('id')
@@ -369,6 +376,7 @@ export type SendRunExistingDocument = {
   share_token?: string | null
   quote_number?: string | null
   superseded_at?: string | null
+  accepted_at?: string | null
 }
 
 export type SendRunPartyKey = {
@@ -422,6 +430,90 @@ export function resolveSendRunDocument(
   if (!found) return { action: 'create' }
   if (found.published) return { action: 'use_published', document: found.document }
   return { action: 'reuse_unpublished', document: found.document }
+}
+
+export type PriorQuoteSupersedeCandidate = {
+  id?: string | null
+  sent_at?: string | null
+  sent_to_client?: boolean | null
+  accepted_at?: string | null
+  send_claimed_at?: string | null
+  superseded_at?: string | null
+}
+
+/** Same durable-publication predicate as extract eligibility. Historical
+ *  omitted-flag + sent_at and accepted_at rows must be superseded; explicit
+ *  sent_to_client=false and in-flight claims stay current unpublished work. */
+export function priorPublishedQuoteIdsToSupersede(
+  candidates: PriorQuoteSupersedeCandidate[],
+): string[] {
+  return uniqueDocumentIds(
+    (candidates || [])
+      .filter((row) => {
+        const publication = {
+          sent_at: row.sent_at,
+          sent_to_client: row.sent_to_client,
+          accepted_at: row.accepted_at,
+          send_claimed_at: row.send_claimed_at,
+          superseded_at: row.superseded_at,
+        }
+        return quoteDocumentHasClientSend(publication) && !quoteDocumentIsSuperseded(publication)
+      })
+      .map((row) => row.id),
+  )
+}
+
+export async function supersedePriorPublishedQuoteDocuments(
+  sb: QuoteSendPublicationClient,
+  input: {
+    jobId: string
+    currentDocumentId: string
+    currentVersion: number
+    jobContactId: string | null
+    runLabel: string | null
+    supersededByRevisionId?: string | null
+    now?: Date
+  },
+): Promise<{ ok: true; supersededIds: string[] } | { ok: false; error: string }> {
+  let sel = sb
+    .from('job_documents')
+    .select('id, version, sent_at, sent_to_client, accepted_at, send_claimed_at, superseded_at')
+    .eq('job_id', input.jobId)
+    .eq('type', 'quote')
+    .is('superseded_at', null)
+    .lt('version', input.currentVersion)
+    .neq('id', input.currentDocumentId)
+  sel = input.jobContactId == null
+    ? sel.is('job_contact_id', null)
+    : sel.eq('job_contact_id', input.jobContactId)
+  sel = input.runLabel == null
+    ? sel.is('run_label', null)
+    : sel.eq('run_label', input.runLabel)
+  const { data, error } = await sel
+  if (error) {
+    console.error('[send-quote] G-B2 supersede-prior read failed:', claimErrorMessage(error))
+    return { ok: false, error: claimErrorMessage(error) }
+  }
+  const ids = priorPublishedQuoteIdsToSupersede(Array.isArray(data) ? data : [])
+  if (!ids.length) return { ok: true, supersededIds: [] }
+  const now = input.now || new Date()
+  const { data: updated, error: updateError } = await sb
+    .from('job_documents')
+    .update({
+      superseded_at: now.toISOString(),
+      superseded_by_revision_id: input.supersededByRevisionId ?? null,
+    })
+    .in('id', ids)
+    .is('superseded_at', null)
+    .select('id')
+  if (updateError) {
+    console.error('[send-quote] G-B2 supersede-prior write failed:', claimErrorMessage(updateError))
+    return { ok: false, error: claimErrorMessage(updateError) }
+  }
+  const supersededIds = uniqueDocumentIds(
+    (Array.isArray(updated) ? updated : []).map((row: { id?: string | null }) => row?.id),
+  )
+  return { ok: true, supersededIds }
 }
 
 export function sendRunsPublicationFailureBlocksSuccess(input: {
@@ -489,6 +581,8 @@ export function sendRunsPrimaryClientPublicationSatisfied(input: {
     superseded_at?: string | null
     sent_to_client?: boolean | null
     sent_at?: string | null
+    accepted_at?: string | null
+    send_claimed_at?: string | null
   }>
   primaryJobContactId: string | null
 }): boolean {
