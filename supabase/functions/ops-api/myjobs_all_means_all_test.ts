@@ -1805,7 +1805,9 @@ Deno.test("search_all_jobs: allocated / makesafe_open drop notes, metadata, and 
   assertEquals(job.makesafe_details?.external_ref, "MLB-27000");
   assertEquals(JSON.stringify(job).includes("9999"), false);
   assertEquals(JSON.stringify(job).includes("PO-54000"), false);
-  const jobQuery = recorded.find((q) => q.table === "jobs" && !q.head);
+  const jobQuery = recorded.find((q) =>
+    q.table === "jobs" && !q.head && q.select.includes("job_number")
+  );
   assertEquals(
     jobQuery?.select.includes("notes"),
     false,
@@ -1816,7 +1818,9 @@ Deno.test("search_all_jobs: allocated / makesafe_open drop notes, metadata, and 
     false,
     "allocated job-feed select omits metadata",
   );
-  const detailQuery = recorded.find((q) => q.table === "makesafe_job_details");
+  const detailQuery = recorded.find((q) =>
+    q.table === "makesafe_job_details" && q.select.includes("makesafe_companies")
+  );
   assertEquals(detailQuery?.select.includes("*"), false);
   assertEquals(detailQuery?.select.includes("invoice_notes"), false);
 });
@@ -1835,9 +1839,13 @@ Deno.test("search_all_jobs: office / DM keep notes, metadata, and full MakeSafe 
   assertEquals(job.metadata?.builder_po_number, "PO-54000");
   assertEquals(job.makesafe_details?.invoice_notes, "Bill $9,999. Rate 85.");
   assertEquals(job.makesafe_details?.billing_rules, { rate: 85, amount: 9999 });
-  const jobQuery = recorded.find((q) => q.table === "jobs" && !q.head);
+  const jobQuery = recorded.find((q) =>
+    q.table === "jobs" && !q.head && q.select.includes("job_number")
+  );
   assertEquals(jobQuery?.select.includes("notes"), true);
   assertEquals(jobQuery?.select.includes("metadata"), true);
-  const detailQuery = recorded.find((q) => q.table === "makesafe_job_details");
+  const detailQuery = recorded.find((q) =>
+    q.table === "makesafe_job_details" && q.select.includes("makesafe_companies")
+  );
   assertEquals(detailQuery?.select.startsWith("*"), true);
 });

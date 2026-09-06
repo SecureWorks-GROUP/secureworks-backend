@@ -517,6 +517,30 @@ export function stripTradePackMoney(text: unknown): string {
 
   s = s
     .replace(new RegExp(`${TRADE_PACK_CURRENCY_PREFIX}${TRADE_PACK_MONEY_AMOUNT}`, 'gi'), '')
+    // Currency-word unit prices before suffix / money-word strips so
+    // "85 AUD each" is not reduced to leftover "each", and "Charge 85 dollars
+    // each" does not keep the unit after the money word eats 85.
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s+each\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s*(?:/\\s*|\\bper\\s+)(?:[A-Za-z]+(?:\\s+[A-Za-z]+)?)\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_CURRENCY_WORD}\\b`,
+        'gi',
+      ),
+      '',
+    )
     .replace(new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*${TRADE_PACK_CURRENCY_SUFFIX}`, 'gi'), '')
     .replace(
       new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*\\(?\\s*${TRADE_PACK_TAX_PHRASE}\\s*\\)?`, 'gi'),
@@ -542,28 +566,6 @@ export function stripTradePackMoney(text: unknown): string {
         'gi',
       ),
       '$1',
-    )
-    .replace(
-      new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s+each\\b`,
-        'gi',
-      ),
-      '',
-    )
-    .replace(
-      new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s*(?:/\\s*|\\bper\\s+)(?:[A-Za-z]+(?:\\s+[A-Za-z]+)?)\\b`,
-        'gi',
-      ),
-      '',
-    )
-    // "85 dollars" / "85 USD" with no unit still reads as a price.
-    .replace(
-      new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_CURRENCY_WORD}\\b`,
-        'gi',
-      ),
-      '',
     )
     // After qty holds, leftover "at 85" / "of 85" / "for 85" are unit prices
     // (12 panels at 85). Keep the connector; drop only the amount.
