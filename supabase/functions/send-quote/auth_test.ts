@@ -1,9 +1,10 @@
 // send-quote SEND-AUTH test suite (TRD6-R6-001 office/admin send lock).
 //
 // Imports the real decideSendQuoteAuth / tenant helpers so the handler and
-// this suite cannot drift. /send and /send-runs require admin, owner, or
-// ops_manager (OPS_API_STAFF_OPERATOR_ROLES). Trade JWTs are 403. API-key
-// and service-role stay office. /send-invoice still accepts any user JWT.
+// this suite cannot drift. /send, /send-runs, and /send-invoice require
+// admin, owner, or ops_manager (OPS_API_STAFF_OPERATOR_ROLES). Trade JWTs
+// are 403. API-key and service-role stay office. JWT send-invoice derives
+// recipient and payment from the authorized job/invoice, never the body.
 //
 // Run from the worktree root:
 //   deno test --allow-net --allow-env --allow-read supabase/functions/send-quote/auth_test.ts
@@ -16,7 +17,9 @@ import {
   decideSendQuoteAuth,
   isSendQuoteStaffOperatorRole,
   jobOrgIdFromQuoteSendDocument,
+  QUOTE_SEND_OFFICE_PATHS,
   quoteSendTenantAccess,
+  resolveSendInvoiceDelivery,
   SEND_QUOTE_STAFF_OPERATOR_ROLES,
 } from "./quote_send_auth.ts";
 
@@ -133,6 +136,10 @@ function captureAuthLog() {
 
 Deno.test("staff operator roles match the ops-api office set", () => {
   assertEquals(
+    [...QUOTE_SEND_OFFICE_PATHS].sort(),
+    ["send", "send-invoice", "send-runs"],
+  );
+  assertEquals(
     [...SEND_QUOTE_STAFF_OPERATOR_ROLES].sort(),
     ["admin", "ops_manager", "owner"],
   );
@@ -212,27 +219,29 @@ Deno.test("A4 — estimator JWT on /send is 403, not send authority", async () =
 
 Deno.test("A4-office — admin / owner / ops_manager JWT may send", async () => {
   for (const role of ["admin", "owner", "ops_manager"]) {
-    const cap = captureAuthLog();
-    try {
-      const d = await decideSendAuth(
-        req({ authorization: `Bearer ${VALID_JWT}` }),
-        makeAuthSb({ role, orgId: DEFAULT_ORG }),
-        ENV,
-        "send",
-      );
-      assert(d.kind === "allow", role);
-      assertEquals(d.mode, "jwt");
-      assertEquals(d.user, {
-        id: "user-uuid-777",
-        email: "operator@secureworksgroup.app",
-        role,
-        orgId: DEFAULT_ORG,
-      });
-      assertEquals(cap.captured[0].authMode, "jwt");
-      assertEquals(cap.captured[0].userRole, role);
-      assertEquals(cap.captured[0].refused, false);
-    } finally {
-      cap.restore();
+    for (const path of ["send", "send-invoice", "send-runs"]) {
+      const cap = captureAuthLog();
+      try {
+        const d = await decideSendAuth(
+          req({ authorization: `Bearer ${VALID_JWT}` }, path),
+          makeAuthSb({ role, orgId: DEFAULT_ORG }),
+          ENV,
+          path,
+        );
+        assert(d.kind === "allow", `${role} ${path}`);
+        assertEquals(d.mode, "jwt");
+        assertEquals(d.user, {
+          id: "user-uuid-777",
+          email: "operator@secureworksgroup.app",
+          role,
+          orgId: DEFAULT_ORG,
+        });
+        assertEquals(cap.captured[0].authMode, "jwt");
+        assertEquals(cap.captured[0].userRole, role);
+        assertEquals(cap.captured[0].refused, false);
+      } finally {
+        cap.restore();
+      }
     }
   }
 });
@@ -267,19 +276,37 @@ Deno.test("A4c — trade / allocated / makesafe_open / lead_installer JWTs canno
     );
     assert(runs.kind === "reject", `${role} send-runs`);
     assertEquals(runs.response.status, 403);
+    const invoice = await decideSendAuth(
+      req({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+      makeAuthSb({ role }),
+      ENV,
+      "send-invoice",
+    );
+    assert(invoice.kind === "reject", `${role} send-invoice`);
+    assertEquals(invoice.response.status, 403);
   }
 });
 
-Deno.test("A4d — send-invoice still accepts a verified estimator JWT", async () => {
-  const d = await decideSendAuth(
+Deno.test("A4d — send-invoice rejects estimator JWT and accepts office JWT", async () => {
+  const estimator = await decideSendAuth(
     req({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
     makeAuthSb({ role: "estimator" }),
     ENV,
     "send-invoice",
   );
-  assert(d.kind === "allow");
-  assertEquals(d.mode, "jwt");
-  assertEquals(d.user?.role, "estimator");
+  assert(estimator.kind === "reject");
+  assertEquals(estimator.response.status, 403);
+  assertEquals((await estimator.response.json()).code, "operator_access_required");
+
+  const admin = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+    makeAuthSb({ role: "admin", orgId: DEFAULT_ORG }),
+    ENV,
+    "send-invoice",
+  );
+  assert(admin.kind === "allow");
+  assertEquals(admin.mode, "jwt");
+  assertEquals(admin.user?.role, "admin");
 });
 
 Deno.test("A4e — unreadable users profile on /send is 503, not send authority", async () => {
@@ -345,7 +372,7 @@ Deno.test("A9 — public 'view' path bypasses send-auth entirely (no credentials
   assert(d.kind === "allow");
 });
 
-Deno.test("A10 — send / send-runs reject trade JWT; send-invoice still accepts user JWT", async () => {
+Deno.test("A10 — send / send-runs / send-invoice reject non-office JWT", async () => {
   for (const p of ["send", "send-invoice", "send-runs"]) {
     const anon = await decideSendAuth(req({}, p), makeAuthSb(), ENV, p);
     assert(anon.kind === "reject", `${p} must reject anon`);
@@ -375,8 +402,8 @@ Deno.test("A10 — send / send-runs reject trade JWT; send-invoice still accepts
     ENV,
     "send-invoice",
   );
-  assert(invoice.kind === "allow");
-  assertEquals(invoice.mode, "jwt");
+  assert(invoice.kind === "reject");
+  assertEquals(invoice.response.status, 403);
 
   const adminRuns = await decideSendAuth(
     req({ authorization: `Bearer ${VALID_JWT}` }, "send-runs"),
@@ -386,6 +413,15 @@ Deno.test("A10 — send / send-runs reject trade JWT; send-invoice still accepts
   );
   assert(adminRuns.kind === "allow");
   assertEquals(adminRuns.mode, "jwt");
+
+  const adminInvoice = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+    makeAuthSb({ role: "admin", orgId: DEFAULT_ORG }),
+    ENV,
+    "send-invoice",
+  );
+  assert(adminInvoice.kind === "allow");
+  assertEquals(adminInvoice.mode, "jwt");
 });
 
 Deno.test("T1 — JWT office caller may send only a same-org job", () => {
@@ -433,4 +469,69 @@ Deno.test("T5 — nested jobs.org_id is read from the send document join", () =>
   );
   assertEquals(jobOrgIdFromQuoteSendDocument({ jobs: null }), undefined);
   assertEquals(jobOrgIdFromQuoteSendDocument(null), undefined);
+});
+
+Deno.test("I1 — JWT send-invoice ignores body recipient and payment fields", () => {
+  const d = resolveSendInvoiceDelivery({
+    authMode: "jwt",
+    body: {
+      client_email: "attacker@evil.test",
+      client_name: "Attacker",
+      payment_url: "https://evil.test/pay",
+      invoice_number: "FAKE-1",
+      deposit_amount: 1,
+      job_type: "fencing",
+      address: "1 Attack St",
+      share_token: "stolen-token",
+      due_date: "yesterday",
+    },
+    job: {
+      client_email: "pat@example.test",
+      client_name: "Pat Client",
+      type: "patio",
+      site_address: "12 Fence St",
+      site_suburb: "Midland",
+    },
+    invoice: {
+      invoice_number: "INV-1001",
+      total: 1650,
+      due_date: "2026-09-20",
+    },
+  });
+  assertEquals(d.client_email, "pat@example.test");
+  assertEquals(d.client_name, "Pat Client");
+  assertEquals(d.job_type, "patio");
+  assertEquals(d.address, "12 Fence St, Midland");
+  assertEquals(d.invoice_number, "INV-1001");
+  assertEquals(d.deposit_amount, 1650);
+  assertEquals(d.payment_url, "");
+  assertEquals(d.share_token, "");
+  assertEquals(d.due_date, "2026-09-20");
+});
+
+Deno.test("I2 — api_key send-invoice may use office-derived body fields", () => {
+  const d = resolveSendInvoiceDelivery({
+    authMode: "api_key",
+    body: {
+      client_email: "override@example.test",
+      client_name: "Override",
+      payment_url: "https://in.xero.com/pay",
+      invoice_number: "INV-9",
+      deposit_amount: 500,
+      share_token: "tok-1",
+    },
+    job: {
+      client_email: "pat@example.test",
+      client_name: "Pat Client",
+      type: "fencing",
+      site_address: "12 Fence St",
+      site_suburb: "Midland",
+    },
+    invoice: { invoice_number: "INV-1001", total: 1650, due_date: "2026-09-20" },
+  });
+  assertEquals(d.client_email, "override@example.test");
+  assertEquals(d.payment_url, "https://in.xero.com/pay");
+  assertEquals(d.deposit_amount, 500);
+  assertEquals(d.share_token, "tok-1");
+  assertEquals(d.invoice_number, "INV-9");
 });

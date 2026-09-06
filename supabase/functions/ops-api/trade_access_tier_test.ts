@@ -35,6 +35,7 @@ import {
   ApiError,
   projectTradePurchaseOrders,
   assertAllocatedTradeQuotePackProjection,
+  projectAllocatedTradeQuotePacks,
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
@@ -811,6 +812,23 @@ Deno.test("redactTradeQuotePackMoney fail-closes ad-hoc percent payment language
   assertEquals(JSON.stringify(generic).includes("AUD"), false);
   assertEquals(JSON.stringify(generic).includes("GST"), false);
   assertAllocatedTradeQuotePackProjection(generic[0]);
+});
+
+Deno.test("projectAllocatedTradeQuotePacks redacts then fail-closes before emit", () => {
+  const emitted = projectAllocatedTradeQuotePacks([{
+    quote_number: "Q-1",
+    summary: "Price review / cost estimate / USD pricing",
+    items: [
+      { kind: "info", description: "Deposit required", quantity: 1, unit: "dollars" },
+      { kind: "install_m", description: "Rear 19m", quantity: 19, unit: "m" },
+    ],
+  }]);
+  assertEquals(emitted[0].summary, null);
+  assertEquals(emitted[0].items[0].description, null);
+  assertEquals(emitted[0].items[0].unit, undefined);
+  assertEquals(emitted[0].items[1].description, "Rear 19m");
+  assertEquals(emitted[0].items[1].unit, "m");
+  assertAllocatedTradeQuotePackProjection(emitted[0]);
 });
 
 Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {

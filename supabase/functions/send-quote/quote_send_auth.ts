@@ -1,4 +1,5 @@
-// Office/admin send gate for send-quote /send and /send-runs (TRD6-R6-001).
+// Office/admin send gate for send-quote /send, /send-runs, and /send-invoice
+// (TRD6-R6-001, TRD6-R12-004).
 //
 // Role names match OPS_API_STAFF_OPERATOR_ROLES in ops-api/index.ts
 // (admin / owner / ops_manager). Do not import that file here — it boots
@@ -11,7 +12,7 @@ export const SEND_QUOTE_STAFF_OPERATOR_ROLES = new Set([
   'ops_manager',
 ])
 
-export const QUOTE_SEND_OFFICE_PATHS = new Set(['send', 'send-runs'])
+export const QUOTE_SEND_OFFICE_PATHS = new Set(['send', 'send-invoice', 'send-runs'])
 
 export const QUOTE_SEND_AUTH_PATHS = new Set([
   'send',
@@ -101,6 +102,93 @@ export function quoteSendTenantAccess(
     }
   }
   return { ok: true }
+}
+
+function asTrimmedString(value: unknown): string {
+  return String(value ?? '').trim()
+}
+
+function asDepositAmount(value: unknown): number {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+export type SendInvoiceDeliverySource = {
+  client_email?: unknown
+  client_name?: unknown
+  type?: unknown
+  site_address?: unknown
+  site_suburb?: unknown
+}
+
+export type SendInvoiceMirrorSource = {
+  invoice_number?: unknown
+  total?: unknown
+  due_date?: unknown
+}
+
+export type SendInvoiceDelivery = {
+  client_email: string
+  client_name: string
+  job_type: string
+  address: string
+  invoice_number: string
+  deposit_amount: number
+  payment_url: string
+  share_token: string
+  due_date: string
+}
+
+/**
+ * JWT callers never supply the recipient or payment fields — those come
+ * from the authorized invoice/job after tenancy. API-key (ops-api) may
+ * pass already-derived office fields.
+ */
+export function resolveSendInvoiceDelivery(input: {
+  authMode: 'api_key' | 'jwt'
+  body: Record<string, unknown> | null | undefined
+  job: SendInvoiceDeliverySource | null | undefined
+  invoice: SendInvoiceMirrorSource | null | undefined
+}): SendInvoiceDelivery {
+  const body = input.body && typeof input.body === 'object' && !Array.isArray(input.body)
+    ? input.body
+    : {}
+  const jobEmail = asTrimmedString(input.job?.client_email)
+  const jobName = asTrimmedString(input.job?.client_name)
+  const jobType = asTrimmedString(input.job?.type)
+  const jobAddress = [input.job?.site_address, input.job?.site_suburb]
+    .map((part) => asTrimmedString(part))
+    .filter(Boolean)
+    .join(', ')
+  const invoiceNumber = asTrimmedString(input.invoice?.invoice_number)
+  const invoiceTotal = asDepositAmount(input.invoice?.total)
+  const invoiceDue = asTrimmedString(input.invoice?.due_date)
+
+  if (input.authMode === 'jwt') {
+    return {
+      client_email: jobEmail,
+      client_name: jobName,
+      job_type: jobType,
+      address: jobAddress,
+      invoice_number: invoiceNumber,
+      deposit_amount: invoiceTotal,
+      payment_url: '',
+      share_token: '',
+      due_date: invoiceDue,
+    }
+  }
+
+  return {
+    client_email: asTrimmedString(body.client_email) || jobEmail,
+    client_name: asTrimmedString(body.client_name) || jobName,
+    job_type: asTrimmedString(body.job_type) || jobType,
+    address: asTrimmedString(body.address) || jobAddress,
+    invoice_number: asTrimmedString(body.invoice_number) || invoiceNumber,
+    deposit_amount: asDepositAmount(body.deposit_amount) || invoiceTotal,
+    payment_url: asTrimmedString(body.payment_url),
+    share_token: asTrimmedString(body.share_token),
+    due_date: asTrimmedString(body.due_date) || invoiceDue,
+  }
 }
 
 export function jobOrgIdFromQuoteSendDocument(doc: {

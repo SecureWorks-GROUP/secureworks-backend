@@ -77,6 +77,7 @@ import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
   quoteSendTenantAccess,
+  resolveSendInvoiceDelivery,
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 
@@ -657,11 +658,12 @@ serve(async (req: Request) => {
     //   api_key — the master SW_API_KEY (ops dashboard, patio tool, agents) or the
     //             service-role key, presented via x-api-key OR Authorization: Bearer.
     //             This path is office send authority and MUST stay.
-    //   jwt     — a logged-in Supabase user. /send and /send-runs require an
-    //             office staff role (admin / owner / ops_manager), matching
-    //             OPS_API_STAFF_OPERATOR_ROLES. Trade / estimator / allocated /
-    //             makesafe_open JWTs are 403 before any Resend or draft→quoted
-    //             write. /send-invoice keeps any verified user JWT.
+    //   jwt     — a logged-in Supabase user. /send, /send-runs, and
+    //             /send-invoice require an office staff role (admin / owner /
+    //             ops_manager), matching OPS_API_STAFF_OPERATOR_ROLES. Trade /
+    //             estimator / allocated / makesafe_open JWTs are 403 before any
+    //             Resend or draft→quoted write. JWT send-invoice also refuses
+    //             body-supplied client_email / payment fields.
     let sendAuthMode: 'api_key' | 'jwt' = 'api_key'
     let sendAuthUser: SendQuoteAuthUser | null = null
     if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
@@ -2919,15 +2921,15 @@ serve(async (req: Request) => {
     // ── SEND BRANDED INVOICE EMAIL ──
     if (path === 'send-invoice' && req.method === 'POST') {
       const body = await req.json()
-      const { xero_invoice_id, job_id, payment_url, invoice_number, deposit_amount,
-              client_name, client_email, job_type, address, share_token, due_date } = body
+      const xero_invoice_id = body?.xero_invoice_id
+      const job_id = body?.job_id
 
-      if (!xero_invoice_id || !job_id || !client_email) {
-        return jsonResponse({ error: 'xero_invoice_id, job_id, and client_email required' }, 400, corsHeaders)
+      if (!xero_invoice_id || !job_id) {
+        return jsonResponse({ error: 'xero_invoice_id and job_id required' }, 400, corsHeaders)
       }
 
       const { data: invoiceRecord, error: invoiceError } = await sb.from('xero_invoices')
-        .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
+        .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token,invoice_number,total,due_date')
         .eq('xero_invoice_id', xero_invoice_id)
         .maybeSingle()
       if (invoiceError || !invoiceRecord) {
@@ -2972,10 +2974,42 @@ serve(async (req: Request) => {
         return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
       }
 
-      // Look up job for reply-to routing and GHL logging
-      const { data: invoiceJob } = await sb.from('jobs')
-        .select('job_number, type, ghl_contact_id')
+      // Look up the authorized job for tenancy, recipient, and reply-to.
+      const { data: invoiceJob, error: invoiceJobError } = await sb.from('jobs')
+        .select('job_number, type, ghl_contact_id, org_id, client_email, client_name, site_address, site_suburb')
         .eq('id', invoiceRecord.job_id).maybeSingle()
+      if (invoiceJobError) {
+        console.error('[send-invoice] job read failed:', invoiceJobError.message)
+        return jsonResponse({ error: 'Invoice job could not be read' }, 503, corsHeaders)
+      }
+
+      {
+        const tenant = quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, invoiceJob?.org_id)
+        if (!tenant.ok) {
+          return jsonResponse({ error: tenant.error, code: tenant.code }, tenant.status, corsHeaders)
+        }
+      }
+
+      const delivery = resolveSendInvoiceDelivery({
+        authMode: sendAuthMode,
+        body,
+        job: invoiceJob,
+        invoice: invoiceRecord,
+      })
+      const {
+        client_email,
+        client_name,
+        job_type,
+        address,
+        invoice_number,
+        deposit_amount,
+        payment_url,
+        share_token,
+        due_date,
+      } = delivery
+      if (!client_email) {
+        return jsonResponse({ error: 'No email address found for this invoice job' }, 400, corsHeaders)
+      }
 
       const firstName = (client_name || 'there').split(' ')[0]
       const typeName = job_type === 'fencing' ? 'fencing' : job_type === 'decking' ? 'decking' : 'patio'
@@ -3024,14 +3058,14 @@ serve(async (req: Request) => {
           const resendData = await emailRes.json()
           resendMessageId = resendData.id
           await insertEmailEvent(sb, {
-            emailType: 'invoice', jobId: job_id, recipient: client_email,
+            emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
             subject: emailSubject, resendMessageId,
             status: 'sent',
             metadata: { xero_invoice_id, invoice_number, deposit_amount, client_name, job_type },
           })
           // Log to po_communications for client email thread
           sb.from('po_communications').insert({
-            job_id, direction: 'outbound',
+            job_id: invoiceRecord.job_id, direction: 'outbound',
             from_email: 'invoices@secureworksgroup.app', to_email: client_email,
             subject: emailSubject, body_html: emailHtml,
             communication_type: 'client', sent_at: new Date().toISOString(),
@@ -3043,7 +3077,7 @@ serve(async (req: Request) => {
           const errData = await emailRes.json().catch(() => ({}))
           console.log('[send-invoice] Resend failed:', JSON.stringify(errData))
           await insertEmailEvent(sb, {
-            emailType: 'invoice', jobId: job_id, recipient: client_email,
+            emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
             subject: emailSubject, status: 'failed',
             failureReason: errData.message || `HTTP ${emailRes.status}`,
             metadata: { xero_invoice_id, invoice_number, client_name },

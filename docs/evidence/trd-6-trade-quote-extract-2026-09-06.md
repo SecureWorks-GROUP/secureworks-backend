@@ -142,7 +142,7 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   `operator_access_required` before Resend, claim, or `draft`→`quoted`.
   JWT send also requires `users.org_id` === `jobs.org_id`; a missing org
   on either side fails closed. API-key / service-role stays office.
-  `/send-invoice` still accepts any verified user JWT.
+  Review-12 puts `/send-invoice` on the same office JWT + tenant gate.
 - **Frozen pack is part of publication.** Both send paths persist and
   confirm `trade_pack_json` before `sent_to_client`/`sent_at`. An
   unconfirmed pack write reverts the owned claim and returns 500. A
@@ -229,3 +229,23 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   that trips `tradeTextHasMoneyToken`. Redact applies that same
   fail-closed check before emitting `unit`. Approved construction
   units (`m`, `ea`, `lot`, …) stay.
+
+## Review-12 locks (2026-09-06)
+
+- **`/send-invoice` is office-only.** `QUOTE_SEND_OFFICE_PATHS` is
+  `send` / `send-invoice` / `send-runs`. JWT callers must be
+  `admin` / `owner` / `ops_manager`. Trade / estimator / allocated /
+  `makesafe_open` / `lead_installer` are 403 before Resend. Tenant
+  compare is `users.org_id` === the authorized invoice job's
+  `jobs.org_id`. API-key / service-role stays office.
+- **JWT send-invoice does not trust body recipient or payment fields.**
+  `resolveSendInvoiceDelivery` reads `client_email`, name, type,
+  address, invoice number, deposit, and due date from the authorized
+  job / Xero mirror. Body `payment_url` / `share_token` / attacker
+  email are ignored on JWT. API-key may still pass office-derived
+  fields (ops-api).
+- **Allocated `quote_packs` emit is asserted.** After
+  `redactTradeQuotePackMoney`, `projectAllocatedTradeQuotePacks`
+  runs `assertAllocatedTradeQuotePackProjection` on every pack
+  before `trade_job_detail` returns allocated / `makesafe_open`
+  `quote_packs`. A residual leak 500s rather than shipping.

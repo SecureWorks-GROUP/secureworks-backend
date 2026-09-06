@@ -38920,6 +38920,15 @@ export function assertAllocatedTradeQuotePackProjection(pack: unknown): void {
   }
 }
 
+/** Allocated / makesafe_open quote_packs emit: redact, then fail closed. */
+export function projectAllocatedTradeQuotePacks(packs: any[]): any[] {
+  const redacted = redactTradeQuotePackMoney(packs)
+  for (const pack of redacted) {
+    assertAllocatedTradeQuotePackProjection(pack)
+  }
+  return redacted
+}
+
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
 // helper ops already uses for invoice descriptions — no second scope grammar.
 //
@@ -39275,7 +39284,7 @@ async function tradeJobDetail(
     : sanitizeTradeAllocatedMediaNotes(tradeMedia)
   const tradeQuotePacks = quoteVisible
     ? quotePacks
-    : redactTradeQuotePackMoney(quotePacks)
+    : projectAllocatedTradeQuotePacks(quotePacks)
 
   return {
     job: tradeSafeJob,
