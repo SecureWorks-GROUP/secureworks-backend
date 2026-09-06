@@ -28,6 +28,7 @@ import {
   _tradeDocumentsForAllocatedTrade,
   _tradeJobDetailForTest,
   _tradeLabourBudgetForTest,
+  _tradeScopeSummary,
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
@@ -553,7 +554,15 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
     id: "e-note",
     job_id: JOB_FENCE,
     event_type: "note",
-    detail_json: { text: "Client approved $9,999 excluding GST" },
+    detail_json: {
+      text: "Client approved $9,999 excluding GST",
+      message: "Charge $9,999 extra",
+      description: "Approved total 9,999 ex GST",
+      body: "Fee 1,200 exclusive of GST",
+      content: "Plus 80 +GST",
+      amount: 9999,
+      qty: 2,
+    },
     created_at: "2026-09-01T00:00:00Z",
     users: { name: "Ops" },
   }];
@@ -562,16 +571,32 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
     job_id: JOB_FENCE,
     type: "photo",
     storage_url: "https://cdn.example.test/jobs/swf-26101/front.jpg",
+    label: "Front run $9,999",
     notes: "Front run priced 1,200 exclusive of GST",
+    caption: "Priced $850",
   }];
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.notes[0].detail_json.text, "Client approved");
+  assertEquals(allocated.notes[0].detail_json.message, "Charge extra");
+  assertEquals(allocated.notes[0].detail_json.description, "Approved total");
+  assertEquals(allocated.notes[0].detail_json.body, "Fee");
+  assertEquals(allocated.notes[0].detail_json.content, "Plus");
+  assertEquals(allocated.notes[0].detail_json.amount, undefined);
+  assertEquals(allocated.notes[0].detail_json.qty, 2);
+  assertEquals(allocated.media[0].label, "Front run");
   assertEquals(allocated.media[0].notes, "Front run priced");
+  assertEquals(allocated.media[0].caption, "Priced");
+  assertEquals(allocated.media[0].storage_url, "https://cdn.example.test/jobs/swf-26101/front.jpg");
   assertEquals(JSON.stringify(allocated.notes).includes("9999"), false);
   assertEquals(JSON.stringify(allocated.media).includes("1200"), false);
+  assertEquals(JSON.stringify(allocated.media).includes("850"), false);
   const office = await detail(t, viewer(OFFICE, "ops_manager"));
   assertEquals(office.notes[0].detail_json.text, "Client approved $9,999 excluding GST");
+  assertEquals(office.notes[0].detail_json.message, "Charge $9,999 extra");
+  assertEquals(office.notes[0].detail_json.amount, 9999);
+  assertEquals(office.media[0].label, "Front run $9,999");
   assertEquals(office.media[0].notes, "Front run priced 1,200 exclusive of GST");
+  assertEquals(office.media[0].caption, "Priced $850");
 });
 
 Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO prose", async () => {
@@ -757,6 +782,45 @@ Deno.test("trade_job_detail: the fencing division manager sees the quote docs an
   assertEquals(p.workOrders[0].scope_items[0].rate, 85);
   assertEquals(p.workOrders[0].special_instructions, "Park on the verge. Charge $9,999 extra.");
   assertEquals(p.workOrderDocuments.map((d: any) => d.id).sort(), ["d-supplier-wo", "d-wo"]);
+});
+
+Deno.test("trade_job_detail: allocated scopeSummary is built from the redacted no-money projection", async () => {
+  const t = seed();
+  const job = t.jobs.find((j: any) => j.id === JOB_FENCE);
+  job.scope_json = {
+    ...job.scope_json,
+    job: {
+      ...job.scope_json.job,
+      material: "Colorbond $9,999",
+      colour: "Monument 9,999 ex GST",
+      quotedTotals: [594],
+    },
+  };
+  const allocated = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(JSON.stringify(allocated.job.scope_json).includes("594"), false);
+  assertEquals(JSON.stringify(allocated.scopeSummary).includes("9999"), false);
+  assertEquals(JSON.stringify(allocated.scopeSummary).includes("594"), false);
+  assertEquals(allocated.scopeSummary.includes("Colorbond"), true);
+  assertEquals(allocated.scopeSummary.includes("Monument"), true);
+  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  assertEquals(office.scopeSummary.includes("$9,999") || office.job.scope_json.job.material.includes("$9,999"), true);
+  assertEquals(office.job.scope_json.job.quotedTotals, [594]);
+});
+
+Deno.test("_tradeScopeSummary strips money only when asked — office full-quote line stays raw", () => {
+  const job = {
+    type: "fencing",
+    scope_json: {
+      job: {
+        runs: [{ length: 10 }],
+        material: "Colorbond $9,999",
+        colour: "Monument",
+        sheetHeight: 1800,
+      },
+    },
+  };
+  assertEquals(_tradeScopeSummary(job), "10m, Colorbond $9,999, Monument, 1800mm high");
+  assertEquals(_tradeScopeSummary(job, { sanitizeMoney: true }), "10m, Colorbond, Monument, 1800mm high");
 });
 
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
@@ -955,6 +1019,23 @@ Deno.test("redactTradeScopeQuote drops unlisted numeric money keys and keeps con
   assertEquals(JSON.stringify(r).includes("1375"), false);
   assertEquals(JSON.stringify(r).includes("9999"), false);
   assertEquals(JSON.stringify(r).includes("250"), false);
+  assertEquals(JSON.stringify(r).includes("850"), false);
+});
+
+Deno.test("redactTradeScopeQuote drops numeric money arrays under unlisted keys", () => {
+  const r = redactTradeScopeQuote({
+    quotedTotals: [594],
+    extras: { sellEx: [1250, "850"] },
+    qty: [12, 14],
+    job: { runs: [{ length: 10 }], quotedTotals: [594] },
+  });
+  assertEquals(r.quotedTotals, []);
+  assertEquals(r.extras.sellEx, []);
+  assertEquals(r.qty, [12, 14]);
+  assertEquals(r.job.runs, [{ length: 10 }]);
+  assertEquals(r.job.quotedTotals, []);
+  assertEquals(JSON.stringify(r).includes("594"), false);
+  assertEquals(JSON.stringify(r).includes("1250"), false);
   assertEquals(JSON.stringify(r).includes("850"), false);
 });
 

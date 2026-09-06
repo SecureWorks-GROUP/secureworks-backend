@@ -38188,10 +38188,13 @@ export const TRADE_SCOPE_QUANTITY_KEEP_KEYS = new Set([
   'site_lat',
   'site_lng',
   'posts',
+  'postCount',
   'pickets',
   'star_picket_count',
   'panel_count',
   'base_count',
+  'projection',
+  'gateCount',
 ])
 // Named known-prose keys only. The allocated walker sanitizes EVERY retained
 // string leaf — unlisted keys (siteNotes, supplierNotes, noteInternal, …)
@@ -38231,21 +38234,80 @@ function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
   return value
 }
 
+/** Array elements have no own key. Apply the parent's keep/drop policy so
+ *  `{ quotedTotals: [594] }` cannot fail open just because the walker lost
+ *  the field name. Unlisted numeric / bare-money primitives are dropped. */
+function tradeScopeRetainPrimitive(value: unknown, parentKey: string | undefined): unknown {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (!parentKey || !tradeScopeKeepNumericLeaf(parentKey)) return undefined
+    return value
+  }
+  if (typeof value === 'string') {
+    if (parentKey && !tradeScopeKeepNumericLeaf(parentKey) && tradeScopeBareMoneyValue(value)) {
+      return undefined
+    }
+    const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+    return cleaned === '' ? undefined : cleaned
+  }
+  return value
+}
+
+function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string): any {
+  if (node == null) return node
+  if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
+  if (Array.isArray(node)) {
+    return node
+      .map((v) => sanitizeTradeAllocatedJsonTree(v, depth + 1, parentKey))
+      .filter((v) => v !== undefined)
+  }
+  if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
+  const out: Record<string, any> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (!tradeScopeKeepNumericLeaf(key)) continue
+      out[key] = value
+      continue
+    }
+    if (typeof value === 'string') {
+      if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
+      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+      if (cleaned === '') continue
+      out[key] = cleaned
+      continue
+    }
+    const walked = sanitizeTradeAllocatedJsonTree(value, depth + 1, key)
+    if (walked === undefined) continue
+    out[key] = walked
+  }
+  return out
+}
+
 function sanitizeTradeAllocatedEventNotes(events: any[]): any[] {
   return (events || []).map((row) => {
-    const detail = row?.detail_json
-    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return row
-    const next = { ...detail }
-    if (typeof next.text === 'string') next.text = sanitizeTradeAllocatedStringLeaf(next.text)
-    if (typeof next.note === 'string') next.note = sanitizeTradeAllocatedStringLeaf(next.note)
-    return { ...row, detail_json: next }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    if (!Object.prototype.hasOwnProperty.call(row, 'detail_json')) return row
+    const next = sanitizeTradeAllocatedJsonTree(row.detail_json)
+    return { ...row, detail_json: next === undefined ? null : next }
   })
 }
 
 function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
   return (media || []).map((row) => {
-    if (!row || typeof row !== 'object' || typeof row.notes !== 'string') return row
-    return { ...row, notes: sanitizeTradeAllocatedStringLeaf(row.notes) }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    const out: Record<string, any> = { ...row }
+    for (const key of Object.keys(out)) {
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) {
+        delete out[key]
+        continue
+      }
+      const value = out[key]
+      if (typeof value !== 'string') continue
+      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+      if (cleaned === '') delete out[key]
+      else out[key] = cleaned
+    }
+    return out
   })
 }
 
@@ -38256,15 +38318,15 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
 // using it as the drop marker cannot collide with real scope data.
 export const TRADE_SCOPE_REDACTION_MAX_DEPTH = 12
 
-function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
+function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: string): any {
   if (node == null) return node
   if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
   if (Array.isArray(node)) {
-    return node.map((v) => walkTradeQuoteObjectAllowlist(v, depth + 1)).filter((v) =>
-      v !== undefined
-    )
+    return node
+      .map((v) => walkTradeQuoteObjectAllowlist(v, depth + 1, parentKey))
+      .filter((v) => v !== undefined)
   }
-  if (typeof node !== 'object') return node
+  if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
     if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
@@ -38286,10 +38348,10 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
         .map((v) =>
           typeof v === 'string'
             ? (stripTradePackMoney(v) || undefined)
-            : walkTradeQuoteObjectAllowlist(v, depth + 1)
+            : walkTradeQuoteObjectAllowlist(v, depth + 1, key)
         )
         .filter((v) => v !== undefined)
-      : walkTradeQuoteObjectAllowlist(value, depth + 1)
+      : walkTradeQuoteObjectAllowlist(value, depth + 1, key)
     if (walked === undefined) continue
     out[key] = walked
   }
@@ -38297,13 +38359,13 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
 }
 
 export function redactTradeScopeQuote(scope: any): any {
-  const walk = (node: any, depth: number): any => {
+  const walk = (node: any, depth: number, parentKey?: string): any => {
     if (node == null) return node
     if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
     if (Array.isArray(node)) {
-      return node.map((v) => walk(v, depth + 1)).filter((v) => v !== undefined)
+      return node.map((v) => walk(v, depth + 1, parentKey)).filter((v) => v !== undefined)
     }
-    if (typeof node !== 'object') return node
+    if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
@@ -38315,7 +38377,7 @@ export function redactTradeScopeQuote(scope: any): any {
           out[key] = cleaned
           continue
         }
-        const allowlisted = walkTradeQuoteObjectAllowlist(value, depth + 1)
+        const allowlisted = walkTradeQuoteObjectAllowlist(value, depth + 1, key)
         if (allowlisted === undefined) continue
         out[key] = allowlisted
         continue
@@ -38346,7 +38408,7 @@ export function redactTradeScopeQuote(scope: any): any {
         out.pricing = Object.keys(keptLabour).length > 0 ? { labour: keptLabour } : {}
         continue
       }
-      const walked = walk(value, depth + 1)
+      const walked = walk(value, depth + 1, key)
       if (walked === undefined) continue
       out[key] = walked
     }
@@ -38468,10 +38530,14 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
 // fallback is already inert, but this strips it explicitly so a later maintainer
 // adding pricing_json to the trade select cannot silently start leaking a quote
 // description into an installer's phone.
-export function _tradeScopeSummary(job: any): string {
+export function _tradeScopeSummary(
+  job: any,
+  opts?: { sanitizeMoney?: boolean },
+): string {
   if (!job) return ''
   const { pricing_json: _pricing, ...scopeOnly } = job
-  return buildScopeSummaryLine(scopeOnly) || ''
+  const line = buildScopeSummaryLine(scopeOnly) || ''
+  return opts?.sanitizeMoney ? stripTradePackMoney(line) : line
 }
 
 // One crew roster per job, carrying the lead designation.
@@ -38862,7 +38928,13 @@ async function tradeJobDetail(
     // the trade payload was the raw scope_json blob (measured up to 1.6 MB on a
     // live job, mostly base64 site-plan media), which is not something a phone
     // should be reverse-engineering.
-    scopeSummary: _tradeScopeSummary(jobRes.data),
+    // Allocated / makesafe_open must not derive a summary from the raw
+    // unredacted blob — colour / material / connection can carry sell figures.
+    // Office and division-manager keep the full-quote line from the live job.
+    scopeSummary: _tradeScopeSummary(
+      quoteVisible ? jobRes.data : tradeSafeJob,
+      quoteVisible ? undefined : { sanitizeMoney: true },
+    ),
     crew: tradeCrew,
     // Additive: who leads this job, or null when nobody has been designated.
     leadInstaller: _tradeLeadInstaller(tradeCrew),
