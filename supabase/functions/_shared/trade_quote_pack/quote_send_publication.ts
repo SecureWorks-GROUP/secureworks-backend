@@ -18,11 +18,16 @@
  * (`jobs.send_runs_claimed_at`) with the same TTL so concurrent/retry
  * calls cannot mint a second published pack. A grouped send-runs email
  * heartbeats every owned document claim in that recipient set before
- * Resend — refreshing only the first leaves secondary claims stale so
+ * Resend and again through pack persist / publication — refreshing
+ * only the first, or only pre-Resend, leaves secondary claims stale so
  * direct `/send` can reclaim them with a distinct Idempotency-Key.
+ * Exclusive key-stamp updates must return the owned row; a zero-row
+ * stamp is not a claim and must not dispatch.
  */
 
 import {
+  persistTradePackOnDocuments,
+  persistTradePackWriteConfirmed,
   quoteDocumentHasClientSend,
   quoteDocumentIsSuperseded,
 } from './pack_trade_quote.ts'
@@ -72,6 +77,18 @@ export function quoteSendResendIdempotencyKey(token: string): string {
 
 export function quoteSendDocumentResendIdempotencyKey(documentId: string): string {
   return `quote-send-doc:${documentId}`
+}
+
+/** Returning row from a token-fenced key stamp. Zero rows are not claimed. */
+export function sendClaimKeyStampConfirmed(
+  returnedId: unknown,
+  expectedId: string,
+  returnedKey: unknown,
+  fallbackKey: string,
+): string | null {
+  const id = typeof returnedId === 'string' ? returnedId.trim() : ''
+  if (!id || id !== expectedId) return null
+  return quoteSendClaimToken(returnedKey) || quoteSendClaimToken(fallbackKey)
 }
 
 export function quoteSendClaimPayload(
@@ -249,22 +266,34 @@ async function claimQuoteDocumentSendExclusive(
       resend_idempotency_key: keptKey,
     }
   }
-  const { error: keyError } = await sb
+  const { data: stamped, error: keyError } = await sb
     .from('job_documents')
     .update({ send_resend_idempotency_key: payload.send_resend_idempotency_key })
     .eq('id', documentId)
     .eq('send_claim_token', payload.send_claim_token)
     .is('send_resend_idempotency_key', null)
+    .select('id, send_resend_idempotency_key')
+    .maybeSingle()
   if (keyError) {
     console.error('[send-quote] claim key stamp failed:', claimErrorMessage(keyError))
     return { status: 'error', error: claimErrorMessage(keyError) }
+  }
+  const stampedKey = sendClaimKeyStampConfirmed(
+    stamped?.id,
+    documentId,
+    stamped?.send_resend_idempotency_key,
+    payload.send_resend_idempotency_key,
+  )
+  if (!stampedKey) {
+    console.error('[send-quote] claim key stamp lost ownership')
+    return { status: 'unavailable' }
   }
   return {
     status: 'claimed',
     id: data.id,
     token: payload.send_claim_token,
     claimed_at: payload.send_claimed_at,
-    resend_idempotency_key: payload.send_resend_idempotency_key,
+    resend_idempotency_key: stampedKey,
   }
 }
 
@@ -508,6 +537,61 @@ export async function publishQuoteDocumentsSendOrRevert(
     return { published: false, error: message }
   }
   return { published: true }
+}
+
+export type PersistHeldSendClaimsResult =
+  | { status: 'persisted' }
+  | { status: 'lease_error'; error: string }
+  | { status: 'lease_lost' }
+  | { status: 'persist_failed' }
+
+/**
+ * Persist each frozen pack only while every claim in the set still
+ * refreshes. Heartbeat the whole group before each write so a slow
+ * persist cannot let `/send` reclaim a sibling.
+ */
+export async function persistTradePacksWhileHoldingSendClaims(
+  sb: QuoteSendPublicationClient,
+  args: Parameters<typeof persistTradePackOnDocuments>[1],
+  now = new Date(),
+): Promise<PersistHeldSendClaimsResult> {
+  const documents = (args.documents || []).filter((doc) => typeof doc?.id === 'string' && doc.id)
+  const claims = uniqueDocumentClaims(
+    documents.map((doc) => ({ id: doc.id, token: doc.claim_token })),
+  )
+  for (const doc of documents) {
+    const beat = await touchQuoteDocumentSendClaims(sb, claims, now)
+    if (beat.outcome === 'error') {
+      return { status: 'lease_error', error: beat.error?.message || 'send claim heartbeat failed' }
+    }
+    if (beat.outcome === 'lost') return { status: 'lease_lost' }
+    const persisted = await persistTradePackOnDocuments(sb, { ...args, documents: [doc] })
+    if (!persistTradePackWriteConfirmed(persisted, 1)) return { status: 'persist_failed' }
+  }
+  return { status: 'persisted' }
+}
+
+export async function publishQuoteDocumentsSendOrRevertWhileHolding(
+  sb: QuoteSendPublicationClient,
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  now = new Date(),
+): Promise<{ published: true } | { published: false; error: string; lease?: SendClaimLeaseOutcome }> {
+  const owned = uniqueDocumentClaims(claims)
+  if (!owned.length) return { published: true }
+  const beat = await touchQuoteDocumentSendClaims(sb, owned, now)
+  if (beat.outcome === 'error') {
+    await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+    return {
+      published: false,
+      error: beat.error?.message || 'send claim heartbeat failed',
+      lease: 'error',
+    }
+  }
+  if (beat.outcome === 'lost') {
+    await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+    return { published: false, error: 'quote send claim lost before publication', lease: 'lost' }
+  }
+  return await publishQuoteDocumentsSendOrRevert(sb, owned, now)
 }
 
 async function claimJobSendRunsExclusive(

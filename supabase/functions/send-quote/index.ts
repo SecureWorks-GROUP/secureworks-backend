@@ -43,8 +43,9 @@ import {
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   mintSendRunQuoteNumber,
+  persistTradePacksWhileHoldingSendClaims,
   publishQuoteDocumentSendOrRevert,
-  publishQuoteDocumentsSendOrRevert,
+  publishQuoteDocumentsSendOrRevertWhileHolding,
   resendIdempotencyHeaders,
   resendResponseIsDefinitivePreSendRejection,
   resolveSendRunDocument,
@@ -2772,7 +2773,7 @@ serve(async (req: Request) => {
           await revertSendRunsDocumentClaims(claimedDocs, true)
           return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
         }
-        const persisted = await persistTradePackOnDocuments(sb, {
+        const persisted = await persistTradePacksWhileHoldingSendClaims(sb, {
           documents: publishedDocs.map((d: any) => ({
             id: d.id,
             quote_number: d.quote_number || null,
@@ -2790,14 +2791,27 @@ serve(async (req: Request) => {
             site_suburb: job.site_suburb,
           },
         })
-        if (!persistTradePackWriteConfirmed(persisted, publishedDocs.length)) {
+        if (persisted.status === 'lease_error' || persisted.status === 'lease_lost') {
+          await revertSendRunsDocumentClaims(claimedDocs, true)
+          return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+        }
+        if (persisted.status !== 'persisted') {
           await revertSendRunsDocumentClaims(claimedDocs, true)
           return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
         }
-        const published = await publishQuoteDocumentsSendOrRevert(sb, publishedClaims, new Date(sentAt))
+        const published = await publishQuoteDocumentsSendOrRevertWhileHolding(
+          sb,
+          publishedClaims,
+          new Date(sentAt),
+        )
         if (!published.published) {
           await revertSendRunsDocumentClaims(claimedDocs, true)
-          return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
+          const leaseFailed = published.lease === 'error' || published.lease === 'lost'
+          return jsonResponse({
+            error: leaseFailed
+              ? 'Failed to refresh quote send claim'
+              : 'Failed to record quote send publication',
+          }, 500, corsHeaders)
         }
         // Successful recipients are published. Failed-recipient claims stay
         // unpublished and must be released now, or the neighbour stays locked

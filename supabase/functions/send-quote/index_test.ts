@@ -31,9 +31,11 @@ import {
   claimsForDocumentIds,
   claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
+  persistTradePacksWhileHoldingSendClaims,
   publishQuoteDocumentSend,
   publishQuoteDocumentSendOrRevert,
   publishQuoteDocumentsSendOrRevert,
+  publishQuoteDocumentsSendOrRevertWhileHolding,
   quoteSendClaimIsStale,
   quoteSendClaimPayload,
   quoteSendPublicationPayload,
@@ -46,6 +48,7 @@ import {
   sendRunsSendOutcome,
   priorPublishedQuoteIdsToSupersede,
   quoteSendIsPublished,
+  sendClaimKeyStampConfirmed,
   supersedePriorPublishedQuoteDocuments,
 } from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
@@ -679,7 +682,10 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
 // If status is error        → database fault; return 500, never already_sent.
 
 // Mock supabase client that simulates the claim UPDATE returning a row or null.
-function makeClaimMockSb(claimResult: { id: string } | null) {
+function makeClaimMockSb(
+  claimResult: { id: string } | null,
+  opts: { keyStampResult?: { id: string } | null } = {},
+) {
   const updates: Record<string, unknown>[] = [];
   const api = {
     updates,
@@ -698,7 +704,15 @@ function makeClaimMockSb(claimResult: { id: string } | null) {
         chain.lt = () => chain;
         chain.in = () => chain;
         chain.select = () => ({
-          maybeSingle: () => Promise.resolve({ data: claimResult, error: null }),
+          maybeSingle: () => {
+            const keyOnly =
+              "send_resend_idempotency_key" in payload &&
+              !("send_claimed_at" in payload)
+            const data = keyOnly && "keyStampResult" in opts
+              ? opts.keyStampResult
+              : claimResult
+            return Promise.resolve({ data, error: null })
+          },
         });
         return chain;
       },
@@ -781,6 +795,31 @@ Deno.test("C5 — claim payload is send_claimed_at plus token; publication is th
     sent_to_client: true,
     sent_at: '2026-09-06T00:00:01.000Z',
   })
+})
+
+Deno.test("R17-001 key-stamp confirmation requires the owned returning row", () => {
+  assertEquals(
+    sendClaimKeyStampConfirmed("doc-1", "doc-1", "quote-send:stored", "quote-send:fallback"),
+    "quote-send:stored",
+  )
+  assertEquals(
+    sendClaimKeyStampConfirmed("doc-1", "doc-1", null, "quote-send:fallback"),
+    "quote-send:fallback",
+  )
+  assertEquals(
+    sendClaimKeyStampConfirmed(null, "doc-1", "quote-send:stored", "quote-send:fallback"),
+    null,
+  )
+  assertEquals(
+    sendClaimKeyStampConfirmed("doc-other", "doc-1", "quote-send:stored", "quote-send:fallback"),
+    null,
+  )
+})
+
+Deno.test("R17-001 exclusive quote key stamp without a returning row is not claimed", async () => {
+  const sb = makeClaimMockSb({ id: "doc-abc" }, { keyStampResult: null })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
+  assertEquals(claimed.status, "unavailable")
 })
 
 Deno.test("R4-002 send-runs publishes only docs for successful recipients", () => {
@@ -1638,6 +1677,128 @@ Deno.test("R16-002 quote and invoice lease errors are 5xx before already_sent", 
   assert(src.slice(invoiceError, invoiceLost).includes("500"))
   assert(src.slice(invoiceLost, invoiceResend).includes("already_sent: true"))
   assert(src.slice(invoiceError, invoiceLost).includes("keep_provider_key"))
+})
+
+function makeHeldPersistSb(opts: {
+  ownedIds?: string[]
+  loseAfterHeartbeats?: number
+} = {}) {
+  const owned = new Set(opts.ownedIds || ["doc-a", "doc-b"])
+  const events: string[] = []
+  let heartbeats = 0
+  return {
+    events,
+    from: (_table: string) => {
+      let documentId = ""
+      let kind: "heartbeat" | "persist" | "publish" | "other" = "other"
+      const chain: Record<string, unknown> = {
+        update: (payload: Record<string, unknown>) => {
+          if ("trade_pack_json" in payload) kind = "persist"
+          else if ("sent_to_client" in payload) kind = "publish"
+          else if ("send_claimed_at" in payload) kind = "heartbeat"
+          else kind = "other"
+          return chain
+        },
+        eq: (col: string, value: unknown) => {
+          if (col === "id") documentId = String(value)
+          return chain
+        },
+        is: () => chain,
+        not: () => chain,
+        select: () => ({
+          maybeSingle: () => {
+            if (kind === "heartbeat") {
+              heartbeats++
+              events.push(`heartbeat:${documentId}`)
+              const lost = typeof opts.loseAfterHeartbeats === "number" &&
+                heartbeats > opts.loseAfterHeartbeats
+              return Promise.resolve({
+                data: !lost && owned.has(documentId) ? { id: documentId } : null,
+                error: null,
+              })
+            }
+            if (kind === "persist" || kind === "publish") {
+              events.push(`${kind}:${documentId}`)
+            }
+            return Promise.resolve({
+              data: owned.has(documentId) ? { id: documentId } : null,
+              error: null,
+            })
+          },
+        }),
+      }
+      return chain
+    },
+  }
+}
+
+Deno.test("R17-002 persist heartbeats every grouped claim before each pack write", async () => {
+  const sb = makeHeldPersistSb()
+  const result = await persistTradePacksWhileHoldingSendClaims(sb, {
+    documents: [
+      { id: "doc-a", claim_token: "tok-a", quote_number: "Q-1" },
+      { id: "doc-b", claim_token: "tok-b", quote_number: "Q-2" },
+    ],
+    jobType: "other",
+    scopeJson: {},
+    pricingJson: {},
+  })
+  assertEquals(result, { status: "persisted" })
+  assertEquals(sb.events, [
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "persist:doc-a",
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "persist:doc-b",
+  ])
+})
+
+Deno.test("R17-002 persist stops without writing when a later heartbeat loses the lease", async () => {
+  const sb = makeHeldPersistSb({ loseAfterHeartbeats: 3 })
+  const result = await persistTradePacksWhileHoldingSendClaims(sb, {
+    documents: [
+      { id: "doc-a", claim_token: "tok-a" },
+      { id: "doc-b", claim_token: "tok-b" },
+    ],
+    jobType: "other",
+    scopeJson: {},
+  })
+  assertEquals(result, { status: "lease_lost" })
+  assertEquals(sb.events, [
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "persist:doc-a",
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+  ])
+})
+
+Deno.test("R17-002 publication heartbeats the grouped set before stamping sent", async () => {
+  const sb = makeHeldPersistSb()
+  const published = await publishQuoteDocumentsSendOrRevertWhileHolding(sb, [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ])
+  assertEquals(published, { published: true })
+  assertEquals(sb.events, [
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "publish:doc-a",
+    "publish:doc-b",
+  ])
+})
+
+Deno.test("R17-002 send-runs source heartbeats grouped claims through persist and publication", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const persist = src.indexOf("persistTradePacksWhileHoldingSendClaims(", start)
+  const publish = src.indexOf("publishQuoteDocumentsSendOrRevertWhileHolding(", start)
+  const leftover = src.indexOf("const leftoverClaims = claimsNotInDocumentIds", start)
+  assert(start >= 0 && persist > start && publish > persist && leftover > publish)
+  const slice = src.slice(persist, leftover)
+  assert(!slice.includes("persistTradePackOnDocuments("))
+  assert(!slice.includes("publishQuoteDocumentsSendOrRevert("))
 })
 
 // ════════════════════════════════════════════════════════════════════════════

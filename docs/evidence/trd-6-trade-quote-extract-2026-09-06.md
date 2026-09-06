@@ -362,3 +362,26 @@ exemption only on `payment_terms` stay locked.
 Office-only `/send` / `/send-runs` / `/send-invoice` and sealed-phrase
 exemption only on `payment_terms` stay locked. Post-send provider keys
 stay on ambiguous / persist / publication failure.
+
+## Review-17 locks (2026-09-06)
+
+- **Claim key-stamp must return the owned row.** Exclusive quote and
+  invoice claims stamp `send_resend_idempotency_key` only after the
+  lease lands. That token-fenced update now `.select()`s and confirms
+  the returning id. Zero rows are `unavailable` (no dispatch). A DB
+  fault stays `error`. An ephemeral payload key must never be treated
+  as claimed — that is the reclaim race that minted a second Resend
+  Idempotency-Key.
+- **send-runs heartbeats grouped claims through persist and
+  publication.** Review-16 refreshed every grouped claim before Resend.
+  Persist and publication can still outlive the 15-minute lease, so
+  `persistTradePacksWhileHoldingSendClaims` heartbeats the whole publish
+  set before each pack write, and
+  `publishQuoteDocumentsSendOrRevertWhileHolding` heartbeats again
+  before `sent_to_client`. Lease miss / fault is 500
+  `Failed to refresh quote send claim` and unpublished claims revert
+  with `keep_provider_key`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Lease errors are 5xx. Every grouped claim
+is heartbeated before Resend. Money fences stay sealed.

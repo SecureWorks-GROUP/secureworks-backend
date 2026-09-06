@@ -26,7 +26,10 @@ type Row = {
   sent_at: string | null;
 };
 
-function makeInvoiceClaimSb(initial: Row | null = null) {
+function makeInvoiceClaimSb(
+  initial: Row | null = null,
+  opts: { failKeyStamp?: boolean } = {},
+) {
   let row = initial;
   const updates: Record<string, unknown>[] = [];
   const inserts: Record<string, unknown>[] = [];
@@ -103,6 +106,13 @@ function makeInvoiceClaimSb(initial: Row | null = null) {
             select() {
               return {
                 maybeSingle: async () => {
+                  if (
+                    opts.failKeyStamp &&
+                    "send_resend_idempotency_key" in payload &&
+                    !("send_claimed_at" in payload)
+                  ) {
+                    return { data: null, error: null };
+                  }
                   if (!row) return { data: null, error: null };
                   if (wanted.xero_invoice_id && row.xero_invoice_id !== wanted.xero_invoice_id) {
                     return { data: null, error: null };
@@ -233,6 +243,35 @@ Deno.test("R13-004 stale reclaim keeps the first-claim Resend key", async () => 
     assertNotEquals(claimed.claim.token, "first-token");
   }
   assert(sb.filters.includes("lt:send_claimed_at"));
+});
+
+Deno.test("R17-001 exclusive invoice key stamp without a returning row is not claimed", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z");
+  const unclaimed: Row = {
+    xero_invoice_id: INVOICE,
+    job_id: JOB,
+    send_claimed_at: null,
+    send_claim_token: null,
+    send_resend_idempotency_key: null,
+    sent_at: null,
+  };
+  const claimed = await claimInvoiceEmailSend(
+    makeInvoiceClaimSb(unclaimed),
+    INVOICE,
+    JOB,
+    now,
+  );
+  assertEquals(claimed.status, "claimed");
+  if (claimed.status === "claimed") {
+    assert(claimed.claim.resend_idempotency_key.startsWith("invoice-send:"));
+  }
+  const lost = await claimInvoiceEmailSend(
+    makeInvoiceClaimSb(unclaimed, { failKeyStamp: true }),
+    INVOICE,
+    JOB,
+    now,
+  );
+  assertEquals(lost, { status: "unavailable" });
 });
 
 Deno.test("R13-004 missing stored key falls back to invoice-scoped Resend key", async () => {

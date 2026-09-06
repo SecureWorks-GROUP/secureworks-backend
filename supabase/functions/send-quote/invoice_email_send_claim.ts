@@ -15,6 +15,7 @@ import {
   quoteSendClaimStaleBefore,
   quoteSendClaimToken,
   QUOTE_SEND_CLAIM_TTL_MS,
+  sendClaimKeyStampConfirmed,
   type SendClaimReleaseMode,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
 
@@ -159,22 +160,34 @@ async function claimInvoiceEmailSendExclusive(
         keptKey,
       )
     }
-    const { error: keyError } = await sb
+    const { data: stamped, error: keyError } = await sb
       .from(INVOICE_EMAIL_SEND_CLAIMS_TABLE)
       .update({ send_resend_idempotency_key: payload.send_resend_idempotency_key })
       .eq('xero_invoice_id', xeroInvoiceId)
       .eq('send_claim_token', payload.send_claim_token)
       .is('send_resend_idempotency_key', null)
+      .select('xero_invoice_id, send_resend_idempotency_key')
+      .maybeSingle()
     if (keyError) {
       console.error('[send-invoice] claim key stamp failed:', claimErrorMessage(keyError))
       return { status: 'error', error: claimErrorMessage(keyError) }
+    }
+    const stampedKey = sendClaimKeyStampConfirmed(
+      stamped?.xero_invoice_id,
+      xeroInvoiceId,
+      stamped?.send_resend_idempotency_key,
+      payload.send_resend_idempotency_key,
+    )
+    if (!stampedKey) {
+      console.error('[send-invoice] claim key stamp lost ownership')
+      return { status: 'unavailable' }
     }
     return claimedResult(
       xeroInvoiceId,
       jobId,
       payload.send_claim_token,
       payload.send_claimed_at,
-      payload.send_resend_idempotency_key,
+      stampedKey,
     )
   }
 
