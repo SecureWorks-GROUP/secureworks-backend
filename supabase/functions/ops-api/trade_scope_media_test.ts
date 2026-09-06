@@ -3,6 +3,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   collectScopeMedia,
   deterministicScopeMediaId,
+  existingMediaMatchesPhoto,
   existingMediaMatchesVideo,
   extractScopeMedia,
   extractScopePhotos,
@@ -13,6 +14,7 @@ import {
 
 const WALKTHROUGH_URL = "https://cdn.example.test/jobs/swf-26101/walkthrough.mp4";
 const PHOTO_URL = "https://cdn.example.test/jobs/swf-26101/front.jpg";
+const REAR_PHOTO_URL = "https://cdn.example.test/jobs/swf-26101/rear.jpg";
 
 function tinyJpegDataUrl(): string {
   // 1x1 jpeg — enough to prove the upload path without a real image decode.
@@ -151,15 +153,67 @@ Deno.test("extractScopeMedia registers a walkthrough URL even when scope photos 
   ]);
   const result = await extractScopeMedia(client, "job-1", {
     job: { scopeMedia: { videoWalkthrough: WALKTHROUGH_URL } },
-    scopeMedia: { photos: [{ dataUrl: tinyJpegDataUrl(), label: "Would re-upload" }] },
+    scopeMedia: { photos: [{ url: PHOTO_URL, label: "Front" }] },
   });
   assertEquals(result.videos, 1);
-  assertEquals(result.photos, 0, "existing scope photos must not be re-extracted");
+  assertEquals(result.photos, 0, "the already-registered front photo is skipped by URL");
   assertEquals(result.rows[0].type, "video");
   assertEquals(result.rows[0].phase, "scope");
   assertEquals(result.rows[0].label, TRADE_WALKTHROUGH_LABEL);
   assertEquals(result.rows[0].storage_url, WALKTHROUGH_URL);
   assertEquals(client.uploads.length, 0, "public URLs are reused, never re-signed");
+});
+
+Deno.test("extractScopeMedia: existing front photo does not skip a missing rear photo", async () => {
+  const client = makeExtractClient([
+    {
+      id: "photo-1",
+      job_id: "job-1",
+      phase: "scope",
+      type: "photo",
+      storage_url: PHOTO_URL,
+      label: "Front",
+    },
+  ]);
+  const result = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      photos: [
+        { url: PHOTO_URL, label: "Front" },
+        { url: REAR_PHOTO_URL, label: "Rear" },
+      ],
+    },
+  });
+  assertEquals(result.photos, 1);
+  assertEquals(result.videos, 0);
+  assertEquals(client.uploads.length, 0);
+  assertEquals(result.rows.map((r) => r.storage_url), [REAR_PHOTO_URL]);
+  assertEquals(client.media.filter((m: any) => m.type === "photo").length, 2);
+});
+
+Deno.test("extractScopeMedia: existing front photo still uploads a missing dataUrl rear", async () => {
+  const client = makeExtractClient([
+    {
+      id: "photo-1",
+      job_id: "job-1",
+      phase: "scope",
+      type: "photo",
+      storage_url: PHOTO_URL,
+      label: "Front",
+    },
+  ]);
+  const result = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      photos: [
+        { url: PHOTO_URL, label: "Front" },
+        { dataUrl: tinyJpegDataUrl(), label: "Rear" },
+      ],
+    },
+  });
+  assertEquals(result.photos, 1);
+  assertEquals(client.uploads.length, 1);
+  assertEquals(client.uploads[0].bucket, "job-photos");
+  assertEquals(result.rows[0].label, "Rear");
+  assertEquals(client.media.filter((m: any) => m.type === "photo").length, 2);
 });
 
 Deno.test("extractScopeMedia is idempotent for the same walkthrough URL", async () => {
@@ -203,6 +257,33 @@ Deno.test("extractScopePhotos still reports combined extracted media", async () 
     scopeMedia: { videoWalkthrough: WALKTHROUGH_URL },
   });
   assertEquals(n, 1);
+});
+
+Deno.test("existingMediaMatchesPhoto: same https URL only, type defaults to photo", () => {
+  const photo = { label: "Front", storageUrl: PHOTO_URL };
+  assertEquals(
+    existingMediaMatchesPhoto({ type: "photo", storage_url: PHOTO_URL }, photo),
+    true,
+  );
+  assertEquals(
+    existingMediaMatchesPhoto({ storage_url: PHOTO_URL }, photo),
+    true,
+  );
+  assertEquals(
+    existingMediaMatchesPhoto({ type: "video", storage_url: PHOTO_URL }, photo),
+    false,
+  );
+  assertEquals(
+    existingMediaMatchesPhoto({ type: "photo", storage_url: REAR_PHOTO_URL }, photo),
+    false,
+  );
+  assertEquals(
+    existingMediaMatchesPhoto({ type: "photo", storage_url: PHOTO_URL }, {
+      label: "Rear",
+      dataUrl: tinyJpegDataUrl(),
+    }),
+    false,
+  );
 });
 
 Deno.test("existingMediaMatchesVideo matches URL or filename fragment", () => {

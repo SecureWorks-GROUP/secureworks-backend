@@ -228,6 +228,17 @@ export function collectScopeMedia(scopeJson: unknown): {
   return { photos, videos };
 }
 
+export function existingMediaMatchesPhoto(
+  row: any,
+  photo: ScopePhotoCandidate,
+): boolean {
+  if (!row) return false;
+  const type = String(row.type || "photo").toLowerCase();
+  if (type !== "photo") return false;
+  const url = String(row.storage_url || "");
+  return !!(photo.storageUrl && url === photo.storageUrl);
+}
+
 export function existingMediaMatchesVideo(
   row: any,
   video: ScopeVideoCandidate,
@@ -482,9 +493,11 @@ async function uploadDataUrlMedia(
  * Extract/register scope photos and videos into job_media.
  * Idempotent at the primary key: the same job+URL always inserts the same
  * id, and a unique-violation recovers the winner instead of minting a twin.
- * A missing walkthrough is still registered even when scope photos already
- * exist. Filename-only metadata without a URL is not turned into a dead
- * player row. One candidate's decode/storage throw does not abort the rest.
+ * A missing walkthrough or photo is still registered even when other scope
+ * media already exists — each candidate is deduped on its own URL/id, never
+ * by a global "any scope photo" short-circuit. Filename-only metadata
+ * without a URL is not turned into a dead player row. One candidate's
+ * decode/storage throw does not abort the rest.
  */
 export async function extractScopeMedia(
   client: any,
@@ -497,10 +510,6 @@ export async function extractScopeMedia(
   }
 
   const existing = await loadExistingMedia(client, jobId);
-  const hasScopePhoto = existing.some((row) =>
-    String(row?.phase || "") === "scope" &&
-    String(row?.type || "photo").toLowerCase() === "photo"
-  );
   const rows: any[] = [];
   let photos = 0;
   let videos = 0;
@@ -541,39 +550,38 @@ export async function extractScopeMedia(
     }
   }
 
-  if (!hasScopePhoto) {
-    for (let i = 0; i < collected.photos.length; i++) {
-      try {
-        const photo = collected.photos[i];
-        if (photo.storageUrl) {
-          const inserted = await registerUrlMedia(
-            client,
-            jobId,
-            "photo",
-            photo.storageUrl,
-            photo.label,
-            existing,
-          );
-          if (inserted?.created) photos++;
-          if (inserted?.row) rows.push(inserted.row);
-          continue;
-        }
-        if (!photo.dataUrl) continue;
-        const inserted = await uploadDataUrlMedia(
+  for (let i = 0; i < collected.photos.length; i++) {
+    try {
+      const photo = collected.photos[i];
+      if (existing.some((row) => existingMediaMatchesPhoto(row, photo))) continue;
+      if (photo.storageUrl) {
+        const inserted = await registerUrlMedia(
           client,
           jobId,
           "photo",
-          photo.dataUrl,
+          photo.storageUrl,
           photo.label,
-          undefined,
-          i,
           existing,
         );
         if (inserted?.created) photos++;
         if (inserted?.row) rows.push(inserted.row);
-      } catch (err: any) {
-        console.log(`[ops-api] scope photo ${i} error:`, err?.message);
+        continue;
       }
+      if (!photo.dataUrl) continue;
+      const inserted = await uploadDataUrlMedia(
+        client,
+        jobId,
+        "photo",
+        photo.dataUrl,
+        photo.label,
+        undefined,
+        i,
+        existing,
+      );
+      if (inserted?.created) photos++;
+      if (inserted?.row) rows.push(inserted.row);
+    } catch (err: any) {
+      console.log(`[ops-api] scope photo ${i} error:`, err?.message);
     }
   }
 
