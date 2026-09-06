@@ -111,7 +111,6 @@ function makeClient(tables: Tables, recorded: any[] = []) {
         return Promise.resolve({ data: data[0] ?? null, error: null });
       },
       then: (res: any, rej: any) => Promise.resolve(run()).then(res, rej),
-    };
       insert: (row: any) => {
         const rec = { id: row?.id || `${table}-${(tables[table] || []).length + 1}`, ...row };
         (tables[table] ||= []).push(rec);

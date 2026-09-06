@@ -183,6 +183,7 @@ function collectFromMediaBlock(
     pushUniquePhoto(photos, photoFromUnknown(row, `Scope photo ${i + 1}`))
   );
 
+  const before = videos.length;
   const videoList = [
     media.video,
     media.videoWalkthrough,
@@ -192,7 +193,12 @@ function collectFromMediaBlock(
     pushUniqueVideo(videos, videoFromUnknown(row, TRADE_WALKTHROUGH_LABEL));
   }
 
-  if (media.videoFileName || media.videoUrl || media.videoWalkthroughUrl || media.videoSize) {
+  // Filename/size sit beside the URL on the same block. Only use them as a
+  // fallback when this block has not already produced a video.
+  if (
+    videos.length === before &&
+    (media.videoFileName || media.videoUrl || media.videoWalkthroughUrl || media.videoSize)
+  ) {
     pushUniqueVideo(
       videos,
       videoFromUnknown({
