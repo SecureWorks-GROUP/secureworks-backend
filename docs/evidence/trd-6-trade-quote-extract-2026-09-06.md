@@ -385,3 +385,21 @@ stay on ambiguous / persist / publication failure.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Lease errors are 5xx. Every grouped claim
 is heartbeated before Resend. Money fences stay sealed.
+
+## Review-18 locks (2026-09-06)
+
+- **Amount strip must not leave payment-schedule prose.** After
+  `stripTradePackMoney`, allocated customer / name / notes / summary /
+  items drop leftovers that still say `on completion` / `upon
+  completion` (`$50 on completion`, `AUD 50 on completion`, `50 dollars
+  on completion`). The sealed phrase stays exempt only on
+  `terms.payment_terms`. Work notes that already said "on completion"
+  with no amount stay.
+- **send-runs recipient keys are trim + lowercase.** Case-variant
+  addresses are one inbox group. Publication matches the stored group
+  email exactly so a success for `Pat@` cannot stamp a distinct `pat@`
+  group's documents. No group-level send protocol.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.

@@ -17,6 +17,7 @@ import {
   sanitizeTradePackUnit,
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
+  leftoverIsPaymentScheduleAfterAmountStrip,
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
   tradeAllocatedProseHasMoneyLanguage,
@@ -378,6 +379,20 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Install Deposit"), false);
   assertEquals(allocatedTradePackProse("50% upfront"), null);
   assertEquals(allocatedTradePackProse("50% deposit + 50% on completion"), null);
+  assertEquals(allocatedTradePackProse("$50 on completion"), null);
+  assertEquals(allocatedTradePackProse("AUD 50 on completion"), null);
+  assertEquals(allocatedTradePackProse("50 dollars on completion"), null);
+  assertEquals(allocatedTradePackProse("upon completion"), null);
+  assertEquals(allocatedTradePackProse("Pat Client $50 on completion"), null);
+  assertEquals(allocatedTradePackProse("Finish remaining posts on completion of neighbour"), "Finish remaining posts on completion of neighbour");
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("AUD 50 on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 dollars on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Finish remaining posts on completion of neighbour",
+    "Finish remaining posts on completion of neighbour",
+  ), false);
   assertEquals(allocatedTradePackProse("Install Deposit"), null);
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion"), "50% deposit + 50% on completion");
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion $9,999"), "50% deposit + 50% on completion");

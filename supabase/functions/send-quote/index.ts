@@ -46,6 +46,7 @@ import {
   persistTradePacksWhileHoldingSendClaims,
   publishQuoteDocumentSendOrRevert,
   publishQuoteDocumentsSendOrRevertWhileHolding,
+  quoteSendRecipientKey,
   resendIdempotencyHeaders,
   resendResponseIsDefinitivePreSendRejection,
   resolveSendRunDocument,
@@ -2428,7 +2429,7 @@ serve(async (req: Request) => {
         doc: { id?: string; share_token?: string | null; quote_number?: string | null },
         run: any,
       ) => {
-        const dest = String(email || '').trim()
+        const dest = quoteSendRecipientKey(email)
         if (!dest || !doc?.id) return
         if (!emailsByRecipient[dest]) {
           emailsByRecipient[dest] = { name: name || '', email: dest, docs: [], runs: [] }

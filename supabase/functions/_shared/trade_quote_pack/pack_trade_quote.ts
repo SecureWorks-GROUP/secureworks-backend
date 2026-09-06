@@ -928,6 +928,20 @@ export function tradeOriginalHasNonFigureMoneyLanguage(value: string): boolean {
   return tradeTextHasMoneyToken(String(value || '').replace(/\$/g, ' '))
 }
 
+/** Payment-schedule leftover after a figure strip (`$50 on completion`
+ *  → `on completion`). Not the sealed terms phrase. */
+const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = /\b(?:on|upon)\s+completion\b/i
+
+export function leftoverIsPaymentScheduleAfterAmountStrip(
+  original: string,
+  leftover: string,
+): boolean {
+  const cleaned = String(leftover || '').trim()
+  if (!cleaned || !TRADE_PAYMENT_SCHEDULE_REMNANT_RE.test(cleaned)) return false
+  if (/^(?:on|upon)\s+completion$/i.test(cleaned)) return true
+  return String(original || '').trim() !== cleaned
+}
+
 /** Short leftover after strip is a mangled remnant only when it is not a
  *  whole word from the original (`uded` from `tax included`). `Plus` from
  *  `Plus 80 +GST` is strip-and-keep. */
@@ -967,9 +981,11 @@ export function allocatedTradePackProse(value: unknown): string | null {
   if (!cleaned) return null
   // Sealed phrase is payment_terms-only. A name / item / note leftover
   // matching it is money prose and must not ride the allocated pack.
+  // Amount + "on/upon completion" leftovers are the same class.
   if (isSealedPaymentTermsPhrase(cleaned)) return null
   if (tradeTextHasMoneyToken(cleaned)) return null
   if (leftoverIsMangledMoneyRemnant(trimmed, cleaned)) return null
+  if (leftoverIsPaymentScheduleAfterAmountStrip(trimmed, cleaned)) return null
   return cleaned
 }
 

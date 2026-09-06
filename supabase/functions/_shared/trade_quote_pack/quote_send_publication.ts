@@ -22,7 +22,8 @@
  * only the first, or only pre-Resend, leaves secondary claims stale so
  * direct `/send` can reclaim them with a distinct Idempotency-Key.
  * Exclusive key-stamp updates must return the owned row; a zero-row
- * stamp is not a claim and must not dispatch.
+ * stamp is not a claim and must not dispatch. send-runs recipient keys
+ * are trim + lowercase so case-variant addresses are one group.
  */
 
 import {
@@ -914,20 +915,29 @@ export function sendRunsPrimaryClientPublicationSatisfied(input: {
   })
 }
 
-/** Document ids belonging to recipients whose Resend call succeeded. */
+/** send-runs recipient group key. Trim + lowercase so case variants
+ *  are one inbox, one email, one publication set. */
+export function quoteSendRecipientKey(email: unknown): string {
+  return String(email || '').trim().toLowerCase()
+}
+
+/** Document ids belonging to recipients whose Resend call succeeded.
+ *  Match the stored group email exactly (after trim) so a success for
+ *  `Pat@` cannot stamp a distinct `pat@` group. Construction must
+ *  store `quoteSendRecipientKey` so live groups stay one inbox. */
 export function documentIdsPublishedForSuccessfulSends(
   recipients: Array<{ email?: string | null; docs?: Array<{ id?: string | null }> | null }>,
   successfulEmails: Iterable<string>,
 ): string[] {
   const ok = new Set(
     [...successfulEmails]
-      .map((email) => String(email || '').trim().toLowerCase())
+      .map((email) => String(email || '').trim())
       .filter(Boolean),
   )
   const ids: string[] = []
   const seen = new Set<string>()
   for (const recipient of recipients) {
-    const email = String(recipient.email || '').trim().toLowerCase()
+    const email = String(recipient.email || '').trim()
     if (!email || !ok.has(email)) continue
     for (const doc of recipient.docs || []) {
       const id = typeof doc?.id === 'string' ? doc.id.trim() : ''

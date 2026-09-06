@@ -32,6 +32,7 @@ import {
   claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
   persistTradePacksWhileHoldingSendClaims,
+  quoteSendRecipientKey,
   publishQuoteDocumentSend,
   publishQuoteDocumentSendOrRevert,
   publishQuoteDocumentsSendOrRevert,
@@ -840,6 +841,51 @@ Deno.test("R4-002 send-runs publishes only docs for successful recipients", () =
     ["doc-primary", "doc-primary-2", "doc-neighbour"],
   )
   assertEquals(documentIdsPublishedForSuccessfulSends(recipients, []), [])
+})
+
+Deno.test("R18-002 case-variant recipient keys are one send-runs group", () => {
+  assertEquals(quoteSendRecipientKey(" Pat@Example.TEST "), "pat@example.test")
+  assertEquals(quoteSendRecipientKey("pat@example.test"), "pat@example.test")
+  const groups: Record<string, string[]> = {}
+  const add = (email: string, docId: string) => {
+    const key = quoteSendRecipientKey(email)
+    if (!groups[key]) groups[key] = []
+    groups[key].push(docId)
+  }
+  add("Pat@example.test", "doc-a")
+  add("pat@example.test", "doc-b")
+  assertEquals(Object.keys(groups), ["pat@example.test"])
+  assertEquals(groups["pat@example.test"], ["doc-a", "doc-b"])
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(
+      [{ email: quoteSendRecipientKey("Pat@example.test"), docs: [{ id: "doc-a" }, { id: "doc-b" }] }],
+      [quoteSendRecipientKey("Pat@example.test")],
+    ),
+    ["doc-a", "doc-b"],
+  )
+})
+
+Deno.test("R18-002 publication matches the exact successful recipient group", () => {
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(
+      [
+        { email: "Pat@example.test", docs: [{ id: "doc-a" }] },
+        { email: "pat@example.test", docs: [{ id: "doc-b" }] },
+      ],
+      ["Pat@example.test"],
+    ),
+    ["doc-a"],
+  )
+})
+
+Deno.test("R18-002 send-runs source groups recipients on the normalized key", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("const addRecipientDoc =")
+  const end = src.indexOf("emailsByRecipient[dest].runs.push(run)", start)
+  const slice = src.slice(start, end)
+  assert(start >= 0 && end > start)
+  assert(slice.includes("quoteSendRecipientKey(email)"))
+  assert(!slice.includes("String(email || '').trim()"))
 })
 
 Deno.test("R7-003 failed send-runs recipients are the claim complement", () => {
