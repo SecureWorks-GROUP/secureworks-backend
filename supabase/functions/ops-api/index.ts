@@ -38021,13 +38021,29 @@ export function _tradeVisibleDocuments(docs: any[]): any[] {
 // here: it is not the client's quote. Widening this list is a Captain call.
 export const TRADE_QUOTE_DOCUMENT_TYPES = new Set(['quote', 'invoice'])
 
+// Full priced MakeSafe / supplier work-order PDFs. Allocated trades and
+// makesafe_open must not receive them until TRD-6 ships a price-free extract.
+// Office / division-manager keep the full files. Do not fold these into
+// TRADE_QUOTE_DOCUMENT_TYPES — that set is the quote/invoice fence only.
+export const TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES = new Set([
+  'work_order',
+  'supplier_work_order',
+])
+
+function tradeAllocatedHiddenDocumentType(type: unknown): boolean {
+  const normalised = String(type || '').toLowerCase()
+  return TRADE_QUOTE_DOCUMENT_TYPES.has(normalised) ||
+    TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES.has(normalised)
+}
+
 // What an ALLOCATED trade (lead or crew, no difference) or the MakeSafe
 // open-pool exception may see of a job's documents: the ops-flagged rows,
-// minus anything quote-bearing regardless of the flag. Office / division
-// manager tiers do not use this — they get the office document set.
+// minus quote-bearing types and full priced work-order PDFs, whatever the
+// flag says. Office / division manager tiers do not use this — they get
+// the office document set, including priced WO / quote files.
 export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
   return _tradeVisibleDocuments(docs)
-    .filter((d: any) => !TRADE_QUOTE_DOCUMENT_TYPES.has(String(d?.type || '').toLowerCase()))
+    .filter((d: any) => !tradeAllocatedHiddenDocumentType(d?.type))
 }
 
 // ── scope_json quote redaction (allocated-trade tiers) ──────────────────────
@@ -38142,6 +38158,11 @@ export const TRADE_SCOPE_NARRATIVE_TEXT_KEYS = new Set([
   'note',
   'text',
   'noteQuote',
+  'name',
+  'label',
+  'title',
+  'instructions',
+  'special_instructions',
 ])
 
 function tradeScopeBareMoneyValue(value: unknown): boolean {
@@ -38152,9 +38173,14 @@ function tradeScopeBareMoneyValue(value: unknown): boolean {
   return stripTradePackMoney(trimmed) === ''
 }
 
-function sanitizeTradeNarrativeLeaf(key: string, value: unknown): unknown {
-  if (typeof value !== 'string' || !TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) return value
+function sanitizeTradeAllocatedStringLeaf(value: unknown): string {
   return stripTradePackMoney(value)
+}
+
+function sanitizeTradeNarrativeLeaf(key: string, value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  if (!TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) return value
+  return sanitizeTradeAllocatedStringLeaf(value)
 }
 
 // The recursion cap is a guard against a pathological blob, not a licence to
@@ -38182,8 +38208,8 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
     if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
       continue
     }
-    if (typeof value === 'string' && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
-      const cleaned = sanitizeTradeNarrativeLeaf(key, value)
+    if (typeof value === 'string') {
+      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
       if (cleaned === '') continue
       out[key] = cleaned
       continue
@@ -38277,6 +38303,7 @@ export const TRADE_WO_SCOPE_ITEM_ALLOWLIST = new Set([
   'unit',
   'units',
   'kind',
+  'special_instructions',
 ])
 
 function isTradeWoScopeItemScalar(value: unknown): boolean {
@@ -38296,6 +38323,12 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
+      if (typeof value === 'string') {
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        if (cleaned === '') continue
+        out[key] = cleaned
+        continue
+      }
       out[key] = value
     }
     return [out]
@@ -38303,10 +38336,24 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
 }
 
 export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
-  return (orders || []).map((wo: any) => ({
-    ...wo,
-    scope_items: redactTradeWorkOrderScopeItems(wo?.scope_items),
-  }))
+  return (orders || []).map((wo: any) => {
+    if (!wo || typeof wo !== 'object' || Array.isArray(wo)) return wo
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(wo)) {
+      if (key === 'scope_items') {
+        out.scope_items = redactTradeWorkOrderScopeItems(value)
+        continue
+      }
+      if (typeof value === 'string') {
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        if (cleaned === '') continue
+        out[key] = cleaned
+        continue
+      }
+      out[key] = value
+    }
+    return out
+  })
 }
 
 export function redactTradeQuotePackMoney(packs: any[]): any[] {
@@ -38657,10 +38704,12 @@ async function tradeJobDetail(
 
   const tradeCrew = _tradeCrewRoster(crewRes.data || [])
   // Documents: office and a division manager get the office document set
-  // (everything, quotes included — "sees everything, can do whatever he
-  // wants"). An allocated trade (lead or crew) and the MakeSafe open-pool
-  // exception get only ops-flagged visible_to_trades rows AND never a quote-type
-  // document, whatever the flag says (Captain's one hard exclusion).
+  // (everything, quotes and priced work-order PDFs included — "sees
+  // everything, can do whatever he wants"). An allocated trade (lead or
+  // crew) and the MakeSafe open-pool exception get only ops-flagged
+  // visible_to_trades rows AND never a quote-type or full priced work-order
+  // PDF, whatever the flag says. JSON TradeQuotePack + allowlisted WO
+  // lines are the price-free substitute until TRD-6.
   const visibleDocuments = quoteVisible
     ? (docsRes.data || [])
     : _tradeDocumentsForAllocatedTrade(docsRes.data || [])
@@ -38716,9 +38765,12 @@ async function tradeJobDetail(
     // has always returned. A job with two live work orders showed the trade only
     // one of them before this.
     workOrders,
-    // Additive: the work-order PDFs ops has flagged for trades, lifted out of the
-    // undifferentiated documents array so the app has a work-order surface to
-    // render instead of having to sort types itself. Already visibility-filtered.
+    // Additive: the work-order PDFs ops has flagged for trades, lifted out of
+    // the undifferentiated documents array so the app has a work-order surface
+    // to render instead of having to sort types itself. Already
+    // visibility-filtered; allocated / makesafe_open also drop priced
+    // work_order / supplier_work_order files, so this list is empty there
+    // until TRD-6. Office / division-manager keep the full PDFs.
     workOrderDocuments: visibleDocuments.filter((d: any) =>
       d?.type === 'work_order' || d?.type === 'supplier_work_order'
     ),

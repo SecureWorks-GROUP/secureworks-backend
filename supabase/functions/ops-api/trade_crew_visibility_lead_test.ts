@@ -5,8 +5,8 @@
 //   1. an installer cannot see who else is on the job          -> crew / leadInstaller
 //   2. no way to name a lead installer                          -> is_lead + set_job_lead
 //   3. an assigned installer cannot see scope or the work order -> scopeSummary,
-//                                                                  workOrders,
-//                                                                  workOrderDocuments
+//                                                                  workOrders
+//      (priced work-order PDFs stay office-only until TRD-6)
 //
 // The controls in the second half are the important half: this change WIDENS
 // what a trade receives, so the tests that matter are the ones proving it did
@@ -184,7 +184,7 @@ function seed(): Tables {
         wo_number: "WO-2",
         status: "sent",
         scope_items: [{ description: "Install patio" }],
-        special_instructions: "Park on the verge",
+        special_instructions: "Park on the verge. Charge $9,999 extra.",
       },
       {
         id: "wo-old",
@@ -357,10 +357,13 @@ Deno.test("assigned installer gets EVERY live work order, not just the newest", 
   assertEquals(d.workOrder.wo_number, "WO-2");
 });
 
-Deno.test("assigned installer gets the work-order PDF as its own surface", async () => {
+Deno.test("assigned installer does not receive priced work-order PDFs (office keeps them)", async () => {
   const d: any = await detailFor(seed());
-  assertEquals(d.workOrderDocuments.length, 1);
-  assertEquals(d.workOrderDocuments[0].id, "doc-wo");
+  assertEquals(d.workOrderDocuments, []);
+  assertEquals(d.documents.map((x: any) => x.id), []);
+  const serialised = JSON.stringify(d);
+  assert(!serialised.includes("wo.pdf"), "priced work-order PDF leaked to allocated payload");
+  assertEquals(d.workOrders[0].special_instructions, "Park on the verge. Charge extra.");
 });
 
 // ── CONTROLS: proof this did not widen too far ──────────────────────────────

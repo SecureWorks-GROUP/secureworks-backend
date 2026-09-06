@@ -31,8 +31,10 @@ import {
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
+  redactTradeWorkOrdersForAllocated,
   tradeLabourCostVisibleForTier,
   resolveTradeJobAccessTier,
+  TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES,
   TRADE_QUOTE_DOCUMENT_TYPES,
   tradeIsDesignatedLead,
   tradeJobAccessRefusal,
@@ -243,6 +245,7 @@ function seed(): Tables {
     ],
     job_documents: [
       { id: "d-wo", job_id: JOB_FENCE, type: "work_order", visible_to_trades: true, file_name: "wo.pdf" },
+      { id: "d-supplier-wo", job_id: JOB_FENCE, type: "supplier_work_order", visible_to_trades: true, file_name: "swo.pdf" },
       // ops flagged this QUOTE visible — the flag must not be enough.
       { id: "d-quote-vis", job_id: JOB_FENCE, type: "quote", visible_to_trades: true, file_name: "quote.pdf", quote_number: "Q-1" },
       { id: "d-quote-hid", job_id: JOB_FENCE, type: "quote", visible_to_trades: false, file_name: "quote-v2.pdf", quote_number: "Q-2" },
@@ -258,7 +261,13 @@ function seed(): Tables {
       job_id: JOB_FENCE,
       wo_number: "WO-1",
       scope_items: [{
-        description: "Install fence",
+        description: "Install fence Total $850",
+        name: "Fence run $850",
+        label: "Front run $850",
+        title: "WO line $850",
+        instructions: "Use 90x90 posts. Charge $850.",
+        notes: "Priced $850 — hide from trade",
+        text: "Line text $850",
         quantity: 10,
         unit: "m",
         rate: 85,
@@ -271,6 +280,7 @@ function seed(): Tables {
         cost: 12,
         pricing: { amount: 99 },
       }],
+      special_instructions: "Park on the verge. Charge $9,999 extra.",
       status: "sent",
     }],
     purchase_orders: [{ id: "po-1", job_id: JOB_FENCE, status: "sent", total: 1000, line_items: [{ description: "Labour install", quantity: 2, unit_price: 300 }] }],
@@ -449,6 +459,8 @@ function quoteLeakProbe(payload: any): string[] {
       "unitPriceEx",
       "777",
       "784",
+      "wo.pdf",
+      "swo.pdf",
     ]
   ) {
     if (text.includes(needle)) leaks.push(needle);
@@ -465,10 +477,12 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.purchaseOrders.length, 1);
   assertEquals(p.quote_packs || [], [], "unsent quotes do not become a trade pack");
   assertEquals(quoteLeakProbe(p), [], "no sell price, rate, or quote PDF in the allocated payload");
-  // Documents: flagged-visible non-quote docs only. The visible-flagged QUOTE and
-  // the client INVOICE are gone; the supplier quote (a supplier's price to us)
-  // and the work order stay. Quote numbers on remaining rows are kept.
-  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
+  // Documents: flagged-visible non-quote, non-priced-WO docs only. The
+  // visible-flagged QUOTE, client INVOICE, and full priced work-order PDFs
+  // are gone; the supplier quote (a supplier's price to us) stays. Quote
+  // numbers on remaining rows are kept. JSON workOrders stay allowlisted.
+  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
+  assertEquals(p.workOrderDocuments, []);
   // Labour headcount/days survive; dayRate is a price and is stripped.
   assertEquals(p.job.scope_json.pricing, { labour: { trades: 2, days: 3 } });
   assertEquals(p.job.scope_json.notes, {
@@ -483,10 +497,17 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     materials: [{ name: "90x90 posts", qty: 12 }],
   });
   assertEquals(p.workOrders[0].scope_items, [{
-    description: "Install fence",
+    description: "Install fence Total",
+    name: "Fence run",
+    label: "Front run",
+    title: "WO line",
+    instructions: "Use 90x90 posts. Charge.",
+    notes: "Priced — hide from trade",
+    text: "Line text",
     quantity: 10,
     unit: "m",
   }]);
+  assertEquals(p.workOrders[0].special_instructions, "Park on the verge. Charge extra.");
   assertEquals(p.workOrder.scope_items[0].rate, undefined);
   assertEquals(p.workOrder.scope_items[0].total, undefined);
   assertEquals(p.workOrder.scope_items[0].unit_price, undefined);
@@ -507,7 +528,8 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(install?.quantity, 10);
   assertEquals(install?.unit_price, null, "allocated trades never see installer or sell rates");
   assertEquals(install?.line_total, null);
-  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
+  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
+  assertEquals(p.workOrderDocuments, []);
   assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
   assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
   assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell, rates and PDF are not");
@@ -517,6 +539,38 @@ Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", a
   const lead = await detail(seed(), viewer(LEAD, "crew"));
   const crew = await detail(seed(), viewer(CREW, "crew"));
   assertEquals(crew, lead);
+});
+
+Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO prose", async () => {
+  const t = seed();
+  t.job_documents.push({
+    id: "d-ms-wo",
+    job_id: JOB_MS,
+    type: "work_order",
+    visible_to_trades: true,
+    file_name: "ms-wo.pdf",
+  });
+  t.work_orders.push({
+    id: "wo-ms",
+    job_id: JOB_MS,
+    wo_number: "WO-MS",
+    special_instructions: "Attend after hours. Charge $9,999 extra.",
+    scope_items: [{ description: "Make safe $850", quantity: 1, unit: "lot", rate: 85 }],
+    status: "sent",
+  });
+  const p = await _tradeJobDetailForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_MS }),
+    viewer(STRANGER, "crew") as any,
+    false,
+  );
+  assertEquals(p.access_tier, "makesafe_open");
+  assertEquals(p.quote_visible, false);
+  assertEquals(p.documents.map((d: any) => d.id), []);
+  assertEquals(p.workOrderDocuments, []);
+  assertEquals(JSON.stringify(p).includes("ms-wo.pdf"), false);
+  assertEquals(p.workOrders[0].special_instructions, "Attend after hours. Charge extra.");
+  assertEquals(p.workOrders[0].scope_items, [{ description: "Make safe", quantity: 1, unit: "lot" }]);
 });
 
 const WALKTHROUGH_URL = "https://cdn.example.test/jobs/swf-26101/walkthrough.mp4";
@@ -623,9 +677,11 @@ Deno.test("trade_job_detail: the fencing division manager sees the quote docs an
   const p = await detail(seed(), viewer(HENRY, "lead_installer", ["fencing"]));
   assertEquals(p.access_tier, "division_manager");
   assertEquals(p.quote_visible, true);
-  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-internal", "d-invoice", "d-quote-hid", "d-quote-vis", "d-supplier-quote", "d-wo"]);
+  assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-internal", "d-invoice", "d-quote-hid", "d-quote-vis", "d-supplier-quote", "d-supplier-wo", "d-wo"]);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
   assertEquals(p.workOrders[0].scope_items[0].rate, 85);
+  assertEquals(p.workOrders[0].special_instructions, "Park on the verge. Charge $9,999 extra.");
+  assertEquals(p.workOrderDocuments.map((d: any) => d.id).sort(), ["d-supplier-wo", "d-wo"]);
 });
 
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
@@ -633,7 +689,8 @@ Deno.test("trade_job_detail: office gets the same as the manager", async () => {
   assertEquals(p.access_tier, "office");
   assertEquals(p.quote_visible, true);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
-  assertEquals(p.documents.length, 6);
+  assertEquals(p.documents.length, 7);
+  assertEquals(p.workOrderDocuments.map((d: any) => d.id).sort(), ["d-supplier-wo", "d-wo"]);
 });
 
 Deno.test("trade_job_detail: a trade with no vertical and no allocation is refused outright", async () => {
@@ -709,6 +766,10 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
         quote_number: "Q-NARR",
         description: "Supply and install. Total A$ 9,999",
         narrative: "Gate on the left $ 1,200 extra",
+        name: "Monument package $9,999",
+        label: "Front run AUD 1,200",
+        title: "Quote title A$ 80",
+        materials: [{ name: "90x90 posts $45", qty: 12, title: "Posts $45" }],
       },
     },
   });
@@ -717,6 +778,10 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
   assertEquals(r.job.quote.quote_number, "Q-NARR");
   assertEquals(r.job.quote.description, "Supply and install. Total");
   assertEquals(r.job.quote.narrative, "Gate on the left extra");
+  assertEquals(r.job.quote.name, "Monument package");
+  assertEquals(r.job.quote.label, "Front run");
+  assertEquals(r.job.quote.title, "Quote title");
+  assertEquals(r.job.quote.materials, [{ name: "90x90 posts", qty: 12, title: "Posts" }]);
   assertEquals(JSON.stringify(r).includes("9999"), false);
   assertEquals(JSON.stringify(r).includes("1200"), false);
 });
@@ -787,19 +852,22 @@ Deno.test("redactTradeScopeQuote: a pricing block with no labour becomes empty, 
   assertEquals(redactTradeScopeQuote("not json"), null);
 });
 
-Deno.test("_tradeDocumentsForAllocatedTrade: honours the flag AND drops quote-bearing types whatever the flag says", () => {
+Deno.test("_tradeDocumentsForAllocatedTrade: honours the flag AND drops quote-bearing and priced WO types whatever the flag says", () => {
   const docs = seed().job_documents;
-  assertEquals(_tradeDocumentsForAllocatedTrade(docs).map((d) => d.id).sort(), ["d-supplier-quote", "d-wo"]);
+  assertEquals(_tradeDocumentsForAllocatedTrade(docs).map((d) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals([...TRADE_QUOTE_DOCUMENT_TYPES].sort(), ["invoice", "quote"]);
+  assertEquals([...TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES].sort(), ["supplier_work_order", "work_order"]);
 });
 
-Deno.test("_tradeDocumentsForAllocatedTrade keeps quote_number on a remaining non-quote row", () => {
+Deno.test("_tradeDocumentsForAllocatedTrade keeps quote_number on a remaining non-quote, non-priced-WO row", () => {
   const docs = [
-    { id: "d-wo", type: "work_order", visible_to_trades: true, quote_number: "Q-KEEP" },
+    { id: "d-wo", type: "work_order", visible_to_trades: true, quote_number: "Q-WO" },
+    { id: "d-supplier-wo", type: "supplier_work_order", visible_to_trades: true, quote_number: "Q-SWO" },
+    { id: "d-sq", type: "supplier_quote", visible_to_trades: true, quote_number: "Q-KEEP" },
     { id: "d-quote", type: "quote", visible_to_trades: true, quote_number: "Q-HIDE" },
   ];
   const out = _tradeDocumentsForAllocatedTrade(docs);
-  assertEquals(out.map((d) => d.id), ["d-wo"]);
+  assertEquals(out.map((d) => d.id), ["d-sq"]);
   assertEquals(out[0].quote_number, "Q-KEEP");
 });
 
@@ -842,6 +910,61 @@ Deno.test("redactTradeWorkOrderScopeItems drops non-object and nested-array entr
     [{ description: "Posts", quantity: 4, unit: "ea" }],
   );
   assertEquals(redactTradeWorkOrderScopeItems("$9,999"), []);
+});
+
+Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string leaf", () => {
+  assertEquals(
+    redactTradeWorkOrderScopeItems([
+      {
+        description: "Posts Total $9,999",
+        instructions: "Charge AUD 1,200 extra",
+        notes: "Priced A$ 80",
+        name: "Front $9,999",
+        label: "Run $ 40",
+        title: "Line $9,999",
+        text: "Text $9,999",
+        quantity: 4,
+        unit: "ea",
+      },
+    ]),
+    [{
+      description: "Posts Total",
+      instructions: "Charge extra",
+      notes: "Priced",
+      name: "Front",
+      label: "Run",
+      title: "Line",
+      text: "Text",
+      quantity: 4,
+      unit: "ea",
+    }],
+  );
+});
+
+Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instructions and other WO prose", () => {
+  const out = redactTradeWorkOrdersForAllocated([
+    {
+      id: "wo-1",
+      wo_number: "WO-1",
+      status: "sent",
+      special_instructions: "Park on the verge. Charge $9,999 extra.",
+      notes: "Installer note $1,200",
+      scope_items: [{
+        description: "Posts Total $850",
+        quantity: 4,
+        unit: "ea",
+        rate: 20,
+      }],
+    },
+  ]);
+  assertEquals(out[0].id, "wo-1");
+  assertEquals(out[0].wo_number, "WO-1");
+  assertEquals(out[0].special_instructions, "Park on the verge. Charge extra.");
+  assertEquals(out[0].notes, "Installer note");
+  assertEquals(out[0].scope_items, [{ description: "Posts Total", quantity: 4, unit: "ea" }]);
+  assertEquals(JSON.stringify(out).includes("9999"), false);
+  assertEquals(JSON.stringify(out).includes("1200"), false);
+  assertEquals(JSON.stringify(out).includes("850"), false);
 });
 
 Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money", () => {
