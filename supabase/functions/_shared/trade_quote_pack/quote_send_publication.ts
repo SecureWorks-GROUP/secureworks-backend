@@ -368,6 +368,7 @@ export type SendRunExistingDocument = {
   send_claimed_at?: string | null
   share_token?: string | null
   quote_number?: string | null
+  superseded_at?: string | null
 }
 
 export type SendRunPartyKey = {
@@ -387,6 +388,13 @@ function sameSendRunContact(
   return (left ?? null) === (right ?? null)
 }
 
+export function sendRunDocumentIsSuperseded(
+  doc: { superseded_at?: string | null } | null | undefined,
+): boolean {
+  const stamp = doc?.superseded_at
+  return typeof stamp === 'string' && stamp.trim().length > 0
+}
+
 export function existingQuoteDocumentForRun(
   documents: SendRunExistingDocument[],
   key: SendRunPartyKey,
@@ -396,6 +404,7 @@ export function existingQuoteDocumentForRun(
     if (typeof d?.id !== 'string' || !d.id) return false
     if (String(d.type || '').toLowerCase() !== 'quote') return false
     if (d.archived) return false
+    if (sendRunDocumentIsSuperseded(d)) return false
     if (String(d.run_label || '') !== runLabel) return false
     return sameSendRunContact(d.job_contact_id, key.jobContactId)
   })
@@ -466,6 +475,29 @@ export function sendRunsSendOutcome(input: {
     code: 'no_quote_recipients',
     error: 'No quote recipients to send',
   }
+}
+
+/**
+ * draft→quoted is durable primary-client publication, not "emailed this
+ * request". A retry that resolves the primary as use_published must still
+ * flip a leftover draft. Neighbour-only publication never satisfies.
+ */
+export function sendRunsPrimaryClientPublicationSatisfied(input: {
+  primarySentThisRequest: boolean
+  publishedExistingDocs: Array<{
+    job_contact_id?: string | null
+    superseded_at?: string | null
+    sent_to_client?: boolean | null
+    sent_at?: string | null
+  }>
+  primaryJobContactId: string | null
+}): boolean {
+  if (input.primarySentThisRequest) return true
+  return (input.publishedExistingDocs || []).some((doc) => {
+    if (sendRunDocumentIsSuperseded(doc)) return false
+    if (!sameSendRunContact(doc.job_contact_id, input.primaryJobContactId)) return false
+    return quoteSendIsPublished(doc)
+  })
 }
 
 /** Document ids belonging to recipients whose Resend call succeeded. */

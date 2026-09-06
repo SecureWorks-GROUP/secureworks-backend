@@ -47,6 +47,7 @@ import {
   revertQuoteDocumentSendClaim,
   revertQuoteDocumentSendClaims,
   sendRunQuoteNumberFallback,
+  sendRunsPrimaryClientPublicationSatisfied,
   sendRunsSendOutcome,
   type QuoteSendDocumentClaim,
   type SendRunExistingDocument,
@@ -2292,9 +2293,10 @@ serve(async (req: Request) => {
 
       try {
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
-        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at')
         .eq('job_id', job.id)
         .eq('type', 'quote')
+        .is('superseded_at', null)
       if (existingQuoteError) {
         console.error('[send-quote] send-runs existing quote read failed:', existingQuoteError.message || String(existingQuoteError))
         return jsonResponse({ error: 'Failed to load existing quote documents' }, 500, corsHeaders)
@@ -2397,6 +2399,7 @@ serve(async (req: Request) => {
               sent_at: null,
               share_token: clientDoc.share_token,
               quote_number: clientDoc.quote_number,
+              superseded_at: null,
             })
             const insertedClientClaim = await claimWorkingDoc(clientDoc)
             if (insertedClientClaim !== 'claimed') return await refuseWorkingClaim(insertedClientClaim)
@@ -2459,6 +2462,7 @@ serve(async (req: Request) => {
                 sent_at: null,
                 share_token: nbDoc.share_token,
                 quote_number: nbDoc.quote_number,
+                superseded_at: null,
               })
               const insertedNeighbourClaim = await claimWorkingDoc(nbDoc)
               if (insertedNeighbourClaim !== 'claimed') return await refuseWorkingClaim(insertedNeighbourClaim)
@@ -2598,9 +2602,10 @@ serve(async (req: Request) => {
       // Stamp sent_at / sent_to_client per successful recipient, not from
       // the primary result alone. Neighbour docs stay unpublished when that
       // email failed; a neighbour-only success still publishes those docs.
-      // Job draft→quoted still requires primarySent (ADR). A stamp failure
-      // after Resend success fails the handler and reverts in-flight claims
-      // so a retry publishes the same documents instead of minting twins.
+      // Job draft→quoted requires durable primary-client publication (ADR),
+      // not only a newly successful primary email. A stamp failure after
+      // Resend success fails the handler and reverts unpublished claims so a
+      // retry publishes the same documents instead of minting twins.
       const publishedDocIds = documentIdsPublishedForSuccessfulSends(
         Object.values(emailsByRecipient),
         successfulEmails,
@@ -2674,13 +2679,20 @@ serve(async (req: Request) => {
 
       // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.
       // A neighbour-only success does NOT release the quote.
-      // Only flip status from 'draft' to 'quoted' — never regress an already
-      // accepted / scheduled / in_progress / complete / invoiced job back to quoted.
+      // Use durable publication: a primary email this request, OR a current
+      // already-published primary document (including alreadyComplete retry
+      // after a prior partial publication). Never regress an already
+      // accepted / scheduled / in_progress / complete / invoiced job.
       // We gate canonical emits on the UPDATE's affected-row count (not a pre-select),
       // so a concurrent writer that moved the job out of 'draft' between read and write
       // cannot cause a false canonical release event.
       let transitioned = false
-      if (primarySent) {
+      const primaryPublicationSatisfied = sendRunsPrimaryClientPublicationSatisfied({
+        primarySentThisRequest: primarySent,
+        publishedExistingDocs,
+        primaryJobContactId: primaryContact.id || null,
+      })
+      if (primaryPublicationSatisfied) {
         const { data: updatedRows } = await sb.from('jobs')
           .update({ status: 'quoted', quoted_at: new Date().toISOString() })
           .eq('id', job.id)
@@ -2688,7 +2700,7 @@ serve(async (req: Request) => {
           .select('id')
         transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
       } else {
-        console.log(`[send-runs] Primary client send did not succeed (primaryEmail=${primaryEmail || '(none)'}, emailsSent=${emailsSent}). Leaving job unquoted.`)
+        console.log(`[send-runs] Primary client publication not satisfied (primaryEmail=${primaryEmail || '(none)'}, emailsSent=${emailsSent}, publishedExisting=${publishedExistingDocs.length}). Leaving job unquoted.`)
       }
 
       // Analytics event (preserved): records the runs-bundle send attempt regardless of outcome.

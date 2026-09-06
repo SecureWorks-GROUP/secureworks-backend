@@ -33,6 +33,7 @@ import {
   revertQuoteDocumentSendClaim,
   revertQuoteDocumentSendClaims,
   sendRunQuoteNumberFallback,
+  sendRunsPrimaryClientPublicationSatisfied,
   sendRunsPublicationFailureBlocksSuccess,
   sendRunsSendOutcome,
 } from "../_shared/trade_quote_pack/quote_send_publication.ts"
@@ -1160,6 +1161,137 @@ Deno.test("R6-004 send-runs reports non-success when no email was published", ()
       claimedCount: 0,
     }),
     { success: true, alreadyComplete: true },
+  )
+})
+
+Deno.test("R8-001 durable primary publication recovers draft→quoted", () => {
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "c-1",
+        sent_to_client: true,
+        sent_at: "2026-09-06T00:00:00.000Z",
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    true,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: true,
+      publishedExistingDocs: [],
+      primaryJobContactId: "c-1",
+    }),
+    true,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "nb-1",
+        sent_to_client: true,
+        sent_at: "2026-09-06T00:00:00.000Z",
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    false,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "c-1",
+        sent_to_client: true,
+        sent_at: "2026-09-06T00:00:00.000Z",
+        superseded_at: "2026-09-06T12:00:00.000Z",
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    false,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [],
+      primaryJobContactId: "c-1",
+    }),
+    false,
+  )
+})
+
+Deno.test("R8-002 superseded documents are not current published runs", () => {
+  assertEquals(
+    resolveSendRunDocument([{
+      id: "doc-old",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    }], { runLabel: "REAR", jobContactId: "c-1" }).action,
+    "create",
+  )
+  const unpublishedTwin = resolveSendRunDocument([
+    {
+      id: "doc-old",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    },
+    {
+      id: "doc-open",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+      superseded_at: null,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(unpublishedTwin.action, "reuse_unpublished")
+  if (unpublishedTwin.action === "reuse_unpublished") {
+    assertEquals(unpublishedTwin.document.id, "doc-open")
+  }
+  const currentPublished = resolveSendRunDocument([
+    {
+      id: "doc-old",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    },
+    {
+      id: "doc-current",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-06T12:00:00.000Z",
+      superseded_at: null,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(currentPublished.action, "use_published")
+  if (currentPublished.action === "use_published") {
+    assertEquals(currentPublished.document.id, "doc-current")
+  }
+  assertEquals(
+    resolveSendRunDocument([{
+      id: "doc-old-open",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    }], { runLabel: "REAR", jobContactId: "c-1" }).action,
+    "create",
   )
 })
 

@@ -164,3 +164,17 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   the successful subset, leftover claims revert under the same token
   fence (cannot clear a published row). Zero-publication still reverts
   every claim.
+
+## Review-8 locks (2026-09-06)
+
+- **draft→quoted uses durable primary publication.** send-runs flips a
+  leftover draft when the primary client document is already published
+  (`publishedExistingDocs` / `use_published`), not only when this request
+  emailed the primary. An alreadyComplete retry after a partial
+  publication cannot leave the job draft. Neighbour-only publication
+  still does not release.
+- **Superseded send-runs rows are not current.** The existing-document
+  read selects `superseded_at` and excludes non-null rows before
+  `use_published` / `reuse_unpublished`. A `/send` revision mint must
+  create a fresh run document instead of claiming the superseded pack
+  was already sent. Extract exclusion of superseded packs stays in force.
