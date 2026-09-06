@@ -264,10 +264,27 @@ export function assembleQuotePacksForTrade(input: {
   })
 }
 
+export type PersistTradePackResult = {
+  wrote: number
+  failed: Array<{ document_id: string; error: string }>
+}
+
+export function persistTradePackWriteConfirmed(
+  result: PersistTradePackResult,
+  expectedCount: number,
+): boolean {
+  return result.failed.length === 0 && result.wrote === expectedCount && expectedCount >= 0
+}
+
 export async function persistTradePackOnDocuments(
   sb: { from: (table: string) => any },
   args: {
-    documents: Array<{ id?: string; quote_number?: string | null; sent_at?: string | null }>
+    documents: Array<{
+      id?: string
+      quote_number?: string | null
+      sent_at?: string | null
+      claim_token?: string | null
+    }>
     jobType?: string | null
     scopeJson?: unknown
     pricingJson?: unknown
@@ -275,8 +292,9 @@ export async function persistTradePackOnDocuments(
     customer?: Partial<TradeQuoteCustomerSnapshot> | null
     terms?: Partial<TradeQuoteTermsSnapshot> | null
   },
-): Promise<number> {
+): Promise<PersistTradePackResult> {
   let wrote = 0
+  const failed: PersistTradePackResult['failed'] = []
   const sentAt = args.sentAt || new Date().toISOString()
   for (const doc of args.documents || []) {
     if (!doc?.id) continue
@@ -291,17 +309,22 @@ export async function persistTradePackOnDocuments(
       customer: args.customer,
       terms: args.terms,
     })
-    const { error } = await sb.from('job_documents').update({ trade_pack_json: pack }).eq('id', doc.id)
-    if (error) {
+    const token = typeof doc.claim_token === 'string' ? doc.claim_token.trim() : ''
+    let query = sb.from('job_documents').update({ trade_pack_json: pack }).eq('id', doc.id)
+    if (token) query = query.eq('send_claim_token', token)
+    const { data, error } = await query.select('id').maybeSingle()
+    if (error || !data || typeof data.id !== 'string') {
+      const message = error?.message || 'pack write not confirmed'
       console.error('[trade-pack-persist-fail]', JSON.stringify({
         document_id: doc.id,
-        error: error.message || String(error),
+        error: message,
       }))
+      failed.push({ document_id: doc.id, error: message })
       continue
     }
     wrote++
   }
-  return wrote
+  return { wrote, failed }
 }
 
 export function quoteDocumentHasClientSend(doc: QuoteDocRow | null | undefined): boolean {

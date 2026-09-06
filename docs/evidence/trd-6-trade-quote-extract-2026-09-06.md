@@ -122,3 +122,22 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   fences concurrent create+send. Existing published job+run+contact docs are
   reused, not reminted; unpublished docs are reclaimed and republished. A
   retry after stamp failure publishes the same documents.
+
+## Review-6 locks (2026-09-06)
+
+- **Claim token owns publish and revert.** `send_claim_token` is minted with
+  `send_claimed_at`. Stale reclaim writes a new token. Publication and
+  revert match that token per document. The original worker cannot stamp
+  or clear a claim after reclaim. Batch send-runs claims are fenced the
+  same way. Held: JWT send authorization (TRD6-R6-001) is unchanged.
+- **Frozen pack is part of publication.** Both send paths persist and
+  confirm `trade_pack_json` before `sent_to_client`/`sent_at`. An
+  unconfirmed pack write reverts the owned claim and returns 500. A
+  published row cannot silently miss the extract.
+- **send-runs does not report success with zero emails.** All-Resend-fail
+  is 502. Nothing assembled is 400. Neighbour-only email success stays
+  200 and leaves the job unquoted. An already-published no-op retry is
+  200 `already_sent`.
+- **Claim database faults are not already_sent.** Document and job claim
+  helpers return `claimed` / `unavailable` / `error`. `/send` maps error
+  to 500. send-runs maps a job-claim error to 500, not 409.

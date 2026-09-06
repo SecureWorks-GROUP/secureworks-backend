@@ -273,3 +273,4 @@ send-quote|supabase/migrations/20260904090000_job_documents_trade_pack_json.sql|
 ops-api|supabase/migrations/20260906140000_job_documents_send_claimed_at.sql|column|job_documents.send_claimed_at
 send-quote|supabase/migrations/20260906140000_job_documents_send_claimed_at.sql|column|job_documents.send_claimed_at
 send-quote|supabase/migrations/20260906150000_jobs_send_runs_claimed_at.sql|column|jobs.send_runs_claimed_at
+send-quote|supabase/migrations/20260906160000_job_documents_send_claim_token.sql|column|job_documents.send_claim_token

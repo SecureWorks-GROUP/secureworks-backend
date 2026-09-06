@@ -29,10 +29,14 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
-import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  persistTradePackOnDocuments,
+  persistTradePackWriteConfirmed,
+} from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 import {
   claimJobSendRuns,
   claimQuoteDocumentSend,
+  claimsForDocumentIds,
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   mintSendRunQuoteNumber,
@@ -42,6 +46,8 @@ import {
   revertQuoteDocumentSendClaim,
   revertQuoteDocumentSendClaims,
   sendRunQuoteNumberFallback,
+  sendRunsSendOutcome,
+  type QuoteSendDocumentClaim,
   type SendRunExistingDocument,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
@@ -762,14 +768,20 @@ serve(async (req: Request) => {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
       // ── Atomic in-flight claim (double-send idempotency guard) ──
-      // Claim send_claimed_at only. That is not publication: quote_packs and
-      // extracts stay hidden until Resend succeeds and we stamp sent_to_client
-      // + sent_at. Concurrent callers see a claimed or already-published row
-      // and return already_sent. Resend failure clears the claim so a retry
-      // can re-claim.
+      // Claim send_claimed_at + opaque send_claim_token. That is not
+      // publication: quote_packs and extracts stay hidden until Resend
+      // succeeds, the frozen pack write is confirmed, and we stamp
+      // sent_to_client + sent_at. Concurrent callers see a claimed or
+      // already-published row and return already_sent. A database claim
+      // fault is an error, not already_sent. Resend failure clears the
+      // owned claim so a retry can re-claim.
       const claimed = await claimQuoteDocumentSend(sb, document_id)
 
-      if (!claimed) {
+      if (claimed.status === 'error') {
+        console.error(`[send-quote] doc ${document_id} claim failed:`, claimed.error)
+        return jsonResponse({ error: 'Failed to claim quote document for send' }, 500, corsHeaders)
+      }
+      if (claimed.status !== 'claimed') {
         // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
@@ -828,7 +840,7 @@ serve(async (req: Request) => {
           })
         } catch (fetchErr) {
           // Network-level throw — clear the in-flight claim so a retry can resend.
-          await revertQuoteDocumentSendClaim(sb, document_id)
+          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token)
           console.log('[send-quote] Resend fetch threw (claim reverted):', (fetchErr as Error).message)
           return jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
         }
@@ -861,52 +873,48 @@ serve(async (req: Request) => {
             metadata: { document_id: doc.id, client_name: client_name },
           })
           // Clear the in-flight claim — email not sent, so a retry can re-claim.
-          await revertQuoteDocumentSendClaim(sb, document_id)
+          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token)
           return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
       }
 
-      // Publication marker: only after Resend accepted the primary send.
-      // In-flight send_claimed_at is not quote-pack eligibility. A stamp
-      // failure reverts the claim so retry is not stranded on already_sent.
-      const published = await publishQuoteDocumentSendOrRevert(sb, document_id)
-      if (!published.published) {
-        return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
+      // Frozen pack is part of the durable release. Persist and confirm
+      // the write before publication so a published row cannot miss
+      // trade_pack_json. A persist or stamp failure reverts the owned
+      // claim so retry is not stranded on already_sent.
+      const sentAt = new Date().toISOString()
+      const { data: jobForPack } = doc.job_id
+        ? await sb.from('jobs')
+          .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
+          .eq('id', doc.job_id)
+          .single()
+        : { data: null }
+      const persisted = await persistTradePackOnDocuments(sb, {
+        documents: [{
+          id: document_id,
+          quote_number: doc.quote_number || null,
+          sent_at: sentAt,
+          claim_token: claimed.token,
+        }],
+        jobType: jobForPack?.type || doc.jobs?.type,
+        scopeJson: jobForPack?.scope_json,
+        pricingJson: jobForPack?.pricing_json || doc.jobs?.pricing_json,
+        customer: {
+          name: jobForPack?.client_name ?? doc.jobs?.client_name,
+          phone: jobForPack?.client_phone ?? doc.jobs?.client_phone,
+          email: jobForPack?.client_email ?? doc.jobs?.client_email,
+          site_address: jobForPack?.site_address ?? doc.jobs?.site_address,
+          site_suburb: jobForPack?.site_suburb ?? doc.jobs?.site_suburb,
+        },
+      })
+      if (!persistTradePackWriteConfirmed(persisted, 1)) {
+        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token)
+        return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
 
-      // Freeze a trade-safe SOW onto this quote document on EVERY successful
-      // send (not only the first draft→quoted flip). Crew triages by quote number.
-      if (doc.job_id) {
-        try {
-          const { data: jobForPack } = await sb.from('jobs')
-            .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
-            .eq('id', doc.job_id)
-            .single()
-          await persistTradePackOnDocuments(sb, {
-            documents: [{
-              id: document_id,
-              quote_number: doc.quote_number || null,
-              sent_at: new Date().toISOString(),
-            }],
-            jobType: jobForPack?.type || doc.jobs?.type,
-            scopeJson: jobForPack?.scope_json,
-            pricingJson: jobForPack?.pricing_json || doc.jobs?.pricing_json,
-            customer: {
-              name: jobForPack?.client_name ?? doc.jobs?.client_name,
-              phone: jobForPack?.client_phone ?? doc.jobs?.client_phone,
-              email: jobForPack?.client_email ?? doc.jobs?.client_email,
-              site_address: jobForPack?.site_address ?? doc.jobs?.site_address,
-              site_suburb: jobForPack?.site_suburb ?? doc.jobs?.site_suburb,
-            },
-          })
-        } catch (e) {
-          console.error('[trade-pack-persist-fail]', JSON.stringify({
-            job_id: doc.job_id,
-            document_id,
-            handler: 'send-quote/send',
-            error: (e as Error).message,
-          }))
-        }
+      const published = await publishQuoteDocumentSendOrRevert(sb, document_id, claimed.token, new Date(sentAt))
+      if (!published.published) {
+        return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
       }
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
@@ -2286,7 +2294,10 @@ serve(async (req: Request) => {
       const primaryContact = contacts.find((c: any) => c.is_primary) || { client_name: job.client_name, client_email: job.client_email }
 
       const jobClaim = await claimJobSendRuns(sb, job.id)
-      if (!jobClaim) {
+      if (jobClaim.status === 'error') {
+        return jsonResponse({ error: 'Failed to claim quote send for this job' }, 500, corsHeaders)
+      }
+      if (jobClaim.status !== 'claimed') {
         return jsonResponse({
           error: 'Quote send already in progress for this job',
           code: 'send_runs_in_progress',
@@ -2311,7 +2322,7 @@ serve(async (req: Request) => {
       // second pack. Concurrent callers are fenced by the job claim above.
       const createdDocs: any[] = []
       const publishedExistingDocs: any[] = []
-      const claimedDocIds: string[] = []
+      const claimedDocs: QuoteSendDocumentClaim[] = []
       const emailsByRecipient: Record<string, { name: string, email: string, docs: any[], runs: any[] }> = {}
 
       const rememberExisting = (doc: SendRunExistingDocument) => {
@@ -2331,13 +2342,25 @@ serve(async (req: Request) => {
         emailsByRecipient[dest].docs.push(doc)
         emailsByRecipient[dest].runs.push(run)
       }
-      const claimWorkingDoc = async (doc: { id?: string }): Promise<boolean> => {
-        if (typeof doc?.id !== 'string' || !doc.id) return false
+      const claimWorkingDoc = async (doc: { id?: string }): Promise<'claimed' | 'unavailable' | 'error'> => {
+        if (typeof doc?.id !== 'string' || !doc.id) return 'error'
         const claimed = await claimQuoteDocumentSend(sb, doc.id)
-        if (!claimed) return false
-        claimedDocIds.push(doc.id)
-        createdDocs.push(doc)
-        return true
+        if (claimed.status === 'claimed') {
+          claimedDocs.push(claimed)
+          createdDocs.push(doc)
+          return 'claimed'
+        }
+        return claimed.status
+      }
+      const refuseWorkingClaim = async (status: 'unavailable' | 'error') => {
+        await revertQuoteDocumentSendClaims(sb, claimedDocs)
+        if (status === 'error') {
+          return jsonResponse({ error: 'Failed to claim quote document for send' }, 500, corsHeaders)
+        }
+        return jsonResponse({
+          error: 'Quote send already in progress for this job',
+          code: 'send_runs_in_progress',
+        }, 409, corsHeaders)
       }
 
       for (const run of runs) {
@@ -2353,13 +2376,8 @@ serve(async (req: Request) => {
           publishedExistingDocs.push(clientDoc)
         } else if (clientResolution.action === 'reuse_unpublished') {
           clientDoc = clientResolution.document
-          if (!await claimWorkingDoc(clientDoc)) {
-            await revertQuoteDocumentSendClaims(sb, claimedDocIds)
-            return jsonResponse({
-              error: 'Quote send already in progress for this job',
-              code: 'send_runs_in_progress',
-            }, 409, corsHeaders)
-          }
+          const clientClaim = await claimWorkingDoc(clientDoc)
+          if (clientClaim !== 'claimed') return await refuseWorkingClaim(clientClaim)
           const clientEmail = primaryContact.client_email || job.client_email
           addRecipientDoc(clientEmail, primaryContact.client_name || job.client_name, clientDoc, run)
         } else {
@@ -2394,13 +2412,8 @@ serve(async (req: Request) => {
               share_token: clientDoc.share_token,
               quote_number: clientDoc.quote_number,
             })
-            if (!await claimWorkingDoc(clientDoc)) {
-              await revertQuoteDocumentSendClaims(sb, claimedDocIds)
-              return jsonResponse({
-                error: 'Quote send already in progress for this job',
-                code: 'send_runs_in_progress',
-              }, 409, corsHeaders)
-            }
+            const insertedClientClaim = await claimWorkingDoc(clientDoc)
+            if (insertedClientClaim !== 'claimed') return await refuseWorkingClaim(insertedClientClaim)
             const clientEmail = primaryContact.client_email || job.client_email
             addRecipientDoc(clientEmail, primaryContact.client_name || job.client_name, clientDoc, run)
           }
@@ -2426,13 +2439,8 @@ serve(async (req: Request) => {
             publishedExistingDocs.push(nbDoc)
           } else if (neighbourResolution.action === 'reuse_unpublished') {
             nbDoc = neighbourResolution.document
-            if (!await claimWorkingDoc(nbDoc)) {
-              await revertQuoteDocumentSendClaims(sb, claimedDocIds)
-              return jsonResponse({
-                error: 'Quote send already in progress for this job',
-                code: 'send_runs_in_progress',
-              }, 409, corsHeaders)
-            }
+            const neighbourClaim = await claimWorkingDoc(nbDoc)
+            if (neighbourClaim !== 'claimed') return await refuseWorkingClaim(neighbourClaim)
             addRecipientDoc(neighbour.client_email, neighbour.client_name, nbDoc, run)
           } else {
             const neighbourQuoteNumber = await mintSendRunQuoteNumber(
@@ -2466,13 +2474,8 @@ serve(async (req: Request) => {
                 share_token: nbDoc.share_token,
                 quote_number: nbDoc.quote_number,
               })
-              if (!await claimWorkingDoc(nbDoc)) {
-                await revertQuoteDocumentSendClaims(sb, claimedDocIds)
-                return jsonResponse({
-                  error: 'Quote send already in progress for this job',
-                  code: 'send_runs_in_progress',
-                }, 409, corsHeaders)
-              }
+              const insertedNeighbourClaim = await claimWorkingDoc(nbDoc)
+              if (insertedNeighbourClaim !== 'claimed') return await refuseWorkingClaim(insertedNeighbourClaim)
               addRecipientDoc(neighbour.client_email, neighbour.client_name, nbDoc, run)
             }
           }
@@ -2618,39 +2621,59 @@ serve(async (req: Request) => {
       )
       if (publishedDocIds.length > 0) {
         const sentAt = new Date().toISOString()
-        const published = await publishQuoteDocumentsSendOrRevert(sb, publishedDocIds, new Date(sentAt))
+        const publishedClaims = claimsForDocumentIds(claimedDocs, publishedDocIds)
+        const publishedDocs = createdDocs.filter((d: any) => publishedDocIds.includes(d.id))
+        if (
+          publishedDocs.length !== publishedDocIds.length ||
+          publishedClaims.length !== publishedDocIds.length
+        ) {
+          await revertQuoteDocumentSendClaims(sb, claimedDocs)
+          return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+        }
+        const persisted = await persistTradePackOnDocuments(sb, {
+          documents: publishedDocs.map((d: any) => ({
+            id: d.id,
+            quote_number: d.quote_number || null,
+            sent_at: sentAt,
+            claim_token: publishedClaims.find((claim) => claim.id === d.id)?.token || null,
+          })),
+          jobType: job.type,
+          scopeJson: job.scope_json,
+          pricingJson: pj,
+          customer: {
+            name: job.client_name,
+            phone: job.client_phone,
+            email: job.client_email,
+            site_address: job.site_address,
+            site_suburb: job.site_suburb,
+          },
+        })
+        if (!persistTradePackWriteConfirmed(persisted, publishedDocs.length)) {
+          await revertQuoteDocumentSendClaims(sb, claimedDocs)
+          return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+        }
+        const published = await publishQuoteDocumentsSendOrRevert(sb, publishedClaims, new Date(sentAt))
         if (!published.published) {
-          await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+          await revertQuoteDocumentSendClaims(sb, claimedDocs)
           return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
         }
-        const publishedDocs = createdDocs.filter((d: any) => publishedDocIds.includes(d.id))
-        try {
-          await persistTradePackOnDocuments(sb, {
-            documents: publishedDocs.map((d: any) => ({
-              id: d.id,
-              quote_number: d.quote_number || null,
-              sent_at: sentAt,
-            })),
-            jobType: job.type,
-            scopeJson: job.scope_json,
-            pricingJson: pj,
-            customer: {
-              name: job.client_name,
-              phone: job.client_phone,
-              email: job.client_email,
-              site_address: job.site_address,
-              site_suburb: job.site_suburb,
-            },
-          })
-        } catch (e) {
-          console.error('[trade-pack-persist-fail]', JSON.stringify({
-            job_id: job.id,
-            handler: 'send-quote/send-runs',
-            error: (e as Error).message,
-          }))
-        }
-      } else if (claimedDocIds.length > 0) {
-        await revertQuoteDocumentSendClaims(sb, claimedDocIds)
+      } else if (claimedDocs.length > 0) {
+        await revertQuoteDocumentSendClaims(sb, claimedDocs)
+      }
+
+      const sendOutcome = sendRunsSendOutcome({
+        emailsSent,
+        recipientsAssembled: Object.keys(emailsByRecipient).length,
+        publishedExistingCount: publishedExistingDocs.length,
+        claimedCount: claimedDocs.length,
+      })
+      if (!sendOutcome.success) {
+        return jsonResponse({
+          success: false,
+          error: sendOutcome.error,
+          code: sendOutcome.code,
+          emails_sent: emailsSent,
+        }, sendOutcome.httpStatus, corsHeaders)
       }
 
       // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.
@@ -2855,6 +2878,7 @@ serve(async (req: Request) => {
       const responseDocs = [...publishedExistingDocs, ...createdDocs]
       return jsonResponse({
         success: true,
+        already_sent: sendOutcome.alreadyComplete === true,
         runs_sent: runs.length,
         documents_created: createdDocs.length,
         emails_sent: emailsSent,

@@ -10,6 +10,7 @@ import {
   packTradeQuote,
   overlayTradePackSnapshots,
   persistTradePackOnDocuments,
+  persistTradePackWriteConfirmed,
   quoteDocumentHasClientSend,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
@@ -525,22 +526,33 @@ Deno.test("hydrateStoredPack replaces money-shaped unit/kind with safe defaults"
   assertEquals(packs[0].items[1].unit, "m");
 });
 
-Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {
-  const writes: Array<{ id: string; pack: any }> = [];
-  const sb = {
+function persistWriteMock(writes: Array<{ id: string; pack: any }>) {
+  return {
     from(_table: string) {
       return {
         update(row: any) {
-          return {
+          const chain: Record<string, unknown> = {
             eq(_col: string, id: string) {
-              writes.push({ id, pack: row.trade_pack_json });
-              return { error: null };
+              if (_col === "id") writes.push({ id, pack: row.trade_pack_json });
+              return chain;
+            },
+            select() {
+              const last = writes[writes.length - 1];
+              return {
+                maybeSingle: () => Promise.resolve({ data: last ? { id: last.id } : null, error: null }),
+              };
             },
           };
+          return chain;
         },
       };
     },
   };
+}
+
+Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {
+  const writes: Array<{ id: string; pack: any }> = [];
+  const sb = persistWriteMock(writes);
   const n = await persistTradePackOnDocuments(sb, {
     documents: [
       { id: "doc-a", quote_number: "SWF-1-Q1" },
@@ -550,7 +562,8 @@ Deno.test("persistTradePackOnDocuments writes frozen packs per document", async 
     scopeJson: FENCE_SCOPE,
     pricingJson: FENCE_PRICING,
   });
-  assertEquals(n, 2);
+  assertEquals(n.wrote, 2);
+  assertEquals(n.failed, []);
   assertEquals(writes[0].pack.quote_number, "SWF-1-Q1");
   assertEquals(writes[1].pack.quote_number, "SWF-1-Q2");
   assertEquals(writes[0].pack.source, "frozen");
@@ -610,20 +623,7 @@ Deno.test("overlayTradePackSnapshots fills empty customer/terms on older frozen 
 
 Deno.test("persistTradePackOnDocuments writes customer snapshot onto the frozen pack", async () => {
   const writes: Array<{ id: string; pack: any }> = [];
-  const sb = {
-    from(_table: string) {
-      return {
-        update(row: any) {
-          return {
-            eq(_col: string, id: string) {
-              writes.push({ id, pack: row.trade_pack_json });
-              return { error: null };
-            },
-          };
-        },
-      };
-    },
-  };
+  const sb = persistWriteMock(writes);
   await persistTradePackOnDocuments(sb, {
     documents: [{ id: "doc-c", quote_number: "SWF-1-Q1", sent_at: "2026-09-01T00:00:00.000Z" }],
     jobType: "fencing",
@@ -635,4 +635,33 @@ Deno.test("persistTradePackOnDocuments writes customer snapshot onto the frozen 
   assertEquals(writes[0].pack.customer.phone, "0400 000 000");
   assertEquals(writes[0].pack.terms.payment_terms, "50% deposit + 50% on completion");
   assertEquals(tradePackMoneyLeakKeys(writes[0].pack), []);
+});
+
+Deno.test("R6-003 persistTradePackOnDocuments fails closed when the write is not confirmed", async () => {
+  const sb = {
+    from(_table: string) {
+      return {
+        update() {
+          const chain: Record<string, unknown> = {
+            eq() { return chain; },
+            select() {
+              return {
+                maybeSingle: () => Promise.resolve({ data: null, error: { message: "write missed" } }),
+              };
+            },
+          };
+          return chain;
+        },
+      };
+    },
+  };
+  const result = await persistTradePackOnDocuments(sb, {
+    documents: [{ id: "doc-miss", quote_number: "SWF-1-Q1" }],
+    jobType: "fencing",
+    scopeJson: FENCE_SCOPE,
+    pricingJson: FENCE_PRICING,
+  });
+  assertEquals(result.wrote, 0);
+  assertEquals(result.failed[0]?.document_id, "doc-miss");
+  assertEquals(persistTradePackWriteConfirmed(result, 1), false);
 });

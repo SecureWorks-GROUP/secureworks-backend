@@ -39,6 +39,7 @@ TRADE_INVOICE_WEEKLY_MIGRATION="$REPO_ROOT/supabase/migrations/20260831021701_tr
 TRADE_PACK_MIGRATION="$REPO_ROOT/supabase/migrations/20260904090000_job_documents_trade_pack_json.sql"
 SEND_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906140000_job_documents_send_claimed_at.sql"
 SEND_RUNS_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906150000_jobs_send_runs_claimed_at.sql"
+SEND_CLAIM_TOKEN_MIGRATION="$REPO_ROOT/supabase/migrations/20260906160000_job_documents_send_claim_token.sql"
 
 
 PASS_COUNT=0
@@ -189,6 +190,10 @@ send_runs_claimed_at_migration_sha() {
   shasum -a 256 "$SEND_RUNS_CLAIMED_AT_MIGRATION" | awk '{print $1}'
 }
 
+send_claim_token_migration_sha() {
+  shasum -a 256 "$SEND_CLAIM_TOKEN_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -227,6 +232,7 @@ write_response() {
   TRADE_PACK_EXPECTED_SHA="$(trade_pack_migration_sha)" \
   SEND_CLAIMED_AT_EXPECTED_SHA="$(send_claimed_at_migration_sha)" \
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
+  SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -592,6 +598,17 @@ send_runs_claimed_at_row = {
     "actual_statement_sha256": os.environ["SEND_RUNS_CLAIMED_AT_EXPECTED_SHA"],
     "missing_markers": [],
 }
+send_claim_token_row = {
+    "function_name": "send-quote",
+    "migration_version": "20260906160000",
+    "expected_migration_name": "job_documents_send_claim_token",
+    "expected_statement_sha256": os.environ["SEND_CLAIM_TOKEN_EXPECTED_SHA"],
+    "actual_migration_version": "20260906160000",
+    "actual_migration_name": "job_documents_send_claim_token",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SEND_CLAIM_TOKEN_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -627,6 +644,7 @@ with open(sys.argv[1], "w") as f:
             trade_pack_row,
             send_claimed_at_row,
             send_runs_claimed_at_row,
+            send_claim_token_row,
         ],
         f,
     )

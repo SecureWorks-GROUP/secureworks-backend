@@ -1,14 +1,17 @@
 /**
  * Direct /send and send-runs claim vs publication.
  *
- * An in-flight claim locks the row (`send_claimed_at`) so two callers cannot
- * both dispatch Resend. That stamp is not a client send. Quote-pack and
- * extract eligibility read publication only: `sent_to_client=true` plus
- * `sent_at` after Resend succeeds, or a historical omitted-flag row, or
- * `accepted_at`. Same bar as send-runs.
+ * An in-flight claim locks the row (`send_claimed_at` + opaque
+ * `send_claim_token`) so two callers cannot both dispatch Resend.
+ * That stamp is not a client send. Quote-pack and extract eligibility
+ * read publication only: `sent_to_client=true` plus `sent_at` after
+ * Resend succeeds, or a historical omitted-flag row, or `accepted_at`.
+ * Same bar as send-runs.
  *
  * Claims expire. A worker that dies after claim and before Resend-failure
  * revert or publication must not strand `/send` on `already_sent` forever.
+ * Reclaim writes a new token. Publish and revert match that token so the
+ * original worker cannot stamp or clear a claim it no longer owns.
  * send-runs takes a job-level claim (`jobs.send_runs_claimed_at`) with the
  * same TTL so concurrent/retry calls cannot mint a second published pack.
  */
@@ -20,8 +23,36 @@ export type QuoteSendPublicationClient = {
   rpc?: (fn: string) => Promise<{ data: unknown; error: { message?: string } | null }>
 }
 
-export function quoteSendClaimPayload(now = new Date()): { send_claimed_at: string } {
-  return { send_claimed_at: now.toISOString() }
+export type QuoteSendDocumentClaim = {
+  id: string
+  token: string
+  claimed_at: string
+}
+
+export type QuoteSendClaimResult =
+  | { status: 'claimed'; id: string; token: string; claimed_at: string }
+  | { status: 'unavailable' }
+  | { status: 'error'; error: string }
+
+export type JobSendRunsClaimResult =
+  | { status: 'claimed'; id: string; claimed_at: string }
+  | { status: 'unavailable' }
+  | { status: 'error'; error: string }
+
+export function mintQuoteSendClaimToken(): string {
+  return crypto.randomUUID()
+}
+
+export function quoteSendClaimToken(token: string | null | undefined): string | null {
+  const value = typeof token === 'string' ? token.trim() : ''
+  return value || null
+}
+
+export function quoteSendClaimPayload(
+  now = new Date(),
+  token = mintQuoteSendClaimToken(),
+): { send_claimed_at: string; send_claim_token: string } {
+  return { send_claimed_at: now.toISOString(), send_claim_token: token }
 }
 
 export function quoteSendPublicationPayload(now = new Date()): {
@@ -34,8 +65,11 @@ export function quoteSendPublicationPayload(now = new Date()): {
   }
 }
 
-export function quoteSendClaimRevertPayload(): { send_claimed_at: null } {
-  return { send_claimed_at: null }
+export function quoteSendClaimRevertPayload(): {
+  send_claimed_at: null
+  send_claim_token: null
+} {
+  return { send_claimed_at: null, send_claim_token: null }
 }
 
 export function jobSendRunsClaimPayload(now = new Date()): { send_runs_claimed_at: string } {
@@ -81,14 +115,40 @@ function uniqueDocumentIds(documentIds: Iterable<string | null | undefined>): st
   return ids
 }
 
+function uniqueDocumentClaims(
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+): QuoteSendDocumentClaim[] {
+  const out: QuoteSendDocumentClaim[] = []
+  const seen = new Set<string>()
+  for (const raw of claims) {
+    const id = typeof raw?.id === 'string' ? raw.id.trim() : ''
+    const token = quoteSendClaimToken(raw?.token)
+    if (!id || !token || seen.has(id)) continue
+    seen.add(id)
+    out.push({
+      id,
+      token,
+      claimed_at: typeof raw === 'object' && raw && 'claimed_at' in raw && typeof raw.claimed_at === 'string'
+        ? raw.claimed_at
+        : '',
+    })
+  }
+  return out
+}
+
+function claimErrorMessage(error: { message?: string } | null | undefined): string {
+  return error?.message || String(error)
+}
+
 async function claimQuoteDocumentSendExclusive(
   sb: QuoteSendPublicationClient,
   documentId: string,
   now: Date,
-): Promise<{ id: string } | null> {
+): Promise<QuoteSendClaimResult> {
+  const payload = quoteSendClaimPayload(now)
   const { data, error } = await sb
     .from('job_documents')
-    .update(quoteSendClaimPayload(now))
+    .update(payload)
     .eq('id', documentId)
     .is('send_claimed_at', null)
     .is('sent_at', null)
@@ -96,20 +156,23 @@ async function claimQuoteDocumentSendExclusive(
     .select('id')
     .maybeSingle()
   if (error) {
-    console.error('[send-quote] claim failed:', error.message || String(error))
-    return null
+    console.error('[send-quote] claim failed:', claimErrorMessage(error))
+    return { status: 'error', error: claimErrorMessage(error) }
   }
-  return data && typeof data.id === 'string' ? { id: data.id } : null
+  return data && typeof data.id === 'string'
+    ? { status: 'claimed', id: data.id, token: payload.send_claim_token, claimed_at: payload.send_claimed_at }
+    : { status: 'unavailable' }
 }
 
 async function reclaimStaleQuoteDocumentSend(
   sb: QuoteSendPublicationClient,
   documentId: string,
   now: Date,
-): Promise<{ id: string } | null> {
+): Promise<QuoteSendClaimResult> {
+  const payload = quoteSendClaimPayload(now)
   const { data, error } = await sb
     .from('job_documents')
-    .update(quoteSendClaimPayload(now))
+    .update(payload)
     .eq('id', documentId)
     .is('sent_at', null)
     .not('sent_to_client', 'is', true)
@@ -117,100 +180,121 @@ async function reclaimStaleQuoteDocumentSend(
     .select('id')
     .maybeSingle()
   if (error) {
-    console.error('[send-quote] stale claim reclaim failed:', error.message || String(error))
-    return null
+    console.error('[send-quote] stale claim reclaim failed:', claimErrorMessage(error))
+    return { status: 'error', error: claimErrorMessage(error) }
   }
-  return data && typeof data.id === 'string' ? { id: data.id } : null
+  return data && typeof data.id === 'string'
+    ? { status: 'claimed', id: data.id, token: payload.send_claim_token, claimed_at: payload.send_claimed_at }
+    : { status: 'unavailable' }
 }
 
 export async function claimQuoteDocumentSend(
   sb: QuoteSendPublicationClient,
   documentId: string,
   now = new Date(),
-): Promise<{ id: string } | null> {
+): Promise<QuoteSendClaimResult> {
   const exclusive = await claimQuoteDocumentSendExclusive(sb, documentId, now)
-  if (exclusive) return exclusive
+  if (exclusive.status === 'claimed' || exclusive.status === 'error') return exclusive
   return await reclaimStaleQuoteDocumentSend(sb, documentId, now)
 }
 
 export async function publishQuoteDocumentSend(
   sb: QuoteSendPublicationClient,
   documentId: string,
+  token: string,
   now = new Date(),
-): Promise<{ error: { message?: string } | null }> {
-  const { error } = await sb
+): Promise<{ updated: boolean; error: { message?: string } | null }> {
+  const owned = quoteSendClaimToken(token)
+  if (!owned) return { updated: false, error: { message: 'send claim token required' } }
+  const { data, error } = await sb
     .from('job_documents')
-    .update(quoteSendPublicationPayload(now))
+    .update({
+      ...quoteSendPublicationPayload(now),
+      ...quoteSendClaimRevertPayload(),
+    })
     .eq('id', documentId)
-  return { error: error || null }
+    .eq('send_claim_token', owned)
+    .select('id')
+    .maybeSingle()
+  if (error) return { updated: false, error }
+  return { updated: !!(data && typeof data.id === 'string'), error: null }
 }
 
 export async function revertQuoteDocumentSendClaim(
   sb: QuoteSendPublicationClient,
   documentId: string,
-): Promise<{ error: { message?: string } | null }> {
-  const { error } = await sb
+  token: string,
+): Promise<{ updated: boolean; error: { message?: string } | null }> {
+  const owned = quoteSendClaimToken(token)
+  if (!owned) return { updated: false, error: { message: 'send claim token required' } }
+  const { data, error } = await sb
     .from('job_documents')
     .update(quoteSendClaimRevertPayload())
     .eq('id', documentId)
+    .eq('send_claim_token', owned)
     .not('sent_to_client', 'is', true)
-  return { error: error || null }
+    .select('id')
+    .maybeSingle()
+  if (error) return { updated: false, error }
+  return { updated: !!(data && typeof data.id === 'string'), error: null }
 }
 
 export async function revertQuoteDocumentSendClaims(
   sb: QuoteSendPublicationClient,
-  documentIds: Iterable<string | null | undefined>,
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
 ): Promise<{ error: { message?: string } | null }> {
-  const ids = uniqueDocumentIds(documentIds)
-  if (!ids.length) return { error: null }
-  const { error } = await sb
-    .from('job_documents')
-    .update(quoteSendClaimRevertPayload())
-    .in('id', ids)
-    .not('sent_to_client', 'is', true)
-  return { error: error || null }
+  const owned = uniqueDocumentClaims(claims)
+  if (!owned.length) return { error: null }
+  for (const claim of owned) {
+    const { error } = await revertQuoteDocumentSendClaim(sb, claim.id, claim.token)
+    if (error) return { error }
+  }
+  return { error: null }
 }
 
 /**
  * Stamp publication after Resend. On stamp failure revert the in-flight
  * claim so a retry can re-claim. Do not treat a logged error as success.
+ * Publish and revert match the caller token so a stale reclaim cannot be
+ * overwritten by the original worker.
  */
 export async function publishQuoteDocumentSendOrRevert(
   sb: QuoteSendPublicationClient,
   documentId: string,
+  token: string,
   now = new Date(),
 ): Promise<{ published: true } | { published: false; error: string }> {
-  const { error } = await publishQuoteDocumentSend(sb, documentId, now)
-  if (!error) return { published: true }
-  const message = error.message || String(error)
+  const { updated, error } = await publishQuoteDocumentSend(sb, documentId, token, now)
+  if (updated) return { published: true }
+  const message = error?.message || 'publication stamp not confirmed'
   console.error('[send-quote] publication stamp failed:', message)
-  await revertQuoteDocumentSendClaim(sb, documentId)
+  await revertQuoteDocumentSendClaim(sb, documentId, token)
   return { published: false, error: message }
 }
 
 export async function publishQuoteDocumentsSendOrRevert(
   sb: QuoteSendPublicationClient,
-  documentIds: Iterable<string | null | undefined>,
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
   now = new Date(),
 ): Promise<{ published: true } | { published: false; error: string }> {
-  const ids = uniqueDocumentIds(documentIds)
-  if (!ids.length) return { published: true }
-  const { error } = await sb
-    .from('job_documents')
-    .update(quoteSendPublicationPayload(now))
-    .in('id', ids)
-  if (!error) return { published: true }
-  const message = error.message || String(error)
-  console.error('[send-quote] publication stamp failed:', message)
-  await revertQuoteDocumentSendClaims(sb, ids)
-  return { published: false, error: message }
+  const owned = uniqueDocumentClaims(claims)
+  if (!owned.length) return { published: true }
+  for (const claim of owned) {
+    const { updated, error } = await publishQuoteDocumentSend(sb, claim.id, claim.token, now)
+    if (updated) continue
+    const message = error?.message || 'publication stamp not confirmed'
+    console.error('[send-quote] publication stamp failed:', message)
+    await revertQuoteDocumentSendClaims(sb, owned)
+    return { published: false, error: message }
+  }
+  return { published: true }
 }
 
 async function claimJobSendRunsExclusive(
   sb: QuoteSendPublicationClient,
   jobId: string,
   now: Date,
-): Promise<{ id: string; claimed_at: string } | null> {
+): Promise<JobSendRunsClaimResult> {
   const payload = jobSendRunsClaimPayload(now)
   const { data, error } = await sb
     .from('jobs')
@@ -220,19 +304,19 @@ async function claimJobSendRunsExclusive(
     .select('id')
     .maybeSingle()
   if (error) {
-    console.error('[send-quote] send-runs job claim failed:', error.message || String(error))
-    return null
+    console.error('[send-quote] send-runs job claim failed:', claimErrorMessage(error))
+    return { status: 'error', error: claimErrorMessage(error) }
   }
   return data && typeof data.id === 'string'
-    ? { id: data.id, claimed_at: payload.send_runs_claimed_at }
-    : null
+    ? { status: 'claimed', id: data.id, claimed_at: payload.send_runs_claimed_at }
+    : { status: 'unavailable' }
 }
 
 async function reclaimStaleJobSendRuns(
   sb: QuoteSendPublicationClient,
   jobId: string,
   now: Date,
-): Promise<{ id: string; claimed_at: string } | null> {
+): Promise<JobSendRunsClaimResult> {
   const payload = jobSendRunsClaimPayload(now)
   const { data, error } = await sb
     .from('jobs')
@@ -242,21 +326,21 @@ async function reclaimStaleJobSendRuns(
     .select('id')
     .maybeSingle()
   if (error) {
-    console.error('[send-quote] send-runs stale job claim reclaim failed:', error.message || String(error))
-    return null
+    console.error('[send-quote] send-runs stale job claim reclaim failed:', claimErrorMessage(error))
+    return { status: 'error', error: claimErrorMessage(error) }
   }
   return data && typeof data.id === 'string'
-    ? { id: data.id, claimed_at: payload.send_runs_claimed_at }
-    : null
+    ? { status: 'claimed', id: data.id, claimed_at: payload.send_runs_claimed_at }
+    : { status: 'unavailable' }
 }
 
 export async function claimJobSendRuns(
   sb: QuoteSendPublicationClient,
   jobId: string,
   now = new Date(),
-): Promise<{ id: string; claimed_at: string } | null> {
+): Promise<JobSendRunsClaimResult> {
   const exclusive = await claimJobSendRunsExclusive(sb, jobId, now)
-  if (exclusive) return exclusive
+  if (exclusive.status === 'claimed' || exclusive.status === 'error') return exclusive
   return await reclaimStaleJobSendRuns(sb, jobId, now)
 }
 
@@ -344,6 +428,46 @@ export function sendRunsPublicationFailureBlocksSuccess(input: {
   }
 }
 
+export type SendRunsSendOutcome =
+  | { success: true; alreadyComplete: boolean }
+  | { success: false; httpStatus: number; code: string; error: string }
+
+/**
+ * send-runs may report success only when at least one email was published,
+ * or when every eligible pack is already published (idempotent retry).
+ * Neighbour-only email success stays success; the job stays unquoted.
+ * Zero emails after assembled recipients, or nothing assembled, is failure.
+ */
+export function sendRunsSendOutcome(input: {
+  emailsSent: number
+  recipientsAssembled: number
+  publishedExistingCount: number
+  claimedCount: number
+}): SendRunsSendOutcome {
+  if (input.emailsSent > 0) return { success: true, alreadyComplete: false }
+  if (
+    input.recipientsAssembled === 0 &&
+    input.claimedCount === 0 &&
+    input.publishedExistingCount > 0
+  ) {
+    return { success: true, alreadyComplete: true }
+  }
+  if (input.recipientsAssembled > 0) {
+    return {
+      success: false,
+      httpStatus: 502,
+      code: 'quote_email_delivery_failed',
+      error: 'Quote email delivery failed',
+    }
+  }
+  return {
+    success: false,
+    httpStatus: 400,
+    code: 'no_quote_recipients',
+    error: 'No quote recipients to send',
+  }
+}
+
 /** Document ids belonging to recipients whose Resend call succeeded. */
 export function documentIdsPublishedForSuccessfulSends(
   recipients: Array<{ email?: string | null; docs?: Array<{ id?: string | null }> | null }>,
@@ -367,6 +491,14 @@ export function documentIdsPublishedForSuccessfulSends(
     }
   }
   return ids
+}
+
+export function claimsForDocumentIds(
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  documentIds: Iterable<string>,
+): QuoteSendDocumentClaim[] {
+  const wanted = new Set(uniqueDocumentIds(documentIds))
+  return uniqueDocumentClaims(claims).filter((claim) => wanted.has(claim.id))
 }
 
 export function sendRunQuoteNumberFallback(input: {

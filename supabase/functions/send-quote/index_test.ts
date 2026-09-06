@@ -21,14 +21,17 @@ import {
   claimQuoteDocumentSend,
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
+  publishQuoteDocumentSend,
   publishQuoteDocumentSendOrRevert,
   publishQuoteDocumentsSendOrRevert,
   quoteSendClaimIsStale,
   quoteSendClaimPayload,
   quoteSendPublicationPayload,
   resolveSendRunDocument,
+  revertQuoteDocumentSendClaim,
   sendRunQuoteNumberFallback,
   sendRunsPublicationFailureBlocksSuccess,
+  sendRunsSendOutcome,
 } from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
@@ -652,11 +655,13 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
 // SEND-CLAIM-IDEMPOTENCY — atomic claim decision tests (C1–C4)
 // ════════════════════════════════════════════════════════════════════════════
 //
-// The /send handler claims send_claimed_at only (in-flight lock), then stamps
-// sent_to_client + sent_at after Resend succeeds. Claim is not publication.
+// The /send handler claims send_claimed_at + send_claim_token (in-flight lock),
+// then stamps sent_to_client + sent_at after Resend succeeds and the frozen
+// pack write is confirmed. Claim is not publication.
 //
-// If data is non-null  → claim succeeded; proceed to email.
-// If data is null      → already claimed or published; return already_sent.
+// If status is claimed      → proceed to email.
+// If status is unavailable  → already claimed or published; return already_sent.
+// If status is error        → database fault; return 500, never already_sent.
 
 // Mock supabase client that simulates the claim UPDATE returning a row or null.
 function makeClaimMockSb(claimResult: { id: string } | null) {
@@ -684,7 +689,7 @@ function makeClaimMockSb(claimResult: { id: string } | null) {
 
 async function simulateClaim(sb: ReturnType<typeof makeClaimMockSb>, documentId: string): Promise<boolean> {
   const claimed = await claimQuoteDocumentSend(sb, documentId);
-  return claimed !== null;
+  return claimed.status === "claimed";
 }
 
 Deno.test("C1 — claim succeeds when DB returns a row (first caller gets through)", async () => {
@@ -721,15 +726,15 @@ Deno.test("C4 — claim with distinct document IDs: each simulates independent d
   assertEquals(resultB, false, 'doc-B should already be claimed')
 })
 
-Deno.test("C5 — claim payload is send_claimed_at only; publication is the sent marker", async () => {
+Deno.test("C5 — claim payload is send_claimed_at plus token; publication is the sent marker", async () => {
   const sb = makeClaimMockSb({ id: 'doc-pub' })
   await simulateClaim(sb, 'doc-pub')
-  assertEquals(Object.keys(sb.updates[0]).sort(), ['send_claimed_at'])
+  assertEquals(Object.keys(sb.updates[0]).sort(), ['send_claim_token', 'send_claimed_at'])
   assertEquals('sent_to_client' in sb.updates[0], false)
   assertEquals('sent_at' in sb.updates[0], false)
-  const claim = quoteSendClaimPayload(new Date('2026-09-06T00:00:00.000Z'))
+  const claim = quoteSendClaimPayload(new Date('2026-09-06T00:00:00.000Z'), 'tok-1')
   const published = quoteSendPublicationPayload(new Date('2026-09-06T00:00:01.000Z'))
-  assertEquals(claim, { send_claimed_at: '2026-09-06T00:00:00.000Z' })
+  assertEquals(claim, { send_claimed_at: '2026-09-06T00:00:00.000Z', send_claim_token: 'tok-1' })
   assertEquals(published, {
     sent_to_client: true,
     sent_at: '2026-09-06T00:00:01.000Z',
@@ -767,32 +772,63 @@ Deno.test("R4-003 send-runs quote numbers are assigned per document", () => {
   )
 })
 
-Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async () => {
-  const updates: Record<string, unknown>[] = []
-  const sb = {
+function makeOwnedWriteMock(opts: {
+  updates: Record<string, unknown>[]
+  eqs: Array<{ col: string; value: unknown }>
+  publishError?: { message: string } | null
+  publishRow?: { id: string } | null
+  revertRow?: { id: string } | null
+}) {
+  return {
     from: (_table: string) => ({
       update: (payload: Record<string, unknown>) => {
-        updates.push(payload)
-        const resolved = {
-          error: "sent_to_client" in payload ? { message: "stamp failed" } : null,
-        }
+        opts.updates.push(payload)
+        const isPublish = "sent_to_client" in payload
         const chain: Record<string, unknown> = {
-          eq: () => chain,
+          eq: (col: string, value: unknown) => {
+            opts.eqs.push({ col, value })
+            return chain
+          },
           not: () => chain,
-          then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
-            Promise.resolve(resolved).then(onFulfilled, onRejected),
+          select: () => ({
+            maybeSingle: () =>
+              Promise.resolve(
+                isPublish
+                  ? {
+                    data: opts.publishError ? null : opts.publishRow ?? null,
+                    error: opts.publishError || null,
+                  }
+                  : {
+                    data: opts.revertRow === undefined ? { id: "doc-pub" } : opts.revertRow,
+                    error: null,
+                  },
+              ),
+          }),
         }
         return chain
       },
     }),
   }
-  const result = await publishQuoteDocumentSendOrRevert(sb, "doc-pub")
+}
+
+Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const sb = makeOwnedWriteMock({
+    updates,
+    eqs,
+    publishError: { message: "stamp failed" },
+    revertRow: { id: "doc-pub" },
+  })
+  const result = await publishQuoteDocumentSendOrRevert(sb, "doc-pub", "tok-owner")
   assertEquals(result.published, false)
   if (result.published === false) {
     assertEquals(result.error, "stamp failed")
   }
-  assertEquals(updates[0], quoteSendPublicationPayload(new Date(updates[0].sent_at as string)))
-  assertEquals(updates[1], { send_claimed_at: null })
+  assertEquals(updates[0].sent_to_client, true)
+  assertEquals(updates[0].send_claim_token, null)
+  assertEquals(updates[1], { send_claimed_at: null, send_claim_token: null })
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-owner"))
 })
 
 Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not", async () => {
@@ -830,13 +866,18 @@ Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not",
             })
           },
         })
-        assertEquals(Object.keys(payload).sort(), ["send_claimed_at"])
+        assertEquals(Object.keys(payload).sort(), ["send_claim_token", "send_claimed_at"])
         return chain
       },
     }),
   }
   const claimed = await claimQuoteDocumentSend(sb, "doc-stale", now)
-  assertEquals(claimed, { id: "doc-stale" })
+  assertEquals(claimed.status, "claimed")
+  if (claimed.status === "claimed") {
+    assertEquals(claimed.id, "doc-stale")
+    assertEquals(typeof claimed.token, "string")
+    assert(claimed.token.length > 0)
+  }
   assertEquals(call, 2)
   assert(staleFilters.includes("lt:send_claimed_at"))
 })
@@ -844,7 +885,7 @@ Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not",
 Deno.test("R5-002 fresh claim stays exclusive after exclusive miss", async () => {
   const sb = makeClaimMockSb(null)
   const claimed = await claimQuoteDocumentSend(sb, "doc-fresh")
-  assertEquals(claimed, null)
+  assertEquals(claimed, { status: "unavailable" })
 })
 
 Deno.test("R5-001 send-runs stamp failure after Resend blocks success and quoted flip", () => {
@@ -862,31 +903,24 @@ Deno.test("R5-001 send-runs stamp failure after Resend blocks success and quoted
   )
 })
 
-Deno.test("R5-001 send-runs batch stamp failure reverts unpublished claims", async () => {
+Deno.test("R5-001 send-runs batch stamp failure reverts unpublished claims per document token", async () => {
   const updates: Record<string, unknown>[] = []
-  const sb = {
-    from: (_table: string) => ({
-      update: (payload: Record<string, unknown>) => {
-        updates.push(payload)
-        const resolved = {
-          error: "sent_to_client" in payload ? { message: "stamp failed" } : null,
-        }
-        const chain: Record<string, unknown> = {
-          in: () => chain,
-          not: () => chain,
-          then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
-            Promise.resolve(resolved).then(onFulfilled, onRejected),
-        }
-        return chain
-      },
-    }),
-  }
-  const result = await publishQuoteDocumentsSendOrRevert(sb, ["doc-a", "doc-b"])
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const sb = makeOwnedWriteMock({
+    updates,
+    eqs,
+    publishError: { message: "stamp failed" },
+  })
+  const result = await publishQuoteDocumentsSendOrRevert(sb, [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ])
   assertEquals(result.published, false)
   if (result.published === false) {
     assertEquals(result.error, "stamp failed")
   }
-  assertEquals(updates[1], { send_claimed_at: null })
+  assertEquals(updates[1], { send_claimed_at: null, send_claim_token: null })
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-a"))
 })
 
 Deno.test("R5-003 send-runs reuses unpublished docs and skips already published packs", () => {
@@ -965,7 +999,9 @@ Deno.test("R5-003 send-runs job claim is exclusive then reclaimable when stale",
     },
   }
   const claimed = await claimJobSendRuns(sb, "job-1", new Date("2026-09-06T12:00:00.000Z"))
-  assertEquals(claimed?.id, "job-1")
+  assertEquals(claimed.status, "claimed")
+  if (claimed.status !== "claimed") throw new Error("expected claimed")
+  assertEquals(claimed.id, "job-1")
   assertEquals(call, 2)
   assertEquals(Object.keys(updates[0]), ["send_runs_claimed_at"])
   const cleared = await clearJobSendRunsClaim({
@@ -983,8 +1019,108 @@ Deno.test("R5-003 send-runs job claim is exclusive then reclaimable when stale",
         },
       }
     },
-  }, "job-1", claimed!.claimed_at)
+  }, "job-1", claimed.claimed_at)
   assertEquals(cleared.error, null)
+})
+
+Deno.test("R6-002 publish and revert match the claim token, not id alone", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const sb = makeOwnedWriteMock({
+    updates,
+    eqs,
+    publishRow: null,
+    revertRow: null,
+  })
+  const published = await publishQuoteDocumentSend(sb, "doc-pub", "tok-old")
+  assertEquals(published.updated, false)
+  assertEquals(published.error, null)
+  assert(eqs.some((eq) => eq.col === "id" && eq.value === "doc-pub"))
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-old"))
+  const reverted = await revertQuoteDocumentSendClaim(sb, "doc-pub", "tok-old")
+  assertEquals(reverted.updated, false)
+  const missing = await publishQuoteDocumentSendOrRevert(sb, "doc-pub", "  ")
+  assertEquals(missing.published, false)
+})
+
+Deno.test("R6-004 send-runs reports non-success when no email was published", () => {
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 0,
+      recipientsAssembled: 2,
+      publishedExistingCount: 0,
+      claimedCount: 2,
+    }),
+    {
+      success: false,
+      httpStatus: 502,
+      code: "quote_email_delivery_failed",
+      error: "Quote email delivery failed",
+    },
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 0,
+      recipientsAssembled: 0,
+      publishedExistingCount: 0,
+      claimedCount: 0,
+    }),
+    {
+      success: false,
+      httpStatus: 400,
+      code: "no_quote_recipients",
+      error: "No quote recipients to send",
+    },
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 1,
+      recipientsAssembled: 1,
+      publishedExistingCount: 0,
+      claimedCount: 1,
+    }),
+    { success: true, alreadyComplete: false },
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 1,
+      recipientsAssembled: 1,
+      publishedExistingCount: 0,
+      claimedCount: 1,
+    }).success,
+    true,
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 0,
+      recipientsAssembled: 0,
+      publishedExistingCount: 2,
+      claimedCount: 0,
+    }),
+    { success: true, alreadyComplete: true },
+  )
+})
+
+Deno.test("R6-005 claim database errors are not already_sent", async () => {
+  const sb = {
+    from: (_table: string) => ({
+      update: () => {
+        const chain: Record<string, unknown> = {}
+        chain.eq = () => chain
+        chain.is = () => chain
+        chain.not = () => chain
+        chain.lt = () => chain
+        chain.select = () => ({
+          maybeSingle: () => Promise.resolve({ data: null, error: { message: "db down" } }),
+        })
+        return chain
+      },
+    }),
+  }
+  const documentClaim = await claimQuoteDocumentSend(sb, "doc-err")
+  assertEquals(documentClaim, { status: "error", error: "db down" })
+  const jobClaim = await claimJobSendRuns(sb, "job-err")
+  assertEquals(jobClaim, { status: "error", error: "db down" })
 })
 
 // ════════════════════════════════════════════════════════════════════════════
