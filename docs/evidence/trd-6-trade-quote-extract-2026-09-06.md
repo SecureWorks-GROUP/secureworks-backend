@@ -518,3 +518,21 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-25 locks (2026-09-06)
+
+- **N30 / N 30 / 30 net leftovers fail closed.**
+  Review-24's `TRADE_NET_TERMS_RE` required a dash or slash after `N`
+  and `days` between the count and `net`. Leftover `N30`, `N 30`,
+  `30 net`, and `30 net days` therefore survived `stripTradePackMoney`
+  and could ride allocated prose, identity, quote-pack projections,
+  and extract leaves. The predicate now covers those forms. Already-
+  covered `Net 30` / `Nett 7` / `net30` / `N/30` / `30 days net` stay.
+  Bare `net` / `netting` / `network` stay. `30 netting` stays. N+digits
+  fail closed even on construction leftovers such as `N 10 posts`
+  because Net 10 is a real term and leftover `N 30` must not leak.
+  Sealed phrase stays exempt only on `terms.payment_terms`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.

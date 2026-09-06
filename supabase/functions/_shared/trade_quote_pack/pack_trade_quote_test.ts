@@ -443,19 +443,41 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("30 days net"), true);
   assertEquals(tradeTextHasMoneyToken("N/30"), true);
   assertEquals(tradeTextHasMoneyToken("N-60"), true);
+  assertEquals(tradeTextHasMoneyToken("N30"), true);
+  assertEquals(tradeTextHasMoneyToken("N 30"), true);
+  assertEquals(tradeTextHasMoneyToken("N 30 days"), true);
+  assertEquals(tradeTextHasMoneyToken("30 net"), true);
+  assertEquals(tradeTextHasMoneyToken("30 net days"), true);
   assertEquals(tradeTextHasMoneyToken("2/10 Net 30"), true);
   assertEquals(tradeTextHasMoneyToken("tennis net"), false);
   assertEquals(tradeTextHasMoneyToken("safety netting"), false);
   assertEquals(tradeTextHasMoneyToken("network switch"), false);
+  assertEquals(tradeTextHasMoneyToken("30 netting"), false);
+  assertEquals(tradeTextHasMoneyToken("2 trades over 3 days"), false);
   assertEquals(allocatedTradePackProse("Net 30"), null);
   assertEquals(allocatedTradePackProse("Install Net 30"), null);
   assertEquals(allocatedTradePackProse("Terms N/30"), null);
   assertEquals(allocatedTradePackProse("30 days net"), null);
+  assertEquals(allocatedTradePackProse("N30"), null);
+  assertEquals(allocatedTradePackProse("N 30"), null);
+  assertEquals(allocatedTradePackProse("30 net"), null);
+  assertEquals(allocatedTradePackProse("30 net days"), null);
   assertEquals(allocatedTradePackIdentity("Net 30"), null);
+  assertEquals(allocatedTradePackIdentity("N30"), null);
+  assertEquals(allocatedTradePackIdentity("N 30"), null);
+  assertEquals(allocatedTradePackIdentity("30 net"), null);
+  assertEquals(allocatedTradePackIdentity("30 net days"), null);
   assertEquals(allocatedTradePackProse("tennis net"), "tennis net");
   assertEquals(allocatedTradePackProse("safety netting"), "safety netting");
+  assertEquals(allocatedTradePackProse("network switch"), "network switch");
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     items: [{ description: "Net 30" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "N30" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "30 net" }],
   }), ["items[0].description"]);
   assertEquals(isSealedPaymentTermsPhrase("50% deposit + 50% on completion"), true);
   assertEquals(isTradePaymentTermsFieldPath("extract.terms.payment_terms"), true);

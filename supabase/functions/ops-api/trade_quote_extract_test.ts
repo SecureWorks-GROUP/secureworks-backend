@@ -312,6 +312,22 @@ Deno.test("extract fail-closes ad-hoc percent and payment-language outside seale
     pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "Net 30" } },
     job: { job_number: "SWF-25101" },
   }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "N30" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "N 30" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "30 net" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "30 net days" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
   assertEquals(extract.customer.name, null);
   assertEquals(extract.notes, []);
   assertEquals(extract.scope.some((row) => /percent|%|upfront|balance/i.test(row.description)), false);

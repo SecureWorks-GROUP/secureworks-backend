@@ -176,9 +176,12 @@ export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+c
 const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
-/** Net 30 / Nett 7 / N/30 / 30 days net. Not bare "net" or "netting". */
+/** Net 30 / Nett 7 / N30 / N 30 / N/30 / 30 net / 30 net days / 30 days net.
+ *  Not bare "net", "netting", or "network". N+digits is a payment leftover
+ *  (including construction collisions such as "N 10 posts") because Net 10
+ *  is a real term and leftover "N 30" must not leak. */
 const TRADE_NET_TERMS_RE =
-  /\b(?:nett?(?:\s*[-/]?\s*\d+(?:\s*days?)?)|\d+\s+days?\s+nett?|n\s*[-/]\s*\d+)\b/i
+  /\b(?:nett?(?:\s*[-/]?\s*\d+(?:\s*days?)?)|\d+\s+(?:days?\s+)?nett?(?:\s+days?)?|n\s*[-/]?\s*\d+(?:\s+days?)?)\b/i
 const TRADE_CURRENCY_WORD_RE =
   /\b(?:dollars?|bucks?|euros?|cents?|pounds?|pence|pennies|yen|yuan|rupees?|francs?|quid|grands?)\b/i
 /** 10k / 2.5K / 1000k. Not `10m` — that is held construction metres. */
