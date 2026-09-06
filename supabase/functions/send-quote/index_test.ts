@@ -20,6 +20,10 @@ import {
   claimJobSendRuns,
   claimQuoteDocumentSend,
   clearJobSendRunsClaim,
+  quoteSendClaimRevertPayload,
+  quoteSendResendIdempotencyKey,
+  resendIdempotencyHeaders,
+  touchQuoteDocumentSendClaim,
   claimsForDocumentIds,
   claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
@@ -676,6 +680,11 @@ function makeClaimMockSb(claimResult: { id: string } | null) {
   const api = {
     updates,
     from: (_table: string) => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        }),
+      }),
       update: (payload: Record<string, unknown>) => {
         updates.push(payload);
         const chain: Record<string, unknown> = {};
@@ -736,12 +745,25 @@ Deno.test("C4 — claim with distinct document IDs: each simulates independent d
 Deno.test("C5 — claim payload is send_claimed_at plus token; publication is the sent marker", async () => {
   const sb = makeClaimMockSb({ id: 'doc-pub' })
   await simulateClaim(sb, 'doc-pub')
-  assertEquals(Object.keys(sb.updates[0]).sort(), ['send_claim_token', 'send_claimed_at'])
+  assertEquals(Object.keys(sb.updates[0]).sort(), [
+    'send_claim_token',
+    'send_claimed_at',
+    'send_resend_idempotency_key',
+  ])
   assertEquals('sent_to_client' in sb.updates[0], false)
   assertEquals('sent_at' in sb.updates[0], false)
   const claim = quoteSendClaimPayload(new Date('2026-09-06T00:00:00.000Z'), 'tok-1')
   const published = quoteSendPublicationPayload(new Date('2026-09-06T00:00:01.000Z'))
-  assertEquals(claim, { send_claimed_at: '2026-09-06T00:00:00.000Z', send_claim_token: 'tok-1' })
+  assertEquals(claim, {
+    send_claimed_at: '2026-09-06T00:00:00.000Z',
+    send_claim_token: 'tok-1',
+    send_resend_idempotency_key: quoteSendResendIdempotencyKey('tok-1'),
+  })
+  assertEquals(quoteSendClaimRevertPayload(), {
+    send_claimed_at: null,
+    send_claim_token: null,
+    send_resend_idempotency_key: null,
+  })
   assertEquals(published, {
     sent_to_client: true,
     sent_at: '2026-09-06T00:00:01.000Z',
@@ -821,7 +843,7 @@ Deno.test("R7-003 leftover send-runs revert is token-fenced and skips published 
   )
   const result = await revertQuoteDocumentSendClaims(sb, leftover)
   assertEquals(result.error, null)
-  assertEquals(updates, [{ send_claimed_at: null, send_claim_token: null }])
+  assertEquals(updates, [quoteSendClaimRevertPayload()])
   assertEquals(eqs.filter((eq) => eq.col === "id").map((eq) => eq.value), ["doc-neighbour"])
   assertEquals(eqs.filter((eq) => eq.col === "send_claim_token").map((eq) => eq.value), ["tok-n"])
   assert(nots.some((n) => n.col === "sent_to_client" && n.op === "is" && n.value === true))
@@ -893,7 +915,7 @@ Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async 
   }
   assertEquals(updates[0].sent_to_client, true)
   assertEquals(updates[0].send_claim_token, null)
-  assertEquals(updates[1], { send_claimed_at: null, send_claim_token: null })
+  assertEquals(updates[1], quoteSendClaimRevertPayload())
   assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-owner"))
 })
 
@@ -907,10 +929,27 @@ Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not",
   )
   assertEquals(quoteSendClaimIsStale("not-a-date", now), true)
 
-  let call = 0
+  let exclusiveCalls = 0
+  let reclaimUpdates = 0
   const staleFilters: string[] = []
+  const firstKey = "quote-send:first-claim-token"
   const sb = {
     from: (_table: string) => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => Promise.resolve({
+            data: {
+              id: "doc-stale",
+              send_claimed_at: "2026-09-06T11:40:00.000Z",
+              send_resend_idempotency_key: firstKey,
+              sent_at: null,
+              sent_to_client: false,
+              accepted_at: null,
+            },
+            error: null,
+          }),
+        }),
+      }),
       update: (payload: Record<string, unknown>) => {
         const chain: Record<string, unknown> = {}
         chain.eq = () => chain
@@ -925,14 +964,22 @@ Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not",
         }
         chain.select = () => ({
           maybeSingle: () => {
-            call += 1
-            return Promise.resolve({
-              data: call === 1 ? null : { id: "doc-stale" },
-              error: null,
-            })
+            if (payload.send_resend_idempotency_key === firstKey) {
+              reclaimUpdates += 1
+              return Promise.resolve({
+                data: { id: "doc-stale", send_resend_idempotency_key: firstKey },
+                error: null,
+              })
+            }
+            exclusiveCalls += 1
+            assertEquals(Object.keys(payload).sort(), [
+              "send_claim_token",
+              "send_claimed_at",
+              "send_resend_idempotency_key",
+            ])
+            return Promise.resolve({ data: null, error: null })
           },
         })
-        assertEquals(Object.keys(payload).sort(), ["send_claim_token", "send_claimed_at"])
         return chain
       },
     }),
@@ -943,8 +990,10 @@ Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not",
     assertEquals(claimed.id, "doc-stale")
     assertEquals(typeof claimed.token, "string")
     assert(claimed.token.length > 0)
+    assertEquals(claimed.resend_idempotency_key, firstKey)
   }
-  assertEquals(call, 2)
+  assertEquals(exclusiveCalls, 1)
+  assertEquals(reclaimUpdates, 1)
   assert(staleFilters.includes("lt:send_claimed_at"))
 })
 
@@ -985,7 +1034,7 @@ Deno.test("R5-001 send-runs batch stamp failure reverts unpublished claims per d
   if (result.published === false) {
     assertEquals(result.error, "stamp failed")
   }
-  assertEquals(updates[1], { send_claimed_at: null, send_claim_token: null })
+  assertEquals(updates[1], quoteSendClaimRevertPayload())
   assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-a"))
 })
 
@@ -1405,6 +1454,46 @@ Deno.test("R6-005 claim database errors are not already_sent", async () => {
   assertEquals(documentClaim, { status: "error", error: "db down" })
   const jobClaim = await claimJobSendRuns(sb, "job-err")
   assertEquals(jobClaim, { status: "error", error: "db down" })
+})
+
+Deno.test("R13-003 heartbeat is token-fenced and Resend keys survive reclaim", async () => {
+  assertEquals(resendIdempotencyHeaders("quote-send:tok-1"), {
+    "Idempotency-Key": "quote-send:tok-1",
+  })
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const updates: Record<string, unknown>[] = []
+  const sb = {
+    from: (_table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        updates.push(payload)
+        const chain: Record<string, unknown> = {
+          eq: (col: string, value: unknown) => {
+            eqs.push({ col, value })
+            return chain
+          },
+          is: () => chain,
+          not: () => chain,
+          select: () => ({
+            maybeSingle: () => Promise.resolve({
+              data: updates.length === 1 ? { id: "doc-1" } : null,
+              error: null,
+            }),
+          }),
+        }
+        return chain
+      },
+    }),
+  }
+  const owned = await touchQuoteDocumentSendClaim(sb, "doc-1", "tok-owner")
+  assertEquals(owned.updated, true)
+  assertEquals(typeof updates[0].send_claimed_at, "string")
+  assert(!("send_claim_token" in updates[0]))
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-owner"))
+  const lost = await touchQuoteDocumentSendClaim(sb, "doc-1", "tok-other")
+  assertEquals(lost.updated, false)
+  const missing = await touchQuoteDocumentSendClaim(sb, "doc-1", "")
+  assertEquals(missing.updated, false)
+  assertEquals(missing.error?.message, "send claim token required")
 })
 
 // ════════════════════════════════════════════════════════════════════════════

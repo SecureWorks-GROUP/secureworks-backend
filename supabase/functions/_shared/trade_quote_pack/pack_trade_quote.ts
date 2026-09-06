@@ -177,6 +177,13 @@ const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
 const TRADE_CURRENCY_WORD_RE = /\b(?:dollars?|bucks?)\b/i
+const TRADE_CURRENCY_SYMBOL_RE = /[€£¥₹₩₽₪₱₫₴₡₦฿₭₮¢￥]/
+const TRADE_CURRENCY_CODE_RE =
+  /\b(?:A\$|AU\$|US\$|NZ\$|C\$|HK\$|S\$|AUD|USD|EUR|GBP|JPY|NZD|CAD|SGD|HKD|CHF|CNY|INR|KRW|ZAR|VAT|GST)\b/i
+const TRADE_CURRENCY_CODE_AMOUNT_RE =
+  /\b(?:AUD|USD|EUR|GBP|JPY|NZD|CAD|SGD|HKD|CHF|CNY|INR|KRW|ZAR)\s*-?\d/i
+const TRADE_TAX_INVOICE_LANGUAGE_RE =
+  /\b(?:tax(?:es|ed|able|ation)?|invoices?|invoiced|invoicing|billing|billed)\b/i
 
 /** Exact sealed payment-terms phrase. Exempt only on a payment_terms field path. */
 export function isSealedPaymentTermsPhrase(value: string): boolean {
@@ -217,15 +224,19 @@ export function tradeAllocatedProseHasMoneyLanguage(value: string): boolean {
 /**
  * Conservative money-token predicate for every extract / allocated-pack
  * string leaf, including identity fields. Fail closed: any hit drops the
- * field rather than copying it. The sealed payment phrase is money here;
- * callers exempt it only when the field path is payment_terms.
+ * field rather than copying it. Covers $, common currency symbols/codes
+ * (€ £ ¥ EUR GBP …), tax/invoice/billing prose, and payment language.
+ * The sealed payment phrase is money here; callers exempt it only when
+ * the field path is payment_terms.
  */
 export function tradeTextHasMoneyToken(value: string): boolean {
   const text = String(value || '')
   const trimmed = text.trim()
   if (!trimmed) return false
   if (/\$/.test(text)) return true
-  if (/\b(?:A\$|AU\$|AUD|USD|GST)\b/i.test(text)) return true
+  if (TRADE_CURRENCY_SYMBOL_RE.test(text)) return true
+  if (TRADE_CURRENCY_CODE_RE.test(text)) return true
+  if (TRADE_CURRENCY_CODE_AMOUNT_RE.test(text)) return true
   if (tradeTextHasCurrencyWord(text)) return true
   if (
     /\b(?:rate|price|amount|cost|fee|subtotal|quoted|charged|unit\s+price|line\s+total|totalIncGST|totalExGST)\b/i
@@ -234,6 +245,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
     return true
   }
   if (/\bdeposit\b/i.test(text)) return true
+  if (TRADE_TAX_INVOICE_LANGUAGE_RE.test(text)) return true
   if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
   return false
 }
@@ -903,6 +915,7 @@ export function allocatedTradePackProse(value: unknown): string | null {
   const trimmed = value.trim()
   if (!trimmed) return ''
   if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
+  if (tradeTextHasMoneyToken(trimmed)) return null
   const cleaned = stripTradePackMoney(value)
   if (!cleaned) return null
   // Sealed phrase is payment_terms-only. A name / item / note leftover
@@ -1041,7 +1054,9 @@ export function sanitizeTradePackUnit(value: unknown): string | undefined {
   if (/\d/.test(trimmed)) return undefined
   const cleaned = stripTradePackMoney(trimmed)
   if (!cleaned || cleaned !== trimmed) return undefined
-  if (/^(?:aud|usd|gst|au\$|a\$|\$|dollars?|bucks?)$/i.test(cleaned)) return undefined
+  if (/^(?:aud|usd|eur|gbp|jpy|nzd|cad|gst|vat|au\$|a\$|\$|€|£|¥|dollars?|bucks?)$/i.test(cleaned)) {
+    return undefined
+  }
   if (new RegExp(`^${TRADE_PACK_UNQUALIFIED_MONEY_WORD}$`, 'i').test(cleaned)) return undefined
   if (tradeTextHasMoneyToken(cleaned)) return undefined
   return cleaned

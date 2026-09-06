@@ -44,6 +44,7 @@ import {
   mintSendRunQuoteNumber,
   publishQuoteDocumentSendOrRevert,
   publishQuoteDocumentsSendOrRevert,
+  resendIdempotencyHeaders,
   resolveSendRunDocument,
   revertQuoteDocumentSendClaim,
   revertQuoteDocumentSendClaims,
@@ -51,6 +52,8 @@ import {
   sendRunsPrimaryClientPublicationSatisfied,
   sendRunsSendOutcome,
   supersedePriorPublishedQuoteDocuments,
+  touchJobSendRunsClaim,
+  touchQuoteDocumentSendClaim,
   type QuoteSendDocumentClaim,
   type SendRunExistingDocument,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
@@ -66,13 +69,14 @@ import {
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
+import { inspectSealedSesJob } from '../_shared/sealed_ses_money_fence.ts'
 import {
-  inspectSealedSesJob,
-  sealedSesFenceCheckFailedRefusal,
-  sealedSesMoneyRefusal,
-  SealedSesMoneyFenceLookupError,
-} from '../_shared/sealed_ses_money_fence.ts'
-import { validateBrandedInvoiceDeliveryBinding } from './invoice_delivery_fence.ts'
+  claimInvoiceEmailSend,
+  publishInvoiceEmailSendOrRevert,
+  revertInvoiceEmailSendClaim,
+  touchInvoiceEmailSendClaim,
+} from './invoice_email_send_claim.ts'
+import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
@@ -819,6 +823,17 @@ serve(async (req: Request) => {
           }
         }
 
+        const quoteLease = await touchQuoteDocumentSendClaim(sb, document_id, claimed.token)
+        if (!quoteLease.updated) {
+          return jsonResponse({
+            success: true,
+            already_sent: true,
+            view_url: viewUrl,
+            share_token: doc.share_token,
+            quote_number: doc.quote_number,
+          }, 200, corsHeaders)
+        }
+
         let emailRes: Response
         try {
           emailRes = await fetch('https://api.resend.com/emails', {
@@ -826,6 +841,7 @@ serve(async (req: Request) => {
             headers: {
               'Authorization': `Bearer ${RESEND_API_KEY}`,
               'Content-Type': 'application/json',
+              ...resendIdempotencyHeaders(claimed.resend_idempotency_key),
             },
             body: JSON.stringify({
               from: `${FROM_NAME} <${FROM_EMAIL}>`,
@@ -2605,9 +2621,36 @@ serve(async (req: Request) => {
           }
           if (attachments.length > 0) emailPayload.attachments = attachments
 
+          const jobLease = await touchJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
+          if (!jobLease.updated) {
+            await revertQuoteDocumentSendClaims(sb, claimedDocs)
+            return jsonResponse({
+              error: 'Quote send already in progress for this job',
+              code: 'send_runs_in_progress',
+            }, 409, corsHeaders)
+          }
+          if (jobLease.claimed_at) jobClaim.claimed_at = jobLease.claimed_at
+          const recipientClaim = claimedDocs.find((claim) =>
+            recipient.docs.some((doc: { id?: string }) => doc?.id === claim.id)
+          )
+          if (recipientClaim) {
+            const docLease = await touchQuoteDocumentSendClaim(
+              sb,
+              recipientClaim.id,
+              recipientClaim.token,
+            )
+            if (!docLease.updated) continue
+          }
+
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RESEND_API_KEY}` },
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${RESEND_API_KEY}`,
+              ...(recipientClaim
+                ? resendIdempotencyHeaders(recipientClaim.resend_idempotency_key)
+                : {}),
+            },
             body: JSON.stringify(emailPayload)
           })
           if (resendRes.ok) {
@@ -2928,66 +2971,47 @@ serve(async (req: Request) => {
         return jsonResponse({ error: 'xero_invoice_id and job_id required' }, 400, corsHeaders)
       }
 
-      const { data: invoiceRecord, error: invoiceError } = await sb.from('xero_invoices')
-        .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token,invoice_number,total,due_date')
-        .eq('xero_invoice_id', xero_invoice_id)
-        .maybeSingle()
-      if (invoiceError || !invoiceRecord) {
-        const refusal = sealedSesFenceCheckFailedRefusal(
-          'send-quote/send-invoice',
-          invoiceError?.message ||
-            'The invoice is missing from the local Xero mirror.',
-          { xero_invoice_id },
-        )
-        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+      const access = await authorizeSendInvoiceAccess({
+        authMode: sendAuthMode,
+        callerOrgId: sendAuthUser?.orgId,
+        bodyJobId: job_id,
+        xeroInvoiceId: xero_invoice_id,
+        deps: {
+          loadInvoice: async () =>
+            await sb.from('xero_invoices')
+              .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token,invoice_number,total,due_date')
+              .eq('xero_invoice_id', xero_invoice_id)
+              .maybeSingle(),
+          loadJob: async (linkedJobId) =>
+            await sb.from('jobs')
+              .select('job_number, type, ghl_contact_id, org_id, client_email, client_name, site_address, site_suburb')
+              .eq('id', linkedJobId)
+              .maybeSingle(),
+          inspectSealedJob: (linkedJobId) => inspectSealedSesJob(sb, linkedJobId),
+        },
+      })
+      if (!access.ok) {
+        return jsonResponse(access.body, access.status, corsHeaders)
       }
-      const binding = validateBrandedInvoiceDeliveryBinding(
-        invoiceRecord,
-        job_id,
+      const invoiceRecord = access.invoice
+      const invoiceJob = access.job
+
+      const invoiceClaim = await claimInvoiceEmailSend(
+        sb,
         xero_invoice_id,
+        invoiceRecord.job_id || job_id,
       )
-      if (!binding.allowed) {
+      if (invoiceClaim.status === 'error') {
+        return jsonResponse({ error: 'Failed to claim invoice email send' }, 500, corsHeaders)
+      }
+      if (invoiceClaim.status === 'already_sent') {
+        return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
+      }
+      if (invoiceClaim.status !== 'claimed') {
         return jsonResponse({
-          success: false,
-          refusal: binding.refusal,
-          error: binding.refusal.fact,
-        }, binding.status, corsHeaders)
-      }
-
-      let linkedJobInspection
-      try {
-        linkedJobInspection = await inspectSealedSesJob(sb, invoiceRecord.job_id)
-      } catch (error) {
-        if (!(error instanceof SealedSesMoneyFenceLookupError)) throw error
-        const refusal = sealedSesFenceCheckFailedRefusal(
-          'send-quote/send-invoice',
-          error.message,
-          { xero_invoice_id, job_id: invoiceRecord.job_id },
-        )
-        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
-      }
-      if (linkedJobInspection.sealed) {
-        const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
-          linked_job_id: invoiceRecord.job_id,
-          linked_job_matched_by: linkedJobInspection.matched_by,
-        })
-        return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
-      }
-
-      // Look up the authorized job for tenancy, recipient, and reply-to.
-      const { data: invoiceJob, error: invoiceJobError } = await sb.from('jobs')
-        .select('job_number, type, ghl_contact_id, org_id, client_email, client_name, site_address, site_suburb')
-        .eq('id', invoiceRecord.job_id).maybeSingle()
-      if (invoiceJobError) {
-        console.error('[send-invoice] job read failed:', invoiceJobError.message)
-        return jsonResponse({ error: 'Invoice job could not be read' }, 503, corsHeaders)
-      }
-
-      {
-        const tenant = quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, invoiceJob?.org_id)
-        if (!tenant.ok) {
-          return jsonResponse({ error: tenant.error, code: tenant.code }, tenant.status, corsHeaders)
-        }
+          error: 'Invoice email send already in progress',
+          code: 'invoice_send_in_progress',
+        }, 409, corsHeaders)
       }
 
       const delivery = resolveSendInvoiceDelivery({
@@ -3037,53 +3061,76 @@ serve(async (req: Request) => {
 
       let resendMessageId: string | null = null
 
-      if (RESEND_API_KEY) {
-        const emailRes = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${RESEND_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            from: `${FROM_NAME} <invoices@secureworksgroup.app>`,
-            reply_to: getClientReplyTo(invoiceJob?.type || job_type, invoiceJob?.job_number),
-            to: client_email,
-            subject: emailSubject,
-            html: emailHtml,
-            cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
-          }),
-        })
+      if (!RESEND_API_KEY) {
+        await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
+        return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
+      }
 
-        if (emailRes.ok) {
-          const resendData = await emailRes.json()
-          resendMessageId = resendData.id
-          await insertEmailEvent(sb, {
-            emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
-            subject: emailSubject, resendMessageId,
-            status: 'sent',
-            metadata: { xero_invoice_id, invoice_number, deposit_amount, client_name, job_type },
-          })
-          // Log to po_communications for client email thread
-          sb.from('po_communications').insert({
-            job_id: invoiceRecord.job_id, direction: 'outbound',
-            from_email: 'invoices@secureworksgroup.app', to_email: client_email,
-            subject: emailSubject, body_html: emailHtml,
-            communication_type: 'client', sent_at: new Date().toISOString(),
-            message_id: resendMessageId, delivery_status: 'sent',
-          }).then(() => {}, () => {})
-          // Log note to GHL contact
-          logEmailToGHL(invoiceJob?.ghl_contact_id, emailSubject, client_email)
-        } else {
-          const errData = await emailRes.json().catch(() => ({}))
-          console.log('[send-invoice] Resend failed:', JSON.stringify(errData))
-          await insertEmailEvent(sb, {
-            emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
-            subject: emailSubject, status: 'failed',
-            failureReason: errData.message || `HTTP ${emailRes.status}`,
-            metadata: { xero_invoice_id, invoice_number, client_name },
-          })
-          return jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
-        }
+      const invoiceLease = await touchInvoiceEmailSendClaim(
+        sb,
+        xero_invoice_id,
+        invoiceClaim.claim.token,
+      )
+      if (!invoiceLease.updated) {
+        return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
+      }
+
+      const emailRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+          ...resendIdempotencyHeaders(invoiceClaim.claim.resend_idempotency_key),
+        },
+        body: JSON.stringify({
+          from: `${FROM_NAME} <invoices@secureworksgroup.app>`,
+          reply_to: getClientReplyTo(invoiceJob?.type || job_type, invoiceJob?.job_number),
+          to: client_email,
+          subject: emailSubject,
+          html: emailHtml,
+          cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
+        }),
+      })
+
+      if (emailRes.ok) {
+        const resendData = await emailRes.json()
+        resendMessageId = resendData.id
+        await insertEmailEvent(sb, {
+          emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
+          subject: emailSubject, resendMessageId,
+          status: 'sent',
+          metadata: { xero_invoice_id, invoice_number, deposit_amount, client_name, job_type },
+        })
+        // Log to po_communications for client email thread
+        sb.from('po_communications').insert({
+          job_id: invoiceRecord.job_id, direction: 'outbound',
+          from_email: 'invoices@secureworksgroup.app', to_email: client_email,
+          subject: emailSubject, body_html: emailHtml,
+          communication_type: 'client', sent_at: new Date().toISOString(),
+          message_id: resendMessageId, delivery_status: 'sent',
+        }).then(() => {}, () => {})
+        // Log note to GHL contact
+        logEmailToGHL(invoiceJob?.ghl_contact_id, emailSubject, client_email)
+      } else {
+        const errData = await emailRes.json().catch(() => ({}))
+        console.log('[send-invoice] Resend failed:', JSON.stringify(errData))
+        await insertEmailEvent(sb, {
+          emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
+          subject: emailSubject, status: 'failed',
+          failureReason: errData.message || `HTTP ${emailRes.status}`,
+          metadata: { xero_invoice_id, invoice_number, client_name },
+        })
+        await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
+        return jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
+      }
+
+      const published = await publishInvoiceEmailSendOrRevert(
+        sb,
+        xero_invoice_id,
+        invoiceClaim.claim.token,
+      )
+      if (!published.published) {
+        return jsonResponse({ error: 'Failed to record invoice email send' }, 500, corsHeaders)
       }
 
       return jsonResponse({ success: true, resend_message_id: resendMessageId }, 200, corsHeaders)

@@ -10,10 +10,13 @@
  *
  * Claims expire. A worker that dies after claim and before Resend-failure
  * revert or publication must not strand `/send` on `already_sent` forever.
- * Reclaim writes a new token. Publish and revert match that token so the
- * original worker cannot stamp or clear a claim it no longer owns.
- * send-runs takes a job-level claim (`jobs.send_runs_claimed_at`) with the
- * same TTL so concurrent/retry calls cannot mint a second published pack.
+ * Reclaim writes a new ownership token. Publish, revert, and heartbeat
+ * match that token so the original worker cannot stamp, clear, or keep a
+ * lease it no longer owns. The first-claim Resend idempotency key stays
+ * on the row across reclaim so a delayed original and a reclaimer cannot
+ * both dispatch. send-runs takes a job-level claim
+ * (`jobs.send_runs_claimed_at`) with the same TTL so concurrent/retry
+ * calls cannot mint a second published pack.
  */
 
 import {
@@ -32,10 +35,17 @@ export type QuoteSendDocumentClaim = {
   id: string
   token: string
   claimed_at: string
+  resend_idempotency_key: string
 }
 
 export type QuoteSendClaimResult =
-  | { status: 'claimed'; id: string; token: string; claimed_at: string }
+  | {
+    status: 'claimed'
+    id: string
+    token: string
+    claimed_at: string
+    resend_idempotency_key: string
+  }
   | { status: 'unavailable' }
   | { status: 'error'; error: string }
 
@@ -53,7 +63,30 @@ export function quoteSendClaimToken(token: string | null | undefined): string | 
   return value || null
 }
 
+export function quoteSendResendIdempotencyKey(token: string): string {
+  return `quote-send:${token}`
+}
+
+export function quoteSendDocumentResendIdempotencyKey(documentId: string): string {
+  return `quote-send-doc:${documentId}`
+}
+
 export function quoteSendClaimPayload(
+  now = new Date(),
+  token = mintQuoteSendClaimToken(),
+): {
+  send_claimed_at: string
+  send_claim_token: string
+  send_resend_idempotency_key: string
+} {
+  return {
+    send_claimed_at: now.toISOString(),
+    send_claim_token: token,
+    send_resend_idempotency_key: quoteSendResendIdempotencyKey(token),
+  }
+}
+
+export function quoteSendClaimReclaimOwnershipPayload(
   now = new Date(),
   token = mintQuoteSendClaimToken(),
 ): { send_claimed_at: string; send_claim_token: string } {
@@ -73,8 +106,13 @@ export function quoteSendPublicationPayload(now = new Date()): {
 export function quoteSendClaimRevertPayload(): {
   send_claimed_at: null
   send_claim_token: null
+  send_resend_idempotency_key: null
 } {
-  return { send_claimed_at: null, send_claim_token: null }
+  return {
+    send_claimed_at: null,
+    send_claim_token: null,
+    send_resend_idempotency_key: null,
+  }
 }
 
 export function jobSendRunsClaimPayload(now = new Date()): { send_runs_claimed_at: string } {
@@ -121,7 +159,12 @@ function uniqueDocumentIds(documentIds: Iterable<string | null | undefined>): st
 }
 
 function uniqueDocumentClaims(
-  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  claims: Iterable<{
+    id?: string | null
+    token?: string | null
+    claimed_at?: string | null
+    resend_idempotency_key?: string | null
+  } | null | undefined>,
 ): QuoteSendDocumentClaim[] {
   const out: QuoteSendDocumentClaim[] = []
   const seen = new Set<string>()
@@ -136,6 +179,8 @@ function uniqueDocumentClaims(
       claimed_at: typeof raw === 'object' && raw && 'claimed_at' in raw && typeof raw.claimed_at === 'string'
         ? raw.claimed_at
         : '',
+      resend_idempotency_key: quoteSendClaimToken(raw?.resend_idempotency_key)
+        || quoteSendDocumentResendIdempotencyKey(id),
     })
   }
   return out
@@ -166,7 +211,13 @@ async function claimQuoteDocumentSendExclusive(
     return { status: 'error', error: claimErrorMessage(error) }
   }
   return data && typeof data.id === 'string'
-    ? { status: 'claimed', id: data.id, token: payload.send_claim_token, claimed_at: payload.send_claimed_at }
+    ? {
+      status: 'claimed',
+      id: data.id,
+      token: payload.send_claim_token,
+      claimed_at: payload.send_claimed_at,
+      resend_idempotency_key: payload.send_resend_idempotency_key,
+    }
     : { status: 'unavailable' }
 }
 
@@ -175,23 +226,47 @@ async function reclaimStaleQuoteDocumentSend(
   documentId: string,
   now: Date,
 ): Promise<QuoteSendClaimResult> {
-  const payload = quoteSendClaimPayload(now)
+  const { data: existing, error: readError } = await sb
+    .from('job_documents')
+    .select('id, send_claimed_at, send_resend_idempotency_key, sent_at, sent_to_client, accepted_at')
+    .eq('id', documentId)
+    .maybeSingle()
+  if (readError) {
+    console.error('[send-quote] stale claim read failed:', claimErrorMessage(readError))
+    return { status: 'error', error: claimErrorMessage(readError) }
+  }
+  if (!existing || typeof existing.id !== 'string') return { status: 'unavailable' }
+  if (quoteSendIsPublished(existing)) return { status: 'unavailable' }
+  if (!quoteSendClaimIsStale(existing.send_claimed_at, now)) return { status: 'unavailable' }
+
+  const ownership = quoteSendClaimReclaimOwnershipPayload(now)
+  const keptKey = quoteSendClaimToken(existing.send_resend_idempotency_key)
+    || quoteSendDocumentResendIdempotencyKey(documentId)
   const { data, error } = await sb
     .from('job_documents')
-    .update(payload)
+    .update({
+      ...ownership,
+      send_resend_idempotency_key: keptKey,
+    })
     .eq('id', documentId)
     .is('sent_at', null)
     .is('accepted_at', null)
     .not('sent_to_client', 'is', true)
     .lt('send_claimed_at', quoteSendClaimStaleBefore(now))
-    .select('id')
+    .select('id, send_resend_idempotency_key')
     .maybeSingle()
   if (error) {
     console.error('[send-quote] stale claim reclaim failed:', claimErrorMessage(error))
     return { status: 'error', error: claimErrorMessage(error) }
   }
   return data && typeof data.id === 'string'
-    ? { status: 'claimed', id: data.id, token: payload.send_claim_token, claimed_at: payload.send_claimed_at }
+    ? {
+      status: 'claimed',
+      id: data.id,
+      token: ownership.send_claim_token,
+      claimed_at: ownership.send_claimed_at,
+      resend_idempotency_key: quoteSendClaimToken(data.send_resend_idempotency_key) || keptKey,
+    }
     : { status: 'unavailable' }
 }
 
@@ -203,6 +278,32 @@ export async function claimQuoteDocumentSend(
   const exclusive = await claimQuoteDocumentSendExclusive(sb, documentId, now)
   if (exclusive.status === 'claimed' || exclusive.status === 'error') return exclusive
   return await reclaimStaleQuoteDocumentSend(sb, documentId, now)
+}
+
+export async function touchQuoteDocumentSendClaim(
+  sb: QuoteSendPublicationClient,
+  documentId: string,
+  token: string,
+  now = new Date(),
+): Promise<{ updated: boolean; error: { message?: string } | null }> {
+  const owned = quoteSendClaimToken(token)
+  if (!owned) return { updated: false, error: { message: 'send claim token required' } }
+  const { data, error } = await sb
+    .from('job_documents')
+    .update({ send_claimed_at: now.toISOString() })
+    .eq('id', documentId)
+    .eq('send_claim_token', owned)
+    .is('sent_at', null)
+    .is('accepted_at', null)
+    .not('sent_to_client', 'is', true)
+    .select('id')
+    .maybeSingle()
+  if (error) return { updated: false, error }
+  return { updated: !!(data && typeof data.id === 'string'), error: null }
+}
+
+export function resendIdempotencyHeaders(key: string): { 'Idempotency-Key': string } {
+  return { 'Idempotency-Key': key }
 }
 
 export async function publishQuoteDocumentSend(
@@ -362,6 +463,28 @@ export async function clearJobSendRunsClaim(
     .eq('id', jobId)
     .eq('send_runs_claimed_at', claimedAt)
   return { error: error || null }
+}
+
+export async function touchJobSendRunsClaim(
+  sb: QuoteSendPublicationClient,
+  jobId: string,
+  claimedAt: string,
+  now = new Date(),
+): Promise<{ updated: boolean; claimed_at?: string; error: { message?: string } | null }> {
+  const stamp = String(claimedAt || '').trim()
+  if (!stamp) return { updated: false, error: { message: 'send-runs claim stamp required' } }
+  const next = jobSendRunsClaimPayload(now)
+  const { data, error } = await sb
+    .from('jobs')
+    .update(next)
+    .eq('id', jobId)
+    .eq('send_runs_claimed_at', stamp)
+    .select('id')
+    .maybeSingle()
+  if (error) return { updated: false, error }
+  return data && typeof data.id === 'string'
+    ? { updated: true, claimed_at: next.send_runs_claimed_at, error: null }
+    : { updated: false, error: null }
 }
 
 export type SendRunExistingDocument = {

@@ -249,3 +249,31 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   runs `assertAllocatedTradeQuotePackProjection` on every pack
   before `trade_job_detail` returns allocated / `makesafe_open`
   `quote_packs`. A residual leak 500s rather than shipping.
+
+## Review-13 locks (2026-09-06)
+
+- **Money-token fence covers non-AUD currency and tax/invoice prose.**
+  `tradeTextHasMoneyToken` refuses `€` / `£` / `¥` and sibling symbols,
+  common currency codes (`EUR` / `GBP` / `JPY` / `VAT` …), compact
+  amounts (`EUR18`), and tax/invoice/billing language. `€18`, `£85`,
+  `tax included`, and `invoice attached` drop from extracts, allocated
+  identity/prose, and units. The sealed phrase stays exempt only on
+  `payment_terms`.
+- **JWT `/send-invoice` tenancy is first after lookup.**
+  `authorizeSendInvoiceAccess` order is invoice → job → tenant →
+  binding → sealed. JWT missing, unreadable, or foreign-org invoices
+  return generic 404 `invoice_not_found` with no job id or sealed
+  fact. Binding and `inspectSealedSesJob` run only after tenant.
+  API-key keeps detailed 503/409 refusals.
+- **Quote send reclaim cannot double-dispatch Resend.** Exclusive
+  claim stores `send_resend_idempotency_key` (`quote-send:<token>`).
+  Stale reclaim rotates `send_claim_token` and keeps that first-claim
+  key (or `quote-send-doc:<id>`). Heartbeat refreshes `send_claimed_at`
+  only for the current token. Resend sends `Idempotency-Key`. A lost
+  lease returns `already_sent` instead of a second dispatch.
+- **`/send-invoice` has an invoice-scoped send claim.**
+  `invoice_email_send_claims` is operational mail state, not the Xero
+  money mirror. Exclusive insert/update, stale reclaim that keeps the
+  first `invoice-send:<token>` key, token-fenced heartbeat / publish /
+  revert, and Resend `Idempotency-Key`. Concurrent retries are
+  `already_sent` or 409 `invoice_send_in_progress`.

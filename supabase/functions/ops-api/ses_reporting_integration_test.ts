@@ -181,18 +181,20 @@ Deno.test("create choke fences F9 email and resolves duplicates before Xero", ()
 
 Deno.test("send-quote preserves explicit SES binding refusal before Resend", () => {
   const start = SEND_QUOTE.indexOf("if (path === 'send-invoice'");
+  const authorize = SEND_QUOTE.indexOf("authorizeSendInvoiceAccess(", start);
   const invoiceLink = SEND_QUOTE.indexOf(".from('xero_invoices')", start);
-  const binding = SEND_QUOTE.indexOf(
-    "validateBrandedInvoiceDeliveryBinding(",
+  const inspect = SEND_QUOTE.indexOf(
+    "inspectSealedSesJob(sb, linkedJobId)",
     start,
   );
+  const claim = SEND_QUOTE.indexOf("claimInvoiceEmailSend(", start);
   const provider = SEND_QUOTE.indexOf(
     "fetch('https://api.resend.com/emails'",
     start,
   );
   assert(
-    start >= 0 && invoiceLink > start && binding > invoiceLink &&
-      provider > binding,
+    start >= 0 && authorize > start && invoiceLink > authorize &&
+      inspect > invoiceLink && claim > inspect && provider > claim,
   );
   assertStringIncludes(FENCE, "sealed_ses_fence_check_failed");
   assertStringIncludes(FENCE, "invoice_link_required");
