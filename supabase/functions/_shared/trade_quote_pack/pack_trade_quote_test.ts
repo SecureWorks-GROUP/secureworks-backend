@@ -191,6 +191,18 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("Approved total 9,999 ex GST"), "Approved total");
   assertEquals(stripTradePackMoney("Approved total 9,999 inc GST"), "Approved total");
   assertEquals(stripTradePackMoney("Fee 9,999.00 excl. GST"), "Fee");
+  assertEquals(stripTradePackMoney("Approved total 9,999 excluding GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 exclusive of GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 inclusive of GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 GST exclusive"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 GST inclusive"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 (ex GST)"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 (inc. GST)"), "Approved total");
+  assertEquals(stripTradePackMoney("Fee ex GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee inc GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee excl. GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee plus GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee +GST 9999"), "Fee");
   assertEquals(stripTradePackMoney("Line 9999AUD"), "Line");
   assertEquals(stripTradePackMoney("Plus 80 +GST"), "Plus");
   assertEquals(stripTradePackMoney("Rear 19m 1800mm install"), "Rear 19m 1800mm install");
@@ -210,13 +222,13 @@ Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewer
           { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
           { kind: "note", description: "Priced $9,999", quantity: 1, unit: "lot" },
         ],
-        summary: "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 ex GST",
+        summary: "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 excluding GST",
       },
     }],
   });
   assertEquals(
     packs[0].summary,
-    "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 ex GST",
+    "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 excluding GST",
   );
   assertEquals(packs[0].items[0].description, "Install fence Total");
   assertEquals(packs[0].items[1].kind, "note");

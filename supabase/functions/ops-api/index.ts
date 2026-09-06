@@ -38151,6 +38151,48 @@ export const TRADE_SCOPE_MONEY_KEYS = new Set([
   'day_rate',
 ])
 export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'labourers'])
+// Construction / attendance quantities. Any other numeric leaf on the
+// allocated walker is treated as money and dropped — unknown keys such as
+// sellEx / quoted_ex / lineSell must not fail open.
+export const TRADE_SCOPE_QUANTITY_KEEP_KEYS = new Set([
+  'qty',
+  'quantity',
+  'qty_m',
+  'length',
+  'lengthM',
+  'totalLength',
+  'width',
+  'height',
+  'depth',
+  'retaining',
+  'slopePlinths',
+  'trades',
+  'days',
+  'labourers',
+  'count',
+  'metres',
+  'meters',
+  'totalMetres',
+  'sheetHeight',
+  'existingFenceLength',
+  'size',
+  'span',
+  'area',
+  'hours',
+  'hours_per_trade',
+  'labour_hours',
+  'storeys',
+  'storey',
+  'lat',
+  'lng',
+  'site_lat',
+  'site_lng',
+  'posts',
+  'pickets',
+  'star_picket_count',
+  'panel_count',
+  'base_count',
+])
 // Named known-prose keys only. The allocated walker sanitizes EVERY retained
 // string leaf — unlisted keys (siteNotes, supplierNotes, noteInternal, …)
 // must not fail open just because they were omitted from this set.
@@ -38178,6 +38220,33 @@ function tradeScopeBareMoneyValue(value: unknown): boolean {
 
 function sanitizeTradeAllocatedStringLeaf(value: unknown): string {
   return stripTradePackMoney(value)
+}
+
+function tradeScopeKeepNumericLeaf(key: string): boolean {
+  return TRADE_SCOPE_QUANTITY_KEEP_KEYS.has(key) || TRADE_SCOPE_LABOUR_KEEP_KEYS.has(key)
+}
+
+function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
+  if (typeof value === 'string') return sanitizeTradeAllocatedStringLeaf(value)
+  return value
+}
+
+function sanitizeTradeAllocatedEventNotes(events: any[]): any[] {
+  return (events || []).map((row) => {
+    const detail = row?.detail_json
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return row
+    const next = { ...detail }
+    if (typeof next.text === 'string') next.text = sanitizeTradeAllocatedStringLeaf(next.text)
+    if (typeof next.note === 'string') next.note = sanitizeTradeAllocatedStringLeaf(next.note)
+    return { ...row, detail_json: next }
+  })
+}
+
+function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
+  return (media || []).map((row) => {
+    if (!row || typeof row !== 'object' || typeof row.notes !== 'string') return row
+    return { ...row, notes: sanitizeTradeAllocatedStringLeaf(row.notes) }
+  })
 }
 
 // The recursion cap is a guard against a pathological blob, not a licence to
@@ -38251,7 +38320,13 @@ export function redactTradeScopeQuote(scope: any): any {
         out[key] = allowlisted
         continue
       }
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (!tradeScopeKeepNumericLeaf(key)) continue
+        out[key] = value
+        continue
+      }
       if (typeof value === 'string') {
+        if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
         const cleaned = sanitizeTradeAllocatedStringLeaf(value)
         if (cleaned === '') continue
         out[key] = cleaned
@@ -38721,6 +38796,12 @@ async function tradeJobDetail(
   if (!quoteVisible && tradeSafeJob && 'scope_json' in tradeSafeJob) {
     tradeSafeJob.scope_json = redactTradeScopeQuote(tradeSafeJob.scope_json)
   }
+  if (!quoteVisible && tradeSafeJob) {
+    tradeSafeJob.notes = sanitizeTradeAllocatedJobNotes(tradeSafeJob.notes)
+  }
+  const allocatedMedia = quoteVisible
+    ? tradeMedia
+    : sanitizeTradeAllocatedMediaNotes(tradeMedia)
   const tradeQuotePacks = quoteVisible
     ? quotePacks
     : redactTradeQuotePackMoney(quotePacks)
@@ -38741,17 +38822,22 @@ async function tradeJobDetail(
       authority: 'typed_job_metadata',
     }),
     documents: visibleDocuments,
-    media: tradeMedia,
+    media: allocatedMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
     // notes thread. The markers stay in job_events untouched.
-    notes: (eventsRes.data || []).filter((n: any) => !noteIsSystemMarker(n?.detail_json?.text ?? n?.detail_json?.note ?? '')),
+    notes: (() => {
+      const human = (eventsRes.data || []).filter((n: any) =>
+        !noteIsSystemMarker(n?.detail_json?.text ?? n?.detail_json?.note ?? '')
+      )
+      return quoteVisible ? human : sanitizeTradeAllocatedEventNotes(human)
+    })(),
     serviceReport: currentServiceReport,
     // Re-attendance (M-C): all reports (latest first) so a re-attended job shows
     // every visit's report, not just the latest. serviceReport is the current
     // attendance only once a reattend boundary exists.
     serviceReports: reportRes.data || [],
-    currentCycleMedia: tradeMedia,
+    currentCycleMedia: allocatedMedia,
     currentCyclePhotoCount: currentCycleMedia.filter((m: any) =>
       !m?.type || m.type === 'photo'
     ).length,

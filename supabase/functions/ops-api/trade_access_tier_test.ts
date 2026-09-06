@@ -209,6 +209,7 @@ function seed(): Tables {
         site_suburb: "Midland",
         scope_json: structuredClone(QUOTE_SCOPE),
         pricing_json: { labourTotal: 3200, total: 8800 },
+        notes: "Park on the verge. Extra $9,999. Charge 1,200 excluding GST.",
         metadata: { builder_po_number: "PO-1" },
       },
       {
@@ -492,6 +493,7 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     noteWorkOrder: "Use 90x90 posts",
     noteInternal: "Client is a repeat customer. Do not mention",
   });
+  assertEquals(p.job.notes, "Park on the verge. Extra . Charge .");
   assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra");
   assertEquals(p.job.scope_json.job.supplierNotes, "Call before arrival. Charge");
   assertEquals(p.job.scope_json.config.totalMetres, 42);
@@ -543,6 +545,33 @@ Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", a
   const lead = await detail(seed(), viewer(LEAD, "crew"));
   const crew = await detail(seed(), viewer(CREW, "crew"));
   assertEquals(crew, lead);
+});
+
+Deno.test("trade_job_detail: allocated path money-sanitizes job event and media notes", async () => {
+  const t = seed();
+  t.job_events = [{
+    id: "e-note",
+    job_id: JOB_FENCE,
+    event_type: "note",
+    detail_json: { text: "Client approved $9,999 excluding GST" },
+    created_at: "2026-09-01T00:00:00Z",
+    users: { name: "Ops" },
+  }];
+  t.job_media = [{
+    id: "p-note",
+    job_id: JOB_FENCE,
+    type: "photo",
+    storage_url: "https://cdn.example.test/jobs/swf-26101/front.jpg",
+    notes: "Front run priced 1,200 exclusive of GST",
+  }];
+  const allocated = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(allocated.notes[0].detail_json.text, "Client approved");
+  assertEquals(allocated.media[0].notes, "Front run priced");
+  assertEquals(JSON.stringify(allocated.notes).includes("9999"), false);
+  assertEquals(JSON.stringify(allocated.media).includes("1200"), false);
+  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  assertEquals(office.notes[0].detail_json.text, "Client approved $9,999 excluding GST");
+  assertEquals(office.media[0].notes, "Front run priced 1,200 exclusive of GST");
 });
 
 Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO prose", async () => {
@@ -722,6 +751,7 @@ Deno.test("trade_job_detail: the fencing division manager sees the quote docs an
   assertEquals(p.quote_visible, true);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-internal", "d-invoice", "d-quote-hid", "d-quote-vis", "d-supplier-quote", "d-supplier-wo", "d-wo"]);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
+  assertEquals(p.job.notes, "Park on the verge. Extra $9,999. Charge 1,200 excluding GST.");
   assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra $9,999");
   assertEquals(p.job.scope_json.notes.noteInternal, "Client is a repeat customer. Do not mention $9,999");
   assertEquals(p.workOrders[0].scope_items[0].rate, 85);
@@ -901,9 +931,31 @@ Deno.test("redactTradeScopeQuote: an over-deep entry inside an ARRAY is dropped,
 
 Deno.test("redactTradeScopeQuote: a pricing block with no labour becomes empty, a string blob is parsed, null stays null", () => {
   assertEquals(redactTradeScopeQuote({ pricing: { addonRows: [{ sell: 1 }] } }), { pricing: {} });
-  assertEquals(redactTradeScopeQuote(JSON.stringify({ a: 1, _pricing_json: {} })), { a: 1 });
+  assertEquals(redactTradeScopeQuote(JSON.stringify({ a: 1, _pricing_json: {} })), {});
   assertEquals(redactTradeScopeQuote(null), null);
   assertEquals(redactTradeScopeQuote("not json"), null);
+});
+
+Deno.test("redactTradeScopeQuote drops unlisted numeric money keys and keeps construction quantities", () => {
+  const r = redactTradeScopeQuote({
+    config: { totalMetres: 42, colour: "Monument" },
+    job: {
+      runs: [{ length: 10, sellEx: 1250, quoted_ex: 1375 }],
+      lineSell: 9999,
+      extras: { sellPriceEx: 250, qty: 3 },
+      quotedEx: "850",
+    },
+  });
+  assertEquals(r.config, { totalMetres: 42, colour: "Monument" });
+  assertEquals(r.job.runs, [{ length: 10 }]);
+  assertEquals(r.job.lineSell, undefined);
+  assertEquals(r.job.extras, { qty: 3 });
+  assertEquals(r.job.quotedEx, undefined);
+  assertEquals(JSON.stringify(r).includes("1250"), false);
+  assertEquals(JSON.stringify(r).includes("1375"), false);
+  assertEquals(JSON.stringify(r).includes("9999"), false);
+  assertEquals(JSON.stringify(r).includes("250"), false);
+  assertEquals(JSON.stringify(r).includes("850"), false);
 });
 
 Deno.test("_tradeDocumentsForAllocatedTrade: honours the flag AND drops quote-bearing and priced WO types whatever the flag says", () => {
