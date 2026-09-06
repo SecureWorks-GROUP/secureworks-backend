@@ -1849,3 +1849,159 @@ Deno.test("search_all_jobs: office / DM keep notes, metadata, and full MakeSafe 
   );
   assertEquals(detailQuery?.select.startsWith("*"), true);
 });
+
+function crossVerticalQuoteFixtures(): Fixtures {
+  return {
+    assignments: [
+      {
+        id: "a-fence",
+        user_id: "u-henry",
+        status: "scheduled",
+        scheduled_date: isoOffsetDays(2),
+        job_id: "job-fence-quote",
+        notes: QUOTE_NOTE,
+      },
+      {
+        id: "a-patio",
+        user_id: "u-henry",
+        status: "scheduled",
+        scheduled_date: isoOffsetDays(3),
+        job_id: "job-patio-quote",
+        notes: QUOTE_NOTE,
+      },
+      {
+        id: "a-alyx-patio",
+        user_id: "u-alyx",
+        status: "scheduled",
+        scheduled_date: isoOffsetDays(3),
+        job_id: "job-patio-quote",
+        notes: QUOTE_NOTE,
+      },
+    ],
+    jobs: [
+      {
+        id: "job-fence-quote",
+        type: "fencing",
+        status: "in_progress",
+        job_number: "SWF-261199",
+        created_at: "2026-07-02T00:00:00Z",
+        notes: QUOTE_NOTE,
+        metadata: { builder_po_number: "PO-54000", sell: 9999 },
+      },
+      {
+        id: "job-patio-quote",
+        type: "patio",
+        status: "in_progress",
+        job_number: "SWP-261199",
+        created_at: "2026-07-01T00:00:00Z",
+        notes: QUOTE_NOTE,
+        metadata: { builder_po_number: "PO-54111", sell: 9999 },
+      },
+    ],
+    details: [
+      {
+        job_id: "job-fence-quote",
+        external_ref: "MLB-27001",
+        invoice_notes: "Bill $9,999. Rate 85.",
+        billing_rules: { rate: 85, amount: 9999 },
+        invoice_ready_at: "2026-08-01T00:00:00Z",
+      },
+      {
+        job_id: "job-patio-quote",
+        external_ref: "MLB-27002",
+        invoice_notes: "Bill $9,999. Rate 85.",
+        billing_rules: { rate: 85, amount: 9999 },
+        invoice_ready_at: "2026-08-01T00:00:00Z",
+      },
+    ],
+  };
+}
+
+Deno.test("search_all_jobs: a fencing manager keeps quote only on fencing cards", async () => {
+  const recorded: RecordedQuery[] = [];
+  const res = await searchAllJobs(
+    makeClient(crossVerticalQuoteFixtures(), recorded),
+    new URLSearchParams("q=261199"),
+    viewer({ id: "u-henry", role: "lead_installer", managedVerticals: ["fencing"] }),
+    false,
+  );
+  assertEquals(res.jobs.length, 2);
+  const fence = res.jobs.find((j: { id: string }) => j.id === "job-fence-quote");
+  const patio = res.jobs.find((j: { id: string }) => j.id === "job-patio-quote");
+  assertEquals(fence.notes, QUOTE_NOTE);
+  assertEquals(fence.metadata?.builder_po_number, "PO-54000");
+  assertEquals(fence.makesafe_details?.invoice_notes, "Bill $9,999. Rate 85.");
+  assertEquals(patio.notes, SANITIZED_NOTE);
+  assertEquals("metadata" in patio, false, "out-of-vertical search rows drop metadata");
+  assertEquals(patio.makesafe_details?.invoice_notes, undefined);
+  assertEquals(patio.makesafe_details?.billing_rules, undefined);
+  assertEquals(JSON.stringify(patio).includes("9999"), false);
+  assertEquals(JSON.stringify(patio).includes("PO-54111"), false);
+  const jobQuery = recorded.find((q) =>
+    q.table === "jobs" && !q.head && q.select.includes("job_number")
+  );
+  assertEquals(
+    jobQuery?.select.includes("notes"),
+    true,
+    "manager search still selects notes so in-vertical cards can keep them",
+  );
+});
+
+Deno.test("my_jobs: a fencing manager's patio allocation is projected, fencing stays raw", async () => {
+  const grouped = await myJobs(
+    makeClient(crossVerticalQuoteFixtures()),
+    "u-henry",
+    false,
+    HENRY.isDispatcher,
+    HENRY.isMakesafeManager,
+    HENRY.poolVerticals,
+    [],
+    TENANT_A,
+  );
+  const fence = nonPool(grouped).find((a: { jobs?: { id?: string } }) =>
+    a.jobs?.id === "job-fence-quote"
+  );
+  const patio = nonPool(grouped).find((a: { jobs?: { id?: string } }) =>
+    a.jobs?.id === "job-patio-quote"
+  );
+  assertEquals(Boolean(fence), true, "in-vertical personal card stays visible");
+  assertEquals(Boolean(patio), true, "cross-vertical personal allocation stays visible");
+  assertEquals(fence.notes, QUOTE_NOTE);
+  assertEquals(fence.jobs.notes, QUOTE_NOTE);
+  assertEquals(patio.notes, SANITIZED_NOTE);
+  assertEquals(patio.jobs.notes, SANITIZED_NOTE);
+  assertEquals(String(patio.notes).includes("9999"), false);
+  assertEquals(String(patio.notes).includes("85"), false);
+
+  const office = await myJobs(
+    makeClient(crossVerticalQuoteFixtures()),
+    "u-marnin",
+    true,
+    MARNIN.isDispatcher,
+    MARNIN.isMakesafeManager,
+    MARNIN.poolVerticals,
+    [],
+    TENANT_A,
+  );
+  const officePatio = nonPool(office).find((a: { jobs?: { id?: string } }) =>
+    a.jobs?.id === "job-patio-quote"
+  );
+  assertEquals(officePatio.notes, QUOTE_NOTE);
+  assertEquals(officePatio.jobs.notes, QUOTE_NOTE);
+
+  const allocated = await myJobs(
+    makeClient(crossVerticalQuoteFixtures()),
+    "u-alyx",
+    false,
+    ALYX.isDispatcher,
+    ALYX.isMakesafeManager,
+    ALYX.poolVerticals,
+    [],
+    TENANT_A,
+  );
+  const allocatedPatio = nonPool(allocated).find((a: { jobs?: { id?: string } }) =>
+    a.jobs?.id === "job-patio-quote"
+  );
+  assertEquals(allocatedPatio.notes, SANITIZED_NOTE);
+  assertEquals(allocatedPatio.jobs.notes, SANITIZED_NOTE);
+});

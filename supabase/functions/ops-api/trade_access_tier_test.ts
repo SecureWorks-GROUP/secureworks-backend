@@ -46,6 +46,7 @@ import {
   tradeJobAccessRefusal,
   tradeLeadJobIds,
   tradeQuoteVisibleForTier,
+  tradeViewerQuoteVisibleForJob,
 } from "./index.ts";
 
 // ── Stub client ─────────────────────────────────────────────────────────────
@@ -449,6 +450,42 @@ Deno.test("quote rule: exactly office and division_manager see the quote", () =>
   assertEquals(tradeQuoteVisibleForTier("allocated"), false);
   assertEquals(tradeQuoteVisibleForTier("makesafe_open"), false);
   assertEquals(tradeQuoteVisibleForTier("none"), false);
+});
+
+Deno.test("list quote fence: office everywhere; manager only in-vertical; crew never", () => {
+  assertEquals(
+    tradeViewerQuoteVisibleForJob({ type: "patio" }, { isOffice: true, managedVerticals: [] }),
+    true,
+  );
+  assertEquals(
+    tradeViewerQuoteVisibleForJob({ type: "fencing" }, { isOffice: false, managedVerticals: ["fencing"] }),
+    true,
+  );
+  assertEquals(
+    tradeViewerQuoteVisibleForJob({ type: "patio" }, { isOffice: false, managedVerticals: ["fencing"] }),
+    false,
+    "a fencing manager's open-pool permission must not quote-unlock a patio card",
+  );
+  assertEquals(
+    tradeViewerQuoteVisibleForJob({ type: "makesafe" }, { isOffice: false, managedVerticals: ["fencing"] }),
+    false,
+  );
+  assertEquals(
+    tradeViewerQuoteVisibleForJob({ type: "makesafe" }, { isOffice: false, managedVerticals: ["makesafe"] }),
+    true,
+  );
+  assertEquals(
+    tradeViewerQuoteVisibleForJob({ type: "fencing" }, { isOffice: false, managedVerticals: [] }),
+    false,
+  );
+  assertEquals(
+    tradeViewerQuoteVisibleForJob(
+      { type: "insurance", job_number: "SWMS-261199" },
+      { isOffice: false, managedVerticals: ["makesafe"] },
+    ),
+    true,
+    "SWMS- identity is the makesafe vertical",
+  );
 });
 
 // ── trade_job_detail: the real payload, per tier ─────────────────────────────

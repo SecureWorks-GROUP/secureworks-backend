@@ -36190,6 +36190,20 @@ export function tradeQuoteVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager'
 }
 
+// List-feed companion to tradeQuoteVisibleForTier: office everywhere, a
+// division manager only on jobs in a vertical they manage. Assigned /
+// makesafe_open never see quote on a list surface. Pure — no assignment
+// read — so search_all_jobs / my_jobs can project each card without N+1.
+export function tradeViewerQuoteVisibleForJob(
+  job: any,
+  input: { isOffice?: boolean; managedVerticals?: unknown },
+): boolean {
+  if (input.isOffice === true) return true
+  const managed = _normalizeManagedVerticals(input.managedVerticals)
+  if (managed.length === 0) return false
+  return managed.includes(_jobVertical(job))
+}
+
 // Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
 // derived from them — is a narrower question than the quote, and the open-pool
 // tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
@@ -36321,10 +36335,23 @@ export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], conta
 const TRADE_MAKESAFE_FEED_SELECT_ALLOCATED =
   'job_id, external_ref, substatus, report_type, cycle_number, last_reattend_at, requesting_company_id, makesafe_companies:requesting_company_id(slug, name)'
 
-async function enrichTradeMakesafeJobs(client: any, jobs: any[], quoteVisible = true) {
+type TradeFeedQuoteVisible = boolean | ((job: any) => boolean)
+
+function tradeFeedQuoteVisibleFor(
+  quoteVisible: TradeFeedQuoteVisible,
+): (job: any) => boolean {
+  return typeof quoteVisible === 'function' ? quoteVisible : (_job: any) => quoteVisible === true
+}
+
+async function enrichTradeMakesafeJobs(
+  client: any,
+  jobs: any[],
+  quoteVisible: TradeFeedQuoteVisible = true,
+) {
   const list = (jobs || []).filter(Boolean)
   const jobIds = collectUniqueStringIds(list.map((job: any) => job?.id))
   if (jobIds.length === 0) return list
+  const quoteVisibleFor = tradeFeedQuoteVisibleFor(quoteVisible)
 
   const detailByJobId: Record<string, any> = {}
   try {
@@ -36335,7 +36362,8 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[], quoteVisible = 
     for (let i = 0; i < jobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
       detailChunks.push(jobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
     }
-    const detailSelect = quoteVisible
+    const anyQuoteVisible = list.some((job) => quoteVisibleFor(job))
+    const detailSelect = anyQuoteVisible
       ? '*, makesafe_companies:requesting_company_id(slug, name)'
       : TRADE_MAKESAFE_FEED_SELECT_ALLOCATED
     const detailPages = await Promise.all(detailChunks.map(async (chunk) => {
@@ -36348,7 +36376,7 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[], quoteVisible = 
     for (const row of (details || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
     for (const job of list) {
       if (!job?.id || !detailByJobId[job.id]) continue
-      job.makesafe_details = quoteVisible
+      job.makesafe_details = quoteVisibleFor(job)
         ? detailByJobId[job.id]
         : projectTradeAllocatedMakesafeDetails(detailByJobId[job.id])
     }
@@ -36415,6 +36443,17 @@ function projectTradeAllocatedJobFeedRow(job: any): void {
   delete job.metadata
 }
 
+function presentTradeJobFeedRow(job: any, quoteVisible: boolean): void {
+  if (!job.external_ref && job.makesafe_details?.external_ref) {
+    job.external_ref = job.makesafe_details.external_ref
+  }
+  if (!job.external_ref) {
+    job.external_ref = job.metadata?.external_ref || null
+  }
+  delete job.org_id
+  if (!quoteVisible) projectTradeAllocatedJobFeedRow(job)
+}
+
 // Records that are operationally unsafe or noisy to surface at all: hard
 // deletes, voids and known duplicates. Deliberately NOT a visibility window —
 // cancelled, archived, lost, complete, invoiced and paid jobs all stay visible,
@@ -36455,8 +36494,15 @@ export async function searchAllJobs(
     managedVerticals: viewer.managedVerticals,
     q,
   })
-  const quoteVisible = canSeeCompany
-  const jobFeedSelect = tradeJobFeedSelect(quoteVisible)
+  // Company-lens viewers still SELECT the quote columns — in-vertical
+  // manager cards need them — then each row is projected by that job's
+  // access tier. A fencing manager must not inherit quote on patio rows.
+  const feedQuoteCtx = {
+    isOffice: isDispatcher,
+    managedVerticals: viewer.managedVerticals,
+  }
+  const jobQuoteVisible = (job: any) => tradeViewerQuoteVisibleForJob(job, feedQuoteCtx)
+  const jobFeedSelect = tradeJobFeedSelect(canSeeCompany)
 
   const requestedPageSize = Number(params.get('page_size') || TRADE_JOB_FEED_PAGE_DEFAULT)
   const requestedOffset = Number(params.get('offset') || 0)
@@ -36539,17 +36585,8 @@ export async function searchAllJobs(
     const capped = ranked.length > TRADE_JOB_SEARCH_RESULT_CAP || (baseRows || []).length > TRADE_JOB_SEARCH_RESULT_CAP
     const materialized = ranked.slice(0, TRADE_JOB_SEARCH_RESULT_CAP)
     const pageJobs = materialized.slice(offset, offset + pageSize)
-    const jobs = await enrichTradeMakesafeJobs(client, pageJobs, quoteVisible)
-    for (const job of jobs) {
-      if (!job.external_ref && job.makesafe_details?.external_ref) {
-        job.external_ref = job.makesafe_details.external_ref
-      }
-      if (!job.external_ref) {
-        job.external_ref = job.metadata?.external_ref || null
-      }
-      delete job.org_id
-      if (!quoteVisible) projectTradeAllocatedJobFeedRow(job)
-    }
+    const jobs = await enrichTradeMakesafeJobs(client, pageJobs, jobQuoteVisible)
+    for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
     const canFetchMore = offset + jobs.length < materialized.length
     return {
       jobs,
@@ -36591,18 +36628,9 @@ export async function searchAllJobs(
 
   // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
   // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
-  const jobs = await enrichTradeMakesafeJobs(client, merged, quoteVisible)
+  const jobs = await enrichTradeMakesafeJobs(client, merged, jobQuoteVisible)
   // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
-  for (const job of jobs) {
-    if (!job.external_ref && job.makesafe_details?.external_ref) {
-      job.external_ref = job.makesafe_details.external_ref
-    }
-    if (!job.external_ref) {
-      job.external_ref = job.metadata?.external_ref || null
-    }
-    delete job.org_id
-    if (!quoteVisible) projectTradeAllocatedJobFeedRow(job)
-  }
+  for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
 
   // `total` counts the paged job query only; the assigned seed and external-ref
   // merges can push a page past it, so never report fewer rows than were sent.
@@ -37146,12 +37174,15 @@ export async function myJobs(
   // every crew, not just this user's — scoped strictly to these verticals. Never
   // set for a dispatcher (they use showAll) or the personal view.
   const managerScope = !showAll ? _normalizeManagedVerticals(managerScopeVerticals) : []
-  // Office / DM keep raw assignment + job notes. Ordinary allocated Mine
-  // cards go through the same notes projection as trade_job_detail.
-  const quoteVisible = isDispatcher ||
-    isMakesafeManager ||
-    managerScope.length > 0 ||
-    _normalizeManagedVerticals(poolVerticals).length > 0
+  // Office keep raw assignment + job notes everywhere. A division manager
+  // keeps raw wording only on in-vertical cards; a personal allocation
+  // outside managed verticals uses the same notes projection as
+  // trade_job_detail. Pool / board permission must never flip quote on
+  // every assignment the viewer holds.
+  const myJobsQuoteCtx = {
+    isOffice: isDispatcher,
+    managedVerticals: poolVerticals,
+  }
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -37932,7 +37963,9 @@ export async function myJobs(
   // job select does not change the my_jobs payload (including Everyone/history).
   for (const assignment of (assignments || [])) {
     if (assignment?.jobs) delete assignment.jobs.archived
-    if (!quoteVisible) projectTradeAllocatedMyJobsCard(assignment)
+    if (!tradeViewerQuoteVisibleForJob(assignment?.jobs, myJobsQuoteCtx)) {
+      projectTradeAllocatedMyJobsCard(assignment)
+    }
   }
 
   // Flag so frontend knows this is admin/all-jobs view
