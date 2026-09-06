@@ -128,6 +128,9 @@ import {
   allocatedTradeQuotePackProjectionLeaks,
   assembleQuotePacksForTrade,
   isHenryInstaller,
+  isSealedPaymentTermsPhrase,
+  isTradePaymentTermsFieldPath,
+  leftoverIsMangledMoneyRemnant,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
@@ -36157,8 +36160,7 @@ async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
     .eq('id', jobId)
     .maybeSingle()
   if (error) throw error
-  if (!data) throw new Error('Job not found')
-  return data
+  return data || null
 }
 
 export type TradeJobAccessContext = {
@@ -36248,12 +36250,18 @@ export async function resolveTradeJobAccessTier(
 ): Promise<TradeJobAccessDecision> {
   const { isOffice = false, access } = opts
   let job: any = null
+  const refuseMissingOrForeign = (): TradeJobAccessDecision => ({
+    tier: 'none',
+    quoteVisible: false,
+    reason: 'tenant_mismatch',
+    job: null,
+  })
   // Tenant is a boundary and is asked FIRST, before office/manager/assignment,
   // when the caller carries an org — same order the previous predicate used.
   if (access?.orgId) {
     job = await getTradeJobForAccess(client, jobId)
-    if (String(job.org_id || '') !== access.orgId) {
-      return { tier: 'none', quoteVisible: false, reason: 'tenant_mismatch', job }
+    if (!job || String(job.org_id || '') !== access.orgId) {
+      return refuseMissingOrForeign()
     }
   }
   if (isOffice) {
@@ -36264,6 +36272,7 @@ export async function resolveTradeJobAccessTier(
   const managedVerticals = _normalizeManagedVerticals(access?.managedVerticals)
   if (managedVerticals.length > 0) {
     if (!job) job = await getTradeJobForAccess(client, jobId)
+    if (!job) return refuseMissingOrForeign()
     if (managedVerticals.includes(_jobVertical(job))) {
       return { tier: 'division_manager', quoteVisible: true, reason: 'vertical_manager', job }
     }
@@ -36280,6 +36289,7 @@ export async function resolveTradeJobAccessTier(
     return { tier: 'allocated', quoteVisible: false, reason: 'assigned', job }
   }
   if (!job) job = await getTradeJobForAccess(client, jobId)
+  if (!job) return refuseMissingOrForeign()
   // MakeSafe report fallback: any logged-in trade may open/report an open
   // MakeSafe even before ops has created a named assignment. This keeps the
   // field-report flow moving when the board/admin upload step is behind, while
@@ -36293,7 +36303,7 @@ export async function resolveTradeJobAccessTier(
 export function tradeJobAccessRefusal(decision: TradeJobAccessDecision): Error | null {
   if (decision.tier !== 'none') return null
   return decision.reason === 'tenant_mismatch'
-    ? new Error('You are not authorized to access this job')
+    ? new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
     : new Error('You are not assigned to this job')
 }
 
@@ -36320,8 +36330,8 @@ async function assertMakesafeJob(
   access?: TradeJobAccessContext,
 ) {
   const job = await getTradeJobForAccess(client, jobId)
-  if (access?.orgId && String(job.org_id || '') !== access.orgId) {
-    throw new Error('You are not authorized to access this job')
+  if (!job || (access?.orgId && String(job.org_id || '') !== access.orgId)) {
+    throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
   }
   if (!(await isMakesafeAccessJobForClient(client, job))) throw new Error('MakeSafe job required')
   return job
@@ -38358,8 +38368,25 @@ function tradeScopeBareMoneyValue(value: unknown): boolean {
   return stripTradePackMoney(trimmed) === ''
 }
 
-function sanitizeTradeAllocatedStringLeaf(value: unknown): string {
-  return stripTradePackMoney(value)
+function leftoverAllocatedProseIsNumericOnly(value: string): boolean {
+  return /^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(value.trim())
+}
+
+function sanitizeTradeAllocatedStringLeaf(value: unknown, key?: string): string {
+  const cleaned = stripTradePackMoney(value)
+  if (!cleaned) return ''
+  const path = key || ''
+  if (isTradePaymentTermsFieldPath(path) && isSealedPaymentTermsPhrase(cleaned)) {
+    return cleaned
+  }
+  if (isSealedPaymentTermsPhrase(cleaned)) return ''
+  if (tradeScopeKeepNumericLeaf(path)) return cleaned
+  if (tradeTextHasMoneyToken(cleaned)) return ''
+  if (leftoverAllocatedProseIsNumericOnly(cleaned)) return ''
+  if (typeof value === 'string' && leftoverIsMangledMoneyRemnant(value, cleaned)) {
+    return ''
+  }
+  return cleaned
 }
 
 function tradeScopeKeepNumericLeaf(key: string): boolean {
@@ -38367,7 +38394,10 @@ function tradeScopeKeepNumericLeaf(key: string): boolean {
 }
 
 export function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
-  if (typeof value === 'string') return allocatedTradePackProse(value)
+  if (typeof value === 'string') {
+    const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+    return cleaned === '' ? null : cleaned
+  }
   if (typeof value === 'number' && Number.isFinite(value)) return null
   if (value && typeof value === 'object') {
     const walked = sanitizeTradeAllocatedJsonTree(value)
@@ -38400,7 +38430,7 @@ function tradeScopeRetainPrimitive(value: unknown, parentKey: string | undefined
     if (parentKey && !tradeScopeKeepNumericLeaf(parentKey) && tradeScopeBareMoneyValue(value)) {
       return undefined
     }
-    const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+    const cleaned = sanitizeTradeAllocatedStringLeaf(value, parentKey)
     return cleaned === '' ? undefined : cleaned
   }
   return value
@@ -38425,7 +38455,7 @@ function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string
     }
     if (typeof value === 'string') {
       if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
-      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+      const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
       if (cleaned === '') continue
       out[key] = cleaned
       continue
@@ -38454,7 +38484,7 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
-          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
           if (cleaned === '') continue
           out[key] = cleaned
           continue
@@ -38556,7 +38586,7 @@ function projectTradePoLineItem(li: any, quoteVisible: boolean): Record<string, 
   // Unit strings are allowlisted / money-stripped — "AUD 9,999" cannot
   // ride as a unit (TRD4-REV18-001).
   return {
-    description: sanitizeTradeAllocatedStringLeaf(rawDesc),
+    description: sanitizeTradeAllocatedStringLeaf(rawDesc, 'description'),
     quantity: tradePoScalarQuantity(li?.quantity ?? li?.Quantity) ?? 0,
     unit: sanitizeTradePackUnit(li?.unit),
   }
@@ -38582,7 +38612,7 @@ export function projectTradePurchaseOrders(
     }
     for (const key of TRADE_PO_ROW_TEXT_KEYS) {
       if (typeof raw[key] === 'string') {
-        po[key] = sanitizeTradeAllocatedStringLeaf(raw[key])
+        po[key] = sanitizeTradeAllocatedStringLeaf(raw[key], key)
       }
     }
     return po
@@ -38624,7 +38654,7 @@ function tradeAllocatedAllowlistedStringLeaf(key: string, value: string): string
   // Bare numeric / money strings ("9999", "85.00") are money, not narrative.
   // Quantity-keep keys may retain a numeric string; everything else fails closed.
   if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) return undefined
-  const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+  const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
   return cleaned === '' ? undefined : cleaned
 }
 
@@ -38682,7 +38712,7 @@ export function redactTradeScopeQuote(scope: any): any {
       if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
         if (tradeScopeBareMoneyValue(value)) continue
         if (typeof value === 'string') {
-          const cleaned = stripTradePackMoney(value)
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
           if (!cleaned) continue
           out[key] = cleaned
           continue
@@ -38699,7 +38729,7 @@ export function redactTradeScopeQuote(scope: any): any {
       }
       if (typeof value === 'string') {
         if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
-        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
         if (cleaned === '') continue
         out[key] = cleaned
         continue
@@ -38789,7 +38819,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
         continue
       }
       if (typeof value === 'string') {
-        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
         if (cleaned === '') continue
         out[key] = cleaned
         continue
@@ -38816,7 +38846,7 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
-          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
           if (cleaned === '') continue
           out[key] = cleaned
         }

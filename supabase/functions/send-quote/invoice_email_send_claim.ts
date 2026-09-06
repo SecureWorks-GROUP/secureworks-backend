@@ -11,9 +11,11 @@
 import {
   mintQuoteSendClaimToken,
   quoteSendClaimIsStale,
+  quoteSendClaimRevertPayload,
   quoteSendClaimStaleBefore,
   quoteSendClaimToken,
   QUOTE_SEND_CLAIM_TTL_MS,
+  type SendClaimReleaseMode,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
 
 export const INVOICE_EMAIL_SEND_CLAIM_TTL_MS = QUOTE_SEND_CLAIM_TTL_MS
@@ -133,19 +135,40 @@ async function claimInvoiceEmailSendExclusive(
   const { data, error } = await sb
     .from(INVOICE_EMAIL_SEND_CLAIMS_TABLE)
     .update({
-      ...payload,
       job_id: jobId,
+      send_claimed_at: payload.send_claimed_at,
+      send_claim_token: payload.send_claim_token,
     })
     .eq('xero_invoice_id', xeroInvoiceId)
     .is('send_claimed_at', null)
     .is('sent_at', null)
-    .select('xero_invoice_id')
+    .select('xero_invoice_id, send_resend_idempotency_key')
     .maybeSingle()
   if (error) {
     console.error('[send-invoice] claim update failed:', claimErrorMessage(error))
     return { status: 'error', error: claimErrorMessage(error) }
   }
   if (data && typeof data.xero_invoice_id === 'string') {
+    const keptKey = quoteSendClaimToken(data.send_resend_idempotency_key)
+    if (keptKey) {
+      return claimedResult(
+        xeroInvoiceId,
+        jobId,
+        payload.send_claim_token,
+        payload.send_claimed_at,
+        keptKey,
+      )
+    }
+    const { error: keyError } = await sb
+      .from(INVOICE_EMAIL_SEND_CLAIMS_TABLE)
+      .update({ send_resend_idempotency_key: payload.send_resend_idempotency_key })
+      .eq('xero_invoice_id', xeroInvoiceId)
+      .eq('send_claim_token', payload.send_claim_token)
+      .is('send_resend_idempotency_key', null)
+    if (keyError) {
+      console.error('[send-invoice] claim key stamp failed:', claimErrorMessage(keyError))
+      return { status: 'error', error: claimErrorMessage(keyError) }
+    }
     return claimedResult(
       xeroInvoiceId,
       jobId,
@@ -289,16 +312,13 @@ export async function revertInvoiceEmailSendClaim(
   sb: InvoiceEmailSendClient,
   xeroInvoiceId: string,
   token: string,
+  mode: SendClaimReleaseMode = 'pre_send',
 ): Promise<{ updated: boolean; error: { message?: string } | null }> {
   const owned = quoteSendClaimToken(token)
   if (!owned) return { updated: false, error: { message: 'send claim token required' } }
   const { data, error } = await sb
     .from(INVOICE_EMAIL_SEND_CLAIMS_TABLE)
-    .update({
-      send_claimed_at: null,
-      send_claim_token: null,
-      send_resend_idempotency_key: null,
-    })
+    .update(quoteSendClaimRevertPayload(mode))
     .eq('xero_invoice_id', xeroInvoiceId)
     .eq('send_claim_token', owned)
     .is('sent_at', null)
@@ -318,6 +338,6 @@ export async function publishInvoiceEmailSendOrRevert(
   if (updated) return { published: true }
   const message = error?.message || 'invoice send publication stamp not confirmed'
   console.error('[send-invoice] publication stamp failed:', message)
-  await revertInvoiceEmailSendClaim(sb, xeroInvoiceId, token)
+  await revertInvoiceEmailSendClaim(sb, xeroInvoiceId, token, 'keep_provider_key')
   return { published: false, error: message }
 }

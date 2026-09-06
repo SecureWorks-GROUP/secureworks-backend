@@ -45,6 +45,7 @@ import {
   publishQuoteDocumentSendOrRevert,
   publishQuoteDocumentsSendOrRevert,
   resendIdempotencyHeaders,
+  resendResponseIsDefinitivePreSendRejection,
   resolveSendRunDocument,
   revertQuoteDocumentSendClaim,
   revertQuoteDocumentSendClaims,
@@ -80,6 +81,7 @@ import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
+  quoteSendMissingOrForeignRefusal,
   quoteSendTenantAccess,
   resolveSendInvoiceDelivery,
   type SendQuoteAuthUser,
@@ -702,7 +704,13 @@ serve(async (req: Request) => {
         .single()
 
       if (docErr || !doc) {
-        return jsonResponse({ error: 'Document not found' }, 404, corsHeaders)
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          true,
+          { ok: true },
+          'Document not found',
+        )
+        return jsonResponse(refused!.body, refused!.status, corsHeaders)
       }
 
       {
@@ -711,8 +719,14 @@ serve(async (req: Request) => {
           sendAuthUser?.orgId,
           jobOrgIdFromQuoteSendDocument(doc),
         )
-        if (!tenant.ok) {
-          return jsonResponse({ error: tenant.error, code: tenant.code }, tenant.status, corsHeaders)
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          false,
+          tenant,
+          'Document not found',
+        )
+        if (refused) {
+          return jsonResponse(refused.body, refused.status, corsHeaders)
         }
       }
 
@@ -854,9 +868,10 @@ serve(async (req: Request) => {
             }),
           })
         } catch (fetchErr) {
-          // Network-level throw — clear the in-flight claim so a retry can resend.
-          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token)
-          console.log('[send-quote] Resend fetch threw (claim reverted):', (fetchErr as Error).message)
+          // Network throw after dispatch is ambiguous — keep the first
+          // Idempotency-Key so reclaim/resume cannot mint a second send.
+          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+          console.log('[send-quote] Resend fetch threw (claim reverted, provider key kept):', (fetchErr as Error).message)
           return jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
         }
 
@@ -887,8 +902,10 @@ serve(async (req: Request) => {
             failureReason: errData.message || `HTTP ${emailRes.status}`,
             metadata: { document_id: doc.id, client_name: client_name },
           })
-          // Clear the in-flight claim — email not sent, so a retry can re-claim.
-          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token)
+          const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
+            ? 'pre_send'
+            : 'keep_provider_key'
+          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, revertMode)
           return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
       }
@@ -923,7 +940,7 @@ serve(async (req: Request) => {
         },
       })
       if (!persistTradePackWriteConfirmed(persisted, 1)) {
-        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token)
+        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
         return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
 
@@ -2293,12 +2310,26 @@ serve(async (req: Request) => {
         .select('*, job_contacts(*)')
         .eq('id', job_id)
         .single()
-      if (jobErr || !job) return jsonResponse({ error: 'Job not found' }, 404, corsHeaders)
+      if (jobErr || !job) {
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          true,
+          { ok: true },
+          'Job not found',
+        )
+        return jsonResponse(refused!.body, refused!.status, corsHeaders)
+      }
 
       {
         const tenant = quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, job.org_id)
-        if (!tenant.ok) {
-          return jsonResponse({ error: tenant.error, code: tenant.code }, tenant.status, corsHeaders)
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          false,
+          tenant,
+          'Job not found',
+        )
+        if (refused) {
+          return jsonResponse(refused.body, refused.status, corsHeaders)
         }
       }
 
@@ -2346,6 +2377,34 @@ serve(async (req: Request) => {
       const createdDocs: any[] = []
       const publishedExistingDocs: any[] = []
       const claimedDocs: QuoteSendDocumentClaim[] = []
+      const keepProviderKeyIds = new Set<string>()
+      const markSendRunsProviderAttempt = (
+        docs: Array<{ id?: string | null } | null | undefined> | null | undefined,
+      ) => {
+        for (const doc of docs || []) {
+          const id = typeof doc?.id === 'string' ? doc.id.trim() : ''
+          if (id) keepProviderKeyIds.add(id)
+        }
+      }
+      const revertSendRunsDocumentClaims = async (
+        claims: QuoteSendDocumentClaim[],
+        forceKeep = false,
+      ) => {
+        const keep: QuoteSendDocumentClaim[] = []
+        const clear: QuoteSendDocumentClaim[] = []
+        for (const claim of claims) {
+          if (forceKeep || keepProviderKeyIds.has(claim.id)) keep.push(claim)
+          else clear.push(claim)
+        }
+        if (keep.length) {
+          const kept = await revertQuoteDocumentSendClaims(sb, keep, 'keep_provider_key')
+          if (kept.error) return kept
+        }
+        if (clear.length) {
+          return await revertQuoteDocumentSendClaims(sb, clear, 'pre_send')
+        }
+        return { error: null }
+      }
       const emailsByRecipient: Record<string, { name: string, email: string, docs: any[], runs: any[] }> = {}
 
       const rememberExisting = (doc: SendRunExistingDocument) => {
@@ -2623,7 +2682,7 @@ serve(async (req: Request) => {
 
           const jobLease = await touchJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
           if (!jobLease.updated) {
-            await revertQuoteDocumentSendClaims(sb, claimedDocs)
+            await revertSendRunsDocumentClaims(claimedDocs)
             return jsonResponse({
               error: 'Quote send already in progress for this job',
               code: 'send_runs_in_progress',
@@ -2654,11 +2713,15 @@ serve(async (req: Request) => {
             body: JSON.stringify(emailPayload)
           })
           if (resendRes.ok) {
+            markSendRunsProviderAttempt(recipient.docs)
             emailsSent++
             successfulEmails.push(email)
             if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
+          } else if (!resendResponseIsDefinitivePreSendRejection(resendRes.status)) {
+            markSendRunsProviderAttempt(recipient.docs)
           }
         } catch (e: any) {
+          markSendRunsProviderAttempt(recipient.docs)
           console.log(`[send-runs] Failed to email ${email}:`, e.message)
         }
       }
@@ -2682,7 +2745,7 @@ serve(async (req: Request) => {
           publishedDocs.length !== publishedDocIds.length ||
           publishedClaims.length !== publishedDocIds.length
         ) {
-          await revertQuoteDocumentSendClaims(sb, claimedDocs)
+          await revertSendRunsDocumentClaims(claimedDocs, true)
           return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
         }
         const persisted = await persistTradePackOnDocuments(sb, {
@@ -2704,26 +2767,28 @@ serve(async (req: Request) => {
           },
         })
         if (!persistTradePackWriteConfirmed(persisted, publishedDocs.length)) {
-          await revertQuoteDocumentSendClaims(sb, claimedDocs)
+          await revertSendRunsDocumentClaims(claimedDocs, true)
           return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
         }
         const published = await publishQuoteDocumentsSendOrRevert(sb, publishedClaims, new Date(sentAt))
         if (!published.published) {
-          await revertQuoteDocumentSendClaims(sb, claimedDocs)
+          await revertSendRunsDocumentClaims(claimedDocs, true)
           return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
         }
         // Successful recipients are published. Failed-recipient claims stay
         // unpublished and must be released now, or the neighbour stays locked
         // until the 15m TTL. Token-fenced revert cannot clear a published row.
+        // Attempted leftovers keep the first provider key; never-fetched
+        // leftovers may clear it.
         const leftoverClaims = claimsNotInDocumentIds(claimedDocs, publishedDocIds)
         if (leftoverClaims.length > 0) {
-          const leftover = await revertQuoteDocumentSendClaims(sb, leftoverClaims)
+          const leftover = await revertSendRunsDocumentClaims(leftoverClaims)
           if (leftover.error) {
             console.error('[send-quote] send-runs leftover claim revert failed:', leftover.error.message || String(leftover.error))
           }
         }
       } else if (claimedDocs.length > 0) {
-        await revertQuoteDocumentSendClaims(sb, claimedDocs)
+        await revertSendRunsDocumentClaims(claimedDocs)
       }
 
       const sendOutcome = sendRunsSendOutcome({
@@ -3075,22 +3140,34 @@ serve(async (req: Request) => {
         return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
       }
 
-      const emailRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-          ...resendIdempotencyHeaders(invoiceClaim.claim.resend_idempotency_key),
-        },
-        body: JSON.stringify({
-          from: `${FROM_NAME} <invoices@secureworksgroup.app>`,
-          reply_to: getClientReplyTo(invoiceJob?.type || job_type, invoiceJob?.job_number),
-          to: client_email,
-          subject: emailSubject,
-          html: emailHtml,
-          cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
-        }),
-      })
+      let emailRes: Response
+      try {
+        emailRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+            ...resendIdempotencyHeaders(invoiceClaim.claim.resend_idempotency_key),
+          },
+          body: JSON.stringify({
+            from: `${FROM_NAME} <invoices@secureworksgroup.app>`,
+            reply_to: getClientReplyTo(invoiceJob?.type || job_type, invoiceJob?.job_number),
+            to: client_email,
+            subject: emailSubject,
+            html: emailHtml,
+            cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
+          }),
+        })
+      } catch (fetchErr) {
+        await revertInvoiceEmailSendClaim(
+          sb,
+          xero_invoice_id,
+          invoiceClaim.claim.token,
+          'keep_provider_key',
+        )
+        console.log('[send-invoice] Resend fetch threw (provider key kept):', (fetchErr as Error).message)
+        return jsonResponse({ error: 'Email send failed', detail: 'network error' }, 502, corsHeaders)
+      }
 
       if (emailRes.ok) {
         const resendData = await emailRes.json()
@@ -3120,7 +3197,10 @@ serve(async (req: Request) => {
           failureReason: errData.message || `HTTP ${emailRes.status}`,
           metadata: { xero_invoice_id, invoice_number, client_name },
         })
-        await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
+        const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
+          ? 'pre_send'
+          : 'keep_provider_key'
+        await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token, revertMode)
         return jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
       }
 

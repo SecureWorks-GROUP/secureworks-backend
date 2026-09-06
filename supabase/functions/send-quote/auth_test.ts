@@ -18,6 +18,7 @@ import {
   isSendQuoteStaffOperatorRole,
   jobOrgIdFromQuoteSendDocument,
   QUOTE_SEND_OFFICE_PATHS,
+  quoteSendMissingOrForeignRefusal,
   quoteSendTenantAccess,
   resolveSendInvoiceDelivery,
   SEND_QUOTE_STAFF_OPERATOR_ROLES,
@@ -451,6 +452,36 @@ Deno.test("T3 — missing caller or job org fails closed for JWT", () => {
     const d = quoteSendTenantAccess("jwt", caller, job);
     assertEquals(d.ok, false, `${caller} vs ${job}`);
   }
+});
+
+Deno.test("T4a — JWT missing and foreign quote/job share one generic 404", () => {
+  const missing = quoteSendMissingOrForeignRefusal("jwt", true, { ok: true }, "Document not found");
+  const foreign = quoteSendMissingOrForeignRefusal(
+    "jwt",
+    false,
+    quoteSendTenantAccess("jwt", DEFAULT_ORG, OTHER_ORG),
+    "Document not found",
+  );
+  assertEquals(missing, { status: 404, body: { error: "Not found", code: "not_found" } });
+  assertEquals(foreign, missing);
+});
+
+Deno.test("T4b — API-key keeps distinguishable missing vs foreign refusals", () => {
+  const missing = quoteSendMissingOrForeignRefusal(
+    "api_key",
+    true,
+    { ok: true },
+    "Document not found",
+  );
+  const foreign = quoteSendMissingOrForeignRefusal(
+    "api_key",
+    false,
+    quoteSendTenantAccess("jwt", DEFAULT_ORG, OTHER_ORG),
+    "Document not found",
+  );
+  assertEquals(missing, { status: 404, body: { error: "Document not found" } });
+  assertEquals(foreign?.status, 403);
+  assertEquals(foreign?.body.code, "operator_access_required");
 });
 
 Deno.test("T4 — api_key skips tenant compare (ops dashboard)", () => {

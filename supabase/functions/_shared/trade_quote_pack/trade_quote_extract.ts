@@ -18,13 +18,13 @@ import {
   type TradeQuoteTermsSnapshot,
   allocatedPaymentTerms,
   allocatedTradePackIdentity,
+  allocatedTradePackProse,
   frozenTradePackForExtract,
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
   overlayTradePackSnapshots,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
-  stripTradePackMoney,
   tradeTextHasMoneyToken,
 } from "./pack_trade_quote.ts";
 
@@ -86,7 +86,7 @@ function failClosedText(value: unknown, scrub: (raw: string) => string | null): 
 }
 
 function extractProse(value: unknown): string | null {
-  return failClosedText(value, (raw) => stripTradePackMoney(raw).trim() || null);
+  return allocatedTradePackProse(value);
 }
 
 /** payment_terms only. Exact sealed leftover after strip; any other leftover drops. */

@@ -177,7 +177,8 @@ const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
 const TRADE_CURRENCY_WORD_RE = /\b(?:dollars?|bucks?)\b/i
-const TRADE_CURRENCY_SYMBOL_RE = /[€£¥₹₩₽₪₱₫₴₡₦฿₭₮¢￥]/
+const TRADE_CURRENCY_SYMBOL_RE = /[€£¥₹₩₽₪₱₫₴₡₦฿₭₮¢￥＄﹩]/
+const TRADE_UNICODE_CURRENCY_RE = /\p{Sc}/u
 const TRADE_CURRENCY_CODE_RE =
   /\b(?:A\$|AU\$|US\$|NZ\$|C\$|HK\$|S\$|AUD|USD|EUR|GBP|JPY|NZD|CAD|SGD|HKD|CHF|CNY|INR|KRW|ZAR|VAT|GST)\b/i
 const TRADE_CURRENCY_CODE_AMOUNT_RE =
@@ -234,6 +235,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return false
   if (/\$/.test(text)) return true
+  if (TRADE_UNICODE_CURRENCY_RE.test(text)) return true
   if (TRADE_CURRENCY_SYMBOL_RE.test(text)) return true
   if (TRADE_CURRENCY_CODE_RE.test(text)) return true
   if (TRADE_CURRENCY_CODE_AMOUNT_RE.test(text)) return true
@@ -835,7 +837,13 @@ export function stripTradePackMoney(text: unknown): string {
   )
 
   s = s
+    // Whole money phrases strip must eat (leftover fail-closed cannot see
+    // `uded` from `tax included`, or `attached` after `invoice`).
+    .replace(/\btax\s+included\b/gi, '')
+    .replace(/\binvoices?\s+attached\b/gi, '')
     .replace(new RegExp(`${TRADE_PACK_CURRENCY_PREFIX}${TRADE_PACK_MONEY_AMOUNT}`, 'gi'), '')
+    .replace(new RegExp(`\\p{Sc}\\s*${TRADE_PACK_MONEY_AMOUNT}`, 'gu'), '')
+    .replace(new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*\\p{Sc}`, 'gu'), '')
     // Currency-word unit prices before suffix / money-word strips so
     // "85 AUD each" is not reduced to leftover "each", and "Charge 85 dollars
     // each" does not keep the unit after the money word eats 85.
@@ -910,18 +918,54 @@ export function stripTradePackMoney(text: unknown): string {
 /** Allocated pack / note prose: strings only. Numbers and numeric-only
  *  strings are amounts, not writing — drop them rather than stringify
  *  through the count-preserving sanitizer (TRD4-REV20-003). */
+/** ASCII $ figures are strip-and-keep. Any other money language in the
+ *  original must fail closed even when strip mangles it (`tax included` → `uded`). */
+export function tradeOriginalHasNonFigureMoneyLanguage(value: string): boolean {
+  return tradeTextHasMoneyToken(String(value || '').replace(/\$/g, ' '))
+}
+
+/** Short leftover after strip is a mangled remnant only when it is not a
+ *  whole word from the original (`uded` from `tax included`). `Plus` from
+ *  `Plus 80 +GST` is strip-and-keep. */
+export function leftoverIsMangledMoneyRemnant(original: string, leftover: string): boolean {
+  const cleaned = String(leftover || '').trim()
+  if (!cleaned || cleaned.length > 8) return false
+  const source = String(original || '')
+  // Unicode currency / tax-included / invoice-attached originals drop a short
+  // leftover (`＄18 extra` → `extra`, `tax included on the invoice attached`
+  // → `on the`). ASCII $ is `\p{Sc}` too — strip it first so `$9,999` stays
+  // strip-and-keep (`Pat Client $9,999`, `WO line $850`).
+  const withoutAsciiDollar = source.replace(/\$/g, ' ')
+  if (
+    TRADE_UNICODE_CURRENCY_RE.test(withoutAsciiDollar) ||
+    TRADE_CURRENCY_SYMBOL_RE.test(withoutAsciiDollar)
+  ) {
+    return true
+  }
+  if (/\btax\s+included\b/i.test(source) || /\binvoices?\s+attached\b/i.test(source)) {
+    return true
+  }
+  if (!tradeOriginalHasNonFigureMoneyLanguage(source)) return false
+  const leftoverWords = cleaned.toLowerCase().match(/[a-z]+/g) || []
+  const originalWords = new Set((source.toLowerCase().match(/[a-z]+/g) || []))
+  if (leftoverWords.length > 0 && leftoverWords.every((word) => originalWords.has(word))) {
+    return false
+  }
+  return true
+}
+
 export function allocatedTradePackProse(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   if (!trimmed) return ''
   if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
-  if (tradeTextHasMoneyToken(trimmed)) return null
   const cleaned = stripTradePackMoney(value)
   if (!cleaned) return null
   // Sealed phrase is payment_terms-only. A name / item / note leftover
   // matching it is money prose and must not ride the allocated pack.
   if (isSealedPaymentTermsPhrase(cleaned)) return null
   if (tradeTextHasMoneyToken(cleaned)) return null
+  if (leftoverIsMangledMoneyRemnant(trimmed, cleaned)) return null
   return cleaned
 }
 

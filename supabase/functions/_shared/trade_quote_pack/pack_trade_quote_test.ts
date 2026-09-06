@@ -320,6 +320,11 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("bucks"), true);
   assertEquals(tradeTextHasMoneyToken("Payne Client"), false);
   assertEquals(tradeTextHasMoneyToken("€18"), true);
+  assertEquals(tradeTextHasMoneyToken("＄18"), true);
+  assertEquals(allocatedTradePackProse("＄18"), null);
+  assertEquals(allocatedTradePackProse("＄18 extra"), null);
+  assertEquals(allocatedTradePackProse("Plus 80 +GST"), "Plus");
+  assertEquals(sanitizeTradePackUnit("＄"), undefined);
   assertEquals(tradeTextHasMoneyToken("£85"), true);
   assertEquals(tradeTextHasMoneyToken("¥1200"), true);
   assertEquals(tradeTextHasMoneyToken("EUR18"), true);
@@ -566,6 +571,7 @@ Deno.test("allocatedTradePackProse drops numbers and numeric-only strings", () =
   assertEquals(allocatedTradePackProse("85"), null);
   assertEquals(allocatedTradePackProse("999"), null);
   assertEquals(allocatedTradePackProse("Install 10m"), "Install 10m");
+  assertEquals(allocatedTradePackProse("Pat Client $9,999"), "Pat Client");
   assertEquals(allocatedTradePackProse("2 trades over 3 days"), "2 trades over 3 days");
   assertEquals(allocatedTradePackProse(null), null);
 });

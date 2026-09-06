@@ -439,7 +439,32 @@ Deno.test("tier: another tenant is refused first, even for a manager of that ver
   });
   assertEquals(crew.tier, "none");
   assertEquals(crew.reason, "tenant_mismatch");
-  assertEquals(tradeJobAccessRefusal(crew)?.message, "You are not authorized to access this job");
+  const foreignRefusal = tradeJobAccessRefusal(crew);
+  assert(foreignRefusal instanceof ApiError);
+  assertEquals(foreignRefusal.message, "Job not found");
+  assertEquals(foreignRefusal.status, 404);
+  assertEquals(foreignRefusal.body, { error: "Job not found", code: "job_not_found" });
+});
+
+Deno.test("tier: missing and tenant-mismatched jobs share the same generic 404", async () => {
+  const missing = await resolveTradeJobAccessTier(makeClient(seed()), "job-missing", CREW, {
+    access: { orgId: ORG_A, managedVerticals: [] },
+  });
+  const foreign = await resolveTradeJobAccessTier(makeClient(seed()), JOB_FENCE_B, CREW, {
+    access: { orgId: ORG_A, managedVerticals: [] },
+  });
+  assertEquals(missing.tier, "none");
+  assertEquals(foreign.tier, "none");
+  assertEquals(missing.reason, foreign.reason);
+  assertEquals(missing.job, null);
+  assertEquals(foreign.job, null);
+  const missingRefusal = tradeJobAccessRefusal(missing);
+  const foreignRefusal = tradeJobAccessRefusal(foreign);
+  assertEquals(missingRefusal?.message, foreignRefusal?.message);
+  assertEquals(missingRefusal instanceof ApiError, true);
+  assertEquals(foreignRefusal instanceof ApiError, true);
+  assertEquals((missingRefusal as ApiError).status, 404);
+  assertEquals((foreignRefusal as ApiError).status, 404);
 });
 
 Deno.test("tier: the MakeSafe field-report exception is preserved as its own tier and never sees the quote", async () => {
@@ -900,7 +925,7 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   assertEquals(allocated.notes[0].detail_json.text, "Client approved");
   assertEquals(allocated.notes[0].detail_json.message, "Charge extra");
   assertEquals(allocated.notes[0].detail_json.description, "Approved total");
-  assertEquals(allocated.notes[0].detail_json.body, "Fee");
+  assertEquals(allocated.notes[0].detail_json.body, undefined);
   assertEquals(allocated.notes[0].detail_json.content, "Plus");
   assertEquals(allocated.notes[0].detail_json.amount, undefined);
   assertEquals(allocated.notes[0].detail_json.qty, 2);
@@ -1016,7 +1041,7 @@ Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing 
     assertEquals(p.makesafe_details.attendance_cycle_id, "cycle-ms");
     assertEquals(p.makesafe_details.external_ref, "MLB-27000");
     assertEquals(p.makesafe_details.special_instructions, "Use 90x90 posts. Charge extra.");
-    assertEquals(p.makesafe_details.safety_requirements, "Watch the GST registration. Total.");
+    assertEquals(p.makesafe_details.safety_requirements, undefined);
     assertEquals(JSON.stringify(p.makesafe_details).includes("9999"), false);
     assertEquals(JSON.stringify(p.makesafe_details).includes("INV-1240"), false);
     assertEquals(JSON.stringify(p.makesafe_details).includes("\"rate\""), false);
@@ -1523,7 +1548,7 @@ Deno.test("projectTradePurchaseOrders allocated drops money-shaped PO units; off
     }],
   }];
   const allocated = projectTradePurchaseOrders(pos, false)[0];
-  assertEquals(allocated.line_items[0].description, "Sheets Deposit");
+  assertEquals(allocated.line_items[0].description, "");
   assertEquals(allocated.line_items[0].quantity, 12);
   assertEquals(allocated.line_items[0].unit, undefined);
   assertEquals(allocated.line_items[1].unit, undefined);
@@ -1573,8 +1598,8 @@ Deno.test("trade_job_detail: another tenant's manager is refused before anything
         viewer(HENRY, "lead_installer", ["fencing"]) as any,
         false,
       ),
-    Error,
-    "not authorized",
+    ApiError,
+    "Job not found",
   );
 });
 
@@ -1645,6 +1670,36 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
   assertEquals(r.job.quote.materials, [{ name: "90x90 posts", qty: 12, title: "Posts" }]);
   assertEquals(JSON.stringify(r).includes("9999"), false);
   assertEquals(JSON.stringify(r).includes("1200"), false);
+});
+
+Deno.test("redactTradeScopeQuote fail-closes leftover currency, tax, and invoice prose", () => {
+  const r = redactTradeScopeQuote({
+    notes: {
+      noteQuote: "€18",
+      noteWorkOrder: "tax included",
+      noteInternal: "invoice attached",
+      noteSafe: "Park on the verge",
+    },
+    job: {
+      siteNotes: "＄18 extra",
+      quote: {
+        quote_number: "Q-NARR",
+        description: "tax included on the invoice attached",
+        narrative: "Gate on the left",
+      },
+    },
+    terms: {
+      payment_terms: "50% deposit + 50% on completion",
+    },
+  });
+  assertEquals(r.notes.noteQuote, undefined);
+  assertEquals(r.notes.noteWorkOrder, undefined);
+  assertEquals(r.notes.noteInternal, undefined);
+  assertEquals(r.notes.noteSafe, "Park on the verge");
+  assertEquals(r.job.siteNotes, undefined);
+  assertEquals(r.job.quote.description, undefined);
+  assertEquals(r.job.quote.narrative, "Gate on the left");
+  assertEquals(r.terms.payment_terms, "50% deposit + 50% on completion");
 });
 
 Deno.test("redactTradeScopeQuote drops bare numeric string leaves on the quote-object allowlist", () => {

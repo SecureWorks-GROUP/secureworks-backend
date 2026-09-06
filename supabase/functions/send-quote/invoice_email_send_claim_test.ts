@@ -293,6 +293,22 @@ Deno.test("R13-004 revert is token-fenced and clears the Resend key", async () =
   assertEquals(sb.row?.send_resend_idempotency_key, null);
 });
 
+Deno.test("R14-002 post-send revert keeps the first-claim Resend key", async () => {
+  const sb = makeInvoiceClaimSb({
+    xero_invoice_id: INVOICE,
+    job_id: JOB,
+    send_claimed_at: "2026-09-06T12:00:00.000Z",
+    send_claim_token: "tok-owner",
+    send_resend_idempotency_key: "invoice-send:tok-owner",
+    sent_at: null,
+  });
+  const own = await revertInvoiceEmailSendClaim(sb, INVOICE, "tok-owner", "keep_provider_key");
+  assertEquals(own.updated, true);
+  assertEquals(sb.row?.send_claimed_at, null);
+  assertEquals(sb.row?.send_claim_token, null);
+  assertEquals(sb.row?.send_resend_idempotency_key, "invoice-send:tok-owner");
+});
+
 Deno.test("R13-004 exclusive claim payload mints invoice-send idempotency key", () => {
   const payload = invoiceEmailSendClaimPayload(
     new Date("2026-09-06T00:00:00.000Z"),

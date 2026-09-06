@@ -95,6 +95,25 @@ Deno.test("assembleTradeQuoteExtract overlays customer on older packs and strips
   assertEquals(tradeQuoteExtractMoneyLeakKeys(extract), []);
 });
 
+Deno.test("assembleTradeQuoteExtract drops bare 1-2 digit prose amounts", () => {
+  const extract = assembleTradeQuoteExtract({
+    pack: {
+      ...PACK,
+      notes: "85",
+      summary: "Install 10m",
+      items: [
+        { kind: "install_m", description: "85", quantity: 10, unit: "m", unit_price: null, line_total: null },
+        { kind: "install_m", description: "Install 10m", quantity: 12, unit: "m", unit_price: null, line_total: null },
+      ],
+    },
+    job: { job_number: "SWF-25101" },
+  });
+  assertEquals(extract.notes, []);
+  assertEquals(extract.summary, "Install 10m");
+  assertEquals(extract.scope.some((row) => row.description === "85"), false);
+  assertEquals(extract.scope.some((row) => row.description === "Install 10m"), true);
+});
+
 Deno.test("renderTradeQuoteExtractHtml is printable and has no dollar or GST money", () => {
   const extract = assembleTradeQuoteExtract({
     pack: PACK,

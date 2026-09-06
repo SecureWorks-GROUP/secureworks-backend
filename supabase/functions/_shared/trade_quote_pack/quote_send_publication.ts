@@ -103,16 +103,38 @@ export function quoteSendPublicationPayload(now = new Date()): {
   }
 }
 
-export function quoteSendClaimRevertPayload(): {
+export type SendClaimReleaseMode = 'pre_send' | 'keep_provider_key'
+
+/**
+ * Pre-send rejection may clear the Resend key. After the provider has
+ * accepted — or any ambiguous post-dispatch failure — omit the key so
+ * reclaim/resume keeps the first-send Idempotency-Key.
+ */
+export function quoteSendClaimRevertPayload(
+  mode: SendClaimReleaseMode = 'pre_send',
+): {
   send_claimed_at: null
   send_claim_token: null
-  send_resend_idempotency_key: null
+  send_resend_idempotency_key?: null
 } {
+  if (mode === 'keep_provider_key') {
+    return {
+      send_claimed_at: null,
+      send_claim_token: null,
+    }
+  }
   return {
     send_claimed_at: null,
     send_claim_token: null,
     send_resend_idempotency_key: null,
   }
+}
+
+/** 4xx except 408/409/429: Resend definitely rejected before accept. */
+export function resendResponseIsDefinitivePreSendRejection(status: number): boolean {
+  if (!Number.isFinite(status)) return false
+  if (status === 408 || status === 409 || status === 429) return false
+  return status >= 400 && status < 500
 }
 
 export function jobSendRunsClaimPayload(now = new Date()): { send_runs_claimed_at: string } {
@@ -198,27 +220,49 @@ async function claimQuoteDocumentSendExclusive(
   const payload = quoteSendClaimPayload(now)
   const { data, error } = await sb
     .from('job_documents')
-    .update(payload)
+    .update({
+      send_claimed_at: payload.send_claimed_at,
+      send_claim_token: payload.send_claim_token,
+    })
     .eq('id', documentId)
     .is('send_claimed_at', null)
     .is('sent_at', null)
     .is('accepted_at', null)
     .not('sent_to_client', 'is', true)
-    .select('id')
+    .select('id, send_resend_idempotency_key')
     .maybeSingle()
   if (error) {
     console.error('[send-quote] claim failed:', claimErrorMessage(error))
     return { status: 'error', error: claimErrorMessage(error) }
   }
-  return data && typeof data.id === 'string'
-    ? {
+  if (!data || typeof data.id !== 'string') return { status: 'unavailable' }
+  const keptKey = quoteSendClaimToken(data.send_resend_idempotency_key)
+  if (keptKey) {
+    return {
       status: 'claimed',
       id: data.id,
       token: payload.send_claim_token,
       claimed_at: payload.send_claimed_at,
-      resend_idempotency_key: payload.send_resend_idempotency_key,
+      resend_idempotency_key: keptKey,
     }
-    : { status: 'unavailable' }
+  }
+  const { error: keyError } = await sb
+    .from('job_documents')
+    .update({ send_resend_idempotency_key: payload.send_resend_idempotency_key })
+    .eq('id', documentId)
+    .eq('send_claim_token', payload.send_claim_token)
+    .is('send_resend_idempotency_key', null)
+  if (keyError) {
+    console.error('[send-quote] claim key stamp failed:', claimErrorMessage(keyError))
+    return { status: 'error', error: claimErrorMessage(keyError) }
+  }
+  return {
+    status: 'claimed',
+    id: data.id,
+    token: payload.send_claim_token,
+    claimed_at: payload.send_claimed_at,
+    resend_idempotency_key: payload.send_resend_idempotency_key,
+  }
 }
 
 async function reclaimStaleQuoteDocumentSend(
@@ -332,12 +376,13 @@ export async function revertQuoteDocumentSendClaim(
   sb: QuoteSendPublicationClient,
   documentId: string,
   token: string,
+  mode: SendClaimReleaseMode = 'pre_send',
 ): Promise<{ updated: boolean; error: { message?: string } | null }> {
   const owned = quoteSendClaimToken(token)
   if (!owned) return { updated: false, error: { message: 'send claim token required' } }
   const { data, error } = await sb
     .from('job_documents')
-    .update(quoteSendClaimRevertPayload())
+    .update(quoteSendClaimRevertPayload(mode))
     .eq('id', documentId)
     .eq('send_claim_token', owned)
     .not('sent_to_client', 'is', true)
@@ -350,11 +395,12 @@ export async function revertQuoteDocumentSendClaim(
 export async function revertQuoteDocumentSendClaims(
   sb: QuoteSendPublicationClient,
   claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  mode: SendClaimReleaseMode = 'pre_send',
 ): Promise<{ error: { message?: string } | null }> {
   const owned = uniqueDocumentClaims(claims)
   if (!owned.length) return { error: null }
   for (const claim of owned) {
-    const { error } = await revertQuoteDocumentSendClaim(sb, claim.id, claim.token)
+    const { error } = await revertQuoteDocumentSendClaim(sb, claim.id, claim.token, mode)
     if (error) return { error }
   }
   return { error: null }
@@ -376,7 +422,7 @@ export async function publishQuoteDocumentSendOrRevert(
   if (updated) return { published: true }
   const message = error?.message || 'publication stamp not confirmed'
   console.error('[send-quote] publication stamp failed:', message)
-  await revertQuoteDocumentSendClaim(sb, documentId, token)
+  await revertQuoteDocumentSendClaim(sb, documentId, token, 'keep_provider_key')
   return { published: false, error: message }
 }
 
@@ -392,7 +438,7 @@ export async function publishQuoteDocumentsSendOrRevert(
     if (updated) continue
     const message = error?.message || 'publication stamp not confirmed'
     console.error('[send-quote] publication stamp failed:', message)
-    await revertQuoteDocumentSendClaims(sb, owned)
+    await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
     return { published: false, error: message }
   }
   return { published: true }

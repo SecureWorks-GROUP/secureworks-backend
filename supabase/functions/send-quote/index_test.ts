@@ -21,6 +21,7 @@ import {
   claimQuoteDocumentSend,
   clearJobSendRunsClaim,
   quoteSendClaimRevertPayload,
+  resendResponseIsDefinitivePreSendRejection,
   quoteSendResendIdempotencyKey,
   resendIdempotencyHeaders,
   touchQuoteDocumentSendClaim,
@@ -748,8 +749,9 @@ Deno.test("C5 — claim payload is send_claimed_at plus token; publication is th
   assertEquals(Object.keys(sb.updates[0]).sort(), [
     'send_claim_token',
     'send_claimed_at',
-    'send_resend_idempotency_key',
   ])
+  assertEquals(Object.prototype.hasOwnProperty.call(sb.updates[0], 'send_resend_idempotency_key'), false)
+  assertEquals(Object.keys(sb.updates[1]), ['send_resend_idempotency_key'])
   assertEquals('sent_to_client' in sb.updates[0], false)
   assertEquals('sent_at' in sb.updates[0], false)
   const claim = quoteSendClaimPayload(new Date('2026-09-06T00:00:00.000Z'), 'tok-1')
@@ -764,6 +766,14 @@ Deno.test("C5 — claim payload is send_claimed_at plus token; publication is th
     send_claim_token: null,
     send_resend_idempotency_key: null,
   })
+  assertEquals(quoteSendClaimRevertPayload('keep_provider_key'), {
+    send_claimed_at: null,
+    send_claim_token: null,
+  })
+  assertEquals(resendResponseIsDefinitivePreSendRejection(422), true)
+  assertEquals(resendResponseIsDefinitivePreSendRejection(409), false)
+  assertEquals(resendResponseIsDefinitivePreSendRejection(429), false)
+  assertEquals(resendResponseIsDefinitivePreSendRejection(500), false)
   assertEquals(published, {
     sent_to_client: true,
     sent_at: '2026-09-06T00:00:01.000Z',
@@ -915,7 +925,7 @@ Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async 
   }
   assertEquals(updates[0].sent_to_client, true)
   assertEquals(updates[0].send_claim_token, null)
-  assertEquals(updates[1], quoteSendClaimRevertPayload())
+  assertEquals(updates[1], quoteSendClaimRevertPayload('keep_provider_key'))
   assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-owner"))
 })
 
@@ -975,7 +985,6 @@ Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not",
             assertEquals(Object.keys(payload).sort(), [
               "send_claim_token",
               "send_claimed_at",
-              "send_resend_idempotency_key",
             ])
             return Promise.resolve({ data: null, error: null })
           },
@@ -1034,7 +1043,7 @@ Deno.test("R5-001 send-runs batch stamp failure reverts unpublished claims per d
   if (result.published === false) {
     assertEquals(result.error, "stamp failed")
   }
-  assertEquals(updates[1], quoteSendClaimRevertPayload())
+  assertEquals(updates[1], quoteSendClaimRevertPayload('keep_provider_key'))
   assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-a"))
 })
 

@@ -275,5 +275,42 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   `invoice_email_send_claims` is operational mail state, not the Xero
   money mirror. Exclusive insert/update, stale reclaim that keeps the
   first `invoice-send:<token>` key, token-fenced heartbeat / publish /
-  revert, and Resend `Idempotency-Key`. Concurrent retries are
+  revert, and Resend `Idempotency-Key`.   Concurrent retries are
   `already_sent` or 409 `invoice_send_in_progress`.
+
+## Review-14 locks (2026-09-06)
+
+- **Quote-send rollback keeps the first-send provider key after Resend.**
+  Exclusive claim leases without overwriting `send_resend_idempotency_key`.
+  Definitive pre-send 4xx (except 408/409/429) may clear it. Network
+  throws, 5xx/ambiguous provider results, persist failure, and
+  publication-stamp failure revert with `keep_provider_key` so reclaim
+  resumes the same Idempotency-Key.
+- **Invoice-send rollback matches quote-send.** Exclusive update is
+  lease-only; insert may mint the first key. `revertInvoiceEmailSendClaim`
+  clears the key only on `pre_send`. Accepted-email persist/publication
+  failure and ambiguous Resend outcomes keep `invoice-send:<token>`.
+- **Allocated scope leftover prose is fail-closed.** After
+  `stripTradePackMoney`, every allocated free-text leaf is refused when
+  `tradeTextHasMoneyToken` or a numeric-only leftover remains. Short
+  remnants of Unicode-currency / `tax included` / `invoice attached`
+  originals also drop (`＄18 extra` → `extra`). ASCII `$` figures stay
+  strip-and-keep (`Pat Client $9,999`, `Plus 80 +GST` → `Plus`). The
+  sealed phrase is exempt only on a `payment_terms` path.
+- **Money classifier includes Unicode currency (`\p{Sc}`).** FULLWIDTH
+  DOLLAR `＄` and other Sc symbols drop on every projection/assertion
+  path that uses `tradeTextHasMoneyToken`.
+- **Extract prose rejects bare 1–2 digit amounts.** `extractProse` uses
+  `allocatedTradePackProse`. Digits remain only on typed identity and
+  quantity fields.
+- **JWT `/send` and `/send-runs` hide missing vs foreign.** Both return
+  generic 404 `{ error: 'Not found', code: 'not_found' }`. API-key office
+  automation still sees `Document not found` / `Job not found` vs 403
+  tenant.
+- **Trade job access hides missing vs tenant-mismatch.** Both resolve to
+  `tenant_mismatch` with `job: null` and throw `ApiError` 404
+  `job_not_found` at the shared door, including `trade_quote_extract`.
+  The outer 500 handler no longer receives distinguishable Error text.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` and sealed-phrase
+exemption only on `payment_terms` stay locked.

@@ -52,6 +52,40 @@ export type QuoteSendTenantAccess =
   | { ok: true }
   | { ok: false; status: 403; error: string; code: 'operator_access_required' }
 
+export const QUOTE_SEND_GENERIC_NOT_FOUND = {
+  error: 'Not found',
+  code: 'not_found',
+} as const
+
+export function quoteSendJwtResourceNotFound(): typeof QUOTE_SEND_GENERIC_NOT_FOUND {
+  return { ...QUOTE_SEND_GENERIC_NOT_FOUND }
+}
+
+/**
+ * JWT callers must not distinguish a missing quote/job from a foreign
+ * tenant. API-key office automation may keep the specific 404 / 403.
+ */
+export function quoteSendMissingOrForeignRefusal(
+  authMode: 'api_key' | 'jwt',
+  missing: boolean,
+  tenant: QuoteSendTenantAccess,
+  apiKeyMissingMessage: string,
+): { status: number; body: Record<string, unknown> } | null {
+  if (missing) {
+    if (authMode === 'jwt') {
+      return { status: 404, body: quoteSendJwtResourceNotFound() }
+    }
+    return { status: 404, body: { error: apiKeyMissingMessage } }
+  }
+  if (!tenant.ok) {
+    if (authMode === 'jwt') {
+      return { status: 404, body: quoteSendJwtResourceNotFound() }
+    }
+    return { status: tenant.status, body: { error: tenant.error, code: tenant.code } }
+  }
+  return null
+}
+
 function rejectJson(
   corsHeaders: Record<string, string>,
   status: number,
