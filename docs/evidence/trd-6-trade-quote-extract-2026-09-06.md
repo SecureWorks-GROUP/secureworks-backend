@@ -149,3 +149,18 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
 - **Claim database faults are not already_sent.** Document and job claim
   helpers return `claimed` / `unavailable` / `error`. `/send` maps error
   to 500. send-runs maps a job-claim error to 500, not 409.
+
+## Review-7 locks (2026-09-06)
+
+- **Superseded outranks accepted.** `superseded_at` makes the pack
+  `status=superseded` even when `accepted_at` is set. Frozen extract
+  hydration returns null; `tradeQuoteExtractIsEligible` still rejects
+  `status=superseded`. A revised accepted quote cannot stay extractable.
+- **Quote numbers are fail-closed identity.** Allocated `quote_packs`
+  and extract pointers run `allocatedTradePackIdentity` on
+  `quote_number`. `$18,400` / `50% deposit` / `rate 850` null the field
+  or omit the pointer. Filenames sanitize before slugging.
+- **Failed send-runs recipients release their claims.** After publishing
+  the successful subset, leftover claims revert under the same token
+  fence (cannot clear a published row). Zero-publication still reverts
+  every claim.

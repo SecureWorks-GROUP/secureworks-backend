@@ -20,6 +20,8 @@ import {
   claimJobSendRuns,
   claimQuoteDocumentSend,
   clearJobSendRunsClaim,
+  claimsForDocumentIds,
+  claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
   publishQuoteDocumentSend,
   publishQuoteDocumentSendOrRevert,
@@ -29,6 +31,7 @@ import {
   quoteSendPublicationPayload,
   resolveSendRunDocument,
   revertQuoteDocumentSendClaim,
+  revertQuoteDocumentSendClaims,
   sendRunQuoteNumberFallback,
   sendRunsPublicationFailureBlocksSuccess,
   sendRunsSendOutcome,
@@ -759,6 +762,65 @@ Deno.test("R4-002 send-runs publishes only docs for successful recipients", () =
     ["doc-primary", "doc-primary-2", "doc-neighbour"],
   )
   assertEquals(documentIdsPublishedForSuccessfulSends(recipients, []), [])
+})
+
+Deno.test("R7-003 failed send-runs recipients are the claim complement", () => {
+  const claims = [
+    { id: "doc-primary", token: "tok-p", claimed_at: "2026-09-06T00:00:00.000Z" },
+    { id: "doc-neighbour", token: "tok-n", claimed_at: "2026-09-06T00:00:00.000Z" },
+  ]
+  const published = documentIdsPublishedForSuccessfulSends(
+    [
+      { email: "pat@example.test", docs: [{ id: "doc-primary" }] },
+      { email: "neighbour@example.test", docs: [{ id: "doc-neighbour" }] },
+    ],
+    ["pat@example.test"],
+  )
+  assertEquals(published, ["doc-primary"])
+  assertEquals(claimsForDocumentIds(claims, published).map((c) => c.id), ["doc-primary"])
+  assertEquals(claimsNotInDocumentIds(claims, published).map((c) => c.id), ["doc-neighbour"])
+  assertEquals(claimsNotInDocumentIds(claims, published)[0].token, "tok-n")
+})
+
+Deno.test("R7-003 leftover send-runs revert is token-fenced and skips published rows", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const nots: Array<{ col: string; op: string; value: unknown }> = []
+  const sb = {
+    from: (_table: string) => {
+      const chain: Record<string, unknown> = {
+        update: (payload: Record<string, unknown>) => {
+          updates.push(payload)
+          return chain
+        },
+        eq: (col: string, value: unknown) => {
+          eqs.push({ col, value })
+          return chain
+        },
+        not: (col: string, op: string, value: unknown) => {
+          nots.push({ col, op, value })
+          return chain
+        },
+        select: () => ({
+          maybeSingle: () => Promise.resolve({ data: { id: "doc-neighbour" }, error: null }),
+        }),
+      }
+      return chain
+    },
+  }
+  const leftover = claimsNotInDocumentIds(
+    [
+      { id: "doc-primary", token: "tok-p" },
+      { id: "doc-neighbour", token: "tok-n" },
+    ],
+    ["doc-primary"],
+  )
+  const result = await revertQuoteDocumentSendClaims(sb, leftover)
+  assertEquals(result.error, null)
+  assertEquals(updates, [{ send_claimed_at: null, send_claim_token: null }])
+  assertEquals(eqs.filter((eq) => eq.col === "id").map((eq) => eq.value), ["doc-neighbour"])
+  assertEquals(eqs.filter((eq) => eq.col === "send_claim_token").map((eq) => eq.value), ["tok-n"])
+  assert(nots.some((n) => n.col === "sent_to_client" && n.op === "is" && n.value === true))
 })
 
 Deno.test("R4-003 send-runs quote numbers are assigned per document", () => {

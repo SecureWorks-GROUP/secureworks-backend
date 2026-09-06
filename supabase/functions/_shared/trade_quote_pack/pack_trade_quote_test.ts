@@ -12,6 +12,7 @@ import {
   persistTradePackOnDocuments,
   persistTradePackWriteConfirmed,
   quoteDocumentHasClientSend,
+  quotePublicationFlags,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
@@ -296,6 +297,12 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("fee@example.test"), true);
   assertEquals(allocatedTradePackIdentity("0412 000 111"), "0412 000 111");
   assertEquals(allocatedTradePackIdentity("fee@example.test"), null);
+  assertEquals(allocatedTradePackIdentity("$18,400"), null);
+  assertEquals(allocatedTradePackIdentity("50% deposit"), null);
+  assertEquals(allocatedTradePackIdentity("rate 850"), null);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    quote_number: "$18,400",
+  }).includes("quote_number"), true);
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     customer: { phone: "0412 $18,400", email: "usd@example.test" },
     terms: { valid_until: "valid until price review" },
@@ -370,6 +377,45 @@ Deno.test("frozenTradePackForExtract refuses live_fallback and unsent packs", ()
   assertEquals(frozen?.source, "frozen");
   assertEquals(frozen?.quote_number, "Q-1");
   assertEquals(frozen?.sent_at, "2026-09-01T00:00:00.000Z");
+});
+
+Deno.test("R7-001 superseded_at outranks accepted_at for extract hydration", () => {
+  assertEquals(quotePublicationFlags({ accepted: true, superseded: true }), {
+    accepted: false,
+    superseded: true,
+    status: "superseded",
+  });
+  const acceptedThenRevised = {
+    id: "d-rev",
+    type: "quote",
+    quote_number: "Q-OLD",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    accepted_at: "2026-09-02T00:00:00.000Z",
+    superseded_at: "2026-09-03T00:00:00.000Z",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-OLD",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      accepted: true,
+      scope_json: FENCE_SCOPE,
+    }),
+  };
+  assertEquals(quoteDocumentHasClientSend(acceptedThenRevised), true);
+  assertEquals(frozenTradePackForExtract(acceptedThenRevised), null);
+  const quotePacks = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [acceptedThenRevised],
+  });
+  assertEquals(quotePacks[0].status, "superseded");
+  assertEquals(quotePacks[0].accepted, false);
+  const live = packTradeQuote({
+    quote_number: "Q-OLD",
+    accepted: true,
+    superseded: true,
+    sent_at: "2026-09-01T00:00:00.000Z",
+    source: "live_fallback",
+  });
+  assertEquals(live.status, "superseded");
+  assertEquals(live.accepted, false);
 });
 
 Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary numbers", () => {

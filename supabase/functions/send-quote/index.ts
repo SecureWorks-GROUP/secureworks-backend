@@ -37,6 +37,7 @@ import {
   claimJobSendRuns,
   claimQuoteDocumentSend,
   claimsForDocumentIds,
+  claimsNotInDocumentIds,
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   mintSendRunQuoteNumber,
@@ -2641,6 +2642,16 @@ serve(async (req: Request) => {
         if (!published.published) {
           await revertQuoteDocumentSendClaims(sb, claimedDocs)
           return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
+        }
+        // Successful recipients are published. Failed-recipient claims stay
+        // unpublished and must be released now, or the neighbour stays locked
+        // until the 15m TTL. Token-fenced revert cannot clear a published row.
+        const leftoverClaims = claimsNotInDocumentIds(claimedDocs, publishedDocIds)
+        if (leftoverClaims.length > 0) {
+          const leftover = await revertQuoteDocumentSendClaims(sb, leftoverClaims)
+          if (leftover.error) {
+            console.error('[send-quote] send-runs leftover claim revert failed:', leftover.error.message || String(leftover.error))
+          }
         }
       } else if (claimedDocs.length > 0) {
         await revertQuoteDocumentSendClaims(sb, claimedDocs)

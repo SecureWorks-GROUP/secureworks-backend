@@ -501,6 +501,15 @@ export function claimsForDocumentIds(
   return uniqueDocumentClaims(claims).filter((claim) => wanted.has(claim.id))
 }
 
+/** Claims whose document was not in the successful-recipient publish set. */
+export function claimsNotInDocumentIds(
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  documentIds: Iterable<string>,
+): QuoteSendDocumentClaim[] {
+  const published = new Set(uniqueDocumentIds(documentIds))
+  return uniqueDocumentClaims(claims).filter((claim) => !published.has(claim.id))
+}
+
 export function sendRunQuoteNumberFallback(input: {
   jobNumber?: string | null
   runLabel?: string | null

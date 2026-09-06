@@ -38844,7 +38844,7 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
   return (packs || []).map((pack: any) => {
     if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return pack
     return {
-      quote_number: pack.quote_number ?? null,
+      quote_number: allocatedTradePackIdentity(pack.quote_number),
       job_document_id: pack.job_document_id ?? null,
       sent_at: pack.sent_at ?? null,
       accepted: pack.accepted,

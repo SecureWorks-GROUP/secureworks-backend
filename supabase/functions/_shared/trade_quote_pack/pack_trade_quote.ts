@@ -103,8 +103,10 @@ export function packTradeQuote(input: PackTradeQuoteInput): TradeQuotePack {
   const notes = installerNotes(scope)
   if (notes) items.push(item('note', notes, 1, 'lot'))
 
-  const accepted = input.accepted === true
-  const superseded = input.superseded === true && !accepted
+  const flags = quotePublicationFlags({
+    accepted: input.accepted === true,
+    superseded: input.superseded === true,
+  })
   const summary = items
     .filter((i) => i.kind !== 'note')
     .slice(0, 6)
@@ -115,8 +117,8 @@ export function packTradeQuote(input: PackTradeQuoteInput): TradeQuotePack {
     quote_number: input.quote_number || null,
     job_document_id: input.job_document_id || null,
     sent_at: input.sent_at || null,
-    accepted,
-    status: accepted ? 'accepted' : superseded ? 'superseded' : 'sent',
+    accepted: flags.accepted,
+    status: flags.status,
     job_type: jobType,
     notes,
     items,
@@ -327,6 +329,25 @@ export async function persistTradePackOnDocuments(
   return { wrote, failed }
 }
 
+/** A superseded stamp outranks accept. A revised quote must not stay
+ *  extract-eligible just because the earlier version was accepted. */
+export function quotePublicationFlags(input: {
+  accepted?: boolean
+  superseded?: boolean
+}): { accepted: boolean; superseded: boolean; status: TradeQuotePackStatus } {
+  const superseded = input.superseded === true
+  const accepted = input.accepted === true && !superseded
+  return {
+    accepted,
+    superseded,
+    status: superseded ? 'superseded' : accepted ? 'accepted' : 'sent',
+  }
+}
+
+export function quoteDocumentIsSuperseded(doc: QuoteDocRow | null | undefined): boolean {
+  return !!doc?.superseded_at
+}
+
 export function quoteDocumentHasClientSend(doc: QuoteDocRow | null | undefined): boolean {
   if (doc?.accepted_at) return true
   if (!doc?.sent_at) return false
@@ -355,6 +376,7 @@ export function frozenTradePackForExtract(
   },
 ): TradeQuotePack | null {
   if (!quoteDocumentHasClientSend(doc) || !quoteDocumentHasFrozenPack(doc)) return null
+  if (quoteDocumentIsSuperseded(doc)) return null
   const packed = hydrateStoredPack(asObject(doc.trade_pack_json), doc)
   if (packed.source === 'live_fallback') return null
   return overlayTradePackSnapshots(packed, {
@@ -376,15 +398,17 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
       typeof row.unit === 'string' ? row.unit : 'ea',
     )
   })
-  const accepted = !!doc.accepted_at
-  const superseded = !!doc.superseded_at && !accepted
+  const flags = quotePublicationFlags({
+    accepted: !!doc.accepted_at,
+    superseded: !!doc.superseded_at,
+  })
   const sentAt = doc.sent_at || null
   return {
     quote_number: (stored.quote_number as string) || doc.quote_number || null,
     job_document_id: (stored.job_document_id as string) || doc.id || null,
     sent_at: sentAt,
-    accepted,
-    status: accepted ? 'accepted' : superseded ? 'superseded' : sentAt ? 'sent' : 'superseded',
+    accepted: flags.accepted,
+    status: flags.superseded ? 'superseded' : flags.accepted ? 'accepted' : sentAt ? 'sent' : 'superseded',
     job_type: classifyJobType(stored.job_type as string, null, null),
     notes: String(stored.notes || ''),
     items,
@@ -916,6 +940,9 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
   const blob = JSON.stringify(row)
   if (blob.includes('$')) leaks.push('$')
   leaks.push(...tradePackMoneyLeakKeys(row as TradeQuotePack).map((key) => `key.${key}`))
+  if (typeof row.quote_number === 'string' && tradeTextHasMoneyToken(row.quote_number)) {
+    leaks.push('quote_number')
+  }
   const customer = row.customer
   if (customer && typeof customer === 'object' && !Array.isArray(customer)) {
     for (const key of ALLOCATED_PACK_CUSTOMER_STRINGS) {

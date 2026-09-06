@@ -1931,6 +1931,9 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     },
   ]);
   assertEquals(out[0].quote_number, "Q-1");
+  assertEquals(redactTradeQuotePackMoney([{ quote_number: "$18,400" }])[0].quote_number, null);
+  assertEquals(redactTradeQuotePackMoney([{ quote_number: "50% deposit" }])[0].quote_number, null);
+  assertEquals(redactTradeQuotePackMoney([{ quote_number: "rate 850" }])[0].quote_number, null);
   assertEquals(out[0].lineTotalEx, undefined);
   assertEquals(out[0].gstAmount, undefined);
   assertEquals(out[0].quotedTotal, undefined);

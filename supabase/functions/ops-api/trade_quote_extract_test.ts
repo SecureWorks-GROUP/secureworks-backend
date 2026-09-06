@@ -130,6 +130,52 @@ Deno.test("projectTradeQuoteExtracts names the HTML extract and skips unsent/sup
   assertEquals(tradeQuoteExtractIsEligible({ ...PACK, sent_at: null, status: "sent" }), false);
   assertEquals(tradeQuoteExtractFilename({ job_number: "SWF-1", quote_number: "Q-1" }), "SWF-1-Q-1-trade-extract.html");
   assertEquals(tradeQuoteExtractFilename({}).includes("quote.pdf"), false);
+  assertEquals(
+    tradeQuoteExtractIsEligible({
+      ...PACK,
+      accepted: true,
+      status: "accepted",
+      quote_number: "Q-OLD",
+    }),
+    true,
+  );
+  assertEquals(
+    tradeQuoteExtractIsEligible({
+      ...PACK,
+      accepted: true,
+      status: "superseded",
+      quote_number: "Q-OLD",
+    }),
+    false,
+  );
+  assertEquals(
+    projectTradeQuoteExtracts([
+      { ...PACK, accepted: true, status: "superseded", quote_number: "Q-OLD" },
+    ], "SWF-25101"),
+    [],
+  );
+});
+
+Deno.test("R7-002 dirty quote numbers are omitted from pointers and filenames", () => {
+  for (const dirty of ["$18,400", "50% deposit", "rate 850"]) {
+    assertEquals(tradeQuoteExtractIsEligible({ ...PACK, quote_number: dirty }), false);
+    assertEquals(
+      projectTradeQuoteExtracts([{ ...PACK, quote_number: dirty }], "SWF-25101"),
+      [],
+    );
+    assertEquals(
+      assembleTradeQuoteExtract({ pack: { ...PACK, quote_number: dirty }, job: { job_number: "SWF-25101" } })
+        .quote_number,
+      null,
+    );
+    assertEquals(
+      tradeQuoteExtractFilename({ job_number: "SWF-25101", quote_number: dirty }),
+      "SWF-25101-trade-extract.html",
+    );
+    assertEquals(tradeQuoteExtractFilename({ quote_number: dirty }).includes("18400"), false);
+    assertEquals(tradeQuoteExtractFilename({ quote_number: dirty }).includes("850"), false);
+    assertEquals(tradeQuoteExtractFilename({ quote_number: dirty }).includes("50"), false);
+  }
 });
 
 Deno.test("extract fail-closes money in phone, email, and units without eating a clean phone", () => {

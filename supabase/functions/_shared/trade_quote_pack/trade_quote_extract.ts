@@ -17,6 +17,7 @@ import {
   type TradeQuotePack,
   type TradeQuoteTermsSnapshot,
   allocatedPaymentTerms,
+  allocatedTradePackIdentity,
   frozenTradePackForExtract,
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
@@ -133,7 +134,7 @@ export function assembleFrozenQuoteExtractPacks(args: {
 
 export function tradeQuoteExtractIsEligible(pack: TradeQuotePack | null | undefined): boolean {
   if (!pack || pack.source === "live_fallback") return false;
-  if (!pack.quote_number) return false;
+  if (!allocatedTradePackIdentity(pack.quote_number)) return false;
   if (pack.status === "superseded") return false;
   if (pack.accepted === true || pack.status === "accepted") return true;
   return pack.status === "sent" && !!pack.sent_at;
@@ -159,7 +160,7 @@ export function assembleTradeQuoteExtract(args: {
   return {
     schema: TRADE_QUOTE_EXTRACT_SCHEMA,
     type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
-    quote_number: extractIdentity(pack.quote_number),
+    quote_number: allocatedTradePackIdentity(pack.quote_number),
     job_number: jobNumber,
     status,
     sent_at: sentAt,
@@ -183,12 +184,18 @@ export function assembleTradeQuoteExtract(args: {
   };
 }
 
+function slugTradeExtractIdentity(value: unknown): string {
+  const clean = allocatedTradePackIdentity(value);
+  if (!clean) return "";
+  return clean.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 export function tradeQuoteExtractFilename(extract: {
   job_number?: string | null;
   quote_number?: string | null;
 }): string {
-  const job = String(extract.job_number ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  const quote = String(extract.quote_number ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const job = slugTradeExtractIdentity(extract.job_number);
+  const quote = slugTradeExtractIdentity(extract.quote_number);
   const stem = [job, quote, "trade-extract"].filter(Boolean).join("-");
   return `${stem || "trade-extract"}.html`;
 }
@@ -199,19 +206,23 @@ export function projectTradeQuoteExtracts(
 ): TradeQuoteExtractPointer[] {
   return packs
     .filter((pack) => tradeQuoteExtractIsEligible(pack))
-    .map((pack) => ({
-      type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
-      label: "Quote extract" as const,
-      action: TRADE_QUOTE_EXTRACT_ACTION,
-      job_document_id: pack.job_document_id ?? null,
-      quote_number: pack.quote_number as string,
-      status: pack.status,
-      sent_at: pack.sent_at ?? null,
-      filename: tradeQuoteExtractFilename({
-        job_number: jobNumber,
-        quote_number: pack.quote_number,
-      }),
-    }));
+    .flatMap((pack) => {
+      const quoteNumber = allocatedTradePackIdentity(pack.quote_number);
+      if (!quoteNumber) return [];
+      return [{
+        type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
+        label: "Quote extract" as const,
+        action: TRADE_QUOTE_EXTRACT_ACTION,
+        job_document_id: pack.job_document_id ?? null,
+        quote_number: quoteNumber,
+        status: pack.status,
+        sent_at: pack.sent_at ?? null,
+        filename: tradeQuoteExtractFilename({
+          job_number: jobNumber,
+          quote_number: quoteNumber,
+        }),
+      }];
+    });
 }
 
 function escapeHtml(value: string): string {
