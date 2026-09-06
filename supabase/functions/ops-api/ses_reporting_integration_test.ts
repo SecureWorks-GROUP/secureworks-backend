@@ -187,6 +187,7 @@ Deno.test("send-quote preserves explicit SES binding refusal before Resend", () 
     "inspectSealedSesJob(sb, linkedJobId)",
     start,
   );
+  const emailCheck = SEND_QUOTE.indexOf("if (!client_email)", start);
   const claim = SEND_QUOTE.indexOf("claimInvoiceEmailSend(", start);
   const provider = SEND_QUOTE.indexOf(
     "fetch('https://api.resend.com/emails'",
@@ -194,7 +195,8 @@ Deno.test("send-quote preserves explicit SES binding refusal before Resend", () 
   );
   assert(
     start >= 0 && authorize > start && invoiceLink > authorize &&
-      inspect > invoiceLink && claim > inspect && provider > claim,
+      inspect > invoiceLink && emailCheck > inspect && emailCheck < claim &&
+      claim > inspect && provider > claim,
   );
   assertStringIncludes(FENCE, "sealed_ses_fence_check_failed");
   assertStringIncludes(FENCE, "invoice_link_required");

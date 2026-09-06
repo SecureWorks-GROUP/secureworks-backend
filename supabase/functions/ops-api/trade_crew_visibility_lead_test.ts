@@ -363,7 +363,7 @@ Deno.test("assigned installer does not receive priced work-order PDFs (office ke
   assertEquals(d.documents.map((x: any) => x.id), []);
   const serialised = JSON.stringify(d);
   assert(!serialised.includes("wo.pdf"), "priced work-order PDF leaked to allocated payload");
-  assertEquals(d.workOrders[0].special_instructions, "Park on the verge. Charge extra.");
+  assertEquals(d.workOrders[0].special_instructions, undefined);
 });
 
 // ── CONTROLS: proof this did not widen too far ──────────────────────────────

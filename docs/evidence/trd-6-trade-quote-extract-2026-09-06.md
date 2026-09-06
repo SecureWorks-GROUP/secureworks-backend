@@ -314,3 +314,31 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
 
 Office-only `/send` / `/send-runs` / `/send-invoice` and sealed-phrase
 exemption only on `payment_terms` stay locked.
+
+## Review-15 locks (2026-09-06)
+
+- **Inflected leftover money vocabulary fails closed.** After
+  `stripTradePackMoney`, `tradeTextHasMoneyToken` refuses residual
+  `total` / `totals` / `pricing` / `prices` / `rates` / `fees` / `costs`
+  / `deposits` / `charged` and the rest of that inflection family on
+  every allocated projection and leak assertion. Strip still leaves
+  orphan vocab (`Approved total`, `Charge extra`). Bare `quote` /
+  `quotes` / `quotation` stay off the classifier so `Quote note text`
+  survives. The sealed phrase is exempt only on `payment_terms`.
+- **Numeric-key allowlist cannot bypass leftover money language.**
+  `sanitizeTradeAllocatedStringLeaf` refuses `tradeTextHasMoneyToken`
+  leftovers before `qty` / `quantity` / `hours` keep. Finite numeric
+  primitives and safe construction counts (`12`, `10m`, `2 trades`)
+  stay. `labourers: "2 at $85/hour"` still keeps leftover `2 at /hour`.
+- **`/send-invoice` validates delivery before claiming.** Missing
+  `client_email` returns 400 without acquiring
+  `invoice_email_send_claims`. Post-claim Resend / persist / publication
+  rollback is unchanged: definitive pre-send 4xx may clear the provider
+  key; ambiguous / post-send failure keeps `invoice-send:<token>`.
+- **Construction holds restore with escaped carets.** `stripTradePackMoney`
+  holds `10m` / `90x90` / `SWF-26101` as `^@n^@` and restores with
+  `/\^@(\d+)\^@/g` after leftover 3+ digit strips. Extracts must not
+  show placeholders.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` and sealed-phrase
+exemption only on `payment_terms` stay locked.

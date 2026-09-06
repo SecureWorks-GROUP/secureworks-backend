@@ -3061,24 +3061,6 @@ serve(async (req: Request) => {
       const invoiceRecord = access.invoice
       const invoiceJob = access.job
 
-      const invoiceClaim = await claimInvoiceEmailSend(
-        sb,
-        xero_invoice_id,
-        invoiceRecord.job_id || job_id,
-      )
-      if (invoiceClaim.status === 'error') {
-        return jsonResponse({ error: 'Failed to claim invoice email send' }, 500, corsHeaders)
-      }
-      if (invoiceClaim.status === 'already_sent') {
-        return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
-      }
-      if (invoiceClaim.status !== 'claimed') {
-        return jsonResponse({
-          error: 'Invoice email send already in progress',
-          code: 'invoice_send_in_progress',
-        }, 409, corsHeaders)
-      }
-
       const delivery = resolveSendInvoiceDelivery({
         authMode: sendAuthMode,
         body,
@@ -3098,6 +3080,24 @@ serve(async (req: Request) => {
       } = delivery
       if (!client_email) {
         return jsonResponse({ error: 'No email address found for this invoice job' }, 400, corsHeaders)
+      }
+
+      const invoiceClaim = await claimInvoiceEmailSend(
+        sb,
+        xero_invoice_id,
+        invoiceRecord.job_id || job_id,
+      )
+      if (invoiceClaim.status === 'error') {
+        return jsonResponse({ error: 'Failed to claim invoice email send' }, 500, corsHeaders)
+      }
+      if (invoiceClaim.status === 'already_sent') {
+        return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
+      }
+      if (invoiceClaim.status !== 'claimed') {
+        return jsonResponse({
+          error: 'Invoice email send already in progress',
+          code: 'invoice_send_in_progress',
+        }, 409, corsHeaders)
       }
 
       const firstName = (client_name || 'there').split(' ')[0]

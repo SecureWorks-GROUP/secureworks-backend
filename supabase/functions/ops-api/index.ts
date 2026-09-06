@@ -38380,8 +38380,8 @@ function sanitizeTradeAllocatedStringLeaf(value: unknown, key?: string): string 
     return cleaned
   }
   if (isSealedPaymentTermsPhrase(cleaned)) return ''
-  if (tradeScopeKeepNumericLeaf(path)) return cleaned
   if (tradeTextHasMoneyToken(cleaned)) return ''
+  if (tradeScopeKeepNumericLeaf(path)) return cleaned
   if (leftoverAllocatedProseIsNumericOnly(cleaned)) return ''
   if (typeof value === 'string' && leftoverIsMangledMoneyRemnant(value, cleaned)) {
     return ''

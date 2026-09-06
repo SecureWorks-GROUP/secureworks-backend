@@ -185,6 +185,16 @@ const TRADE_CURRENCY_CODE_AMOUNT_RE =
   /\b(?:AUD|USD|EUR|GBP|JPY|NZD|CAD|SGD|HKD|CHF|CNY|INR|KRW|ZAR)\s*-?\d/i
 const TRADE_TAX_INVOICE_LANGUAGE_RE =
   /\b(?:tax(?:es|ed|able|ation)?|invoices?|invoiced|invoicing|billing|billed)\b/i
+/** Residual money vocabulary after figure-strip. Inflected totals / pricing /
+ *  rates / fees / costs / deposits / charged. Bare quote / quotes / quotation
+ *  stay off this list so `Quote note text` survives. invoices? and paid|due
+ *  stay on tax / payment predicates. Sealed phrase exempt only on payment_terms. */
+const TRADE_PACK_INFLECTED_MONEY_VOCAB =
+  'totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|deposits?'
+const TRADE_PACK_INFLECTED_MONEY_VOCAB_RE = new RegExp(
+  `\\b(?:${TRADE_PACK_INFLECTED_MONEY_VOCAB}|quoted|unit\\s+price|line\\s+total|totalIncGST|totalExGST)\\b`,
+  'i',
+)
 
 /** Exact sealed payment-terms phrase. Exempt only on a payment_terms field path. */
 export function isSealedPaymentTermsPhrase(value: string): boolean {
@@ -240,13 +250,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   if (TRADE_CURRENCY_CODE_RE.test(text)) return true
   if (TRADE_CURRENCY_CODE_AMOUNT_RE.test(text)) return true
   if (tradeTextHasCurrencyWord(text)) return true
-  if (
-    /\b(?:rate|price|amount|cost|fee|subtotal|quoted|charged|unit\s+price|line\s+total|totalIncGST|totalExGST)\b/i
-      .test(text)
-  ) {
-    return true
-  }
-  if (/\bdeposit\b/i.test(text)) return true
+  if (TRADE_PACK_INFLECTED_MONEY_VOCAB_RE.test(text)) return true
   if (TRADE_TAX_INVOICE_LANGUAGE_RE.test(text)) return true
   if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
   return false
@@ -820,7 +824,7 @@ export function stripTradePackMoney(text: unknown): string {
   const kept: string[] = []
   const hold = (match: string) => {
     kept.push(match)
-    return `\u0000${kept.length - 1}\u0000`
+    return `^@${kept.length - 1}^@`
   }
 
   let s = String(text ?? '')
@@ -911,7 +915,7 @@ export function stripTradePackMoney(text: unknown): string {
     .replace(/\s{2,}/g, ' ')
     .trim()
 
-  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)] ?? '')
+  s = s.replace(/\^@(\d+)\^@/g, (_, i) => kept[Number(i)] ?? '')
   return s.replace(/\s{2,}/g, ' ').trim()
 }
 

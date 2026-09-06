@@ -602,9 +602,9 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     noteWorkOrder: "Use 90x90 posts",
     noteInternal: "Client is a repeat customer. Do not mention",
   });
-  assertEquals(p.job.notes, "Park on the verge. Extra . Charge . Client approved.");
+  assertEquals(p.job.notes, null);
   assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(p.job.scope_json.job.supplierNotes, "Call before arrival. Charge");
+  assertEquals(p.job.scope_json.job.supplierNotes, undefined);
   assertEquals(p.job.scope_json.config.totalMetres, 42);
   assertEquals(p.job.scope_json.job.quote, {
     quote_number: "Q-NARR",
@@ -612,17 +612,14 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     materials: [{ name: "90x90 posts", qty: 12 }],
   });
   assertEquals(p.workOrders[0].scope_items, [{
-    description: "Install fence Total",
     name: "Fence run",
     label: "Front run",
     title: "WO line",
-    instructions: "Use 90x90 posts. Charge extra.",
-    notes: "Priced — hide from trade",
     text: "Line text",
     quantity: 10,
     unit: "m",
   }]);
-  assertEquals(p.workOrders[0].special_instructions, "Park on the verge. Charge extra.");
+  assertEquals(p.workOrders[0].special_instructions, undefined);
   assertEquals(p.workOrder.scope_items[0].rate, undefined);
   assertEquals(p.workOrder.scope_items[0].total, undefined);
   assertEquals(p.workOrder.scope_items[0].unit_price, undefined);
@@ -923,14 +920,14 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   }];
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.notes[0].detail_json.text, "Client approved");
-  assertEquals(allocated.notes[0].detail_json.message, "Charge extra");
-  assertEquals(allocated.notes[0].detail_json.description, "Approved total");
+  assertEquals(allocated.notes[0].detail_json.message, undefined);
+  assertEquals(allocated.notes[0].detail_json.description, undefined);
   assertEquals(allocated.notes[0].detail_json.body, undefined);
   assertEquals(allocated.notes[0].detail_json.content, "Plus");
   assertEquals(allocated.notes[0].detail_json.amount, undefined);
   assertEquals(allocated.notes[0].detail_json.qty, 2);
   assertEquals(allocated.media[0].label, "Front run");
-  assertEquals(allocated.media[0].notes, "Front run priced");
+  assertEquals(allocated.media[0].notes, undefined);
   assertEquals(allocated.media[0].id, "p-note");
   assertEquals(allocated.media[0].phase, "install");
   assertEquals(allocated.media[0].type, "photo");
@@ -989,7 +986,7 @@ Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO
   assertEquals(p.documents.map((d: any) => d.id), []);
   assertEquals(p.workOrderDocuments, []);
   assertEquals(JSON.stringify(p).includes("ms-wo.pdf"), false);
-  assertEquals(p.workOrders[0].special_instructions, "Attend after hours. Charge extra.");
+  assertEquals(p.workOrders[0].special_instructions, undefined);
   assertEquals(p.workOrders[0].scope_items, [{ description: "Make safe", quantity: 1, unit: "lot" }]);
 });
 
@@ -1040,7 +1037,7 @@ Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing 
     assertEquals(p.makesafe_details.reattend_count, 1);
     assertEquals(p.makesafe_details.attendance_cycle_id, "cycle-ms");
     assertEquals(p.makesafe_details.external_ref, "MLB-27000");
-    assertEquals(p.makesafe_details.special_instructions, "Use 90x90 posts. Charge extra.");
+    assertEquals(p.makesafe_details.special_instructions, undefined);
     assertEquals(p.makesafe_details.safety_requirements, undefined);
     assertEquals(JSON.stringify(p.makesafe_details).includes("9999"), false);
     assertEquals(JSON.stringify(p.makesafe_details).includes("INV-1240"), false);
@@ -1083,7 +1080,7 @@ Deno.test("trade_job_detail: allocated service reports drop money and keep hours
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.serviceReport.id, "sr-1");
   assertEquals(allocated.serviceReport.cycle_number, 1);
-  assertEquals(allocated.serviceReport.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.serviceReport.notes, undefined);
   assertEquals(allocated.serviceReport.checklist_json.labour_hours, 3);
   assertEquals(allocated.serviceReport.checklist_json.hours_per_trade, 3);
   assertEquals(allocated.serviceReport.checklist_json.rate, undefined);
@@ -1162,7 +1159,7 @@ Deno.test("get_service_report: allocated / makesafe_open never see money-bearing
   assertEquals(allocated.report.id, "sr-door");
   assertEquals(allocated.report.submitted_by, LEAD);
   assertEquals(allocated.report.cycle_number, 1);
-  assertEquals(allocated.report.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.report.notes, undefined);
   assertEquals(allocated.report.checklist_json.labour_hours, 3);
   assertEquals(allocated.report.checklist_json.rate, undefined);
   assertEquals(allocated.report.checklist_json.amount, undefined);
@@ -1212,7 +1209,7 @@ Deno.test("submit_service_report: allocated response is projected the same as tr
   );
   assertEquals(allocated.report.submitted_by, LEAD);
   assertEquals(allocated.report.status, "submitted");
-  assertEquals(allocated.report.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.report.notes, undefined);
   assertEquals(allocated.report.checklist_json.labour_hours, 3);
   assertEquals(allocated.report.checklist_json.rate, undefined);
   assertEquals(allocated.report.checklist_json.amount, undefined);
@@ -1460,7 +1457,7 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.quote_visible, false);
   const allocatedLine = allocated.purchaseOrders[0].line_items[0];
-  assertEquals(allocatedLine.description, "Sheets . Total.");
+  assertEquals(allocatedLine.description, undefined);
   assertEquals(allocatedLine.quantity, 12);
   assertEquals(allocatedLine.unit_price, undefined);
   assertEquals(allocated.purchaseOrders[0].supplier_name, "Acme Sheets");
@@ -1473,8 +1470,8 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   assertEquals(office.purchaseOrders[0].line_items[0].unit_price, undefined);
   const projectedHidden = projectTradePurchaseOrders(t.purchase_orders, false)[0];
   const projectedOffice = projectTradePurchaseOrders(t.purchase_orders, true)[0];
-  assertEquals(projectedHidden.line_items[0].description, "Sheets . Total.");
-  assertEquals(projectedHidden.notes, "Charge extra. Total.");
+  assertEquals(projectedHidden.line_items[0].description, undefined);
+  assertEquals(projectedHidden.notes, undefined);
   assertEquals(projectedHidden.supplier_name, "Acme Sheets");
   assertEquals(projectedOffice.line_items[0].description, "Sheets $99.50. Total 9999.");
   assertEquals(projectedOffice.notes, "Charge 1200 extra. Total 9999.");
@@ -1494,7 +1491,7 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   );
   assertEquals(open.access_tier, "makesafe_open");
   assertEquals(open.quote_visible, false);
-  assertEquals(open.purchaseOrders[0].line_items[0].description, "Sheets . Total.");
+  assertEquals(open.purchaseOrders[0].line_items[0].description, undefined);
   assertEquals(open.purchaseOrders[0].supplier_name, "Acme Sheets");
 });
 
@@ -1656,14 +1653,14 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
       },
     },
   });
-  assertEquals(r.notes.noteQuote, "Quote writing Total plus");
+  assertEquals(r.notes.noteQuote, undefined);
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
   assertEquals(r.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(r.job.supplierNotes, "Call before arrival. Charge . Total");
+  assertEquals(r.job.supplierNotes, undefined);
   assertEquals(r.job.quote.quote_number, "Q-NARR");
-  assertEquals(r.job.quote.description, "Supply and install. Total Approved total");
-  assertEquals(r.job.quote.narrative, "Gate on the left extra Total");
+  assertEquals(r.job.quote.description, undefined);
+  assertEquals(r.job.quote.narrative, undefined);
   assertEquals(r.job.quote.name, "Monument package");
   assertEquals(r.job.quote.label, "Front run");
   assertEquals(r.job.quote.title, "Quote title");
@@ -1749,7 +1746,7 @@ Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the r
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
   assertEquals(r.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(r.job.supplierNotes, "Call before arrival. Charge");
+  assertEquals(r.job.supplierNotes, undefined);
   assertEquals(r.client, { notes: "Gate on the left" });
   assertEquals(r.job.quote.quote_number, "Q-NARR");
   assertEquals(r.job.quote.description.includes("Monument"), true);
@@ -1815,6 +1812,25 @@ Deno.test("redactTradeScopeQuote walks nested labour keep-key values so money ca
   assertEquals(JSON.stringify(r).includes("3200"), false);
   assertEquals(JSON.stringify(r).includes("85"), false);
   assertEquals(JSON.stringify(r).includes("$"), false);
+});
+
+Deno.test("redactTradeScopeQuote rejects leftover money language on numeric-key strings", () => {
+  const r = redactTradeScopeQuote({
+    job: {
+      qty: "50% upfront",
+      quantity: "amount 9,999",
+      hours: "amount 9,999",
+      hours_per_trade: "50% deposit",
+      labour_hours: "12",
+      extras: { qty: "12", quantity: 10, hours: "2 trades" },
+    },
+  });
+  assertEquals(r.job.qty, undefined);
+  assertEquals(r.job.quantity, undefined);
+  assertEquals(r.job.hours, undefined);
+  assertEquals(r.job.hours_per_trade, undefined);
+  assertEquals(r.job.labour_hours, "12");
+  assertEquals(r.job.extras, { qty: "12", quantity: 10, hours: "2 trades" });
 });
 
 Deno.test("redactTradeScopeQuote drops unlisted numeric money keys and keeps construction quantities", () => {
@@ -1970,9 +1986,6 @@ Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string 
       },
     ]),
     [{
-      description: "Posts Total",
-      instructions: "Charge extra Total Approved total",
-      notes: "Priced",
       name: "Front",
       label: "Run",
       title: "Line",
@@ -2004,9 +2017,9 @@ Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instruction
   assertEquals(out[0].wo_number, "WO-18400");
   assertEquals(out[0].status, "sent");
   assertEquals(out[0].scheduled_date, "2026-08-20");
-  assertEquals(out[0].special_instructions, "Park on the verge. Charge extra Approved total");
-  assertEquals(out[0].notes, "Installer note Total");
-  assertEquals(out[0].scope_items, [{ description: "Posts Total", quantity: 4, unit: "ea" }]);
+  assertEquals(out[0].special_instructions, undefined);
+  assertEquals(out[0].notes, undefined);
+  assertEquals(out[0].scope_items, [{ quantity: 4, unit: "ea" }]);
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("1200"), false);
   assertEquals(JSON.stringify(out).includes("850"), false);
@@ -2259,9 +2272,9 @@ Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures 
       ],
     },
   ]);
-  assertEquals(out[0].summary, "Install 10m Total Total Approved total");
+  assertEquals(out[0].summary, null);
   assertEquals(out[0].items.map((i: any) => i.kind), ["install_m"]);
-  assertEquals(out[0].items[0].description, "Install fence Total Total");
+  assertEquals(out[0].items[0].description, null);
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("1200"), false);
 });
