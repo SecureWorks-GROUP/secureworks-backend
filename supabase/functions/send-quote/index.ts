@@ -930,12 +930,24 @@ serve(async (req: Request) => {
       // trade_pack_json. A persist or stamp failure reverts the owned
       // claim so retry is not stranded on already_sent.
       const sentAt = new Date().toISOString()
-      const { data: jobForPack } = doc.job_id
-        ? await sb.from('jobs')
-          .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
-          .eq('id', doc.job_id)
-          .single()
-        : { data: null }
+      if (!doc.job_id) {
+        console.error('Quote send pack-source job id missing', { document_id })
+        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+      }
+      const { data: jobForPack, error: jobForPackErr } = await sb.from('jobs')
+        .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
+        .eq('id', doc.job_id)
+        .single()
+      if (jobForPackErr || !jobForPack) {
+        console.error('Quote send pack-source job read failed', {
+          document_id,
+          job_id: doc.job_id,
+          error: jobForPackErr?.message,
+        })
+        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+      }
       const persisted = await persistTradePackOnDocuments(sb, {
         documents: [{
           id: document_id,
@@ -943,15 +955,15 @@ serve(async (req: Request) => {
           sent_at: sentAt,
           claim_token: claimed.token,
         }],
-        jobType: jobForPack?.type || doc.jobs?.type,
-        scopeJson: jobForPack?.scope_json,
-        pricingJson: jobForPack?.pricing_json || doc.jobs?.pricing_json,
+        jobType: jobForPack.type || doc.jobs?.type,
+        scopeJson: jobForPack.scope_json,
+        pricingJson: jobForPack.pricing_json || doc.jobs?.pricing_json,
         customer: {
-          name: jobForPack?.client_name ?? doc.jobs?.client_name,
-          phone: jobForPack?.client_phone ?? doc.jobs?.client_phone,
-          email: jobForPack?.client_email ?? doc.jobs?.client_email,
-          site_address: jobForPack?.site_address ?? doc.jobs?.site_address,
-          site_suburb: jobForPack?.site_suburb ?? doc.jobs?.site_suburb,
+          name: jobForPack.client_name ?? doc.jobs?.client_name,
+          phone: jobForPack.client_phone ?? doc.jobs?.client_phone,
+          email: jobForPack.client_email ?? doc.jobs?.client_email,
+          site_address: jobForPack.site_address ?? doc.jobs?.site_address,
+          site_suburb: jobForPack.site_suburb ?? doc.jobs?.site_suburb,
         },
       })
       if (!persistTradePackWriteConfirmed(persisted, 1)) {
@@ -2638,7 +2650,7 @@ serve(async (req: Request) => {
       let emailsSent = 0
       let primarySent = false
       const successfulEmails: string[] = []
-      const primaryEmail = (primaryContact.client_email || job.client_email || '').toLowerCase()
+      const primaryEmail = quoteSendRecipientKey(primaryContact.client_email || job.client_email)
 
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
@@ -2757,7 +2769,7 @@ serve(async (req: Request) => {
             markSendRunsProviderAttempt(recipient.docs)
             emailsSent++
             successfulEmails.push(email)
-            if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
+            if (primaryEmail && email === primaryEmail) primarySent = true
           } else if (!resendResponseIsDefinitivePreSendRejection(resendRes.status)) {
             markSendRunsProviderAttempt(recipient.docs)
           } else {

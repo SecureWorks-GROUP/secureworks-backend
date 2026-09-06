@@ -471,3 +471,19 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-22 locks (2026-09-06)
+
+- **`/send` pack-source job read fails closed before publication.** After
+  Resend succeeds, a missing `job_id` or a failed/null jobs lookup
+  keeps the provider key, reverts the owned claim, and returns 500
+  before persist or publish. Transient read failure cannot mint an
+  empty eligible extract.
+- **send-runs primary recipient uses `quoteSendRecipientKey`.** The
+  primary inbox is derived with the same trim+lowercase helper as
+  recipient groups, so whitespace around the stored primary still
+  marks `primarySent` and can advance the job off draft.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.
