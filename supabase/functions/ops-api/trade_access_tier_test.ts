@@ -1114,24 +1114,21 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   assertEquals(allocatedLine.quantity, 12);
   assertEquals(allocatedLine.unit_price, undefined);
   assertEquals(allocated.purchaseOrders[0].supplier_name, "Acme Sheets");
-  assertEquals(allocated.purchaseOrders[0].notes, "Charge extra. Total.");
   assertEquals(JSON.stringify(allocated.purchaseOrders).includes("99.50"), false);
   assertEquals(JSON.stringify(allocated.purchaseOrders).includes("9999"), false);
-  assertEquals(JSON.stringify(allocated.purchaseOrders).includes("1200"), false);
   const office = await detail(t, viewer(OFFICE, "ops_manager"));
   assertEquals(office.quote_visible, true);
   assertEquals(office.purchaseOrders[0].line_items[0].description, "Sheets $99.50. Total 9999.");
   assertEquals(office.purchaseOrders[0].supplier_name, "Acme Sheets $99.50");
-  assertEquals(office.purchaseOrders[0].notes, "Charge 1200 extra. Total 9999.");
   assertEquals(office.purchaseOrders[0].line_items[0].unit_price, undefined);
-  assertEquals(
-    projectTradePurchaseOrders(t.purchase_orders, false)[0].line_items[0].description,
-    "Sheets . Total.",
-  );
-  assertEquals(
-    projectTradePurchaseOrders(t.purchase_orders, true)[0].line_items[0].description,
-    "Sheets $99.50. Total 9999.",
-  );
+  const projectedHidden = projectTradePurchaseOrders(t.purchase_orders, false)[0];
+  const projectedOffice = projectTradePurchaseOrders(t.purchase_orders, true)[0];
+  assertEquals(projectedHidden.line_items[0].description, "Sheets . Total.");
+  assertEquals(projectedHidden.notes, "Charge extra. Total.");
+  assertEquals(projectedHidden.supplier_name, "Acme Sheets");
+  assertEquals(projectedOffice.line_items[0].description, "Sheets $99.50. Total 9999.");
+  assertEquals(projectedOffice.notes, "Charge 1200 extra. Total 9999.");
+  assertEquals(projectedOffice.supplier_name, "Acme Sheets $99.50");
   t.purchase_orders = [{
     id: "po-ms",
     job_id: JOB_MS,
