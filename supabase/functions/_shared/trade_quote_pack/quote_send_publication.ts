@@ -88,7 +88,8 @@ export function sendClaimKeyStampConfirmed(
 ): string | null {
   const id = typeof returnedId === 'string' ? returnedId.trim() : ''
   if (!id || id !== expectedId) return null
-  return quoteSendClaimToken(returnedKey) || quoteSendClaimToken(fallbackKey)
+  const stored = typeof returnedKey === 'string' ? returnedKey : null
+  return quoteSendClaimToken(stored) || quoteSendClaimToken(fallbackKey)
 }
 
 export function quoteSendClaimPayload(
