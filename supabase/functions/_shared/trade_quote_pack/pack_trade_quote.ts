@@ -459,10 +459,21 @@ function item(kind: TradePackItemKind, description: string, quantity: number, un
   }
 }
 
-/** Money-safe pack text: drop common currency figures, keep the writing. */
+const TRADE_PACK_MONEY_AMOUNT = '-?[\\d,]+(?:\\.\\d+)?'
+const TRADE_PACK_CURRENCY_PREFIX = '(?:\\bAUD\\s*|AU\\$\\s*|A\\$\\s*|\\$\\s*)'
+const TRADE_PACK_CURRENCY_SUFFIX = '(?:AUD\\b|AU\\$|A\\$|\\$)'
+const TRADE_PACK_TAX_SUFFIX =
+  '(?:(?:ex(?:cl(?:usive)?)?|inc(?:l(?:usive)?)?|including|plus|\\+)\\s*[.\\-]?\\s*)?(?:GST|tax)\\b'
+
+/** Money-safe pack text: drop common currency figures, keep the writing.
+ *  Prefix ($ / A$ / AUD 9,999) and suffix / tax forms (9,999 AUD, 9,999 ex GST).
+ *  Leaves ordinary quantities (19m, 1800mm). Office full-quote summaries must
+ *  not call this — hydrateStoredPack keeps stored summary verbatim. */
 export function stripTradePackMoney(text: unknown): string {
   return String(text ?? '')
-    .replace(/(?:\bAUD\s*|AU\$\s*|A\$\s*|\$\s*)-?[\d,]+(?:\.\d+)?/gi, '')
+    .replace(new RegExp(`${TRADE_PACK_CURRENCY_PREFIX}${TRADE_PACK_MONEY_AMOUNT}`, 'gi'), '')
+    .replace(new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*${TRADE_PACK_CURRENCY_SUFFIX}`, 'gi'), '')
+    .replace(new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*${TRADE_PACK_TAX_SUFFIX}`, 'gi'), '')
     .replace(/\s{2,}/g, ' ')
     .trim()
 }

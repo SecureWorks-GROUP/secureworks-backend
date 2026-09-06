@@ -187,7 +187,14 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("Total $ 9,999"), "Total");
   assertEquals(stripTradePackMoney("Total A$ 9,999"), "Total");
   assertEquals(stripTradePackMoney("Total AUD 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total 9,999 AUD"), "Total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 ex GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 inc GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Fee 9,999.00 excl. GST"), "Fee");
+  assertEquals(stripTradePackMoney("Line 9999AUD"), "Line");
+  assertEquals(stripTradePackMoney("Plus 80 +GST"), "Plus");
   assertEquals(stripTradePackMoney("Rear 19m 1800mm install"), "Rear 19m 1800mm install");
+  assertEquals(stripTradePackMoney("Use 90x90 posts"), "Use 90x90 posts");
 });
 
 Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewers and still strips item descriptions", () => {
@@ -203,11 +210,14 @@ Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewer
           { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
           { kind: "note", description: "Priced $9,999", quantity: 1, unit: "lot" },
         ],
-        summary: "Total $9,999 AUD 1,200",
+        summary: "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 ex GST",
       },
     }],
   });
-  assertEquals(packs[0].summary, "Total $9,999 AUD 1,200");
+  assertEquals(
+    packs[0].summary,
+    "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 ex GST",
+  );
   assertEquals(packs[0].items[0].description, "Install fence Total");
   assertEquals(packs[0].items[1].kind, "note");
   assertEquals(packs[0].items[1].description, "Priced");

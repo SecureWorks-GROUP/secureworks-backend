@@ -764,8 +764,8 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
     job: {
       quote: {
         quote_number: "Q-NARR",
-        description: "Supply and install. Total A$ 9,999",
-        narrative: "Gate on the left $ 1,200 extra",
+        description: "Supply and install. Total A$ 9,999 Approved total 9,999 ex GST",
+        narrative: "Gate on the left $ 1,200 extra Total 9,999 AUD",
         name: "Monument package $9,999",
         label: "Front run AUD 1,200",
         title: "Quote title A$ 80",
@@ -776,8 +776,8 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
   assertEquals(r.notes.noteQuote, "Quote writing Total plus");
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.job.quote.quote_number, "Q-NARR");
-  assertEquals(r.job.quote.description, "Supply and install. Total");
-  assertEquals(r.job.quote.narrative, "Gate on the left extra");
+  assertEquals(r.job.quote.description, "Supply and install. Total Approved total");
+  assertEquals(r.job.quote.narrative, "Gate on the left extra Total");
   assertEquals(r.job.quote.name, "Monument package");
   assertEquals(r.job.quote.label, "Front run");
   assertEquals(r.job.quote.title, "Quote title");
@@ -917,7 +917,7 @@ Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string 
     redactTradeWorkOrderScopeItems([
       {
         description: "Posts Total $9,999",
-        instructions: "Charge AUD 1,200 extra",
+        instructions: "Charge AUD 1,200 extra Total 9,999 AUD Approved total 9,999 ex GST",
         notes: "Priced A$ 80",
         name: "Front $9,999",
         label: "Run $ 40",
@@ -929,7 +929,7 @@ Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string 
     ]),
     [{
       description: "Posts Total",
-      instructions: "Charge extra",
+      instructions: "Charge extra Total Approved total",
       notes: "Priced",
       name: "Front",
       label: "Run",
@@ -947,8 +947,8 @@ Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instruction
       id: "wo-1",
       wo_number: "WO-1",
       status: "sent",
-      special_instructions: "Park on the verge. Charge $9,999 extra.",
-      notes: "Installer note $1,200",
+      special_instructions: "Park on the verge. Charge $9,999 extra Approved total 9,999 ex GST",
+      notes: "Installer note $1,200 Total 9,999 AUD",
       scope_items: [{
         description: "Posts Total $850",
         quantity: 4,
@@ -959,8 +959,8 @@ Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instruction
   ]);
   assertEquals(out[0].id, "wo-1");
   assertEquals(out[0].wo_number, "WO-1");
-  assertEquals(out[0].special_instructions, "Park on the verge. Charge extra.");
-  assertEquals(out[0].notes, "Installer note");
+  assertEquals(out[0].special_instructions, "Park on the verge. Charge extra Approved total");
+  assertEquals(out[0].notes, "Installer note Total");
   assertEquals(out[0].scope_items, [{ description: "Posts Total", quantity: 4, unit: "ea" }]);
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("1200"), false);
@@ -1015,16 +1015,16 @@ Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures 
   const out = redactTradeQuotePackMoney([
     {
       quote_number: "Q-1",
-      summary: "Install 10m Total $9,999 AUD 1,200 A$ 80 $ 40",
+      summary: "Install 10m Total $9,999 AUD 1,200 A$ 80 $ 40 Total 9,999 AUD Approved total 9,999 ex GST",
       items: [
-        { kind: "install_m", description: "Install fence Total $9,999 AUD 1,200", quantity: 10, unit: "m" },
+        { kind: "install_m", description: "Install fence Total $9,999 AUD 1,200 Total 9,999 AUD", quantity: 10, unit: "m" },
         { kind: "note", description: "Priced $9,999 — installer note", quantity: 1, unit: "lot" },
       ],
     },
   ]);
-  assertEquals(out[0].summary, "Install 10m Total");
+  assertEquals(out[0].summary, "Install 10m Total Total Approved total");
   assertEquals(out[0].items.map((i: any) => i.kind), ["install_m"]);
-  assertEquals(out[0].items[0].description, "Install fence Total");
+  assertEquals(out[0].items[0].description, "Install fence Total Total");
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("1200"), false);
 });
