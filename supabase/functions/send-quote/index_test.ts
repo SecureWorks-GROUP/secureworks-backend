@@ -2306,6 +2306,7 @@ Deno.test("TRD6-22-001 publication stops when a later heartbeat loses the lease"
     { id: "doc-b", token: "tok-b" },
   ])
   assertEquals(published.published, false)
+  if (published.published) throw new Error("expected publication lease loss")
   assertEquals(published.lease, "lost")
   assertEquals(sb.events.includes("publish:doc-a"), true)
   assertEquals(sb.events.includes("publish:doc-b"), false)
