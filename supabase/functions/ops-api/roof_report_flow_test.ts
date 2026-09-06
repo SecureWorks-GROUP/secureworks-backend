@@ -10,6 +10,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _getRoofReportTemplateForJobForTest,
   _presentRoofReportWriteForTest,
   _renderRoofReportActionForTest,
   _saveRoofReportForTest,
@@ -1026,4 +1027,24 @@ Deno.test("presentRoofReportWrite strips price unless quote_visible", () => {
   const hidden = _presentRoofReportWriteForTest(priced, false);
   assertEquals("price" in hidden, false);
   assertEquals((hidden as { storey: string }).storey, "single");
+});
+
+Deno.test("roof_report_template: allocated omits the client fee; office keeps it", async () => {
+  const { client } = makeClient(baseRows());
+  const allocated: any = await _getRoofReportTemplateForJobForTest(client, "job-1");
+  assert(allocated.template);
+  assertEquals(allocated.template.pricing.single, undefined);
+  assertEquals(allocated.job.ref.includes("SWMS-26861"), true);
+  const allocatedDump = JSON.stringify(allocated.template);
+  assertEquals(allocatedDump.includes("275"), false);
+  assertEquals(allocatedDump.includes("330"), false);
+  assertEquals(/fee/i.test(allocatedDump), false);
+
+  const office: any = await _getRoofReportTemplateForJobForTest(
+    client,
+    "job-1",
+    { quoteVisible: true },
+  );
+  assertEquals(office.template.pricing.single.inc_gst, 275);
+  assertEquals(office.template.pricing.double.inc_gst, 330);
 });

@@ -11,6 +11,8 @@ import {
 import {
   buildRoofReportJob,
   getRoofReportTemplate,
+  projectRoofReportTemplate,
+  ROOF_REPORT_TRADE_STOREY_HELP,
   normaliseStorey,
   ROOF_REPORT_FIELDS,
   ROOF_REPORT_PACK_KIND,
@@ -40,6 +42,37 @@ Deno.test("template: exposes versioned schema, sections, storey pricing driver",
   // Pricing block carries both locked figures.
   assertEquals(t.pricing.single.inc_gst, 275);
   assertEquals(t.pricing.double.inc_gst, 330);
+});
+
+Deno.test("projectRoofReportTemplate: office keeps the locked fee; allocated omits amounts and fee text", () => {
+  const full = getRoofReportTemplate();
+  const office = projectRoofReportTemplate(full, true);
+  assertEquals(office, full);
+  assertEquals(office.pricing.single?.inc_gst, 275);
+  assertEquals(office.pricing.double?.inc_gst, 330);
+
+  const allocated = projectRoofReportTemplate(full, false);
+  const storey = allocated.fields.find((f) => f.key === "storeys");
+  assert(storey, "storeys field present");
+  assertEquals(storey?.options, [STOREY_SINGLE, STOREY_DOUBLE]);
+  assertEquals(storey?.required, true);
+  assertEquals(storey?.help, ROOF_REPORT_TRADE_STOREY_HELP);
+  assertEquals(storey?.pricingDriver, undefined);
+  assertEquals(allocated.pricing.storey_field, "storeys");
+  assertEquals(allocated.pricing.single, undefined);
+  assertEquals(allocated.pricing.double, undefined);
+  assertEquals(allocated.pricing.note, undefined);
+  assertEquals(allocated.fields.length, full.fields.length);
+  assertEquals(allocated.sections, full.sections);
+  const dumped = JSON.stringify(allocated);
+  assertEquals(dumped.includes("250"), false);
+  assertEquals(dumped.includes("275"), false);
+  assertEquals(dumped.includes("300"), false);
+  assertEquals(dumped.includes("330"), false);
+  assertEquals(dumped.includes("ex_gst"), false);
+  assertEquals(dumped.includes("inc_gst"), false);
+  assertEquals(/fee/i.test(dumped), false);
+  assertEquals(dumped.includes("$"), false);
 });
 
 Deno.test("template: no field label or option contains an em dash (house rule)", () => {

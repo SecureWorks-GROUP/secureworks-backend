@@ -943,6 +943,7 @@ import {
   ROOF_REPORT_PACK_KIND,
   ROOF_REPORT_TEMPLATE_VERSION,
   getRoofReportTemplate,
+  projectRoofReportTemplate,
   roofReportPrice,
   normaliseStorey,
   validateRoofReportForSubmit,
@@ -9252,10 +9253,10 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess, isDispatcher))
           // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
           case 'roof_report_template':
-            return json(await getRoofReportTemplateForJob(client, url.searchParams.get('job_id') || url.searchParams.get('jobId') || body?.job_id || body?.jobId))
           case 'save_roof_report':
           case 'submit_roof_report': {
-            const roofJobId = body?.job_id || body?.jobId
+            const roofJobId = url.searchParams.get('job_id') || url.searchParams.get('jobId') ||
+              body?.job_id || body?.jobId
             let quoteVisible = false
             if (roofJobId) {
               const decision = await resolveTradeJobAccessTier(
@@ -9265,6 +9266,9 @@ if (import.meta.main) serve(async (req: Request) => {
                 { isOffice: isDispatcher, access: tradeJobAccess },
               )
               quoteVisible = decision.quoteVisible
+            }
+            if (action === 'roof_report_template') {
+              return json(await getRoofReportTemplateForJob(client, roofJobId, { quoteVisible }))
             }
             if (action === 'save_roof_report') {
               return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }, { quoteVisible }))
@@ -43493,14 +43497,22 @@ async function renderAndAttachRoofReport(
 
 // (Wave 3a) roof_report_template -- READ. Returns the field schema, the job
 // header the form shows, and any existing draft for resume.
-async function getRoofReportTemplateForJob(client: any, jobId: string | null) {
+async function getRoofReportTemplateForJob(
+  client: any,
+  jobId: string | null,
+  opts: { quoteVisible?: boolean } = {},
+) {
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
   const meta = await loadRoofReportJobMeta(client, jobId)
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('fields_json, storey, status, report_doc_id, submitted_at, template_version, updated_at')
     .eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
-  return { template: getRoofReportTemplate(), job: meta, draft: existing || null }
+  return {
+    template: projectRoofReportTemplate(getRoofReportTemplate(), opts.quoteVisible === true),
+    job: meta,
+    draft: existing || null,
+  }
 }
 
 // (Wave 3b) save_roof_report -- WRITE. Draft-safe, idempotent upsert of the fill.
