@@ -1148,6 +1148,35 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   assertEquals(open.purchaseOrders[0].supplier_name, "Acme Sheets");
 });
 
+Deno.test("projectTradePurchaseOrders allocated lines keep only scalars; office may keep nested quantity", () => {
+  const pos = [{
+    id: "po-nested",
+    po_number: "PO-NEST",
+    supplier_name: "Acme",
+    status: "sent",
+    total: 18400,
+    pricing: { sell: 18400, rate: 85 },
+    line_items: [{
+      description: "Sheets 99.50",
+      quantity: { count: 12, rate: 99.5, billed: 9999 },
+      unit: { name: "ea", unit_price: 99.5 },
+      pricing: { sell: 1200 },
+    }],
+  }];
+  const allocated = projectTradePurchaseOrders(pos, false)[0];
+  assertEquals(allocated.line_items[0], { description: "Sheets", quantity: 0, unit: undefined });
+  assertEquals(allocated.total, undefined);
+  assertEquals(allocated.pricing, undefined);
+  assertEquals(JSON.stringify(allocated).includes("99.5"), false);
+  assertEquals(JSON.stringify(allocated).includes("18400"), false);
+  assertEquals(JSON.stringify(allocated).includes("9999"), false);
+  const office = projectTradePurchaseOrders(pos, true)[0];
+  assertEquals(office.line_items[0].description, "Sheets 99.50");
+  assertEquals(office.line_items[0].quantity, { count: 12, rate: 99.5, billed: 9999 });
+  assertEquals(office.total, 18400);
+  assertEquals(office.pricing, { sell: 18400, rate: 85 });
+});
+
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
   const p = await detail(seed(), viewer(OFFICE, "ops_manager"));
   assertEquals(p.access_tier, "office");
@@ -1525,6 +1554,25 @@ Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instruction
   assertEquals(JSON.stringify(out).includes("850"), false);
 });
 
+Deno.test("redactTradeWorkOrdersForAllocated drops nested money objects and unrecognised quote amounts", () => {
+  const out = redactTradeWorkOrdersForAllocated([
+    {
+      id: "wo-2",
+      wo_number: "WO-2",
+      status: "sent",
+      quoted_total: 850,
+      pricing: { sell: 18400, rate: 85 },
+      special_instructions: "Attend site. Quote 850. Monument fencing 18400.",
+      scope_items: [{ description: "Make safe", quantity: 1, unit: "lot" }],
+    },
+  ]);
+  assertEquals(out[0].quoted_total, undefined);
+  assertEquals(out[0].pricing, undefined);
+  assertEquals(out[0].special_instructions, "Attend site. Quote. Monument fencing .");
+  assertEquals(JSON.stringify(out).includes("850"), false);
+  assertEquals(JSON.stringify(out).includes("18400"), false);
+});
+
 Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money", () => {
   const out = redactTradeQuotePackMoney([
     {
@@ -1554,6 +1602,22 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     unit_price: null,
     line_total: null,
   });
+});
+
+Deno.test("redactTradeQuotePackMoney nulls a nested quantity object instead of copying it", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    items: [{
+      kind: "install_m",
+      description: "Install Quote 850",
+      quantity: { billed: 9999, rate: 85 },
+      unit_price: 30,
+    }],
+  }]);
+  assertEquals(out[0].items[0].quantity, null);
+  assertEquals(out[0].items[0].description, "Install Quote");
+  assertEquals(JSON.stringify(out).includes("9999"), false);
+  assertEquals(JSON.stringify(out).includes("850"), false);
 });
 
 Deno.test("redactTradeQuotePackMoney omits pack notes so sell figures cannot ride the allocated projection", () => {

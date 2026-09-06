@@ -470,19 +470,44 @@ const TRADE_PACK_TAX_QUALIFIED =
 const TRADE_PACK_TAX_PHRASE =
   `(?:${TRADE_PACK_TAX_QUALIFIED}|${TRADE_PACK_TAX_WORD})`
 const TRADE_PACK_UNQUALIFIED_MONEY_WORD =
-  '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?)'
+  '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?|quot(?:e[ds]?|ing|ations?))'
 const TRADE_PACK_RATE_UNIT =
   '(?:hours?|hrs?|h|m(?:et(?:re|er)s?)?)'
+const TRADE_PACK_QTY_WORD =
+  '(?:trades?|days?|labourers?|posts?|pickets?|panels?|hours?|hrs?)'
+const TRADE_PACK_REF_PREFIX =
+  '(?:SWF|SWMS|SWP|SWR|SW|WO|PO|INV|MLB|AJBR|AJ|Q)'
 
 /** Money-safe pack text: drop common currency figures, keep the writing.
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
- *  1200/m). Amount boundaries refuse 19m / 1800mm / 90x90. Office full-quote
- *  summaries must not call this — hydrateStoredPack keeps stored summary
- *  verbatim. */
+ *  1200/m). Amount boundaries refuse 19m / 1800mm / 90x90. Leftover
+ *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
+ *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
+ *  full-quote summaries must not call this — hydrateStoredPack keeps
+ *  stored summary verbatim. */
 export function stripTradePackMoney(text: unknown): string {
-  return String(text ?? '')
+  const kept: string[] = []
+  const hold = (match: string) => {
+    kept.push(match)
+    return `\u0000${kept.length - 1}\u0000`
+  }
+
+  let s = String(text ?? '')
+  // Hold construction / identity / count tokens so the fail-closed leftover
+  // strip cannot eat 19m / 1800mm / 90x90 / SWF-26101 / 2 trades.
+  s = s.replace(/\b\d+x\d+\b/gi, hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}mm\\b`, 'gi'), hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}cm\\b`, 'gi'), hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}m\\b`, 'gi'), hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_REF_PREFIX}-[A-Z0-9]+\\b`, 'gi'), hold)
+  s = s.replace(
+    new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_QTY_WORD}\\b`, 'gi'),
+    hold,
+  )
+
+  s = s
     .replace(new RegExp(`${TRADE_PACK_CURRENCY_PREFIX}${TRADE_PACK_MONEY_AMOUNT}`, 'gi'), '')
     .replace(new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*${TRADE_PACK_CURRENCY_SUFFIX}`, 'gi'), '')
     .replace(
@@ -517,8 +542,16 @@ export function stripTradePackMoney(text: unknown): string {
       ),
       '',
     )
+    // Unrecognised leftover quote amounts: 9,999 / 99.50 / 850 / 18400.
+    // 1–2 digit counts stay (2 at, 12 posts) unless a money word already ate them.
+    .replace(/\b-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g, '')
+    .replace(/\b-?\d+\.\d+\b/g, '')
+    .replace(/\b-?\d{3,}\b/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
+
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)] ?? '')
+  return s.replace(/\s{2,}/g, ' ').trim()
 }
 
 function stripMoney(text: string): string {

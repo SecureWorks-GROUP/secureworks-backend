@@ -38251,6 +38251,13 @@ function tradeScopeKeepNumericLeaf(key: string): boolean {
 
 function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
   if (typeof value === 'string') return sanitizeTradeAllocatedStringLeaf(value)
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return sanitizeTradeAllocatedStringLeaf(String(value))
+  }
+  if (value && typeof value === 'object') {
+    const walked = sanitizeTradeAllocatedJsonTree(value)
+    return walked === undefined ? null : walked
+  }
   return value
 }
 
@@ -38322,6 +38329,14 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
         continue
       }
       const value = out[key]
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (!tradeScopeKeepNumericLeaf(key)) delete out[key]
+        continue
+      }
+      if (value && typeof value === 'object') {
+        delete out[key]
+        continue
+      }
       if (typeof value !== 'string') continue
       const cleaned = sanitizeTradeAllocatedStringLeaf(value)
       if (cleaned === '') delete out[key]
@@ -38378,6 +38393,40 @@ const TRADE_PO_ROW_TEXT_KEYS = [
   'title',
 ] as const
 
+function tradePoLineDescription(li: any): string {
+  if (typeof li?.description === 'string') return li.description
+  if (typeof li?.Description === 'string') return li.Description
+  return ''
+}
+
+function tradePoScalarQuantity(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+function projectTradePoLineItem(li: any, quoteVisible: boolean): Record<string, any> {
+  const rawDesc = tradePoLineDescription(li)
+  if (quoteVisible) {
+    return {
+      description: rawDesc,
+      quantity: li?.quantity ?? li?.Quantity ?? 0,
+      unit: li?.unit || (li?.UnitAmount ? undefined : undefined),
+    }
+  }
+  // Allocated / makesafe_open: scalars only. An object quantity/unit/pricing
+  // blob is money-capable and must not copy through (TRD4-REV16-001).
+  const unit = typeof li?.unit === 'string' ? li.unit : undefined
+  return {
+    description: sanitizeTradeAllocatedStringLeaf(rawDesc),
+    quantity: tradePoScalarQuantity(li?.quantity ?? li?.Quantity) ?? 0,
+    unit,
+  }
+}
+
 export function projectTradePurchaseOrders(
   pos: unknown[] | null | undefined,
   quoteVisible: boolean,
@@ -38385,22 +38434,20 @@ export function projectTradePurchaseOrders(
   return (pos || []).map((raw: any) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
     const lines = Array.isArray(raw.line_items) ? raw.line_items : []
-    const po: Record<string, any> = {
-      ...raw,
-      line_items: lines.map((li: any) => {
-        const rawDesc = String(li?.description || li?.Description || '')
-        return {
-          description: quoteVisible ? rawDesc : sanitizeTradeAllocatedStringLeaf(rawDesc),
-          quantity: li?.quantity ?? li?.Quantity ?? 0,
-          unit: li?.unit || (li?.UnitAmount ? undefined : undefined),
-        }
-      }),
+    const lineItems = lines.map((li: any) => projectTradePoLineItem(li, quoteVisible))
+    if (quoteVisible) {
+      return { ...raw, line_items: lineItems }
     }
-    if (!quoteVisible) {
-      for (const key of TRADE_PO_ROW_TEXT_KEYS) {
-        if (typeof po[key] === 'string') {
-          po[key] = sanitizeTradeAllocatedStringLeaf(po[key])
-        }
+    const po: Record<string, any> = {
+      id: raw.id,
+      po_number: raw.po_number,
+      status: raw.status,
+      delivery_date: raw.delivery_date,
+      line_items: lineItems,
+    }
+    for (const key of TRADE_PO_ROW_TEXT_KEYS) {
+      if (typeof raw[key] === 'string') {
+        po[key] = sanitizeTradeAllocatedStringLeaf(raw[key])
       }
     }
     return po
@@ -38623,7 +38670,16 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
         out[key] = cleaned
         continue
       }
-      out[key] = value
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (!tradeScopeKeepNumericLeaf(key)) continue
+        out[key] = value
+        continue
+      }
+      if (value == null || typeof value === 'boolean') {
+        out[key] = value
+        continue
+      }
+      // Nested objects/arrays can carry money — allocated fails closed.
     }
     return out
   })
@@ -38644,12 +38700,15 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
       items: (pack.items || []).flatMap((item: any) => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return []
         if (String(item.kind || '').toLowerCase() === 'note') return []
+        const quantity = typeof item.quantity === 'number' && Number.isFinite(item.quantity)
+          ? item.quantity
+          : item.quantity == null ? item.quantity : null
         const out: Record<string, any> = {
           kind: item.kind,
           description: item.description == null
             ? item.description
             : stripTradePackMoney(item.description),
-          quantity: item.quantity,
+          quantity,
           unit_price: null,
           line_total: null,
         }
