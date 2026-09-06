@@ -8,7 +8,11 @@ import {
   extractScopeMedia,
   extractScopePhotos,
   isJobMediaUniqueViolation,
+  scopeDataUrlContentId,
+  scopeDataUrlIdentityKey,
+  scopeDataUrlObjectPath,
   selectTradeJobMedia,
+  storageUrlCarriesContentId,
   TRADE_WALKTHROUGH_LABEL,
 } from "./trade_scope_media.ts";
 
@@ -19,6 +23,14 @@ const REAR_PHOTO_URL = "https://cdn.example.test/jobs/swf-26101/rear.jpg";
 function tinyJpegDataUrl(): string {
   // 1x1 jpeg — enough to prove the upload path without a real image decode.
   return "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wAAAAD/wgARCAABAAEDAREAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAGz/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPwB//9k=";
+}
+
+function tinyPngDataUrl(): string {
+  return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+}
+
+function tinyVideoDataUrl(): string {
+  return "data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDE=";
 }
 
 function makeExtractClient(
@@ -286,6 +298,30 @@ Deno.test("existingMediaMatchesPhoto: same https URL only, type defaults to phot
   );
 });
 
+Deno.test("existingMediaMatchesPhoto: contentId matches a generated digest URL", async () => {
+  const dataUrl = tinyJpegDataUrl();
+  const contentId = await scopeDataUrlContentId(dataUrl);
+  if (!contentId) throw new Error("expected content id");
+  const path = scopeDataUrlObjectPath("job-1", "photo", contentId, "jpg");
+  const generated = `https://storage.test/job-photos/${path}`;
+  assertEquals(storageUrlCarriesContentId(generated, contentId), true);
+  assertEquals(storageUrlCarriesContentId(PHOTO_URL, contentId), false);
+  assertEquals(
+    existingMediaMatchesPhoto(
+      { type: "photo", storage_url: generated },
+      { label: "Rear", dataUrl, contentId },
+    ),
+    true,
+  );
+  assertEquals(
+    existingMediaMatchesPhoto(
+      { type: "photo", storage_url: PHOTO_URL },
+      { label: "Rear", dataUrl, contentId },
+    ),
+    false,
+  );
+});
+
 Deno.test("existingMediaMatchesVideo matches URL or filename fragment", () => {
   assertEquals(
     existingMediaMatchesVideo(
@@ -436,7 +472,7 @@ Deno.test("a throwing data:video candidate does not block a later playable URL",
 
 Deno.test("a storage throw on one dataUrl photo still registers the next photo", async () => {
   const client = makeExtractClient([], {
-    throwOnUpload: (path) => path.includes("/scope/0."),
+    throwOnUpload: () => true,
   });
   const result = await extractScopeMedia(client, "job-1", {
     job: {
@@ -451,4 +487,93 @@ Deno.test("a storage throw on one dataUrl photo still registers the next photo",
   assertEquals(result.photos, 1);
   assertEquals(result.rows.map((r) => r.storage_url), [PHOTO_URL]);
   assertEquals(client.media.length, 1);
+});
+
+Deno.test("data-URL upload path and media id are content-stable, not array-index", async () => {
+  const dataUrl = tinyJpegDataUrl();
+  const contentId = await scopeDataUrlContentId(dataUrl);
+  if (!contentId) throw new Error("expected content id");
+  const client = makeExtractClient([]);
+  const result = await extractScopeMedia(client, "job-1", {
+    scopeMedia: { photos: [{ dataUrl, label: "Rear" }] },
+  });
+  assertEquals(result.photos, 1);
+  assertEquals(client.uploads.length, 1);
+  assertEquals(
+    client.uploads[0].path,
+    scopeDataUrlObjectPath("job-1", "photo", contentId, "jpg"),
+  );
+  assertEquals(client.uploads[0].path.includes("/scope/0."), false);
+  const expectedId = await deterministicScopeMediaId(
+    "job-1",
+    scopeDataUrlIdentityKey("photo", contentId),
+  );
+  assertEquals(client.media[0].id, expectedId);
+  assertEquals(storageUrlCarriesContentId(client.media[0].storage_url, contentId), true);
+});
+
+Deno.test("reordering data-URL photos does not mint a second row for the same bytes", async () => {
+  const rear = tinyJpegDataUrl();
+  const front = tinyPngDataUrl();
+  const client = makeExtractClient([]);
+  const first = await extractScopeMedia(client, "job-1", {
+    scopeMedia: { photos: [{ dataUrl: rear, label: "Rear" }] },
+  });
+  assertEquals(first.photos, 1);
+  const reordered = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      photos: [
+        { dataUrl: front, label: "Front" },
+        { dataUrl: rear, label: "Rear" },
+      ],
+    },
+  });
+  assertEquals(reordered.photos, 1, "only the newly inserted front photo registers");
+  assertEquals(client.media.filter((m: any) => m.type === "photo").length, 2);
+  const rearAgain = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      photos: [
+        { dataUrl: front, label: "Front" },
+        { dataUrl: rear, label: "Rear" },
+      ],
+    },
+  });
+  assertEquals(rearAgain.photos, 0);
+  assertEquals(client.media.filter((m: any) => m.type === "photo").length, 2);
+  assertEquals(client.uploads.length, 2);
+});
+
+Deno.test("reordering a data:video candidate does not mint a second walkthrough", async () => {
+  const dataUrl = tinyVideoDataUrl();
+  const contentId = await scopeDataUrlContentId(dataUrl);
+  if (!contentId) throw new Error("expected content id");
+  const client = makeExtractClient([]);
+  const first = await extractScopeMedia(client, "job-1", {
+    scopeMedia: { videos: [{ dataUrl, label: TRADE_WALKTHROUGH_LABEL }] },
+  });
+  assertEquals(first.videos, 1);
+  assertEquals(
+    client.uploads[0].path,
+    scopeDataUrlObjectPath("job-1", "video", contentId, "mp4"),
+  );
+  const reordered = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      videos: [
+        { url: WALKTHROUGH_URL, label: "Other" },
+        { dataUrl, label: TRADE_WALKTHROUGH_LABEL },
+      ],
+    },
+  });
+  assertEquals(reordered.videos, 1, "only the new https walkthrough registers");
+  assertEquals(client.media.filter((m: any) => m.type === "video").length, 2);
+  const again = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      videos: [
+        { url: WALKTHROUGH_URL, label: "Other" },
+        { dataUrl, label: TRADE_WALKTHROUGH_LABEL },
+      ],
+    },
+  });
+  assertEquals(again.videos, 0);
+  assertEquals(client.media.filter((m: any) => m.type === "video").length, 2);
 });

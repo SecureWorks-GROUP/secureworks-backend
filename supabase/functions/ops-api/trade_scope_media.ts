@@ -20,6 +20,8 @@ export type ScopePhotoCandidate = {
   label: string;
   dataUrl?: string;
   storageUrl?: string;
+  /** SHA-256 of decoded data-URL bytes; used to match a generated storage URL. */
+  contentId?: string;
 };
 
 export type ScopeVideoCandidate = {
@@ -28,6 +30,8 @@ export type ScopeVideoCandidate = {
   dataUrl?: string;
   fileName?: string;
   size?: number;
+  /** SHA-256 of decoded data-URL bytes; used to match a generated storage URL. */
+  contentId?: string;
 };
 
 export type ExtractScopeMediaResult = {
@@ -236,7 +240,9 @@ export function existingMediaMatchesPhoto(
   const type = String(row.type || "photo").toLowerCase();
   if (type !== "photo") return false;
   const url = String(row.storage_url || "");
-  return !!(photo.storageUrl && url === photo.storageUrl);
+  if (photo.storageUrl && url === photo.storageUrl) return true;
+  if (photo.contentId && storageUrlCarriesContentId(url, photo.contentId)) return true;
+  return false;
 }
 
 export function existingMediaMatchesVideo(
@@ -246,6 +252,7 @@ export function existingMediaMatchesVideo(
   if (!row || String(row.type || "").toLowerCase() !== "video") return false;
   const url = String(row.storage_url || "");
   if (video.storageUrl && url === video.storageUrl) return true;
+  if (video.contentId && storageUrlCarriesContentId(url, video.contentId)) return true;
   if (video.fileName && url.toLowerCase().includes(video.fileName.toLowerCase())) {
     return true;
   }
@@ -329,6 +336,50 @@ export async function deterministicScopeMediaId(
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
     hex.slice(16, 20)
   }-${hex.slice(20)}`;
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** SHA-256 of the decoded data-URL bytes. Null when the payload will not decode. */
+export async function scopeDataUrlContentId(
+  dataUrl: string,
+): Promise<string | null> {
+  const decoded = decodeDataUrl(dataUrl);
+  if (!decoded) return null;
+  return sha256Hex(decoded.bytes);
+}
+
+export function scopeDataUrlIdentityKey(
+  kind: "photo" | "video",
+  contentId: string,
+): string {
+  return `scope-data:${kind}:${contentId}`;
+}
+
+export function scopeDataUrlObjectPath(
+  jobId: string,
+  kind: "photo" | "video",
+  contentId: string,
+  ext: string,
+): string {
+  return kind === "video"
+    ? `${jobId}/scope/walkthrough-${contentId}.${ext}`
+    : `${jobId}/scope/${contentId}.${ext}`;
+}
+
+/** True when a generated (or reused) storage URL was minted from this content digest. */
+export function storageUrlCarriesContentId(
+  storageUrl: string,
+  contentId: string,
+): boolean {
+  if (!storageUrl || !contentId) return false;
+  return storageUrl.includes(`/${contentId}.`) ||
+    storageUrl.includes(`walkthrough-${contentId}.`);
 }
 
 export function isJobMediaUniqueViolation(error: unknown): boolean {
@@ -427,11 +478,17 @@ async function registerUrlMedia(
   storageUrl: string,
   label: string,
   existing: any[],
+  identityKey?: string,
 ): Promise<RegisterMediaResult | null> {
-  if (existing.some((row) => String(row?.storage_url || "") === storageUrl)) {
+  const id = await deterministicScopeMediaId(jobId, identityKey || storageUrl);
+  if (
+    existing.some((row) =>
+      String(row?.id || "") === id ||
+      String(row?.storage_url || "") === storageUrl
+    )
+  ) {
     return null;
   }
-  const id = await deterministicScopeMediaId(jobId, storageUrl);
   const row = {
     id,
     job_id: jobId,
@@ -452,39 +509,61 @@ async function uploadDataUrlMedia(
   kind: "photo" | "video",
   dataUrl: string,
   label: string,
-  fileName: string | undefined,
-  index: number,
   existing: any[],
+  contentId?: string,
 ): Promise<RegisterMediaResult | null> {
   try {
     const decoded = decodeDataUrl(dataUrl);
     if (!decoded) return null;
-    const ext = extFromMimeOrName(decoded.mime, fileName);
+    const digest = contentId || await sha256Hex(decoded.bytes);
+    const identityKey = scopeDataUrlIdentityKey(kind, digest);
+    const mediaId = await deterministicScopeMediaId(jobId, identityKey);
+    if (
+      existing.some((row) =>
+        String(row?.id || "") === mediaId ||
+        storageUrlCarriesContentId(String(row?.storage_url || ""), digest)
+      )
+    ) {
+      return null;
+    }
+    // Path is content-stable: mime-derived ext only, never array index or filename.
+    const ext = extFromMimeOrName(decoded.mime);
     const bucket = kind === "video" ? "job-videos" : "job-photos";
     try {
       await client.storage.createBucket(bucket, { public: true });
     } catch {
       /* exists */
     }
-    const path = kind === "video"
-      ? `${jobId}/scope/walkthrough-${index}.${ext}`
-      : `${jobId}/scope/${index}.${ext}`;
+    const path = scopeDataUrlObjectPath(jobId, kind, digest, ext);
+    const { data: urlData } = client.storage.from(bucket).getPublicUrl(path);
+    const publicUrl = urlData?.publicUrl;
+    if (!isHttpMediaUrl(publicUrl)) return null;
+    if (
+      existing.some((row) => String(row?.storage_url || "") === publicUrl)
+    ) {
+      return null;
+    }
     const { error: uploadError } = await client.storage
       .from(bucket)
       .upload(path, decoded.bytes, { contentType: decoded.mime, upsert: true });
     if (uploadError) {
       console.log(
-        `[ops-api] scope ${kind} ${index} upload failed:`,
+        `[ops-api] scope ${kind} ${digest.slice(0, 8)} upload failed:`,
         uploadError.message,
       );
       return null;
     }
-    const { data: urlData } = client.storage.from(bucket).getPublicUrl(path);
-    const publicUrl = urlData?.publicUrl;
-    if (!isHttpMediaUrl(publicUrl)) return null;
-    return await registerUrlMedia(client, jobId, kind, publicUrl, label, existing);
+    return await registerUrlMedia(
+      client,
+      jobId,
+      kind,
+      publicUrl,
+      label,
+      existing,
+      identityKey,
+    );
   } catch (err: any) {
-    console.log(`[ops-api] scope ${kind} ${index} error:`, err?.message);
+    console.log(`[ops-api] scope ${kind} data-url error:`, err?.message);
     return null;
   }
 }
@@ -495,7 +574,9 @@ async function uploadDataUrlMedia(
  * id, and a unique-violation recovers the winner instead of minting a twin.
  * A missing walkthrough or photo is still registered even when other scope
  * media already exists — each candidate is deduped on its own URL/id, never
- * by a global "any scope photo" short-circuit. Filename-only metadata
+ * by a global "any scope photo" short-circuit. Data-URL bytes hash to a
+ * stable path and media id so inserting or reordering candidates cannot
+ * mint a second row for the same photo/video. Filename-only metadata
  * without a URL is not turned into a dead player row. One candidate's
  * decode/storage throw does not abort the rest.
  */
@@ -516,7 +597,11 @@ export async function extractScopeMedia(
 
   for (const [i, video] of collected.videos.entries()) {
     try {
-      if (existing.some((row) => existingMediaMatchesVideo(row, video))) continue;
+      const contentId = video.dataUrl
+        ? await scopeDataUrlContentId(video.dataUrl) ?? undefined
+        : undefined;
+      const candidate = contentId ? { ...video, contentId } : video;
+      if (existing.some((row) => existingMediaMatchesVideo(row, candidate))) continue;
       if (video.storageUrl) {
         const inserted = await registerUrlMedia(
           client,
@@ -537,9 +622,8 @@ export async function extractScopeMedia(
           "video",
           video.dataUrl,
           video.label || TRADE_WALKTHROUGH_LABEL,
-          video.fileName,
-          i,
           existing,
+          contentId,
         );
         if (inserted?.created) videos++;
         if (inserted?.row) rows.push(inserted.row);
@@ -553,7 +637,11 @@ export async function extractScopeMedia(
   for (let i = 0; i < collected.photos.length; i++) {
     try {
       const photo = collected.photos[i];
-      if (existing.some((row) => existingMediaMatchesPhoto(row, photo))) continue;
+      const contentId = photo.dataUrl
+        ? await scopeDataUrlContentId(photo.dataUrl) ?? undefined
+        : undefined;
+      const candidate = contentId ? { ...photo, contentId } : photo;
+      if (existing.some((row) => existingMediaMatchesPhoto(row, candidate))) continue;
       if (photo.storageUrl) {
         const inserted = await registerUrlMedia(
           client,
@@ -574,9 +662,8 @@ export async function extractScopeMedia(
         "photo",
         photo.dataUrl,
         photo.label,
-        undefined,
-        i,
         existing,
+        contentId,
       );
       if (inserted?.created) photos++;
       if (inserted?.row) rows.push(inserted.row);
