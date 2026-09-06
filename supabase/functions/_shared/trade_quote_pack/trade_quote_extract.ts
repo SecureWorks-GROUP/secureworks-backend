@@ -393,7 +393,8 @@ export const TRADE_QUOTE_EXTRACT_FORBIDDEN_KEYS = new Set([
   "amount",
 ]);
 
-const EXTRACT_HTML_FOOTER_DISCLAIMER = /It does not include prices, rates, or totals\./g;
+const EXTRACT_HTML_FOOTER_DISCLAIMER =
+  /It does not include prices, rates, or totals\.\s*The office holds the priced quote\./g;
 const EXTRACT_HTML_STYLE_BLOCK = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
 
 const EXTRACT_HTML_PAYMENT_TERMS_ROW =
