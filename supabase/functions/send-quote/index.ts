@@ -30,6 +30,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  claimQuoteDocumentSend,
+  publishQuoteDocumentSend,
+  revertQuoteDocumentSendClaim,
+} from '../_shared/trade_quote_pack/quote_send_publication.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
   buildV2Augmentation,
@@ -747,24 +752,16 @@ serve(async (req: Request) => {
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
-      // ── Atomic claim (double-send idempotency guard) ──
-      // Optimistically mark sent_to_client=true BEFORE calling Resend. The
-      // conditional NOT(sent_to_client IS TRUE) filter means only the first
-      // concurrent caller claims the row; subsequent callers get data=null and
-      // return a success-ish "already_sent" response without sending a second
-      // email. If the claim succeeds but the email send fails below, we revert
-      // the claim (set sent_to_client=false, sent_at=null) so a retry can
-      // re-claim and resend.
-      const { data: claimed } = await sb
-        .from('job_documents')
-        .update({ sent_to_client: true, sent_at: new Date().toISOString() })
-        .eq('id', document_id)
-        .not('sent_to_client', 'is', true)
-        .select('id')
-        .maybeSingle()
+      // ── Atomic in-flight claim (double-send idempotency guard) ──
+      // Claim send_claimed_at only. That is not publication: quote_packs and
+      // extracts stay hidden until Resend succeeds and we stamp sent_to_client
+      // + sent_at. Concurrent callers see a claimed or already-published row
+      // and return already_sent. Resend failure clears the claim so a retry
+      // can re-claim.
+      const claimed = await claimQuoteDocumentSend(sb, document_id)
 
       if (!claimed) {
-        // Another call already claimed this document — suppress duplicate email.
+        // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
       }
@@ -821,10 +818,8 @@ serve(async (req: Request) => {
             }),
           })
         } catch (fetchErr) {
-          // Network-level throw — revert claim so a retry can resend.
-          await sb.from('job_documents')
-            .update({ sent_to_client: false, sent_at: null })
-            .eq('id', document_id)
+          // Network-level throw — clear the in-flight claim so a retry can resend.
+          await revertQuoteDocumentSendClaim(sb, document_id)
           console.log('[send-quote] Resend fetch threw (claim reverted):', (fetchErr as Error).message)
           return jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
         }
@@ -856,16 +851,18 @@ serve(async (req: Request) => {
             failureReason: errData.message || `HTTP ${emailRes.status}`,
             metadata: { document_id: doc.id, client_name: client_name },
           })
-          // Revert claim — email not sent, so a retry must be able to re-claim.
-          await sb.from('job_documents')
-            .update({ sent_to_client: false, sent_at: null })
-            .eq('id', document_id)
+          // Clear the in-flight claim — email not sent, so a retry can re-claim.
+          await revertQuoteDocumentSendClaim(sb, document_id)
           return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
       }
 
-      // sent_to_client was already set to true by the atomic claim above
-      // (before the email send). No redundant update needed.
+      // Publication marker: only after Resend accepted the primary send.
+      // In-flight send_claimed_at is not quote-pack eligibility.
+      const { error: publishError } = await publishQuoteDocumentSend(sb, document_id)
+      if (publishError) {
+        console.error('[send-quote] publication stamp failed:', publishError.message || String(publishError))
+      }
 
       // Freeze a trade-safe SOW onto this quote document on EVERY successful
       // send (not only the first draft→quoted flip). Crew triages by quote number.

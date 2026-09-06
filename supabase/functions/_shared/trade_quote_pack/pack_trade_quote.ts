@@ -161,14 +161,30 @@ export type QuoteDocRow = {
   quote_number?: string | null
   sent_at?: string | null
   sent_to_client?: boolean | null
+  send_claimed_at?: string | null
   accepted_at?: string | null
   superseded_at?: string | null
   trade_pack_json?: unknown
   created_at?: string | null
 }
 
-/** Sealed default terms language. Not a billed amount. */
+/** Sealed default terms language. Not a billed amount. Exact phrase only. */
 export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+completion\s*$/i
+
+const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
+const TRADE_PAYMENT_LANGUAGE_RE =
+  /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due)\b/i
+
+/**
+ * Ad-hoc percent or payment-language prose. The exact sealed payment-terms
+ * phrase is exempt; "50% upfront" / "balance due" are not.
+ */
+export function tradeTextHasAdHocPercentOrPaymentLanguage(value: string): boolean {
+  const trimmed = String(value || '').trim()
+  if (!trimmed) return false
+  if (TRADE_SEALED_PAYMENT_TERMS.test(trimmed)) return false
+  return TRADE_PERCENT_MONEY_RE.test(trimmed) || TRADE_PAYMENT_LANGUAGE_RE.test(trimmed)
+}
 
 /**
  * Conservative money-token predicate for every extract / allocated-pack
@@ -177,8 +193,9 @@ export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+c
  */
 export function tradeTextHasMoneyToken(value: string): boolean {
   const text = String(value || '')
-  if (!text.trim()) return false
-  if (TRADE_SEALED_PAYMENT_TERMS.test(text.trim())) return false
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  if (TRADE_SEALED_PAYMENT_TERMS.test(trimmed)) return false
   if (/\$/.test(text)) return true
   if (/\b(?:A\$|AU\$|AUD|USD|GST)\b/i.test(text)) return true
   if (
@@ -188,6 +205,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
     return true
   }
   if (/\bdeposit\b/i.test(text)) return true
+  if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
   return false
 }
 
@@ -279,9 +297,11 @@ export async function persistTradePackOnDocuments(
 export function quoteDocumentHasClientSend(doc: QuoteDocRow | null | undefined): boolean {
   if (doc?.accepted_at) return true
   if (!doc?.sent_at) return false
-  // Pre-send inserts stamp sent_to_client=false. An explicit false is
-  // unpublished even if sent_at leaked. Historical rows omit the flag.
+  // In-flight /send claims send_claimed_at only. That is not publication.
   if (doc.sent_to_client === false) return false
+  if (doc.sent_to_client === true) return true
+  // Historical rows omit the flag. A still-open claim is not a client send.
+  if (doc.send_claimed_at) return false
   return true
 }
 
@@ -809,7 +829,13 @@ export function allocatedTradePackProse(value: unknown): string | null {
   const trimmed = value.trim()
   if (!trimmed) return ''
   if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
-  return stripTradePackMoney(value)
+  const cleaned = stripTradePackMoney(value)
+  if (!cleaned) return ''
+  if (TRADE_SEALED_PAYMENT_TERMS.test(cleaned)) return cleaned
+  // Item leftovers may keep strip artifacts ("Install Deposit"). Ad-hoc
+  // percent / payment-language prose must not ride the allocated pack.
+  if (tradeTextHasAdHocPercentOrPaymentLanguage(cleaned)) return null
+  return cleaned
 }
 
 /** Phone / email / dates keep digits. Drop the field if a money token is present. */
@@ -853,6 +879,16 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
       const value = (terms as Record<string, unknown>)[key]
       if (typeof value === 'string' && tradeTextHasMoneyToken(value)) leaks.push(`terms.${key}`)
     }
+  }
+  const items = row.items
+  if (Array.isArray(items)) {
+    items.forEach((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return
+      const description = (item as Record<string, unknown>).description
+      if (typeof description === 'string' && tradeTextHasAdHocPercentOrPaymentLanguage(description)) {
+        leaks.push(`items[${index}].description`)
+      }
+    })
   }
   return [...new Set(leaks)]
 }

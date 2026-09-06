@@ -223,6 +223,34 @@ Deno.test("assembleFrozenQuoteExtractPacks never synthesizes a live fallback ext
   assertEquals(packs[0].source, "frozen");
 });
 
+Deno.test("extract fail-closes ad-hoc percent and payment-language outside sealed terms", () => {
+  const dirty = structuredClone(PACK);
+  dirty.terms.payment_terms = "50% upfront";
+  dirty.customer.name = "balance due client";
+  dirty.notes = ["owing on completion"];
+  dirty.items.push({
+    kind: "info",
+    description: "Pay 40 percent now",
+    quantity: 1,
+    unit: "ea",
+    unit_price: null,
+    line_total: null,
+  });
+  const extract = assembleTradeQuoteExtract({ pack: dirty, job: { job_number: "SWF-25101" } });
+  assertEquals(extract.terms.payment_terms, null);
+  assertEquals(extract.customer.name, null);
+  assertEquals(extract.notes, []);
+  assertEquals(extract.scope.some((row) => /percent|%|upfront|balance/i.test(row.description)), false);
+  assertEquals(JSON.stringify(extract).includes("50%"), false);
+  assertEquals(JSON.stringify(extract).includes("upfront"), false);
+  const clean = assembleTradeQuoteExtract({ pack: PACK, job: { job_number: "SWF-25101" } });
+  assertEquals(clean.terms.payment_terms, "50% deposit + 50% on completion");
+  const html = renderTradeQuoteExtractHtml(clean);
+  assert(html.includes("50% deposit + 50% on completion"));
+  assertEquals(tradeQuoteExtractHtmlMoneyNeedles(html), []);
+  assertTradeQuoteExtractArtifact(clean, html);
+});
+
 Deno.test("assertTradeQuoteExtractArtifact covers JSON projection and rendered HTML", () => {
   const artifact = buildTradeQuoteExtractArtifact({
     pack: PACK,

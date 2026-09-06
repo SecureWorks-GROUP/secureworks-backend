@@ -15,6 +15,11 @@
 import { assert, assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts"
 import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts"
 import { buildMinimalReleaseManifest } from "../_shared/release_packet/build_minimal_manifest.ts"
+import {
+  claimQuoteDocumentSend,
+  quoteSendClaimPayload,
+  quoteSendPublicationPayload,
+} from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
 async function safeBusinessEventInsert(
@@ -637,46 +642,37 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
 // SEND-CLAIM-IDEMPOTENCY — atomic claim decision tests (C1–C4)
 // ════════════════════════════════════════════════════════════════════════════
 //
-// The /send handler atomically claims a job_documents row by running:
-//   UPDATE job_documents SET sent_to_client=true, sent_at=<now>
-//   WHERE id=<document_id> AND NOT (sent_to_client IS TRUE)
-//   RETURNING id                               -- via .select('id').maybeSingle()
+// The /send handler claims send_claimed_at only (in-flight lock), then stamps
+// sent_to_client + sent_at after Resend succeeds. Claim is not publication.
 //
 // If data is non-null  → claim succeeded; proceed to email.
-// If data is null      → already claimed; return already_sent without emailing.
-//
-// We copy the claim-decision predicate inline (the production code is embedded
-// in the HTTP handler and not directly injectable; a later refactor could
-// extract attemptClaim as a helper). Here we test the mock-client pattern to
-// confirm the branching contract is correct.
+// If data is null      → already claimed or published; return already_sent.
 
 // Mock supabase client that simulates the claim UPDATE returning a row or null.
 function makeClaimMockSb(claimResult: { id: string } | null) {
-  return {
+  const updates: Record<string, unknown>[] = [];
+  const api = {
+    updates,
     from: (_table: string) => ({
-      update: (_payload: Record<string, unknown>) => ({
-        eq: (_col: string, _val: unknown) => ({
-          not: (_col2: string, _op: string, _val2: unknown) => ({
-            select: (_fields: string) => ({
-              maybeSingle: () => Promise.resolve({ data: claimResult, error: null }),
-            }),
-          }),
-        }),
-      }),
+      update: (payload: Record<string, unknown>) => {
+        updates.push(payload);
+        const chain: Record<string, unknown> = {};
+        chain.eq = () => chain;
+        chain.is = () => chain;
+        chain.not = () => chain;
+        chain.select = () => ({
+          maybeSingle: () => Promise.resolve({ data: claimResult, error: null }),
+        });
+        return chain;
+      },
     }),
-  }
+  };
+  return api;
 }
 
-// Simulates the claim decision: returns true if the row was claimed, false if already sent.
 async function simulateClaim(sb: ReturnType<typeof makeClaimMockSb>, documentId: string): Promise<boolean> {
-  const { data: claimed } = await sb
-    .from('job_documents')
-    .update({ sent_to_client: true, sent_at: new Date().toISOString() })
-    .eq('id', documentId)
-    .not('sent_to_client', 'is', true)
-    .select('id')
-    .maybeSingle()
-  return claimed !== null
+  const claimed = await claimQuoteDocumentSend(sb, documentId);
+  return claimed !== null;
 }
 
 Deno.test("C1 — claim succeeds when DB returns a row (first caller gets through)", async () => {
@@ -711,6 +707,21 @@ Deno.test("C4 — claim with distinct document IDs: each simulates independent d
   ])
   assertEquals(resultA, true, 'doc-A should be claimable')
   assertEquals(resultB, false, 'doc-B should already be claimed')
+})
+
+Deno.test("C5 — claim payload is send_claimed_at only; publication is the sent marker", async () => {
+  const sb = makeClaimMockSb({ id: 'doc-pub' })
+  await simulateClaim(sb, 'doc-pub')
+  assertEquals(Object.keys(sb.updates[0]).sort(), ['send_claimed_at'])
+  assertEquals('sent_to_client' in sb.updates[0], false)
+  assertEquals('sent_at' in sb.updates[0], false)
+  const claim = quoteSendClaimPayload(new Date('2026-09-06T00:00:00.000Z'))
+  const published = quoteSendPublicationPayload(new Date('2026-09-06T00:00:01.000Z'))
+  assertEquals(claim, { send_claimed_at: '2026-09-06T00:00:00.000Z' })
+  assertEquals(published, {
+    sent_to_client: true,
+    sent_at: '2026-09-06T00:00:01.000Z',
+  })
 })
 
 // ════════════════════════════════════════════════════════════════════════════

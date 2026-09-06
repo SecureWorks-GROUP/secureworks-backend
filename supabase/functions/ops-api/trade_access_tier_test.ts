@@ -735,6 +735,38 @@ Deno.test("trade_job_detail: pre-send sent_to_client=false stays unpublished eve
   assertEquals(p.quote_extracts || [], [], "pre-send quote rows are not extracts");
 });
 
+Deno.test("trade_job_detail: in-flight send claim is not quote-pack publication", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.send_claimed_at = "2026-09-06T00:00:00Z";
+  vis.sent_to_client = false;
+  vis.sent_at = null;
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs || [], [], "in-flight /send claim is not a trade pack");
+  assertEquals(p.quote_extracts || [], [], "in-flight /send claim is not an extract");
+});
+
+Deno.test("redactTradeQuotePackMoney fail-closes ad-hoc percent payment language", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: { name: "50% upfront client" },
+    terms: { payment_terms: "balance due", valid_days: 30 },
+    items: [{ kind: "install_m", description: "Pay 40 percent now", quantity: 10, unit: "m" }],
+  }]);
+  assertEquals(out[0].customer?.name, null);
+  assertEquals(out[0].terms?.payment_terms, null);
+  assertEquals(out[0].items[0].description, null);
+  assertAllocatedTradeQuotePackProjection(out[0]);
+  const sealed = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    terms: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
+    items: [{ kind: "install_m", description: "Install Deposit", quantity: 10, unit: "m" }],
+  }]);
+  assertEquals(sealed[0].terms?.payment_terms, "50% deposit + 50% on completion");
+  assertEquals(sealed[0].items[0].description, "Install Deposit");
+  assertAllocatedTradeQuotePackProjection(sealed[0]);
+});
+
 Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {
   await assertRejects(
     () =>

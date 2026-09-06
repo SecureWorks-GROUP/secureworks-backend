@@ -65,3 +65,22 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   payment-terms language (`50% deposit + 50% on completion`) is exempt.
   HTML assertion strips that phrase and the extract footer disclaimer
   before scanning.
+
+## Review-3 locks (2026-09-06)
+
+- **Percent and payment-language fail closed.** `tradeTextHasMoneyToken`
+  treats `%` / `percent` / `percentage` and payment-language words
+  (`upfront`, `balance`, `due`, and the neighbouring owing/payable set) as
+  money. The exact sealed phrase `50% deposit + 50% on completion` stays
+  exempt. Ad-hoc "50% upfront" / "balance due" drop from extracts and from
+  allocated customer/terms. Allocated item leftovers may still keep strip
+  artifacts such as `Install Deposit`; leftover percent/payment-language
+  prose does not. HTML money needles strip `<style>` first so CSS `100%`
+  is not a false leak.
+- **In-flight claim is not publication.** Direct `/send` locks
+  `job_documents.send_claimed_at` only. `sent_to_client` and `sent_at`
+  stamp after Resend succeeds. Quote-pack and extract eligibility require
+  that publication marker (or `accepted_at`, or a historical omitted-flag
+  row with `sent_at` and no open claim). An explicit `sent_to_client=false`
+  or a still-open claim never exposes allocated packs. Same bar as
+  send-runs.

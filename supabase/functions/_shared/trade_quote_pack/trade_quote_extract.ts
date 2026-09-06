@@ -374,17 +374,23 @@ export const TRADE_QUOTE_EXTRACT_FORBIDDEN_KEYS = new Set([
 
 const EXTRACT_HTML_SEALED_TERMS = /50%\s*deposit\s*\+\s*50%\s*on\s+completion/gi;
 const EXTRACT_HTML_FOOTER_DISCLAIMER = /It does not include prices, rates, or totals\./g;
+const EXTRACT_HTML_STYLE_BLOCK = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
 
 export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
   const stripped = String(html || "")
+    .replace(EXTRACT_HTML_STYLE_BLOCK, "")
     .replace(EXTRACT_HTML_SEALED_TERMS, "")
     .replace(EXTRACT_HTML_FOOTER_DISCLAIMER, "");
   const hits: string[] = [];
   if (stripped.includes("$")) hits.push("$");
+  if (/%|percent(?:age)?/i.test(stripped)) hits.push("percent");
   if (/\bGST\b/i.test(stripped)) hits.push("GST");
   if (/\b(?:AUD|USD)\b/i.test(stripped)) hits.push("currency");
   if (/\b(?:inc GST|ex GST|subtotal|line total|unit price)\b/i.test(stripped)) hits.push("money-phrase");
   if (/\b(?:rate|price|amount|cost|fee|deposit)\b/i.test(stripped)) hits.push("money-word");
+  if (/\b(?:upfront|up-front|balance|owing|payable|outstanding|due)\b/i.test(stripped)) {
+    hits.push("payment-language");
+  }
   if (tradeTextHasMoneyToken(stripped)) hits.push("money-token");
   return hits;
 }

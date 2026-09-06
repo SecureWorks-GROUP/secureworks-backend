@@ -39067,7 +39067,7 @@ async function tradeJobDetail(
       .eq('job_id', jobId).neq('status', 'deleted')
       .order('delivery_date', { ascending: true }),
     client.from('job_documents')
-      .select('id, type, quote_number, sent_at, sent_to_client, accepted_at, superseded_at, trade_pack_json, created_at')
+      .select('id, type, quote_number, sent_at, sent_to_client, send_claimed_at, accepted_at, superseded_at, trade_pack_json, created_at')
       .eq('job_id', jobId)
       .eq('type', 'quote')
       .order('created_at', { ascending: false }),
@@ -39417,7 +39417,7 @@ async function tradeQuoteExtractAction(
       .eq('org_id', viewer.orgId)
       .single(),
     client.from('job_documents')
-      .select('id, type, quote_number, sent_at, sent_to_client, accepted_at, superseded_at, trade_pack_json, created_at')
+      .select('id, type, quote_number, sent_at, sent_to_client, send_claimed_at, accepted_at, superseded_at, trade_pack_json, created_at')
       .eq('job_id', jobId)
       .eq('type', 'quote')
       .order('created_at', { ascending: false }),

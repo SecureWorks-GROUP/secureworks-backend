@@ -14,6 +14,7 @@ import {
   sanitizeTradePackUnit,
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
+  tradeTextHasAdHocPercentOrPaymentLanguage,
   tradeTextHasMoneyToken,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
@@ -250,6 +251,30 @@ Deno.test("quote packs require authoritative primary-send state, not a pre-send 
   });
   assertEquals(historical.length, 1);
   assertEquals(historical[0].source, "live_fallback");
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-claim",
+    type: "quote",
+    send_claimed_at: "2026-09-06T00:00:00.000Z",
+    sent_to_client: false,
+  }), false);
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-claim-leak",
+    type: "quote",
+    sent_at: "2026-09-06T00:00:00.000Z",
+    send_claimed_at: "2026-09-06T00:00:00.000Z",
+  }), false);
+  assertEquals(assembleQuotePacksForTrade({
+    jobType: "fencing",
+    liveScopeJson: FENCE_SCOPE,
+    livePricingJson: FENCE_PRICING,
+    documents: [{
+      id: "d-claim",
+      type: "quote",
+      quote_number: "Q-CLAIM",
+      send_claimed_at: "2026-09-06T00:00:00.000Z",
+      sent_to_client: false,
+    }],
+  }), []);
 });
 
 Deno.test("tradeTextHasMoneyToken is conservative across identity and date strings", () => {
@@ -271,6 +296,18 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
     customer: { phone: "0412 $18,400", email: "usd@example.test" },
     terms: { valid_until: "valid until price review" },
   }).sort(), ["$", "customer.email", "customer.phone", "terms.valid_until"]);
+  assertEquals(tradeTextHasMoneyToken("50% upfront"), true);
+  assertEquals(tradeTextHasMoneyToken("balance due"), true);
+  assertEquals(tradeTextHasMoneyToken("Pay 40 percent now"), true);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("50% deposit + 50% on completion"), false);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Install Deposit"), false);
+  assertEquals(allocatedTradePackProse("50% upfront"), null);
+  assertEquals(allocatedTradePackProse("Install Deposit"), "Install Deposit");
+  assertEquals(allocatedTradePackIdentity("50% upfront"), null);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    terms: { payment_terms: "50% upfront" },
+    items: [{ description: "balance due on site" }],
+  }).sort(), ["items[0].description", "terms.payment_terms"]);
 });
 
 Deno.test("frozenTradePackForExtract refuses live_fallback and unsent packs", () => {
