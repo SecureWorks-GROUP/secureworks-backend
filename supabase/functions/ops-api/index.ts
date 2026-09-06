@@ -38181,6 +38181,10 @@ export const TRADE_SCOPE_QUANTITY_KEEP_KEYS = new Set([
   'hours',
   'hours_per_trade',
   'labour_hours',
+  'cycle_number',
+  'reattend_count',
+  'portal_verified_cycle',
+  'submitted_cycle',
   'storeys',
   'storey',
   'lat',
@@ -38309,6 +38313,36 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
     }
     return out
   })
+}
+
+// Billing overlay on makesafe_job_details. Allocated / makesafe_open get
+// flags + cycle identity, never invoice notes, billing rules, or money.
+export const TRADE_MAKESAFE_BILLING_KEYS = new Set([
+  'invoice_notes',
+  'billing_rules',
+  'invoice_ready_at',
+])
+
+function projectTradeAllocatedMakesafeDetails(details: any): any {
+  if (details == null) return details
+  if (typeof details !== 'object' || Array.isArray(details)) return details
+  const stripped: Record<string, any> = {}
+  for (const [key, value] of Object.entries(details)) {
+    if (TRADE_MAKESAFE_BILLING_KEYS.has(key)) continue
+    stripped[key] = value
+  }
+  const walked = sanitizeTradeAllocatedJsonTree(stripped)
+  return walked === undefined ? null : walked
+}
+
+function projectTradeAllocatedServiceReport(report: any): any {
+  if (report == null) return report
+  const walked = sanitizeTradeAllocatedJsonTree(report)
+  return walked === undefined ? null : walked
+}
+
+function projectTradeAllocatedServiceReports(reports: any[]): any[] {
+  return (reports || []).map((row) => projectTradeAllocatedServiceReport(row))
 }
 
 // The recursion cap is a guard against a pathological blob, not a licence to
@@ -38902,11 +38936,17 @@ async function tradeJobDetail(
       )
       return quoteVisible ? human : sanitizeTradeAllocatedEventNotes(human)
     })(),
-    serviceReport: currentServiceReport,
+    serviceReport: quoteVisible
+      ? currentServiceReport
+      : projectTradeAllocatedServiceReport(currentServiceReport),
     // Re-attendance (M-C): all reports (latest first) so a re-attended job shows
     // every visit's report, not just the latest. serviceReport is the current
     // attendance only once a reattend boundary exists.
-    serviceReports: reportRes.data || [],
+    // Allocated / makesafe_open get a money-projected report; office /
+    // division-manager keep the raw select('*') row.
+    serviceReports: quoteVisible
+      ? (reportRes.data || [])
+      : projectTradeAllocatedServiceReports(reportRes.data || []),
     currentCycleMedia: allocatedMedia,
     currentCyclePhotoCount: currentCycleMedia.filter((m: any) =>
       !m?.type || m.type === 'photo'
@@ -38943,7 +38983,9 @@ async function tradeJobDetail(
     // Additive: who leads this job, or null when nobody has been designated.
     leadInstaller: _tradeLeadInstaller(tradeCrew),
     purchaseOrders: safePOs,
-    makesafe_details: makesafeDetails,
+    makesafe_details: quoteVisible
+      ? makesafeDetails
+      : projectTradeAllocatedMakesafeDetails(makesafeDetails),
     quote_packs: tradeQuotePacks,
   }
 }

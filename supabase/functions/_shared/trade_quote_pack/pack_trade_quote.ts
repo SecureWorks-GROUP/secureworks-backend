@@ -469,11 +469,16 @@ const TRADE_PACK_TAX_QUALIFIED =
   `(?:${TRADE_PACK_TAX_QUALIFIER}\\s*[.\\-]?\\s*(?:of\\s+)?${TRADE_PACK_TAX_WORD}|${TRADE_PACK_TAX_WORD}\\s*[.\\-]?\\s*${TRADE_PACK_TAX_QUALIFIER})`
 const TRADE_PACK_TAX_PHRASE =
   `(?:${TRADE_PACK_TAX_QUALIFIED}|${TRADE_PACK_TAX_WORD})`
+const TRADE_PACK_UNQUALIFIED_MONEY_WORD =
+  '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?)'
+const TRADE_PACK_RATE_UNIT =
+  '(?:hours?|hrs?|h|m(?:et(?:re|er)s?)?)'
 
 /** Money-safe pack text: drop common currency figures, keep the writing.
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
- *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), and parenthetical
- *  tax marks. Leaves ordinary quantities (19m, 1800mm). Office full-quote
+ *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
+ *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
+ *  1200/m). Amount boundaries refuse 19m / 1800mm / 90x90. Office full-quote
  *  summaries must not call this — hydrateStoredPack keeps stored summary
  *  verbatim. */
 export function stripTradePackMoney(text: unknown): string {
@@ -491,6 +496,27 @@ export function stripTradePackMoney(text: unknown): string {
     // "$9,999 excluding GST" loses the figure first; drop the orphaned
     // qualified tax mark. Bare "GST" / "tax" stays (not a money figure).
     .replace(new RegExp(`\\(?\\s*${TRADE_PACK_TAX_QUALIFIED}\\s*\\)?`, 'gi'), '')
+    .replace(
+      new RegExp(
+        `(\\b${TRADE_PACK_UNQUALIFIED_MONEY_WORD}\\b)\\s*[=:\\-]?\\s*${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        'gi',
+      ),
+      '$1',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\b\\s+(${TRADE_PACK_UNQUALIFIED_MONEY_WORD})\\b`,
+        'gi',
+      ),
+      '$1',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\s*(?:/\\s*|\\bper\\s+)${TRADE_PACK_RATE_UNIT}\\b`,
+        'gi',
+      ),
+      '',
+    )
     .replace(/\s{2,}/g, ' ')
     .trim()
 }

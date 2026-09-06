@@ -209,6 +209,17 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("Plus 80 +GST"), "Plus");
   assertEquals(stripTradePackMoney("Rear 19m 1800mm install"), "Rear 19m 1800mm install");
   assertEquals(stripTradePackMoney("Use 90x90 posts"), "Use 90x90 posts");
+  assertEquals(stripTradePackMoney("Total 9999"), "Total");
+  assertEquals(stripTradePackMoney("Approved total 9,999"), "Approved total");
+  assertEquals(stripTradePackMoney("rate 85"), "rate");
+  assertEquals(stripTradePackMoney("charged 1200 extra"), "charged extra");
+  assertEquals(stripTradePackMoney("Fee 1,200"), "Fee");
+  assertEquals(stripTradePackMoney("cost 99"), "cost");
+  assertEquals(stripTradePackMoney("85/hour"), "");
+  assertEquals(stripTradePackMoney("85 / hr"), "");
+  assertEquals(stripTradePackMoney("1200/m"), "");
+  assertEquals(stripTradePackMoney("85 per hour"), "");
+  assertEquals(stripTradePackMoney("2 trades over 3 days"), "2 trades over 3 days");
 });
 
 Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewers and still strips item descriptions", () => {

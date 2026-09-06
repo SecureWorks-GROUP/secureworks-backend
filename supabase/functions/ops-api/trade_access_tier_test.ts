@@ -627,6 +627,116 @@ Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO
   assertEquals(p.workOrders[0].scope_items, [{ description: "Make safe", quantity: 1, unit: "lot" }]);
 });
 
+Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing overlay", async () => {
+  const t = seed();
+  t.jobs.find((j: any) => j.id === JOB_MS).notes = "Attend after hours.";
+  t.makesafe_job_details = [{
+    job_id: JOB_MS,
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    external_ref: "MLB-27000",
+    substatus: "waiting_on_trade_report",
+    attendance_cycle_id: "cycle-ms",
+    cycle_number: 2,
+    reattend_count: 1,
+    invoice_notes: "Bill $9,999. Rate 85. Invoice INV-1240.",
+    billing_rules: { rate: 85, amount: 9999, labour_hours: 3 },
+    invoice_ready_at: "2026-09-01T00:00:00Z",
+    special_instructions: "Use 90x90 posts. Charge 1200 extra.",
+    safety_requirements: "Watch the GST registration. Total 9999.",
+  }];
+  t.job_assignments.push({
+    id: "a-ms-lead",
+    job_id: JOB_MS,
+    user_id: LEAD,
+    status: "scheduled",
+    is_lead: true,
+    role: "lead_installer",
+  });
+  const allocated = await _tradeJobDetailForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_MS }),
+    viewer(LEAD, "lead_installer") as any,
+    false,
+  );
+  const open = await _tradeJobDetailForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_MS }),
+    viewer(STRANGER, "crew") as any,
+    false,
+  );
+  for (const p of [allocated, open]) {
+    assertEquals(p.quote_visible, false);
+    assertEquals(p.makesafe_details.invoice_notes, undefined);
+    assertEquals(p.makesafe_details.billing_rules, undefined);
+    assertEquals(p.makesafe_details.invoice_ready_at, undefined);
+    assertEquals(p.makesafe_details.cycle_number, 2);
+    assertEquals(p.makesafe_details.reattend_count, 1);
+    assertEquals(p.makesafe_details.attendance_cycle_id, "cycle-ms");
+    assertEquals(p.makesafe_details.external_ref, "MLB-27000");
+    assertEquals(p.makesafe_details.special_instructions, "Use 90x90 posts. Charge extra.");
+    assertEquals(p.makesafe_details.safety_requirements, "Watch the GST registration. Total.");
+    assertEquals(JSON.stringify(p.makesafe_details).includes("9999"), false);
+    assertEquals(JSON.stringify(p.makesafe_details).includes("INV-1240"), false);
+    assertEquals(JSON.stringify(p.makesafe_details).includes("\"rate\""), false);
+  }
+  const officeP = await _tradeJobDetailForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_MS }),
+    viewer(OFFICE, "ops_manager") as any,
+    true,
+  );
+  assertEquals(officeP.quote_visible, true);
+  assertEquals(officeP.makesafe_details.invoice_notes, "Bill $9,999. Rate 85. Invoice INV-1240.");
+  assertEquals(officeP.makesafe_details.billing_rules, { rate: 85, amount: 9999, labour_hours: 3 });
+  assertEquals(officeP.makesafe_details.invoice_ready_at, "2026-09-01T00:00:00Z");
+  assertEquals(officeP.makesafe_details.special_instructions, "Use 90x90 posts. Charge 1200 extra.");
+});
+
+Deno.test("trade_job_detail: allocated service reports drop money and keep hours", async () => {
+  const t = seed();
+  t.job_service_reports = [{
+    id: "sr-1",
+    job_id: JOB_FENCE,
+    status: "submitted",
+    cycle_number: 1,
+    attendance_cycle_id: "cycle-1",
+    notes: "Installed rear run. Charge 1200 extra. Total 9999.",
+    checklist_json: {
+      labour_hours: 3,
+      hours_per_trade: 3,
+      rate: 85,
+      amount: 9999,
+      total: 255,
+      materials: "Sheets $99",
+      items: [{ label: "Pickets", quantity: 4, rate: 13.5 }],
+    },
+    billed_total: 9999,
+    quoted_amount: 8800,
+  }];
+  const allocated = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(allocated.serviceReport.id, "sr-1");
+  assertEquals(allocated.serviceReport.cycle_number, 1);
+  assertEquals(allocated.serviceReport.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.serviceReport.checklist_json.labour_hours, 3);
+  assertEquals(allocated.serviceReport.checklist_json.hours_per_trade, 3);
+  assertEquals(allocated.serviceReport.checklist_json.rate, undefined);
+  assertEquals(allocated.serviceReport.checklist_json.amount, undefined);
+  assertEquals(allocated.serviceReport.checklist_json.total, undefined);
+  assertEquals(allocated.serviceReport.checklist_json.materials, "Sheets");
+  assertEquals(allocated.serviceReport.checklist_json.items, [{ label: "Pickets", quantity: 4 }]);
+  assertEquals(allocated.serviceReport.billed_total, undefined);
+  assertEquals(allocated.serviceReport.quoted_amount, undefined);
+  assertEquals(allocated.serviceReports[0].notes, allocated.serviceReport.notes);
+  assertEquals(JSON.stringify(allocated.serviceReport).includes("9999"), false);
+  assertEquals(JSON.stringify(allocated.serviceReports).includes("8800"), false);
+  const officeP = await detail(t, viewer(OFFICE, "ops_manager"));
+  assertEquals(officeP.serviceReport.notes, "Installed rear run. Charge 1200 extra. Total 9999.");
+  assertEquals(officeP.serviceReport.checklist_json.rate, 85);
+  assertEquals(officeP.serviceReport.billed_total, 9999);
+  assertEquals(officeP.serviceReport.quoted_amount, 8800);
+});
+
 const WALKTHROUGH_URL = "https://cdn.example.test/jobs/swf-26101/walkthrough.mp4";
 
 Deno.test("trade_job_detail: promotes a job.scopeMedia walkthrough even when scope photos already exist", async () => {
