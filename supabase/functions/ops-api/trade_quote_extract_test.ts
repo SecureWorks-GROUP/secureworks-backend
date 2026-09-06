@@ -146,7 +146,14 @@ Deno.test("extract fail-closes money in phone, email, and units without eating a
       site_suburb: "Midland",
     },
   });
-  dirty.items.push({ kind: "info", description: "Sheets", quantity: 2, unit: "$18,400" });
+  dirty.items.push({
+    kind: "info",
+    description: "Sheets",
+    quantity: 2,
+    unit: "$18,400",
+    unit_price: null,
+    line_total: null,
+  });
   dirty.customer.phone = "0412 $18,400";
   dirty.customer.email = "pat+$18,400@example.test";
   const extract = assembleTradeQuoteExtract({ pack: dirty, job: { job_number: "SWF-25101" } });
