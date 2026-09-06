@@ -121,8 +121,12 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
+  allocatedTradePackProse,
   assembleQuotePacksForTrade,
   isHenryInstaller,
+  sanitizeTradePackKind,
+  sanitizeTradePackUnit,
+  stripTradePackMoney,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
 import {
@@ -261,6 +265,7 @@ import {
   projectCycleScopedEvidence,
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
+import { extractScopeMedia, selectTradeJobMedia } from './trade_scope_media.ts'
 import {
   currentMakesafeReceivableInvoicesByJobId,
   makesafeHasQualifyingCurrentDraftInvoice,
@@ -933,11 +938,12 @@ import {
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
-import { renderRoofReportPdf } from './roof_report_render.ts'
+import { omitRoofReportFee, renderRoofReportPdf } from './roof_report_render.ts'
 import {
   ROOF_REPORT_PACK_KIND,
   ROOF_REPORT_TEMPLATE_VERSION,
   getRoofReportTemplate,
+  projectRoofReportTemplate,
   roofReportPrice,
   normaliseStorey,
   validateRoofReportForSubmit,
@@ -4175,7 +4181,9 @@ async function dispatchMakesafeReport(
     userId: _resolveMakesafeReportActor(authMode, authUser, body),
   }, authUser
     ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
-    : undefined)
+    : undefined, {
+    isOffice: _opsApiCallerIsStaffOperator(authMode, authUser),
+  })
 }
 
 // Trade Board route: always the production canonical loader. There is no
@@ -9240,15 +9248,33 @@ if (import.meta.main) serve(async (req: Request) => {
               client,
               { ...body, userId: tradeUser.id },
               tradeJobAccess,
+              isDispatcher,
             ))
-          case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess))
+          case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess, isDispatcher))
           // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
           case 'roof_report_template':
-            return json(await getRoofReportTemplateForJob(client, url.searchParams.get('job_id') || url.searchParams.get('jobId') || body?.job_id || body?.jobId))
           case 'save_roof_report':
-            return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }))
-          case 'submit_roof_report':
-            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }))
+          case 'submit_roof_report': {
+            const roofJobId = url.searchParams.get('job_id') || url.searchParams.get('jobId') ||
+              body?.job_id || body?.jobId
+            let quoteVisible = false
+            if (roofJobId) {
+              const decision = await resolveTradeJobAccessTier(
+                client,
+                roofJobId,
+                tradeUser.id,
+                { isOffice: isDispatcher, access: tradeJobAccess },
+              )
+              quoteVisible = decision.quoteVisible
+            }
+            if (action === 'roof_report_template') {
+              return json(await getRoofReportTemplateForJob(client, roofJobId, { quoteVisible }))
+            }
+            if (action === 'save_roof_report') {
+              return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }, { quoteVisible }))
+            }
+            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }, {}, { quoteVisible }))
+          }
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
@@ -22730,6 +22756,7 @@ async function submitMakesafeReport(
   client: any,
   body: any,
   access?: TradeJobAccessContext,
+  opts?: { isOffice?: boolean },
 ) {
   const {
     job_id, jobId, userId, user_id,
@@ -22925,7 +22952,7 @@ async function submitMakesafeReport(
         status: 'draft',
         submitted_at: null,
       })
-      .select()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS)
       .single()
     if (!error) {
       report = data
@@ -22970,7 +22997,7 @@ async function submitMakesafeReport(
   if (!submittingFinal && !existing) {
     const { data, error } = await client.from('job_service_reports')
       .insert({ id: canonicalReportId, job_id: jId, ...reportFields })
-      .select()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS)
       .single()
     if (!error) {
       report = data
@@ -22998,12 +23025,12 @@ async function submitMakesafeReport(
     if (resumingSubmitted) {
       assertResumableSubmissionAuthority(existing)
       const { data, error } = await client.from('job_service_reports')
-        .select().eq('id', existing.id).single()
+        .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).eq('id', existing.id).single()
       if (error) throw error
       report = data
     } else {
       const { data, error } = await client.from('job_service_reports')
-        .update(reportFields).eq('id', existing.id).select().single()
+        .update(reportFields).eq('id', existing.id).select(TRADE_JOB_SERVICE_REPORT_COLUMNS).single()
       if (error) {
         throw new ApiError(
           `${submittingFinal ? 'MakeSafe final report promotion' : 'MakeSafe draft update'} failed: ${error.message || error}`,
@@ -23131,7 +23158,19 @@ async function submitMakesafeReport(
     }
   }
 
-  return { ok: true, report, board_sync: boardSync, event_sync: eventSync, warnings }
+  const isOffice = opts?.isOffice === true
+  let quoteVisible = isOffice
+  if (!quoteVisible && uId) {
+    const decision = await resolveTradeJobAccessTier(client, jId, String(uId), { isOffice, access })
+    quoteVisible = decision.quoteVisible
+  }
+  return {
+    ok: true,
+    report: presentTradeServiceReport(report, quoteVisible),
+    board_sync: boardSync,
+    event_sync: eventSync,
+    warnings,
+  }
 }
 export const _submitMakesafeReportForTest = submitMakesafeReport
 export const _dispatchMakesafeReportForTest = dispatchMakesafeReport
@@ -36151,6 +36190,20 @@ export function tradeQuoteVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager'
 }
 
+// List-feed companion to tradeQuoteVisibleForTier: office everywhere, a
+// division manager only on jobs in a vertical they manage. Assigned /
+// makesafe_open never see quote on a list surface. Pure — no assignment
+// read — so search_all_jobs / my_jobs can project each card without N+1.
+export function tradeViewerQuoteVisibleForJob(
+  job: any,
+  input: { isOffice?: boolean; managedVerticals?: unknown },
+): boolean {
+  if (input.isOffice === true) return true
+  const managed = _normalizeManagedVerticals(input.managedVerticals)
+  if (managed.length === 0) return false
+  return managed.includes(_jobVertical(job))
+}
+
 // Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
 // derived from them — is a narrower question than the quote, and the open-pool
 // tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
@@ -36279,10 +36332,26 @@ export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], conta
   return openMakesafes
 }
 
-async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
+const TRADE_MAKESAFE_FEED_SELECT_ALLOCATED =
+  'job_id, external_ref, substatus, report_type, cycle_number, last_reattend_at, requesting_company_id, makesafe_companies:requesting_company_id(slug, name)'
+
+type TradeFeedQuoteVisible = boolean | ((job: any) => boolean)
+
+function tradeFeedQuoteVisibleFor(
+  quoteVisible: TradeFeedQuoteVisible,
+): (job: any) => boolean {
+  return typeof quoteVisible === 'function' ? quoteVisible : (_job: any) => quoteVisible === true
+}
+
+async function enrichTradeMakesafeJobs(
+  client: any,
+  jobs: any[],
+  quoteVisible: TradeFeedQuoteVisible = true,
+) {
   const list = (jobs || []).filter(Boolean)
   const jobIds = collectUniqueStringIds(list.map((job: any) => job?.id))
   if (jobIds.length === 0) return list
+  const quoteVisibleFor = tradeFeedQuoteVisibleFor(quoteVisible)
 
   const detailByJobId: Record<string, any> = {}
   try {
@@ -36293,16 +36362,23 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
     for (let i = 0; i < jobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
       detailChunks.push(jobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
     }
+    const anyQuoteVisible = list.some((job) => quoteVisibleFor(job))
+    const detailSelect = anyQuoteVisible
+      ? '*, makesafe_companies:requesting_company_id(slug, name)'
+      : TRADE_MAKESAFE_FEED_SELECT_ALLOCATED
     const detailPages = await Promise.all(detailChunks.map(async (chunk) => {
       const { data } = await client.from('makesafe_job_details')
-        .select('*, makesafe_companies:requesting_company_id(slug, name)')
+        .select(detailSelect)
         .in('job_id', chunk)
       return data || []
     }))
     const details = detailPages.flat()
     for (const row of (details || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
     for (const job of list) {
-      if (job?.id && detailByJobId[job.id]) job.makesafe_details = detailByJobId[job.id]
+      if (!job?.id || !detailByJobId[job.id]) continue
+      job.makesafe_details = quoteVisibleFor(job)
+        ? detailByJobId[job.id]
+        : projectTradeAllocatedMakesafeDetails(detailByJobId[job.id])
     }
   } catch (e: any) {
     console.log('[ops-api] trade MakeSafe detail enrichment skipped:', e?.message)
@@ -36350,6 +36426,33 @@ export const TRADE_JOB_FEED_PAGE_MAX = 500
 export const TRADE_JOB_SEARCH_RESULT_CAP = 500
 export const TRADE_JOB_FEED_SELECT =
   'id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at'
+export const TRADE_JOB_FEED_SELECT_ALLOCATED =
+  'id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, created_at, updated_at, completed_at'
+
+function tradeJobFeedSelect(quoteVisible: boolean): string {
+  return quoteVisible ? TRADE_JOB_FEED_SELECT : TRADE_JOB_FEED_SELECT_ALLOCATED
+}
+
+function projectTradeAllocatedJobFeedRow(job: any): void {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return
+  if ('notes' in job) job.notes = sanitizeTradeAllocatedJobNotes(job.notes)
+  if (!job.external_ref && job.metadata && typeof job.metadata === 'object') {
+    const metaRef = (job.metadata as { external_ref?: unknown }).external_ref
+    if (typeof metaRef === 'string' && metaRef.trim()) job.external_ref = metaRef
+  }
+  delete job.metadata
+}
+
+function presentTradeJobFeedRow(job: any, quoteVisible: boolean): void {
+  if (!job.external_ref && job.makesafe_details?.external_ref) {
+    job.external_ref = job.makesafe_details.external_ref
+  }
+  if (!job.external_ref) {
+    job.external_ref = job.metadata?.external_ref || null
+  }
+  delete job.org_id
+  if (!quoteVisible) projectTradeAllocatedJobFeedRow(job)
+}
 
 // Records that are operationally unsafe or noisy to surface at all: hard
 // deletes, voids and known duplicates. Deliberately NOT a visibility window —
@@ -36386,11 +36489,20 @@ export async function searchAllJobs(
   isDispatcher = false,
 ) {
   const q = (params.get('q') || '').toLowerCase().trim()
-  const { lens } = _resolveTradeJobFeedLens({
+  const { lens, canSeeCompany } = _resolveTradeJobFeedLens({
     isDispatcher,
     managedVerticals: viewer.managedVerticals,
     q,
   })
+  // Company-lens viewers still SELECT the quote columns — in-vertical
+  // manager cards need them — then each row is projected by that job's
+  // access tier. A fencing manager must not inherit quote on patio rows.
+  const feedQuoteCtx = {
+    isOffice: isDispatcher,
+    managedVerticals: viewer.managedVerticals,
+  }
+  const jobQuoteVisible = (job: any) => tradeViewerQuoteVisibleForJob(job, feedQuoteCtx)
+  const jobFeedSelect = tradeJobFeedSelect(canSeeCompany)
 
   const requestedPageSize = Number(params.get('page_size') || TRADE_JOB_FEED_PAGE_DEFAULT)
   const requestedOffset = Number(params.get('offset') || 0)
@@ -36409,7 +36521,7 @@ export async function searchAllJobs(
   let seedJobs: any[] = []
   if (lens === 'assigned') {
     const { data: assignedRows, error: assignedErr } = await client.from('job_assignments')
-      .select('jobs:job_id(id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
+      .select(`jobs:job_id(${jobFeedSelect})`)
       .eq('user_id', viewer.id)
     if (assignedErr) throw assignedErr
     seedJobs = (assignedRows || [])
@@ -36444,13 +36556,13 @@ export async function searchAllJobs(
       client,
       [q],
       _GLOBAL_SEARCH_STATUS_EXCLUDE,
-      TRADE_JOB_FEED_SELECT,
+      jobFeedSelect,
     )
     const externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
       /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
       String(job?.org_id || viewer.orgId) === String(viewer.orgId)
     )
-    const { data: baseRows, error: baseErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+    const { data: baseRows, error: baseErr } = await buildJobQuery(jobFeedSelect)
       .order('created_at', { ascending: false })
       .order('id', { ascending: true })
       .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
@@ -36473,16 +36585,8 @@ export async function searchAllJobs(
     const capped = ranked.length > TRADE_JOB_SEARCH_RESULT_CAP || (baseRows || []).length > TRADE_JOB_SEARCH_RESULT_CAP
     const materialized = ranked.slice(0, TRADE_JOB_SEARCH_RESULT_CAP)
     const pageJobs = materialized.slice(offset, offset + pageSize)
-    const jobs = await enrichTradeMakesafeJobs(client, pageJobs)
-    for (const job of jobs) {
-      if (!job.external_ref && job.makesafe_details?.external_ref) {
-        job.external_ref = job.makesafe_details.external_ref
-      }
-      if (!job.external_ref) {
-        job.external_ref = job.metadata?.external_ref || null
-      }
-      delete job.org_id
-    }
+    const jobs = await enrichTradeMakesafeJobs(client, pageJobs, jobQuoteVisible)
+    for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
     const canFetchMore = offset + jobs.length < materialized.length
     return {
       jobs,
@@ -36508,7 +36612,7 @@ export async function searchAllJobs(
   }
 
   // created_at is not unique, so paging needs the id tiebreak for a total order.
-  const { data: allJobs, error: allJobsErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+  const { data: allJobs, error: allJobsErr } = await buildJobQuery(jobFeedSelect)
     .order('created_at', { ascending: false })
     .order('id', { ascending: true })
     .range(offset, offset + pageSize - 1)
@@ -36524,17 +36628,9 @@ export async function searchAllJobs(
 
   // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
   // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
-  const jobs = await enrichTradeMakesafeJobs(client, merged)
+  const jobs = await enrichTradeMakesafeJobs(client, merged, jobQuoteVisible)
   // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
-  for (const job of jobs) {
-    if (!job.external_ref && job.makesafe_details?.external_ref) {
-      job.external_ref = job.makesafe_details.external_ref
-    }
-    if (!job.external_ref) {
-      job.external_ref = job.metadata?.external_ref || null
-    }
-    delete job.org_id
-  }
+  for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
 
   // `total` counts the paged job query only; the assigned seed and external-ref
   // merges can push a page past it, so never report fewer rows than were sent.
@@ -37078,6 +37174,15 @@ export async function myJobs(
   // every crew, not just this user's — scoped strictly to these verticals. Never
   // set for a dispatcher (they use showAll) or the personal view.
   const managerScope = !showAll ? _normalizeManagedVerticals(managerScopeVerticals) : []
+  // Office keep raw assignment + job notes everywhere. A division manager
+  // keeps raw wording only on in-vertical cards; a personal allocation
+  // outside managed verticals uses the same notes projection as
+  // trade_job_detail. Pool / board permission must never flip quote on
+  // every assignment the viewer holds.
+  const myJobsQuoteCtx = {
+    isOffice: isDispatcher,
+    managedVerticals: poolVerticals,
+  }
   const today = getAWSTDate()
   const thirtyDaysAgo = new Date(Date.now() + AWST_OFFSET_MS)
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
@@ -37858,75 +37963,15 @@ export async function myJobs(
   // job select does not change the my_jobs payload (including Everyone/history).
   for (const assignment of (assignments || [])) {
     if (assignment?.jobs) delete assignment.jobs.archived
+    if (!tradeViewerQuoteVisibleForJob(assignment?.jobs, myJobsQuoteCtx)) {
+      projectTradeAllocatedMyJobsCard(assignment)
+    }
   }
 
   // Flag so frontend knows this is admin/all-jobs view
   if (showAll) grouped._adminView = true
 
   return grouped
-}
-
-// ── Scope Photo Extraction ──────────────────────────────────────────────
-// Fencing scope tool captures photos as BASE64 inside scope_json.scopeMedia.photos.
-// This extracts them to Supabase Storage + job_media so the trade app can display them.
-async function extractScopePhotos(client: any, jobId: string, scopeJson: any): Promise<number> {
-  // Guard: nothing to extract
-  const photos = scopeJson?.scopeMedia?.photos
-  if (!Array.isArray(photos) || photos.length === 0) return 0
-
-  // Check if already extracted
-  const { data: existing } = await client.from('job_media')
-    .select('id')
-    .eq('job_id', jobId)
-    .eq('phase', 'scope')
-    .limit(1)
-  if (existing && existing.length > 0) return 0
-
-  // Ensure bucket exists (idempotent)
-  try { await client.storage.createBucket('job-photos', { public: true }) } catch { /* exists */ }
-
-  let count = 0
-  for (let i = 0; i < photos.length; i++) {
-    const photo = photos[i]
-    if (!photo?.dataUrl || typeof photo.dataUrl !== 'string') continue
-
-    try {
-      // Strip data URL prefix — handle jpeg, png, webp etc
-      const base64 = photo.dataUrl.split(',')[1]
-      if (!base64) continue
-
-      const mimeMatch = photo.dataUrl.match(/data:([^;]+);/)
-      const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg'
-      const ext = mime.includes('png') ? 'png' : 'jpg'
-      const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0))
-
-      const path = `${DEFAULT_ORG_ID}/${jobId}/scope/${i}.${ext}`
-
-      const { error: uploadError } = await client.storage
-        .from('job-photos')
-        .upload(path, bytes, { contentType: mime, upsert: true })
-      if (uploadError) { console.log(`[ops-api] scope photo ${i} upload failed:`, uploadError.message); continue }
-
-      const { data: urlData } = client.storage.from('job-photos').getPublicUrl(path)
-
-      const { error: insertError } = await client.from('job_media').insert({
-        job_id: jobId,
-        phase: 'scope',
-        type: 'photo',
-        storage_url: urlData.publicUrl,
-        label: photo.label || `Scope photo ${i + 1}`,
-        created_at: new Date().toISOString(),
-      })
-      if (insertError) { console.log(`[ops-api] scope photo ${i} insert failed:`, insertError.message); continue }
-
-      count++
-    } catch (err: any) {
-      console.log(`[ops-api] scope photo ${i} error:`, err?.message)
-    }
-  }
-
-  console.log(`[ops-api] extracted ${count} scope photos for job ${jobId}`)
-  return count
 }
 
 type TradeMakesafeCompletionHandoff =
@@ -38082,30 +38127,46 @@ export function _tradeVisibleDocuments(docs: any[]): any[] {
 // here: it is not the client's quote. Widening this list is a Captain call.
 export const TRADE_QUOTE_DOCUMENT_TYPES = new Set(['quote', 'invoice'])
 
+// Full priced MakeSafe / supplier work-order PDFs. Allocated trades and
+// makesafe_open must not receive them until TRD-6 ships a price-free extract.
+// Office / division-manager keep the full files. Do not fold these into
+// TRADE_QUOTE_DOCUMENT_TYPES — that set is the quote/invoice fence only.
+export const TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES = new Set([
+  'work_order',
+  'supplier_work_order',
+])
+
+function tradeAllocatedHiddenDocumentType(type: unknown): boolean {
+  const normalised = String(type || '').toLowerCase()
+  return TRADE_QUOTE_DOCUMENT_TYPES.has(normalised) ||
+    TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES.has(normalised)
+}
+
 // What an ALLOCATED trade (lead or crew, no difference) or the MakeSafe
 // open-pool exception may see of a job's documents: the ops-flagged rows,
-// minus anything quote-bearing regardless of the flag. Office / division
-// manager tiers do not use this — they get the office document set.
+// minus quote-bearing types and full priced work-order PDFs, whatever the
+// flag says. Office / division manager tiers do not use this — they get
+// the office document set, including priced WO / quote files.
 export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
   return _tradeVisibleDocuments(docs)
-    .filter((d: any) => !TRADE_QUOTE_DOCUMENT_TYPES.has(String(d?.type || '').toLowerCase()))
-    .map((d: any) => {
-      // quote_number is a quote coordinate; nothing an installer needs.
-      const { quote_number: _qn, ...rest } = d || {}
-      return rest
-    })
+    .filter((d: any) => !tradeAllocatedHiddenDocumentType(d?.type))
 }
 
 // ── scope_json quote redaction (allocated-trade tiers) ──────────────────────
 // The scoping tools write the QUOTE into jobs.scope_json: `_pricing_json` (the
 // full quote blob — totals, margin, sell), `pricing` (addon/extras sell rows,
-// labour sell), `notes.pricingNotes` / `notes.noteQuote`, nested per patio /
-// option (`scope_json.patios[].options[]`, `scope_json.job`). trade_job_detail
+// labour sell), `notes.pricingNotes`, nested per patio / option
+// (`scope_json.patios[].options[]`, `scope_json.job`). trade_job_detail
 // used to ship the raw blob and rely on trade.html not rendering the price.
-// This strips it server-side at every depth. What survives is what the trade
-// app already deliberately shows an installer: `pricing.labour.{trades,days,
-// dayRate}` (their own days/day-rate, not the customer's price) — `sell` under
-// labour goes too. Keys are matched exactly (case-sensitive) so a structural
+// This strips it server-side at every depth.
+//
+// TRD-4 (2026-09-06): allocated trades and makesafe_open MUST see the quote
+// WRITING — descriptions, scope text, `job.quote` narrative, `notes.noteQuote`,
+// and quote numbers — and MUST NEVER see money. So `quote` / `quotes` are
+// walked (they are ~1 kB narrative blobs), not dropped; a numeric `quote`
+// key is still stripped. `dayRate` is a price and goes with the money set.
+// What survives of labour is headcount/days only (`trades`, `days`,
+// `labourers`). Keys are matched exactly (case-sensitive) so a structural
 // key like `totalMetres` is untouched; the pure helper is exported and pinned.
 //
 // The blob's shape is owned by the scoping tools, so the list is grounded in the
@@ -38116,16 +38177,16 @@ export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
 // are load-bearing: fencing carries `scope_json.job.pricePerMetre`, which with
 // the surviving `job.runs[].length` reconstructs the quoted total outright, and
 // patio carries a top-level `scope_json.job_costs`. When the scoping tools add a
-// new money key, add it HERE and re-check that audit — a key absent from this
-// set ships to an allocated crew member's phone.
+// new money key on the OUTER blob, add it HERE and re-check that audit — a key
+// absent from this set ships to an allocated crew member's phone. `quote` /
+// `quotes` objects are NOT this denylist: they are allowlist-only
+// (`TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST`) so an unknown money key there
+// (`lineTotalEx`, `gstAmount`, `quotedTotal`, …) cannot fail open.
 export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   '_pricing_json',
   'pricing_json',
   'pricing_json_public',
   'pricingNotes',
-  'noteQuote',
-  'quote',
-  'quotes',
   'quoteTotal',
   'quote_total',
   'totalSell',
@@ -38147,7 +38208,387 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   'materialCostEstimate',
   'commissionCostEstimate',
 ])
-export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'dayRate', 'labourers'])
+// Walked, never dropped as objects: the quote narrative + quote-number pack.
+// A bare numeric/money value on these keys is still stripped. Nested objects
+// keep ONLY the allowlist below — unknown keys are dropped, not denylisted.
+export const TRADE_SCOPE_NARRATIVE_QUOTE_KEYS = new Set(['quote', 'quotes'])
+export const TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST = new Set([
+  'quote_number',
+  'quoteNumber',
+  'description',
+  'narrative',
+  'notes',
+  'note',
+  'text',
+  'name',
+  'label',
+  'title',
+  'qty',
+  'quantity',
+  'unit',
+  'units',
+  'materials',
+  'items',
+  'lines',
+  'kind',
+  'quote',
+  'quotes',
+])
+export const TRADE_SCOPE_MONEY_KEYS = new Set([
+  'unit_price',
+  'unitPrice',
+  'unit_price_ex',
+  'unitPriceEx',
+  'line_total',
+  'lineTotal',
+  'line_total_ex',
+  'price',
+  'rate',
+  'amount',
+  'amount_ex',
+  'amountEx',
+  'total',
+  'gst',
+  'deposit',
+  'cost',
+  'cost_price',
+  'costPrice',
+  'dayRate',
+  'day_rate',
+])
+export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'labourers'])
+// Construction / attendance quantities. Any other numeric leaf on the
+// allocated walker is treated as money and dropped — unknown keys such as
+// sellEx / quoted_ex / lineSell must not fail open.
+export const TRADE_SCOPE_QUANTITY_KEEP_KEYS = new Set([
+  'qty',
+  'quantity',
+  'qty_m',
+  'length',
+  'lengthM',
+  'totalLength',
+  'width',
+  'height',
+  'depth',
+  'retaining',
+  'slopePlinths',
+  'trades',
+  'days',
+  'labourers',
+  'count',
+  'metres',
+  'meters',
+  'totalMetres',
+  'sheetHeight',
+  'existingFenceLength',
+  'size',
+  'span',
+  'area',
+  'hours',
+  'hours_per_trade',
+  'labour_hours',
+  'cycle_number',
+  'reattend_count',
+  'portal_verified_cycle',
+  'submitted_cycle',
+  'storeys',
+  'storey',
+  'lat',
+  'lng',
+  'site_lat',
+  'site_lng',
+  'posts',
+  'postCount',
+  'pickets',
+  'star_picket_count',
+  'panel_count',
+  'base_count',
+  'projection',
+  'gateCount',
+])
+// Named known-prose keys only. Media and work-order projectors sanitize
+// these human-text fields and leave structural keys (URLs, ids, dates)
+// untouched — a leftover-number strip on storage_url / scheduled_date
+// corrupts playback and identifiers (TRD4-REV17-002 / TRD4-REV17-003).
+export const TRADE_SCOPE_NARRATIVE_TEXT_KEYS = new Set([
+  'description',
+  'narrative',
+  'notes',
+  'note',
+  'text',
+  'noteQuote',
+  'name',
+  'label',
+  'title',
+  'instructions',
+  'special_instructions',
+  'caption',
+  'comment',
+  'comments',
+])
+
+function tradeScopeBareMoneyValue(value: unknown): boolean {
+  if (typeof value === 'number' && Number.isFinite(value)) return true
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return true
+  return stripTradePackMoney(trimmed) === ''
+}
+
+function sanitizeTradeAllocatedStringLeaf(value: unknown): string {
+  return stripTradePackMoney(value)
+}
+
+function tradeScopeKeepNumericLeaf(key: string): boolean {
+  return TRADE_SCOPE_QUANTITY_KEEP_KEYS.has(key) || TRADE_SCOPE_LABOUR_KEEP_KEYS.has(key)
+}
+
+export function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
+  if (typeof value === 'string') return allocatedTradePackProse(value)
+  if (typeof value === 'number' && Number.isFinite(value)) return null
+  if (value && typeof value === 'object') {
+    const walked = sanitizeTradeAllocatedJsonTree(value)
+    return walked === undefined ? null : walked
+  }
+  return value
+}
+
+function projectTradeAllocatedMyJobsCard(assignment: any): void {
+  if (!assignment || typeof assignment !== 'object' || Array.isArray(assignment)) return
+  if ('notes' in assignment) {
+    assignment.notes = sanitizeTradeAllocatedJobNotes(assignment.notes)
+  }
+  if (assignment.jobs && typeof assignment.jobs === 'object' && !Array.isArray(assignment.jobs)) {
+    if ('notes' in assignment.jobs) {
+      assignment.jobs.notes = sanitizeTradeAllocatedJobNotes(assignment.jobs.notes)
+    }
+  }
+}
+
+/** Array elements have no own key. Apply the parent's keep/drop policy so
+ *  `{ quotedTotals: [594] }` cannot fail open just because the walker lost
+ *  the field name. Unlisted numeric / bare-money primitives are dropped. */
+function tradeScopeRetainPrimitive(value: unknown, parentKey: string | undefined): unknown {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (!parentKey || !tradeScopeKeepNumericLeaf(parentKey)) return undefined
+    return value
+  }
+  if (typeof value === 'string') {
+    if (parentKey && !tradeScopeKeepNumericLeaf(parentKey) && tradeScopeBareMoneyValue(value)) {
+      return undefined
+    }
+    const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+    return cleaned === '' ? undefined : cleaned
+  }
+  return value
+}
+
+function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string): any {
+  if (node == null) return node
+  if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
+  if (Array.isArray(node)) {
+    return node
+      .map((v) => sanitizeTradeAllocatedJsonTree(v, depth + 1, parentKey))
+      .filter((v) => v !== undefined)
+  }
+  if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
+  const out: Record<string, any> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (!tradeScopeKeepNumericLeaf(key)) continue
+      out[key] = value
+      continue
+    }
+    if (typeof value === 'string') {
+      if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
+      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+      if (cleaned === '') continue
+      out[key] = cleaned
+      continue
+    }
+    const walked = sanitizeTradeAllocatedJsonTree(value, depth + 1, key)
+    if (walked === undefined) continue
+    out[key] = walked
+  }
+  return out
+}
+
+function sanitizeTradeAllocatedEventNotes(events: any[]): any[] {
+  return (events || []).map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    if (!Object.prototype.hasOwnProperty.call(row, 'detail_json')) return row
+    const next = sanitizeTradeAllocatedJsonTree(row.detail_json)
+    return { ...row, detail_json: next === undefined ? null : next }
+  })
+}
+
+function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
+  return (media || []).map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(row)) {
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
+        if (typeof value === 'string') {
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          if (cleaned === '') continue
+          out[key] = cleaned
+          continue
+        }
+        if (value && typeof value === 'object') {
+          const walked = sanitizeTradeAllocatedJobNotes(value)
+          if (
+            walked &&
+            typeof walked === 'object' &&
+            !Array.isArray(walked) &&
+            Object.keys(walked as Record<string, unknown>).length === 0
+          ) continue
+          out[key] = walked
+          continue
+        }
+        continue
+      }
+      // Structural media fields stay verbatim so allocated playback works:
+      // storage_url, thumbnail_url, id, created_at, po_id, cycle ids.
+      out[key] = value
+    }
+    return out
+  })
+}
+
+// Billing overlay on makesafe_job_details. Allocated / makesafe_open get
+// flags + cycle identity, never invoice notes, billing rules, or money.
+export const TRADE_MAKESAFE_BILLING_KEYS = new Set([
+  'invoice_notes',
+  'billing_rules',
+  'invoice_ready_at',
+])
+
+function projectTradeAllocatedMakesafeDetails(details: any): any {
+  if (details == null) return details
+  if (typeof details !== 'object' || Array.isArray(details)) return details
+  const stripped: Record<string, any> = {}
+  for (const [key, value] of Object.entries(details)) {
+    if (TRADE_MAKESAFE_BILLING_KEYS.has(key)) continue
+    stripped[key] = value
+  }
+  const walked = sanitizeTradeAllocatedJsonTree(stripped)
+  return walked === undefined ? null : walked
+}
+
+function projectTradeAllocatedServiceReport(report: any): any {
+  if (report == null) return report
+  const walked = sanitizeTradeAllocatedJsonTree(report)
+  return walked === undefined ? null : walked
+}
+
+function projectTradeAllocatedServiceReports(reports: any[]): any[] {
+  return (reports || []).map((row) => projectTradeAllocatedServiceReport(row))
+}
+
+function presentTradeServiceReport(report: any, quoteVisible: boolean): any {
+  if (report == null) return report
+  return quoteVisible ? report : projectTradeAllocatedServiceReport(report)
+}
+
+// PO rows stay price-stripped for every trade tier. Allocated / makesafe_open
+// also money-sanitize free-text (line descriptions + row notes). Office and
+// division-manager keep the raw wording (full-quote). TRD4-REV15-002.
+const TRADE_PO_ROW_TEXT_KEYS = [
+  'supplier_name',
+  'notes',
+  'reference',
+  'name',
+  'label',
+  'title',
+] as const
+
+function tradePoLineDescription(li: any): string {
+  if (typeof li?.description === 'string') return li.description
+  if (typeof li?.Description === 'string') return li.Description
+  return ''
+}
+
+function tradePoScalarQuantity(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+function projectTradePoLineItem(li: any, quoteVisible: boolean): Record<string, any> {
+  const rawDesc = tradePoLineDescription(li)
+  if (quoteVisible) {
+    return {
+      description: rawDesc,
+      quantity: li?.quantity ?? li?.Quantity ?? 0,
+      unit: li?.unit || (li?.UnitAmount ? undefined : undefined),
+    }
+  }
+  // Allocated / makesafe_open: scalars only. An object quantity/unit/pricing
+  // blob is money-capable and must not copy through (TRD4-REV16-001).
+  // Unit strings are allowlisted / money-stripped — "AUD 9,999" cannot
+  // ride as a unit (TRD4-REV18-001).
+  return {
+    description: sanitizeTradeAllocatedStringLeaf(rawDesc),
+    quantity: tradePoScalarQuantity(li?.quantity ?? li?.Quantity) ?? 0,
+    unit: sanitizeTradePackUnit(li?.unit),
+  }
+}
+
+export function projectTradePurchaseOrders(
+  pos: unknown[] | null | undefined,
+  quoteVisible: boolean,
+): any[] {
+  return (pos || []).map((raw: any) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+    const lines = Array.isArray(raw.line_items) ? raw.line_items : []
+    const lineItems = lines.map((li: any) => projectTradePoLineItem(li, quoteVisible))
+    if (quoteVisible) {
+      return { ...raw, line_items: lineItems }
+    }
+    const po: Record<string, any> = {
+      id: raw.id,
+      po_number: raw.po_number,
+      status: raw.status,
+      delivery_date: raw.delivery_date,
+      line_items: lineItems,
+    }
+    for (const key of TRADE_PO_ROW_TEXT_KEYS) {
+      if (typeof raw[key] === 'string') {
+        po[key] = sanitizeTradeAllocatedStringLeaf(raw[key])
+      }
+    }
+    return po
+  })
+}
+
+// Operational job_service_reports columns for every trade-path read/return.
+// Never select('*') here: an unknown money column would fail open before
+// projection. Office / division-manager get these same columns unsanitized.
+export const TRADE_JOB_SERVICE_REPORT_COLUMNS = [
+  'id',
+  'job_id',
+  'submitted_by',
+  'checklist_json',
+  'notes',
+  'signature_data',
+  'signature_name',
+  'status',
+  'submitted_at',
+  'created_at',
+  'updated_at',
+  'weather',
+  'start_time',
+  'end_time',
+  'variations',
+  'cycle_number',
+  'attendance_cycle_id',
+  'cycle_attribution',
+].join(', ')
 
 // The recursion cap is a guard against a pathological blob, not a licence to
 // stop redacting: past it the branch is DROPPED, never returned verbatim. A
@@ -38156,32 +38597,116 @@ export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'dayRate'
 // using it as the drop marker cannot collide with real scope data.
 export const TRADE_SCOPE_REDACTION_MAX_DEPTH = 12
 
+function tradeAllocatedAllowlistedStringLeaf(key: string, value: string): string | undefined {
+  // Bare numeric / money strings ("9999", "85.00") are money, not narrative.
+  // Quantity-keep keys may retain a numeric string; everything else fails closed.
+  if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) return undefined
+  const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+  return cleaned === '' ? undefined : cleaned
+}
+
+function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: string): any {
+  if (node == null) return node
+  if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
+  if (Array.isArray(node)) {
+    return node
+      .map((v) => walkTradeQuoteObjectAllowlist(v, depth + 1, parentKey))
+      .filter((v) => v !== undefined)
+  }
+  if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
+  const out: Record<string, any> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
+    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    // Nested quote/quotes are narrative keys, same as the outer walker:
+    // a bare numeric / "$594" value is money, not a quote object.
+    if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
+      continue
+    }
+    if (typeof value === 'string') {
+      const cleaned = tradeAllocatedAllowlistedStringLeaf(key, value)
+      if (cleaned === undefined) continue
+      out[key] = cleaned
+      continue
+    }
+    const walked = TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && Array.isArray(value)
+      ? value
+        .filter((v) => !tradeScopeBareMoneyValue(v))
+        .map((v) =>
+          typeof v === 'string'
+            ? tradeAllocatedAllowlistedStringLeaf(key, v)
+            : walkTradeQuoteObjectAllowlist(v, depth + 1, key)
+        )
+        .filter((v) => v !== undefined)
+      : walkTradeQuoteObjectAllowlist(value, depth + 1, key)
+    if (walked === undefined) continue
+    out[key] = walked
+  }
+  return out
+}
+
 export function redactTradeScopeQuote(scope: any): any {
-  const walk = (node: any, depth: number): any => {
+  const walk = (node: any, depth: number, parentKey?: string): any => {
     if (node == null) return node
     if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
     if (Array.isArray(node)) {
-      return node.map((v) => walk(v, depth + 1)).filter((v) => v !== undefined)
+      return node.map((v) => walk(v, depth + 1, parentKey)).filter((v) => v !== undefined)
     }
-    if (typeof node !== 'object') return node
+    if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key)) continue
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
+        if (tradeScopeBareMoneyValue(value)) continue
+        if (typeof value === 'string') {
+          const cleaned = stripTradePackMoney(value)
+          if (!cleaned) continue
+          out[key] = cleaned
+          continue
+        }
+        const allowlisted = walkTradeQuoteObjectAllowlist(value, depth + 1, key)
+        if (allowlisted === undefined) continue
+        out[key] = allowlisted
+        continue
+      }
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (!tradeScopeKeepNumericLeaf(key)) continue
+        out[key] = value
+        continue
+      }
+      if (typeof value === 'string') {
+        if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        if (cleaned === '') continue
+        out[key] = cleaned
+        continue
+      }
       if (key === 'pricing') {
-        // Keep only the installer's own labour budget inputs.
+        // Keep only the installer's own labour budget inputs. Walk each
+        // retained keep-key value so nested money cannot fail open through
+        // trades / days / labourers (TRD4-REV15-001).
         const labour = value && typeof value === 'object' && !Array.isArray(value)
           ? (value as any).labour
           : null
         const keptLabour: Record<string, any> = {}
         if (labour && typeof labour === 'object' && !Array.isArray(labour)) {
           for (const [lk, lv] of Object.entries(labour)) {
-            if (TRADE_SCOPE_LABOUR_KEEP_KEYS.has(lk)) keptLabour[lk] = lv
+            if (!TRADE_SCOPE_LABOUR_KEEP_KEYS.has(lk)) continue
+            const walked = walk(lv, depth + 1, lk)
+            if (walked === undefined) continue
+            if (
+              walked &&
+              typeof walked === 'object' &&
+              !Array.isArray(walked) &&
+              Object.keys(walked).length === 0
+            ) continue
+            keptLabour[lk] = walked
           }
         }
         out.pricing = Object.keys(keptLabour).length > 0 ? { labour: keptLabour } : {}
         continue
       }
-      const walked = walk(value, depth + 1)
+      const walked = walk(value, depth + 1, key)
       if (walked === undefined) continue
       out[key] = walked
     }
@@ -38193,6 +38718,142 @@ export function redactTradeScopeQuote(scope: any): any {
   return walk(scope, 0)
 }
 
+// Allocated WO lines are allowlist-only. A denylist that copies every other
+// field lets unitPriceEx / lineTotalEx / gstAmount / quotedTotal / cost and
+// nested pricing objects fail open onto workOrders.
+export const TRADE_WO_SCOPE_ITEM_ALLOWLIST = new Set([
+  'description',
+  'instructions',
+  'notes',
+  'note',
+  'name',
+  'label',
+  'title',
+  'text',
+  'qty',
+  'quantity',
+  'unit',
+  'units',
+  'kind',
+  'special_instructions',
+])
+
+function isTradeWoScopeItemScalar(value: unknown): boolean {
+  return value == null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+}
+
+export function redactTradeWorkOrderScopeItems(items: any): any {
+  if (items == null) return items
+  if (!Array.isArray(items)) return []
+  return items.flatMap((item: any) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(item)) {
+      if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (!isTradeWoScopeItemScalar(value)) continue
+      if (key === 'kind') {
+        const kind = sanitizeTradePackKind(value)
+        if (kind !== undefined) out[key] = kind
+        continue
+      }
+      if (key === 'unit' || key === 'units') {
+        const unit = sanitizeTradePackUnit(value)
+        if (unit !== undefined) out[key] = unit
+        continue
+      }
+      if (typeof value === 'string') {
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        if (cleaned === '') continue
+        out[key] = cleaned
+        continue
+      }
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (key === 'qty' || key === 'quantity') out[key] = value
+        continue
+      }
+      out[key] = value
+    }
+    return [out]
+  })
+}
+
+export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
+  return (orders || []).map((wo: any) => {
+    if (!wo || typeof wo !== 'object' || Array.isArray(wo)) return wo
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(wo)) {
+      if (key === 'scope_items') {
+        out.scope_items = redactTradeWorkOrderScopeItems(value)
+        continue
+      }
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
+        if (typeof value === 'string') {
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          if (cleaned === '') continue
+          out[key] = cleaned
+        }
+        continue
+      }
+      if (typeof value === 'string' || value == null || typeof value === 'boolean') {
+        // Structural identifiers and dates stay verbatim (scheduled_date,
+        // id, wo_number, status). A leftover-number strip turns
+        // 2026-08-20 into -08-20 (TRD4-REV17-003).
+        out[key] = value
+        continue
+      }
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (!tradeScopeKeepNumericLeaf(key)) continue
+        out[key] = value
+        continue
+      }
+      // Nested objects/arrays can carry money — allocated fails closed.
+    }
+    return out
+  })
+}
+
+export function redactTradeQuotePackMoney(packs: any[]): any[] {
+  return (packs || []).map((pack: any) => {
+    if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return pack
+    return {
+      quote_number: pack.quote_number ?? null,
+      job_document_id: pack.job_document_id ?? null,
+      sent_at: pack.sent_at ?? null,
+      accepted: pack.accepted,
+      status: pack.status,
+      job_type: pack.job_type,
+      summary: pack.summary == null ? pack.summary : allocatedTradePackProse(pack.summary),
+      source: pack.source,
+      items: (pack.items || []).flatMap((item: any) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+        if (String(item.kind || '').toLowerCase() === 'note') return []
+        const kind = sanitizeTradePackKind(item.kind)
+        if (item.kind != null && item.kind !== '' && kind === undefined) return []
+        const quantity = typeof item.quantity === 'number' && Number.isFinite(item.quantity)
+          ? item.quantity
+          : item.quantity == null ? item.quantity : null
+        const out: Record<string, any> = {
+          description: item.description == null
+            ? item.description
+            : allocatedTradePackProse(item.description),
+          quantity,
+          unit_price: null,
+          line_total: null,
+        }
+        if (kind !== undefined) out.kind = kind
+        const unit = sanitizeTradePackUnit(item.unit)
+        if (unit !== undefined) out.unit = unit
+        return [out]
+      }),
+    }
+  })
+}
+
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
 // helper ops already uses for invoice descriptions — no second scope grammar.
 //
@@ -38202,10 +38863,18 @@ export function redactTradeScopeQuote(scope: any): any {
 // fallback is already inert, but this strips it explicitly so a later maintainer
 // adding pricing_json to the trade select cannot silently start leaking a quote
 // description into an installer's phone.
-export function _tradeScopeSummary(job: any): string {
+//
+// Allocated / makesafe_open callers pass the already-redacted job and
+// sanitizeMoney so colour/material/connection cannot carry a sell figure.
+// Office / division-manager pass the live job and leave the line verbatim.
+export function _tradeScopeSummary(
+  job: any,
+  opts?: { sanitizeMoney?: boolean },
+): string {
   if (!job) return ''
   const { pricing_json: _pricing, ...scopeOnly } = job
-  return buildScopeSummaryLine(scopeOnly) || ''
+  const line = buildScopeSummaryLine(scopeOnly) || ''
+  return opts?.sanitizeMoney ? stripTradePackMoney(line) : line
 }
 
 // One crew roster per job, carrying the lead designation.
@@ -38289,21 +38958,29 @@ async function tradeJobDetail(
   })
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
-  const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes, quoteDocsRes] = await Promise.all([
+  const TRADE_JOB_MEDIA_COLUMNS =
+    'id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at, attendance_cycle_id, cycle_attribution'
+  const [jobRes, docsRes, mediaRes, videoMediaRes, eventsRes, reportRes, woRes, crewRes, posRes, quoteDocsRes] =
+    await Promise.all([
     client.from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, pricing_json, ghl_opportunity_id, ghl_contact_id, metadata')
       .eq('id', jobId).eq('org_id', viewer.orgId).single(),
     client.from('job_documents')
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
       .eq('job_id', jobId).order('created_at', { ascending: false }),
+    // Photos/other stay paged. Videos are a separate uncapped lane so a
+    // 200-row photo page cannot omit the walkthrough the trade player needs.
     client.from('job_media')
-      .select('id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at, attendance_cycle_id, cycle_attribution')
+      .select(TRADE_JOB_MEDIA_COLUMNS)
       .eq('job_id', jobId).order('created_at').limit(200),
+    client.from('job_media')
+      .select(TRADE_JOB_MEDIA_COLUMNS)
+      .eq('job_id', jobId).eq('type', 'video').order('created_at'),
     client.from('job_events')
       .select('id, event_type, detail_json, created_at, users:user_id(name)')
       .eq('job_id', jobId).eq('event_type', 'note').order('created_at', { ascending: false }).limit(50),
     client.from('job_service_reports')
-      .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
     // Work order data (scope items, instructions).
     //
     // NOT limit(1). The admin path (jobDetail) returns every non-cancelled work
@@ -38333,20 +39010,22 @@ async function tradeJobDetail(
 
   if (jobRes.error) throw jobRes.error
 
-  // Strip pricing from PO line items — trades only see descriptions and quantities
-  const safePOs = (posRes.data || []).map((po: any) => ({
-    ...po,
-    line_items: (po.line_items || []).map((li: any) => ({
-      description: li.description || li.Description || '',
-      quantity: li.quantity || li.Quantity || 0,
-      unit: li.unit || li.UnitAmount ? undefined : undefined,
-    })),
-  }))
+  // Strip pricing from PO line items — trades only see descriptions and quantities.
+  // Allocated / makesafe_open also money-sanitize free-text (TRD4-REV15-002).
+  const safePOs = projectTradePurchaseOrders(posRes.data, quoteVisible)
 
-  // Fire-and-forget: extract scope photos if not already done
-  if (jobRes.data?.scope_json?.scopeMedia?.photos?.length > 0) {
-    extractScopePhotos(client, jobId, jobRes.data.scope_json)
-      .catch(e => console.log('[ops-api] scope photo extraction failed:', e?.message))
+  // Promote scope walkthroughs (and missing photos) into job_media so the
+  // trade player gets a real storage_url. Awaits so this response includes
+  // the just-registered rows. No-op when collect is empty (no storage/insert).
+  let extractedScopeMedia: Awaited<ReturnType<typeof extractScopeMedia>> = {
+    photos: 0,
+    videos: 0,
+    rows: [],
+  }
+  try {
+    extractedScopeMedia = await extractScopeMedia(client, jobId, jobRes.data?.scope_json)
+  } catch (e) {
+    console.log('[ops-api] scope media extraction failed:', (e as Error)?.message)
   }
 
   // Make-safe overlay details for trade view
@@ -38443,13 +39122,41 @@ async function tradeJobDetail(
       makesafeDetails.attendance_cycle_id || null,
     )
     : (reportRes.data || [])[0] || null
+  if (videoMediaRes.error) {
+    console.error('[ops-api] trade video media read failed:', videoMediaRes.error.message)
+  }
+  const mediaByKey = new Map<string, any>()
+  for (
+    const row of [
+      ...(mediaRes.data || []),
+      ...(videoMediaRes.data || []),
+      ...extractedScopeMedia.rows,
+    ]
+  ) {
+    const key = String(row?.id || row?.storage_url || '')
+    if (key) mediaByKey.set(key, row)
+  }
+  const allMedia = mediaByKey.size > 0
+    ? [...mediaByKey.values()]
+    : [
+      ...(mediaRes.data || []),
+      ...(videoMediaRes.data || []),
+      ...extractedScopeMedia.rows,
+    ]
   const currentCycleMedia = makesafeDetails
     ? filterMediaForCurrentCycle(
-      mediaRes.data || [],
+      allMedia,
       makesafeDetails,
       makesafeDetails.attendance_cycle_id || null,
     )
-    : mediaRes.data || []
+    : allMedia
+  // Reattend cycle filter must not hide the only walkthrough. Trade list =
+  // current-cycle rows plus every job video (scope walkthroughs included).
+  const tradeMedia = selectTradeJobMedia(
+    allMedia,
+    makesafeDetails,
+    makesafeDetails?.attendance_cycle_id || null,
+  )
 
   // A wrong/absent column comes back from PostgREST as a 400 with data:null,
   // which `|| []` would turn into a silently empty crew list — the exact failure
@@ -38466,20 +39173,35 @@ async function tradeJobDetail(
 
   const tradeCrew = _tradeCrewRoster(crewRes.data || [])
   // Documents: office and a division manager get the office document set
-  // (everything, quotes included — "sees everything, can do whatever he
-  // wants"). An allocated trade (lead or crew) and the MakeSafe open-pool
-  // exception get only ops-flagged visible_to_trades rows AND never a quote-type
-  // document, whatever the flag says (Captain's one hard exclusion).
+  // (everything, quotes and priced work-order PDFs included — "sees
+  // everything, can do whatever he wants"). An allocated trade (lead or
+  // crew) and the MakeSafe open-pool exception get only ops-flagged
+  // visible_to_trades rows AND never a quote-type or full priced work-order
+  // PDF, whatever the flag says. JSON TradeQuotePack + allowlisted WO
+  // lines are the price-free substitute until TRD-6.
   const visibleDocuments = quoteVisible
     ? (docsRes.data || [])
     : _tradeDocumentsForAllocatedTrade(docsRes.data || [])
-  const workOrders = woRes.data || []
+  const workOrders = quoteVisible
+    ? (woRes.data || [])
+    : redactTradeWorkOrdersForAllocated(woRes.data || [])
   // scope_json carries the scoping tools' quote (pricing, _pricing_json, sell
-  // rows, quote notes). It is redacted server-side for every non-quote tier;
-  // the labour days/rate the app already shows installers survives.
+  // rows). It is redacted server-side for every non-quote tier. TRD-4 keeps
+  // narrative scope + quote numbers. Outer-blob money uses the denylist;
+  // `quote`/`quotes` objects are allowlist-only. Quote packs keep
+  // descriptions/qty/quote_number; unit prices are nulled for allocated viewers.
   if (!quoteVisible && tradeSafeJob && 'scope_json' in tradeSafeJob) {
     tradeSafeJob.scope_json = redactTradeScopeQuote(tradeSafeJob.scope_json)
   }
+  if (!quoteVisible && tradeSafeJob) {
+    tradeSafeJob.notes = sanitizeTradeAllocatedJobNotes(tradeSafeJob.notes)
+  }
+  const allocatedMedia = quoteVisible
+    ? tradeMedia
+    : sanitizeTradeAllocatedMediaNotes(tradeMedia)
+  const tradeQuotePacks = quoteVisible
+    ? quotePacks
+    : redactTradeQuotePackMoney(quotePacks)
 
   return {
     job: tradeSafeJob,
@@ -38497,17 +39219,28 @@ async function tradeJobDetail(
       authority: 'typed_job_metadata',
     }),
     documents: visibleDocuments,
-    media: currentCycleMedia,
+    media: allocatedMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
     // notes thread. The markers stay in job_events untouched.
-    notes: (eventsRes.data || []).filter((n: any) => !noteIsSystemMarker(n?.detail_json?.text ?? n?.detail_json?.note ?? '')),
-    serviceReport: currentServiceReport,
+    notes: (() => {
+      const human = (eventsRes.data || []).filter((n: any) =>
+        !noteIsSystemMarker(n?.detail_json?.text ?? n?.detail_json?.note ?? '')
+      )
+      return quoteVisible ? human : sanitizeTradeAllocatedEventNotes(human)
+    })(),
+    serviceReport: quoteVisible
+      ? currentServiceReport
+      : projectTradeAllocatedServiceReport(currentServiceReport),
     // Re-attendance (M-C): all reports (latest first) so a re-attended job shows
     // every visit's report, not just the latest. serviceReport is the current
     // attendance only once a reattend boundary exists.
-    serviceReports: reportRes.data || [],
-    currentCycleMedia,
+    // Allocated / makesafe_open get a money-projected report; office /
+    // division-manager keep the same operational columns unsanitized.
+    serviceReports: quoteVisible
+      ? (reportRes.data || [])
+      : projectTradeAllocatedServiceReports(reportRes.data || []),
+    currentCycleMedia: allocatedMedia,
     currentCyclePhotoCount: currentCycleMedia.filter((m: any) =>
       !m?.type || m.type === 'photo'
     ).length,
@@ -38518,9 +39251,12 @@ async function tradeJobDetail(
     // has always returned. A job with two live work orders showed the trade only
     // one of them before this.
     workOrders,
-    // Additive: the work-order PDFs ops has flagged for trades, lifted out of the
-    // undifferentiated documents array so the app has a work-order surface to
-    // render instead of having to sort types itself. Already visibility-filtered.
+    // Additive: the work-order PDFs ops has flagged for trades, lifted out of
+    // the undifferentiated documents array so the app has a work-order surface
+    // to render instead of having to sort types itself. Already
+    // visibility-filtered; allocated / makesafe_open also drop priced
+    // work_order / supplier_work_order files, so this list is empty there
+    // until TRD-6. Office / division-manager keep the full PDFs.
     workOrderDocuments: visibleDocuments.filter((d: any) =>
       d?.type === 'work_order' || d?.type === 'supplier_work_order'
     ),
@@ -38529,13 +39265,21 @@ async function tradeJobDetail(
     // the trade payload was the raw scope_json blob (measured up to 1.6 MB on a
     // live job, mostly base64 site-plan media), which is not something a phone
     // should be reverse-engineering.
-    scopeSummary: _tradeScopeSummary(jobRes.data),
+    // Allocated / makesafe_open must not derive a summary from the raw
+    // unredacted blob — colour / material / connection can carry sell figures.
+    // Office and division-manager keep the full-quote line from the live job.
+    scopeSummary: _tradeScopeSummary(
+      quoteVisible ? jobRes.data : tradeSafeJob,
+      quoteVisible ? undefined : { sanitizeMoney: true },
+    ),
     crew: tradeCrew,
     // Additive: who leads this job, or null when nobody has been designated.
     leadInstaller: _tradeLeadInstaller(tradeCrew),
     purchaseOrders: safePOs,
-    makesafe_details: makesafeDetails,
-    quote_packs: quotePacks,
+    makesafe_details: quoteVisible
+      ? makesafeDetails
+      : projectTradeAllocatedMakesafeDetails(makesafeDetails),
+    quote_packs: tradeQuotePacks,
   }
 }
 
@@ -38983,6 +39727,7 @@ async function submitServiceReport(
   client: any,
   body: any,
   access?: TradeJobAccessContext,
+  isOffice = false,
 ) {
   const { jobId, job_id, userId, user_id, checklist, notes, signatureData, signatureName, status, weather, start_time, end_time, variations } = body
   const jId = jobId || job_id
@@ -39002,11 +39747,16 @@ async function submitServiceReport(
       job_id: jId,
       userId: uId,
       status: reportStatus,
-    }, access)
+    }, access, { isOffice })
   }
 
   // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
-  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, false, access)
+  // Fail closed: unknown viewer (no user, not office) never sees raw money.
+  let quoteVisible = isOffice
+  if (uId) {
+    const decision = await assertAssignedOrMakesafeAccess(client, jId, uId, isOffice, access)
+    quoteVisible = decision.quoteVisible
+  }
 
   // Upload signature to storage if provided (instead of storing base64 in DB)
   const signatureUrl = await persistServiceReportSignature(client, jId, signatureData)
@@ -39043,7 +39793,7 @@ async function submitServiceReport(
       .from('job_service_reports')
       .update(reportFields)
       .eq('id', existing.id)
-      .select().single()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).single()
 
     if (error) throw error
     report = data
@@ -39051,7 +39801,7 @@ async function submitServiceReport(
     const { data, error } = await client
       .from('job_service_reports')
       .insert({ job_id: jId, ...reportFields })
-      .select().single()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).single()
 
     if (error) throw error
     report = data
@@ -39088,21 +39838,27 @@ async function submitServiceReport(
     }
   }
 
-  return { report }
+  return { report: presentTradeServiceReport(report, quoteVisible) }
 }
 export const _submitServiceReportForTest = submitServiceReport
 
-async function getServiceReport(client: any, params: URLSearchParams, userId: string, access?: TradeJobAccessContext) {
+async function getServiceReport(
+  client: any,
+  params: URLSearchParams,
+  userId: string,
+  access?: TradeJobAccessContext,
+  isOffice = false,
+) {
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
   // Verify user is assigned, manages the job's vertical, or this is a
   // MakeSafe/SWMS field-report job.
-  await assertAssignedOrMakesafeAccess(client, jobId, userId, false, access)
+  const decision = await assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)
 
   const { data: report } = await client
     .from('job_service_reports')
-    .select('*')
+    .select(TRADE_JOB_SERVICE_REPORT_COLUMNS)
     .eq('job_id', jobId)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -39118,7 +39874,7 @@ async function getServiceReport(client: any, params: URLSearchParams, userId: st
     .maybeSingle()
 
   return {
-    report: report || null,
+    report: presentTradeServiceReport(report || null, decision.quoteVisible),
     checklistTemplate: config?.config_value?.items || [],
   }
 }
@@ -42730,13 +43486,31 @@ async function resolveRoofReportPhotos(
 // Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
 // Shared by submit_roof_report and render_roof_report. attachMakesafeDocument
 // writes the makesafe_document_attached audit row.
+// Trade write responses (save/submit) may carry the locked client report fee
+// only for office / division-manager. Allocated and makesafe_open get storey
+// and status only — the fee stays internal to PDF rendering / office invoicing.
+function presentRoofReportWrite<T extends { price?: unknown }>(
+  result: T,
+  quoteVisible: boolean,
+): T | Omit<T, 'price'> {
+  if (quoteVisible) return result
+  const { price: _omit, ...rest } = result
+  return rest
+}
+
+export const _presentRoofReportWriteForTest = presentRoofReportWrite
+
 async function renderAndAttachRoofReport(
   client: any,
   jobId: string,
   renderJob: Record<string, unknown>,
   operator: string,
 ) {
-  const rendered = await renderRoofReportPdf(renderJob as any)
+  // The attached roof_report defaults visible_to_trades=true. Always omit the
+  // client fee from those bytes so allocated / makesafe_open viewers keep the
+  // report content without the $275/$330 row. Office invoicing still prices
+  // from roofReportPrice, not this PDF.
+  const rendered = await renderRoofReportPdf(omitRoofReportFee(renderJob as any))
   let bin = ''
   for (let i = 0; i < rendered.bytes.length; i++) bin += String.fromCharCode(rendered.bytes[i])
   const pdfBase64 = btoa(bin)
@@ -42756,20 +43530,28 @@ async function renderAndAttachRoofReport(
 
 // (Wave 3a) roof_report_template -- READ. Returns the field schema, the job
 // header the form shows, and any existing draft for resume.
-async function getRoofReportTemplateForJob(client: any, jobId: string | null) {
+async function getRoofReportTemplateForJob(
+  client: any,
+  jobId: string | null,
+  opts: { quoteVisible?: boolean } = {},
+) {
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
   const meta = await loadRoofReportJobMeta(client, jobId)
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('fields_json, storey, status, report_doc_id, submitted_at, template_version, updated_at')
     .eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
-  return { template: getRoofReportTemplate(), job: meta, draft: existing || null }
+  return {
+    template: projectRoofReportTemplate(getRoofReportTemplate(), opts.quoteVisible === true),
+    job: meta,
+    draft: existing || null,
+  }
 }
 
 // (Wave 3b) save_roof_report -- WRITE. Draft-safe, idempotent upsert of the fill.
 // Never renders, never advances the board. A save on an already-submitted fill is
 // a no-op (the submitted report is terminal).
-async function saveRoofReport(client: any, body: any) {
+async function saveRoofReport(client: any, body: any, opts: { quoteVisible?: boolean } = {}) {
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
@@ -42879,7 +43661,10 @@ async function saveRoofReport(client: any, body: any) {
 
   let price: any = null
   try { price = roofReportPrice(storey) } catch { price = null }
-  return { ok: true, status: 'draft', saved: true, draft_id: draft.id, storey, price }
+  return presentRoofReportWrite(
+    { ok: true, status: 'draft', saved: true, draft_id: draft.id, storey, price },
+    opts.quoteVisible === true,
+  )
 }
 
 // (Wave 3c) submit_roof_report -- WRITE. Validates the merged fill, renders OUR
@@ -42919,7 +43704,7 @@ async function assertRoofReportIsReportTypeJob(client: any, jobId: string) {
   }
 }
 
-async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}) {
+async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}, opts: { quoteVisible?: boolean } = {}) {
   const renderAndAttach = deps.renderAndAttach || renderAndAttachRoofReport
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -43019,7 +43804,7 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
 
   // Render + attach OUR letterhead PDF.
   const meta = await loadRoofReportJobMeta(client, jobId)
-  const renderJob = buildRoofReportJob(fieldsJson, meta, photosForRender)
+  const renderJob = omitRoofReportFee(buildRoofReportJob(fieldsJson, meta, photosForRender) as any)
   const attached = await renderAndAttach(
     client,
     jobId,
@@ -43093,17 +43878,20 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     eventSync = { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
 
-  return {
-    ok: true,
-    status: 'submitted',
-    draft_id: draft.id,
-    report_doc_id: attached.document_id,
-    file_name: attached.file_name,
-    render_hash: attached.render_hash,
-    price,
-    board_sync: boardSync,
-    event_sync: eventSync,
-  }
+  return presentRoofReportWrite(
+    {
+      ok: true,
+      status: 'submitted',
+      draft_id: draft.id,
+      report_doc_id: attached.document_id,
+      file_name: attached.file_name,
+      render_hash: attached.render_hash,
+      price,
+      board_sync: boardSync,
+      event_sync: eventSync,
+    },
+    opts.quoteVisible === true,
+  )
 }
 
 // Advance the make-safe reporting checklist for a roof-report submit. Sets the
@@ -43221,7 +44009,9 @@ async function renderRoofReportAction(client: any, body: any, deps: RoofRenderDe
     draftPhotos,
   )
   const meta = await loadRoofReportJobMeta(client, jobId)
-  const renderJob = buildRoofReportJob({ ...mergedText, photos: [] }, meta, photosForRender)
+  const renderJob = omitRoofReportFee(
+    buildRoofReportJob({ ...mergedText, photos: [] }, meta, photosForRender) as any,
+  )
   const attached = await renderAndAttach(
     client,
     jobId,

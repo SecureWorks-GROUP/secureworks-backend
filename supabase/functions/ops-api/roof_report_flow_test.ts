@@ -10,6 +10,8 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _getRoofReportTemplateForJobForTest,
+  _presentRoofReportWriteForTest,
   _renderRoofReportActionForTest,
   _saveRoofReportForTest,
   _submitRoofReportForTest,
@@ -218,7 +220,8 @@ Deno.test("save_roof_report: inserts a draft, denormalises storey, records audit
   assertEquals(res.status, "draft");
   assertEquals(res.saved, true);
   assertEquals(res.storey, "single");
-  assertEquals(res.price.inc_gst, 275);
+  assertEquals(res.price, undefined);
+  assertEquals("price" in res, false);
 
   assertEquals(rows.makesafe_roof_report_drafts.length, 1);
   const draft = rows.makesafe_roof_report_drafts[0];
@@ -641,13 +644,16 @@ Deno.test("submit_roof_report: renders our PDF, persists submitted, advances the
 
   assertEquals(res.ok, true);
   assertEquals(res.status, "submitted");
-  assertEquals(res.price.inc_gst, 330); // double storey
+  assertEquals(res.price, undefined);
+  assertEquals("price" in res, false);
   assertEquals(res.board_sync.ok, true);
   assertEquals(res.event_sync.ok, true);
 
-  // Render was called once, with the fee computed onto the render job.
+  // Trade-visible attach omits the client fee; office audit still records it.
   assertEquals(calls.length, 1);
-  assertEquals(calls[0].renderJob.price_inc_gst, 330);
+  assertEquals(calls[0].renderJob.price_inc_gst, undefined);
+  assertEquals(calls[0].renderJob.price_ex_gst, undefined);
+  assertEquals(calls[0].renderJob.include_report_fee, false);
   assertEquals(calls[0].renderJob.ref, "MLB-17270PO-54939 / SWMS-26861");
   assertEquals((calls[0].renderJob.photos as any[])[0].label, "Ridge capping");
 
@@ -700,8 +706,10 @@ Deno.test("submit_roof_report: merges an existing draft with the submit request 
   }, deps);
 
   assertEquals(res.ok, true);
-  assertEquals(res.price.inc_gst, 275); // single storey from the request
+  assertEquals(res.price, undefined);
+  assertEquals("price" in res, false);
   assertEquals(calls[0].renderJob.roof_type, "Terracotta Tiles"); // from the draft
+  assertEquals(calls[0].renderJob.include_report_fee, false);
   assertEquals(rows.makesafe_roof_report_drafts[0].status, "submitted");
 });
 
@@ -899,6 +907,8 @@ Deno.test("render_roof_report: succeeds on a report_type='roof_report' job", asy
   assertEquals(res.success, true);
   assertEquals(res.document_id, "00000000-0000-0000-0000-0000000000aa");
   assertEquals(calls.length, 1);
+  assertEquals(calls[0].renderJob.include_report_fee, false);
+  assertEquals(calls[0].renderJob.price_inc_gst, undefined);
 });
 
 Deno.test("render_roof_report: job_media read does not select cycle_number", async () => {
@@ -954,4 +964,87 @@ Deno.test("render_roof_report: supplied fields persist onto the roof draft", asy
   assertEquals(draft.fields_json.overall_findings, "Cracked tiles");
   assertEquals(draft.fields_json.leak_cause, "siliconed both cracks");
   assertEquals(draft.storey, "double");
+});
+
+Deno.test("save_roof_report: office/quote-visible write may return the fee; allocated does not", async () => {
+  const { client } = makeClient(baseRows());
+  const office: any = await _saveRoofReportForTest(
+    client,
+    {
+      job_id: "job-1",
+      fields: { inspected_by: "Sam Trade", storeys: STOREY_SINGLE },
+    },
+    { quoteVisible: true },
+  );
+  assertEquals(office.storey, "single");
+  assertEquals(office.price.ex_gst, 250);
+  assertEquals(office.price.inc_gst, 275);
+
+  const allocated: any = await _saveRoofReportForTest(
+    client,
+    {
+      job_id: "job-1",
+      fields: { inspected_by: "Sam Trade", storeys: STOREY_DOUBLE },
+    },
+    { quoteVisible: false },
+  );
+  assertEquals(allocated.storey, "double");
+  assertEquals("price" in allocated, false);
+  assertEquals(JSON.stringify(allocated).includes("330"), false);
+  assertEquals(JSON.stringify(allocated).includes("300"), false);
+});
+
+Deno.test("submit_roof_report: office write may return the fee; allocated/makesafe_open do not", async () => {
+  const { client } = makeClient(baseRows());
+  const { calls, deps } = stubRenderDeps();
+  const office: any = await _submitRoofReportForTest(
+    client,
+    { job_id: "job-1", fields: fullFill },
+    deps,
+    { quoteVisible: true },
+  );
+  assertEquals(office.price.inc_gst, 330);
+  assertEquals(office.price.ex_gst, 300);
+  assertEquals(calls[0].renderJob.include_report_fee, false);
+
+  const allocated: any = await _submitRoofReportForTest(
+    client,
+    { job_id: "job-1", fields: fullFill },
+    deps,
+    { quoteVisible: false },
+  );
+  assertEquals(allocated.already_submitted, true);
+  assertEquals("price" in allocated, false);
+});
+
+Deno.test("presentRoofReportWrite strips price unless quote_visible", () => {
+  const priced = {
+    ok: true,
+    storey: "single",
+    price: { ex_gst: 250, inc_gst: 275 },
+  };
+  assertEquals(_presentRoofReportWriteForTest(priced, true), priced);
+  const hidden = _presentRoofReportWriteForTest(priced, false);
+  assertEquals("price" in hidden, false);
+  assertEquals((hidden as { storey: string }).storey, "single");
+});
+
+Deno.test("roof_report_template: allocated omits the client fee; office keeps it", async () => {
+  const { client } = makeClient(baseRows());
+  const allocated: any = await _getRoofReportTemplateForJobForTest(client, "job-1");
+  assert(allocated.template);
+  assertEquals(allocated.template.pricing.single, undefined);
+  assertEquals(allocated.job.ref.includes("SWMS-26861"), true);
+  const allocatedDump = JSON.stringify(allocated.template);
+  assertEquals(allocatedDump.includes("275"), false);
+  assertEquals(allocatedDump.includes("330"), false);
+  assertEquals(/fee/i.test(allocatedDump), false);
+
+  const office: any = await _getRoofReportTemplateForJobForTest(
+    client,
+    "job-1",
+    { quoteVisible: true },
+  );
+  assertEquals(office.template.pricing.single.inc_gst, 275);
+  assertEquals(office.template.pricing.double.inc_gst, 330);
 });

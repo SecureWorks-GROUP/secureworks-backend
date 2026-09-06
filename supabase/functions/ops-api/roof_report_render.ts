@@ -11,7 +11,8 @@
 //   - orange top band (#F15A29)
 //   - white header band with 'Roof Inspection Report' + '<ref> | <address>'
 //   - KV table (Job reference, Property, Site contact, Inspection date,
-//     Inspected by, Weather, Number of storeys, Report fee inc GST)
+//     Inspected by, Weather, Number of storeys; Report fee inc GST only when
+//     include_report_fee is not false — trade-visible attaches omit the fee)
 //   - Property Details KV grid + Roof Findings Yes/No block
 //   - prose sections (Scope of Inspection, Roof Condition and Findings,
 //     Maintenance) with doc.splitTextToSize wrapping
@@ -57,6 +58,10 @@ export interface RoofReportJob {
   scope_summary?: string;
   price_ex_gst?: number;
   price_inc_gst?: number;
+  // Office / invoice letterhead may show the locked client report fee.
+  // Trade-visible attaches set this false so allocated / makesafe_open
+  // viewers get the report content without the fee row.
+  include_report_fee?: boolean;
   photos?: RoofReportPhoto[];
   photo_limit?: number;
 }
@@ -88,6 +93,45 @@ export function yesNo(v: unknown): string {
   if (s === "yes" || s === "true" || s === "1" || s === "y") return "Yes";
   if (s === "no" || s === "false" || s === "0" || s === "n") return "No";
   return String(v);
+}
+
+// Strip the client report fee from a render job so a trade-visible PDF can
+// keep the inspection content without the locked $275/$330 fee row.
+export function omitRoofReportFee<T extends RoofReportJob>(job: T): T {
+  const next = { ...job, include_report_fee: false };
+  delete next.price_ex_gst;
+  delete next.price_inc_gst;
+  return next;
+}
+
+export function roofReportIncludesFee(job: Pick<RoofReportJob, "include_report_fee" | "price_inc_gst">): boolean {
+  return job.include_report_fee !== false && job.price_inc_gst != null;
+}
+
+// Header KV rows. The Report fee line is office-only; trade-visible renders
+// keep storeys and drop the fee.
+export function roofReportHeaderRows(job: RoofReportJob): Array<[string, string]> {
+  const attendance = sanitiseText(
+    `${job.inspection_date || "to confirm"}${
+      job.inspection_time ? " " + job.inspection_time : ""
+    }`,
+  ).trim();
+  const rows: Array<[string, string]> = [
+    ["Job reference", String(job.ref || "")],
+    ["Property", String(job.address || "")],
+    ["Site contact", String(job.contact || job.client || "")],
+    ["Inspection date", attendance],
+    ["Inspected by", String(job.inspected_by || "")],
+    ["Weather", String(job.weather || "")],
+    ["Number of storeys", String(job.storeys || "")],
+  ];
+  if (roofReportIncludesFee(job)) {
+    const feeLine = `${formatAud(job.price_inc_gst)} inc GST${
+      job.storeys ? " (" + sanitiseText(job.storeys) + ")" : ""
+    }`;
+    rows.push(["Report fee", feeLine]);
+  }
+  return rows;
 }
 
 // Format an AUD money value for the report fee line.
@@ -137,8 +181,9 @@ export function roofReportHashInput(job: RoofReportJob): string {
     maintenance_recommendation: job.maintenance_recommendation || "",
     maintenance_details: job.maintenance_details || "",
     scope_summary: job.scope_summary || "",
-    price_ex_gst: job.price_ex_gst ?? "",
-    price_inc_gst: job.price_inc_gst ?? "",
+    price_ex_gst: job.include_report_fee === false ? "" : (job.price_ex_gst ?? ""),
+    price_inc_gst: job.include_report_fee === false ? "" : (job.price_inc_gst ?? ""),
+    include_report_fee: job.include_report_fee !== false,
     photo_limit: job.photo_limit ?? DEFAULT_REPORT_PHOTO_LIMIT,
     photos,
   });
@@ -331,26 +376,7 @@ export async function renderRoofReportPdf(
     }
   };
 
-  const attendance = sanitiseText(
-    `${job.inspection_date || "to confirm"}${
-      job.inspection_time ? " " + job.inspection_time : ""
-    }`,
-  ).trim();
-  const feeLine = job.price_inc_gst != null
-    ? `${formatAud(job.price_inc_gst)} inc GST${
-      job.storeys ? " (" + sanitiseText(job.storeys) + ")" : ""
-    }`
-    : "";
-  kvTable([
-    ["Job reference", String(job.ref || "")],
-    ["Property", String(job.address || "")],
-    ["Site contact", String(job.contact || job.client || "")],
-    ["Inspection date", attendance],
-    ["Inspected by", String(job.inspected_by || "")],
-    ["Weather", String(job.weather || "")],
-    ["Number of storeys", String(job.storeys || "")],
-    ["Report fee", feeLine],
-  ]);
+  kvTable(roofReportHeaderRows(job));
   y += 4;
 
   // Section header bar (dark band + orange tab + white title).

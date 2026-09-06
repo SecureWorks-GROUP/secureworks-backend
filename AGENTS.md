@@ -2407,7 +2407,10 @@ The Trade app is a THREE-TIER model (Captain 2026-08-17): office
 (`users.managed_verticals` contains the job's vertical, everything in that
 trade incl. the quote, allocates, sets the lead), allocated trade
 (`job_assignments` row, `is_lead` true OR false with NO visibility difference,
-everything except the quote). `resolveTradeJobAccessTier` in `ops-api/index.ts`
+everything except the quote). TRD-4 (2026-09-06) keeps that money fence and
+adds the writing: allocated / `makesafe_open` see quote narrative, descriptions,
+and quote numbers, and never unit prices, totals, rates, or `$` fields — see
+`docs/evidence/trd-4-trade-quote-video-contract-2026-09-06.md`. `resolveTradeJobAccessTier` in `ops-api/index.ts`
 is the one decision and `tradeQuoteVisibleForTier` the one quote rule; every
 per-job Trade door reaches them through
 `assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)` with
@@ -2417,17 +2420,29 @@ Never add a per-job trade action that calls the predicate without the context,
 never widen the predicate, and never read `job_assignments.role` as a lead or
 authority signal (it defaults to `lead_installer` on every insert; the lead-only
 surfaces read `is_lead` via `tradeLeadJobIds` / `tradeIsDesignatedLead`).
-`trade_job_detail` redacts the quote server-side for non-quote tiers
+`trade_job_detail` redacts quote MONEY server-side for non-quote tiers
 (`redactTradeScopeQuote` over `scope_json`, `_tradeDocumentsForAllocatedTrade`
-over documents) — never ship raw `scope_json` or a `quote`/`invoice` document to
-an allocated trade, and never re-derive the tier per route.
-`TRADE_SCOPE_QUOTE_KEYS` is an exact-name denylist over a blob the SCOPING TOOLS
-own, so it is grounded in the production key audit in
-`_shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md` §2, not on intuition —
-`job.pricePerMetre` (x the surviving `job.runs[].length` = the quoted total) and
-patio `job_costs` were both missed on the first pass. Add a new money key there
-and re-check that audit; the redactor drops a branch past its depth cap rather
-than returning it verbatim. `makesafe_open` is a REPORT door, never a payroll
+over documents, `redactTradeQuotePackMoney` / `redactTradeWorkOrdersForAllocated`
+on packs and WO `scope_items`) — never ship a `quote`/`invoice` PDF or a price
+field to an allocated trade, keep the writing and quote numbers,
+`redactTradeWorkOrderScopeItems` is allowlist-only (unknown money keys and
+nested pricing objects do not fail open), and never
+re-derive the tier per route. Scope walkthroughs are promoted from
+`scope_json` (`job.scopeMedia` or top-level) into `job_media` on this read;
+`media` / `currentCycleMedia` are current-cycle rows plus every job video.
+`TRADE_SCOPE_QUOTE_KEYS` is an exact-name denylist over the OUTER blob the
+SCOPING TOOLS own, grounded in the production key audit in
+`_shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md` §2 — `job.pricePerMetre`
+(x the surviving `job.runs[].length` = the quoted total) and patio `job_costs`
+were both missed on the first pass. Add a new outer money key there and
+re-check that audit. `quote` / `quotes` objects are **allowlist-only**
+(`TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST`: narrative/qty/`quote_number` and the
+named containers) so an unknown money key (`lineTotalEx`, `gstAmount`,
+`quotedTotal`) cannot fail open. The redactor drops a branch past its depth
+cap rather than returning it verbatim. Scope-media registration is HTTPS
+only; `trade_job_detail` fetches every `type:video` on a separate uncapped
+lane so the 200-row media page cannot hide a walkthrough; `data:video` on
+that read is ignored (no upload-on-read, no invented URL). `makesafe_open` is a REPORT door, never a payroll
 one: it admits ANY signed-in trade to ANY make-safe job, so
 `trade_labour_budget` (every crew member's `trade_rates.hourly_rate` and cost)
 refuses that tier via `tradeLabourCostVisibleForTier` at the door, not in the

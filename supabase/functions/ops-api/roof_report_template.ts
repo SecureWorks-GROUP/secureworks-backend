@@ -322,20 +322,29 @@ export const ROOF_REPORT_FIELDS: RoofReportField[] = [
   },
 ];
 
+export interface RoofReportTemplatePricing {
+  storey_field: string;
+  single?: { ex_gst: number; inc_gst: number };
+  double?: { ex_gst: number; inc_gst: number };
+  note?: string;
+}
+
 export interface RoofReportTemplate {
   version: number;
   pack_kind: string;
   sections: RoofReportSection[];
   fields: RoofReportField[];
-  pricing: {
-    single: { ex_gst: number; inc_gst: number };
-    double: { ex_gst: number; inc_gst: number };
-    storey_field: string;
-    note: string;
-  };
+  pricing: RoofReportTemplatePricing;
 }
 
+// Allocated / makesafe_open storey help: report content only, no client fee.
+export const ROOF_REPORT_TRADE_STOREY_HELP =
+  "Single Storey or Double Storey as observed on site.";
+
 // The full template payload the trade app renders. Pure and deterministic.
+// Office / division-manager callers receive this as-is. Allocated and
+// makesafe_open callers must go through projectRoofReportTemplate so the
+// locked client fee never reaches quote_visible:false.
 export function getRoofReportTemplate(): RoofReportTemplate {
   return {
     version: ROOF_REPORT_TEMPLATE_VERSION,
@@ -348,6 +357,30 @@ export function getRoofReportTemplate(): RoofReportTemplate {
       storey_field: "storeys",
       note:
         "Storey sets the fee. Single Storey $275 inc GST (locked 2026-07-16), Double Storey $330 inc GST (Captain ruling 2026-08-06). Access or scope beyond a plain double storey is scaled manually at release.",
+    },
+  };
+}
+
+// Project the template for a trade read. quote_visible:true keeps the locked
+// fee block. quote_visible:false keeps the form (storeys, fields, sections)
+// and drops pricing amounts plus fee-bearing help/note text.
+export function projectRoofReportTemplate(
+  template: RoofReportTemplate,
+  quoteVisible: boolean,
+): RoofReportTemplate {
+  if (quoteVisible) return template;
+  return {
+    version: template.version,
+    pack_kind: template.pack_kind,
+    sections: template.sections,
+    fields: template.fields.map((field) => {
+      if (field.key !== "storeys") return { ...field };
+      const next: RoofReportField = { ...field, help: ROOF_REPORT_TRADE_STOREY_HELP };
+      delete next.pricingDriver;
+      return next;
+    }),
+    pricing: {
+      storey_field: template.pricing.storey_field,
     },
   };
 }
@@ -517,6 +550,7 @@ export function buildRoofReportJob(
 
 // Test-only aliases (mirror the `_`-prefixed convention in sibling modules).
 export const _getRoofReportTemplate = getRoofReportTemplate;
+export const _projectRoofReportTemplate = projectRoofReportTemplate;
 export const _roofReportPrice = roofReportPrice;
 export const _normaliseStorey = normaliseStorey;
 export const _validateRoofReportForSubmit = validateRoofReportForSubmit;

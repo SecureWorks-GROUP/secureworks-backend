@@ -1,9 +1,13 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  allocatedTradePackProse,
   applyInstallerRates,
   assembleQuotePacksForTrade,
   packTradeQuote,
   persistTradePackOnDocuments,
+  sanitizeTradePackKind,
+  sanitizeTradePackUnit,
+  stripTradePackMoney,
   tradePackMoneyLeakKeys,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
@@ -179,6 +183,160 @@ Deno.test("two sent quotes stay two packs with their own quote numbers", () => {
   assertEquals(packs[1].accepted, false);
   const q1Install = packs[1].items.find((i) => i.kind === "install_m");
   assertEquals(q1Install?.quantity, 10);
+});
+
+Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary numbers", () => {
+  assertEquals(stripTradePackMoney("Total $9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total $ 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total A$ 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total AUD 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total 9,999 AUD"), "Total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 ex GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 inc GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Fee 9,999.00 excl. GST"), "Fee");
+  assertEquals(stripTradePackMoney("Approved total 9,999 excluding GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 exclusive of GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 inclusive of GST"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 GST exclusive"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 GST inclusive"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 (ex GST)"), "Approved total");
+  assertEquals(stripTradePackMoney("Approved total 9,999 (inc. GST)"), "Approved total");
+  assertEquals(stripTradePackMoney("Fee ex GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee inc GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee excl. GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee plus GST 9,999"), "Fee");
+  assertEquals(stripTradePackMoney("Fee +GST 9999"), "Fee");
+  assertEquals(stripTradePackMoney("Client approved $9,999 excluding GST"), "Client approved");
+  assertEquals(stripTradePackMoney("Watch the GST registration"), "Watch the GST registration");
+  assertEquals(stripTradePackMoney("Line 9999AUD"), "Line");
+  assertEquals(stripTradePackMoney("Plus 80 +GST"), "Plus");
+  assertEquals(stripTradePackMoney("Rear 19m 1800mm install"), "Rear 19m 1800mm install");
+  assertEquals(stripTradePackMoney("Use 90x90 posts"), "Use 90x90 posts");
+  assertEquals(stripTradePackMoney("Total 9999"), "Total");
+  assertEquals(stripTradePackMoney("Approved total 9,999"), "Approved total");
+  assertEquals(stripTradePackMoney("rate 85"), "rate");
+  assertEquals(stripTradePackMoney("charged 1200 extra"), "charged extra");
+  assertEquals(stripTradePackMoney("Fee 1,200"), "Fee");
+  assertEquals(stripTradePackMoney("cost 99"), "cost");
+  assertEquals(stripTradePackMoney("85/hour"), "");
+  assertEquals(stripTradePackMoney("85 / hr"), "");
+  assertEquals(stripTradePackMoney("1200/m"), "");
+  assertEquals(stripTradePackMoney("85 per hour"), "");
+  assertEquals(stripTradePackMoney("85 per day"), "");
+  assertEquals(stripTradePackMoney("85/day"), "");
+  assertEquals(stripTradePackMoney("85 per trade"), "");
+  assertEquals(stripTradePackMoney("85/trade"), "");
+  assertEquals(stripTradePackMoney("2 trades over 3 days"), "2 trades over 3 days");
+  assertEquals(stripTradePackMoney("Quote 850"), "Quote");
+  assertEquals(stripTradePackMoney("quoted at 9999"), "quoted");
+  assertEquals(stripTradePackMoney("Sheets 99.50"), "Sheets");
+  assertEquals(stripTradePackMoney("Monument fencing 18400"), "Monument fencing");
+  assertEquals(stripTradePackMoney("12 posts at 850"), "12 posts at");
+  assertEquals(stripTradePackMoney("SWF-26101 Quote 850"), "SWF-26101 Quote");
+  assertEquals(stripTradePackMoney("Deposit 85"), "Deposit");
+  assertEquals(stripTradePackMoney("Deposit of 85"), "Deposit");
+  assertEquals(stripTradePackMoney("Price of 85"), "Price");
+  assertEquals(stripTradePackMoney("12 panels at 85"), "12 panels at");
+  assertEquals(stripTradePackMoney("85 per panel"), "");
+  assertEquals(stripTradePackMoney("85 each"), "");
+  assertEquals(stripTradePackMoney("85 dollars each"), "");
+  assertEquals(stripTradePackMoney("85 USD each"), "");
+  assertEquals(stripTradePackMoney("85 AUD each"), "");
+  assertEquals(stripTradePackMoney("85 dollars per item"), "");
+  assertEquals(stripTradePackMoney("85 USD per panel"), "");
+  assertEquals(stripTradePackMoney("Charge 85 dollars each"), "Charge");
+  assertEquals(stripTradePackMoney("USD 85"), "");
+  assertEquals(stripTradePackMoney("Rate USD 85"), "Rate");
+  assertEquals(stripTradePackMoney("dollars 85"), "");
+  assertEquals(stripTradePackMoney("bucks 85"), "");
+  assertEquals(stripTradePackMoney("Install USD 85 plus posts"), "Install plus posts");
+  assertEquals(stripTradePackMoney("Install 85 dollars each plus posts"), "Install plus posts");
+  assertEquals(stripTradePackMoney("85 per item"), "");
+  assertEquals(stripTradePackMoney("85 per gate"), "");
+  assertEquals(stripTradePackMoney("85 per material"), "");
+  assertEquals(stripTradePackMoney("85 per linear metre"), "");
+  assertEquals(stripTradePackMoney("Balance due 85"), "Balance due");
+  assertEquals(stripTradePackMoney("Paid 85"), "Paid");
+  assertEquals(stripTradePackMoney("Due 85"), "Due");
+  assertEquals(stripTradePackMoney("deposit: 40"), "deposit");
+});
+
+Deno.test("allocatedTradePackProse drops numbers and numeric-only strings", () => {
+  assertEquals(allocatedTradePackProse(85), null);
+  assertEquals(allocatedTradePackProse(999), null);
+  assertEquals(allocatedTradePackProse("85"), null);
+  assertEquals(allocatedTradePackProse("999"), null);
+  assertEquals(allocatedTradePackProse("Install 10m"), "Install 10m");
+  assertEquals(allocatedTradePackProse("2 trades over 3 days"), "2 trades over 3 days");
+  assertEquals(allocatedTradePackProse(null), null);
+});
+
+Deno.test("sanitizeTradePackUnit and sanitizeTradePackKind drop money scalars", () => {
+  assertEquals(sanitizeTradePackUnit("m"), "m");
+  assertEquals(sanitizeTradePackUnit("ea"), "ea");
+  assertEquals(sanitizeTradePackUnit("lot"), "lot");
+  assertEquals(sanitizeTradePackUnit("sheet"), "sheet");
+  assertEquals(sanitizeTradePackUnit("85"), undefined);
+  assertEquals(sanitizeTradePackUnit("999"), undefined);
+  assertEquals(sanitizeTradePackUnit("AUD 9,999"), undefined);
+  assertEquals(sanitizeTradePackUnit("85/day"), undefined);
+  assertEquals(sanitizeTradePackUnit("AUD"), undefined);
+  assertEquals(sanitizeTradePackUnit({ name: "ea", unit_price: 99.5 }), undefined);
+  assertEquals(sanitizeTradePackKind("install_m"), "install_m");
+  assertEquals(sanitizeTradePackKind("info"), "info");
+  assertEquals(sanitizeTradePackKind("note"), undefined);
+  assertEquals(sanitizeTradePackKind("AUD 9,999"), undefined);
+  assertEquals(sanitizeTradePackKind("sell"), undefined);
+});
+
+Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewers and still strips item descriptions", () => {
+  const packs = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [{
+      id: "d-stored",
+      type: "quote",
+      quote_number: "Q-STORED",
+      sent_at: "2026-09-04T00:00:00.000Z",
+      trade_pack_json: {
+        items: [
+          { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
+          { kind: "note", description: "Priced $9,999", quantity: 1, unit: "lot" },
+        ],
+        summary: "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 excluding GST",
+      },
+    }],
+  });
+  assertEquals(
+    packs[0].summary,
+    "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 excluding GST",
+  );
+  assertEquals(packs[0].items[0].description, "Install fence Total");
+  assertEquals(packs[0].items[0].unit, "m");
+  assertEquals(packs[0].items[1].kind, "note");
+  assertEquals(packs[0].items[1].description, "Priced");
+});
+
+Deno.test("hydrateStoredPack replaces money-shaped unit/kind with safe defaults", () => {
+  const packs = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [{
+      id: "d-unit",
+      type: "quote",
+      quote_number: "Q-UNIT",
+      sent_at: "2026-09-04T00:00:00.000Z",
+      trade_pack_json: {
+        items: [
+          { kind: "AUD 9,999", description: "Install", quantity: 10, unit: "AUD 9,999" },
+          { kind: "install_m", description: "Rear run", quantity: 19, unit: "m" },
+        ],
+        summary: "kept",
+      },
+    }],
+  });
+  assertEquals(packs[0].items[0].kind, "info");
+  assertEquals(packs[0].items[0].unit, "ea");
+  assertEquals(packs[0].items[1].kind, "install_m");
+  assertEquals(packs[0].items[1].unit, "m");
 });
 
 Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {

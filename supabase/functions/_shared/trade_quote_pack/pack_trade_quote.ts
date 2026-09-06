@@ -213,11 +213,14 @@ export async function persistTradePackOnDocuments(
 function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): TradeQuotePack {
   const items = (Array.isArray(stored.items) ? stored.items : []).map((raw) => {
     const row = asObject(raw)
+    const rawKind = String(row.kind || '').trim().toLowerCase()
     return item(
-      (row.kind as TradePackItemKind) || 'info',
+      rawKind === 'note'
+        ? 'note'
+        : (sanitizeTradePackKind(row.kind) as TradePackItemKind) || 'info',
       String(row.description || ''),
       Number(row.quantity) || 0,
-      String(row.unit || 'ea'),
+      typeof row.unit === 'string' ? row.unit : 'ea',
     )
   })
   const accepted = !!doc.accepted_at || stored.accepted === true
@@ -231,6 +234,9 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
     job_type: classifyJobType(stored.job_type as string, null, null),
     notes: String(stored.notes || ''),
     items,
+    // Keep stored summary verbatim. Office / division-manager are quote-visible
+    // and must still see monetary summary text. Allocated trades strip later
+    // in redactTradeQuotePackMoney.
     summary: String(stored.summary || ''),
     source: stored.source === 'live_fallback' ? 'live_fallback' : 'frozen',
   }
@@ -448,19 +454,209 @@ function rateForKind(
 function item(kind: TradePackItemKind, description: string, quantity: number, unit: string): TradePackItem {
   return {
     kind,
-    description: stripMoney(description),
+    description: stripTradePackMoney(description),
     quantity,
-    unit,
+    unit: sanitizeTradePackUnit(unit) || 'ea',
     unit_price: null,
     line_total: null,
   }
 }
 
-function stripMoney(text: string): string {
-  return String(text || '')
-    .replace(/\$[\d,]+(?:\.\d+)?/g, '')
+const TRADE_PACK_MONEY_AMOUNT = '-?[\\d,]+(?:\\.\\d+)?'
+const TRADE_PACK_CURRENCY_WORD = '(?:dollars?|bucks|usd|aud)'
+const TRADE_PACK_CURRENCY_PREFIX =
+  `(?:\\b${TRADE_PACK_CURRENCY_WORD}\\s*|AU\\$\\s*|A\\$\\s*|\\$\\s*)`
+const TRADE_PACK_CURRENCY_SUFFIX = '(?:AUD\\b|AU\\$|A\\$|\\$)'
+const TRADE_PACK_CURRENCY_MID = `(?:\\s+${TRADE_PACK_CURRENCY_WORD})?`
+const TRADE_PACK_TAX_WORD = '(?:GST|tax)\\b'
+const TRADE_PACK_TAX_QUALIFIER =
+  '(?:ex(?:cl(?:uding|usive)?)?|inc(?:l(?:uding|usive)?)?|excluding|including|exclusive|inclusive|plus|\\+)'
+const TRADE_PACK_TAX_QUALIFIED =
+  `(?:${TRADE_PACK_TAX_QUALIFIER}\\s*[.\\-]?\\s*(?:of\\s+)?${TRADE_PACK_TAX_WORD}|${TRADE_PACK_TAX_WORD}\\s*[.\\-]?\\s*${TRADE_PACK_TAX_QUALIFIER})`
+const TRADE_PACK_TAX_PHRASE =
+  `(?:${TRADE_PACK_TAX_QUALIFIED}|${TRADE_PACK_TAX_WORD})`
+const TRADE_PACK_UNQUALIFIED_MONEY_WORD =
+  '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?|quot(?:e[ds]?|ing|ations?)|deposits?|balances?|paid|due)'
+const TRADE_PACK_QTY_WORD =
+  '(?:trades?|days?|labourers?|posts?|pickets?|panels?|hours?|hrs?)'
+const TRADE_PACK_REF_PREFIX =
+  '(?:SWF|SWMS|SWP|SWR|SW|WO|PO|INV|MLB|AJBR|AJ|Q)'
+
+/** Money-safe pack text: drop common currency figures, keep the writing.
+ *  Prefix ($ / A$ / AUD / USD / dollars 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
+ *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
+ *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
+ *  1200/m, 85 per day, 85/day, 85 per trade, 85 per panel, 85 each,
+ *  85 dollars each, 85 USD each, 85 per item, 85 per gate, 85 per material,
+ *  85 per linear metre).
+ *  Contextual words also catch two-digit marks (Deposit 85, Deposit of 85,
+ *  Price of 85, 12 panels at 85, Balance due 85, Paid 85, Due 85)
+ *  without eating construction counts (2 trades, 19m). Leftover
+ *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
+ *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
+ *  full-quote summaries must not call this — hydrateStoredPack keeps
+ *  stored summary verbatim. */
+export function stripTradePackMoney(text: unknown): string {
+  const kept: string[] = []
+  const hold = (match: string) => {
+    kept.push(match)
+    return `\u0000${kept.length - 1}\u0000`
+  }
+
+  let s = String(text ?? '')
+  // Hold construction / identity / count tokens so the fail-closed leftover
+  // strip cannot eat 19m / 1800mm / 90x90 / SWF-26101 / 2 trades.
+  s = s.replace(/\b\d+x\d+\b/gi, hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}mm\\b`, 'gi'), hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}cm\\b`, 'gi'), hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}m\\b`, 'gi'), hold)
+  s = s.replace(new RegExp(`\\b${TRADE_PACK_REF_PREFIX}-[A-Z0-9]+\\b`, 'gi'), hold)
+  s = s.replace(
+    new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_QTY_WORD}\\b`, 'gi'),
+    hold,
+  )
+
+  s = s
+    .replace(new RegExp(`${TRADE_PACK_CURRENCY_PREFIX}${TRADE_PACK_MONEY_AMOUNT}`, 'gi'), '')
+    // Currency-word unit prices before suffix / money-word strips so
+    // "85 AUD each" is not reduced to leftover "each", and "Charge 85 dollars
+    // each" does not keep the unit after the money word eats 85.
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s+each\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}${TRADE_PACK_CURRENCY_MID}\\s*(?:/\\s*|\\bper\\s+)(?:[A-Za-z]+(?:\\s+[A-Za-z]+)?)\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_CURRENCY_WORD}\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*${TRADE_PACK_CURRENCY_SUFFIX}`, 'gi'), '')
+    .replace(
+      new RegExp(`${TRADE_PACK_MONEY_AMOUNT}\\s*\\(?\\s*${TRADE_PACK_TAX_PHRASE}\\s*\\)?`, 'gi'),
+      '',
+    )
+    .replace(
+      new RegExp(`\\(?\\s*${TRADE_PACK_TAX_PHRASE}\\s*\\)?\\s*:?\\s*${TRADE_PACK_MONEY_AMOUNT}`, 'gi'),
+      '',
+    )
+    // "$9,999 excluding GST" loses the figure first; drop the orphaned
+    // qualified tax mark. Bare "GST" / "tax" stays (not a money figure).
+    .replace(new RegExp(`\\(?\\s*${TRADE_PACK_TAX_QUALIFIED}\\s*\\)?`, 'gi'), '')
+    .replace(
+      new RegExp(
+        `(\\b${TRADE_PACK_UNQUALIFIED_MONEY_WORD}\\b)\\s*(?:[=:\\-]|(?:of|at|for))?\\s*(?:${TRADE_PACK_CURRENCY_WORD}\\s+)?${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        'gi',
+      ),
+      '$1',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\b\\s+(${TRADE_PACK_UNQUALIFIED_MONEY_WORD})\\b`,
+        'gi',
+      ),
+      '$1',
+    )
+    // After qty holds, leftover "at 85" / "of 85" / "for 85" are unit prices
+    // (12 panels at 85). Keep the connector; drop only the amount.
+    .replace(
+      new RegExp(
+        `(\\b(?:of|at|for)\\b)\\s+${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        'gi',
+      ),
+      '$1',
+    )
+    // Unrecognised leftover quote amounts: 9,999 / 99.50 / 850 / 18400.
+    // 1–2 digit counts stay (2 at, 12 posts) unless a money word already ate them.
+    .replace(/\b-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g, '')
+    .replace(/\b-?\d+\.\d+\b/g, '')
+    .replace(/\b-?\d{3,}\b/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
+
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)] ?? '')
+  return s.replace(/\s{2,}/g, ' ').trim()
+}
+
+/** Allocated pack / note prose: strings only. Numbers and numeric-only
+ *  strings are amounts, not writing — drop them rather than stringify
+ *  through the count-preserving sanitizer (TRD4-REV20-003). */
+export function allocatedTradePackProse(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
+  return stripTradePackMoney(value)
+}
+
+/** Closed installer-pack kinds that may ride an allocated quote pack.
+ *  `note` is excluded — allocated redaction drops note items separately. */
+export const TRADE_PACK_ALLOCATED_KINDS = new Set<string>([
+  'install_m',
+  'plinth',
+  'removal_m',
+  'gate_pedestrian',
+  'gate_double',
+  'patio_tube',
+  'info',
+])
+
+const TRADE_PACK_SAFE_UNITS = new Set([
+  'm',
+  'lm',
+  'mm',
+  'cm',
+  'ea',
+  'each',
+  'lot',
+  'hr',
+  'hrs',
+  'hour',
+  'hours',
+  'day',
+  'days',
+  'kg',
+  'sheet',
+  'sheets',
+])
+
+/** Allocated unit scalar: approved construction vocabulary only, or a
+ *  digit-free money-clean token. The shared prose sanitizer holds unmarked
+ *  1–2 digit integers as construction counts — that must not apply here, or
+ *  bare "85" / "999" ride as units (TRD4-REV19-001). */
+export function sanitizeTradePackUnit(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (TRADE_PACK_SAFE_UNITS.has(trimmed.toLowerCase())) return trimmed
+  if (/\d/.test(trimmed)) return undefined
+  const cleaned = stripTradePackMoney(trimmed)
+  if (!cleaned || cleaned !== trimmed) return undefined
+  if (/^(?:aud|au\$|a\$|\$)$/i.test(cleaned)) return undefined
+  if (new RegExp(`^${TRADE_PACK_UNQUALIFIED_MONEY_WORD}$`, 'i').test(cleaned)) return undefined
+  return cleaned
+}
+
+/** Allocated pack kind: allowlisted installer kinds only. */
+export function sanitizeTradePackKind(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const key = value.trim().toLowerCase()
+  return TRADE_PACK_ALLOCATED_KINDS.has(key) ? key : undefined
+}
+
+function stripMoney(text: string): string {
+  return stripTradePackMoney(text)
 }
 
 function qtyLabel(i: TradePackItem): string {
