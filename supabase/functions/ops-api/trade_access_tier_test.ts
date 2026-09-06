@@ -865,6 +865,23 @@ Deno.test("redactTradeQuotePackMoney omits pack notes so sell figures cannot rid
   assertEquals(JSON.stringify(out).includes("9999"), false);
 });
 
+Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures from summary and descriptions", () => {
+  const out = redactTradeQuotePackMoney([
+    {
+      quote_number: "Q-1",
+      summary: "Install 10m · Total $9,999",
+      items: [
+        { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
+        { kind: "note", description: "Priced $9,999 — installer note", quantity: 1, unit: "lot" },
+      ],
+    },
+  ]);
+  assertEquals(out[0].summary, "Install 10m · Total");
+  assertEquals(out[0].items.map((i: any) => i.kind), ["install_m"]);
+  assertEquals(out[0].items[0].description, "Install fence Total");
+  assertEquals(JSON.stringify(out).includes("9999"), false);
+});
+
 // ── Lead designation reads is_lead, never role ──────────────────────────────
 
 Deno.test("lead surfaces: tradeLeadJobIds / tradeIsDesignatedLead read is_lead=true and never job_assignments.role", async () => {

@@ -181,6 +181,30 @@ Deno.test("two sent quotes stay two packs with their own quote numbers", () => {
   assertEquals(q1Install?.quantity, 10);
 });
 
+Deno.test("hydrateStoredPack strips $ figures from stored summary and descriptions", () => {
+  const packs = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [{
+      id: "d-stored",
+      type: "quote",
+      quote_number: "Q-STORED",
+      sent_at: "2026-09-04T00:00:00.000Z",
+      trade_pack_json: {
+        items: [
+          { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
+          { kind: "note", description: "Priced $9,999", quantity: 1, unit: "lot" },
+        ],
+        summary: "Total $9,999",
+      },
+    }],
+  });
+  assertEquals(packs[0].summary, "Total");
+  assertEquals(packs[0].items[0].description, "Install fence Total");
+  assertEquals(packs[0].items[1].kind, "note");
+  assertEquals(packs[0].items[1].description, "Priced");
+  assertEquals(JSON.stringify(packs).includes("9999"), false);
+});
+
 Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {
   const writes: Array<{ id: string; pack: any }> = [];
   const sb = {

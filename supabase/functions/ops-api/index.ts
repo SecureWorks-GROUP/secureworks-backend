@@ -123,6 +123,7 @@ import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
   assembleQuotePacksForTrade,
   isHenryInstaller,
+  stripTradePackMoney,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
 import {
@@ -38281,19 +38282,22 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
       accepted: pack.accepted,
       status: pack.status,
       job_type: pack.job_type,
-      summary: pack.summary,
+      summary: pack.summary == null ? pack.summary : stripTradePackMoney(pack.summary),
       source: pack.source,
-      items: (pack.items || []).map((item: any) => {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+      items: (pack.items || []).flatMap((item: any) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+        if (String(item.kind || '').toLowerCase() === 'note') return []
         const out: Record<string, any> = {
           kind: item.kind,
-          description: item.description,
+          description: item.description == null
+            ? item.description
+            : stripTradePackMoney(item.description),
           quantity: item.quantity,
           unit_price: null,
           line_total: null,
         }
         if (item.unit !== undefined) out.unit = item.unit
-        return out
+        return [out]
       }),
     }
   })

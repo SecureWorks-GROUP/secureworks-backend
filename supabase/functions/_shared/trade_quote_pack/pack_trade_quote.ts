@@ -231,7 +231,7 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
     job_type: classifyJobType(stored.job_type as string, null, null),
     notes: String(stored.notes || ''),
     items,
-    summary: String(stored.summary || ''),
+    summary: stripTradePackMoney(stored.summary),
     source: stored.source === 'live_fallback' ? 'live_fallback' : 'frozen',
   }
 }
@@ -448,7 +448,7 @@ function rateForKind(
 function item(kind: TradePackItemKind, description: string, quantity: number, unit: string): TradePackItem {
   return {
     kind,
-    description: stripMoney(description),
+    description: stripTradePackMoney(description),
     quantity,
     unit,
     unit_price: null,
@@ -456,11 +456,16 @@ function item(kind: TradePackItemKind, description: string, quantity: number, un
   }
 }
 
-function stripMoney(text: string): string {
-  return String(text || '')
+/** Money-safe pack text: drop `$9,999`-style figures, keep the writing. */
+export function stripTradePackMoney(text: unknown): string {
+  return String(text ?? '')
     .replace(/\$[\d,]+(?:\.\d+)?/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
+}
+
+function stripMoney(text: string): string {
+  return stripTradePackMoney(text)
 }
 
 function qtyLabel(i: TradePackItem): string {
