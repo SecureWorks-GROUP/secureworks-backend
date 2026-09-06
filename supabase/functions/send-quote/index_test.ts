@@ -25,6 +25,9 @@ import {
   quoteSendResendIdempotencyKey,
   resendIdempotencyHeaders,
   touchQuoteDocumentSendClaim,
+  touchQuoteDocumentSendClaims,
+  touchGroupedQuoteDocumentSendClaims,
+  classifySendClaimLease,
   claimsForDocumentIds,
   claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
@@ -1503,6 +1506,138 @@ Deno.test("R13-003 heartbeat is token-fenced and Resend keys survive reclaim", a
   const missing = await touchQuoteDocumentSendClaim(sb, "doc-1", "")
   assertEquals(missing.updated, false)
   assertEquals(missing.error?.message, "send claim token required")
+})
+
+Deno.test("R16-002 lease errors are not already_sent ownership loss", () => {
+  assertEquals(classifySendClaimLease({ updated: true, error: null }), "owned")
+  assertEquals(classifySendClaimLease({ updated: false, error: null }), "lost")
+  assertEquals(
+    classifySendClaimLease({ updated: false, error: { message: "db down" } }),
+    "error",
+  )
+  assertEquals(
+    classifySendClaimLease({ updated: true, error: { message: "db down" } }),
+    "error",
+  )
+})
+
+function makeQuoteHeartbeatSb(opts: {
+  ownedIds?: string[]
+  errorIds?: string[]
+}) {
+  const owned = new Set(opts.ownedIds || [])
+  const errored = new Set(opts.errorIds || [])
+  const touched: string[] = []
+  return {
+    touched,
+    from: (_table: string) => {
+      let documentId = ""
+      let token = ""
+      const chain: Record<string, unknown> = {
+        update: () => chain,
+        eq: (col: string, value: unknown) => {
+          if (col === "id") documentId = String(value)
+          if (col === "send_claim_token") token = String(value)
+          return chain
+        },
+        is: () => chain,
+        not: () => chain,
+        select: () => ({
+          maybeSingle: () => {
+            if (documentId) touched.push(documentId)
+            if (errored.has(documentId)) {
+              return Promise.resolve({ data: null, error: { message: "db down" } })
+            }
+            return Promise.resolve({
+              data: owned.has(documentId) && token ? { id: documentId } : null,
+              error: null,
+            })
+          },
+        }),
+      }
+      return chain
+    },
+  }
+}
+
+Deno.test("R16-001 grouped send-runs heartbeats every document claim", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a", claimed_at: "2026-09-06T00:00:00.000Z", resend_idempotency_key: "quote-send:tok-a" },
+    { id: "doc-b", token: "tok-b", claimed_at: "2026-09-06T00:00:00.000Z", resend_idempotency_key: "quote-send:tok-b" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a", "doc-b"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b"])
+  assertEquals(grouped.outcome, "owned")
+  assertEquals(sb.touched, ["doc-a", "doc-b"])
+  assertEquals(grouped.claims.map((c) => c.id), ["doc-a", "doc-b"])
+})
+
+Deno.test("R16-001 grouped heartbeat continues after a lost sibling", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+    { id: "doc-c", token: "tok-c" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a", "doc-c"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b", "doc-c"])
+  assertEquals(grouped.outcome, "lost")
+  assertEquals(sb.touched, ["doc-a", "doc-b", "doc-c"])
+})
+
+Deno.test("R16-001 grouped heartbeat treats a missing claim as lost after refreshing owned rows", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b"])
+  assertEquals(grouped.outcome, "lost")
+  assertEquals(sb.touched, ["doc-a"])
+})
+
+Deno.test("R16-002 grouped heartbeat DB faults win over ownership loss", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a"], errorIds: ["doc-b"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b"])
+  assertEquals(grouped.outcome, "error")
+  assertEquals(grouped.error?.message, "db down")
+  assertEquals(sb.touched, ["doc-a", "doc-b"])
+  const batch = await touchQuoteDocumentSendClaims(sb, claims)
+  assertEquals(batch.outcome, "error")
+})
+
+Deno.test("R16-001 send-runs source heartbeats the grouped claims before Resend", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const preDispatch = src.slice(start, provider)
+  assert(start >= 0 && provider > start)
+  assert(preDispatch.includes("touchGroupedQuoteDocumentSendClaims("))
+  assert(!preDispatch.includes("claimedDocs.find("))
+})
+
+Deno.test("R16-002 quote and invoice lease errors are 5xx before already_sent", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const quoteTouch = src.indexOf("touchQuoteDocumentSendClaim(sb, document_id, claimed.token)")
+  const quoteError = src.indexOf("quoteLeaseOutcome === 'error'", quoteTouch)
+  const quoteLost = src.indexOf("quoteLeaseOutcome === 'lost'", quoteTouch)
+  const quoteResend = src.indexOf("fetch('https://api.resend.com/emails'", quoteTouch)
+  assert(quoteTouch >= 0 && quoteError > quoteTouch && quoteLost > quoteError && quoteLost < quoteResend)
+  assert(src.slice(quoteError, quoteResend).includes("Failed to refresh quote send claim"))
+  assert(src.slice(quoteError, quoteLost).includes("500"))
+  assert(src.slice(quoteLost, quoteResend).includes("already_sent: true"))
+
+  const invoiceTouch = src.indexOf("touchInvoiceEmailSendClaim(")
+  const invoiceError = src.indexOf("invoiceLeaseOutcome === 'error'", invoiceTouch)
+  const invoiceLost = src.indexOf("invoiceLeaseOutcome === 'lost'", invoiceTouch)
+  const invoiceResend = src.indexOf("fetch('https://api.resend.com/emails'", invoiceTouch)
+  assert(invoiceTouch >= 0 && invoiceError > invoiceTouch && invoiceLost > invoiceError && invoiceLost < invoiceResend)
+  assert(src.slice(invoiceError, invoiceResend).includes("Failed to refresh invoice send claim"))
+  assert(src.slice(invoiceError, invoiceLost).includes("500"))
+  assert(src.slice(invoiceLost, invoiceResend).includes("already_sent: true"))
+  assert(src.slice(invoiceError, invoiceLost).includes("keep_provider_key"))
 })
 
 // ════════════════════════════════════════════════════════════════════════════

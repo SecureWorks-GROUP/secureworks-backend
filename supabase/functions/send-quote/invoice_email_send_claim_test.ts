@@ -266,8 +266,10 @@ Deno.test("R13-004 heartbeat and publish are token-fenced", async () => {
   });
   const lost = await touchInvoiceEmailSendClaim(sb, INVOICE, "tok-other");
   assertEquals(lost.updated, false);
+  assertEquals(lost.error, null);
   const beat = await touchInvoiceEmailSendClaim(sb, INVOICE, "tok-owner");
   assertEquals(beat.updated, true);
+  assertEquals(beat.error, null);
   const published = await publishInvoiceEmailSendOrRevert(sb, INVOICE, "tok-owner");
   assertEquals(published, { published: true });
   assertEquals(typeof sb.row?.sent_at, "string");

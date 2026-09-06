@@ -16,7 +16,10 @@
  * on the row across reclaim so a delayed original and a reclaimer cannot
  * both dispatch. send-runs takes a job-level claim
  * (`jobs.send_runs_claimed_at`) with the same TTL so concurrent/retry
- * calls cannot mint a second published pack.
+ * calls cannot mint a second published pack. A grouped send-runs email
+ * heartbeats every owned document claim in that recipient set before
+ * Resend — refreshing only the first leaves secondary claims stale so
+ * direct `/send` can reclaim them with a distinct Idempotency-Key.
  */
 
 import {
@@ -344,6 +347,69 @@ export async function touchQuoteDocumentSendClaim(
     .maybeSingle()
   if (error) return { updated: false, error }
   return { updated: !!(data && typeof data.id === 'string'), error: null }
+}
+
+export type SendClaimLeaseOutcome = 'owned' | 'lost' | 'error'
+
+/** DB faults are errors. Zero-row token misses are ownership loss. */
+export function classifySendClaimLease(lease: {
+  updated: boolean
+  error?: { message?: string } | null
+}): SendClaimLeaseOutcome {
+  if (lease.error) return 'error'
+  return lease.updated ? 'owned' : 'lost'
+}
+
+/**
+ * Refresh every owned claim. Continue after a lost token so siblings in
+ * a grouped email do not expire. A DB fault on any row wins the outcome.
+ */
+export async function touchQuoteDocumentSendClaims(
+  sb: QuoteSendPublicationClient,
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  now = new Date(),
+): Promise<{ outcome: SendClaimLeaseOutcome; error: { message?: string } | null }> {
+  const owned = uniqueDocumentClaims(claims)
+  let lost = false
+  let error: { message?: string } | null = null
+  for (const claim of owned) {
+    const lease = await touchQuoteDocumentSendClaim(sb, claim.id, claim.token, now)
+    const outcome = classifySendClaimLease(lease)
+    if (outcome === 'error') {
+      error = lease.error || { message: 'send claim heartbeat failed' }
+      continue
+    }
+    if (outcome === 'lost') lost = true
+  }
+  if (error) return { outcome: 'error', error }
+  return { outcome: lost ? 'lost' : 'owned', error: null }
+}
+
+/**
+ * Heartbeat every claim that belongs to a grouped recipient. A document
+ * in the group with no owned claim is ownership loss — do not dispatch.
+ */
+export async function touchGroupedQuoteDocumentSendClaims(
+  sb: QuoteSendPublicationClient,
+  claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
+  documentIds: Iterable<string | null | undefined>,
+  now = new Date(),
+): Promise<{
+  outcome: SendClaimLeaseOutcome
+  claims: QuoteSendDocumentClaim[]
+  error: { message?: string } | null
+}> {
+  const wanted = uniqueDocumentIds(documentIds)
+  const grouped = uniqueDocumentClaims(claims).filter((claim) => wanted.includes(claim.id))
+  const heartbeats = await touchQuoteDocumentSendClaims(sb, grouped, now)
+  if (heartbeats.outcome === 'error') {
+    return { outcome: 'error', claims: grouped, error: heartbeats.error }
+  }
+  if (!wanted.length) return { outcome: 'owned', claims: grouped, error: null }
+  if (grouped.length !== wanted.length || heartbeats.outcome === 'lost') {
+    return { outcome: 'lost', claims: grouped, error: null }
+  }
+  return { outcome: 'owned', claims: grouped, error: null }
 }
 
 export function resendIdempotencyHeaders(key: string): { 'Idempotency-Key': string } {

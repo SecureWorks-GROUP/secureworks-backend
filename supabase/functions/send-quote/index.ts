@@ -39,6 +39,7 @@ import {
   claimQuoteDocumentSend,
   claimsForDocumentIds,
   claimsNotInDocumentIds,
+  classifySendClaimLease,
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   mintSendRunQuoteNumber,
@@ -53,6 +54,7 @@ import {
   sendRunsPrimaryClientPublicationSatisfied,
   sendRunsSendOutcome,
   supersedePriorPublishedQuoteDocuments,
+  touchGroupedQuoteDocumentSendClaims,
   touchJobSendRunsClaim,
   touchQuoteDocumentSendClaim,
   type QuoteSendDocumentClaim,
@@ -838,7 +840,16 @@ serve(async (req: Request) => {
         }
 
         const quoteLease = await touchQuoteDocumentSendClaim(sb, document_id, claimed.token)
-        if (!quoteLease.updated) {
+        const quoteLeaseOutcome = classifySendClaimLease(quoteLease)
+        if (quoteLeaseOutcome === 'error') {
+          console.error(
+            `[send-quote] doc ${document_id} lease refresh failed:`,
+            quoteLease.error?.message || String(quoteLease.error),
+          )
+          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+          return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+        }
+        if (quoteLeaseOutcome === 'lost') {
           return jsonResponse({
             success: true,
             already_sent: true,
@@ -2681,7 +2692,16 @@ serve(async (req: Request) => {
           if (attachments.length > 0) emailPayload.attachments = attachments
 
           const jobLease = await touchJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
-          if (!jobLease.updated) {
+          const jobLeaseOutcome = classifySendClaimLease(jobLease)
+          if (jobLeaseOutcome === 'error') {
+            console.error(
+              '[send-quote] send-runs job lease refresh failed:',
+              jobLease.error?.message || String(jobLease.error),
+            )
+            await revertSendRunsDocumentClaims(claimedDocs, true)
+            return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+          }
+          if (jobLeaseOutcome === 'lost') {
             await revertSendRunsDocumentClaims(claimedDocs)
             return jsonResponse({
               error: 'Quote send already in progress for this job',
@@ -2689,17 +2709,21 @@ serve(async (req: Request) => {
             }, 409, corsHeaders)
           }
           if (jobLease.claimed_at) jobClaim.claimed_at = jobLease.claimed_at
-          const recipientClaim = claimedDocs.find((claim) =>
-            recipient.docs.some((doc: { id?: string }) => doc?.id === claim.id)
+          const groupedLease = await touchGroupedQuoteDocumentSendClaims(
+            sb,
+            claimedDocs,
+            recipient.docs.map((doc: { id?: string }) => doc?.id),
           )
-          if (recipientClaim) {
-            const docLease = await touchQuoteDocumentSendClaim(
-              sb,
-              recipientClaim.id,
-              recipientClaim.token,
+          if (groupedLease.outcome === 'error') {
+            console.error(
+              '[send-quote] send-runs document lease refresh failed:',
+              groupedLease.error?.message || String(groupedLease.error),
             )
-            if (!docLease.updated) continue
+            await revertSendRunsDocumentClaims(claimedDocs, true)
+            return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
           }
+          if (groupedLease.outcome !== 'owned') continue
+          const recipientClaim = groupedLease.claims[0]
 
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
@@ -3136,7 +3160,21 @@ serve(async (req: Request) => {
         xero_invoice_id,
         invoiceClaim.claim.token,
       )
-      if (!invoiceLease.updated) {
+      const invoiceLeaseOutcome = classifySendClaimLease(invoiceLease)
+      if (invoiceLeaseOutcome === 'error') {
+        console.error(
+          '[send-invoice] lease refresh failed:',
+          invoiceLease.error?.message || String(invoiceLease.error),
+        )
+        await revertInvoiceEmailSendClaim(
+          sb,
+          xero_invoice_id,
+          invoiceClaim.claim.token,
+          'keep_provider_key',
+        )
+        return jsonResponse({ error: 'Failed to refresh invoice send claim' }, 500, corsHeaders)
+      }
+      if (invoiceLeaseOutcome === 'lost') {
         return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
       }
 

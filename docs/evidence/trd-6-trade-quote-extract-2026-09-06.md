@@ -342,3 +342,23 @@ exemption only on `payment_terms` stay locked.
 
 Office-only `/send` / `/send-runs` / `/send-invoice` and sealed-phrase
 exemption only on `payment_terms` stay locked.
+
+## Review-16 locks (2026-09-06)
+
+- **send-runs heartbeats every grouped document claim.** A recipient
+  email covering several runs refreshes `send_claimed_at` on every owned
+  document claim (`touchGroupedQuoteDocumentSendClaims`) before Resend.
+  Refreshing only the first left secondary claims stale so `/send` could
+  reclaim them with a distinct Idempotency-Key and duplicate the email.
+  A missing claim in the group, or any lost token, skips that dispatch.
+  A DB fault on any heartbeat is 500, not a skip.
+- **Lease-refresh faults are 5xx, not already_sent.** `/send` and
+  `/send-invoice` (and send-runs job/document heartbeats) treat a
+  heartbeat `{ error }` as a lease error: HTTP 500, unpublished claim
+  reverted with `keep_provider_key`. `already_sent` is reserved for
+  explicit ownership loss (`updated: false`, no error). Job-lease
+  ownership loss stays 409 `send_runs_in_progress`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` and sealed-phrase
+exemption only on `payment_terms` stay locked. Post-send provider keys
+stay on ambiguous / persist / publication failure.
