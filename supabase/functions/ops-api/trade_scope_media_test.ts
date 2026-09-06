@@ -2,9 +2,11 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   collectScopeMedia,
+  deterministicScopeMediaId,
   existingMediaMatchesVideo,
   extractScopeMedia,
   extractScopePhotos,
+  isJobMediaUniqueViolation,
   selectTradeJobMedia,
   TRADE_WALKTHROUGH_LABEL,
 } from "./trade_scope_media.ts";
@@ -17,7 +19,14 @@ function tinyJpegDataUrl(): string {
   return "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wAAAAD/wgARCAABAAEDAREAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAGz/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPwB//9k=";
 }
 
-function makeExtractClient(existing: any[] = []) {
+function makeExtractClient(
+  existing: any[] = [],
+  opts: {
+    throwOnUpload?: boolean | ((path: string) => boolean);
+    hideJobScan?: boolean;
+    forceUniqueViolation?: boolean;
+  } = {},
+) {
   const media = existing.map((row) => ({ ...row }));
   const uploads: Array<{ bucket: string; path: string }> = [];
   const api = {
@@ -28,6 +37,9 @@ function makeExtractClient(existing: any[] = []) {
         select(_cols?: string) {
           return {
             eq(col: string, val: any) {
+              if (opts.hideJobScan && col === "job_id") {
+                return Promise.resolve({ data: [], error: null });
+              }
               const filtered = media.filter((r) =>
                 String(r?.[col] ?? "") === String(val)
               );
@@ -36,7 +48,17 @@ function makeExtractClient(existing: any[] = []) {
           };
         },
         insert(row: any) {
-          const rec = { id: `m-${media.length + 1}`, ...row };
+          const id = row?.id || `m-${media.length + 1}`;
+          if (
+            opts.forceUniqueViolation ||
+            media.some((r) => String(r?.id || "") === String(id))
+          ) {
+            return Promise.resolve({
+              data: null,
+              error: { code: "23505", message: "duplicate key value" },
+            });
+          }
+          const rec = { id, ...row };
           media.push(rec);
           return Promise.resolve({ data: rec, error: null });
         },
@@ -47,6 +69,10 @@ function makeExtractClient(existing: any[] = []) {
       from(bucket: string) {
         return {
           upload: async (path: string) => {
+            const shouldThrow = typeof opts.throwOnUpload === "function"
+              ? opts.throwOnUpload(path)
+              : !!opts.throwOnUpload;
+            if (shouldThrow) throw new Error("storage upload threw");
             uploads.push({ bucket, path });
             return { error: null };
           },
@@ -248,4 +274,100 @@ Deno.test("selectTradeJobMedia without a reattend boundary returns every row", (
     "p",
     "v",
   ]);
+});
+
+Deno.test("deterministicScopeMediaId is stable for the same job+url", async () => {
+  const first = await deterministicScopeMediaId("job-1", WALKTHROUGH_URL);
+  const retry = await deterministicScopeMediaId("job-1", WALKTHROUGH_URL);
+  const other = await deterministicScopeMediaId("job-1", PHOTO_URL);
+  assertEquals(first, retry);
+  assertEquals(first === other, false);
+  assertEquals(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(first),
+    true,
+  );
+  assertEquals(isJobMediaUniqueViolation({ code: "23505" }), true);
+  assertEquals(isJobMediaUniqueViolation({ message: "duplicate key value" }), true);
+  assertEquals(isJobMediaUniqueViolation({ code: "42501" }), false);
+});
+
+Deno.test("a 23505 insert recovers the winner and does not mint a second row", async () => {
+  const id = await deterministicScopeMediaId("job-1", WALKTHROUGH_URL);
+  const winner = {
+    id,
+    job_id: "job-1",
+    type: "video",
+    phase: "scope",
+    storage_url: WALKTHROUGH_URL,
+    label: TRADE_WALKTHROUGH_LABEL,
+  };
+  const client = makeExtractClient([winner], {
+    hideJobScan: true,
+    forceUniqueViolation: true,
+  });
+  const result = await extractScopeMedia(client, "job-1", {
+    scopeMedia: { videoWalkthrough: WALKTHROUGH_URL },
+  });
+  assertEquals(client.media.filter((m: any) => m.type === "video").length, 1);
+  assertEquals(result.videos, 0);
+  assertEquals(result.rows[0].id, id);
+  assertEquals(result.rows[0].storage_url, WALKTHROUGH_URL);
+});
+
+Deno.test("concurrent walkthrough registration converges on one row identity", async () => {
+  const client = makeExtractClient([]);
+  const scope = { scopeMedia: { videoWalkthrough: WALKTHROUGH_URL } };
+  const [first, second] = await Promise.all([
+    extractScopeMedia(client, "job-1", scope),
+    extractScopeMedia(client, "job-1", scope),
+  ]);
+  const videos = client.media.filter((m: any) => m.type === "video");
+  assertEquals(videos.length, 1);
+  const expectedId = await deterministicScopeMediaId("job-1", WALKTHROUGH_URL);
+  assertEquals(videos[0].id, expectedId);
+  const returnedIds = [...first.rows, ...second.rows].map((r) => r.id);
+  assertEquals(new Set(returnedIds).size, 1);
+  assertEquals(returnedIds[0], expectedId);
+  assertEquals(first.videos + second.videos, 1);
+});
+
+Deno.test("a throwing data:video candidate does not block a later playable URL", async () => {
+  let uploads = 0;
+  const client = makeExtractClient([], {
+    throwOnUpload: () => {
+      uploads++;
+      return true;
+    },
+  });
+  const result = await extractScopeMedia(client, "job-1", {
+    scopeMedia: {
+      videos: [
+        { dataUrl: "data:video/mp4;base64,%%%not-base64%%%", label: "Broken" },
+        { url: WALKTHROUGH_URL, label: TRADE_WALKTHROUGH_LABEL },
+      ],
+    },
+  });
+  assertEquals(result.videos, 1);
+  assertEquals(result.rows[0].storage_url, WALKTHROUGH_URL);
+  assertEquals(client.media.filter((m: any) => m.type === "video").length, 1);
+  assertEquals(uploads, 0, "invalid data:video is skipped before storage");
+});
+
+Deno.test("a storage throw on one dataUrl photo still registers the next photo", async () => {
+  const client = makeExtractClient([], {
+    throwOnUpload: (path) => path.includes("/scope/0."),
+  });
+  const result = await extractScopeMedia(client, "job-1", {
+    job: {
+      scopeMedia: {
+        photos: [
+          { dataUrl: tinyJpegDataUrl(), label: "Bad first" },
+          { url: PHOTO_URL, label: "Front" },
+        ],
+      },
+    },
+  });
+  assertEquals(result.photos, 1);
+  assertEquals(result.rows.map((r) => r.storage_url), [PHOTO_URL]);
+  assertEquals(client.media.length, 1);
 });

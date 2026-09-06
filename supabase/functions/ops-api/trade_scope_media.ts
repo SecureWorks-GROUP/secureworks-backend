@@ -294,13 +294,49 @@ function extFromMimeOrName(mime: string, fileName?: string): string {
   return "jpg";
 }
 
+/**
+ * Same identity coordinate as ghl-proxy `deterministicMediaId` so a walkthrough
+ * URL registered here or via register_media is one job_media primary key.
+ * Concurrent trade_job_detail reads therefore collide on id (23505) instead of
+ * inserting two random UUIDs that response-side dedupe still shows as twins.
+ */
+export async function deterministicScopeMediaId(
+  jobId: string,
+  storageUrl: string,
+): Promise<string> {
+  const input = `${jobId}\n${storageUrl}`;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(input),
+  );
+  const bytes = new Uint8Array(digest).slice(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20)}`;
+}
+
+export function isJobMediaUniqueViolation(error: unknown): boolean {
+  const anyErr = error as { code?: string; message?: string; details?: string };
+  const msg = String(anyErr?.message || anyErr?.details || error || "");
+  return anyErr?.code === "23505" || /duplicate key value|unique constraint/i.test(msg);
+}
+
 function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } | null {
-  const base64 = dataUrl.split(",")[1];
-  if (!base64) return null;
-  const mimeMatch = dataUrl.match(/data:([^;]+);/);
-  const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
-  const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0));
-  return { mime, bytes };
+  try {
+    const base64 = dataUrl.split(",")[1];
+    if (!base64) return null;
+    const mimeMatch = dataUrl.match(/data:([^;]+);/);
+    const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
+    const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0));
+    return { mime, bytes };
+  } catch {
+    return null;
+  }
 }
 
 async function loadExistingMedia(client: any, jobId: string): Promise<any[]> {
@@ -314,16 +350,63 @@ async function loadExistingMedia(client: any, jobId: string): Promise<any[]> {
   return data || [];
 }
 
-async function insertMediaRow(
+type RegisterMediaResult = { row: any; created: boolean };
+
+async function resolveUniqueInsertWinner(
   client: any,
+  jobId: string,
   row: Record<string, unknown>,
 ): Promise<any | null> {
+  const id = String(row.id || "");
+  if (id) {
+    const { data, error } = await client.from("job_media")
+      .select("id, type, phase, storage_url, label")
+      .eq("id", id);
+    if (!error) {
+      const found = Array.isArray(data) ? data[0] : data;
+      if (found) return found;
+    }
+  }
+  const fresh = await loadExistingMedia(client, jobId);
+  const url = String(row.storage_url || "");
+  return fresh.find((existing) =>
+    (id && String(existing?.id || "") === id) ||
+    (url && String(existing?.storage_url || "") === url)
+  ) || null;
+}
+
+async function insertMediaRow(
+  client: any,
+  jobId: string,
+  row: Record<string, unknown>,
+): Promise<RegisterMediaResult | null> {
   const { data, error } = await client.from("job_media").insert(row);
   if (error) {
+    if (isJobMediaUniqueViolation(error)) {
+      const winner = await resolveUniqueInsertWinner(client, jobId, row);
+      if (winner) return { row: winner, created: false };
+    }
     console.log("[ops-api] scope media insert failed:", error.message);
     return null;
   }
-  return data && !Array.isArray(data) ? data : { ...row, ...(data?.[0] || {}) };
+  const created = data && !Array.isArray(data)
+    ? data
+    : { ...row, ...(data?.[0] || {}) };
+  return { row: created, created: true };
+}
+
+function rememberExisting(existing: any[], row: any) {
+  const id = String(row?.id || "");
+  const url = String(row?.storage_url || "");
+  if (
+    existing.some((seen) =>
+      (id && String(seen?.id || "") === id) ||
+      (url && String(seen?.storage_url || "") === url)
+    )
+  ) {
+    return;
+  }
+  existing.push(row);
 }
 
 async function registerUrlMedia(
@@ -333,11 +416,13 @@ async function registerUrlMedia(
   storageUrl: string,
   label: string,
   existing: any[],
-): Promise<any | null> {
+): Promise<RegisterMediaResult | null> {
   if (existing.some((row) => String(row?.storage_url || "") === storageUrl)) {
     return null;
   }
+  const id = await deterministicScopeMediaId(jobId, storageUrl);
   const row = {
+    id,
     job_id: jobId,
     phase: "scope",
     type: kind,
@@ -345,8 +430,8 @@ async function registerUrlMedia(
     label,
     created_at: new Date().toISOString(),
   };
-  const inserted = await insertMediaRow(client, row);
-  if (inserted) existing.push(inserted);
+  const inserted = await insertMediaRow(client, jobId, row);
+  if (inserted) rememberExisting(existing, inserted.row);
   return inserted;
 }
 
@@ -359,37 +444,47 @@ async function uploadDataUrlMedia(
   fileName: string | undefined,
   index: number,
   existing: any[],
-): Promise<any | null> {
-  const decoded = decodeDataUrl(dataUrl);
-  if (!decoded) return null;
-  const ext = extFromMimeOrName(decoded.mime, fileName);
-  const bucket = kind === "video" ? "job-videos" : "job-photos";
+): Promise<RegisterMediaResult | null> {
   try {
-    await client.storage.createBucket(bucket, { public: true });
-  } catch {
-    /* exists */
-  }
-  const path = kind === "video"
-    ? `${jobId}/scope/walkthrough-${index}.${ext}`
-    : `${jobId}/scope/${index}.${ext}`;
-  const { error: uploadError } = await client.storage
-    .from(bucket)
-    .upload(path, decoded.bytes, { contentType: decoded.mime, upsert: true });
-  if (uploadError) {
-    console.log(`[ops-api] scope ${kind} ${index} upload failed:`, uploadError.message);
+    const decoded = decodeDataUrl(dataUrl);
+    if (!decoded) return null;
+    const ext = extFromMimeOrName(decoded.mime, fileName);
+    const bucket = kind === "video" ? "job-videos" : "job-photos";
+    try {
+      await client.storage.createBucket(bucket, { public: true });
+    } catch {
+      /* exists */
+    }
+    const path = kind === "video"
+      ? `${jobId}/scope/walkthrough-${index}.${ext}`
+      : `${jobId}/scope/${index}.${ext}`;
+    const { error: uploadError } = await client.storage
+      .from(bucket)
+      .upload(path, decoded.bytes, { contentType: decoded.mime, upsert: true });
+    if (uploadError) {
+      console.log(
+        `[ops-api] scope ${kind} ${index} upload failed:`,
+        uploadError.message,
+      );
+      return null;
+    }
+    const { data: urlData } = client.storage.from(bucket).getPublicUrl(path);
+    const publicUrl = urlData?.publicUrl;
+    if (!isHttpMediaUrl(publicUrl)) return null;
+    return await registerUrlMedia(client, jobId, kind, publicUrl, label, existing);
+  } catch (err: any) {
+    console.log(`[ops-api] scope ${kind} ${index} error:`, err?.message);
     return null;
   }
-  const { data: urlData } = client.storage.from(bucket).getPublicUrl(path);
-  const publicUrl = urlData?.publicUrl;
-  if (!isHttpMediaUrl(publicUrl)) return null;
-  return await registerUrlMedia(client, jobId, kind, publicUrl, label, existing);
 }
 
 /**
  * Extract/register scope photos and videos into job_media.
- * Idempotent. A missing walkthrough is still registered even when scope
- * photos already exist. Filename-only metadata without a URL is not turned
- * into a dead player row.
+ * Idempotent at the primary key: the same job+URL always inserts the same
+ * id, and a unique-violation recovers the winner instead of minting a twin.
+ * A missing walkthrough is still registered even when scope photos already
+ * exist. Filename-only metadata without a URL is not turned into a dead
+ * player row. One candidate's decode/storage throw does not abort the rest.
  */
 export async function extractScopeMedia(
   client: any,
@@ -411,73 +506,73 @@ export async function extractScopeMedia(
   let videos = 0;
 
   for (const [i, video] of collected.videos.entries()) {
-    if (existing.some((row) => existingMediaMatchesVideo(row, video))) continue;
-    if (video.storageUrl) {
-      const inserted = await registerUrlMedia(
-        client,
-        jobId,
-        "video",
-        video.storageUrl,
-        video.label || TRADE_WALKTHROUGH_LABEL,
-        existing,
-      );
-      if (inserted) {
-        videos++;
-        rows.push(inserted);
+    try {
+      if (existing.some((row) => existingMediaMatchesVideo(row, video))) continue;
+      if (video.storageUrl) {
+        const inserted = await registerUrlMedia(
+          client,
+          jobId,
+          "video",
+          video.storageUrl,
+          video.label || TRADE_WALKTHROUGH_LABEL,
+          existing,
+        );
+        if (inserted?.created) videos++;
+        if (inserted?.row) rows.push(inserted.row);
+        continue;
       }
-      continue;
-    }
-    if (video.dataUrl) {
-      const inserted = await uploadDataUrlMedia(
-        client,
-        jobId,
-        "video",
-        video.dataUrl,
-        video.label || TRADE_WALKTHROUGH_LABEL,
-        video.fileName,
-        i,
-        existing,
-      );
-      if (inserted) {
-        videos++;
-        rows.push(inserted);
+      if (video.dataUrl) {
+        const inserted = await uploadDataUrlMedia(
+          client,
+          jobId,
+          "video",
+          video.dataUrl,
+          video.label || TRADE_WALKTHROUGH_LABEL,
+          video.fileName,
+          i,
+          existing,
+        );
+        if (inserted?.created) videos++;
+        if (inserted?.row) rows.push(inserted.row);
       }
+      // Filename/size-only: no inventing a signed or guessed URL.
+    } catch (err: any) {
+      console.log(`[ops-api] scope video ${i} error:`, err?.message);
     }
-    // Filename/size-only: no inventing a signed or guessed URL.
   }
 
   if (!hasScopePhoto) {
     for (let i = 0; i < collected.photos.length; i++) {
-      const photo = collected.photos[i];
-      if (photo.storageUrl) {
-        const inserted = await registerUrlMedia(
+      try {
+        const photo = collected.photos[i];
+        if (photo.storageUrl) {
+          const inserted = await registerUrlMedia(
+            client,
+            jobId,
+            "photo",
+            photo.storageUrl,
+            photo.label,
+            existing,
+          );
+          if (inserted?.created) photos++;
+          if (inserted?.row) rows.push(inserted.row);
+          continue;
+        }
+        if (!photo.dataUrl) continue;
+        const inserted = await uploadDataUrlMedia(
           client,
           jobId,
           "photo",
-          photo.storageUrl,
+          photo.dataUrl,
           photo.label,
+          undefined,
+          i,
           existing,
         );
-        if (inserted) {
-          photos++;
-          rows.push(inserted);
-        }
-        continue;
-      }
-      if (!photo.dataUrl) continue;
-      const inserted = await uploadDataUrlMedia(
-        client,
-        jobId,
-        "photo",
-        photo.dataUrl,
-        photo.label,
-        undefined,
-        i,
-        existing,
-      );
-      if (inserted) {
-        photos++;
-        rows.push(inserted);
+        if (inserted?.created) photos++;
+        if (inserted?.row) rows.push(inserted.row);
+      } catch (err: any) {
+        console.log(`[ops-api] scope photo ${i} error:`, err?.message);
       }
     }
   }
