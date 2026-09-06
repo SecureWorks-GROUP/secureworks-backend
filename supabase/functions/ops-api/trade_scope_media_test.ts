@@ -171,6 +171,28 @@ Deno.test("collectScopeMedia still takes a block-level https alias after invalid
   assertEquals(collected.videos.some((v) => v.storageUrl === WALKTHROUGH_URL), true);
 });
 
+Deno.test("collectScopeMedia prefers a later https walkthrough alias over a data:video videoUrl", () => {
+  const collected = collectScopeMedia({
+    scopeMedia: {
+      videoFileName: "broken.mp4",
+      videoUrl: tinyVideoDataUrl(),
+      videoWalkthroughUrl: WALKTHROUGH_URL,
+    },
+  });
+  assertEquals(collected.videos.some((v) => v.storageUrl === WALKTHROUGH_URL), true);
+});
+
+Deno.test("collectScopeMedia prefers a later https walkthrough alias over an http:// videoUrl", () => {
+  const collected = collectScopeMedia({
+    scopeMedia: {
+      videoFileName: "broken.mp4",
+      videoUrl: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4",
+      videoWalkthroughUrl: WALKTHROUGH_URL,
+    },
+  });
+  assertEquals(collected.videos.some((v) => v.storageUrl === WALKTHROUGH_URL), true);
+});
+
 Deno.test("collectScopeMedia still takes videoWalkthroughUrl after an http:// primary", () => {
   const collected = collectScopeMedia({
     job: {

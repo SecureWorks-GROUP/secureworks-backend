@@ -38161,7 +38161,17 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
   for (const [key, value] of Object.entries(node)) {
     if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
     if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
-    const walked = walkTradeQuoteObjectAllowlist(value, depth + 1)
+    // Nested quote/quotes are narrative keys, same as the outer walker:
+    // a bare numeric / "$594" value is money, not a quote object.
+    if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
+      continue
+    }
+    const walked = TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && Array.isArray(value)
+      ? value
+        .filter((v) => !tradeScopeBareMoneyValue(v))
+        .map((v) => walkTradeQuoteObjectAllowlist(v, depth + 1))
+        .filter((v) => v !== undefined)
+      : walkTradeQuoteObjectAllowlist(value, depth + 1)
     if (walked === undefined) continue
     out[key] = walked
   }
@@ -38239,9 +38249,10 @@ function isTradeWoScopeItemScalar(value: unknown): boolean {
 }
 
 export function redactTradeWorkOrderScopeItems(items: any): any {
-  if (!Array.isArray(items)) return items
-  return items.map((item: any) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+  if (items == null) return items
+  if (!Array.isArray(items)) return []
+  return items.flatMap((item: any) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(item)) {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
@@ -38249,7 +38260,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
       if (!isTradeWoScopeItemScalar(value)) continue
       out[key] = value
     }
-    return out
+    return [out]
   })
 }
 
@@ -38270,7 +38281,6 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
       accepted: pack.accepted,
       status: pack.status,
       job_type: pack.job_type,
-      notes: pack.notes,
       summary: pack.summary,
       source: pack.source,
       items: (pack.items || []).map((item: any) => {

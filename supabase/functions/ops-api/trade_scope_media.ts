@@ -216,7 +216,7 @@ function collectFromMediaBlock(
   ) {
     const alias = videoFromUnknown({
       fileName: media.videoFileName,
-      url: media.videoUrl || media.videoWalkthroughUrl,
+      url: firstHttpUrl(media.videoUrl, media.videoWalkthroughUrl),
       videoSize: media.videoSize,
       label: media.videoLabel || TRADE_WALKTHROUGH_LABEL,
     }, TRADE_WALKTHROUGH_LABEL);

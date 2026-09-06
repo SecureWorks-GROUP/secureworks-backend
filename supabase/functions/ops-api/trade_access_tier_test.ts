@@ -698,6 +698,17 @@ Deno.test("redactTradeScopeQuote allowlists quote/quotes so unknown money keys c
   assertEquals(quoteLeakProbe(r), []);
 });
 
+Deno.test("redactTradeScopeQuote strips nested numeric quote/quotes the same as a bare top-level quote", () => {
+  const r = redactTradeScopeQuote({
+    job: {
+      quote: { quote: 594, quotes: ["$9,999", { quote_number: "Q-NEST", quote: 777 }] },
+    },
+  });
+  assertEquals(r.job.quote, { quotes: [{ quote_number: "Q-NEST" }] });
+  assertEquals(quoteLeakProbe(r), []);
+  assertEquals(JSON.stringify(r).includes("9999"), false);
+});
+
 Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the rest", () => {
   const r = redactTradeScopeQuote(structuredClone(QUOTE_SCOPE));
   assertEquals(r._pricing_json, undefined);
@@ -798,6 +809,18 @@ Deno.test("redactTradeWorkOrderScopeItems is allowlist-only — unknown money an
   );
 });
 
+Deno.test("redactTradeWorkOrderScopeItems drops non-object and nested-array entries", () => {
+  assertEquals(
+    redactTradeWorkOrderScopeItems([
+      "$9,999",
+      [{ description: "Hidden", unitPriceEx: 20, quotedTotal: 88 }],
+      { description: "Posts", quantity: 4, unit: "ea" },
+    ]),
+    [{ description: "Posts", quantity: 4, unit: "ea" }],
+  );
+  assertEquals(redactTradeWorkOrderScopeItems("$9,999"), []);
+});
+
 Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money", () => {
   const out = redactTradeQuotePackMoney([
     {
@@ -827,6 +850,19 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     unit_price: null,
     line_total: null,
   });
+});
+
+Deno.test("redactTradeQuotePackMoney omits pack notes so sell figures cannot ride the allocated projection", () => {
+  const out = redactTradeQuotePackMoney([
+    {
+      quote_number: "Q-1",
+      notes: "Priced $9,999 inc GST — do not show the trade",
+      items: [],
+    },
+  ]);
+  assertEquals(out[0].quote_number, "Q-1");
+  assertEquals("notes" in out[0], false);
+  assertEquals(JSON.stringify(out).includes("9999"), false);
 });
 
 // ── Lead designation reads is_lead, never role ──────────────────────────────
