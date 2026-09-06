@@ -36,6 +36,7 @@ import {
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
   redactTradeWorkOrdersForAllocated,
+  sanitizeTradeAllocatedJobNotes,
   tradeLabourCostVisibleForTier,
   resolveTradeJobAccessTier,
   TRADE_JOB_SERVICE_REPORT_COLUMNS,
@@ -1063,6 +1064,15 @@ Deno.test("trade_job_detail: existing video rows must be playable HTTPS to reach
   assertEquals(videos[0].storage_url, WALKTHROUGH_URL);
 });
 
+Deno.test("trade_job_detail: allocated drops numeric top-level job.notes", async () => {
+  const t = seed();
+  t.jobs[0].notes = 85;
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.access_tier, "allocated");
+  assertEquals(p.job.notes, null);
+  assertEquals(JSON.stringify(p.job).includes("\"85\""), false);
+});
+
 Deno.test("trade_job_detail: the fencing division manager sees the quote docs and the raw scope (office parity within the trade)", async () => {
   const p = await detail(seed(), viewer(HENRY, "lead_installer", ["fencing"]));
   assertEquals(p.access_tier, "division_manager");
@@ -1562,6 +1572,19 @@ Deno.test("redactTradeWorkOrderScopeItems drops non-object and nested-array entr
   assertEquals(redactTradeWorkOrderScopeItems("$9,999"), []);
 });
 
+Deno.test("redactTradeWorkOrderScopeItems drops numeric narrative scalars and keeps quantity", () => {
+  assertEquals(
+    redactTradeWorkOrderScopeItems([
+      { description: 85, instructions: 85, notes: 85, name: 85, label: 85, title: 85, text: 85, quantity: 4, unit: "ea" },
+      { description: "Posts", quantity: 4, unit: "ea" },
+    ]),
+    [
+      { quantity: 4, unit: "ea" },
+      { description: "Posts", quantity: 4, unit: "ea" },
+    ],
+  );
+});
+
 Deno.test("redactTradeWorkOrderScopeItems drops bare money unit/kind and keeps approved vocabulary", () => {
   assertEquals(
     redactTradeWorkOrderScopeItems([
@@ -1734,6 +1757,39 @@ Deno.test("redactTradeQuotePackMoney drops money-shaped unit and kind scalars", 
   assertEquals(JSON.stringify(out).includes("9,999"), false);
   assertEquals(JSON.stringify(out).includes("\"85\""), false);
   assertEquals(JSON.stringify(out).includes("999"), false);
+});
+
+Deno.test("redactTradeQuotePackMoney drops numeric-only summaries and descriptions", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    summary: 85,
+    items: [
+      { kind: "install_m", description: 85, quantity: 10, unit: "m" },
+      { kind: "install_m", description: "999", quantity: 2, unit: "ea" },
+      { kind: "install_m", description: "Rear 19m", quantity: 19, unit: "m" },
+    ],
+  }]);
+  assertEquals(out[0].summary, null);
+  assertEquals(out[0].items[0].description, null);
+  assertEquals(out[0].items[1].description, null);
+  assertEquals(out[0].items[2].description, "Rear 19m");
+  assertEquals(JSON.stringify(out).includes("\"85\""), false);
+});
+
+Deno.test("sanitizeTradeAllocatedJobNotes drops numeric top-level notes and keeps writing / objects", () => {
+  assertEquals(sanitizeTradeAllocatedJobNotes(85), null);
+  assertEquals(sanitizeTradeAllocatedJobNotes("85"), null);
+  assertEquals(
+    sanitizeTradeAllocatedJobNotes("Park on the verge. Extra $9,999"),
+    "Park on the verge. Extra",
+  );
+  assertEquals(sanitizeTradeAllocatedJobNotes("2 trades over 3 days"), "2 trades over 3 days");
+  const walked = sanitizeTradeAllocatedJobNotes({
+    noteWorkOrder: "Use 90x90 posts",
+    sell: 9999,
+    amount: 85,
+  });
+  assertEquals(walked, { noteWorkOrder: "Use 90x90 posts" });
 });
 
 Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures from summary and descriptions", () => {

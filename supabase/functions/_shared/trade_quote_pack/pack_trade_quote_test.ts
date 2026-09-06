@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  allocatedTradePackProse,
   applyInstallerRates,
   assembleQuotePacksForTrade,
   packTradeQuote,
@@ -237,10 +238,25 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("Price of 85"), "Price");
   assertEquals(stripTradePackMoney("12 panels at 85"), "12 panels at");
   assertEquals(stripTradePackMoney("85 per panel"), "");
+  assertEquals(stripTradePackMoney("85 each"), "");
+  assertEquals(stripTradePackMoney("85 per item"), "");
+  assertEquals(stripTradePackMoney("85 per gate"), "");
+  assertEquals(stripTradePackMoney("85 per material"), "");
+  assertEquals(stripTradePackMoney("85 per linear metre"), "");
   assertEquals(stripTradePackMoney("Balance due 85"), "Balance due");
   assertEquals(stripTradePackMoney("Paid 85"), "Paid");
   assertEquals(stripTradePackMoney("Due 85"), "Due");
   assertEquals(stripTradePackMoney("deposit: 40"), "deposit");
+});
+
+Deno.test("allocatedTradePackProse drops numbers and numeric-only strings", () => {
+  assertEquals(allocatedTradePackProse(85), null);
+  assertEquals(allocatedTradePackProse(999), null);
+  assertEquals(allocatedTradePackProse("85"), null);
+  assertEquals(allocatedTradePackProse("999"), null);
+  assertEquals(allocatedTradePackProse("Install 10m"), "Install 10m");
+  assertEquals(allocatedTradePackProse("2 trades over 3 days"), "2 trades over 3 days");
+  assertEquals(allocatedTradePackProse(null), null);
 });
 
 Deno.test("sanitizeTradePackUnit and sanitizeTradePackKind drop money scalars", () => {

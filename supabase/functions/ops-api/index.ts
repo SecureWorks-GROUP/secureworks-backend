@@ -121,6 +121,7 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
+  allocatedTradePackProse,
   assembleQuotePacksForTrade,
   isHenryInstaller,
   sanitizeTradePackKind,
@@ -38255,11 +38256,9 @@ function tradeScopeKeepNumericLeaf(key: string): boolean {
   return TRADE_SCOPE_QUANTITY_KEEP_KEYS.has(key) || TRADE_SCOPE_LABOUR_KEEP_KEYS.has(key)
 }
 
-function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
-  if (typeof value === 'string') return sanitizeTradeAllocatedStringLeaf(value)
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return sanitizeTradeAllocatedStringLeaf(String(value))
-  }
+export function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
+  if (typeof value === 'string') return allocatedTradePackProse(value)
+  if (typeof value === 'number' && Number.isFinite(value)) return null
   if (value && typeof value === 'object') {
     const walked = sanitizeTradeAllocatedJsonTree(value)
     return walked === undefined ? null : walked
@@ -38673,6 +38672,10 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
         out[key] = cleaned
         continue
       }
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (key === 'qty' || key === 'quantity') out[key] = value
+        continue
+      }
       out[key] = value
     }
     return [out]
@@ -38725,7 +38728,7 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
       accepted: pack.accepted,
       status: pack.status,
       job_type: pack.job_type,
-      summary: pack.summary == null ? pack.summary : stripTradePackMoney(pack.summary),
+      summary: pack.summary == null ? pack.summary : allocatedTradePackProse(pack.summary),
       source: pack.source,
       items: (pack.items || []).flatMap((item: any) => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return []
@@ -38738,7 +38741,7 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
         const out: Record<string, any> = {
           description: item.description == null
             ? item.description
-            : stripTradePackMoney(item.description),
+            : allocatedTradePackProse(item.description),
           quantity,
           unit_price: null,
           line_total: null,

@@ -474,8 +474,6 @@ const TRADE_PACK_TAX_PHRASE =
   `(?:${TRADE_PACK_TAX_QUALIFIED}|${TRADE_PACK_TAX_WORD})`
 const TRADE_PACK_UNQUALIFIED_MONEY_WORD =
   '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?|quot(?:e[ds]?|ing|ations?)|deposits?|balances?|paid|due)'
-const TRADE_PACK_RATE_UNIT =
-  '(?:hours?|hrs?|h|m(?:et(?:re|er)s?)?|days?|trades?|labou?rers?)'
 const TRADE_PACK_QTY_WORD =
   '(?:trades?|days?|labourers?|posts?|pickets?|panels?|hours?|hrs?)'
 const TRADE_PACK_REF_PREFIX =
@@ -485,8 +483,9 @@ const TRADE_PACK_REF_PREFIX =
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
- *  1200/m, 85 per day, 85/day, 85 per trade, 85 per panel). Contextual
- *  words also catch two-digit marks (Deposit 85, Deposit of 85,
+ *  1200/m, 85 per day, 85/day, 85 per trade, 85 per panel, 85 each,
+ *  85 per item, 85 per gate, 85 per material, 85 per linear metre).
+ *  Contextual words also catch two-digit marks (Deposit 85, Deposit of 85,
  *  Price of 85, 12 panels at 85, Balance due 85, Paid 85, Due 85)
  *  without eating construction counts (2 trades, 19m). Leftover
  *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
@@ -543,7 +542,14 @@ export function stripTradePackMoney(text: unknown): string {
     )
     .replace(
       new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}\\s*(?:/\\s*|\\bper\\s+)(?:${TRADE_PACK_RATE_UNIT}|${TRADE_PACK_QTY_WORD})\\b`,
+        `${TRADE_PACK_MONEY_AMOUNT}\\s+each\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(
+      new RegExp(
+        `${TRADE_PACK_MONEY_AMOUNT}\\s*(?:/\\s*|\\bper\\s+)(?:[A-Za-z]+(?:\\s+[A-Za-z]+)?)\\b`,
         'gi',
       ),
       '',
@@ -567,6 +573,17 @@ export function stripTradePackMoney(text: unknown): string {
 
   s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)] ?? '')
   return s.replace(/\s{2,}/g, ' ').trim()
+}
+
+/** Allocated pack / note prose: strings only. Numbers and numeric-only
+ *  strings are amounts, not writing — drop them rather than stringify
+ *  through the count-preserving sanitizer (TRD4-REV20-003). */
+export function allocatedTradePackProse(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
+  return stripTradePackMoney(value)
 }
 
 /** Closed installer-pack kinds that may ride an allocated quote pack.
