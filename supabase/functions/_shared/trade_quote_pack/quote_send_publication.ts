@@ -19,7 +19,10 @@
  * calls cannot mint a second published pack. A grouped send-runs email
  * heartbeats every still-held document claim for the job — including
  * earlier successful groups — before each Resend and again through
- * pack persist / publication. Refreshing only the current recipient
+ * pack persist / publication. Each persist or publication iteration
+ * refreshes with the current time so a long grouped write cannot let
+ * an earlier claim fall past the TTL. A lost lease fails closed
+ * before the next write. Refreshing only the current recipient
  * lets a successful group's unpublished claims expire so `/send` can
  * reclaim them with a distinct per-document Idempotency-Key after the
  * grouped email already used the group key.
@@ -566,20 +569,19 @@ export type PersistHeldSendClaimsResult =
 
 /**
  * Persist each frozen pack only while every claim in the set still
- * refreshes. Heartbeat the whole group before each write so a slow
- * persist cannot let `/send` reclaim a sibling.
+ * refreshes. Heartbeat the whole group with the current time before
+ * each write so a slow persist cannot let `/send` reclaim a sibling.
  */
 export async function persistTradePacksWhileHoldingSendClaims(
   sb: QuoteSendPublicationClient,
   args: Parameters<typeof persistTradePackOnDocuments>[1],
-  now = new Date(),
 ): Promise<PersistHeldSendClaimsResult> {
   const documents = (args.documents || []).filter((doc) => typeof doc?.id === 'string' && doc.id)
   const claims = uniqueDocumentClaims(
     documents.map((doc) => ({ id: doc.id, token: doc.claim_token })),
   )
   for (const doc of documents) {
-    const beat = await touchQuoteDocumentSendClaims(sb, claims, now)
+    const beat = await touchQuoteDocumentSendClaims(sb, claims, new Date())
     if (beat.outcome === 'error') {
       return { status: 'lease_error', error: beat.error?.message || 'send claim heartbeat failed' }
     }
@@ -597,20 +599,28 @@ export async function publishQuoteDocumentsSendOrRevertWhileHolding(
 ): Promise<{ published: true } | { published: false; error: string; lease?: SendClaimLeaseOutcome }> {
   const owned = uniqueDocumentClaims(claims)
   if (!owned.length) return { published: true }
-  const beat = await touchQuoteDocumentSendClaims(sb, owned, now)
-  if (beat.outcome === 'error') {
-    await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
-    return {
-      published: false,
-      error: beat.error?.message || 'send claim heartbeat failed',
-      lease: 'error',
+  for (const claim of owned) {
+    const beat = await touchQuoteDocumentSendClaims(sb, owned, new Date())
+    if (beat.outcome === 'error') {
+      await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+      return {
+        published: false,
+        error: beat.error?.message || 'send claim heartbeat failed',
+        lease: 'error',
+      }
     }
-  }
-  if (beat.outcome === 'lost') {
+    if (beat.outcome === 'lost') {
+      await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+      return { published: false, error: 'quote send claim lost before publication', lease: 'lost' }
+    }
+    const { updated, error } = await publishQuoteDocumentSend(sb, claim.id, claim.token, now)
+    if (updated) continue
+    const message = error?.message || 'publication stamp not confirmed'
+    console.error('[send-quote] publication stamp failed:', message)
     await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
-    return { published: false, error: 'quote send claim lost before publication', lease: 'lost' }
+    return { published: false, error: message }
   }
-  return await publishQuoteDocumentsSendOrRevert(sb, owned, now)
+  return { published: true }
 }
 
 async function claimJobSendRunsExclusive(

@@ -487,3 +487,20 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-23 locks (2026-09-06)
+
+- **Persist/publication heartbeats use current time each iteration.**
+  `persistTradePacksWhileHoldingSendClaims` and
+  `publishQuoteDocumentsSendOrRevertWhileHolding` refresh every still-held
+  claim with `new Date()` before each write. A lost lease fails closed
+  before the next persist or publication stamp. Grouped `sent_at` may
+  still use the caller stamp; the lease must not.
+- **Trade extract access is a generic 404.** Unassigned same-tenant jobs,
+  missing ids, and foreign jobs share `Job not found` / `job_not_found`
+  before any extract read. Other trade doors keep their existing
+  not-assigned Error.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.

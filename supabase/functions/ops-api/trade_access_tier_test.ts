@@ -875,8 +875,36 @@ Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", 
         viewer(STRANGER, "lead_installer"),
         false,
       ),
-    Error,
+    ApiError,
+    "Job not found",
   );
+});
+
+Deno.test("TRD6-22-002 trade_quote_extract hides same-tenant unassigned jobs as generic 404", async () => {
+  const t = seed();
+  const refuse = async (jobId: string, userId: string) => {
+    try {
+      await _tradeQuoteExtractForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId }),
+        {},
+        viewer(userId, "lead_installer"),
+        false,
+      );
+      throw new Error("expected extract access refusal");
+    } catch (error) {
+      assert(error instanceof ApiError);
+      return error;
+    }
+  };
+  const unassigned = await refuse(JOB_FENCE, STRANGER);
+  const missing = await refuse("job-missing", LEAD);
+  const foreign = await refuse(JOB_FENCE_B, LEAD);
+  for (const error of [unassigned, missing, foreign]) {
+    assertEquals(error.status, 404);
+    assertEquals(error.message, "Job not found");
+    assertEquals(error.body, { error: "Job not found", code: "job_not_found" });
+  }
 });
 
 Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", async () => {

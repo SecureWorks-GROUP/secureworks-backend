@@ -2272,8 +2272,43 @@ Deno.test("R17-002 publication heartbeats the grouped set before stamping sent",
     "heartbeat:doc-a",
     "heartbeat:doc-b",
     "publish:doc-a",
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
     "publish:doc-b",
   ])
+})
+
+Deno.test("TRD6-22-001 persist and publish refresh leases with current time each iteration", () => {
+  const src = Deno.readTextFileSync(new URL("../_shared/trade_quote_pack/quote_send_publication.ts", import.meta.url))
+  const persistStart = src.indexOf("export async function persistTradePacksWhileHoldingSendClaims")
+  const publishStart = src.indexOf("export async function publishQuoteDocumentsSendOrRevertWhileHolding")
+  const publishEnd = src.indexOf("async function claimJobSendRunsExclusive")
+  const persist = src.slice(persistStart, publishStart)
+  const publish = src.slice(publishStart, publishEnd)
+  assert(persistStart >= 0 && publishStart > persistStart && publishEnd > publishStart)
+  assert(persist.includes("for (const doc of documents)"))
+  assert(persist.includes("touchQuoteDocumentSendClaims(sb, claims, new Date())"))
+  assert(!persist.includes("touchQuoteDocumentSendClaims(sb, claims, now)"))
+  assert(persist.includes("if (beat.outcome === 'lost')"))
+  assert(publish.includes("for (const claim of owned)"))
+  assert(publish.includes("touchQuoteDocumentSendClaims(sb, owned, new Date())"))
+  assert(!publish.includes("touchQuoteDocumentSendClaims(sb, owned, now)"))
+  const loop = publish.indexOf("for (const claim of owned)")
+  const beat = publish.indexOf("touchQuoteDocumentSendClaims(sb, owned, new Date())")
+  const stamp = publish.indexOf("publishQuoteDocumentSend(sb, claim.id, claim.token, now)")
+  assert(loop >= 0 && beat > loop && stamp > beat)
+})
+
+Deno.test("TRD6-22-001 publication stops when a later heartbeat loses the lease", async () => {
+  const sb = makeHeldPersistSb({ loseAfterHeartbeats: 3 })
+  const published = await publishQuoteDocumentsSendOrRevertWhileHolding(sb, [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ])
+  assertEquals(published.published, false)
+  assertEquals(published.lease, "lost")
+  assertEquals(sb.events.includes("publish:doc-a"), true)
+  assertEquals(sb.events.includes("publish:doc-b"), false)
 })
 
 Deno.test("R17-002 send-runs source heartbeats grouped claims through persist and publication", () => {

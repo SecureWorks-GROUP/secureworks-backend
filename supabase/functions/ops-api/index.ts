@@ -39440,10 +39440,16 @@ async function tradeQuoteExtractAction(
   const jobId = params.get('jobId') || params.get('job_id') || body?.jobId || body?.job_id
   if (!jobId) throw new ApiError('jobId required', 400)
 
-  await assertAssignedOrMakesafeAccess(client, jobId, viewer.id, isAdmin, {
-    orgId: viewer.orgId,
-    managedVerticals: viewer.managedVerticals,
+  const extractAccess = await resolveTradeJobAccessTier(client, jobId, viewer.id, {
+    isOffice: isAdmin,
+    access: {
+      orgId: viewer.orgId,
+      managedVerticals: viewer.managedVerticals,
+    },
   })
+  if (extractAccess.tier === 'none') {
+    throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+  }
 
   const documentId = String(
     params.get('document_id') || params.get('documentId') || body?.document_id || body?.documentId || '',
