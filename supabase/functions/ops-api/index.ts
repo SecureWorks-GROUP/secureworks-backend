@@ -4177,7 +4177,9 @@ async function dispatchMakesafeReport(
     userId: _resolveMakesafeReportActor(authMode, authUser, body),
   }, authUser
     ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
-    : undefined)
+    : undefined, {
+    isOffice: _opsApiCallerIsStaffOperator(authMode, authUser),
+  })
 }
 
 // Trade Board route: always the production canonical loader. There is no
@@ -9242,8 +9244,9 @@ if (import.meta.main) serve(async (req: Request) => {
               client,
               { ...body, userId: tradeUser.id },
               tradeJobAccess,
+              isDispatcher,
             ))
-          case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess))
+          case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id, tradeJobAccess, isDispatcher))
           // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
           case 'roof_report_template':
             return json(await getRoofReportTemplateForJob(client, url.searchParams.get('job_id') || url.searchParams.get('jobId') || body?.job_id || body?.jobId))
@@ -22732,6 +22735,7 @@ async function submitMakesafeReport(
   client: any,
   body: any,
   access?: TradeJobAccessContext,
+  opts?: { isOffice?: boolean },
 ) {
   const {
     job_id, jobId, userId, user_id,
@@ -22927,7 +22931,7 @@ async function submitMakesafeReport(
         status: 'draft',
         submitted_at: null,
       })
-      .select()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS)
       .single()
     if (!error) {
       report = data
@@ -22972,7 +22976,7 @@ async function submitMakesafeReport(
   if (!submittingFinal && !existing) {
     const { data, error } = await client.from('job_service_reports')
       .insert({ id: canonicalReportId, job_id: jId, ...reportFields })
-      .select()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS)
       .single()
     if (!error) {
       report = data
@@ -23000,12 +23004,12 @@ async function submitMakesafeReport(
     if (resumingSubmitted) {
       assertResumableSubmissionAuthority(existing)
       const { data, error } = await client.from('job_service_reports')
-        .select().eq('id', existing.id).single()
+        .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).eq('id', existing.id).single()
       if (error) throw error
       report = data
     } else {
       const { data, error } = await client.from('job_service_reports')
-        .update(reportFields).eq('id', existing.id).select().single()
+        .update(reportFields).eq('id', existing.id).select(TRADE_JOB_SERVICE_REPORT_COLUMNS).single()
       if (error) {
         throw new ApiError(
           `${submittingFinal ? 'MakeSafe final report promotion' : 'MakeSafe draft update'} failed: ${error.message || error}`,
@@ -23133,7 +23137,19 @@ async function submitMakesafeReport(
     }
   }
 
-  return { ok: true, report, board_sync: boardSync, event_sync: eventSync, warnings }
+  const isOffice = opts?.isOffice === true
+  let quoteVisible = isOffice
+  if (!quoteVisible && uId) {
+    const decision = await resolveTradeJobAccessTier(client, jId, String(uId), { isOffice, access })
+    quoteVisible = decision.quoteVisible
+  }
+  return {
+    ok: true,
+    report: presentTradeServiceReport(report, quoteVisible),
+    board_sync: boardSync,
+    event_sync: eventSync,
+    warnings,
+  }
 }
 export const _submitMakesafeReportForTest = submitMakesafeReport
 export const _dispatchMakesafeReportForTest = dispatchMakesafeReport
@@ -38345,12 +38361,49 @@ function projectTradeAllocatedServiceReports(reports: any[]): any[] {
   return (reports || []).map((row) => projectTradeAllocatedServiceReport(row))
 }
 
+function presentTradeServiceReport(report: any, quoteVisible: boolean): any {
+  if (report == null) return report
+  return quoteVisible ? report : projectTradeAllocatedServiceReport(report)
+}
+
+// Operational job_service_reports columns for every trade-path read/return.
+// Never select('*') here: an unknown money column would fail open before
+// projection. Office / division-manager get these same columns unsanitized.
+export const TRADE_JOB_SERVICE_REPORT_COLUMNS = [
+  'id',
+  'job_id',
+  'submitted_by',
+  'checklist_json',
+  'notes',
+  'signature_data',
+  'signature_name',
+  'status',
+  'submitted_at',
+  'created_at',
+  'updated_at',
+  'weather',
+  'start_time',
+  'end_time',
+  'variations',
+  'cycle_number',
+  'attendance_cycle_id',
+  'cycle_attribution',
+].join(', ')
+
 // The recursion cap is a guard against a pathological blob, not a licence to
 // stop redacting: past it the branch is DROPPED, never returned verbatim. A
 // redaction fence that fails open at its own limit is the one failure mode it
 // exists to prevent, and it would be silent. JSON carries no `undefined`, so
 // using it as the drop marker cannot collide with real scope data.
 export const TRADE_SCOPE_REDACTION_MAX_DEPTH = 12
+
+function tradeAllocatedAllowlistedStringLeaf(key: string, value: string): string | undefined {
+  // Bare numeric / money strings ("9999", "85.00") are money, not narrative.
+  // Quantity-keep keys may retain a numeric string; everything else fails closed.
+  if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) return undefined
+  const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+  return cleaned === '' ? undefined : cleaned
+}
 
 function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: string): any {
   if (node == null) return node
@@ -38371,8 +38424,8 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: str
       continue
     }
     if (typeof value === 'string') {
-      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
-      if (cleaned === '') continue
+      const cleaned = tradeAllocatedAllowlistedStringLeaf(key, value)
+      if (cleaned === undefined) continue
       out[key] = cleaned
       continue
     }
@@ -38381,7 +38434,7 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: str
         .filter((v) => !tradeScopeBareMoneyValue(v))
         .map((v) =>
           typeof v === 'string'
-            ? (stripTradePackMoney(v) || undefined)
+            ? tradeAllocatedAllowlistedStringLeaf(key, v)
             : walkTradeQuoteObjectAllowlist(v, depth + 1, key)
         )
         .filter((v) => v !== undefined)
@@ -38681,7 +38734,7 @@ async function tradeJobDetail(
       .select('id, event_type, detail_json, created_at, users:user_id(name)')
       .eq('job_id', jobId).eq('event_type', 'note').order('created_at', { ascending: false }).limit(50),
     client.from('job_service_reports')
-      .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
     // Work order data (scope items, instructions).
     //
     // NOT limit(1). The admin path (jobDetail) returns every non-cancelled work
@@ -38943,7 +38996,7 @@ async function tradeJobDetail(
     // every visit's report, not just the latest. serviceReport is the current
     // attendance only once a reattend boundary exists.
     // Allocated / makesafe_open get a money-projected report; office /
-    // division-manager keep the raw select('*') row.
+    // division-manager keep the same operational columns unsanitized.
     serviceReports: quoteVisible
       ? (reportRes.data || [])
       : projectTradeAllocatedServiceReports(reportRes.data || []),
@@ -39434,6 +39487,7 @@ async function submitServiceReport(
   client: any,
   body: any,
   access?: TradeJobAccessContext,
+  isOffice = false,
 ) {
   const { jobId, job_id, userId, user_id, checklist, notes, signatureData, signatureName, status, weather, start_time, end_time, variations } = body
   const jId = jobId || job_id
@@ -39453,11 +39507,16 @@ async function submitServiceReport(
       job_id: jId,
       userId: uId,
       status: reportStatus,
-    }, access)
+    }, access, { isOffice })
   }
 
   // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
-  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, false, access)
+  // Fail closed: unknown viewer (no user, not office) never sees raw money.
+  let quoteVisible = isOffice
+  if (uId) {
+    const decision = await assertAssignedOrMakesafeAccess(client, jId, uId, isOffice, access)
+    quoteVisible = decision.quoteVisible
+  }
 
   // Upload signature to storage if provided (instead of storing base64 in DB)
   const signatureUrl = await persistServiceReportSignature(client, jId, signatureData)
@@ -39494,7 +39553,7 @@ async function submitServiceReport(
       .from('job_service_reports')
       .update(reportFields)
       .eq('id', existing.id)
-      .select().single()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).single()
 
     if (error) throw error
     report = data
@@ -39502,7 +39561,7 @@ async function submitServiceReport(
     const { data, error } = await client
       .from('job_service_reports')
       .insert({ job_id: jId, ...reportFields })
-      .select().single()
+      .select(TRADE_JOB_SERVICE_REPORT_COLUMNS).single()
 
     if (error) throw error
     report = data
@@ -39539,21 +39598,27 @@ async function submitServiceReport(
     }
   }
 
-  return { report }
+  return { report: presentTradeServiceReport(report, quoteVisible) }
 }
 export const _submitServiceReportForTest = submitServiceReport
 
-async function getServiceReport(client: any, params: URLSearchParams, userId: string, access?: TradeJobAccessContext) {
+async function getServiceReport(
+  client: any,
+  params: URLSearchParams,
+  userId: string,
+  access?: TradeJobAccessContext,
+  isOffice = false,
+) {
   const jobId = params.get('jobId')
   if (!jobId) throw new Error('jobId required')
 
   // Verify user is assigned, manages the job's vertical, or this is a
   // MakeSafe/SWMS field-report job.
-  await assertAssignedOrMakesafeAccess(client, jobId, userId, false, access)
+  const decision = await assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)
 
   const { data: report } = await client
     .from('job_service_reports')
-    .select('*')
+    .select(TRADE_JOB_SERVICE_REPORT_COLUMNS)
     .eq('job_id', jobId)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -39569,7 +39634,7 @@ async function getServiceReport(client: any, params: URLSearchParams, userId: st
     .maybeSingle()
 
   return {
-    report: report || null,
+    report: presentTradeServiceReport(report || null, decision.quoteVisible),
     checklistTemplate: config?.config_value?.items || [],
   }
 }

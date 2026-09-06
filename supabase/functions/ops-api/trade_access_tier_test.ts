@@ -22,9 +22,11 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _getServiceReportForTest,
   _myJobsPersonalRecencyFilter,
   _resolveManagerVisibility,
   _scopeCalendarPayloadToVerticals,
+  _submitServiceReportForTest,
   _tradeDocumentsForAllocatedTrade,
   _tradeJobDetailForTest,
   _tradeLabourBudgetForTest,
@@ -35,6 +37,7 @@ import {
   redactTradeWorkOrdersForAllocated,
   tradeLabourCostVisibleForTier,
   resolveTradeJobAccessTier,
+  TRADE_JOB_SERVICE_REPORT_COLUMNS,
   TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES,
   TRADE_QUOTE_DOCUMENT_TYPES,
   tradeIsDesignatedLead,
@@ -75,6 +78,7 @@ function makeClient(tables: Tables, recorded: any[] = []) {
     const api: any = {
       select: (cols?: string) => {
         const c = String(cols || "").trim();
+        rec.select = c;
         selectCols = c && c !== "*" && !c.includes("(") && !c.includes(":")
           ? c.split(",").map((x) => x.trim()).filter(Boolean)
           : null;
@@ -117,7 +121,27 @@ function makeClient(tables: Tables, recorded: any[] = []) {
       insert: (row: any) => {
         const rec = { id: row?.id || `${table}-${(tables[table] || []).length + 1}`, ...row };
         (tables[table] ||= []).push(rec);
-        return Promise.resolve({ data: rec, error: null });
+        const inserted = { data: rec, error: null };
+        const chain: any = {
+          select: () => chain,
+          single: () => Promise.resolve(inserted),
+          maybeSingle: () => Promise.resolve(inserted),
+          then: (res: any, rej: any) => Promise.resolve(inserted).then(res, rej),
+        };
+        return chain;
+      },
+      update: (row: any) => {
+        const matched = (tables[table] || []).filter((r) => preds.every((p) => p(r)));
+        for (const r of matched) Object.assign(r, row);
+        const updated = { data: matched[0] ?? null, error: null };
+        const chain: any = {
+          select: () => chain,
+          eq: api.eq,
+          single: () => Promise.resolve(updated),
+          maybeSingle: () => Promise.resolve(updated),
+          then: (res: any, rej: any) => Promise.resolve(updated).then(res, rej),
+        };
+        return chain;
       },
     };
     return api;
@@ -733,8 +757,144 @@ Deno.test("trade_job_detail: allocated service reports drop money and keep hours
   const officeP = await detail(t, viewer(OFFICE, "ops_manager"));
   assertEquals(officeP.serviceReport.notes, "Installed rear run. Charge 1200 extra. Total 9999.");
   assertEquals(officeP.serviceReport.checklist_json.rate, 85);
-  assertEquals(officeP.serviceReport.billed_total, 9999);
-  assertEquals(officeP.serviceReport.quoted_amount, 8800);
+  // billed_total / quoted_amount are not operational columns — the trade
+  // path no longer select('*'), so they cannot fail open even for office.
+  assertEquals(officeP.serviceReport.billed_total, undefined);
+  assertEquals(officeP.serviceReport.quoted_amount, undefined);
+});
+
+Deno.test("trade_job_detail: service-report read projects operational columns, never '*'", async () => {
+  const t = seed();
+  t.job_service_reports = [{
+    id: "sr-cols",
+    job_id: JOB_FENCE,
+    status: "submitted",
+    notes: "On site",
+  }];
+  const recorded: any[] = [];
+  await _tradeJobDetailForTest(
+    makeClient(t, recorded),
+    new URLSearchParams({ jobId: JOB_FENCE }),
+    viewer(LEAD, "lead_installer") as any,
+    false,
+  );
+  const reportReads = recorded.filter((r) => r.table === "job_service_reports");
+  assertEquals(reportReads.length > 0, true);
+  for (const r of reportReads) {
+    assertEquals(r.select, TRADE_JOB_SERVICE_REPORT_COLUMNS);
+    assertEquals(String(r.select || "").includes("*"), false);
+  }
+});
+
+const MONEY_REPORT = {
+  id: "sr-door",
+  job_id: JOB_FENCE,
+  status: "submitted",
+  submitted_by: LEAD,
+  cycle_number: 1,
+  attendance_cycle_id: "cycle-1",
+  notes: "Installed rear run. Charge 1200 extra. Total 9999.",
+  checklist_json: {
+    labour_hours: 3,
+    hours_per_trade: 3,
+    rate: 85,
+    amount: 9999,
+    total: 255,
+    materials: "Sheets $99",
+  },
+  billed_total: 9999,
+  quoted_amount: 8800,
+};
+
+Deno.test("get_service_report: allocated / makesafe_open never see money-bearing rows", async () => {
+  const t = seed();
+  t.job_service_reports = [{ ...MONEY_REPORT }];
+  const recorded: any[] = [];
+  const allocated = await _getServiceReportForTest(
+    makeClient(t, recorded),
+    new URLSearchParams({ jobId: JOB_FENCE }),
+    LEAD,
+    { orgId: ORG_A, managedVerticals: [] },
+    false,
+  );
+  assertEquals(allocated.report.id, "sr-door");
+  assertEquals(allocated.report.submitted_by, LEAD);
+  assertEquals(allocated.report.cycle_number, 1);
+  assertEquals(allocated.report.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.report.checklist_json.labour_hours, 3);
+  assertEquals(allocated.report.checklist_json.rate, undefined);
+  assertEquals(allocated.report.checklist_json.amount, undefined);
+  assertEquals(allocated.report.billed_total, undefined);
+  assertEquals(allocated.report.quoted_amount, undefined);
+  assertEquals(JSON.stringify(allocated.report).includes("9999"), false);
+  const reportReads = recorded.filter((r) => r.table === "job_service_reports");
+  assertEquals(reportReads.some((r) => r.select === TRADE_JOB_SERVICE_REPORT_COLUMNS), true);
+  assertEquals(reportReads.every((r) => !String(r.select || "").includes("*")), true);
+});
+
+Deno.test("get_service_report: office keeps raw notes and checklist money", async () => {
+  const t = seed();
+  t.job_service_reports = [{ ...MONEY_REPORT }];
+  const officeP = await _getServiceReportForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_FENCE }),
+    OFFICE,
+    { orgId: ORG_A, managedVerticals: [] },
+    true,
+  );
+  assertEquals(officeP.report.notes, "Installed rear run. Charge 1200 extra. Total 9999.");
+  assertEquals(officeP.report.checklist_json.rate, 85);
+  assertEquals(officeP.report.checklist_json.amount, 9999);
+  assertEquals(officeP.report.billed_total, undefined);
+  assertEquals(officeP.report.quoted_amount, undefined);
+});
+
+Deno.test("submit_service_report: allocated response is projected the same as trade_job_detail", async () => {
+  const t = seed();
+  const allocated = await _submitServiceReportForTest(
+    makeClient(t),
+    {
+      jobId: JOB_FENCE,
+      userId: LEAD,
+      checklist: {
+        labour_hours: 3,
+        rate: 85,
+        amount: 9999,
+        materials: "Sheets $99",
+      },
+      notes: "Installed rear run. Charge 1200 extra. Total 9999.",
+      status: "submitted",
+    },
+    { orgId: ORG_A, managedVerticals: [] },
+    false,
+  );
+  assertEquals(allocated.report.submitted_by, LEAD);
+  assertEquals(allocated.report.status, "submitted");
+  assertEquals(allocated.report.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.report.checklist_json.labour_hours, 3);
+  assertEquals(allocated.report.checklist_json.rate, undefined);
+  assertEquals(allocated.report.checklist_json.amount, undefined);
+  assertEquals(allocated.report.checklist_json.materials, "Sheets");
+  assertEquals(JSON.stringify(allocated.report).includes("9999"), false);
+});
+
+Deno.test("submit_service_report: office keeps raw notes and checklist money", async () => {
+  const t = seed();
+  const officeP = await _submitServiceReportForTest(
+    makeClient(t),
+    {
+      jobId: JOB_FENCE,
+      userId: OFFICE,
+      checklist: { labour_hours: 3, rate: 85, amount: 9999 },
+      notes: "Installed rear run. Charge 1200 extra. Total 9999.",
+      status: "submitted",
+    },
+    { orgId: ORG_A, managedVerticals: [] },
+    true,
+  );
+  assertEquals(officeP.report.notes, "Installed rear run. Charge 1200 extra. Total 9999.");
+  assertEquals(officeP.report.checklist_json.rate, 85);
+  assertEquals(officeP.report.checklist_json.amount, 9999);
 });
 
 const WALKTHROUGH_URL = "https://cdn.example.test/jobs/swf-26101/walkthrough.mp4";
@@ -1036,6 +1196,28 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
   assertEquals(r.job.quote.materials, [{ name: "90x90 posts", qty: 12, title: "Posts" }]);
   assertEquals(JSON.stringify(r).includes("9999"), false);
   assertEquals(JSON.stringify(r).includes("1200"), false);
+});
+
+Deno.test("redactTradeScopeQuote drops bare numeric string leaves on the quote-object allowlist", () => {
+  const r = redactTradeScopeQuote({
+    job: {
+      quote: {
+        quote_number: "Q-NARR",
+        description: "9999",
+        narrative: "85.00",
+        notes: "Gate on the left",
+        qty: "12",
+      },
+    },
+  });
+  assertEquals(r.job.quote.quote_number, "Q-NARR");
+  assertEquals(r.job.quote.description, undefined);
+  assertEquals(r.job.quote.narrative, undefined);
+  assertEquals(r.job.quote.notes, "Gate on the left");
+  assertEquals(r.job.quote.qty, "12");
+  assertEquals(JSON.stringify(r).includes("9999"), false);
+  assertEquals(JSON.stringify(r).includes("85.00"), false);
+  assertEquals(quoteLeakProbe(r), []);
 });
 
 Deno.test("redactTradeScopeQuote strips nested numeric quote/quotes the same as a bare top-level quote", () => {
