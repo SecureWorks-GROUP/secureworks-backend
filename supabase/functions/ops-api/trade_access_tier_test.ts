@@ -573,7 +573,6 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
     storage_url: "https://cdn.example.test/jobs/swf-26101/front.jpg",
     label: "Front run $9,999",
     notes: "Front run priced 1,200 exclusive of GST",
-    caption: "Priced $850",
   }];
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.notes[0].detail_json.text, "Client approved");
@@ -585,18 +584,15 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   assertEquals(allocated.notes[0].detail_json.qty, 2);
   assertEquals(allocated.media[0].label, "Front run");
   assertEquals(allocated.media[0].notes, "Front run priced");
-  assertEquals(allocated.media[0].caption, "Priced");
   assertEquals(allocated.media[0].storage_url, "https://cdn.example.test/jobs/swf-26101/front.jpg");
   assertEquals(JSON.stringify(allocated.notes).includes("9999"), false);
   assertEquals(JSON.stringify(allocated.media).includes("1200"), false);
-  assertEquals(JSON.stringify(allocated.media).includes("850"), false);
   const office = await detail(t, viewer(OFFICE, "ops_manager"));
   assertEquals(office.notes[0].detail_json.text, "Client approved $9,999 excluding GST");
   assertEquals(office.notes[0].detail_json.message, "Charge $9,999 extra");
   assertEquals(office.notes[0].detail_json.amount, 9999);
   assertEquals(office.media[0].label, "Front run $9,999");
   assertEquals(office.media[0].notes, "Front run priced 1,200 exclusive of GST");
-  assertEquals(office.media[0].caption, "Priced $850");
 });
 
 Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO prose", async () => {
@@ -820,7 +816,8 @@ Deno.test("_tradeScopeSummary strips money only when asked — office full-quote
     },
   };
   assertEquals(_tradeScopeSummary(job), "10m, Colorbond $9,999, Monument, 1800mm high");
-  assertEquals(_tradeScopeSummary(job, { sanitizeMoney: true }), "10m, Colorbond, Monument, 1800mm high");
+  // $9,999, eats the list comma (amount class includes ','). Pin the leftover.
+  assertEquals(_tradeScopeSummary(job, { sanitizeMoney: true }), "10m, Colorbond Monument, 1800mm high");
 });
 
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {

@@ -38530,6 +38530,10 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
 // fallback is already inert, but this strips it explicitly so a later maintainer
 // adding pricing_json to the trade select cannot silently start leaking a quote
 // description into an installer's phone.
+//
+// Allocated / makesafe_open callers pass the already-redacted job and
+// sanitizeMoney so colour/material/connection cannot carry a sell figure.
+// Office / division-manager pass the live job and leave the line verbatim.
 export function _tradeScopeSummary(
   job: any,
   opts?: { sanitizeMoney?: boolean },
