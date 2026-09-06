@@ -231,7 +231,10 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
     job_type: classifyJobType(stored.job_type as string, null, null),
     notes: String(stored.notes || ''),
     items,
-    summary: stripTradePackMoney(stored.summary),
+    // Keep stored summary verbatim. Office / division-manager are quote-visible
+    // and must still see monetary summary text. Allocated trades strip later
+    // in redactTradeQuotePackMoney.
+    summary: String(stored.summary || ''),
     source: stored.source === 'live_fallback' ? 'live_fallback' : 'frozen',
   }
 }
@@ -456,10 +459,10 @@ function item(kind: TradePackItemKind, description: string, quantity: number, un
   }
 }
 
-/** Money-safe pack text: drop `$9,999`-style figures, keep the writing. */
+/** Money-safe pack text: drop common currency figures, keep the writing. */
 export function stripTradePackMoney(text: unknown): string {
   return String(text ?? '')
-    .replace(/\$[\d,]+(?:\.\d+)?/g, '')
+    .replace(/(?:\bAUD\s*|AU\$\s*|A\$\s*|\$\s*)-?[\d,]+(?:\.\d+)?/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
 }

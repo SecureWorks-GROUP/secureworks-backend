@@ -38135,11 +38135,26 @@ export const TRADE_SCOPE_MONEY_KEYS = new Set([
   'day_rate',
 ])
 export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'labourers'])
+export const TRADE_SCOPE_NARRATIVE_TEXT_KEYS = new Set([
+  'description',
+  'narrative',
+  'notes',
+  'note',
+  'text',
+  'noteQuote',
+])
 
 function tradeScopeBareMoneyValue(value: unknown): boolean {
   if (typeof value === 'number' && Number.isFinite(value)) return true
   if (typeof value !== 'string') return false
-  return /^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(value.trim())
+  const trimmed = value.trim()
+  if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return true
+  return stripTradePackMoney(trimmed) === ''
+}
+
+function sanitizeTradeNarrativeLeaf(key: string, value: unknown): unknown {
+  if (typeof value !== 'string' || !TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) return value
+  return stripTradePackMoney(value)
 }
 
 // The recursion cap is a guard against a pathological blob, not a licence to
@@ -38167,10 +38182,20 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
     if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
       continue
     }
+    if (typeof value === 'string' && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
+      const cleaned = sanitizeTradeNarrativeLeaf(key, value)
+      if (cleaned === '') continue
+      out[key] = cleaned
+      continue
+    }
     const walked = TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && Array.isArray(value)
       ? value
         .filter((v) => !tradeScopeBareMoneyValue(v))
-        .map((v) => walkTradeQuoteObjectAllowlist(v, depth + 1))
+        .map((v) =>
+          typeof v === 'string'
+            ? (stripTradePackMoney(v) || undefined)
+            : walkTradeQuoteObjectAllowlist(v, depth + 1)
+        )
         .filter((v) => v !== undefined)
       : walkTradeQuoteObjectAllowlist(value, depth + 1)
     if (walked === undefined) continue
@@ -38192,9 +38217,21 @@ export function redactTradeScopeQuote(scope: any): any {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
         if (tradeScopeBareMoneyValue(value)) continue
+        if (typeof value === 'string') {
+          const cleaned = stripTradePackMoney(value)
+          if (!cleaned) continue
+          out[key] = cleaned
+          continue
+        }
         const allowlisted = walkTradeQuoteObjectAllowlist(value, depth + 1)
         if (allowlisted === undefined) continue
         out[key] = allowlisted
+        continue
+      }
+      if (typeof value === 'string' && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
+        const cleaned = sanitizeTradeNarrativeLeaf(key, value)
+        if (cleaned === '') continue
+        out[key] = cleaned
         continue
       }
       if (key === 'pricing') {

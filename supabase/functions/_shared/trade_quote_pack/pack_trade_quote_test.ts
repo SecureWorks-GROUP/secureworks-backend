@@ -4,6 +4,7 @@ import {
   assembleQuotePacksForTrade,
   packTradeQuote,
   persistTradePackOnDocuments,
+  stripTradePackMoney,
   tradePackMoneyLeakKeys,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
@@ -181,7 +182,15 @@ Deno.test("two sent quotes stay two packs with their own quote numbers", () => {
   assertEquals(q1Install?.quantity, 10);
 });
 
-Deno.test("hydrateStoredPack strips $ figures from stored summary and descriptions", () => {
+Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary numbers", () => {
+  assertEquals(stripTradePackMoney("Total $9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total $ 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total A$ 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Total AUD 9,999"), "Total");
+  assertEquals(stripTradePackMoney("Rear 19m 1800mm install"), "Rear 19m 1800mm install");
+});
+
+Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewers and still strips item descriptions", () => {
   const packs = assembleQuotePacksForTrade({
     jobType: "fencing",
     documents: [{
@@ -194,15 +203,14 @@ Deno.test("hydrateStoredPack strips $ figures from stored summary and descriptio
           { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
           { kind: "note", description: "Priced $9,999", quantity: 1, unit: "lot" },
         ],
-        summary: "Total $9,999",
+        summary: "Total $9,999 AUD 1,200",
       },
     }],
   });
-  assertEquals(packs[0].summary, "Total");
+  assertEquals(packs[0].summary, "Total $9,999 AUD 1,200");
   assertEquals(packs[0].items[0].description, "Install fence Total");
   assertEquals(packs[0].items[1].kind, "note");
   assertEquals(packs[0].items[1].description, "Priced");
-  assertEquals(JSON.stringify(packs).includes("9999"), false);
 });
 
 Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {

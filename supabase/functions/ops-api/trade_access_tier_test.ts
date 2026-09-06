@@ -698,6 +698,29 @@ Deno.test("redactTradeScopeQuote allowlists quote/quotes so unknown money keys c
   assertEquals(quoteLeakProbe(r), []);
 });
 
+Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and description leaves", () => {
+  const r = redactTradeScopeQuote({
+    notes: {
+      noteQuote: "Quote writing Total $9,999 plus AUD 1,200",
+      noteWorkOrder: "Use 90x90 posts",
+    },
+    job: {
+      quote: {
+        quote_number: "Q-NARR",
+        description: "Supply and install. Total A$ 9,999",
+        narrative: "Gate on the left $ 1,200 extra",
+      },
+    },
+  });
+  assertEquals(r.notes.noteQuote, "Quote writing Total plus");
+  assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
+  assertEquals(r.job.quote.quote_number, "Q-NARR");
+  assertEquals(r.job.quote.description, "Supply and install. Total");
+  assertEquals(r.job.quote.narrative, "Gate on the left extra");
+  assertEquals(JSON.stringify(r).includes("9999"), false);
+  assertEquals(JSON.stringify(r).includes("1200"), false);
+});
+
 Deno.test("redactTradeScopeQuote strips nested numeric quote/quotes the same as a bare top-level quote", () => {
   const r = redactTradeScopeQuote({
     job: {
@@ -869,17 +892,18 @@ Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures 
   const out = redactTradeQuotePackMoney([
     {
       quote_number: "Q-1",
-      summary: "Install 10m · Total $9,999",
+      summary: "Install 10m Total $9,999 AUD 1,200 A$ 80 $ 40",
       items: [
-        { kind: "install_m", description: "Install fence Total $9,999", quantity: 10, unit: "m" },
+        { kind: "install_m", description: "Install fence Total $9,999 AUD 1,200", quantity: 10, unit: "m" },
         { kind: "note", description: "Priced $9,999 — installer note", quantity: 1, unit: "lot" },
       ],
     },
   ]);
-  assertEquals(out[0].summary, "Install 10m · Total");
+  assertEquals(out[0].summary, "Install 10m Total");
   assertEquals(out[0].items.map((i: any) => i.kind), ["install_m"]);
   assertEquals(out[0].items[0].description, "Install fence Total");
   assertEquals(JSON.stringify(out).includes("9999"), false);
+  assertEquals(JSON.stringify(out).includes("1200"), false);
 });
 
 // ── Lead designation reads is_lead, never role ──────────────────────────────
