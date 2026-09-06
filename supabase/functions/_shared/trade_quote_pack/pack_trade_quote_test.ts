@@ -4,6 +4,7 @@ import {
   applyInstallerRates,
   assembleQuotePacksForTrade,
   packTradeQuote,
+  overlayTradePackSnapshots,
   persistTradePackOnDocuments,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
@@ -368,5 +369,85 @@ Deno.test("persistTradePackOnDocuments writes frozen packs per document", async 
   assertEquals(writes[0].pack.quote_number, "SWF-1-Q1");
   assertEquals(writes[1].pack.quote_number, "SWF-1-Q2");
   assertEquals(writes[0].pack.source, "frozen");
+  assertEquals(tradePackMoneyLeakKeys(writes[0].pack), []);
+});
+
+Deno.test("packTradeQuote stamps customer and default payment terms without pricing totals", () => {
+  const pack = packTradeQuote({
+    quote_number: "SWF-25101-Q2",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    job_type: "fencing",
+    scope_json: FENCE_SCOPE,
+    pricing_json: { ...FENCE_PRICING, payment_terms: "Pay $18,400 now", valid_days: 14 },
+    customer: {
+      name: "Pat Client",
+      phone: "0412 000 111",
+      email: "pat@example.test",
+      site_address: "12 Fence St, Midland",
+      site_suburb: "Midland",
+    },
+  });
+  assertEquals(pack.customer, {
+    name: "Pat Client",
+    phone: "0412 000 111",
+    email: "pat@example.test",
+    site_address: "12 Fence St, Midland",
+    site_suburb: "Midland",
+  });
+  assertEquals(pack.terms.payment_terms, "Pay now");
+  assertEquals(pack.terms.valid_days, 14);
+  assertEquals(pack.terms.valid_until, "2026-09-15");
+  assertEquals(tradePackMoneyLeakKeys(pack), []);
+  assertEquals(JSON.stringify(pack.customer).includes("18400"), false);
+  assertEquals(JSON.stringify(pack.terms).includes("18400"), false);
+  assertEquals(JSON.stringify(pack.terms).includes("$"), false);
+});
+
+Deno.test("overlayTradePackSnapshots fills empty customer/terms on older frozen packs", () => {
+  const old = packTradeQuote({
+    quote_number: "Q-OLD",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    job_type: "fencing",
+    scope_json: FENCE_SCOPE,
+  });
+  old.customer = { name: null, phone: null, email: null, site_address: null, site_suburb: null };
+  old.terms = { payment_terms: null, valid_days: null, valid_until: null };
+  const overlaid = overlayTradePackSnapshots(old, {
+    customer: { name: "Client One", site_suburb: "Midland" },
+    pricing_json: FENCE_PRICING,
+  });
+  assertEquals(overlaid.customer.name, "Client One");
+  assertEquals(overlaid.customer.site_suburb, "Midland");
+  assertEquals(overlaid.terms.payment_terms, "50% deposit + 50% on completion");
+  assertEquals(overlaid.terms.valid_days, 30);
+  assertEquals(JSON.stringify(overlaid.terms).includes("18400"), false);
+});
+
+Deno.test("persistTradePackOnDocuments writes customer snapshot onto the frozen pack", async () => {
+  const writes: Array<{ id: string; pack: any }> = [];
+  const sb = {
+    from(_table: string) {
+      return {
+        update(row: any) {
+          return {
+            eq(_col: string, id: string) {
+              writes.push({ id, pack: row.trade_pack_json });
+              return { error: null };
+            },
+          };
+        },
+      };
+    },
+  };
+  await persistTradePackOnDocuments(sb, {
+    documents: [{ id: "doc-c", quote_number: "SWF-1-Q1", sent_at: "2026-09-01T00:00:00.000Z" }],
+    jobType: "fencing",
+    scopeJson: FENCE_SCOPE,
+    pricingJson: FENCE_PRICING,
+    customer: { name: "Pat", site_suburb: "Midland", phone: "0400 000 000" },
+  });
+  assertEquals(writes[0].pack.customer.name, "Pat");
+  assertEquals(writes[0].pack.customer.phone, "0400 000 000");
+  assertEquals(writes[0].pack.terms.payment_terms, "50% deposit + 50% on completion");
   assertEquals(tradePackMoneyLeakKeys(writes[0].pack), []);
 });

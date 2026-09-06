@@ -872,7 +872,7 @@ serve(async (req: Request) => {
       if (doc.job_id) {
         try {
           const { data: jobForPack } = await sb.from('jobs')
-            .select('type, scope_json, pricing_json')
+            .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
             .eq('id', doc.job_id)
             .single()
           await persistTradePackOnDocuments(sb, {
@@ -884,6 +884,13 @@ serve(async (req: Request) => {
             jobType: jobForPack?.type || doc.jobs?.type,
             scopeJson: jobForPack?.scope_json,
             pricingJson: jobForPack?.pricing_json || doc.jobs?.pricing_json,
+            customer: {
+              name: jobForPack?.client_name ?? doc.jobs?.client_name,
+              phone: jobForPack?.client_phone ?? doc.jobs?.client_phone,
+              email: jobForPack?.client_email ?? doc.jobs?.client_email,
+              site_address: jobForPack?.site_address ?? doc.jobs?.site_address,
+              site_suburb: jobForPack?.site_suburb ?? doc.jobs?.site_suburb,
+            },
           })
         } catch (e) {
           console.error('[trade-pack-persist-fail]', JSON.stringify({
@@ -2471,6 +2478,13 @@ serve(async (req: Request) => {
             jobType: job.type,
             scopeJson: job.scope_json,
             pricingJson: pj,
+            customer: {
+              name: job.client_name,
+              phone: job.client_phone,
+              email: job.client_email,
+              site_address: job.site_address,
+              site_suburb: job.site_suburb,
+            },
           })
         } catch (e) {
           console.error('[trade-pack-persist-fail]', JSON.stringify({

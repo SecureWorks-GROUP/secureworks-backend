@@ -78,6 +78,7 @@
 //   my_jobs             — Jobs assigned to a user
 //   trade_calendar      — Tenant-scoped calendar assignments for Trade
 //   trade_job_detail    — Trimmed job view for trades
+//   trade_quote_extract — Price-free printable quote extract for allocated trades
 //   add_note            — Add note to job timeline
 //   upload_photo        — Upload completion photo (base64)
 //   submit_service_report — Save checklist + notes + signature
@@ -128,6 +129,14 @@ import {
   sanitizeTradePackUnit,
   stripTradePackMoney,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  TRADE_QUOTE_EXTRACT_DOC_TYPE,
+  TRADE_QUOTE_EXTRACT_SCHEMA,
+  assembleTradeQuoteExtract,
+  projectTradeQuoteExtracts,
+  renderTradeQuoteExtractHtml,
+  tradeQuoteExtractFilename,
+} from '../_shared/trade_quote_pack/trade_quote_extract.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
 import {
   buildV2Augmentation,
@@ -3906,6 +3915,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'my_work_orders',
   'my_jobs',
   'trade_job_detail',
+  'trade_quote_extract',
   'upload_photo',
   'get_upload_url',
   'confirm_upload',
@@ -9157,6 +9167,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return await handleTradeWorkOrdersAction(req, client)
       case 'my_jobs':
       case 'trade_job_detail':
+      case 'trade_quote_extract':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -9238,6 +9249,14 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'trade_job_detail':
             return json(await tradeJobDetail(client, url.searchParams, tradeUser, isDispatcher))
+          case 'trade_quote_extract':
+            return await tradeQuoteExtractAction(
+              client,
+              url.searchParams,
+              body,
+              tradeUser,
+              isDispatcher,
+            )
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }, tradeJobAccess))
           // Office tier bypass is isDispatcher (admin / owner / ops_manager), not the
           // admin-only isAdmin: an ops_manager is office everywhere.
@@ -38850,8 +38869,38 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
         if (unit !== undefined) out.unit = unit
         return [out]
       }),
+      customer: redactAllocatedTradeQuoteCustomer(pack.customer),
+      terms: redactAllocatedTradeQuoteTerms(pack.terms),
     }
   })
+}
+
+function redactAllocatedTradeQuoteCustomer(customer: any): Record<string, unknown> | undefined {
+  if (!customer || typeof customer !== 'object' || Array.isArray(customer)) return undefined
+  return {
+    name: customer.name == null ? customer.name : allocatedTradePackProse(customer.name),
+    phone: typeof customer.phone === 'string' ? customer.phone : null,
+    email: typeof customer.email === 'string' ? customer.email : null,
+    site_address: customer.site_address == null
+      ? customer.site_address
+      : allocatedTradePackProse(customer.site_address),
+    site_suburb: customer.site_suburb == null
+      ? customer.site_suburb
+      : allocatedTradePackProse(customer.site_suburb),
+  }
+}
+
+function redactAllocatedTradeQuoteTerms(terms: any): Record<string, unknown> | undefined {
+  if (!terms || typeof terms !== 'object' || Array.isArray(terms)) return undefined
+  return {
+    payment_terms: terms.payment_terms == null
+      ? terms.payment_terms
+      : allocatedTradePackProse(terms.payment_terms),
+    valid_days: typeof terms.valid_days === 'number' && Number.isFinite(terms.valid_days)
+      ? terms.valid_days
+      : null,
+    valid_until: typeof terms.valid_until === 'string' ? terms.valid_until : null,
+  }
 }
 
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
@@ -39112,6 +39161,13 @@ async function tradeJobDetail(
     liveScopeJson: jobRes.data?.scope_json,
     livePricingJson: jobRes.data?.pricing_json,
     isHenry: isHenryInstaller(viewer.email),
+    customer: {
+      name: jobRes.data?.client_name,
+      phone: jobRes.data?.client_phone,
+      email: jobRes.data?.client_email,
+      site_address: jobRes.data?.site_address,
+      site_suburb: jobRes.data?.site_suburb,
+    },
   })
 
   const { metadata: _tradeJobMetadata, pricing_json: _tradePricingJson, ...tradeSafeJob } = jobRes.data || {}
@@ -39177,8 +39233,9 @@ async function tradeJobDetail(
   // everything, can do whatever he wants"). An allocated trade (lead or
   // crew) and the MakeSafe open-pool exception get only ops-flagged
   // visible_to_trades rows AND never a quote-type or full priced work-order
-  // PDF, whatever the flag says. JSON TradeQuotePack + allowlisted WO
-  // lines are the price-free substitute until TRD-6.
+  // PDF, whatever the flag says. JSON TradeQuotePack, quote_extracts, and
+  // allowlisted WO lines are the price-free substitute. Priced quote / WO
+  // PDFs stay office-only.
   const visibleDocuments = quoteVisible
     ? (docsRes.data || [])
     : _tradeDocumentsForAllocatedTrade(docsRes.data || [])
@@ -39255,8 +39312,9 @@ async function tradeJobDetail(
     // the undifferentiated documents array so the app has a work-order surface
     // to render instead of having to sort types itself. Already
     // visibility-filtered; allocated / makesafe_open also drop priced
-    // work_order / supplier_work_order files, so this list is empty there
-    // until TRD-6. Office / division-manager keep the full PDFs.
+    // work_order / supplier_work_order files, so this list stays empty
+    // there. Trades fetch `trade_quote_extract` for SOW / quantities.
+    // Office / division-manager keep the full priced PDFs.
     workOrderDocuments: visibleDocuments.filter((d: any) =>
       d?.type === 'work_order' || d?.type === 'supplier_work_order'
     ),
@@ -39280,6 +39338,13 @@ async function tradeJobDetail(
       ? makesafeDetails
       : projectTradeAllocatedMakesafeDetails(makesafeDetails),
     quote_packs: tradeQuotePacks,
+    // Additive: price-free extract pointers. Not injected into `documents`
+    // (allocated documents stay the existing allowlist). Fetch via
+    // `trade_quote_extract`.
+    quote_extracts: projectTradeQuoteExtracts(
+      quotePacks,
+      tradeSafeJob?.job_number || null,
+    ),
   }
 }
 
@@ -39289,6 +39354,96 @@ async function tradeJobDetail(
 // precisely the failure this suite exists to catch.
 export const _tradeJobDetailForTest = tradeJobDetail
 export const _setJobLeadForTest = setJobLead
+
+function tradeQuoteCustomerFromJob(job: any) {
+  return {
+    name: job?.client_name,
+    phone: job?.client_phone,
+    email: job?.client_email,
+    site_address: job?.site_address,
+    site_suburb: job?.site_suburb,
+  }
+}
+
+async function tradeQuoteExtractAction(
+  client: any,
+  params: URLSearchParams,
+  body: any,
+  viewer: TradeAuthContext,
+  isAdmin = false,
+): Promise<Response> {
+  const jobId = params.get('jobId') || params.get('job_id') || body?.jobId || body?.job_id
+  if (!jobId) throw new ApiError('jobId required', 400)
+
+  await assertAssignedOrMakesafeAccess(client, jobId, viewer.id, isAdmin, {
+    orgId: viewer.orgId,
+    managedVerticals: viewer.managedVerticals,
+  })
+
+  const documentId = String(
+    params.get('document_id') || params.get('documentId') || body?.document_id || body?.documentId || '',
+  ).trim() || null
+  const format = String(params.get('format') || body?.format || 'json').toLowerCase()
+
+  const [jobRes, quoteDocsRes] = await Promise.all([
+    client.from('jobs')
+      .select('id, type, job_number, client_name, client_phone, client_email, site_address, site_suburb, scope_json, pricing_json')
+      .eq('id', jobId)
+      .eq('org_id', viewer.orgId)
+      .single(),
+    client.from('job_documents')
+      .select('id, type, quote_number, sent_at, accepted_at, superseded_at, trade_pack_json, created_at')
+      .eq('job_id', jobId)
+      .eq('type', 'quote')
+      .order('created_at', { ascending: false }),
+  ])
+  if (jobRes.error) throw jobRes.error
+  if (!jobRes.data) throw new ApiError('Job not found', 404)
+  if (quoteDocsRes.error) {
+    console.error('[ops-api] trade quote extract read failed:', quoteDocsRes.error.message)
+    throw new ApiError('Quote extract unavailable', 503)
+  }
+
+  const packs = assembleQuotePacksForTrade({
+    documents: quoteDocsRes.data || [],
+    jobType: jobRes.data.type,
+    liveScopeJson: jobRes.data.scope_json,
+    livePricingJson: jobRes.data.pricing_json,
+    isHenry: false,
+    customer: tradeQuoteCustomerFromJob(jobRes.data),
+  })
+  const eligible = packs.filter((pack) =>
+    (pack.status === 'sent' || pack.status === 'accepted') && pack.quote_number
+  )
+  const pack = documentId
+    ? eligible.find((row) => row.job_document_id === documentId)
+    : eligible[0]
+  if (!pack) throw new ApiError('No sent quote extract for this job', 404)
+
+  const extract = assembleTradeQuoteExtract({ pack, job: jobRes.data })
+  const html = renderTradeQuoteExtractHtml(extract)
+  const filename = tradeQuoteExtractFilename(extract)
+  if (format === 'html') {
+    return new Response(html, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Disposition': `inline; filename="${filename}"`,
+        ...CORS,
+      },
+    })
+  }
+  return json({
+    schema: TRADE_QUOTE_EXTRACT_SCHEMA,
+    type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
+    extract,
+    html,
+    filename,
+    format: 'json',
+  })
+}
+
+export const _tradeQuoteExtractForTest = tradeQuoteExtractAction
 // The other per-job trade surfaces, exported so the visibility suite can prove
 // they share trade_job_detail's access predicate rather than a narrower copy.
 export const _addNoteForTest = addNote

@@ -6,7 +6,7 @@
 //   2. no way to name a lead installer                          -> is_lead + set_job_lead
 //   3. an assigned installer cannot see scope or the work order -> scopeSummary,
 //                                                                  workOrders
-//      (priced work-order PDFs stay office-only until TRD-6)
+//      (priced work-order PDFs stay office-only; TRD-6 is the quote extract)
 //
 // The controls in the second half are the important half: this change WIDENS
 // what a trade receives, so the tests that matter are the ones proving it did

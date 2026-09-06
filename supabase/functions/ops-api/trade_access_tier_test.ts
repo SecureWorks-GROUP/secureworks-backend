@@ -29,8 +29,10 @@ import {
   _submitServiceReportForTest,
   _tradeDocumentsForAllocatedTrade,
   _tradeJobDetailForTest,
+  _tradeQuoteExtractForTest,
   _tradeLabourBudgetForTest,
   _tradeScopeSummary,
+  ApiError,
   projectTradePurchaseOrders,
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
@@ -543,6 +545,7 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.workOrders.length, 1);
   assertEquals(p.purchaseOrders.length, 1);
   assertEquals(p.quote_packs || [], [], "unsent quotes do not become a trade pack");
+  assertEquals(p.quote_extracts || [], [], "unsent quotes do not mint an extract pointer");
   assertEquals(quoteLeakProbe(p), [], "no sell price, rate, or quote PDF in the allocated payload");
   // Documents: flagged-visible non-quote, non-priced-WO docs only. The
   // visible-flagged QUOTE, client INVOICE, and full priced work-order PDFs
@@ -600,9 +603,84 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(install?.line_total, null);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals(p.workOrderDocuments, []);
+  assertEquals(p.quote_extracts, [{
+    type: "trade_quote_extract",
+    label: "Quote extract",
+    action: "trade_quote_extract",
+    job_document_id: "d-quote-vis",
+    quote_number: "Q-1",
+    status: "sent",
+    sent_at: "2026-09-01T00:00:00Z",
+    filename: "SWF-26091-Q-1-trade-extract.html",
+  }]);
   assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
   assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
+  assertEquals(JSON.stringify(p.quote_extracts).includes("quote.pdf"), false);
   assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell, rates and PDF are not");
+});
+
+Deno.test("trade_quote_extract: allocated trade gets printable HTML with no money", async () => {
+  const t = seed();
+  t.job_documents.find((d: any) => d.id === "d-quote-vis").sent_at = "2026-09-01T00:00:00Z";
+  const htmlRes = await _tradeQuoteExtractForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_FENCE, format: "html" }),
+    {},
+    viewer(LEAD, "lead_installer"),
+    false,
+  );
+  assertEquals(htmlRes.status, 200);
+  assertEquals(htmlRes.headers.get("content-type"), "text/html; charset=utf-8");
+  const html = await htmlRes.text();
+  assert(html.includes("Client One"));
+  assert(html.includes("Midland"));
+  assert(html.includes("50% deposit + 50% on completion"));
+  assertEquals(html.includes("$"), false);
+  assertEquals(html.includes("8800"), false);
+  assertEquals(html.includes("quote.pdf"), false);
+  assertEquals(html.toLowerCase().includes("gst"), false);
+
+  const jsonRes = await _tradeQuoteExtractForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_FENCE, document_id: "d-quote-vis" }),
+    {},
+    viewer(LEAD, "lead_installer"),
+    false,
+  );
+  const body = await jsonRes.json();
+  assertEquals(body.schema, "secureworks.trade-quote-extract/v1");
+  assertEquals(body.type, "trade_quote_extract");
+  assertEquals(body.filename, "SWF-26091-Q-1-trade-extract.html");
+  assertEquals(body.extract.customer.name, "Client One");
+  assertEquals(JSON.stringify(body.extract).includes("$"), false);
+  assertEquals(JSON.stringify(body.extract).includes("unit_price"), false);
+  assertEquals(JSON.stringify(body.extract).includes("line_total"), false);
+});
+
+Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(seed()),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "No sent quote extract for this job",
+  );
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(seed()),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(STRANGER, "lead_installer"),
+        false,
+      ),
+    Error,
+  );
 });
 
 Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", async () => {
@@ -1753,6 +1831,44 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     unit_price: null,
     line_total: null,
   });
+});
+
+Deno.test("redactTradeQuotePackMoney allowlists customer and terms without money keys", () => {
+  const out = redactTradeQuotePackMoney([
+    {
+      quote_number: "Q-1",
+      customer: {
+        name: "Pat Client $9,999",
+        phone: "0412 000 111",
+        email: "pat@example.test",
+        site_address: "12 Fence St $850",
+        site_suburb: "Midland",
+        deposit_amount: 4400,
+      },
+      terms: {
+        payment_terms: "50% deposit + 50% on completion $9,999",
+        valid_days: 30,
+        valid_until: "2026-10-01",
+        deposit_percent: 50,
+      },
+    },
+  ]);
+  assertEquals(out[0].customer, {
+    name: "Pat Client",
+    phone: "0412 000 111",
+    email: "pat@example.test",
+    site_address: "12 Fence St",
+    site_suburb: "Midland",
+  });
+  assertEquals(out[0].terms, {
+    payment_terms: "50% deposit + 50% on completion",
+    valid_days: 30,
+    valid_until: "2026-10-01",
+  });
+  assertEquals("deposit_amount" in (out[0].customer || {}), false);
+  assertEquals("deposit_percent" in (out[0].terms || {}), false);
+  assertEquals(JSON.stringify(out).includes("9999"), false);
+  assertEquals(JSON.stringify(out).includes("4400"), false);
 });
 
 Deno.test("redactTradeQuotePackMoney nulls a nested quantity object instead of copying it", () => {

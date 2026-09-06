@@ -24,6 +24,20 @@ export type TradePackItem = {
 
 export type TradeQuotePackStatus = 'accepted' | 'sent' | 'superseded'
 
+export type TradeQuoteCustomerSnapshot = {
+  name: string | null
+  phone: string | null
+  email: string | null
+  site_address: string | null
+  site_suburb: string | null
+}
+
+export type TradeQuoteTermsSnapshot = {
+  payment_terms: string | null
+  valid_days: number | null
+  valid_until: string | null
+}
+
 export type TradeQuotePack = {
   quote_number: string | null
   job_document_id: string | null
@@ -35,6 +49,8 @@ export type TradeQuotePack = {
   items: TradePackItem[]
   summary: string
   source: 'frozen' | 'live_fallback'
+  customer: TradeQuoteCustomerSnapshot
+  terms: TradeQuoteTermsSnapshot
 }
 
 export const TRADE_INSTALLER_RATES = {
@@ -66,6 +82,8 @@ export type PackTradeQuoteInput = {
   scope_json?: unknown
   pricing_json?: unknown
   source?: 'frozen' | 'live_fallback'
+  customer?: Partial<TradeQuoteCustomerSnapshot> | null
+  terms?: Partial<TradeQuoteTermsSnapshot> | null
 }
 
 export function isHenryInstaller(email: string | null | undefined): boolean {
@@ -104,6 +122,12 @@ export function packTradeQuote(input: PackTradeQuoteInput): TradeQuotePack {
     items,
     summary,
     source: input.source || 'frozen',
+    customer: snapshotTradeQuoteCustomer(input.customer),
+    terms: snapshotTradeQuoteTerms({
+      pricing_json: input.pricing_json,
+      sent_at: input.sent_at,
+      terms: input.terms,
+    }),
   }
 }
 
@@ -148,6 +172,8 @@ export function assembleQuotePacksForTrade(input: {
   liveScopeJson?: unknown
   livePricingJson?: unknown
   isHenry?: boolean
+  customer?: Partial<TradeQuoteCustomerSnapshot> | null
+  terms?: Partial<TradeQuoteTermsSnapshot> | null
 }): TradeQuotePack[] {
   const docs = (input.documents || [])
     .filter((d) => String(d?.type || '').toLowerCase() === 'quote')
@@ -169,8 +195,17 @@ export function assembleQuotePacksForTrade(input: {
         scope_json: input.liveScopeJson,
         pricing_json: input.livePricingJson,
         source: 'live_fallback',
+        customer: input.customer,
+        terms: input.terms,
       })
-    return applyInstallerRates(packed, input.isHenry === true)
+    return applyInstallerRates(
+      overlayTradePackSnapshots(packed, {
+        customer: input.customer,
+        pricing_json: input.livePricingJson,
+        terms: input.terms,
+      }),
+      input.isHenry === true,
+    )
   })
 }
 
@@ -182,6 +217,8 @@ export async function persistTradePackOnDocuments(
     scopeJson?: unknown
     pricingJson?: unknown
     sentAt?: string | null
+    customer?: Partial<TradeQuoteCustomerSnapshot> | null
+    terms?: Partial<TradeQuoteTermsSnapshot> | null
   },
 ): Promise<number> {
   let wrote = 0
@@ -196,6 +233,8 @@ export async function persistTradePackOnDocuments(
       scope_json: args.scopeJson,
       pricing_json: args.pricingJson,
       source: 'frozen',
+      customer: args.customer,
+      terms: args.terms,
     })
     const { error } = await sb.from('job_documents').update({ trade_pack_json: pack }).eq('id', doc.id)
     if (error) {
@@ -239,7 +278,118 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
     // in redactTradeQuotePackMoney.
     summary: String(stored.summary || ''),
     source: stored.source === 'live_fallback' ? 'live_fallback' : 'frozen',
+    customer: stored.customer && typeof stored.customer === 'object'
+      ? snapshotTradeQuoteCustomer(asObject(stored.customer))
+      : emptyTradeQuoteCustomer(),
+    terms: stored.terms && typeof stored.terms === 'object'
+      ? snapshotTradeQuoteTerms({
+        sent_at: (stored.sent_at as string) || doc.sent_at || null,
+        terms: asObject(stored.terms),
+      })
+      : emptyTradeQuoteTerms(),
   }
+}
+
+export function emptyTradeQuoteCustomer(): TradeQuoteCustomerSnapshot {
+  return { name: null, phone: null, email: null, site_address: null, site_suburb: null }
+}
+
+export function emptyTradeQuoteTerms(): TradeQuoteTermsSnapshot {
+  return { payment_terms: null, valid_days: null, valid_until: null }
+}
+
+export function tradeQuoteCustomerHasValues(
+  customer?: Partial<TradeQuoteCustomerSnapshot> | null,
+): boolean {
+  if (!customer) return false
+  return [customer.name, customer.phone, customer.email, customer.site_address, customer.site_suburb]
+    .some((v) => String(v || '').trim() !== '')
+}
+
+export function tradeQuoteTermsHasValues(
+  terms?: Partial<TradeQuoteTermsSnapshot> | null,
+): boolean {
+  if (!terms) return false
+  return String(terms.payment_terms || '').trim() !== '' ||
+    (typeof terms.valid_days === 'number' && Number.isFinite(terms.valid_days)) ||
+    String(terms.valid_until || '').trim() !== ''
+}
+
+export function snapshotTradeQuoteCustomer(
+  input?: Partial<TradeQuoteCustomerSnapshot> | null,
+): TradeQuoteCustomerSnapshot {
+  const raw = input && typeof input === 'object' ? input : {}
+  return {
+    name: cleanIdentityText(raw.name),
+    phone: cleanIdentityText(raw.phone),
+    email: cleanIdentityText(raw.email),
+    site_address: cleanProseField(raw.site_address),
+    site_suburb: cleanProseField(raw.site_suburb),
+  }
+}
+
+export function snapshotTradeQuoteTerms(input: {
+  pricing_json?: unknown
+  sent_at?: string | null
+  terms?: Partial<TradeQuoteTermsSnapshot> | null
+}): TradeQuoteTermsSnapshot {
+  const pricing = asObject(input.pricing_json)
+  const explicit = input.terms && typeof input.terms === 'object' ? input.terms : {}
+  const rawTerms = String(explicit.payment_terms ?? pricing.payment_terms ?? '').trim()
+  const paymentTerms = rawTerms
+    ? stripTradePackMoney(rawTerms) || null
+    : '50% deposit + 50% on completion'
+  const rawDays = explicit.valid_days ?? pricing.valid_days ?? 30
+  const days = Number(rawDays)
+  const validDays = Number.isFinite(days) && days > 0 && days <= 3650 ? Math.round(days) : 30
+  const explicitUntil = cleanIdentityText(explicit.valid_until)
+  let validUntil = explicitUntil
+  if (!validUntil && input.sent_at) {
+    const sent = new Date(input.sent_at)
+    if (!Number.isNaN(sent.getTime())) {
+      validUntil = new Date(sent.getTime() + validDays * 86400000).toISOString().slice(0, 10)
+    }
+  }
+  return {
+    payment_terms: paymentTerms,
+    valid_days: validDays,
+    valid_until: validUntil,
+  }
+}
+
+export function overlayTradePackSnapshots(
+  pack: TradeQuotePack,
+  overlay: {
+    customer?: Partial<TradeQuoteCustomerSnapshot> | null
+    pricing_json?: unknown
+    terms?: Partial<TradeQuoteTermsSnapshot> | null
+  },
+): TradeQuotePack {
+  return {
+    ...pack,
+    customer: tradeQuoteCustomerHasValues(pack.customer)
+      ? pack.customer
+      : snapshotTradeQuoteCustomer(overlay.customer),
+    terms: tradeQuoteTermsHasValues(pack.terms)
+      ? pack.terms
+      : snapshotTradeQuoteTerms({
+        pricing_json: overlay.pricing_json,
+        sent_at: pack.sent_at,
+        terms: overlay.terms,
+      }),
+  }
+}
+
+function cleanIdentityText(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed || null
+}
+
+function cleanProseField(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const cleaned = stripTradePackMoney(value)
+  return cleaned || null
 }
 
 function classifyJobType(raw: unknown, scope: unknown, pricing: unknown): 'fencing' | 'patio' | 'other' {
