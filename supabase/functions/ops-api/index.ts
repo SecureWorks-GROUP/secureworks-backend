@@ -38151,6 +38151,9 @@ export const TRADE_SCOPE_MONEY_KEYS = new Set([
   'day_rate',
 ])
 export const TRADE_SCOPE_LABOUR_KEEP_KEYS = new Set(['trades', 'days', 'labourers'])
+// Named known-prose keys only. The allocated walker sanitizes EVERY retained
+// string leaf — unlisted keys (siteNotes, supplierNotes, noteInternal, …)
+// must not fail open just because they were omitted from this set.
 export const TRADE_SCOPE_NARRATIVE_TEXT_KEYS = new Set([
   'description',
   'narrative',
@@ -38175,12 +38178,6 @@ function tradeScopeBareMoneyValue(value: unknown): boolean {
 
 function sanitizeTradeAllocatedStringLeaf(value: unknown): string {
   return stripTradePackMoney(value)
-}
-
-function sanitizeTradeNarrativeLeaf(key: string, value: unknown): unknown {
-  if (typeof value !== 'string') return value
-  if (!TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) return value
-  return sanitizeTradeAllocatedStringLeaf(value)
 }
 
 // The recursion cap is a guard against a pathological blob, not a licence to
@@ -38254,8 +38251,8 @@ export function redactTradeScopeQuote(scope: any): any {
         out[key] = allowlisted
         continue
       }
-      if (typeof value === 'string' && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
-        const cleaned = sanitizeTradeNarrativeLeaf(key, value)
+      if (typeof value === 'string') {
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
         if (cleaned === '') continue
         out[key] = cleaned
         continue

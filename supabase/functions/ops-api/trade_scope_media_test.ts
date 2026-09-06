@@ -425,6 +425,28 @@ Deno.test("existingMediaMatchesVideo matches URL or filename fragment", () => {
     ),
     false,
   );
+  assertEquals(
+    existingMediaMatchesVideo(
+      { type: "video", storage_url: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4" },
+      { label: "Walkthrough", storageUrl: WALKTHROUGH_URL },
+    ),
+    false,
+    "http:// existing rows are not a registered playable match",
+  );
+  assertEquals(
+    existingMediaMatchesVideo(
+      { type: "video", storage_url: tinyVideoDataUrl() },
+      { label: "Walkthrough", fileName: "walkthrough.mp4" },
+    ),
+    false,
+  );
+  assertEquals(
+    existingMediaMatchesVideo(
+      { type: "video", storage_url: "blob:https://local/abc" },
+      { label: "Walkthrough" },
+    ),
+    false,
+  );
 });
 
 Deno.test("selectTradeJobMedia keeps current-cycle photos and recovers the unbound walkthrough", () => {
@@ -457,21 +479,57 @@ Deno.test("selectTradeJobMedia keeps current-cycle photos and recovers the unbou
       label: "Install clip",
       attendance_cycle_id: "cycle-1",
       cycle_attribution: "bound",
+      storage_url: "https://cdn.example.test/jobs/swf-26101/install.mp4",
     },
   ];
   const selected = selectTradeJobMedia(media, { reattend_count: 1, cycle_number: 2 }, "cycle-2");
   assertEquals(selected.map((r) => r.id).sort(), ["new-photo", "other-vid", "walk"]);
 });
 
-Deno.test("selectTradeJobMedia without a reattend boundary returns every row", () => {
+Deno.test("selectTradeJobMedia without a reattend boundary returns every playable row", () => {
   const media = [
     { id: "p", type: "photo" },
-    { id: "v", type: "video" },
+    { id: "v", type: "video", storage_url: WALKTHROUGH_URL },
   ];
   assertEquals(selectTradeJobMedia(media, { reattend_count: 0 }, null).map((r) => r.id), [
     "p",
     "v",
   ]);
+});
+
+Deno.test("selectTradeJobMedia drops existing video rows that are not playable HTTPS", () => {
+  const media = [
+    { id: "https-walk", type: "video", storage_url: WALKTHROUGH_URL },
+    { id: "http-walk", type: "video", storage_url: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4" },
+    { id: "data-walk", type: "video", storage_url: tinyVideoDataUrl() },
+    { id: "blob-walk", type: "video", storage_url: "blob:https://local/abc" },
+    { id: "no-url", type: "video" },
+    { id: "photo", type: "photo", storage_url: PHOTO_URL },
+  ];
+  const selected = selectTradeJobMedia(media, { reattend_count: 0 }, null);
+  assertEquals(selected.map((r) => r.id).sort(), ["https-walk", "photo"]);
+});
+
+Deno.test("selectTradeJobMedia also drops a current-cycle http video while keeping the HTTPS walkthrough", () => {
+  const media = [
+    {
+      id: "http-current",
+      type: "video",
+      phase: "completion",
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: "bound",
+      storage_url: "http://cdn.example.test/jobs/swf-26101/clip.mp4",
+    },
+    {
+      id: "walk",
+      type: "video",
+      phase: "scope",
+      label: "Walkthrough",
+      storage_url: WALKTHROUGH_URL,
+    },
+  ];
+  const selected = selectTradeJobMedia(media, { reattend_count: 1, cycle_number: 2 }, "cycle-2");
+  assertEquals(selected.map((r) => r.id), ["walk"]);
 });
 
 Deno.test("deterministicScopeMediaId is stable for the same job+url", async () => {

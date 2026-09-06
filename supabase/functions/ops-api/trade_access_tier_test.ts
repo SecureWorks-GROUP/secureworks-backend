@@ -159,11 +159,11 @@ const QUOTE_SCOPE = {
     extrasRows: [{ desc: "Skip bin", sell: 350 }],
     labour: { trades: 2, days: 3, dayRate: 400, sell: 3200 },
   },
-  notes: {
+    notes: {
     pricingNotes: "Priced at 35% margin",
     noteQuote: "Quote note text",
     noteWorkOrder: "Use 90x90 posts",
-    noteInternal: "Client is a repeat customer",
+    noteInternal: "Client is a repeat customer. Do not mention $9,999",
   },
   _pricing_json: { totalExGST: 8000, totalIncGST: 8800, marginPct: 35 },
   patios: [{
@@ -182,6 +182,8 @@ const QUOTE_SCOPE = {
     _pricing_json: { totalExGST: 5000 },
     pricePerMetre: 125,
     runs: [{ length: 10 }],
+    siteNotes: "Park on the verge. Extra $9,999",
+    supplierNotes: "Call before arrival. Charge 1,200 ex GST",
     quote: {
       quote_number: "Q-NARR",
       description: "Supply and install Monument fencing with a gate on the left.",
@@ -488,8 +490,10 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.job.scope_json.notes, {
     noteQuote: "Quote note text",
     noteWorkOrder: "Use 90x90 posts",
-    noteInternal: "Client is a repeat customer",
+    noteInternal: "Client is a repeat customer. Do not mention",
   });
+  assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra");
+  assertEquals(p.job.scope_json.job.supplierNotes, "Call before arrival. Charge");
   assertEquals(p.job.scope_json.config.totalMetres, 42);
   assertEquals(p.job.scope_json.job.quote, {
     quote_number: "Q-NARR",
@@ -673,12 +677,53 @@ Deno.test("trade_job_detail: reattend cycle filter still returns the unbound wal
   assertEquals(p.currentCyclePhotoCount, 1);
 });
 
+Deno.test("trade_job_detail: existing video rows must be playable HTTPS to reach the trade payload", async () => {
+  const t = seed();
+  t.job_media = [
+    {
+      id: "https-walk",
+      job_id: JOB_FENCE,
+      type: "video",
+      phase: "scope",
+      label: "Walkthrough",
+      storage_url: WALKTHROUGH_URL,
+    },
+    {
+      id: "http-walk",
+      job_id: JOB_FENCE,
+      type: "video",
+      phase: "scope",
+      storage_url: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4",
+    },
+    {
+      id: "data-walk",
+      job_id: JOB_FENCE,
+      type: "video",
+      phase: "scope",
+      storage_url: "data:video/mp4;base64,AAAA",
+    },
+    {
+      id: "blob-walk",
+      job_id: JOB_FENCE,
+      type: "video",
+      phase: "scope",
+      storage_url: "blob:https://local/abc",
+    },
+  ];
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  const videos = (p.media || []).filter((m: any) => m.type === "video");
+  assertEquals(videos.map((m: any) => m.id), ["https-walk"]);
+  assertEquals(videos[0].storage_url, WALKTHROUGH_URL);
+});
+
 Deno.test("trade_job_detail: the fencing division manager sees the quote docs and the raw scope (office parity within the trade)", async () => {
   const p = await detail(seed(), viewer(HENRY, "lead_installer", ["fencing"]));
   assertEquals(p.access_tier, "division_manager");
   assertEquals(p.quote_visible, true);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-internal", "d-invoice", "d-quote-hid", "d-quote-vis", "d-supplier-quote", "d-supplier-wo", "d-wo"]);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
+  assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra $9,999");
+  assertEquals(p.job.scope_json.notes.noteInternal, "Client is a repeat customer. Do not mention $9,999");
   assertEquals(p.workOrders[0].scope_items[0].rate, 85);
   assertEquals(p.workOrders[0].special_instructions, "Park on the verge. Charge $9,999 extra.");
   assertEquals(p.workOrderDocuments.map((d: any) => d.id).sort(), ["d-supplier-wo", "d-wo"]);
@@ -760,8 +805,11 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
     notes: {
       noteQuote: "Quote writing Total $9,999 plus AUD 1,200",
       noteWorkOrder: "Use 90x90 posts",
+      noteInternal: "Client is a repeat customer. Do not mention $9,999",
     },
     job: {
+      siteNotes: "Park on the verge. Extra $9,999",
+      supplierNotes: "Call before arrival. Charge 1,200 ex GST. Total 9,999 AUD",
       quote: {
         quote_number: "Q-NARR",
         description: "Supply and install. Total A$ 9,999 Approved total 9,999 ex GST",
@@ -775,6 +823,9 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
   });
   assertEquals(r.notes.noteQuote, "Quote writing Total plus");
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
+  assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
+  assertEquals(r.job.siteNotes, "Park on the verge. Extra");
+  assertEquals(r.job.supplierNotes, "Call before arrival. Charge. Total");
   assertEquals(r.job.quote.quote_number, "Q-NARR");
   assertEquals(r.job.quote.description, "Supply and install. Total Approved total");
   assertEquals(r.job.quote.narrative, "Gate on the left extra Total");
@@ -809,6 +860,9 @@ Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the r
   assertEquals(r.notes.pricingNotes, undefined);
   assertEquals(r.notes.noteQuote, "Quote note text");
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
+  assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
+  assertEquals(r.job.siteNotes, "Park on the verge. Extra");
+  assertEquals(r.job.supplierNotes, "Call before arrival. Charge");
   assertEquals(r.client, { notes: "Gate on the left" });
   assertEquals(r.job.quote.quote_number, "Q-NARR");
   assertEquals(r.job.quote.description.includes("Monument"), true);

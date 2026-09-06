@@ -262,7 +262,7 @@ export function existingMediaMatchesVideo(
   row: any,
   video: ScopeVideoCandidate,
 ): boolean {
-  if (!row || String(row.type || "").toLowerCase() !== "video") return false;
+  if (!isPlayableTradeVideoRow(row)) return false;
   const url = String(row.storage_url || "");
   if (video.storageUrl && url === video.storageUrl) return true;
   if (video.contentId && storageUrlCarriesContentId(url, video.contentId)) return true;
@@ -285,9 +285,16 @@ export function isTradeVideoRow(row: any): boolean {
   return String(row?.type || "").toLowerCase() === "video";
 }
 
+/** Existing/projected video that the trade player may keep — HTTPS only. */
+export function isPlayableTradeVideoRow(row: any): boolean {
+  return isTradeVideoRow(row) && isHttpMediaUrl(row?.storage_url);
+}
+
 /**
  * Current-cycle evidence plus every job video. Reattend must not hide the
  * only walkthrough just because it is unbound / prior-cycle scope media.
+ * Historical type:video rows still need a playable HTTPS URL — http:/data:/
+ * blob: never reach the trade payload, matching the registration gate.
  */
 export function selectTradeJobMedia(
   media: any[] | null | undefined,
@@ -299,13 +306,13 @@ export function selectTradeJobMedia(
     rows,
     detail,
     currentAttendanceCycleId,
-  );
+  ).filter((row) => !isTradeVideoRow(row) || isPlayableTradeVideoRow(row));
   const seen = new Set(
     cycle.map((row) => String(row?.id || row?.storage_url || "")).filter(Boolean),
   );
   const out = [...cycle];
   for (const row of rows) {
-    if (!isTradeVideoRow(row)) continue;
+    if (!isPlayableTradeVideoRow(row)) continue;
     const key = String(row?.id || row?.storage_url || "");
     if (key && seen.has(key)) continue;
     if (!key && out.includes(row)) continue;
