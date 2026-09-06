@@ -43,6 +43,7 @@ import {
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
   ensureQuoteGroupEmailSendKey,
+  retireQuoteGroupEmailSendKey,
   mintSendRunQuoteNumber,
   persistTradePacksWhileHoldingSendClaims,
   publishQuoteDocumentSendOrRevert,
@@ -2756,6 +2757,18 @@ serve(async (req: Request) => {
             if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
           } else if (!resendResponseIsDefinitivePreSendRejection(resendRes.status)) {
             markSendRunsProviderAttempt(recipient.docs)
+          } else {
+            const retired = await retireQuoteGroupEmailSendKey(sb, {
+              jobId: job.id,
+              recipientEmail: email,
+              resendIdempotencyKey: groupSend.resend_idempotency_key,
+            })
+            if (retired.status === 'error') {
+              console.error(
+                '[send-quote] send-runs group send record retire failed:',
+                retired.error,
+              )
+            }
           }
         } catch (e: any) {
           markSendRunsProviderAttempt(recipient.docs)

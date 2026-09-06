@@ -419,3 +419,32 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-20 locks (2026-09-06)
+
+- **Payment-schedule remnants after strip are broader than completion.**
+  Review-18 still drops leftover `on/upon completion`. Review-20 also
+  drops leftover `on|upon|after|before|following` plus
+  delivery / approval / acceptance / install(ation) / invoice / receipt
+  / sign-off / handover when an amount was stripped (`$50 on delivery`,
+  `$50 after completion`, `$50 upon approval`) or the leftover is only
+  that remnant. Work notes that already said those schedule words with
+  no amount stay. Sealed phrase stays exempt only on
+  `terms.payment_terms`.
+- **Money-token fence covers denomination leftovers and amount
+  shorthand.** `euros` / `cents` / `pounds` / `pence` / `yen` / `yuan`
+  / `rupees` / `francs` / `quid` fail closed on leftover prose
+  (`100 euros` → `euros`). `10k` / `2.5K` are amount shorthand. `10m`
+  stays a held construction count. Those words are not added to the
+  strip list, so `100 euros extra` cannot collapse to leftover `extra`.
+- **Definitive pre-send 4xx retires the group provider key.**
+  `ensureQuoteGroupEmailSendKey` still persists before Resend. A
+  definitive 4xx (not 408/409/429) deletes the matching
+  `quote_group_email_send_records` row so a corrected retry of the same
+  document set mints a new Idempotency-Key. Accepted or ambiguous
+  provider outcomes keep the key. Per-doc claims still revert
+  `pre_send` on that 4xx. Retire write faults log and continue.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.

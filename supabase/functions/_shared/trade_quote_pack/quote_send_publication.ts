@@ -27,8 +27,10 @@
  * grouped Resend Idempotency-Key lives on
  * `quote_group_email_send_records` for the original document set, not
  * `claims[0]`. A leftover retry after partial publication reuses that
- * stored key; a new document set mints another record. Per-doc claims
- * stay the lease.
+ * stored key; a new document set mints another record. A definitive
+ * pre-send 4xx retires that group key so a corrected retry mints a
+ * new one. Ambiguous or accepted provider outcomes keep the key.
+ * Per-doc claims stay the lease.
  */
 
 import {
@@ -1088,6 +1090,43 @@ export async function ensureQuoteGroupEmailSendKey(
     return { status: 'error', error: 'quote group send record insert was not confirmed' }
   }
   return { status: 'ready', resend_idempotency_key: confirmed, reused: false }
+}
+
+export type QuoteGroupEmailSendRetireResult =
+  | { status: 'retired' }
+  | { status: 'unavailable' }
+  | { status: 'error'; error: string }
+
+/**
+ * Drop the durable group provider key after Resend definitely rejected
+ * the payload (4xx except 408/409/429). CHECK forbids an empty key, so
+ * this deletes the matching row. Next `ensure` mints a new key. Keep
+ * the row for accepted or ambiguous provider outcomes.
+ */
+export async function retireQuoteGroupEmailSendKey(
+  sb: QuoteSendPublicationClient,
+  input: {
+    jobId?: string | null
+    recipientEmail?: string | null
+    resendIdempotencyKey?: string | null
+  },
+): Promise<QuoteGroupEmailSendRetireResult> {
+  const jobId = typeof input.jobId === 'string' ? input.jobId.trim() : ''
+  const recipientEmail = quoteSendRecipientKey(input.recipientEmail)
+  const key = quoteSendClaimToken(input.resendIdempotencyKey)
+  if (!jobId || !recipientEmail || !key) return { status: 'unavailable' }
+
+  const { error } = await sb
+    .from(QUOTE_GROUP_EMAIL_SEND_TABLE)
+    .delete()
+    .eq('job_id', jobId)
+    .eq('recipient_email', recipientEmail)
+    .eq('send_resend_idempotency_key', key)
+  if (error) {
+    console.error('[send-quote] group send record retire failed:', claimErrorMessage(error))
+    return { status: 'error', error: claimErrorMessage(error) }
+  }
+  return { status: 'retired' }
 }
 
 /** Document ids belonging to recipients whose Resend call succeeded.

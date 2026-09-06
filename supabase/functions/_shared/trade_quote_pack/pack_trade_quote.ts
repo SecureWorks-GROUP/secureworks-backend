@@ -176,7 +176,10 @@ export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+c
 const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
-const TRADE_CURRENCY_WORD_RE = /\b(?:dollars?|bucks?)\b/i
+const TRADE_CURRENCY_WORD_RE =
+  /\b(?:dollars?|bucks?|euros?|cents?|pounds?|pence|pennies|yen|yuan|rupees?|francs?|quid)\b/i
+/** 10k / 2.5K. Not `10m` — that is held construction metres. */
+const TRADE_AMOUNT_SHORTHAND_RE = /\b-?\d{1,3}(?:,\d{3})*(?:\.\d+)?[kK]\b/
 const TRADE_CURRENCY_SYMBOL_RE = /[€£¥₹₩₽₪₱₫₴₡₦฿₭₮¢￥＄﹩]/
 const TRADE_UNICODE_CURRENCY_RE = /\p{Sc}/u
 const TRADE_CURRENCY_CODE_RE =
@@ -250,6 +253,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   if (TRADE_CURRENCY_CODE_RE.test(text)) return true
   if (TRADE_CURRENCY_CODE_AMOUNT_RE.test(text)) return true
   if (tradeTextHasCurrencyWord(text)) return true
+  if (TRADE_AMOUNT_SHORTHAND_RE.test(text)) return true
   if (TRADE_PACK_INFLECTED_MONEY_VOCAB_RE.test(text)) return true
   if (TRADE_TAX_INVOICE_LANGUAGE_RE.test(text)) return true
   if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
@@ -929,8 +933,19 @@ export function tradeOriginalHasNonFigureMoneyLanguage(value: string): boolean {
 }
 
 /** Payment-schedule leftover after a figure strip (`$50 on completion`
- *  → `on completion`). Not the sealed terms phrase. */
-const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = /\b(?:on|upon)\s+completion\b/i
+ *  → `on completion`, `$50 on delivery` → `on delivery`). Not the
+ *  sealed terms phrase. Work notes that already said the same schedule
+ *  words with no amount stay. */
+const TRADE_PAYMENT_SCHEDULE_EVENT =
+  '(?:completion|delivery|approval|acceptance|install(?:ation)?|invoice|receipt|sign(?:-|\\s*)off|handover)'
+const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = new RegExp(
+  `\\b(?:on|upon|after|before|following)\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
+  'i',
+)
+const TRADE_PAYMENT_SCHEDULE_BARE_RE = new RegExp(
+  `^(?:on|upon|after|before|following)\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}$`,
+  'i',
+)
 
 export function leftoverIsPaymentScheduleAfterAmountStrip(
   original: string,
@@ -938,7 +953,7 @@ export function leftoverIsPaymentScheduleAfterAmountStrip(
 ): boolean {
   const cleaned = String(leftover || '').trim()
   if (!cleaned || !TRADE_PAYMENT_SCHEDULE_REMNANT_RE.test(cleaned)) return false
-  if (/^(?:on|upon)\s+completion$/i.test(cleaned)) return true
+  if (TRADE_PAYMENT_SCHEDULE_BARE_RE.test(cleaned)) return true
   return String(original || '').trim() !== cleaned
 }
 
@@ -981,7 +996,8 @@ export function allocatedTradePackProse(value: unknown): string | null {
   if (!cleaned) return null
   // Sealed phrase is payment_terms-only. A name / item / note leftover
   // matching it is money prose and must not ride the allocated pack.
-  // Amount + "on/upon completion" leftovers are the same class.
+  // Amount + schedule leftovers (`on delivery` / `after completion`)
+  // are the same class.
   if (isSealedPaymentTermsPhrase(cleaned)) return null
   if (tradeTextHasMoneyToken(cleaned)) return null
   if (leftoverIsMangledMoneyRemnant(trimmed, cleaned)) return null

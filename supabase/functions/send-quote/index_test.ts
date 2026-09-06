@@ -32,6 +32,7 @@ import {
   claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
   ensureQuoteGroupEmailSendKey,
+  retireQuoteGroupEmailSendKey,
   persistTradePacksWhileHoldingSendClaims,
   pickQuoteGroupEmailCoveringRecord,
   quoteGroupEmailCoversDocumentSet,
@@ -941,20 +942,24 @@ function makeGroupSendRecordSb(opts: {
   }>
   selectError?: { message: string }
   insertError?: { message: string; code?: string }
+  deleteError?: { message: string }
   insertResult?: null | { id?: string; send_resend_idempotency_key?: string }
   emptyFirstSelect?: boolean
 } = {}) {
   const rows = (opts.existing || []).map((row) => ({ ...row }))
   const inserts: Record<string, unknown>[] = []
+  const deletes: Record<string, unknown>[] = []
   let selects = 0
   return {
     rows,
     inserts,
+    deletes,
     from: (table: string) => {
       assertEquals(table, "quote_group_email_send_records")
       let jobId = ""
       let recipient = ""
-      let mode: "select" | "insert" = "select"
+      let idempotencyKey = ""
+      let mode: "select" | "insert" | "delete" = "select"
       const self: Record<string, unknown> = {}
       const matching = () =>
         rows.filter((row) =>
@@ -965,11 +970,16 @@ function makeGroupSendRecordSb(opts: {
       self.eq = (col: string, value: unknown) => {
         if (col === "job_id") jobId = String(value)
         if (col === "recipient_email") recipient = String(value)
+        if (col === "send_resend_idempotency_key") idempotencyKey = String(value)
         return self
       }
       self.insert = (payload: Record<string, unknown>) => {
         mode = "insert"
         inserts.push(payload)
+        return self
+      }
+      self.delete = () => {
+        mode = "delete"
         return self
       }
       self.maybeSingle = () => {
@@ -1003,6 +1013,27 @@ function makeGroupSendRecordSb(opts: {
         resolve: (value: unknown) => unknown,
         reject?: (reason: unknown) => unknown,
       ) => {
+        if (mode === "delete") {
+          deletes.push({
+            job_id: jobId,
+            recipient_email: recipient,
+            send_resend_idempotency_key: idempotencyKey,
+          })
+          if (opts.deleteError) {
+            return Promise.resolve({ data: null, error: opts.deleteError }).then(resolve, reject)
+          }
+          for (let i = rows.length - 1; i >= 0; i--) {
+            const row = rows[i]
+            if (
+              row.job_id === jobId &&
+              row.recipient_email === recipient &&
+              row.send_resend_idempotency_key === idempotencyKey
+            ) {
+              rows.splice(i, 1)
+            }
+          }
+          return Promise.resolve({ data: null, error: null }).then(resolve, reject)
+        }
         selects += 1
         if (opts.selectError) {
           return Promise.resolve({ data: null, error: opts.selectError }).then(resolve, reject)
@@ -1142,6 +1173,120 @@ Deno.test("R19-003 send-runs source uses the durable group Resend key", () => {
   assert(!headers.includes("groupedLease.claims[0]"))
   assert(preDispatch.includes("Failed to load quote group send record"))
   assert(preDispatch.includes("500"))
+})
+
+Deno.test("R20-003 retiring the group key lets the same set mint a new provider key", async () => {
+  const sb = makeGroupSendRecordSb()
+  const first = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: " Pat@Example.TEST ",
+    documentIds: ["doc-b", "doc-a"],
+  })
+  assertEquals(first.status, "ready")
+  if (first.status !== "ready") return
+  const retired = await retireQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "Pat@Example.TEST",
+    resendIdempotencyKey: first.resend_idempotency_key,
+  })
+  assertEquals(retired.status, "retired")
+  assertEquals(sb.deletes.length, 1)
+  assertEquals(sb.deletes[0].recipient_email, "pat@example.test")
+  assertEquals(sb.deletes[0].send_resend_idempotency_key, first.resend_idempotency_key)
+  assertEquals(sb.rows.length, 0)
+  const again = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a", "doc-b"],
+  })
+  assertEquals(again.status, "ready")
+  if (again.status !== "ready") return
+  assertEquals(again.reused, false)
+  assert(again.resend_idempotency_key !== first.resend_idempotency_key)
+  assert(again.resend_idempotency_key.startsWith("quote-group-send:"))
+  assertEquals(sb.inserts.length, 2)
+})
+
+Deno.test("R20-003 a mismatched group key is not retired", async () => {
+  const sb = makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+  })
+  const retired = await retireQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    resendIdempotencyKey: "quote-group-send:other",
+  })
+  assertEquals(retired.status, "retired")
+  assertEquals(sb.rows.length, 1)
+  const leftover = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-b"],
+  })
+  assertEquals(leftover.status, "ready")
+  if (leftover.status !== "ready") return
+  assertEquals(leftover.reused, true)
+  assertEquals(leftover.resend_idempotency_key, "quote-group-send:orig")
+})
+
+Deno.test("R20-003 group key retire faults and missing coordinates", async () => {
+  const missing = await retireQuoteGroupEmailSendKey(makeGroupSendRecordSb(), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    resendIdempotencyKey: " ",
+  })
+  assertEquals(missing.status, "unavailable")
+
+  const failed = await retireQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a"],
+      document_set_key: "doc-a",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+    deleteError: { message: "delete failed" },
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    resendIdempotencyKey: "quote-group-send:orig",
+  })
+  assertEquals(failed.status, "error")
+  if (failed.status === "error") assertEquals(failed.error, "delete failed")
+})
+
+Deno.test("R20-003 send-runs retires the group key only on definitive pre-send 4xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const catchStart = src.indexOf("} catch (e: any) {", provider)
+  const afterFetch = src.slice(provider, catchStart)
+  const okEnd = afterFetch.indexOf("} else if (!resendResponseIsDefinitivePreSendRejection")
+  const okBranch = afterFetch.slice(0, okEnd)
+  const rest = afterFetch.slice(okEnd)
+  const retireStart = rest.indexOf("} else {")
+  const ambiguousBranch = rest.slice(0, retireStart)
+  const retireBranch = rest.slice(retireStart)
+  assert(start >= 0 && provider > start && catchStart > provider)
+  assert(okEnd >= 0 && retireStart >= 0)
+  assert(okBranch.includes("markSendRunsProviderAttempt"))
+  assert(!okBranch.includes("retireQuoteGroupEmailSendKey"))
+  assert(ambiguousBranch.includes("markSendRunsProviderAttempt"))
+  assert(!ambiguousBranch.includes("retireQuoteGroupEmailSendKey"))
+  assert(retireBranch.includes("retireQuoteGroupEmailSendKey("))
+  assert(retireBranch.includes("groupSend.resend_idempotency_key"))
+  assert(!retireBranch.includes("markSendRunsProviderAttempt"))
+  const catchBlock = src.slice(catchStart, src.indexOf("}", catchStart + 80) + 1)
+  assert(catchBlock.includes("markSendRunsProviderAttempt"))
+  assert(!catchBlock.includes("retireQuoteGroupEmailSendKey"))
 })
 
 Deno.test("R7-003 failed send-runs recipients are the claim complement", () => {

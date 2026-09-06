@@ -319,6 +319,13 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("Pay now"), true);
   assertEquals(tradeTextHasMoneyToken("dollars"), true);
   assertEquals(tradeTextHasMoneyToken("bucks"), true);
+  assertEquals(tradeTextHasMoneyToken("euros"), true);
+  assertEquals(tradeTextHasMoneyToken("100 euros"), true);
+  assertEquals(tradeTextHasMoneyToken("cents"), true);
+  assertEquals(tradeTextHasMoneyToken("100 cents"), true);
+  assertEquals(tradeTextHasMoneyToken("10k"), true);
+  assertEquals(tradeTextHasMoneyToken("2.5K"), true);
+  assertEquals(tradeTextHasMoneyToken("10m"), false);
   assertEquals(tradeTextHasMoneyToken("Payne Client"), false);
   assertEquals(tradeTextHasMoneyToken("€18"), true);
   assertEquals(tradeTextHasMoneyToken("＄18"), true);
@@ -380,6 +387,12 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(allocatedTradePackProse("50% upfront"), null);
   assertEquals(allocatedTradePackProse("50% deposit + 50% on completion"), null);
   assertEquals(allocatedTradePackProse("$50 on completion"), null);
+  assertEquals(allocatedTradePackProse("$50 on delivery"), null);
+  assertEquals(allocatedTradePackProse("$50 after completion"), null);
+  assertEquals(allocatedTradePackProse("$50 upon approval"), null);
+  assertEquals(allocatedTradePackProse("100 euros"), null);
+  assertEquals(allocatedTradePackProse("100 cents"), null);
+  assertEquals(allocatedTradePackProse("10k"), null);
   assertEquals(allocatedTradePackProse("AUD 50 on completion"), null);
   assertEquals(allocatedTradePackProse("50 dollars on completion"), null);
   assertEquals(allocatedTradePackProse("upon completion"), null);
@@ -389,6 +402,9 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("AUD 50 on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 dollars on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 on delivery", "on delivery"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 after completion", "after completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 upon approval", "upon approval"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
     "Finish remaining posts on completion of neighbour",
     "Finish remaining posts on completion of neighbour",
