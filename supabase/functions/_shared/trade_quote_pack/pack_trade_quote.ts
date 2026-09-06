@@ -463,9 +463,10 @@ function item(kind: TradePackItemKind, description: string, quantity: number, un
 }
 
 const TRADE_PACK_MONEY_AMOUNT = '-?[\\d,]+(?:\\.\\d+)?'
-const TRADE_PACK_CURRENCY_PREFIX = '(?:\\bAUD\\s*|AU\\$\\s*|A\\$\\s*|\\$\\s*)'
-const TRADE_PACK_CURRENCY_SUFFIX = '(?:AUD\\b|AU\\$|A\\$|\\$)'
 const TRADE_PACK_CURRENCY_WORD = '(?:dollars?|bucks|usd|aud)'
+const TRADE_PACK_CURRENCY_PREFIX =
+  `(?:\\b${TRADE_PACK_CURRENCY_WORD}\\s*|AU\\$\\s*|A\\$\\s*|\\$\\s*)`
+const TRADE_PACK_CURRENCY_SUFFIX = '(?:AUD\\b|AU\\$|A\\$|\\$)'
 const TRADE_PACK_CURRENCY_MID = `(?:\\s+${TRADE_PACK_CURRENCY_WORD})?`
 const TRADE_PACK_TAX_WORD = '(?:GST|tax)\\b'
 const TRADE_PACK_TAX_QUALIFIER =
@@ -482,7 +483,7 @@ const TRADE_PACK_REF_PREFIX =
   '(?:SWF|SWMS|SWP|SWR|SW|WO|PO|INV|MLB|AJBR|AJ|Q)'
 
 /** Money-safe pack text: drop common currency figures, keep the writing.
- *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
+ *  Prefix ($ / A$ / AUD / USD / dollars 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
  *  1200/m, 85 per day, 85/day, 85 per trade, 85 per panel, 85 each,
@@ -555,7 +556,7 @@ export function stripTradePackMoney(text: unknown): string {
     .replace(new RegExp(`\\(?\\s*${TRADE_PACK_TAX_QUALIFIED}\\s*\\)?`, 'gi'), '')
     .replace(
       new RegExp(
-        `(\\b${TRADE_PACK_UNQUALIFIED_MONEY_WORD}\\b)\\s*(?:[=:\\-]|(?:of|at|for))?\\s*${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        `(\\b${TRADE_PACK_UNQUALIFIED_MONEY_WORD}\\b)\\s*(?:[=:\\-]|(?:of|at|for))?\\s*(?:${TRADE_PACK_CURRENCY_WORD}\\s+)?${TRADE_PACK_MONEY_AMOUNT}\\b`,
         'gi',
       ),
       '$1',

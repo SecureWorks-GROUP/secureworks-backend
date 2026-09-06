@@ -245,6 +245,11 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("85 dollars per item"), "");
   assertEquals(stripTradePackMoney("85 USD per panel"), "");
   assertEquals(stripTradePackMoney("Charge 85 dollars each"), "Charge");
+  assertEquals(stripTradePackMoney("USD 85"), "");
+  assertEquals(stripTradePackMoney("Rate USD 85"), "Rate");
+  assertEquals(stripTradePackMoney("dollars 85"), "");
+  assertEquals(stripTradePackMoney("bucks 85"), "");
+  assertEquals(stripTradePackMoney("Install USD 85 plus posts"), "Install plus posts");
   assertEquals(stripTradePackMoney("Install 85 dollars each plus posts"), "Install plus posts");
   assertEquals(stripTradePackMoney("85 per item"), "");
   assertEquals(stripTradePackMoney("85 per gate"), "");
