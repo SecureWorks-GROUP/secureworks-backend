@@ -175,9 +175,11 @@ export function assembleQuotePacksForTrade(input: {
   customer?: Partial<TradeQuoteCustomerSnapshot> | null
   terms?: Partial<TradeQuoteTermsSnapshot> | null
 }): TradeQuotePack[] {
+  // Live fallback is for quote_packs (TRD-4) on an already-sent/accepted
+  // quote with no frozen pack. trade_quote_extract never consumes that path.
   const docs = (input.documents || [])
     .filter((d) => String(d?.type || '').toLowerCase() === 'quote')
-    .filter((d) => !!(d.sent_at || d.trade_pack_json))
+    .filter((d) => quoteDocumentHasClientSend(d))
     .slice()
     .sort((a, b) => String(b.sent_at || b.created_at || '').localeCompare(String(a.sent_at || a.created_at || '')))
 
@@ -249,6 +251,35 @@ export async function persistTradePackOnDocuments(
   return wrote
 }
 
+export function quoteDocumentHasClientSend(doc: QuoteDocRow | null | undefined): boolean {
+  return !!(doc?.sent_at || doc?.accepted_at)
+}
+
+export function quoteDocumentHasFrozenPack(doc: QuoteDocRow | null | undefined): boolean {
+  const stored = asObject(doc?.trade_pack_json)
+  return Array.isArray(stored.items)
+}
+
+/** Frozen pack for the trade extract only. Requires an authoritative client
+ *  send or accept on the document row, plus persisted `trade_pack_json`.
+ *  Never synthesizes from live scope/pricing. Overlay fills empty customer
+ *  and terms snapshots only. */
+export function frozenTradePackForExtract(
+  doc: QuoteDocRow,
+  overlay?: {
+    customer?: Partial<TradeQuoteCustomerSnapshot> | null
+    terms?: Partial<TradeQuoteTermsSnapshot> | null
+  },
+): TradeQuotePack | null {
+  if (!quoteDocumentHasClientSend(doc) || !quoteDocumentHasFrozenPack(doc)) return null
+  const packed = hydrateStoredPack(asObject(doc.trade_pack_json), doc)
+  if (packed.source === 'live_fallback') return null
+  return overlayTradePackSnapshots(packed, {
+    customer: overlay?.customer,
+    terms: overlay?.terms,
+  })
+}
+
 function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): TradeQuotePack {
   const items = (Array.isArray(stored.items) ? stored.items : []).map((raw) => {
     const row = asObject(raw)
@@ -262,14 +293,15 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
       typeof row.unit === 'string' ? row.unit : 'ea',
     )
   })
-  const accepted = !!doc.accepted_at || stored.accepted === true
+  const accepted = !!doc.accepted_at
   const superseded = !!doc.superseded_at && !accepted
+  const sentAt = doc.sent_at || null
   return {
     quote_number: (stored.quote_number as string) || doc.quote_number || null,
     job_document_id: (stored.job_document_id as string) || doc.id || null,
-    sent_at: (stored.sent_at as string) || doc.sent_at || null,
+    sent_at: sentAt,
     accepted,
-    status: accepted ? 'accepted' : superseded ? 'superseded' : 'sent',
+    status: accepted ? 'accepted' : superseded ? 'superseded' : sentAt ? 'sent' : 'superseded',
     job_type: classifyJobType(stored.job_type as string, null, null),
     notes: String(stored.notes || ''),
     items,

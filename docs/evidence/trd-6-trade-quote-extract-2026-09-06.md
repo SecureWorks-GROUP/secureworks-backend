@@ -30,3 +30,17 @@ GET ops-api?action=trade_quote_extract&jobId=<id>&document_id=<quote doc id opti
 
 No trade.html / dashboard change in this repo. The app opens the HTML (or
 prints the JSON `.html`) later. No stored PDF. No print button here.
+
+## Review-1 locks (2026-09-06)
+
+- **Client send before extract.** Eligibility is `job_documents.sent_at` or
+  `accepted_at`. Pack presence / stored `sent_at` / `hydrateStoredPack` status
+  is not enough. Send-runs persist `trade_pack_json` only after `primarySent`.
+- **Money scrub at every free-text field.** Phone, email, units, quote/job
+  numbers, notes, and customer/terms prose all fail closed on `$` / AUD / GST
+  / money tokens. Phone and email keep digits unless a money token is present.
+  `assertTradeQuoteExtractArtifact` covers the JSON extract and rendered HTML.
+- **Frozen pack only.** `trade_quote_extract` requires persisted
+  `trade_pack_json`. A sent quote with no frozen pack may still get a TRD-4
+  `quote_packs` `live_fallback`; it gets no extract. Old packs may overlay
+  documented customer/terms fields only.

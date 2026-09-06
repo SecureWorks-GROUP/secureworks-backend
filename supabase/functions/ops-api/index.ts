@@ -132,10 +132,10 @@ import {
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
-  assembleTradeQuoteExtract,
+  assembleFrozenQuoteExtractPacks,
+  buildTradeQuoteExtractArtifact,
   projectTradeQuoteExtracts,
-  renderTradeQuoteExtractHtml,
-  tradeQuoteExtractFilename,
+  tradeQuoteExtractIsEligible,
 } from '../_shared/trade_quote_pack/trade_quote_extract.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
 import {
@@ -39342,7 +39342,16 @@ async function tradeJobDetail(
     // (allocated documents stay the existing allowlist). Fetch via
     // `trade_quote_extract`.
     quote_extracts: projectTradeQuoteExtracts(
-      quotePacks,
+      assembleFrozenQuoteExtractPacks({
+        documents: quoteDocsRes.error ? [] : (quoteDocsRes.data || []),
+        customer: {
+          name: jobRes.data?.client_name,
+          phone: jobRes.data?.client_phone,
+          email: jobRes.data?.client_email,
+          site_address: jobRes.data?.site_address,
+          site_suburb: jobRes.data?.site_suburb,
+        },
+      }),
       tradeSafeJob?.job_number || null,
     ),
   }
@@ -39387,7 +39396,7 @@ async function tradeQuoteExtractAction(
 
   const [jobRes, quoteDocsRes] = await Promise.all([
     client.from('jobs')
-      .select('id, type, job_number, client_name, client_phone, client_email, site_address, site_suburb, scope_json, pricing_json')
+      .select('id, type, job_number, client_name, client_phone, client_email, site_address, site_suburb')
       .eq('id', jobId)
       .eq('org_id', viewer.orgId)
       .single(),
@@ -39404,25 +39413,28 @@ async function tradeQuoteExtractAction(
     throw new ApiError('Quote extract unavailable', 503)
   }
 
-  const packs = assembleQuotePacksForTrade({
+  const packs = assembleFrozenQuoteExtractPacks({
     documents: quoteDocsRes.data || [],
-    jobType: jobRes.data.type,
-    liveScopeJson: jobRes.data.scope_json,
-    livePricingJson: jobRes.data.pricing_json,
-    isHenry: false,
     customer: tradeQuoteCustomerFromJob(jobRes.data),
   })
-  const eligible = packs.filter((pack) =>
-    (pack.status === 'sent' || pack.status === 'accepted') && pack.quote_number
-  )
+  const eligible = packs.filter((pack) => tradeQuoteExtractIsEligible(pack))
   const pack = documentId
     ? eligible.find((row) => row.job_document_id === documentId)
     : eligible[0]
   if (!pack) throw new ApiError('No sent quote extract for this job', 404)
 
-  const extract = assembleTradeQuoteExtract({ pack, job: jobRes.data })
-  const html = renderTradeQuoteExtractHtml(extract)
-  const filename = tradeQuoteExtractFilename(extract)
+  let extract: ReturnType<typeof buildTradeQuoteExtractArtifact>['extract']
+  let html: string
+  let filename: string
+  try {
+    const artifact = buildTradeQuoteExtractArtifact({ pack, job: jobRes.data })
+    extract = artifact.extract
+    html = artifact.html
+    filename = artifact.filename
+  } catch (e) {
+    console.error('[ops-api] trade quote extract refused:', (e as Error).message)
+    throw new ApiError('Quote extract unavailable', 409)
+  }
   if (format === 'html') {
     return new Response(html, {
       status: 200,

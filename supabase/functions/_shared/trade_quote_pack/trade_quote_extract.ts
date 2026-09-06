@@ -11,11 +11,15 @@
  */
 
 import {
+  type QuoteDocRow,
   type TradePackItem,
   type TradeQuoteCustomerSnapshot,
   type TradeQuotePack,
   type TradeQuoteTermsSnapshot,
+  frozenTradePackForExtract,
   overlayTradePackSnapshots,
+  sanitizeTradePackKind,
+  sanitizeTradePackUnit,
   stripTradePackMoney,
 } from "./pack_trade_quote.ts";
 
@@ -64,20 +68,69 @@ export type TradeQuoteExtractJobOverlay = {
   site_suburb?: unknown;
 };
 
-function extractProse(value: unknown): string | null {
+function extractFieldHasMoney(text: string): boolean {
+  if (text.includes("$")) return true;
+  if (/\bA\$|\bAU\$/i.test(text)) return true;
+  if (/\bAUD\b/i.test(text)) return true;
+  if (/\bGST\b/i.test(text)) return true;
+  if (/\b(?:subtotal|line total|unit price|totalIncGST|totalExGST)\b/i.test(text)) return true;
+  return false;
+}
+
+function failClosedText(value: unknown, scrub: (raw: string) => string | null): string | null {
   if (typeof value !== "string") return null;
-  const cleaned = stripTradePackMoney(value).trim();
-  return cleaned || null;
+  const cleaned = scrub(value);
+  if (!cleaned) return null;
+  if (extractFieldHasMoney(cleaned)) return null;
+  return cleaned;
+}
+
+function extractProse(value: unknown): string | null {
+  return failClosedText(value, (raw) => stripTradePackMoney(raw).trim() || null);
+}
+
+/** Phone / email / quote numbers keep digits. Drop the field if a money token is present. */
+function extractIdentity(value: unknown): string | null {
+  return failClosedText(value, (raw) => raw.trim() || null);
 }
 
 function extractScopeItem(item: TradePackItem): TradeQuoteExtractScopeItem | null {
-  if (item.kind === "note") return null;
+  const kind = item.kind === "note" ? undefined : sanitizeTradePackKind(item.kind);
+  if (!kind) return null;
+  const unit = sanitizeTradePackUnit(item.unit ?? undefined) ?? null;
+  if (unit && extractFieldHasMoney(unit)) return null;
   return {
-    kind: item.kind,
-    description: extractProse(item.description) || String(item.kind),
+    kind: kind as TradePackItem["kind"],
+    description: extractProse(item.description) || kind,
     quantity: Number.isFinite(item.quantity) ? item.quantity : null,
-    unit: item.unit ?? null,
+    unit,
   };
+}
+
+export function assembleFrozenQuoteExtractPacks(args: {
+  documents: QuoteDocRow[];
+  customer?: Partial<TradeQuoteCustomerSnapshot> | null;
+  terms?: Partial<TradeQuoteTermsSnapshot> | null;
+}): TradeQuotePack[] {
+  return (args.documents || [])
+    .map((doc) =>
+      frozenTradePackForExtract(doc, {
+        customer: args.customer,
+        terms: args.terms,
+      })
+    )
+    .filter((pack): pack is TradeQuotePack => !!pack)
+    .sort((a, b) =>
+      String(b.sent_at || "").localeCompare(String(a.sent_at || ""))
+    );
+}
+
+export function tradeQuoteExtractIsEligible(pack: TradeQuotePack | null | undefined): boolean {
+  if (!pack || pack.source === "live_fallback") return false;
+  if (!pack.quote_number) return false;
+  if (pack.status === "superseded") return false;
+  if (pack.accepted === true || pack.status === "accepted") return true;
+  return pack.status === "sent" && !!pack.sent_at;
 }
 
 export function assembleTradeQuoteExtract(args: {
@@ -93,18 +146,21 @@ export function assembleTradeQuoteExtract(args: {
       site_suburb: typeof args.job?.site_suburb === "string" ? args.job.site_suburb : null,
     },
   });
-  const jobNumber = String(args.job?.job_number ?? "").trim() || null;
+  const accepted = pack.accepted === true || pack.status === "accepted";
+  const sentAt = pack.sent_at ?? null;
+  const status = accepted ? "accepted" : sentAt ? "sent" : pack.status;
+  const jobNumber = extractIdentity(args.job?.job_number);
   return {
     schema: TRADE_QUOTE_EXTRACT_SCHEMA,
     type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
-    quote_number: pack.quote_number,
+    quote_number: extractIdentity(pack.quote_number),
     job_number: jobNumber,
-    status: pack.status,
-    sent_at: pack.sent_at ?? null,
+    status,
+    sent_at: sentAt,
     customer: {
       name: extractProse(pack.customer?.name),
-      phone: pack.customer?.phone ?? null,
-      email: pack.customer?.email ?? null,
+      phone: extractIdentity(pack.customer?.phone),
+      email: extractIdentity(pack.customer?.email),
       site_address: extractProse(pack.customer?.site_address),
       site_suburb: extractProse(pack.customer?.site_suburb),
     },
@@ -113,7 +169,7 @@ export function assembleTradeQuoteExtract(args: {
       valid_days: typeof pack.terms?.valid_days === "number" && Number.isFinite(pack.terms.valid_days)
         ? pack.terms.valid_days
         : null,
-      valid_until: pack.terms?.valid_until ?? null,
+      valid_until: extractIdentity(pack.terms?.valid_until),
     },
     scope: pack.items.map(extractScopeItem).filter((row): row is TradeQuoteExtractScopeItem => !!row),
     notes: extractProse(pack.notes) ? [extractProse(pack.notes) as string] : [],
@@ -136,9 +192,7 @@ export function projectTradeQuoteExtracts(
   jobNumber?: string | null,
 ): TradeQuoteExtractPointer[] {
   return packs
-    .filter((pack) =>
-      (pack.status === "sent" || pack.status === "accepted") && !!pack.quote_number
-    )
+    .filter((pack) => tradeQuoteExtractIsEligible(pack))
     .map((pack) => ({
       type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
       label: "Quote extract" as const,
@@ -328,4 +382,57 @@ export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
   if (/\bGST\b/i.test(html)) hits.push("GST");
   if (/\b(AUD|inc GST|ex GST|subtotal|line total|unit price)\b/i.test(html)) hits.push("money-phrase");
   return hits;
+}
+
+function extractStringLeafMoneyLeaks(value: unknown, path = ""): string[] {
+  const leaks: string[] = [];
+  const walk = (node: unknown, at: string) => {
+    if (typeof node === "string") {
+      if (extractFieldHasMoney(node)) leaks.push(at || "root");
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach((child, i) => walk(child, `${at}[${i}]`));
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      walk(child, at ? `${at}.${key}` : key);
+    }
+  };
+  walk(value, path);
+  return leaks;
+}
+
+export function tradeQuoteExtractArtifactLeaks(
+  extract: TradeQuoteExtract,
+  html: string,
+): string[] {
+  const leaks = [
+    ...tradeQuoteExtractMoneyLeakKeys(extract),
+    ...extractStringLeafMoneyLeaks(extract, "extract"),
+    ...tradeQuoteExtractHtmlMoneyNeedles(html).map((hit) => `html.${hit}`),
+  ];
+  if (JSON.stringify(extract).includes("$")) leaks.push("extract.$");
+  return [...new Set(leaks)];
+}
+
+export function assertTradeQuoteExtractArtifact(
+  extract: TradeQuoteExtract,
+  html: string,
+): void {
+  const leaks = tradeQuoteExtractArtifactLeaks(extract, html);
+  if (leaks.length) {
+    throw new Error(`trade quote extract money leak: ${leaks.join(",")}`);
+  }
+}
+
+export function buildTradeQuoteExtractArtifact(args: {
+  pack: TradeQuotePack;
+  job?: TradeQuoteExtractJobOverlay | null;
+}): { extract: TradeQuoteExtract; html: string; filename: string } {
+  const extract = assembleTradeQuoteExtract(args);
+  const html = renderTradeQuoteExtractHtml(extract);
+  assertTradeQuoteExtractArtifact(extract, html);
+  return { extract, html, filename: tradeQuoteExtractFilename(extract) };
 }

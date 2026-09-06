@@ -50,6 +50,7 @@ import {
   tradeQuoteVisibleForTier,
   tradeViewerQuoteVisibleForJob,
 } from "./index.ts";
+import { packTradeQuote } from "../_shared/trade_quote_pack/pack_trade_quote.ts";
 
 // ── Stub client ─────────────────────────────────────────────────────────────
 // Same generic chainable stand-in the crew-visibility suite uses: accumulates
@@ -224,6 +225,20 @@ const QUOTE_SCOPE = {
     },
   },
 };
+
+function stampFrozenSentQuote(doc: any, sentAt = "2026-09-01T00:00:00Z") {
+  doc.sent_at = sentAt;
+  doc.trade_pack_json = packTradeQuote({
+    quote_number: doc.quote_number,
+    job_document_id: doc.id,
+    sent_at: sentAt,
+    job_type: "fencing",
+    scope_json: structuredClone(QUOTE_SCOPE),
+    pricing_json: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
+    source: "frozen",
+  });
+  return doc;
+}
 
 function seed(): Tables {
   return {
@@ -603,6 +618,18 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(install?.line_total, null);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals(p.workOrderDocuments, []);
+  assertEquals(p.quote_extracts, [], "sent quote without a frozen pack has no extract");
+  assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
+  assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
+  assertEquals(JSON.stringify(p.quote_extracts).includes("quote.pdf"), false);
+  assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell, rates and PDF are not");
+});
+
+Deno.test("trade_job_detail: allocated extract pointer requires a frozen pack plus client send", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  stampFrozenSentQuote(vis);
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(p.quote_extracts, [{
     type: "trade_quote_extract",
     label: "Quote extract",
@@ -613,15 +640,14 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
     sent_at: "2026-09-01T00:00:00Z",
     filename: "SWF-26091-Q-1-trade-extract.html",
   }]);
-  assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
-  assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
+  assertEquals(p.quote_packs[0].source, "frozen");
   assertEquals(JSON.stringify(p.quote_extracts).includes("quote.pdf"), false);
-  assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell, rates and PDF are not");
+  assertEquals(quoteLeakProbe(p), [], "extract pointer is price-free");
 });
 
 Deno.test("trade_quote_extract: allocated trade gets printable HTML with no money", async () => {
   const t = seed();
-  t.job_documents.find((d: any) => d.id === "d-quote-vis").sent_at = "2026-09-01T00:00:00Z";
+  stampFrozenSentQuote(t.job_documents.find((d: any) => d.id === "d-quote-vis"));
   const htmlRes = await _tradeQuoteExtractForTest(
     makeClient(t),
     new URLSearchParams({ jobId: JOB_FENCE, format: "html" }),
@@ -655,6 +681,46 @@ Deno.test("trade_quote_extract: allocated trade gets printable HTML with no mone
   assertEquals(JSON.stringify(body.extract).includes("$"), false);
   assertEquals(JSON.stringify(body.extract).includes("unit_price"), false);
   assertEquals(JSON.stringify(body.extract).includes("line_total"), false);
+});
+
+Deno.test("trade_quote_extract: sent quote without a frozen pack is 404", async () => {
+  const t = seed();
+  t.job_documents.find((d: any) => d.id === "d-quote-vis").sent_at = "2026-09-01T00:00:00Z";
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "No sent quote extract for this job",
+  );
+});
+
+Deno.test("trade_quote_extract: frozen pack without client send is 404", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  stampFrozenSentQuote(vis);
+  vis.sent_at = null;
+  vis.accepted_at = null;
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "No sent quote extract for this job",
+  );
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs || [], [], "unsent frozen pack is not a trade pack");
+  assertEquals(p.quote_extracts || [], [], "unsent frozen pack is not an extract");
 });
 
 Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {

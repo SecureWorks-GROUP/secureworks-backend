@@ -2467,7 +2467,9 @@ serve(async (req: Request) => {
         }
       }
 
-      if (emailsSent > 0 && createdDocs.length > 0) {
+      // Persist the frozen trade pack only after the primary client send
+      // succeeds. A CC/BCC-only success must not mint an extractable pack.
+      if (primarySent && createdDocs.length > 0) {
         try {
           await persistTradePackOnDocuments(sb, {
             documents: createdDocs.map((d: any) => ({

@@ -7,11 +7,16 @@ import { packTradeQuote } from "../_shared/trade_quote_pack/pack_trade_quote.ts"
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
+  assembleFrozenQuoteExtractPacks,
   assembleTradeQuoteExtract,
+  assertTradeQuoteExtractArtifact,
+  buildTradeQuoteExtractArtifact,
   projectTradeQuoteExtracts,
   renderTradeQuoteExtractHtml,
+  tradeQuoteExtractArtifactLeaks,
   tradeQuoteExtractFilename,
   tradeQuoteExtractHtmlMoneyNeedles,
+  tradeQuoteExtractIsEligible,
   tradeQuoteExtractMoneyLeakKeys,
 } from "../_shared/trade_quote_pack/trade_quote_extract.ts";
 
@@ -112,12 +117,95 @@ Deno.test("projectTradeQuoteExtracts names the HTML extract and skips unsent/sup
     { ...PACK, status: "sent" },
     { ...PACK, quote_number: "Q-ACC", status: "accepted", job_document_id: "doc-acc" },
     { ...PACK, quote_number: "Q-OLD", status: "superseded", job_document_id: "doc-old" },
+    { ...PACK, quote_number: "Q-LIVE", source: "live_fallback", job_document_id: "doc-live" },
+    { ...PACK, quote_number: "Q-PACK-ONLY", sent_at: null, status: "sent", job_document_id: "doc-pack" },
   ], "SWF-25101");
   assertEquals(pointers.length, 2);
   assertEquals(pointers[0].filename, "SWF-25101-SWF-25101-Q2-trade-extract.html");
   assertEquals(pointers[0].action, "trade_quote_extract");
   assertEquals(pointers[0].type, "trade_quote_extract");
   assertEquals(pointers[1].quote_number, "Q-ACC");
+  assertEquals(tradeQuoteExtractIsEligible({ ...PACK, source: "live_fallback" }), false);
+  assertEquals(tradeQuoteExtractIsEligible({ ...PACK, sent_at: null, status: "sent" }), false);
   assertEquals(tradeQuoteExtractFilename({ job_number: "SWF-1", quote_number: "Q-1" }), "SWF-1-Q-1-trade-extract.html");
   assertEquals(tradeQuoteExtractFilename({}).includes("quote.pdf"), false);
+});
+
+Deno.test("extract fail-closes money in phone, email, and units without eating a clean phone", () => {
+  const dirty = packTradeQuote({
+    quote_number: "Q-DIRTY",
+    job_document_id: "doc-dirty",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    job_type: "fencing",
+    scope_json: { job: { runs: [{ name: "Rear", length: 19, panels: [] }] } },
+    customer: {
+      name: "Pat Client",
+      phone: "0412 $18,400",
+      email: "pat+$18,400@example.test",
+      site_address: "12 Fence St",
+      site_suburb: "Midland",
+    },
+  });
+  dirty.items.push({ kind: "info", description: "Sheets", quantity: 2, unit: "$18,400" });
+  dirty.customer.phone = "0412 $18,400";
+  dirty.customer.email = "pat+$18,400@example.test";
+  const extract = assembleTradeQuoteExtract({ pack: dirty, job: { job_number: "SWF-25101" } });
+  assertEquals(extract.customer.phone, null);
+  assertEquals(extract.customer.email, null);
+  assertEquals(extract.customer.name, "Pat Client");
+  assertEquals(extract.scope.some((row) => String(row.unit || "").includes("$")), false);
+  assertEquals(extract.scope.some((row) => /18400/.test(String(row.unit || ""))), false);
+  assertEquals(JSON.stringify(extract).includes("$"), false);
+  assertEquals(JSON.stringify(extract).includes("18400"), false);
+
+  const clean = assembleTradeQuoteExtract({ pack: PACK, job: { job_number: "SWF-25101" } });
+  assertEquals(clean.customer.phone, "0412 000 111");
+  assertEquals(clean.customer.email, "pat@example.test");
+});
+
+Deno.test("assembleFrozenQuoteExtractPacks never synthesizes a live fallback extract", () => {
+  const packs = assembleFrozenQuoteExtractPacks({
+    documents: [
+      {
+        id: "d-live",
+        type: "quote",
+        quote_number: "Q-LIVE",
+        sent_at: "2026-09-01T00:00:00.000Z",
+      },
+      {
+        id: "d-unsent",
+        type: "quote",
+        quote_number: "Q-PACK",
+        trade_pack_json: PACK,
+      },
+      {
+        id: "d-frozen",
+        type: "quote",
+        quote_number: "SWF-25101-Q2",
+        sent_at: "2026-09-01T00:00:00.000Z",
+        trade_pack_json: PACK,
+      },
+    ],
+  });
+  assertEquals(packs.length, 1);
+  assertEquals(packs[0].quote_number, "SWF-25101-Q2");
+  assertEquals(packs[0].source, "frozen");
+});
+
+Deno.test("assertTradeQuoteExtractArtifact covers JSON projection and rendered HTML", () => {
+  const artifact = buildTradeQuoteExtractArtifact({
+    pack: PACK,
+    job: { job_number: "SWF-25101" },
+  });
+  assertEquals(tradeQuoteExtractArtifactLeaks(artifact.extract, artifact.html), []);
+  assertTradeQuoteExtractArtifact(artifact.extract, artifact.html);
+  assertEquals(tradeQuoteExtractHtmlMoneyNeedles(artifact.html), []);
+  assertEquals(tradeQuoteExtractMoneyLeakKeys(artifact.extract), []);
+
+  const dirtyExtract = assembleTradeQuoteExtract({ pack: PACK, job: { job_number: "SWF-25101" } });
+  dirtyExtract.customer.phone = "$18,400";
+  const dirtyHtml = renderTradeQuoteExtractHtml(dirtyExtract);
+  const leaks = tradeQuoteExtractArtifactLeaks(dirtyExtract, dirtyHtml);
+  assert(leaks.length > 0);
+  assert(leaks.some((hit) => hit.includes("$") || hit.includes("extract.customer.phone")));
 });

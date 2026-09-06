@@ -3,6 +3,7 @@ import {
   allocatedTradePackProse,
   applyInstallerRates,
   assembleQuotePacksForTrade,
+  frozenTradePackForExtract,
   packTradeQuote,
   overlayTradePackSnapshots,
   persistTradePackOnDocuments,
@@ -184,6 +185,60 @@ Deno.test("two sent quotes stay two packs with their own quote numbers", () => {
   assertEquals(packs[1].accepted, false);
   const q1Install = packs[1].items.find((i) => i.kind === "install_m");
   assertEquals(q1Install?.quantity, 10);
+});
+
+Deno.test("assembleQuotePacksForTrade ignores a stored pack until the quote is sent or accepted", () => {
+  const packs = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [{
+      id: "d-unsent",
+      type: "quote",
+      quote_number: "Q-UNSENT",
+      trade_pack_json: {
+        items: [{ kind: "install_m", description: "Rear", quantity: 10, unit: "m" }],
+        source: "frozen",
+      },
+    }],
+  });
+  assertEquals(packs, []);
+});
+
+Deno.test("frozenTradePackForExtract refuses live_fallback and unsent packs", () => {
+  assertEquals(frozenTradePackForExtract({
+    id: "d-live",
+    type: "quote",
+    quote_number: "Q-1",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-1",
+      source: "live_fallback",
+      scope_json: FENCE_SCOPE,
+    }),
+  }), null);
+  assertEquals(frozenTradePackForExtract({
+    id: "d-unsent",
+    type: "quote",
+    quote_number: "Q-1",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-1",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      scope_json: FENCE_SCOPE,
+    }),
+  }), null);
+  const frozen = frozenTradePackForExtract({
+    id: "d-ok",
+    type: "quote",
+    quote_number: "Q-1",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-1",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      scope_json: FENCE_SCOPE,
+    }),
+  });
+  assertEquals(frozen?.source, "frozen");
+  assertEquals(frozen?.quote_number, "Q-1");
+  assertEquals(frozen?.sent_at, "2026-09-01T00:00:00.000Z");
 });
 
 Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary numbers", () => {
