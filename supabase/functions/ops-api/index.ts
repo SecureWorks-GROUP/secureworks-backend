@@ -123,6 +123,8 @@ import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
   assembleQuotePacksForTrade,
   isHenryInstaller,
+  sanitizeTradePackKind,
+  sanitizeTradePackUnit,
   stripTradePackMoney,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
@@ -38430,11 +38432,12 @@ function projectTradePoLineItem(li: any, quoteVisible: boolean): Record<string, 
   }
   // Allocated / makesafe_open: scalars only. An object quantity/unit/pricing
   // blob is money-capable and must not copy through (TRD4-REV16-001).
-  const unit = typeof li?.unit === 'string' ? li.unit : undefined
+  // Unit strings are allowlisted / money-stripped — "AUD 9,999" cannot
+  // ride as a unit (TRD4-REV18-001).
   return {
     description: sanitizeTradeAllocatedStringLeaf(rawDesc),
     quantity: tradePoScalarQuantity(li?.quantity ?? li?.Quantity) ?? 0,
-    unit,
+    unit: sanitizeTradePackUnit(li?.unit),
   }
 }
 
@@ -38717,11 +38720,12 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
       items: (pack.items || []).flatMap((item: any) => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return []
         if (String(item.kind || '').toLowerCase() === 'note') return []
+        const kind = sanitizeTradePackKind(item.kind)
+        if (item.kind != null && item.kind !== '' && kind === undefined) return []
         const quantity = typeof item.quantity === 'number' && Number.isFinite(item.quantity)
           ? item.quantity
           : item.quantity == null ? item.quantity : null
         const out: Record<string, any> = {
-          kind: item.kind,
           description: item.description == null
             ? item.description
             : stripTradePackMoney(item.description),
@@ -38729,7 +38733,9 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
           unit_price: null,
           line_total: null,
         }
-        if (item.unit !== undefined) out.unit = item.unit
+        if (kind !== undefined) out.kind = kind
+        const unit = sanitizeTradePackUnit(item.unit)
+        if (unit !== undefined) out.unit = unit
         return [out]
       }),
     }

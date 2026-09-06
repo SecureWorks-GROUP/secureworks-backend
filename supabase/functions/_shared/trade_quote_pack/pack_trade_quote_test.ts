@@ -4,6 +4,8 @@ import {
   assembleQuotePacksForTrade,
   packTradeQuote,
   persistTradePackOnDocuments,
+  sanitizeTradePackKind,
+  sanitizeTradePackUnit,
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
   TRADE_INSTALLER_RATES,
@@ -230,6 +232,27 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("Monument fencing 18400"), "Monument fencing");
   assertEquals(stripTradePackMoney("12 posts at 850"), "12 posts at");
   assertEquals(stripTradePackMoney("SWF-26101 Quote 850"), "SWF-26101 Quote");
+  assertEquals(stripTradePackMoney("Deposit 85"), "Deposit");
+  assertEquals(stripTradePackMoney("Balance due 85"), "Balance due");
+  assertEquals(stripTradePackMoney("Paid 85"), "Paid");
+  assertEquals(stripTradePackMoney("Due 85"), "Due");
+  assertEquals(stripTradePackMoney("deposit: 40"), "deposit");
+});
+
+Deno.test("sanitizeTradePackUnit and sanitizeTradePackKind drop money scalars", () => {
+  assertEquals(sanitizeTradePackUnit("m"), "m");
+  assertEquals(sanitizeTradePackUnit("ea"), "ea");
+  assertEquals(sanitizeTradePackUnit("lot"), "lot");
+  assertEquals(sanitizeTradePackUnit("sheet"), "sheet");
+  assertEquals(sanitizeTradePackUnit("AUD 9,999"), undefined);
+  assertEquals(sanitizeTradePackUnit("85/day"), undefined);
+  assertEquals(sanitizeTradePackUnit("AUD"), undefined);
+  assertEquals(sanitizeTradePackUnit({ name: "ea", unit_price: 99.5 }), undefined);
+  assertEquals(sanitizeTradePackKind("install_m"), "install_m");
+  assertEquals(sanitizeTradePackKind("info"), "info");
+  assertEquals(sanitizeTradePackKind("note"), undefined);
+  assertEquals(sanitizeTradePackKind("AUD 9,999"), undefined);
+  assertEquals(sanitizeTradePackKind("sell"), undefined);
 });
 
 Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewers and still strips item descriptions", () => {
@@ -254,8 +277,32 @@ Deno.test("hydrateStoredPack keeps stored summary money for quote-visible viewer
     "Total $9,999 AUD 1,200 / Total 9,999 AUD / Approved total 9,999 excluding GST",
   );
   assertEquals(packs[0].items[0].description, "Install fence Total");
+  assertEquals(packs[0].items[0].unit, "m");
   assertEquals(packs[0].items[1].kind, "note");
   assertEquals(packs[0].items[1].description, "Priced");
+});
+
+Deno.test("hydrateStoredPack replaces money-shaped unit/kind with safe defaults", () => {
+  const packs = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [{
+      id: "d-unit",
+      type: "quote",
+      quote_number: "Q-UNIT",
+      sent_at: "2026-09-04T00:00:00.000Z",
+      trade_pack_json: {
+        items: [
+          { kind: "AUD 9,999", description: "Install", quantity: 10, unit: "AUD 9,999" },
+          { kind: "install_m", description: "Rear run", quantity: 19, unit: "m" },
+        ],
+        summary: "kept",
+      },
+    }],
+  });
+  assertEquals(packs[0].items[0].kind, "info");
+  assertEquals(packs[0].items[0].unit, "ea");
+  assertEquals(packs[0].items[1].kind, "install_m");
+  assertEquals(packs[0].items[1].unit, "m");
 });
 
 Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {

@@ -1203,6 +1203,29 @@ Deno.test("projectTradePurchaseOrders allocated lines keep only scalars; office 
   assertEquals(office.pricing, { sell: 18400, rate: 85 });
 });
 
+Deno.test("projectTradePurchaseOrders allocated drops money-shaped PO units; office keeps raw unit", () => {
+  const pos = [{
+    id: "po-unit",
+    po_number: "PO-UNIT",
+    supplier_name: "Acme",
+    status: "sent",
+    line_items: [{
+      description: "Sheets Deposit 85",
+      quantity: 12,
+      unit: "AUD 9,999",
+    }],
+  }];
+  const allocated = projectTradePurchaseOrders(pos, false)[0];
+  assertEquals(allocated.line_items[0].description, "Sheets Deposit");
+  assertEquals(allocated.line_items[0].quantity, 12);
+  assertEquals(allocated.line_items[0].unit, undefined);
+  assertEquals(JSON.stringify(allocated).includes("9,999"), false);
+  assertEquals(JSON.stringify(allocated).includes("AUD"), false);
+  const office = projectTradePurchaseOrders(pos, true)[0];
+  assertEquals(office.line_items[0].description, "Sheets Deposit 85");
+  assertEquals(office.line_items[0].unit, "AUD 9,999");
+});
+
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
   const p = await detail(seed(), viewer(OFFICE, "ops_manager"));
   assertEquals(p.access_tier, "office");
@@ -1660,6 +1683,23 @@ Deno.test("redactTradeQuotePackMoney omits pack notes so sell figures cannot rid
   assertEquals(out[0].quote_number, "Q-1");
   assertEquals("notes" in out[0], false);
   assertEquals(JSON.stringify(out).includes("9999"), false);
+});
+
+Deno.test("redactTradeQuotePackMoney drops money-shaped unit and kind scalars", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    items: [
+      { kind: "install_m", description: "Install Deposit 85", quantity: 10, unit: "AUD 9,999" },
+      { kind: "AUD 9,999", description: "Sell line", quantity: 1, unit: "ea" },
+      { kind: "install_m", description: "Rear", quantity: 19, unit: "m" },
+    ],
+  }]);
+  assertEquals(out[0].items.map((i: any) => i.kind), ["install_m", "install_m"]);
+  assertEquals(out[0].items[0].description, "Install Deposit");
+  assertEquals(out[0].items[0].unit, undefined);
+  assertEquals(out[0].items[1].unit, "m");
+  assertEquals(JSON.stringify(out).includes("AUD"), false);
+  assertEquals(JSON.stringify(out).includes("9,999"), false);
 });
 
 Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures from summary and descriptions", () => {

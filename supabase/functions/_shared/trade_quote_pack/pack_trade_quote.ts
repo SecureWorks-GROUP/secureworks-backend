@@ -213,11 +213,14 @@ export async function persistTradePackOnDocuments(
 function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): TradeQuotePack {
   const items = (Array.isArray(stored.items) ? stored.items : []).map((raw) => {
     const row = asObject(raw)
+    const rawKind = String(row.kind || '').trim().toLowerCase()
     return item(
-      (row.kind as TradePackItemKind) || 'info',
+      rawKind === 'note'
+        ? 'note'
+        : (sanitizeTradePackKind(row.kind) as TradePackItemKind) || 'info',
       String(row.description || ''),
       Number(row.quantity) || 0,
-      String(row.unit || 'ea'),
+      typeof row.unit === 'string' ? row.unit : 'ea',
     )
   })
   const accepted = !!doc.accepted_at || stored.accepted === true
@@ -453,7 +456,7 @@ function item(kind: TradePackItemKind, description: string, quantity: number, un
     kind,
     description: stripTradePackMoney(description),
     quantity,
-    unit,
+    unit: sanitizeTradePackUnit(unit) || 'ea',
     unit_price: null,
     line_total: null,
   }
@@ -470,7 +473,7 @@ const TRADE_PACK_TAX_QUALIFIED =
 const TRADE_PACK_TAX_PHRASE =
   `(?:${TRADE_PACK_TAX_QUALIFIED}|${TRADE_PACK_TAX_WORD})`
 const TRADE_PACK_UNQUALIFIED_MONEY_WORD =
-  '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?|quot(?:e[ds]?|ing|ations?))'
+  '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?|quot(?:e[ds]?|ing|ations?)|deposits?|balances?|paid|due)'
 const TRADE_PACK_RATE_UNIT =
   '(?:hours?|hrs?|h|m(?:et(?:re|er)s?)?|days?|trades?|labou?rers?)'
 const TRADE_PACK_QTY_WORD =
@@ -482,8 +485,9 @@ const TRADE_PACK_REF_PREFIX =
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
- *  1200/m, 85 per day, 85/day, 85 per trade). Amount boundaries refuse
- *  19m / 1800mm / 90x90. Leftover
+ *  1200/m, 85 per day, 85/day, 85 per trade). Contextual words also
+ *  catch two-digit marks (Deposit 85, Balance due 85, Paid 85, Due 85)
+ *  without eating construction counts (2 trades, 19m). Leftover
  *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
  *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
  *  full-quote summaries must not call this — hydrateStoredPack keeps
@@ -553,6 +557,56 @@ export function stripTradePackMoney(text: unknown): string {
 
   s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)] ?? '')
   return s.replace(/\s{2,}/g, ' ').trim()
+}
+
+/** Closed installer-pack kinds that may ride an allocated quote pack.
+ *  `note` is excluded — allocated redaction drops note items separately. */
+export const TRADE_PACK_ALLOCATED_KINDS = new Set<string>([
+  'install_m',
+  'plinth',
+  'removal_m',
+  'gate_pedestrian',
+  'gate_double',
+  'patio_tube',
+  'info',
+])
+
+const TRADE_PACK_SAFE_UNITS = new Set([
+  'm',
+  'lm',
+  'mm',
+  'cm',
+  'ea',
+  'each',
+  'lot',
+  'hr',
+  'hrs',
+  'hour',
+  'hours',
+  'day',
+  'days',
+  'kg',
+])
+
+/** Allocated unit scalar: known construction units, or a money-clean token.
+ *  Currency leftovers and money-word units (AUD 9,999, AUD, rate) drop. */
+export function sanitizeTradePackUnit(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (TRADE_PACK_SAFE_UNITS.has(trimmed.toLowerCase())) return trimmed
+  const cleaned = stripTradePackMoney(trimmed)
+  if (!cleaned || cleaned !== trimmed) return undefined
+  if (/^(?:aud|au\$|a\$|\$)$/i.test(cleaned)) return undefined
+  if (new RegExp(`^${TRADE_PACK_UNQUALIFIED_MONEY_WORD}$`, 'i').test(cleaned)) return undefined
+  return cleaned
+}
+
+/** Allocated pack kind: allowlisted installer kinds only. */
+export function sanitizeTradePackKind(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const key = value.trim().toLowerCase()
+  return TRADE_PACK_ALLOCATED_KINDS.has(key) ? key : undefined
 }
 
 function stripMoney(text: string): string {
