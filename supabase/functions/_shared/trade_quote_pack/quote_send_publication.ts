@@ -23,7 +23,12 @@
  * direct `/send` can reclaim them with a distinct Idempotency-Key.
  * Exclusive key-stamp updates must return the owned row; a zero-row
  * stamp is not a claim and must not dispatch. send-runs recipient keys
- * are trim + lowercase so case-variant addresses are one group.
+ * are trim + lowercase so case-variant addresses are one group. The
+ * grouped Resend Idempotency-Key lives on
+ * `quote_group_email_send_records` for the original document set, not
+ * `claims[0]`. A leftover retry after partial publication reuses that
+ * stored key; a new document set mints another record. Per-doc claims
+ * stay the lease.
  */
 
 import {
@@ -74,6 +79,12 @@ export function quoteSendClaimToken(token: string | null | undefined): string | 
 
 export function quoteSendResendIdempotencyKey(token: string): string {
   return `quote-send:${token}`
+}
+
+export const QUOTE_GROUP_EMAIL_SEND_TABLE = 'quote_group_email_send_records'
+
+export function quoteGroupEmailResendIdempotencyKey(token: string): string {
+  return `quote-group-send:${token}`
 }
 
 export function quoteSendDocumentResendIdempotencyKey(documentId: string): string {
@@ -919,6 +930,164 @@ export function sendRunsPrimaryClientPublicationSatisfied(input: {
  *  are one inbox, one email, one publication set. */
 export function quoteSendRecipientKey(email: unknown): string {
   return String(email || '').trim().toLowerCase()
+}
+
+export function quoteGroupEmailDocumentIds(
+  documentIds: Iterable<string | null | undefined>,
+): string[] {
+  return uniqueDocumentIds(documentIds).slice().sort()
+}
+
+export function quoteGroupEmailDocumentSetKey(
+  documentIds: Iterable<string | null | undefined>,
+): string {
+  return quoteGroupEmailDocumentIds(documentIds).join(',')
+}
+
+export function quoteGroupEmailCoversDocumentSet(
+  storedIds: Iterable<string | null | undefined>,
+  currentIds: Iterable<string | null | undefined>,
+): boolean {
+  const stored = new Set(quoteGroupEmailDocumentIds(storedIds))
+  const current = quoteGroupEmailDocumentIds(currentIds)
+  if (!current.length || !stored.size) return false
+  return current.every((id) => stored.has(id))
+}
+
+export type QuoteGroupEmailSendRecord = {
+  id?: string | null
+  document_ids?: Iterable<string | null | undefined> | null
+  document_set_key?: string | null
+  send_resend_idempotency_key?: string | null
+}
+
+/** Exact original set first, then the smallest covering superset. */
+export function pickQuoteGroupEmailCoveringRecord<T extends QuoteGroupEmailSendRecord>(
+  records: Iterable<T | null | undefined>,
+  currentIds: Iterable<string | null | undefined>,
+): T | null {
+  const current = quoteGroupEmailDocumentIds(currentIds)
+  if (!current.length) return null
+  const covering: Array<{ record: T; size: number; setKey: string; exact: boolean }> = []
+  for (const raw of records) {
+    if (!raw) continue
+    const stored = quoteGroupEmailDocumentIds(raw.document_ids || [])
+    if (!quoteGroupEmailCoversDocumentSet(stored, current)) continue
+    const setKey = quoteSendClaimToken(raw.document_set_key) || quoteGroupEmailDocumentSetKey(stored)
+    covering.push({
+      record: raw,
+      size: stored.length,
+      setKey,
+      exact: stored.length === current.length,
+    })
+  }
+  if (!covering.length) return null
+  covering.sort((a, b) => {
+    if (a.exact !== b.exact) return a.exact ? -1 : 1
+    if (a.size !== b.size) return a.size - b.size
+    return a.setKey.localeCompare(b.setKey)
+  })
+  return covering[0].record
+}
+
+function isPgUniqueViolation(error: { code?: string; message?: string } | null | undefined): boolean {
+  if (!error) return false
+  if (error.code === '23505') return true
+  return /duplicate key|unique constraint/i.test(String(error.message || ''))
+}
+
+export type QuoteGroupEmailSendKeyResult =
+  | { status: 'ready'; resend_idempotency_key: string; reused: boolean }
+  | { status: 'unavailable' }
+  | { status: 'error'; error: string }
+
+function quoteGroupEmailReadyKey(
+  record: QuoteGroupEmailSendRecord | null | undefined,
+): string | null {
+  return quoteSendClaimToken(record?.send_resend_idempotency_key)
+}
+
+async function loadQuoteGroupEmailSendRecords(
+  sb: QuoteSendPublicationClient,
+  jobId: string,
+  recipientEmail: string,
+): Promise<{ records: QuoteGroupEmailSendRecord[]; error: string | null }> {
+  const { data, error } = await sb
+    .from(QUOTE_GROUP_EMAIL_SEND_TABLE)
+    .select('id, document_ids, document_set_key, send_resend_idempotency_key')
+    .eq('job_id', jobId)
+    .eq('recipient_email', recipientEmail)
+  if (error) return { records: [], error: claimErrorMessage(error) }
+  const records = Array.isArray(data) ? data.filter((row): row is QuoteGroupEmailSendRecord => !!row) : []
+  return { records, error: null }
+}
+
+/**
+ * Durable send-runs group provider key. Lookup a covering original set
+ * (current docs ⊆ stored docs) and reuse its Idempotency-Key. Otherwise
+ * insert this attempt's document set. Unique races re-read. Partial
+ * publication does not mint a second key for leftovers.
+ */
+export async function ensureQuoteGroupEmailSendKey(
+  sb: QuoteSendPublicationClient,
+  input: {
+    jobId?: string | null
+    recipientEmail?: string | null
+    documentIds: Iterable<string | null | undefined>
+  },
+): Promise<QuoteGroupEmailSendKeyResult> {
+  const jobId = typeof input.jobId === 'string' ? input.jobId.trim() : ''
+  const recipientEmail = quoteSendRecipientKey(input.recipientEmail)
+  const documentIds = quoteGroupEmailDocumentIds(input.documentIds)
+  if (!jobId || !recipientEmail || !documentIds.length) return { status: 'unavailable' }
+
+  const loaded = await loadQuoteGroupEmailSendRecords(sb, jobId, recipientEmail)
+  if (loaded.error) {
+    console.error('[send-quote] group send record read failed:', loaded.error)
+    return { status: 'error', error: loaded.error }
+  }
+  const covering = pickQuoteGroupEmailCoveringRecord(loaded.records, documentIds)
+  const reusedKey = quoteGroupEmailReadyKey(covering)
+  if (reusedKey) {
+    return { status: 'ready', resend_idempotency_key: reusedKey, reused: true }
+  }
+
+  const payload = {
+    job_id: jobId,
+    recipient_email: recipientEmail,
+    document_ids: documentIds,
+    document_set_key: quoteGroupEmailDocumentSetKey(documentIds),
+    send_resend_idempotency_key: quoteGroupEmailResendIdempotencyKey(mintQuoteSendClaimToken()),
+  }
+  const { data, error } = await sb
+    .from(QUOTE_GROUP_EMAIL_SEND_TABLE)
+    .insert(payload)
+    .select('id, document_ids, document_set_key, send_resend_idempotency_key')
+    .maybeSingle()
+  if (error) {
+    if (isPgUniqueViolation(error)) {
+      const again = await loadQuoteGroupEmailSendRecords(sb, jobId, recipientEmail)
+      if (again.error) {
+        console.error('[send-quote] group send record reread failed:', again.error)
+        return { status: 'error', error: again.error }
+      }
+      const raced = pickQuoteGroupEmailCoveringRecord(again.records, documentIds)
+      const racedKey = quoteGroupEmailReadyKey(raced)
+      if (racedKey) {
+        return { status: 'ready', resend_idempotency_key: racedKey, reused: true }
+      }
+    }
+    console.error('[send-quote] group send record insert failed:', claimErrorMessage(error))
+    return { status: 'error', error: claimErrorMessage(error) }
+  }
+  const confirmedId = typeof data?.id === 'string' ? data.id.trim() : ''
+  const confirmed = quoteGroupEmailReadyKey(data)
+    || (confirmedId ? quoteSendClaimToken(payload.send_resend_idempotency_key) : null)
+  if (!confirmedId || !confirmed) {
+    console.error('[send-quote] group send record insert lost the returning row')
+    return { status: 'error', error: 'quote group send record insert was not confirmed' }
+  }
+  return { status: 'ready', resend_idempotency_key: confirmed, reused: false }
 }
 
 /** Document ids belonging to recipients whose Resend call succeeded.

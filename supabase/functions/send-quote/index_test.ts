@@ -31,7 +31,12 @@ import {
   claimsForDocumentIds,
   claimsNotInDocumentIds,
   documentIdsPublishedForSuccessfulSends,
+  ensureQuoteGroupEmailSendKey,
   persistTradePacksWhileHoldingSendClaims,
+  pickQuoteGroupEmailCoveringRecord,
+  quoteGroupEmailCoversDocumentSet,
+  quoteGroupEmailDocumentSetKey,
+  quoteGroupEmailResendIdempotencyKey,
   quoteSendRecipientKey,
   publishQuoteDocumentSend,
   publishQuoteDocumentSendOrRevert,
@@ -886,6 +891,257 @@ Deno.test("R18-002 send-runs source groups recipients on the normalized key", ()
   assert(start >= 0 && end > start)
   assert(slice.includes("quoteSendRecipientKey(email)"))
   assert(!slice.includes("String(email || '').trim()"))
+})
+
+Deno.test("R19-003 group document set key is sorted unique ids", () => {
+  assertEquals(quoteGroupEmailDocumentSetKey(["doc-b", "doc-a", "doc-b"]), "doc-a,doc-b")
+  assertEquals(quoteGroupEmailDocumentSetKey(["  doc-a  ", null, ""]), "doc-a")
+  assertEquals(
+    quoteGroupEmailResendIdempotencyKey("tok-group"),
+    "quote-group-send:tok-group",
+  )
+})
+
+Deno.test("R19-003 leftover docs are covered by the original grouped set", () => {
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-b"]), true)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-a", "doc-b"]), true)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-c"]), false)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-b", "doc-c"]), false)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a"], []), false)
+  const original = {
+    document_ids: ["doc-a", "doc-b"],
+    document_set_key: "doc-a,doc-b",
+    send_resend_idempotency_key: "quote-group-send:orig",
+  }
+  const later = {
+    document_ids: ["doc-c"],
+    document_set_key: "doc-c",
+    send_resend_idempotency_key: "quote-group-send:later",
+  }
+  assertEquals(
+    pickQuoteGroupEmailCoveringRecord([later, original], ["doc-b"])?.send_resend_idempotency_key,
+    "quote-group-send:orig",
+  )
+  assertEquals(
+    pickQuoteGroupEmailCoveringRecord([later, original], ["doc-a", "doc-b"])?.send_resend_idempotency_key,
+    "quote-group-send:orig",
+  )
+  assertEquals(pickQuoteGroupEmailCoveringRecord([later, original], ["doc-c"])?.send_resend_idempotency_key, "quote-group-send:later")
+  assertEquals(pickQuoteGroupEmailCoveringRecord([later, original], ["doc-d"]), null)
+})
+
+function makeGroupSendRecordSb(opts: {
+  existing?: Array<{
+    id: string
+    job_id: string
+    recipient_email: string
+    document_ids: string[]
+    document_set_key: string
+    send_resend_idempotency_key: string
+  }>
+  selectError?: { message: string }
+  insertError?: { message: string; code?: string }
+  insertResult?: null | { id?: string; send_resend_idempotency_key?: string }
+  emptyFirstSelect?: boolean
+} = {}) {
+  const rows = (opts.existing || []).map((row) => ({ ...row }))
+  const inserts: Record<string, unknown>[] = []
+  let selects = 0
+  return {
+    rows,
+    inserts,
+    from: (table: string) => {
+      assertEquals(table, "quote_group_email_send_records")
+      let jobId = ""
+      let recipient = ""
+      let mode: "select" | "insert" = "select"
+      const self: Record<string, unknown> = {}
+      const matching = () =>
+        rows.filter((row) =>
+          (!jobId || row.job_id === jobId) &&
+          (!recipient || row.recipient_email === recipient)
+        )
+      self.select = () => self
+      self.eq = (col: string, value: unknown) => {
+        if (col === "job_id") jobId = String(value)
+        if (col === "recipient_email") recipient = String(value)
+        return self
+      }
+      self.insert = (payload: Record<string, unknown>) => {
+        mode = "insert"
+        inserts.push(payload)
+        return self
+      }
+      self.maybeSingle = () => {
+        if (mode !== "insert") {
+          return Promise.resolve({ data: null, error: { message: "not insert" } })
+        }
+        if (opts.insertError) return Promise.resolve({ data: null, error: opts.insertError })
+        const payload = inserts[inserts.length - 1]
+        const conflict = rows.some((row) =>
+          row.job_id === payload.job_id &&
+          row.recipient_email === payload.recipient_email &&
+          row.document_set_key === payload.document_set_key
+        )
+        if (conflict) {
+          return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key" } })
+        }
+        if (opts.insertResult === null) return Promise.resolve({ data: null, error: null })
+        const row = {
+          id: opts.insertResult?.id || "grp-new",
+          job_id: String(payload.job_id),
+          recipient_email: String(payload.recipient_email),
+          document_ids: payload.document_ids as string[],
+          document_set_key: String(payload.document_set_key),
+          send_resend_idempotency_key: opts.insertResult?.send_resend_idempotency_key
+            || String(payload.send_resend_idempotency_key),
+        }
+        rows.push(row)
+        return Promise.resolve({ data: row, error: null })
+      }
+      self.then = (
+        resolve: (value: unknown) => unknown,
+        reject?: (reason: unknown) => unknown,
+      ) => {
+        selects += 1
+        if (opts.selectError) {
+          return Promise.resolve({ data: null, error: opts.selectError }).then(resolve, reject)
+        }
+        if (opts.emptyFirstSelect && selects === 1) {
+          return Promise.resolve({ data: [], error: null }).then(resolve, reject)
+        }
+        return Promise.resolve({ data: matching(), error: null }).then(resolve, reject)
+      }
+      return self
+    },
+  }
+}
+
+Deno.test("R19-003 leftover retry reuses the original grouped Resend key", async () => {
+  const sb = makeGroupSendRecordSb()
+  const first = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: " Pat@Example.TEST ",
+    documentIds: ["doc-b", "doc-a"],
+  })
+  assertEquals(first.status, "ready")
+  if (first.status !== "ready") return
+  assertEquals(first.reused, false)
+  assert(first.resend_idempotency_key.startsWith("quote-group-send:"))
+  assertEquals(sb.inserts.length, 1)
+  assertEquals(sb.inserts[0].recipient_email, "pat@example.test")
+  assertEquals(sb.inserts[0].document_set_key, "doc-a,doc-b")
+  const leftover = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-b"],
+  })
+  assertEquals(leftover.status, "ready")
+  if (leftover.status !== "ready") return
+  assertEquals(leftover.reused, true)
+  assertEquals(leftover.resend_idempotency_key, first.resend_idempotency_key)
+  assertEquals(sb.inserts.length, 1)
+})
+
+Deno.test("R19-003 a new document set mints a distinct grouped Resend key", async () => {
+  const sb = makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+  })
+  const next = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-c"],
+  })
+  assertEquals(next.status, "ready")
+  if (next.status !== "ready") return
+  assertEquals(next.reused, false)
+  assert(next.resend_idempotency_key !== "quote-group-send:orig")
+  assertEquals(sb.inserts.length, 1)
+  assertEquals(sb.inserts[0].document_set_key, "doc-c")
+})
+
+Deno.test("R19-003 unique insert race rereads the covering group key", async () => {
+  const sb = makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+    emptyFirstSelect: true,
+  })
+  const raced = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a", "doc-b"],
+  })
+  assertEquals(raced.status, "ready")
+  if (raced.status !== "ready") return
+  assertEquals(raced.reused, true)
+  assertEquals(raced.resend_idempotency_key, "quote-group-send:orig")
+})
+
+Deno.test("R19-003 group send record read/insert faults are errors", async () => {
+  const readFail = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    selectError: { message: "db down" },
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(readFail.status, "error")
+  if (readFail.status === "error") assertEquals(readFail.error, "db down")
+
+  const insertFail = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    insertError: { message: "insert failed" },
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(insertFail.status, "error")
+
+  const lostRow = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    insertResult: null,
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(lostRow.status, "error")
+
+  const missing = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb(), {
+    jobId: "job-1",
+    recipientEmail: " ",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(missing.status, "unavailable")
+})
+
+Deno.test("R19-003 send-runs source uses the durable group Resend key", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const headersEnd = src.indexOf("body: JSON.stringify(emailPayload)", provider)
+  const preDispatch = src.slice(start, provider)
+  const headers = src.slice(provider, headersEnd)
+  assert(start >= 0 && provider > start && headersEnd > provider)
+  assert(preDispatch.includes("touchGroupedQuoteDocumentSendClaims("))
+  assert(preDispatch.includes("ensureQuoteGroupEmailSendKey("))
+  assert(headers.includes("groupSend.resend_idempotency_key"))
+  assert(!headers.includes("recipientClaim"))
+  assert(!headers.includes("groupedLease.claims[0]"))
+  assert(preDispatch.includes("Failed to load quote group send record"))
+  assert(preDispatch.includes("500"))
 })
 
 Deno.test("R7-003 failed send-runs recipients are the claim complement", () => {

@@ -398,7 +398,23 @@ is heartbeated before Resend. Money fences stay sealed.
 - **send-runs recipient keys are trim + lowercase.** Case-variant
   addresses are one inbox group. Publication matches the stored group
   email exactly so a success for `Pat@` cannot stamp a distinct `pat@`
-  group's documents. No group-level send protocol.
+  group's documents. Group provider-key reuse is Review-19.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.
+
+## Review-19 locks (2026-09-06)
+
+- **send-runs grouped email has a durable provider key.**
+  `quote_group_email_send_records` stores the first Resend
+  Idempotency-Key for job + normalized recipient + the original
+  document set. send-runs uses that key, not `claims[0]`. A leftover
+  retry after partial publication is a subset of the original set and
+  reuses the same key. A later document set that is not a subset mints
+  a new record. Partial group publish stays allowed; this is not a
+  second lease and does not replace per-doc claims or heartbeats.
+  Direct `/send` stays document-scoped.
 
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats

@@ -42,6 +42,7 @@ import {
   classifySendClaimLease,
   clearJobSendRunsClaim,
   documentIdsPublishedForSuccessfulSends,
+  ensureQuoteGroupEmailSendKey,
   mintSendRunQuoteNumber,
   persistTradePacksWhileHoldingSendClaims,
   publishQuoteDocumentSendOrRevert,
@@ -2725,16 +2726,26 @@ serve(async (req: Request) => {
             return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
           }
           if (groupedLease.outcome !== 'owned') continue
-          const recipientClaim = groupedLease.claims[0]
+          const groupSend = await ensureQuoteGroupEmailSendKey(sb, {
+            jobId: job.id,
+            recipientEmail: email,
+            documentIds: recipient.docs.map((doc: { id?: string }) => doc?.id),
+          })
+          if (groupSend.status === 'error' || groupSend.status !== 'ready') {
+            console.error(
+              '[send-quote] send-runs group send record failed:',
+              groupSend.status === 'error' ? groupSend.error : groupSend.status,
+            )
+            await revertSendRunsDocumentClaims(claimedDocs, true)
+            return jsonResponse({ error: 'Failed to load quote group send record' }, 500, corsHeaders)
+          }
 
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${RESEND_API_KEY}`,
-              ...(recipientClaim
-                ? resendIdempotencyHeaders(recipientClaim.resend_idempotency_key)
-                : {}),
+              ...resendIdempotencyHeaders(groupSend.resend_idempotency_key),
             },
             body: JSON.stringify(emailPayload)
           })
