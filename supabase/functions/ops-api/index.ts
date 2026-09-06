@@ -38657,6 +38657,16 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
+      if (key === 'kind') {
+        const kind = sanitizeTradePackKind(value)
+        if (kind !== undefined) out[key] = kind
+        continue
+      }
+      if (key === 'unit' || key === 'units') {
+        const unit = sanitizeTradePackUnit(value)
+        if (unit !== undefined) out[key] = unit
+        continue
+      }
       if (typeof value === 'string') {
         const cleaned = sanitizeTradeAllocatedStringLeaf(value)
         if (cleaned === '') continue

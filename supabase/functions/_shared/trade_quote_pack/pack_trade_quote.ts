@@ -485,8 +485,9 @@ const TRADE_PACK_REF_PREFIX =
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
- *  1200/m, 85 per day, 85/day, 85 per trade). Contextual words also
- *  catch two-digit marks (Deposit 85, Balance due 85, Paid 85, Due 85)
+ *  1200/m, 85 per day, 85/day, 85 per trade, 85 per panel). Contextual
+ *  words also catch two-digit marks (Deposit 85, Deposit of 85,
+ *  Price of 85, 12 panels at 85, Balance due 85, Paid 85, Due 85)
  *  without eating construction counts (2 trades, 19m). Leftover
  *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
  *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
@@ -528,7 +529,7 @@ export function stripTradePackMoney(text: unknown): string {
     .replace(new RegExp(`\\(?\\s*${TRADE_PACK_TAX_QUALIFIED}\\s*\\)?`, 'gi'), '')
     .replace(
       new RegExp(
-        `(\\b${TRADE_PACK_UNQUALIFIED_MONEY_WORD}\\b)\\s*[=:\\-]?\\s*${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        `(\\b${TRADE_PACK_UNQUALIFIED_MONEY_WORD}\\b)\\s*(?:[=:\\-]|(?:of|at|for))?\\s*${TRADE_PACK_MONEY_AMOUNT}\\b`,
         'gi',
       ),
       '$1',
@@ -542,10 +543,19 @@ export function stripTradePackMoney(text: unknown): string {
     )
     .replace(
       new RegExp(
-        `${TRADE_PACK_MONEY_AMOUNT}\\s*(?:/\\s*|\\bper\\s+)${TRADE_PACK_RATE_UNIT}\\b`,
+        `${TRADE_PACK_MONEY_AMOUNT}\\s*(?:/\\s*|\\bper\\s+)(?:${TRADE_PACK_RATE_UNIT}|${TRADE_PACK_QTY_WORD})\\b`,
         'gi',
       ),
       '',
+    )
+    // After qty holds, leftover "at 85" / "of 85" / "for 85" are unit prices
+    // (12 panels at 85). Keep the connector; drop only the amount.
+    .replace(
+      new RegExp(
+        `(\\b(?:of|at|for)\\b)\\s+${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        'gi',
+      ),
+      '$1',
     )
     // Unrecognised leftover quote amounts: 9,999 / 99.50 / 850 / 18400.
     // 1–2 digit counts stay (2 at, 12 posts) unless a money word already ate them.
@@ -586,15 +596,20 @@ const TRADE_PACK_SAFE_UNITS = new Set([
   'day',
   'days',
   'kg',
+  'sheet',
+  'sheets',
 ])
 
-/** Allocated unit scalar: known construction units, or a money-clean token.
- *  Currency leftovers and money-word units (AUD 9,999, AUD, rate) drop. */
+/** Allocated unit scalar: approved construction vocabulary only, or a
+ *  digit-free money-clean token. The shared prose sanitizer holds unmarked
+ *  1–2 digit integers as construction counts — that must not apply here, or
+ *  bare "85" / "999" ride as units (TRD4-REV19-001). */
 export function sanitizeTradePackUnit(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   if (!trimmed) return undefined
   if (TRADE_PACK_SAFE_UNITS.has(trimmed.toLowerCase())) return trimmed
+  if (/\d/.test(trimmed)) return undefined
   const cleaned = stripTradePackMoney(trimmed)
   if (!cleaned || cleaned !== trimmed) return undefined
   if (/^(?:aud|au\$|a\$|\$)$/i.test(cleaned)) return undefined

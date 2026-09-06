@@ -1213,17 +1213,31 @@ Deno.test("projectTradePurchaseOrders allocated drops money-shaped PO units; off
       description: "Sheets Deposit 85",
       quantity: 12,
       unit: "AUD 9,999",
+    }, {
+      description: "Panels",
+      quantity: 12,
+      unit: "85",
+    }, {
+      description: "Posts",
+      quantity: 4,
+      unit: "999",
     }],
   }];
   const allocated = projectTradePurchaseOrders(pos, false)[0];
   assertEquals(allocated.line_items[0].description, "Sheets Deposit");
   assertEquals(allocated.line_items[0].quantity, 12);
   assertEquals(allocated.line_items[0].unit, undefined);
+  assertEquals(allocated.line_items[1].unit, undefined);
+  assertEquals(allocated.line_items[2].unit, undefined);
   assertEquals(JSON.stringify(allocated).includes("9,999"), false);
   assertEquals(JSON.stringify(allocated).includes("AUD"), false);
+  assertEquals(JSON.stringify(allocated.line_items).includes("\"85\""), false);
+  assertEquals(JSON.stringify(allocated.line_items).includes("999"), false);
   const office = projectTradePurchaseOrders(pos, true)[0];
   assertEquals(office.line_items[0].description, "Sheets Deposit 85");
   assertEquals(office.line_items[0].unit, "AUD 9,999");
+  assertEquals(office.line_items[1].unit, "85");
+  assertEquals(office.line_items[2].unit, "999");
 });
 
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
@@ -1548,6 +1562,21 @@ Deno.test("redactTradeWorkOrderScopeItems drops non-object and nested-array entr
   assertEquals(redactTradeWorkOrderScopeItems("$9,999"), []);
 });
 
+Deno.test("redactTradeWorkOrderScopeItems drops bare money unit/kind and keeps approved vocabulary", () => {
+  assertEquals(
+    redactTradeWorkOrderScopeItems([
+      { kind: "85", unit: "85", description: "Posts", quantity: 4 },
+      { kind: "install_m", unit: "m", description: "Rear", quantity: 19 },
+      { kind: "999", units: "999", description: "Gate", quantity: 1 },
+    ]),
+    [
+      { description: "Posts", quantity: 4 },
+      { kind: "install_m", unit: "m", description: "Rear", quantity: 19 },
+      { description: "Gate", quantity: 1 },
+    ],
+  );
+});
+
 Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string leaf", () => {
   assertEquals(
     redactTradeWorkOrderScopeItems([
@@ -1692,14 +1721,19 @@ Deno.test("redactTradeQuotePackMoney drops money-shaped unit and kind scalars", 
       { kind: "install_m", description: "Install Deposit 85", quantity: 10, unit: "AUD 9,999" },
       { kind: "AUD 9,999", description: "Sell line", quantity: 1, unit: "ea" },
       { kind: "install_m", description: "Rear", quantity: 19, unit: "m" },
+      { kind: "install_m", description: "Sheets", quantity: 12, unit: "85" },
+      { kind: "85", description: "Hidden", quantity: 1, unit: "999" },
     ],
   }]);
-  assertEquals(out[0].items.map((i: any) => i.kind), ["install_m", "install_m"]);
+  assertEquals(out[0].items.map((i: any) => i.kind), ["install_m", "install_m", "install_m"]);
   assertEquals(out[0].items[0].description, "Install Deposit");
   assertEquals(out[0].items[0].unit, undefined);
   assertEquals(out[0].items[1].unit, "m");
+  assertEquals(out[0].items[2].unit, undefined);
   assertEquals(JSON.stringify(out).includes("AUD"), false);
   assertEquals(JSON.stringify(out).includes("9,999"), false);
+  assertEquals(JSON.stringify(out).includes("\"85\""), false);
+  assertEquals(JSON.stringify(out).includes("999"), false);
 });
 
 Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures from summary and descriptions", () => {

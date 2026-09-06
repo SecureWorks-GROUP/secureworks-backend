@@ -227,12 +227,16 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("85/trade"), "");
   assertEquals(stripTradePackMoney("2 trades over 3 days"), "2 trades over 3 days");
   assertEquals(stripTradePackMoney("Quote 850"), "Quote");
-  assertEquals(stripTradePackMoney("quoted at 9999"), "quoted at");
+  assertEquals(stripTradePackMoney("quoted at 9999"), "quoted");
   assertEquals(stripTradePackMoney("Sheets 99.50"), "Sheets");
   assertEquals(stripTradePackMoney("Monument fencing 18400"), "Monument fencing");
   assertEquals(stripTradePackMoney("12 posts at 850"), "12 posts at");
   assertEquals(stripTradePackMoney("SWF-26101 Quote 850"), "SWF-26101 Quote");
   assertEquals(stripTradePackMoney("Deposit 85"), "Deposit");
+  assertEquals(stripTradePackMoney("Deposit of 85"), "Deposit");
+  assertEquals(stripTradePackMoney("Price of 85"), "Price");
+  assertEquals(stripTradePackMoney("12 panels at 85"), "12 panels at");
+  assertEquals(stripTradePackMoney("85 per panel"), "");
   assertEquals(stripTradePackMoney("Balance due 85"), "Balance due");
   assertEquals(stripTradePackMoney("Paid 85"), "Paid");
   assertEquals(stripTradePackMoney("Due 85"), "Due");
@@ -244,6 +248,8 @@ Deno.test("sanitizeTradePackUnit and sanitizeTradePackKind drop money scalars", 
   assertEquals(sanitizeTradePackUnit("ea"), "ea");
   assertEquals(sanitizeTradePackUnit("lot"), "lot");
   assertEquals(sanitizeTradePackUnit("sheet"), "sheet");
+  assertEquals(sanitizeTradePackUnit("85"), undefined);
+  assertEquals(sanitizeTradePackUnit("999"), undefined);
   assertEquals(sanitizeTradePackUnit("AUD 9,999"), undefined);
   assertEquals(sanitizeTradePackUnit("85/day"), undefined);
   assertEquals(sanitizeTradePackUnit("AUD"), undefined);
