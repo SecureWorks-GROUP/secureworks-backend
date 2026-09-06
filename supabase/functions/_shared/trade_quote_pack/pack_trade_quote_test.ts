@@ -325,16 +325,26 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasCurrencyWord("in bucks"), true);
   assertEquals(tradeAllocatedProseHasMoneyLanguage("Payment 50"), true);
   assertEquals(tradeAllocatedProseHasMoneyLanguage("in dollars"), true);
-  assertEquals(tradeAllocatedProseHasMoneyLanguage("Install Deposit"), false);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Install Deposit"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Price review"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("cost estimate"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Deposit required"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("USD pricing"), true);
   assertEquals(allocatedTradePackProse("Payment 50"), null);
   assertEquals(allocatedTradePackProse("Payment in dollars"), null);
   assertEquals(allocatedTradePackProse("in dollars"), null);
   assertEquals(allocatedTradePackProse("paid in bucks"), null);
+  assertEquals(allocatedTradePackProse("Price review"), null);
+  assertEquals(allocatedTradePackProse("cost estimate"), null);
+  assertEquals(allocatedTradePackProse("fee schedule"), null);
+  assertEquals(allocatedTradePackProse("Deposit required"), null);
+  assertEquals(allocatedTradePackProse("USD pricing"), null);
+  assertEquals(allocatedTradePackProse("GST exclusive"), null);
   assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("50% deposit + 50% on completion"), true);
   assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Install Deposit"), false);
   assertEquals(allocatedTradePackProse("50% upfront"), null);
   assertEquals(allocatedTradePackProse("50% deposit + 50% on completion"), null);
-  assertEquals(allocatedTradePackProse("Install Deposit"), "Install Deposit");
+  assertEquals(allocatedTradePackProse("Install Deposit"), null);
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion"), "50% deposit + 50% on completion");
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion $9,999"), "50% deposit + 50% on completion");
   assertEquals(allocatedPaymentTerms("50% upfront"), null);
@@ -352,6 +362,26 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
     customer: { name: "Payment in dollars", site_address: "paid in bucks" },
     items: [{ description: "Payment 50" }],
   }).sort(), ["customer.name", "customer.site_address", "items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    summary: "Price review",
+    items: [
+      { description: "cost estimate", unit: "dollars" },
+      { description: "Deposit required", unit: "USD" },
+      { description: "Rear 19m", unit: "bucks" },
+      { description: "Side sheets", unit: "AUD" },
+      { description: "fee schedule", unit: "GST" },
+    ],
+  }).sort(), [
+    "items[0].description",
+    "items[0].unit",
+    "items[1].description",
+    "items[1].unit",
+    "items[2].unit",
+    "items[3].unit",
+    "items[4].description",
+    "items[4].unit",
+    "summary",
+  ]);
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     terms: { payment_terms: "Payment on completion" },
   }), ["terms.payment_terms"]);
@@ -538,6 +568,14 @@ Deno.test("sanitizeTradePackUnit and sanitizeTradePackKind drop money scalars", 
   assertEquals(sanitizeTradePackUnit("AUD 9,999"), undefined);
   assertEquals(sanitizeTradePackUnit("85/day"), undefined);
   assertEquals(sanitizeTradePackUnit("AUD"), undefined);
+  assertEquals(sanitizeTradePackUnit("USD"), undefined);
+  assertEquals(sanitizeTradePackUnit("GST"), undefined);
+  assertEquals(sanitizeTradePackUnit("dollars"), undefined);
+  assertEquals(sanitizeTradePackUnit("dollar"), undefined);
+  assertEquals(sanitizeTradePackUnit("bucks"), undefined);
+  assertEquals(sanitizeTradePackUnit("buck"), undefined);
+  assertEquals(sanitizeTradePackUnit("price"), undefined);
+  assertEquals(sanitizeTradePackUnit("deposit"), undefined);
   assertEquals(sanitizeTradePackUnit({ name: "ea", unit_price: 99.5 }), undefined);
   assertEquals(sanitizeTradePackKind("install_m"), "install_m");
   assertEquals(sanitizeTradePackKind("info"), "info");

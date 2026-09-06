@@ -760,10 +760,10 @@ Deno.test("redactTradeQuotePackMoney fail-closes ad-hoc percent payment language
   const sealed = redactTradeQuotePackMoney([{
     quote_number: "Q-1",
     terms: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
-    items: [{ kind: "install_m", description: "Install Deposit", quantity: 10, unit: "m" }],
+    items: [{ kind: "install_m", description: "Install 10m", quantity: 10, unit: "m" }],
   }]);
   assertEquals(sealed[0].terms?.payment_terms, "50% deposit + 50% on completion");
-  assertEquals(sealed[0].items[0].description, "Install Deposit");
+  assertEquals(sealed[0].items[0].description, "Install 10m");
   assertAllocatedTradeQuotePackProjection(sealed[0]);
   const leftover = redactTradeQuotePackMoney([{
     quote_number: "Q-1",
@@ -778,6 +778,39 @@ Deno.test("redactTradeQuotePackMoney fail-closes ad-hoc percent payment language
   assertEquals(leftover[0].items[0].description, null);
   assertEquals(leftover[0].terms?.payment_terms, "50% deposit + 50% on completion");
   assertAllocatedTradeQuotePackProjection(leftover[0]);
+  const generic = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    summary: "Price review / cost estimate / USD pricing",
+    items: [
+      { kind: "info", description: "Deposit required", quantity: 1, unit: "dollars" },
+      { kind: "info", description: "fee schedule", quantity: 1, unit: "bucks" },
+      { kind: "info", description: "GST exclusive", quantity: 1, unit: "USD" },
+      { kind: "info", description: "Rear posts", quantity: 4, unit: "AUD" },
+      { kind: "info", description: "Side sheets", quantity: 2, unit: "GST" },
+      { kind: "install_m", description: "Rear 19m", quantity: 19, unit: "m" },
+    ],
+  }]);
+  assertEquals(generic[0].summary, null);
+  assertEquals(generic[0].items[0].description, null);
+  assertEquals(generic[0].items[0].unit, undefined);
+  assertEquals(generic[0].items[1].description, null);
+  assertEquals(generic[0].items[1].unit, undefined);
+  assertEquals(generic[0].items[2].description, null);
+  assertEquals(generic[0].items[2].unit, undefined);
+  assertEquals(generic[0].items[3].description, "Rear posts");
+  assertEquals(generic[0].items[3].unit, undefined);
+  assertEquals(generic[0].items[4].description, "Side sheets");
+  assertEquals(generic[0].items[4].unit, undefined);
+  assertEquals(generic[0].items[5].description, "Rear 19m");
+  assertEquals(generic[0].items[5].unit, "m");
+  assertEquals(JSON.stringify(generic).includes("Price review"), false);
+  assertEquals(JSON.stringify(generic).includes("cost estimate"), false);
+  assertEquals(JSON.stringify(generic).includes("Deposit required"), false);
+  assertEquals(JSON.stringify(generic).includes("dollars"), false);
+  assertEquals(JSON.stringify(generic).includes("USD"), false);
+  assertEquals(JSON.stringify(generic).includes("AUD"), false);
+  assertEquals(JSON.stringify(generic).includes("GST"), false);
+  assertAllocatedTradeQuotePackProjection(generic[0]);
 });
 
 Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {
@@ -2099,7 +2132,7 @@ Deno.test("redactTradeQuotePackMoney drops money-shaped unit and kind scalars", 
     ],
   }]);
   assertEquals(out[0].items.map((i: any) => i.kind), ["install_m", "install_m", "install_m"]);
-  assertEquals(out[0].items[0].description, "Install Deposit");
+  assertEquals(out[0].items[0].description, null);
   assertEquals(out[0].items[0].unit, undefined);
   assertEquals(out[0].items[1].unit, "m");
   assertEquals(out[0].items[2].unit, undefined);

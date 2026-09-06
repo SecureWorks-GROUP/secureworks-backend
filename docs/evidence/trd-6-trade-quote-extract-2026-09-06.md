@@ -76,9 +76,10 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   `50% deposit + 50% on completion` stays exempt only on
   `terms.payment_terms`. Ad-hoc "50% upfront" / "balance due" /
   "Payment 50" drop from extracts and from allocated customer/terms.
-  Allocated item leftovers may still keep strip artifacts such as
-  `Install Deposit`; leftover percent/payment-language / currency-word
-  prose does not. HTML money needles strip `<style>` first so CSS `100%`
+  Allocated leftover percent/payment-language / currency-word prose
+  drops. Review-11 supersedes the earlier `Install Deposit` leftover
+  allowance: allocated quote-pack prose now uses the full money-token
+  predicate. HTML money needles strip `<style>` first so CSS `100%`
   is not a false leak.
 - **In-flight claim is not publication.** Direct `/send` locks
   `job_documents.send_claimed_at` only. `sent_to_client` and `sent_at`
@@ -113,7 +114,8 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   `allocatedPaymentTerms` keeps `50% deposit + 50% on completion` and drops
   every other leftover (`Payment on completion`, `Net 30` included).
   Allocated projection leaks and extract HTML Payment terms `<dd>` use that
-  same allowlist. Item leftovers such as `Install Deposit` stay allowed.
+  same allowlist. Review-11 drops the earlier `Install Deposit`
+  leftover allowance on allocated quote-packs.
 - **Document send claims expire.** `send_claimed_at` is exclusive while
   fresh (`QUOTE_SEND_CLAIM_TTL_MS` = 15 minutes) and unpublished. A stale
   unpublished claim is reclaimable. A published row stays `already_sent`.
@@ -209,4 +211,21 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   The exact sealed phrase stays exempt only on `terms.payment_terms`.
   HTML leak scanning removes the whole Payment terms row (label
   included) so the `<dt>Payment terms</dt>` copy is not a false hit.
-  `Install Deposit` item leftovers remain allowed.
+  Review-11 supersedes the earlier `Install Deposit` leftover
+  allowance on allocated quote-packs.
+
+## Review-11 locks (2026-09-06)
+
+- **Allocated quote-pack prose uses the full money-token predicate.**
+  `allocatedTradePackProse` / projection leaks refuse the same tokens
+  as extract leaves: generic money words (`price`, `cost`, `fee`,
+  `rate`, …), `USD`/`GST`, deposit-only leftovers, payment language,
+  and currency words. `Price review`, `cost estimate`, `Deposit
+  required`, `USD pricing`, and `Install Deposit` drop from allocated
+  summary and item descriptions. Sealed phrase stays exempt only on
+  `terms.payment_terms`.
+- **Allocated units reject currency tokens.** `sanitizeTradePackUnit`
+  refuses `dollar(s)`, `buck(s)`, `USD`/`AUD`/`GST`, and any leftover
+  that trips `tradeTextHasMoneyToken`. Redact applies that same
+  fail-closed check before emitting `unit`. Approved construction
+  units (`m`, `ea`, `lot`, …) stay.

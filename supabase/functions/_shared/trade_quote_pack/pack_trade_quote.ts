@@ -205,12 +205,13 @@ export function tradeTextHasCurrencyWord(value: string): boolean {
 }
 
 /**
- * Allocated leftover prose after figure-strip: payment language, percents,
- * and currency words. Does not include leftover artifacts such as
- * `Install Deposit` (deposit is a money token, not this fence).
+ * Allocated leftover prose after figure-strip. Same fail-closed predicate
+ * as extract / identity leaves — generic money words, USD/GST, deposit,
+ * payment language, and currency words all drop. Sealed phrase exemption
+ * is payment_terms-only.
  */
 export function tradeAllocatedProseHasMoneyLanguage(value: string): boolean {
-  return tradeTextHasAdHocPercentOrPaymentLanguage(value) || tradeTextHasCurrencyWord(value)
+  return tradeTextHasMoneyToken(value)
 }
 
 /**
@@ -903,14 +904,11 @@ export function allocatedTradePackProse(value: unknown): string | null {
   if (!trimmed) return ''
   if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
   const cleaned = stripTradePackMoney(value)
-  if (!cleaned) return ''
+  if (!cleaned) return null
   // Sealed phrase is payment_terms-only. A name / item / note leftover
   // matching it is money prose and must not ride the allocated pack.
   if (isSealedPaymentTermsPhrase(cleaned)) return null
-  // Item leftovers may keep strip artifacts ("Install Deposit"). Ad-hoc
-  // percent / payment-language / currency-word prose must not ride the
-  // allocated pack. Sealed phrase stays payment_terms-only.
-  if (tradeAllocatedProseHasMoneyLanguage(cleaned)) return null
+  if (tradeTextHasMoneyToken(cleaned)) return null
   return cleaned
 }
 
@@ -947,9 +945,8 @@ const ALLOCATED_PACK_CUSTOMER_STRINGS = [
 ] as const
 const ALLOCATED_PACK_TERMS_STRINGS = ['payment_terms', 'valid_until'] as const
 
-/** Customer / terms leaks on an allocated quote-pack projection. Item
- *  leftover words ("Install Deposit") are out of scope — REV2-001 is the
- *  snapshot strings that were copied verbatim. */
+/** Customer / terms / summary / item prose / unit leaks on an allocated
+ *  quote-pack projection. Same money-token predicate as extract leaves. */
 export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] {
   if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return []
   const row = pack as Record<string, unknown>
@@ -959,6 +956,9 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
   leaks.push(...tradePackMoneyLeakKeys(row as TradeQuotePack).map((key) => `key.${key}`))
   if (typeof row.quote_number === 'string' && tradeTextHasMoneyToken(row.quote_number)) {
     leaks.push('quote_number')
+  }
+  if (typeof row.summary === 'string' && tradeTextHasMoneyToken(row.summary)) {
+    leaks.push('summary')
   }
   const customer = row.customer
   if (customer && typeof customer === 'object' && !Array.isArray(customer)) {
@@ -984,12 +984,14 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
     items.forEach((item, index) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return
       const description = (item as Record<string, unknown>).description
-      if (typeof description !== 'string') return
-      if (
-        isSealedPaymentTermsPhrase(description) ||
-        tradeAllocatedProseHasMoneyLanguage(description)
-      ) {
-        leaks.push(`items[${index}].description`)
+      if (typeof description === 'string') {
+        if (isSealedPaymentTermsPhrase(description) || tradeTextHasMoneyToken(description)) {
+          leaks.push(`items[${index}].description`)
+        }
+      }
+      const unit = (item as Record<string, unknown>).unit
+      if (typeof unit === 'string' && tradeTextHasMoneyToken(unit)) {
+        leaks.push(`items[${index}].unit`)
       }
     })
   }
@@ -1039,8 +1041,9 @@ export function sanitizeTradePackUnit(value: unknown): string | undefined {
   if (/\d/.test(trimmed)) return undefined
   const cleaned = stripTradePackMoney(trimmed)
   if (!cleaned || cleaned !== trimmed) return undefined
-  if (/^(?:aud|au\$|a\$|\$)$/i.test(cleaned)) return undefined
+  if (/^(?:aud|usd|gst|au\$|a\$|\$|dollars?|bucks?)$/i.test(cleaned)) return undefined
   if (new RegExp(`^${TRADE_PACK_UNQUALIFIED_MONEY_WORD}$`, 'i').test(cleaned)) return undefined
+  if (tradeTextHasMoneyToken(cleaned)) return undefined
   return cleaned
 }
 

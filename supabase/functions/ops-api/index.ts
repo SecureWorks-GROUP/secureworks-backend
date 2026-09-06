@@ -38870,7 +38870,7 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
         }
         if (kind !== undefined) out.kind = kind
         const unit = sanitizeTradePackUnit(item.unit)
-        if (unit !== undefined) out.unit = unit
+        if (unit !== undefined && !tradeTextHasMoneyToken(unit)) out.unit = unit
         return [out]
       }),
       customer: redactAllocatedTradeQuoteCustomer(pack.customer),
