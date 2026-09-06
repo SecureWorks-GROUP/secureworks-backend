@@ -13,7 +13,7 @@ import { filterMediaForCurrentCycle } from "./makesafe_cycle_evidence.ts";
 
 export const TRADE_WALKTHROUGH_LABEL = "Walkthrough";
 
-const HTTP_URL_RE = /^https?:\/\//i;
+const HTTPS_URL_RE = /^https:\/\//i;
 const VIDEO_TYPE_RE = /video|walkthrough|\.mov$|\.mp4$|\.webm$|\.m4v$/i;
 
 export type ScopePhotoCandidate = {
@@ -57,8 +57,9 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** Public playback URL. HTTPS only — `http://` is never registered. */
 export function isHttpMediaUrl(value: unknown): value is string {
-  return typeof value === "string" && HTTP_URL_RE.test(value.trim());
+  return typeof value === "string" && HTTPS_URL_RE.test(value.trim());
 }
 
 function firstHttpUrl(...values: unknown[]): string | undefined {
@@ -97,7 +98,7 @@ function looksLikeVideo(value: unknown): boolean {
 function photoFromUnknown(value: unknown, fallbackLabel: string): ScopePhotoCandidate | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  const dataUrl = typeof row.dataUrl === "string" && row.dataUrl.startsWith("data:")
+  const dataUrl = typeof row.dataUrl === "string" && row.dataUrl.startsWith("data:image")
     ? row.dataUrl
     : undefined;
   const storageUrl = firstHttpUrl(
@@ -137,22 +138,19 @@ function videoFromUnknown(value: unknown, fallbackLabel: string): ScopeVideoCand
     row.videoWalkthrough,
     row.objectUrl,
   );
-  const dataUrl = typeof row.dataUrl === "string" &&
-      row.dataUrl.startsWith("data:video")
-    ? row.dataUrl
-    : undefined;
   const fileName = String(
     row.fileName || row.videoFileName || row.videoName || row.name || "",
   ).trim() || undefined;
   const size = Number(row.size ?? row.videoSize ?? row.originalSize);
-  if (!storageUrl && !dataUrl && !fileName && !(Number.isFinite(size) && size > 0)) {
+  // data:video is ignored on this read — never upload-on-read or invent a
+  // public playback URL. Promote only an existing https URL.
+  if (!storageUrl && !fileName && !(Number.isFinite(size) && size > 0)) {
     return null;
   }
-  if (!storageUrl && !dataUrl && !fileName && !looksLikeVideo(row)) return null;
+  if (!storageUrl && !fileName && !looksLikeVideo(row)) return null;
   return {
     label: String(row.label || fallbackLabel),
     storageUrl,
-    dataUrl,
     fileName,
     size: Number.isFinite(size) && size > 0 ? size : undefined,
   };
@@ -167,8 +165,8 @@ function pushUniquePhoto(out: ScopePhotoCandidate[], photo: ScopePhotoCandidate 
 
 function pushUniqueVideo(out: ScopeVideoCandidate[], video: ScopeVideoCandidate | null) {
   if (!video) return;
-  const key = video.storageUrl || video.dataUrl || video.fileName || video.label;
-  if (out.some((v) => (v.storageUrl || v.dataUrl || v.fileName || v.label) === key)) {
+  const key = video.storageUrl || video.fileName || video.label;
+  if (out.some((v) => (v.storageUrl || v.fileName || v.label) === key)) {
     return;
   }
   out.push(video);
@@ -480,6 +478,7 @@ async function registerUrlMedia(
   existing: any[],
   identityKey?: string,
 ): Promise<RegisterMediaResult | null> {
+  if (!isHttpMediaUrl(storageUrl)) return null;
   const id = await deterministicScopeMediaId(jobId, identityKey || storageUrl);
   if (
     existing.some((row) =>
@@ -506,7 +505,7 @@ async function registerUrlMedia(
 async function uploadDataUrlMedia(
   client: any,
   jobId: string,
-  kind: "photo" | "video",
+  kind: "photo",
   dataUrl: string,
   label: string,
   existing: any[],
@@ -528,7 +527,7 @@ async function uploadDataUrlMedia(
     }
     // Path is content-stable: mime-derived ext only, never array index or filename.
     const ext = extFromMimeOrName(decoded.mime);
-    const bucket = kind === "video" ? "job-videos" : "job-photos";
+    const bucket = "job-photos";
     try {
       await client.storage.createBucket(bucket, { public: true });
     } catch {
@@ -574,11 +573,13 @@ async function uploadDataUrlMedia(
  * id, and a unique-violation recovers the winner instead of minting a twin.
  * A missing walkthrough or photo is still registered even when other scope
  * media already exists — each candidate is deduped on its own URL/id, never
- * by a global "any scope photo" short-circuit. Data-URL bytes hash to a
- * stable path and media id so inserting or reordering candidates cannot
- * mint a second row for the same photo/video. Filename-only metadata
- * without a URL is not turned into a dead player row. One candidate's
- * decode/storage throw does not abort the rest.
+ * by a global "any scope photo" short-circuit. Videos register only an
+ * existing public https URL — data:video and http:// are ignored, never
+ * uploaded on this read. data:image photo bytes still hash to a stable
+ * path and media id so inserting or reordering candidates cannot mint a
+ * second row for the same photo. Filename-only metadata without a URL is
+ * not turned into a dead player row. One candidate's decode/storage throw
+ * does not abort the rest.
  */
 export async function extractScopeMedia(
   client: any,
@@ -597,38 +598,19 @@ export async function extractScopeMedia(
 
   for (const [i, video] of collected.videos.entries()) {
     try {
-      const contentId = video.dataUrl
-        ? await scopeDataUrlContentId(video.dataUrl) ?? undefined
-        : undefined;
-      const candidate = contentId ? { ...video, contentId } : video;
-      if (existing.some((row) => existingMediaMatchesVideo(row, candidate))) continue;
-      if (video.storageUrl) {
-        const inserted = await registerUrlMedia(
-          client,
-          jobId,
-          "video",
-          video.storageUrl,
-          video.label || TRADE_WALKTHROUGH_LABEL,
-          existing,
-        );
-        if (inserted?.created) videos++;
-        if (inserted?.row) rows.push(inserted.row);
-        continue;
-      }
-      if (video.dataUrl) {
-        const inserted = await uploadDataUrlMedia(
-          client,
-          jobId,
-          "video",
-          video.dataUrl,
-          video.label || TRADE_WALKTHROUGH_LABEL,
-          existing,
-          contentId,
-        );
-        if (inserted?.created) videos++;
-        if (inserted?.row) rows.push(inserted.row);
-      }
-      // Filename/size-only: no inventing a signed or guessed URL.
+      if (existing.some((row) => existingMediaMatchesVideo(row, video))) continue;
+      if (!video.storageUrl) continue;
+      const inserted = await registerUrlMedia(
+        client,
+        jobId,
+        "video",
+        video.storageUrl,
+        video.label || TRADE_WALKTHROUGH_LABEL,
+        existing,
+      );
+      if (inserted?.created) videos++;
+      if (inserted?.row) rows.push(inserted.row);
+      // data:video / http / filename-only: never upload-on-read or invent a URL.
     } catch (err: any) {
       console.log(`[ops-api] scope video ${i} error:`, err?.message);
     }

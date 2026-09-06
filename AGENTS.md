@@ -2428,13 +2428,19 @@ field to an allocated trade, keep the writing and quote numbers, and never
 re-derive the tier per route. Scope walkthroughs are promoted from
 `scope_json` (`job.scopeMedia` or top-level) into `job_media` on this read;
 `media` / `currentCycleMedia` are current-cycle rows plus every job video.
-`TRADE_SCOPE_QUOTE_KEYS` is an exact-name denylist over a blob the SCOPING TOOLS
-own, so it is grounded in the production key audit in
-`_shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md` §2, not on intuition —
-`job.pricePerMetre` (x the surviving `job.runs[].length` = the quoted total) and
-patio `job_costs` were both missed on the first pass. Add a new money key there
-and re-check that audit; the redactor drops a branch past its depth cap rather
-than returning it verbatim. `makesafe_open` is a REPORT door, never a payroll
+`TRADE_SCOPE_QUOTE_KEYS` is an exact-name denylist over the OUTER blob the
+SCOPING TOOLS own, grounded in the production key audit in
+`_shared/release_packet/adapters/LOOP2_DRYRUN_REPORT.md` §2 — `job.pricePerMetre`
+(x the surviving `job.runs[].length` = the quoted total) and patio `job_costs`
+were both missed on the first pass. Add a new outer money key there and
+re-check that audit. `quote` / `quotes` objects are **allowlist-only**
+(`TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST`: narrative/qty/`quote_number` and the
+named containers) so an unknown money key (`lineTotalEx`, `gstAmount`,
+`quotedTotal`) cannot fail open. The redactor drops a branch past its depth
+cap rather than returning it verbatim. Scope-media registration is HTTPS
+only; `trade_job_detail` fetches every `type:video` on a separate uncapped
+lane so the 200-row media page cannot hide a walkthrough; `data:video` on
+that read is ignored (no upload-on-read, no invented URL). `makesafe_open` is a REPORT door, never a payroll
 one: it admits ANY signed-in trade to ANY make-safe job, so
 `trade_labour_budget` (every crew member's `trade_rates.hourly_rate` and cost)
 refuses that tier via `tradeLabourCostVisibleForTier` at the door, not in the

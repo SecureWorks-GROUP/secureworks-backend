@@ -184,6 +184,9 @@ const QUOTE_SCOPE = {
       quote_number: "Q-NARR",
       description: "Supply and install Monument fencing with a gate on the left.",
       materials: [{ name: "90x90 posts", qty: 12, unit_price: 45, total: 540 }],
+      lineTotalEx: 540,
+      gstAmount: 54,
+      quotedTotal: 594,
     },
   },
 };
@@ -433,6 +436,10 @@ function quoteLeakProbe(payload: any): string[] {
       "5500",
       "540",
       "850",
+      "lineTotalEx",
+      "gstAmount",
+      "quotedTotal",
+      "594",
     ]
   ) {
     if (text.includes(needle)) leaks.push(needle);
@@ -540,6 +547,36 @@ Deno.test("trade_job_detail: promotes a job.scopeMedia walkthrough even when sco
   assertEquals(quoteLeakProbe(p), []);
 });
 
+Deno.test("trade_job_detail: a video past the 200-row media page still reaches media", async () => {
+  const t = seed();
+  const photos = Array.from({ length: 200 }, (_, i) => ({
+    id: `photo-${i}`,
+    job_id: JOB_FENCE,
+    type: "photo",
+    phase: "completion",
+    storage_url: `https://cdn.example.test/jobs/swf-26101/p-${i}.jpg`,
+    created_at: `2026-09-01T00:00:${String(i % 60).padStart(2, "0")}Z`,
+  }));
+  t.job_media = [
+    ...photos,
+    {
+      id: "walk-late",
+      job_id: JOB_FENCE,
+      type: "video",
+      phase: "scope",
+      label: "Walkthrough",
+      storage_url: WALKTHROUGH_URL,
+      created_at: "2026-09-02T00:00:00Z",
+    },
+  ];
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  const videos = (p.media || []).filter((m: any) => m.type === "video");
+  assertEquals(videos.length, 1);
+  assertEquals(videos[0].id, "walk-late");
+  assertEquals(videos[0].storage_url, WALKTHROUGH_URL);
+  assertEquals((p.currentCycleMedia || []).some((m: any) => m.id === "walk-late"), true);
+});
+
 Deno.test("trade_job_detail: reattend cycle filter still returns the unbound walkthrough", async () => {
   const t = seed();
   t.jobs.find((j: any) => j.id === JOB_FENCE).type = "makesafe";
@@ -622,6 +659,36 @@ Deno.test("trade_job_detail: another tenant's manager is refused before anything
 
 // ── The pure redactor and document filter ───────────────────────────────────
 
+Deno.test("redactTradeScopeQuote allowlists quote/quotes so unknown money keys cannot fail open", () => {
+  const r = redactTradeScopeQuote({
+    job: {
+      quote: {
+        quote_number: "Q-NARR",
+        description: "Supply and install Monument fencing with a gate on the left.",
+        materials: [{ name: "90x90 posts", qty: 12, unit_price: 45, total: 540 }],
+        lineTotalEx: 540,
+        gstAmount: 54,
+        quotedTotal: 594,
+      },
+      quotes: [{
+        quote_number: "Q-ALLOW",
+        narrative: "Gate on the left",
+        lineTotalEx: 99,
+      }],
+    },
+  });
+  assertEquals(r.job.quote, {
+    quote_number: "Q-NARR",
+    description: "Supply and install Monument fencing with a gate on the left.",
+    materials: [{ name: "90x90 posts", qty: 12 }],
+  });
+  assertEquals(r.job.quotes, [{
+    quote_number: "Q-ALLOW",
+    narrative: "Gate on the left",
+  }]);
+  assertEquals(quoteLeakProbe(r), []);
+});
+
 Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the rest", () => {
   const r = redactTradeScopeQuote(structuredClone(QUOTE_SCOPE));
   assertEquals(r._pricing_json, undefined);
@@ -702,14 +769,28 @@ Deno.test("redactTradeWorkOrderScopeItems drops rate/total/unit_price and keeps 
   );
 });
 
-Deno.test("redactTradeQuotePackMoney nulls unit_price and line_total only", () => {
+Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money", () => {
   const out = redactTradeQuotePackMoney([
     {
       quote_number: "Q-1",
-      items: [{ kind: "install_m", description: "Install", quantity: 10, unit_price: 30, line_total: 300 }],
+      lineTotalEx: 300,
+      gstAmount: 30,
+      quotedTotal: 330,
+      items: [{
+        kind: "install_m",
+        description: "Install",
+        quantity: 10,
+        unit_price: 30,
+        line_total: 300,
+        lineTotalEx: 300,
+        gstAmount: 30,
+      }],
     },
   ]);
   assertEquals(out[0].quote_number, "Q-1");
+  assertEquals(out[0].lineTotalEx, undefined);
+  assertEquals(out[0].gstAmount, undefined);
+  assertEquals(out[0].quotedTotal, undefined);
   assertEquals(out[0].items[0], {
     kind: "install_m",
     description: "Install",

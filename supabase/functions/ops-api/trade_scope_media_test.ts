@@ -7,6 +7,7 @@ import {
   existingMediaMatchesVideo,
   extractScopeMedia,
   extractScopePhotos,
+  isHttpMediaUrl,
   isJobMediaUniqueViolation,
   scopeDataUrlContentId,
   scopeDataUrlIdentityKey,
@@ -133,6 +134,31 @@ Deno.test("collectScopeMedia reads a video object parked on top-level scopeMedia
     },
   });
   assertEquals(collected.videos.map((v) => v.storageUrl), [WALKTHROUGH_URL]);
+});
+
+Deno.test("isHttpMediaUrl accepts https only", () => {
+  assertEquals(isHttpMediaUrl(WALKTHROUGH_URL), true);
+  assertEquals(isHttpMediaUrl("http://cdn.example.test/jobs/swf-26101/walkthrough.mp4"), false);
+  assertEquals(isHttpMediaUrl("blob:https://local/abc"), false);
+  assertEquals(isHttpMediaUrl("data:video/mp4;base64,AAAA"), false);
+});
+
+Deno.test("collectScopeMedia ignores http:// video URLs", () => {
+  const collected = collectScopeMedia({
+    scopeMedia: {
+      videoWalkthrough: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4",
+    },
+  });
+  assertEquals(collected.videos.some((v) => v.storageUrl), false);
+});
+
+Deno.test("collectScopeMedia ignores data:video and does not keep a data URL", () => {
+  const collected = collectScopeMedia({
+    scopeMedia: {
+      videos: [{ dataUrl: tinyVideoDataUrl(), label: TRADE_WALKTHROUGH_LABEL }],
+    },
+  });
+  assertEquals(collected.videos, []);
 });
 
 Deno.test("collectScopeMedia ignores blob: object URLs and filename-only stays metadata", () => {
@@ -467,7 +493,7 @@ Deno.test("a throwing data:video candidate does not block a later playable URL",
   assertEquals(result.videos, 1);
   assertEquals(result.rows[0].storage_url, WALKTHROUGH_URL);
   assertEquals(client.media.filter((m: any) => m.type === "video").length, 1);
-  assertEquals(uploads, 0, "invalid data:video is skipped before storage");
+  assertEquals(uploads, 0, "data:video is ignored — never uploaded on read");
 });
 
 Deno.test("a storage throw on one dataUrl photo still registers the next photo", async () => {
@@ -543,37 +569,37 @@ Deno.test("reordering data-URL photos does not mint a second row for the same by
   assertEquals(client.uploads.length, 2);
 });
 
-Deno.test("reordering a data:video candidate does not mint a second walkthrough", async () => {
+Deno.test("data:video on trade_job_detail read is ignored — no upload, no invented URL", async () => {
   const dataUrl = tinyVideoDataUrl();
-  const contentId = await scopeDataUrlContentId(dataUrl);
-  if (!contentId) throw new Error("expected content id");
   const client = makeExtractClient([]);
   const first = await extractScopeMedia(client, "job-1", {
     scopeMedia: { videos: [{ dataUrl, label: TRADE_WALKTHROUGH_LABEL }] },
   });
-  assertEquals(first.videos, 1);
-  assertEquals(
-    client.uploads[0].path,
-    scopeDataUrlObjectPath("job-1", "video", contentId, "mp4"),
-  );
-  const reordered = await extractScopeMedia(client, "job-1", {
+  assertEquals(first.videos, 0);
+  assertEquals(first.rows, []);
+  assertEquals(client.uploads.length, 0);
+  assertEquals(client.media.filter((m: any) => m.type === "video").length, 0);
+  const withHttps = await extractScopeMedia(client, "job-1", {
     scopeMedia: {
       videos: [
-        { url: WALKTHROUGH_URL, label: "Other" },
-        { dataUrl, label: TRADE_WALKTHROUGH_LABEL },
+        { url: WALKTHROUGH_URL, label: TRADE_WALKTHROUGH_LABEL },
+        { dataUrl, label: "Ignored" },
       ],
     },
   });
-  assertEquals(reordered.videos, 1, "only the new https walkthrough registers");
-  assertEquals(client.media.filter((m: any) => m.type === "video").length, 2);
-  const again = await extractScopeMedia(client, "job-1", {
+  assertEquals(withHttps.videos, 1, "only the existing https walkthrough registers");
+  assertEquals(client.media.filter((m: any) => m.type === "video").length, 1);
+  assertEquals(client.uploads.length, 0);
+});
+
+Deno.test("extractScopeMedia does not register an http:// walkthrough", async () => {
+  const client = makeExtractClient([]);
+  const result = await extractScopeMedia(client, "job-1", {
     scopeMedia: {
-      videos: [
-        { url: WALKTHROUGH_URL, label: "Other" },
-        { dataUrl, label: TRADE_WALKTHROUGH_LABEL },
-      ],
+      videoWalkthrough: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4",
     },
   });
-  assertEquals(again.videos, 0);
-  assertEquals(client.media.filter((m: any) => m.type === "video").length, 2);
+  assertEquals(result.videos, 0);
+  assertEquals(result.rows, []);
+  assertEquals(client.media.length, 0);
 });

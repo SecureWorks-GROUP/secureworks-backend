@@ -38054,8 +38054,11 @@ export function _tradeDocumentsForAllocatedTrade(docs: any[]): any[] {
 // are load-bearing: fencing carries `scope_json.job.pricePerMetre`, which with
 // the surviving `job.runs[].length` reconstructs the quoted total outright, and
 // patio carries a top-level `scope_json.job_costs`. When the scoping tools add a
-// new money key, add it HERE and re-check that audit — a key absent from this
-// set ships to an allocated crew member's phone.
+// new money key on the OUTER blob, add it HERE and re-check that audit — a key
+// absent from this set ships to an allocated crew member's phone. `quote` /
+// `quotes` objects are NOT this denylist: they are allowlist-only
+// (`TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST`) so an unknown money key there
+// (`lineTotalEx`, `gstAmount`, `quotedTotal`, …) cannot fail open.
 export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   '_pricing_json',
   'pricing_json',
@@ -38083,8 +38086,31 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   'commissionCostEstimate',
 ])
 // Walked, never dropped as objects: the quote narrative + quote-number pack.
-// A bare numeric/money value on these keys is still stripped.
+// A bare numeric/money value on these keys is still stripped. Nested objects
+// keep ONLY the allowlist below — unknown keys are dropped, not denylisted.
 export const TRADE_SCOPE_NARRATIVE_QUOTE_KEYS = new Set(['quote', 'quotes'])
+export const TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST = new Set([
+  'quote_number',
+  'quoteNumber',
+  'description',
+  'narrative',
+  'notes',
+  'note',
+  'text',
+  'name',
+  'label',
+  'title',
+  'qty',
+  'quantity',
+  'unit',
+  'units',
+  'materials',
+  'items',
+  'lines',
+  'kind',
+  'quote',
+  'quotes',
+])
 export const TRADE_SCOPE_MONEY_KEYS = new Set([
   'unit_price',
   'unitPrice',
@@ -38122,6 +38148,26 @@ function tradeScopeBareMoneyValue(value: unknown): boolean {
 // using it as the drop marker cannot collide with real scope data.
 export const TRADE_SCOPE_REDACTION_MAX_DEPTH = 12
 
+function walkTradeQuoteObjectAllowlist(node: any, depth: number): any {
+  if (node == null) return node
+  if (depth > TRADE_SCOPE_REDACTION_MAX_DEPTH) return undefined
+  if (Array.isArray(node)) {
+    return node.map((v) => walkTradeQuoteObjectAllowlist(v, depth + 1)).filter((v) =>
+      v !== undefined
+    )
+  }
+  if (typeof node !== 'object') return node
+  const out: Record<string, any> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
+    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    const walked = walkTradeQuoteObjectAllowlist(value, depth + 1)
+    if (walked === undefined) continue
+    out[key] = walked
+  }
+  return out
+}
+
 export function redactTradeScopeQuote(scope: any): any {
   const walk = (node: any, depth: number): any => {
     if (node == null) return node
@@ -38133,7 +38179,13 @@ export function redactTradeScopeQuote(scope: any): any {
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
-      if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) continue
+      if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
+        if (tradeScopeBareMoneyValue(value)) continue
+        const allowlisted = walkTradeQuoteObjectAllowlist(value, depth + 1)
+        if (allowlisted === undefined) continue
+        out[key] = allowlisted
+        continue
+      }
       if (key === 'pricing') {
         // Keep only the installer's own labour budget inputs.
         const labour = value && typeof value === 'object' && !Array.isArray(value)
@@ -38193,14 +38245,32 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
 }
 
 export function redactTradeQuotePackMoney(packs: any[]): any[] {
-  return (packs || []).map((pack: any) => ({
-    ...pack,
-    items: (pack?.items || []).map((item: any) =>
-      item && typeof item === 'object'
-        ? { ...item, unit_price: null, line_total: null }
-        : item
-    ),
-  }))
+  return (packs || []).map((pack: any) => {
+    if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return pack
+    return {
+      quote_number: pack.quote_number ?? null,
+      job_document_id: pack.job_document_id ?? null,
+      sent_at: pack.sent_at ?? null,
+      accepted: pack.accepted,
+      status: pack.status,
+      job_type: pack.job_type,
+      notes: pack.notes,
+      summary: pack.summary,
+      source: pack.source,
+      items: (pack.items || []).map((item: any) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+        const out: Record<string, any> = {
+          kind: item.kind,
+          description: item.description,
+          quantity: item.quantity,
+          unit_price: null,
+          line_total: null,
+        }
+        if (item.unit !== undefined) out.unit = item.unit
+        return out
+      }),
+    }
+  })
 }
 
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
@@ -38299,16 +38369,24 @@ async function tradeJobDetail(
   })
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
-  const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes, quoteDocsRes] = await Promise.all([
+  const TRADE_JOB_MEDIA_COLUMNS =
+    'id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at, attendance_cycle_id, cycle_attribution'
+  const [jobRes, docsRes, mediaRes, videoMediaRes, eventsRes, reportRes, woRes, crewRes, posRes, quoteDocsRes] =
+    await Promise.all([
     client.from('jobs')
       .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, pricing_json, ghl_opportunity_id, ghl_contact_id, metadata')
       .eq('id', jobId).eq('org_id', viewer.orgId).single(),
     client.from('job_documents')
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
       .eq('job_id', jobId).order('created_at', { ascending: false }),
+    // Photos/other stay paged. Videos are a separate uncapped lane so a
+    // 200-row photo page cannot omit the walkthrough the trade player needs.
     client.from('job_media')
-      .select('id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at, attendance_cycle_id, cycle_attribution')
+      .select(TRADE_JOB_MEDIA_COLUMNS)
       .eq('job_id', jobId).order('created_at').limit(200),
+    client.from('job_media')
+      .select(TRADE_JOB_MEDIA_COLUMNS)
+      .eq('job_id', jobId).eq('type', 'video').order('created_at'),
     client.from('job_events')
       .select('id, event_type, detail_json, created_at, users:user_id(name)')
       .eq('job_id', jobId).eq('event_type', 'note').order('created_at', { ascending: false }).limit(50),
@@ -38461,14 +38539,27 @@ async function tradeJobDetail(
       makesafeDetails.attendance_cycle_id || null,
     )
     : (reportRes.data || [])[0] || null
+  if (videoMediaRes.error) {
+    console.error('[ops-api] trade video media read failed:', videoMediaRes.error.message)
+  }
   const mediaByKey = new Map<string, any>()
-  for (const row of [...(mediaRes.data || []), ...extractedScopeMedia.rows]) {
+  for (
+    const row of [
+      ...(mediaRes.data || []),
+      ...(videoMediaRes.data || []),
+      ...extractedScopeMedia.rows,
+    ]
+  ) {
     const key = String(row?.id || row?.storage_url || '')
     if (key) mediaByKey.set(key, row)
   }
   const allMedia = mediaByKey.size > 0
     ? [...mediaByKey.values()]
-    : [...(mediaRes.data || []), ...extractedScopeMedia.rows]
+    : [
+      ...(mediaRes.data || []),
+      ...(videoMediaRes.data || []),
+      ...extractedScopeMedia.rows,
+    ]
   const currentCycleMedia = makesafeDetails
     ? filterMediaForCurrentCycle(
       allMedia,
@@ -38511,9 +38602,9 @@ async function tradeJobDetail(
     : redactTradeWorkOrdersForAllocated(woRes.data || [])
   // scope_json carries the scoping tools' quote (pricing, _pricing_json, sell
   // rows). It is redacted server-side for every non-quote tier. TRD-4 keeps
-  // narrative scope + quote numbers and strips every money key, including
-  // labour dayRate. Quote packs keep descriptions/qty/quote_number; unit
-  // prices are nulled for allocated viewers.
+  // narrative scope + quote numbers. Outer-blob money uses the denylist;
+  // `quote`/`quotes` objects are allowlist-only. Quote packs keep
+  // descriptions/qty/quote_number; unit prices are nulled for allocated viewers.
   if (!quoteVisible && tradeSafeJob && 'scope_json' in tradeSafeJob) {
     tradeSafeJob.scope_json = redactTradeScopeQuote(tradeSafeJob.scope_json)
   }
