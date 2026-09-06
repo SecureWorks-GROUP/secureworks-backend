@@ -1517,6 +1517,16 @@ Deno.test("_tradeDocumentsForAllocatedTrade: honours the flag AND drops quote-be
   assertEquals(_tradeDocumentsForAllocatedTrade(docs).map((d) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals([...TRADE_QUOTE_DOCUMENT_TYPES].sort(), ["invoice", "quote"]);
   assertEquals([...TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES].sort(), ["supplier_work_order", "work_order"]);
+  assertEquals(TRADE_QUOTE_DOCUMENT_TYPES.has("roof_report"), false);
+  assertEquals(TRADE_PRICED_WORK_ORDER_DOCUMENT_TYPES.has("roof_report"), false);
+});
+
+Deno.test("_tradeDocumentsForAllocatedTrade keeps a fee-free roof_report for allocated viewers", () => {
+  const out = _tradeDocumentsForAllocatedTrade([
+    { id: "d-roof", type: "roof_report", visible_to_trades: true, file_name: "Roof Inspection Report.pdf" },
+    { id: "d-quote", type: "quote", visible_to_trades: true },
+  ]);
+  assertEquals(out.map((d) => d.id), ["d-roof"]);
 });
 
 Deno.test("_tradeDocumentsForAllocatedTrade keeps quote_number on a remaining non-quote, non-priced-WO row", () => {

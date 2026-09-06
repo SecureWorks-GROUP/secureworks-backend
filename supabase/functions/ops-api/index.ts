@@ -938,7 +938,7 @@ import {
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
-import { renderRoofReportPdf } from './roof_report_render.ts'
+import { omitRoofReportFee, renderRoofReportPdf } from './roof_report_render.ts'
 import {
   ROOF_REPORT_PACK_KIND,
   ROOF_REPORT_TEMPLATE_VERSION,
@@ -9254,9 +9254,23 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'roof_report_template':
             return json(await getRoofReportTemplateForJob(client, url.searchParams.get('job_id') || url.searchParams.get('jobId') || body?.job_id || body?.jobId))
           case 'save_roof_report':
-            return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }))
-          case 'submit_roof_report':
-            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }))
+          case 'submit_roof_report': {
+            const roofJobId = body?.job_id || body?.jobId
+            let quoteVisible = false
+            if (roofJobId) {
+              const decision = await resolveTradeJobAccessTier(
+                client,
+                roofJobId,
+                tradeUser.id,
+                { isOffice: isDispatcher, access: tradeJobAccess },
+              )
+              quoteVisible = decision.quoteVisible
+            }
+            if (action === 'save_roof_report') {
+              return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }, { quoteVisible }))
+            }
+            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }, {}, { quoteVisible }))
+          }
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
@@ -43435,13 +43449,31 @@ async function resolveRoofReportPhotos(
 // Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
 // Shared by submit_roof_report and render_roof_report. attachMakesafeDocument
 // writes the makesafe_document_attached audit row.
+// Trade write responses (save/submit) may carry the locked client report fee
+// only for office / division-manager. Allocated and makesafe_open get storey
+// and status only — the fee stays internal to PDF rendering / office invoicing.
+function presentRoofReportWrite<T extends { price?: unknown }>(
+  result: T,
+  quoteVisible: boolean,
+): T | Omit<T, 'price'> {
+  if (quoteVisible) return result
+  const { price: _omit, ...rest } = result
+  return rest
+}
+
+export const _presentRoofReportWriteForTest = presentRoofReportWrite
+
 async function renderAndAttachRoofReport(
   client: any,
   jobId: string,
   renderJob: Record<string, unknown>,
   operator: string,
 ) {
-  const rendered = await renderRoofReportPdf(renderJob as any)
+  // The attached roof_report defaults visible_to_trades=true. Always omit the
+  // client fee from those bytes so allocated / makesafe_open viewers keep the
+  // report content without the $275/$330 row. Office invoicing still prices
+  // from roofReportPrice, not this PDF.
+  const rendered = await renderRoofReportPdf(omitRoofReportFee(renderJob as any))
   let bin = ''
   for (let i = 0; i < rendered.bytes.length; i++) bin += String.fromCharCode(rendered.bytes[i])
   const pdfBase64 = btoa(bin)
@@ -43474,7 +43506,7 @@ async function getRoofReportTemplateForJob(client: any, jobId: string | null) {
 // (Wave 3b) save_roof_report -- WRITE. Draft-safe, idempotent upsert of the fill.
 // Never renders, never advances the board. A save on an already-submitted fill is
 // a no-op (the submitted report is terminal).
-async function saveRoofReport(client: any, body: any) {
+async function saveRoofReport(client: any, body: any, opts: { quoteVisible?: boolean } = {}) {
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
@@ -43584,7 +43616,10 @@ async function saveRoofReport(client: any, body: any) {
 
   let price: any = null
   try { price = roofReportPrice(storey) } catch { price = null }
-  return { ok: true, status: 'draft', saved: true, draft_id: draft.id, storey, price }
+  return presentRoofReportWrite(
+    { ok: true, status: 'draft', saved: true, draft_id: draft.id, storey, price },
+    opts.quoteVisible === true,
+  )
 }
 
 // (Wave 3c) submit_roof_report -- WRITE. Validates the merged fill, renders OUR
@@ -43624,7 +43659,7 @@ async function assertRoofReportIsReportTypeJob(client: any, jobId: string) {
   }
 }
 
-async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}) {
+async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}, opts: { quoteVisible?: boolean } = {}) {
   const renderAndAttach = deps.renderAndAttach || renderAndAttachRoofReport
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -43724,7 +43759,7 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
 
   // Render + attach OUR letterhead PDF.
   const meta = await loadRoofReportJobMeta(client, jobId)
-  const renderJob = buildRoofReportJob(fieldsJson, meta, photosForRender)
+  const renderJob = omitRoofReportFee(buildRoofReportJob(fieldsJson, meta, photosForRender) as any)
   const attached = await renderAndAttach(
     client,
     jobId,
@@ -43798,17 +43833,20 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     eventSync = { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
 
-  return {
-    ok: true,
-    status: 'submitted',
-    draft_id: draft.id,
-    report_doc_id: attached.document_id,
-    file_name: attached.file_name,
-    render_hash: attached.render_hash,
-    price,
-    board_sync: boardSync,
-    event_sync: eventSync,
-  }
+  return presentRoofReportWrite(
+    {
+      ok: true,
+      status: 'submitted',
+      draft_id: draft.id,
+      report_doc_id: attached.document_id,
+      file_name: attached.file_name,
+      render_hash: attached.render_hash,
+      price,
+      board_sync: boardSync,
+      event_sync: eventSync,
+    },
+    opts.quoteVisible === true,
+  )
 }
 
 // Advance the make-safe reporting checklist for a roof-report submit. Sets the
@@ -43926,7 +43964,9 @@ async function renderRoofReportAction(client: any, body: any, deps: RoofRenderDe
     draftPhotos,
   )
   const meta = await loadRoofReportJobMeta(client, jobId)
-  const renderJob = buildRoofReportJob({ ...mergedText, photos: [] }, meta, photosForRender)
+  const renderJob = omitRoofReportFee(
+    buildRoofReportJob({ ...mergedText, photos: [] }, meta, photosForRender) as any,
+  )
   const attached = await renderAndAttach(
     client,
     jobId,

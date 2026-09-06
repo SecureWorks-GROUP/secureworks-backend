@@ -10,10 +10,13 @@ import {
 import {
   aspectFitBox,
   formatAud,
+  omitRoofReportFee,
   renderHash,
   renderRoofReportPdf,
   roofReportFileName,
   roofReportHashInput,
+  roofReportHeaderRows,
+  roofReportIncludesFee,
   sanitiseText,
   slug,
   yesNo,
@@ -48,6 +51,45 @@ Deno.test("formatAud: money format, non-numeric -> blank", () => {
   assertEquals(formatAud(275), "$275.00");
   assertEquals(formatAud(330), "$330.00");
   assertEquals(formatAud(undefined), "");
+});
+
+Deno.test("omitRoofReportFee drops prices and disables the Report fee row", () => {
+  const omitted = omitRoofReportFee({
+    ref: "MLB-1",
+    address: "1 A St",
+    storeys: "Double Storey",
+    price_ex_gst: 300,
+    price_inc_gst: 330,
+  });
+  assertEquals(omitted.price_ex_gst, undefined);
+  assertEquals(omitted.price_inc_gst, undefined);
+  assertEquals(omitted.include_report_fee, false);
+  assertEquals(omitted.storeys, "Double Storey");
+  assertEquals(roofReportIncludesFee(omitted), false);
+});
+
+Deno.test("roofReportHeaderRows: office render keeps Report fee; trade-visible omits it", () => {
+  const office = roofReportHeaderRows({
+    ref: "MLB-1",
+    address: "1 A St",
+    storeys: "Double Storey",
+    price_inc_gst: 330,
+  });
+  assertEquals(office.some(([k]) => k === "Report fee"), true);
+  assertEquals(office.find(([k]) => k === "Report fee")?.[1].includes("$330.00"), true);
+  assertEquals(office.find(([k]) => k === "Number of storeys")?.[1], "Double Storey");
+
+  const trade = roofReportHeaderRows({
+    ref: "MLB-1",
+    address: "1 A St",
+    storeys: "Double Storey",
+    price_inc_gst: 330,
+    include_report_fee: false,
+  });
+  assertEquals(trade.some(([k]) => k === "Report fee"), false);
+  assertEquals(JSON.stringify(trade).includes("330"), false);
+  assertEquals(JSON.stringify(trade).includes("Report fee"), false);
+  assertEquals(trade.find(([k]) => k === "Number of storeys")?.[1], "Double Storey");
 });
 
 Deno.test("sanitiseText: em/en dashes normalised to hyphen (house comms rule)", () => {
