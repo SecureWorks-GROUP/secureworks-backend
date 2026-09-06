@@ -219,6 +219,10 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("85 / hr"), "");
   assertEquals(stripTradePackMoney("1200/m"), "");
   assertEquals(stripTradePackMoney("85 per hour"), "");
+  assertEquals(stripTradePackMoney("85 per day"), "");
+  assertEquals(stripTradePackMoney("85/day"), "");
+  assertEquals(stripTradePackMoney("85 per trade"), "");
+  assertEquals(stripTradePackMoney("85/trade"), "");
   assertEquals(stripTradePackMoney("2 trades over 3 days"), "2 trades over 3 days");
   assertEquals(stripTradePackMoney("Quote 850"), "Quote");
   assertEquals(stripTradePackMoney("quoted at 9999"), "quoted at");

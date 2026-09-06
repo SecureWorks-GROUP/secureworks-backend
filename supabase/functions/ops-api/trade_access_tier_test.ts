@@ -595,9 +595,16 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
     id: "p-note",
     job_id: JOB_FENCE,
     type: "photo",
-    storage_url: "https://cdn.example.test/jobs/swf-26101/front.jpg",
+    phase: "install",
+    storage_url: "https://cdn.example.test/object/sign/media/1725234567/front.jpg",
+    thumbnail_url: "https://cdn.example.test/thumbs/18400-front.jpg",
+    po_id: "po-18400",
+    created_at: "2026-09-01T00:00:00Z",
+    attendance_cycle_id: "cycle-18400",
+    cycle_attribution: { attendance_cycle_id: "cycle-18400", cycle_number: 1 },
     label: "Front run $9,999",
     notes: "Front run priced 1,200 exclusive of GST",
+    amount: 9999,
   }];
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.notes[0].detail_json.text, "Client approved");
@@ -609,15 +616,34 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   assertEquals(allocated.notes[0].detail_json.qty, 2);
   assertEquals(allocated.media[0].label, "Front run");
   assertEquals(allocated.media[0].notes, "Front run priced");
-  assertEquals(allocated.media[0].storage_url, "https://cdn.example.test/jobs/swf-26101/front.jpg");
+  assertEquals(allocated.media[0].id, "p-note");
+  assertEquals(allocated.media[0].phase, "install");
+  assertEquals(allocated.media[0].type, "photo");
+  assertEquals(
+    allocated.media[0].storage_url,
+    "https://cdn.example.test/object/sign/media/1725234567/front.jpg",
+  );
+  assertEquals(allocated.media[0].thumbnail_url, "https://cdn.example.test/thumbs/18400-front.jpg");
+  assertEquals(allocated.media[0].po_id, "po-18400");
+  assertEquals(allocated.media[0].created_at, "2026-09-01T00:00:00Z");
+  assertEquals(allocated.media[0].attendance_cycle_id, "cycle-18400");
+  assertEquals(allocated.media[0].cycle_attribution, {
+    attendance_cycle_id: "cycle-18400",
+    cycle_number: 1,
+  });
+  assertEquals(allocated.media[0].amount, undefined);
   assertEquals(JSON.stringify(allocated.notes).includes("9999"), false);
-  assertEquals(JSON.stringify(allocated.media).includes("1200"), false);
+  assertEquals(allocated.media[0].notes.includes("1200"), false);
   const office = await detail(t, viewer(OFFICE, "ops_manager"));
   assertEquals(office.notes[0].detail_json.text, "Client approved $9,999 excluding GST");
   assertEquals(office.notes[0].detail_json.message, "Charge $9,999 extra");
   assertEquals(office.notes[0].detail_json.amount, 9999);
   assertEquals(office.media[0].label, "Front run $9,999");
   assertEquals(office.media[0].notes, "Front run priced 1,200 exclusive of GST");
+  assertEquals(
+    office.media[0].storage_url,
+    "https://cdn.example.test/object/sign/media/1725234567/front.jpg",
+  );
 });
 
 Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO prose", async () => {
@@ -1531,9 +1557,10 @@ Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string 
 Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instructions and other WO prose", () => {
   const out = redactTradeWorkOrdersForAllocated([
     {
-      id: "wo-1",
-      wo_number: "WO-1",
+      id: "wo-18400",
+      wo_number: "WO-18400",
       status: "sent",
+      scheduled_date: "2026-08-20",
       special_instructions: "Park on the verge. Charge $9,999 extra Approved total 9,999 ex GST",
       notes: "Installer note $1,200 Total 9,999 AUD",
       scope_items: [{
@@ -1544,8 +1571,10 @@ Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instruction
       }],
     },
   ]);
-  assertEquals(out[0].id, "wo-1");
-  assertEquals(out[0].wo_number, "WO-1");
+  assertEquals(out[0].id, "wo-18400");
+  assertEquals(out[0].wo_number, "WO-18400");
+  assertEquals(out[0].status, "sent");
+  assertEquals(out[0].scheduled_date, "2026-08-20");
   assertEquals(out[0].special_instructions, "Park on the verge. Charge extra Approved total");
   assertEquals(out[0].notes, "Installer note Total");
   assertEquals(out[0].scope_items, [{ description: "Posts Total", quantity: 4, unit: "ea" }]);

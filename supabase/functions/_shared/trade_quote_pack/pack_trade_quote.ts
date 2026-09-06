@@ -472,7 +472,7 @@ const TRADE_PACK_TAX_PHRASE =
 const TRADE_PACK_UNQUALIFIED_MONEY_WORD =
   '(?:totals?|subtotals?|rates?|charg(?:e[ds]?|ing)|pric(?:e[ds]?|ing)|fees?|costs?|amounts?|invoices?|quot(?:e[ds]?|ing|ations?))'
 const TRADE_PACK_RATE_UNIT =
-  '(?:hours?|hrs?|h|m(?:et(?:re|er)s?)?)'
+  '(?:hours?|hrs?|h|m(?:et(?:re|er)s?)?|days?|trades?|labou?rers?)'
 const TRADE_PACK_QTY_WORD =
   '(?:trades?|days?|labourers?|posts?|pickets?|panels?|hours?|hrs?)'
 const TRADE_PACK_REF_PREFIX =
@@ -482,7 +482,8 @@ const TRADE_PACK_REF_PREFIX =
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
  *  9,999 excluding GST, 9,999 GST exclusive, ex GST 9,999), parenthetical
  *  tax marks, and unqualified totals/rates (Total 9999, rate 85, 85/hour,
- *  1200/m). Amount boundaries refuse 19m / 1800mm / 90x90. Leftover
+ *  1200/m, 85 per day, 85/day, 85 per trade). Amount boundaries refuse
+ *  19m / 1800mm / 90x90. Leftover
  *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
  *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
  *  full-quote summaries must not call this — hydrateStoredPack keeps

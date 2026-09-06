@@ -38216,9 +38216,10 @@ export const TRADE_SCOPE_QUANTITY_KEEP_KEYS = new Set([
   'projection',
   'gateCount',
 ])
-// Named known-prose keys only. The allocated walker sanitizes EVERY retained
-// string leaf — unlisted keys (siteNotes, supplierNotes, noteInternal, …)
-// must not fail open just because they were omitted from this set.
+// Named known-prose keys only. Media and work-order projectors sanitize
+// these human-text fields and leave structural keys (URLs, ids, dates)
+// untouched — a leftover-number strip on storage_url / scheduled_date
+// corrupts playback and identifiers (TRD4-REV17-002 / TRD4-REV17-003).
 export const TRADE_SCOPE_NARRATIVE_TEXT_KEYS = new Set([
   'description',
   'narrative',
@@ -38231,6 +38232,9 @@ export const TRADE_SCOPE_NARRATIVE_TEXT_KEYS = new Set([
   'title',
   'instructions',
   'special_instructions',
+  'caption',
+  'comment',
+  'comments',
 ])
 
 function tradeScopeBareMoneyValue(value: unknown): boolean {
@@ -38322,25 +38326,32 @@ function sanitizeTradeAllocatedEventNotes(events: any[]): any[] {
 function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
   return (media || []).map((row) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row
-    const out: Record<string, any> = { ...row }
-    for (const key of Object.keys(out)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) {
-        delete out[key]
+    const out: Record<string, any> = {}
+    for (const [key, value] of Object.entries(row)) {
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
+        if (typeof value === 'string') {
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          if (cleaned === '') continue
+          out[key] = cleaned
+          continue
+        }
+        if (value && typeof value === 'object') {
+          const walked = sanitizeTradeAllocatedJobNotes(value)
+          if (
+            walked &&
+            typeof walked === 'object' &&
+            !Array.isArray(walked) &&
+            Object.keys(walked as Record<string, unknown>).length === 0
+          ) continue
+          out[key] = walked
+          continue
+        }
         continue
       }
-      const value = out[key]
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        if (!tradeScopeKeepNumericLeaf(key)) delete out[key]
-        continue
-      }
-      if (value && typeof value === 'object') {
-        delete out[key]
-        continue
-      }
-      if (typeof value !== 'string') continue
-      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
-      if (cleaned === '') delete out[key]
-      else out[key] = cleaned
+      // Structural media fields stay verbatim so allocated playback works:
+      // storage_url, thumbnail_url, id, created_at, po_id, cycle ids.
+      out[key] = value
     }
     return out
   })
@@ -38664,18 +38675,24 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
         out.scope_items = redactTradeWorkOrderScopeItems(value)
         continue
       }
-      if (typeof value === 'string') {
-        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
-        if (cleaned === '') continue
-        out[key] = cleaned
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
+        if (typeof value === 'string') {
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          if (cleaned === '') continue
+          out[key] = cleaned
+        }
+        continue
+      }
+      if (typeof value === 'string' || value == null || typeof value === 'boolean') {
+        // Structural identifiers and dates stay verbatim (scheduled_date,
+        // id, wo_number, status). A leftover-number strip turns
+        // 2026-08-20 into -08-20 (TRD4-REV17-003).
+        out[key] = value
         continue
       }
       if (typeof value === 'number' && Number.isFinite(value)) {
         if (!tradeScopeKeepNumericLeaf(key)) continue
-        out[key] = value
-        continue
-      }
-      if (value == null || typeof value === 'boolean') {
         out[key] = value
         continue
       }
