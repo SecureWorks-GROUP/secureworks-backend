@@ -825,7 +825,7 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
   assertEquals(r.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(r.job.supplierNotes, "Call before arrival. Charge. Total");
+  assertEquals(r.job.supplierNotes, "Call before arrival. Charge . Total");
   assertEquals(r.job.quote.quote_number, "Q-NARR");
   assertEquals(r.job.quote.description, "Supply and install. Total Approved total");
   assertEquals(r.job.quote.narrative, "Gate on the left extra Total");
