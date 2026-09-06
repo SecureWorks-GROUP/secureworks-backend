@@ -163,6 +163,10 @@ function pushUniquePhoto(out: ScopePhotoCandidate[], photo: ScopePhotoCandidate 
   out.push(photo);
 }
 
+function isPlayableScopeVideo(video: ScopeVideoCandidate | null | undefined): boolean {
+  return !!video && isHttpMediaUrl(video.storageUrl);
+}
+
 function pushUniqueVideo(out: ScopeVideoCandidate[], video: ScopeVideoCandidate | null) {
   if (!video) return;
   const key = video.storageUrl || video.fileName || video.label;
@@ -170,6 +174,12 @@ function pushUniqueVideo(out: ScopeVideoCandidate[], video: ScopeVideoCandidate 
     return;
   }
   out.push(video);
+}
+
+function pushPlayableVideo(out: ScopeVideoCandidate[], video: ScopeVideoCandidate | null) {
+  if (!isPlayableScopeVideo(video)) return;
+  if (out.some((v) => v.storageUrl === video!.storageUrl)) return;
+  out.push(video!);
 }
 
 function collectFromMediaBlock(
@@ -195,21 +205,26 @@ function collectFromMediaBlock(
     pushUniqueVideo(videos, videoFromUnknown(row, TRADE_WALKTHROUGH_LABEL));
   }
 
-  // Filename/size sit beside the URL on the same block. Only use them as a
-  // fallback when this block has not already produced a video.
+  // Filename/size and videoUrl aliases sit beside the primary fields. A
+  // data:video / http:// / filename-only candidate still increments length,
+  // so gate the fallback on a playable https storageUrl from this block,
+  // and dedupe only against an existing playable URL.
+  const producedPlayable = videos.slice(before).some((v) => isPlayableScopeVideo(v));
   if (
-    videos.length === before &&
+    !producedPlayable &&
     (media.videoFileName || media.videoUrl || media.videoWalkthroughUrl || media.videoSize)
   ) {
-    pushUniqueVideo(
-      videos,
-      videoFromUnknown({
-        fileName: media.videoFileName,
-        url: media.videoUrl || media.videoWalkthroughUrl,
-        videoSize: media.videoSize,
-        label: media.videoLabel || TRADE_WALKTHROUGH_LABEL,
-      }, TRADE_WALKTHROUGH_LABEL),
-    );
+    const alias = videoFromUnknown({
+      fileName: media.videoFileName,
+      url: media.videoUrl || media.videoWalkthroughUrl,
+      videoSize: media.videoSize,
+      label: media.videoLabel || TRADE_WALKTHROUGH_LABEL,
+    }, TRADE_WALKTHROUGH_LABEL);
+    if (isPlayableScopeVideo(alias)) {
+      pushPlayableVideo(videos, alias);
+    } else if (videos.length === before) {
+      pushUniqueVideo(videos, alias);
+    }
   }
 }
 

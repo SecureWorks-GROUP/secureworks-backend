@@ -38212,17 +38212,31 @@ export function redactTradeScopeQuote(scope: any): any {
   return walk(scope, 0)
 }
 
-const TRADE_WO_SCOPE_ITEM_MONEY_KEYS = new Set([
-  'rate',
-  'total',
-  'unit_price',
-  'unitPrice',
-  'line_total',
-  'lineTotal',
-  'price',
-  'amount',
-  'gst',
+// Allocated WO lines are allowlist-only. A denylist that copies every other
+// field lets unitPriceEx / lineTotalEx / gstAmount / quotedTotal / cost and
+// nested pricing objects fail open onto workOrders.
+export const TRADE_WO_SCOPE_ITEM_ALLOWLIST = new Set([
+  'description',
+  'instructions',
+  'notes',
+  'note',
+  'name',
+  'label',
+  'title',
+  'text',
+  'qty',
+  'quantity',
+  'unit',
+  'units',
+  'kind',
 ])
+
+function isTradeWoScopeItemScalar(value: unknown): boolean {
+  return value == null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+}
 
 export function redactTradeWorkOrderScopeItems(items: any): any {
   if (!Array.isArray(items)) return items
@@ -38230,7 +38244,9 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return item
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(item)) {
-      if (TRADE_WO_SCOPE_ITEM_MONEY_KEYS.has(key)) continue
+      if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
+      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (!isTradeWoScopeItemScalar(value)) continue
       out[key] = value
     }
     return out

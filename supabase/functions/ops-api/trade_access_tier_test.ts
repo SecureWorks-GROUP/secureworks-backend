@@ -264,6 +264,12 @@ function seed(): Tables {
         rate: 85,
         unit_price: 85,
         total: 850,
+        unitPriceEx: 77,
+        lineTotalEx: 777,
+        gstAmount: 7.7,
+        quotedTotal: 784,
+        cost: 12,
+        pricing: { amount: 99 },
       }],
       status: "sent",
     }],
@@ -440,6 +446,9 @@ function quoteLeakProbe(payload: any): string[] {
       "gstAmount",
       "quotedTotal",
       "594",
+      "unitPriceEx",
+      "777",
+      "784",
     ]
   ) {
     if (text.includes(needle)) leaks.push(needle);
@@ -766,6 +775,26 @@ Deno.test("redactTradeWorkOrderScopeItems drops rate/total/unit_price and keeps 
       { description: "Posts", quantity: 4, unit: "ea", rate: 20, unit_price: 20, total: 80, price: 20 },
     ]),
     [{ description: "Posts", quantity: 4, unit: "ea" }],
+  );
+});
+
+Deno.test("redactTradeWorkOrderScopeItems is allowlist-only — unknown money and nested pricing do not fail open", () => {
+  assertEquals(
+    redactTradeWorkOrderScopeItems([
+      {
+        description: "Posts",
+        quantity: 4,
+        unit: "ea",
+        instructions: "Use 90x90 posts",
+        unitPriceEx: 20,
+        lineTotalEx: 80,
+        gstAmount: 8,
+        quotedTotal: 88,
+        cost: 12,
+        pricing: { amount: 80 },
+      },
+    ]),
+    [{ description: "Posts", quantity: 4, unit: "ea", instructions: "Use 90x90 posts" }],
   );
 });
 

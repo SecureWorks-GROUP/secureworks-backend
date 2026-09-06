@@ -2424,7 +2424,9 @@ surfaces read `is_lead` via `tradeLeadJobIds` / `tradeIsDesignatedLead`).
 (`redactTradeScopeQuote` over `scope_json`, `_tradeDocumentsForAllocatedTrade`
 over documents, `redactTradeQuotePackMoney` / `redactTradeWorkOrdersForAllocated`
 on packs and WO `scope_items`) — never ship a `quote`/`invoice` PDF or a price
-field to an allocated trade, keep the writing and quote numbers, and never
+field to an allocated trade, keep the writing and quote numbers,
+`redactTradeWorkOrderScopeItems` is allowlist-only (unknown money keys and
+nested pricing objects do not fail open), and never
 re-derive the tier per route. Scope walkthroughs are promoted from
 `scope_json` (`job.scopeMedia` or top-level) into `job_media` on this read;
 `media` / `currentCycleMedia` are current-cycle rows plus every job video.

@@ -161,6 +161,39 @@ Deno.test("collectScopeMedia ignores data:video and does not keep a data URL", (
   assertEquals(collected.videos, []);
 });
 
+Deno.test("collectScopeMedia still takes a block-level https alias after invalid video metadata", () => {
+  const collected = collectScopeMedia({
+    scopeMedia: {
+      video: { dataUrl: tinyVideoDataUrl(), fileName: "broken.mp4", label: "Broken" },
+      videoUrl: WALKTHROUGH_URL,
+    },
+  });
+  assertEquals(collected.videos.some((v) => v.storageUrl === WALKTHROUGH_URL), true);
+});
+
+Deno.test("collectScopeMedia still takes videoWalkthroughUrl after an http:// primary", () => {
+  const collected = collectScopeMedia({
+    job: {
+      scopeMedia: {
+        video: "http://cdn.example.test/jobs/swf-26101/walkthrough.mp4",
+        videoWalkthroughUrl: WALKTHROUGH_URL,
+      },
+    },
+  });
+  assertEquals(collected.videos.filter((v) => v.storageUrl === WALKTHROUGH_URL).length, 1);
+});
+
+Deno.test("collectScopeMedia does not duplicate a playable https already taken from the block", () => {
+  const collected = collectScopeMedia({
+    scopeMedia: {
+      videoWalkthrough: WALKTHROUGH_URL,
+      videoUrl: WALKTHROUGH_URL,
+      videoFileName: "site-walkthrough.mov",
+    },
+  });
+  assertEquals(collected.videos.map((v) => v.storageUrl), [WALKTHROUGH_URL]);
+});
+
 Deno.test("collectScopeMedia ignores blob: object URLs and filename-only stays metadata", () => {
   const collected = collectScopeMedia({
     job: {
