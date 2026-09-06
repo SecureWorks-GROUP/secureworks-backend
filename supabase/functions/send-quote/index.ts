@@ -32,8 +32,11 @@ import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_min
 import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
 import {
   claimQuoteDocumentSend,
-  publishQuoteDocumentSend,
+  documentIdsPublishedForSuccessfulSends,
+  mintSendRunQuoteNumber,
+  publishQuoteDocumentSendOrRevert,
   revertQuoteDocumentSendClaim,
+  sendRunQuoteNumberFallback,
 } from '../_shared/trade_quote_pack/quote_send_publication.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -858,10 +861,11 @@ serve(async (req: Request) => {
       }
 
       // Publication marker: only after Resend accepted the primary send.
-      // In-flight send_claimed_at is not quote-pack eligibility.
-      const { error: publishError } = await publishQuoteDocumentSend(sb, document_id)
-      if (publishError) {
-        console.error('[send-quote] publication stamp failed:', publishError.message || String(publishError))
+      // In-flight send_claimed_at is not quote-pack eligibility. A stamp
+      // failure reverts the claim so retry is not stranded on already_sent.
+      const published = await publishQuoteDocumentSendOrRevert(sb, document_id)
+      if (!published.published) {
+        return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
       }
 
       // Freeze a trade-safe SOW onto this quote document on EVERY successful
@@ -2284,16 +2288,25 @@ serve(async (req: Request) => {
 
         // Client document for this run
         const runPdfUrl = run_pdfs?.[run.run_label] || null
+        const clientQuoteNumber = await mintSendRunQuoteNumber(
+          sb,
+          sendRunQuoteNumberFallback({
+            jobNumber: job.job_number,
+            runLabel: run.run_label,
+            party: 'client',
+          }),
+        )
         const { data: clientDoc } = await sb.from('job_documents').insert({
           job_id: job.id,
           type: 'quote',
           run_label: run.run_label,
           job_contact_id: primaryContact.id || null,
+          quote_number: clientQuoteNumber,
           pdf_url: runPdfUrl,
           sent_to_client: false,
           sent_at: null,
           data_snapshot_json: { run },
-        }).select('id, share_token').single()
+        }).select('id, share_token, quote_number').single()
 
         if (clientDoc) {
           createdDocs.push(clientDoc)
@@ -2318,16 +2331,25 @@ serve(async (req: Request) => {
 
         // Neighbour document for this run (if neighbour exists)
         if (neighbour && neighbour.client_email) {
+          const neighbourQuoteNumber = await mintSendRunQuoteNumber(
+            sb,
+            sendRunQuoteNumberFallback({
+              jobNumber: job.job_number,
+              runLabel: run.run_label,
+              party: 'neighbour',
+            }),
+          )
           const { data: nbDoc } = await sb.from('job_documents').insert({
             job_id: job.id,
             type: 'quote',
             run_label: run.run_label,
             job_contact_id: neighbour.id,
+            quote_number: neighbourQuoteNumber,
             pdf_url: runPdfUrl,
             sent_to_client: false,
             sent_at: null,
             data_snapshot_json: { run },
-          }).select('id, share_token').single()
+          }).select('id, share_token, quote_number').single()
 
           if (nbDoc) {
             createdDocs.push(nbDoc)
@@ -2393,6 +2415,7 @@ serve(async (req: Request) => {
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
       let emailsSent = 0
       let primarySent = false
+      const successfulEmails: string[] = []
       const primaryEmail = (primaryContact.client_email || job.client_email || '').toLowerCase()
 
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
@@ -2457,6 +2480,7 @@ serve(async (req: Request) => {
           })
           if (resendRes.ok) {
             emailsSent++
+            successfulEmails.push(email)
             if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
           }
         } catch (e: any) {
@@ -2464,42 +2488,49 @@ serve(async (req: Request) => {
         }
       }
 
-      // Stamp sent_at / sent_to_client only after the primary client send
-      // succeeds. Pre-send inserts stay unpublished so a Resend failure
-      // cannot expose quote_packs while the job is still draft.
+      // Stamp sent_at / sent_to_client per successful recipient, not from
+      // the primary result alone. Neighbour docs stay unpublished when that
+      // email failed; a neighbour-only success still publishes those docs.
+      // Job draft→quoted still requires primarySent (ADR).
       const createdDocIds = createdDocs.map((d: any) => d.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
-      if (primarySent && createdDocIds.length > 0) {
+      const publishedDocIds = documentIdsPublishedForSuccessfulSends(
+        Object.values(emailsByRecipient),
+        successfulEmails,
+      )
+      if (publishedDocIds.length > 0) {
         const sentAt = new Date().toISOString()
         const { error: stampError } = await sb.from('job_documents')
           .update({ sent_to_client: true, sent_at: sentAt })
-          .in('id', createdDocIds)
+          .in('id', publishedDocIds)
         if (stampError) {
           console.error('[send-quote] send-runs stamp failed:', stampError.message || String(stampError))
-        }
-        try {
-          await persistTradePackOnDocuments(sb, {
-            documents: createdDocs.map((d: any) => ({
-              id: d.id,
-              quote_number: d.quote_number || null,
-              sent_at: sentAt,
-            })),
-            jobType: job.type,
-            scopeJson: job.scope_json,
-            pricingJson: pj,
-            customer: {
-              name: job.client_name,
-              phone: job.client_phone,
-              email: job.client_email,
-              site_address: job.site_address,
-              site_suburb: job.site_suburb,
-            },
-          })
-        } catch (e) {
-          console.error('[trade-pack-persist-fail]', JSON.stringify({
-            job_id: job.id,
-            handler: 'send-quote/send-runs',
-            error: (e as Error).message,
-          }))
+        } else {
+          const publishedDocs = createdDocs.filter((d: any) => publishedDocIds.includes(d.id))
+          try {
+            await persistTradePackOnDocuments(sb, {
+              documents: publishedDocs.map((d: any) => ({
+                id: d.id,
+                quote_number: d.quote_number || null,
+                sent_at: sentAt,
+              })),
+              jobType: job.type,
+              scopeJson: job.scope_json,
+              pricingJson: pj,
+              customer: {
+                name: job.client_name,
+                phone: job.client_phone,
+                email: job.client_email,
+                site_address: job.site_address,
+                site_suburb: job.site_suburb,
+              },
+            })
+          } catch (e) {
+            console.error('[trade-pack-persist-fail]', JSON.stringify({
+              job_id: job.id,
+              handler: 'send-quote/send-runs',
+              error: (e as Error).message,
+            }))
+          }
         }
       } else if (createdDocIds.length > 0) {
         const { error: revertError } = await sb.from('job_documents')

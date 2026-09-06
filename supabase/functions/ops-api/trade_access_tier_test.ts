@@ -2013,6 +2013,27 @@ Deno.test("redactTradeQuotePackMoney fail-closes money tokens on every customer 
   assertAllocatedTradeQuotePackProjection(out[0]);
 });
 
+Deno.test("redactTradeQuotePackMoney keeps sealed phrase only on payment_terms", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: { name: "50% deposit + 50% on completion" },
+    terms: { payment_terms: "50% deposit + 50% on completion $9,999", valid_days: 30 },
+    items: [{
+      kind: "info",
+      description: "50% deposit + 50% on completion",
+      quantity: 1,
+      unit_price: null,
+      line_total: null,
+    }],
+    summary: "50% deposit + 50% on completion",
+  }]);
+  assertEquals(out[0].customer?.name, null);
+  assertEquals(out[0].summary, null);
+  assertEquals(out[0].items[0].description, null);
+  assertEquals(out[0].terms?.payment_terms, "50% deposit + 50% on completion");
+  assertAllocatedTradeQuotePackProjection(out[0]);
+});
+
 Deno.test("redactTradeQuotePackMoney nulls a nested quantity object instead of copying it", () => {
   const out = redactTradeQuotePackMoney([{
     quote_number: "Q-1",

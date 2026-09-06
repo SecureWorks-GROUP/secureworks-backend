@@ -175,27 +175,37 @@ const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due)\b/i
 
+/** Exact sealed payment-terms phrase. Exempt only on a payment_terms field path. */
+export function isSealedPaymentTermsPhrase(value: string): boolean {
+  return TRADE_SEALED_PAYMENT_TERMS.test(String(value || '').trim())
+}
+
+/** Last path segment is `payment_terms` (`terms.payment_terms`, `extract.terms.payment_terms`). */
+export function isTradePaymentTermsFieldPath(path: string): boolean {
+  const parts = String(path || '').split(/[.[\]]+/).filter(Boolean)
+  return parts[parts.length - 1] === 'payment_terms'
+}
+
 /**
- * Ad-hoc percent or payment-language prose. The exact sealed payment-terms
- * phrase is exempt; "50% upfront" / "balance due" are not.
+ * Ad-hoc percent or payment-language prose. No sealed-phrase exemption —
+ * that lives only on an explicit payment_terms field path.
  */
 export function tradeTextHasAdHocPercentOrPaymentLanguage(value: string): boolean {
   const trimmed = String(value || '').trim()
   if (!trimmed) return false
-  if (TRADE_SEALED_PAYMENT_TERMS.test(trimmed)) return false
   return TRADE_PERCENT_MONEY_RE.test(trimmed) || TRADE_PAYMENT_LANGUAGE_RE.test(trimmed)
 }
 
 /**
  * Conservative money-token predicate for every extract / allocated-pack
  * string leaf, including identity fields. Fail closed: any hit drops the
- * field rather than copying it. Sealed payment-terms language is exempt.
+ * field rather than copying it. The sealed payment phrase is money here;
+ * callers exempt it only when the field path is payment_terms.
  */
 export function tradeTextHasMoneyToken(value: string): boolean {
   const text = String(value || '')
   const trimmed = text.trim()
   if (!trimmed) return false
-  if (TRADE_SEALED_PAYMENT_TERMS.test(trimmed)) return false
   if (/\$/.test(text)) return true
   if (/\b(?:A\$|AU\$|AUD|USD|GST)\b/i.test(text)) return true
   if (
@@ -831,10 +841,28 @@ export function allocatedTradePackProse(value: unknown): string | null {
   if (/^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(trimmed)) return null
   const cleaned = stripTradePackMoney(value)
   if (!cleaned) return ''
-  if (TRADE_SEALED_PAYMENT_TERMS.test(cleaned)) return cleaned
+  // Sealed phrase is payment_terms-only. A name / item / note leftover
+  // matching it is money prose and must not ride the allocated pack.
+  if (isSealedPaymentTermsPhrase(cleaned)) return null
   // Item leftovers may keep strip artifacts ("Install Deposit"). Ad-hoc
   // percent / payment-language prose must not ride the allocated pack.
   if (tradeTextHasAdHocPercentOrPaymentLanguage(cleaned)) return null
+  return cleaned
+}
+
+/**
+ * payment_terms only. Strip billed amounts, then keep the exact sealed
+ * leftover. Any other leftover with money / percent / payment-language
+ * fails closed. Do not use for customer, items, notes, or summary.
+ */
+export function allocatedPaymentTerms(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const cleaned = stripTradePackMoney(value)
+  if (!cleaned) return ''
+  if (isSealedPaymentTermsPhrase(cleaned)) return cleaned
+  if (tradeTextHasMoneyToken(cleaned)) return null
   return cleaned
 }
 
@@ -877,7 +905,9 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
   if (terms && typeof terms === 'object' && !Array.isArray(terms)) {
     for (const key of ALLOCATED_PACK_TERMS_STRINGS) {
       const value = (terms as Record<string, unknown>)[key]
-      if (typeof value === 'string' && tradeTextHasMoneyToken(value)) leaks.push(`terms.${key}`)
+      if (typeof value !== 'string') continue
+      if (key === 'payment_terms' && isSealedPaymentTermsPhrase(value)) continue
+      if (tradeTextHasMoneyToken(value)) leaks.push(`terms.${key}`)
     }
   }
   const items = row.items
@@ -885,7 +915,11 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
     items.forEach((item, index) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return
       const description = (item as Record<string, unknown>).description
-      if (typeof description === 'string' && tradeTextHasAdHocPercentOrPaymentLanguage(description)) {
+      if (typeof description !== 'string') return
+      if (
+        isSealedPaymentTermsPhrase(description) ||
+        tradeTextHasAdHocPercentOrPaymentLanguage(description)
+      ) {
         leaks.push(`items[${index}].description`)
       }
     })

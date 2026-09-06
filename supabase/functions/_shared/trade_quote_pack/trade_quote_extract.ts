@@ -16,7 +16,10 @@ import {
   type TradeQuoteCustomerSnapshot,
   type TradeQuotePack,
   type TradeQuoteTermsSnapshot,
+  allocatedPaymentTerms,
   frozenTradePackForExtract,
+  isSealedPaymentTermsPhrase,
+  isTradePaymentTermsFieldPath,
   overlayTradePackSnapshots,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
@@ -83,6 +86,13 @@ function failClosedText(value: unknown, scrub: (raw: string) => string | null): 
 
 function extractProse(value: unknown): string | null {
   return failClosedText(value, (raw) => stripTradePackMoney(raw).trim() || null);
+}
+
+/** payment_terms only. Sealed leftover after strip is kept; other money fails closed. */
+function extractPaymentTerms(value: unknown): string | null {
+  const kept = allocatedPaymentTerms(value);
+  if (!kept) return null;
+  return kept;
 }
 
 /** Phone / email / quote numbers keep digits. Drop the field if a money token is present. */
@@ -161,7 +171,7 @@ export function assembleTradeQuoteExtract(args: {
       site_suburb: extractProse(pack.customer?.site_suburb),
     },
     terms: {
-      payment_terms: extractProse(pack.terms?.payment_terms),
+      payment_terms: extractPaymentTerms(pack.terms?.payment_terms),
       valid_days: typeof pack.terms?.valid_days === "number" && Number.isFinite(pack.terms.valid_days)
         ? pack.terms.valid_days
         : null,
@@ -372,14 +382,15 @@ export const TRADE_QUOTE_EXTRACT_FORBIDDEN_KEYS = new Set([
   "amount",
 ]);
 
-const EXTRACT_HTML_SEALED_TERMS = /50%\s*deposit\s*\+\s*50%\s*on\s+completion/gi;
+const EXTRACT_HTML_SEALED_PAYMENT_TERMS_ROW =
+  /(<div><dt>Payment terms<\/dt><dd>)50%\s*deposit\s*\+\s*50%\s*on\s+completion(<\/dd><\/div>)/gi;
 const EXTRACT_HTML_FOOTER_DISCLAIMER = /It does not include prices, rates, or totals\./g;
 const EXTRACT_HTML_STYLE_BLOCK = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
 
 export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
   const stripped = String(html || "")
     .replace(EXTRACT_HTML_STYLE_BLOCK, "")
-    .replace(EXTRACT_HTML_SEALED_TERMS, "")
+    .replace(EXTRACT_HTML_SEALED_PAYMENT_TERMS_ROW, "$1$2")
     .replace(EXTRACT_HTML_FOOTER_DISCLAIMER, "");
   const hits: string[] = [];
   if (stripped.includes("$")) hits.push("$");
@@ -399,6 +410,7 @@ function extractStringLeafMoneyLeaks(value: unknown, path = ""): string[] {
   const leaks: string[] = [];
   const walk = (node: unknown, at: string) => {
     if (typeof node === "string") {
+      if (isTradePaymentTermsFieldPath(at) && isSealedPaymentTermsPhrase(node)) return;
       if (extractFieldHasMoney(node)) leaks.push(at || "root");
       return;
     }

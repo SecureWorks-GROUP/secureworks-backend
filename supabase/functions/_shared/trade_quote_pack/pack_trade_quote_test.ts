@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  allocatedPaymentTerms,
   allocatedTradePackIdentity,
   allocatedTradePackProse,
   allocatedTradeQuotePackProjectionLeaks,
@@ -14,6 +15,8 @@ import {
   sanitizeTradePackUnit,
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
+  isSealedPaymentTermsPhrase,
+  isTradePaymentTermsFieldPath,
   tradeTextHasAdHocPercentOrPaymentLanguage,
   tradeTextHasMoneyToken,
   TRADE_INSTALLER_RATES,
@@ -281,7 +284,7 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("0412 000 111"), false);
   assertEquals(tradeTextHasMoneyToken("pat@example.test"), false);
   assertEquals(tradeTextHasMoneyToken("2026-10-01"), false);
-  assertEquals(tradeTextHasMoneyToken("50% deposit + 50% on completion"), false);
+  assertEquals(tradeTextHasMoneyToken("50% deposit + 50% on completion"), true);
   assertEquals(tradeTextHasMoneyToken("0412 $18,400"), true);
   assertEquals(tradeTextHasMoneyToken("USD 12"), true);
   assertEquals(tradeTextHasMoneyToken("rate@example.test"), true);
@@ -299,15 +302,27 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("50% upfront"), true);
   assertEquals(tradeTextHasMoneyToken("balance due"), true);
   assertEquals(tradeTextHasMoneyToken("Pay 40 percent now"), true);
-  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("50% deposit + 50% on completion"), false);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("50% deposit + 50% on completion"), true);
   assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Install Deposit"), false);
   assertEquals(allocatedTradePackProse("50% upfront"), null);
+  assertEquals(allocatedTradePackProse("50% deposit + 50% on completion"), null);
   assertEquals(allocatedTradePackProse("Install Deposit"), "Install Deposit");
+  assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion"), "50% deposit + 50% on completion");
+  assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion $9,999"), "50% deposit + 50% on completion");
+  assertEquals(allocatedPaymentTerms("50% upfront"), null);
+  assertEquals(isSealedPaymentTermsPhrase("50% deposit + 50% on completion"), true);
+  assertEquals(isTradePaymentTermsFieldPath("extract.terms.payment_terms"), true);
+  assertEquals(isTradePaymentTermsFieldPath("customer.name"), false);
   assertEquals(allocatedTradePackIdentity("50% upfront"), null);
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     terms: { payment_terms: "50% upfront" },
     items: [{ description: "balance due on site" }],
   }).sort(), ["items[0].description", "terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { name: "50% deposit + 50% on completion" },
+    terms: { payment_terms: "50% deposit + 50% on completion" },
+    items: [{ description: "50% deposit + 50% on completion" }],
+  }).sort(), ["customer.name", "items[0].description"]);
 });
 
 Deno.test("frozenTradePackForExtract refuses live_fallback and unsent packs", () => {

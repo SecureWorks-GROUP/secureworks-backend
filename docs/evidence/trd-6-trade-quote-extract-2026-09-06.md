@@ -84,3 +84,22 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   row with `sent_at` and no open claim). An explicit `sent_to_client=false`
   or a still-open claim never exposes allocated packs. Same bar as
   send-runs.
+
+## Review-4 locks (2026-09-06)
+
+- **Sealed phrase is payment_terms-only.** `tradeTextHasMoneyToken` and
+  `allocatedTradePackProse` fail closed on `50% deposit + 50% on completion`
+  like any other money prose. The exact leftover is kept only by
+  `allocatedPaymentTerms` / extract `terms.payment_terms`. Customer name,
+  items, notes, and summary that carry that phrase are dropped. HTML leak
+  scanning strips the phrase only from the Payment terms `<dt>/<dd>` row.
+- **send-runs publishes per recipient.** A primary Resend success no longer
+  stamps neighbour documents. Each created doc publishes only when that
+  recipient's email succeeded. Job `draft` → `quoted` still requires the
+  primary client send.
+- **send-runs documents mint a quote number at insert** (`next_quote_number`,
+  fallback `job-run` / `job-run-N`) and select it through so frozen packs
+  stay extract-eligible.
+- **Publication stamp failure reverts the /send claim.** After Resend
+  accepts, a failed `sent_to_client`/`sent_at` write clears `send_claimed_at`
+  and returns 500 so retry is not stranded on `already_sent`.

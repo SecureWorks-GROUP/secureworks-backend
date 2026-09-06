@@ -122,6 +122,7 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
+  allocatedPaymentTerms,
   allocatedTradePackIdentity,
   allocatedTradePackProse,
   allocatedTradeQuotePackProjectionLeaks,
@@ -38904,7 +38905,7 @@ function redactAllocatedTradeQuoteTerms(terms: any): Record<string, unknown> | u
   return {
     payment_terms: terms.payment_terms == null
       ? terms.payment_terms
-      : failClosedAllocatedSnapshotString(allocatedTradePackProse(terms.payment_terms)),
+      : allocatedPaymentTerms(terms.payment_terms),
     valid_days: typeof terms.valid_days === 'number' && Number.isFinite(terms.valid_days)
       ? terms.valid_days
       : null,

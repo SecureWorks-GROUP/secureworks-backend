@@ -17,8 +17,11 @@ import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts"
 import { buildMinimalReleaseManifest } from "../_shared/release_packet/build_minimal_manifest.ts"
 import {
   claimQuoteDocumentSend,
+  documentIdsPublishedForSuccessfulSends,
+  publishQuoteDocumentSendOrRevert,
   quoteSendClaimPayload,
   quoteSendPublicationPayload,
+  sendRunQuoteNumberFallback,
 } from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
@@ -722,6 +725,65 @@ Deno.test("C5 — claim payload is send_claimed_at only; publication is the sent
     sent_to_client: true,
     sent_at: '2026-09-06T00:00:01.000Z',
   })
+})
+
+Deno.test("R4-002 send-runs publishes only docs for successful recipients", () => {
+  const recipients = [
+    { email: "pat@example.test", docs: [{ id: "doc-primary" }, { id: "doc-primary-2" }] },
+    { email: "neighbour@example.test", docs: [{ id: "doc-neighbour" }] },
+  ]
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(recipients, ["pat@example.test"]),
+    ["doc-primary", "doc-primary-2"],
+  )
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(recipients, ["neighbour@example.test"]),
+    ["doc-neighbour"],
+  )
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(recipients, ["pat@example.test", "neighbour@example.test"]),
+    ["doc-primary", "doc-primary-2", "doc-neighbour"],
+  )
+  assertEquals(documentIdsPublishedForSuccessfulSends(recipients, []), [])
+})
+
+Deno.test("R4-003 send-runs quote numbers are assigned per document", () => {
+  assertEquals(
+    sendRunQuoteNumberFallback({ jobNumber: "SWF-25101", runLabel: "REAR", party: "client" }),
+    "SWF-25101-REAR",
+  )
+  assertEquals(
+    sendRunQuoteNumberFallback({ jobNumber: "SWF-25101", runLabel: "REAR", party: "neighbour" }),
+    "SWF-25101-REAR-N",
+  )
+})
+
+Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async () => {
+  const updates: Record<string, unknown>[] = []
+  const sb = {
+    from: (_table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        updates.push(payload)
+        const resolved = {
+          error: "sent_to_client" in payload ? { message: "stamp failed" } : null,
+        }
+        const chain: Record<string, unknown> = {
+          eq: () => chain,
+          not: () => chain,
+          then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+            Promise.resolve(resolved).then(onFulfilled, onRejected),
+        }
+        return chain
+      },
+    }),
+  }
+  const result = await publishQuoteDocumentSendOrRevert(sb, "doc-pub")
+  assertEquals(result.published, false)
+  if (result.published === false) {
+    assertEquals(result.error, "stamp failed")
+  }
+  assertEquals(updates[0], quoteSendPublicationPayload(new Date(updates[0].sent_at as string)))
+  assertEquals(updates[1], { send_claimed_at: null })
 })
 
 // ════════════════════════════════════════════════════════════════════════════

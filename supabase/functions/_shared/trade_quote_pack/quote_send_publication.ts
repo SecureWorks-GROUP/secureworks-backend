@@ -10,6 +10,7 @@
 
 export type QuoteSendPublicationClient = {
   from: (table: string) => any
+  rpc?: (fn: string) => Promise<{ data: unknown; error: { message?: string } | null }>
 }
 
 export function quoteSendClaimPayload(now = new Date()): { send_claimed_at: string } {
@@ -72,4 +73,70 @@ export async function revertQuoteDocumentSendClaim(
     .eq('id', documentId)
     .not('sent_to_client', 'is', true)
   return { error: error || null }
+}
+
+/**
+ * Stamp publication after Resend. On stamp failure revert the in-flight
+ * claim so a retry can re-claim. Do not treat a logged error as success.
+ */
+export async function publishQuoteDocumentSendOrRevert(
+  sb: QuoteSendPublicationClient,
+  documentId: string,
+  now = new Date(),
+): Promise<{ published: true } | { published: false; error: string }> {
+  const { error } = await publishQuoteDocumentSend(sb, documentId, now)
+  if (!error) return { published: true }
+  const message = error.message || String(error)
+  console.error('[send-quote] publication stamp failed:', message)
+  await revertQuoteDocumentSendClaim(sb, documentId)
+  return { published: false, error: message }
+}
+
+/** Document ids belonging to recipients whose Resend call succeeded. */
+export function documentIdsPublishedForSuccessfulSends(
+  recipients: Array<{ email?: string | null; docs?: Array<{ id?: string | null }> | null }>,
+  successfulEmails: Iterable<string>,
+): string[] {
+  const ok = new Set(
+    [...successfulEmails]
+      .map((email) => String(email || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const recipient of recipients) {
+    const email = String(recipient.email || '').trim().toLowerCase()
+    if (!email || !ok.has(email)) continue
+    for (const doc of recipient.docs || []) {
+      const id = typeof doc?.id === 'string' ? doc.id.trim() : ''
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      ids.push(id)
+    }
+  }
+  return ids
+}
+
+export function sendRunQuoteNumberFallback(input: {
+  jobNumber?: string | null
+  runLabel?: string | null
+  party?: 'client' | 'neighbour'
+}): string {
+  const job = String(input.jobNumber || '').trim() || 'Q'
+  const run = String(input.runLabel || '').trim() || 'RUN'
+  const suffix = input.party === 'neighbour' ? '-N' : ''
+  return `${job}-${run}${suffix}`
+}
+
+export async function mintSendRunQuoteNumber(
+  sb: QuoteSendPublicationClient,
+  fallback: string,
+): Promise<string> {
+  if (typeof sb.rpc !== 'function') return fallback
+  const { data, error } = await sb.rpc('next_quote_number')
+  if (error) {
+    console.error('[send-quote] next_quote_number failed:', error.message || String(error))
+  }
+  if (typeof data === 'string' && data.trim()) return data.trim()
+  return fallback
 }
