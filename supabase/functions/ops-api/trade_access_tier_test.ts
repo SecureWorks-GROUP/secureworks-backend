@@ -209,7 +209,7 @@ function seed(): Tables {
         site_suburb: "Midland",
         scope_json: structuredClone(QUOTE_SCOPE),
         pricing_json: { labourTotal: 3200, total: 8800 },
-        notes: "Park on the verge. Extra $9,999. Charge 1,200 excluding GST.",
+        notes: "Park on the verge. Extra $9,999. Charge 1,200 excluding GST. Client approved $9,999 excluding GST.",
         metadata: { builder_po_number: "PO-1" },
       },
       {
@@ -493,7 +493,7 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     noteWorkOrder: "Use 90x90 posts",
     noteInternal: "Client is a repeat customer. Do not mention",
   });
-  assertEquals(p.job.notes, "Park on the verge. Extra . Charge .");
+  assertEquals(p.job.notes, "Park on the verge. Extra . Charge . Client approved");
   assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra");
   assertEquals(p.job.scope_json.job.supplierNotes, "Call before arrival. Charge");
   assertEquals(p.job.scope_json.config.totalMetres, 42);
@@ -751,7 +751,7 @@ Deno.test("trade_job_detail: the fencing division manager sees the quote docs an
   assertEquals(p.quote_visible, true);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-internal", "d-invoice", "d-quote-hid", "d-quote-vis", "d-supplier-quote", "d-supplier-wo", "d-wo"]);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
-  assertEquals(p.job.notes, "Park on the verge. Extra $9,999. Charge 1,200 excluding GST.");
+  assertEquals(p.job.notes, "Park on the verge. Extra $9,999. Charge 1,200 excluding GST. Client approved $9,999 excluding GST.");
   assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra $9,999");
   assertEquals(p.job.scope_json.notes.noteInternal, "Client is a repeat customer. Do not mention $9,999");
   assertEquals(p.workOrders[0].scope_items[0].rate, 85);

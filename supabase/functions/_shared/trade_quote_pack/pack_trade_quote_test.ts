@@ -203,6 +203,8 @@ Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary 
   assertEquals(stripTradePackMoney("Fee excl. GST 9,999"), "Fee");
   assertEquals(stripTradePackMoney("Fee plus GST 9,999"), "Fee");
   assertEquals(stripTradePackMoney("Fee +GST 9999"), "Fee");
+  assertEquals(stripTradePackMoney("Client approved $9,999 excluding GST"), "Client approved");
+  assertEquals(stripTradePackMoney("Watch the GST registration"), "Watch the GST registration");
   assertEquals(stripTradePackMoney("Line 9999AUD"), "Line");
   assertEquals(stripTradePackMoney("Plus 80 +GST"), "Plus");
   assertEquals(stripTradePackMoney("Rear 19m 1800mm install"), "Rear 19m 1800mm install");

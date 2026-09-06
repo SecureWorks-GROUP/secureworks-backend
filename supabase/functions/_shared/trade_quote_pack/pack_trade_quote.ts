@@ -465,8 +465,10 @@ const TRADE_PACK_CURRENCY_SUFFIX = '(?:AUD\\b|AU\\$|A\\$|\\$)'
 const TRADE_PACK_TAX_WORD = '(?:GST|tax)\\b'
 const TRADE_PACK_TAX_QUALIFIER =
   '(?:ex(?:cl(?:uding|usive)?)?|inc(?:l(?:uding|usive)?)?|excluding|including|exclusive|inclusive|plus|\\+)'
+const TRADE_PACK_TAX_QUALIFIED =
+  `(?:${TRADE_PACK_TAX_QUALIFIER}\\s*[.\\-]?\\s*(?:of\\s+)?${TRADE_PACK_TAX_WORD}|${TRADE_PACK_TAX_WORD}\\s*[.\\-]?\\s*${TRADE_PACK_TAX_QUALIFIER})`
 const TRADE_PACK_TAX_PHRASE =
-  `(?:${TRADE_PACK_TAX_QUALIFIER}\\s*[.\\-]?\\s*(?:of\\s+)?${TRADE_PACK_TAX_WORD}|${TRADE_PACK_TAX_WORD}\\s*[.\\-]?\\s*${TRADE_PACK_TAX_QUALIFIER}|${TRADE_PACK_TAX_WORD})`
+  `(?:${TRADE_PACK_TAX_QUALIFIED}|${TRADE_PACK_TAX_WORD})`
 
 /** Money-safe pack text: drop common currency figures, keep the writing.
  *  Prefix ($ / A$ / AUD 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
@@ -486,6 +488,9 @@ export function stripTradePackMoney(text: unknown): string {
       new RegExp(`\\(?\\s*${TRADE_PACK_TAX_PHRASE}\\s*\\)?\\s*:?\\s*${TRADE_PACK_MONEY_AMOUNT}`, 'gi'),
       '',
     )
+    // "$9,999 excluding GST" loses the figure first; drop the orphaned
+    // qualified tax mark. Bare "GST" / "tax" stays (not a money figure).
+    .replace(new RegExp(`\\(?\\s*${TRADE_PACK_TAX_QUALIFIED}\\s*\\)?`, 'gi'), '')
     .replace(/\s{2,}/g, ' ')
     .trim()
 }
