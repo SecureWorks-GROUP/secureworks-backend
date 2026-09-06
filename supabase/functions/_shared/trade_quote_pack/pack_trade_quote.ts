@@ -176,6 +176,9 @@ export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+c
 const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
   /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
+/** Net 30 / Nett 7 / N/30 / 30 days net. Not bare "net" or "netting". */
+const TRADE_NET_TERMS_RE =
+  /\b(?:nett?(?:\s*[-/]?\s*\d+(?:\s*days?)?)|\d+\s+days?\s+nett?|n\s*[-/]\s*\d+)\b/i
 const TRADE_CURRENCY_WORD_RE =
   /\b(?:dollars?|bucks?|euros?|cents?|pounds?|pence|pennies|yen|yuan|rupees?|francs?|quid|grands?)\b/i
 /** 10k / 2.5K / 1000k. Not `10m` — that is held construction metres. */
@@ -220,6 +223,11 @@ export function tradeTextHasAdHocPercentOrPaymentLanguage(value: string): boolea
   return TRADE_PERCENT_MONEY_RE.test(trimmed) || TRADE_PAYMENT_LANGUAGE_RE.test(trimmed)
 }
 
+/** Net-N payment terms. No sealed-phrase exemption — that is payment_terms-only. */
+export function tradeTextHasNetTerms(value: string): boolean {
+  return TRADE_NET_TERMS_RE.test(String(value || '').trim())
+}
+
 /** Bare currency words. Not AUD/USD codes — those stay on the token predicate. */
 export function tradeTextHasCurrencyWord(value: string): boolean {
   return TRADE_CURRENCY_WORD_RE.test(String(value || '').trim())
@@ -239,9 +247,9 @@ export function tradeAllocatedProseHasMoneyLanguage(value: string): boolean {
  * Conservative money-token predicate for every extract / allocated-pack
  * string leaf, including identity fields. Fail closed: any hit drops the
  * field rather than copying it. Covers $, common currency symbols/codes
- * (€ £ ¥ EUR GBP …), tax/invoice/billing prose, and payment language.
- * The sealed payment phrase is money here; callers exempt it only when
- * the field path is payment_terms.
+ * (€ £ ¥ EUR GBP …), tax/invoice/billing prose, payment language, and
+ * Net-N term forms. The sealed payment phrase is money here; callers
+ * exempt it only when the field path is payment_terms.
  */
 export function tradeTextHasMoneyToken(value: string): boolean {
   const text = String(value || '')
@@ -257,6 +265,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   if (TRADE_PACK_INFLECTED_MONEY_VOCAB_RE.test(text)) return true
   if (TRADE_TAX_INVOICE_LANGUAGE_RE.test(text)) return true
   if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
+  if (tradeTextHasNetTerms(trimmed)) return true
   return false
 }
 

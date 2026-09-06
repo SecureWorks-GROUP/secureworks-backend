@@ -504,3 +504,17 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-24 locks (2026-09-06)
+
+- **Net-N payment terms fail closed outside payment_terms.**
+  `tradeTextHasMoneyToken` refuses `Net 30` / `Nett 7` / `N/30` /
+  `30 days net` and similar forms. `stripTradePackMoney` still leaves
+  two-digit counts; the leftover must not ride allocated prose, identity,
+  quote-pack projections, or extract leaves. Bare `net` / `netting` /
+  `network` stay. Sealed phrase stays exempt only on
+  `terms.payment_terms`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.
