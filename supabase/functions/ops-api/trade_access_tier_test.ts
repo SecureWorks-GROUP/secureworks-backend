@@ -765,6 +765,19 @@ Deno.test("redactTradeQuotePackMoney fail-closes ad-hoc percent payment language
   assertEquals(sealed[0].terms?.payment_terms, "50% deposit + 50% on completion");
   assertEquals(sealed[0].items[0].description, "Install Deposit");
   assertAllocatedTradeQuotePackProjection(sealed[0]);
+  const leftover = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: { name: "Payment in dollars", site_address: "paid in bucks" },
+    terms: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
+    summary: "Payment 50 leftover",
+    items: [{ kind: "info", description: "Pay on site", quantity: 1, unit: "ea" }],
+  }]);
+  assertEquals(leftover[0].customer?.name, null);
+  assertEquals(leftover[0].customer?.site_address, null);
+  assertEquals(leftover[0].summary, null);
+  assertEquals(leftover[0].items[0].description, null);
+  assertEquals(leftover[0].terms?.payment_terms, "50% deposit + 50% on completion");
+  assertAllocatedTradeQuotePackProjection(leftover[0]);
 });
 
 Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {

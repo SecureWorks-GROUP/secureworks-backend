@@ -59,22 +59,25 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   Historical rows that omit the flag and already have `sent_at` stay
   eligible. `accepted_at` still wins.
 - **One conservative money-token predicate.** `tradeTextHasMoneyToken`
-  covers `$`, `A$`/`AU$`, `AUD`, `USD`, `GST`, and contextual words
+  covers `$`, `A$`/`AU$`, `AUD`, `USD`, `GST`, currency words
+  (`dollar(s)` / `buck(s)`), and contextual words
   (`rate`, `price`, `amount`, `cost`, `fee`, `deposit`, plus the existing
   total phrases) on every extract string leaf, identity included. Sealed
-  payment-terms language (`50% deposit + 50% on completion`) is exempt.
-  HTML assertion strips that phrase and the extract footer disclaimer
-  before scanning.
+  payment-terms language (`50% deposit + 50% on completion`) is exempt
+  only on `terms.payment_terms`. HTML assertion strips the Payment terms
+  row and the extract footer disclaimer before scanning.
 
 ## Review-3 locks (2026-09-06)
 
 - **Percent and payment-language fail closed.** `tradeTextHasMoneyToken`
   treats `%` / `percent` / `percentage` and payment-language words
-  (`upfront`, `balance`, `due`, and the neighbouring owing/payable set) as
-  money. The exact sealed phrase `50% deposit + 50% on completion` stays
-  exempt. Ad-hoc "50% upfront" / "balance due" drop from extracts and from
-  allocated customer/terms. Allocated item leftovers may still keep strip
-  artifacts such as `Install Deposit`; leftover percent/payment-language
+  (`upfront`, `balance`, `due`, `payment` / `pay` / `paid`, and the
+  neighbouring owing/payable set) as money. The exact sealed phrase
+  `50% deposit + 50% on completion` stays exempt only on
+  `terms.payment_terms`. Ad-hoc "50% upfront" / "balance due" /
+  "Payment 50" drop from extracts and from allocated customer/terms.
+  Allocated item leftovers may still keep strip artifacts such as
+  `Install Deposit`; leftover percent/payment-language / currency-word
   prose does not. HTML money needles strip `<style>` first so CSS `100%`
   is not a false leak.
 - **In-flight claim is not publication.** Direct `/send` locks
@@ -194,3 +197,16 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   an accepted historical/run row with a false or omitted sent marker is
   `use_published`, not claimed or re-emailed. Claim exclusive/reclaim also
   require `accepted_at IS NULL`.
+
+## Review-10 locks (2026-09-06)
+
+- **Payment prose and currency words fail closed outside payment_terms.**
+  `TRADE_PAYMENT_LANGUAGE_RE` includes `payment` / `pay` / `paid`.
+  `tradeTextHasMoneyToken` and allocated leftover prose also refuse
+  `dollar(s)` / `buck(s)`. After figure-strip, leftovers such as
+  `Payment 50` and `Payment in dollars` drop from extract notes,
+  customer fields, item descriptions, HTML, and quote-pack redaction.
+  The exact sealed phrase stays exempt only on `terms.payment_terms`.
+  HTML leak scanning removes the whole Payment terms row (label
+  included) so the `<dt>Payment terms</dt>` copy is not a false hit.
+  `Install Deposit` item leftovers remain allowed.

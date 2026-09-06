@@ -175,7 +175,8 @@ export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+c
 
 const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
 const TRADE_PAYMENT_LANGUAGE_RE =
-  /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due)\b/i
+  /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
+const TRADE_CURRENCY_WORD_RE = /\b(?:dollars?|bucks?)\b/i
 
 /** Exact sealed payment-terms phrase. Exempt only on a payment_terms field path. */
 export function isSealedPaymentTermsPhrase(value: string): boolean {
@@ -198,6 +199,20 @@ export function tradeTextHasAdHocPercentOrPaymentLanguage(value: string): boolea
   return TRADE_PERCENT_MONEY_RE.test(trimmed) || TRADE_PAYMENT_LANGUAGE_RE.test(trimmed)
 }
 
+/** Bare currency words. Not AUD/USD codes — those stay on the token predicate. */
+export function tradeTextHasCurrencyWord(value: string): boolean {
+  return TRADE_CURRENCY_WORD_RE.test(String(value || '').trim())
+}
+
+/**
+ * Allocated leftover prose after figure-strip: payment language, percents,
+ * and currency words. Does not include leftover artifacts such as
+ * `Install Deposit` (deposit is a money token, not this fence).
+ */
+export function tradeAllocatedProseHasMoneyLanguage(value: string): boolean {
+  return tradeTextHasAdHocPercentOrPaymentLanguage(value) || tradeTextHasCurrencyWord(value)
+}
+
 /**
  * Conservative money-token predicate for every extract / allocated-pack
  * string leaf, including identity fields. Fail closed: any hit drops the
@@ -210,6 +225,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   if (!trimmed) return false
   if (/\$/.test(text)) return true
   if (/\b(?:A\$|AU\$|AUD|USD|GST)\b/i.test(text)) return true
+  if (tradeTextHasCurrencyWord(text)) return true
   if (
     /\b(?:rate|price|amount|cost|fee|subtotal|quoted|charged|unit\s+price|line\s+total|totalIncGST|totalExGST)\b/i
       .test(text)
@@ -892,8 +908,9 @@ export function allocatedTradePackProse(value: unknown): string | null {
   // matching it is money prose and must not ride the allocated pack.
   if (isSealedPaymentTermsPhrase(cleaned)) return null
   // Item leftovers may keep strip artifacts ("Install Deposit"). Ad-hoc
-  // percent / payment-language prose must not ride the allocated pack.
-  if (tradeTextHasAdHocPercentOrPaymentLanguage(cleaned)) return null
+  // percent / payment-language / currency-word prose must not ride the
+  // allocated pack. Sealed phrase stays payment_terms-only.
+  if (tradeAllocatedProseHasMoneyLanguage(cleaned)) return null
   return cleaned
 }
 
@@ -970,7 +987,7 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
       if (typeof description !== 'string') return
       if (
         isSealedPaymentTermsPhrase(description) ||
-        tradeTextHasAdHocPercentOrPaymentLanguage(description)
+        tradeAllocatedProseHasMoneyLanguage(description)
       ) {
         leaks.push(`items[${index}].description`)
       }

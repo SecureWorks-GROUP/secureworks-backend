@@ -19,7 +19,9 @@ import {
   tradePackMoneyLeakKeys,
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
+  tradeAllocatedProseHasMoneyLanguage,
   tradeTextHasAdHocPercentOrPaymentLanguage,
+  tradeTextHasCurrencyWord,
   tradeTextHasMoneyToken,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
@@ -310,6 +312,24 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("50% upfront"), true);
   assertEquals(tradeTextHasMoneyToken("balance due"), true);
   assertEquals(tradeTextHasMoneyToken("Pay 40 percent now"), true);
+  assertEquals(tradeTextHasMoneyToken("Payment 50"), true);
+  assertEquals(tradeTextHasMoneyToken("Payment in dollars"), true);
+  assertEquals(tradeTextHasMoneyToken("paid in bucks"), true);
+  assertEquals(tradeTextHasMoneyToken("Pay now"), true);
+  assertEquals(tradeTextHasMoneyToken("dollars"), true);
+  assertEquals(tradeTextHasMoneyToken("bucks"), true);
+  assertEquals(tradeTextHasMoneyToken("Payne Client"), false);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Payment 50"), true);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Pay now"), true);
+  assertEquals(tradeTextHasCurrencyWord("Payment in dollars"), true);
+  assertEquals(tradeTextHasCurrencyWord("in bucks"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Payment 50"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("in dollars"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Install Deposit"), false);
+  assertEquals(allocatedTradePackProse("Payment 50"), null);
+  assertEquals(allocatedTradePackProse("Payment in dollars"), null);
+  assertEquals(allocatedTradePackProse("in dollars"), null);
+  assertEquals(allocatedTradePackProse("paid in bucks"), null);
   assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("50% deposit + 50% on completion"), true);
   assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Install Deposit"), false);
   assertEquals(allocatedTradePackProse("50% upfront"), null);
@@ -328,6 +348,10 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
     terms: { payment_terms: "50% upfront" },
     items: [{ description: "balance due on site" }],
   }).sort(), ["items[0].description", "terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { name: "Payment in dollars", site_address: "paid in bucks" },
+    items: [{ description: "Payment 50" }],
+  }).sort(), ["customer.name", "customer.site_address", "items[0].description"]);
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     terms: { payment_terms: "Payment on completion" },
   }), ["terms.payment_terms"]);

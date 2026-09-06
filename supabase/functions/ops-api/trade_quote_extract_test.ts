@@ -306,6 +306,42 @@ Deno.test("extract fail-closes ad-hoc percent and payment-language outside seale
   assertTradeQuoteExtractArtifact(clean, html);
 });
 
+Deno.test("extract fail-closes payment prose and currency words outside sealed terms", () => {
+  const dirty = structuredClone(PACK);
+  dirty.customer.name = "Payment in dollars";
+  dirty.customer.site_address = "paid in bucks";
+  dirty.notes = "Payment 50";
+  dirty.summary = "Pay now leftover";
+  dirty.items.push({
+    kind: "info",
+    description: "Payment 50 on site",
+    quantity: 1,
+    unit: "ea",
+    unit_price: null,
+    line_total: null,
+  });
+  const extract = assembleTradeQuoteExtract({ pack: dirty, job: { job_number: "SWF-25101" } });
+  assertEquals(extract.customer.name, null);
+  assertEquals(extract.customer.site_address, null);
+  assertEquals(extract.notes, []);
+  assertEquals(extract.summary, null);
+  assertEquals(extract.scope.some((row) => /payment|pay|paid|dollar|buck/i.test(row.description)), false);
+  assertEquals(extract.terms.payment_terms, "50% deposit + 50% on completion");
+  const html = renderTradeQuoteExtractHtml(extract);
+  assertEquals(tradeQuoteExtractHtmlMoneyNeedles(html), []);
+  assertTradeQuoteExtractArtifact(extract, html);
+  assert(!/Payment 50|Payment in dollars|paid in bucks|Pay now leftover/i.test(html));
+
+  const leaked = assembleTradeQuoteExtract({ pack: PACK, job: { job_number: "SWF-25101" } });
+  leaked.notes = ["Payment 50"];
+  leaked.customer.name = "Payment in dollars";
+  leaked.scope.push({ kind: "info", description: "in bucks", quantity: 1, unit: "ea" });
+  const leakedHtml = renderTradeQuoteExtractHtml(leaked);
+  const needles = tradeQuoteExtractHtmlMoneyNeedles(leakedHtml);
+  assert(needles.includes("payment-language") || needles.includes("money-token"));
+  assert(needles.includes("currency") || needles.includes("money-token"));
+});
+
 Deno.test("sealed payment phrase is exempt only on terms.payment_terms", () => {
   const dirty = structuredClone(PACK);
   dirty.customer.name = "50% deposit + 50% on completion";
