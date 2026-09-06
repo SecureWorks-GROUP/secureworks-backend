@@ -1,19 +1,24 @@
-// send-quote SEND-AUTH test suite (H2 hotfix: user JWTs accepted alongside shared key).
+// send-quote SEND-AUTH test suite (TRD6-R6-001 office/admin send lock).
 //
-// LOCAL-ONLY, same convention as index_test.ts: the auth decision lives inline in
-// the serve() HTTP handler in index.ts (importing index.ts would boot the prod
-// server via serve(...) at module load). We therefore copy the decision block
-// verbatim below into `decideSendAuth`, preserving every branch, header name,
-// comparison, status code and error string from index.ts:614-681. Any drift is
-// caught at PR review via grep diff.
+// Imports the real decideSendQuoteAuth / tenant helpers so the handler and
+// this suite cannot drift. /send and /send-runs require admin, owner, or
+// ops_manager (OPS_API_STAFF_OPERATOR_ROLES). Trade JWTs are 403. API-key
+// and service-role stay office. /send-invoice still accepts any user JWT.
 //
 // Run from the worktree root:
-//   deno test --allow-net --allow-env supabase/functions/send-quote/auth_test.ts
+//   deno test --allow-net --allow-env --allow-read supabase/functions/send-quote/auth_test.ts
 
 import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.208.0/assert/mod.ts";
+import {
+  decideSendQuoteAuth,
+  isSendQuoteStaffOperatorRole,
+  jobOrgIdFromQuoteSendDocument,
+  quoteSendTenantAccess,
+  SEND_QUOTE_STAFF_OPERATOR_ROLES,
+} from "./quote_send_auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -21,119 +26,42 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
 };
 
-type AuthDecision =
-  | {
-    kind: "allow";
-    mode: "api_key" | "jwt";
-    user: { id: string; email: string; role: string } | null;
-  }
-  | { kind: "reject"; response: Response };
-
-// ── EXACT COPY of the send-auth block from index.ts:614-681 ───────────────────
-// `env` stands in for Deno.env.get(...) and `sb` for the service-role client.
-async function decideSendAuth(
-  req: Request,
-  sb: any,
-  env: Record<string, string | undefined>,
-  path: string | undefined,
-): Promise<AuthDecision> {
-  let sendAuthMode: "api_key" | "jwt" = "api_key";
-  let sendAuthUser: { id: string; email: string; role: string } | null = null;
-  if (path === "send" || path === "send-invoice" || path === "send-runs") {
-    const validKey = env["SW_API_KEY"];
-    const serviceKey = env["SUPABASE_SERVICE_ROLE_KEY"];
-    const xApiKey = req.headers.get("x-api-key");
-    const authHeader = req.headers.get("authorization");
-    const bearerToken = authHeader?.startsWith("Bearer ")
-      ? authHeader.slice(7)
-      : null;
-
-    if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
-      sendAuthMode = "api_key"; // server-to-server via x-api-key header (unchanged)
-    } else if (
-      bearerToken && (bearerToken === validKey || bearerToken === serviceKey)
-    ) {
-      sendAuthMode = "api_key"; // server-to-server via Authorization header (unchanged)
-    } else if (bearerToken) {
-      // Verify as a Supabase user JWT (browser request from a scoping tool).
-      try {
-        const { data: { user }, error } = await sb.auth.getUser(bearerToken);
-        if (error || !user) {
-          return {
-            kind: "reject",
-            response: new Response(
-              JSON.stringify({
-                error: "Session expired — please log in again",
-              }),
-              {
-                status: 401,
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
-              },
-            ),
-          };
-        }
-        const { data: profile } = await sb.from("users")
-          .select("role")
-          .eq("id", user.id)
-          .maybeSingle();
-        sendAuthMode = "jwt";
-        sendAuthUser = {
-          id: user.id,
-          email: user.email || "",
-          role: profile?.role || "unknown",
-        };
-      } catch (_e) {
-        return {
-          kind: "reject",
-          response: new Response(
-            JSON.stringify({ error: "Authentication failed" }),
-            {
-              status: 401,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            },
-          ),
-        };
-      }
-    } else {
-      return {
-        kind: "reject",
-        response: new Response(JSON.stringify({ error: "Unauthorized" }), {
-          status: 401,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }),
-      };
-    }
-
-    // Attribution ledger: who sent what, under which auth mode.
-    console.log(
-      "[send-quote] auth",
-      JSON.stringify({
-        path,
-        authMode: sendAuthMode,
-        userId: sendAuthUser?.id ?? null,
-        userEmail: sendAuthUser?.email ?? null,
-        userRole: sendAuthUser?.role ?? null,
-      }),
-    );
-  }
-  return { kind: "allow", mode: sendAuthMode, user: sendAuthUser };
-}
-// ── END EXACT COPY ──
-
 const ENV = {
   SW_API_KEY: "master-sw-key-123",
   SUPABASE_SERVICE_ROLE_KEY: "service-role-key-456",
 };
 
-// Mock service-role client. getUser validates the bearer against a fixture
-// "signing key": only VALID_JWT resolves to a user; EXPIRED_JWT returns an error
-// (mirrors Supabase returning {error} for a forged/expired token); THROW_JWT makes
-// getUser throw (network/transport failure).
+const DEFAULT_ORG = "00000000-0000-0000-0000-000000000001";
+const OTHER_ORG = "11111111-1111-1111-1111-111111111111";
+
 const VALID_JWT = "valid.user.jwt";
 const EXPIRED_JWT = "expired.user.jwt";
 const THROW_JWT = "throw.user.jwt";
 
-function makeAuthSb() {
+function decideSendAuth(
+  req: Request,
+  sb: any,
+  env: Record<string, string | undefined>,
+  path: string | undefined,
+) {
+  return decideSendQuoteAuth({
+    req,
+    sb,
+    path,
+    corsHeaders,
+    swApiKey: env["SW_API_KEY"],
+    serviceRoleKey: env["SUPABASE_SERVICE_ROLE_KEY"],
+  });
+}
+
+function makeAuthSb(opts?: {
+  role?: string | null;
+  orgId?: string | null;
+  profileError?: { message: string } | null;
+}) {
+  const role = opts && "role" in opts ? opts.role : "estimator";
+  const orgId = opts && "orgId" in opts ? opts.orgId : DEFAULT_ORG;
+  const profileError = opts?.profileError ?? null;
   return {
     auth: {
       getUser: (token: string) => {
@@ -145,7 +73,7 @@ function makeAuthSb() {
             data: {
               user: {
                 id: "user-uuid-777",
-                email: "estimator@secureworksgroup.app",
+                email: "operator@secureworksgroup.app",
               },
             },
             error: null,
@@ -160,8 +88,18 @@ function makeAuthSb() {
     from: (_table: string) => ({
       select: (_c: string) => ({
         eq: (_col: string, _val: string) => ({
-          maybeSingle: () =>
-            Promise.resolve({ data: { role: "estimator" }, error: null }),
+          maybeSingle: () => {
+            if (profileError) {
+              return Promise.resolve({ data: null, error: profileError });
+            }
+            if (role == null && orgId == null) {
+              return Promise.resolve({ data: null, error: null });
+            }
+            return Promise.resolve({
+              data: { role, org_id: orgId },
+              error: null,
+            });
+          },
         }),
       }),
     }),
@@ -175,7 +113,6 @@ function req(headers: Record<string, string>, path = "send") {
   });
 }
 
-// Log capture for the attribution-ledger assertion.
 function captureAuthLog() {
   const captured: any[] = [];
   const original = console.log;
@@ -194,7 +131,28 @@ function captureAuthLog() {
   };
 }
 
-// ── A1: valid x-api-key → allowed, api_key mode (historical server-to-server, unchanged) ──
+Deno.test("staff operator roles match the ops-api office set", () => {
+  assertEquals(
+    [...SEND_QUOTE_STAFF_OPERATOR_ROLES].sort(),
+    ["admin", "ops_manager", "owner"],
+  );
+  for (const role of ["admin", "owner", "ops_manager", "ADMIN", "Owner"]) {
+    assertEquals(isSendQuoteStaffOperatorRole(role), true, role);
+  }
+  for (const role of [
+    "estimator",
+    "lead_installer",
+    "trade",
+    "allocated",
+    "makesafe_open",
+    "unknown",
+    "",
+    null,
+  ]) {
+    assertEquals(isSendQuoteStaffOperatorRole(role), false, String(role));
+  }
+});
+
 Deno.test("A1 — valid x-api-key header → allow, mode=api_key (unchanged path)", async () => {
   const d = await decideSendAuth(
     req({ "x-api-key": ENV.SW_API_KEY }),
@@ -208,7 +166,6 @@ Deno.test("A1 — valid x-api-key header → allow, mode=api_key (unchanged path
   assertEquals(d.user, null);
 });
 
-// ── A2: Authorization: Bearer <master key> → allowed, api_key mode (unchanged) ──
 Deno.test("A2 — Bearer master SW_API_KEY → allow, mode=api_key (unchanged path)", async () => {
   const d = await decideSendAuth(
     req({ authorization: `Bearer ${ENV.SW_API_KEY}` }),
@@ -220,7 +177,6 @@ Deno.test("A2 — Bearer master SW_API_KEY → allow, mode=api_key (unchanged pa
   assertEquals(d.mode, "api_key");
 });
 
-// ── A3: Authorization: Bearer <service-role key> → allowed, api_key mode (unchanged) ──
 Deno.test("A3 — Bearer service-role key → allow, mode=api_key (unchanged path)", async () => {
   const d = await decideSendAuth(
     req({ authorization: `Bearer ${ENV.SUPABASE_SERVICE_ROLE_KEY}` }),
@@ -232,56 +188,112 @@ Deno.test("A3 — Bearer service-role key → allow, mode=api_key (unchanged pat
   assertEquals(d.mode, "api_key");
 });
 
-// ── A4: THE FIX — logged-in Supabase user JWT bearer → allowed, mode=jwt, user captured ──
-Deno.test("A4 — valid user JWT bearer (scoping tool login) → allow, mode=jwt, user+role captured", async () => {
+Deno.test("A4 — estimator JWT on /send is 403, not send authority", async () => {
   const cap = captureAuthLog();
   try {
     const d = await decideSendAuth(
       req({ authorization: `Bearer ${VALID_JWT}` }),
-      makeAuthSb(),
+      makeAuthSb({ role: "estimator" }),
       ENV,
       "send",
     );
-    assert(d.kind === "allow");
-    assertEquals(d.mode, "jwt");
-    assertEquals(d.user, {
-      id: "user-uuid-777",
-      email: "estimator@secureworksgroup.app",
-      role: "estimator",
-    });
-    // Attribution ledger records the caller under jwt mode.
+    assert(d.kind === "reject");
+    assertEquals(d.response.status, 403);
+    const body = await d.response.json();
+    assertEquals(body.error, "Quote send requires an office operator session");
+    assertEquals(body.code, "operator_access_required");
     assertEquals(cap.captured.length, 1);
-    assertEquals(cap.captured[0].authMode, "jwt");
-    assertEquals(cap.captured[0].userId, "user-uuid-777");
+    assertEquals(cap.captured[0].refused, true);
     assertEquals(cap.captured[0].userRole, "estimator");
   } finally {
     cap.restore();
   }
 });
 
-// ── A4b: any authenticated user is allowed regardless of role (R1: no admin/owner gate) ──
-Deno.test("A4b — valid JWT with no users-row profile → allowed, role defaults to 'unknown' (not gated)", async () => {
-  const sb = makeAuthSb();
-  sb.from = (_t: string) =>
-    ({
-      select: (_c: string) => ({
-        eq: (_col: string, _v: string) => ({
-          maybeSingle: () => Promise.resolve({ data: null, error: null }),
-        }),
-      }),
-    }) as any;
+Deno.test("A4-office — admin / owner / ops_manager JWT may send", async () => {
+  for (const role of ["admin", "owner", "ops_manager"]) {
+    const cap = captureAuthLog();
+    try {
+      const d = await decideSendAuth(
+        req({ authorization: `Bearer ${VALID_JWT}` }),
+        makeAuthSb({ role, orgId: DEFAULT_ORG }),
+        ENV,
+        "send",
+      );
+      assert(d.kind === "allow", role);
+      assertEquals(d.mode, "jwt");
+      assertEquals(d.user, {
+        id: "user-uuid-777",
+        email: "operator@secureworksgroup.app",
+        role,
+        orgId: DEFAULT_ORG,
+      });
+      assertEquals(cap.captured[0].authMode, "jwt");
+      assertEquals(cap.captured[0].userRole, role);
+      assertEquals(cap.captured[0].refused, false);
+    } finally {
+      cap.restore();
+    }
+  }
+});
+
+Deno.test("A4b — missing users-row profile on /send is 403, not unknown send", async () => {
   const d = await decideSendAuth(
     req({ authorization: `Bearer ${VALID_JWT}` }),
-    sb,
+    makeAuthSb({ role: null, orgId: null }),
     ENV,
     "send",
   );
-  assert(d.kind === "allow");
-  assertEquals(d.mode, "jwt");
-  assertEquals(d.user?.role, "unknown");
+  assert(d.kind === "reject");
+  assertEquals(d.response.status, 403);
+  assertEquals((await d.response.json()).code, "operator_access_required");
 });
 
-// ── A5: expired/forged JWT (getUser returns error) → 401 "Session expired" ──
+Deno.test("A4c — trade / allocated / makesafe_open / lead_installer JWTs cannot send", async () => {
+  for (const role of ["trade", "allocated", "makesafe_open", "lead_installer"]) {
+    const send = await decideSendAuth(
+      req({ authorization: `Bearer ${VALID_JWT}` }),
+      makeAuthSb({ role }),
+      ENV,
+      "send",
+    );
+    assert(send.kind === "reject", role);
+    assertEquals(send.response.status, 403);
+    const runs = await decideSendAuth(
+      req({ authorization: `Bearer ${VALID_JWT}` }, "send-runs"),
+      makeAuthSb({ role }),
+      ENV,
+      "send-runs",
+    );
+    assert(runs.kind === "reject", `${role} send-runs`);
+    assertEquals(runs.response.status, 403);
+  }
+});
+
+Deno.test("A4d — send-invoice still accepts a verified estimator JWT", async () => {
+  const d = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+    makeAuthSb({ role: "estimator" }),
+    ENV,
+    "send-invoice",
+  );
+  assert(d.kind === "allow");
+  assertEquals(d.mode, "jwt");
+  assertEquals(d.user?.role, "estimator");
+});
+
+Deno.test("A4e — unreadable users profile on /send is 503, not send authority", async () => {
+  const d = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }),
+    makeAuthSb({ profileError: { message: "timeout" } }),
+    ENV,
+    "send",
+  );
+  assert(d.kind === "reject");
+  assertEquals(d.response.status, 503);
+  assertEquals((await d.response.json()).code, "operator_profile_unreadable");
+});
+
 Deno.test("A5 — expired/forged JWT → 401 'Session expired — please log in again'", async () => {
   const d = await decideSendAuth(
     req({ authorization: `Bearer ${EXPIRED_JWT}` }),
@@ -297,7 +309,6 @@ Deno.test("A5 — expired/forged JWT → 401 'Session expired — please log in 
   );
 });
 
-// ── A6: getUser transport failure (throws) → 401 "Authentication failed" ──
 Deno.test("A6 — getUser throws (transport failure) → 401 'Authentication failed'", async () => {
   const d = await decideSendAuth(
     req({ authorization: `Bearer ${THROW_JWT}` }),
@@ -310,7 +321,6 @@ Deno.test("A6 — getUser throws (transport failure) → 401 'Authentication fai
   assertEquals((await d.response.json()).error, "Authentication failed");
 });
 
-// ── A7: no credentials at all → 401 "Unauthorized" ──
 Deno.test("A7 — no x-api-key and no bearer → 401 'Unauthorized'", async () => {
   const d = await decideSendAuth(req({}), makeAuthSb(), ENV, "send-runs");
   assert(d.kind === "reject");
@@ -318,7 +328,6 @@ Deno.test("A7 — no x-api-key and no bearer → 401 'Unauthorized'", async () =
   assertEquals((await d.response.json()).error, "Unauthorized");
 });
 
-// ── A8: wrong x-api-key with no bearer → 401 (bad key is not a JWT bearer) ──
 Deno.test("A8 — wrong x-api-key, no bearer → 401 'Unauthorized'", async () => {
   const d = await decideSendAuth(
     req({ "x-api-key": "not-the-key" }),
@@ -331,25 +340,97 @@ Deno.test("A8 — wrong x-api-key, no bearer → 401 'Unauthorized'", async () =
   assertEquals((await d.response.json()).error, "Unauthorized");
 });
 
-// ── A9: public path (view) is NOT auth-gated → allowed with default mode, no getUser call ──
 Deno.test("A9 — public 'view' path bypasses send-auth entirely (no credentials needed)", async () => {
   const d = await decideSendAuth(req({}, "view"), makeAuthSb(), ENV, "view");
   assert(d.kind === "allow");
 });
 
-// ── A10: all three guarded paths enforce auth identically ──
-Deno.test("A10 — send / send-invoice / send-runs all reject anon and accept a user JWT", async () => {
+Deno.test("A10 — send / send-runs reject trade JWT; send-invoice still accepts user JWT", async () => {
   for (const p of ["send", "send-invoice", "send-runs"]) {
     const anon = await decideSendAuth(req({}, p), makeAuthSb(), ENV, p);
     assert(anon.kind === "reject", `${p} must reject anon`);
     assertEquals(anon.response.status, 401);
-    const jwt = await decideSendAuth(
-      req({ authorization: `Bearer ${VALID_JWT}` }, p),
-      makeAuthSb(),
-      ENV,
-      p,
-    );
-    assert(jwt.kind === "allow", `${p} must accept a valid user JWT`);
-    assertEquals(jwt.mode, "jwt");
   }
+  const estimatorSend = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }),
+    makeAuthSb({ role: "estimator" }),
+    ENV,
+    "send",
+  );
+  assert(estimatorSend.kind === "reject");
+  assertEquals(estimatorSend.response.status, 403);
+
+  const estimatorRuns = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }, "send-runs"),
+    makeAuthSb({ role: "estimator" }),
+    ENV,
+    "send-runs",
+  );
+  assert(estimatorRuns.kind === "reject");
+  assertEquals(estimatorRuns.response.status, 403);
+
+  const invoice = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+    makeAuthSb({ role: "estimator" }),
+    ENV,
+    "send-invoice",
+  );
+  assert(invoice.kind === "allow");
+  assertEquals(invoice.mode, "jwt");
+
+  const adminRuns = await decideSendAuth(
+    req({ authorization: `Bearer ${VALID_JWT}` }, "send-runs"),
+    makeAuthSb({ role: "admin", orgId: DEFAULT_ORG }),
+    ENV,
+    "send-runs",
+  );
+  assert(adminRuns.kind === "allow");
+  assertEquals(adminRuns.mode, "jwt");
+});
+
+Deno.test("T1 — JWT office caller may send only a same-org job", () => {
+  assertEquals(
+    quoteSendTenantAccess("jwt", DEFAULT_ORG, DEFAULT_ORG),
+    { ok: true },
+  );
+});
+
+Deno.test("T2 — JWT office caller cannot send another tenant's job", () => {
+  const d = quoteSendTenantAccess("jwt", DEFAULT_ORG, OTHER_ORG);
+  assertEquals(d.ok, false);
+  if (!d.ok) {
+    assertEquals(d.status, 403);
+    assertEquals(d.code, "operator_access_required");
+  }
+});
+
+Deno.test("T3 — missing caller or job org fails closed for JWT", () => {
+  for (const [caller, job] of [
+    [null, DEFAULT_ORG],
+    [DEFAULT_ORG, null],
+    ["", DEFAULT_ORG],
+    [DEFAULT_ORG, ""],
+    [null, null],
+  ] as const) {
+    const d = quoteSendTenantAccess("jwt", caller, job);
+    assertEquals(d.ok, false, `${caller} vs ${job}`);
+  }
+});
+
+Deno.test("T4 — api_key skips tenant compare (ops dashboard)", () => {
+  assertEquals(quoteSendTenantAccess("api_key", null, OTHER_ORG).ok, true);
+  assertEquals(quoteSendTenantAccess("api_key", DEFAULT_ORG, OTHER_ORG).ok, true);
+});
+
+Deno.test("T5 — nested jobs.org_id is read from the send document join", () => {
+  assertEquals(
+    jobOrgIdFromQuoteSendDocument({ jobs: { org_id: DEFAULT_ORG } }),
+    DEFAULT_ORG,
+  );
+  assertEquals(
+    jobOrgIdFromQuoteSendDocument({ jobs: [{ org_id: DEFAULT_ORG }] }),
+    DEFAULT_ORG,
+  );
+  assertEquals(jobOrgIdFromQuoteSendDocument({ jobs: null }), undefined);
+  assertEquals(jobOrgIdFromQuoteSendDocument(null), undefined);
 });

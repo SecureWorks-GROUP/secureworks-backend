@@ -69,6 +69,12 @@ import {
   SealedSesMoneyFenceLookupError,
 } from '../_shared/sealed_ses_money_fence.ts'
 import { validateBrandedInvoiceDeliveryBinding } from './invoice_delivery_fence.ts'
+import {
+  decideSendQuoteAuth,
+  jobOrgIdFromQuoteSendDocument,
+  quoteSendTenantAccess,
+  type SendQuoteAuthUser,
+} from './quote_send_auth.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -643,68 +649,29 @@ serve(async (req: Request) => {
 
   try {
     // ── Auth (only for send/send-invoice/send-runs — view/accept/decline are public client endpoints) ──
-    // Two caller classes are accepted (mirrors ops-api/index.ts:2218-2274):
+    // Two caller classes are accepted (mirrors ops-api staff + shared-key):
     //   api_key — the master SW_API_KEY (ops dashboard, patio tool, agents) or the
     //             service-role key, presented via x-api-key OR Authorization: Bearer.
-    //             This path is byte-for-byte the historical behaviour and MUST stay.
-    //   jwt     — a logged-in Supabase user (the scoping tools). Since fence commit
-    //             8c39ca2 the fence client sends the user's JWT as the bearer whenever
-    //             a session exists, so a healthy login always presented a non-key
-    //             bearer and got 401. We now verify that bearer as a Supabase user JWT
-    //             (getUser is validated against Supabase's signing key server-side, so
-    //             a forged/expired token cannot pass) and allow authenticated users.
-    // Role note (R1): we capture the caller's role for attribution/logging but do NOT
-    // gate on it. ops-api restricts privileged actions to admin/owner, but the scoping
-    // senders we are unblocking are estimators — an admin/owner-only gate would re-break
-    // the exact login this hotfix fixes. Any valid authenticated Supabase user may send.
-    // FLAGGED for the adversarial reviewer.
+    //             This path is office send authority and MUST stay.
+    //   jwt     — a logged-in Supabase user. /send and /send-runs require an
+    //             office staff role (admin / owner / ops_manager), matching
+    //             OPS_API_STAFF_OPERATOR_ROLES. Trade / estimator / allocated /
+    //             makesafe_open JWTs are 403 before any Resend or draft→quoted
+    //             write. /send-invoice keeps any verified user JWT.
     let sendAuthMode: 'api_key' | 'jwt' = 'api_key'
-    let sendAuthUser: { id: string; email: string; role: string } | null = null
+    let sendAuthUser: SendQuoteAuthUser | null = null
     if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
-      const validKey = Deno.env.get('SW_API_KEY')
-      const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-      const xApiKey = req.headers.get('x-api-key')
-      const authHeader = req.headers.get('authorization')
-      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-
-      if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
-        sendAuthMode = 'api_key' // server-to-server via x-api-key header (unchanged)
-      } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
-        sendAuthMode = 'api_key' // server-to-server via Authorization header (unchanged)
-      } else if (bearerToken) {
-        // Verify as a Supabase user JWT (browser request from a scoping tool).
-        try {
-          const { data: { user }, error } = await sb.auth.getUser(bearerToken)
-          if (error || !user) {
-            return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
-              status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            })
-          }
-          const { data: profile } = await sb.from('users')
-            .select('role')
-            .eq('id', user.id)
-            .maybeSingle()
-          sendAuthMode = 'jwt'
-          sendAuthUser = { id: user.id, email: user.email || '', role: profile?.role || 'unknown' }
-        } catch (_e) {
-          return new Response(JSON.stringify({ error: 'Authentication failed' }), {
-            status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          })
-        }
-      } else {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        })
-      }
-
-      // Attribution ledger: who sent what, under which auth mode.
-      console.log('[send-quote] auth', JSON.stringify({
+      const decided = await decideSendQuoteAuth({
+        req,
+        sb,
         path,
-        authMode: sendAuthMode,
-        userId: sendAuthUser?.id ?? null,
-        userEmail: sendAuthUser?.email ?? null,
-        userRole: sendAuthUser?.role ?? null,
-      }))
+        corsHeaders,
+        swApiKey: Deno.env.get('SW_API_KEY'),
+        serviceRoleKey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),
+      })
+      if (decided.kind === 'reject') return decided.response
+      sendAuthMode = decided.mode
+      sendAuthUser = decided.user
     }
 
     // ── SEND QUOTE EMAIL ──
@@ -720,12 +687,23 @@ serve(async (req: Request) => {
       // staging time for the manifest snapshot.
       const { data: doc, error: docErr } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json), job_contacts(client_name, client_email)')
+        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json, org_id), job_contacts(client_name, client_email)')
         .eq('id', document_id)
         .single()
 
       if (docErr || !doc) {
         return jsonResponse({ error: 'Document not found' }, 404, corsHeaders)
+      }
+
+      {
+        const tenant = quoteSendTenantAccess(
+          sendAuthMode,
+          sendAuthUser?.orgId,
+          jobOrgIdFromQuoteSendDocument(doc),
+        )
+        if (!tenant.ok) {
+          return jsonResponse({ error: tenant.error, code: tenant.code }, tenant.status, corsHeaders)
+        }
       }
 
       // Resolve email: use provided, fall back to job_contact, then job-level
@@ -2279,6 +2257,13 @@ serve(async (req: Request) => {
         .eq('id', job_id)
         .single()
       if (jobErr || !job) return jsonResponse({ error: 'Job not found' }, 404, corsHeaders)
+
+      {
+        const tenant = quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, job.org_id)
+        if (!tenant.ok) {
+          return jsonResponse({ error: tenant.error, code: tenant.code }, tenant.status, corsHeaders)
+        }
+      }
 
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []

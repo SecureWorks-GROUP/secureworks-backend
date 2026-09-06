@@ -129,7 +129,15 @@ prints the JSON `.html`) later. No stored PDF. No print button here.
   `send_claimed_at`. Stale reclaim writes a new token. Publication and
   revert match that token per document. The original worker cannot stamp
   or clear a claim after reclaim. Batch send-runs claims are fenced the
-  same way. Held: JWT send authorization (TRD6-R6-001) is unchanged.
+  same way.
+- **Office/admin only may send (TRD6-R6-001).** `/send` and `/send-runs`
+  JWT callers must be `admin`, `owner`, or `ops_manager` (the same
+  `OPS_API_STAFF_OPERATOR_ROLES` set). Trade / estimator / allocated /
+  `makesafe_open` / `lead_installer` JWTs are 403
+  `operator_access_required` before Resend, claim, or `draft`→`quoted`.
+  JWT send also requires `users.org_id` === `jobs.org_id`; a missing org
+  on either side fails closed. API-key / service-role stays office.
+  `/send-invoice` still accepts any verified user JWT.
 - **Frozen pack is part of publication.** Both send paths persist and
   confirm `trade_pack_json` before `sent_to_client`/`sent_at`. An
   unconfirmed pack write reverts the owned claim and returns 500. A
