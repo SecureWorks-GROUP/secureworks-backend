@@ -71,7 +71,7 @@ export type QuoteSendClaimResult =
     resend_idempotency_key: string
   }
   | { status: 'unavailable' }
-  | { status: 'error'; error: string }
+  | { status: 'error'; error: string; release_error?: string }
 
 export type JobSendRunsClaimResult =
   | { status: 'claimed'; id: string; claimed_at: string }
@@ -299,6 +299,23 @@ async function claimQuoteDocumentSendExclusive(
     .maybeSingle()
   if (keyError) {
     console.error('[send-quote] claim key stamp failed:', claimErrorMessage(keyError))
+    const released = await revertQuoteDocumentSendClaim(
+      sb,
+      documentId,
+      payload.send_claim_token,
+      'pre_send',
+    )
+    if (released.error) {
+      console.error(
+        '[send-quote] claim key stamp release failed:',
+        claimErrorMessage(released.error),
+      )
+      return {
+        status: 'error',
+        error: claimErrorMessage(released.error),
+        release_error: claimErrorMessage(released.error),
+      }
+    }
     return { status: 'error', error: claimErrorMessage(keyError) }
   }
   const stampedKey = sendClaimKeyStampConfirmed(
@@ -308,6 +325,7 @@ async function claimQuoteDocumentSendExclusive(
     payload.send_resend_idempotency_key,
   )
   if (!stampedKey) {
+    // CAS miss: a newer owner holds the row. Do not clear their claim.
     console.error('[send-quote] claim key stamp lost ownership')
     return { status: 'unavailable' }
   }

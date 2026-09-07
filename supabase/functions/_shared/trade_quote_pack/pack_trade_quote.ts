@@ -352,6 +352,8 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
   if (tradeTextHasNetTerms(trimmed)) return true
   if (tradeTextHasPaymentScheduleAmount(trimmed)) return true
+  if (CLIENT_MONEY_RE.test(text)) return true
+  if (tradeTextHasQualifiedSmallMoneyAmount(trimmed)) return true
   return false
 }
 
@@ -906,6 +908,50 @@ const TRADE_PACK_QTY_WORD =
   '(?:trades?|days?|labourers?|posts?|pickets?|panels?|hours?|hrs?)'
 const TRADE_PACK_REF_PREFIX =
   '(?:SWF|SWMS|SWP|SWR|SW|WO|PO|INV|MLB|AJBR|AJ|Q)'
+/** Quote-blob money keys. camelCase forms (`grandTotal 50`) are not
+ *  `\btotals?\b` and survive the unqualified-word strip. */
+const TRADE_PACK_CLIENT_MONEY_KEY =
+  '(?:totalIncGST|totalExGST|total_inc_gst|total_ex_gst|grandTotal|total_sell|sell_price|unit_price_ex|pricePerMetre|price_per_metre|margin_pct|marginPct|job_costs|jobCosts|cost_price|labourCostEstimate|materialCostEstimate|commissionCostEstimate)'
+/** Qualifier then amount (`by 50`, `denom 50`). Opposite order from
+ *  amount-then-schedule (`50 on completion`, `30 by delivery`). */
+const TRADE_PACK_QUALIFIED_AMOUNT_HEAD =
+  `(?:by|denom(?:ination)?s?|${TRADE_PACK_CLIENT_MONEY_KEY})`
+const TRADE_PACK_QUALIFIED_SMALL_MONEY_RE = new RegExp(
+  `\\b${TRADE_PACK_QUALIFIED_AMOUNT_HEAD}\\s*[=:\\-]?\\s*\\$?${TRADE_PACK_MONEY_AMOUNT}\\b`,
+  'i',
+)
+
+/** Hold construction / identity counts so `by 12 posts` / `19m` / `90x90`
+ *  are not read as qualifier+amount money. */
+function holdConstructionCountsForMoneyFence(value: string): string {
+  return String(value || '')
+    .replace(/\b\d+x\d+\b/gi, ' ')
+    .replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}mm\\b`, 'gi'), ' ')
+    .replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}cm\\b`, 'gi'), ' ')
+    .replace(new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}m\\b`, 'gi'), ' ')
+    .replace(new RegExp(`\\b${TRADE_PACK_REF_PREFIX}-[A-Z0-9]+\\b`, 'gi'), ' ')
+    .replace(
+      new RegExp(`\\b${TRADE_PACK_MONEY_AMOUNT}\\s+${TRADE_PACK_QTY_WORD}\\b`, 'gi'),
+      ' ',
+    )
+}
+
+/** Qualifier + leftover 1–2 digit amount after qty holds. `by 50`,
+ *  `denom 50`, `grandTotal 50`. Not `12 posts` / `19m` / `2 trades`. */
+export function tradeTextHasQualifiedSmallMoneyAmount(value: string): boolean {
+  const held = holdConstructionCountsForMoneyFence(value)
+  return TRADE_PACK_QUALIFIED_SMALL_MONEY_RE.test(held)
+}
+
+/** Original carried qualifier+amount. Leftover `by` after strip is still
+ *  that money phrase — drop it rather than publishing the connector. */
+export function leftoverIsQualifiedSmallMoneyAfterStrip(
+  original: string,
+  leftover: string,
+): boolean {
+  if (!String(leftover || '').trim()) return false
+  return tradeTextHasQualifiedSmallMoneyAmount(original)
+}
 
 /** Money-safe pack text: drop common currency figures, keep the writing.
  *  Prefix ($ / A$ / AUD / USD / dollars 9,999), suffix / tax forms (9,999 AUD, 9,999 ex GST,
@@ -1001,14 +1047,30 @@ export function stripTradePackMoney(text: unknown): string {
       ),
       '$1',
     )
-    // After qty holds, leftover "at 85" / "of 85" / "for 85" are unit prices
-    // (12 panels at 85). Keep the connector; drop only the amount.
+    // After qty holds, leftover "at 85" / "of 85" / "for 85" / "by 50"
+    // are unit prices or qualified small amounts (12 panels at 85,
+    // by 50). Keep the connector; drop only the amount. `by 12 posts`
+    // is held above so it never reaches this strip.
     .replace(
       new RegExp(
-        `(\\b(?:of|at|for)\\b)\\s+${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        `(\\b(?:of|at|for|by)\\b)\\s+${TRADE_PACK_MONEY_AMOUNT}\\b`,
         'gi',
       ),
       '$1',
+    )
+    .replace(
+      new RegExp(
+        `\\bdenom(?:ination)?s?\\s*[=:\\-]?\\s*\\$?${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        'gi',
+      ),
+      '',
+    )
+    .replace(
+      new RegExp(
+        `\\b${TRADE_PACK_CLIENT_MONEY_KEY}\\s*[=:\\-]?\\s*\\$?${TRADE_PACK_MONEY_AMOUNT}\\b`,
+        'gi',
+      ),
+      '',
     )
     // Amount + payment schedule (`50 on completion`, `30 by delivery`,
     // `50 on practical completion`, `50 when complete`). Must run before
@@ -1106,6 +1168,7 @@ export function allocatedTradePackProse(value: unknown): string | null {
   if (tradeTextHasMoneyToken(cleaned)) return null
   if (leftoverIsMangledMoneyRemnant(trimmed, cleaned)) return null
   if (leftoverIsPaymentScheduleAfterAmountStrip(trimmed, cleaned)) return null
+  if (leftoverIsQualifiedSmallMoneyAfterStrip(trimmed, cleaned)) return null
   return cleaned
 }
 

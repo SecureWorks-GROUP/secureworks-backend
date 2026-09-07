@@ -909,6 +909,74 @@ Deno.test("TRD6-22-002 trade_quote_extract hides same-tenant unassigned jobs as 
   }
 });
 
+function extractJobsErrorClient(error: { message: string; code?: string }) {
+  const client = makeClient(seed());
+  const origFrom = client.from.bind(client);
+  client.from = (t: string) => {
+    const inner = origFrom(t);
+    if (t !== "jobs") return inner;
+    const origSelect = inner.select.bind(inner);
+    inner.select = (cols?: string) => {
+      const chain = origSelect(cols);
+      chain.maybeSingle = () => Promise.resolve({ data: null, error });
+      chain.single = () => Promise.resolve({ data: null, error });
+      return chain;
+    };
+    return inner;
+  };
+  return client;
+}
+
+Deno.test("TRD6-30-003 trade_quote_extract maps thrown access refusals to the same generic 404", async () => {
+  const refuse = async (client: ReturnType<typeof makeClient>) => {
+    try {
+      await _tradeQuoteExtractForTest(
+        client,
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      );
+      throw new Error("expected extract access refusal");
+    } catch (error) {
+      assert(error instanceof ApiError);
+      return error;
+    }
+  };
+  const assignment = await refuse(extractJobsErrorClient({
+    message: "You are not assigned to this job",
+  }));
+  const missingRow = await refuse(extractJobsErrorClient({
+    code: "PGRST116",
+    message: "JSON object requested, multiple (or no) rows returned",
+  }));
+  for (const error of [assignment, missingRow]) {
+    assertEquals(error.status, 404);
+    assertEquals(error.message, "Job not found");
+    assertEquals(error.body, { error: "Job not found", code: "job_not_found" });
+  }
+});
+
+Deno.test("TRD6-30-003 trade_quote_extract keeps true job-read faults as server errors", async () => {
+  try {
+    await _tradeQuoteExtractForTest(
+      extractJobsErrorClient({
+        code: "42703",
+        message: "column jobs.secret does not exist",
+      }),
+      new URLSearchParams({ jobId: JOB_FENCE }),
+      {},
+      viewer(LEAD, "lead_installer"),
+      false,
+    );
+    throw new Error("expected extract server fault");
+  } catch (error) {
+    assert(error instanceof ApiError);
+    assertEquals(error.status, 503);
+    assertEquals(error.message, "Quote extract unavailable");
+  }
+});
+
 Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", async () => {
   const lead = await detail(seed(), viewer(LEAD, "crew"));
   const crew = await detail(seed(), viewer(CREW, "crew"));

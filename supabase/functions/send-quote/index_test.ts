@@ -708,7 +708,11 @@ function emptyGroupSendRecords() {
 
 function makeClaimMockSb(
   claimResult: { id: string } | null,
-  opts: { keyStampResult?: { id: string } | null } = {},
+  opts: {
+    keyStampResult?: { id: string } | null
+    keyStampError?: { message: string } | null
+    revertError?: { message: string } | null
+  } = {},
 ) {
   const updates: Record<string, unknown>[] = [];
   const api = {
@@ -731,9 +735,21 @@ function makeClaimMockSb(
         chain.in = () => chain;
         chain.select = () => ({
           maybeSingle: () => {
+            const isRevert =
+              payload.send_claimed_at === null &&
+              payload.send_claim_token === null
+            if (isRevert) {
+              return Promise.resolve({
+                data: opts.revertError ? null : claimResult,
+                error: opts.revertError || null,
+              })
+            }
             const keyOnly =
               "send_resend_idempotency_key" in payload &&
               !("send_claimed_at" in payload)
+            if (keyOnly && opts.keyStampError) {
+              return Promise.resolve({ data: null, error: opts.keyStampError })
+            }
             const data = keyOnly && "keyStampResult" in opts
               ? opts.keyStampResult
               : claimResult
@@ -847,6 +863,35 @@ Deno.test("R17-001 exclusive quote key stamp without a returning row is not clai
   const sb = makeClaimMockSb({ id: "doc-abc" }, { keyStampResult: null })
   const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
   assertEquals(claimed.status, "unavailable")
+  assertEquals(sb.updates.some((row) => row.send_claimed_at === null), false)
+})
+
+Deno.test("TRD6-30-002 exclusive quote key stamp error releases the token-fenced claim", async () => {
+  const sb = makeClaimMockSb({ id: "doc-abc" }, { keyStampError: { message: "stamp failed" } })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
+  assertEquals(claimed.status, "error")
+  if (claimed.status === "error") {
+    assertEquals(claimed.error, "stamp failed")
+    assertEquals(claimed.release_error, undefined)
+  }
+  assertEquals(sb.updates.some((row) => (
+    row.send_claimed_at === null &&
+    row.send_claim_token === null &&
+    row.send_resend_idempotency_key === null
+  )), true)
+})
+
+Deno.test("TRD6-30-002 exclusive quote key stamp error surfaces a failed release", async () => {
+  const sb = makeClaimMockSb({ id: "doc-abc" }, {
+    keyStampError: { message: "stamp failed" },
+    revertError: { message: "release failed" },
+  })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
+  assertEquals(claimed.status, "error")
+  if (claimed.status === "error") {
+    assertEquals(claimed.error, "release failed")
+    assertEquals(claimed.release_error, "release failed")
+  }
 })
 
 Deno.test("R4-002 send-runs publishes only docs for successful recipients", () => {

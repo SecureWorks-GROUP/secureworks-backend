@@ -19,7 +19,9 @@ import {
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
   leftoverIsPaymentScheduleAfterAmountStrip,
+  leftoverIsQualifiedSmallMoneyAfterStrip,
   tradeTextHasPaymentScheduleAmount,
+  tradeTextHasQualifiedSmallMoneyAmount,
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
   tradeAllocatedProseHasMoneyLanguage,
@@ -446,6 +448,46 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
     allocatedTradePackProse("12 posts at completion of neighbour"),
     "12 posts at completion of neighbour",
   );
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("by 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("denom 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("denomination 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("grandTotal 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("12 posts"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("19m"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("2 trades"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("90x90"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("extend fence by 12 posts"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("12 posts at completion of neighbour"), false);
+  assertEquals(tradeTextHasMoneyToken("by 50"), true);
+  assertEquals(tradeTextHasMoneyToken("denom 50"), true);
+  assertEquals(tradeTextHasMoneyToken("grandTotal 50"), true);
+  assertEquals(tradeTextHasMoneyToken("extend fence by 12 posts"), false);
+  assertEquals(tradeTextHasMoneyToken("2 trades over 3 days"), false);
+  assertEquals(stripTradePackMoney("by 50"), "by");
+  assertEquals(stripTradePackMoney("denom 50").includes("50"), false);
+  assertEquals(stripTradePackMoney("grandTotal 50").includes("50"), false);
+  assertEquals(stripTradePackMoney("extend fence by 12 posts"), "extend fence by 12 posts");
+  assertEquals(allocatedTradePackProse("by 50"), null);
+  assertEquals(allocatedTradePackProse("denom 50"), null);
+  assertEquals(allocatedTradePackProse("grandTotal 50"), null);
+  assertEquals(allocatedTradePackProse("extend fence by 12 posts"), "extend fence by 12 posts");
+  assertEquals(allocatedTradePackProse("2 trades over 3 days"), "2 trades over 3 days");
+  assertEquals(leftoverIsQualifiedSmallMoneyAfterStrip("by 50", "by"), true);
+  assertEquals(leftoverIsQualifiedSmallMoneyAfterStrip("denom 50", "denom"), true);
+  assertEquals(leftoverIsQualifiedSmallMoneyAfterStrip("extend fence by 12 posts", "extend fence by 12 posts"), false);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    summary: "by 50",
+  }).includes("summary"), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "denom 50" }],
+  }).some((key) => key.startsWith("items[0]")), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { name: "grandTotal 50" },
+  }).includes("customer.name"), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    summary: "12 posts at completion of neighbour",
+    items: [{ description: "extend fence by 12 posts", unit: "m" }],
+  }), []);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "50 on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on practical completion", "50 on practical completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 after final delivery", "after final delivery"), true);

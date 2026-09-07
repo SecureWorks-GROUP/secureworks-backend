@@ -706,3 +706,43 @@ Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed. Extract 404 stays
 generic. Pack-source job-read fail-closed stays.
+
+## Review-31 locks (2026-09-07)
+
+- **Qualified small amounts are money on allocated prose.**
+  `tradeTextHasMoneyToken` / `stripTradePackMoney` now treat
+  `by 50`, `denom 50` / `denomination 50`, and camelCase quote keys
+  (`grandTotal 50`) as money after construction-count holds.
+  `allocatedTradePackProse` drops the original even when leftover is
+  only the connector (`by`). Post-redaction
+  `allocatedTradeQuotePackProjectionLeaks` rejects the same forms.
+  Ordinary counts stay (`12 posts`, `19m`, `2 trades`, `90x90`,
+  `extend fence by 12 posts`).
+
+- **Failed exclusive idempotency-key stamp releases the claim.**
+  `claimQuoteDocumentSendExclusive` token-fences
+  `revertQuoteDocumentSendClaim` on key-stamp PostgREST error so a
+  retry can re-claim. A zero-row / unconfirmed stamp is ownership
+  loss (CAS miss): return `unavailable` and do not clear a newer
+  owner. A failed release surfaces as `status: 'error'` with
+  `release_error`.
+
+- **Extract access refusals stay one generic 404.**
+  `tradeQuoteExtractAction` maps assignment / missing / 0-row /
+  `PGRST116` throws to `{ error: "Job not found", code: "job_not_found" }`
+  before querying extract data. True job-read faults (schema /
+  connectivity) stay 503 `Quote extract unavailable` and do not
+  leak PostgREST text. Allocated / `makesafe_open` callers stay 200.
+  `tradeJobAccessRefusal` for other doors is unchanged.
+
+Already-covered leftover / zero-publication / job-lease cleanup
+5xx stay. `/send` covering fence stays. send-runs grouped reclaim
+stays. Per-run pack filter stays. Allocated packs omit
+`unit_price` / `line_total`. Sealed phrase stays exempt only on
+`terms.payment_terms`. Claim-release errors stay 5xx (CAS miss
+ok).
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed. Extract 404 stays
+generic. Pack-source job-read fail-closed stays.

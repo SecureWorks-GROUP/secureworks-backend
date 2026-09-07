@@ -39428,6 +39428,33 @@ function tradeQuoteCustomerFromJob(job: any) {
   }
 }
 
+function tradeQuoteExtractJobNotFoundError(): ApiError {
+  return new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+}
+
+function tradeQuoteExtractUnavailableError(): ApiError {
+  return new ApiError('Quote extract unavailable', 503)
+}
+
+/** Access refusals for extract are one generic 404. Distinct assignment /
+ *  missing-job / PostgREST 0-row text must not leak job existence. */
+function isTradeQuoteExtractAccessRefusal(err: unknown): boolean {
+  if (err instanceof ApiError && (err.status === 404 || err.status === 403)) return true
+  const rec = err && typeof err === 'object'
+    ? err as { message?: string; code?: string }
+    : null
+  const msg = err instanceof Error
+    ? err.message
+    : String(rec?.message || err || '')
+  if (msg === 'You are not assigned to this job') return true
+  if (msg === 'Job not found') return true
+  const code = String(rec?.code || '')
+  if (code === 'PGRST116') return true
+  if (/JSON object requested, multiple \(or no\) rows returned/i.test(msg)) return true
+  if (/0 rows/i.test(msg)) return true
+  return false
+}
+
 async function tradeQuoteExtractAction(
   client: any,
   params: URLSearchParams,
@@ -39438,15 +39465,22 @@ async function tradeQuoteExtractAction(
   const jobId = params.get('jobId') || params.get('job_id') || body?.jobId || body?.job_id
   if (!jobId) throw new ApiError('jobId required', 400)
 
-  const extractAccess = await resolveTradeJobAccessTier(client, jobId, viewer.id, {
-    isOffice: isAdmin,
-    access: {
-      orgId: viewer.orgId,
-      managedVerticals: viewer.managedVerticals,
-    },
-  })
+  let extractAccess: TradeJobAccessDecision
+  try {
+    extractAccess = await resolveTradeJobAccessTier(client, jobId, viewer.id, {
+      isOffice: isAdmin,
+      access: {
+        orgId: viewer.orgId,
+        managedVerticals: viewer.managedVerticals,
+      },
+    })
+  } catch (err) {
+    if (isTradeQuoteExtractAccessRefusal(err)) throw tradeQuoteExtractJobNotFoundError()
+    console.error('[ops-api] trade quote extract access read failed:', (err as Error)?.message || err)
+    throw tradeQuoteExtractUnavailableError()
+  }
   if (extractAccess.tier === 'none') {
-    throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+    throw tradeQuoteExtractJobNotFoundError()
   }
 
   const documentId = String(
@@ -39466,8 +39500,12 @@ async function tradeQuoteExtractAction(
       .eq('type', 'quote')
       .order('created_at', { ascending: false }),
   ])
-  if (jobRes.error) throw jobRes.error
-  if (!jobRes.data) throw new ApiError('Job not found', 404)
+  if (jobRes.error) {
+    if (isTradeQuoteExtractAccessRefusal(jobRes.error)) throw tradeQuoteExtractJobNotFoundError()
+    console.error('[ops-api] trade quote extract job read failed:', jobRes.error.message)
+    throw tradeQuoteExtractUnavailableError()
+  }
+  if (!jobRes.data) throw tradeQuoteExtractJobNotFoundError()
   if (quoteDocsRes.error) {
     console.error('[ops-api] trade quote extract read failed:', quoteDocsRes.error.message)
     throw new ApiError('Quote extract unavailable', 503)
