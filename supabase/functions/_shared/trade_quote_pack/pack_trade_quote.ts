@@ -182,6 +182,27 @@ const TRADE_PAYMENT_LANGUAGE_RE =
  *  is a real term and leftover "N 30" must not leak. */
 const TRADE_NET_TERMS_RE =
   /\b(?:nett?(?:\s*[-/]?\s*\d+(?:\s*days?)?)|\d+\s+(?:days?\s+)?nett?(?:\s+days?)?|n\s*[-/]?\s*\d+(?:\s+days?)?)\b/i
+/** 30-day terms / 30-day net. Not `3-day hire` or spaced `3 days`. */
+const TRADE_HYPHENATED_DAY_TERMS_RE =
+  /\b\d+\s*-\s*days?(?:\s+|\s*-\s*)(?:nett?|terms?|payments?|payable|due)\b/i
+/** Payment-schedule leftover after a figure strip (`$50 on completion`
+ *  → `on completion`). Also the unmarked 1–2 digit form (`50 on completion`)
+ *  that count-preserving strip would otherwise leave intact. */
+const TRADE_PAYMENT_SCHEDULE_EVENT =
+  '(?:completion|delivery|approval|acceptance|install(?:ation)?|invoice|receipt|sign(?:-|\\s*)off|handover)'
+const TRADE_PAYMENT_SCHEDULE_PREP = '(?:on|upon|after|before|following|at|by)'
+const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = new RegExp(
+  `\\b${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
+  'i',
+)
+const TRADE_PAYMENT_SCHEDULE_BARE_RE = new RegExp(
+  `^${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}$`,
+  'i',
+)
+const TRADE_PAYMENT_SCHEDULE_AMOUNT_RE = new RegExp(
+  `\\b-?[\\d,]+(?:\\.\\d+)?\\s+${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
+  'i',
+)
 const TRADE_CURRENCY_WORD_RE =
   /\b(?:dollars?|bucks?|euros?|cents?|pounds?|pence|pennies|yen|yuan|rupees?|francs?|quid|grands?)\b/i
 /** 10k / 2.5K / 1000k. Not `10m` — that is held construction metres. */
@@ -226,9 +247,15 @@ export function tradeTextHasAdHocPercentOrPaymentLanguage(value: string): boolea
   return TRADE_PERCENT_MONEY_RE.test(trimmed) || TRADE_PAYMENT_LANGUAGE_RE.test(trimmed)
 }
 
-/** Net-N payment terms. No sealed-phrase exemption — that is payment_terms-only. */
+/** Net-N and hyphenated day/payment terms. No sealed-phrase exemption. */
 export function tradeTextHasNetTerms(value: string): boolean {
-  return TRADE_NET_TERMS_RE.test(String(value || '').trim())
+  const trimmed = String(value || '').trim()
+  return TRADE_NET_TERMS_RE.test(trimmed) || TRADE_HYPHENATED_DAY_TERMS_RE.test(trimmed)
+}
+
+/** Unmarked amount sitting on a payment schedule (`50 on completion`). */
+export function tradeTextHasPaymentScheduleAmount(value: string): boolean {
+  return TRADE_PAYMENT_SCHEDULE_AMOUNT_RE.test(String(value || '').trim())
 }
 
 /** Bare currency words. Not AUD/USD codes — those stay on the token predicate. */
@@ -250,8 +277,9 @@ export function tradeAllocatedProseHasMoneyLanguage(value: string): boolean {
  * Conservative money-token predicate for every extract / allocated-pack
  * string leaf, including identity fields. Fail closed: any hit drops the
  * field rather than copying it. Covers $, common currency symbols/codes
- * (€ £ ¥ EUR GBP …), tax/invoice/billing prose, payment language, and
- * Net-N term forms. The sealed payment phrase is money here; callers
+ * (€ £ ¥ EUR GBP …), tax/invoice/billing prose, payment language,
+ * Net-N / hyphenated day terms, and unmarked amount + payment schedule.
+ * The sealed payment phrase is money here; callers
  * exempt it only when the field path is payment_terms.
  */
 export function tradeTextHasMoneyToken(value: string): boolean {
@@ -269,6 +297,7 @@ export function tradeTextHasMoneyToken(value: string): boolean {
   if (TRADE_TAX_INVOICE_LANGUAGE_RE.test(text)) return true
   if (tradeTextHasAdHocPercentOrPaymentLanguage(trimmed)) return true
   if (tradeTextHasNetTerms(trimmed)) return true
+  if (tradeTextHasPaymentScheduleAmount(trimmed)) return true
   return false
 }
 
@@ -831,7 +860,9 @@ const TRADE_PACK_REF_PREFIX =
  *  85 per linear metre).
  *  Contextual words also catch two-digit marks (Deposit 85, Deposit of 85,
  *  Price of 85, 12 panels at 85, Balance due 85, Paid 85, Due 85)
- *  without eating construction counts (2 trades, 19m). Leftover
+ *  and amount + payment-schedule (`50 on completion`, `30 by delivery`)
+ *  without eating construction counts (2 trades, 19m, 12 posts at
+ *  completion). Leftover
  *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
  *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
  *  full-quote summaries must not call this — hydrateStoredPack keeps
@@ -923,6 +954,17 @@ export function stripTradePackMoney(text: unknown): string {
       ),
       '$1',
     )
+    // Amount + payment schedule (`50 on completion`, `30 by delivery`).
+    // Must run before the count-preserving leftover strip, which keeps
+    // unmarked 1–2 digit numbers. Construction `12 posts at completion`
+    // does not match — the count is not adjacent to the schedule prep.
+    .replace(
+      new RegExp(
+        `\\b${TRADE_PACK_MONEY_AMOUNT}(?=\\s+${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b)`,
+        'gi',
+      ),
+      '',
+    )
     // Unrecognised leftover quote amounts: 9,999 / 99.50 / 850 / 18400.
     // 1–2 digit counts stay (2 at, 12 posts) unless a money word already ate them.
     .replace(/\b-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g, '')
@@ -946,21 +988,9 @@ export function tradeOriginalHasNonFigureMoneyLanguage(value: string): boolean {
 
 /** Payment-schedule leftover after a figure strip (`$50 on completion`
  *  → `on completion`, `50 dollars at completion` → `at completion`,
- *  `50 dollars by delivery` → `by delivery`). Not the sealed terms
- *  phrase. Work notes that already said the same schedule words with
- *  no amount stay. */
-const TRADE_PAYMENT_SCHEDULE_EVENT =
-  '(?:completion|delivery|approval|acceptance|install(?:ation)?|invoice|receipt|sign(?:-|\\s*)off|handover)'
-const TRADE_PAYMENT_SCHEDULE_PREP = '(?:on|upon|after|before|following|at|by)'
-const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = new RegExp(
-  `\\b${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
-  'i',
-)
-const TRADE_PAYMENT_SCHEDULE_BARE_RE = new RegExp(
-  `^${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}$`,
-  'i',
-)
-
+ *  `50 dollars by delivery` → `by delivery`). Also the unmarked form
+ *  whose leftover still holds the count (`50 on completion`). Work
+ *  notes that already said the same schedule words with no amount stay. */
 export function leftoverIsPaymentScheduleAfterAmountStrip(
   original: string,
   leftover: string,
@@ -968,6 +998,7 @@ export function leftoverIsPaymentScheduleAfterAmountStrip(
   const cleaned = String(leftover || '').trim()
   if (!cleaned || !TRADE_PAYMENT_SCHEDULE_REMNANT_RE.test(cleaned)) return false
   if (TRADE_PAYMENT_SCHEDULE_BARE_RE.test(cleaned)) return true
+  if (TRADE_PAYMENT_SCHEDULE_AMOUNT_RE.test(cleaned)) return true
   return String(original || '').trim() !== cleaned
 }
 

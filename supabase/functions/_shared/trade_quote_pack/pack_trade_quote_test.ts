@@ -18,6 +18,7 @@ import {
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
   leftoverIsPaymentScheduleAfterAmountStrip,
+  tradeTextHasPaymentScheduleAmount,
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
   tradeAllocatedProseHasMoneyLanguage,
@@ -406,6 +407,23 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(allocatedTradePackProse("upon completion"), null);
   assertEquals(allocatedTradePackProse("Pat Client $50 on completion"), null);
   assertEquals(allocatedTradePackProse("Finish remaining posts on completion of neighbour"), "Finish remaining posts on completion of neighbour");
+  assertEquals(tradeTextHasMoneyToken("50 on completion"), true);
+  assertEquals(tradeTextHasMoneyToken("30 by delivery"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 on completion"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("30 by delivery"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("12 posts at completion of neighbour"), false);
+  assertEquals(allocatedTradePackProse("50 on completion"), null);
+  assertEquals(allocatedTradePackProse("30 by delivery"), null);
+  assertEquals(allocatedTradePackIdentity("50 on completion"), null);
+  assertEquals(allocatedTradePackIdentity("30 by delivery"), null);
+  assertEquals(stripTradePackMoney("50 on completion"), "on completion");
+  assertEquals(stripTradePackMoney("30 by delivery"), "by delivery");
+  assertEquals(
+    allocatedTradePackProse("12 posts at completion of neighbour"),
+    "12 posts at completion of neighbour",
+  );
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "50 on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("AUD 50 on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 dollars on completion", "on completion"), true);
@@ -423,6 +441,10 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
     "Meet crew at completion of neighbour",
     "Meet crew at completion of neighbour",
+  ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "12 posts at completion of neighbour",
+    "12 posts at completion of neighbour",
   ), false);
   assertEquals(
     allocatedTradePackProse("Meet crew at completion of neighbour"),
@@ -448,11 +470,15 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(tradeTextHasMoneyToken("N 30 days"), true);
   assertEquals(tradeTextHasMoneyToken("30 net"), true);
   assertEquals(tradeTextHasMoneyToken("30 net days"), true);
+  assertEquals(tradeTextHasMoneyToken("30-day terms"), true);
+  assertEquals(tradeTextHasMoneyToken("30-day net"), true);
+  assertEquals(tradeTextHasMoneyToken("14-day payment"), true);
   assertEquals(tradeTextHasMoneyToken("2/10 Net 30"), true);
   assertEquals(tradeTextHasMoneyToken("tennis net"), false);
   assertEquals(tradeTextHasMoneyToken("safety netting"), false);
   assertEquals(tradeTextHasMoneyToken("network switch"), false);
   assertEquals(tradeTextHasMoneyToken("30 netting"), false);
+  assertEquals(tradeTextHasMoneyToken("3-day hire"), false);
   assertEquals(tradeTextHasMoneyToken("2 trades over 3 days"), false);
   assertEquals(allocatedTradePackProse("Net 30"), null);
   assertEquals(allocatedTradePackProse("Install Net 30"), null);
@@ -462,11 +488,16 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(allocatedTradePackProse("N 30"), null);
   assertEquals(allocatedTradePackProse("30 net"), null);
   assertEquals(allocatedTradePackProse("30 net days"), null);
+  assertEquals(allocatedTradePackProse("30-day terms"), null);
+  assertEquals(allocatedTradePackProse("30-day net"), null);
   assertEquals(allocatedTradePackIdentity("Net 30"), null);
   assertEquals(allocatedTradePackIdentity("N30"), null);
   assertEquals(allocatedTradePackIdentity("N 30"), null);
   assertEquals(allocatedTradePackIdentity("30 net"), null);
   assertEquals(allocatedTradePackIdentity("30 net days"), null);
+  assertEquals(allocatedTradePackIdentity("30-day terms"), null);
+  assertEquals(allocatedTradePackIdentity("30-day net"), null);
+  assertEquals(allocatedTradePackProse("3-day hire"), "3-day hire");
   assertEquals(allocatedTradePackProse("tennis net"), "tennis net");
   assertEquals(allocatedTradePackProse("safety netting"), "safety netting");
   assertEquals(allocatedTradePackProse("network switch"), "network switch");
@@ -478,6 +509,15 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   }), ["items[0].description"]);
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     items: [{ description: "30 net" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "30-day terms" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 on completion" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "30 by delivery" }],
   }), ["items[0].description"]);
   assertEquals(isSealedPaymentTermsPhrase("50% deposit + 50% on completion"), true);
   assertEquals(isTradePaymentTermsFieldPath("extract.terms.payment_terms"), true);

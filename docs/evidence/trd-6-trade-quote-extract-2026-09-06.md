@@ -536,3 +536,32 @@ through publication stay. Money fences stay sealed.
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-26 locks (2026-09-07)
+
+- **Hyphenated day payment terms fail closed.**
+  Review-25's `TRADE_NET_TERMS_RE` required whitespace between the
+  count and `net`, so leftover `30-day terms` / `30-day net` survived
+  strip and could ride allocated prose, identity, quote-pack
+  projections, and extract leaves. A narrow hyphenated-day predicate
+  now covers `N-day` + `net` / `terms` / `payment` / `payable` / `due`.
+  Construction `3-day hire` and spaced `2 trades over 3 days` stay.
+
+- **Unmarked amount + payment schedule fails closed.**
+  The leftover schedule guard only fired when strip changed the
+  string. Unmarked 1–2 digit counts are preserved, so `50 on
+  completion` / `30 by delivery` stayed equal leftovers and leaked.
+  Strip now eats an amount immediately followed by a schedule prep +
+  event before the count-preserving leftover pass. The token
+  predicate and leftover guard also refuse amount + schedule, so
+  identity and extract drop the original even without strip.
+  Construction `12 posts at completion of neighbour` stays — the
+  count is not adjacent to the schedule prep.
+
+Already-covered Net-N / N30 / 30 net stay. Bare `net` / `netting` /
+`network` stay. Sealed phrase stays exempt only on
+`terms.payment_terms`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed.
