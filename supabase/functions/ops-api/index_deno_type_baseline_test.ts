@@ -35,6 +35,10 @@ Deno.test("trade portal outer switch includes get_trade_invoice + save_trade_inv
     tradeBlock[0].includes("case 'save_trade_invoice_draft':"),
     "save_trade_invoice_draft missing from outer trade case list",
   );
+  assert(
+    tradeBlock[0].includes("case 'trade_quote_extract':"),
+    "trade_quote_extract missing from outer trade case list",
+  );
 });
 
 Deno.test("reconcile_transaction returns json so serve Handler never yields undefined", () => {

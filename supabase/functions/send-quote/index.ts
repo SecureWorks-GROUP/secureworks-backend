@@ -29,7 +29,42 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
-import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  persistTradePackOnDocuments,
+  persistTradePackWriteConfirmed,
+  quoteDocumentHasClientSend,
+} from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  claimJobSendRuns,
+  claimQuoteDocumentSend,
+  claimQuoteDocumentSendForGroupedRuns,
+  claimsForDocumentIds,
+  claimsNotInDocumentIds,
+  classifySendClaimLease,
+  clearJobSendRunsClaim,
+  documentIdsPublishedForSuccessfulSends,
+  ensureQuoteGroupEmailSendKey,
+  retireQuoteGroupEmailSendKey,
+  mintSendRunQuoteNumber,
+  persistTradePacksWhileHoldingSendClaims,
+  publishQuoteDocumentSendOrRevert,
+  publishQuoteDocumentsSendOrRevertWhileHolding,
+  quoteSendRecipientKey,
+  resendIdempotencyHeaders,
+  resendResponseIsDefinitivePreSendRejection,
+  resolveSendRunDocument,
+  revertQuoteDocumentSendClaim,
+  revertQuoteDocumentSendClaims,
+  sendRunQuoteNumberFallback,
+  sendRunsPrimaryClientPublicationSatisfied,
+  sendRunsSendOutcome,
+  supersedePriorPublishedQuoteDocuments,
+  touchGroupedQuoteDocumentSendClaims,
+  touchJobSendRunsClaim,
+  touchQuoteDocumentSendClaim,
+  type QuoteSendDocumentClaim,
+  type SendRunExistingDocument,
+} from '../_shared/trade_quote_pack/quote_send_publication.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
   buildV2Augmentation,
@@ -42,13 +77,22 @@ import {
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
+import { inspectSealedSesJob } from '../_shared/sealed_ses_money_fence.ts'
 import {
-  inspectSealedSesJob,
-  sealedSesFenceCheckFailedRefusal,
-  sealedSesMoneyRefusal,
-  SealedSesMoneyFenceLookupError,
-} from '../_shared/sealed_ses_money_fence.ts'
-import { validateBrandedInvoiceDeliveryBinding } from './invoice_delivery_fence.ts'
+  claimInvoiceEmailSend,
+  publishInvoiceEmailSendOrRevert,
+  revertInvoiceEmailSendClaim,
+  touchInvoiceEmailSendClaim,
+} from './invoice_email_send_claim.ts'
+import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
+import {
+  decideSendQuoteAuth,
+  jobOrgIdFromQuoteSendDocument,
+  quoteSendMissingOrForeignRefusal,
+  quoteSendTenantAccess,
+  resolveSendInvoiceDelivery,
+  type SendQuoteAuthUser,
+} from './quote_send_auth.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -623,68 +667,30 @@ serve(async (req: Request) => {
 
   try {
     // ── Auth (only for send/send-invoice/send-runs — view/accept/decline are public client endpoints) ──
-    // Two caller classes are accepted (mirrors ops-api/index.ts:2218-2274):
+    // Two caller classes are accepted (mirrors ops-api staff + shared-key):
     //   api_key — the master SW_API_KEY (ops dashboard, patio tool, agents) or the
     //             service-role key, presented via x-api-key OR Authorization: Bearer.
-    //             This path is byte-for-byte the historical behaviour and MUST stay.
-    //   jwt     — a logged-in Supabase user (the scoping tools). Since fence commit
-    //             8c39ca2 the fence client sends the user's JWT as the bearer whenever
-    //             a session exists, so a healthy login always presented a non-key
-    //             bearer and got 401. We now verify that bearer as a Supabase user JWT
-    //             (getUser is validated against Supabase's signing key server-side, so
-    //             a forged/expired token cannot pass) and allow authenticated users.
-    // Role note (R1): we capture the caller's role for attribution/logging but do NOT
-    // gate on it. ops-api restricts privileged actions to admin/owner, but the scoping
-    // senders we are unblocking are estimators — an admin/owner-only gate would re-break
-    // the exact login this hotfix fixes. Any valid authenticated Supabase user may send.
-    // FLAGGED for the adversarial reviewer.
+    //             This path is office send authority and MUST stay.
+    //   jwt     — a logged-in Supabase user. /send, /send-runs, and
+    //             /send-invoice require an office staff role (admin / owner /
+    //             ops_manager), matching OPS_API_STAFF_OPERATOR_ROLES. Trade /
+    //             estimator / allocated / makesafe_open JWTs are 403 before any
+    //             Resend or draft→quoted write. JWT send-invoice also refuses
+    //             body-supplied client_email / payment fields.
     let sendAuthMode: 'api_key' | 'jwt' = 'api_key'
-    let sendAuthUser: { id: string; email: string; role: string } | null = null
+    let sendAuthUser: SendQuoteAuthUser | null = null
     if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
-      const validKey = Deno.env.get('SW_API_KEY')
-      const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-      const xApiKey = req.headers.get('x-api-key')
-      const authHeader = req.headers.get('authorization')
-      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-
-      if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) {
-        sendAuthMode = 'api_key' // server-to-server via x-api-key header (unchanged)
-      } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) {
-        sendAuthMode = 'api_key' // server-to-server via Authorization header (unchanged)
-      } else if (bearerToken) {
-        // Verify as a Supabase user JWT (browser request from a scoping tool).
-        try {
-          const { data: { user }, error } = await sb.auth.getUser(bearerToken)
-          if (error || !user) {
-            return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
-              status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            })
-          }
-          const { data: profile } = await sb.from('users')
-            .select('role')
-            .eq('id', user.id)
-            .maybeSingle()
-          sendAuthMode = 'jwt'
-          sendAuthUser = { id: user.id, email: user.email || '', role: profile?.role || 'unknown' }
-        } catch (_e) {
-          return new Response(JSON.stringify({ error: 'Authentication failed' }), {
-            status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          })
-        }
-      } else {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        })
-      }
-
-      // Attribution ledger: who sent what, under which auth mode.
-      console.log('[send-quote] auth', JSON.stringify({
+      const decided = await decideSendQuoteAuth({
+        req,
+        sb,
         path,
-        authMode: sendAuthMode,
-        userId: sendAuthUser?.id ?? null,
-        userEmail: sendAuthUser?.email ?? null,
-        userRole: sendAuthUser?.role ?? null,
-      }))
+        corsHeaders,
+        swApiKey: Deno.env.get('SW_API_KEY'),
+        serviceRoleKey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),
+      })
+      if (decided.kind === 'reject') return decided.response
+      sendAuthMode = decided.mode
+      sendAuthUser = decided.user
     }
 
     // ── SEND QUOTE EMAIL ──
@@ -700,12 +706,35 @@ serve(async (req: Request) => {
       // staging time for the manifest snapshot.
       const { data: doc, error: docErr } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json), job_contacts(client_name, client_email)')
+        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json, org_id), job_contacts(client_name, client_email)')
         .eq('id', document_id)
         .single()
 
       if (docErr || !doc) {
-        return jsonResponse({ error: 'Document not found' }, 404, corsHeaders)
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          true,
+          { ok: true },
+          'Document not found',
+        )
+        return jsonResponse(refused!.body, refused!.status, corsHeaders)
+      }
+
+      {
+        const tenant = quoteSendTenantAccess(
+          sendAuthMode,
+          sendAuthUser?.orgId,
+          jobOrgIdFromQuoteSendDocument(doc),
+        )
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          false,
+          tenant,
+          'Document not found',
+        )
+        if (refused) {
+          return jsonResponse(refused.body, refused.status, corsHeaders)
+        }
       }
 
       // Resolve email: use provided, fall back to job_contact, then job-level
@@ -747,25 +776,38 @@ serve(async (req: Request) => {
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
-      // ── Atomic claim (double-send idempotency guard) ──
-      // Optimistically mark sent_to_client=true BEFORE calling Resend. The
-      // conditional NOT(sent_to_client IS TRUE) filter means only the first
-      // concurrent caller claims the row; subsequent callers get data=null and
-      // return a success-ish "already_sent" response without sending a second
-      // email. If the claim succeeds but the email send fails below, we revert
-      // the claim (set sent_to_client=false, sent_at=null) so a retry can
-      // re-claim and resend.
-      const { data: claimed } = await sb
-        .from('job_documents')
-        .update({ sent_to_client: true, sent_at: new Date().toISOString() })
-        .eq('id', document_id)
-        .not('sent_to_client', 'is', true)
-        .select('id')
-        .maybeSingle()
+      // ── Atomic in-flight claim (double-send idempotency guard) ──
+      // Claim send_claimed_at + opaque send_claim_token. That is not
+      // publication: quote_packs and extracts stay hidden until Resend
+      // succeeds, the frozen pack write is confirmed, and we stamp
+      // sent_to_client + sent_at. Concurrent callers see a claimed or
+      // already-published row and return already_sent. A database claim
+      // fault is an error, not already_sent. Resend failure clears the
+      // owned claim so a retry can re-claim.
+      const claimed = await claimQuoteDocumentSend(sb, document_id)
 
-      if (!claimed) {
-        // Another call already claimed this document — suppress duplicate email.
+      if (claimed.status === 'error') {
+        console.error(`[send-quote] doc ${document_id} claim failed:`, claimed.error)
+        return jsonResponse({ error: 'Failed to claim quote document for send' }, 500, corsHeaders)
+      }
+      if (claimed.status !== 'claimed') {
+        // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
+        if (supersede_prior === true && doc.job_id && quoteDocumentHasClientSend(doc)) {
+          const retrySupersede = await supersedePriorPublishedQuoteDocuments(sb, {
+            jobId: doc.job_id,
+            currentDocumentId: doc.id,
+            currentVersion: doc.version || 1,
+            jobContactId: doc.job_contact_id ?? null,
+            runLabel: doc.run_label ?? null,
+          })
+          if (!retrySupersede.ok) {
+            return jsonResponse({
+              error: 'Failed to supersede prior quote documents',
+              code: 'quote_supersede_failed',
+            }, 500, corsHeaders)
+          }
+        }
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
       }
       {
@@ -802,6 +844,27 @@ serve(async (req: Request) => {
           }
         }
 
+        const quoteLease = await touchQuoteDocumentSendClaim(sb, document_id, claimed.token)
+        const quoteLeaseOutcome = classifySendClaimLease(quoteLease)
+        if (quoteLeaseOutcome === 'error') {
+          console.error(
+            `[send-quote] doc ${document_id} lease refresh failed:`,
+            quoteLease.error?.message || String(quoteLease.error),
+          )
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+        }
+        if (quoteLeaseOutcome === 'lost') {
+          return jsonResponse({
+            success: true,
+            already_sent: true,
+            view_url: viewUrl,
+            share_token: doc.share_token,
+            quote_number: doc.quote_number,
+          }, 200, corsHeaders)
+        }
+
         let emailRes: Response
         try {
           emailRes = await fetch('https://api.resend.com/emails', {
@@ -809,6 +872,7 @@ serve(async (req: Request) => {
             headers: {
               'Authorization': `Bearer ${RESEND_API_KEY}`,
               'Content-Type': 'application/json',
+              ...resendIdempotencyHeaders(claimed.resend_idempotency_key),
             },
             body: JSON.stringify({
               from: `${FROM_NAME} <${FROM_EMAIL}>`,
@@ -821,12 +885,12 @@ serve(async (req: Request) => {
             }),
           })
         } catch (fetchErr) {
-          // Network-level throw — revert claim so a retry can resend.
-          await sb.from('job_documents')
-            .update({ sent_to_client: false, sent_at: null })
-            .eq('id', document_id)
-          console.log('[send-quote] Resend fetch threw (claim reverted):', (fetchErr as Error).message)
-          return jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
+          // Network throw after dispatch is ambiguous — keep the first
+          // Idempotency-Key so reclaim/resume cannot mint a second send.
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+          console.log('[send-quote] Resend fetch threw (claim reverted, provider key kept):', (fetchErr as Error).message)
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
         }
 
         if (emailRes.ok) {
@@ -856,43 +920,71 @@ serve(async (req: Request) => {
             failureReason: errData.message || `HTTP ${emailRes.status}`,
             metadata: { document_id: doc.id, client_name: client_name },
           })
-          // Revert claim — email not sent, so a retry must be able to re-claim.
-          await sb.from('job_documents')
-            .update({ sent_to_client: false, sent_at: null })
-            .eq('id', document_id)
-          return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
+          const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
+            ? 'pre_send'
+            : 'keep_provider_key'
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, revertMode)
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
       }
 
-      // sent_to_client was already set to true by the atomic claim above
-      // (before the email send). No redundant update needed.
+      // Frozen pack is part of the durable release. Persist and confirm
+      // the write before publication so a published row cannot miss
+      // trade_pack_json. A persist or stamp failure reverts the owned
+      // claim so retry is not stranded on already_sent.
+      const sentAt = new Date().toISOString()
+      if (!doc.job_id) {
+        console.error('Quote send pack-source job id missing', { document_id })
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+      }
+      const { data: jobForPack, error: jobForPackErr } = await sb.from('jobs')
+        .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
+        .eq('id', doc.job_id)
+        .single()
+      if (jobForPackErr || !jobForPack) {
+        console.error('Quote send pack-source job read failed', {
+          document_id,
+          job_id: doc.job_id,
+          error: jobForPackErr?.message,
+        })
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+      }
+      const persisted = await persistTradePackOnDocuments(sb, {
+        documents: [{
+          id: document_id,
+          quote_number: doc.quote_number || null,
+          sent_at: sentAt,
+          claim_token: claimed.token,
+        }],
+        jobType: jobForPack.type || doc.jobs?.type,
+        scopeJson: jobForPack.scope_json,
+        pricingJson: jobForPack.pricing_json || doc.jobs?.pricing_json,
+        customer: {
+          name: jobForPack.client_name ?? doc.jobs?.client_name,
+          phone: jobForPack.client_phone ?? doc.jobs?.client_phone,
+          email: jobForPack.client_email ?? doc.jobs?.client_email,
+          site_address: jobForPack.site_address ?? doc.jobs?.site_address,
+          site_suburb: jobForPack.site_suburb ?? doc.jobs?.site_suburb,
+        },
+      })
+      if (!persistTradePackWriteConfirmed(persisted, 1)) {
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+      }
 
-      // Freeze a trade-safe SOW onto this quote document on EVERY successful
-      // send (not only the first draft→quoted flip). Crew triages by quote number.
-      if (doc.job_id) {
-        try {
-          const { data: jobForPack } = await sb.from('jobs')
-            .select('type, scope_json, pricing_json')
-            .eq('id', doc.job_id)
-            .single()
-          await persistTradePackOnDocuments(sb, {
-            documents: [{
-              id: document_id,
-              quote_number: doc.quote_number || null,
-              sent_at: new Date().toISOString(),
-            }],
-            jobType: jobForPack?.type || doc.jobs?.type,
-            scopeJson: jobForPack?.scope_json,
-            pricingJson: jobForPack?.pricing_json || doc.jobs?.pricing_json,
-          })
-        } catch (e) {
-          console.error('[trade-pack-persist-fail]', JSON.stringify({
-            job_id: doc.job_id,
-            document_id,
-            handler: 'send-quote/send',
-            error: (e as Error).message,
-          }))
-        }
+      const published = await publishQuoteDocumentSendOrRevert(sb, document_id, claimed.token, new Date(sentAt))
+      if (!published.published) {
+        return jsonResponse({
+          error: published.release_error
+            ? 'Failed to release quote send claim'
+            : 'Failed to record quote send publication',
+        }, 500, corsHeaders)
       }
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
@@ -1123,32 +1215,32 @@ serve(async (req: Request) => {
           }
         }
 
-        // (M4 G-B2) Supersede prior sent quote versions so old client links show the
-        // branded "quote was updated" page (see /view + G-B1). Gated on the caller
-        // explicitly passing supersede_prior:true — a plain or multi-option send must NOT
-        // supersede coexisting option docs; only the fence "Make a revision" flow sets
-        // the flag. Scope key = (job_id, job_contact_id, run_label); only lower versions
-        // matched. Best-effort: a failure here must not fail the send (email already went).
+        // (M4 G-B2) Supersede prior published quote versions so old client
+        // links show the branded "quote was updated" page (see /view + G-B1)
+        // and stale frozen extracts leave allocated trades. Gated on
+        // supersede_prior:true — a plain or multi-option send must NOT
+        // supersede coexisting option docs. Scope key = (job_id,
+        // job_contact_id, run_label); only lower versions matched. Uses the
+        // same durable-publication predicate as extract eligibility. A
+        // failed write is loud (500) so a retry can finish supersession on
+        // the already_sent path instead of leaving stale extracts current.
         if (supersede_prior === true) {
-          try {
-            const curVersion = doc.version || 1
-            let supSel = sb.from('job_documents')
-              .update({ superseded_at: new Date().toISOString(), superseded_by_revision_id: releasedRevisionId ?? null })
-              .eq('job_id', doc.job_id)
-              .eq('type', 'quote')
-              .eq('sent_to_client', true)
-              .is('superseded_at', null)
-              .lt('version', curVersion)
-              .neq('id', doc.id)
-            // Match the scope exactly: null-to-null on job_contact_id and run_label.
-            supSel = (doc.job_contact_id == null) ? supSel.is('job_contact_id', null) : supSel.eq('job_contact_id', doc.job_contact_id)
-            supSel = (doc.run_label == null) ? supSel.is('run_label', null) : supSel.eq('run_label', doc.run_label)
-            const { data: superseded } = await supSel.select('id')
-            if (superseded && superseded.length) {
-              console.log(`[send-quote] G-B2 superseded ${superseded.length} prior sent quote(s) for job ${doc.job_id}`)
-            }
-          } catch (e) {
-            console.error('[send-quote] G-B2 supersede-prior failed (non-blocking):', (e as Error).message)
+          const superseded = await supersedePriorPublishedQuoteDocuments(sb, {
+            jobId: doc.job_id,
+            currentDocumentId: doc.id,
+            currentVersion: doc.version || 1,
+            jobContactId: doc.job_contact_id ?? null,
+            runLabel: doc.run_label ?? null,
+            supersededByRevisionId: releasedRevisionId ?? null,
+          })
+          if (!superseded.ok) {
+            return jsonResponse({
+              error: 'Failed to supersede prior quote documents',
+              code: 'quote_supersede_failed',
+            }, 500, corsHeaders)
+          }
+          if (superseded.supersededIds.length) {
+            console.log(`[send-quote] G-B2 superseded ${superseded.supersededIds.length} prior sent quote(s) for job ${doc.job_id}`)
           }
         }
       }
@@ -2256,7 +2348,28 @@ serve(async (req: Request) => {
         .select('*, job_contacts(*)')
         .eq('id', job_id)
         .single()
-      if (jobErr || !job) return jsonResponse({ error: 'Job not found' }, 404, corsHeaders)
+      if (jobErr || !job) {
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          true,
+          { ok: true },
+          'Job not found',
+        )
+        return jsonResponse(refused!.body, refused!.status, corsHeaders)
+      }
+
+      {
+        const tenant = quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, job.org_id)
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          false,
+          tenant,
+          'Job not found',
+        )
+        if (refused) {
+          return jsonResponse(refused.body, refused.status, corsHeaders)
+        }
+      }
 
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []
@@ -2271,38 +2384,174 @@ serve(async (req: Request) => {
       const contacts = job.job_contacts || []
       const primaryContact = contacts.find((c: any) => c.is_primary) || { client_name: job.client_name, client_email: job.client_email }
 
-      // Create one job_document per run per party (client doc + neighbour doc)
+      const jobClaim = await claimJobSendRuns(sb, job.id)
+      if (jobClaim.status === 'error') {
+        return jsonResponse({ error: 'Failed to claim quote send for this job' }, 500, corsHeaders)
+      }
+      if (jobClaim.status !== 'claimed') {
+        return jsonResponse({
+          error: 'Quote send already in progress for this job',
+          code: 'send_runs_in_progress',
+        }, 409, corsHeaders)
+      }
+
+      try {
+      const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
+        .eq('job_id', job.id)
+        .eq('type', 'quote')
+        .is('superseded_at', null)
+      if (existingQuoteError) {
+        console.error('[send-quote] send-runs existing quote read failed:', existingQuoteError.message || String(existingQuoteError))
+        return jsonResponse({ error: 'Failed to load existing quote documents' }, 500, corsHeaders)
+      }
+      const existingQuoteDocs: SendRunExistingDocument[] = Array.isArray(existingQuoteRows)
+        ? existingQuoteRows.filter((row: SendRunExistingDocument) => typeof row?.id === 'string' && row.id)
+        : []
+
+      // One job_document per run per party. Reuse an existing published or
+      // unpublished row for that job+run+contact so a retry cannot mint a
+      // second pack. Concurrent callers are fenced by the job claim above.
       const createdDocs: any[] = []
+      const publishedExistingDocs: any[] = []
+      const claimedDocs: QuoteSendDocumentClaim[] = []
+      const keepProviderKeyIds = new Set<string>()
+      const markSendRunsProviderAttempt = (
+        docs: Array<{ id?: string | null } | null | undefined> | null | undefined,
+      ) => {
+        for (const doc of docs || []) {
+          const id = typeof doc?.id === 'string' ? doc.id.trim() : ''
+          if (id) keepProviderKeyIds.add(id)
+        }
+      }
+      const revertSendRunsDocumentClaims = async (
+        claims: QuoteSendDocumentClaim[],
+        forceKeep = false,
+      ) => {
+        const keep: QuoteSendDocumentClaim[] = []
+        const clear: QuoteSendDocumentClaim[] = []
+        for (const claim of claims) {
+          if (forceKeep || keepProviderKeyIds.has(claim.id)) keep.push(claim)
+          else clear.push(claim)
+        }
+        if (keep.length) {
+          const kept = await revertQuoteDocumentSendClaims(sb, keep, 'keep_provider_key')
+          if (kept.error) return kept
+        }
+        if (clear.length) {
+          return await revertQuoteDocumentSendClaims(sb, clear, 'pre_send')
+        }
+        return { error: null }
+      }
       const emailsByRecipient: Record<string, { name: string, email: string, docs: any[], runs: any[] }> = {}
+
+      const rememberExisting = (doc: SendRunExistingDocument) => {
+        if (!existingQuoteDocs.some((row) => row.id === doc.id)) existingQuoteDocs.push(doc)
+      }
+      const addRecipientDoc = (
+        email: string | null | undefined,
+        name: string | null | undefined,
+        doc: { id?: string; share_token?: string | null; quote_number?: string | null },
+        run: any,
+      ) => {
+        const dest = quoteSendRecipientKey(email)
+        if (!dest || !doc?.id) return
+        if (!emailsByRecipient[dest]) {
+          emailsByRecipient[dest] = { name: name || '', email: dest, docs: [], runs: [] }
+        }
+        emailsByRecipient[dest].docs.push(doc)
+        emailsByRecipient[dest].runs.push(run)
+      }
+      const claimWorkingDoc = async (doc: { id?: string }): Promise<'claimed' | 'unavailable' | 'error'> => {
+        if (typeof doc?.id !== 'string' || !doc.id) return 'error'
+        const claimed = await claimQuoteDocumentSendForGroupedRuns(sb, doc.id)
+        if (claimed.status === 'claimed') {
+          claimedDocs.push(claimed)
+          createdDocs.push(doc)
+          return 'claimed'
+        }
+        return claimed.status
+      }
+      const refuseWorkingClaim = async (status: 'unavailable' | 'error') => {
+        const released = await revertQuoteDocumentSendClaims(sb, claimedDocs)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claims')
+          || (status === 'error'
+            ? jsonResponse({ error: 'Failed to claim quote document for send' }, 500, corsHeaders)
+            : jsonResponse({
+              error: 'Quote send already in progress for this job',
+              code: 'send_runs_in_progress',
+            }, 409, corsHeaders))
+      }
+      const abortAfterDocumentClaimRelease = async (
+        forceKeep: boolean,
+        fallback: Response,
+      ): Promise<Response> => {
+        const released = await revertSendRunsDocumentClaims(claimedDocs, forceKeep)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claims')
+          || fallback
+      }
 
       for (const run of runs) {
         const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(run.run_label)) : null
 
         // Client document for this run
         const runPdfUrl = run_pdfs?.[run.run_label] || null
-        const { data: clientDoc } = await sb.from('job_documents').insert({
-          job_id: job.id,
-          type: 'quote',
-          run_label: run.run_label,
-          job_contact_id: primaryContact.id || null,
-          pdf_url: runPdfUrl,
-          sent_to_client: true,
-          sent_at: new Date().toISOString(),
-          data_snapshot_json: { run },
-        }).select('id, share_token').single()
+        const clientKey = { runLabel: String(run.run_label || ''), jobContactId: primaryContact.id || null }
+        const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
+        let clientDoc: any = null
+        if (clientResolution.action === 'use_published') {
+          clientDoc = clientResolution.document
+          publishedExistingDocs.push(clientDoc)
+        } else if (clientResolution.action === 'reuse_unpublished') {
+          clientDoc = clientResolution.document
+          const clientClaim = await claimWorkingDoc(clientDoc)
+          if (clientClaim !== 'claimed') return await refuseWorkingClaim(clientClaim)
+          const clientEmail = primaryContact.client_email || job.client_email
+          addRecipientDoc(clientEmail, primaryContact.client_name || job.client_name, clientDoc, run)
+        } else {
+          const clientQuoteNumber = await mintSendRunQuoteNumber(
+            sb,
+            sendRunQuoteNumberFallback({
+              jobNumber: job.job_number,
+              runLabel: run.run_label,
+              party: 'client',
+            }),
+          )
+          const { data: insertedClient } = await sb.from('job_documents').insert({
+            job_id: job.id,
+            type: 'quote',
+            run_label: run.run_label,
+            job_contact_id: primaryContact.id || null,
+            quote_number: clientQuoteNumber,
+            pdf_url: runPdfUrl,
+            sent_to_client: false,
+            sent_at: null,
+            data_snapshot_json: { run },
+          }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
+          clientDoc = insertedClient
+            ? { ...insertedClient, run_label: insertedClient.run_label || run.run_label, data_snapshot_json: insertedClient.data_snapshot_json || { run } }
+            : null
+          if (clientDoc) {
+            rememberExisting({
+              id: clientDoc.id,
+              type: 'quote',
+              run_label: run.run_label,
+              job_contact_id: primaryContact.id || null,
+              sent_to_client: false,
+              sent_at: null,
+              share_token: clientDoc.share_token,
+              quote_number: clientDoc.quote_number,
+              superseded_at: null,
+              accepted_at: null,
+            })
+            const insertedClientClaim = await claimWorkingDoc(clientDoc)
+            if (insertedClientClaim !== 'claimed') return await refuseWorkingClaim(insertedClientClaim)
+            const clientEmail = primaryContact.client_email || job.client_email
+            addRecipientDoc(clientEmail, primaryContact.client_name || job.client_name, clientDoc, run)
+          }
+        }
 
         if (clientDoc) {
-          createdDocs.push(clientDoc)
-          const clientEmail = primaryContact.client_email || job.client_email
-          if (clientEmail) {
-            if (!emailsByRecipient[clientEmail]) {
-              emailsByRecipient[clientEmail] = { name: primaryContact.client_name || job.client_name, email: clientEmail, docs: [], runs: [] }
-            }
-            emailsByRecipient[clientEmail].docs.push(clientDoc)
-            emailsByRecipient[clientEmail].runs.push(run)
-          }
-
-          // Create run_acceptance for client
           await sb.from('run_acceptances').upsert({
             job_id: job.id,
             job_contact_id: primaryContact.id || contacts[0]?.id,
@@ -2314,26 +2563,60 @@ serve(async (req: Request) => {
 
         // Neighbour document for this run (if neighbour exists)
         if (neighbour && neighbour.client_email) {
-          const { data: nbDoc } = await sb.from('job_documents').insert({
-            job_id: job.id,
-            type: 'quote',
-            run_label: run.run_label,
-            job_contact_id: neighbour.id,
-            pdf_url: runPdfUrl,
-            sent_to_client: true,
-            sent_at: new Date().toISOString(),
-            data_snapshot_json: { run },
-          }).select('id, share_token').single()
+          const neighbourKey = { runLabel: String(run.run_label || ''), jobContactId: neighbour.id || null }
+          const neighbourResolution = resolveSendRunDocument(existingQuoteDocs, neighbourKey)
+          let nbDoc: any = null
+          if (neighbourResolution.action === 'use_published') {
+            nbDoc = neighbourResolution.document
+            publishedExistingDocs.push(nbDoc)
+          } else if (neighbourResolution.action === 'reuse_unpublished') {
+            nbDoc = neighbourResolution.document
+            const neighbourClaim = await claimWorkingDoc(nbDoc)
+            if (neighbourClaim !== 'claimed') return await refuseWorkingClaim(neighbourClaim)
+            addRecipientDoc(neighbour.client_email, neighbour.client_name, nbDoc, run)
+          } else {
+            const neighbourQuoteNumber = await mintSendRunQuoteNumber(
+              sb,
+              sendRunQuoteNumberFallback({
+                jobNumber: job.job_number,
+                runLabel: run.run_label,
+                party: 'neighbour',
+              }),
+            )
+            const { data: insertedNeighbour } = await sb.from('job_documents').insert({
+              job_id: job.id,
+              type: 'quote',
+              run_label: run.run_label,
+              job_contact_id: neighbour.id,
+              quote_number: neighbourQuoteNumber,
+              pdf_url: runPdfUrl,
+              sent_to_client: false,
+              sent_at: null,
+              data_snapshot_json: { run },
+            }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
+            nbDoc = insertedNeighbour
+              ? { ...insertedNeighbour, run_label: insertedNeighbour.run_label || run.run_label, data_snapshot_json: insertedNeighbour.data_snapshot_json || { run } }
+              : null
+            if (nbDoc) {
+              rememberExisting({
+                id: nbDoc.id,
+                type: 'quote',
+                run_label: run.run_label,
+                job_contact_id: neighbour.id,
+                sent_to_client: false,
+                sent_at: null,
+                share_token: nbDoc.share_token,
+                quote_number: nbDoc.quote_number,
+                superseded_at: null,
+                accepted_at: null,
+              })
+              const insertedNeighbourClaim = await claimWorkingDoc(nbDoc)
+              if (insertedNeighbourClaim !== 'claimed') return await refuseWorkingClaim(insertedNeighbourClaim)
+              addRecipientDoc(neighbour.client_email, neighbour.client_name, nbDoc, run)
+            }
+          }
 
           if (nbDoc) {
-            createdDocs.push(nbDoc)
-            if (!emailsByRecipient[neighbour.client_email]) {
-              emailsByRecipient[neighbour.client_email] = { name: neighbour.client_name, email: neighbour.client_email, docs: [], runs: [] }
-            }
-            emailsByRecipient[neighbour.client_email].docs.push(nbDoc)
-            emailsByRecipient[neighbour.client_email].runs.push(run)
-
-            // Create run_acceptance for neighbour
             await sb.from('run_acceptances').upsert({
               job_id: job.id,
               job_contact_id: neighbour.id,
@@ -2375,7 +2658,7 @@ serve(async (req: Request) => {
       // jobs.status flip), not pre-Resend. This precomputes the per-run scope
       // summary + neighbour flag + first-client-doc reference that the
       // post-flip recordReleasedQuoteRevision call needs.
-      const firstClientDocForRev = createdDocs[0] || null
+      const firstClientDocForRev = createdDocs[0] || publishedExistingDocs[0] || null
       const anyRunPdfUrl = (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
       const runsScopeSummary = runs.map((r: any) => ({
         run_label: String(r.run_label),
@@ -2389,7 +2672,8 @@ serve(async (req: Request) => {
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
       let emailsSent = 0
       let primarySent = false
-      const primaryEmail = (primaryContact.client_email || job.client_email || '').toLowerCase()
+      const successfulEmails: string[] = []
+      const primaryEmail = quoteSendRecipientKey(primaryContact.client_email || job.client_email)
 
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
@@ -2446,50 +2730,228 @@ serve(async (req: Request) => {
           }
           if (attachments.length > 0) emailPayload.attachments = attachments
 
+          const jobLease = await touchJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
+          const jobLeaseOutcome = classifySendClaimLease(jobLease)
+          if (jobLeaseOutcome === 'error') {
+            console.error(
+              '[send-quote] send-runs job lease refresh failed:',
+              jobLease.error?.message || String(jobLease.error),
+            )
+            return await abortAfterDocumentClaimRelease(
+              true,
+              jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders),
+            )
+          }
+          if (jobLeaseOutcome === 'lost') {
+            return await abortAfterDocumentClaimRelease(
+              false,
+              jsonResponse({
+                error: 'Quote send already in progress for this job',
+                code: 'send_runs_in_progress',
+              }, 409, corsHeaders),
+            )
+          }
+          if (jobLease.claimed_at) jobClaim.claimed_at = jobLease.claimed_at
+          const groupedLease = await touchGroupedQuoteDocumentSendClaims(
+            sb,
+            claimedDocs,
+            [
+              ...claimedDocs.map((claim) => claim.id),
+              ...recipient.docs.map((doc: { id?: string }) => doc?.id),
+            ],
+          )
+          if (groupedLease.outcome === 'error') {
+            console.error(
+              '[send-quote] send-runs document lease refresh failed:',
+              groupedLease.error?.message || String(groupedLease.error),
+            )
+            return await abortAfterDocumentClaimRelease(
+              true,
+              jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders),
+            )
+          }
+          if (groupedLease.outcome !== 'owned') continue
+          const groupSend = await ensureQuoteGroupEmailSendKey(sb, {
+            jobId: job.id,
+            recipientEmail: email,
+            documentIds: recipient.docs.map((doc: { id?: string }) => doc?.id),
+          })
+          if (groupSend.status === 'error' || groupSend.status !== 'ready') {
+            console.error(
+              '[send-quote] send-runs group send record failed:',
+              groupSend.status === 'error' ? groupSend.error : groupSend.status,
+            )
+            return await abortAfterDocumentClaimRelease(
+              true,
+              jsonResponse({ error: 'Failed to load quote group send record' }, 500, corsHeaders),
+            )
+          }
+
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RESEND_API_KEY}` },
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${RESEND_API_KEY}`,
+              ...resendIdempotencyHeaders(groupSend.resend_idempotency_key),
+            },
             body: JSON.stringify(emailPayload)
           })
           if (resendRes.ok) {
+            markSendRunsProviderAttempt(recipient.docs)
             emailsSent++
-            if (primaryEmail && email.toLowerCase() === primaryEmail) primarySent = true
+            successfulEmails.push(email)
+            if (primaryEmail && email === primaryEmail) primarySent = true
+          } else if (!resendResponseIsDefinitivePreSendRejection(resendRes.status)) {
+            markSendRunsProviderAttempt(recipient.docs)
+          } else {
+            const retired = await retireQuoteGroupEmailSendKey(sb, {
+              jobId: job.id,
+              recipientEmail: email,
+              resendIdempotencyKey: groupSend.resend_idempotency_key,
+            })
+            if (retired.status !== 'retired') {
+              console.error(
+                '[send-quote] send-runs group send record retire failed:',
+                retired.status === 'error' ? retired.error : retired.status,
+              )
+              return await abortAfterDocumentClaimRelease(
+                true,
+                jsonResponse({ error: 'Failed to retire quote group send key' }, 500, corsHeaders),
+              )
+            }
           }
         } catch (e: any) {
+          markSendRunsProviderAttempt(recipient.docs)
           console.log(`[send-runs] Failed to email ${email}:`, e.message)
         }
       }
 
-      if (emailsSent > 0 && createdDocs.length > 0) {
-        try {
-          await persistTradePackOnDocuments(sb, {
-            documents: createdDocs.map((d: any) => ({
-              id: d.id,
-              quote_number: d.quote_number || null,
-              sent_at: d.sent_at || new Date().toISOString(),
-            })),
-            jobType: job.type,
-            scopeJson: job.scope_json,
-            pricingJson: pj,
-          })
-        } catch (e) {
-          console.error('[trade-pack-persist-fail]', JSON.stringify({
-            job_id: job.id,
-            handler: 'send-quote/send-runs',
-            error: (e as Error).message,
-          }))
+      // Stamp sent_at / sent_to_client per successful recipient, not from
+      // the primary result alone. Neighbour docs stay unpublished when that
+      // email failed; a neighbour-only success still publishes those docs.
+      // Job draft→quoted requires durable primary-client publication (ADR),
+      // not only a newly successful primary email. A stamp failure after
+      // Resend success fails the handler and reverts unpublished claims so a
+      // retry publishes the same documents instead of minting twins.
+      const publishedDocIds = documentIdsPublishedForSuccessfulSends(
+        Object.values(emailsByRecipient),
+        successfulEmails,
+      )
+      if (publishedDocIds.length > 0) {
+        const sentAt = new Date().toISOString()
+        const publishedClaims = claimsForDocumentIds(claimedDocs, publishedDocIds)
+        const publishedDocs = createdDocs.filter((d: any) => publishedDocIds.includes(d.id))
+        if (
+          publishedDocs.length !== publishedDocIds.length ||
+          publishedClaims.length !== publishedDocIds.length
+        ) {
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders),
+          )
         }
+        const persisted = await persistTradePacksWhileHoldingSendClaims(sb, {
+          documents: publishedDocs.map((d: any) => ({
+            id: d.id,
+            quote_number: d.quote_number || null,
+            sent_at: sentAt,
+            claim_token: publishedClaims.find((claim) => claim.id === d.id)?.token || null,
+            run_label: d.run_label || null,
+            run_snapshot: d.data_snapshot_json?.run ?? null,
+          })),
+          jobType: job.type,
+          scopeJson: job.scope_json,
+          pricingJson: pj,
+          customer: {
+            name: job.client_name,
+            phone: job.client_phone,
+            email: job.client_email,
+            site_address: job.site_address,
+            site_suburb: job.site_suburb,
+          },
+        })
+        if (persisted.status === 'lease_error' || persisted.status === 'lease_lost') {
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders),
+          )
+        }
+        if (persisted.status !== 'persisted') {
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders),
+          )
+        }
+        const published = await publishQuoteDocumentsSendOrRevertWhileHolding(
+          sb,
+          publishedClaims,
+          new Date(sentAt),
+        )
+        if (!published.published) {
+          const leaseFailed = published.lease === 'error' || published.lease === 'lost'
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({
+              error: published.release_error
+                ? 'Failed to release quote send claims'
+                : leaseFailed
+                ? 'Failed to refresh quote send claim'
+                : 'Failed to record quote send publication',
+            }, 500, corsHeaders),
+          )
+        }
+        // Successful recipients are published. Failed-recipient claims stay
+        // unpublished and must be released now, or the neighbour stays locked
+        // until the 15m TTL. Token-fenced revert cannot clear a published row.
+        // Attempted leftovers keep the first provider key; never-fetched
+        // leftovers may clear it.
+        const leftoverClaims = claimsNotInDocumentIds(claimedDocs, publishedDocIds)
+        if (leftoverClaims.length > 0) {
+          const leftover = await revertSendRunsDocumentClaims(leftoverClaims)
+          if (leftover.error) {
+            console.error('[send-quote] send-runs leftover claim revert failed:', leftover.error.message || String(leftover.error))
+            return jsonResponse({ error: 'Failed to release leftover quote send claims' }, 500, corsHeaders)
+          }
+        }
+      } else if (claimedDocs.length > 0) {
+        const released = await revertSendRunsDocumentClaims(claimedDocs)
+        if (released.error) {
+          console.error('[send-quote] send-runs claim revert failed:', released.error.message || String(released.error))
+          return jsonResponse({ error: 'Failed to release quote send claims' }, 500, corsHeaders)
+        }
+      }
+
+      const sendOutcome = sendRunsSendOutcome({
+        emailsSent,
+        recipientsAssembled: Object.keys(emailsByRecipient).length,
+        publishedExistingCount: publishedExistingDocs.length,
+        claimedCount: claimedDocs.length,
+      })
+      if (!sendOutcome.success) {
+        return jsonResponse({
+          success: false,
+          error: sendOutcome.error,
+          code: sendOutcome.code,
+          emails_sent: emailsSent,
+        }, sendOutcome.httpStatus, corsHeaders)
       }
 
       // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.
       // A neighbour-only success does NOT release the quote.
-      // Only flip status from 'draft' to 'quoted' — never regress an already
-      // accepted / scheduled / in_progress / complete / invoiced job back to quoted.
+      // Use durable publication: a primary email this request, OR a current
+      // already-published primary document (including alreadyComplete retry
+      // after a prior partial publication). Never regress an already
+      // accepted / scheduled / in_progress / complete / invoiced job.
       // We gate canonical emits on the UPDATE's affected-row count (not a pre-select),
       // so a concurrent writer that moved the job out of 'draft' between read and write
       // cannot cause a false canonical release event.
       let transitioned = false
-      if (primarySent) {
+      const primaryPublicationSatisfied = sendRunsPrimaryClientPublicationSatisfied({
+        primarySentThisRequest: primarySent,
+        publishedExistingDocs,
+        primaryJobContactId: primaryContact.id || null,
+      })
+      if (primaryPublicationSatisfied) {
         const { data: updatedRows } = await sb.from('jobs')
           .update({ status: 'quoted', quoted_at: new Date().toISOString() })
           .eq('id', job.id)
@@ -2497,7 +2959,7 @@ serve(async (req: Request) => {
           .select('id')
         transitioned = Array.isArray(updatedRows) && updatedRows.length > 0
       } else {
-        console.log(`[send-runs] Primary client send did not succeed (primaryEmail=${primaryEmail || '(none)'}, emailsSent=${emailsSent}). Leaving job unquoted.`)
+        console.log(`[send-runs] Primary client publication not satisfied (primaryEmail=${primaryEmail || '(none)'}, emailsSent=${emailsSent}, publishedExisting=${publishedExistingDocs.length}). Leaving job unquoted.`)
       }
 
       // Analytics event (preserved): records the runs-bundle send attempt regardless of outcome.
@@ -2680,75 +3142,100 @@ serve(async (req: Request) => {
         }, { handler: 'send-quote/send-runs', job_id: job.id })
       }
 
+      const responseDocs = [...publishedExistingDocs, ...createdDocs]
       return jsonResponse({
         success: true,
+        already_sent: sendOutcome.alreadyComplete === true,
         runs_sent: runs.length,
         documents_created: createdDocs.length,
         emails_sent: emailsSent,
-        documents: createdDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
+        documents: responseDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
       }, 200, corsHeaders)
+      } finally {
+        const released = await clearJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
+        if (released.error) {
+          console.error(
+            '[send-quote] send-runs job claim release failed:',
+            released.error.message || String(released.error),
+          )
+          return jsonResponse({ error: 'Failed to release job send-runs claim' }, 500, corsHeaders)
+        }
+      }
     }
 
     // ── SEND BRANDED INVOICE EMAIL ──
     if (path === 'send-invoice' && req.method === 'POST') {
       const body = await req.json()
-      const { xero_invoice_id, job_id, payment_url, invoice_number, deposit_amount,
-              client_name, client_email, job_type, address, share_token, due_date } = body
+      const xero_invoice_id = body?.xero_invoice_id
+      const job_id = body?.job_id
 
-      if (!xero_invoice_id || !job_id || !client_email) {
-        return jsonResponse({ error: 'xero_invoice_id, job_id, and client_email required' }, 400, corsHeaders)
+      if (!xero_invoice_id || !job_id) {
+        return jsonResponse({ error: 'xero_invoice_id and job_id required' }, 400, corsHeaders)
       }
 
-      const { data: invoiceRecord, error: invoiceError } = await sb.from('xero_invoices')
-        .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
-        .eq('xero_invoice_id', xero_invoice_id)
-        .maybeSingle()
-      if (invoiceError || !invoiceRecord) {
-        const refusal = sealedSesFenceCheckFailedRefusal(
-          'send-quote/send-invoice',
-          invoiceError?.message ||
-            'The invoice is missing from the local Xero mirror.',
-          { xero_invoice_id },
-        )
-        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+      const access = await authorizeSendInvoiceAccess({
+        authMode: sendAuthMode,
+        callerOrgId: sendAuthUser?.orgId,
+        bodyJobId: job_id,
+        xeroInvoiceId: xero_invoice_id,
+        deps: {
+          loadInvoice: async () =>
+            await sb.from('xero_invoices')
+              .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token,invoice_number,total,due_date')
+              .eq('xero_invoice_id', xero_invoice_id)
+              .maybeSingle(),
+          loadJob: async (linkedJobId) =>
+            await sb.from('jobs')
+              .select('job_number, type, ghl_contact_id, org_id, client_email, client_name, site_address, site_suburb')
+              .eq('id', linkedJobId)
+              .maybeSingle(),
+          inspectSealedJob: (linkedJobId) => inspectSealedSesJob(sb, linkedJobId),
+        },
+      })
+      if (!access.ok) {
+        return jsonResponse(access.body, access.status, corsHeaders)
       }
-      const binding = validateBrandedInvoiceDeliveryBinding(
-        invoiceRecord,
-        job_id,
+      const invoiceRecord = access.invoice
+      const invoiceJob = access.job
+
+      const delivery = resolveSendInvoiceDelivery({
+        authMode: sendAuthMode,
+        body,
+        job: invoiceJob,
+        invoice: invoiceRecord,
+      })
+      const {
+        client_email,
+        client_name,
+        job_type,
+        address,
+        invoice_number,
+        deposit_amount,
+        payment_url,
+        share_token,
+        due_date,
+      } = delivery
+      if (!client_email) {
+        return jsonResponse({ error: 'No email address found for this invoice job' }, 400, corsHeaders)
+      }
+
+      const invoiceClaim = await claimInvoiceEmailSend(
+        sb,
         xero_invoice_id,
+        invoiceRecord.job_id || job_id,
       )
-      if (!binding.allowed) {
+      if (invoiceClaim.status === 'error') {
+        return jsonResponse({ error: 'Failed to claim invoice email send' }, 500, corsHeaders)
+      }
+      if (invoiceClaim.status === 'already_sent') {
+        return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
+      }
+      if (invoiceClaim.status !== 'claimed') {
         return jsonResponse({
-          success: false,
-          refusal: binding.refusal,
-          error: binding.refusal.fact,
-        }, binding.status, corsHeaders)
+          error: 'Invoice email send already in progress',
+          code: 'invoice_send_in_progress',
+        }, 409, corsHeaders)
       }
-
-      let linkedJobInspection
-      try {
-        linkedJobInspection = await inspectSealedSesJob(sb, invoiceRecord.job_id)
-      } catch (error) {
-        if (!(error instanceof SealedSesMoneyFenceLookupError)) throw error
-        const refusal = sealedSesFenceCheckFailedRefusal(
-          'send-quote/send-invoice',
-          error.message,
-          { xero_invoice_id, job_id: invoiceRecord.job_id },
-        )
-        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
-      }
-      if (linkedJobInspection.sealed) {
-        const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
-          linked_job_id: invoiceRecord.job_id,
-          linked_job_matched_by: linkedJobInspection.matched_by,
-        })
-        return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
-      }
-
-      // Look up job for reply-to routing and GHL logging
-      const { data: invoiceJob } = await sb.from('jobs')
-        .select('job_number, type, ghl_contact_id')
-        .eq('id', invoiceRecord.job_id).maybeSingle()
 
       const firstName = (client_name || 'there').split(' ')[0]
       const typeName = job_type === 'fencing' ? 'fencing' : job_type === 'decking' ? 'decking' : 'patio'
@@ -2776,12 +3263,44 @@ serve(async (req: Request) => {
 
       let resendMessageId: string | null = null
 
-      if (RESEND_API_KEY) {
-        const emailRes = await fetch('https://api.resend.com/emails', {
+      if (!RESEND_API_KEY) {
+        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
+      }
+
+      const invoiceLease = await touchInvoiceEmailSendClaim(
+        sb,
+        xero_invoice_id,
+        invoiceClaim.claim.token,
+      )
+      const invoiceLeaseOutcome = classifySendClaimLease(invoiceLease)
+      if (invoiceLeaseOutcome === 'error') {
+        console.error(
+          '[send-invoice] lease refresh failed:',
+          invoiceLease.error?.message || String(invoiceLease.error),
+        )
+        const released = await revertInvoiceEmailSendClaim(
+          sb,
+          xero_invoice_id,
+          invoiceClaim.claim.token,
+          'keep_provider_key',
+        )
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Failed to refresh invoice send claim' }, 500, corsHeaders)
+      }
+      if (invoiceLeaseOutcome === 'lost') {
+        return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
+      }
+
+      let emailRes: Response
+      try {
+        emailRes = await fetch('https://api.resend.com/emails', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${RESEND_API_KEY}`,
             'Content-Type': 'application/json',
+            ...resendIdempotencyHeaders(invoiceClaim.claim.resend_idempotency_key),
           },
           body: JSON.stringify({
             from: `${FROM_NAME} <invoices@secureworksgroup.app>`,
@@ -2792,37 +3311,65 @@ serve(async (req: Request) => {
             cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
           }),
         })
+      } catch (fetchErr) {
+        const released = await revertInvoiceEmailSendClaim(
+          sb,
+          xero_invoice_id,
+          invoiceClaim.claim.token,
+          'keep_provider_key',
+        )
+        console.log('[send-invoice] Resend fetch threw (provider key kept):', (fetchErr as Error).message)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Email send failed', detail: 'network error' }, 502, corsHeaders)
+      }
 
-        if (emailRes.ok) {
-          const resendData = await emailRes.json()
-          resendMessageId = resendData.id
-          await insertEmailEvent(sb, {
-            emailType: 'invoice', jobId: job_id, recipient: client_email,
-            subject: emailSubject, resendMessageId,
-            status: 'sent',
-            metadata: { xero_invoice_id, invoice_number, deposit_amount, client_name, job_type },
-          })
-          // Log to po_communications for client email thread
-          sb.from('po_communications').insert({
-            job_id, direction: 'outbound',
-            from_email: 'invoices@secureworksgroup.app', to_email: client_email,
-            subject: emailSubject, body_html: emailHtml,
-            communication_type: 'client', sent_at: new Date().toISOString(),
-            message_id: resendMessageId, delivery_status: 'sent',
-          }).then(() => {}, () => {})
-          // Log note to GHL contact
-          logEmailToGHL(invoiceJob?.ghl_contact_id, emailSubject, client_email)
-        } else {
-          const errData = await emailRes.json().catch(() => ({}))
-          console.log('[send-invoice] Resend failed:', JSON.stringify(errData))
-          await insertEmailEvent(sb, {
-            emailType: 'invoice', jobId: job_id, recipient: client_email,
-            subject: emailSubject, status: 'failed',
-            failureReason: errData.message || `HTTP ${emailRes.status}`,
-            metadata: { xero_invoice_id, invoice_number, client_name },
-          })
-          return jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
-        }
+      if (emailRes.ok) {
+        const resendData = await emailRes.json()
+        resendMessageId = resendData.id
+        await insertEmailEvent(sb, {
+          emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
+          subject: emailSubject, resendMessageId,
+          status: 'sent',
+          metadata: { xero_invoice_id, invoice_number, deposit_amount, client_name, job_type },
+        })
+        // Log to po_communications for client email thread
+        sb.from('po_communications').insert({
+          job_id: invoiceRecord.job_id, direction: 'outbound',
+          from_email: 'invoices@secureworksgroup.app', to_email: client_email,
+          subject: emailSubject, body_html: emailHtml,
+          communication_type: 'client', sent_at: new Date().toISOString(),
+          message_id: resendMessageId, delivery_status: 'sent',
+        }).then(() => {}, () => {})
+        // Log note to GHL contact
+        logEmailToGHL(invoiceJob?.ghl_contact_id, emailSubject, client_email)
+      } else {
+        const errData = await emailRes.json().catch(() => ({}))
+        console.log('[send-invoice] Resend failed:', JSON.stringify(errData))
+        await insertEmailEvent(sb, {
+          emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
+          subject: emailSubject, status: 'failed',
+          failureReason: errData.message || `HTTP ${emailRes.status}`,
+          metadata: { xero_invoice_id, invoice_number, client_name },
+        })
+        const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
+          ? 'pre_send'
+          : 'keep_provider_key'
+        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token, revertMode)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
+      }
+
+      const published = await publishInvoiceEmailSendOrRevert(
+        sb,
+        xero_invoice_id,
+        invoiceClaim.claim.token,
+      )
+      if (!published.published) {
+        return jsonResponse({
+          error: published.release_error
+            ? 'Failed to release invoice send claim'
+            : 'Failed to record invoice email send',
+        }, 500, corsHeaders)
       }
 
       return jsonResponse({ success: true, resend_message_id: resendMessageId }, 200, corsHeaders)
@@ -3098,6 +3645,16 @@ function jsonResponse(data: any, status: number, headers: Record<string, string>
     status,
     headers: { ...headers, 'Content-Type': 'application/json' },
   })
+}
+
+function claimReleaseFailureResponse(
+  released: { error?: { message?: string } | null } | null | undefined,
+  corsHeaders: Record<string, string>,
+  message: string,
+): Response | null {
+  if (!released?.error) return null
+  console.error('[send-quote] claim release failed:', released.error.message || String(released.error))
+  return jsonResponse({ error: message }, 500, corsHeaders)
 }
 
 async function htmlResponse(html: string) {

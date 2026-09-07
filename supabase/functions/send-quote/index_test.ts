@@ -15,6 +15,52 @@
 import { assert, assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts"
 import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts"
 import { buildMinimalReleaseManifest } from "../_shared/release_packet/build_minimal_manifest.ts"
+import {
+  QUOTE_GROUP_EMAIL_SEND_TABLE,
+  QUOTE_SEND_CLAIM_TTL_MS,
+  claimJobSendRuns,
+  claimQuoteDocumentSend,
+  claimQuoteDocumentSendForGroupedRuns,
+  coveringQuoteGroupEmailSendKeyForDocument,
+  clearJobSendRunsClaim,
+  quoteSendClaimRevertPayload,
+  resendResponseIsDefinitivePreSendRejection,
+  quoteSendResendIdempotencyKey,
+  resendIdempotencyHeaders,
+  touchQuoteDocumentSendClaim,
+  touchQuoteDocumentSendClaims,
+  touchGroupedQuoteDocumentSendClaims,
+  classifySendClaimLease,
+  claimsForDocumentIds,
+  claimsNotInDocumentIds,
+  documentIdsPublishedForSuccessfulSends,
+  ensureQuoteGroupEmailSendKey,
+  retireQuoteGroupEmailSendKey,
+  persistTradePacksWhileHoldingSendClaims,
+  pickQuoteGroupEmailCoveringRecord,
+  quoteGroupEmailCoversDocumentSet,
+  quoteGroupEmailDocumentSetKey,
+  quoteGroupEmailResendIdempotencyKey,
+  quoteSendRecipientKey,
+  publishQuoteDocumentSend,
+  publishQuoteDocumentSendOrRevert,
+  publishQuoteDocumentsSendOrRevert,
+  publishQuoteDocumentsSendOrRevertWhileHolding,
+  quoteSendClaimIsStale,
+  quoteSendClaimPayload,
+  quoteSendPublicationPayload,
+  resolveSendRunDocument,
+  revertQuoteDocumentSendClaim,
+  revertQuoteDocumentSendClaims,
+  sendRunQuoteNumberFallback,
+  sendRunsPrimaryClientPublicationSatisfied,
+  sendRunsPublicationFailureBlocksSuccess,
+  sendRunsSendOutcome,
+  priorPublishedQuoteIdsToSupersede,
+  quoteSendIsPublished,
+  sendClaimKeyStampConfirmed,
+  supersedePriorPublishedQuoteDocuments,
+} from "../_shared/trade_quote_pack/quote_send_publication.ts"
 
 // ── EXACT COPY of safeBusinessEventInsert from index.ts:108-132 ──
 async function safeBusinessEventInsert(
@@ -637,46 +683,90 @@ Deno.test("R13 — CAP0-QUOTE-REVISION-MANIFEST-STORAGE: upload writes the canon
 // SEND-CLAIM-IDEMPOTENCY — atomic claim decision tests (C1–C4)
 // ════════════════════════════════════════════════════════════════════════════
 //
-// The /send handler atomically claims a job_documents row by running:
-//   UPDATE job_documents SET sent_to_client=true, sent_at=<now>
-//   WHERE id=<document_id> AND NOT (sent_to_client IS TRUE)
-//   RETURNING id                               -- via .select('id').maybeSingle()
+// The /send handler claims send_claimed_at + send_claim_token (in-flight lock),
+// then stamps sent_to_client + sent_at after Resend succeeds and the frozen
+// pack write is confirmed. Claim is not publication.
 //
-// If data is non-null  → claim succeeded; proceed to email.
-// If data is null      → already claimed; return already_sent without emailing.
-//
-// We copy the claim-decision predicate inline (the production code is embedded
-// in the HTTP handler and not directly injectable; a later refactor could
-// extract attemptClaim as a helper). Here we test the mock-client pattern to
-// confirm the branching contract is correct.
+// If status is claimed      → proceed to email.
+// If status is unavailable  → already claimed or published; return already_sent.
+// If status is error        → database fault; return 500, never already_sent.
 
 // Mock supabase client that simulates the claim UPDATE returning a row or null.
-function makeClaimMockSb(claimResult: { id: string } | null) {
-  return {
-    from: (_table: string) => ({
-      update: (_payload: Record<string, unknown>) => ({
-        eq: (_col: string, _val: unknown) => ({
-          not: (_col2: string, _op: string, _val2: unknown) => ({
-            select: (_fields: string) => ({
-              maybeSingle: () => Promise.resolve({ data: claimResult, error: null }),
-            }),
-          }),
-        }),
-      }),
-    }),
-  }
+function emptyGroupSendRecords() {
+  const chain: Record<string, unknown> = {}
+  chain.select = () => chain
+  chain.eq = () => ({
+    then(
+      resolve: (value: unknown) => unknown,
+      reject?: (reason: unknown) => unknown,
+    ) {
+      return Promise.resolve({ data: [], error: null }).then(resolve, reject)
+    },
+  })
+  return chain
 }
 
-// Simulates the claim decision: returns true if the row was claimed, false if already sent.
+function makeClaimMockSb(
+  claimResult: { id: string } | null,
+  opts: {
+    keyStampResult?: { id: string } | null
+    keyStampError?: { message: string } | null
+    revertError?: { message: string } | null
+  } = {},
+) {
+  const updates: Record<string, unknown>[] = [];
+  const api = {
+    updates,
+    from: (table: string) => {
+      if (table === QUOTE_GROUP_EMAIL_SEND_TABLE) return emptyGroupSendRecords()
+      return {
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        }),
+      }),
+      update: (payload: Record<string, unknown>) => {
+        updates.push(payload);
+        const chain: Record<string, unknown> = {};
+        chain.eq = () => chain;
+        chain.is = () => chain;
+        chain.not = () => chain;
+        chain.lt = () => chain;
+        chain.in = () => chain;
+        chain.select = () => ({
+          maybeSingle: () => {
+            const isRevert =
+              payload.send_claimed_at === null &&
+              payload.send_claim_token === null
+            if (isRevert) {
+              return Promise.resolve({
+                data: opts.revertError ? null : claimResult,
+                error: opts.revertError || null,
+              })
+            }
+            const keyOnly =
+              "send_resend_idempotency_key" in payload &&
+              !("send_claimed_at" in payload)
+            if (keyOnly && opts.keyStampError) {
+              return Promise.resolve({ data: null, error: opts.keyStampError })
+            }
+            const data = keyOnly && "keyStampResult" in opts
+              ? opts.keyStampResult
+              : claimResult
+            return Promise.resolve({ data, error: null })
+          },
+        });
+        return chain;
+      },
+    };
+    },
+  };
+  return api;
+}
+
 async function simulateClaim(sb: ReturnType<typeof makeClaimMockSb>, documentId: string): Promise<boolean> {
-  const { data: claimed } = await sb
-    .from('job_documents')
-    .update({ sent_to_client: true, sent_at: new Date().toISOString() })
-    .eq('id', documentId)
-    .not('sent_to_client', 'is', true)
-    .select('id')
-    .maybeSingle()
-  return claimed !== null
+  const claimed = await claimQuoteDocumentSend(sb, documentId);
+  return claimed.status === "claimed";
 }
 
 Deno.test("C1 — claim succeeds when DB returns a row (first caller gets through)", async () => {
@@ -713,13 +803,1987 @@ Deno.test("C4 — claim with distinct document IDs: each simulates independent d
   assertEquals(resultB, false, 'doc-B should already be claimed')
 })
 
+Deno.test("C5 — claim payload is send_claimed_at plus token; publication is the sent marker", async () => {
+  const sb = makeClaimMockSb({ id: 'doc-pub' })
+  await simulateClaim(sb, 'doc-pub')
+  assertEquals(Object.keys(sb.updates[0]).sort(), [
+    'send_claim_token',
+    'send_claimed_at',
+  ])
+  assertEquals(Object.prototype.hasOwnProperty.call(sb.updates[0], 'send_resend_idempotency_key'), false)
+  assertEquals(Object.keys(sb.updates[1]), ['send_resend_idempotency_key'])
+  assertEquals('sent_to_client' in sb.updates[0], false)
+  assertEquals('sent_at' in sb.updates[0], false)
+  const claim = quoteSendClaimPayload(new Date('2026-09-06T00:00:00.000Z'), 'tok-1')
+  const published = quoteSendPublicationPayload(new Date('2026-09-06T00:00:01.000Z'))
+  assertEquals(claim, {
+    send_claimed_at: '2026-09-06T00:00:00.000Z',
+    send_claim_token: 'tok-1',
+    send_resend_idempotency_key: quoteSendResendIdempotencyKey('tok-1'),
+  })
+  assertEquals(quoteSendClaimRevertPayload(), {
+    send_claimed_at: null,
+    send_claim_token: null,
+    send_resend_idempotency_key: null,
+  })
+  assertEquals(quoteSendClaimRevertPayload('keep_provider_key'), {
+    send_claimed_at: null,
+    send_claim_token: null,
+  })
+  assertEquals(resendResponseIsDefinitivePreSendRejection(422), true)
+  assertEquals(resendResponseIsDefinitivePreSendRejection(409), false)
+  assertEquals(resendResponseIsDefinitivePreSendRejection(429), false)
+  assertEquals(resendResponseIsDefinitivePreSendRejection(500), false)
+  assertEquals(published, {
+    sent_to_client: true,
+    sent_at: '2026-09-06T00:00:01.000Z',
+  })
+})
+
+Deno.test("R17-001 key-stamp confirmation requires the owned returning row", () => {
+  assertEquals(
+    sendClaimKeyStampConfirmed("doc-1", "doc-1", "quote-send:stored", "quote-send:fallback"),
+    "quote-send:stored",
+  )
+  assertEquals(
+    sendClaimKeyStampConfirmed("doc-1", "doc-1", null, "quote-send:fallback"),
+    "quote-send:fallback",
+  )
+  assertEquals(
+    sendClaimKeyStampConfirmed(null, "doc-1", "quote-send:stored", "quote-send:fallback"),
+    null,
+  )
+  assertEquals(
+    sendClaimKeyStampConfirmed("doc-other", "doc-1", "quote-send:stored", "quote-send:fallback"),
+    null,
+  )
+})
+
+Deno.test("R17-001 exclusive quote key stamp without a returning row is not claimed", async () => {
+  const sb = makeClaimMockSb({ id: "doc-abc" }, { keyStampResult: null })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
+  assertEquals(claimed.status, "unavailable")
+  assertEquals(sb.updates.some((row) => row.send_claimed_at === null), false)
+})
+
+Deno.test("TRD6-30-002 exclusive quote key stamp error releases the token-fenced claim", async () => {
+  const sb = makeClaimMockSb({ id: "doc-abc" }, { keyStampError: { message: "stamp failed" } })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
+  assertEquals(claimed.status, "error")
+  if (claimed.status === "error") {
+    assertEquals(claimed.error, "stamp failed")
+    assertEquals(claimed.release_error, undefined)
+  }
+  assertEquals(sb.updates.some((row) => (
+    row.send_claimed_at === null &&
+    row.send_claim_token === null &&
+    row.send_resend_idempotency_key === null
+  )), true)
+})
+
+Deno.test("TRD6-30-002 exclusive quote key stamp error surfaces a failed release", async () => {
+  const sb = makeClaimMockSb({ id: "doc-abc" }, {
+    keyStampError: { message: "stamp failed" },
+    revertError: { message: "release failed" },
+  })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-abc")
+  assertEquals(claimed.status, "error")
+  if (claimed.status === "error") {
+    assertEquals(claimed.error, "release failed")
+    assertEquals(claimed.release_error, "release failed")
+  }
+})
+
+Deno.test("R4-002 send-runs publishes only docs for successful recipients", () => {
+  const recipients = [
+    { email: "pat@example.test", docs: [{ id: "doc-primary" }, { id: "doc-primary-2" }] },
+    { email: "neighbour@example.test", docs: [{ id: "doc-neighbour" }] },
+  ]
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(recipients, ["pat@example.test"]),
+    ["doc-primary", "doc-primary-2"],
+  )
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(recipients, ["neighbour@example.test"]),
+    ["doc-neighbour"],
+  )
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(recipients, ["pat@example.test", "neighbour@example.test"]),
+    ["doc-primary", "doc-primary-2", "doc-neighbour"],
+  )
+  assertEquals(documentIdsPublishedForSuccessfulSends(recipients, []), [])
+})
+
+Deno.test("R18-002 case-variant recipient keys are one send-runs group", () => {
+  assertEquals(quoteSendRecipientKey(" Pat@Example.TEST "), "pat@example.test")
+  assertEquals(quoteSendRecipientKey("pat@example.test"), "pat@example.test")
+  const groups: Record<string, string[]> = {}
+  const add = (email: string, docId: string) => {
+    const key = quoteSendRecipientKey(email)
+    if (!groups[key]) groups[key] = []
+    groups[key].push(docId)
+  }
+  add("Pat@example.test", "doc-a")
+  add("pat@example.test", "doc-b")
+  assertEquals(Object.keys(groups), ["pat@example.test"])
+  assertEquals(groups["pat@example.test"], ["doc-a", "doc-b"])
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(
+      [{ email: quoteSendRecipientKey("Pat@example.test"), docs: [{ id: "doc-a" }, { id: "doc-b" }] }],
+      [quoteSendRecipientKey("Pat@example.test")],
+    ),
+    ["doc-a", "doc-b"],
+  )
+})
+
+Deno.test("R18-002 publication matches the exact successful recipient group", () => {
+  assertEquals(
+    documentIdsPublishedForSuccessfulSends(
+      [
+        { email: "Pat@example.test", docs: [{ id: "doc-a" }] },
+        { email: "pat@example.test", docs: [{ id: "doc-b" }] },
+      ],
+      ["Pat@example.test"],
+    ),
+    ["doc-a"],
+  )
+})
+
+Deno.test("R18-002 send-runs source groups recipients on the normalized key", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("const addRecipientDoc =")
+  const end = src.indexOf("emailsByRecipient[dest].runs.push(run)", start)
+  const slice = src.slice(start, end)
+  assert(start >= 0 && end > start)
+  assert(slice.includes("quoteSendRecipientKey(email)"))
+  assert(!slice.includes("String(email || '').trim()"))
+})
+
+Deno.test("TRD6-21-001 /send fails closed on pack-source job read before persist", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendStart = src.indexOf("if (path === 'send' && req.method === 'POST')")
+  const persist = src.indexOf("persistTradePackOnDocuments", sendStart)
+  const publish = src.indexOf("publishQuoteDocumentSendOrRevert", persist)
+  const prePersist = src.slice(sendStart, persist)
+  const persistToPublish = src.slice(persist, publish)
+  assert(sendStart >= 0 && persist > sendStart && publish > persist)
+  assert(prePersist.includes("!doc.job_id"))
+  assert(prePersist.includes("jobForPackErr || !jobForPack"))
+  assert(prePersist.includes("keep_provider_key"))
+  assert(prePersist.includes("500"))
+  assert(prePersist.includes("Failed to persist quote trade pack"))
+  assert(!prePersist.includes("publishQuoteDocumentSendOrRevert"))
+  assert(persistToPublish.includes("persistTradePackWriteConfirmed"))
+})
+
+Deno.test("TRD6-21-002 send-runs primaryEmail uses quoteSendRecipientKey", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("const primaryEmail =")
+  const compare = src.indexOf("if (primaryEmail && email === primaryEmail)", start)
+  const slice = src.slice(start, compare + 80)
+  assert(start >= 0 && compare > start)
+  assert(slice.includes("quoteSendRecipientKey(primaryContact.client_email || job.client_email)"))
+  assert(!slice.includes(".toLowerCase()"))
+  assertEquals(quoteSendRecipientKey(" pat@x.com "), "pat@x.com")
+})
+
+Deno.test("R19-003 group document set key is sorted unique ids", () => {
+  assertEquals(quoteGroupEmailDocumentSetKey(["doc-b", "doc-a", "doc-b"]), "doc-a,doc-b")
+  assertEquals(quoteGroupEmailDocumentSetKey(["  doc-a  ", null, ""]), "doc-a")
+  assertEquals(
+    quoteGroupEmailResendIdempotencyKey("tok-group"),
+    "quote-group-send:tok-group",
+  )
+})
+
+Deno.test("R19-003 leftover docs are covered by the original grouped set", () => {
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-b"]), true)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-a", "doc-b"]), true)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-c"]), false)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a", "doc-b"], ["doc-b", "doc-c"]), false)
+  assertEquals(quoteGroupEmailCoversDocumentSet(["doc-a"], []), false)
+  const original = {
+    document_ids: ["doc-a", "doc-b"],
+    document_set_key: "doc-a,doc-b",
+    send_resend_idempotency_key: "quote-group-send:orig",
+  }
+  const later = {
+    document_ids: ["doc-c"],
+    document_set_key: "doc-c",
+    send_resend_idempotency_key: "quote-group-send:later",
+  }
+  assertEquals(
+    pickQuoteGroupEmailCoveringRecord([later, original], ["doc-b"])?.send_resend_idempotency_key,
+    "quote-group-send:orig",
+  )
+  assertEquals(
+    pickQuoteGroupEmailCoveringRecord([later, original], ["doc-a", "doc-b"])?.send_resend_idempotency_key,
+    "quote-group-send:orig",
+  )
+  assertEquals(pickQuoteGroupEmailCoveringRecord([later, original], ["doc-c"])?.send_resend_idempotency_key, "quote-group-send:later")
+  assertEquals(pickQuoteGroupEmailCoveringRecord([later, original], ["doc-d"]), null)
+})
+
+function makeGroupSendRecordSb(opts: {
+  existing?: Array<{
+    id: string
+    job_id: string
+    recipient_email: string
+    document_ids: string[]
+    document_set_key: string
+    send_resend_idempotency_key: string
+  }>
+  selectError?: { message: string }
+  insertError?: { message: string; code?: string }
+  deleteError?: { message: string }
+  insertResult?: null | { id?: string; send_resend_idempotency_key?: string }
+  emptyFirstSelect?: boolean
+} = {}) {
+  const rows = (opts.existing || []).map((row) => ({ ...row }))
+  const inserts: Record<string, unknown>[] = []
+  const deletes: Record<string, unknown>[] = []
+  let selects = 0
+  return {
+    rows,
+    inserts,
+    deletes,
+    from: (table: string) => {
+      assertEquals(table, "quote_group_email_send_records")
+      let jobId = ""
+      let recipient = ""
+      let idempotencyKey = ""
+      let mode: "select" | "insert" | "delete" = "select"
+      const self: Record<string, unknown> = {}
+      const matching = () =>
+        rows.filter((row) =>
+          (!jobId || row.job_id === jobId) &&
+          (!recipient || row.recipient_email === recipient)
+        )
+      self.select = () => self
+      self.eq = (col: string, value: unknown) => {
+        if (col === "job_id") jobId = String(value)
+        if (col === "recipient_email") recipient = String(value)
+        if (col === "send_resend_idempotency_key") idempotencyKey = String(value)
+        return self
+      }
+      self.insert = (payload: Record<string, unknown>) => {
+        mode = "insert"
+        inserts.push(payload)
+        return self
+      }
+      self.delete = () => {
+        mode = "delete"
+        return self
+      }
+      self.maybeSingle = () => {
+        if (mode !== "insert") {
+          return Promise.resolve({ data: null, error: { message: "not insert" } })
+        }
+        if (opts.insertError) return Promise.resolve({ data: null, error: opts.insertError })
+        const payload = inserts[inserts.length - 1]
+        const conflict = rows.some((row) =>
+          row.job_id === payload.job_id &&
+          row.recipient_email === payload.recipient_email &&
+          row.document_set_key === payload.document_set_key
+        )
+        if (conflict) {
+          return Promise.resolve({ data: null, error: { code: "23505", message: "duplicate key" } })
+        }
+        if (opts.insertResult === null) return Promise.resolve({ data: null, error: null })
+        const row = {
+          id: opts.insertResult?.id || "grp-new",
+          job_id: String(payload.job_id),
+          recipient_email: String(payload.recipient_email),
+          document_ids: payload.document_ids as string[],
+          document_set_key: String(payload.document_set_key),
+          send_resend_idempotency_key: opts.insertResult?.send_resend_idempotency_key
+            || String(payload.send_resend_idempotency_key),
+        }
+        rows.push(row)
+        return Promise.resolve({ data: row, error: null })
+      }
+      self.then = (
+        resolve: (value: unknown) => unknown,
+        reject?: (reason: unknown) => unknown,
+      ) => {
+        if (mode === "delete") {
+          deletes.push({
+            job_id: jobId,
+            recipient_email: recipient,
+            send_resend_idempotency_key: idempotencyKey,
+          })
+          if (opts.deleteError) {
+            return Promise.resolve({ data: null, error: opts.deleteError }).then(resolve, reject)
+          }
+          for (let i = rows.length - 1; i >= 0; i--) {
+            const row = rows[i]
+            if (
+              row.job_id === jobId &&
+              row.recipient_email === recipient &&
+              row.send_resend_idempotency_key === idempotencyKey
+            ) {
+              rows.splice(i, 1)
+            }
+          }
+          return Promise.resolve({ data: null, error: null }).then(resolve, reject)
+        }
+        selects += 1
+        if (opts.selectError) {
+          return Promise.resolve({ data: null, error: opts.selectError }).then(resolve, reject)
+        }
+        if (opts.emptyFirstSelect && selects === 1) {
+          return Promise.resolve({ data: [], error: null }).then(resolve, reject)
+        }
+        return Promise.resolve({ data: matching(), error: null }).then(resolve, reject)
+      }
+      return self
+    },
+  }
+}
+
+Deno.test("R19-003 leftover retry reuses the original grouped Resend key", async () => {
+  const sb = makeGroupSendRecordSb()
+  const first = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: " Pat@Example.TEST ",
+    documentIds: ["doc-b", "doc-a"],
+  })
+  assertEquals(first.status, "ready")
+  if (first.status !== "ready") return
+  assertEquals(first.reused, false)
+  assert(first.resend_idempotency_key.startsWith("quote-group-send:"))
+  assertEquals(sb.inserts.length, 1)
+  assertEquals(sb.inserts[0].recipient_email, "pat@example.test")
+  assertEquals(sb.inserts[0].document_set_key, "doc-a,doc-b")
+  const leftover = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-b"],
+  })
+  assertEquals(leftover.status, "ready")
+  if (leftover.status !== "ready") return
+  assertEquals(leftover.reused, true)
+  assertEquals(leftover.resend_idempotency_key, first.resend_idempotency_key)
+  assertEquals(sb.inserts.length, 1)
+})
+
+Deno.test("R19-003 a new document set mints a distinct grouped Resend key", async () => {
+  const sb = makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+  })
+  const next = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-c"],
+  })
+  assertEquals(next.status, "ready")
+  if (next.status !== "ready") return
+  assertEquals(next.reused, false)
+  assert(next.resend_idempotency_key !== "quote-group-send:orig")
+  assertEquals(sb.inserts.length, 1)
+  assertEquals(sb.inserts[0].document_set_key, "doc-c")
+})
+
+Deno.test("R19-003 unique insert race rereads the covering group key", async () => {
+  const sb = makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+    emptyFirstSelect: true,
+  })
+  const raced = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a", "doc-b"],
+  })
+  assertEquals(raced.status, "ready")
+  if (raced.status !== "ready") return
+  assertEquals(raced.reused, true)
+  assertEquals(raced.resend_idempotency_key, "quote-group-send:orig")
+})
+
+Deno.test("R19-003 group send record read/insert faults are errors", async () => {
+  const readFail = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    selectError: { message: "db down" },
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(readFail.status, "error")
+  if (readFail.status === "error") assertEquals(readFail.error, "db down")
+
+  const insertFail = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    insertError: { message: "insert failed" },
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(insertFail.status, "error")
+
+  const lostRow = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    insertResult: null,
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(lostRow.status, "error")
+
+  const missing = await ensureQuoteGroupEmailSendKey(makeGroupSendRecordSb(), {
+    jobId: "job-1",
+    recipientEmail: " ",
+    documentIds: ["doc-a"],
+  })
+  assertEquals(missing.status, "unavailable")
+})
+
+Deno.test("R19-003 send-runs source uses the durable group Resend key", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const headersEnd = src.indexOf("body: JSON.stringify(emailPayload)", provider)
+  const preDispatch = src.slice(start, provider)
+  const headers = src.slice(provider, headersEnd)
+  assert(start >= 0 && provider > start && headersEnd > provider)
+  assert(preDispatch.includes("touchGroupedQuoteDocumentSendClaims("))
+  assert(preDispatch.includes("ensureQuoteGroupEmailSendKey("))
+  assert(headers.includes("groupSend.resend_idempotency_key"))
+  assert(!headers.includes("recipientClaim"))
+  assert(!headers.includes("groupedLease.claims[0]"))
+  assert(preDispatch.includes("Failed to load quote group send record"))
+  assert(preDispatch.includes("500"))
+})
+
+Deno.test("R20-003 retiring the group key lets the same set mint a new provider key", async () => {
+  const sb = makeGroupSendRecordSb()
+  const first = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: " Pat@Example.TEST ",
+    documentIds: ["doc-b", "doc-a"],
+  })
+  assertEquals(first.status, "ready")
+  if (first.status !== "ready") return
+  const retired = await retireQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "Pat@Example.TEST",
+    resendIdempotencyKey: first.resend_idempotency_key,
+  })
+  assertEquals(retired.status, "retired")
+  assertEquals(sb.deletes.length, 1)
+  assertEquals(sb.deletes[0].recipient_email, "pat@example.test")
+  assertEquals(sb.deletes[0].send_resend_idempotency_key, first.resend_idempotency_key)
+  assertEquals(sb.rows.length, 0)
+  const again = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-a", "doc-b"],
+  })
+  assertEquals(again.status, "ready")
+  if (again.status !== "ready") return
+  assertEquals(again.reused, false)
+  assert(again.resend_idempotency_key !== first.resend_idempotency_key)
+  assert(again.resend_idempotency_key.startsWith("quote-group-send:"))
+  assertEquals(sb.inserts.length, 2)
+})
+
+Deno.test("R20-003 a mismatched group key is not retired", async () => {
+  const sb = makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+  })
+  const retired = await retireQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    resendIdempotencyKey: "quote-group-send:other",
+  })
+  assertEquals(retired.status, "retired")
+  assertEquals(sb.rows.length, 1)
+  const leftover = await ensureQuoteGroupEmailSendKey(sb, {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    documentIds: ["doc-b"],
+  })
+  assertEquals(leftover.status, "ready")
+  if (leftover.status !== "ready") return
+  assertEquals(leftover.reused, true)
+  assertEquals(leftover.resend_idempotency_key, "quote-group-send:orig")
+})
+
+Deno.test("R20-003 group key retire faults and missing coordinates", async () => {
+  const missing = await retireQuoteGroupEmailSendKey(makeGroupSendRecordSb(), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    resendIdempotencyKey: " ",
+  })
+  assertEquals(missing.status, "unavailable")
+
+  const failed = await retireQuoteGroupEmailSendKey(makeGroupSendRecordSb({
+    existing: [{
+      id: "grp-orig",
+      job_id: "job-1",
+      recipient_email: "pat@example.test",
+      document_ids: ["doc-a"],
+      document_set_key: "doc-a",
+      send_resend_idempotency_key: "quote-group-send:orig",
+    }],
+    deleteError: { message: "delete failed" },
+  }), {
+    jobId: "job-1",
+    recipientEmail: "pat@example.test",
+    resendIdempotencyKey: "quote-group-send:orig",
+  })
+  assertEquals(failed.status, "error")
+  if (failed.status === "error") assertEquals(failed.error, "delete failed")
+})
+
+Deno.test("R20-003 send-runs retires the group key only on definitive pre-send 4xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const catchStart = src.indexOf("} catch (e: any) {", provider)
+  const afterFetch = src.slice(provider, catchStart)
+  const okEnd = afterFetch.indexOf("} else if (!resendResponseIsDefinitivePreSendRejection")
+  const okBranch = afterFetch.slice(0, okEnd)
+  const rest = afterFetch.slice(okEnd)
+  const retireStart = rest.indexOf("} else {")
+  const ambiguousBranch = rest.slice(0, retireStart)
+  const retireBranch = rest.slice(retireStart)
+  assert(start >= 0 && provider > start && catchStart > provider)
+  assert(okEnd >= 0 && retireStart >= 0)
+  assert(okBranch.includes("markSendRunsProviderAttempt"))
+  assert(!okBranch.includes("retireQuoteGroupEmailSendKey"))
+  assert(ambiguousBranch.includes("markSendRunsProviderAttempt"))
+  assert(!ambiguousBranch.includes("retireQuoteGroupEmailSendKey"))
+  assert(retireBranch.includes("retireQuoteGroupEmailSendKey("))
+  assert(retireBranch.includes("groupSend.resend_idempotency_key"))
+  assert(retireBranch.includes("retired.status !== 'retired'"))
+  assert(retireBranch.includes("abortAfterDocumentClaimRelease("))
+  assert(retireBranch.includes("Failed to retire quote group send key"))
+  assert(retireBranch.includes("500"))
+  assert(!retireBranch.includes("markSendRunsProviderAttempt"))
+  const catchBlock = src.slice(catchStart, src.indexOf("}", catchStart + 80) + 1)
+  assert(catchBlock.includes("markSendRunsProviderAttempt"))
+  assert(!catchBlock.includes("retireQuoteGroupEmailSendKey"))
+})
+
+Deno.test("R7-003 failed send-runs recipients are the claim complement", () => {
+  const claims = [
+    { id: "doc-primary", token: "tok-p", claimed_at: "2026-09-06T00:00:00.000Z" },
+    { id: "doc-neighbour", token: "tok-n", claimed_at: "2026-09-06T00:00:00.000Z" },
+  ]
+  const published = documentIdsPublishedForSuccessfulSends(
+    [
+      { email: "pat@example.test", docs: [{ id: "doc-primary" }] },
+      { email: "neighbour@example.test", docs: [{ id: "doc-neighbour" }] },
+    ],
+    ["pat@example.test"],
+  )
+  assertEquals(published, ["doc-primary"])
+  assertEquals(claimsForDocumentIds(claims, published).map((c) => c.id), ["doc-primary"])
+  assertEquals(claimsNotInDocumentIds(claims, published).map((c) => c.id), ["doc-neighbour"])
+  assertEquals(claimsNotInDocumentIds(claims, published)[0].token, "tok-n")
+})
+
+Deno.test("R7-003 leftover send-runs revert is token-fenced and skips published rows", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const nots: Array<{ col: string; op: string; value: unknown }> = []
+  const sb = {
+    from: (_table: string) => {
+      const chain: Record<string, unknown> = {
+        update: (payload: Record<string, unknown>) => {
+          updates.push(payload)
+          return chain
+        },
+        eq: (col: string, value: unknown) => {
+          eqs.push({ col, value })
+          return chain
+        },
+        not: (col: string, op: string, value: unknown) => {
+          nots.push({ col, op, value })
+          return chain
+        },
+        select: () => ({
+          maybeSingle: () => Promise.resolve({ data: { id: "doc-neighbour" }, error: null }),
+        }),
+      }
+      return chain
+    },
+  }
+  const leftover = claimsNotInDocumentIds(
+    [
+      { id: "doc-primary", token: "tok-p" },
+      { id: "doc-neighbour", token: "tok-n" },
+    ],
+    ["doc-primary"],
+  )
+  const result = await revertQuoteDocumentSendClaims(sb, leftover)
+  assertEquals(result.error, null)
+  assertEquals(updates, [quoteSendClaimRevertPayload()])
+  assertEquals(eqs.filter((eq) => eq.col === "id").map((eq) => eq.value), ["doc-neighbour"])
+  assertEquals(eqs.filter((eq) => eq.col === "send_claim_token").map((eq) => eq.value), ["tok-n"])
+  assert(nots.some((n) => n.col === "sent_to_client" && n.op === "is" && n.value === true))
+})
+
+Deno.test("R4-003 send-runs quote numbers are assigned per document", () => {
+  assertEquals(
+    sendRunQuoteNumberFallback({ jobNumber: "SWF-25101", runLabel: "REAR", party: "client" }),
+    "SWF-25101-REAR",
+  )
+  assertEquals(
+    sendRunQuoteNumberFallback({ jobNumber: "SWF-25101", runLabel: "REAR", party: "neighbour" }),
+    "SWF-25101-REAR-N",
+  )
+})
+
+function makeOwnedWriteMock(opts: {
+  updates: Record<string, unknown>[]
+  eqs: Array<{ col: string; value: unknown }>
+  publishError?: { message: string } | null
+  publishRow?: { id: string } | null
+  revertRow?: { id: string } | null
+  revertError?: { message: string } | null
+}) {
+  return {
+    from: (_table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        opts.updates.push(payload)
+        const isPublish = "sent_to_client" in payload
+        const chain: Record<string, unknown> = {
+          eq: (col: string, value: unknown) => {
+            opts.eqs.push({ col, value })
+            return chain
+          },
+          not: () => chain,
+          select: () => ({
+            maybeSingle: () =>
+              Promise.resolve(
+                isPublish
+                  ? {
+                    data: opts.publishError ? null : opts.publishRow ?? null,
+                    error: opts.publishError || null,
+                  }
+                  : {
+                    data: opts.revertError
+                      ? null
+                      : opts.revertRow === undefined ? { id: "doc-pub" } : opts.revertRow,
+                    error: opts.revertError || null,
+                  },
+              ),
+          }),
+        }
+        return chain
+      },
+    }),
+  }
+}
+
+Deno.test("R4-004 publication stamp failure reverts the in-flight claim", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const sb = makeOwnedWriteMock({
+    updates,
+    eqs,
+    publishError: { message: "stamp failed" },
+    revertRow: { id: "doc-pub" },
+  })
+  const result = await publishQuoteDocumentSendOrRevert(sb, "doc-pub", "tok-owner")
+  assertEquals(result.published, false)
+  if (result.published === false) {
+    assertEquals(result.error, "stamp failed")
+  }
+  assertEquals(updates[0].sent_to_client, true)
+  assertEquals(updates[0].send_claim_token, null)
+  assertEquals(updates[1], quoteSendClaimRevertPayload('keep_provider_key'))
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-owner"))
+})
+
+Deno.test("R5-002 stale in-flight claims are reclaimable; fresh claims are not", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  assertEquals(quoteSendClaimIsStale(null, now), false)
+  assertEquals(quoteSendClaimIsStale("2026-09-06T11:50:00.000Z", now), false)
+  assertEquals(
+    quoteSendClaimIsStale(new Date(now.getTime() - QUOTE_SEND_CLAIM_TTL_MS).toISOString(), now),
+    true,
+  )
+  assertEquals(quoteSendClaimIsStale("not-a-date", now), true)
+
+  let exclusiveCalls = 0
+  let reclaimUpdates = 0
+  const staleFilters: string[] = []
+  const firstKey = "quote-send:first-claim-token"
+  const sb = {
+    from: (table: string) => {
+      if (table === QUOTE_GROUP_EMAIL_SEND_TABLE) return emptyGroupSendRecords()
+      return {
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => Promise.resolve({
+            data: {
+              id: "doc-stale",
+              job_id: "job-stale",
+              send_claimed_at: "2026-09-06T11:40:00.000Z",
+              send_resend_idempotency_key: firstKey,
+              sent_at: null,
+              sent_to_client: false,
+              accepted_at: null,
+            },
+            error: null,
+          }),
+        }),
+      }),
+      update: (payload: Record<string, unknown>) => {
+        const chain: Record<string, unknown> = {}
+        chain.eq = () => chain
+        chain.is = (col: string) => {
+          staleFilters.push(`is:${col}`)
+          return chain
+        }
+        chain.not = () => chain
+        chain.lt = (col: string) => {
+          staleFilters.push(`lt:${col}`)
+          return chain
+        }
+        chain.select = () => ({
+          maybeSingle: () => {
+            if (payload.send_resend_idempotency_key === firstKey) {
+              reclaimUpdates += 1
+              return Promise.resolve({
+                data: { id: "doc-stale", send_resend_idempotency_key: firstKey },
+                error: null,
+              })
+            }
+            exclusiveCalls += 1
+            assertEquals(Object.keys(payload).sort(), [
+              "send_claim_token",
+              "send_claimed_at",
+            ])
+            return Promise.resolve({ data: null, error: null })
+          },
+        })
+        return chain
+      },
+    }
+    },
+  }
+  const claimed = await claimQuoteDocumentSend(sb, "doc-stale", now)
+  assertEquals(claimed.status, "claimed")
+  if (claimed.status === "claimed") {
+    assertEquals(claimed.id, "doc-stale")
+    assertEquals(typeof claimed.token, "string")
+    assert(claimed.token.length > 0)
+    assertEquals(claimed.resend_idempotency_key, firstKey)
+  }
+  assertEquals(exclusiveCalls, 1)
+  assertEquals(reclaimUpdates, 1)
+  assert(staleFilters.includes("lt:send_claimed_at"))
+})
+
+Deno.test("R5-002 fresh claim stays exclusive after exclusive miss", async () => {
+  const sb = makeClaimMockSb(null)
+  const claimed = await claimQuoteDocumentSend(sb, "doc-fresh")
+  assertEquals(claimed, { status: "unavailable" })
+})
+
+function makeCoveringGroupClaimSb(opts: {
+  documentId: string
+  jobId?: string | null
+  documentError?: { message: string }
+  groupError?: { message: string }
+  groupRecords?: Array<{
+    id: string
+    document_ids: string[]
+    document_set_key?: string
+    send_resend_idempotency_key?: string | null
+  }>
+  stale?: boolean
+  exclusiveResult?: { id: string } | null
+  now?: Date
+}) {
+  const updates: Record<string, unknown>[] = []
+  const now = opts.now || new Date("2026-09-06T12:00:00.000Z")
+  const staleAt = new Date(now.getTime() - QUOTE_SEND_CLAIM_TTL_MS - 60_000).toISOString()
+  const documentRow = opts.jobId === null
+    ? { id: opts.documentId }
+    : {
+      id: opts.documentId,
+      job_id: opts.jobId ?? "job-1",
+      send_claimed_at: opts.stale ? staleAt : null,
+      send_resend_idempotency_key: "quote-send:first",
+      sent_at: null,
+      sent_to_client: false,
+      accepted_at: null,
+    }
+  return {
+    updates,
+    from(table: string) {
+      if (table === QUOTE_GROUP_EMAIL_SEND_TABLE) {
+        const chain: Record<string, unknown> = {}
+        chain.select = () => chain
+        chain.eq = () => ({
+          then(
+            resolve: (value: unknown) => unknown,
+            reject?: (reason: unknown) => unknown,
+          ) {
+            if (opts.groupError) {
+              return Promise.resolve({ data: null, error: opts.groupError }).then(resolve, reject)
+            }
+            return Promise.resolve({ data: opts.groupRecords || [], error: null }).then(resolve, reject)
+          },
+        })
+        return chain
+      }
+      return {
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => {
+              if (opts.documentError) {
+                return Promise.resolve({ data: null, error: opts.documentError })
+              }
+              return Promise.resolve({ data: documentRow, error: null })
+            },
+          }),
+        }),
+        update: (payload: Record<string, unknown>) => {
+          updates.push(payload)
+          const chain: Record<string, unknown> = {}
+          chain.eq = () => chain
+          chain.is = () => chain
+          chain.not = () => chain
+          chain.lt = () => chain
+          chain.select = () => ({
+            maybeSingle: () => {
+              if (opts.stale && "send_resend_idempotency_key" in payload) {
+                return Promise.resolve({
+                  data: {
+                    id: opts.documentId,
+                    send_resend_idempotency_key: payload.send_resend_idempotency_key,
+                  },
+                  error: null,
+                })
+              }
+              return Promise.resolve({ data: opts.exclusiveResult ?? null, error: null })
+            },
+          })
+          return chain
+        },
+      }
+    },
+  }
+}
+
+Deno.test("TRD6-27-001 stale unpublished doc with covering group key is not reclaimed", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-a",
+    stale: true,
+    now,
+    groupRecords: [{
+      id: "grp-1",
+      document_ids: ["doc-a"],
+      document_set_key: "doc-a",
+      send_resend_idempotency_key: "quote-group-send:live",
+    }],
+  })
+  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, "doc-a")
+  assertEquals(covering.status, "covered")
+  if (covering.status === "covered") {
+    assertEquals(covering.recordId, "grp-1")
+    assertEquals(covering.idempotencyKey, "quote-group-send:live")
+  }
+  const claimed = await claimQuoteDocumentSend(sb, "doc-a", now)
+  assertEquals(claimed, { status: "unavailable" })
+  assertEquals(sb.updates.length, 0)
+})
+
+Deno.test("TRD6-27-001 covering superset blocks /send reclaim of one leftover document", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-a",
+    stale: true,
+    now,
+    groupRecords: [{
+      id: "grp-superset",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:set",
+    }],
+  })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-a", now)
+  assertEquals(claimed, { status: "unavailable" })
+  assertEquals(sb.updates.length, 0)
+})
+
+Deno.test("TRD6-27-001 stale unpublished doc without a group row stays reclaimable", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-stale",
+    stale: true,
+    now,
+    groupRecords: [],
+  })
+  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, "doc-stale")
+  assertEquals(covering, { status: "none" })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-stale", now)
+  assertEquals(claimed.status, "claimed")
+  if (claimed.status === "claimed") {
+    assertEquals(claimed.id, "doc-stale")
+    assertEquals(claimed.resend_idempotency_key, "quote-send:first")
+  }
+  assert(sb.updates.length >= 1)
+})
+
+Deno.test("TRD6-27-001 group record read fault fails closed instead of reclaiming", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-a",
+    stale: true,
+    now,
+    groupError: { message: "group table down" },
+  })
+  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, "doc-a")
+  assertEquals(covering, { status: "error", error: "group table down" })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-a", now)
+  assertEquals(claimed, { status: "error", error: "group table down" })
+  assertEquals(sb.updates.length, 0)
+})
+
+Deno.test("TRD6-27-001 retired or absent group row lets exclusive /send claim proceed", async () => {
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-open",
+    exclusiveResult: { id: "doc-open" },
+    groupRecords: [],
+  })
+  const claimed = await claimQuoteDocumentSend(sb, "doc-open")
+  assertEquals(claimed.status, "claimed")
+  if (claimed.status === "claimed") {
+    assertEquals(claimed.id, "doc-open")
+  }
+})
+
+Deno.test("TRD6-28-001 send-runs grouped claim reclaims a stale leftover under a covering group key", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-a",
+    stale: true,
+    now,
+    groupRecords: [{
+      id: "grp-1",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:live",
+    }],
+  })
+  const direct = await claimQuoteDocumentSend(sb, "doc-a", now)
+  assertEquals(direct, { status: "unavailable" })
+  assertEquals(sb.updates.length, 0)
+  const grouped = await claimQuoteDocumentSendForGroupedRuns(sb, "doc-a", now)
+  assertEquals(grouped.status, "claimed")
+  if (grouped.status === "claimed") {
+    assertEquals(grouped.id, "doc-a")
+    assertEquals(grouped.resend_idempotency_key, "quote-send:first")
+  }
+  assert(sb.updates.length >= 1)
+})
+
+Deno.test("TRD6-28-001 /send stays on the covering fence; send-runs uses the grouped claim path", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendStart = src.indexOf("if (path === 'send' && req.method === 'POST')")
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const sendSlice = src.slice(sendStart, sendRuns)
+  const runsSlice = src.slice(sendRuns)
+  assert(sendStart >= 0 && sendRuns > sendStart)
+  assert(sendSlice.includes("claimQuoteDocumentSend(sb, document_id)"))
+  assert(!sendSlice.includes("claimQuoteDocumentSendForGroupedRuns"))
+  assert(runsSlice.includes("claimQuoteDocumentSendForGroupedRuns(sb, doc.id)"))
+  assert(runsSlice.includes("ensureQuoteGroupEmailSendKey("))
+})
+
+Deno.test("R5-001 send-runs stamp failure after Resend blocks success and quoted flip", () => {
+  assertEquals(
+    sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: true, publicationSucceeded: false }),
+    { failHandler: true, flipQuoted: false },
+  )
+  assertEquals(
+    sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: true, publicationSucceeded: true }),
+    { failHandler: false, flipQuoted: true },
+  )
+  assertEquals(
+    sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: false, publicationSucceeded: false }),
+    { failHandler: false, flipQuoted: false },
+  )
+})
+
+Deno.test("R5-001 send-runs batch stamp failure reverts unpublished claims per document token", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const sb = makeOwnedWriteMock({
+    updates,
+    eqs,
+    publishError: { message: "stamp failed" },
+  })
+  const result = await publishQuoteDocumentsSendOrRevert(sb, [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ])
+  assertEquals(result.published, false)
+  if (result.published === false) {
+    assertEquals(result.error, "stamp failed")
+  }
+  assertEquals(updates[1], quoteSendClaimRevertPayload('keep_provider_key'))
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-a"))
+})
+
+Deno.test("R5-003 send-runs reuses unpublished docs and skips already published packs", () => {
+  const docs = [
+    {
+      id: "doc-published",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-06T00:00:00.000Z",
+    },
+    {
+      id: "doc-open",
+      type: "quote",
+      run_label: "LHS",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+    },
+  ]
+  assertEquals(
+    resolveSendRunDocument(docs, { runLabel: "REAR", jobContactId: "c-1" }).action,
+    "use_published",
+  )
+  assertEquals(
+    resolveSendRunDocument(docs, { runLabel: "LHS", jobContactId: "c-1" }).action,
+    "reuse_unpublished",
+  )
+  assertEquals(
+    resolveSendRunDocument(docs, { runLabel: "FRONT", jobContactId: "c-1" }).action,
+    "create",
+  )
+  const publishedTwin = resolveSendRunDocument([
+    ...docs,
+    {
+      id: "doc-twin-open",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(publishedTwin.action, "use_published")
+  if (publishedTwin.action === "use_published") {
+    assertEquals(publishedTwin.document.id, "doc-published")
+  }
+})
+
+Deno.test("R5-003 send-runs job claim is exclusive then reclaimable when stale", async () => {
+  let call = 0
+  const updates: Record<string, unknown>[] = []
+  const sb = {
+    from: (table: string) => {
+      assertEquals(table, "jobs")
+      return {
+        update: (payload: Record<string, unknown>) => {
+          updates.push(payload)
+          const chain: Record<string, unknown> = {}
+          chain.eq = () => chain
+          chain.is = () => chain
+          chain.lt = () => chain
+          chain.select = () => ({
+            maybeSingle: () => {
+              call += 1
+              return Promise.resolve({
+                data: call === 1 ? null : { id: "job-1" },
+                error: null,
+              })
+            },
+          })
+          return chain
+        },
+      }
+    },
+  }
+  const claimed = await claimJobSendRuns(sb, "job-1", new Date("2026-09-06T12:00:00.000Z"))
+  assertEquals(claimed.status, "claimed")
+  if (claimed.status !== "claimed") throw new Error("expected claimed")
+  assertEquals(claimed.id, "job-1")
+  assertEquals(call, 2)
+  assertEquals(Object.keys(updates[0]), ["send_runs_claimed_at"])
+  const cleared = await clearJobSendRunsClaim({
+    from: (table: string) => {
+      assertEquals(table, "jobs")
+      return {
+        update: (payload: Record<string, unknown>) => {
+          assertEquals(payload, { send_runs_claimed_at: null })
+          const chain: Record<string, unknown> = {
+            eq: () => chain,
+            then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+              Promise.resolve({ error: null }).then(onFulfilled, onRejected),
+          }
+          return chain
+        },
+      }
+    },
+  }, "job-1", claimed.claimed_at)
+  assertEquals(cleared.error, null)
+})
+
+Deno.test("R6-002 publish and revert match the claim token, not id alone", async () => {
+  const updates: Record<string, unknown>[] = []
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const sb = makeOwnedWriteMock({
+    updates,
+    eqs,
+    publishRow: null,
+    revertRow: null,
+  })
+  const published = await publishQuoteDocumentSend(sb, "doc-pub", "tok-old")
+  assertEquals(published.updated, false)
+  assertEquals(published.error, null)
+  assert(eqs.some((eq) => eq.col === "id" && eq.value === "doc-pub"))
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-old"))
+  const reverted = await revertQuoteDocumentSendClaim(sb, "doc-pub", "tok-old")
+  assertEquals(reverted.updated, false)
+  const missing = await publishQuoteDocumentSendOrRevert(sb, "doc-pub", "  ")
+  assertEquals(missing.published, false)
+})
+
+Deno.test("R6-004 send-runs reports non-success when no email was published", () => {
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 0,
+      recipientsAssembled: 2,
+      publishedExistingCount: 0,
+      claimedCount: 2,
+    }),
+    {
+      success: false,
+      httpStatus: 502,
+      code: "quote_email_delivery_failed",
+      error: "Quote email delivery failed",
+    },
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 0,
+      recipientsAssembled: 0,
+      publishedExistingCount: 0,
+      claimedCount: 0,
+    }),
+    {
+      success: false,
+      httpStatus: 400,
+      code: "no_quote_recipients",
+      error: "No quote recipients to send",
+    },
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 1,
+      recipientsAssembled: 1,
+      publishedExistingCount: 0,
+      claimedCount: 1,
+    }),
+    { success: true, alreadyComplete: false },
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 1,
+      recipientsAssembled: 1,
+      publishedExistingCount: 0,
+      claimedCount: 1,
+    }).success,
+    true,
+  )
+  assertEquals(
+    sendRunsSendOutcome({
+      emailsSent: 0,
+      recipientsAssembled: 0,
+      publishedExistingCount: 2,
+      claimedCount: 0,
+    }),
+    { success: true, alreadyComplete: true },
+  )
+})
+
+Deno.test("R8-001 durable primary publication recovers draft→quoted", () => {
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "c-1",
+        sent_to_client: true,
+        sent_at: "2026-09-06T00:00:00.000Z",
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    true,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: true,
+      publishedExistingDocs: [],
+      primaryJobContactId: "c-1",
+    }),
+    true,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "nb-1",
+        sent_to_client: true,
+        sent_at: "2026-09-06T00:00:00.000Z",
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    false,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "c-1",
+        sent_to_client: true,
+        sent_at: "2026-09-06T00:00:00.000Z",
+        superseded_at: "2026-09-06T12:00:00.000Z",
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    false,
+  )
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [],
+      primaryJobContactId: "c-1",
+    }),
+    false,
+  )
+})
+
+Deno.test("R8-002 superseded documents are not current published runs", () => {
+  assertEquals(
+    resolveSendRunDocument([{
+      id: "doc-old",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    }], { runLabel: "REAR", jobContactId: "c-1" }).action,
+    "create",
+  )
+  const unpublishedTwin = resolveSendRunDocument([
+    {
+      id: "doc-old",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    },
+    {
+      id: "doc-open",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+      superseded_at: null,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(unpublishedTwin.action, "reuse_unpublished")
+  if (unpublishedTwin.action === "reuse_unpublished") {
+    assertEquals(unpublishedTwin.document.id, "doc-open")
+  }
+  const currentPublished = resolveSendRunDocument([
+    {
+      id: "doc-old",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    },
+    {
+      id: "doc-current",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-06T12:00:00.000Z",
+      superseded_at: null,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(currentPublished.action, "use_published")
+  if (currentPublished.action === "use_published") {
+    assertEquals(currentPublished.document.id, "doc-current")
+  }
+  assertEquals(
+    resolveSendRunDocument([{
+      id: "doc-old-open",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: false,
+      sent_at: null,
+      superseded_at: "2026-09-06T00:00:00.000Z",
+    }], { runLabel: "REAR", jobContactId: "c-1" }).action,
+    "create",
+  )
+})
+
+Deno.test("R9-001 supersession uses extract-durable publication, not sent_to_client alone", () => {
+  assertEquals(priorPublishedQuoteIdsToSupersede([
+    { id: "hist", sent_at: "2026-09-01T00:00:00.000Z" },
+    { id: "accepted", accepted_at: "2026-09-02T00:00:00.000Z", sent_to_client: false },
+    { id: "flagged", sent_at: "2026-09-01T00:00:00.000Z", sent_to_client: true },
+    { id: "unsent", sent_to_client: false },
+    { id: "inflight", sent_at: "2026-09-01T00:00:00.000Z", send_claimed_at: "2026-09-06T00:00:00.000Z" },
+    { id: "already", sent_at: "2026-09-01T00:00:00.000Z", sent_to_client: true, superseded_at: "2026-09-06T00:00:00.000Z" },
+  ]).sort(), ["accepted", "flagged", "hist"])
+})
+
+Deno.test("R9-001 supersede write failure is loud, not a silent skip", async () => {
+  const sb = {
+    from: () => ({
+      select: () => {
+        const chain: Record<string, unknown> = {}
+        chain.eq = () => chain
+        chain.is = () => chain
+        chain.lt = () => chain
+        chain.neq = () => chain
+        chain.then = (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+          Promise.resolve({
+            data: [{ id: "hist", sent_at: "2026-09-01T00:00:00.000Z" }],
+            error: null,
+          }).then(onFulfilled, onRejected)
+        return chain
+      },
+      update: () => {
+        const chain: Record<string, unknown> = {}
+        chain.in = () => chain
+        chain.is = () => chain
+        chain.select = () => Promise.resolve({ data: null, error: { message: "stamp failed" } })
+        return chain
+      },
+    }),
+  }
+  const result = await supersedePriorPublishedQuoteDocuments(sb, {
+    jobId: "job-1",
+    currentDocumentId: "doc-new",
+    currentVersion: 2,
+    jobContactId: null,
+    runLabel: null,
+  })
+  assertEquals(result, { ok: false, error: "stamp failed" })
+})
+
+Deno.test("R9-002 accepted documents are already published for send-runs reuse", () => {
+  assertEquals(quoteSendIsPublished({
+    accepted_at: "2026-09-06T00:00:00.000Z",
+    sent_to_client: false,
+    sent_at: null,
+  }), true)
+  assertEquals(quoteSendIsPublished({
+    sent_at: "2026-09-01T00:00:00.000Z",
+  }), true)
+  assertEquals(quoteSendIsPublished({
+    sent_to_client: false,
+    sent_at: "2026-09-01T00:00:00.000Z",
+  }), false)
+  const accepted = resolveSendRunDocument([{
+    id: "doc-acc",
+    type: "quote",
+    run_label: "REAR",
+    job_contact_id: "c-1",
+    sent_to_client: false,
+    sent_at: null,
+    accepted_at: "2026-09-06T00:00:00.000Z",
+    superseded_at: null,
+  }], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(accepted.action, "use_published")
+  if (accepted.action === "use_published") {
+    assertEquals(accepted.document.id, "doc-acc")
+  }
+  assertEquals(
+    sendRunsPrimaryClientPublicationSatisfied({
+      primarySentThisRequest: false,
+      publishedExistingDocs: [{
+        job_contact_id: "c-1",
+        accepted_at: "2026-09-06T00:00:00.000Z",
+        sent_to_client: false,
+      }],
+      primaryJobContactId: "c-1",
+    }),
+    true,
+  )
+})
+
+Deno.test("R6-005 claim database errors are not already_sent", async () => {
+  const sb = {
+    from: (table: string) => {
+      if (table === QUOTE_GROUP_EMAIL_SEND_TABLE) return emptyGroupSendRecords()
+      return {
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        }),
+      }),
+      update: () => {
+        const chain: Record<string, unknown> = {}
+        chain.eq = () => chain
+        chain.is = () => chain
+        chain.not = () => chain
+        chain.lt = () => chain
+        chain.select = () => ({
+          maybeSingle: () => Promise.resolve({ data: null, error: { message: "db down" } }),
+        })
+        return chain
+      },
+    }
+    },
+  }
+  const documentClaim = await claimQuoteDocumentSend(sb, "doc-err")
+  assertEquals(documentClaim, { status: "error", error: "db down" })
+  const jobClaim = await claimJobSendRuns(sb, "job-err")
+  assertEquals(jobClaim, { status: "error", error: "db down" })
+})
+
+Deno.test("R13-003 heartbeat is token-fenced and Resend keys survive reclaim", async () => {
+  assertEquals(resendIdempotencyHeaders("quote-send:tok-1"), {
+    "Idempotency-Key": "quote-send:tok-1",
+  })
+  const eqs: Array<{ col: string; value: unknown }> = []
+  const updates: Record<string, unknown>[] = []
+  const sb = {
+    from: (_table: string) => ({
+      update: (payload: Record<string, unknown>) => {
+        updates.push(payload)
+        const chain: Record<string, unknown> = {
+          eq: (col: string, value: unknown) => {
+            eqs.push({ col, value })
+            return chain
+          },
+          is: () => chain,
+          not: () => chain,
+          select: () => ({
+            maybeSingle: () => Promise.resolve({
+              data: updates.length === 1 ? { id: "doc-1" } : null,
+              error: null,
+            }),
+          }),
+        }
+        return chain
+      },
+    }),
+  }
+  const owned = await touchQuoteDocumentSendClaim(sb, "doc-1", "tok-owner")
+  assertEquals(owned.updated, true)
+  assertEquals(typeof updates[0].send_claimed_at, "string")
+  assert(!("send_claim_token" in updates[0]))
+  assert(eqs.some((eq) => eq.col === "send_claim_token" && eq.value === "tok-owner"))
+  const lost = await touchQuoteDocumentSendClaim(sb, "doc-1", "tok-other")
+  assertEquals(lost.updated, false)
+  const missing = await touchQuoteDocumentSendClaim(sb, "doc-1", "")
+  assertEquals(missing.updated, false)
+  assertEquals(missing.error?.message, "send claim token required")
+})
+
+Deno.test("R16-002 lease errors are not already_sent ownership loss", () => {
+  assertEquals(classifySendClaimLease({ updated: true, error: null }), "owned")
+  assertEquals(classifySendClaimLease({ updated: false, error: null }), "lost")
+  assertEquals(
+    classifySendClaimLease({ updated: false, error: { message: "db down" } }),
+    "error",
+  )
+  assertEquals(
+    classifySendClaimLease({ updated: true, error: { message: "db down" } }),
+    "error",
+  )
+})
+
+function makeQuoteHeartbeatSb(opts: {
+  ownedIds?: string[]
+  errorIds?: string[]
+}) {
+  const owned = new Set(opts.ownedIds || [])
+  const errored = new Set(opts.errorIds || [])
+  const touched: string[] = []
+  return {
+    touched,
+    from: (_table: string) => {
+      let documentId = ""
+      let token = ""
+      const chain: Record<string, unknown> = {
+        update: () => chain,
+        eq: (col: string, value: unknown) => {
+          if (col === "id") documentId = String(value)
+          if (col === "send_claim_token") token = String(value)
+          return chain
+        },
+        is: () => chain,
+        not: () => chain,
+        select: () => ({
+          maybeSingle: () => {
+            if (documentId) touched.push(documentId)
+            if (errored.has(documentId)) {
+              return Promise.resolve({ data: null, error: { message: "db down" } })
+            }
+            return Promise.resolve({
+              data: owned.has(documentId) && token ? { id: documentId } : null,
+              error: null,
+            })
+          },
+        }),
+      }
+      return chain
+    },
+  }
+}
+
+Deno.test("R16-001 grouped send-runs heartbeats every document claim", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a", claimed_at: "2026-09-06T00:00:00.000Z", resend_idempotency_key: "quote-send:tok-a" },
+    { id: "doc-b", token: "tok-b", claimed_at: "2026-09-06T00:00:00.000Z", resend_idempotency_key: "quote-send:tok-b" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a", "doc-b"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b"])
+  assertEquals(grouped.outcome, "owned")
+  assertEquals(sb.touched, ["doc-a", "doc-b"])
+  assertEquals(grouped.claims.map((c) => c.id), ["doc-a", "doc-b"])
+})
+
+Deno.test("R16-001 grouped heartbeat continues after a lost sibling", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+    { id: "doc-c", token: "tok-c" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a", "doc-c"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b", "doc-c"])
+  assertEquals(grouped.outcome, "lost")
+  assertEquals(sb.touched, ["doc-a", "doc-b", "doc-c"])
+})
+
+Deno.test("R16-001 grouped heartbeat treats a missing claim as lost after refreshing owned rows", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b"])
+  assertEquals(grouped.outcome, "lost")
+  assertEquals(sb.touched, ["doc-a"])
+})
+
+Deno.test("R16-002 grouped heartbeat DB faults win over ownership loss", async () => {
+  const claims = [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ]
+  const sb = makeQuoteHeartbeatSb({ ownedIds: ["doc-a"], errorIds: ["doc-b"] })
+  const grouped = await touchGroupedQuoteDocumentSendClaims(sb, claims, ["doc-a", "doc-b"])
+  assertEquals(grouped.outcome, "error")
+  assertEquals(grouped.error?.message, "db down")
+  assertEquals(sb.touched, ["doc-a", "doc-b"])
+  const batch = await touchQuoteDocumentSendClaims(sb, claims)
+  assertEquals(batch.outcome, "error")
+})
+
+Deno.test("R16-001 send-runs source heartbeats the grouped claims before Resend", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const preDispatch = src.slice(start, provider)
+  assert(start >= 0 && provider > start)
+  assert(preDispatch.includes("touchGroupedQuoteDocumentSendClaims("))
+  assert(!preDispatch.includes("claimedDocs.find("))
+})
+
+Deno.test("R21-003 send-runs heartbeats every held claim before each Resend", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const provider = src.indexOf("fetch('https://api.resend.com/emails'", start)
+  const preDispatch = src.slice(start, provider)
+  const lastTouch = preDispatch.lastIndexOf("touchGroupedQuoteDocumentSendClaims(")
+  const touchCall = preDispatch.slice(lastTouch, provider)
+  assert(start >= 0 && provider > start && lastTouch >= 0)
+  assert(touchCall.includes("claimedDocs.map"))
+  assert(touchCall.includes("recipient.docs.map"))
+})
+
+Deno.test("R16-002 quote and invoice lease errors are 5xx before already_sent", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const quoteTouch = src.indexOf("touchQuoteDocumentSendClaim(sb, document_id, claimed.token)")
+  const quoteError = src.indexOf("quoteLeaseOutcome === 'error'", quoteTouch)
+  const quoteLost = src.indexOf("quoteLeaseOutcome === 'lost'", quoteTouch)
+  const quoteResend = src.indexOf("fetch('https://api.resend.com/emails'", quoteTouch)
+  assert(quoteTouch >= 0 && quoteError > quoteTouch && quoteLost > quoteError && quoteLost < quoteResend)
+  assert(src.slice(quoteError, quoteResend).includes("Failed to refresh quote send claim"))
+  assert(src.slice(quoteError, quoteLost).includes("500"))
+  assert(src.slice(quoteLost, quoteResend).includes("already_sent: true"))
+
+  const invoiceTouch = src.indexOf("touchInvoiceEmailSendClaim(")
+  const invoiceError = src.indexOf("invoiceLeaseOutcome === 'error'", invoiceTouch)
+  const invoiceLost = src.indexOf("invoiceLeaseOutcome === 'lost'", invoiceTouch)
+  const invoiceResend = src.indexOf("fetch('https://api.resend.com/emails'", invoiceTouch)
+  assert(invoiceTouch >= 0 && invoiceError > invoiceTouch && invoiceLost > invoiceError && invoiceLost < invoiceResend)
+  assert(src.slice(invoiceError, invoiceResend).includes("Failed to refresh invoice send claim"))
+  assert(src.slice(invoiceError, invoiceLost).includes("500"))
+  assert(src.slice(invoiceLost, invoiceResend).includes("already_sent: true"))
+  assert(src.slice(invoiceError, invoiceLost).includes("keep_provider_key"))
+})
+
+function makeHeldPersistSb(opts: {
+  ownedIds?: string[]
+  loseAfterHeartbeats?: number
+} = {}) {
+  const owned = new Set(opts.ownedIds || ["doc-a", "doc-b"])
+  const events: string[] = []
+  let heartbeats = 0
+  return {
+    events,
+    from: (_table: string) => {
+      let documentId = ""
+      let kind: "heartbeat" | "persist" | "publish" | "other" = "other"
+      const chain: Record<string, unknown> = {
+        update: (payload: Record<string, unknown>) => {
+          if ("trade_pack_json" in payload) kind = "persist"
+          else if ("sent_to_client" in payload) kind = "publish"
+          else if ("send_claimed_at" in payload) kind = "heartbeat"
+          else kind = "other"
+          return chain
+        },
+        eq: (col: string, value: unknown) => {
+          if (col === "id") documentId = String(value)
+          return chain
+        },
+        is: () => chain,
+        not: () => chain,
+        select: () => ({
+          maybeSingle: () => {
+            if (kind === "heartbeat") {
+              heartbeats++
+              events.push(`heartbeat:${documentId}`)
+              const lost = typeof opts.loseAfterHeartbeats === "number" &&
+                heartbeats > opts.loseAfterHeartbeats
+              return Promise.resolve({
+                data: !lost && owned.has(documentId) ? { id: documentId } : null,
+                error: null,
+              })
+            }
+            if (kind === "persist" || kind === "publish") {
+              events.push(`${kind}:${documentId}`)
+            }
+            return Promise.resolve({
+              data: owned.has(documentId) ? { id: documentId } : null,
+              error: null,
+            })
+          },
+        }),
+      }
+      return chain
+    },
+  }
+}
+
+Deno.test("R17-002 persist heartbeats every grouped claim before each pack write", async () => {
+  const sb = makeHeldPersistSb()
+  const result = await persistTradePacksWhileHoldingSendClaims(sb, {
+    documents: [
+      { id: "doc-a", claim_token: "tok-a", quote_number: "Q-1" },
+      { id: "doc-b", claim_token: "tok-b", quote_number: "Q-2" },
+    ],
+    jobType: "other",
+    scopeJson: {},
+    pricingJson: {},
+  })
+  assertEquals(result, { status: "persisted" })
+  assertEquals(sb.events, [
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "persist:doc-a",
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "persist:doc-b",
+  ])
+})
+
+Deno.test("R17-002 persist stops without writing when a later heartbeat loses the lease", async () => {
+  const sb = makeHeldPersistSb({ loseAfterHeartbeats: 3 })
+  const result = await persistTradePacksWhileHoldingSendClaims(sb, {
+    documents: [
+      { id: "doc-a", claim_token: "tok-a" },
+      { id: "doc-b", claim_token: "tok-b" },
+    ],
+    jobType: "other",
+    scopeJson: {},
+  })
+  assertEquals(result, { status: "lease_lost" })
+  assertEquals(sb.events, [
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "persist:doc-a",
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+  ])
+})
+
+Deno.test("R17-002 publication heartbeats the grouped set before stamping sent", async () => {
+  const sb = makeHeldPersistSb()
+  const published = await publishQuoteDocumentsSendOrRevertWhileHolding(sb, [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ])
+  assertEquals(published, { published: true })
+  assertEquals(sb.events, [
+    "heartbeat:doc-a",
+    "heartbeat:doc-b",
+    "publish:doc-a",
+    "heartbeat:doc-b",
+    "publish:doc-b",
+  ])
+})
+
+Deno.test("TRD6-22-001 persist and publish refresh leases with current time each iteration", () => {
+  const src = Deno.readTextFileSync(new URL("../_shared/trade_quote_pack/quote_send_publication.ts", import.meta.url))
+  const persistStart = src.indexOf("export async function persistTradePacksWhileHoldingSendClaims")
+  const publishStart = src.indexOf("export async function publishQuoteDocumentsSendOrRevertWhileHolding")
+  const publishEnd = src.indexOf("async function claimJobSendRunsExclusive")
+  const persist = src.slice(persistStart, publishStart)
+  const publish = src.slice(publishStart, publishEnd)
+  assert(persistStart >= 0 && publishStart > persistStart && publishEnd > publishStart)
+  assert(persist.includes("for (const doc of documents)"))
+  assert(persist.includes("touchQuoteDocumentSendClaims(sb, claims, new Date())"))
+  assert(!persist.includes("touchQuoteDocumentSendClaims(sb, claims, now)"))
+  assert(persist.includes("if (beat.outcome === 'lost')"))
+  assert(publish.includes("for (const claim of owned)"))
+  assert(publish.includes("touchQuoteDocumentSendClaims(sb, unpublished, new Date())"))
+  assert(!publish.includes("touchQuoteDocumentSendClaims(sb, owned, new Date())"))
+  assert(!publish.includes("touchQuoteDocumentSendClaims(sb, unpublished, now)"))
+  const loop = publish.indexOf("for (const claim of owned)")
+  const beat = publish.indexOf("touchQuoteDocumentSendClaims(sb, unpublished, new Date())")
+  const stamp = publish.indexOf("publishQuoteDocumentSend(sb, claim.id, claim.token, now)")
+  assert(loop >= 0 && beat > loop && stamp > beat)
+})
+
+Deno.test("TRD6-22-001 publication stops when a later heartbeat loses the lease", async () => {
+  const sb = makeHeldPersistSb({ loseAfterHeartbeats: 2 })
+  const published = await publishQuoteDocumentsSendOrRevertWhileHolding(sb, [
+    { id: "doc-a", token: "tok-a" },
+    { id: "doc-b", token: "tok-b" },
+  ])
+  assertEquals(published.published, false)
+  if (published.published) throw new Error("expected publication lease loss")
+  assertEquals(published.lease, "lost")
+  assertEquals(sb.events.includes("publish:doc-a"), true)
+  assertEquals(sb.events.includes("publish:doc-b"), false)
+})
+
+Deno.test("R17-002 send-runs source heartbeats grouped claims through persist and publication", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("if (path === 'send-runs'")
+  const persist = src.indexOf("persistTradePacksWhileHoldingSendClaims(", start)
+  const publish = src.indexOf("publishQuoteDocumentsSendOrRevertWhileHolding(", start)
+  const leftover = src.indexOf("const leftoverClaims = claimsNotInDocumentIds", start)
+  assert(start >= 0 && persist > start && publish > persist && leftover > publish)
+  const slice = src.slice(persist, leftover)
+  assert(!slice.includes("persistTradePackOnDocuments("))
+  assert(!slice.includes("publishQuoteDocumentsSendOrRevert("))
+})
+
+Deno.test("TRD6-27-002 leftover and zero-publication revert faults are 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("const leftoverClaims = claimsNotInDocumentIds")
+  const leftoverEnd = src.indexOf("} else if (claimedDocs.length > 0)", start)
+  const leftover = src.slice(start, leftoverEnd)
+  assert(start >= 0 && leftoverEnd > start)
+  assert(leftover.includes("const leftover = await revertSendRunsDocumentClaims(leftoverClaims)"))
+  assert(leftover.includes("if (leftover.error)"))
+  assert(leftover.includes("Failed to release leftover quote send claims"))
+  assert(leftover.includes("500"))
+  assert(!leftover.includes("markSendRunsProviderAttempt"))
+  const zeroStart = leftoverEnd
+  const zeroEnd = src.indexOf("const sendOutcome = sendRunsSendOutcome", zeroStart)
+  const zeroPub = src.slice(zeroStart, zeroEnd)
+  assert(zeroEnd > zeroStart)
+  assert(zeroPub.includes("const released = await revertSendRunsDocumentClaims(claimedDocs)"))
+  assert(zeroPub.includes("if (released.error)"))
+  assert(zeroPub.includes("Failed to release quote send claims"))
+  assert(zeroPub.includes("500"))
+  assert(!zeroPub.includes("markSendRunsProviderAttempt"))
+})
+
+Deno.test("TRD6-28-002 send-runs persist stamps each document's run_label onto the pack write", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("persistTradePacksWhileHoldingSendClaims(sb, {")
+  const end = src.indexOf("if (persisted.status === 'lease_error'", start)
+  const slice = src.slice(start, end)
+  assert(start >= 0 && end > start)
+  assert(slice.includes("run_label: d.run_label || null"))
+  assert(slice.includes("run_snapshot: d.data_snapshot_json?.run ?? null"))
+})
+
+Deno.test("TRD6-28-003 send-runs job-lease cleanup failure is 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const invoice = src.indexOf("if (path === 'send-invoice' && req.method === 'POST')")
+  const block = src.slice(sendRuns, invoice)
+  assert(sendRuns >= 0 && invoice > sendRuns)
+  assert(block.includes("const released = await clearJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)"))
+  assert(block.includes("if (released.error)"))
+  assert(block.includes("Failed to release job send-runs claim"))
+  assert(block.includes("500"))
+  assert(block.includes("jobClaim.claimed_at"))
+})
+
+Deno.test("TRD6-29-001 publication revert error is release_error; CAS miss is not", async () => {
+  const failed = await publishQuoteDocumentSendOrRevert(makeOwnedWriteMock({
+    updates: [],
+    eqs: [],
+    publishError: { message: "stamp failed" },
+    revertError: { message: "db down" },
+  }), "doc-pub", "tok-owner")
+  assertEquals(failed.published, false)
+  if (failed.published === false) {
+    assertEquals(failed.error, "stamp failed")
+    assertEquals(failed.release_error, "db down")
+  }
+
+  const missed = await publishQuoteDocumentSendOrRevert(makeOwnedWriteMock({
+    updates: [],
+    eqs: [],
+    publishError: { message: "stamp failed" },
+    revertRow: null,
+  }), "doc-pub", "tok-owner")
+  assertEquals(missed.published, false)
+  if (missed.published === false) {
+    assertEquals(missed.error, "stamp failed")
+    assertEquals(missed.release_error, undefined)
+  }
+
+  const batch = await publishQuoteDocumentsSendOrRevert(makeOwnedWriteMock({
+    updates: [],
+    eqs: [],
+    publishError: { message: "stamp failed" },
+    revertError: { message: "db down" },
+  }), [{ id: "doc-a", token: "tok-a" }, { id: "doc-b", token: "tok-b" }])
+  assertEquals(batch.published, false)
+  if (batch.published === false) {
+    assertEquals(batch.error, "stamp failed")
+    assertEquals(batch.release_error, "db down")
+  }
+})
+
+Deno.test("TRD6-29-001 publication helpers check revert errors on every failure path", () => {
+  const src = Deno.readTextFileSync(new URL("../_shared/trade_quote_pack/quote_send_publication.ts", import.meta.url))
+  const single = src.slice(
+    src.indexOf("export async function publishQuoteDocumentSendOrRevert"),
+    src.indexOf("export async function publishQuoteDocumentsSendOrRevert("),
+  )
+  const batch = src.slice(
+    src.indexOf("export async function publishQuoteDocumentsSendOrRevert("),
+    src.indexOf("export type PersistHeldSendClaimsResult"),
+  )
+  const held = src.slice(
+    src.indexOf("export async function publishQuoteDocumentsSendOrRevertWhileHolding"),
+    src.indexOf("async function claimJobSendRunsExclusive"),
+  )
+  assert(single.includes("const released = await revertQuoteDocumentSendClaim"))
+  assert(single.includes("withQuoteSendReleaseError"))
+  assert(batch.includes("const released = await revertQuoteDocumentSendClaims"))
+  assert(batch.includes("withQuoteSendReleaseError"))
+  assert(held.includes("const released = await revertQuoteDocumentSendClaims"))
+  assert(held.includes("withQuoteSendReleaseError"))
+  assert(held.includes("lease: 'error'"))
+  assert(held.includes("lease: 'lost'"))
+})
+
+Deno.test("TRD6-29-002 /send provider and pack-source revert faults are 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendStart = src.indexOf("if (path === 'send' && req.method === 'POST')")
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const send = src.slice(sendStart, sendRuns)
+  assert(sendStart >= 0 && sendRuns > sendStart)
+  assert(send.includes("claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')"))
+  const resendRevert = send.indexOf("resendResponseIsDefinitivePreSendRejection")
+  const resendErr = send.indexOf("Email delivery failed: ' + (errData.message")
+  const packId = send.indexOf("Quote send pack-source job id missing")
+  const packRead = send.indexOf("Quote send pack-source job read failed")
+  assert(resendRevert >= 0 && resendErr > resendRevert && packId > resendErr && packRead > packId)
+  assert(send.slice(resendRevert, packId).includes("Failed to release quote send claim"))
+  assert(send.slice(packId, packRead).includes("Failed to release quote send claim"))
+  assert(send.slice(packRead).includes("Failed to release quote send claim"))
+  assert(send.includes("published.release_error"))
+  assert(send.includes("claimed.token"))
+})
+
+Deno.test("TRD6-29-003 send-runs abort paths check document-claim cleanup", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const invoice = src.indexOf("if (path === 'send-invoice' && req.method === 'POST')")
+  const block = src.slice(sendRuns, invoice)
+  assert(sendRuns >= 0 && invoice > sendRuns)
+  assert(block.includes("const refuseWorkingClaim = async"))
+  assert(block.includes("claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claims')"))
+  assert(block.includes("const abortAfterDocumentClaimRelease = async"))
+  assert(block.includes("revertSendRunsDocumentClaims(claimedDocs, forceKeep)"))
+  assert(block.includes("Failed to release quote send claims"))
+  assert(block.includes("abortAfterDocumentClaimRelease("))
+  assert(block.includes("Failed to load quote group send record"))
+  assert(block.includes("Failed to refresh quote send claim"))
+})
+
+Deno.test("TRD6-29-004 invoice send cleanup failures are 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const invoice = src.indexOf("if (path === 'send-invoice' && req.method === 'POST')")
+  const payment = src.indexOf("if (path === 'payment-confirmed' && req.method === 'POST')")
+  const block = src.slice(invoice, payment)
+  assert(invoice >= 0 && payment > invoice)
+  assert(block.includes("claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')"))
+  assert(block.includes("Email service not configured"))
+  assert(block.includes("invoiceLeaseOutcome === 'error'"))
+  assert(block.includes("Resend fetch threw"))
+  assert(block.includes("published.release_error"))
+  assert(block.includes("send_claim_token") || block.includes("invoiceClaim.claim.token"))
+})
+
 // ════════════════════════════════════════════════════════════════════════════
 // G-B2 SUPERSESSION SCOPE-MATCH — manual test documentation
 // ════════════════════════════════════════════════════════════════════════════
 //
-// The G-B2 supersession logic is inline in the /send handler and not extracted
-// into a unit-testable helper, so we document the manual test here rather than
-// forcing a refactor. Verify in Supabase directly after a resend:
+// G-B2 candidate matching is unit-tested via priorPublishedQuoteIdsToSupersede
+// (R9-001). Scope isolation against live rows is still a manual check:
 //
 //   1. Send version 1 of a quote (doc A, version=1, job_contact_id=X, run_label=Y).
 //      Confirm: doc A has sent_to_client=true, superseded_at IS NULL.

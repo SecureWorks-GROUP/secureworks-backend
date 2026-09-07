@@ -6,7 +6,7 @@
 //   2. no way to name a lead installer                          -> is_lead + set_job_lead
 //   3. an assigned installer cannot see scope or the work order -> scopeSummary,
 //                                                                  workOrders
-//      (priced work-order PDFs stay office-only until TRD-6)
+//      (priced work-order PDFs stay office-only; TRD-6 is the quote extract)
 //
 // The controls in the second half are the important half: this change WIDENS
 // what a trade receives, so the tests that matter are the ones proving it did
@@ -363,7 +363,7 @@ Deno.test("assigned installer does not receive priced work-order PDFs (office ke
   assertEquals(d.documents.map((x: any) => x.id), []);
   const serialised = JSON.stringify(d);
   assert(!serialised.includes("wo.pdf"), "priced work-order PDF leaked to allocated payload");
-  assertEquals(d.workOrders[0].special_instructions, "Park on the verge. Charge extra.");
+  assertEquals(d.workOrders[0].special_instructions, undefined);
 });
 
 // ── CONTROLS: proof this did not widen too far ──────────────────────────────

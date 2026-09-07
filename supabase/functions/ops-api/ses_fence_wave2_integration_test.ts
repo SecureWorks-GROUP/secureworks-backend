@@ -11,6 +11,9 @@ const SEND_QUOTE = await Deno.readTextFile(
 const INVOICE_DELIVERY_FENCE = await Deno.readTextFile(
   new URL("../send-quote/invoice_delivery_fence.ts", import.meta.url),
 );
+const SEND_INVOICE_ACCESS = await Deno.readTextFile(
+  new URL("../send-quote/send_invoice_access.ts", import.meta.url),
+);
 const OUTLOOK = await Deno.readTextFile(
   new URL("../send-outlook-email/index.ts", import.meta.url),
 );
@@ -161,16 +164,16 @@ Deno.test("invoice PDF and branded delivery bind to the invoice mirror", () => {
   const sendInvoice = SEND_QUOTE.indexOf(
     "if (path === 'send-invoice'",
   );
+  const authorize = SEND_QUOTE.indexOf(
+    "authorizeSendInvoiceAccess(",
+    sendInvoice,
+  );
   const invoiceLookup = SEND_QUOTE.indexOf(
     ".from('xero_invoices')",
     sendInvoice,
   );
   const jobFence = SEND_QUOTE.indexOf(
-    "inspectSealedSesJob(sb, invoiceRecord.job_id)",
-    invoiceLookup,
-  );
-  const binding = SEND_QUOTE.indexOf(
-    "validateBrandedInvoiceDeliveryBinding(",
+    "inspectSealedSesJob(sb, linkedJobId)",
     invoiceLookup,
   );
   const provider = SEND_QUOTE.indexOf(
@@ -178,13 +181,28 @@ Deno.test("invoice PDF and branded delivery bind to the invoice mirror", () => {
     sendInvoice,
   );
   assert(
-    sendInvoice >= 0 && invoiceLookup > sendInvoice &&
-      binding > invoiceLookup && jobFence > binding && provider > jobFence,
+    sendInvoice >= 0 && authorize > sendInvoice &&
+      invoiceLookup > authorize && jobFence > invoiceLookup &&
+      provider > jobFence,
   );
   assertStringIncludes(FENCE, "invoice_link_required");
   assertStringIncludes(
     INVOICE_DELIVERY_FENCE,
     "invoiceRecord.job_id !== callerJobId",
+  );
+  const tenantStep = SEND_INVOICE_ACCESS.indexOf("steps.push('tenant')");
+  const bindingStep = SEND_INVOICE_ACCESS.indexOf("steps.push('binding')");
+  const sealedStep = SEND_INVOICE_ACCESS.indexOf("steps.push('sealed')");
+  const bindingCall = SEND_INVOICE_ACCESS.indexOf(
+    "validateBrandedInvoiceDeliveryBinding(",
+  );
+  const inspectCall = SEND_INVOICE_ACCESS.indexOf(
+    "input.deps.inspectSealedJob(linkedJobId)",
+  );
+  assert(
+    tenantStep >= 0 && bindingStep > tenantStep &&
+      sealedStep > bindingStep && bindingCall > bindingStep &&
+      inspectCall > sealedStep,
   );
 });
 

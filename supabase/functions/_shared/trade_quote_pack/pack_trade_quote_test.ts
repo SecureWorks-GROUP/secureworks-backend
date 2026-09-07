@@ -1,14 +1,33 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  allocatedPaymentTerms,
+  allocatedTradePackIdentity,
   allocatedTradePackProse,
+  allocatedTradeQuotePackProjectionLeaks,
   applyInstallerRates,
   assembleQuotePacksForTrade,
+  frozenTradePackForExtract,
   packTradeQuote,
+  filterTradeQuoteScopeToRun,
+  overlayTradePackSnapshots,
   persistTradePackOnDocuments,
+  persistTradePackWriteConfirmed,
+  quoteDocumentHasClientSend,
+  quotePublicationFlags,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
   tradePackMoneyLeakKeys,
+  leftoverIsPaymentScheduleAfterAmountStrip,
+  leftoverIsQualifiedSmallMoneyAfterStrip,
+  tradeTextHasPaymentScheduleAmount,
+  tradeTextHasQualifiedSmallMoneyAmount,
+  isSealedPaymentTermsPhrase,
+  isTradePaymentTermsFieldPath,
+  tradeAllocatedProseHasMoneyLanguage,
+  tradeTextHasAdHocPercentOrPaymentLanguage,
+  tradeTextHasCurrencyWord,
+  tradeTextHasMoneyToken,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
 } from "./pack_trade_quote.ts";
@@ -70,6 +89,14 @@ Deno.test("fencing pack: runs, plinths, gate, colorbond removal, no client money
   assertEquals(removal?.quantity, 12);
   assertEquals(tradePackMoneyLeakKeys(pack), []);
   assertEquals(pack.items.every((i) => i.unit_price == null), true);
+  assertEquals(tradePackMoneyLeakKeys({
+    ...pack,
+    items: pack.items.map((item) => ({ ...item, sell_price: null })),
+  } as typeof pack), []);
+  assertEquals(tradePackMoneyLeakKeys({
+    ...pack,
+    items: pack.items.map((item) => ({ ...item, sell_price: 30 })),
+  } as typeof pack), ["sell_price"]);
 });
 
 Deno.test("fencing trade rates: $30/m, $10 plinth, $10 removal, $250 gate", () => {
@@ -185,6 +212,538 @@ Deno.test("two sent quotes stay two packs with their own quote numbers", () => {
   assertEquals(q1Install?.quantity, 10);
 });
 
+Deno.test("assembleQuotePacksForTrade ignores a stored pack until the quote is sent or accepted", () => {
+  const packs = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [{
+      id: "d-unsent",
+      type: "quote",
+      quote_number: "Q-UNSENT",
+      trade_pack_json: {
+        items: [{ kind: "install_m", description: "Rear", quantity: 10, unit: "m" }],
+        source: "frozen",
+      },
+    }],
+  });
+  assertEquals(packs, []);
+});
+
+Deno.test("quote packs require authoritative primary-send state, not a pre-send stamp", () => {
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-pre",
+    type: "quote",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    sent_to_client: false,
+  }), false);
+  assertEquals(assembleQuotePacksForTrade({
+    jobType: "fencing",
+    liveScopeJson: FENCE_SCOPE,
+    livePricingJson: FENCE_PRICING,
+    documents: [{
+      id: "d-pre",
+      type: "quote",
+      quote_number: "Q-PRE",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      sent_to_client: false,
+    }],
+  }), []);
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-hist",
+    type: "quote",
+    sent_at: "2026-09-01T00:00:00.000Z",
+  }), true);
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-acc",
+    type: "quote",
+    sent_to_client: false,
+    accepted_at: "2026-09-01T12:00:00.000Z",
+  }), true);
+  const historical = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    liveScopeJson: FENCE_SCOPE,
+    livePricingJson: FENCE_PRICING,
+    documents: [{
+      id: "d-hist",
+      type: "quote",
+      quote_number: "Q-HIST",
+      sent_at: "2026-09-01T00:00:00.000Z",
+    }],
+  });
+  assertEquals(historical.length, 1);
+  assertEquals(historical[0].source, "live_fallback");
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-claim",
+    type: "quote",
+    send_claimed_at: "2026-09-06T00:00:00.000Z",
+    sent_to_client: false,
+  }), false);
+  assertEquals(quoteDocumentHasClientSend({
+    id: "d-claim-leak",
+    type: "quote",
+    sent_at: "2026-09-06T00:00:00.000Z",
+    send_claimed_at: "2026-09-06T00:00:00.000Z",
+  }), false);
+  assertEquals(assembleQuotePacksForTrade({
+    jobType: "fencing",
+    liveScopeJson: FENCE_SCOPE,
+    livePricingJson: FENCE_PRICING,
+    documents: [{
+      id: "d-claim",
+      type: "quote",
+      quote_number: "Q-CLAIM",
+      send_claimed_at: "2026-09-06T00:00:00.000Z",
+      sent_to_client: false,
+    }],
+  }), []);
+});
+
+Deno.test("tradeTextHasMoneyToken is conservative across identity and date strings", () => {
+  assertEquals(tradeTextHasMoneyToken("0412 000 111"), false);
+  assertEquals(tradeTextHasMoneyToken("pat@example.test"), false);
+  assertEquals(tradeTextHasMoneyToken("2026-10-01"), false);
+  assertEquals(tradeTextHasMoneyToken("50% deposit + 50% on completion"), true);
+  assertEquals(tradeTextHasMoneyToken("0412 $18,400"), true);
+  assertEquals(tradeTextHasMoneyToken("USD 12"), true);
+  assertEquals(tradeTextHasMoneyToken("rate@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("price@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("amount@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("cost@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("deposit@example.test"), true);
+  assertEquals(tradeTextHasMoneyToken("fee@example.test"), true);
+  assertEquals(allocatedTradePackIdentity("0412 000 111"), "0412 000 111");
+  assertEquals(allocatedTradePackIdentity("fee@example.test"), null);
+  assertEquals(allocatedTradePackIdentity("$18,400"), null);
+  assertEquals(allocatedTradePackIdentity("50% deposit"), null);
+  assertEquals(allocatedTradePackIdentity("rate 850"), null);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    quote_number: "$18,400",
+  }).includes("quote_number"), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { phone: "0412 $18,400", email: "usd@example.test" },
+    terms: { valid_until: "valid until price review" },
+  }).sort(), ["$", "customer.email", "customer.phone", "terms.valid_until"]);
+  assertEquals(tradeTextHasMoneyToken("50% upfront"), true);
+  assertEquals(tradeTextHasMoneyToken("balance due"), true);
+  assertEquals(tradeTextHasMoneyToken("Pay 40 percent now"), true);
+  assertEquals(tradeTextHasMoneyToken("Payment 50"), true);
+  assertEquals(tradeTextHasMoneyToken("Payment in dollars"), true);
+  assertEquals(tradeTextHasMoneyToken("paid in bucks"), true);
+  assertEquals(tradeTextHasMoneyToken("Pay now"), true);
+  assertEquals(tradeTextHasMoneyToken("dollars"), true);
+  assertEquals(tradeTextHasMoneyToken("bucks"), true);
+  assertEquals(tradeTextHasMoneyToken("euros"), true);
+  assertEquals(tradeTextHasMoneyToken("100 euros"), true);
+  assertEquals(tradeTextHasMoneyToken("cents"), true);
+  assertEquals(tradeTextHasMoneyToken("100 cents"), true);
+  assertEquals(tradeTextHasMoneyToken("10k"), true);
+  assertEquals(tradeTextHasMoneyToken("2.5K"), true);
+  assertEquals(tradeTextHasMoneyToken("1000k"), true);
+  assertEquals(tradeTextHasMoneyToken("10 grand"), true);
+  assertEquals(tradeTextHasMoneyToken("grand"), true);
+  assertEquals(tradeTextHasMoneyToken("10m"), false);
+  assertEquals(tradeTextHasMoneyToken("grandfather"), false);
+  assertEquals(tradeTextHasMoneyToken("Payne Client"), false);
+  assertEquals(tradeTextHasMoneyToken("€18"), true);
+  assertEquals(tradeTextHasMoneyToken("＄18"), true);
+  assertEquals(allocatedTradePackProse("＄18"), null);
+  assertEquals(allocatedTradePackProse("＄18 extra"), null);
+  assertEquals(allocatedTradePackProse("Plus 80 +GST"), "Plus");
+  assertEquals(sanitizeTradePackUnit("＄"), undefined);
+  assertEquals(tradeTextHasMoneyToken("£85"), true);
+  assertEquals(tradeTextHasMoneyToken("¥1200"), true);
+  assertEquals(tradeTextHasMoneyToken("EUR18"), true);
+  assertEquals(tradeTextHasMoneyToken("tax included"), true);
+  assertEquals(tradeTextHasMoneyToken("invoice attached"), true);
+  assertEquals(tradeTextHasMoneyToken("billing summary"), true);
+  assertEquals(tradeTextHasMoneyToken("VAT exclusive"), true);
+  assertEquals(tradeTextHasMoneyToken("Total"), true);
+  assertEquals(tradeTextHasMoneyToken("totals"), true);
+  assertEquals(tradeTextHasMoneyToken("pricing"), true);
+  assertEquals(tradeTextHasMoneyToken("prices"), true);
+  assertEquals(tradeTextHasMoneyToken("rates"), true);
+  assertEquals(tradeTextHasMoneyToken("fees"), true);
+  assertEquals(tradeTextHasMoneyToken("costs"), true);
+  assertEquals(tradeTextHasMoneyToken("deposits"), true);
+  assertEquals(tradeTextHasMoneyToken("charged"), true);
+  assertEquals(tradeTextHasMoneyToken("Quote note text"), false);
+  assertEquals(allocatedTradePackProse("Total $18,400"), null);
+  assertEquals(allocatedTradePackProse("Approved total"), null);
+  assertEquals(allocatedTradePackProse("Quote note text"), "Quote note text");
+  const held = stripTradePackMoney("Install 10m Total $18,400");
+  assertEquals(held.includes("10m"), true);
+  assertEquals(held.includes("^@"), false);
+  assertEquals(held, "Install 10m Total");
+  assertEquals(allocatedTradePackIdentity("€18"), null);
+  assertEquals(allocatedTradePackIdentity("invoice attached"), null);
+  assertEquals(allocatedTradePackProse("tax included"), null);
+  assertEquals(allocatedTradePackProse("invoice attached"), null);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Payment 50"), true);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Pay now"), true);
+  assertEquals(tradeTextHasCurrencyWord("Payment in dollars"), true);
+  assertEquals(tradeTextHasCurrencyWord("in bucks"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Payment 50"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("in dollars"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Install Deposit"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Price review"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("cost estimate"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("Deposit required"), true);
+  assertEquals(tradeAllocatedProseHasMoneyLanguage("USD pricing"), true);
+  assertEquals(allocatedTradePackProse("Payment 50"), null);
+  assertEquals(allocatedTradePackProse("Payment in dollars"), null);
+  assertEquals(allocatedTradePackProse("in dollars"), null);
+  assertEquals(allocatedTradePackProse("paid in bucks"), null);
+  assertEquals(allocatedTradePackProse("Price review"), null);
+  assertEquals(allocatedTradePackProse("cost estimate"), null);
+  assertEquals(allocatedTradePackProse("fee schedule"), null);
+  assertEquals(allocatedTradePackProse("Deposit required"), null);
+  assertEquals(allocatedTradePackProse("USD pricing"), null);
+  assertEquals(allocatedTradePackProse("GST exclusive"), null);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("50% deposit + 50% on completion"), true);
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage("Install Deposit"), false);
+  assertEquals(allocatedTradePackProse("50% upfront"), null);
+  assertEquals(allocatedTradePackProse("50% deposit + 50% on completion"), null);
+  assertEquals(allocatedTradePackProse("$50 on completion"), null);
+  assertEquals(allocatedTradePackProse("$50 on delivery"), null);
+  assertEquals(allocatedTradePackProse("$50 after completion"), null);
+  assertEquals(allocatedTradePackProse("$50 upon approval"), null);
+  assertEquals(allocatedTradePackProse("100 euros"), null);
+  assertEquals(allocatedTradePackProse("100 cents"), null);
+  assertEquals(allocatedTradePackProse("10k"), null);
+  assertEquals(allocatedTradePackProse("1000k"), null);
+  assertEquals(allocatedTradePackProse("10 grand"), null);
+  assertEquals(allocatedTradePackProse("50 dollars at completion"), null);
+  assertEquals(allocatedTradePackProse("50 dollars by delivery"), null);
+  assertEquals(allocatedTradePackProse("AUD 50 on completion"), null);
+  assertEquals(allocatedTradePackProse("50 dollars on completion"), null);
+  assertEquals(allocatedTradePackProse("upon completion"), null);
+  assertEquals(allocatedTradePackProse("Pat Client $50 on completion"), null);
+  assertEquals(allocatedTradePackProse("Finish remaining posts on completion of neighbour"), "Finish remaining posts on completion of neighbour");
+  assertEquals(tradeTextHasMoneyToken("50 on completion"), true);
+  assertEquals(tradeTextHasMoneyToken("30 by delivery"), true);
+  assertEquals(tradeTextHasMoneyToken("50 on practical completion"), true);
+  assertEquals(tradeTextHasMoneyToken("50 after final delivery"), true);
+  assertEquals(tradeTextHasMoneyToken("50 when complete"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 on completion"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("30 by delivery"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 on practical completion"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 after final delivery"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 when complete"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("12 posts at completion of neighbour"), false);
+  assertEquals(allocatedTradePackProse("50 on completion"), null);
+  assertEquals(allocatedTradePackProse("30 by delivery"), null);
+  assertEquals(allocatedTradePackProse("50 on practical completion"), null);
+  assertEquals(allocatedTradePackProse("50 after final delivery"), null);
+  assertEquals(allocatedTradePackProse("50 when complete"), null);
+  assertEquals(allocatedTradePackIdentity("50 on completion"), null);
+  assertEquals(allocatedTradePackIdentity("30 by delivery"), null);
+  assertEquals(allocatedTradePackIdentity("50 on practical completion"), null);
+  assertEquals(allocatedTradePackIdentity("50 after final delivery"), null);
+  assertEquals(allocatedTradePackIdentity("50 when complete"), null);
+  assertEquals(stripTradePackMoney("50 on completion"), "on completion");
+  assertEquals(stripTradePackMoney("30 by delivery"), "by delivery");
+  assertEquals(stripTradePackMoney("50 on practical completion"), "on practical completion");
+  assertEquals(stripTradePackMoney("50 after final delivery"), "after final delivery");
+  assertEquals(stripTradePackMoney("50 when complete"), "when complete");
+  assertEquals(
+    allocatedTradePackProse("12 posts at completion of neighbour"),
+    "12 posts at completion of neighbour",
+  );
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("by 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("denom 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("denomination 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("grandTotal 50"), true);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("12 posts"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("19m"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("2 trades"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("90x90"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("extend fence by 12 posts"), false);
+  assertEquals(tradeTextHasQualifiedSmallMoneyAmount("12 posts at completion of neighbour"), false);
+  assertEquals(tradeTextHasMoneyToken("by 50"), true);
+  assertEquals(tradeTextHasMoneyToken("denom 50"), true);
+  assertEquals(tradeTextHasMoneyToken("grandTotal 50"), true);
+  assertEquals(tradeTextHasMoneyToken("extend fence by 12 posts"), false);
+  assertEquals(tradeTextHasMoneyToken("2 trades over 3 days"), false);
+  assertEquals(stripTradePackMoney("by 50"), "by");
+  assertEquals(stripTradePackMoney("denom 50").includes("50"), false);
+  assertEquals(stripTradePackMoney("grandTotal 50").includes("50"), false);
+  assertEquals(stripTradePackMoney("extend fence by 12 posts"), "extend fence by 12 posts");
+  assertEquals(allocatedTradePackProse("by 50"), null);
+  assertEquals(allocatedTradePackProse("denom 50"), null);
+  assertEquals(allocatedTradePackProse("grandTotal 50"), null);
+  assertEquals(allocatedTradePackProse("extend fence by 12 posts"), "extend fence by 12 posts");
+  assertEquals(allocatedTradePackProse("2 trades over 3 days"), "2 trades over 3 days");
+  assertEquals(leftoverIsQualifiedSmallMoneyAfterStrip("by 50", "by"), true);
+  assertEquals(leftoverIsQualifiedSmallMoneyAfterStrip("denom 50", "denom"), true);
+  assertEquals(leftoverIsQualifiedSmallMoneyAfterStrip("extend fence by 12 posts", "extend fence by 12 posts"), false);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    summary: "by 50",
+  }).includes("summary"), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "denom 50" }],
+  }).some((key) => key.startsWith("items[0]")), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { name: "grandTotal 50" },
+  }).includes("customer.name"), true);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    summary: "12 posts at completion of neighbour",
+    items: [{ description: "extend fence by 12 posts", unit: "m" }],
+  }), []);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "50 on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on practical completion", "50 on practical completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 after final delivery", "after final delivery"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 when complete", "when complete"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("AUD 50 on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 dollars on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("on completion", "on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 on delivery", "on delivery"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 after completion", "after completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 upon approval", "upon approval"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 dollars at completion", "at completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 dollars by delivery", "by delivery"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("at completion", "at completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Finish remaining posts on completion of neighbour",
+    "Finish remaining posts on completion of neighbour",
+  ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Meet crew at completion of neighbour",
+    "Meet crew at completion of neighbour",
+  ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "12 posts at completion of neighbour",
+    "12 posts at completion of neighbour",
+  ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Meet crew when complete of neighbour",
+    "Meet crew when complete of neighbour",
+  ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Finish remaining posts on practical completion of neighbour",
+    "Finish remaining posts on practical completion of neighbour",
+  ), false);
+  assertEquals(
+    allocatedTradePackProse("Meet crew at completion of neighbour"),
+    "Meet crew at completion of neighbour",
+  );
+  assertEquals(
+    allocatedTradePackProse("Meet crew when complete of neighbour"),
+    "Meet crew when complete of neighbour",
+  );
+  assertEquals(
+    allocatedTradePackProse("Finish remaining posts on practical completion of neighbour"),
+    "Finish remaining posts on practical completion of neighbour",
+  );
+  assertEquals(allocatedTradePackProse("Install Deposit"), null);
+  assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion"), "50% deposit + 50% on completion");
+  assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion $9,999"), "50% deposit + 50% on completion");
+  assertEquals(allocatedPaymentTerms("50% upfront"), null);
+  assertEquals(allocatedPaymentTerms("Payment on completion"), null);
+  assertEquals(allocatedPaymentTerms("Net 30"), null);
+  assertEquals(tradeTextHasMoneyToken("Net 30"), true);
+  assertEquals(tradeTextHasMoneyToken("NET-30"), true);
+  assertEquals(tradeTextHasMoneyToken("Net/30"), true);
+  assertEquals(tradeTextHasMoneyToken("net30"), true);
+  assertEquals(tradeTextHasMoneyToken("Net 30 days"), true);
+  assertEquals(tradeTextHasMoneyToken("Nett 7"), true);
+  assertEquals(tradeTextHasMoneyToken("30 days net"), true);
+  assertEquals(tradeTextHasMoneyToken("N/30"), true);
+  assertEquals(tradeTextHasMoneyToken("N-60"), true);
+  assertEquals(tradeTextHasMoneyToken("N30"), true);
+  assertEquals(tradeTextHasMoneyToken("N 30"), true);
+  assertEquals(tradeTextHasMoneyToken("N 30 days"), true);
+  assertEquals(tradeTextHasMoneyToken("30 net"), true);
+  assertEquals(tradeTextHasMoneyToken("30 net days"), true);
+  assertEquals(tradeTextHasMoneyToken("30-day terms"), true);
+  assertEquals(tradeTextHasMoneyToken("30-day net"), true);
+  assertEquals(tradeTextHasMoneyToken("14-day payment"), true);
+  assertEquals(tradeTextHasMoneyToken("2/10 Net 30"), true);
+  assertEquals(tradeTextHasMoneyToken("tennis net"), false);
+  assertEquals(tradeTextHasMoneyToken("safety netting"), false);
+  assertEquals(tradeTextHasMoneyToken("network switch"), false);
+  assertEquals(tradeTextHasMoneyToken("30 netting"), false);
+  assertEquals(tradeTextHasMoneyToken("3-day hire"), false);
+  assertEquals(tradeTextHasMoneyToken("2 trades over 3 days"), false);
+  assertEquals(allocatedTradePackProse("Net 30"), null);
+  assertEquals(allocatedTradePackProse("Install Net 30"), null);
+  assertEquals(allocatedTradePackProse("Terms N/30"), null);
+  assertEquals(allocatedTradePackProse("30 days net"), null);
+  assertEquals(allocatedTradePackProse("N30"), null);
+  assertEquals(allocatedTradePackProse("N 30"), null);
+  assertEquals(allocatedTradePackProse("30 net"), null);
+  assertEquals(allocatedTradePackProse("30 net days"), null);
+  assertEquals(allocatedTradePackProse("30-day terms"), null);
+  assertEquals(allocatedTradePackProse("30-day net"), null);
+  assertEquals(allocatedTradePackIdentity("Net 30"), null);
+  assertEquals(allocatedTradePackIdentity("N30"), null);
+  assertEquals(allocatedTradePackIdentity("N 30"), null);
+  assertEquals(allocatedTradePackIdentity("30 net"), null);
+  assertEquals(allocatedTradePackIdentity("30 net days"), null);
+  assertEquals(allocatedTradePackIdentity("30-day terms"), null);
+  assertEquals(allocatedTradePackIdentity("30-day net"), null);
+  assertEquals(allocatedTradePackProse("3-day hire"), "3-day hire");
+  assertEquals(allocatedTradePackProse("tennis net"), "tennis net");
+  assertEquals(allocatedTradePackProse("safety netting"), "safety netting");
+  assertEquals(allocatedTradePackProse("network switch"), "network switch");
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "Net 30" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "N30" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "30 net" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "30-day terms" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 on completion" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "30 by delivery" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 on practical completion" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 after final delivery" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 when complete" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "12 posts at completion of neighbour" }],
+  }), []);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "Install", unit_price: null, line_total: null }],
+  }), []);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "Install", unit_price: 30, line_total: 300 }],
+  }).sort(), ["items[0].line_total", "items[0].unit_price"]);
+  assertEquals(isSealedPaymentTermsPhrase("50% deposit + 50% on completion"), true);
+  assertEquals(isTradePaymentTermsFieldPath("extract.terms.payment_terms"), true);
+  assertEquals(isTradePaymentTermsFieldPath("customer.name"), false);
+  assertEquals(allocatedTradePackIdentity("50% upfront"), null);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    terms: { payment_terms: "50% upfront" },
+    items: [{ description: "balance due on site" }],
+  }).sort(), ["items[0].description", "terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { name: "Payment in dollars", site_address: "paid in bucks" },
+    items: [{ description: "Payment 50" }],
+  }).sort(), ["customer.name", "customer.site_address", "items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    summary: "Price review",
+    items: [
+      { description: "cost estimate", unit: "dollars" },
+      { description: "Deposit required", unit: "USD" },
+      { description: "Rear 19m", unit: "bucks" },
+      { description: "Side sheets", unit: "AUD" },
+      { description: "fee schedule", unit: "GST" },
+    ],
+  }).sort(), [
+    "items[0].description",
+    "items[0].unit",
+    "items[1].description",
+    "items[1].unit",
+    "items[2].unit",
+    "items[3].unit",
+    "items[4].description",
+    "items[4].unit",
+    "summary",
+  ]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    terms: { payment_terms: "Payment on completion" },
+  }), ["terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    terms: { payment_terms: "Net 30" },
+  }), ["terms.payment_terms"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    customer: { name: "50% deposit + 50% on completion" },
+    terms: { payment_terms: "50% deposit + 50% on completion" },
+    items: [{ description: "50% deposit + 50% on completion" }],
+  }).sort(), ["customer.name", "items[0].description"]);
+});
+
+Deno.test("frozenTradePackForExtract refuses live_fallback and unsent packs", () => {
+  assertEquals(frozenTradePackForExtract({
+    id: "d-live",
+    type: "quote",
+    quote_number: "Q-1",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-1",
+      source: "live_fallback",
+      scope_json: FENCE_SCOPE,
+    }),
+  }), null);
+  assertEquals(frozenTradePackForExtract({
+    id: "d-unsent",
+    type: "quote",
+    quote_number: "Q-1",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-1",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      scope_json: FENCE_SCOPE,
+    }),
+  }), null);
+  const frozen = frozenTradePackForExtract({
+    id: "d-ok",
+    type: "quote",
+    quote_number: "Q-1",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-1",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      scope_json: FENCE_SCOPE,
+    }),
+  });
+  assertEquals(frozen?.source, "frozen");
+  assertEquals(frozen?.quote_number, "Q-1");
+  assertEquals(frozen?.sent_at, "2026-09-01T00:00:00.000Z");
+});
+
+Deno.test("R7-001 superseded_at outranks accepted_at for extract hydration", () => {
+  assertEquals(quotePublicationFlags({ accepted: true, superseded: true }), {
+    accepted: false,
+    superseded: true,
+    status: "superseded",
+  });
+  const acceptedThenRevised = {
+    id: "d-rev",
+    type: "quote",
+    quote_number: "Q-OLD",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    accepted_at: "2026-09-02T00:00:00.000Z",
+    superseded_at: "2026-09-03T00:00:00.000Z",
+    trade_pack_json: packTradeQuote({
+      quote_number: "Q-OLD",
+      sent_at: "2026-09-01T00:00:00.000Z",
+      accepted: true,
+      scope_json: FENCE_SCOPE,
+    }),
+  };
+  assertEquals(quoteDocumentHasClientSend(acceptedThenRevised), true);
+  assertEquals(frozenTradePackForExtract(acceptedThenRevised), null);
+  const quotePacks = assembleQuotePacksForTrade({
+    jobType: "fencing",
+    documents: [acceptedThenRevised],
+  });
+  assertEquals(quotePacks[0].status, "superseded");
+  assertEquals(quotePacks[0].accepted, false);
+  const live = packTradeQuote({
+    quote_number: "Q-OLD",
+    accepted: true,
+    superseded: true,
+    sent_at: "2026-09-01T00:00:00.000Z",
+    source: "live_fallback",
+  });
+  assertEquals(live.status, "superseded");
+  assertEquals(live.accepted, false);
+});
+
 Deno.test("stripTradePackMoney removes $ / A$ / AUD figures and leaves ordinary numbers", () => {
   assertEquals(stripTradePackMoney("Total $9,999"), "Total");
   assertEquals(stripTradePackMoney("Total $ 9,999"), "Total");
@@ -267,6 +826,7 @@ Deno.test("allocatedTradePackProse drops numbers and numeric-only strings", () =
   assertEquals(allocatedTradePackProse("85"), null);
   assertEquals(allocatedTradePackProse("999"), null);
   assertEquals(allocatedTradePackProse("Install 10m"), "Install 10m");
+  assertEquals(allocatedTradePackProse("Pat Client $9,999"), "Pat Client");
   assertEquals(allocatedTradePackProse("2 trades over 3 days"), "2 trades over 3 days");
   assertEquals(allocatedTradePackProse(null), null);
 });
@@ -281,6 +841,20 @@ Deno.test("sanitizeTradePackUnit and sanitizeTradePackKind drop money scalars", 
   assertEquals(sanitizeTradePackUnit("AUD 9,999"), undefined);
   assertEquals(sanitizeTradePackUnit("85/day"), undefined);
   assertEquals(sanitizeTradePackUnit("AUD"), undefined);
+  assertEquals(sanitizeTradePackUnit("USD"), undefined);
+  assertEquals(sanitizeTradePackUnit("EUR"), undefined);
+  assertEquals(sanitizeTradePackUnit("GBP"), undefined);
+  assertEquals(sanitizeTradePackUnit("€"), undefined);
+  assertEquals(sanitizeTradePackUnit("£"), undefined);
+  assertEquals(sanitizeTradePackUnit("¥"), undefined);
+  assertEquals(sanitizeTradePackUnit("VAT"), undefined);
+  assertEquals(sanitizeTradePackUnit("GST"), undefined);
+  assertEquals(sanitizeTradePackUnit("dollars"), undefined);
+  assertEquals(sanitizeTradePackUnit("dollar"), undefined);
+  assertEquals(sanitizeTradePackUnit("bucks"), undefined);
+  assertEquals(sanitizeTradePackUnit("buck"), undefined);
+  assertEquals(sanitizeTradePackUnit("price"), undefined);
+  assertEquals(sanitizeTradePackUnit("deposit"), undefined);
   assertEquals(sanitizeTradePackUnit({ name: "ea", unit_price: 99.5 }), undefined);
   assertEquals(sanitizeTradePackKind("install_m"), "install_m");
   assertEquals(sanitizeTradePackKind("info"), "info");
@@ -339,22 +913,82 @@ Deno.test("hydrateStoredPack replaces money-shaped unit/kind with safe defaults"
   assertEquals(packs[0].items[1].unit, "m");
 });
 
-Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {
-  const writes: Array<{ id: string; pack: any }> = [];
-  const sb = {
+function persistWriteMock(writes: Array<{ id: string; pack: any }>) {
+  return {
     from(_table: string) {
       return {
         update(row: any) {
-          return {
+          const chain: Record<string, unknown> = {
             eq(_col: string, id: string) {
-              writes.push({ id, pack: row.trade_pack_json });
-              return { error: null };
+              if (_col === "id") writes.push({ id, pack: row.trade_pack_json });
+              return chain;
+            },
+            select() {
+              const last = writes[writes.length - 1];
+              return {
+                maybeSingle: () => Promise.resolve({ data: last ? { id: last.id } : null, error: null }),
+              };
             },
           };
+          return chain;
         },
       };
     },
   };
+}
+
+Deno.test("TRD6-28-002 filterTradeQuoteScopeToRun keeps only the document run", () => {
+  const rear = filterTradeQuoteScopeToRun(FENCE_SCOPE, "REAR") as { job: { runs: Array<{ name?: string }> } }
+  assertEquals(rear.job.runs.map((run) => run.name), ["Rear"])
+  const lhs = filterTradeQuoteScopeToRun(FENCE_SCOPE, "LHS") as { job: { runs: Array<{ name?: string }> } }
+  assertEquals(lhs.job.runs.map((run) => run.name), ["LHS"])
+  const whole = filterTradeQuoteScopeToRun(FENCE_SCOPE, null) as { job: { runs: unknown[] } }
+  assertEquals(whole.job.runs.length, 2)
+  const missing = filterTradeQuoteScopeToRun(FENCE_SCOPE, "FRONT") as { job: { runs: unknown[] } }
+  assertEquals(missing.job.runs, [])
+  const fromSnapshot = filterTradeQuoteScopeToRun(FENCE_SCOPE, "FRONT", {
+    run_label: "FRONT",
+    name: "Front",
+    length: 4,
+  }) as { job: { runs: Array<{ name?: string; length?: number }> } }
+  assertEquals(fromSnapshot.job.runs.map((run) => run.name), ["Front"])
+  const rearPack = packTradeQuote({
+    job_type: "fencing",
+    scope_json: filterTradeQuoteScopeToRun(FENCE_SCOPE, "Rear"),
+    pricing_json: FENCE_PRICING,
+  })
+  const descriptions = rearPack.items.map((item) => item.description).join(" | ")
+  assertEquals(/Rear/.test(descriptions), true)
+  assertEquals(/LHS/.test(descriptions), false)
+})
+
+Deno.test("TRD6-28-002 persist filters fencing runs to the document run_label", async () => {
+  const writes: Array<{ id: string; pack: any }> = []
+  const sb = persistWriteMock(writes)
+  const n = await persistTradePackOnDocuments(sb, {
+    documents: [
+      { id: "doc-rear", quote_number: "Q-REAR", run_label: "REAR" },
+      { id: "doc-lhs", quote_number: "Q-LHS", run_label: "LHS" },
+    ],
+    jobType: "fencing",
+    scopeJson: FENCE_SCOPE,
+    pricingJson: FENCE_PRICING,
+  })
+  assertEquals(n.wrote, 2)
+  assertEquals(n.failed, [])
+  const rear = writes.find((row) => row.id === "doc-rear")?.pack
+  const lhs = writes.find((row) => row.id === "doc-lhs")?.pack
+  const rearText = (rear?.items || []).map((item: { description?: string }) => item.description).join(" | ")
+  const lhsText = (lhs?.items || []).map((item: { description?: string }) => item.description).join(" | ")
+  assertEquals(/Rear/.test(rearText), true)
+  assertEquals(/LHS/.test(rearText), false)
+  assertEquals(/LHS/.test(lhsText), true)
+  assertEquals(/Rear/.test(lhsText), false)
+})
+
+Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {
+  const writes: Array<{ id: string; pack: any }> = [];
+  const sb = persistWriteMock(writes);
   const n = await persistTradePackOnDocuments(sb, {
     documents: [
       { id: "doc-a", quote_number: "SWF-1-Q1" },
@@ -364,9 +998,106 @@ Deno.test("persistTradePackOnDocuments writes frozen packs per document", async 
     scopeJson: FENCE_SCOPE,
     pricingJson: FENCE_PRICING,
   });
-  assertEquals(n, 2);
+  assertEquals(n.wrote, 2);
+  assertEquals(n.failed, []);
   assertEquals(writes[0].pack.quote_number, "SWF-1-Q1");
   assertEquals(writes[1].pack.quote_number, "SWF-1-Q2");
   assertEquals(writes[0].pack.source, "frozen");
   assertEquals(tradePackMoneyLeakKeys(writes[0].pack), []);
+});
+
+Deno.test("packTradeQuote stamps customer and default payment terms without pricing totals", () => {
+  const pack = packTradeQuote({
+    quote_number: "SWF-25101-Q2",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    job_type: "fencing",
+    scope_json: FENCE_SCOPE,
+    pricing_json: { ...FENCE_PRICING, payment_terms: "Pay $18,400 now", valid_days: 14 },
+    customer: {
+      name: "Pat Client",
+      phone: "0412 000 111",
+      email: "pat@example.test",
+      site_address: "12 Fence St, Midland",
+      site_suburb: "Midland",
+    },
+  });
+  assertEquals(pack.customer, {
+    name: "Pat Client",
+    phone: "0412 000 111",
+    email: "pat@example.test",
+    site_address: "12 Fence St, Midland",
+    site_suburb: "Midland",
+  });
+  assertEquals(pack.terms.payment_terms, "Pay now");
+  assertEquals(pack.terms.valid_days, 14);
+  assertEquals(pack.terms.valid_until, "2026-09-15");
+  assertEquals(tradePackMoneyLeakKeys(pack), []);
+  assertEquals(JSON.stringify(pack.customer).includes("18400"), false);
+  assertEquals(JSON.stringify(pack.terms).includes("18400"), false);
+  assertEquals(JSON.stringify(pack.terms).includes("$"), false);
+});
+
+Deno.test("overlayTradePackSnapshots fills empty customer/terms on older frozen packs", () => {
+  const old = packTradeQuote({
+    quote_number: "Q-OLD",
+    sent_at: "2026-09-01T00:00:00.000Z",
+    job_type: "fencing",
+    scope_json: FENCE_SCOPE,
+  });
+  old.customer = { name: null, phone: null, email: null, site_address: null, site_suburb: null };
+  old.terms = { payment_terms: null, valid_days: null, valid_until: null };
+  const overlaid = overlayTradePackSnapshots(old, {
+    customer: { name: "Client One", site_suburb: "Midland" },
+    pricing_json: FENCE_PRICING,
+  });
+  assertEquals(overlaid.customer.name, "Client One");
+  assertEquals(overlaid.customer.site_suburb, "Midland");
+  assertEquals(overlaid.terms.payment_terms, "50% deposit + 50% on completion");
+  assertEquals(overlaid.terms.valid_days, 30);
+  assertEquals(JSON.stringify(overlaid.terms).includes("18400"), false);
+});
+
+Deno.test("persistTradePackOnDocuments writes customer snapshot onto the frozen pack", async () => {
+  const writes: Array<{ id: string; pack: any }> = [];
+  const sb = persistWriteMock(writes);
+  await persistTradePackOnDocuments(sb, {
+    documents: [{ id: "doc-c", quote_number: "SWF-1-Q1", sent_at: "2026-09-01T00:00:00.000Z" }],
+    jobType: "fencing",
+    scopeJson: FENCE_SCOPE,
+    pricingJson: FENCE_PRICING,
+    customer: { name: "Pat", site_suburb: "Midland", phone: "0400 000 000" },
+  });
+  assertEquals(writes[0].pack.customer.name, "Pat");
+  assertEquals(writes[0].pack.customer.phone, "0400 000 000");
+  assertEquals(writes[0].pack.terms.payment_terms, "50% deposit + 50% on completion");
+  assertEquals(tradePackMoneyLeakKeys(writes[0].pack), []);
+});
+
+Deno.test("R6-003 persistTradePackOnDocuments fails closed when the write is not confirmed", async () => {
+  const sb = {
+    from(_table: string) {
+      return {
+        update() {
+          const chain: Record<string, unknown> = {
+            eq() { return chain; },
+            select() {
+              return {
+                maybeSingle: () => Promise.resolve({ data: null, error: { message: "write missed" } }),
+              };
+            },
+          };
+          return chain;
+        },
+      };
+    },
+  };
+  const result = await persistTradePackOnDocuments(sb, {
+    documents: [{ id: "doc-miss", quote_number: "SWF-1-Q1" }],
+    jobType: "fencing",
+    scopeJson: FENCE_SCOPE,
+    pricingJson: FENCE_PRICING,
+  });
+  assertEquals(result.wrote, 0);
+  assertEquals(result.failed[0]?.document_id, "doc-miss");
+  assertEquals(persistTradePackWriteConfirmed(result, 1), false);
 });

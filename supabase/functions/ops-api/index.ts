@@ -78,6 +78,7 @@
 //   my_jobs             — Jobs assigned to a user
 //   trade_calendar      — Tenant-scoped calendar assignments for Trade
 //   trade_job_detail    — Trimmed job view for trades
+//   trade_quote_extract — Price-free printable quote extract for allocated trades
 //   add_note            — Add note to job timeline
 //   upload_photo        — Upload completion photo (base64)
 //   submit_service_report — Save checklist + notes + signature
@@ -121,13 +122,28 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
+  allocatedPaymentTerms,
+  allocatedTradePackIdentity,
   allocatedTradePackProse,
+  allocatedTradeQuotePackProjectionLeaks,
   assembleQuotePacksForTrade,
   isHenryInstaller,
+  isSealedPaymentTermsPhrase,
+  isTradePaymentTermsFieldPath,
+  leftoverIsMangledMoneyRemnant,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
+  tradeTextHasMoneyToken,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  TRADE_QUOTE_EXTRACT_DOC_TYPE,
+  TRADE_QUOTE_EXTRACT_SCHEMA,
+  assembleFrozenQuoteExtractPacks,
+  buildTradeQuoteExtractArtifact,
+  projectTradeQuoteExtracts,
+  tradeQuoteExtractIsEligible,
+} from '../_shared/trade_quote_pack/trade_quote_extract.ts'
 // Loop 3 / P2 V2 augmentation — runs alongside V1 in soft-warn mode.
 import {
   buildV2Augmentation,
@@ -3906,6 +3922,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'my_work_orders',
   'my_jobs',
   'trade_job_detail',
+  'trade_quote_extract',
   'upload_photo',
   'get_upload_url',
   'confirm_upload',
@@ -9164,6 +9181,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return await handleTradeWorkOrdersAction(req, client)
       case 'my_jobs':
       case 'trade_job_detail':
+      case 'trade_quote_extract':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -9245,6 +9263,14 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'trade_job_detail':
             return json(await tradeJobDetail(client, url.searchParams, tradeUser, isDispatcher))
+          case 'trade_quote_extract':
+            return await tradeQuoteExtractAction(
+              client,
+              url.searchParams,
+              body,
+              tradeUser,
+              isDispatcher,
+            )
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }, tradeJobAccess))
           // Office tier bypass is isDispatcher (admin / owner / ops_manager), not the
           // admin-only isAdmin: an ops_manager is office everywhere.
@@ -36158,8 +36184,7 @@ async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
     .eq('id', jobId)
     .maybeSingle()
   if (error) throw error
-  if (!data) throw new Error('Job not found')
-  return data
+  return data || null
 }
 
 export type TradeJobAccessContext = {
@@ -36249,12 +36274,18 @@ export async function resolveTradeJobAccessTier(
 ): Promise<TradeJobAccessDecision> {
   const { isOffice = false, access } = opts
   let job: any = null
+  const refuseMissingOrForeign = (): TradeJobAccessDecision => ({
+    tier: 'none',
+    quoteVisible: false,
+    reason: 'tenant_mismatch',
+    job: null,
+  })
   // Tenant is a boundary and is asked FIRST, before office/manager/assignment,
   // when the caller carries an org — same order the previous predicate used.
   if (access?.orgId) {
     job = await getTradeJobForAccess(client, jobId)
-    if (String(job.org_id || '') !== access.orgId) {
-      return { tier: 'none', quoteVisible: false, reason: 'tenant_mismatch', job }
+    if (!job || String(job.org_id || '') !== access.orgId) {
+      return refuseMissingOrForeign()
     }
   }
   if (isOffice) {
@@ -36265,6 +36296,7 @@ export async function resolveTradeJobAccessTier(
   const managedVerticals = _normalizeManagedVerticals(access?.managedVerticals)
   if (managedVerticals.length > 0) {
     if (!job) job = await getTradeJobForAccess(client, jobId)
+    if (!job) return refuseMissingOrForeign()
     if (managedVerticals.includes(_jobVertical(job))) {
       return { tier: 'division_manager', quoteVisible: true, reason: 'vertical_manager', job }
     }
@@ -36281,6 +36313,7 @@ export async function resolveTradeJobAccessTier(
     return { tier: 'allocated', quoteVisible: false, reason: 'assigned', job }
   }
   if (!job) job = await getTradeJobForAccess(client, jobId)
+  if (!job) return refuseMissingOrForeign()
   // MakeSafe report fallback: any logged-in trade may open/report an open
   // MakeSafe even before ops has created a named assignment. This keeps the
   // field-report flow moving when the board/admin upload step is behind, while
@@ -36294,7 +36327,7 @@ export async function resolveTradeJobAccessTier(
 export function tradeJobAccessRefusal(decision: TradeJobAccessDecision): Error | null {
   if (decision.tier !== 'none') return null
   return decision.reason === 'tenant_mismatch'
-    ? new Error('You are not authorized to access this job')
+    ? new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
     : new Error('You are not assigned to this job')
 }
 
@@ -36321,8 +36354,8 @@ async function assertMakesafeJob(
   access?: TradeJobAccessContext,
 ) {
   const job = await getTradeJobForAccess(client, jobId)
-  if (access?.orgId && String(job.org_id || '') !== access.orgId) {
-    throw new Error('You are not authorized to access this job')
+  if (!job || (access?.orgId && String(job.org_id || '') !== access.orgId)) {
+    throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
   }
   if (!(await isMakesafeAccessJobForClient(client, job))) throw new Error('MakeSafe job required')
   return job
@@ -38359,8 +38392,25 @@ function tradeScopeBareMoneyValue(value: unknown): boolean {
   return stripTradePackMoney(trimmed) === ''
 }
 
-function sanitizeTradeAllocatedStringLeaf(value: unknown): string {
-  return stripTradePackMoney(value)
+function leftoverAllocatedProseIsNumericOnly(value: string): boolean {
+  return /^\$?\s*-?[\d,]+(?:\.\d+)?(?:\s*(?:ex|inc)?\s*gst)?$/i.test(value.trim())
+}
+
+function sanitizeTradeAllocatedStringLeaf(value: unknown, key?: string): string {
+  const cleaned = stripTradePackMoney(value)
+  if (!cleaned) return ''
+  const path = key || ''
+  if (isTradePaymentTermsFieldPath(path) && isSealedPaymentTermsPhrase(cleaned)) {
+    return cleaned
+  }
+  if (isSealedPaymentTermsPhrase(cleaned)) return ''
+  if (tradeTextHasMoneyToken(cleaned)) return ''
+  if (tradeScopeKeepNumericLeaf(path)) return cleaned
+  if (leftoverAllocatedProseIsNumericOnly(cleaned)) return ''
+  if (typeof value === 'string' && leftoverIsMangledMoneyRemnant(value, cleaned)) {
+    return ''
+  }
+  return cleaned
 }
 
 function tradeScopeKeepNumericLeaf(key: string): boolean {
@@ -38368,7 +38418,10 @@ function tradeScopeKeepNumericLeaf(key: string): boolean {
 }
 
 export function sanitizeTradeAllocatedJobNotes(value: unknown): unknown {
-  if (typeof value === 'string') return allocatedTradePackProse(value)
+  if (typeof value === 'string') {
+    const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+    return cleaned === '' ? null : cleaned
+  }
   if (typeof value === 'number' && Number.isFinite(value)) return null
   if (value && typeof value === 'object') {
     const walked = sanitizeTradeAllocatedJsonTree(value)
@@ -38401,7 +38454,7 @@ function tradeScopeRetainPrimitive(value: unknown, parentKey: string | undefined
     if (parentKey && !tradeScopeKeepNumericLeaf(parentKey) && tradeScopeBareMoneyValue(value)) {
       return undefined
     }
-    const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+    const cleaned = sanitizeTradeAllocatedStringLeaf(value, parentKey)
     return cleaned === '' ? undefined : cleaned
   }
   return value
@@ -38426,7 +38479,7 @@ function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string
     }
     if (typeof value === 'string') {
       if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
-      const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+      const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
       if (cleaned === '') continue
       out[key] = cleaned
       continue
@@ -38455,7 +38508,7 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
-          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
           if (cleaned === '') continue
           out[key] = cleaned
           continue
@@ -38557,7 +38610,7 @@ function projectTradePoLineItem(li: any, quoteVisible: boolean): Record<string, 
   // Unit strings are allowlisted / money-stripped — "AUD 9,999" cannot
   // ride as a unit (TRD4-REV18-001).
   return {
-    description: sanitizeTradeAllocatedStringLeaf(rawDesc),
+    description: sanitizeTradeAllocatedStringLeaf(rawDesc, 'description'),
     quantity: tradePoScalarQuantity(li?.quantity ?? li?.Quantity) ?? 0,
     unit: sanitizeTradePackUnit(li?.unit),
   }
@@ -38583,7 +38636,7 @@ export function projectTradePurchaseOrders(
     }
     for (const key of TRADE_PO_ROW_TEXT_KEYS) {
       if (typeof raw[key] === 'string') {
-        po[key] = sanitizeTradeAllocatedStringLeaf(raw[key])
+        po[key] = sanitizeTradeAllocatedStringLeaf(raw[key], key)
       }
     }
     return po
@@ -38625,7 +38678,7 @@ function tradeAllocatedAllowlistedStringLeaf(key: string, value: string): string
   // Bare numeric / money strings ("9999", "85.00") are money, not narrative.
   // Quantity-keep keys may retain a numeric string; everything else fails closed.
   if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) return undefined
-  const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+  const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
   return cleaned === '' ? undefined : cleaned
 }
 
@@ -38683,7 +38736,7 @@ export function redactTradeScopeQuote(scope: any): any {
       if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
         if (tradeScopeBareMoneyValue(value)) continue
         if (typeof value === 'string') {
-          const cleaned = stripTradePackMoney(value)
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
           if (!cleaned) continue
           out[key] = cleaned
           continue
@@ -38700,7 +38753,7 @@ export function redactTradeScopeQuote(scope: any): any {
       }
       if (typeof value === 'string') {
         if (!tradeScopeKeepNumericLeaf(key) && tradeScopeBareMoneyValue(value)) continue
-        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
         if (cleaned === '') continue
         out[key] = cleaned
         continue
@@ -38790,7 +38843,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
         continue
       }
       if (typeof value === 'string') {
-        const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+        const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
         if (cleaned === '') continue
         out[key] = cleaned
         continue
@@ -38817,7 +38870,7 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
-          const cleaned = sanitizeTradeAllocatedStringLeaf(value)
+          const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
           if (cleaned === '') continue
           out[key] = cleaned
         }
@@ -38845,7 +38898,7 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
   return (packs || []).map((pack: any) => {
     if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return pack
     return {
-      quote_number: pack.quote_number ?? null,
+      quote_number: allocatedTradePackIdentity(pack.quote_number),
       job_document_id: pack.job_document_id ?? null,
       sent_at: pack.sent_at ?? null,
       accepted: pack.accepted,
@@ -38866,16 +38919,66 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
             ? item.description
             : allocatedTradePackProse(item.description),
           quantity,
-          unit_price: null,
-          line_total: null,
         }
         if (kind !== undefined) out.kind = kind
         const unit = sanitizeTradePackUnit(item.unit)
-        if (unit !== undefined) out.unit = unit
+        if (unit !== undefined && !tradeTextHasMoneyToken(unit)) out.unit = unit
         return [out]
       }),
+      customer: redactAllocatedTradeQuoteCustomer(pack.customer),
+      terms: redactAllocatedTradeQuoteTerms(pack.terms),
     }
   })
+}
+
+function failClosedAllocatedSnapshotString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  if (tradeTextHasMoneyToken(value)) return null
+  return value
+}
+
+function redactAllocatedTradeQuoteCustomer(customer: any): Record<string, unknown> | undefined {
+  if (!customer || typeof customer !== 'object' || Array.isArray(customer)) return undefined
+  return {
+    name: customer.name == null ? customer.name : failClosedAllocatedSnapshotString(allocatedTradePackProse(customer.name)),
+    phone: allocatedTradePackIdentity(customer.phone),
+    email: allocatedTradePackIdentity(customer.email),
+    site_address: customer.site_address == null
+      ? customer.site_address
+      : failClosedAllocatedSnapshotString(allocatedTradePackProse(customer.site_address)),
+    site_suburb: customer.site_suburb == null
+      ? customer.site_suburb
+      : failClosedAllocatedSnapshotString(allocatedTradePackProse(customer.site_suburb)),
+  }
+}
+
+function redactAllocatedTradeQuoteTerms(terms: any): Record<string, unknown> | undefined {
+  if (!terms || typeof terms !== 'object' || Array.isArray(terms)) return undefined
+  return {
+    payment_terms: terms.payment_terms == null
+      ? terms.payment_terms
+      : allocatedPaymentTerms(terms.payment_terms),
+    valid_days: typeof terms.valid_days === 'number' && Number.isFinite(terms.valid_days)
+      ? terms.valid_days
+      : null,
+    valid_until: allocatedTradePackIdentity(terms.valid_until),
+  }
+}
+
+export function assertAllocatedTradeQuotePackProjection(pack: unknown): void {
+  const leaks = allocatedTradeQuotePackProjectionLeaks(pack)
+  if (leaks.length) {
+    throw new Error(`allocated quote pack money leak: ${leaks.join(',')}`)
+  }
+}
+
+/** Allocated / makesafe_open quote_packs emit: redact, then fail closed. */
+export function projectAllocatedTradeQuotePacks(packs: any[]): any[] {
+  const redacted = redactTradeQuotePackMoney(packs)
+  for (const pack of redacted) {
+    assertAllocatedTradeQuotePackProjection(pack)
+  }
+  return redacted
 }
 
 // The scope summary a trade sees is derived from jobs.scope_json by the SAME
@@ -39026,7 +39129,7 @@ async function tradeJobDetail(
       .eq('job_id', jobId).neq('status', 'deleted')
       .order('delivery_date', { ascending: true }),
     client.from('job_documents')
-      .select('id, type, quote_number, sent_at, accepted_at, superseded_at, trade_pack_json, created_at')
+      .select('id, type, quote_number, sent_at, sent_to_client, send_claimed_at, accepted_at, superseded_at, trade_pack_json, created_at')
       .eq('job_id', jobId)
       .eq('type', 'quote')
       .order('created_at', { ascending: false }),
@@ -39136,6 +39239,13 @@ async function tradeJobDetail(
     liveScopeJson: jobRes.data?.scope_json,
     livePricingJson: jobRes.data?.pricing_json,
     isHenry: isHenryInstaller(viewer.email),
+    customer: {
+      name: jobRes.data?.client_name,
+      phone: jobRes.data?.client_phone,
+      email: jobRes.data?.client_email,
+      site_address: jobRes.data?.site_address,
+      site_suburb: jobRes.data?.site_suburb,
+    },
   })
 
   const { metadata: _tradeJobMetadata, pricing_json: _tradePricingJson, ...tradeSafeJob } = jobRes.data || {}
@@ -39201,8 +39311,9 @@ async function tradeJobDetail(
   // everything, can do whatever he wants"). An allocated trade (lead or
   // crew) and the MakeSafe open-pool exception get only ops-flagged
   // visible_to_trades rows AND never a quote-type or full priced work-order
-  // PDF, whatever the flag says. JSON TradeQuotePack + allowlisted WO
-  // lines are the price-free substitute until TRD-6.
+  // PDF, whatever the flag says. JSON TradeQuotePack, quote_extracts, and
+  // allowlisted WO lines are the price-free substitute. Priced quote / WO
+  // PDFs stay office-only.
   const visibleDocuments = quoteVisible
     ? (docsRes.data || [])
     : _tradeDocumentsForAllocatedTrade(docsRes.data || [])
@@ -39225,7 +39336,7 @@ async function tradeJobDetail(
     : sanitizeTradeAllocatedMediaNotes(tradeMedia)
   const tradeQuotePacks = quoteVisible
     ? quotePacks
-    : redactTradeQuotePackMoney(quotePacks)
+    : projectAllocatedTradeQuotePacks(quotePacks)
 
   return {
     job: tradeSafeJob,
@@ -39279,8 +39390,9 @@ async function tradeJobDetail(
     // the undifferentiated documents array so the app has a work-order surface
     // to render instead of having to sort types itself. Already
     // visibility-filtered; allocated / makesafe_open also drop priced
-    // work_order / supplier_work_order files, so this list is empty there
-    // until TRD-6. Office / division-manager keep the full PDFs.
+    // work_order / supplier_work_order files, so this list stays empty
+    // there. Trades fetch `trade_quote_extract` for SOW / quantities.
+    // Office / division-manager keep the full priced PDFs.
     workOrderDocuments: visibleDocuments.filter((d: any) =>
       d?.type === 'work_order' || d?.type === 'supplier_work_order'
     ),
@@ -39304,6 +39416,22 @@ async function tradeJobDetail(
       ? makesafeDetails
       : projectTradeAllocatedMakesafeDetails(makesafeDetails),
     quote_packs: tradeQuotePacks,
+    // Additive: price-free extract pointers. Not injected into `documents`
+    // (allocated documents stay the existing allowlist). Fetch via
+    // `trade_quote_extract`.
+    quote_extracts: projectTradeQuoteExtracts(
+      assembleFrozenQuoteExtractPacks({
+        documents: quoteDocsRes.error ? [] : (quoteDocsRes.data || []),
+        customer: {
+          name: jobRes.data?.client_name,
+          phone: jobRes.data?.client_phone,
+          email: jobRes.data?.client_email,
+          site_address: jobRes.data?.site_address,
+          site_suburb: jobRes.data?.site_suburb,
+        },
+      }),
+      tradeSafeJob?.job_number || null,
+    ),
   }
 }
 
@@ -39313,6 +39441,143 @@ async function tradeJobDetail(
 // precisely the failure this suite exists to catch.
 export const _tradeJobDetailForTest = tradeJobDetail
 export const _setJobLeadForTest = setJobLead
+
+function tradeQuoteCustomerFromJob(job: any) {
+  return {
+    name: job?.client_name,
+    phone: job?.client_phone,
+    email: job?.client_email,
+    site_address: job?.site_address,
+    site_suburb: job?.site_suburb,
+  }
+}
+
+function tradeQuoteExtractJobNotFoundError(): ApiError {
+  return new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+}
+
+function tradeQuoteExtractUnavailableError(): ApiError {
+  return new ApiError('Quote extract unavailable', 503)
+}
+
+/** Access refusals for extract are one generic 404. Distinct assignment /
+ *  missing-job / PostgREST 0-row text must not leak job existence. */
+function isTradeQuoteExtractAccessRefusal(err: unknown): boolean {
+  if (err instanceof ApiError && (err.status === 404 || err.status === 403)) return true
+  const rec = err && typeof err === 'object'
+    ? err as { message?: string; code?: string }
+    : null
+  const msg = err instanceof Error
+    ? err.message
+    : String(rec?.message || err || '')
+  if (msg === 'You are not assigned to this job') return true
+  if (msg === 'Job not found') return true
+  const code = String(rec?.code || '')
+  if (code === 'PGRST116') return true
+  if (/JSON object requested, multiple \(or no\) rows returned/i.test(msg)) return true
+  if (/0 rows/i.test(msg)) return true
+  return false
+}
+
+async function tradeQuoteExtractAction(
+  client: any,
+  params: URLSearchParams,
+  body: any,
+  viewer: TradeAuthContext,
+  isAdmin = false,
+): Promise<Response> {
+  const jobId = params.get('jobId') || params.get('job_id') || body?.jobId || body?.job_id
+  if (!jobId) throw new ApiError('jobId required', 400)
+
+  let extractAccess: TradeJobAccessDecision
+  try {
+    extractAccess = await resolveTradeJobAccessTier(client, jobId, viewer.id, {
+      isOffice: isAdmin,
+      access: {
+        orgId: viewer.orgId,
+        managedVerticals: viewer.managedVerticals,
+      },
+    })
+  } catch (err) {
+    if (isTradeQuoteExtractAccessRefusal(err)) throw tradeQuoteExtractJobNotFoundError()
+    console.error('[ops-api] trade quote extract access read failed:', (err as Error)?.message || err)
+    throw tradeQuoteExtractUnavailableError()
+  }
+  if (extractAccess.tier === 'none') {
+    throw tradeQuoteExtractJobNotFoundError()
+  }
+
+  const documentId = String(
+    params.get('document_id') || params.get('documentId') || body?.document_id || body?.documentId || '',
+  ).trim() || null
+  const format = String(params.get('format') || body?.format || 'json').toLowerCase()
+
+  const [jobRes, quoteDocsRes] = await Promise.all([
+    client.from('jobs')
+      .select('id, type, job_number, client_name, client_phone, client_email, site_address, site_suburb')
+      .eq('id', jobId)
+      .eq('org_id', viewer.orgId)
+      .single(),
+    client.from('job_documents')
+      .select('id, type, quote_number, sent_at, sent_to_client, send_claimed_at, accepted_at, superseded_at, trade_pack_json, created_at')
+      .eq('job_id', jobId)
+      .eq('type', 'quote')
+      .order('created_at', { ascending: false }),
+  ])
+  if (jobRes.error) {
+    if (isTradeQuoteExtractAccessRefusal(jobRes.error)) throw tradeQuoteExtractJobNotFoundError()
+    console.error('[ops-api] trade quote extract job read failed:', jobRes.error.message)
+    throw tradeQuoteExtractUnavailableError()
+  }
+  if (!jobRes.data) throw tradeQuoteExtractJobNotFoundError()
+  if (quoteDocsRes.error) {
+    console.error('[ops-api] trade quote extract read failed:', quoteDocsRes.error.message)
+    throw new ApiError('Quote extract unavailable', 503)
+  }
+
+  const packs = assembleFrozenQuoteExtractPacks({
+    documents: quoteDocsRes.data || [],
+    customer: tradeQuoteCustomerFromJob(jobRes.data),
+  })
+  const eligible = packs.filter((pack) => tradeQuoteExtractIsEligible(pack))
+  const pack = documentId
+    ? eligible.find((row) => row.job_document_id === documentId)
+    : eligible[0]
+  if (!pack) throw new ApiError('No sent quote extract for this job', 404)
+
+  let extract: ReturnType<typeof buildTradeQuoteExtractArtifact>['extract']
+  let html: string
+  let filename: string
+  try {
+    const artifact = buildTradeQuoteExtractArtifact({ pack, job: jobRes.data })
+    extract = artifact.extract
+    html = artifact.html
+    filename = artifact.filename
+  } catch (e) {
+    console.error('[ops-api] trade quote extract refused:', (e as Error).message)
+    throw new ApiError('Quote extract unavailable', 409)
+  }
+  if (format === 'html') {
+    return new Response(html, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Disposition': `inline; filename="${filename}"`,
+        ...CORS,
+      },
+    })
+  }
+  return json({
+    schema: TRADE_QUOTE_EXTRACT_SCHEMA,
+    type: TRADE_QUOTE_EXTRACT_DOC_TYPE,
+    extract,
+    html,
+    filename,
+    format: 'json',
+  })
+}
+
+export const _tradeQuoteExtractForTest = tradeQuoteExtractAction
 // The other per-job trade surfaces, exported so the visibility suite can prove
 // they share trade_job_detail's access predicate rather than a narrower copy.
 export const _addNoteForTest = addNote

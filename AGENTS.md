@@ -2410,7 +2410,10 @@ trade incl. the quote, allocates, sets the lead), allocated trade
 everything except the quote). TRD-4 (2026-09-06) keeps that money fence and
 adds the writing: allocated / `makesafe_open` see quote narrative, descriptions,
 and quote numbers, and never unit prices, totals, rates, or `$` fields — see
-`docs/evidence/trd-4-trade-quote-video-contract-2026-09-06.md`. `resolveTradeJobAccessTier` in `ops-api/index.ts`
+`docs/evidence/trd-4-trade-quote-video-contract-2026-09-06.md`. TRD-6 is the
+price-free printable extract (`trade_quote_extract` + `quote_extracts`);
+allocated trades still do not get priced quote / WO PDFs. Contract:
+`docs/evidence/trd-6-trade-quote-extract-2026-09-06.md`. `resolveTradeJobAccessTier` in `ops-api/index.ts`
 is the one decision and `tradeQuoteVisibleForTier` the one quote rule; every
 per-job Trade door reaches them through
 `assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)` with

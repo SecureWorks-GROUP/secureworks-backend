@@ -37,6 +37,9 @@ STALE_ROUTE_DISPATCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260825034944_se
 TRADE_INVOICE_MONEY_MIGRATION="$REPO_ROOT/supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql"
 TRADE_INVOICE_WEEKLY_MIGRATION="$REPO_ROOT/supabase/migrations/20260831021701_trade_invoice_weekly_deductions.sql"
 TRADE_PACK_MIGRATION="$REPO_ROOT/supabase/migrations/20260904090000_job_documents_trade_pack_json.sql"
+SEND_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906140000_job_documents_send_claimed_at.sql"
+SEND_RUNS_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906150000_jobs_send_runs_claimed_at.sql"
+SEND_CLAIM_TOKEN_MIGRATION="$REPO_ROOT/supabase/migrations/20260906160000_job_documents_send_claim_token.sql"
 
 
 PASS_COUNT=0
@@ -179,6 +182,18 @@ trade_pack_migration_sha() {
   shasum -a 256 "$TRADE_PACK_MIGRATION" | awk '{print $1}'
 }
 
+send_claimed_at_migration_sha() {
+  shasum -a 256 "$SEND_CLAIMED_AT_MIGRATION" | awk '{print $1}'
+}
+
+send_runs_claimed_at_migration_sha() {
+  shasum -a 256 "$SEND_RUNS_CLAIMED_AT_MIGRATION" | awk '{print $1}'
+}
+
+send_claim_token_migration_sha() {
+  shasum -a 256 "$SEND_CLAIM_TOKEN_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -215,6 +230,9 @@ write_response() {
   TRADE_INVOICE_MONEY_EXPECTED_SHA="$(trade_invoice_money_migration_sha)" \
   TRADE_INVOICE_WEEKLY_EXPECTED_SHA="$(trade_invoice_weekly_migration_sha)" \
   TRADE_PACK_EXPECTED_SHA="$(trade_pack_migration_sha)" \
+  SEND_CLAIMED_AT_EXPECTED_SHA="$(send_claimed_at_migration_sha)" \
+  SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
+  SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -558,6 +576,39 @@ trade_pack_row = {
     "actual_statement_sha256": os.environ["TRADE_PACK_EXPECTED_SHA"],
     "missing_markers": [],
 }
+send_claimed_at_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260906140000",
+    "expected_migration_name": "job_documents_send_claimed_at",
+    "expected_statement_sha256": os.environ["SEND_CLAIMED_AT_EXPECTED_SHA"],
+    "actual_migration_version": "20260906140000",
+    "actual_migration_name": "job_documents_send_claimed_at",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SEND_CLAIMED_AT_EXPECTED_SHA"],
+    "missing_markers": [],
+}
+send_runs_claimed_at_row = {
+    "function_name": "send-quote",
+    "migration_version": "20260906150000",
+    "expected_migration_name": "jobs_send_runs_claimed_at",
+    "expected_statement_sha256": os.environ["SEND_RUNS_CLAIMED_AT_EXPECTED_SHA"],
+    "actual_migration_version": "20260906150000",
+    "actual_migration_name": "jobs_send_runs_claimed_at",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SEND_RUNS_CLAIMED_AT_EXPECTED_SHA"],
+    "missing_markers": [],
+}
+send_claim_token_row = {
+    "function_name": "send-quote",
+    "migration_version": "20260906160000",
+    "expected_migration_name": "job_documents_send_claim_token",
+    "expected_statement_sha256": os.environ["SEND_CLAIM_TOKEN_EXPECTED_SHA"],
+    "actual_migration_version": "20260906160000",
+    "actual_migration_name": "job_documents_send_claim_token",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SEND_CLAIM_TOKEN_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -591,6 +642,9 @@ with open(sys.argv[1], "w") as f:
             trade_invoice_money_row,
             trade_invoice_weekly_row,
             trade_pack_row,
+            send_claimed_at_row,
+            send_runs_claimed_at_row,
+            send_claim_token_row,
         ],
         f,
     )

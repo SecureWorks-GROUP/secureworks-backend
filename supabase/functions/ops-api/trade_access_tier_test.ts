@@ -29,9 +29,13 @@ import {
   _submitServiceReportForTest,
   _tradeDocumentsForAllocatedTrade,
   _tradeJobDetailForTest,
+  _tradeQuoteExtractForTest,
   _tradeLabourBudgetForTest,
   _tradeScopeSummary,
+  ApiError,
   projectTradePurchaseOrders,
+  assertAllocatedTradeQuotePackProjection,
+  projectAllocatedTradeQuotePacks,
   redactTradeQuotePackMoney,
   redactTradeScopeQuote,
   redactTradeWorkOrderScopeItems,
@@ -48,6 +52,7 @@ import {
   tradeQuoteVisibleForTier,
   tradeViewerQuoteVisibleForJob,
 } from "./index.ts";
+import { packTradeQuote } from "../_shared/trade_quote_pack/pack_trade_quote.ts";
 
 // ── Stub client ─────────────────────────────────────────────────────────────
 // Same generic chainable stand-in the crew-visibility suite uses: accumulates
@@ -222,6 +227,20 @@ const QUOTE_SCOPE = {
     },
   },
 };
+
+function stampFrozenSentQuote(doc: any, sentAt = "2026-09-01T00:00:00Z") {
+  doc.sent_at = sentAt;
+  doc.trade_pack_json = packTradeQuote({
+    quote_number: doc.quote_number,
+    job_document_id: doc.id,
+    sent_at: sentAt,
+    job_type: "fencing",
+    scope_json: structuredClone(QUOTE_SCOPE),
+    pricing_json: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
+    source: "frozen",
+  });
+  return doc;
+}
 
 function seed(): Tables {
   return {
@@ -420,7 +439,32 @@ Deno.test("tier: another tenant is refused first, even for a manager of that ver
   });
   assertEquals(crew.tier, "none");
   assertEquals(crew.reason, "tenant_mismatch");
-  assertEquals(tradeJobAccessRefusal(crew)?.message, "You are not authorized to access this job");
+  const foreignRefusal = tradeJobAccessRefusal(crew);
+  assert(foreignRefusal instanceof ApiError);
+  assertEquals(foreignRefusal.message, "Job not found");
+  assertEquals(foreignRefusal.status, 404);
+  assertEquals(foreignRefusal.body, { error: "Job not found", code: "job_not_found" });
+});
+
+Deno.test("tier: missing and tenant-mismatched jobs share the same generic 404", async () => {
+  const missing = await resolveTradeJobAccessTier(makeClient(seed()), "job-missing", CREW, {
+    access: { orgId: ORG_A, managedVerticals: [] },
+  });
+  const foreign = await resolveTradeJobAccessTier(makeClient(seed()), JOB_FENCE_B, CREW, {
+    access: { orgId: ORG_A, managedVerticals: [] },
+  });
+  assertEquals(missing.tier, "none");
+  assertEquals(foreign.tier, "none");
+  assertEquals(missing.reason, foreign.reason);
+  assertEquals(missing.job, null);
+  assertEquals(foreign.job, null);
+  const missingRefusal = tradeJobAccessRefusal(missing);
+  const foreignRefusal = tradeJobAccessRefusal(foreign);
+  assertEquals(missingRefusal?.message, foreignRefusal?.message);
+  assertEquals(missingRefusal instanceof ApiError, true);
+  assertEquals(foreignRefusal instanceof ApiError, true);
+  assertEquals((missingRefusal as ApiError).status, 404);
+  assertEquals((foreignRefusal as ApiError).status, 404);
 });
 
 Deno.test("tier: the MakeSafe field-report exception is preserved as its own tier and never sees the quote", async () => {
@@ -543,6 +587,7 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
   assertEquals(p.workOrders.length, 1);
   assertEquals(p.purchaseOrders.length, 1);
   assertEquals(p.quote_packs || [], [], "unsent quotes do not become a trade pack");
+  assertEquals(p.quote_extracts || [], [], "unsent quotes do not mint an extract pointer");
   assertEquals(quoteLeakProbe(p), [], "no sell price, rate, or quote PDF in the allocated payload");
   // Documents: flagged-visible non-quote, non-priced-WO docs only. The
   // visible-flagged QUOTE, client INVOICE, and full priced work-order PDFs
@@ -557,9 +602,9 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     noteWorkOrder: "Use 90x90 posts",
     noteInternal: "Client is a repeat customer. Do not mention",
   });
-  assertEquals(p.job.notes, "Park on the verge. Extra . Charge . Client approved.");
+  assertEquals(p.job.notes, null);
   assertEquals(p.job.scope_json.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(p.job.scope_json.job.supplierNotes, "Call before arrival. Charge");
+  assertEquals(p.job.scope_json.job.supplierNotes, undefined);
   assertEquals(p.job.scope_json.config.totalMetres, 42);
   assertEquals(p.job.scope_json.job.quote, {
     quote_number: "Q-NARR",
@@ -567,17 +612,14 @@ Deno.test("trade_job_detail: the LEAD gets the job, work order, PO, docs — and
     materials: [{ name: "90x90 posts", qty: 12 }],
   });
   assertEquals(p.workOrders[0].scope_items, [{
-    description: "Install fence Total",
     name: "Fence run",
     label: "Front run",
     title: "WO line",
-    instructions: "Use 90x90 posts. Charge extra.",
-    notes: "Priced — hide from trade",
     text: "Line text",
     quantity: 10,
     unit: "m",
   }]);
-  assertEquals(p.workOrders[0].special_instructions, "Park on the verge. Charge extra.");
+  assertEquals(p.workOrders[0].special_instructions, undefined);
   assertEquals(p.workOrder.scope_items[0].rate, undefined);
   assertEquals(p.workOrder.scope_items[0].total, undefined);
   assertEquals(p.workOrder.scope_items[0].unit_price, undefined);
@@ -596,13 +638,343 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(p.quote_packs[0].source, "live_fallback");
   const install = (p.quote_packs[0].items || []).find((i: any) => i.kind === "install_m");
   assertEquals(install?.quantity, 10);
-  assertEquals(install?.unit_price, null, "allocated trades never see installer or sell rates");
-  assertEquals(install?.line_total, null);
+  assertEquals(install?.unit_price, undefined, "allocated trades never see installer or sell rates");
+  assertEquals(install?.line_total, undefined);
+  assertEquals("unit_price" in (install || {}), false);
+  assertEquals("line_total" in (install || {}), false);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals(p.workOrderDocuments, []);
+  assertEquals(p.quote_extracts, [], "sent quote without a frozen pack has no extract");
+  assertAllocatedTradeQuotePackProjection(p.quote_packs[0]);
   assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
   assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
+  assertEquals(JSON.stringify(p.quote_extracts).includes("quote.pdf"), false);
   assertEquals(quoteLeakProbe(p), [], "quote number on the pack is allowed; sell, rates and PDF are not");
+});
+
+Deno.test("trade_job_detail: allocated extract pointer requires a frozen pack plus client send", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  stampFrozenSentQuote(vis);
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_extracts, [{
+    type: "trade_quote_extract",
+    label: "Quote extract",
+    action: "trade_quote_extract",
+    job_document_id: "d-quote-vis",
+    quote_number: "Q-1",
+    status: "sent",
+    sent_at: "2026-09-01T00:00:00Z",
+    filename: "SWF-26091-Q-1-trade-extract.html",
+  }]);
+  assertEquals(p.quote_packs[0].source, "frozen");
+  assertEquals(JSON.stringify(p.quote_extracts).includes("quote.pdf"), false);
+  assertEquals(quoteLeakProbe(p), [], "extract pointer is price-free");
+});
+
+Deno.test("trade_quote_extract: allocated trade gets printable HTML with no money", async () => {
+  const t = seed();
+  stampFrozenSentQuote(t.job_documents.find((d: any) => d.id === "d-quote-vis"));
+  const htmlRes = await _tradeQuoteExtractForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_FENCE, format: "html" }),
+    {},
+    viewer(LEAD, "lead_installer"),
+    false,
+  );
+  assertEquals(htmlRes.status, 200);
+  assertEquals(htmlRes.headers.get("content-type"), "text/html; charset=utf-8");
+  const html = await htmlRes.text();
+  assert(html.includes("Client One"));
+  assert(html.includes("Midland"));
+  assert(html.includes("50% deposit + 50% on completion"));
+  assertEquals(html.includes("$"), false);
+  assertEquals(html.includes("8800"), false);
+  assertEquals(html.includes("quote.pdf"), false);
+  assertEquals(html.toLowerCase().includes("gst"), false);
+
+  const jsonRes = await _tradeQuoteExtractForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_FENCE, document_id: "d-quote-vis" }),
+    {},
+    viewer(LEAD, "lead_installer"),
+    false,
+  );
+  const body = await jsonRes.json();
+  assertEquals(body.schema, "secureworks.trade-quote-extract/v1");
+  assertEquals(body.type, "trade_quote_extract");
+  assertEquals(body.filename, "SWF-26091-Q-1-trade-extract.html");
+  assertEquals(body.extract.customer.name, "Client One");
+  assertEquals(JSON.stringify(body.extract).includes("$"), false);
+  assertEquals(JSON.stringify(body.extract).includes("unit_price"), false);
+  assertEquals(JSON.stringify(body.extract).includes("line_total"), false);
+});
+
+Deno.test("trade_quote_extract: sent quote without a frozen pack is 404", async () => {
+  const t = seed();
+  t.job_documents.find((d: any) => d.id === "d-quote-vis").sent_at = "2026-09-01T00:00:00Z";
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "No sent quote extract for this job",
+  );
+});
+
+Deno.test("trade_quote_extract: frozen pack without client send is 404", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  stampFrozenSentQuote(vis);
+  vis.sent_at = null;
+  vis.accepted_at = null;
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "No sent quote extract for this job",
+  );
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs || [], [], "unsent frozen pack is not a trade pack");
+  assertEquals(p.quote_extracts || [], [], "unsent frozen pack is not an extract");
+});
+
+Deno.test("trade_job_detail: pre-send sent_to_client=false stays unpublished even with sent_at", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.sent_at = "2026-09-01T00:00:00Z";
+  vis.sent_to_client = false;
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs || [], [], "pre-send quote rows are not trade packs");
+  assertEquals(p.quote_extracts || [], [], "pre-send quote rows are not extracts");
+});
+
+Deno.test("trade_job_detail: in-flight send claim is not quote-pack publication", async () => {
+  const t = seed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.send_claimed_at = "2026-09-06T00:00:00Z";
+  vis.sent_to_client = false;
+  vis.sent_at = null;
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs || [], [], "in-flight /send claim is not a trade pack");
+  assertEquals(p.quote_extracts || [], [], "in-flight /send claim is not an extract");
+});
+
+Deno.test("redactTradeQuotePackMoney fail-closes ad-hoc percent payment language", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: { name: "50% upfront client" },
+    terms: { payment_terms: "balance due", valid_days: 30 },
+    items: [{ kind: "install_m", description: "Pay 40 percent now", quantity: 10, unit: "m" }],
+  }]);
+  assertEquals(out[0].customer?.name, null);
+  assertEquals(out[0].terms?.payment_terms, null);
+  assertEquals(out[0].items[0].description, null);
+  assertAllocatedTradeQuotePackProjection(out[0]);
+  const sealed = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    terms: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
+    items: [{ kind: "install_m", description: "Install 10m", quantity: 10, unit: "m" }],
+  }]);
+  assertEquals(sealed[0].terms?.payment_terms, "50% deposit + 50% on completion");
+  assertEquals(sealed[0].items[0].description, "Install 10m");
+  assertAllocatedTradeQuotePackProjection(sealed[0]);
+  const leftover = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: { name: "Payment in dollars", site_address: "paid in bucks" },
+    terms: { payment_terms: "50% deposit + 50% on completion", valid_days: 30 },
+    summary: "Payment 50 leftover",
+    items: [{ kind: "info", description: "Pay on site", quantity: 1, unit: "ea" }],
+  }]);
+  assertEquals(leftover[0].customer?.name, null);
+  assertEquals(leftover[0].customer?.site_address, null);
+  assertEquals(leftover[0].summary, null);
+  assertEquals(leftover[0].items[0].description, null);
+  assertEquals(leftover[0].terms?.payment_terms, "50% deposit + 50% on completion");
+  assertAllocatedTradeQuotePackProjection(leftover[0]);
+  const generic = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    summary: "Price review / cost estimate / USD pricing",
+    items: [
+      { kind: "info", description: "Deposit required", quantity: 1, unit: "dollars" },
+      { kind: "info", description: "fee schedule", quantity: 1, unit: "bucks" },
+      { kind: "info", description: "GST exclusive", quantity: 1, unit: "USD" },
+      { kind: "info", description: "Rear posts", quantity: 4, unit: "AUD" },
+      { kind: "info", description: "Side sheets", quantity: 2, unit: "GST" },
+      { kind: "install_m", description: "Rear 19m", quantity: 19, unit: "m" },
+    ],
+  }]);
+  assertEquals(generic[0].summary, null);
+  assertEquals(generic[0].items[0].description, null);
+  assertEquals(generic[0].items[0].unit, undefined);
+  assertEquals(generic[0].items[1].description, null);
+  assertEquals(generic[0].items[1].unit, undefined);
+  assertEquals(generic[0].items[2].description, null);
+  assertEquals(generic[0].items[2].unit, undefined);
+  assertEquals(generic[0].items[3].description, "Rear posts");
+  assertEquals(generic[0].items[3].unit, undefined);
+  assertEquals(generic[0].items[4].description, "Side sheets");
+  assertEquals(generic[0].items[4].unit, undefined);
+  assertEquals(generic[0].items[5].description, "Rear 19m");
+  assertEquals(generic[0].items[5].unit, "m");
+  assertEquals(JSON.stringify(generic).includes("Price review"), false);
+  assertEquals(JSON.stringify(generic).includes("cost estimate"), false);
+  assertEquals(JSON.stringify(generic).includes("Deposit required"), false);
+  assertEquals(JSON.stringify(generic).includes("dollars"), false);
+  assertEquals(JSON.stringify(generic).includes("USD"), false);
+  assertEquals(JSON.stringify(generic).includes("AUD"), false);
+  assertEquals(JSON.stringify(generic).includes("GST"), false);
+  assertAllocatedTradeQuotePackProjection(generic[0]);
+});
+
+Deno.test("projectAllocatedTradeQuotePacks redacts then fail-closes before emit", () => {
+  const emitted = projectAllocatedTradeQuotePacks([{
+    quote_number: "Q-1",
+    summary: "Price review / cost estimate / USD pricing",
+    items: [
+      { kind: "info", description: "Deposit required", quantity: 1, unit: "dollars" },
+      { kind: "install_m", description: "Rear 19m", quantity: 19, unit: "m" },
+    ],
+  }]);
+  assertEquals(emitted[0].summary, null);
+  assertEquals(emitted[0].items[0].description, null);
+  assertEquals(emitted[0].items[0].unit, undefined);
+  assertEquals(emitted[0].items[1].description, "Rear 19m");
+  assertEquals(emitted[0].items[1].unit, "m");
+  assertAllocatedTradeQuotePackProjection(emitted[0]);
+});
+
+Deno.test("trade_quote_extract: unsent quote is 404 and a stranger is refused", async () => {
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(seed()),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "No sent quote extract for this job",
+  );
+  await assertRejects(
+    () =>
+      _tradeQuoteExtractForTest(
+        makeClient(seed()),
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(STRANGER, "lead_installer"),
+        false,
+      ),
+    ApiError,
+    "Job not found",
+  );
+});
+
+Deno.test("TRD6-22-002 trade_quote_extract hides same-tenant unassigned jobs as generic 404", async () => {
+  const t = seed();
+  const refuse = async (jobId: string, userId: string) => {
+    try {
+      await _tradeQuoteExtractForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId }),
+        {},
+        viewer(userId, "lead_installer"),
+        false,
+      );
+      throw new Error("expected extract access refusal");
+    } catch (error) {
+      assert(error instanceof ApiError);
+      return error;
+    }
+  };
+  const unassigned = await refuse(JOB_FENCE, STRANGER);
+  const missing = await refuse("job-missing", LEAD);
+  const foreign = await refuse(JOB_FENCE_B, LEAD);
+  for (const error of [unassigned, missing, foreign]) {
+    assertEquals(error.status, 404);
+    assertEquals(error.message, "Job not found");
+    assertEquals(error.body, { error: "Job not found", code: "job_not_found" });
+  }
+});
+
+function extractJobsErrorClient(error: { message: string; code?: string }) {
+  const client = makeClient(seed());
+  const origFrom = client.from.bind(client);
+  client.from = (t: string) => {
+    const inner = origFrom(t);
+    if (t !== "jobs") return inner;
+    const origSelect = inner.select.bind(inner);
+    inner.select = (cols?: string) => {
+      const chain = origSelect(cols);
+      chain.maybeSingle = () => Promise.resolve({ data: null, error });
+      chain.single = () => Promise.resolve({ data: null, error });
+      return chain;
+    };
+    return inner;
+  };
+  return client;
+}
+
+Deno.test("TRD6-30-003 trade_quote_extract maps thrown access refusals to the same generic 404", async () => {
+  const refuse = async (client: ReturnType<typeof makeClient>) => {
+    try {
+      await _tradeQuoteExtractForTest(
+        client,
+        new URLSearchParams({ jobId: JOB_FENCE }),
+        {},
+        viewer(LEAD, "lead_installer"),
+        false,
+      );
+      throw new Error("expected extract access refusal");
+    } catch (error) {
+      assert(error instanceof ApiError);
+      return error;
+    }
+  };
+  const assignment = await refuse(extractJobsErrorClient({
+    message: "You are not assigned to this job",
+  }));
+  const missingRow = await refuse(extractJobsErrorClient({
+    code: "PGRST116",
+    message: "JSON object requested, multiple (or no) rows returned",
+  }));
+  for (const error of [assignment, missingRow]) {
+    assertEquals(error.status, 404);
+    assertEquals(error.message, "Job not found");
+    assertEquals(error.body, { error: "Job not found", code: "job_not_found" });
+  }
+});
+
+Deno.test("TRD6-30-003 trade_quote_extract keeps true job-read faults as server errors", async () => {
+  try {
+    await _tradeQuoteExtractForTest(
+      extractJobsErrorClient({
+        code: "42703",
+        message: "column jobs.secret does not exist",
+      }),
+      new URLSearchParams({ jobId: JOB_FENCE }),
+      {},
+      viewer(LEAD, "lead_installer"),
+      false,
+    );
+    throw new Error("expected extract server fault");
+  } catch (error) {
+    assert(error instanceof ApiError);
+    assertEquals(error.status, 503);
+    assertEquals(error.message, "Quote extract unavailable");
+  }
 });
 
 Deno.test("trade_job_detail: the CREW member gets EXACTLY what the lead gets", async () => {
@@ -646,14 +1018,14 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   }];
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.notes[0].detail_json.text, "Client approved");
-  assertEquals(allocated.notes[0].detail_json.message, "Charge extra");
-  assertEquals(allocated.notes[0].detail_json.description, "Approved total");
-  assertEquals(allocated.notes[0].detail_json.body, "Fee");
+  assertEquals(allocated.notes[0].detail_json.message, undefined);
+  assertEquals(allocated.notes[0].detail_json.description, undefined);
+  assertEquals(allocated.notes[0].detail_json.body, undefined);
   assertEquals(allocated.notes[0].detail_json.content, "Plus");
   assertEquals(allocated.notes[0].detail_json.amount, undefined);
   assertEquals(allocated.notes[0].detail_json.qty, 2);
   assertEquals(allocated.media[0].label, "Front run");
-  assertEquals(allocated.media[0].notes, "Front run priced");
+  assertEquals(allocated.media[0].notes, undefined);
   assertEquals(allocated.media[0].id, "p-note");
   assertEquals(allocated.media[0].phase, "install");
   assertEquals(allocated.media[0].type, "photo");
@@ -671,7 +1043,7 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   });
   assertEquals(allocated.media[0].amount, undefined);
   assertEquals(JSON.stringify(allocated.notes).includes("9999"), false);
-  assertEquals(allocated.media[0].notes.includes("1200"), false);
+  assertEquals(allocated.media[0].notes, undefined);
   const office = await detail(t, viewer(OFFICE, "ops_manager"));
   assertEquals(office.notes[0].detail_json.text, "Client approved $9,999 excluding GST");
   assertEquals(office.notes[0].detail_json.message, "Charge $9,999 extra");
@@ -712,7 +1084,7 @@ Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO
   assertEquals(p.documents.map((d: any) => d.id), []);
   assertEquals(p.workOrderDocuments, []);
   assertEquals(JSON.stringify(p).includes("ms-wo.pdf"), false);
-  assertEquals(p.workOrders[0].special_instructions, "Attend after hours. Charge extra.");
+  assertEquals(p.workOrders[0].special_instructions, undefined);
   assertEquals(p.workOrders[0].scope_items, [{ description: "Make safe", quantity: 1, unit: "lot" }]);
 });
 
@@ -763,8 +1135,8 @@ Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing 
     assertEquals(p.makesafe_details.reattend_count, 1);
     assertEquals(p.makesafe_details.attendance_cycle_id, "cycle-ms");
     assertEquals(p.makesafe_details.external_ref, "MLB-27000");
-    assertEquals(p.makesafe_details.special_instructions, "Use 90x90 posts. Charge extra.");
-    assertEquals(p.makesafe_details.safety_requirements, "Watch the GST registration. Total.");
+    assertEquals(p.makesafe_details.special_instructions, undefined);
+    assertEquals(p.makesafe_details.safety_requirements, undefined);
     assertEquals(JSON.stringify(p.makesafe_details).includes("9999"), false);
     assertEquals(JSON.stringify(p.makesafe_details).includes("INV-1240"), false);
     assertEquals(JSON.stringify(p.makesafe_details).includes("\"rate\""), false);
@@ -806,7 +1178,7 @@ Deno.test("trade_job_detail: allocated service reports drop money and keep hours
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.serviceReport.id, "sr-1");
   assertEquals(allocated.serviceReport.cycle_number, 1);
-  assertEquals(allocated.serviceReport.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.serviceReport.notes, undefined);
   assertEquals(allocated.serviceReport.checklist_json.labour_hours, 3);
   assertEquals(allocated.serviceReport.checklist_json.hours_per_trade, 3);
   assertEquals(allocated.serviceReport.checklist_json.rate, undefined);
@@ -885,7 +1257,7 @@ Deno.test("get_service_report: allocated / makesafe_open never see money-bearing
   assertEquals(allocated.report.id, "sr-door");
   assertEquals(allocated.report.submitted_by, LEAD);
   assertEquals(allocated.report.cycle_number, 1);
-  assertEquals(allocated.report.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.report.notes, undefined);
   assertEquals(allocated.report.checklist_json.labour_hours, 3);
   assertEquals(allocated.report.checklist_json.rate, undefined);
   assertEquals(allocated.report.checklist_json.amount, undefined);
@@ -935,7 +1307,7 @@ Deno.test("submit_service_report: allocated response is projected the same as tr
   );
   assertEquals(allocated.report.submitted_by, LEAD);
   assertEquals(allocated.report.status, "submitted");
-  assertEquals(allocated.report.notes, "Installed rear run. Charge extra. Total.");
+  assertEquals(allocated.report.notes, undefined);
   assertEquals(allocated.report.checklist_json.labour_hours, 3);
   assertEquals(allocated.report.checklist_json.rate, undefined);
   assertEquals(allocated.report.checklist_json.amount, undefined);
@@ -1183,7 +1555,7 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   const allocated = await detail(t, viewer(LEAD, "lead_installer"));
   assertEquals(allocated.quote_visible, false);
   const allocatedLine = allocated.purchaseOrders[0].line_items[0];
-  assertEquals(allocatedLine.description, "Sheets . Total.");
+  assertEquals(allocatedLine.description, "");
   assertEquals(allocatedLine.quantity, 12);
   assertEquals(allocatedLine.unit_price, undefined);
   assertEquals(allocated.purchaseOrders[0].supplier_name, "Acme Sheets");
@@ -1196,8 +1568,8 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   assertEquals(office.purchaseOrders[0].line_items[0].unit_price, undefined);
   const projectedHidden = projectTradePurchaseOrders(t.purchase_orders, false)[0];
   const projectedOffice = projectTradePurchaseOrders(t.purchase_orders, true)[0];
-  assertEquals(projectedHidden.line_items[0].description, "Sheets . Total.");
-  assertEquals(projectedHidden.notes, "Charge extra. Total.");
+  assertEquals(projectedHidden.line_items[0].description, "");
+  assertEquals(projectedHidden.notes, "");
   assertEquals(projectedHidden.supplier_name, "Acme Sheets");
   assertEquals(projectedOffice.line_items[0].description, "Sheets $99.50. Total 9999.");
   assertEquals(projectedOffice.notes, "Charge 1200 extra. Total 9999.");
@@ -1217,7 +1589,7 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   );
   assertEquals(open.access_tier, "makesafe_open");
   assertEquals(open.quote_visible, false);
-  assertEquals(open.purchaseOrders[0].line_items[0].description, "Sheets . Total.");
+  assertEquals(open.purchaseOrders[0].line_items[0].description, "");
   assertEquals(open.purchaseOrders[0].supplier_name, "Acme Sheets");
 });
 
@@ -1271,7 +1643,7 @@ Deno.test("projectTradePurchaseOrders allocated drops money-shaped PO units; off
     }],
   }];
   const allocated = projectTradePurchaseOrders(pos, false)[0];
-  assertEquals(allocated.line_items[0].description, "Sheets Deposit");
+  assertEquals(allocated.line_items[0].description, "");
   assertEquals(allocated.line_items[0].quantity, 12);
   assertEquals(allocated.line_items[0].unit, undefined);
   assertEquals(allocated.line_items[1].unit, undefined);
@@ -1321,8 +1693,8 @@ Deno.test("trade_job_detail: another tenant's manager is refused before anything
         viewer(HENRY, "lead_installer", ["fencing"]) as any,
         false,
       ),
-    Error,
-    "not authorized",
+    ApiError,
+    "Job not found",
   );
 });
 
@@ -1379,20 +1751,50 @@ Deno.test("redactTradeScopeQuote money-sanitizes retained narrative and descript
       },
     },
   });
-  assertEquals(r.notes.noteQuote, "Quote writing Total plus");
+  assertEquals(r.notes.noteQuote, undefined);
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
   assertEquals(r.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(r.job.supplierNotes, "Call before arrival. Charge . Total");
+  assertEquals(r.job.supplierNotes, undefined);
   assertEquals(r.job.quote.quote_number, "Q-NARR");
-  assertEquals(r.job.quote.description, "Supply and install. Total Approved total");
-  assertEquals(r.job.quote.narrative, "Gate on the left extra Total");
+  assertEquals(r.job.quote.description, undefined);
+  assertEquals(r.job.quote.narrative, undefined);
   assertEquals(r.job.quote.name, "Monument package");
   assertEquals(r.job.quote.label, "Front run");
   assertEquals(r.job.quote.title, "Quote title");
   assertEquals(r.job.quote.materials, [{ name: "90x90 posts", qty: 12, title: "Posts" }]);
   assertEquals(JSON.stringify(r).includes("9999"), false);
   assertEquals(JSON.stringify(r).includes("1200"), false);
+});
+
+Deno.test("redactTradeScopeQuote fail-closes leftover currency, tax, and invoice prose", () => {
+  const r = redactTradeScopeQuote({
+    notes: {
+      noteQuote: "€18",
+      noteWorkOrder: "tax included",
+      noteInternal: "invoice attached",
+      noteSafe: "Park on the verge",
+    },
+    job: {
+      siteNotes: "＄18 extra",
+      quote: {
+        quote_number: "Q-NARR",
+        description: "tax included on the invoice attached",
+        narrative: "Gate on the left",
+      },
+    },
+    terms: {
+      payment_terms: "50% deposit + 50% on completion",
+    },
+  });
+  assertEquals(r.notes.noteQuote, undefined);
+  assertEquals(r.notes.noteWorkOrder, undefined);
+  assertEquals(r.notes.noteInternal, undefined);
+  assertEquals(r.notes.noteSafe, "Park on the verge");
+  assertEquals(r.job.siteNotes, undefined);
+  assertEquals(r.job.quote.description, undefined);
+  assertEquals(r.job.quote.narrative, "Gate on the left");
+  assertEquals(r.terms.payment_terms, "50% deposit + 50% on completion");
 });
 
 Deno.test("redactTradeScopeQuote drops bare numeric string leaves on the quote-object allowlist", () => {
@@ -1442,7 +1844,7 @@ Deno.test("redactTradeScopeQuote strips the quote at every depth and keeps the r
   assertEquals(r.notes.noteWorkOrder, "Use 90x90 posts");
   assertEquals(r.notes.noteInternal, "Client is a repeat customer. Do not mention");
   assertEquals(r.job.siteNotes, "Park on the verge. Extra");
-  assertEquals(r.job.supplierNotes, "Call before arrival. Charge");
+  assertEquals(r.job.supplierNotes, undefined);
   assertEquals(r.client, { notes: "Gate on the left" });
   assertEquals(r.job.quote.quote_number, "Q-NARR");
   assertEquals(r.job.quote.description.includes("Monument"), true);
@@ -1508,6 +1910,25 @@ Deno.test("redactTradeScopeQuote walks nested labour keep-key values so money ca
   assertEquals(JSON.stringify(r).includes("3200"), false);
   assertEquals(JSON.stringify(r).includes("85"), false);
   assertEquals(JSON.stringify(r).includes("$"), false);
+});
+
+Deno.test("redactTradeScopeQuote rejects leftover money language on numeric-key strings", () => {
+  const r = redactTradeScopeQuote({
+    job: {
+      qty: "50% upfront",
+      quantity: "amount 9,999",
+      hours: "amount 9,999",
+      hours_per_trade: "50% deposit",
+      labour_hours: "12",
+      extras: { qty: "12", quantity: 10, hours: "2 trades" },
+    },
+  });
+  assertEquals(r.job.qty, undefined);
+  assertEquals(r.job.quantity, undefined);
+  assertEquals(r.job.hours, undefined);
+  assertEquals(r.job.hours_per_trade, undefined);
+  assertEquals(r.job.labour_hours, "12");
+  assertEquals(r.job.extras, { qty: "12", quantity: 10, hours: "2 trades" });
 });
 
 Deno.test("redactTradeScopeQuote drops unlisted numeric money keys and keeps construction quantities", () => {
@@ -1663,9 +2084,6 @@ Deno.test("redactTradeWorkOrderScopeItems money-sanitizes every retained string 
       },
     ]),
     [{
-      description: "Posts Total",
-      instructions: "Charge extra Total Approved total",
-      notes: "Priced",
       name: "Front",
       label: "Run",
       title: "Line",
@@ -1697,9 +2115,9 @@ Deno.test("redactTradeWorkOrdersForAllocated money-sanitizes special_instruction
   assertEquals(out[0].wo_number, "WO-18400");
   assertEquals(out[0].status, "sent");
   assertEquals(out[0].scheduled_date, "2026-08-20");
-  assertEquals(out[0].special_instructions, "Park on the verge. Charge extra Approved total");
-  assertEquals(out[0].notes, "Installer note Total");
-  assertEquals(out[0].scope_items, [{ description: "Posts Total", quantity: 4, unit: "ea" }]);
+  assertEquals(out[0].special_instructions, undefined);
+  assertEquals(out[0].notes, undefined);
+  assertEquals(out[0].scope_items, [{ quantity: 4, unit: "ea" }]);
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("1200"), false);
   assertEquals(JSON.stringify(out).includes("850"), false);
@@ -1724,7 +2142,7 @@ Deno.test("redactTradeWorkOrdersForAllocated drops nested money objects and unre
   assertEquals(JSON.stringify(out).includes("18400"), false);
 });
 
-Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money", () => {
+Deno.test("redactTradeQuotePackMoney allowlists pack fields and omits item money keys", () => {
   const out = redactTradeQuotePackMoney([
     {
       quote_number: "Q-1",
@@ -1743,6 +2161,9 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     },
   ]);
   assertEquals(out[0].quote_number, "Q-1");
+  assertEquals(redactTradeQuotePackMoney([{ quote_number: "$18,400" }])[0].quote_number, null);
+  assertEquals(redactTradeQuotePackMoney([{ quote_number: "50% deposit" }])[0].quote_number, null);
+  assertEquals(redactTradeQuotePackMoney([{ quote_number: "rate 850" }])[0].quote_number, null);
   assertEquals(out[0].lineTotalEx, undefined);
   assertEquals(out[0].gstAmount, undefined);
   assertEquals(out[0].quotedTotal, undefined);
@@ -1750,9 +2171,107 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     kind: "install_m",
     description: "Install",
     quantity: 10,
-    unit_price: null,
-    line_total: null,
   });
+  assertEquals("unit_price" in out[0].items[0], false);
+  assertEquals("line_total" in out[0].items[0], false);
+  assertAllocatedTradeQuotePackProjection(out[0]);
+});
+
+Deno.test("redactTradeQuotePackMoney allowlists customer and terms without money keys", () => {
+  const out = redactTradeQuotePackMoney([
+    {
+      quote_number: "Q-1",
+      customer: {
+        name: "Pat Client $9,999",
+        phone: "0412 000 111",
+        email: "pat@example.test",
+        site_address: "12 Fence St $850",
+        site_suburb: "Midland",
+        deposit_amount: 4400,
+      },
+      terms: {
+        payment_terms: "50% deposit + 50% on completion $9,999",
+        valid_days: 30,
+        valid_until: "2026-10-01",
+        deposit_percent: 50,
+      },
+    },
+  ]);
+  assertEquals(out[0].customer, {
+    name: "Pat Client",
+    phone: "0412 000 111",
+    email: "pat@example.test",
+    site_address: "12 Fence St",
+    site_suburb: "Midland",
+  });
+  assertEquals(out[0].terms, {
+    payment_terms: "50% deposit + 50% on completion",
+    valid_days: 30,
+    valid_until: "2026-10-01",
+  });
+  assertEquals("deposit_amount" in (out[0].customer || {}), false);
+  assertEquals("deposit_percent" in (out[0].terms || {}), false);
+  assertEquals(JSON.stringify(out).includes("9999"), false);
+  assertEquals(JSON.stringify(out).includes("4400"), false);
+  assertAllocatedTradeQuotePackProjection(out[0]);
+});
+
+Deno.test("redactTradeQuotePackMoney fail-closes money tokens on every customer and terms string", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: {
+      name: "USD Client",
+      phone: "0412 $18,400",
+      email: "fee@example.test",
+      site_address: "12 cost street",
+      site_suburb: "rate suburb",
+    },
+    terms: {
+      payment_terms: "Pay the deposit now",
+      valid_days: 30,
+      valid_until: "valid until price review",
+    },
+  }]);
+  assertEquals(out[0].customer, {
+    name: null,
+    phone: null,
+    email: null,
+    site_address: null,
+    site_suburb: null,
+  });
+  assertEquals(out[0].terms, {
+    payment_terms: null,
+    valid_days: 30,
+    valid_until: null,
+  });
+  assertAllocatedTradeQuotePackProjection(out[0]);
+  assertEquals(redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    terms: { payment_terms: "Payment on completion", valid_days: 30 },
+  }])[0].terms?.payment_terms, null);
+  assertEquals(redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    terms: { payment_terms: "Net 30", valid_days: 30 },
+  }])[0].terms?.payment_terms, null);
+});
+
+Deno.test("redactTradeQuotePackMoney keeps sealed phrase only on payment_terms", () => {
+  const out = redactTradeQuotePackMoney([{
+    quote_number: "Q-1",
+    customer: { name: "50% deposit + 50% on completion" },
+    terms: { payment_terms: "50% deposit + 50% on completion $9,999", valid_days: 30 },
+    items: [{
+      kind: "info",
+      description: "50% deposit + 50% on completion",
+      quantity: 1,
+    }],
+    summary: "50% deposit + 50% on completion",
+  }]);
+  assertEquals(out[0].customer?.name, null);
+  assertEquals(out[0].summary, null);
+  assertEquals(out[0].items[0].description, null);
+  assertEquals(out[0].terms?.payment_terms, "50% deposit + 50% on completion");
+  assertAllocatedTradeQuotePackProjection(out[0]);
 });
 
 Deno.test("redactTradeQuotePackMoney nulls a nested quantity object instead of copying it", () => {
@@ -1796,7 +2315,7 @@ Deno.test("redactTradeQuotePackMoney drops money-shaped unit and kind scalars", 
     ],
   }]);
   assertEquals(out[0].items.map((i: any) => i.kind), ["install_m", "install_m", "install_m"]);
-  assertEquals(out[0].items[0].description, "Install Deposit");
+  assertEquals(out[0].items[0].description, null);
   assertEquals(out[0].items[0].unit, undefined);
   assertEquals(out[0].items[1].unit, "m");
   assertEquals(out[0].items[2].unit, undefined);
@@ -1850,9 +2369,9 @@ Deno.test("redactTradeQuotePackMoney omits kind:note items and strips $ figures 
       ],
     },
   ]);
-  assertEquals(out[0].summary, "Install 10m Total Total Approved total");
+  assertEquals(out[0].summary, null);
   assertEquals(out[0].items.map((i: any) => i.kind), ["install_m"]);
-  assertEquals(out[0].items[0].description, "Install fence Total Total");
+  assertEquals(out[0].items[0].description, null);
   assertEquals(JSON.stringify(out).includes("9999"), false);
   assertEquals(JSON.stringify(out).includes("1200"), false);
 });
