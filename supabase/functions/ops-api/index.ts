@@ -3965,6 +3965,13 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // #667 left it off this list, so a lead_installer vertical manager hit the
   // staff-role 403 before that gate ran (Henry / SWF-26091 "Make lead").
   'set_job_lead',
+  // Same gate again (assertAssignmentMutationAuthz at the dispatch case). The
+  // Trade allocate sheet edits an assignment's schedule through
+  // update_assignment and removes a crew member through delete_assignment; a
+  // vertical manager (Henry on fencing) must reach both, a plain installer is
+  // refused inside the route exactly as for set_job_lead.
+  'update_assignment',
+  'delete_assignment',
   'reattend_makesafe',
   'confirm_roof_report_done',
   'cancel_makesafe',
@@ -31441,9 +31448,26 @@ async function deleteAssignment(client: any, body: any) {
   // Get assignment for event log + dual-write
   const { data: existing } = await client
     .from('job_assignments')
-    .select('job_id, user_id, scheduled_date, confirmation_status, crew_name')
+    .select('job_id, user_id, scheduled_date, confirmation_status, crew_name, invoiced_in')
     .eq('id', id)
     .single()
+
+  // An assignment already carried on a live trade invoice is money truth, not
+  // a schedule entry. Removing it would orphan the invoice line's provenance.
+  if (existing?.invoiced_in) {
+    const { data: holder } = await client.from('trade_invoices')
+      .select('id, status, invoice_number')
+      .eq('id', existing.invoiced_in)
+      .maybeSingle()
+    if (holder && !RELEASED_INVOICE_STATUS_SET.has(String(holder.status || ''))) {
+      throw new ApiError(
+        'This crew member has already invoiced this job' +
+          (holder.invoice_number ? ' (' + holder.invoice_number + ')' : '') +
+          '. The office must adjust the invoice before the allocation can be removed.',
+        409,
+      )
+    }
+  }
 
   const { error } = await client.from('job_assignments').delete().eq('id', id)
   if (error) throw error
