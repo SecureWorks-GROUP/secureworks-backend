@@ -23,9 +23,10 @@
  * refreshes with the current time so a long grouped write cannot let
  * an earlier claim fall past the TTL. A lost lease fails closed
  * before the next write. Refreshing only the current recipient
- * lets a successful group's unpublished claims expire so `/send` can
- * reclaim them with a distinct per-document Idempotency-Key after the
- * grouped email already used the group key.
+ * lets a successful group's unpublished claims expire. `/send` must
+ * not reclaim across a covering in-flight/accepted group key — that
+ * path uses a per-document Idempotency-Key and would send a second
+ * quote. Recovery is send-runs retry with the stored group key.
  * Exclusive key-stamp updates must return the owned row; a zero-row
  * stamp is not a claim and must not dispatch. send-runs recipient keys
  * are trim + lowercase so case-variant addresses are one group. The
@@ -324,7 +325,7 @@ async function reclaimStaleQuoteDocumentSend(
 ): Promise<QuoteSendClaimResult> {
   const { data: existing, error: readError } = await sb
     .from('job_documents')
-    .select('id, send_claimed_at, send_resend_idempotency_key, sent_at, sent_to_client, accepted_at')
+    .select('id, job_id, send_claimed_at, send_resend_idempotency_key, sent_at, sent_to_client, accepted_at')
     .eq('id', documentId)
     .maybeSingle()
   if (readError) {
@@ -334,6 +335,10 @@ async function reclaimStaleQuoteDocumentSend(
   if (!existing || typeof existing.id !== 'string') return { status: 'unavailable' }
   if (quoteSendIsPublished(existing)) return { status: 'unavailable' }
   if (!quoteSendClaimIsStale(existing.send_claimed_at, now)) return { status: 'unavailable' }
+
+  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, documentId)
+  if (covering.status === 'error') return { status: 'error', error: covering.error }
+  if (covering.status === 'covered') return { status: 'unavailable' }
 
   const ownership = quoteSendClaimReclaimOwnershipPayload(now)
   const keptKey = quoteSendClaimToken(existing.send_resend_idempotency_key)
@@ -371,6 +376,10 @@ export async function claimQuoteDocumentSend(
   documentId: string,
   now = new Date(),
 ): Promise<QuoteSendClaimResult> {
+  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, documentId)
+  if (covering.status === 'error') return { status: 'error', error: covering.error }
+  if (covering.status === 'covered') return { status: 'unavailable' }
+
   const exclusive = await claimQuoteDocumentSendExclusive(sb, documentId, now)
   if (exclusive.status === 'claimed' || exclusive.status === 'error') return exclusive
   return await reclaimStaleQuoteDocumentSend(sb, documentId, now)
@@ -1023,6 +1032,13 @@ function quoteGroupEmailReadyKey(
   return quoteSendClaimToken(record?.send_resend_idempotency_key)
 }
 
+function parseQuoteGroupEmailSendRecords(
+  data: unknown,
+): QuoteGroupEmailSendRecord[] {
+  if (!Array.isArray(data)) return []
+  return data.filter((row): row is QuoteGroupEmailSendRecord => !!row)
+}
+
 async function loadQuoteGroupEmailSendRecords(
   sb: QuoteSendPublicationClient,
   jobId: string,
@@ -1034,8 +1050,55 @@ async function loadQuoteGroupEmailSendRecords(
     .eq('job_id', jobId)
     .eq('recipient_email', recipientEmail)
   if (error) return { records: [], error: claimErrorMessage(error) }
-  const records = Array.isArray(data) ? data.filter((row): row is QuoteGroupEmailSendRecord => !!row) : []
-  return { records, error: null }
+  return { records: parseQuoteGroupEmailSendRecords(data), error: null }
+}
+
+async function loadQuoteGroupEmailSendRecordsForJob(
+  sb: QuoteSendPublicationClient,
+  jobId: string,
+): Promise<{ records: QuoteGroupEmailSendRecord[]; error: string | null }> {
+  const { data, error } = await sb
+    .from(QUOTE_GROUP_EMAIL_SEND_TABLE)
+    .select('id, document_ids, document_set_key, send_resend_idempotency_key')
+    .eq('job_id', jobId)
+  if (error) return { records: [], error: claimErrorMessage(error) }
+  return { records: parseQuoteGroupEmailSendRecords(data), error: null }
+}
+
+export type CoveringQuoteGroupEmailSendKey =
+  | { status: 'none' }
+  | { status: 'covered'; recordId: string; idempotencyKey: string | null }
+  | { status: 'error'; error: string }
+
+/**
+ * Job-wide covering group key for one document. `/send` must not mint a
+ * per-document Idempotency-Key while send-runs still holds a ready group
+ * key that includes this document. Recipient is ignored — `/send` may
+ * name a different inbox. A retired/absent row is `none`.
+ */
+export async function coveringQuoteGroupEmailSendKeyForDocument(
+  sb: QuoteSendPublicationClient,
+  documentId: string,
+): Promise<CoveringQuoteGroupEmailSendKey> {
+  const { data, error } = await sb
+    .from('job_documents')
+    .select('id, job_id')
+    .eq('id', documentId)
+    .maybeSingle()
+  if (error) return { status: 'error', error: claimErrorMessage(error) }
+  const jobId = typeof data?.job_id === 'string' ? data.job_id.trim() : ''
+  if (!jobId) return { status: 'none' }
+
+  const loaded = await loadQuoteGroupEmailSendRecordsForJob(sb, jobId)
+  if (loaded.error) return { status: 'error', error: loaded.error }
+
+  const covering = pickQuoteGroupEmailCoveringRecord(loaded.records, [documentId])
+  if (!covering) return { status: 'none' }
+  return {
+    status: 'covered',
+    recordId: typeof covering.id === 'string' ? covering.id : '',
+    idempotencyKey: quoteGroupEmailReadyKey(covering),
+  }
 }
 
 /**

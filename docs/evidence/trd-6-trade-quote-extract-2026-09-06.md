@@ -601,3 +601,34 @@ Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed. Extract 404 stays
 generic. Pack-source job-read fail-closed stays.
+
+## Review-28 locks (2026-09-07)
+
+- **`/send` does not reclaim across a covering group key.**
+  Before exclusive claim and again before stale reclaim,
+  `coveringQuoteGroupEmailSendKeyForDocument` reads the job-wide
+  `quote_group_email_send_records` set (no recipient filter). A covering
+  in-flight/accepted group record — current document ⊆ stored ids,
+  including a leftover subset of a larger original set — returns
+  `unavailable`. Recovery is send-runs retry with the stored group key,
+  never a per-document Idempotency-Key on `/send`. A group or document
+  read fault is `error`, not reclaim. A retired or absent row is `none`.
+
+- **Leftover and zero-publication claim-release faults are 5xx.**
+  After successful-recipient publication, `revertSendRunsDocumentClaims`
+  on leftover (failed-recipient) claims must succeed before the handler
+  reports success. The same applies to the zero-publication revert of
+  still-held claims. Either `.error` returns 500 and does not mark a
+  provider attempt. Attempted leftovers still keep the first provider
+  key; the job lease still clears in `finally`.
+
+Already-covered hyphenated-day terms, unmarked `50 on completion` /
+`30 by delivery`, Net-N / N30 family stay. Qualified schedule amounts
+stay. Allocated packs omit `unit_price` / `line_total`. Value-aware
+leak keys stay. Sealed phrase stays exempt only on
+`terms.payment_terms`. Group-key retire failure stays 5xx.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed. Extract 404 stays
+generic. Pack-source job-read fail-closed stays.

@@ -2865,10 +2865,15 @@ serve(async (req: Request) => {
           const leftover = await revertSendRunsDocumentClaims(leftoverClaims)
           if (leftover.error) {
             console.error('[send-quote] send-runs leftover claim revert failed:', leftover.error.message || String(leftover.error))
+            return jsonResponse({ error: 'Failed to release leftover quote send claims' }, 500, corsHeaders)
           }
         }
       } else if (claimedDocs.length > 0) {
-        await revertSendRunsDocumentClaims(claimedDocs)
+        const released = await revertSendRunsDocumentClaims(claimedDocs)
+        if (released.error) {
+          console.error('[send-quote] send-runs claim revert failed:', released.error.message || String(released.error))
+          return jsonResponse({ error: 'Failed to release quote send claims' }, 500, corsHeaders)
+        }
       }
 
       const sendOutcome = sendRunsSendOutcome({
