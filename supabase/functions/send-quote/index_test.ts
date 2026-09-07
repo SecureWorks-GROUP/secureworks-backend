@@ -20,6 +20,7 @@ import {
   QUOTE_SEND_CLAIM_TTL_MS,
   claimJobSendRuns,
   claimQuoteDocumentSend,
+  claimQuoteDocumentSendForGroupedRuns,
   coveringQuoteGroupEmailSendKeyForDocument,
   clearJobSendRunsClaim,
   quoteSendClaimRevertPayload,
@@ -1732,6 +1733,44 @@ Deno.test("TRD6-27-001 retired or absent group row lets exclusive /send claim pr
   }
 })
 
+Deno.test("TRD6-28-001 send-runs grouped claim reclaims a stale leftover under a covering group key", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z")
+  const sb = makeCoveringGroupClaimSb({
+    documentId: "doc-a",
+    stale: true,
+    now,
+    groupRecords: [{
+      id: "grp-1",
+      document_ids: ["doc-a", "doc-b"],
+      document_set_key: "doc-a,doc-b",
+      send_resend_idempotency_key: "quote-group-send:live",
+    }],
+  })
+  const direct = await claimQuoteDocumentSend(sb, "doc-a", now)
+  assertEquals(direct, { status: "unavailable" })
+  assertEquals(sb.updates.length, 0)
+  const grouped = await claimQuoteDocumentSendForGroupedRuns(sb, "doc-a", now)
+  assertEquals(grouped.status, "claimed")
+  if (grouped.status === "claimed") {
+    assertEquals(grouped.id, "doc-a")
+    assertEquals(grouped.resend_idempotency_key, "quote-send:first")
+  }
+  assert(sb.updates.length >= 1)
+})
+
+Deno.test("TRD6-28-001 /send stays on the covering fence; send-runs uses the grouped claim path", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendStart = src.indexOf("if (path === 'send' && req.method === 'POST')")
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const sendSlice = src.slice(sendStart, sendRuns)
+  const runsSlice = src.slice(sendRuns)
+  assert(sendStart >= 0 && sendRuns > sendStart)
+  assert(sendSlice.includes("claimQuoteDocumentSend(sb, document_id)"))
+  assert(!sendSlice.includes("claimQuoteDocumentSendForGroupedRuns"))
+  assert(runsSlice.includes("claimQuoteDocumentSendForGroupedRuns(sb, doc.id)"))
+  assert(runsSlice.includes("ensureQuoteGroupEmailSendKey("))
+})
+
 Deno.test("R5-001 send-runs stamp failure after Resend blocks success and quoted flip", () => {
   assertEquals(
     sendRunsPublicationFailureBlocksSuccess({ resendSucceeded: true, publicationSucceeded: false }),
@@ -2555,6 +2594,29 @@ Deno.test("TRD6-27-002 leftover and zero-publication revert faults are 5xx", () 
   assert(zeroPub.includes("Failed to release quote send claims"))
   assert(zeroPub.includes("500"))
   assert(!zeroPub.includes("markSendRunsProviderAttempt"))
+})
+
+Deno.test("TRD6-28-002 send-runs persist stamps each document's run_label onto the pack write", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const start = src.indexOf("persistTradePacksWhileHoldingSendClaims(sb, {")
+  const end = src.indexOf("if (persisted.status === 'lease_error'", start)
+  const slice = src.slice(start, end)
+  assert(start >= 0 && end > start)
+  assert(slice.includes("run_label: d.run_label || null"))
+  assert(slice.includes("run_snapshot: d.data_snapshot_json?.run ?? null"))
+})
+
+Deno.test("TRD6-28-003 send-runs job-lease cleanup failure is 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const invoice = src.indexOf("if (path === 'send-invoice' && req.method === 'POST')")
+  const block = src.slice(sendRuns, invoice)
+  assert(sendRuns >= 0 && invoice > sendRuns)
+  assert(block.includes("const released = await clearJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)"))
+  assert(block.includes("if (released.error)"))
+  assert(block.includes("Failed to release job send-runs claim"))
+  assert(block.includes("500"))
+  assert(block.includes("jobClaim.claimed_at"))
 })
 
 // ════════════════════════════════════════════════════════════════════════════

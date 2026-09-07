@@ -90,6 +90,43 @@ export function isHenryInstaller(email: string | null | undefined): boolean {
   return /emeka|henry/i.test(String(email || ''))
 }
 
+export function quoteRunLabelKey(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+export function tradeQuoteRunMatchesLabel(run: unknown, runLabel: string): boolean {
+  const label = quoteRunLabelKey(runLabel).toLowerCase()
+  if (!label) return false
+  const row = asObject(run)
+  return [row.run_label, row.run_name, row.name]
+    .map((value) => quoteRunLabelKey(value).toLowerCase())
+    .filter(Boolean)
+    .includes(label)
+}
+
+/** Restrict fencing scope to the document's own run. Absent label keeps
+ *  the whole job (single-quote `/send`). No match and no snapshot yields
+ *  empty runs — never the sibling set. */
+export function filterTradeQuoteScopeToRun(
+  scopeJson: unknown,
+  runLabel?: string | null,
+  runSnapshot?: unknown,
+): unknown {
+  const label = quoteRunLabelKey(runLabel)
+  if (!label) return scopeJson
+  const scope = asObject(scopeJson)
+  const job = asObject(scope.job)
+  const runs = Array.isArray(job.runs) ? job.runs : []
+  let selected = runs.filter((run) => tradeQuoteRunMatchesLabel(run, label))
+  if (!selected.length) {
+    const snapshot = runSnapshot && typeof runSnapshot === 'object' && !Array.isArray(runSnapshot)
+      ? runSnapshot
+      : null
+    if (snapshot) selected = [snapshot]
+  }
+  return { ...scope, job: { ...job, runs: selected } }
+}
+
 export function packTradeQuote(input: PackTradeQuoteInput): TradeQuotePack {
   const jobType = classifyJobType(input.job_type, input.scope_json, input.pricing_json)
   const scope = asObject(input.scope_json)
@@ -383,6 +420,8 @@ export async function persistTradePackOnDocuments(
       quote_number?: string | null
       sent_at?: string | null
       claim_token?: string | null
+      run_label?: string | null
+      run_snapshot?: unknown
     }>
     jobType?: string | null
     scopeJson?: unknown
@@ -402,7 +441,7 @@ export async function persistTradePackOnDocuments(
       job_document_id: doc.id,
       sent_at: doc.sent_at || sentAt,
       job_type: args.jobType,
-      scope_json: args.scopeJson,
+      scope_json: filterTradeQuoteScopeToRun(args.scopeJson, doc.run_label, doc.run_snapshot),
       pricing_json: args.pricingJson,
       source: 'frozen',
       customer: args.customer,

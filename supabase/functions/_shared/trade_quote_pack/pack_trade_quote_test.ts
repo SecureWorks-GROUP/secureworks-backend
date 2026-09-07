@@ -8,6 +8,7 @@ import {
   assembleQuotePacksForTrade,
   frozenTradePackForExtract,
   packTradeQuote,
+  filterTradeQuoteScopeToRun,
   overlayTradePackSnapshots,
   persistTradePackOnDocuments,
   persistTradePackWriteConfirmed,
@@ -893,6 +894,55 @@ function persistWriteMock(writes: Array<{ id: string; pack: any }>) {
     },
   };
 }
+
+Deno.test("TRD6-28-002 filterTradeQuoteScopeToRun keeps only the document run", () => {
+  const rear = filterTradeQuoteScopeToRun(FENCE_SCOPE, "REAR") as { job: { runs: Array<{ name?: string }> } }
+  assertEquals(rear.job.runs.map((run) => run.name), ["Rear"])
+  const lhs = filterTradeQuoteScopeToRun(FENCE_SCOPE, "LHS") as { job: { runs: Array<{ name?: string }> } }
+  assertEquals(lhs.job.runs.map((run) => run.name), ["LHS"])
+  const whole = filterTradeQuoteScopeToRun(FENCE_SCOPE, null) as { job: { runs: unknown[] } }
+  assertEquals(whole.job.runs.length, 2)
+  const missing = filterTradeQuoteScopeToRun(FENCE_SCOPE, "FRONT") as { job: { runs: unknown[] } }
+  assertEquals(missing.job.runs, [])
+  const fromSnapshot = filterTradeQuoteScopeToRun(FENCE_SCOPE, "FRONT", {
+    run_label: "FRONT",
+    name: "Front",
+    length: 4,
+  }) as { job: { runs: Array<{ name?: string; length?: number }> } }
+  assertEquals(fromSnapshot.job.runs.map((run) => run.name), ["Front"])
+  const rearPack = packTradeQuote({
+    job_type: "fencing",
+    scope_json: filterTradeQuoteScopeToRun(FENCE_SCOPE, "Rear"),
+    pricing_json: FENCE_PRICING,
+  })
+  const descriptions = rearPack.items.map((item) => item.description).join(" | ")
+  assertEquals(/Rear/.test(descriptions), true)
+  assertEquals(/LHS/.test(descriptions), false)
+})
+
+Deno.test("TRD6-28-002 persist filters fencing runs to the document run_label", async () => {
+  const writes: Array<{ id: string; pack: any }> = []
+  const sb = persistWriteMock(writes)
+  const n = await persistTradePackOnDocuments(sb, {
+    documents: [
+      { id: "doc-rear", quote_number: "Q-REAR", run_label: "REAR" },
+      { id: "doc-lhs", quote_number: "Q-LHS", run_label: "LHS" },
+    ],
+    jobType: "fencing",
+    scopeJson: FENCE_SCOPE,
+    pricingJson: FENCE_PRICING,
+  })
+  assertEquals(n.wrote, 2)
+  assertEquals(n.failed, [])
+  const rear = writes.find((row) => row.id === "doc-rear")?.pack
+  const lhs = writes.find((row) => row.id === "doc-lhs")?.pack
+  const rearText = (rear?.items || []).map((item: { description?: string }) => item.description).join(" | ")
+  const lhsText = (lhs?.items || []).map((item: { description?: string }) => item.description).join(" | ")
+  assertEquals(/Rear/.test(rearText), true)
+  assertEquals(/LHS/.test(rearText), false)
+  assertEquals(/LHS/.test(lhsText), true)
+  assertEquals(/Rear/.test(lhsText), false)
+})
 
 Deno.test("persistTradePackOnDocuments writes frozen packs per document", async () => {
   const writes: Array<{ id: string; pack: any }> = [];

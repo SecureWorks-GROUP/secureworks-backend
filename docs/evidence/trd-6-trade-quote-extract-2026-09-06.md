@@ -632,3 +632,38 @@ Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed. Extract 404 stays
 generic. Pack-source job-read fail-closed stays.
+
+## Review-29 locks (2026-09-07)
+
+- **send-runs grouped claim can reclaim a covering leftover.**
+  `/send` still uses `claimQuoteDocumentSend` (`direct`): a covering
+  group record is `unavailable` and never mints a per-document
+  Idempotency-Key. send-runs reuse goes through
+  `claimQuoteDocumentSendForGroupedRuns`, which skips that fence so a
+  stale leftover can be reclaimed and `ensureQuoteGroupEmailSendKey`
+  reused. A fresh foreign claim stays exclusive.
+
+- **Per-run frozen packs filter `scope.job.runs`.**
+  `persistTradePackOnDocuments` runs `filterTradeQuoteScopeToRun` from
+  the document `run_label` (snapshot fallback). Sibling runs never
+  enter that pack or extract. Whole-quote `/send` still passes no
+  label and keeps the full job. An unmatched label with no snapshot
+  yields empty runs, never the whole set.
+
+- **send-runs job-lease cleanup failure is 5xx.**
+  `finally` checks `clearJobSendRunsClaim`. A PostgREST error returns
+  500 (`Failed to release job send-runs claim`) instead of 200 with
+  `send_runs_claimed_at` still held. Clear stays compare-and-set on
+  this attempt's `claimed_at`, so a newer owner's lease is not cleared.
+  A zero-row CAS miss is not an error.
+
+Already-covered leftover claim release→5xx, retire-on-4xx failure→5xx,
+hyphenated-day terms, unmarked schedule amounts, Net-N / N30 family,
+qualified schedule amounts stay. Allocated packs omit `unit_price` /
+`line_total`. Value-aware leak keys stay. Sealed phrase stays exempt
+only on `terms.payment_terms`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed. Extract 404 stays
+generic. Pack-source job-read fail-closed stays.

@@ -26,7 +26,9 @@
  * lets a successful group's unpublished claims expire. `/send` must
  * not reclaim across a covering in-flight/accepted group key — that
  * path uses a per-document Idempotency-Key and would send a second
- * quote. Recovery is send-runs retry with the stored group key.
+ * quote. send-runs recovers through the grouped claim path, which
+ * may reclaim a covered leftover set and reuse
+ * `ensureQuoteGroupEmailSendKey`.
  * Exclusive key-stamp updates must return the owned row; a zero-row
  * stamp is not a claim and must not dispatch. send-runs recipient keys
  * are trim + lowercase so case-variant addresses are one group. The
@@ -318,10 +320,13 @@ async function claimQuoteDocumentSendExclusive(
   }
 }
 
+export type QuoteDocumentSendClaimPath = 'direct' | 'grouped_send_runs'
+
 async function reclaimStaleQuoteDocumentSend(
   sb: QuoteSendPublicationClient,
   documentId: string,
   now: Date,
+  path: QuoteDocumentSendClaimPath = 'direct',
 ): Promise<QuoteSendClaimResult> {
   const { data: existing, error: readError } = await sb
     .from('job_documents')
@@ -336,9 +341,11 @@ async function reclaimStaleQuoteDocumentSend(
   if (quoteSendIsPublished(existing)) return { status: 'unavailable' }
   if (!quoteSendClaimIsStale(existing.send_claimed_at, now)) return { status: 'unavailable' }
 
-  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, documentId)
-  if (covering.status === 'error') return { status: 'error', error: covering.error }
-  if (covering.status === 'covered') return { status: 'unavailable' }
+  if (path === 'direct') {
+    const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, documentId)
+    if (covering.status === 'error') return { status: 'error', error: covering.error }
+    if (covering.status === 'covered') return { status: 'unavailable' }
+  }
 
   const ownership = quoteSendClaimReclaimOwnershipPayload(now)
   const keptKey = quoteSendClaimToken(existing.send_resend_idempotency_key)
@@ -375,14 +382,28 @@ export async function claimQuoteDocumentSend(
   sb: QuoteSendPublicationClient,
   documentId: string,
   now = new Date(),
+  path: QuoteDocumentSendClaimPath = 'direct',
 ): Promise<QuoteSendClaimResult> {
-  const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, documentId)
-  if (covering.status === 'error') return { status: 'error', error: covering.error }
-  if (covering.status === 'covered') return { status: 'unavailable' }
+  if (path === 'direct') {
+    const covering = await coveringQuoteGroupEmailSendKeyForDocument(sb, documentId)
+    if (covering.status === 'error') return { status: 'error', error: covering.error }
+    if (covering.status === 'covered') return { status: 'unavailable' }
+  }
 
   const exclusive = await claimQuoteDocumentSendExclusive(sb, documentId, now)
   if (exclusive.status === 'claimed' || exclusive.status === 'error') return exclusive
-  return await reclaimStaleQuoteDocumentSend(sb, documentId, now)
+  return await reclaimStaleQuoteDocumentSend(sb, documentId, now, path)
+}
+
+/** send-runs reuse of an unpublished leftover. May reclaim across a
+ *  covering group record so the retry can call
+ *  `ensureQuoteGroupEmailSendKey`. `/send` must not use this path. */
+export async function claimQuoteDocumentSendForGroupedRuns(
+  sb: QuoteSendPublicationClient,
+  documentId: string,
+  now = new Date(),
+): Promise<QuoteSendClaimResult> {
+  return await claimQuoteDocumentSend(sb, documentId, now, 'grouped_send_runs')
 }
 
 export async function touchQuoteDocumentSendClaim(
@@ -734,6 +755,7 @@ export type SendRunExistingDocument = {
   quote_number?: string | null
   superseded_at?: string | null
   accepted_at?: string | null
+  data_snapshot_json?: { run?: unknown } | null
 }
 
 export type SendRunPartyKey = {

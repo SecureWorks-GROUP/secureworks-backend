@@ -37,6 +37,7 @@ import {
 import {
   claimJobSendRuns,
   claimQuoteDocumentSend,
+  claimQuoteDocumentSendForGroupedRuns,
   claimsForDocumentIds,
   claimsNotInDocumentIds,
   classifySendClaimLease,
@@ -2386,7 +2387,7 @@ serve(async (req: Request) => {
 
       try {
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
-        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at, accepted_at')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
         .eq('job_id', job.id)
         .eq('type', 'quote')
         .is('superseded_at', null)
@@ -2453,7 +2454,7 @@ serve(async (req: Request) => {
       }
       const claimWorkingDoc = async (doc: { id?: string }): Promise<'claimed' | 'unavailable' | 'error'> => {
         if (typeof doc?.id !== 'string' || !doc.id) return 'error'
-        const claimed = await claimQuoteDocumentSend(sb, doc.id)
+        const claimed = await claimQuoteDocumentSendForGroupedRuns(sb, doc.id)
         if (claimed.status === 'claimed') {
           claimedDocs.push(claimed)
           createdDocs.push(doc)
@@ -2508,8 +2509,10 @@ serve(async (req: Request) => {
             sent_to_client: false,
             sent_at: null,
             data_snapshot_json: { run },
-          }).select('id, share_token, quote_number').single()
+          }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
           clientDoc = insertedClient
+            ? { ...insertedClient, run_label: insertedClient.run_label || run.run_label, data_snapshot_json: insertedClient.data_snapshot_json || { run } }
+            : null
           if (clientDoc) {
             rememberExisting({
               id: clientDoc.id,
@@ -2572,8 +2575,10 @@ serve(async (req: Request) => {
               sent_to_client: false,
               sent_at: null,
               data_snapshot_json: { run },
-            }).select('id, share_token, quote_number').single()
+            }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
             nbDoc = insertedNeighbour
+              ? { ...insertedNeighbour, run_label: insertedNeighbour.run_label || run.run_label, data_snapshot_json: insertedNeighbour.data_snapshot_json || { run } }
+              : null
             if (nbDoc) {
               rememberExisting({
                 id: nbDoc.id,
@@ -2821,6 +2826,8 @@ serve(async (req: Request) => {
             quote_number: d.quote_number || null,
             sent_at: sentAt,
             claim_token: publishedClaims.find((claim) => claim.id === d.id)?.token || null,
+            run_label: d.run_label || null,
+            run_snapshot: d.data_snapshot_json?.run ?? null,
           })),
           jobType: job.type,
           scopeJson: job.scope_json,
@@ -3107,7 +3114,14 @@ serve(async (req: Request) => {
         documents: responseDocs.map((d: any) => ({ id: d.id, token: d.share_token })),
       }, 200, corsHeaders)
       } finally {
-        await clearJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
+        const released = await clearJobSendRunsClaim(sb, job.id, jobClaim.claimed_at)
+        if (released.error) {
+          console.error(
+            '[send-quote] send-runs job claim release failed:',
+            released.error.message || String(released.error),
+          )
+          return jsonResponse({ error: 'Failed to release job send-runs claim' }, 500, corsHeaders)
+        }
       }
     }
 
