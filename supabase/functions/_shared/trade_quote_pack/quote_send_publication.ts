@@ -559,25 +559,53 @@ export async function revertQuoteDocumentSendClaims(
  * Publish and revert match the caller token so a stale reclaim cannot be
  * overwritten by the original worker.
  */
+export type QuoteSendPublishOrRevertFailure = {
+  published: false
+  error: string
+  lease?: SendClaimLeaseOutcome
+  release_error?: string
+}
+
+export type QuoteSendPublishOrRevertResult =
+  | { published: true }
+  | QuoteSendPublishOrRevertFailure
+
+function quoteSendReleaseErrorMessage(
+  released: { error?: { message?: string } | null } | null | undefined,
+): string | undefined {
+  if (!released?.error) return undefined
+  return released.error.message || String(released.error)
+}
+
+function withQuoteSendReleaseError<T extends QuoteSendPublishOrRevertFailure>(
+  result: T,
+  released: { error?: { message?: string } | null } | null | undefined,
+): T {
+  const release_error = quoteSendReleaseErrorMessage(released)
+  if (!release_error) return result
+  console.error('[send-quote] publication claim release failed:', release_error)
+  return { ...result, release_error }
+}
+
 export async function publishQuoteDocumentSendOrRevert(
   sb: QuoteSendPublicationClient,
   documentId: string,
   token: string,
   now = new Date(),
-): Promise<{ published: true } | { published: false; error: string }> {
+): Promise<QuoteSendPublishOrRevertResult> {
   const { updated, error } = await publishQuoteDocumentSend(sb, documentId, token, now)
   if (updated) return { published: true }
   const message = error?.message || 'publication stamp not confirmed'
   console.error('[send-quote] publication stamp failed:', message)
-  await revertQuoteDocumentSendClaim(sb, documentId, token, 'keep_provider_key')
-  return { published: false, error: message }
+  const released = await revertQuoteDocumentSendClaim(sb, documentId, token, 'keep_provider_key')
+  return withQuoteSendReleaseError({ published: false, error: message }, released)
 }
 
 export async function publishQuoteDocumentsSendOrRevert(
   sb: QuoteSendPublicationClient,
   claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
   now = new Date(),
-): Promise<{ published: true } | { published: false; error: string }> {
+): Promise<QuoteSendPublishOrRevertResult> {
   const owned = uniqueDocumentClaims(claims)
   if (!owned.length) return { published: true }
   for (const claim of owned) {
@@ -585,8 +613,8 @@ export async function publishQuoteDocumentsSendOrRevert(
     if (updated) continue
     const message = error?.message || 'publication stamp not confirmed'
     console.error('[send-quote] publication stamp failed:', message)
-    await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
-    return { published: false, error: message }
+    const released = await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+    return withQuoteSendReleaseError({ published: false, error: message }, released)
   }
   return { published: true }
 }
@@ -626,29 +654,33 @@ export async function publishQuoteDocumentsSendOrRevertWhileHolding(
   sb: QuoteSendPublicationClient,
   claims: Iterable<{ id?: string | null; token?: string | null } | null | undefined>,
   now = new Date(),
-): Promise<{ published: true } | { published: false; error: string; lease?: SendClaimLeaseOutcome }> {
+): Promise<QuoteSendPublishOrRevertResult> {
   const owned = uniqueDocumentClaims(claims)
   if (!owned.length) return { published: true }
   for (const claim of owned) {
     const beat = await touchQuoteDocumentSendClaims(sb, owned, new Date())
     if (beat.outcome === 'error') {
-      await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
-      return {
+      const released = await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+      return withQuoteSendReleaseError({
         published: false,
         error: beat.error?.message || 'send claim heartbeat failed',
         lease: 'error',
-      }
+      }, released)
     }
     if (beat.outcome === 'lost') {
-      await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
-      return { published: false, error: 'quote send claim lost before publication', lease: 'lost' }
+      const released = await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+      return withQuoteSendReleaseError({
+        published: false,
+        error: 'quote send claim lost before publication',
+        lease: 'lost',
+      }, released)
     }
     const { updated, error } = await publishQuoteDocumentSend(sb, claim.id, claim.token, now)
     if (updated) continue
     const message = error?.message || 'publication stamp not confirmed'
     console.error('[send-quote] publication stamp failed:', message)
-    await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
-    return { published: false, error: message }
+    const released = await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
+    return withQuoteSendReleaseError({ published: false, error: message }, released)
   }
   return { published: true }
 }

@@ -1332,7 +1332,7 @@ Deno.test("R20-003 send-runs retires the group key only on definitive pre-send 4
   assert(retireBranch.includes("retireQuoteGroupEmailSendKey("))
   assert(retireBranch.includes("groupSend.resend_idempotency_key"))
   assert(retireBranch.includes("retired.status !== 'retired'"))
-  assert(retireBranch.includes("revertSendRunsDocumentClaims(claimedDocs, true)"))
+  assert(retireBranch.includes("abortAfterDocumentClaimRelease("))
   assert(retireBranch.includes("Failed to retire quote group send key"))
   assert(retireBranch.includes("500"))
   assert(!retireBranch.includes("markSendRunsProviderAttempt"))
@@ -1417,6 +1417,7 @@ function makeOwnedWriteMock(opts: {
   publishError?: { message: string } | null
   publishRow?: { id: string } | null
   revertRow?: { id: string } | null
+  revertError?: { message: string } | null
 }) {
   return {
     from: (_table: string) => ({
@@ -1438,8 +1439,10 @@ function makeOwnedWriteMock(opts: {
                     error: opts.publishError || null,
                   }
                   : {
-                    data: opts.revertRow === undefined ? { id: "doc-pub" } : opts.revertRow,
-                    error: null,
+                    data: opts.revertError
+                      ? null
+                      : opts.revertRow === undefined ? { id: "doc-pub" } : opts.revertRow,
+                    error: opts.revertError || null,
                   },
               ),
           }),
@@ -2617,6 +2620,116 @@ Deno.test("TRD6-28-003 send-runs job-lease cleanup failure is 5xx", () => {
   assert(block.includes("Failed to release job send-runs claim"))
   assert(block.includes("500"))
   assert(block.includes("jobClaim.claimed_at"))
+})
+
+Deno.test("TRD6-29-001 publication revert error is release_error; CAS miss is not", async () => {
+  const failed = await publishQuoteDocumentSendOrRevert(makeOwnedWriteMock({
+    updates: [],
+    eqs: [],
+    publishError: { message: "stamp failed" },
+    revertError: { message: "db down" },
+  }), "doc-pub", "tok-owner")
+  assertEquals(failed.published, false)
+  if (failed.published === false) {
+    assertEquals(failed.error, "stamp failed")
+    assertEquals(failed.release_error, "db down")
+  }
+
+  const missed = await publishQuoteDocumentSendOrRevert(makeOwnedWriteMock({
+    updates: [],
+    eqs: [],
+    publishError: { message: "stamp failed" },
+    revertRow: null,
+  }), "doc-pub", "tok-owner")
+  assertEquals(missed.published, false)
+  if (missed.published === false) {
+    assertEquals(missed.error, "stamp failed")
+    assertEquals(missed.release_error, undefined)
+  }
+
+  const batch = await publishQuoteDocumentsSendOrRevert(makeOwnedWriteMock({
+    updates: [],
+    eqs: [],
+    publishError: { message: "stamp failed" },
+    revertError: { message: "db down" },
+  }), [{ id: "doc-a", token: "tok-a" }, { id: "doc-b", token: "tok-b" }])
+  assertEquals(batch.published, false)
+  if (batch.published === false) {
+    assertEquals(batch.error, "stamp failed")
+    assertEquals(batch.release_error, "db down")
+  }
+})
+
+Deno.test("TRD6-29-001 publication helpers check revert errors on every failure path", () => {
+  const src = Deno.readTextFileSync(new URL("../_shared/trade_quote_pack/quote_send_publication.ts", import.meta.url))
+  const single = src.slice(
+    src.indexOf("export async function publishQuoteDocumentSendOrRevert"),
+    src.indexOf("export async function publishQuoteDocumentsSendOrRevert("),
+  )
+  const batch = src.slice(
+    src.indexOf("export async function publishQuoteDocumentsSendOrRevert("),
+    src.indexOf("export type PersistHeldSendClaimsResult"),
+  )
+  const held = src.slice(
+    src.indexOf("export async function publishQuoteDocumentsSendOrRevertWhileHolding"),
+    src.indexOf("async function claimJobSendRunsExclusive"),
+  )
+  assert(single.includes("const released = await revertQuoteDocumentSendClaim"))
+  assert(single.includes("withQuoteSendReleaseError"))
+  assert(batch.includes("const released = await revertQuoteDocumentSendClaims"))
+  assert(batch.includes("withQuoteSendReleaseError"))
+  assert(held.includes("const released = await revertQuoteDocumentSendClaims"))
+  assert(held.includes("withQuoteSendReleaseError"))
+  assert(held.includes("lease: 'error'"))
+  assert(held.includes("lease: 'lost'"))
+})
+
+Deno.test("TRD6-29-002 /send provider and pack-source revert faults are 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendStart = src.indexOf("if (path === 'send' && req.method === 'POST')")
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const send = src.slice(sendStart, sendRuns)
+  assert(sendStart >= 0 && sendRuns > sendStart)
+  assert(send.includes("claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')"))
+  const resendErr = send.indexOf("Email delivery failed: ' + (errData.message")
+  const packId = send.indexOf("Quote send pack-source job id missing")
+  const packRead = send.indexOf("Quote send pack-source job read failed")
+  assert(resendErr >= 0 && packId > resendErr && packRead > packId)
+  assert(send.slice(resendErr, packId).includes("Failed to release quote send claim"))
+  assert(send.slice(packId, packRead).includes("Failed to release quote send claim"))
+  assert(send.slice(packRead).includes("Failed to release quote send claim"))
+  assert(send.includes("published.release_error"))
+  assert(send.includes("claimed.token"))
+})
+
+Deno.test("TRD6-29-003 send-runs abort paths check document-claim cleanup", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const invoice = src.indexOf("if (path === 'send-invoice' && req.method === 'POST')")
+  const block = src.slice(sendRuns, invoice)
+  assert(sendRuns >= 0 && invoice > sendRuns)
+  assert(block.includes("const refuseWorkingClaim = async"))
+  assert(block.includes("claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claims')"))
+  assert(block.includes("const abortAfterDocumentClaimRelease = async"))
+  assert(block.includes("revertSendRunsDocumentClaims(claimedDocs, forceKeep)"))
+  assert(block.includes("Failed to release quote send claims"))
+  assert(block.includes("abortAfterDocumentClaimRelease("))
+  assert(block.includes("Failed to load quote group send record"))
+  assert(block.includes("Failed to refresh quote send claim"))
+})
+
+Deno.test("TRD6-29-004 invoice send cleanup failures are 5xx", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const invoice = src.indexOf("if (path === 'send-invoice' && req.method === 'POST')")
+  const payment = src.indexOf("if (path === 'payment-confirmed' && req.method === 'POST')")
+  const block = src.slice(invoice, payment)
+  assert(invoice >= 0 && payment > invoice)
+  assert(block.includes("claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')"))
+  assert(block.includes("Email service not configured"))
+  assert(block.includes("invoiceLeaseOutcome === 'error'"))
+  assert(block.includes("Resend fetch threw"))
+  assert(block.includes("published.release_error"))
+  assert(block.includes("send_claim_token") || block.includes("invoiceClaim.claim.token"))
 })
 
 // ════════════════════════════════════════════════════════════════════════════

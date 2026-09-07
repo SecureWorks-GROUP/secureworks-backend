@@ -350,6 +350,68 @@ Deno.test("R14-002 post-send revert keeps the first-claim Resend key", async () 
   assertEquals(sb.row?.send_resend_idempotency_key, "invoice-send:tok-owner");
 });
 
+Deno.test("TRD6-29-001 invoice publication revert error is release_error; CAS miss is not", async () => {
+  const failing = {
+    from: () => {
+      let step = 0
+      return {
+        update: () => {
+          const chain = {
+            eq: () => chain,
+            is: () => chain,
+            select: () => ({
+              maybeSingle: () => {
+                step++
+                if (step === 1) {
+                  return Promise.resolve({ data: null, error: { message: "stamp failed" } })
+                }
+                return Promise.resolve({ data: null, error: { message: "db down" } })
+              },
+            }),
+          }
+          return chain
+        },
+      }
+    },
+  }
+  const failed = await publishInvoiceEmailSendOrRevert(failing, INVOICE, "tok-owner")
+  assertEquals(failed.published, false)
+  if (failed.published === false) {
+    assertEquals(failed.error, "stamp failed")
+    assertEquals(failed.release_error, "db down")
+  }
+
+  const missing = {
+    from: () => {
+      let step = 0
+      return {
+        update: () => {
+          const chain = {
+            eq: () => chain,
+            is: () => chain,
+            select: () => ({
+              maybeSingle: () => {
+                step++
+                if (step === 1) {
+                  return Promise.resolve({ data: null, error: { message: "stamp failed" } })
+                }
+                return Promise.resolve({ data: null, error: null })
+              },
+            }),
+          }
+          return chain
+        },
+      }
+    },
+  }
+  const missed = await publishInvoiceEmailSendOrRevert(missing, INVOICE, "tok-owner")
+  assertEquals(missed.published, false)
+  if (missed.published === false) {
+    assertEquals(missed.error, "stamp failed")
+    assertEquals(missed.release_error, undefined)
+  }
+})
+
 Deno.test("R13-004 exclusive claim payload mints invoice-send idempotency key", () => {
   const payload = invoiceEmailSendClaimPayload(
     new Date("2026-09-06T00:00:00.000Z"),

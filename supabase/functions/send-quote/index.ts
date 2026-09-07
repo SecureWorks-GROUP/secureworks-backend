@@ -851,8 +851,9 @@ serve(async (req: Request) => {
             `[send-quote] doc ${document_id} lease refresh failed:`,
             quoteLease.error?.message || String(quoteLease.error),
           )
-          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
-          return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
         }
         if (quoteLeaseOutcome === 'lost') {
           return jsonResponse({
@@ -886,9 +887,10 @@ serve(async (req: Request) => {
         } catch (fetchErr) {
           // Network throw after dispatch is ambiguous — keep the first
           // Idempotency-Key so reclaim/resume cannot mint a second send.
-          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
           console.log('[send-quote] Resend fetch threw (claim reverted, provider key kept):', (fetchErr as Error).message)
-          return jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse({ error: 'Email delivery failed: network error' }, 502, corsHeaders)
         }
 
         if (emailRes.ok) {
@@ -921,8 +923,9 @@ serve(async (req: Request) => {
           const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
             ? 'pre_send'
             : 'keep_provider_key'
-          await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, revertMode)
-          return jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, revertMode)
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse({ error: 'Email delivery failed: ' + (errData.message || `HTTP ${emailRes.status}`) }, 502, corsHeaders)
         }
       }
 
@@ -933,8 +936,9 @@ serve(async (req: Request) => {
       const sentAt = new Date().toISOString()
       if (!doc.job_id) {
         console.error('Quote send pack-source job id missing', { document_id })
-        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
-        return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
       const { data: jobForPack, error: jobForPackErr } = await sb.from('jobs')
         .select('type, scope_json, pricing_json, client_name, client_phone, client_email, site_address, site_suburb')
@@ -946,8 +950,9 @@ serve(async (req: Request) => {
           job_id: doc.job_id,
           error: jobForPackErr?.message,
         })
-        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
-        return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
       const persisted = await persistTradePackOnDocuments(sb, {
         documents: [{
@@ -968,13 +973,18 @@ serve(async (req: Request) => {
         },
       })
       if (!persistTradePackWriteConfirmed(persisted, 1)) {
-        await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
-        return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'keep_provider_key')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
 
       const published = await publishQuoteDocumentSendOrRevert(sb, document_id, claimed.token, new Date(sentAt))
       if (!published.published) {
-        return jsonResponse({ error: 'Failed to record quote send publication' }, 500, corsHeaders)
+        return jsonResponse({
+          error: published.release_error
+            ? 'Failed to release quote send claim'
+            : 'Failed to record quote send publication',
+        }, 500, corsHeaders)
       }
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
@@ -2463,14 +2473,22 @@ serve(async (req: Request) => {
         return claimed.status
       }
       const refuseWorkingClaim = async (status: 'unavailable' | 'error') => {
-        await revertQuoteDocumentSendClaims(sb, claimedDocs)
-        if (status === 'error') {
-          return jsonResponse({ error: 'Failed to claim quote document for send' }, 500, corsHeaders)
-        }
-        return jsonResponse({
-          error: 'Quote send already in progress for this job',
-          code: 'send_runs_in_progress',
-        }, 409, corsHeaders)
+        const released = await revertQuoteDocumentSendClaims(sb, claimedDocs)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claims')
+          || (status === 'error'
+            ? jsonResponse({ error: 'Failed to claim quote document for send' }, 500, corsHeaders)
+            : jsonResponse({
+              error: 'Quote send already in progress for this job',
+              code: 'send_runs_in_progress',
+            }, 409, corsHeaders))
+      }
+      const abortAfterDocumentClaimRelease = async (
+        forceKeep: boolean,
+        fallback: Response,
+      ): Promise<Response> => {
+        const released = await revertSendRunsDocumentClaims(claimedDocs, forceKeep)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claims')
+          || fallback
       }
 
       for (const run of runs) {
@@ -2719,15 +2737,19 @@ serve(async (req: Request) => {
               '[send-quote] send-runs job lease refresh failed:',
               jobLease.error?.message || String(jobLease.error),
             )
-            await revertSendRunsDocumentClaims(claimedDocs, true)
-            return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+            return await abortAfterDocumentClaimRelease(
+              true,
+              jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders),
+            )
           }
           if (jobLeaseOutcome === 'lost') {
-            await revertSendRunsDocumentClaims(claimedDocs)
-            return jsonResponse({
-              error: 'Quote send already in progress for this job',
-              code: 'send_runs_in_progress',
-            }, 409, corsHeaders)
+            return await abortAfterDocumentClaimRelease(
+              false,
+              jsonResponse({
+                error: 'Quote send already in progress for this job',
+                code: 'send_runs_in_progress',
+              }, 409, corsHeaders),
+            )
           }
           if (jobLease.claimed_at) jobClaim.claimed_at = jobLease.claimed_at
           const groupedLease = await touchGroupedQuoteDocumentSendClaims(
@@ -2743,8 +2765,10 @@ serve(async (req: Request) => {
               '[send-quote] send-runs document lease refresh failed:',
               groupedLease.error?.message || String(groupedLease.error),
             )
-            await revertSendRunsDocumentClaims(claimedDocs, true)
-            return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+            return await abortAfterDocumentClaimRelease(
+              true,
+              jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders),
+            )
           }
           if (groupedLease.outcome !== 'owned') continue
           const groupSend = await ensureQuoteGroupEmailSendKey(sb, {
@@ -2757,8 +2781,10 @@ serve(async (req: Request) => {
               '[send-quote] send-runs group send record failed:',
               groupSend.status === 'error' ? groupSend.error : groupSend.status,
             )
-            await revertSendRunsDocumentClaims(claimedDocs, true)
-            return jsonResponse({ error: 'Failed to load quote group send record' }, 500, corsHeaders)
+            return await abortAfterDocumentClaimRelease(
+              true,
+              jsonResponse({ error: 'Failed to load quote group send record' }, 500, corsHeaders),
+            )
           }
 
           const resendRes = await fetch('https://api.resend.com/emails', {
@@ -2788,8 +2814,10 @@ serve(async (req: Request) => {
                 '[send-quote] send-runs group send record retire failed:',
                 retired.status === 'error' ? retired.error : retired.status,
               )
-              await revertSendRunsDocumentClaims(claimedDocs, true)
-              return jsonResponse({ error: 'Failed to retire quote group send key' }, 500, corsHeaders)
+              return await abortAfterDocumentClaimRelease(
+                true,
+                jsonResponse({ error: 'Failed to retire quote group send key' }, 500, corsHeaders),
+              )
             }
           }
         } catch (e: any) {
@@ -2817,8 +2845,10 @@ serve(async (req: Request) => {
           publishedDocs.length !== publishedDocIds.length ||
           publishedClaims.length !== publishedDocIds.length
         ) {
-          await revertSendRunsDocumentClaims(claimedDocs, true)
-          return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders),
+          )
         }
         const persisted = await persistTradePacksWhileHoldingSendClaims(sb, {
           documents: publishedDocs.map((d: any) => ({
@@ -2841,12 +2871,16 @@ serve(async (req: Request) => {
           },
         })
         if (persisted.status === 'lease_error' || persisted.status === 'lease_lost') {
-          await revertSendRunsDocumentClaims(claimedDocs, true)
-          return jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders)
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({ error: 'Failed to refresh quote send claim' }, 500, corsHeaders),
+          )
         }
         if (persisted.status !== 'persisted') {
-          await revertSendRunsDocumentClaims(claimedDocs, true)
-          return jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders),
+          )
         }
         const published = await publishQuoteDocumentsSendOrRevertWhileHolding(
           sb,
@@ -2854,13 +2888,17 @@ serve(async (req: Request) => {
           new Date(sentAt),
         )
         if (!published.published) {
-          await revertSendRunsDocumentClaims(claimedDocs, true)
           const leaseFailed = published.lease === 'error' || published.lease === 'lost'
-          return jsonResponse({
-            error: leaseFailed
-              ? 'Failed to refresh quote send claim'
-              : 'Failed to record quote send publication',
-          }, 500, corsHeaders)
+          return await abortAfterDocumentClaimRelease(
+            true,
+            jsonResponse({
+              error: published.release_error
+                ? 'Failed to release quote send claims'
+                : leaseFailed
+                ? 'Failed to refresh quote send claim'
+                : 'Failed to record quote send publication',
+            }, 500, corsHeaders),
+          )
         }
         // Successful recipients are published. Failed-recipient claims stay
         // unpublished and must be released now, or the neighbour stays locked
@@ -3226,8 +3264,9 @@ serve(async (req: Request) => {
       let resendMessageId: string | null = null
 
       if (!RESEND_API_KEY) {
-        await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
-        return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
+        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
 
       const invoiceLease = await touchInvoiceEmailSendClaim(
@@ -3241,13 +3280,14 @@ serve(async (req: Request) => {
           '[send-invoice] lease refresh failed:',
           invoiceLease.error?.message || String(invoiceLease.error),
         )
-        await revertInvoiceEmailSendClaim(
+        const released = await revertInvoiceEmailSendClaim(
           sb,
           xero_invoice_id,
           invoiceClaim.claim.token,
           'keep_provider_key',
         )
-        return jsonResponse({ error: 'Failed to refresh invoice send claim' }, 500, corsHeaders)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Failed to refresh invoice send claim' }, 500, corsHeaders)
       }
       if (invoiceLeaseOutcome === 'lost') {
         return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
@@ -3272,14 +3312,15 @@ serve(async (req: Request) => {
           }),
         })
       } catch (fetchErr) {
-        await revertInvoiceEmailSendClaim(
+        const released = await revertInvoiceEmailSendClaim(
           sb,
           xero_invoice_id,
           invoiceClaim.claim.token,
           'keep_provider_key',
         )
         console.log('[send-invoice] Resend fetch threw (provider key kept):', (fetchErr as Error).message)
-        return jsonResponse({ error: 'Email send failed', detail: 'network error' }, 502, corsHeaders)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Email send failed', detail: 'network error' }, 502, corsHeaders)
       }
 
       if (emailRes.ok) {
@@ -3313,8 +3354,9 @@ serve(async (req: Request) => {
         const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
           ? 'pre_send'
           : 'keep_provider_key'
-        await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token, revertMode)
-        return jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
+        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token, revertMode)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
       }
 
       const published = await publishInvoiceEmailSendOrRevert(
@@ -3323,7 +3365,11 @@ serve(async (req: Request) => {
         invoiceClaim.claim.token,
       )
       if (!published.published) {
-        return jsonResponse({ error: 'Failed to record invoice email send' }, 500, corsHeaders)
+        return jsonResponse({
+          error: published.release_error
+            ? 'Failed to release invoice send claim'
+            : 'Failed to record invoice email send',
+        }, 500, corsHeaders)
       }
 
       return jsonResponse({ success: true, resend_message_id: resendMessageId }, 200, corsHeaders)
@@ -3599,6 +3645,16 @@ function jsonResponse(data: any, status: number, headers: Record<string, string>
     status,
     headers: { ...headers, 'Content-Type': 'application/json' },
   })
+}
+
+function claimReleaseFailureResponse(
+  released: { error?: { message?: string } | null } | null | undefined,
+  corsHeaders: Record<string, string>,
+  message: string,
+): Response | null {
+  if (!released?.error) return null
+  console.error('[send-quote] claim release failed:', released.error.message || String(released.error))
+  return jsonResponse({ error: message }, 500, corsHeaders)
 }
 
 async function htmlResponse(html: string) {

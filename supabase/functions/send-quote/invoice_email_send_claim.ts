@@ -346,11 +346,14 @@ export async function publishInvoiceEmailSendOrRevert(
   xeroInvoiceId: string,
   token: string,
   now = new Date(),
-): Promise<{ published: true } | { published: false; error: string }> {
+): Promise<{ published: true } | { published: false; error: string; release_error?: string }> {
   const { updated, error } = await publishInvoiceEmailSend(sb, xeroInvoiceId, token, now)
   if (updated) return { published: true }
   const message = error?.message || 'invoice send publication stamp not confirmed'
   console.error('[send-invoice] publication stamp failed:', message)
-  await revertInvoiceEmailSendClaim(sb, xeroInvoiceId, token, 'keep_provider_key')
-  return { published: false, error: message }
+  const released = await revertInvoiceEmailSendClaim(sb, xeroInvoiceId, token, 'keep_provider_key')
+  if (!released.error) return { published: false, error: message }
+  const release_error = released.error.message || String(released.error)
+  console.error('[send-invoice] publication claim release failed:', release_error)
+  return { published: false, error: message, release_error }
 }

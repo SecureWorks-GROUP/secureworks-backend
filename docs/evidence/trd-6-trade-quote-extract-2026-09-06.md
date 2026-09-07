@@ -667,3 +667,42 @@ Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed. Extract 404 stays
 generic. Pack-source job-read fail-closed stays.
+
+## Review-30 locks (2026-09-07)
+
+- **Publication/heartbeat revert faults are 5xx.**
+  `publishQuoteDocumentSendOrRevert`,
+  `publishQuoteDocumentsSendOrRevert`,
+  `publishQuoteDocumentsSendOrRevertWhileHolding`, and
+  `publishInvoiceEmailSendOrRevert` check the revert result. A
+  PostgREST `{ error }` becomes `release_error` and the handler
+  returns 500 (`Failed to release quote send claim(s)` /
+  `Failed to release invoice send claim`). A zero-row CAS miss is
+  not an error and does not clear a newer owner's token.
+
+- **`/send` provider and pack-source cleanup faults are 5xx.**
+  Resend-error, network-throw, missing job id, pack-source read,
+  persist-fail, and lease-refresh paths check
+  `revertQuoteDocumentSendClaim`. Cleanup `{ error }` outranks the
+  original 502/500. Token fence stays.
+
+- **send-runs abort paths check document-claim cleanup.**
+  `refuseWorkingClaim` and `abortAfterDocumentClaimRelease` return
+  500 when release itself errors, including lease, group-record,
+  retire, persist, and publication aborts. Token/CAS stay.
+
+- **Invoice send cleanup faults are 5xx.**
+  Missing-service, lease-error, network-throw, and provider-error
+  paths check `revertInvoiceEmailSendClaim`. A failed release
+  returns 500 instead of 503/502/409 with the claim still held.
+
+Already-covered leftover / zero-publication / job-lease cleanup
+5xx stay. `/send` covering fence stays. send-runs grouped reclaim
+stays. Per-run pack filter stays. Allocated packs omit
+`unit_price` / `line_total`. Sealed phrase stays exempt only on
+`terms.payment_terms`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed. Extract 404 stays
+generic. Pack-source job-read fail-closed stays.
