@@ -351,9 +351,9 @@ Deno.test("R14-002 post-send revert keeps the first-claim Resend key", async () 
 });
 
 Deno.test("TRD6-29-001 invoice publication revert error is release_error; CAS miss is not", async () => {
+  let failStep = 0
   const failing = {
     from: () => {
-      let step = 0
       return {
         update: () => {
           const chain = {
@@ -361,8 +361,8 @@ Deno.test("TRD6-29-001 invoice publication revert error is release_error; CAS mi
             is: () => chain,
             select: () => ({
               maybeSingle: () => {
-                step++
-                if (step === 1) {
+                failStep++
+                if (failStep === 1) {
                   return Promise.resolve({ data: null, error: { message: "stamp failed" } })
                 }
                 return Promise.resolve({ data: null, error: { message: "db down" } })
@@ -381,9 +381,9 @@ Deno.test("TRD6-29-001 invoice publication revert error is release_error; CAS mi
     assertEquals(failed.release_error, "db down")
   }
 
+  let missStep = 0
   const missing = {
     from: () => {
-      let step = 0
       return {
         update: () => {
           const chain = {
@@ -391,8 +391,8 @@ Deno.test("TRD6-29-001 invoice publication revert error is release_error; CAS mi
             is: () => chain,
             select: () => ({
               maybeSingle: () => {
-                step++
-                if (step === 1) {
+                missStep++
+                if (missStep === 1) {
                   return Promise.resolve({ data: null, error: { message: "stamp failed" } })
                 }
                 return Promise.resolve({ data: null, error: null })
