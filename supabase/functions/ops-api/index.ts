@@ -38895,8 +38895,6 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
             ? item.description
             : allocatedTradePackProse(item.description),
           quantity,
-          unit_price: null,
-          line_total: null,
         }
         if (kind !== undefined) out.kind = kind
         const unit = sanitizeTradePackUnit(item.unit)

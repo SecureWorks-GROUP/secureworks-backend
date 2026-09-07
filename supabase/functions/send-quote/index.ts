@@ -2778,11 +2778,13 @@ serve(async (req: Request) => {
               recipientEmail: email,
               resendIdempotencyKey: groupSend.resend_idempotency_key,
             })
-            if (retired.status === 'error') {
+            if (retired.status !== 'retired') {
               console.error(
                 '[send-quote] send-runs group send record retire failed:',
-                retired.error,
+                retired.status === 'error' ? retired.error : retired.status,
               )
+              await revertSendRunsDocumentClaims(claimedDocs, true)
+              return jsonResponse({ error: 'Failed to retire quote group send key' }, 500, corsHeaders)
             }
           }
         } catch (e: any) {

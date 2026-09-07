@@ -112,6 +112,20 @@ Deno.test("assembleTradeQuoteExtract drops bare 1-2 digit prose amounts", () => 
   assertEquals(extract.summary, "Install 10m");
   assertEquals(extract.scope.some((row) => row.description === "85"), false);
   assertEquals(extract.scope.some((row) => row.description === "Install 10m"), true);
+  const schedule = assembleTradeQuoteExtract({
+    pack: {
+      ...PACK,
+      items: [
+        { kind: "info", description: "50 on practical completion", quantity: 1, unit: "ea", unit_price: null, line_total: null },
+        { kind: "info", description: "50 after final delivery", quantity: 1, unit: "ea", unit_price: null, line_total: null },
+        { kind: "info", description: "50 when complete", quantity: 1, unit: "ea", unit_price: null, line_total: null },
+        { kind: "info", description: "12 posts at completion of neighbour", quantity: 12, unit: "ea", unit_price: null, line_total: null },
+      ],
+    },
+    job: { job_number: "SWF-25101" },
+  });
+  assertEquals(schedule.scope.some((row) => /practical completion|final delivery|when complete/.test(row.description)), false);
+  assertEquals(schedule.scope.some((row) => row.description === "12 posts at completion of neighbour"), true);
 });
 
 Deno.test("renderTradeQuoteExtractHtml is printable and has no dollar or GST money", () => {
@@ -342,6 +356,18 @@ Deno.test("extract fail-closes ad-hoc percent and payment-language outside seale
   }).terms.payment_terms, null);
   assertEquals(assembleTradeQuoteExtract({
     pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "30 by delivery" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "50 on practical completion" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "50 after final delivery" } },
+    job: { job_number: "SWF-25101" },
+  }).terms.payment_terms, null);
+  assertEquals(assembleTradeQuoteExtract({
+    pack: { ...PACK, terms: { ...PACK.terms, payment_terms: "50 when complete" } },
     job: { job_number: "SWF-25101" },
   }).terms.payment_terms, null);
   assertEquals(extract.customer.name, null);

@@ -152,9 +152,20 @@ export function applyInstallerRates(pack: TradeQuotePack, isHenry: boolean): Tra
 }
 
 export function tradePackMoneyLeakKeys(pack: TradeQuotePack): string[] {
-  const blob = JSON.stringify(pack)
-  const hits = blob.match(CLIENT_MONEY_RE)
-  return hits ? [...new Set(hits)] : []
+  const keys = new Set<string>()
+  const visit = (node: unknown) => {
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item)
+      return
+    }
+    if (!node || typeof node !== 'object') return
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (CLIENT_MONEY_RE.test(key) && child != null) keys.add(key)
+      visit(child)
+    }
+  }
+  visit(pack)
+  return [...keys]
 }
 
 export type QuoteDocRow = {
@@ -187,20 +198,26 @@ const TRADE_HYPHENATED_DAY_TERMS_RE =
   /\b\d+\s*-\s*days?(?:\s+|\s*-\s*)(?:nett?|terms?|payments?|payable|due)\b/i
 /** Payment-schedule leftover after a figure strip (`$50 on completion`
  *  → `on completion`). Also the unmarked 1–2 digit form (`50 on completion`)
- *  that count-preserving strip would otherwise leave intact. */
+ *  that count-preserving strip would otherwise leave intact. Qualified
+ *  events (`50 on practical completion`, `50 after final delivery`) and
+ *  `50 when complete` are the same family. Construction counts stay
+ *  (`12 posts at completion`) because the amount is not adjacent to prep. */
 const TRADE_PAYMENT_SCHEDULE_EVENT =
-  '(?:completion|delivery|approval|acceptance|install(?:ation)?|invoice|receipt|sign(?:-|\\s*)off|handover)'
-const TRADE_PAYMENT_SCHEDULE_PREP = '(?:on|upon|after|before|following|at|by)'
+  '(?:completion|complete(?:d)?|delivery|approval|acceptance|install(?:ation)?|invoice|receipt|sign(?:-|\\s*)off|handover)'
+const TRADE_PAYMENT_SCHEDULE_PREP = '(?:on|upon|after|before|following|at|by|when)'
+const TRADE_PAYMENT_SCHEDULE_QUALIFIER = '(?:(?:practical|final|full|official|signed)\\s+)?'
+const TRADE_PAYMENT_SCHEDULE_TAIL =
+  `${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_QUALIFIER}${TRADE_PAYMENT_SCHEDULE_EVENT}`
 const TRADE_PAYMENT_SCHEDULE_REMNANT_RE = new RegExp(
-  `\\b${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
+  `\\b${TRADE_PAYMENT_SCHEDULE_TAIL}\\b`,
   'i',
 )
 const TRADE_PAYMENT_SCHEDULE_BARE_RE = new RegExp(
-  `^${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}$`,
+  `^${TRADE_PAYMENT_SCHEDULE_TAIL}$`,
   'i',
 )
 const TRADE_PAYMENT_SCHEDULE_AMOUNT_RE = new RegExp(
-  `\\b-?[\\d,]+(?:\\.\\d+)?\\s+${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b`,
+  `\\b-?[\\d,]+(?:\\.\\d+)?\\s+${TRADE_PAYMENT_SCHEDULE_TAIL}\\b`,
   'i',
 )
 const TRADE_CURRENCY_WORD_RE =
@@ -860,9 +877,9 @@ const TRADE_PACK_REF_PREFIX =
  *  85 per linear metre).
  *  Contextual words also catch two-digit marks (Deposit 85, Deposit of 85,
  *  Price of 85, 12 panels at 85, Balance due 85, Paid 85, Due 85)
- *  and amount + payment-schedule (`50 on completion`, `30 by delivery`)
- *  without eating construction counts (2 trades, 19m, 12 posts at
- *  completion). Leftover
+ *  and amount + payment-schedule (`50 on completion`, `30 by delivery`,
+ *  `50 on practical completion`, `50 when complete`) without eating
+ *  construction counts (2 trades, 19m, 12 posts at completion). Leftover
  *  money-shaped numbers (decimals, thousands commas, 3+ digit integers)
  *  fail closed as unrecognised quote amounts (TRD4-REV16-002). Office
  *  full-quote summaries must not call this — hydrateStoredPack keeps
@@ -954,13 +971,14 @@ export function stripTradePackMoney(text: unknown): string {
       ),
       '$1',
     )
-    // Amount + payment schedule (`50 on completion`, `30 by delivery`).
-    // Must run before the count-preserving leftover strip, which keeps
-    // unmarked 1–2 digit numbers. Construction `12 posts at completion`
-    // does not match — the count is not adjacent to the schedule prep.
+    // Amount + payment schedule (`50 on completion`, `30 by delivery`,
+    // `50 on practical completion`, `50 when complete`). Must run before
+    // the count-preserving leftover strip, which keeps unmarked 1–2
+    // digit numbers. Construction `12 posts at completion` does not
+    // match — the count is not adjacent to the schedule prep.
     .replace(
       new RegExp(
-        `\\b${TRADE_PACK_MONEY_AMOUNT}(?=\\s+${TRADE_PAYMENT_SCHEDULE_PREP}\\s+${TRADE_PAYMENT_SCHEDULE_EVENT}\\b)`,
+        `\\b${TRADE_PACK_MONEY_AMOUNT}(?=\\s+${TRADE_PAYMENT_SCHEDULE_TAIL}\\b)`,
         'gi',
       ),
       '',
@@ -988,9 +1006,11 @@ export function tradeOriginalHasNonFigureMoneyLanguage(value: string): boolean {
 
 /** Payment-schedule leftover after a figure strip (`$50 on completion`
  *  → `on completion`, `50 dollars at completion` → `at completion`,
- *  `50 dollars by delivery` → `by delivery`). Also the unmarked form
- *  whose leftover still holds the count (`50 on completion`). Work
- *  notes that already said the same schedule words with no amount stay. */
+ *  `50 dollars by delivery` → `by delivery`, `$50 on practical
+ *  completion` → `on practical completion`). Also the unmarked form
+ *  whose leftover still holds the count (`50 on completion`,
+ *  `50 when complete`). Work notes that already said the same
+ *  schedule words with no amount stay. */
 export function leftoverIsPaymentScheduleAfterAmountStrip(
   original: string,
   leftover: string,
@@ -1131,6 +1151,10 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
       if (typeof unit === 'string' && tradeTextHasMoneyToken(unit)) {
         leaks.push(`items[${index}].unit`)
       }
+      const unitPrice = (item as Record<string, unknown>).unit_price
+      if (unitPrice != null) leaks.push(`items[${index}].unit_price`)
+      const lineTotal = (item as Record<string, unknown>).line_total
+      if (lineTotal != null) leaks.push(`items[${index}].line_total`)
     })
   }
   return [...new Set(leaks)]

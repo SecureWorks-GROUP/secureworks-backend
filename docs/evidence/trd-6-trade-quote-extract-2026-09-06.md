@@ -565,3 +565,39 @@ Already-covered Net-N / N30 / 30 net stay. Bare `net` / `netting` /
 Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed.
+
+## Review-27 locks (2026-09-07)
+
+- **Allocated quote-pack projection omits item money keys.**
+  `redactTradeQuotePackMoney` no longer emits `unit_price` / `line_total`
+  (including null). `tradePackMoneyLeakKeys` is value-aware — a matching
+  client-money key is a leak only when the value is present — and the
+  allocated assertion also refuses a non-null item `unit_price` /
+  `line_total`. A pack with items can reach `trade_job_detail` instead
+  of throwing. Office installer rates stay off the client-money key
+  list.
+
+- **Qualified / common completion schedule amounts fail closed.**
+  Schedule strip, token predicate, and leftover guard now accept a
+  short qualifier (`practical` / `final` / `full` / `official` /
+  `signed`) between prep and event, plus `when` + `complete(d)`.
+  `50 on practical completion`, `50 after final delivery`, and
+  `50 when complete` drop. Construction `12 posts at completion of
+  neighbour` stays — the count is not adjacent to the schedule prep.
+
+- **Group-key retire failure is a failed send.**
+  On definitive pre-send Resend 4xx, `retireQuoteGroupEmailSendKey`
+  must return `retired` before the handler continues. `error` or
+  `unavailable` reverts still-held claims and returns 500 so a
+  corrected retry cannot reuse a rejected Idempotency-Key. The retire
+  branch still does not mark a provider attempt.
+
+Already-covered hyphenated-day terms, unmarked `50 on completion` /
+`30 by delivery`, Net-N / N30 family stay. Bare `net` / `netting` /
+`network` stay. Sealed phrase stays exempt only on
+`terms.payment_terms`.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay. Money fences stay sealed. Extract 404 stays
+generic. Pack-source job-read fail-closed stays.

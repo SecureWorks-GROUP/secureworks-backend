@@ -86,6 +86,14 @@ Deno.test("fencing pack: runs, plinths, gate, colorbond removal, no client money
   assertEquals(removal?.quantity, 12);
   assertEquals(tradePackMoneyLeakKeys(pack), []);
   assertEquals(pack.items.every((i) => i.unit_price == null), true);
+  assertEquals(tradePackMoneyLeakKeys({
+    ...pack,
+    items: pack.items.map((item) => ({ ...item, sell_price: null })),
+  } as typeof pack), []);
+  assertEquals(tradePackMoneyLeakKeys({
+    ...pack,
+    items: pack.items.map((item) => ({ ...item, sell_price: 30 })),
+  } as typeof pack), ["sell_price"]);
 });
 
 Deno.test("fencing trade rates: $30/m, $10 plinth, $10 removal, $250 gate", () => {
@@ -409,20 +417,38 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(allocatedTradePackProse("Finish remaining posts on completion of neighbour"), "Finish remaining posts on completion of neighbour");
   assertEquals(tradeTextHasMoneyToken("50 on completion"), true);
   assertEquals(tradeTextHasMoneyToken("30 by delivery"), true);
+  assertEquals(tradeTextHasMoneyToken("50 on practical completion"), true);
+  assertEquals(tradeTextHasMoneyToken("50 after final delivery"), true);
+  assertEquals(tradeTextHasMoneyToken("50 when complete"), true);
   assertEquals(tradeTextHasPaymentScheduleAmount("50 on completion"), true);
   assertEquals(tradeTextHasPaymentScheduleAmount("30 by delivery"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 on practical completion"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 after final delivery"), true);
+  assertEquals(tradeTextHasPaymentScheduleAmount("50 when complete"), true);
   assertEquals(tradeTextHasPaymentScheduleAmount("12 posts at completion of neighbour"), false);
   assertEquals(allocatedTradePackProse("50 on completion"), null);
   assertEquals(allocatedTradePackProse("30 by delivery"), null);
+  assertEquals(allocatedTradePackProse("50 on practical completion"), null);
+  assertEquals(allocatedTradePackProse("50 after final delivery"), null);
+  assertEquals(allocatedTradePackProse("50 when complete"), null);
   assertEquals(allocatedTradePackIdentity("50 on completion"), null);
   assertEquals(allocatedTradePackIdentity("30 by delivery"), null);
+  assertEquals(allocatedTradePackIdentity("50 on practical completion"), null);
+  assertEquals(allocatedTradePackIdentity("50 after final delivery"), null);
+  assertEquals(allocatedTradePackIdentity("50 when complete"), null);
   assertEquals(stripTradePackMoney("50 on completion"), "on completion");
   assertEquals(stripTradePackMoney("30 by delivery"), "by delivery");
+  assertEquals(stripTradePackMoney("50 on practical completion"), "on practical completion");
+  assertEquals(stripTradePackMoney("50 after final delivery"), "after final delivery");
+  assertEquals(stripTradePackMoney("50 when complete"), "when complete");
   assertEquals(
     allocatedTradePackProse("12 posts at completion of neighbour"),
     "12 posts at completion of neighbour",
   );
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "50 on completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on practical completion", "50 on practical completion"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 after final delivery", "after final delivery"), true);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 when complete", "when complete"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("50 on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("$50 on completion", "on completion"), true);
   assertEquals(leftoverIsPaymentScheduleAfterAmountStrip("AUD 50 on completion", "on completion"), true);
@@ -446,9 +472,25 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
     "12 posts at completion of neighbour",
     "12 posts at completion of neighbour",
   ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Meet crew when complete of neighbour",
+    "Meet crew when complete of neighbour",
+  ), false);
+  assertEquals(leftoverIsPaymentScheduleAfterAmountStrip(
+    "Finish remaining posts on practical completion of neighbour",
+    "Finish remaining posts on practical completion of neighbour",
+  ), false);
   assertEquals(
     allocatedTradePackProse("Meet crew at completion of neighbour"),
     "Meet crew at completion of neighbour",
+  );
+  assertEquals(
+    allocatedTradePackProse("Meet crew when complete of neighbour"),
+    "Meet crew when complete of neighbour",
+  );
+  assertEquals(
+    allocatedTradePackProse("Finish remaining posts on practical completion of neighbour"),
+    "Finish remaining posts on practical completion of neighbour",
   );
   assertEquals(allocatedTradePackProse("Install Deposit"), null);
   assertEquals(allocatedPaymentTerms("50% deposit + 50% on completion"), "50% deposit + 50% on completion");
@@ -519,6 +561,24 @@ Deno.test("tradeTextHasMoneyToken is conservative across identity and date strin
   assertEquals(allocatedTradeQuotePackProjectionLeaks({
     items: [{ description: "30 by delivery" }],
   }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 on practical completion" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 after final delivery" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "50 when complete" }],
+  }), ["items[0].description"]);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "12 posts at completion of neighbour" }],
+  }), []);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "Install", unit_price: null, line_total: null }],
+  }), []);
+  assertEquals(allocatedTradeQuotePackProjectionLeaks({
+    items: [{ description: "Install", unit_price: 30, line_total: 300 }],
+  }).sort(), ["items[0].line_total", "items[0].unit_price"]);
   assertEquals(isSealedPaymentTermsPhrase("50% deposit + 50% on completion"), true);
   assertEquals(isTradePaymentTermsFieldPath("extract.terms.payment_terms"), true);
   assertEquals(isTradePaymentTermsFieldPath("customer.name"), false);

@@ -638,8 +638,10 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(p.quote_packs[0].source, "live_fallback");
   const install = (p.quote_packs[0].items || []).find((i: any) => i.kind === "install_m");
   assertEquals(install?.quantity, 10);
-  assertEquals(install?.unit_price, null, "allocated trades never see installer or sell rates");
-  assertEquals(install?.line_total, null);
+  assertEquals(install?.unit_price, undefined, "allocated trades never see installer or sell rates");
+  assertEquals(install?.line_total, undefined);
+  assertEquals("unit_price" in (install || {}), false);
+  assertEquals("line_total" in (install || {}), false);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals(p.workOrderDocuments, []);
   assertEquals(p.quote_extracts, [], "sent quote without a frozen pack has no extract");
@@ -2072,7 +2074,7 @@ Deno.test("redactTradeWorkOrdersForAllocated drops nested money objects and unre
   assertEquals(JSON.stringify(out).includes("18400"), false);
 });
 
-Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money", () => {
+Deno.test("redactTradeQuotePackMoney allowlists pack fields and omits item money keys", () => {
   const out = redactTradeQuotePackMoney([
     {
       quote_number: "Q-1",
@@ -2101,9 +2103,10 @@ Deno.test("redactTradeQuotePackMoney allowlists pack fields and nulls item money
     kind: "install_m",
     description: "Install",
     quantity: 10,
-    unit_price: null,
-    line_total: null,
   });
+  assertEquals("unit_price" in out[0].items[0], false);
+  assertEquals("line_total" in out[0].items[0], false);
+  assertAllocatedTradeQuotePackProjection(out[0]);
 });
 
 Deno.test("redactTradeQuotePackMoney allowlists customer and terms without money keys", () => {
@@ -2193,8 +2196,6 @@ Deno.test("redactTradeQuotePackMoney keeps sealed phrase only on payment_terms",
       kind: "info",
       description: "50% deposit + 50% on completion",
       quantity: 1,
-      unit_price: null,
-      line_total: null,
     }],
     summary: "50% deposit + 50% on completion",
   }]);
