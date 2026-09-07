@@ -746,3 +746,33 @@ Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
 Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
 through publication stay. Money fences stay sealed. Extract 404 stays
 generic. Pack-source job-read fail-closed stays.
+
+## Review-32 locks (2026-09-07)
+
+- **Grouped publication heartbeats unpublished claims only.**
+  `publishQuoteDocumentsSendOrRevertWhileHolding` copies the owned set
+  into `unpublished` and heartbeats that shrinking list. After a
+  document stamp clears the claim, later heartbeats must not treat
+  that sibling as lease loss. Persist still heartbeats the full
+  held set (persist does not clear claims).
+
+- **Failed exclusive invoice idempotency-key stamp releases the claim.**
+  `claimInvoiceEmailSendExclusive` token-fences
+  `revertInvoiceEmailSendClaim` on key-stamp PostgREST error so a
+  retry can re-claim. A zero-row / unconfirmed stamp is ownership
+  loss (CAS miss): return `unavailable` and do not clear a newer
+  owner. A failed release surfaces as `status: 'error'` with
+  `release_error`.
+
+Already-covered leftover / zero-publication / job-lease cleanup
+5xx stay. `/send` covering fence stays. send-runs grouped reclaim
+stays. Per-run pack filter stays. Allocated packs omit
+`unit_price` / `line_total`. Sealed phrase stays exempt only on
+`terms.payment_terms`. Claim-release / stamp-release errors stay
+5xx (CAS miss ok). Quote exclusive stamp-release stays.
+
+Office-only `/send` / `/send-runs` / `/send-invoice` stay locked.
+Post-send provider keys stay. Key-stamp ownership stays. Heartbeats
+through publication stay (unpublished-only on grouped publish).
+Money fences stay sealed. Extract 404 stays generic. Pack-source
+job-read fail-closed stays.

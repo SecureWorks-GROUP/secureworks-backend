@@ -675,8 +675,11 @@ export async function publishQuoteDocumentsSendOrRevertWhileHolding(
 ): Promise<QuoteSendPublishOrRevertResult> {
   const owned = uniqueDocumentClaims(claims)
   if (!owned.length) return { published: true }
+  // Publication clears the claim. Heartbeat only rows still unpublished
+  // so a later stamp does not read an already-sent sibling as lease loss.
+  const unpublished = [...owned]
   for (const claim of owned) {
-    const beat = await touchQuoteDocumentSendClaims(sb, owned, new Date())
+    const beat = await touchQuoteDocumentSendClaims(sb, unpublished, new Date())
     if (beat.outcome === 'error') {
       const released = await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')
       return withQuoteSendReleaseError({
@@ -694,7 +697,11 @@ export async function publishQuoteDocumentsSendOrRevertWhileHolding(
       }, released)
     }
     const { updated, error } = await publishQuoteDocumentSend(sb, claim.id, claim.token, now)
-    if (updated) continue
+    if (updated) {
+      const idx = unpublished.findIndex((row) => row.id === claim.id)
+      if (idx >= 0) unpublished.splice(idx, 1)
+      continue
+    }
     const message = error?.message || 'publication stamp not confirmed'
     console.error('[send-quote] publication stamp failed:', message)
     const released = await revertQuoteDocumentSendClaims(sb, owned, 'keep_provider_key')

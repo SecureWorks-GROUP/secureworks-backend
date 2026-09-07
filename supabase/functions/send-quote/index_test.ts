@@ -2570,7 +2570,6 @@ Deno.test("R17-002 publication heartbeats the grouped set before stamping sent",
     "heartbeat:doc-a",
     "heartbeat:doc-b",
     "publish:doc-a",
-    "heartbeat:doc-a",
     "heartbeat:doc-b",
     "publish:doc-b",
   ])
@@ -2589,16 +2588,17 @@ Deno.test("TRD6-22-001 persist and publish refresh leases with current time each
   assert(!persist.includes("touchQuoteDocumentSendClaims(sb, claims, now)"))
   assert(persist.includes("if (beat.outcome === 'lost')"))
   assert(publish.includes("for (const claim of owned)"))
-  assert(publish.includes("touchQuoteDocumentSendClaims(sb, owned, new Date())"))
-  assert(!publish.includes("touchQuoteDocumentSendClaims(sb, owned, now)"))
+  assert(publish.includes("touchQuoteDocumentSendClaims(sb, unpublished, new Date())"))
+  assert(!publish.includes("touchQuoteDocumentSendClaims(sb, owned, new Date())"))
+  assert(!publish.includes("touchQuoteDocumentSendClaims(sb, unpublished, now)"))
   const loop = publish.indexOf("for (const claim of owned)")
-  const beat = publish.indexOf("touchQuoteDocumentSendClaims(sb, owned, new Date())")
+  const beat = publish.indexOf("touchQuoteDocumentSendClaims(sb, unpublished, new Date())")
   const stamp = publish.indexOf("publishQuoteDocumentSend(sb, claim.id, claim.token, now)")
   assert(loop >= 0 && beat > loop && stamp > beat)
 })
 
 Deno.test("TRD6-22-001 publication stops when a later heartbeat loses the lease", async () => {
-  const sb = makeHeldPersistSb({ loseAfterHeartbeats: 3 })
+  const sb = makeHeldPersistSb({ loseAfterHeartbeats: 2 })
   const published = await publishQuoteDocumentsSendOrRevertWhileHolding(sb, [
     { id: "doc-a", token: "tok-a" },
     { id: "doc-b", token: "tok-b" },

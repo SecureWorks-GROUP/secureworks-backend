@@ -28,7 +28,11 @@ type Row = {
 
 function makeInvoiceClaimSb(
   initial: Row | null = null,
-  opts: { failKeyStamp?: boolean } = {},
+  opts: {
+    failKeyStamp?: boolean
+    keyStampError?: { message: string } | null
+    revertError?: { message: string } | null
+  } = {},
 ) {
   let row = initial;
   const updates: Record<string, unknown>[] = [];
@@ -106,6 +110,19 @@ function makeInvoiceClaimSb(
             select() {
               return {
                 maybeSingle: async () => {
+                  const isRevert =
+                    payload.send_claimed_at === null &&
+                    payload.send_claim_token === null;
+                  if (isRevert && opts.revertError) {
+                    return { data: null, error: opts.revertError };
+                  }
+                  if (
+                    opts.keyStampError &&
+                    "send_resend_idempotency_key" in payload &&
+                    !("send_claimed_at" in payload)
+                  ) {
+                    return { data: null, error: opts.keyStampError };
+                  }
                   if (
                     opts.failKeyStamp &&
                     "send_resend_idempotency_key" in payload &&
@@ -265,13 +282,62 @@ Deno.test("R17-001 exclusive invoice key stamp without a returning row is not cl
   if (claimed.status === "claimed") {
     assert(claimed.claim.resend_idempotency_key.startsWith("invoice-send:"));
   }
-  const lost = await claimInvoiceEmailSend(
-    makeInvoiceClaimSb(unclaimed, { failKeyStamp: true }),
-    INVOICE,
-    JOB,
-    now,
-  );
+  const lostSb = makeInvoiceClaimSb(unclaimed, { failKeyStamp: true });
+  const lost = await claimInvoiceEmailSend(lostSb, INVOICE, JOB, now);
   assertEquals(lost, { status: "unavailable" });
+  assertEquals(typeof lostSb.row?.send_claimed_at, "string");
+  assertEquals(typeof lostSb.row?.send_claim_token, "string");
+  assertEquals(
+    lostSb.updates.some((row) => row.send_claimed_at === null && row.send_claim_token === null),
+    false,
+  );
+});
+
+Deno.test("TRD6-31-002 exclusive invoice key stamp error releases the token-fenced claim", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z");
+  const unclaimed: Row = {
+    xero_invoice_id: INVOICE,
+    job_id: JOB,
+    send_claimed_at: null,
+    send_claim_token: null,
+    send_resend_idempotency_key: null,
+    sent_at: null,
+  };
+  const sb = makeInvoiceClaimSb(unclaimed, { keyStampError: { message: "stamp failed" } });
+  const claimed = await claimInvoiceEmailSend(sb, INVOICE, JOB, now);
+  assertEquals(claimed.status, "error");
+  if (claimed.status === "error") {
+    assertEquals(claimed.error, "stamp failed");
+    assertEquals(claimed.release_error, undefined);
+  }
+  assertEquals(sb.row?.send_claimed_at, null);
+  assertEquals(sb.row?.send_claim_token, null);
+  assertEquals(
+    sb.updates.some((row) => row.send_claimed_at === null && row.send_claim_token === null),
+    true,
+  );
+});
+
+Deno.test("TRD6-31-002 exclusive invoice key stamp error surfaces a failed release", async () => {
+  const now = new Date("2026-09-06T12:00:00.000Z");
+  const sb = makeInvoiceClaimSb({
+    xero_invoice_id: INVOICE,
+    job_id: JOB,
+    send_claimed_at: null,
+    send_claim_token: null,
+    send_resend_idempotency_key: null,
+    sent_at: null,
+  }, {
+    keyStampError: { message: "stamp failed" },
+    revertError: { message: "release failed" },
+  });
+  const claimed = await claimInvoiceEmailSend(sb, INVOICE, JOB, now);
+  assertEquals(claimed.status, "error");
+  if (claimed.status === "error") {
+    assertEquals(claimed.error, "release failed");
+    assertEquals(claimed.release_error, "release failed");
+  }
+  assertEquals(typeof sb.row?.send_claimed_at, "string");
 });
 
 Deno.test("R13-004 missing stored key falls back to invoice-scoped Resend key", async () => {
