@@ -787,6 +787,43 @@ Deno.test("Henry: a lead_installer managing fencing reaches set_job_lead on a fe
   );
 });
 
+// ── update_assignment / delete_assignment front door (Trade allocate sheet) ──
+// The Trade allocate sheet saves a schedule edit through update_assignment and
+// removes a crew member through delete_assignment. Both dispatch cases run
+// assertAssignmentMutationAuthz, the same gate as set_job_lead, so the front
+// door must let a signed-in lead_installer through and the route must decide.
+for (const action of ["update_assignment", "delete_assignment"] as const) {
+  Deno.test(`Henry: a lead_installer managing fencing reaches ${action} on a fencing job`, async () => {
+    assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true);
+    assertEquals(_opsApiActionNeedsStaffRole(actionUrl(action)), false);
+    assertEquals(
+      _authorizeOpsApiAction({ url: actionUrl(action), authMode: "jwt", authUser: { role: "lead_installer" } }),
+      { ok: true },
+    );
+    await assertAssignmentMutationAuthz(
+      makeAssignmentAuthzClient(FENCING_JOB),
+      "jwt",
+      { id: "henry", role: "lead_installer", managedVerticals: ["fencing"] },
+      { jobId: FENCING_JOB.id, assignmentId: "asg-1" },
+    );
+  });
+
+  Deno.test(`${action}: a plain installer with no managed vertical is refused by the route gate`, async () => {
+    let status: number | undefined;
+    try {
+      await assertAssignmentMutationAuthz(
+        makeAssignmentAuthzClient(FENCING_JOB),
+        "jwt",
+        { id: "crew", role: "crew", managedVerticals: [] },
+        { jobId: FENCING_JOB.id, assignmentId: "asg-1" },
+      );
+    } catch (e) {
+      status = (e as { status?: number }).status;
+    }
+    assertEquals(status, 403);
+  });
+}
+
 Deno.test("set_job_lead: the same lead_installer managing only patios is refused by the route gate on a fencing job", async () => {
   assertEquals(
     await setJobLeadOutcome({
