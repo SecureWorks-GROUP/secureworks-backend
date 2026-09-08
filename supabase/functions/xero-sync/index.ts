@@ -492,6 +492,91 @@ function parseXeroDate(xeroDate: string | null | undefined): string | null {
 // ════════════════════════════════════════════════════════════
 
 const TRADE_PDF_BACKFILL_PER_RUN = 15
+
+// Render the audit PDF for a trade bill from the bill's own labour lines plus the
+// persisted money split, and PUT it onto the bill. Returns true when attached.
+async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: string, tenantId: string): Promise<boolean> {
+  try {
+    const money = validatePersistedTradeInvoiceMoney(tradeInv)
+    const labour = (inv.LineItems as any[]).filter((l) => !isTradeInvoiceSuperXeroLine(l)).map((l) => ({
+      Description: String(l.Description || ''),
+      Quantity: Number(l.Quantity ?? 1),
+      UnitAmount: Number(l.UnitAmount ?? 0),
+      AccountCode: l.AccountCode,
+      TaxType: l.TaxType,
+    }))
+    const audit = renderTradeInvoiceAuditPdf({
+      submittedLines: labour,
+      money,
+      tradeName: tradeInv?.users?.name || inv.Contact?.Name || null,
+      invoiceNumber: tradeInv.invoice_number || inv.Reference || 'trade-invoice',
+    })
+    await attachPdfToXeroInvoiceUntilAttached({
+      invoiceId: inv.InvoiceID,
+      filename: distinctXeroPdfFilenames(tradeInv.invoice_number || inv.Reference).audit,
+      pdfBytes: audit.bytes,
+      accessToken,
+      tenantId,
+    })
+    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfilled onto bill ' + inv.InvoiceID)
+    return true
+  } catch (pdfErr: any) {
+    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfill skipped:', pdfErr?.message || pdfErr)
+    return false
+  }
+}
+
+// Targeted sweep. The invoice sync is incremental (If-Modified-Since), so a bill
+// that has sat untouched in Xero since it was pushed is never re-read by the
+// loop above. Pull the cached "no attachment" trade bills by id and fix them.
+const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, users:user_id(name)'
+async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string, cap = TRADE_PDF_BACKFILL_PER_RUN) {
+  const out = { checked: 0, attached: 0, skipped: 0 }
+  try {
+    const { data: cached, error } = await sb.from('xero_invoices')
+      .select('xero_invoice_id, raw_json')
+      .eq('invoice_type', 'ACCPAY')
+      .in('status', ['DRAFT', 'SUBMITTED', 'AUTHORISED', 'PAID'])
+      .eq('raw_json->>HasAttachments', 'false')
+      .order('updated_at', { ascending: false })
+      .limit(200)
+    if (error) throw error
+    const ids = (cached || []).map((r: any) => String(r.xero_invoice_id)).filter(Boolean)
+    if (!ids.length) return out
+    const { data: tradeRows, error: tErr } = await sb.from('trade_invoices')
+      .select(TRADE_PDF_SWEEP_COLUMNS).in('xero_bill_id', ids)
+    if (tErr) throw tErr
+    for (const tradeInv of (tradeRows || [])) {
+      if (out.attached >= cap) break
+      out.checked++
+      try {
+        const live = await xeroGet(`/Invoices/${encodeURIComponent(tradeInv.xero_bill_id)}`, accessToken, tenantId)
+        const inv = live?.Invoices?.[0]
+        if (!inv) { out.skipped++; continue }
+        if (!shouldBackfillTradeBillPdf(inv, tradeInv)) {
+          // Already has one (or void): refresh the cached flag so it drops out of the sweep.
+          await sb.from('xero_invoices').update({ raw_json: inv, status: inv.Status, synced_at: new Date().toISOString() }).eq('xero_invoice_id', inv.InvoiceID)
+          out.skipped++
+          continue
+        }
+        if (await attachTradeBillAuditPdf(inv, tradeInv, accessToken, tenantId)) {
+          out.attached++
+          await sb.from('xero_invoices').update({ raw_json: { ...inv, HasAttachments: true }, synced_at: new Date().toISOString() }).eq('xero_invoice_id', inv.InvoiceID)
+        } else {
+          out.skipped++
+        }
+      } catch (e: any) {
+        out.skipped++
+        console.log('[xero-sync] Trade bill PDF sweep failed for ' + tradeInv.id + ':', e?.message || e)
+      }
+    }
+  } catch (e: any) {
+    console.log('[xero-sync] Trade bill PDF sweep degraded:', e?.message || e)
+  }
+  console.log('[xero-sync] Trade bill PDF sweep: ' + JSON.stringify(out))
+  return out
+}
+
 async function syncInvoices(sb: any) {
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
@@ -779,33 +864,7 @@ async function syncInvoices(sb: any) {
                 // audit PDF (labour at submitted amounts, super as one minus line)
                 // rendered from the bill's own lines + the persisted money split.
                 if (tradePdfBackfilled < TRADE_PDF_BACKFILL_PER_RUN && shouldBackfillTradeBillPdf(inv, tradeInv)) {
-                  try {
-                    const money = validatePersistedTradeInvoiceMoney(tradeInv)
-                    const labour = (inv.LineItems as any[]).filter((l) => !isTradeInvoiceSuperXeroLine(l)).map((l) => ({
-                      Description: String(l.Description || ''),
-                      Quantity: Number(l.Quantity ?? 1),
-                      UnitAmount: Number(l.UnitAmount ?? 0),
-                      AccountCode: l.AccountCode,
-                      TaxType: l.TaxType,
-                    }))
-                    const audit = renderTradeInvoiceAuditPdf({
-                      submittedLines: labour,
-                      money,
-                      tradeName: (tradeInv as any).users?.name || inv.Contact?.Name || null,
-                      invoiceNumber: tradeInv.invoice_number || inv.Reference || 'trade-invoice',
-                    })
-                    await attachPdfToXeroInvoiceUntilAttached({
-                      invoiceId: inv.InvoiceID,
-                      filename: distinctXeroPdfFilenames(tradeInv.invoice_number || inv.Reference).audit,
-                      pdfBytes: audit.bytes,
-                      accessToken,
-                      tenantId,
-                    })
-                    tradePdfBackfilled++
-                    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfilled onto bill ' + inv.InvoiceID)
-                  } catch (pdfErr: any) {
-                    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfill skipped:', pdfErr?.message || pdfErr)
-                  }
+                  if (await attachTradeBillAuditPdf(inv, tradeInv, accessToken, tenantId)) tradePdfBackfilled++
                 }
               }
             } catch (e: any) { console.log('[xero-sync] Trade bill status check failed:', e) }
@@ -818,6 +877,9 @@ async function syncInvoices(sb: any) {
       page++
     }
   }
+
+  // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
+  const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
   // ── Match unlinked invoices after sync ──
   const matchResult = await matchUnlinkedInvoices(sb)
@@ -900,11 +962,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult },
+    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult }
+  return { success: true, synced: totalSynced, reconciled, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep }
 }
 
 
