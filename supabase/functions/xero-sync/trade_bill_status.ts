@@ -46,3 +46,18 @@ export function tradeBillStatusPatch(inv: any, current: TradeBillCurrent): Trade
   if (status === 'PAID' && ours !== 'paid' && !RELEASED_TRADE_INVOICE_STATUSES.has(ours)) patch.status = 'paid'
   return Object.keys(patch).length ? patch : null
 }
+
+// ── PDF backfill decision (2026-09-08, Marnin: "make sure the invoices the
+// guys send us on Xero come with their bills in PDF form") ──
+// Every push since the 27 Aug super split failed its returned-split check and
+// never reached the attach step, so 16 recent bills sat in Xero with no PDF.
+// xero-sync now attaches the audit PDF to any trade bill Xero reports without
+// attachments. Pure decision here; the sync loop renders and PUTs.
+export function shouldBackfillTradeBillPdf(inv: any, current: TradeBillCurrent & { invoice_number?: string | null }): boolean {
+  if (!inv || inv.Type !== 'ACCPAY') return false
+  if (inv.HasAttachments === true) return false
+  const status = String(inv.Status || '').toUpperCase()
+  if (status === 'VOIDED' || status === 'DELETED') return false
+  if (RELEASED_TRADE_INVOICE_STATUSES.has(String(current?.status || ''))) return false
+  return Array.isArray(inv.LineItems) && inv.LineItems.length > 0
+}

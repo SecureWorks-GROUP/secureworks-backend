@@ -38,3 +38,18 @@ Pure aggregation in `ops-api/trade_money.ts` (`trade_money_test.ts`).
   know the flag wiped it.
 - `my_trade_invoices`: limit 100, per-row safe presenter, `paid`, `paid_at`,
   `amount_paid`, `xero_bill_status` on each row.
+
+## Trade bill PDFs in Xero (same day, Marnin: "make sure the invoices come with their bills in PDF form")
+
+Root cause: Xero stores a `TaxType` of `NONE` as `BASEXCLUDED` on Australian
+organisations and returns it that way. `assertReturnedTradeInvoiceXeroSplit`
+compared the spelling, so EVERY push since the 27 Aug super split (`#`
+generate_trade_invoice, submit paths, and the ops retry) failed with 422 AFTER
+the bill was created and never reached the attach step. 16 of 63 bills since
+August had no PDF; none since 27 Aug did. Live check on Hugo's
+SW-INV-H-260904-026 confirmed `has_attachments: false`.
+
+Fix: `normaliseXeroTaxType` (BASEXCLUDED == NONE) in the validator. Backfill:
+xero-sync (`shouldBackfillTradeBillPdf`) attaches the audit PDF to any live
+trade bill Xero reports with `HasAttachments: false`, rendered from the bill's
+own labour lines plus the persisted money split, 15 per run.

@@ -18,7 +18,10 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
-import { tradeBillStatusPatch } from './trade_bill_status.ts'
+import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
+import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
+import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
+import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -488,8 +491,10 @@ function parseXeroDate(xeroDate: string | null | undefined): string | null {
 // SYNC INVOICES — incremental via If-Modified-Since
 // ════════════════════════════════════════════════════════════
 
+const TRADE_PDF_BACKFILL_PER_RUN = 15
 async function syncInvoices(sb: any) {
   const { accessToken, tenantId } = await getToken(sb)
+  let tradePdfBackfilled = 0
 
   // Find last Xero-side update time (not our sync time) for incremental fetch.
   // Using updated_at (Xero's UpdatedDateUTC) ensures we catch all changes
@@ -760,7 +765,7 @@ async function syncInvoices(sb: any) {
           if (inv.Type === 'ACCPAY') {
             try {
               const { data: tradeInv } = await sb.from('trade_invoices')
-                .select('id, status, xero_bill_status, amount_paid, paid_at')
+                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, users:user_id(name)')
                 .eq('xero_bill_id', inv.InvoiceID)
                 .maybeSingle()
               if (tradeInv) {
@@ -769,6 +774,38 @@ async function syncInvoices(sb: any) {
                   const { error: patchErr } = await sb.from('trade_invoices').update(patch).eq('id', tradeInv.id)
                   if (patchErr) console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' bill status write failed:', patchErr.message)
                   else console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' bill status -> ' + JSON.stringify(patch))
+                }
+                // PDF backfill: a trade bill in Xero with no attachment gets the
+                // audit PDF (labour at submitted amounts, super as one minus line)
+                // rendered from the bill's own lines + the persisted money split.
+                if (tradePdfBackfilled < TRADE_PDF_BACKFILL_PER_RUN && shouldBackfillTradeBillPdf(inv, tradeInv)) {
+                  try {
+                    const money = validatePersistedTradeInvoiceMoney(tradeInv)
+                    const labour = (inv.LineItems as any[]).filter((l) => !isTradeInvoiceSuperXeroLine(l)).map((l) => ({
+                      Description: String(l.Description || ''),
+                      Quantity: Number(l.Quantity ?? 1),
+                      UnitAmount: Number(l.UnitAmount ?? 0),
+                      AccountCode: l.AccountCode,
+                      TaxType: l.TaxType,
+                    }))
+                    const audit = renderTradeInvoiceAuditPdf({
+                      submittedLines: labour,
+                      money,
+                      tradeName: (tradeInv as any).users?.name || inv.Contact?.Name || null,
+                      invoiceNumber: tradeInv.invoice_number || inv.Reference || 'trade-invoice',
+                    })
+                    await attachPdfToXeroInvoiceUntilAttached({
+                      invoiceId: inv.InvoiceID,
+                      filename: distinctXeroPdfFilenames(tradeInv.invoice_number || inv.Reference).audit,
+                      pdfBytes: audit.bytes,
+                      accessToken,
+                      tenantId,
+                    })
+                    tradePdfBackfilled++
+                    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfilled onto bill ' + inv.InvoiceID)
+                  } catch (pdfErr: any) {
+                    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfill skipped:', pdfErr?.message || pdfErr)
+                  }
                 }
               }
             } catch (e: any) { console.log('[xero-sync] Trade bill status check failed:', e) }
@@ -936,7 +973,7 @@ export async function matchUnlinkedInvoices(client: any) {
             entity_id: inv.xero_invoice_id,
             job_id: job.job_number,
             payload: { invoice_number: inv.invoice_number, job_number: job.job_number, method: 'reference_match' },
-          }).catch(() => {})
+          }).then(() => undefined, () => undefined)
 
           matched++
           continue
@@ -985,7 +1022,7 @@ export async function matchUnlinkedInvoices(client: any) {
             entity_id: inv.xero_invoice_id,
             job_id: jobs[0].job_number,
             payload: { invoice_number: inv.invoice_number, job_number: jobs[0].job_number, method: 'client_name_exact' },
-          }).catch(() => {})
+          }).then(() => undefined, () => undefined)
 
           matched++
           continue
@@ -1020,7 +1057,7 @@ export async function matchUnlinkedInvoices(client: any) {
               source: 'xero-sync',
               source_ref: _srcRef,
               confidence: 0.5,
-            }).catch(() => {})
+            }).then(() => undefined, () => undefined)
           }
 
           flagged++
@@ -1247,7 +1284,7 @@ async function ingestMaterialsActuals(
       event_type: 'ingest_materials',
       payload: { window_days: windowDays, ...result },
       status: 'processed',
-    }).catch(() => {})
+    }).then(() => undefined, () => undefined)
 
     console.log(`[materials] ingest: ${JSON.stringify(result)}`)
     return { success: true, ...result }
