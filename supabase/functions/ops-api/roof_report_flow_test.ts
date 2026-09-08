@@ -1056,3 +1056,12 @@ Deno.test("roof_report_template: allocated omits the client fee; office keeps it
   assertEquals(office.template.pricing.single.inc_gst, 275);
   assertEquals(office.template.pricing.double.inc_gst, 330);
 });
+
+import { roofReportPhotoTransformUrl } from "./index.ts";
+Deno.test("roof photos: public storage URLs get a resized render URL, others do not", () => {
+  assertEquals(
+    roofReportPhotoTransformUrl("https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/object/public/job-photos/a/b.jpg"),
+    "https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/render/image/public/job-photos/a/b.jpg?width=900&quality=60",
+  );
+  assertEquals(roofReportPhotoTransformUrl("https://cdn.example.test/x.jpg"), null);
+});
