@@ -1284,7 +1284,7 @@ async function ingestMaterialsActuals(
       event_type: 'ingest_materials',
       payload: { window_days: windowDays, ...result },
       status: 'processed',
-    }).catch(() => {})
+    }).then(() => undefined, () => undefined)
 
     console.log(`[materials] ingest: ${JSON.stringify(result)}`)
     return { success: true, ...result }
