@@ -3936,6 +3936,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'trade_quote_extract',
   'complete_my_job',
   'waive_neighbour_signoff',
+  'log_my_job_hours',
   'upload_photo',
   'get_upload_url',
   'confirm_upload',
@@ -9197,6 +9198,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'trade_quote_extract':
       case 'complete_my_job':
       case 'waive_neighbour_signoff':
+      case 'log_my_job_hours':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -9326,6 +9328,7 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
           case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
+          case 'log_my_job_hours': return json(await tradeLogMyJobHours(client, body, tradeUser, tradeJobAccess))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
           case 'my_trade_invoices': return json(await myTradeInvoices(client, tradeUser.id))
@@ -44127,7 +44130,7 @@ interface RoofRenderDeps {
 //   1. makesafe_job_details.report_type (intake approval writes this), or
 //   2. jobs.metadata.makesafe_job_family being a report family.
 // Body-supplied report_type / is_report_type flags are IGNORED either way.
-async function assertRoofReportIsReportTypeJob(client: any, jobId: string) {
+async function roofReportIsReportTypeJob(client: any, jobId: string): Promise<boolean> {
   const { data: detail } = await client.from('makesafe_job_details')
     .select('report_type').eq('job_id', jobId).maybeSingle()
   let reportType = String(detail?.report_type || '').trim() || null
@@ -44137,17 +44140,27 @@ async function assertRoofReportIsReportTypeJob(client: any, jobId: string) {
     const persistedFamily = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
     reportType = _reportTypeForJobFamily(persistedFamily) || null
   }
-  if (!reportType) {
+  return !!reportType
+}
+// 2026-09-08 (Marnin): a trade may attach a SecureWorks letterhead roof report
+// to ANY make-safe (151 Deanmore Rd was a general MLB make-safe that needed one).
+// On a normal make-safe the PDF is rendered and attached and the fill persisted,
+// but the reporting checklist is NEVER advanced: the real make-safe report is
+// still the deliverable that moves the board. Only a report-type job (the two
+// persisted sources above) advances on submit. Body flags are still ignored.
+async function assertRoofReportIsReportTypeJob(client: any, jobId: string) {
+  if (!(await roofReportIsReportTypeJob(client, jobId))) {
     throw new ApiError('roof report is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real make-safe report.', 409)
   }
 }
+export const _assertRoofReportIsReportTypeJobForTest = assertRoofReportIsReportTypeJob
 
 async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {}, opts: { quoteVisible?: boolean } = {}) {
   const renderAndAttach = deps.renderAndAttach || renderAndAttachRoofReport
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
-  await assertRoofReportIsReportTypeJob(client, jobId)
+  const reportTypeJob = await roofReportIsReportTypeJob(client, jobId)
 
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('*').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
@@ -44183,7 +44196,9 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
         (!!boardSubstatus && _PORTAL_DONE_ALREADY_SUBSTATUSES.includes(boardSubstatus))
       const sameCycle = submittedCycle !== null && submittedCycle === currentCycle
       let boardSync: any
-      if (sameCycle && !boardAdvanced) {
+      if (!reportTypeJob) {
+        boardSync = { ok: true, skipped: true, reason: 'not_report_type', substatus: boardSubstatus }
+      } else if (sameCycle && !boardAdvanced) {
         boardSync = await advanceRoofReportChecklist(
           client,
           jobId,
@@ -44292,7 +44307,11 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
 
   // Advance the reporting checklist. Mirrors mark_makesafe_portal_report_done:
   // our submitted+rendered roof report IS the verified deliverable for this cycle.
-  const boardSync = await advanceRoofReportChecklist(client, jobId, nowIso, body)
+  // A normal make-safe keeps its board untouched: the roof report is an extra
+  // attached deliverable, the real make-safe report still moves the card.
+  const boardSync = reportTypeJob
+    ? await advanceRoofReportChecklist(client, jobId, nowIso, body)
+    : { ok: true, skipped: true, reason: 'not_report_type' }
 
   // Audit event (non-blocking after the board sync succeeded).
   let eventSync: any = { ok: true }
@@ -44310,6 +44329,7 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
         render_hash: attached.render_hash,
         photo_count: photosForRender.length,
         template_version: ROOF_REPORT_TEMPLATE_VERSION,
+        report_type_job: reportTypeJob,
       },
     })
   } catch (e) {
@@ -44421,7 +44441,6 @@ async function renderRoofReportAction(client: any, body: any, deps: RoofRenderDe
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
   await assertMakesafeJob(client, jobId)
-  await assertRoofReportIsReportTypeJob(client, jobId)
   const { data: existing } = await client.from('makesafe_roof_report_drafts')
     .select('fields_json').eq('job_id', jobId).eq('pack_kind', ROOF_REPORT_PACK_KIND).maybeSingle()
   const draftFields = (existing?.fields_json && typeof existing.fields_json === 'object')
@@ -47956,6 +47975,139 @@ async function tradeWaiveNeighbourSignoff(client: any, body: any, tradeUser: Tra
 
 export const _tradeCompleteMyJobForTest = tradeCompleteMyJob
 export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
+
+// ── log_my_job_hours (2026-09-08, Marnin) ────────────────────────────────────
+// "They mark it as complete, put the 2 hours on their invoice, and we see it
+// is done on our end." One tap from the job view after a report is done
+// (make-safe report, roof report, builder-portal report) writes the hours onto
+// the trade's own assignment for the job, so the weekly hours view and the
+// weekly invoice already carry them. Rules:
+//   - hours: finite, 0.25..24, rounded to the nearest quarter hour; REPLACES
+//     hours_worked (not additive) so a re-tap corrects rather than doubles.
+//   - target assignment: the caller's own non-cancelled assignment on the job,
+//     preferring in_progress > scheduled/confirmed > latest complete. A
+//     make-safe with no assignment for the caller gets the same completing-trade
+//     binding submit_makesafe_report mints (the report submitter is the
+//     attending trade). Any other job with no assignment is refused: the office
+//     allocates non make-safe work.
+//   - an assignment already stamped invoiced_in is locked: 409, nothing written.
+//   - status moves to complete (completed_at stamped) unless already complete;
+//     scheduled_date is set to today (AWST) when missing so my_hours lists it.
+//   - never touches rates, invoices, or the make-safe board.
+const LOG_MY_JOB_HOURS_MAX = 24
+function normaliseLoggedHours(raw: unknown): number {
+  const n = typeof raw === 'string' ? Number(raw.trim()) : Number(raw)
+  if (!Number.isFinite(n)) throw new ApiError('hours must be a number', 400)
+  const q = Math.round(n * 4) / 4
+  if (q < 0.25) throw new ApiError('hours must be at least 0.25', 400)
+  if (q > LOG_MY_JOB_HOURS_MAX) throw new ApiError('hours must be ' + LOG_MY_JOB_HOURS_MAX + ' or less', 400)
+  return q
+}
+const LOG_HOURS_ASSIGNMENT_COLUMNS = 'id, job_id, user_id, status, role, assignment_type, scheduled_date, hours_worked, invoiced_in, completed_at, attendance_cycle_id, cycle_attribution, notes'
+function pickHoursAssignment(rows: any[]): any | null {
+  const live = (rows || []).filter((r) => r && r.status !== 'cancelled' && isGenuineTradeAssignment(r))
+  if (!live.length) return null
+  const byDate = (a: any, b: any) => String(b.scheduled_date || '').localeCompare(String(a.scheduled_date || ''))
+  const active = live.find((r) => r.status === 'in_progress')
+  if (active) return active
+  const ready = live.filter((r) => r.status === 'scheduled' || r.status === 'confirmed').sort(byDate)
+  if (ready.length) return ready[0]
+  return live.slice().sort(byDate)[0]
+}
+async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
+  const jobId = String(body?.jobId || body?.job_id || '').trim()
+  if (!jobId) throw new ApiError('jobId required', 400)
+  const hours = normaliseLoggedHours(body?.hours)
+  const source = String(body?.source || 'job_view').replace(/[^a-z0-9_]/gi, '').slice(0, 40) || 'job_view'
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, false, access)
+  const { data: job, error: jobErr } = await client.from('jobs')
+    .select('id, type, job_number, status')
+    .eq('id', jobId).eq('org_id', tradeUser.orgId).maybeSingle()
+  if (jobErr) throw jobErr
+  if (!job) throw new ApiError('Job not found', 404)
+
+  const { data: mine, error: asnErr } = await client.from('job_assignments')
+    .select(LOG_HOURS_ASSIGNMENT_COLUMNS)
+    .eq('job_id', jobId).eq('user_id', tradeUser.id)
+  if (asnErr) throw asnErr
+  let assignment = pickHoursAssignment(mine || [])
+  let created = false
+  if (!assignment) {
+    const { data: detail } = await client.from('makesafe_job_details')
+      .select('job_id, cycle_number').eq('job_id', jobId).maybeSingle()
+    if (!detail) {
+      throw new ApiError('You are not allocated to this job. Ask the office to add you before logging hours.', 409)
+    }
+    const cycleNumber = Number(detail.cycle_number ?? 1)
+    const cycle = await ensureMakesafeAttendanceCycle(client, jobId, cycleNumber, 'log_my_job_hours')
+    const nowIso = new Date().toISOString()
+    const bound = await ensureMakesafeReportSubmitterAssignment(client, {
+      canonicalAssignmentId: cycle.id,
+      jobId,
+      userId: tradeUser.id,
+      attendanceCycleId: cycle.id,
+      cycleNumber,
+      completedAt: nowIso,
+    })
+    created = bound.created
+    const { data: reread, error: rereadErr } = await client.from('job_assignments')
+      .select(LOG_HOURS_ASSIGNMENT_COLUMNS)
+      .eq('job_id', jobId).eq('user_id', tradeUser.id)
+    if (rereadErr) throw rereadErr
+    assignment = pickHoursAssignment(reread || []) || bound.assignment
+    if (!assignment) throw new ApiError('Could not find your assignment on this job', 500)
+  }
+  if (assignment.invoiced_in) {
+    throw new ApiError('These hours are already on invoice ' + assignment.invoiced_in + '. Ask the office to adjust it.', 409)
+  }
+  const nowIso = new Date().toISOString()
+  const update: any = { hours_worked: hours }
+  if (!assignment.scheduled_date) update.scheduled_date = getAWSTDate()
+  if (assignment.status !== 'complete') {
+    update.status = 'complete'
+    if (!assignment.completed_at) update.completed_at = nowIso
+  }
+  const { data: saved, error: updErr } = await client.from('job_assignments')
+    .update(update).eq('id', assignment.id).select(LOG_HOURS_ASSIGNMENT_COLUMNS).single()
+  if (updErr) throw updErr
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      user_id: tradeUser.id,
+      event_type: 'trade_hours_logged',
+      detail_json: {
+        assignment_id: assignment.id,
+        hours,
+        previous_hours: assignment.hours_worked == null ? null : Number(assignment.hours_worked),
+        source,
+        assignment_created: created,
+      },
+    })
+  } catch (_e) { /* audit is non-blocking */ }
+  const scheduledDate = String(saved?.scheduled_date || update.scheduled_date || assignment.scheduled_date || getAWSTDate())
+  return {
+    ok: true,
+    hours,
+    assignment: {
+      id: saved?.id || assignment.id,
+      status: saved?.status || update.status || assignment.status,
+      scheduled_date: scheduledDate,
+      hours_worked: hours,
+      created,
+    },
+    week_ending: weekEndSundayFor(scheduledDate),
+  }
+}
+// Sunday on or after the given AWST date (matches the app's week buckets).
+function weekEndSundayFor(isoDate: string): string {
+  const d = new Date(isoDate + 'T00:00:00Z')
+  if (Number.isNaN(d.getTime())) return getAWSTWeekEnd()
+  const day = d.getUTCDay()
+  d.setUTCDate(d.getUTCDate() + (day === 0 ? 0 : 7 - day))
+  return d.toISOString().slice(0, 10)
+}
+export const _tradeLogMyJobHoursForTest = tradeLogMyJobHours
+export const _pickHoursAssignmentForTest = pickHoursAssignment
 export const _assertFencingCompletionEvidenceForTest = assertFencingCompletionEvidence
 
 async function updateMyAssignment(client: any, body: any, userId: string) {

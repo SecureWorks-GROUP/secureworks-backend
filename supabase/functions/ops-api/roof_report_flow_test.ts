@@ -751,16 +751,16 @@ Deno.test("submit_roof_report: idempotent -- resubmit returns existing report, n
   assertEquals(rows.job_events.length, 0);
 });
 
-Deno.test("submit_roof_report: 409s on a normal (non-report-type) make-safe, nothing persisted or advanced", async () => {
+Deno.test("submit_roof_report: a normal (non-report-type) make-safe renders and attaches OUR report but never advances the board", async () => {
   const { client, rows } = makeClient(baseRows({
     jobs: [{
       id: "job-1",
-      job_number: "SWMS-26861",
+      job_number: "SWMS-261386",
       type: "makesafe",
       status: "scheduled",
       client_name: "Major Loss Builders",
-      site_address: "10 Caversham Way",
-      site_suburb: "Caversham",
+      site_address: "151 Deanmore Road",
+      site_suburb: "Scarborough",
       metadata: {},
     }],
     makesafe_job_details: [{
@@ -774,24 +774,36 @@ Deno.test("submit_roof_report: 409s on a normal (non-report-type) make-safe, not
   }));
   const { calls, deps } = stubRenderDeps();
 
-  await assertRejects(
-    () =>
-      _submitRoofReportForTest(client, {
-        job_id: "job-1",
-        fields: fullFill,
-      }, deps),
-    Error,
-    "restricted to report-type jobs",
-  );
+  const res = await _submitRoofReportForTest(client, {
+    job_id: "job-1",
+    fields: fullFill,
+    // Client flags are still ignored: they cannot buy a board advance.
+    report_type: "roof_report",
+    is_report_type: true,
+  }, deps);
 
-  // Nothing rendered, nothing persisted, board untouched.
-  assertEquals(calls.length, 0);
-  assertEquals(rows.makesafe_roof_report_drafts.length, 0);
-  assertEquals(
-    rows.makesafe_job_details[0].substatus,
-    "waiting_on_trade_report",
-  );
+  assertEquals(res.ok, true);
+  assertEquals(res.status, "submitted");
+  // Rendered + persisted as an extra deliverable on the job.
+  assertEquals(calls.length, 1);
+  assertEquals(rows.makesafe_roof_report_drafts.length, 1);
+  assertEquals(rows.makesafe_roof_report_drafts[0].status, "submitted");
+  // The real make-safe report still moves the card: board untouched.
+  assertEquals(res.board_sync.skipped, true);
+  assertEquals(res.board_sync.reason, "not_report_type");
+  assertEquals(rows.makesafe_job_details[0].substatus, "waiting_on_trade_report");
   assertEquals(rows.makesafe_job_details[0].report_received_at, null);
+  assertEquals(rows.makesafe_job_details[0].portal_verified_at, undefined);
+  const submitted = rows.job_events.filter((e: any) => e.event_type === "roof_report_submitted");
+  assertEquals(submitted.length, 1);
+  assertEquals(submitted[0].detail_json.report_type_job, false);
+
+  // A same-cycle repeat stays idempotent and still never touches the board.
+  const again = await _submitRoofReportForTest(client, { job_id: "job-1", fields: fullFill }, deps);
+  assertEquals(again.already_submitted, true);
+  assertEquals(again.board_sync.skipped, true);
+  assertEquals(calls.length, 1);
+  assertEquals(rows.makesafe_job_details[0].substatus, "waiting_on_trade_report");
 });
 
 Deno.test("submit_roof_report: a report-family job (no report_type, family metadata) still succeeds", async () => {
@@ -845,7 +857,7 @@ Deno.test("submit_roof_report: board-sync failure surfaces loudly", async () => 
   );
 });
 
-Deno.test("render_roof_report: 409s on a normal (non-report-type) make-safe, nothing attached", async () => {
+Deno.test("render_roof_report: renders on a normal (non-report-type) make-safe without touching the board", async () => {
   const { client, rows } = makeClient(baseRows({
     jobs: [{
       id: "job-1",
@@ -875,15 +887,11 @@ Deno.test("render_roof_report: 409s on a normal (non-report-type) make-safe, not
   }));
   const { calls, deps } = stubRenderDeps();
 
-  await assertRejects(
-    () => _renderRoofReportActionForTest(client, { job_id: "job-1" }, deps),
-    Error,
-    "restricted to report-type jobs",
-  );
-
-  // Nothing rendered or attached.
-  assertEquals(calls.length, 0);
-  assertEquals(rows.job_documents.length, 0);
+  const res = await _renderRoofReportActionForTest(client, { job_id: "job-1" }, deps);
+  assertEquals(res.success, true);
+  assertEquals(calls.length, 1);
+  assertEquals(rows.makesafe_job_details[0].substatus, "waiting_on_trade_report");
+  assertEquals(rows.makesafe_job_details[0].report_received_at, null);
 });
 
 Deno.test("render_roof_report: succeeds on a report_type='roof_report' job", async () => {
