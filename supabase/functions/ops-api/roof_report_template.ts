@@ -241,6 +241,13 @@ export const ROOF_REPORT_FIELDS: RoofReportField[] = [
     section: "property",
   },
   {
+    key: "gutters_notes",
+    label: "Gutters, valleys and downpipes: comments",
+    type: "textarea",
+    section: "property",
+    placeholder: "What you saw: blockages, rust, sagging, missing sections, downpipes disconnected.",
+  },
+  {
     key: "roof_condition",
     label: "Roof condition",
     type: "select",
@@ -260,6 +267,13 @@ export const ROOF_REPORT_FIELDS: RoofReportField[] = [
     label: "Storm-created openings in the roof",
     type: "toggle",
     section: "findings",
+  },
+  {
+    key: "storm_openings_notes",
+    label: "Storm-created openings: details",
+    type: "textarea",
+    section: "findings",
+    placeholder: "Where, how big, what was done to make it safe.",
   },
   {
     key: "water_leak",
@@ -456,6 +470,7 @@ export interface RoofReportRenderPhoto {
   bytesBase64?: string;
   contentType?: string;
   url?: string;
+  thumbUrl?: string;
   label?: string;
 }
 
@@ -466,13 +481,19 @@ export interface RoofReportRenderPhoto {
 // never bloat the row. The renderer fetches the URL bytes itself at render time.
 export interface RoofPhotoMeta {
   url?: string;
+  thumbUrl?: string;
   contentType?: string;
   label?: string;
 }
 
+// 2026-09-08 (Marnin): every photo on the visit goes into the report (Hugo's
+// MLB job had 137). The renderer uses thumbnails for the grid to keep the PDF
+// small, so the cap is about sanity, not size.
+export const ROOF_REPORT_PHOTO_CAP = 200;
+
 export function sanitiseRoofPhotosMeta(
   photos: unknown,
-  cap = 20,
+  cap = ROOF_REPORT_PHOTO_CAP,
 ): RoofPhotoMeta[] {
   if (!Array.isArray(photos)) return [];
   const out: RoofPhotoMeta[] = [];
@@ -483,6 +504,7 @@ export function sanitiseRoofPhotosMeta(
     if (!url) continue; // no URL -> nothing to persist/resolve later
     out.push({
       url,
+      ...(typeof (p as any)?.thumbUrl === "string" ? { thumbUrl: (p as any).thumbUrl } : {}),
       contentType: typeof (p as any)?.contentType === "string"
         ? (p as any).contentType
         : undefined,
@@ -532,9 +554,11 @@ export function buildRoofReportJob(
     roof_pitch: bag.roof_pitch,
     roof_profile_correct: bag.roof_profile_correct,
     gutters_serviceable: bag.gutters_serviceable,
+    gutters_notes: bag.gutters_notes,
     roof_condition: bag.roof_condition,
     services_penetrations: bag.services_penetrations,
     storm_openings: bag.storm_openings,
+    storm_openings_notes: bag.storm_openings_notes,
     water_leak: bag.water_leak,
     leak_cause: bag.leak_cause,
     overall_findings: bag.overall_findings,
