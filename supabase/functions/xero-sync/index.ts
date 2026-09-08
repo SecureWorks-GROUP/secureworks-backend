@@ -973,7 +973,7 @@ export async function matchUnlinkedInvoices(client: any) {
             entity_id: inv.xero_invoice_id,
             job_id: job.job_number,
             payload: { invoice_number: inv.invoice_number, job_number: job.job_number, method: 'reference_match' },
-          }).catch(() => {})
+          }).then(() => undefined, () => undefined)
 
           matched++
           continue
@@ -1022,7 +1022,7 @@ export async function matchUnlinkedInvoices(client: any) {
             entity_id: inv.xero_invoice_id,
             job_id: jobs[0].job_number,
             payload: { invoice_number: inv.invoice_number, job_number: jobs[0].job_number, method: 'client_name_exact' },
-          }).catch(() => {})
+          }).then(() => undefined, () => undefined)
 
           matched++
           continue
@@ -1057,7 +1057,7 @@ export async function matchUnlinkedInvoices(client: any) {
               source: 'xero-sync',
               source_ref: _srcRef,
               confidence: 0.5,
-            }).catch(() => {})
+            }).then(() => undefined, () => undefined)
           }
 
           flagged++
