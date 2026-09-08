@@ -15,6 +15,7 @@ import {
   _resolveOpsApiAuthIntent,
   _submitMakesafeReportForTest,
   _submitServiceReportForTest,
+  _unlockMakesafeReportForTest,
   _tradeMakesafeCompletionHandoffForTest,
   allocateJob,
   createAssignment,
@@ -612,7 +613,7 @@ Deno.test("submit_makesafe_report does not let an unbound assignment suppress th
   assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
 });
 
-Deno.test("submit_makesafe_report preserves a different current-cycle assignment while attaching the submitter", async () => {
+Deno.test("submit_makesafe_report: the submitter overrides a different trade's allocation on this cycle (Marnin 2026-09-08)", async () => {
   const { client, rows } = makeSubmitClient(baseRows({
     makesafe_job_details: [{
       job_id: "job-1",
@@ -635,26 +636,50 @@ Deno.test("submit_makesafe_report preserves a different current-cycle assignment
       role: "lead_installer",
       attendance_cycle_id: "cycle-1",
       cycle_attribution: "bound",
+    }, {
+      id: "assignment-invoiced",
+      job_id: "job-1",
+      user_id: "trade-paid",
+      status: "complete",
+      role: "lead_installer",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      invoiced_in: "INV-9",
+    }, {
+      id: "assignment-other-cycle",
+      job_id: "job-1",
+      user_id: "trade-old",
+      status: "complete",
+      role: "lead_installer",
+      attendance_cycle_id: "cycle-0",
+      cycle_attribution: "bound",
     }],
   }));
 
   const result: any = await _submitMakesafeReportForTest(client, validBody());
 
-  assertEquals(rows.job_assignments.length, 2);
-  const existing = rows.job_assignments.find((row) =>
-    row.id === "assignment-existing"
-  );
+  // The absent trade's allocation is cancelled (not completed), so it never
+  // becomes an invoiceable card in my_hours.
+  const existing = rows.job_assignments.find((row) => row.id === "assignment-existing");
   assert(existing);
-  assertEquals(existing.user_id, "trade-existing");
-  assertEquals(existing.attendance_cycle_id, "cycle-1");
-  const completingTrade = rows.job_assignments.find((row) =>
-    row.user_id === "trade-1"
-  );
+  assertEquals(existing.status, "cancelled");
+  assert(/Overridden by report submitter/.test(existing.notes || ""));
+  // An allocation already on an invoice is left alone and flagged.
+  assertEquals(rows.job_assignments.find((row) => row.id === "assignment-invoiced").status, "complete");
+  assert(result.warnings.includes("allocation_override_blocked_invoiced"));
+  // A prior cycle is untouched.
+  assertEquals(rows.job_assignments.find((row) => row.id === "assignment-other-cycle").status, "complete");
+  // The submitter holds the completing-trade row on this cycle.
+  const completingTrade = rows.job_assignments.find((row) => row.user_id === "trade-1");
   assert(completingTrade);
   assertEquals(completingTrade.attendance_cycle_id, "cycle-1");
   assertEquals(completingTrade.status, "complete");
-  assertEquals(result.board_sync.auto_assignment.id, completingTrade.id);
-  assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
+  assertEquals(result.board_sync.allocation_override.cancelled.map((r: any) => r.user_id), ["trade-existing"]);
+  assertEquals(result.board_sync.allocation_override.blocked.map((r: any) => r.user_id), ["trade-paid"]);
+  const ev = rows.job_events.find((e) => e.event_type === "makesafe_allocation_overridden");
+  assert(ev);
+  assertEquals(ev.detail_json.cancelled[0].user_id, "trade-existing");
+  assertEquals(ev.detail_json.blocked_invoiced[0].invoiced_in, "INV-9");
 });
 
 Deno.test("observer ghost declined and open-pool rows cannot satisfy final report attribution", async () => {
@@ -1638,4 +1663,67 @@ Deno.test("submit_makesafe_report returns an event warning if audit event insert
   assertEquals(res.event_sync.ok, false);
   assertEquals(res.warnings.includes("event_sync_failed"), true);
   assertEquals(rows.makesafe_job_details[0].substatus, "admin_to_send_report");
+});
+
+// ── unlock_makesafe_report: back to draft, board back to waiting, resubmit rewrites the same row ──
+Deno.test("unlock_makesafe_report: the submitter reopens their report, the card waits again, resubmit reuses the row", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      report_sent_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{ id: "cycle-1", job_id: "job-1", cycle_number: 1 }],
+    makesafe_report_packs: [],
+    xero_invoices: [],
+  }));
+  await _submitMakesafeReportForTest(client, validBody());
+  const submitted = rows.job_service_reports.find((r) => r.job_id === "job-1");
+  assertEquals(submitted.status, "submitted");
+  assertEquals(rows.makesafe_job_details[0].substatus, "admin_to_send_report");
+
+  const trade = { id: "trade-1", email: "trade@example.test", orgId: "org-test", role: "lead_installer", managedVerticals: [] as string[] };
+  const access = { orgId: "org-test", managedVerticals: [] as string[] };
+  const res = await _unlockMakesafeReportForTest(client, { job_id: "job-1" }, trade as any, access, true);
+  assertEquals(res.ok, true);
+  assertEquals(submitted.status, "draft");
+  assertEquals(submitted.submitted_at, null);
+  assertEquals(rows.makesafe_job_details[0].substatus, "waiting_on_trade_report");
+  assertEquals(rows.makesafe_job_details[0].report_received_at, null);
+  assert(rows.job_events.some((e) => e.event_type === "makesafe_report_unlocked"));
+
+  // A second unlock is a no-op, not an error.
+  const again = await _unlockMakesafeReportForTest(client, { job_id: "job-1" }, trade as any, access, true);
+  assertEquals(again.already, true);
+
+  // Resubmit rewrites the same report row for this cycle (unique per attendance cycle).
+  await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(rows.job_service_reports.filter((r) => r.job_id === "job-1").length, 1);
+  assertEquals(rows.job_service_reports[0].status, "submitted");
+  assertEquals(rows.makesafe_job_details[0].substatus, "admin_to_send_report");
+});
+
+Deno.test("unlock_makesafe_report: refused once the office has sent the report", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1", substatus: "waiting_on_trade_report", report_received_at: null, report_sent_at: null,
+      cycle_number: 1, attendance_cycle_id: "cycle-1", cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{ id: "cycle-1", job_id: "job-1", cycle_number: 1 }],
+    makesafe_report_packs: [],
+    xero_invoices: [],
+  }));
+  await _submitMakesafeReportForTest(client, validBody());
+  rows.makesafe_job_details[0].report_sent_at = "2026-09-08T03:00:00Z";
+  const trade = { id: "trade-1", email: "trade@example.test", orgId: "org-test", role: "lead_installer", managedVerticals: [] as string[] };
+  await assertRejects(
+    () => _unlockMakesafeReportForTest(client, { job_id: "job-1" }, trade as any, { orgId: "org-test", managedVerticals: [] }, true),
+    Error,
+    "already sent",
+  );
+  assertEquals(rows.job_service_reports[0].status, "submitted");
 });
