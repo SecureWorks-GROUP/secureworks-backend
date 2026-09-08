@@ -48051,8 +48051,73 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     satisfaction_rating: body?.satisfaction_rating,
     signatureName: body?.signatureName,
   })
-  return { ...(result || {}), completion_evidence: ev }
+  // 2026-09-08 (Marnin): complete-to-invoice. Never blocks completion.
+  let invoiceQueue: any = null
+  try {
+    invoiceQueue = await completeMyWorkOrdersForInvoice(client, tradeUser, job)
+  } catch (e) {
+    console.warn('[ops-api] complete_my_job invoice queue failed (non-blocking):', e instanceof Error ? e.message : e)
+    invoiceQueue = { lane: null, work_orders: [], error: e instanceof Error ? e.message : String(e) }
+  }
+  return { ...(result || {}), completion_evidence: ev, invoice_queue: invoiceQueue }
 }
+
+// ── complete-to-invoice (2026-09-08, Marnin) ──────────────────────────────────
+// "When the guys say job complete on a repair job that has a work order, it
+// should tie to their weekly invoice automatically; end of week is a review."
+// On complete_my_job the trade's OWN work orders on the job become complete
+// (stamping completed_at, which is the business date the weekly invoice keys
+// the week on) and the response names the lane that pays them:
+//   - per_metre trades (Henry): the weekly work-order invoice. The app adds the
+//     work order to this week's draft straight away.
+//   - everyone else: hours on their assignment (my_hours). The app offers the
+//     one-tap hours row when nothing is clocked yet.
+// Read-only on invoices here: the draft write goes through the existing
+// save_trade_invoice_draft path with all its guards.
+async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthContext, job: any) {
+  const nowIso = new Date().toISOString()
+  const { data: userRow } = await client.from('users').select('invoice_type').eq('id', tradeUser.id).maybeSingle()
+  const lane = userRow?.invoice_type === 'per_metre' ? 'weekly_work_order' : 'hours'
+  const { data: mine, error: woErr } = await client.from('work_orders')
+    .select('id, wo_number, status, scheduled_date, completed_at, scope_items')
+    .eq('job_id', job.id).eq('org_id', tradeUser.orgId).eq('assigned_user_id', tradeUser.id)
+  if (woErr) throw woErr
+  const workOrders: any[] = []
+  for (const wo of (mine || [])) {
+    const status = String(wo.status || '')
+    if (status === 'cancelled' || status === 'draft') continue
+    let completedAt = wo.completed_at || null
+    if (status !== 'complete') {
+      const { data: updated, error: updErr } = await client.from('work_orders')
+        .update({ status: 'complete', completed_at: nowIso })
+        .eq('id', wo.id).select('id, completed_at').maybeSingle()
+      if (updErr) throw updErr
+      completedAt = updated?.completed_at || nowIso
+      try {
+        await client.from('job_events').insert({
+          job_id: job.id, user_id: tradeUser.id, event_type: 'work_order_completed_by_trade',
+          detail_json: { work_order_id: wo.id, wo_number: wo.wo_number || null, previous_status: status, lane },
+        })
+      } catch (_e) { /* audit non-blocking */ }
+    }
+    const businessDate = getAWSTDate(new Date(completedAt || nowIso))
+    workOrders.push({
+      id: wo.id,
+      wo_number: wo.wo_number || null,
+      completed_at: completedAt,
+      business_date: businessDate,
+      week_end: weekEndSundayFor(businessDate),
+      priced: Array.isArray(wo.scope_items) && wo.scope_items.length > 0,
+      already_complete: status === 'complete',
+    })
+  }
+  const { data: asns } = await client.from('job_assignments')
+    .select(LOG_HOURS_ASSIGNMENT_COLUMNS).eq('job_id', job.id).eq('user_id', tradeUser.id)
+  const myAssignment = pickHoursAssignment(asns || [])
+  const hoursLogged = myAssignment && myAssignment.hours_worked != null ? Number(myAssignment.hours_worked) : null
+  return { lane, work_orders: workOrders, hours_logged: hoursLogged, assignment_id: myAssignment?.id || null }
+}
+export const _completeMyWorkOrdersForInvoiceForTest = completeMyWorkOrdersForInvoice
 
 async function tradeWaiveNeighbourSignoff(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
   const jobId = String(body?.jobId || body?.job_id || '').trim()
