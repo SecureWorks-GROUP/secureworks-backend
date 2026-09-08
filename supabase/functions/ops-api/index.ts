@@ -978,6 +978,7 @@ import {
   sanitiseRoofPhotosMeta,
   buildRoofReportJob,
 } from './roof_report_template.ts'
+import { summariseTradeMoney, tradeMoneyRow } from './trade_money.ts'
 // M2/U4 — materials reconciliation queue (ops worklist that drains unmatched
 // non-mirror ACCPAY bills into manual materials facts, auditably).
 import {
@@ -3979,6 +3980,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'complete_my_job',
   'waive_neighbour_signoff',
   'log_my_job_hours',
+  'my_money',
   'upload_photo',
   'get_upload_url',
   'confirm_upload',
@@ -9241,6 +9243,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'complete_my_job':
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
+      case 'my_money':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -9371,6 +9374,7 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
           case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
           case 'log_my_job_hours': return json(await tradeLogMyJobHours(client, body, tradeUser, tradeJobAccess))
+          case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
           case 'my_trade_invoices': return json(await myTradeInvoices(client, tradeUser.id))
@@ -10069,15 +10073,34 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           case 'set_trade_rate': return json(await setTradeRate(client, tradeUser.id, body))
           case 'update_trade_profile': {
-            const { fullName, phone, email, abn, bsb, accountNo, accountName, licence, gstRegistered } = body
-            // Store trade details as user_metadata jsonb on the users table
-            const updates: any = {}
-            if (abn !== undefined) updates.abn = abn || null
-            // Store everything else in a trade_details jsonb column
-            const tradeDetails = { fullName, phone, email, bsb, accountNo, accountName, licence, gstRegistered }
-            updates.trade_details = tradeDetails
-            await client.from('users').update(updates).eq('id', tradeUser.id)
-            return json({ success: true })
+            // 2026-09-08: MERGE into trade_details. The old handler replaced the
+            // whole jsonb with whatever keys the form sent, so saving bank details
+            // from a phone that did not know the GST flag wiped it (Hugo
+            // under-invoiced by 10%). Only keys present in the body change.
+            const { data: currentUser } = await client.from('users')
+              .select('abn, trade_details').eq('id', tradeUser.id).maybeSingle()
+            const existingDetails = (currentUser?.trade_details && typeof currentUser.trade_details === 'object')
+              ? currentUser.trade_details : {}
+            const tradeDetails: Record<string, unknown> = { ...existingDetails }
+            for (const key of ['fullName', 'phone', 'email', 'bsb', 'accountNo', 'accountName', 'licence', 'ratePerMetre']) {
+              if (body[key] !== undefined) tradeDetails[key] = body[key]
+            }
+            const gstRaw = body.gstRegistered !== undefined ? body.gstRegistered : body.gst_registered
+            if (gstRaw !== undefined && gstRaw !== null) {
+              tradeDetails.gstRegistered = gstRaw === true || gstRaw === 'true' || gstRaw === 1 || gstRaw === '1'
+            }
+            const updates: any = { trade_details: tradeDetails }
+            if (body.abn !== undefined) updates.abn = body.abn || null
+            const { error: profileErr } = await client.from('users').update(updates).eq('id', tradeUser.id)
+            if (profileErr) throw new ApiError('Could not save your details: ' + (profileErr.message || profileErr), 500)
+            return json({
+              success: true,
+              profile: {
+                abn: body.abn !== undefined ? (body.abn || null) : (currentUser?.abn ?? null),
+                trade_details: tradeDetails,
+                gst_registered: tradeDetails.gstRegistered === true,
+              },
+            })
           }
           case 'attach_invoice_pdf': {
             const { xero_bill_id: attachBillId, pdf_base64 } = body
@@ -49043,23 +49066,77 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 }
 
 // ── my_trade_invoices: invoice history for a trade ──
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at'
+
+// presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
+// does not reconcile. One such row is live; it used to 500 the whole list.
+// Degrade that row to "figures unavailable" and keep the rest.
+function presentTradeInvoiceSafe(inv: any): any {
+  try {
+    return presentTradeInvoice(inv)
+  } catch (error) {
+    const code = (error as any)?.code || (error as any)?.message || 'MONEY_SPLIT_INVALID'
+    console.warn('[ops-api] trade invoice ' + inv?.id + ' figures unavailable: ' + code)
+    return {
+      ...inv,
+      gross_earned: null, super_amount: null, net_pay: null, gst: null,
+      trade_payable: null,
+      figures_error: String(code),
+    }
+  }
+}
+
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select('id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, status, created_at')
+    .select(MY_TRADE_INVOICE_COLUMNS)
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
-    .limit(20)
+    .limit(100)
 
   if (error) throw error
   const invoices = (data || []).map((inv: any) => ({
-    ...presentTradeInvoice(inv),
+    ...presentTradeInvoiceSafe(inv),
     week_ending: inv.week_end,
     total: inv.total_inc ?? 0,
     subtotal: inv.subtotal_ex ?? 0,
+    paid: inv.status === 'paid' || String(inv.xero_bill_status || '').toUpperCase() === 'PAID',
   }))
   return { invoices }
 }
+
+// ── my_money (2026-09-08, Marnin): earned, paid, owed, super and GST for the
+// signed-in trade, by month and financial year, plus every invoice with its
+// Xero paid state. Read-only. GST registration and ABN ride along so the app
+// can show them next to the money and default new invoices from the server,
+// never from browser storage.
+async function myMoney(client: any, tradeUser: TradeAuthContext, params: URLSearchParams) {
+  const today = params.get('today') && /^\d{4}-\d{2}-\d{2}$/.test(params.get('today') || '')
+    ? String(params.get('today')) : getAWSTDate()
+  const monthsBack = Math.max(0, Math.min(36, parseInt(params.get('months') || '12', 10) || 12))
+  const [{ data: userRow, error: userErr }, { data: rows, error: invErr }] = await Promise.all([
+    client.from('users').select('id, name, abn, invoice_type, trade_details, xero_contact_id').eq('id', tradeUser.id).maybeSingle(),
+    client.from('trade_invoices').select(MY_TRADE_INVOICE_COLUMNS).eq('user_id', tradeUser.id)
+      .order('week_end', { ascending: false, nullsFirst: false }).limit(400),
+  ])
+  if (userErr) throw userErr
+  if (invErr) throw invErr
+  const money = (rows || []).map((inv: any) => tradeMoneyRow(presentTradeInvoiceSafe(inv)))
+  const summary = summariseTradeMoney(money, today, monthsBack)
+  const details = (userRow?.trade_details && typeof userRow.trade_details === 'object') ? userRow.trade_details : {}
+  return {
+    ...summary,
+    profile: {
+      name: userRow?.name || tradeUser.email,
+      abn: userRow?.abn || null,
+      gst_registered: details.gstRegistered === true,
+      invoice_type: userRow?.invoice_type || 'hourly',
+      xero_linked: !!userRow?.xero_contact_id,
+    },
+  }
+}
+export const _myMoneyForTest = myMoney
+export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 
 // ── set_trade_rate: trade or ops sets hourly rate ──
 async function setTradeRate(client: any, authUserId: string | null, body: any) {
