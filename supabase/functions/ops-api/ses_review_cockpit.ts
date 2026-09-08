@@ -573,13 +573,36 @@ function missingRouteRefusals(
   return refusals;
 }
 
+/**
+ * Mint-time money holds that are already satisfied once this docket binds an
+ * AUTHORISED Xero invoice. `invoice_duplicate_live` / `pricing_evidence_missing`
+ * exist to stop a SECOND mint. The recovery they print is "use the bound live
+ * invoice". After that invoice is bound, leaving them on SEND IT is a loop:
+ * Hillman SWMS-26585 (INV-0702 AUTHORISED) could not send because those two
+ * leftover prepare-time blockers kept `verdict.clean` false.
+ */
+const SETTLED_BOUND_INVOICE_BLOCKER_CODES = new Set([
+  "invoice_duplicate_live",
+  "invoice_duplicate_ambiguous",
+  "pricing_evidence_missing",
+]);
+
+function readinessBlockersForReview(input: SesCleanInput): SesRefusal[] {
+  if (!input.invoice_already_bound) return input.readiness_blockers;
+  return input.readiness_blockers.filter((blocker) =>
+    !SETTLED_BOUND_INVOICE_BLOCKER_CODES.has(blocker.code)
+  );
+}
+
 export function evaluateSesMechanicalClean(
   input: SesCleanInput,
 ): SesMechanicalCleanResult {
+  const readinessBlockers = readinessBlockersForReview(input);
   const pricingClean = input.pricing_disposition === "priced_from_canon" ||
     input.pricing_disposition === "no_additional_charge" ||
     (input.pricing_disposition === "priced_with_line_override" &&
-      input.line_overrides_audited);
+      input.line_overrides_audited) ||
+    input.invoice_already_bound;
   const moneyBlocked = input.money_blocker_codes.some((code) =>
     [
       "money_review_required",
@@ -615,7 +638,7 @@ export function evaluateSesMechanicalClean(
     // blocker was gone and a live Xero DRAFT was already bound.
     check(
       "C2",
-      input.readiness_blockers.length === 0,
+      readinessBlockers.length === 0,
       "No named readiness blockers remain on the current revision.",
     ),
     check(
@@ -669,7 +692,7 @@ export function evaluateSesMechanicalClean(
   ];
 
   const blockers: SesRefusal[] = [
-    ...input.readiness_blockers,
+    ...readinessBlockers,
     ...routeRefusals,
   ];
   if (!input.trade_report_submitted) {

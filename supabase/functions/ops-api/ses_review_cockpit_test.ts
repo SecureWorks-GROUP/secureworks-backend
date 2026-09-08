@@ -110,6 +110,69 @@ Deno.test(
 );
 
 Deno.test(
+  "bound AUTHORISED invoice settles leftover mint-time duplicate and pricing holds",
+  () => {
+    const result = evaluateSesMechanicalClean(cleanInput({
+      invoice_already_bound: true,
+      duplicate_allows_create: false,
+      pricing_disposition: "blocked_duplicate_live",
+      readiness_blockers: [
+        {
+          state: "refused",
+          code: "invoice_duplicate_live",
+          fact: "A live non-void Xero invoice already covers this released work.",
+          recovery_action:
+            "Use the bound live invoice or record an explicit post-release compensation disposition.",
+        },
+        {
+          state: "refused",
+          code: "pricing_evidence_missing",
+          fact: "The current evidence does not prove the invoice price.",
+          recovery_action:
+            "Record the evidenced hours, materials, storeys, and approved rate before approving the invoice.",
+        },
+      ],
+      money_blocker_codes: [
+        "invoice_duplicate_live",
+        "pricing_evidence_missing",
+      ],
+    }));
+    assertEquals(result.checks.find((item) => item.id === "C2")?.passed, true);
+    assertEquals(result.checks.find((item) => item.id === "C3")?.passed, true);
+    assertEquals(result.blockers.map((blocker) => blocker.code), []);
+    assert(result.clean);
+  },
+);
+
+Deno.test(
+  "unbound mint-time duplicate and pricing holds still keep SEND dark",
+  () => {
+    const result = evaluateSesMechanicalClean(cleanInput({
+      invoice_already_bound: false,
+      duplicate_allows_create: false,
+      pricing_disposition: "blocked_duplicate_live",
+      readiness_blockers: [
+        {
+          state: "refused",
+          code: "invoice_duplicate_live",
+          fact: "A live non-void Xero invoice already covers this released work.",
+          recovery_action:
+            "Use the bound live invoice or record an explicit post-release compensation disposition.",
+        },
+      ],
+      money_blocker_codes: ["invoice_duplicate_live"],
+    }));
+    assertEquals(result.checks.find((item) => item.id === "C2")?.passed, false);
+    assertEquals(result.checks.find((item) => item.id === "C3")?.passed, false);
+    assertEquals(result.clean, false);
+    assertEquals(
+      result.blockers.map((blocker) => blocker.code),
+      ["invoice_duplicate_live"],
+    );
+  },
+);
+
+Deno.test(
   "missing invoice PDF is a caveat, not a route blocker, when support is present",
   () => {
     const input = cleanInput({
