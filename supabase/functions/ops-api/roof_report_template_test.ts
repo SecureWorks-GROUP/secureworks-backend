@@ -227,6 +227,10 @@ Deno.test("sanitiseRoofPhotosMeta: keeps url+label+contentType, strips base64 by
     20,
   );
   assertEquals(many.length, 20);
+  // Default cap is every photo on a visit, not a handful (137 on Hugo's MLB job).
+  const all = sanitiseRoofPhotosMeta(Array.from({ length: 150 }, (_, i) => ({ url: `u${i}`, thumbUrl: `t${i}` })));
+  assertEquals(all.length, 150);
+  assertEquals(all[0].thumbUrl, "t0");
 });
 
 Deno.test("buildRoofReportJob: maps fields + computes fee from storey; draft with no storey leaves fee undefined", () => {

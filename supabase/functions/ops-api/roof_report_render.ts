@@ -26,6 +26,8 @@ export interface RoofReportPhoto {
   bytesBase64?: string;
   contentType?: string;
   url?: string;
+  // Small copy for the evidence grid; the full photo stays on the job.
+  thumbUrl?: string;
   label?: string;
 }
 
@@ -46,9 +48,11 @@ export interface RoofReportJob {
   roof_pitch?: string;
   roof_profile_correct?: boolean | string;
   gutters_serviceable?: boolean | string;
+  gutters_notes?: string;
   roof_condition?: string;
   services_penetrations?: string;
   storm_openings?: boolean | string;
+  storm_openings_notes?: string;
   water_leak?: boolean | string;
   leak_cause?: string;
   overall_findings?: string;
@@ -152,6 +156,7 @@ export function roofReportHashInput(job: RoofReportJob): string {
     len: (p.bytesBase64 || "").length,
     ct: p.contentType || "",
     url: p.url || "",
+    thumb: p.thumbUrl || "",
     label: p.label || "",
   }));
   return JSON.stringify({
@@ -220,8 +225,9 @@ const PAGE_W = 210;
 const PAGE_H = 297;
 const MARGIN = 14;
 const CONTENT_W = PAGE_W - 2 * MARGIN;
-const DEFAULT_REPORT_PHOTO_LIMIT = 12;
-const MAX_REPORT_PHOTO_LIMIT = 20;
+// 2026-09-08: all photos on the visit go in (Marnin). Six thumbnails per page.
+const DEFAULT_REPORT_PHOTO_LIMIT = 200;
+const MAX_REPORT_PHOTO_LIMIT = 200;
 
 const REPORT_TITLE = "Roof Inspection Report";
 
@@ -257,9 +263,11 @@ async function resolvePhotoBytes(
   p: RoofReportPhoto,
 ): Promise<RoofReportPhoto | null> {
   if (p?.bytesBase64) return p;
-  if (!p?.url) return null;
+  const src = p?.thumbUrl || p?.url;
+  if (!src) return null;
   try {
-    const resp = await fetch(p.url);
+    let resp = await fetch(src);
+    if (!resp.ok && p?.thumbUrl && p?.url && src !== p.url) resp = await fetch(p.url);
     if (!resp.ok) return null;
     const buf = new Uint8Array(await resp.arrayBuffer());
     let bin = "";
@@ -355,11 +363,19 @@ export async function renderRoofReportPdf(
   // KV table renderer, reused for the header block and property details.
   const kvTable = (rowsIn: Array<[string, string]>): void => {
     for (const [k, v] of rowsIn) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7.5);
+      // 2026-09-08: long labels ("Gutters/valleys/downpipes serviceable",
+      // "Storm-created openings in roof") ran into the value column. Wrap the
+      // label inside its own 40mm column and size the row to the taller side.
+      const labelLines: string[] = doc.splitTextToSize(k.toUpperCase(), 40);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.4);
       const valueLines: string[] = doc.splitTextToSize(
         sanitiseText(v) || "-",
         CONTENT_W - 52,
       );
-      const rowH = Math.max(8.5, 5 + valueLines.length * 4.1);
+      const rowH = Math.max(8.5, 5 + Math.max(labelLines.length, valueLines.length) * 4.1);
       ensureSpace(rowH);
       doc.setFillColor(...LIGHT);
       doc.setDrawColor(...RULE);
@@ -368,8 +384,9 @@ export async function renderRoofReportPdf(
       doc.setTextColor(...MID);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(7.5);
-      doc.text(k.toUpperCase(), MARGIN + 4, y + 5.2);
+      doc.text(labelLines, MARGIN + 4, y + 5.2);
       doc.setTextColor(...DARK);
+      doc.setFont("helvetica", "normal");
       doc.setFontSize(8.4);
       doc.text(valueLines, MARGIN + 46, y + 5.2);
       y += rowH;
@@ -410,6 +427,19 @@ export async function renderRoofReportPdf(
     return y;
   };
 
+  // A bold lead-in followed by the trade's own words, verbatim.
+  const labelledPara = (label: string, text: unknown): number => {
+    const clean = sanitiseText(String(text ?? "")).trim();
+    if (!clean) return y;
+    ensureSpace(9);
+    doc.setTextColor(...DARK);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.6);
+    doc.text(label, MARGIN, y);
+    y += 4.6;
+    return para(clean);
+  };
+
   // Property Details as a KV grid.
   y = section("Property Details", 40);
   kvTable([
@@ -423,6 +453,7 @@ export async function renderRoofReportPdf(
     ["Services / penetrations", String(job.services_penetrations || "")],
   ]);
   y += 4;
+  y = labelledPara("Gutters, valleys and downpipes", job.gutters_notes);
 
   // Roof Findings: the Yes/No block + leak cause + narrative.
   y = section("Roof Findings", 20);
@@ -432,7 +463,8 @@ export async function renderRoofReportPdf(
     ["Cause of water leak", String(job.leak_cause || "")],
   ]);
   y += 2;
-  y = para(job.overall_findings || "");
+  y = labelledPara("Storm-created openings", job.storm_openings_notes);
+  y = labelledPara("Roof condition and findings", job.overall_findings || "");
 
   // Maintenance.
   y = section("Maintenance", 10);
@@ -479,26 +511,29 @@ export async function renderRoofReportPdf(
     );
     y += 5;
   } else {
-    const rows = 2;
-    const gap = 5;
-    const cellW = CONTENT_W;
-    const cellH = 100;
-    const gridH = rows * cellH + gap;
+    // 2026-09-08: six per page (2 x 3) so a 137-photo visit is 23 pages of
+    // thumbnails, not 69 pages of full-size images.
+    const cols = 2;
+    const rows = 3;
+    const gap = 4;
+    const cellW = (CONTENT_W - gap) / cols;
+    const cellH = 62;
+    const perPage = cols * rows;
+    const gridH = rows * cellH + (rows - 1) * gap;
     let idx = 0;
     while (idx < resolved.length) {
-      if (idx === 0) {
-        y = section("Photo Evidence", gridH + 4);
-      } else {
-        y = newPage();
-        y = section("Photo Evidence", gridH + 4);
-      }
-      ensureSpace(gridH + 4);
+      // section() breaks the page itself when the grid will not fit; calling
+      // newPage() first as well produced a blank page between photo pages.
+      y = section(
+        idx === 0 ? `Photo Evidence (${resolved.length})` : `Photo Evidence (${resolved.length}), continued`,
+        gridH + 4,
+      );
       const gridTop = y;
-      for (let slot = 0; slot < rows && idx < resolved.length; slot++) {
+      for (let slot = 0; slot < perPage && idx < resolved.length; slot++) {
         const p = resolved[idx];
         idx++;
-        const cellX = MARGIN;
-        const cellY = gridTop + slot * (cellH + gap);
+        const cellX = MARGIN + (slot % cols) * (cellW + gap);
+        const cellY = gridTop + Math.floor(slot / cols) * (cellH + gap);
         const dataUrl = photoDataUrl(p);
         doc.setDrawColor(...RULE);
         doc.setFillColor(255, 255, 255);

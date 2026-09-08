@@ -973,6 +973,7 @@ import {
   projectRoofReportTemplate,
   roofReportPrice,
   normaliseStorey,
+  ROOF_REPORT_PHOTO_CAP,
   validateRoofReportForSubmit,
   sanitiseRoofReportFields,
   sanitiseRoofPhotosMeta,
@@ -44132,8 +44133,8 @@ async function resolveRoofReportPhotos(
   // job_media has no cycle_number column. Cycle-scope uses
   // attendance_cycle_id + cycle_attribution (filterMediaForCurrentCycle).
   const { data: media, error: mediaErr } = await client.from('job_media')
-    .select('storage_url, label, type, phase, attendance_cycle_id, cycle_attribution')
-    .eq('job_id', jobId).eq('type', 'photo').limit(20)
+    .select('storage_url, thumbnail_url, label, type, phase, attendance_cycle_id, cycle_attribution, created_at')
+    .eq('job_id', jobId).eq('type', 'photo').order('created_at', { ascending: true }).limit(ROOF_REPORT_PHOTO_CAP)
   if (detailErr || mediaErr) {
     throw new ApiError(
       `roof report photo cycle read failed: ${detailErr?.message || mediaErr?.message || 'unknown error'}`,
@@ -44151,9 +44152,12 @@ async function resolveRoofReportPhotos(
   const currentUrls = new Set(currentMedia.map((m: any) => String(m?.storage_url || '')).filter(Boolean))
   const retainCurrentPhoto = (p: any) =>
     p?.bytesBase64 || !hasReattendBoundary(detail) || currentUrls.has(String(p?.url || ''))
+  const thumbByUrl = new Map<string, string>()
+  for (const m of currentMedia) if (m?.storage_url && m?.thumbnail_url) thumbByUrl.set(String(m.storage_url), String(m.thumbnail_url))
   if (Array.isArray(bodyPhotos) && bodyPhotos.length) {
     return (bodyPhotos as any[]).map((p) => ({
       url: typeof p?.url === 'string' ? p.url : undefined,
+      thumbUrl: typeof p?.thumbUrl === 'string' ? p.thumbUrl : (typeof p?.url === 'string' ? thumbByUrl.get(p.url) : undefined),
       bytesBase64: typeof p?.bytesBase64 === 'string' ? p.bytesBase64 : undefined,
       contentType: typeof p?.contentType === 'string' ? p.contentType : undefined,
       label: typeof p?.label === 'string' ? p.label : undefined,
@@ -44162,13 +44166,14 @@ async function resolveRoofReportPhotos(
   if (Array.isArray(draftPhotos) && draftPhotos.length) {
     return (draftPhotos as any[]).map((p) => ({
       url: typeof p?.url === 'string' ? p.url : undefined,
+      thumbUrl: typeof p?.thumbUrl === 'string' ? p.thumbUrl : (typeof p?.url === 'string' ? thumbByUrl.get(p.url) : undefined),
       contentType: typeof p?.contentType === 'string' ? p.contentType : undefined,
       label: typeof p?.label === 'string' ? p.label : undefined,
     })).filter((p) => p.url && retainCurrentPhoto(p))
   }
   return currentMedia
     .filter((m) => m?.storage_url)
-    .map((m) => ({ url: m.storage_url as string, label: (m.label as string) || undefined }))
+    .map((m) => ({ url: m.storage_url as string, thumbUrl: (m.thumbnail_url as string) || undefined, label: (m.label as string) || undefined }))
 }
 
 // Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
@@ -44437,6 +44442,31 @@ async function submitRoofReport(client: any, body: any, deps: RoofRenderDeps = {
     const submittedCycle = existing.submitted_cycle == null ? null : Number(existing.submitted_cycle)
     const reopenedNewerCycle = submittedCycle !== null && currentCycle > submittedCycle
     staleSubmitted = reopenedNewerCycle
+    // 2026-09-08 (Marnin): "Rebuild PDF" from the app. Re-render the same
+    // cycle's report with the photos now on the job, replace the document
+    // pointer, never touch the board again.
+    if (!reopenedNewerCycle && body.force_render === true) {
+      const draftFieldsR = (existing.fields_json && typeof existing.fields_json === 'object') ? existing.fields_json : {}
+      const reqFieldsR = (body.fields && typeof body.fields === 'object') ? body.fields : {}
+      const mergedR = sanitiseRoofReportFields({ ...draftFieldsR, ...reqFieldsR })
+      const draftPhotosR = Array.isArray((draftFieldsR as any).photos) ? (draftFieldsR as any).photos : []
+      const photosR = await resolveRoofReportPhotos(client, jobId, body.photos ?? (reqFieldsR as any).photos, draftPhotosR)
+      const metaR = await loadRoofReportJobMeta(client, jobId)
+      const attachedR = await renderAndAttach(client, jobId, omitRoofReportFee(buildRoofReportJob(mergedR, metaR, photosR) as any), body.operator || body.operator_email || 'roof report (trade rebuild)')
+      const nowR = new Date().toISOString()
+      await client.from('makesafe_roof_report_drafts')
+        .update({ fields_json: { ...mergedR, photos: sanitiseRoofPhotosMeta(photosR) }, report_doc_id: roofUuidOrNull(attachedR.document_id), last_render_hash: attachedR.render_hash, updated_at: nowR })
+        .eq('id', existing.id)
+      try {
+        await client.from('job_events').insert({ job_id: jobId, user_id: roofUuidOrNull(body.userId || body.user_id), event_type: 'roof_report_rerendered', detail_json: { draft_id: existing.id, report_doc_id: attachedR.document_id, photo_count: photosR.length, render_hash: attachedR.render_hash } })
+      } catch (_e) { /* non-blocking */ }
+      const rerenderOut: { price?: unknown; [k: string]: unknown } = {
+        ok: true, already_submitted: true, rerendered: true, status: 'submitted', draft_id: existing.id,
+        report_doc_id: attachedR.document_id, file_name: attachedR.file_name, render_hash: attachedR.render_hash, photo_count: photosR.length,
+        board_sync: { ok: true, skipped: true, reason: 'rerender_only' },
+      }
+      return presentRoofReportWrite(rerenderOut, opts.quoteVisible === true)
+    }
     if (!reopenedNewerCycle) {
       const boardSubstatus = normalizeMakesafeSubstatus(detail.substatus)
       const boardAdvanced = !!detail.report_received_at ||
