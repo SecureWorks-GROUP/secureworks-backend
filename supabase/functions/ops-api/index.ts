@@ -44122,6 +44122,14 @@ async function loadRoofReportJobMeta(client: any, jobId: string) {
 // an immediate render), then the persisted draft photo meta (URL + label), then a
 // fall back to the job's completion/scope photos in job_media (labels included).
 // The renderer fetches any URL bytes itself at render time.
+// Public Supabase Storage object -> resized render URL (width 900, quality 60).
+export function roofReportPhotoTransformUrl(url: string, width = 900, quality = 60): string | null {
+  const u = String(url || '')
+  if (!/\/storage\/v1\/object\/public\//.test(u)) return null
+  const base = u.split('?')[0].replace('/storage/v1/object/public/', '/storage/v1/render/image/public/')
+  return base + '?width=' + width + '&quality=' + quality
+}
+
 async function resolveRoofReportPhotos(
   client: any,
   jobId: string,
@@ -44152,8 +44160,16 @@ async function resolveRoofReportPhotos(
   const currentUrls = new Set(currentMedia.map((m: any) => String(m?.storage_url || '')).filter(Boolean))
   const retainCurrentPhoto = (p: any) =>
     p?.bytesBase64 || !hasReattendBoundary(detail) || currentUrls.has(String(p?.url || ''))
+  // Most job photos have no thumbnail row. Supabase Storage renders a resized
+  // copy on the fly for public objects, so a 137-photo report is ~5MB of
+  // 900px JPEGs instead of ~40MB of originals. Falls back to the original if
+  // the transform is unavailable (renderer retries the full URL).
   const thumbByUrl = new Map<string, string>()
-  for (const m of currentMedia) if (m?.storage_url && m?.thumbnail_url) thumbByUrl.set(String(m.storage_url), String(m.thumbnail_url))
+  for (const m of currentMedia) {
+    if (!m?.storage_url) continue
+    const t = m?.thumbnail_url ? String(m.thumbnail_url) : roofReportPhotoTransformUrl(String(m.storage_url))
+    if (t) thumbByUrl.set(String(m.storage_url), t)
+  }
   if (Array.isArray(bodyPhotos) && bodyPhotos.length) {
     return (bodyPhotos as any[]).map((p) => ({
       url: typeof p?.url === 'string' ? p.url : undefined,
