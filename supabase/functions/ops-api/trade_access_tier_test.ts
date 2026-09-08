@@ -31,6 +31,8 @@ import {
   _tradeJobDetailForTest,
   _tradeQuoteExtractForTest,
   _tradeCompleteMyJobForTest,
+  _tradeLogMyJobHoursForTest,
+  _pickHoursAssignmentForTest,
   _tradeWaiveNeighbourSignoffForTest,
   _tradeLabourBudgetForTest,
   _tradeScopeSummary,
@@ -141,15 +143,22 @@ function makeClient(tables: Tables, recorded: any[] = []) {
         return chain;
       },
       update: (row: any) => {
-        const matched = (tables[table] || []).filter((r) => preds.every((p) => p(r)));
-        for (const r of matched) Object.assign(r, row);
-        const updated = { data: matched[0] ?? null, error: null };
+        // PostgREST applies every filter regardless of call order, so the
+        // match is resolved lazily at the terminal (after any trailing .eq()).
+        let applied: any = null;
+        const apply = () => {
+          if (applied) return applied;
+          const matched = (tables[table] || []).filter((r) => preds.every((p) => p(r)));
+          for (const r of matched) Object.assign(r, row);
+          applied = { data: matched[0] ?? null, error: null };
+          return applied;
+        };
         const chain: any = {
           select: () => chain,
-          eq: api.eq,
-          single: () => Promise.resolve(updated),
-          maybeSingle: () => Promise.resolve(updated),
-          then: (res: any, rej: any) => Promise.resolve(updated).then(res, rej),
+          eq: (c: string, v: any) => { api.eq(c, v); return chain; },
+          single: () => Promise.resolve(apply()),
+          maybeSingle: () => Promise.resolve(apply()),
+          then: (res: any, rej: any) => Promise.resolve(apply()).then(res, rej),
         };
         return chain;
       },
@@ -2708,4 +2717,89 @@ Deno.test("patio job: completion_evidence does not apply", async () => {
   const p = await _tradeJobDetailForTest(makeClient(t), new URLSearchParams({ jobId: JOB_PATIO }), viewer(CREW, "crew") as any, false);
   assertEquals(p.completion_evidence.applies, false);
   assertEquals(p.completion_evidence.satisfied, true);
+});
+
+// ── log_my_job_hours: one tap puts the hours on the trade's own week ─────────
+Deno.test("log_my_job_hours: writes hours onto the trade's own assignment, completes it, dates it, audits it", async () => {
+  const t = woodvaleSeed();
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  const lead = viewer(LEAD, "lead_installer");
+  const res = await _tradeLogMyJobHoursForTest(makeClient(t), { jobId: JOB_FENCE, hours: "2", source: "roof_report" }, lead as any, access);
+  assertEquals(res.ok, true);
+  assertEquals(res.hours, 2);
+  const a = t.job_assignments.find((r: any) => r.id === "a-lead");
+  assertEquals(a.hours_worked, 2);
+  assertEquals(a.status, "complete");
+  assert(a.completed_at, "completed_at stamped");
+  assert(/^\d{4}-\d{2}-\d{2}$/.test(a.scheduled_date), "undated assignment is dated today so my_hours lists it");
+  assertEquals(res.assignment.id, "a-lead");
+  assert(/^\d{4}-\d{2}-\d{2}$/.test(res.week_ending));
+  assertEquals(new Date(res.week_ending + "T00:00:00Z").getUTCDay(), 0, "week ends on a Sunday");
+  const ev = t.job_events.filter((e: any) => e.event_type === "trade_hours_logged");
+  assertEquals(ev.length, 1);
+  assertEquals(ev[0].detail_json.hours, 2);
+  assertEquals(ev[0].detail_json.source, "roof_report");
+  assertEquals(ev[0].detail_json.previous_hours, null);
+  // Someone else's assignment on the same job is untouched.
+  assertEquals(t.job_assignments.find((r: any) => r.id === "a-crew").hours_worked, undefined);
+});
+
+Deno.test("log_my_job_hours: a re-tap replaces the hours (never doubles) and rounds to the quarter hour", async () => {
+  const t = woodvaleSeed();
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  const lead = viewer(LEAD, "lead_installer");
+  await _tradeLogMyJobHoursForTest(makeClient(t), { jobId: JOB_FENCE, hours: 2 }, lead as any, access);
+  const res = await _tradeLogMyJobHoursForTest(makeClient(t), { jobId: JOB_FENCE, hours: 3.1 }, lead as any, access);
+  assertEquals(res.hours, 3);
+  assertEquals(t.job_assignments.find((r: any) => r.id === "a-lead").hours_worked, 3);
+  const ev = t.job_events.filter((e: any) => e.event_type === "trade_hours_logged");
+  assertEquals(ev[1].detail_json.previous_hours, 2);
+});
+
+Deno.test("log_my_job_hours: refuses bad hours and an assignment already on an invoice", async () => {
+  const t = woodvaleSeed();
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  const lead = viewer(LEAD, "lead_installer");
+  for (const bad of [0, -1, 25, "lots", null]) {
+    await assertRejects(() => _tradeLogMyJobHoursForTest(makeClient(t), { jobId: JOB_FENCE, hours: bad }, lead as any, access), Error, "hours");
+  }
+  t.job_assignments.find((r: any) => r.id === "a-lead").invoiced_in = "INV-0042";
+  await assertRejects(
+    () => _tradeLogMyJobHoursForTest(makeClient(t), { jobId: JOB_FENCE, hours: 2 }, lead as any, access),
+    Error,
+    "already on invoice INV-0042",
+  );
+  assertEquals(t.job_assignments.find((r: any) => r.id === "a-lead").hours_worked, undefined);
+});
+
+Deno.test("log_my_job_hours: a trade with no assignment on a non make-safe job is refused (office allocates)", async () => {
+  const t = woodvaleSeed();
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  // The crew member is on JOB_FENCE too; move them off it so they have no assignment.
+  t.job_assignments = t.job_assignments.filter((r: any) => r.id !== "a-crew");
+  await assertRejects(
+    () => _tradeLogMyJobHoursForTest(makeClient(t), { jobId: JOB_FENCE, hours: 2 }, viewer(CREW, "lead_installer") as any, access),
+    Error,
+  );
+  assertEquals(t.job_assignments.filter((r: any) => r.user_id === CREW && r.job_id === JOB_FENCE).length, 0);
+});
+
+Deno.test("pickHoursAssignment: prefers in_progress, then the latest scheduled/confirmed, then the latest complete; never observers", () => {
+  const pick = _pickHoursAssignmentForTest;
+  assertEquals(pick([]), null);
+  assertEquals(pick([{ id: "x", status: "cancelled" }]), null);
+  assertEquals(pick([{ id: "obs", status: "scheduled", role: "makesafe_open" }]), null);
+  assertEquals(pick([
+    { id: "c1", status: "complete", scheduled_date: "2026-09-01" },
+    { id: "c2", status: "complete", scheduled_date: "2026-09-05" },
+  ]).id, "c2");
+  assertEquals(pick([
+    { id: "c2", status: "complete", scheduled_date: "2026-09-05" },
+    { id: "s1", status: "scheduled", scheduled_date: "2026-09-02" },
+    { id: "s2", status: "confirmed", scheduled_date: "2026-09-04" },
+  ]).id, "s2");
+  assertEquals(pick([
+    { id: "s2", status: "confirmed", scheduled_date: "2026-09-04" },
+    { id: "ip", status: "in_progress", scheduled_date: "2026-09-01" },
+  ]).id, "ip");
 });
