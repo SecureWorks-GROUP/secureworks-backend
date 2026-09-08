@@ -30,6 +30,8 @@ import {
   _tradeDocumentsForAllocatedTrade,
   _tradeJobDetailForTest,
   _tradeQuoteExtractForTest,
+  _tradeCompleteMyJobForTest,
+  _tradeWaiveNeighbourSignoffForTest,
   _tradeLabourBudgetForTest,
   _tradeScopeSummary,
   ApiError,
@@ -635,7 +637,13 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals(p.quote_packs.length, 1);
   assertEquals(p.quote_packs[0].quote_number, "Q-1");
   assertEquals(p.quote_packs[0].status, "sent");
-  assertEquals(p.quote_packs[0].source, "live_fallback");
+  // Legacy sent quote on an ACTIVE job (status scheduled): frozen on this
+  // first trade read (Captain 2026-09-08), so the extract exists from now on.
+  assertEquals(p.quote_packs[0].source, "frozen");
+  assert(typeof p.quote_packs[0].frozen_late_at === "string");
+  assert(Array.isArray(vis.trade_pack_json?.items), "late freeze wrote trade_pack_json on the sent doc");
+  assertEquals(vis.trade_pack_json.source, "frozen");
+  assertEquals(vis.trade_pack_json.frozen_late_at, p.quote_packs[0].frozen_late_at);
   const install = (p.quote_packs[0].items || []).find((i: any) => i.kind === "install_m");
   assertEquals(install?.quantity, 10);
   assertEquals(install?.unit_price, undefined, "allocated trades never see installer or sell rates");
@@ -644,7 +652,8 @@ Deno.test("trade_job_detail: allocated trade sees sent quote packs by number, ne
   assertEquals("line_total" in (install || {}), false);
   assertEquals(p.documents.map((d: any) => d.id).sort(), ["d-supplier-quote"]);
   assertEquals(p.workOrderDocuments, []);
-  assertEquals(p.quote_extracts, [], "sent quote without a frozen pack has no extract");
+  assertEquals(p.quote_extracts.length, 1, "late-frozen sent quote mints the extract pointer in the same read");
+  assertEquals(p.quote_extracts[0].quote_number, "Q-1");
   assertAllocatedTradeQuotePackProjection(p.quote_packs[0]);
   assertEquals("pricing_json" in (p.job || {}), false, "live pricing_json must not ride the trade payload");
   assertEquals(JSON.stringify(p.documents).includes("quote.pdf"), false);
@@ -2526,4 +2535,177 @@ Deno.test("my_jobs personal recency is window overlap: an ongoing span, a fresh 
     _myJobsPersonalRecencyFilter("2026-07-18"),
     "scheduled_end.gte.2026-07-18,and(scheduled_end.is.null,scheduled_date.gte.2026-07-18),scheduled_date.is.null",
   );
+});
+
+// ── Quote lines (the quote's own rows) + late freeze policy ──────────────────
+// The client PDF prints pricing_json.runs[].items; the trade must see those
+// rows minus money, plus the custom / removal line_items and the quote's
+// writing (Captain 2026-09-08, SWF-261314 Woodvale).
+const WOODVALE_PRICING = {
+  job_description: "7m Colorbond Fencing — 1800mm Domain — Woodvale",
+  totalExGST: 2065.25,
+  totalIncGST: 2271.78,
+  runs: [{
+    run_label: "RHS",
+    items: [
+      { description: "Domain Ridgeside fencing — 7.1m", quantity: 7.1, unit: "m", unit_price_ex: 125, line_total_ex: 887.5, allocation: "client_only" },
+      { description: "Retaining plinths (150mm)", quantity: 3, unit: "ea", unit_price_ex: 80, line_total_ex: 240 },
+      { description: "Delivery (pro-rated)", quantity: 1, unit: "lot", unit_price_ex: 200, line_total_ex: 200 },
+    ],
+    totals: { subtotal_ex: 1327.5 },
+  }],
+  line_items: [
+    { description: "3× Ridgeside (7.1m total)", quantity: 7.1, unit: "m", category: "fencing", sell_price: 125, total_sell: 887.5 },
+    { description: "Retaining plinths (150mm COLORBOND)", quantity: 3, unit: "each", category: "materials", cost_price: 41, sell_price: 80 },
+    { description: "Remove Colorbond fence", quantity: 5, unit: "m", category: "removal", total_sell: 150 },
+    { description: "Jack hammering to make room for footings ", quantity: 1, unit: "job", category: "custom", sell_price: 200 },
+    { description: "Removal of roots and vegetation", quantity: 1, unit: "job", category: "custom", sell_price: 200 },
+    { description: "Delivery", quantity: 1, unit: "lot", category: "delivery", sell_price: 200 },
+  ],
+  deposit: { percent: 50, total_deposit_inc_gst: 1032.63 },
+};
+
+function woodvaleSeed(status = "processing"): Tables {
+  const t = seed();
+  const job = t.jobs.find((j: any) => j.id === JOB_FENCE);
+  job.status = status;
+  job.pricing_json = structuredClone(WOODVALE_PRICING);
+  job.scope_json.job.siteNotes = "Deep ocean rails and plinths";
+  job.scope_json.job.quote = {
+    customLineItems: [{ qty: 1, desc: "Jack hammering to make room for footings ", unit: "job", price: 200 }],
+    customDescription: "Our assessment is that a plinth is required to stop rust occurring and reducing the life span of the colourbond fence and an extra panel allowed as we identified 3 panels that no longer had Structural integrity - damaged due to storms and wind",
+  };
+  // A note that carries money is dropped WHOLE for the trade (fail closed),
+  // never half-redacted.
+  job.scope_json.job.removal = { notes: "Skip bin on the verge. Deposit $1,032.63 paid." };
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.sent_at = "2026-08-26T06:25:18Z";
+  vis.sent_to_client = true;
+  return t;
+}
+
+Deno.test("quote lines: the allocated trade sees every quote row and the quote's writing, never a price", async () => {
+  const t = woodvaleSeed();
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  const pack = p.quote_packs[0];
+  const lines = pack.quote_lines.map((l: any) => `${l.description}|${l.quantity}|${l.unit}`);
+  assertEquals(lines, [
+    "Domain Ridgeside fencing — 7.1m|7.1|m",
+    "Retaining plinths (150mm)|3|ea",
+    "Delivery (pro-rated)|1|lot",
+    "Remove Colorbond fence|5|m",
+    "Jack hammering to make room for footings|1|job",
+    "Removal of roots and vegetation|1|job",
+  ], "run rows first, then the custom/removal flat rows; duplicates of run rows dropped");
+  assertEquals(pack.quote_notes[0], "7m Colorbond Fencing — 1800mm Domain — Woodvale");
+  assert(pack.quote_notes.some((n: string) => n.startsWith("Our assessment is that a plinth is required")));
+  assert(pack.quote_notes.includes("Deep ocean rails and plinths"));
+  assertEquals(pack.quote_notes.some((n: string) => /skip bin/i.test(n)), false, "money-bearing note is dropped whole for the trade");
+  const blob = JSON.stringify(p.quote_packs);
+  // "deposit" is allowed ONLY inside the sealed payment_terms phrase.
+  assertEquals(pack.terms.payment_terms, "50% deposit + 50% on completion");
+  for (const needle of ["$", "1,032", "1032", "887", "2065", "2271", "unit_price", "line_total", "sell_price", "cost_price", "total_deposit"]) {
+    assertEquals(blob.includes(needle), false, `quote pack leaks ${needle}`);
+  }
+  for (const line of pack.quote_lines) assertEquals(Object.keys(line).sort(), ["description", "quantity", "unit"]);
+  assertAllocatedTradeQuotePackProjection(pack);
+  assertEquals(quoteLeakProbe(p), []);
+});
+
+Deno.test("quote lines: office sees the same rows and the extract HTML prints them without money", async () => {
+  const t = woodvaleSeed();
+  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  assertEquals(office.quote_packs[0].quote_lines.length, 6);
+  // The late freeze from the office read wrote the pack; the extract now serves.
+  const htmlRes = await _tradeQuoteExtractForTest(
+    makeClient(t),
+    new URLSearchParams({ jobId: JOB_FENCE, format: "html" }),
+    {},
+    viewer(LEAD, "lead_installer"),
+    false,
+  );
+  assertEquals(htmlRes.status, 200);
+  const html = await htmlRes.text();
+  assert(html.includes("Jack hammering to make room for footings"));
+  assert(html.includes("Removal of roots and vegetation"));
+  assert(html.includes("Deep ocean rails and plinths"));
+  assert(html.includes("SecureWorks Group"));
+  assertEquals(html.includes("SecureWorks WA"), false);
+  assertEquals(html.includes("$"), false);
+  assertEquals(html.includes("1,032"), false);
+  assertEquals(html.includes("887"), false);
+});
+
+Deno.test("late freeze: a sent quote on a job still at quoted stays live and unfrozen", async () => {
+  const t = woodvaleSeed("quoted");
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  const p = await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(p.quote_packs[0].source, "live_fallback");
+  assertEquals(vis.trade_pack_json, undefined, "no write while the quote can still change");
+  assertEquals(p.quote_extracts, []);
+});
+
+Deno.test("late freeze: a superseded sent quote is never frozen", async () => {
+  const t = woodvaleSeed();
+  const vis = t.job_documents.find((d: any) => d.id === "d-quote-vis");
+  vis.superseded_at = "2026-08-27T00:00:00Z";
+  await detail(t, viewer(LEAD, "lead_installer"));
+  assertEquals(vis.trade_pack_json, undefined);
+});
+
+// ── Fencing completion evidence on the trade job + complete_my_job gate ──────
+Deno.test("trade_job_detail: fencing job carries completion_evidence; complete_my_job refuses until it is on file", async () => {
+  const t = woodvaleSeed();
+  const lead = viewer(LEAD, "lead_installer");
+  const before = await detail(t, lead);
+  assertEquals(before.completion_evidence.applies, true);
+  assertEquals(before.completion_evidence.satisfied, false);
+  assertEquals(before.completion_evidence.photos_required, 3);
+  assertEquals(before.completion_evidence.signoffs_required, 1, "blank neighbour row still means one affected neighbour");
+
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  await assertRejects(
+    () => _tradeCompleteMyJobForTest(makeClient(t), { jobId: JOB_FENCE }, lead as any, access),
+    Error,
+    "cannot be marked complete yet",
+  );
+  assertEquals(t.jobs.find((j: any) => j.id === JOB_FENCE).status, "processing");
+
+  for (let i = 0; i < 3; i++) t.job_media.push({ id: `c${i}`, job_id: JOB_FENCE, phase: "completion", type: "photo", storage_url: "https://x/c.jpg" });
+  t.job_media.push({ id: "ns1", job_id: JOB_FENCE, phase: "neighbour_signoff", type: "photo", storage_url: "https://x/ns.png", label: "Neighbour sign-off" });
+  const after = await detail(t, lead);
+  assertEquals(after.completion_evidence.satisfied, true);
+  const done = await _tradeCompleteMyJobForTest(makeClient(t), { jobId: JOB_FENCE }, lead as any, access);
+  assertEquals(done.completion_evidence.satisfied, true);
+  assertEquals(t.jobs.find((j: any) => j.id === JOB_FENCE).status, "complete");
+});
+
+Deno.test("waive_neighbour_signoff: a reason is logged on the job and replaces the sign-off requirement", async () => {
+  const t = woodvaleSeed();
+  const lead = viewer(LEAD, "lead_installer");
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  await assertRejects(
+    () => _tradeWaiveNeighbourSignoffForTest(makeClient(t), { jobId: JOB_FENCE, reason: "" }, lead as any, access),
+    Error,
+    "Say why",
+  );
+  const res = await _tradeWaiveNeighbourSignoffForTest(makeClient(t), { jobId: JOB_FENCE, reason: "Front boundary fence, no neighbour" }, lead as any, access);
+  assertEquals(res.ok, true);
+  assertEquals(res.completion_evidence.waived, true);
+  assertEquals(res.completion_evidence.signoffs_required, 0);
+  const ev = t.job_events.find((e: any) => e.event_type === "neighbour_signoff_waived");
+  assertEquals(ev.detail_json.reason, "Front boundary fence, no neighbour");
+  assertEquals(ev.user_id, LEAD);
+  // A stranger cannot waive.
+  await assertRejects(
+    () => _tradeWaiveNeighbourSignoffForTest(makeClient(t), { jobId: JOB_FENCE, reason: "nope" }, viewer(STRANGER, "crew") as any, access),
+    Error,
+  );
+});
+
+Deno.test("patio job: completion_evidence does not apply", async () => {
+  const t = seed();
+  const p = await _tradeJobDetailForTest(makeClient(t), new URLSearchParams({ jobId: JOB_PATIO }), viewer(CREW, "crew") as any, false);
+  assertEquals(p.completion_evidence.applies, false);
+  assertEquals(p.completion_evidence.satisfied, true);
 });

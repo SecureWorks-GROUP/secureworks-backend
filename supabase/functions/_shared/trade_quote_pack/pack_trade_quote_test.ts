@@ -30,6 +30,8 @@ import {
   tradeTextHasMoneyToken,
   TRADE_INSTALLER_RATES,
   HENRY_INSTALLER_RATES,
+  packQuoteLines,
+  packQuoteNotes,
 } from "./pack_trade_quote.ts";
 
 const FENCE_SCOPE = {
@@ -1100,4 +1102,77 @@ Deno.test("R6-003 persistTradePackOnDocuments fails closed when the write is not
   assertEquals(result.wrote, 0);
   assertEquals(result.failed[0]?.document_id, "doc-miss");
   assertEquals(persistTradePackWriteConfirmed(result, 1), false);
+});
+
+Deno.test("packQuoteLines: run rows first, then custom/removal flat rows, no duplicates, no money", () => {
+  const pricing = {
+    runs: [{ run_label: "RHS", items: [
+      { description: "Domain Ridgeside fencing — 7.1m", quantity: 7.1, unit: "m", unit_price_ex: 125, line_total_ex: 887.5 },
+      { description: "Retaining plinths (150mm)", quantity: 3, unit: "ea", line_total_ex: 240 },
+      { description: "Delivery (pro-rated)", quantity: 1, unit: "lot", line_total_ex: 200 },
+    ] }],
+    line_items: [
+      { description: "3× Ridgeside (7.1m total)", quantity: 7.1, unit: "m", category: "fencing", total_sell: 887.5 },
+      { description: "Retaining plinths (150mm COLORBOND)", quantity: 3, unit: "each", category: "materials" },
+      { description: "Remove Colorbond fence", quantity: 5, unit: "m", category: "removal" },
+      { description: "Jack hammering to make room for footings ", quantity: 1, unit: "job", category: "custom", sell_price: 200 },
+      { description: "Delivery", quantity: 1, unit: "lot", category: "delivery" },
+      { description: "Extra post $45 each", quantity: 2, unit: "ea", category: "custom" },
+    ],
+  };
+  const lines = packQuoteLines(pricing);
+  assertEquals(lines.map((l) => l.description), [
+    "Domain Ridgeside fencing — 7.1m",
+    "Retaining plinths (150mm)",
+    "Delivery (pro-rated)",
+    "Remove Colorbond fence",
+    "Jack hammering to make room for footings",
+    "Extra post each",
+  ]);
+  assertEquals(lines[4], { description: "Jack hammering to make room for footings", quantity: 1, unit: "job" });
+  assertEquals(JSON.stringify(lines).includes("$"), false);
+  assertEquals(JSON.stringify(lines).includes("887"), false);
+});
+
+Deno.test("packQuoteLines: no run rows means every flat line item; multi-run keeps only the document run", () => {
+  const flatOnly = packQuoteLines({ line_items: [
+    { description: "Patio 6x4", quantity: 1, unit: "lot" },
+    { description: "Council fee", quantity: 1, unit: "lot", category: "fees" },
+  ] });
+  assertEquals(flatOnly.map((l) => l.description), ["Patio 6x4", "Council fee"]);
+  const twoRuns = {
+    runs: [
+      { run_label: "LHS", items: [{ description: "LHS fence", quantity: 10, unit: "m" }] },
+      { run_label: "RHS", items: [{ description: "RHS fence", quantity: 8, unit: "m" }] },
+    ],
+    line_items: [{ description: "Gate", quantity: 1, unit: "ea", category: "custom", run_label: "LHS" }],
+  };
+  assertEquals(packQuoteLines(twoRuns, "RHS").map((l) => l.description), ["RHS fence"]);
+  assertEquals(packQuoteLines(twoRuns).map((l) => l.description), ["LHS fence", "RHS fence", "Gate"]);
+});
+
+Deno.test("packQuoteNotes: description, custom description, site notes, removal notes; money stripped; deduped", () => {
+  const notes = packQuoteNotes(
+    { job: { siteNotes: "Deep ocean rails and plinths", removal: { notes: "Skip bin on verge" }, quote: { customDescription: "Plinth required to stop rust. Deposit $1,032.63 paid." } }, notes: { noteQuote: "Deep ocean rails and plinths" } },
+    { job_description: "7m Colorbond Fencing — 1800mm Domain — Woodvale" },
+  );
+  assertEquals(notes, [
+    "7m Colorbond Fencing — 1800mm Domain — Woodvale",
+    "Plinth required to stop rust. Deposit paid.",
+    "Deep ocean rails and plinths",
+    "Skip bin on verge",
+  ]);
+  const pack = packTradeQuote({ quote_number: "Q-1", job_type: "fencing", scope_json: { job: { runs: [{ length: 7.1, sheetHeight: 1800 }] } }, pricing_json: { job_description: "7m fence", runs: [{ items: [{ description: "Fence", quantity: 7.1, unit: "m", line_total_ex: 100 }] }] } });
+  assertEquals(pack.quote_lines, [{ description: "Fence", quantity: 7.1, unit: "m" }]);
+  assertEquals(pack.quote_notes, ["7m fence"]);
+  assertEquals(pack.frozen_late_at, null);
+});
+
+Deno.test("payment language: causal 'due to' is prose, 'due' alone stays money language", () => {
+  const causal = "an extra panel allowed as 3 panels no longer had structural integrity - damaged due to storms and wind";
+  assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage(causal), false);
+  assertEquals(allocatedTradePackProse(causal), causal);
+  for (const money of ["balance due", "Due on completion", "50 due", "due upon delivery", "amount due to be paid"]) {
+    assertEquals(tradeTextHasAdHocPercentOrPaymentLanguage(money), true, money);
+  }
 });

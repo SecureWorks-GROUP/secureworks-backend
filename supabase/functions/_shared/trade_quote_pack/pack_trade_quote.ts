@@ -24,6 +24,16 @@ export type TradePackItem = {
 
 export type TradeQuotePackStatus = 'accepted' | 'sent' | 'superseded'
 
+/** One row exactly as the client's quote printed it: description, quantity,
+ *  unit. Never money. Source: pricing_json.runs[].items (the rows the quote
+ *  PDF renders) plus pricing_json.line_items rows the run rows do not carry
+ *  (custom lines, removal, delivery). */
+export type TradePackQuoteLine = {
+  description: string
+  quantity: number | null
+  unit: string | null
+}
+
 export type TradeQuoteCustomerSnapshot = {
   name: string | null
   phone: string | null
@@ -51,6 +61,16 @@ export type TradeQuotePack = {
   source: 'frozen' | 'live_fallback'
   customer: TradeQuoteCustomerSnapshot
   terms: TradeQuoteTermsSnapshot
+  /** The quote's own rows, price-free (see TradePackQuoteLine). Empty when the
+   *  quote carried no priced rows (older scope blobs). */
+  quote_lines: TradePackQuoteLine[]
+  /** The quote's writing: job description, the scoper's custom description,
+   *  site notes, removal notes. Money-stripped at pack time and again at
+   *  allocated projection. */
+  quote_notes: string[]
+  /** Set when a legacy sent quote was frozen on first trade read (after the
+   *  send-time freeze went live) rather than at send. */
+  frozen_late_at?: string | null
 }
 
 export const TRADE_INSTALLER_RATES = {
@@ -84,6 +104,9 @@ export type PackTradeQuoteInput = {
   source?: 'frozen' | 'live_fallback'
   customer?: Partial<TradeQuoteCustomerSnapshot> | null
   terms?: Partial<TradeQuoteTermsSnapshot> | null
+  /** Fencing multi-run quotes: keep only this run's priced rows. */
+  run_label?: string | null
+  frozen_late_at?: string | null
 }
 
 export function isHenryInstaller(email: string | null | undefined): boolean {
@@ -140,6 +163,9 @@ export function packTradeQuote(input: PackTradeQuoteInput): TradeQuotePack {
   const notes = installerNotes(scope)
   if (notes) items.push(item('note', notes, 1, 'lot'))
 
+  const quoteLines = packQuoteLines(pricing, input.run_label)
+  const quoteNotes = packQuoteNotes(scope, pricing)
+
   const flags = quotePublicationFlags({
     accepted: input.accepted === true,
     superseded: input.superseded === true,
@@ -167,7 +193,115 @@ export function packTradeQuote(input: PackTradeQuoteInput): TradeQuotePack {
       sent_at: input.sent_at,
       terms: input.terms,
     }),
+    quote_lines: quoteLines,
+    quote_notes: quoteNotes,
+    frozen_late_at: input.frozen_late_at || null,
   }
+}
+
+// ── The quote's own rows and writing ─────────────────────────────────────────
+// Captain ask 2026-09-08: trades must see EXACTLY what was in the quote, minus
+// the price, reliably. The client PDF (send-quote) prints pricing_json.runs[]
+// .items — description / quantity / unit / line_total_ex. We take those same
+// rows and drop the money columns, then add the flat line_items rows the run
+// rows do not carry (custom lines such as "Jack hammering to make room for
+// footings", removal, delivery). Dedupe is by (quantity, unit) against the run
+// rows so "3× Ridgeside (7.1m total)" does not double the run's
+// "Domain Ridgeside fencing — 7.1m". Descriptions are money-stripped here and
+// fail closed again in the allocated projection.
+
+const QUOTE_LINE_UNIT_ALIASES: Record<string, string> = {
+  each: 'ea',
+  ea: 'ea',
+  lm: 'm',
+  m: 'm',
+  metre: 'm',
+  metres: 'm',
+  meter: 'm',
+  meters: 'm',
+  lot: 'lot',
+  job: 'lot',
+}
+
+function quoteLineUnitKey(unit: unknown): string {
+  const raw = String(unit || '').trim().toLowerCase()
+  return QUOTE_LINE_UNIT_ALIASES[raw] || raw
+}
+
+function quoteLineFromRow(raw: unknown): TradePackQuoteLine | null {
+  const row = asObject(raw)
+  const description = stripTradePackMoney(String(row.description || row.desc || '')).trim()
+  if (!description) return null
+  const qtyRaw = Number(row.quantity ?? row.qty)
+  const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : null
+  const unit = sanitizeTradePackUnit(typeof row.unit === 'string' ? row.unit : undefined) ?? null
+  return { description, quantity, unit }
+}
+
+export function packQuoteLines(pricingJson: unknown, runLabel?: string | null): TradePackQuoteLine[] {
+  const pricing = asObject(pricingJson)
+  const label = quoteRunLabelKey(runLabel)
+  const runs = (Array.isArray(pricing.runs) ? pricing.runs : [])
+    .map((r) => asObject(r))
+    .filter((r) => !label || tradeQuoteRunMatchesLabel(r, label))
+  const lines: TradePackQuoteLine[] = []
+  const seenKeys = new Set<string>()
+  const seenDesc = new Set<string>()
+  const push = (line: TradePackQuoteLine | null, dedupeByQty: boolean) => {
+    if (!line) return
+    const descKey = line.description.toLowerCase().replace(/\s+/g, ' ')
+    if (seenDesc.has(descKey)) return
+    const qtyKey = line.quantity != null ? `${line.quantity}|${quoteLineUnitKey(line.unit)}` : ''
+    if (dedupeByQty && qtyKey && seenKeys.has(qtyKey)) return
+    seenDesc.add(descKey)
+    if (qtyKey) seenKeys.add(qtyKey)
+    lines.push(line)
+  }
+  for (const run of runs) {
+    for (const raw of Array.isArray(run.items) ? run.items : []) push(quoteLineFromRow(raw), false)
+  }
+  const hadRunRows = lines.length > 0
+  for (const raw of Array.isArray(pricing.line_items) ? pricing.line_items : []) {
+    const row = asObject(raw)
+    // Multi-run quotes: a flat line tagged with another run stays out.
+    if (label && quoteRunLabelKey(row.run_label) && !tradeQuoteRunMatchesLabel(row, label)) continue
+    const category = String(row.category || '').toLowerCase()
+    const alwaysExtra = category === 'custom' || category === 'removal'
+    push(quoteLineFromRow(row), hadRunRows && !alwaysExtra)
+  }
+  return lines
+}
+
+function quoteNoteText(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return stripTradePackMoney(value).replace(/\s+/g, ' ').trim()
+}
+
+export function packQuoteNotes(scopeJson: unknown, pricingJson: unknown): string[] {
+  const scope = asObject(scopeJson)
+  const pricing = asObject(pricingJson)
+  const job = asObject(scope.job)
+  const quote = asObject(job.quote)
+  const removal = asObject(job.removal)
+  const notes = asObject(scope.notes)
+  const candidates = [
+    pricing.job_description ?? pricing.description,
+    quote.customDescription ?? quote.description,
+    job.siteNotes,
+    removal.notes,
+    notes.noteQuote,
+  ]
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of candidates) {
+    const text = quoteNoteText(raw)
+    if (!text) continue
+    const key = text.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(text)
+  }
+  return out
 }
 
 export function applyInstallerRates(pack: TradeQuotePack, isHenry: boolean): TradeQuotePack {
@@ -222,8 +356,11 @@ export type QuoteDocRow = {
 export const TRADE_SEALED_PAYMENT_TERMS = /^\s*50%\s*deposit\s*\+\s*50%\s*on\s+completion\s*$/i
 
 const TRADE_PERCENT_MONEY_RE = /%|percent(?:age)?/i
+/** "due" is payment language ("balance due", "due on completion") except the
+ *  causal "due to" ("damaged due to storms"), which is ordinary quote prose
+ *  (SWF-261314: the scoper's description was dropped whole for the trade). */
 const TRADE_PAYMENT_LANGUAGE_RE =
-  /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due|payments?|pay|paid)\b/i
+  /\b(?:upfront|up-front|balance|owing|payable|outstanding|instal?ment|retainer|progress\s+payment|due(?!\s+to\b)|payments?|pay|paid)\b/i
 /** Net 30 / Nett 7 / N30 / N 30 / N/30 / 30 net / 30 net days / 30 days net.
  *  Not bare "net", "netting", or "network". N+digits is a payment leftover
  *  (including construction collisions such as "N 10 posts") because Net 10
@@ -431,6 +568,8 @@ export async function persistTradePackOnDocuments(
     sentAt?: string | null
     customer?: Partial<TradeQuoteCustomerSnapshot> | null
     terms?: Partial<TradeQuoteTermsSnapshot> | null
+    /** Legacy sent quote frozen on first trade read, not at send. */
+    frozenLateAt?: string | null
   },
 ): Promise<PersistTradePackResult> {
   let wrote = 0
@@ -448,6 +587,8 @@ export async function persistTradePackOnDocuments(
       source: 'frozen',
       customer: args.customer,
       terms: args.terms,
+      run_label: doc.run_label,
+      frozen_late_at: args.frozenLateAt || null,
     })
     const token = typeof doc.claim_token === 'string' ? doc.claim_token.trim() : ''
     let query = sb.from('job_documents').update({ trade_pack_json: pack }).eq('id', doc.id)
@@ -564,6 +705,13 @@ function hydrateStoredPack(stored: Record<string, unknown>, doc: QuoteDocRow): T
         terms: asObject(stored.terms),
       })
       : emptyTradeQuoteTerms(),
+    quote_lines: (Array.isArray(stored.quote_lines) ? stored.quote_lines : [])
+      .map((raw) => quoteLineFromRow(raw))
+      .filter((line): line is TradePackQuoteLine => !!line),
+    quote_notes: (Array.isArray(stored.quote_notes) ? stored.quote_notes : [])
+      .map((raw) => quoteNoteText(raw))
+      .filter(Boolean),
+    frozen_late_at: typeof stored.frozen_late_at === 'string' ? stored.frozen_late_at : null,
   }
 }
 
@@ -1257,6 +1405,29 @@ export function allocatedTradeQuotePackProjectionLeaks(pack: unknown): string[] 
       if (unitPrice != null) leaks.push(`items[${index}].unit_price`)
       const lineTotal = (item as Record<string, unknown>).line_total
       if (lineTotal != null) leaks.push(`items[${index}].line_total`)
+    })
+  }
+  const quoteLines = row.quote_lines
+  if (Array.isArray(quoteLines)) {
+    quoteLines.forEach((line, index) => {
+      if (!line || typeof line !== 'object' || Array.isArray(line)) return
+      const rec = line as Record<string, unknown>
+      for (const key of Object.keys(rec)) {
+        if (key !== 'description' && key !== 'quantity' && key !== 'unit') leaks.push(`quote_lines[${index}].${key}`)
+      }
+      const description = rec.description
+      if (typeof description === 'string' && (isSealedPaymentTermsPhrase(description) || tradeTextHasMoneyToken(description))) {
+        leaks.push(`quote_lines[${index}].description`)
+      }
+      const unit = rec.unit
+      if (typeof unit === 'string' && tradeTextHasMoneyToken(unit)) leaks.push(`quote_lines[${index}].unit`)
+    })
+  }
+  const quoteNotes = row.quote_notes
+  if (Array.isArray(quoteNotes)) {
+    quoteNotes.forEach((note, index) => {
+      if (typeof note !== 'string') { leaks.push(`quote_notes[${index}]`); return }
+      if (isSealedPaymentTermsPhrase(note) || tradeTextHasMoneyToken(note)) leaks.push(`quote_notes[${index}]`)
     })
   }
   return [...new Set(leaks)]

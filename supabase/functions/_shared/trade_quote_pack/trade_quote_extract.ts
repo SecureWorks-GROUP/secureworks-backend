@@ -49,8 +49,11 @@ export type TradeQuoteExtract = {
   customer: TradeQuoteCustomerSnapshot;
   terms: TradeQuoteTermsSnapshot;
   scope: TradeQuoteExtractScopeItem[];
+  /** The quote's own rows, exactly as sent, minus price. */
+  quote_lines: TradeQuoteExtractScopeItem[];
   notes: string[];
   summary: string | null;
+  frozen_late_at: string | null;
 };
 
 export type TradeQuoteExtractPointer = {
@@ -179,8 +182,24 @@ export function assembleTradeQuoteExtract(args: {
       valid_until: extractIdentity(pack.terms?.valid_until),
     },
     scope: pack.items.map(extractScopeItem).filter((row): row is TradeQuoteExtractScopeItem => !!row),
-    notes: extractProse(pack.notes) ? [extractProse(pack.notes) as string] : [],
+    quote_lines: (pack.quote_lines || []).map((line) => {
+      const description = extractProse(line.description);
+      if (!description) return null;
+      const unit = sanitizeTradePackUnit(line.unit ?? undefined) ?? null;
+      if (unit && extractFieldHasMoney(unit)) return null;
+      return {
+        kind: "info" as TradePackItem["kind"],
+        description,
+        quantity: typeof line.quantity === "number" && Number.isFinite(line.quantity) ? line.quantity : null,
+        unit,
+      };
+    }).filter((row): row is TradeQuoteExtractScopeItem => !!row),
+    notes: [
+      ...(pack.quote_notes || []).map((note) => extractProse(note)).filter((note): note is string => !!note),
+      ...(extractProse(pack.notes) ? [extractProse(pack.notes) as string] : []),
+    ],
     summary: extractProse(pack.summary),
+    frozen_late_at: pack.frozen_late_at ?? null,
   };
 }
 
@@ -272,13 +291,16 @@ function dl(rows: Array<[string, string]>): string {
  * to PDF from the browser. Template copy is price-free by construction.
  */
 export function renderTradeQuoteExtractHtml(extract: TradeQuoteExtract): string {
-  const scopeRows = extract.scope.map((item) => {
-    const qty = formatQuantity(item.quantity, item.unit);
-    return `<tr>
+  const rowsHtml = (items: TradeQuoteExtractScopeItem[]) =>
+    items.map((item) => {
+      const qty = formatQuantity(item.quantity, item.unit);
+      return `<tr>
       <td>${escapeHtml(item.description || item.kind)}</td>
       <td class="qty">${qty}</td>
     </tr>`;
-  }).join("");
+    }).join("");
+  const quoteRows = rowsHtml(extract.quote_lines || []);
+  const scopeRows = rowsHtml(extract.scope);
   const notes = extract.notes
     .map((note) => `<li>${escapeHtml(note)}</li>`)
     .join("");
@@ -321,7 +343,7 @@ export function renderTradeQuoteExtractHtml(extract: TradeQuoteExtract): string 
 <body>
 <main>
   <header>
-    <div class="brand">SecureWorks WA - trade extract</div>
+    <div class="brand">SecureWorks Group - trade copy</div>
     <h1>${escapeHtml(heading)}</h1>
     <p class="meta">Status: ${escapeHtml(extract.status)}${extract.sent_at ? ` · Sent ${escapeHtml(extract.sent_at.slice(0, 10))}` : ""}</p>
   </header>
@@ -336,12 +358,19 @@ export function renderTradeQuoteExtractHtml(extract: TradeQuoteExtract): string 
   <section>
     <h2>Scope of works</h2>
     ${
-      scopeRows
+      quoteRows
+        ? `<table><thead><tr><th>Item</th><th>Quantity</th></tr></thead><tbody>${quoteRows}</tbody></table>`
+        : scopeRows
         ? `<table><thead><tr><th>Item</th><th>Quantity</th></tr></thead><tbody>${scopeRows}</tbody></table>`
         : `<p class="empty">No scope items on this quote.</p>`
     }
     ${extract.summary ? `<p class="summary">${escapeHtml(extract.summary)}</p>` : ""}
   </section>
+  ${
+    quoteRows && scopeRows
+      ? `<section><h2>Install summary</h2><table><thead><tr><th>Item</th><th>Quantity</th></tr></thead><tbody>${scopeRows}</tbody></table></section>`
+      : ""
+  }
   ${
     notes
       ? `<section><h2>Notes</h2><ul>${notes}</ul></section>`
@@ -428,12 +457,24 @@ export function tradeQuoteExtractHtmlMoneyNeedles(html: string): string[] {
   if (/\b(?:AUD|USD|dollars?|bucks?)\b/i.test(stripped)) hits.push("currency");
   if (/\b(?:inc GST|ex GST|subtotal|line total|unit price)\b/i.test(stripped)) hits.push("money-phrase");
   if (/\b(?:rate|price|amount|cost|fee|deposit)\b/i.test(stripped)) hits.push("money-word");
-  if (/\b(?:upfront|up-front|balance|owing|payable|outstanding|due|payments?|pay|paid)\b/i.test(stripped)) {
+  // Causal "due to" is quote prose ("damaged due to storms"); bare "due" is
+  // payment language. Same carve-out as TRADE_PAYMENT_LANGUAGE_RE.
+  if (/\b(?:upfront|up-front|balance|owing|payable|outstanding|due(?!\s+to\b)|payments?|pay|paid)\b/i.test(stripped)) {
     hits.push("payment-language");
   }
-  if (tradeTextHasMoneyToken(stripped)) hits.push("money-token");
+  // A quantity cell is a finite number + sanitized unit by construction
+  // (formatQuantity); "7.1 m" is metres, not money. Only the digit+unit shape
+  // is exempt — anything else in a qty cell still goes through the token scan.
+  const withoutPlainQuantities = stripped.replace(
+    EXTRACT_HTML_QTY_CELL,
+    (whole: string, inner: string) => (EXTRACT_PLAIN_QUANTITY.test(inner) ? '<td class="qty"></td>' : whole),
+  );
+  if (tradeTextHasMoneyToken(withoutPlainQuantities)) hits.push("money-token");
   return [...new Set(hits)];
 }
+
+const EXTRACT_HTML_QTY_CELL = /<td class="qty">([\s\S]*?)<\/td>/gi;
+const EXTRACT_PLAIN_QUANTITY = /^\s*\d+(?:\.\d+)?(?:\s+[A-Za-z]{1,8})?\s*$/;
 
 function extractStringLeafMoneyLeaks(value: unknown, path = ""): string[] {
   const leaks: string[] = [];
