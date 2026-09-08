@@ -17,6 +17,7 @@ import {
   splitTradeInvoiceXeroLines,
   TradeInvoiceMoneyError,
   validatePersistedTradeInvoiceMoney,
+  normaliseXeroTaxType,
 } from "./trade_invoice_money.ts";
 
 Deno.test("trade invoice money: GST off splits gross earned into net pay and 12% super", () => {
@@ -566,4 +567,29 @@ Deno.test("audit model does not shrink labour per line; super is 12% of submitte
   );
   assertEquals(model.super_line.kind, "super");
   assertEquals(model.super_line.unit_amount, -264.98);
+});
+
+// 2026-09-08: the shape Xero actually returns for a pushed trade bill (Hugo,
+// SW-INV-H-260904-026): labour INPUT, super BASEXCLUDED (Xero's spelling of NONE).
+Deno.test("returned split: Xero's BASEXCLUDED super line is accepted as NONE", () => {
+  const money = calculateTradeInvoiceMoney({ grossEarned: 2470, gstOn: true, earningsDate: "2026-09-04" });
+  const returned = [
+    { Description: "Hugo\nSWF-261281 | SW - FENCING\nLabour", Quantity: 1, UnitAmount: 710, TaxType: "INPUT" },
+    { Description: "Hugo\nSWMS-261344 | SW - MAKESAFE\nMS and RR", Quantity: 44, UnitAmount: 40, TaxType: "INPUT" },
+    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -296.4, TaxType: "BASEXCLUDED" },
+  ];
+  assertReturnedTradeInvoiceXeroSplit(returned, money);
+  // GST off: labour comes back BASEXCLUDED too.
+  const moneyOff = calculateTradeInvoiceMoney({ grossEarned: 1000, gstOn: false, earningsDate: "2026-09-04" });
+  assertReturnedTradeInvoiceXeroSplit([
+    { Description: "Labour", Quantity: 1, UnitAmount: 1000, TaxType: "BASEXCLUDED" },
+    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -120, TaxType: "BASEXCLUDED" },
+  ], moneyOff);
+  // A taxed super line is still wrong.
+  assertThrows(() => assertReturnedTradeInvoiceXeroSplit([
+    { Description: "Labour", Quantity: 1, UnitAmount: 2470, TaxType: "INPUT" },
+    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -296.4, TaxType: "INPUT" },
+  ], money), TradeInvoiceMoneyError);
+  assertEquals(normaliseXeroTaxType("basexcluded"), "NONE");
+  assertEquals(normaliseXeroTaxType("INPUT"), "INPUT");
 });

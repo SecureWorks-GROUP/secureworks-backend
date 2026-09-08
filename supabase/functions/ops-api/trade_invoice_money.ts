@@ -547,6 +547,12 @@ export function splitTradeInvoiceXeroLines(
   return labourLines;
 }
 
+/** Xero returns a NONE tax type as BASEXCLUDED on Australian organisations. */
+export function normaliseXeroTaxType(value: unknown): string {
+  const t = String(value || "").trim().toUpperCase();
+  return t === "BASEXCLUDED" ? "NONE" : t;
+}
+
 export function assertReturnedTradeInvoiceXeroSplit(
   value: unknown,
   money: TradeInvoiceMoney,
@@ -562,6 +568,11 @@ export function assertReturnedTradeInvoiceXeroSplit(
   const superLines = lines.filter((line) => isTradeInvoiceSuperXeroLine(line));
   const labourLines = lines.filter((line) => !isTradeInvoiceSuperXeroLine(line));
   const expectedLabourTaxType = money.gst_on ? "INPUT" : "NONE";
+  // 2026-09-08: Xero (AU orgs) stores a TaxType of NONE as BASEXCLUDED and
+  // returns it that way. Reading it back as a mismatch made EVERY push since the
+  // 27 Aug super split fail after the bill was created (422, no PDF attached,
+  // ops retry failed the same way). Compare tax types by meaning, not spelling.
+  const taxTypeOf = (line: TradeInvoiceXeroLine) => normaliseXeroTaxType(line.TaxType);
   const totalCents = lines.reduce(
     (sum, line) => sum + lineGrossCents(line),
     0,
@@ -583,8 +594,8 @@ export function assertReturnedTradeInvoiceXeroSplit(
     Math.abs(labourCents - expectedGrossCents) > 1 ||
     Math.abs(superCents - expectedSuperCents) > 1 ||
     Math.abs(totalCents - expectedNetCents) > 1 ||
-    superLines.some((line) => line.TaxType !== "NONE") ||
-    labourLines.some((line) => line.TaxType !== expectedLabourTaxType)
+    superLines.some((line) => taxTypeOf(line) !== "NONE") ||
+    labourLines.some((line) => taxTypeOf(line) !== expectedLabourTaxType)
   ) {
     throw new TradeInvoiceMoneyError(
       "XERO_RETURNED_SPLIT_INVALID",

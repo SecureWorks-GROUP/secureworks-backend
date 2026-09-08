@@ -42,3 +42,15 @@ Deno.test("a partial payment updates amount_paid without paid_at", () => {
   const patch = tradeBillStatusPatch({ Status: "AUTHORISED", AmountPaid: 500 }, { status: "pushed_to_xero", xero_bill_status: "AUTHORISED", amount_paid: 0 });
   assertEquals(patch, { amount_paid: 500 });
 });
+
+import { shouldBackfillTradeBillPdf } from "./trade_bill_status.ts";
+Deno.test("pdf backfill: only live trade bills Xero reports without attachments", () => {
+  const live = { status: "pushed_to_xero" };
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCPAY", Status: "DRAFT", HasAttachments: false, LineItems: [{}] }, live), true);
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCPAY", Status: "PAID", HasAttachments: false, LineItems: [{}] }, live), true);
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCPAY", Status: "DRAFT", HasAttachments: true, LineItems: [{}] }, live), false);
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCPAY", Status: "VOIDED", HasAttachments: false, LineItems: [{}] }, live), false);
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCREC", Status: "DRAFT", HasAttachments: false, LineItems: [{}] }, live), false);
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCPAY", Status: "DRAFT", HasAttachments: false, LineItems: [] }, live), false);
+  assertEquals(shouldBackfillTradeBillPdf({ Type: "ACCPAY", Status: "DRAFT", HasAttachments: false, LineItems: [{}] }, { status: "ops-reject" }), false);
+});
