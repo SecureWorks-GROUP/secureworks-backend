@@ -47,7 +47,25 @@ type Fixtures = {
   invoices?: any[];
   charges?: any[];
   profile?: any;
+  /** job_media rows. Default: every fencing job carries satisfied completion
+   *  evidence (3 completion photos + 1 neighbour sign-off). */
+  media?: any[];
+  events?: any[];
+  jobs?: any[];
 };
+
+function satisfiedEvidenceMedia(workOrders: any[]): any[] {
+  const rows: any[] = [];
+  const seen = new Set<string>();
+  for (const wo of workOrders || []) {
+    const jobId = String(wo?.job_id || wo?.jobs?.id || "");
+    if (!jobId || seen.has(jobId)) continue;
+    seen.add(jobId);
+    for (let i = 0; i < 3; i++) rows.push({ id: `${jobId}-c${i}`, job_id: jobId, phase: "completion", type: "photo" });
+    rows.push({ id: `${jobId}-ns`, job_id: jobId, phase: "neighbour_signoff", type: "photo" });
+  }
+  return rows;
+}
 
 function parseNotIn(value: string): Set<string> {
   return new Set(
@@ -154,6 +172,11 @@ function makeClient(
           if (table === "trade_invoice_lines") {
             rows = (fixtures.charges || []).slice();
           }
+          if (table === "job_media") {
+            rows = (fixtures.media ?? satisfiedEvidenceMedia(fixtures.workOrders)).slice();
+          }
+          if (table === "job_events") rows = (fixtures.events || []).slice();
+          if (table === "jobs") rows = (fixtures.jobs || []).slice();
 
           for (const [column, value] of Object.entries(state.eq)) {
             if (column === "jobs.org_id") {
@@ -961,4 +984,47 @@ Deno.test("single-work-order submit claims its source atomically before Xero", a
     accessToken: "token",
     tenantId: "tenant",
   });
+});
+
+// ── Fencing completion evidence gate (Captain ask 2026-09-08) ────────────────
+Deno.test("fencing work order without completion evidence is listed but not invoiceable", async () => {
+  const wo = workOrder("no-evidence", { assigned: HENRY.id, status: "complete" });
+  const { client } = makeClient({ workOrders: [wo], media: [] }, HENRY);
+  const result = await tradeWorkOrders(client, new URLSearchParams({ mode: "mine" }), HENRY, false);
+  const row = result.work_orders[0];
+  assertEquals(row.can_invoice, false);
+  assertEquals(row.can_add_to_weekly_invoice, false);
+  assertEquals(row.invoice_block_reason, "completion_evidence");
+  assertEquals(row.completion_evidence.applies, true);
+  assertEquals(row.completion_evidence.photos, 0);
+  assertEquals(row.completion_evidence.signoffs_required, 1);
+  assertEquals(row.completion_evidence.missing, ["completion_photos", "neighbour_signoff"]);
+});
+
+Deno.test("fencing work order with photos + neighbour sign-off is invoiceable; a waiver replaces the sign-off", async () => {
+  const wo = workOrder("evidence-ok", { assigned: HENRY.id, status: "complete" });
+  const ok = makeClient({ workOrders: [wo] }, HENRY).client;
+  const okResult = await tradeWorkOrders(ok, new URLSearchParams({ mode: "mine" }), HENRY, false);
+  assertEquals(okResult.work_orders[0].can_invoice, true);
+  assertEquals(okResult.work_orders[0].completion_evidence.satisfied, true);
+
+  const jobId = wo.job_id;
+  const waived = makeClient({
+    workOrders: [wo],
+    media: [0, 1, 2].map((i) => ({ id: `c${i}`, job_id: jobId, phase: "completion", type: "photo" })),
+    events: [{ id: "ev-1", job_id: jobId, event_type: "neighbour_signoff_waived", detail_json: { reason: "Front fence, no neighbour" } }],
+  }, HENRY).client;
+  const waivedResult = await tradeWorkOrders(waived, new URLSearchParams({ mode: "mine" }), HENRY, false);
+  assertEquals(waivedResult.work_orders[0].can_invoice, true);
+  assertEquals(waivedResult.work_orders[0].completion_evidence.waived, true);
+  assertEquals(waivedResult.work_orders[0].completion_evidence.signoffs_required, 0);
+});
+
+Deno.test("patio work order is never gated on neighbour sign-off", async () => {
+  const viewer = { ...HENRY, managedVerticals: ["patio"] };
+  const wo = workOrder("patio-1", { assigned: HENRY.id, status: "complete", type: "patio" });
+  const { client } = makeClient({ workOrders: [wo], media: [] }, viewer);
+  const result = await tradeWorkOrders(client, new URLSearchParams({ mode: "mine" }), viewer, false);
+  assertEquals(result.work_orders[0].can_invoice, true);
+  assertEquals(result.work_orders[0].completion_evidence, undefined);
 });

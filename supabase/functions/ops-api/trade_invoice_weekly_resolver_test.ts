@@ -32,7 +32,21 @@ type ResolverFixtures = {
   users?: any[];
   rates?: any[];
   assignments?: any[];
+  /** job_media rows; default = satisfied fencing completion evidence. */
+  media?: any[];
+  events?: any[];
 };
+
+function defaultEvidenceMedia(workOrders: any[]): any[] {
+  const rows: any[] = [];
+  for (const wo of workOrders || []) {
+    const jobId = String(wo?.jobs?.id || wo?.job_id || "");
+    if (!jobId) continue;
+    for (let i = 0; i < 3; i++) rows.push({ id: `${jobId}-c${i}`, job_id: jobId, phase: "completion", type: "photo" });
+    rows.push({ id: `${jobId}-ns`, job_id: jobId, phase: "neighbour_signoff", type: "photo" });
+  }
+  return rows;
+}
 
 function resolverClient(fixtures: ResolverFixtures): any {
   return {
@@ -68,6 +82,9 @@ function resolverClient(fixtures: ResolverFixtures): any {
           if (table === "job_assignments") {
             data = fixtures.assignments || [];
           }
+          if (table === "job_media") data = fixtures.media ?? defaultEvidenceMedia(fixtures.workOrders);
+          if (table === "job_events") data = fixtures.events || [];
+          if (table === "jobs") data = [];
           resolve({ data, error: null });
         },
       };
@@ -570,4 +587,21 @@ Deno.test("single-work-order persistence uses the same atomic source-claim bound
       p_requested_prior_draft_id: "00000000-0000-0000-0000-000000000800",
     },
   }]);
+});
+
+Deno.test("weekly resolver refuses a fencing work order whose job lacks completion evidence", async () => {
+  const workOrder = completedWorkOrder();
+  await assertRejects(
+    () =>
+      _resolveWeeklyWorkOrderInvoice(
+        resolverClient({ workOrders: [workOrder], media: [] }),
+        HENRY,
+        false,
+        "2026-08-24",
+        "2026-08-30",
+        { work_order_blocks: [{ work_order_id: workOrder.id }] },
+      ),
+    Error,
+    "cannot be invoiced yet",
+  );
 });

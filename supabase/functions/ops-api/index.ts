@@ -131,11 +131,22 @@ import {
   isSealedPaymentTermsPhrase,
   isTradePaymentTermsFieldPath,
   leftoverIsMangledMoneyRemnant,
+  persistTradePackOnDocuments,
+  quoteDocumentHasClientSend,
+  quoteDocumentHasFrozenPack,
+  quoteDocumentIsSuperseded,
   sanitizeTradePackKind,
   sanitizeTradePackUnit,
   stripTradePackMoney,
   tradeTextHasMoneyToken,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import {
+  COMPLETION_EVIDENCE_BLOCK_REASON,
+  NEIGHBOUR_SIGNOFF_WAIVED_EVENT,
+  completionEvidenceMessage,
+  loadCompletionEvidenceByJob,
+  type CompletionEvidence,
+} from './trade_completion_evidence.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
@@ -3923,6 +3934,8 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'my_jobs',
   'trade_job_detail',
   'trade_quote_extract',
+  'complete_my_job',
+  'waive_neighbour_signoff',
   'upload_photo',
   'get_upload_url',
   'confirm_upload',
@@ -9182,6 +9195,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'my_jobs':
       case 'trade_job_detail':
       case 'trade_quote_extract':
+      case 'complete_my_job':
+      case 'waive_neighbour_signoff':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -9309,6 +9324,8 @@ if (import.meta.main) serve(async (req: Request) => {
             return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }, {}, { quoteVisible }))
           }
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
+          case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
+          case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
           case 'my_trade_invoices': return json(await myTradeInvoices(client, tradeUser.id))
@@ -9449,6 +9466,11 @@ if (import.meta.main) serve(async (req: Request) => {
             if (!workOrderIsInvoiceReady({ ...wo, jobs: woJob })) {
               throw new ApiError('Work order must be complete, or sent/accepted on a finished job, before invoicing', 400)
             }
+            await assertFencingCompletionEvidence(client, [{
+              id: String(woJob?.id || wo.job_id || ''),
+              vertical: _jobVertical(woJob),
+              label: woJob?.job_number || null,
+            }])
 
             // One live invoice per work order across the tenant, regardless of
             // which authorised manager/trade submitted it. The caller's own
@@ -13048,6 +13070,13 @@ export async function _resolveWeeklyWorkOrderInvoice(
     }
     workDateById.set(String(workOrder.id), workDate)
   }
+  await assertFencingCompletionEvidence(
+    client,
+    (workOrders || []).map((workOrder: any) => {
+      const job = Array.isArray(workOrder.jobs) ? workOrder.jobs[0] : workOrder.jobs
+      return { id: String(job?.id || workOrder.job_id || ''), vertical: _jobVertical(job), label: job?.job_number || null }
+    }).filter((j: any) => j.id),
+  )
 
   const requestedChargeIds = requestedBlocks.flatMap((block: any) =>
     Array.isArray(block?.crew_charge_line_ids) ? block.crew_charge_line_ids : []
@@ -13437,7 +13466,7 @@ export async function tradeWorkOrders(
     )
   }
 
-  const mapped = pageRows.map((workOrder: any) => {
+  const mapped: any[] = pageRows.map((workOrder: any) => {
     const scopeItems = Array.isArray(workOrder.scope_items) ? workOrder.scope_items : []
     const subtotal = workOrderScopeSubtotal(scopeItems)
     const gst = roundMoney(subtotal * 0.1)
@@ -13499,6 +13528,22 @@ export async function tradeWorkOrders(
         workOrderHasPricedScope(scopeItems) && !blockingInvoice,
     }
   })
+  // Fencing completion evidence: same rule the submit paths enforce, so a
+  // card never offers an invoice action that 422s.
+  const evidenceByJob = await loadCompletionEvidenceByJob(
+    client,
+    pageRows.map((row: any) => ({ id: String(row.job_id || ''), vertical: _jobVertical(row.jobs) })).filter((j: any) => j.id),
+  )
+  for (let i = 0; i < mapped.length; i++) {
+    const ev = evidenceByJob.get(String(pageRows[i]?.job_id || ''))
+    if (!ev || !ev.applies) continue
+    mapped[i].completion_evidence = ev
+    if (!ev.satisfied) {
+      mapped[i].can_invoice = false
+      mapped[i].can_add_to_weekly_invoice = false
+      mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || COMPLETION_EVIDENCE_BLOCK_REASON
+    }
+  }
   const hasMore = requestedOffset + mapped.length < total
   return {
     schema: 'trade-work-orders.v1',
@@ -38894,6 +38939,80 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
   })
 }
 
+/** Job statuses where a sent quote can no longer change and a late freeze is
+ *  safe: accepted through to rectification. Not quoted (still negotiable),
+ *  not complete / invoiced / archived (no crew reads them). */
+export const TRADE_LATE_FREEZE_JOB_STATUSES = new Set([
+  'accepted',
+  'partially_accepted',
+  'approvals',
+  'awaiting_deposit',
+  'deposit',
+  'order_materials',
+  'processing',
+  'awaiting_supplier',
+  'order_confirmed',
+  'schedule_install',
+  'scheduled',
+  'in_progress',
+  'rectification',
+])
+
+export function tradeQuoteDocNeedsLateFreeze(doc: any): boolean {
+  if (!doc || String(doc.type || '').toLowerCase() !== 'quote') return false
+  if (!quoteDocumentHasClientSend(doc)) return false
+  if (quoteDocumentIsSuperseded(doc)) return false
+  return !quoteDocumentHasFrozenPack(doc)
+}
+
+export async function freezeLegacySentQuotePacks(client: any, job: any, docs: any[]): Promise<number> {
+  if (!job || job.archived === true) return 0
+  if (!TRADE_LATE_FREEZE_JOB_STATUSES.has(String(job.status || '').toLowerCase())) return 0
+  const pending = (docs || []).filter(tradeQuoteDocNeedsLateFreeze)
+  if (pending.length === 0) return 0
+  const frozenLateAt = new Date().toISOString()
+  let wrote = 0
+  try {
+    const result = await persistTradePackOnDocuments(client, {
+      documents: pending.map((d: any) => ({
+        id: d.id,
+        quote_number: d.quote_number,
+        sent_at: d.sent_at,
+        run_label: d.run_label,
+        run_snapshot: d.run_snapshot,
+      })),
+      jobType: job.type,
+      scopeJson: job.scope_json,
+      pricingJson: job.pricing_json,
+      customer: {
+        name: job.client_name,
+        phone: job.client_phone,
+        email: job.client_email,
+        site_address: job.site_address,
+        site_suburb: job.site_suburb,
+      },
+      frozenLateAt,
+    })
+    wrote = result.wrote
+    const failedIds = new Set(result.failed.map((f) => f.document_id))
+    // Reflect the write on the in-memory rows so THIS response already carries
+    // the frozen pack and the extract pointer. The stub/live client returns
+    // the row it updated, but the docs array was read before the write.
+    for (const d of pending) {
+      if (failedIds.has(d.id)) continue
+      const { data: fresh } = await client.from('job_documents')
+        .select('trade_pack_json').eq('id', d.id).maybeSingle()
+      if (fresh?.trade_pack_json) d.trade_pack_json = fresh.trade_pack_json
+    }
+    if (wrote > 0) {
+      console.log('[ops-api] trade quote late freeze', JSON.stringify({ job_id: job.id, wrote, failed: result.failed.length }))
+    }
+  } catch (e) {
+    console.error('[ops-api] trade quote late freeze failed:', (e as Error)?.message || e)
+  }
+  return wrote
+}
+
 export function redactTradeQuotePackMoney(packs: any[]): any[] {
   return (packs || []).map((pack: any) => {
     if (!pack || typeof pack !== 'object' || Array.isArray(pack)) return pack
@@ -38927,6 +39046,19 @@ export function redactTradeQuotePackMoney(packs: any[]): any[] {
       }),
       customer: redactAllocatedTradeQuoteCustomer(pack.customer),
       terms: redactAllocatedTradeQuoteTerms(pack.terms),
+      quote_lines: (Array.isArray(pack.quote_lines) ? pack.quote_lines : []).flatMap((line: any) => {
+        if (!line || typeof line !== 'object' || Array.isArray(line)) return []
+        const description = allocatedTradePackProse(line.description)
+        if (!description) return []
+        const quantity = typeof line.quantity === 'number' && Number.isFinite(line.quantity) ? line.quantity : null
+        const unit = sanitizeTradePackUnit(line.unit)
+        return [{ description, quantity, unit: unit !== undefined && !tradeTextHasMoneyToken(unit) ? unit : null }]
+      }),
+      quote_notes: (Array.isArray(pack.quote_notes) ? pack.quote_notes : []).flatMap((note: any) => {
+        const text = allocatedTradePackProse(note)
+        return text ? [text] : []
+      }),
+      frozen_late_at: typeof pack.frozen_late_at === 'string' ? pack.frozen_late_at : null,
     }
   })
 }
@@ -39233,6 +39365,14 @@ async function tradeJobDetail(
   if (quoteDocsRes.error) {
     console.error('[ops-api] trade quote packs read failed:', quoteDocsRes.error.message)
   }
+  // Legacy sent quotes (sent before the send-time freeze went live 2026-09-04)
+  // on a job that is already in production are frozen here, on first trade
+  // read, so "Open quote" works on active jobs without a backfill worker
+  // (Captain 2026-09-08). Frozen from the live quote as it stands now; the
+  // pack records frozen_late_at. Never re-run for a doc that has a pack.
+  if (!quoteDocsRes.error) {
+    await freezeLegacySentQuotePacks(client, jobRes.data, quoteDocsRes.data || [])
+  }
   const quotePacks = assembleQuotePacksForTrade({
     documents: quoteDocsRes.error ? [] : (quoteDocsRes.data || []),
     jobType: jobRes.data?.type,
@@ -39338,6 +39478,12 @@ async function tradeJobDetail(
     ? quotePacks
     : projectAllocatedTradeQuotePacks(quotePacks)
 
+  const completionEvidence = (await loadCompletionEvidenceByJob(client, [{
+    id: jobId,
+    vertical: _jobVertical(jobRes.data),
+    scope_json: jobRes.data?.scope_json,
+  }])).get(jobId) || null
+
   return {
     job: tradeSafeJob,
     // Additive: the resolved tier and the quote fence, so the app can render the
@@ -39416,6 +39562,9 @@ async function tradeJobDetail(
       ? makesafeDetails
       : projectTradeAllocatedMakesafeDetails(makesafeDetails),
     quote_packs: tradeQuotePacks,
+    // Additive: fencing completion evidence (photos + neighbour sign-off) the
+    // invoice paths require. Non-fencing jobs: applies=false.
+    completion_evidence: completionEvidence,
     // Additive: price-free extract pointers. Not injected into `documents`
     // (allocated documents stay the existing allowlist). Fetch via
     // `trade_quote_extract`.
@@ -47742,6 +47891,73 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
 export const _confirmUploadForTest = confirmUpload
 
 // ── Update assignment status (trade can confirm/start/complete their own) ──
+async function assertFencingCompletionEvidence(
+  client: any,
+  jobs: Array<{ id: string; vertical: string; scope_json?: unknown; label?: string | null }>,
+): Promise<void> {
+  const wanted = (jobs || []).filter((j) => j && j.id)
+  if (wanted.length === 0) return
+  const map = await loadCompletionEvidenceByJob(client, wanted)
+  for (const job of wanted) {
+    const ev = map.get(job.id)
+    if (ev && ev.applies && !ev.satisfied) {
+      throw new ApiError(completionEvidenceMessage(ev, job.label || null), 422)
+    }
+  }
+}
+
+// ── Trade job completion + neighbour sign-off waiver ─────────────────────────
+// complete_my_job is the trade-scoped door to completeJob (complete_job stays a
+// staff action; the completion wizard 403'd for installers before this). For
+// fencing it refuses until the completion evidence is on file.
+async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
+  const jobId = String(body?.jobId || body?.job_id || '').trim()
+  if (!jobId) throw new ApiError('jobId required', 400)
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, false, access)
+  const { data: job, error } = await client.from('jobs')
+    .select('id, type, status, job_number, scope_json, metadata')
+    .eq('id', jobId).eq('org_id', tradeUser.orgId).maybeSingle()
+  if (error) throw error
+  if (!job) throw new ApiError('Job not found', 404)
+  const ev = (await loadCompletionEvidenceByJob(client, [{ id: job.id, vertical: _jobVertical(job), scope_json: job.scope_json }])).get(job.id) || null
+  if (ev && ev.applies && !ev.satisfied) {
+    throw new ApiError(completionEvidenceMessage(ev, null, 'marked complete'), 422)
+  }
+  const result = await completeJob(client, {
+    job_id: job.id,
+    user_id: tradeUser.id,
+    satisfaction_rating: body?.satisfaction_rating,
+    signatureName: body?.signatureName,
+  })
+  return { ...(result || {}), completion_evidence: ev }
+}
+
+async function tradeWaiveNeighbourSignoff(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
+  const jobId = String(body?.jobId || body?.job_id || '').trim()
+  const reason = String(body?.reason || '').replace(/\s+/g, ' ').trim()
+  if (!jobId) throw new ApiError('jobId required', 400)
+  if (reason.length < 3) throw new ApiError('Say why no neighbour sign-off is needed for this job', 400)
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, false, access)
+  const { data: job, error } = await client.from('jobs')
+    .select('id, type, job_number, scope_json, metadata')
+    .eq('id', jobId).eq('org_id', tradeUser.orgId).maybeSingle()
+  if (error) throw error
+  if (!job) throw new ApiError('Job not found', 404)
+  const { data: event, error: insErr } = await client.from('job_events').insert({
+    job_id: job.id,
+    user_id: tradeUser.id,
+    event_type: NEIGHBOUR_SIGNOFF_WAIVED_EVENT,
+    detail_json: { reason, waived_by: tradeUser.id, waived_by_email: tradeUser.email || null },
+  }).select().single()
+  if (insErr) throw insErr
+  const ev = (await loadCompletionEvidenceByJob(client, [{ id: job.id, vertical: _jobVertical(job), scope_json: job.scope_json }])).get(job.id) || null
+  return { ok: true, event_id: event?.id || null, completion_evidence: ev }
+}
+
+export const _tradeCompleteMyJobForTest = tradeCompleteMyJob
+export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
+export const _assertFencingCompletionEvidenceForTest = assertFencingCompletionEvidence
+
 async function updateMyAssignment(client: any, body: any, userId: string) {
   const id = body.assignmentId || body.id
 
@@ -48050,6 +48266,22 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
     }
   })
 
+  // Per-metre (job) invoices need the fencing completion evidence on file.
+  // Carried on every card so the app can say what is missing; the submit path
+  // refuses with the same rule.
+  if (isPerMetre) {
+    const evidenceByJob = await loadCompletionEvidenceByJob(
+      client,
+      enriched.map((a: any) => ({ id: String(a.jobs?.id || ''), vertical: _jobVertical(a.jobs) })).filter((j: any) => j.id),
+    )
+    for (const a of enriched) {
+      const ev = evidenceByJob.get(String(a.jobs?.id || ''))
+      if (!ev || !ev.applies) continue
+      a.completion_evidence = ev
+      if (!ev.satisfied) a.invoice_block_reason = COMPLETION_EVIDENCE_BLOCK_REASON
+    }
+  }
+
   // Check if already submitted
   const { data: existingInvoice } = await client
     .from('trade_invoices')
@@ -48214,6 +48446,17 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
       const job = a.jobs as any
       if (job?.id) jobMap[job.id] = job
     }
+
+    await assertFencingCompletionEvidence(
+      client,
+      items
+        .filter((item: any) => (Number(item?.metres) || 0) > 0 && jobMap[item.job_id])
+        .map((item: any) => ({
+          id: String(item.job_id),
+          vertical: _jobVertical(jobMap[item.job_id]),
+          label: jobMap[item.job_id]?.job_number || null,
+        })),
+    )
 
     for (const item of items) {
       const metres = Number(item.metres) || 0
