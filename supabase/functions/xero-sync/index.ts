@@ -18,6 +18,7 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { tradeBillStatusPatch } from './trade_bill_status.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -751,24 +752,26 @@ async function syncInvoices(sb: any) {
             }
           }
 
-          // ── Trade invoice payment detection — ACCPAY bills ──
-          // Match both reference formats: "TRADE-Name-WKn-year" (ops push) and "Name WE date" (direct push)
-          const tradeRef = inv.Reference || ''
-          const isTradeInvoice = tradeRef.startsWith('TRADE-') || / WE \d{4}-\d{2}-\d{2}/.test(tradeRef)
-          if (inv.Type === 'ACCPAY' && inv.Status === 'PAID' && isTradeInvoice) {
+          // ── Trade invoice bill status — ACCPAY bills ──
+          // Keyed on the bill id stored at push time (trade_invoices.xero_bill_id).
+          // Mirrors Xero's status / AmountPaid / FullyPaidOnDate onto the row and
+          // moves it to 'paid' when Xero says PAID. See trade_bill_status.ts for
+          // why the old reference-text gate never matched a single bill.
+          if (inv.Type === 'ACCPAY') {
             try {
-              // Check both column names: xero_bill_id (ops push) and xero_invoice_id (direct push)
               const { data: tradeInv } = await sb.from('trade_invoices')
-                .select('id, user_id, week_start, total_inc, status')
-                .or(`xero_bill_id.eq.${inv.InvoiceID},xero_invoice_id.eq.${inv.InvoiceID}`)
+                .select('id, status, xero_bill_status, amount_paid, paid_at')
+                .eq('xero_bill_id', inv.InvoiceID)
                 .maybeSingle()
-
-              if (tradeInv && tradeInv.status !== 'paid') {
-                await sb.from('trade_invoices').update({ status: 'paid' }).eq('id', tradeInv.id)
-
-                console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' marked as paid')
+              if (tradeInv) {
+                const patch = tradeBillStatusPatch(inv, tradeInv)
+                if (patch) {
+                  const { error: patchErr } = await sb.from('trade_invoices').update(patch).eq('id', tradeInv.id)
+                  if (patchErr) console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' bill status write failed:', patchErr.message)
+                  else console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' bill status -> ' + JSON.stringify(patch))
+                }
               }
-            } catch (e: any) { console.log('[xero-sync] Trade payment check failed:', e) }
+            } catch (e: any) { console.log('[xero-sync] Trade bill status check failed:', e) }
           }
         }
       }

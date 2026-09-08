@@ -32,6 +32,8 @@ import {
   _tradeQuoteExtractForTest,
   _tradeCompleteMyJobForTest,
   _tradeLogMyJobHoursForTest,
+  _myMoneyForTest,
+  _presentTradeInvoiceSafeForTest,
   _pickHoursAssignmentForTest,
   _tradeWaiveNeighbourSignoffForTest,
   _tradeLabourBudgetForTest,
@@ -2802,4 +2804,43 @@ Deno.test("pickHoursAssignment: prefers in_progress, then the latest scheduled/c
     { id: "s2", status: "confirmed", scheduled_date: "2026-09-04" },
     { id: "ip", status: "in_progress", scheduled_date: "2026-09-01" },
   ]).id, "ip");
+});
+
+// ── my_money: earned / paid / owed with a bad legacy row in the mix ──────────
+Deno.test("my_money: totals by month and FY, paid state from Xero, one bad split row degrades alone", async () => {
+  const t = woodvaleSeed();
+  t.users.push({ id: "u-hugo", org_id: ORG_A, name: "Hugo", role: "lead_installer", trade_tier: 1, abn: "36 332 272 781", invoice_type: "hourly", trade_details: { gstRegistered: true }, xero_contact_id: "xc-1" });
+  t.trade_invoices = [
+    { id: "ti-paid", user_id: "u-hugo", invoice_number: "SW-INV-H-260801-020", week_end: "2026-08-02", status: "paid", xero_bill_status: "PAID", paid_at: "2026-08-10", amount_paid: 2420.6, subtotal_ex: 2470, gst: 247, gst_on: true, super_rate: 0.12, super_amount: 296.4, gross_earned: 2470, net_pay: 2173.6, total_inc: 2717, created_at: "2026-08-01T00:00:00Z" },
+    { id: "ti-owed", user_id: "u-hugo", invoice_number: "SW-INV-H-260904-026", week_end: "2026-09-06", status: "pushed_to_xero", xero_bill_status: "AUTHORISED", amount_paid: 0, subtotal_ex: 1000, gst: 100, gst_on: true, super_rate: 0.12, super_amount: 120, gross_earned: 1000, net_pay: 880, total_inc: 1100, created_at: "2026-09-04T00:00:00Z" },
+    // Legacy: a split that cannot reconcile (super with no gross).
+    { id: "ti-bad", user_id: "u-hugo", week_end: "2026-09-06", status: "pushed_to_xero", xero_bill_status: "DRAFT", amount_paid: 0, subtotal_ex: 500, gst: 0, gst_on: false, super_amount: 999, gross_earned: null, net_pay: null, total_inc: 500, created_at: "2026-09-05T00:00:00Z" },
+    { id: "ti-other", user_id: LEAD, week_end: "2026-09-06", status: "paid", xero_bill_status: "PAID", amount_paid: 50, total_inc: 55, created_at: "2026-09-05T00:00:00Z" },
+  ];
+  const me = { id: "u-hugo", email: "hugo@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: [] as string[] };
+  const res = await _myMoneyForTest(makeClient(t), me as any, new URLSearchParams({ today: "2026-09-08" }));
+  assertEquals(res.profile.gst_registered, true);
+  assertEquals(res.profile.abn, "36 332 272 781");
+  assertEquals(res.fy_label, "FY 2026/27");
+  assertEquals(res.invoices.length, 3, "only my invoices");
+  const bad = res.invoices.find((r: any) => r.id === "ti-bad");
+  assertEquals(bad.figures_ok, false);
+  assertEquals(bad.payable, 500, "cash figure still counts");
+  assertEquals(res.month.invoices, 2);
+  assertEquals(res.month.outstanding, 1480);
+  assertEquals(res.fytd.paid_total, 2420.6);
+  assertEquals(res.fytd.super_amount, 416.4);
+  assertEquals(res.fytd.gst, 347);
+  assertEquals(res.fytd.figures_incomplete, 1);
+  assertEquals(res.months.map((m: any) => m.month), ["2026-09", "2026-08"]);
+  const paid = res.invoices.find((r: any) => r.id === "ti-paid");
+  assertEquals(paid.paid, true);
+  assertEquals(paid.paid_at, "2026-08-10");
+});
+
+Deno.test("presentTradeInvoiceSafe: a bad split row is returned flagged instead of throwing", () => {
+  const out = _presentTradeInvoiceSafeForTest({ id: "x", super_amount: 999, gross_earned: null, net_pay: null, total_inc: 500 });
+  assertEquals(out.id, "x");
+  assertEquals(out.trade_payable, null);
+  assertEquals(typeof out.figures_error, "string");
 });
