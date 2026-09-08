@@ -34,3 +34,16 @@ Response: `{ ok, hours, assignment: { id, status, scheduled_date, hours_worked, 
 
 Tests: `roof_report_flow_test.ts` (normal make-safe renders without board
 advance), `trade_access_tier_test.ts` (log_my_job_hours + pickHoursAssignment).
+
+## Complete-to-invoice (same day)
+
+`complete_my_job` now also completes the trade's OWN work orders on the job
+(`work_orders.status = 'complete'`, `completed_at` stamped, event
+`work_order_completed_by_trade`) and returns `invoice_queue`:
+`{ lane: 'weekly_work_order' | 'hours', work_orders: [{ id, wo_number, completed_at, business_date, week_end, priced, already_complete }], hours_logged, assignment_id }`.
+`completed_at` is the business date the weekly work-order invoice keys its week
+on, so a per-metre trade's work order is invoice-ready the moment the job is
+complete. Never blocks completion (errors are returned in `invoice_queue.error`).
+The app adds the work order to this week's weekly draft through the existing
+`save_trade_invoice_draft` path (all guards intact) or, for hourly trades,
+offers the one-tap hours row.

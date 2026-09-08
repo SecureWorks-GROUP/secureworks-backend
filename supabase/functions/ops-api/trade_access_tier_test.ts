@@ -33,6 +33,7 @@ import {
   _tradeCompleteMyJobForTest,
   _tradeLogMyJobHoursForTest,
   _myMoneyForTest,
+  _completeMyWorkOrdersForInvoiceForTest,
   _presentTradeInvoiceSafeForTest,
   _pickHoursAssignmentForTest,
   _tradeWaiveNeighbourSignoffForTest,
@@ -2843,4 +2844,32 @@ Deno.test("presentTradeInvoiceSafe: a bad split row is returned flagged instead 
   assertEquals(out.id, "x");
   assertEquals(out.trade_payable, null);
   assertEquals(typeof out.figures_error, "string");
+});
+
+// ── complete-to-invoice: the trade's own work orders complete with the job ──
+Deno.test("complete_my_job: the trade's own work order goes complete and the response names the invoice lane", async () => {
+  const t = woodvaleSeed();
+  t.work_orders[0].assigned_user_id = LEAD;
+  t.work_orders[0].org_id = ORG_A;
+  t.work_orders.push({ id: "wo-other", job_id: JOB_FENCE, org_id: ORG_A, wo_number: "WO-2", status: "sent", assigned_user_id: CREW, scope_items: [{ description: "x", quantity: 1, unit: "ea", rate: 1 }] });
+  t.users.push({ id: "u-henry", org_id: ORG_A, name: "Henry", role: "lead_installer", trade_tier: 1, invoice_type: "per_metre" });
+  const lead = { id: LEAD, email: "lead@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: [] as string[] };
+  const res = await _completeMyWorkOrdersForInvoiceForTest(makeClient(t), lead as any, { id: JOB_FENCE });
+  assertEquals(res.lane, "hours", "an hourly trade is paid through hours");
+  assertEquals(res.work_orders.length, 1, "only my own work order");
+  assertEquals(res.work_orders[0].id, "wo-1");
+  assertEquals(res.work_orders[0].priced, true);
+  assert(/^\d{4}-\d{2}-\d{2}$/.test(res.work_orders[0].week_end));
+  assertEquals(t.work_orders.find((w: any) => w.id === "wo-1").status, "complete");
+  assert(t.work_orders.find((w: any) => w.id === "wo-1").completed_at, "completed_at anchors the invoice week");
+  assertEquals(t.work_orders.find((w: any) => w.id === "wo-other").status, "sent", "someone else's work order is untouched");
+  assertEquals(t.job_events.filter((e: any) => e.event_type === "work_order_completed_by_trade").length, 1);
+
+  // Per-metre trade: the weekly work-order lane. Second call is idempotent.
+  t.work_orders[0].assigned_user_id = "u-henry";
+  const henry = { id: "u-henry", email: "henry@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: [] as string[] };
+  const res2 = await _completeMyWorkOrdersForInvoiceForTest(makeClient(t), henry as any, { id: JOB_FENCE });
+  assertEquals(res2.lane, "weekly_work_order");
+  assertEquals(res2.work_orders[0].already_complete, true);
+  assertEquals(t.job_events.filter((e: any) => e.event_type === "work_order_completed_by_trade").length, 1, "no second event on a repeat");
 });
