@@ -3981,6 +3981,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'waive_neighbour_signoff',
   'log_my_job_hours',
   'my_money',
+  'unlock_makesafe_report',
   'upload_photo',
   'get_upload_url',
   'confirm_upload',
@@ -9244,6 +9245,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
       case 'my_money':
+      case 'unlock_makesafe_report':
       case 'upload_photo':
       case 'get_upload_url':
       case 'confirm_upload':
@@ -9375,6 +9377,7 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
           case 'log_my_job_hours': return json(await tradeLogMyJobHours(client, body, tradeUser, tradeJobAccess))
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
+          case 'unlock_makesafe_report': return json(await unlockMakesafeReport(client, body, tradeUser, tradeJobAccess, isDispatcher))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
           case 'my_trade_invoices': return json(await myTradeInvoices(client, tradeUser.id))
@@ -14412,7 +14415,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
-    client.from('job_service_reports').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
+    client.from('job_service_reports').select('*, submitted_user:submitted_by(id, name)').eq('job_id', jobId).order('created_at', { ascending: false }),
   ])
 
   if (jobRes.error) throw jobRes.error
@@ -14560,7 +14563,11 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
       remaining_to_invoice: Math.max(0, quotedTotal - invoicedTotal),
     },
     makesafe_details: makesafeDetails,
-    service_reports: serviceReportsRes.data || [],
+    // 2026-09-08: ops showed submitted_by as a raw UUID. Carry the name.
+    service_reports: (serviceReportsRes.data || []).map((r: any) => ({
+      ...r,
+      submitted_by_name: r?.submitted_user?.name || null,
+    })),
     chase_logs: chaseLogs,
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
@@ -22827,6 +22834,132 @@ async function reconcileMakesafeReportBindingWithAllocation(
   }
 }
 
+// ── Submitter overrides allocation (2026-09-08) ──────────────────────────────
+// Returns the other trades' bound, genuine assignments on this attendance cycle
+// that were cancelled, and the ones left alone because they are already on an
+// invoice. Never touches the submitter's own rows.
+async function overrideMakesafeAllocationToSubmitter(
+  client: any,
+  jobId: string,
+  attendanceCycleId: string,
+  submitterId: string,
+  nowIso: string,
+): Promise<{ cancelled: any[]; blocked: any[] }> {
+  const { data: others, error } = await client.from('job_assignments')
+    .select('id, user_id, status, role, assignment_type, invoiced_in, notes, is_lead')
+    .eq('job_id', jobId)
+    .eq('attendance_cycle_id', attendanceCycleId)
+    .eq('cycle_attribution', 'bound')
+    .neq('status', 'cancelled')
+    .neq('user_id', submitterId)
+  if (error) {
+    console.warn('[ops-api] allocation override read failed (non-blocking):', error.message || error)
+    return { cancelled: [], blocked: [] }
+  }
+  const cancelled: any[] = []
+  const blocked: any[] = []
+  for (const row of (others || []).filter((r: any) => isGenuineTradeAssignment(r))) {
+    if (row.invoiced_in) { blocked.push(row); continue }
+    const note = [String(row.notes || '').trim(), 'Overridden by report submitter ' + nowIso.slice(0, 10)].filter(Boolean).join(' | ')
+    const { error: updErr } = await client.from('job_assignments')
+      .update({ status: 'cancelled', notes: note }).eq('id', row.id)
+    if (updErr) { console.warn('[ops-api] allocation override cancel failed:', updErr.message || updErr); blocked.push(row); continue }
+    cancelled.push(row)
+  }
+  if (cancelled.length || blocked.length) {
+    try {
+      await client.from('job_events').insert({
+        job_id: jobId,
+        user_id: submitterId,
+        event_type: 'makesafe_allocation_overridden',
+        detail_json: {
+          attendance_cycle_id: attendanceCycleId,
+          submitter_user_id: submitterId,
+          cancelled: cancelled.map((r) => ({ assignment_id: r.id, user_id: r.user_id, prior_status: r.status })),
+          blocked_invoiced: blocked.map((r) => ({ assignment_id: r.id, user_id: r.user_id, invoiced_in: r.invoiced_in })),
+        },
+      })
+    } catch (_e) { /* audit non-blocking */ }
+  }
+  return { cancelled, blocked }
+}
+export const _overrideMakesafeAllocationToSubmitterForTest = overrideMakesafeAllocationToSubmitter
+
+// ── unlock_makesafe_report (2026-09-08, Marnin): "they can unlock something and
+// edit it after it has been submitted". Only while the office has not sent the
+// report anywhere: substatus still admin_to_send_report, report_sent_at null,
+// no sent docs pack, no receivable past DRAFT. The submitter, a make-safe
+// manager, or office may unlock. The report goes back to draft, the card back
+// to waiting_on_trade_report; assignments stay as they are. Re-submit rewrites
+// the same cycle-unique report row.
+async function unlockMakesafeReport(
+  client: any,
+  body: any,
+  tradeUser: TradeAuthContext,
+  access: TradeJobAccessContext,
+  isDispatcher: boolean,
+) {
+  const jobId = String(body?.job_id || body?.jobId || '').trim()
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, isDispatcher, access)
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+    .select('job_id, substatus, report_sent_at, cycle_number, attendance_cycle_id')
+    .eq('job_id', jobId).maybeSingle()
+  if (detailErr) throw detailErr
+  if (!detail) throw new ApiError('This is not a make-safe job', 404)
+  const substatus = normalizeMakesafeSubstatus(detail.substatus)
+  const currentCycle = Number(detail.cycle_number ?? 1)
+  const { data: report, error: repErr } = await client.from('job_service_reports')
+    .select('id, status, submitted_by, submitted_at, attendance_cycle_id, cycle_number')
+    .eq('job_id', jobId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
+  if (repErr) throw repErr
+  if (!report) throw new ApiError('No report on this visit to unlock', 404)
+  if (report.status === 'draft' && substatus === 'waiting_on_trade_report') {
+    return { ok: true, already: true, report_id: report.id, substatus }
+  }
+  if (report.status === 'approved') throw new ApiError('This report has been approved by the office and cannot be unlocked. Submit a separate attendance instead.', 409)
+  if (substatus !== 'admin_to_send_report') {
+    throw new ApiError('This report can no longer be unlocked. Submit a separate attendance instead.', 409)
+  }
+  if (detail.report_sent_at) {
+    throw new ApiError('The office has already sent this report to the builder. Submit a separate attendance instead.', 409)
+  }
+  const sentMap = await buildPackSentMap(client, [jobId])
+  if (sentMap[jobId]) {
+    throw new ApiError('The office has already sent the documents for this visit. Submit a separate attendance instead.', 409)
+  }
+  const { data: liveInvoice } = await client.from('xero_invoices')
+    .select('id').eq('job_id', jobId).eq('invoice_type', 'ACCREC')
+    .in('status', ['SUBMITTED', 'AUTHORISED', 'PAID']).limit(1).maybeSingle()
+  if (liveInvoice) throw new ApiError('This job has already been invoiced. Submit a separate attendance instead.', 409)
+  const isManager = isDispatcher || (Array.isArray(access?.managedVerticals) && access.managedVerticals.includes('makesafe'))
+  if (String(report.submitted_by || '') !== String(tradeUser.id) && !isManager) {
+    throw new ApiError('Only the trade who submitted this report, or the office, can unlock it', 403)
+  }
+  const nowIso = new Date().toISOString()
+  const { error: updErr } = await client.from('job_service_reports')
+    .update({ status: 'draft', submitted_at: null }).eq('id', report.id)
+  if (updErr) throw new ApiError('Could not unlock the report: ' + (updErr.message || updErr), 500)
+  const { error: boardErr } = await writeMakesafeSubstatus(
+    client,
+    jobId,
+    { substatus: 'waiting_on_trade_report', report_received_at: null, updated_at: nowIso },
+    internalEvidenceOrigin('trade_report_unlocked'),
+    { select: 'substatus', row: 'maybeSingle' },
+  )
+  if (boardErr) throw new ApiError('Report unlocked but the board did not follow: ' + (boardErr.message || boardErr), 500)
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      user_id: tradeUser.id,
+      event_type: 'makesafe_report_unlocked',
+      detail_json: { report_id: report.id, cycle_number: currentCycle, submitted_by: report.submitted_by, unlocked_by: tradeUser.id, previous_substatus: substatus },
+    })
+  } catch (_e) { /* audit non-blocking */ }
+  return { ok: true, report_id: report.id, substatus: 'waiting_on_trade_report' }
+}
+export const _unlockMakesafeReportForTest = unlockMakesafeReport
+
 async function ensureMakesafeReportSubmitterAssignment(
   client: any,
   input: {
@@ -23255,11 +23388,22 @@ async function submitMakesafeReport(
     if (!detailSync) {
       throw new ApiError('MakeSafe report saved but board sync failed: makesafe detail row missing', 500)
     }
+    // 2026-09-08 (Marnin): "whoever does the actual report is who it should be
+    // logged as allocated to; an override of whoever was allocated before".
+    // Cancel the other trades' bound allocations for THIS cycle before the
+    // close below, otherwise the trade who did not attend keeps an invoiceable
+    // complete card. Already-invoiced rows are left alone and flagged.
+    const override = await overrideMakesafeAllocationToSubmitter(client, jId, attendanceCycle.id, String(uId), syncAt)
+    if (override.blocked.length) warnings.push('allocation_override_blocked_invoiced')
     // ── M3d U2b: submitting the final make-safe report advances substatus to a
     // finished value (admin_to_send_report) — close its still-open crew
     // assignments. Guarded by submittingFinal above. Non-blocking.
     await closeOpenAssignmentsForJob(client, jId, 'complete')
     boardSync = {
+      allocation_override: {
+        cancelled: override.cancelled.map((r: any) => ({ id: r.id, user_id: r.user_id })),
+        blocked: override.blocked.map((r: any) => ({ id: r.id, user_id: r.user_id, invoiced_in: r.invoiced_in })),
+      },
       ok: true,
       substatus: detailSync.substatus || 'admin_to_send_report',
       report_received_at: detailSync.report_received_at || syncAt,
