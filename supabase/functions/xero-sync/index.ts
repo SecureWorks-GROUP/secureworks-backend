@@ -533,13 +533,17 @@ const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, inv
 async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string, cap = TRADE_PDF_BACKFILL_PER_RUN) {
   const out = { checked: 0, attached: 0, skipped: 0 }
   try {
+    // Bills cached at push time carry no raw_json at all (HasAttachments is
+    // null, not false), and the incremental sync never re-reads an untouched
+    // bill, so they must be swept too. Each candidate costs one Xero GET; the
+    // refreshed raw_json drops settled ones out of the next run.
     const { data: cached, error } = await sb.from('xero_invoices')
       .select('xero_invoice_id, raw_json')
       .eq('invoice_type', 'ACCPAY')
       .in('status', ['DRAFT', 'SUBMITTED', 'AUTHORISED', 'PAID'])
-      .eq('raw_json->>HasAttachments', 'false')
-      .order('updated_at', { ascending: false })
-      .limit(200)
+      .or('raw_json->>HasAttachments.eq.false,raw_json->>HasAttachments.is.null')
+      .order('updated_at', { ascending: false, nullsFirst: false })
+      .limit(60)
     if (error) throw error
     const ids = (cached || []).map((r: any) => String(r.xero_invoice_id)).filter(Boolean)
     if (!ids.length) return out
