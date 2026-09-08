@@ -1451,6 +1451,48 @@ function logEmailToGHL(contactId: string | null, subject: string, recipient: str
 const RELEASED_INVOICE_STATUSES: readonly string[] = ['draft', 'failed', 'ops-reject']
 const RELEASED_INVOICE_STATUS_SET: ReadonlySet<string> = new Set(RELEASED_INVOICE_STATUSES)
 
+// Per-metre trade pay default ($/m). The ONLY place this number lives: the
+// legacy per-metre invoice lane and the fencing estimator both read it. A
+// trade's own per-metre rate on users.trade_details overrides it when present
+// (neither users nor trade_rates has a dedicated per-metre column today).
+export const PER_METRE_DEFAULT_RATE = 35
+
+export function _resolvePerMetreRate(tradeDetails: unknown): number {
+  const details = tradeDetails && typeof tradeDetails === 'object'
+    ? tradeDetails as Record<string, unknown>
+    : {}
+  for (const key of ['ratePerMetre', 'rate_per_metre', 'per_metre_rate']) {
+    const value = Number(details[key])
+    if (Number.isFinite(value) && value > 0) return value
+  }
+  return PER_METRE_DEFAULT_RATE
+}
+
+// Manual (job-centric) hours typed by the trade: finite, more than zero and no
+// more than 24 per assignment. Anything else is refused, never coerced to 0.
+export function _sanitiseManualAssignmentHours(raw: unknown): number | null {
+  const hours = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24) return null
+  return Math.round(hours * 100) / 100
+}
+
+// One live invoice per trade per week. Returns the LIVE (non-released) invoice
+// already holding user + week_end, or null. Draft / ops-reject rows are
+// released and may be overwritten by the existing prior-draft replacement.
+export async function _findLiveTradeInvoiceForWeek(
+  client: any,
+  userId: string,
+  weekEnd: string,
+): Promise<any | null> {
+  const { data, error } = await client.from('trade_invoices')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc')
+    .eq('user_id', userId)
+    .eq('week_end', weekEnd)
+    .order('created_at', { ascending: true })
+  if (error) throw new Error('Failed to check for an existing invoice this week: ' + error.message)
+  return (data || []).find((row: any) => !RELEASED_INVOICE_STATUS_SET.has(String(row?.status || ''))) || null
+}
+
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 
@@ -10133,9 +10175,9 @@ if (import.meta.main) serve(async (req: Request) => {
             const weeklyShape = hasWeeklyWorkOrderInvoiceShape(body)
 
             // ── Manual-assignment money-path guards ──────────────────────────
-            // manual_assignments is the job-centric prefill payload. Trades may
-            // now submit an editable rate; server rates remain the prefill/default
-            // and client-entered rates are flagged for ops review.
+            // manual_assignments is the job-centric prefill payload. Hours are
+            // client-typed (sanitised below); the rate is ALWAYS server-resolved
+            // from trade_rates. Client rate/subtotal/gst/super/total are ignored.
             const manualAssignmentsIn: any[] = Array.isArray(manual_assignments) ? manual_assignments : []
             for (const ma of manualAssignmentsIn) {
               if (!ma || !ma.assignment_id) {
@@ -10160,10 +10202,40 @@ if (import.meta.main) serve(async (req: Request) => {
               const weekEndDate = new Date(weekStartDate.getTime() + 6 * 86400000)
               weekEnd = weekEndDate.toISOString().slice(0, 10)
 
-              // ── Duplicate-week guard (Layer A) REMOVED ────────────────────
-              // Multiple invoices per week are now allowed (e.g. correction/
-              // supplemental submissions). The DB unique index was also dropped.
-              // Per-assignment duplicate protection remains via invoiced_in. [F3]
+              // ── Duplicate-week guard (Layer A) RESTORED ───────────────────
+              // Removed 2026-06-18, restored after the 2026-09 money audit: a
+              // second submit for the same trade + week_end must never mint a
+              // second Xero bill. A LIVE invoice for the week is returned as-is
+              // (idempotent). A draft / ops-reject row is released and falls
+              // through to the prior-draft replacement below, so drafts can
+              // still be overwritten. Per-assignment protection via invoiced_in
+              // is unchanged.                                              [F3]
+              const liveWeekInvoice = await _findLiveTradeInvoiceForWeek(client, tradeUser.id, weekEnd)
+              if (liveWeekInvoice) {
+                const liveNet = Number(liveWeekInvoice.net_pay)
+                const liveGst = Number(liveWeekInvoice.gst)
+                return json({
+                  success: true,
+                  already_submitted: true,
+                  invoice_id: liveWeekInvoice.id,
+                  invoice_number: liveWeekInvoice.invoice_number || null,
+                  status: liveWeekInvoice.status,
+                  week_start: liveWeekInvoice.week_start || week_start,
+                  week_end: weekEnd,
+                  xero_bill_id: liveWeekInvoice.xero_bill_id || null,
+                  gst_on: liveWeekInvoice.gst_on ?? null,
+                  gross_earned: liveWeekInvoice.gross_earned ?? liveWeekInvoice.subtotal_ex ?? null,
+                  super_rate: liveWeekInvoice.super_rate ?? null,
+                  super_amount: liveWeekInvoice.super_amount ?? null,
+                  net_pay: liveWeekInvoice.net_pay ?? null,
+                  gst: liveWeekInvoice.gst ?? null,
+                  total_inc: liveWeekInvoice.total_inc ?? null,
+                  trade_payable: Number.isFinite(liveNet) && Number.isFinite(liveGst)
+                    ? Math.round((liveNet + liveGst) * 100) / 100
+                    : null,
+                  userMessage: 'An invoice for this week has already been submitted. It was returned unchanged; contact the office if it needs changing.',
+                })
+              }
             }
             if (weeklyShape && (!week_start || !weekEnd)) {
               throw new ApiError('week_start is required for a weekly work-order invoice', 422)
@@ -10211,15 +10283,15 @@ if (import.meta.main) serve(async (req: Request) => {
             let assignments: any[] = []
             let reviewFlag: string | null = null
             if (!weeklyInvoice && week_start && weekEnd && hasManualAssignments) {
-              // Rate guard: reject only if server rate is missing AND no client rate provided.
-              // If the trade enters their own rate, allow it — it flags pending_ops_review below.
-              const anyClientRate = manualAssignmentsIn.some((m: any) => Number(m.rate) > 0)
-              if (resolvedRate <= 0 && !anyClientRate) {
+              // Rate guard: the rate is SERVER-SIDE ONLY (trade_rates). A client
+              // rate on a manual row is never read; a missing server rate blocks
+              // the submission instead of trusting the client.  [audit 2026-09]
+              if (resolvedRate <= 0) {
                 // B3: RATE_NOT_CONFIGURED — structured error the FE can surface as a toast
                 return json({
                   ok: false,
                   code: 'RATE_NOT_CONFIGURED',
-                  userMessage: 'No pay rate is set for you this week. Enter a rate on the job card, or contact the office to have one configured.',
+                  userMessage: 'No pay rate is set for you this week. Contact the office to have one configured before submitting.',
                 }, 422)
               }
               const wantedIds = manualAssignmentsIn.map((m: any) => m.assignment_id)
@@ -10240,7 +10312,15 @@ if (import.meta.main) serve(async (req: Request) => {
               const hoursById: Record<string, number> = {}
               const manualById: Record<string, any> = {}
               for (const m of manualAssignmentsIn) {
-                hoursById[m.assignment_id] = Number(m.hours) || 0
+                const cleanHours = _sanitiseManualAssignmentHours(m.hours)
+                if (cleanHours === null) {
+                  return json({
+                    ok: false,
+                    code: 'HOURS_INVALID',
+                    userMessage: 'Enter the hours on each ticked job card as a number more than 0 and no more than 24.',
+                  }, 422)
+                }
+                hoursById[m.assignment_id] = cleanHours
                 manualById[m.assignment_id] = m
               }
               for (const a of (asn || [])) {
@@ -10265,11 +10345,11 @@ if (import.meta.main) serve(async (req: Request) => {
                 // hours>16/day is implausible — flag for ops review, do not reject. [F2]
                 if (h > 16) reviewFlag = 'hours_excess'
                 const manualRow = manualById[a.id] || {}
-                const clientRateProvided = Object.prototype.hasOwnProperty.call(manualRow, 'rate') && Number(manualRow.rate) > 0
-                const appliedRate = clientRateProvided ? Number(manualRow.rate) : resolvedRate
+                // Server-resolved rate only. Any rate / subtotal / gst / super /
+                // total the client put on the row is never read.  [audit 2026-09]
                 assignments.push({
-                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: appliedRate,
-                  rate_source: clientRateProvided ? 'client_entered' : 'server_resolved',
+                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: resolvedRate,
+                  rate_source: 'server_resolved',
                   description: manualRow.description || null,
                   // M4 U1: carry the trade's variation explanation (trade-app capture
                   // is U2/Deckhand B) so the jobGroups loop can attach it to a flagged
@@ -15744,7 +15824,7 @@ async function generateWorkOrderDoc(client: any, body: any) {
     panelKit1800_2400:185, panelKit1800_2700:210, panelKit1800_3000:235,
     panelKit1500_2400:165, panelKit1200_2400:145, panelKit2100_2700:230, panelKit2100_3000:255,
     plinth:28, patioTube:45, gateKitPed:320, gateKitDbl:580, gatePost:85,
-    concrete:9.50, tekBox:18, labourPerM:35, delivery:250
+    concrete:9.50, tekBox:18, labourPerM:PER_METRE_DEFAULT_RATE, delivery:250
   }
   const ACCESS_RATE: Record<string,number> = { easy:0, moderate:0.10, difficult:0.20 }
 
@@ -48284,7 +48364,7 @@ function weekStartFromEnd(weekEnd: string): string {
 }
 
 // ── my_hours: completed assignments for a given week ──
-async function myHours(client: any, userId: string, params: URLSearchParams) {
+export async function myHours(client: any, userId: string, params: URLSearchParams) {
   const weekEnding = params.get('week_ending') || getAWSTWeekEnd()
   const weekStart = weekStartFromEnd(weekEnding)
 
@@ -48293,7 +48373,7 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
   // invoiceable. invoice_type on the users row is the primary signal.   [F4 / M1]
   const { data: userRow } = await client
     .from('users')
-    .select('invoice_type')
+    .select('invoice_type, trade_details')
     .eq('id', userId)
     .maybeSingle()
   const isPerMetre = userRow?.invoice_type === 'per_metre'
@@ -48443,7 +48523,15 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
     .maybeSingle()
 
   const subtotal = Math.round(totalHours * rate * 100) / 100
-  const gst = Math.round(subtotal * 0.1 * 100) / 100
+  // Preview money uses the SAME split as the invoice (super 12% of gross, GST
+  // 10% of gross when on) so the Pay tab and the bill never disagree. The GST
+  // choice is ?gst_on=true|false, else the profile flag, else off.  [audit 2026-09]
+  const previewGstParam = params.get('gst_on')
+  const previewGstOn = previewGstParam === 'true' || previewGstParam === 'false'
+    ? previewGstParam === 'true'
+    : userRow?.trade_details?.gstRegistered === true
+  const previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  const gst = previewMoney.gst_amount
 
   // Check verification state across assignments
   const pendingVerification = enriched.some((a: any) => a.status === 'submitted')
@@ -48459,9 +48547,10 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
     week_ending: weekEnding,
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
+    ...tradeInvoiceMoneyResponse(previewMoney),
     subtotal,
     gst,
-    total: Math.round((subtotal + gst) * 100) / 100,
+    total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
     xero_bill_number: existingInvoice?.xero_bill_number || null,
     pending_verification: pendingVerification,
@@ -48470,12 +48559,22 @@ async function myHours(client: any, userId: string, params: URLSearchParams) {
 }
 
 // ── submit_trade_invoice: build + push ACCPAY bill to Xero ──
-async function submitTradeInvoice(client: any, userId: string, body: any) {
-  const { week_ending, notes, invoice_type, rate_per_metre, items } = body
+export async function submitTradeInvoice(client: any, userId: string, body: any) {
+  const { week_ending, notes, items } = body
   if (!week_ending) throw new Error('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
 
   const weekStart = weekStartFromEnd(week_ending)
-  const isPerMetre = invoice_type === 'per_metre'
+
+  // Billing mode comes from the users row, never the request. The client may
+  // still send invoice_type / rate_per_metre; both are ignored and the
+  // response says where the mode came from.                    [audit 2026-09]
+  const { data: tradeUser } = await client
+    .from('users')
+    .select('name, email, xero_contact_id, trade_details, invoice_type')
+    .eq('id', userId)
+    .single()
+  const serverInvoiceType = tradeUser?.invoice_type === 'per_metre' ? 'per_metre' : 'hourly'
+  const isPerMetre = serverInvoiceType === 'per_metre'
 
   // Prevent double-submit
   // week_end is the live column (trade_invoices was rebuilt in
@@ -48495,7 +48594,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   const { data: weekAssignments, error } = await client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, started_at, completed_at, role, assignment_type, status,
+      id, scheduled_date, started_at, completed_at, role, assignment_type, status, invoiced_in,
       jobs:job_id (
         id, type, job_number, client_name, site_address, site_suburb, metadata
       )
@@ -48506,7 +48605,26 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     .order('scheduled_date', { ascending: true })
 
   if (error) throw error
-  const assignments = (weekAssignments || []).filter((a: any) =>
+  // Assignment lock (Layer B), same rule as my_hours and generate_trade_invoice:
+  // a job card held by a LIVE invoice is refused here. This lane auto-collects
+  // (the trade never ticks these cards and cannot deselect one), so a held card
+  // is dropped rather than 409-ing; the stamp below fails closed if anything
+  // changes concurrently.                                       [audit 2026-09]
+  const stHeldRefIds = [...new Set((weekAssignments || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+  let stLiveInvoiceIds = new Set<string>()
+  if (stHeldRefIds.length > 0) {
+    const { data: stRefInvoices, error: stRefErr } = await client
+      .from('trade_invoices')
+      .select('id, status')
+      .in('id', stHeldRefIds)
+    if (stRefErr) throw new Error('Failed to check which job cards are already on a live invoice: ' + stRefErr.message)
+    stLiveInvoiceIds = new Set<string>((stRefInvoices || [])
+      .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
+      .map((ti: any) => String(ti.id)))
+  }
+  const stUnlockedAssignments = selectUnlockedAssignments((weekAssignments || []) as any[], stLiveInvoiceIds)
+  const stHeldCount = (weekAssignments || []).length - stUnlockedAssignments.length
+  const assignments = stUnlockedAssignments.filter((a: any) =>
     a.status === 'complete' && a.started_at && a.completed_at)
   // Per-metre scope: every assignment the trade still holds for the week,
   // minus cancelled ones (a cancelled assignment is not work they can bill).
@@ -48515,15 +48633,10 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   if (isPerMetre) {
     if (billableAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
   } else if (assignments.length === 0) {
-    throw new Error('No completed hours found for this week')
+    throw new Error(stHeldCount > 0
+      ? 'Every completed job card for this week is already on a live invoice. Contact the office if this looks wrong.'
+      : 'No completed hours found for this week')
   }
-
-  // Get trade user info
-  const { data: tradeUser } = await client
-    .from('users')
-    .select('name, email, xero_contact_id, trade_details')
-    .eq('id', userId)
-    .single()
 
   const stGstOn = tradeInvoiceGstOn(body)
   const stTaxType = stGstOn ? 'INPUT' : 'NONE'
@@ -48591,7 +48704,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
   if (isPerMetre) {
     // ── Per-metre invoice: use client-sent items with per-metre rate ──
     if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
-    const pmRate = Number(rate_per_metre) || 35
+    const pmRate = _resolvePerMetreRate(tradeUser?.trade_details)
 
     const jobMap: Record<string, any> = {}
     for (const a of billableAssignments) {
@@ -48765,6 +48878,74 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     )
   }
 
+  // ── Layer B: stamp invoiced_in on every covered assignment, before Xero ──
+  // Same decide-before-write lock as generate_trade_invoice: refuse if any
+  // covered card is held by a LIVE invoice, roll back a partial claim, and
+  // release this invoice to 'draft' (CHECK-legal, released) on failure so the
+  // cards are never wedged.                                    [audit 2026-09]
+  const stCoveredAssignmentIds = [...new Set(Object.values(jobLines).flatMap((l) => l.assignment_ids))]
+  if (stCoveredAssignmentIds.length > 0) {
+    const stReleaseInvoice = async (stampMsg: string) => {
+      const { error: markErr } = await client.from('trade_invoices').update({
+        status: 'draft',
+        query_note: ('Invoice assignment stamp failed before Xero push: ' + stampMsg).slice(0, 500),
+      }).eq('id', insertedInvoice.id)
+      if (markErr) console.error('[ops-api] Failed to mark assignment-stamp failure:', markErr.message)
+      throw new Error('Failed to lock invoiced job cards before Xero push: ' + stampMsg)
+    }
+    const { data: stStampCandidates, error: stStampReadErr } = await client.from('job_assignments')
+      .select('id, invoiced_in')
+      .eq('user_id', userId)
+      .in('id', stCoveredAssignmentIds)
+    if (stStampReadErr) await stReleaseInvoice(stStampReadErr.message)
+    const stStampRefIds = [...new Set((stStampCandidates || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+    let stReleasedInvoiceIds: string[] = []
+    if (stStampRefIds.length > 0) {
+      const { data: stStampRefInvoices, error: stStampRefErr } = await client.from('trade_invoices')
+        .select('id, status')
+        .in('id', stStampRefIds)
+      if (stStampRefErr) await stReleaseInvoice(stStampRefErr.message)
+      stReleasedInvoiceIds = (stStampRefInvoices || [])
+        .filter((ti: any) => RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
+        .map((ti: any) => String(ti.id))
+    }
+    const stLockPlan = planAssignmentLock({
+      expectedIds: stCoveredAssignmentIds,
+      candidates: (stStampCandidates || []) as any,
+      releasedInvoiceIds: stReleasedInvoiceIds,
+    })
+    if (!stLockPlan.ok) {
+      const stJobLabels: Record<string, string> = {}
+      for (const l of Object.values(jobLines)) {
+        for (const aid of l.assignment_ids) stJobLabels[String(aid)] = l.job_number || String(aid)
+      }
+      await stReleaseInvoice(describeAssignmentLockBlock(stLockPlan, stJobLabels))
+    }
+    const stStampFilter = stReleasedInvoiceIds.length > 0
+      ? 'invoiced_in.is.null,invoiced_in.in.(' + stReleasedInvoiceIds.join(',') + ')'
+      : 'invoiced_in.is.null'
+    const { data: stStamped, error: stStampErr } = await client.from('job_assignments')
+      .update({ invoiced_in: insertedInvoice.id })
+      .eq('user_id', userId)
+      .in('id', stCoveredAssignmentIds)
+      .or(stStampFilter)
+      .select('id')
+    const stStampedIds = [...new Set((stStamped || []).map((a: any) => String(a.id)))]
+    if (stStampErr || stStampedIds.length !== stCoveredAssignmentIds.length) {
+      if (stStampedIds.length > 0) {
+        const { error: stRollbackErr } = await client.from('job_assignments')
+          .update({ invoiced_in: null })
+          .eq('invoiced_in', insertedInvoice.id)
+          .in('id', stStampedIds)
+        if (stRollbackErr) console.error('[ops-api] Assignment stamp rollback failed:', stRollbackErr.message)
+      }
+      await stReleaseInvoice(stStampErr
+        ? stStampErr.message
+        : 'Only stamped ' + stStampedIds.length + ' of ' + stCoveredAssignmentIds.length +
+          ' assignments (concurrent submission; claim rolled back)')
+    }
+  }
+
   // Resolve Xero supplier contact only after line construction, money
   // calculation, split validation, and local persistence all succeed.
   const { accessToken: stAt, tenantId: stTi } = await getToken(client)
@@ -48855,6 +49036,8 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
     xero_bill_number: billNumber,
     total,
     ...tradeInvoiceMoneyResponse(stMoney),
+    invoice_type: serverInvoiceType,
+    invoice_type_source: 'user',
     pdf_attached: pdfAttached,
   }
 }
