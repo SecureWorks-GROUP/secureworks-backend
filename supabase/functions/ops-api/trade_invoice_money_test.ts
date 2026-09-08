@@ -53,6 +53,19 @@ Deno.test("trade invoice money: GST on stays 10% of gross and never double-count
   assertEquals(money.total_inc, 1_100);
 });
 
+Deno.test("trade invoice money: GST is 10% of gross earned, never of net pay after super", () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 2_208.20,
+    gstOn: true,
+    earningsDate: "2026-08-28",
+  });
+  // Audit 2026-09: a fixture that put GST on net pay would expect 194.32 here.
+  assertEquals(money.gst_amount, 220.82);
+  assertEquals(money.gst_amount === Math.round(money.net_pay * 0.1 * 100) / 100, false);
+  assertEquals(money.total_inc, 2_429.02);
+  assertEquals(money.trade_payable, 2_164.04);
+});
+
 Deno.test("trade invoice money: statutory rate is resolved by date and fails closed outside the owned schedule", () => {
   assertEquals(
     calculateTradeInvoiceMoney({
