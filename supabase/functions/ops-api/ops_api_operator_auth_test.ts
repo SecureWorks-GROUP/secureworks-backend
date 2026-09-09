@@ -56,6 +56,26 @@ function scopedDispatchStatus(
   return 200;
 }
 
+
+Deno.test("create_invoice_draft is privileged server or staff JWT only at the ops-api front door", () => {
+  const action = "create_invoice_draft";
+  assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true);
+  assertEquals(_opsApiActionNeedsStaffRole(actionUrl(action)), true);
+  assertEquals(authorizationStatus({ action, authMode: "none" }), 401);
+  assertEquals(authorizationStatus({ action, authMode: "api_key" }), 401);
+  assertEquals(
+    authorizationStatus({ action, authMode: "api_key", serverSecretPresented: true }),
+    200,
+  );
+  for (const role of ["admin", "owner", "ops_manager"]) {
+    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200, role);
+  }
+  for (const role of ["crew", "installer", "lead_installer"]) {
+    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 403, role);
+  }
+  assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
+});
+
 Deno.test("direct Xero evidence reads retain staff/server auth and refuse public or trade callers", () => {
   for (
     const action of [

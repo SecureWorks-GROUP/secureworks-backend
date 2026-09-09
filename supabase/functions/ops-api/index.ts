@@ -7516,6 +7516,16 @@ if (import.meta.main) serve(async (req: Request) => {
         return json({ success: true })
       }
       case 'create_invoice': return json(await createInvoice(client, body))
+      case 'create_invoice_draft': {
+        const result = await createInvoiceDraftAction(
+          client,
+          body,
+          authMode,
+          authUser,
+          serverSecretPresented,
+        )
+        return json(result, createInvoiceDraftHttpStatus(result))
+      }
       case 'preflight_invoice': {
         // Read-only preflight check. No Xero call, no writes.
         // Used by ops UI and MCP tools to gate invoice creation before any
@@ -33624,6 +33634,265 @@ interface CreateInvoiceInternalOptions {
   captainLock?: {
     decision_key: string
   }
+  /** Trusted wrapper only: draft minting must not advance job lifecycle. */
+  preserveJobLifecycle?: boolean
+  /** Trusted wrapper only: do not mirror a requested status as provider fact. */
+  requireProviderDraftConfirmation?: boolean
+}
+
+const CREATE_INVOICE_DRAFT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const CREATE_INVOICE_DRAFT_ALLOWED_KEYS = new Set([
+  'job_id',
+  'xero_contact_id',
+  'job_contact_id',
+  'line_items',
+  'due_date',
+  'reference',
+])
+const CREATE_INVOICE_DRAFT_FORBIDDEN_KEYS = new Set([
+  'jobId',
+  'lineItems',
+  'dueDate',
+  'contact_name',
+  'contactName',
+  'contact',
+  'xero_status',
+  'status',
+  'send_email',
+  'bypass_preflight',
+  'bypass_reason',
+  'preserveJobLifecycle',
+  'captainLock',
+  'makesafeIdempotencyKey',
+  'makesafe_idempotency_key',
+  'ses',
+])
+const CREATE_INVOICE_DRAFT_LINE_ITEM_KEYS = new Set([
+  'description',
+  'quantity',
+  'unit_price',
+  'account_code',
+])
+
+type CreateInvoiceDraftResult = Record<string, unknown> & {
+  ok?: boolean
+  success?: boolean
+  code?: string
+}
+
+function createInvoiceDraftRefusal(
+  code: string,
+  error: string,
+  status = 400,
+  extra: Record<string, unknown> = {},
+): CreateInvoiceDraftResult {
+  return { ok: false, success: false, code, error, status_code: status, ...extra }
+}
+
+function createInvoiceDraftHttpStatus(result: CreateInvoiceDraftResult): number {
+  if (result.ok !== false) return 200
+  const raw = Number(result.status_code)
+  if (Number.isInteger(raw) && raw >= 400 && raw <= 599) return raw
+  if (result.code === 'INVOICE_DRAFT_OUTCOME_UNCONFIRMED') return 502
+  if (result.code === 'operator_access_required') return 403
+  return 400
+}
+
+function validateCreateInvoiceDraftBody(body: any):
+  | { ok: true; body: any }
+  | { ok: false; result: CreateInvoiceDraftResult } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'JSON object body required') }
+  }
+  for (const key of Object.keys(body)) {
+    if (!CREATE_INVOICE_DRAFT_ALLOWED_KEYS.has(key)) {
+      const code = CREATE_INVOICE_DRAFT_FORBIDDEN_KEYS.has(key) ? 'FORBIDDEN_FIELD' : 'UNKNOWN_FIELD'
+      return { ok: false, result: createInvoiceDraftRefusal(code, `${key} is not accepted by create_invoice_draft`, 400, { field: key }) }
+    }
+  }
+  const jobId = String(body.job_id || '').trim()
+  if (!CREATE_INVOICE_DRAFT_UUID_RE.test(jobId)) {
+    return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'job_id must be a valid UUID', 400, { field: 'job_id' }) }
+  }
+  const xeroContactId = String(body.xero_contact_id || '').trim()
+  if (!CREATE_INVOICE_DRAFT_UUID_RE.test(xeroContactId)) {
+    return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'xero_contact_id must be a valid existing Xero contact UUID', 400, { field: 'xero_contact_id' }) }
+  }
+  const jobContactId = body.job_contact_id === undefined ? undefined : String(body.job_contact_id || '').trim()
+  if (jobContactId !== undefined && !CREATE_INVOICE_DRAFT_UUID_RE.test(jobContactId)) {
+    return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'job_contact_id must be a valid UUID when supplied', 400, { field: 'job_contact_id' }) }
+  }
+  const dueDate = body.due_date === undefined ? undefined : String(body.due_date || '').trim()
+  if (dueDate !== undefined) {
+    const parsedDueDate = new Date(`${dueDate}T00:00:00.000Z`)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || Number.isNaN(parsedDueDate.getTime()) || parsedDueDate.toISOString().slice(0, 10) !== dueDate) {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'due_date must use a real YYYY-MM-DD calendar date', 400, { field: 'due_date' }) }
+    }
+  }
+  if (body.reference !== undefined && typeof body.reference !== 'string') {
+    return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'reference must be a string', 400, { field: 'reference' }) }
+  }
+  const items = body.line_items
+  if (!Array.isArray(items) || items.length === 0) {
+    return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', 'line_items must be a non-empty array', 400, { field: 'line_items' }) }
+  }
+  const lineItems = []
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}] must be an object`, 400, { field: `line_items[${i}]` }) }
+    }
+    for (const key of Object.keys(item)) {
+      if (!CREATE_INVOICE_DRAFT_LINE_ITEM_KEYS.has(key)) {
+        return { ok: false, result: createInvoiceDraftRefusal('UNKNOWN_FIELD', `line_items[${i}].${key} is not accepted by create_invoice_draft`, 400, { field: `line_items[${i}].${key}` }) }
+      }
+    }
+    if (typeof item.description !== 'string') {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}].description must be a string`, 400, { field: `line_items[${i}].description` }) }
+    }
+    const description = item.description.trim()
+    if (!description) {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}].description required`, 400, { field: `line_items[${i}].description` }) }
+    }
+    const quantity = item.quantity
+    if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}].quantity must be a finite number greater than zero`, 400, { field: `line_items[${i}].quantity` }) }
+    }
+    const unitPrice = item.unit_price
+    if (typeof unitPrice !== 'number' || !Number.isFinite(unitPrice)) {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}].unit_price must be a finite number`, 400, { field: `line_items[${i}].unit_price` }) }
+    }
+    const lineTotal = quantity * unitPrice
+    if (!Number.isFinite(lineTotal)) {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}] total must be finite`, 400, { field: `line_items[${i}]` }) }
+    }
+    if (item.account_code !== undefined && typeof item.account_code !== 'string') {
+      return { ok: false, result: createInvoiceDraftRefusal('INVALID_ARGUMENT', `line_items[${i}].account_code must be a string`, 400, { field: `line_items[${i}].account_code` }) }
+    }
+    lineItems.push({
+      description,
+      quantity,
+      unit_price: unitPrice,
+      account_code: item.account_code === undefined ? undefined : String(item.account_code).trim(),
+    })
+  }
+  return {
+    ok: true,
+    body: {
+      job_id: jobId,
+      xero_contact_id: xeroContactId,
+      ...(jobContactId ? { job_contact_id: jobContactId } : {}),
+      line_items: lineItems,
+      ...(dueDate ? { due_date: dueDate } : {}),
+      ...(body.reference !== undefined ? { reference: String(body.reference) } : {}),
+      xero_status: 'DRAFT',
+      send_email: false,
+      bypass_preflight: false,
+    },
+  }
+}
+
+async function assertCreateInvoiceDraftTenantBindings(
+  client: any,
+  payload: Record<string, unknown>,
+): Promise<CreateInvoiceDraftResult | null> {
+  const jobId = String(payload.job_id || '')
+  const { data: job, error: jobError } = await client.from('jobs')
+    .select('id, org_id')
+    .eq('id', jobId)
+    .eq('org_id', DEFAULT_ORG_ID)
+    .maybeSingle()
+  if (jobError) {
+    return createInvoiceDraftRefusal('JOB_LOOKUP_FAILED', jobError.message || 'job lookup failed', 500)
+  }
+  if (!job) {
+    return createInvoiceDraftRefusal('JOB_NOT_FOUND', 'job_id was not found in the supported SecureWorks organisation', 404, { field: 'job_id' })
+  }
+  if (payload.job_contact_id) {
+    const { data: jobContact, error: contactError } = await client.from('job_contacts')
+      .select('id, job_id')
+      .eq('id', String(payload.job_contact_id))
+      .eq('job_id', jobId)
+      .maybeSingle()
+    if (contactError) {
+      return createInvoiceDraftRefusal('JOB_CONTACT_LOOKUP_FAILED', contactError.message || 'job_contact lookup failed', 500)
+    }
+    if (!jobContact) {
+      return createInvoiceDraftRefusal('JOB_CONTACT_MISMATCH', 'job_contact_id must belong to job_id', 400, { field: 'job_contact_id' })
+    }
+  }
+  return null
+}
+
+async function createInvoiceDraftAction(
+  client: any,
+  body: any,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none' = 'none',
+  authUser?: (Pick<TradeAuthContext, 'role' | 'orgId'> & { managedVerticals?: unknown }) | null,
+  serverSecretPresented = false,
+): Promise<CreateInvoiceDraftResult> {
+  const privilegedServer = authMode === 'api_key' && serverSecretPresented
+  const staffJwt = authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId === DEFAULT_ORG_ID
+  if (!privilegedServer && !staffJwt) {
+    return createInvoiceDraftRefusal(
+      'operator_access_required',
+      'An authorised operator session or privileged server credential is required.',
+      403,
+    )
+  }
+  const validation = validateCreateInvoiceDraftBody(body)
+  if (!validation.ok) return validation.result
+  const bindingRefusal = await assertCreateInvoiceDraftTenantBindings(client, validation.body)
+  if (bindingRefusal) return bindingRefusal
+
+  const result: any = await createInvoice(client, validation.body, {
+    preserveJobLifecycle: true,
+    requireProviderDraftConfirmation: true,
+  })
+  const invoiceId = String(result?.xero_invoice_id || '').trim()
+  const providerStatus = result?.xero_provider_status == null
+    ? null
+    : String(result.xero_provider_status).trim().toUpperCase()
+  const providerType = result?.xero_provider_type == null
+    ? null
+    : String(result.xero_provider_type).trim().toUpperCase()
+  if (
+    result?.success === true &&
+    CREATE_INVOICE_DRAFT_UUID_RE.test(invoiceId) &&
+    providerStatus === 'DRAFT' &&
+    providerType === 'ACCREC' &&
+    result?.emailed === false &&
+    result?.email_status === 'not_requested'
+  ) {
+    return {
+      ...result,
+      ok: true,
+      success: true,
+      status: 'DRAFT',
+      xero_provider_status: providerStatus,
+      xero_provider_type: providerType,
+      emailed: false,
+      email_status: 'not_requested',
+      outcome: 'xero_draft_created_not_sent',
+      draft_created_not_sent: true,
+    }
+  }
+
+  return createInvoiceDraftRefusal(
+    'INVOICE_DRAFT_OUTCOME_UNCONFIRMED',
+    'Xero did not explicitly confirm an ACCREC DRAFT invoice with no email request. Inspect the known Xero invoice/cache/audit state before retrying.',
+    502,
+    {
+      xero_invoice_id: invoiceId || null,
+      invoice_number: result?.invoice_number || null,
+      xero_provider_status: providerStatus,
+      xero_provider_type: providerType,
+      emailed: result?.emailed ?? null,
+      email_status: result?.email_status || null,
+      outcome: 'unknown_no_retry',
+      retry_safe: false,
+    },
+  )
 }
 
 async function createInvoice(
@@ -33913,6 +34182,37 @@ async function createInvoice(
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
   const invNumber = xeroInv?.InvoiceNumber
+  const providerInvoiceStatus = xeroInv?.Status == null ? null : String(xeroInv.Status)
+  const providerInvoiceType = xeroInv?.Type == null ? null : String(xeroInv.Type)
+  const observedInvoiceStatus = providerInvoiceStatus ||
+    (internal.requireProviderDraftConfirmation ? null : invoiceStatus)
+  const providerInvoiceId = xeroInvId == null ? '' : String(xeroInvId).trim()
+  if (
+    internal.requireProviderDraftConfirmation &&
+    (
+      !CREATE_INVOICE_DRAFT_UUID_RE.test(providerInvoiceId) ||
+      String(providerInvoiceStatus || '').trim().toUpperCase() !== 'DRAFT' ||
+      String(providerInvoiceType || '').trim().toUpperCase() !== 'ACCREC'
+    )
+  ) {
+    return {
+      success: false,
+      code: 'INVOICE_DRAFT_OUTCOME_UNCONFIRMED',
+      outcome: 'unknown_no_retry',
+      retry_safe: false,
+      error: 'Xero did not explicitly confirm an ACCREC DRAFT invoice identity. Inspect the known Xero invoice state before retrying.',
+      xero_invoice_id: providerInvoiceId || null,
+      invoice_number: invNumber || null,
+      total: xeroInv?.Total ?? null,
+      status: observedInvoiceStatus,
+      xero_provider_status: providerInvoiceStatus,
+      xero_provider_type: providerInvoiceType,
+      reference: xeroInv?.Reference || ref,
+      emailed: null,
+      email_status: 'not_requested',
+      email_error: null,
+    }
+  }
 
   // SES crash-safe carrier: stamp the Xero InvoiceID onto the effect row as soon
   // as Xero accepts create, before the local mirror upsert. Reconcile can then
@@ -33980,7 +34280,7 @@ async function createInvoice(
       contact_name: contact || xeroInv?.Contact?.Name || null,
       invoice_number: invNumber,
       invoice_type: 'ACCREC',
-      status: xeroInv?.Status || invoiceStatus,
+      status: observedInvoiceStatus,
       reference: ref,
       sub_total: invSubTotal,
       total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
@@ -34030,7 +34330,7 @@ async function createInvoice(
       detail_json: {
         xero_invoice_id: xeroInvId,
         invoice_number: invNumber,
-        status: xeroInv?.Status || invoiceStatus,
+        status: observedInvoiceStatus,
         total: invTotal,
         emailed: invoiceEmailAccepted(emailStatus),
         email_status: emailStatus,
@@ -34038,7 +34338,7 @@ async function createInvoice(
         ses_operation_key: sesContext?.operationKey || null,
       },
     })
-    if (!sesContext && !internal.captainLock) {
+    if (!sesContext && !internal.captainLock && !internal.preserveJobLifecycle) {
       // Update job status to invoiced if complete.
       await client.from('jobs')
         .update({ status: 'invoiced' })
@@ -34059,7 +34359,9 @@ async function createInvoice(
     xero_invoice_id: xeroInvId,
     invoice_number: invNumber,
     total: invTotal,
-    status: xeroInv?.Status || invoiceStatus,
+    status: observedInvoiceStatus,
+    xero_provider_status: providerInvoiceStatus,
+    xero_provider_type: providerInvoiceType,
     reference: xeroInv?.Reference || ref,
     emailed: invoiceEmailAccepted(emailStatus),
     email_status: emailStatus,
@@ -57889,6 +58191,8 @@ async function getJobFinancialsDetail(client: any, jobId: string) {
 
 // Test-only exports for Issue A + B + C safety guards.
 export const _createInvoiceForTest = createInvoice
+export const _createInvoiceDraftActionForTest = createInvoiceDraftAction
+export const _createInvoiceDraftHttpStatusForTest = createInvoiceDraftHttpStatus
 export const _makeSesXeroGatewayForTest = makeSesXeroGateway
 export const _assertLegacySesMoneyActionAllowedForJobForTest =
   assertLegacySesMoneyActionAllowedForJob
