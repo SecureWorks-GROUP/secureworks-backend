@@ -221,6 +221,36 @@ jobs:
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
 
+      - name: Test shared provider, invoice and communication contracts
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/send-outlook-email/outlook_action_behavior_test.ts \
+            supabase/functions/send-outlook-email/outlook_authorization_test.ts \
+            supabase/functions/send-outlook-email/ses_delivery_fence_test.ts \
+            supabase/functions/send-quote/xero_quote_outcome_test.ts \
+            supabase/functions/send-quote/send_runs_request_test.ts \
+            supabase/functions/ghl-proxy/hardening_helpers_test.ts \
+            supabase/functions/ghl-proxy/provider_reads_test.ts \
+            supabase/functions/ghl-proxy/lead_search_test.ts \
+            supabase/functions/ghl-proxy/sms_sender_default_test.ts \
+            supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts \
+            supabase/functions/xero-sync/xero_age_test.ts \
+            supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/ops-api/invoice_create_contract_test.ts \
+            supabase/functions/ops-api/xero_accpay_books_test.ts \
+            supabase/functions/ops-api/xero_receivables_read_test.ts \
+            supabase/functions/ops-api/xero_attachment_test.ts \
+            supabase/functions/ops-api/xero_post_rate_limit_retry_test.ts \
+            supabase/functions/ops-api/read_job_record_test.ts
+
+      # This suite imports the serving monolith, whose pre-existing type errors
+      # are reported by the advisory deno check above. Runtime assertions still
+      # block release, and all provider calls are injected fixtures.
+      - name: Test shared Xero transport and uncertain outcomes
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/xero-sync/xero_transport_test.ts
+
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live
   # baseline drift, so the contract registry supplies the narrow prerequisites
