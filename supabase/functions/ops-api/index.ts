@@ -422,6 +422,16 @@ import {
   updateSupplierBill,
 } from './xero_accpay_books.ts'
 import {
+  getXeroReceivable,
+  listXeroReceivables,
+  listXeroSettlementRecords,
+  readXeroOrganisation,
+  readXeroSettlementRecord,
+  readXeroTrackingCategories,
+  XeroReceivablesReadError,
+  xeroReadGet,
+} from './xero_receivables_read.ts'
+import {
   createTradeInvoiceBeforeExternalWrite,
   replaceTradeInvoiceDraftKeepingPrior,
   replaceTradeInvoicePriorDraft,
@@ -6909,6 +6919,34 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'submit_makesafe_report':
         return json(await dispatchMakesafeReport(client, body, authMode, authUser))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
+      case 'read_xero_organisation':
+      case 'read_xero_tracking_categories':
+      case 'list_xero_receivables':
+      case 'get_xero_receivable':
+      case 'list_xero_settlement_records':
+      case 'read_xero_settlement_record': {
+        if (req.method !== 'GET') {
+          return json({ ok: false, error: 'Xero receivables reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        try {
+          const reads = {
+            read_xero_organisation: readXeroOrganisation,
+            read_xero_tracking_categories: readXeroTrackingCategories,
+            list_xero_receivables: listXeroReceivables,
+            get_xero_receivable: getXeroReceivable,
+            list_xero_settlement_records: listXeroSettlementRecords,
+            read_xero_settlement_record: readXeroSettlementRecord,
+          }
+          return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
+        } catch (error) {
+          if (error instanceof XeroReceivablesReadError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
+          // The existing credential helper can include a provider error body in
+          // its exception. Do not reflect or log credentials through this read door.
+          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
       case 'list_supplier_bills':
       case 'list_xero_bills': {
         try {

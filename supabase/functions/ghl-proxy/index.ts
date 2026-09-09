@@ -87,6 +87,13 @@ import {
   validateFenceMintInput,
 } from './fence_mint.ts'
 import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
+import {
+  assertGhlProviderReadCaller,
+  GhlProviderReadError,
+  isDedicatedGhlReadServerKey,
+  isGhlProviderReadAction,
+  readGhlProvider,
+} from './provider_reads.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -602,7 +609,17 @@ serve(async (req: Request) => {
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
-  const credential = classifyAuthCredential({ xApiKey, bearerToken, validKey, serviceKey })
+  // The dedicated inside pass applies ONLY to the additive full provider reads.
+  // Shared browser keys never gain these reads; existing action auth is unchanged.
+  const dedicatedProviderRead = isDedicatedGhlReadServerKey({
+    action, xApiKey, bearerToken,
+    agentServerKey: Deno.env.get('OPS_AGENT_SERVER_KEY'),
+    sharedKey: validKey, serviceKey,
+    routineKey: Deno.env.get('MAKESAFE_ROUTINE_KEY'),
+  })
+  const credential = dedicatedProviderRead
+    ? { ok: true as const, mode: 'service_role' as const, bearerToken }
+    : classifyAuthCredential({ xApiKey, bearerToken, validKey, serviceKey })
   if (!credential.ok) return json({ error: credential.error, code: credential.code }, credential.status)
   // Staged compatibility gate. Existing patio/decking browser clients still use
   // SW_API_KEY today, while the fence client has moved to a Supabase user JWT.
@@ -662,6 +679,26 @@ serve(async (req: Request) => {
 
   try {
     console.log(`[ghl-proxy] action=${action} method=${req.method}`)
+    if (isGhlProviderReadAction(action)) {
+      try {
+        assertGhlProviderReadCaller({
+          method: req.method, mode: credential.mode, role: authProfile?.role,
+          orgId: authProfile?.org_id, configuredOrgId: PRODUCTION_DEFAULT_ORG_ID,
+          testMode: route.testMode,
+        })
+        return json(await readGhlProvider(action, url.searchParams, {
+          locationId: PRODUCTION_GHL_LOCATION_ID, token: GHL_API_TOKEN,
+        }))
+      } catch (error) {
+        if (error instanceof GhlProviderReadError) {
+          return json({ success: false, source: 'ghl_provider', code: error.code,
+            error: error.message, provider_status: error.providerStatus,
+            retry_after: error.retryAfter, complete: false }, error.status)
+        }
+        return json({ success: false, source: 'ghl_provider', code: 'provider_read_failed',
+          error: 'GHL provider read failed', complete: false }, 502)
+      }
+    }
     const requireSameOrgJob = async (sb: any, jobId: string) => {
       if (!jobId) return { ok: false as const, response: json({ error: 'jobId required', code: 'job_id_required' }, 400) }
       const { data: job, error } = await sb.from('jobs').select('id, org_id, job_number, pricing_json').eq('id', jobId).single()
