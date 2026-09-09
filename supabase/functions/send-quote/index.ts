@@ -87,6 +87,7 @@ import {
   touchInvoiceEmailSendClaim,
 } from './invoice_email_send_claim.ts'
 import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
+import { sendRunsJobTypeRefusal, sendRunsRequestRefusal } from './send_runs_request.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
@@ -2344,12 +2345,14 @@ serve(async (req: Request) => {
 
     // ── SEND PER-RUN FENCING QUOTES (multi-neighbour) ──
     if (path === 'send-runs' && req.method === 'POST') {
+      const requestBody = await req.json()
+      const requestRefusal = sendRunsRequestRefusal(requestBody)
+      if (requestRefusal) return jsonResponse(requestRefusal.body, requestRefusal.status, corsHeaders)
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
-      const { job_id, message, run_pdfs } = await req.json()
+      const { job_id, message, run_pdfs } = requestBody
       // run_pdfs: optional map { 'REAR': 'https://...pdf', 'LHS': 'https://...pdf' }
-      if (!job_id) return jsonResponse({ error: 'job_id required' }, 400, corsHeaders)
 
       // Load job with contacts and pricing
       const { data: job, error: jobErr } = await sb.from('jobs')
@@ -2378,6 +2381,11 @@ serve(async (req: Request) => {
           return jsonResponse(refused.body, refused.status, corsHeaders)
         }
       }
+
+      // MCP supplies this scope marker; legacy clients omit it. Check after
+      // tenant access and before pricing, claims, documents, or provider sends.
+      const scopeRefusal = sendRunsJobTypeRefusal(requestBody, job.type)
+      if (scopeRefusal) return jsonResponse(scopeRefusal.body, scopeRefusal.status, corsHeaders)
 
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []
