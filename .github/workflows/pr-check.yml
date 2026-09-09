@@ -237,6 +237,7 @@ jobs:
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
+            supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
             supabase/functions/ops-api/xero_receivables_read_test.ts \
             supabase/functions/ops-api/xero_attachment_test.ts \
