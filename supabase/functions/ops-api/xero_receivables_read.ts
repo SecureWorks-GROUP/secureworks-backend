@@ -1,6 +1,10 @@
 // Direct Xero accounting reads. Only the injected token helper may maintain
 // credentials; this module has no business/cache write or provider POST capability.
 import type { GetTokenFn, XeroGetFn } from "./xero_accpay_books.ts";
+import {
+  XeroCooldownError,
+  xeroCooldownReport,
+} from "../_shared/xero_cooldown.ts";
 
 export class XeroReceivablesReadError extends Error {
   constructor(
@@ -17,6 +21,7 @@ export class XeroReceivablesReadError extends Error {
 type RawRecord = Record<string, unknown>;
 type Params = URLSearchParams | Record<string, unknown>;
 type XeroResponseMetadata = {
+  shared_cooldown: Record<string, unknown> | null;
   request_id: string | null;
   quota: {
     minute_remaining: string | null;
@@ -42,6 +47,7 @@ function responseMetadata(response: Response): XeroResponseMetadata {
   const header = (name: string) =>
     response.headers.get(name)?.slice(0, 256) ?? null;
   return {
+    shared_cooldown: xeroCooldownReport(response),
     request_id: header("xero-correlation-id") ?? header("xero-request-id") ??
       header("x-request-id"),
     quota: {
@@ -79,7 +85,8 @@ export function createXeroReadGet(options: {
         redirect: "error",
         signal,
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof XeroCooldownError) throw error;
       throw new XeroReceivablesReadError(
         signal.aborted
           ? "Xero read timed out"
@@ -150,8 +157,6 @@ export function createXeroReadGet(options: {
     }
   };
 }
-
-export const xeroReadGet = createXeroReadGet();
 
 const STATUSES = new Set([
   "OUTSTANDING",

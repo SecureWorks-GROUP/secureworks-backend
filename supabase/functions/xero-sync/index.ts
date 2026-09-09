@@ -18,6 +18,9 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
+import { createXeroSyncTransport } from './xero_transport.ts'
+import { listStaleXeroInvoices, reconcileXeroInvoice } from './xero_invoice_reconciliation.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
@@ -52,8 +55,6 @@ const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
-const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
-const XERO_PROJECTS_BASE = 'https://api.xero.com/projects.xro/2.0'
 
 // Tracking category ID for "Business Unit" (Fencing, Patios, Group, etc.)
 const TRACKING_CATEGORY_ID = '68b39e33-e803-4163-af8d-2e8955a1ce2a'
@@ -222,6 +223,9 @@ if (import.meta.main) serve(async (req: Request) => {
         return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials' }, 400)
     }
   } catch (err: any) {
+    if (err instanceof XeroCooldownError) {
+      return json({ ok: false, code: err.code, error: err.message, ...err.details }, err.status)
+    }
     console.error(`xero-sync [${action}] error:`, err)
     // Log webhook error
     try {
@@ -340,139 +344,21 @@ async function getToken(sb: any): Promise<{ accessToken: string; tenantId: strin
 // XERO API HELPER
 // ════════════════════════════════════════════════════════════
 
-async function xeroGet(
-  path: string,
-  accessToken: string,
-  tenantId: string,
-  params?: Record<string, string>,
-  extraHeaders?: Record<string, string>,
-  retryCount = 0
-) {
-  const url = new URL(`${XERO_API_BASE}${path}`)
-  if (params) {
-    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
-  }
-
-  // Xero's Statuses param needs raw commas (not URL-encoded %2C).
-  // URLSearchParams encodes commas, so we decode the final URL.
-  const fetchUrl = url.toString().replace(/%2C/g, ',')
-
-  const headers: Record<string, string> = {
-    'Authorization': `Bearer ${accessToken}`,
-    'Xero-tenant-id': tenantId,
-    'Accept': 'application/json',
-    ...extraHeaders,
-  }
-
-  const resp = await fetchWithTimeout(fetchUrl, { headers }, 30000)
-
-  if (resp.status === 429) {
-    if (retryCount >= 3) {
-      throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
-    }
-    const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
-    console.warn(`Xero rate limited on ${path}, retry ${retryCount + 1}/3 after ${retryAfter}s`)
-    await new Promise(r => setTimeout(r, retryAfter * 1000))
-    return xeroGet(path, accessToken, tenantId, params, extraHeaders, retryCount + 1)
-  }
-
-  if (!resp.ok) {
-    const errText = await resp.text()
-    throw new Error(`Xero API ${path} failed (${resp.status}): ${errText}`)
-  }
-
-  return resp.json()
+// Accounting and Projects share the same durable org/app/tenant hold as ops-api.
+// The existing sync transport budget is 30s; no token/Connections route uses this.
+let _xeroSyncFetch: typeof fetch | null = null
+let _xeroAppKey: Promise<string> | null = null
+const xeroSyncFetch: typeof fetch = (input, init) => {
+  _xeroSyncFetch ??= createXeroCooldownFetch({
+    store: createOrgConfigXeroCooldownStore(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
+    orgId: DEFAULT_ORG_ID,
+    appKey: () => (_xeroAppKey ??= xeroAppKey(XERO_CLIENT_ID)),
+    timeoutMs: 30_000,
+    onPersistenceFailure: () => console.warn('[xero-sync] Xero cooldown persistence failed; shared protection is degraded'),
+  })
+  return _xeroSyncFetch(input, init)
 }
-
-
-// Helper for Xero Projects API (different base URL from Accounting API)
-async function xeroProjectsGet(
-  path: string,
-  accessToken: string,
-  tenantId: string,
-  params?: Record<string, string>,
-  retryCount = 0
-) {
-  const url = new URL(`${XERO_PROJECTS_BASE}${path}`)
-  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
-
-  const headers: Record<string, string> = {
-    'Authorization': `Bearer ${accessToken}`,
-    'Xero-tenant-id': tenantId,
-    'Accept': 'application/json',
-  }
-
-  const resp = await fetchWithTimeout(url.toString(), { headers }, 30000)
-
-  if (resp.status === 429) {
-    if (retryCount >= 3) throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
-    const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
-    console.warn(`Xero Projects rate limited, retry ${retryCount + 1}/3 after ${retryAfter}s`)
-    await new Promise(r => setTimeout(r, retryAfter * 1000))
-    return xeroProjectsGet(path, accessToken, tenantId, params, retryCount + 1)
-  }
-
-  if (!resp.ok) {
-    const errText = await resp.text()
-    throw new Error(`Xero Projects API ${path} failed (${resp.status}): ${errText}`)
-  }
-
-  return resp.json()
-}
-
-
-// ════════════════════════════════════════════════════════════
-// XERO POST/PUT HELPER — for creating/updating Xero resources
-// ════════════════════════════════════════════════════════════
-
-async function xeroPost(
-  path: string,
-  accessToken: string,
-  tenantId: string,
-  body: unknown,
-  method: 'POST' | 'PUT' = 'POST',
-  retryCount = 0
-) {
-  const url = `${XERO_API_BASE}${path}`
-
-  const headers: Record<string, string> = {
-    'Authorization': `Bearer ${accessToken}`,
-    'Xero-tenant-id': tenantId,
-    'Accept': 'application/json',
-    'Content-Type': 'application/json',
-  }
-
-  // Add idempotency key for POST/PUT requests to prevent duplicate creation
-  // Callers can include _idempotencyKey in the body; otherwise auto-generate from path + timestamp
-  const bodyObj = body as any
-  if (bodyObj?._idempotencyKey) {
-    headers['Idempotency-Key'] = bodyObj._idempotencyKey
-    delete bodyObj._idempotencyKey
-  }
-
-  const resp = await fetchWithTimeout(url, {
-    method,
-    headers,
-    body: JSON.stringify(body),
-  }, 30000)
-
-  if (resp.status === 429) {
-    if (retryCount >= 3) {
-      throw new Error(`Xero rate limited on ${method} ${path} after ${retryCount} retries`)
-    }
-    const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
-    console.warn(`Xero rate limited on ${method} ${path}, retry ${retryCount + 1}/3 after ${retryAfter}s`)
-    await new Promise(r => setTimeout(r, retryAfter * 1000))
-    return xeroPost(path, accessToken, tenantId, body, method, retryCount + 1)
-  }
-
-  if (!resp.ok) {
-    const errText = await resp.text()
-    throw new Error(`Xero API ${method} ${path} failed (${resp.status}): ${errText}`)
-  }
-
-  return resp.json()
-}
+const { get: xeroGet, getProjects: xeroProjectsGet, post: xeroPost } = createXeroSyncTransport(xeroSyncFetch)
 
 
 // ════════════════════════════════════════════════════════════
@@ -517,10 +403,12 @@ async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: str
       pdfBytes: audit.bytes,
       accessToken,
       tenantId,
+      fetchImpl: xeroSyncFetch,
     })
     console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfilled onto bill ' + inv.InvoiceID)
     return true
   } catch (pdfErr: any) {
+    if (pdfErr instanceof XeroCooldownError) throw pdfErr
     console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfill skipped:', pdfErr?.message || pdfErr)
     return false
   }
@@ -570,11 +458,13 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
           out.skipped++
         }
       } catch (e: any) {
+        if (e instanceof XeroCooldownError) throw e
         out.skipped++
         console.log('[xero-sync] Trade bill PDF sweep failed for ' + tradeInv.id + ':', e?.message || e)
       }
     }
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     console.log('[xero-sync] Trade bill PDF sweep degraded:', e?.message || e)
   }
   console.log('[xero-sync] Trade bill PDF sweep: ' + JSON.stringify(out))
@@ -871,7 +761,10 @@ async function syncInvoices(sb: any) {
                   if (await attachTradeBillAuditPdf(inv, tradeInv, accessToken, tenantId)) tradePdfBackfilled++
                 }
               }
-            } catch (e: any) { console.log('[xero-sync] Trade bill status check failed:', e) }
+            } catch (e: any) {
+              if (e instanceof XeroCooldownError) throw e
+              console.log('[xero-sync] Trade bill status check failed:', e)
+            }
           }
         }
       }
@@ -900,64 +793,36 @@ async function syncInvoices(sb: any) {
   try {
     bankTxnResult = await syncBankTransactions(sb)
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     bankTxnResult = { success: false, error: (e as Error).message }
     console.error('[xero-sync] Bank-transactions sync error:', (e as Error).message)
   }
 
   // ── Reconciliation: verify stale local invoices against Xero ──
-  // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in 24h+
+  // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in one hour
   // and check if they still exist in Xero with that status
   let reconciled = 0
+  let reconciliationError: Record<string, unknown> | null = null
   try {
-    const staleThreshold = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString()
-    const { data: staleInvoices } = await sb.from('xero_invoices')
-      .select('xero_invoice_id')
-      .eq('org_id', DEFAULT_ORG_ID)
-      .eq('invoice_type', 'ACCREC')
-      .in('status', ['AUTHORISED', 'SUBMITTED'])
-      .gt('amount_due', 0)
-      .lt('synced_at', staleThreshold)
-      .limit(50)
+    const staleInvoices = await listStaleXeroInvoices(sb, DEFAULT_ORG_ID)
 
     if (staleInvoices && staleInvoices.length > 0) {
       const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
       for (const stale of staleInvoices) {
         try {
-          const invData = await xeroGet(`/Invoices/${stale.xero_invoice_id}`, at2, tid2, {})
-          const inv = invData?.Invoices?.[0]
-          if (inv && inv.Status !== 'AUTHORISED' && inv.Status !== 'SUBMITTED') {
-            // Status changed in Xero — update locally
-            await sb.from('xero_invoices')
-              .update({
-                status: inv.Status,
-                amount_due: inv.AmountDue || 0,
-                amount_paid: inv.AmountPaid || 0,
-                synced_at: new Date().toISOString(),
-                updated_at: parseXeroDate(inv.UpdatedDateUTC) || new Date().toISOString(),
-              })
-              .eq('xero_invoice_id', stale.xero_invoice_id)
-              .eq('org_id', DEFAULT_ORG_ID)
-            reconciled++
-            console.log(`[xero-sync] Reconciled ${stale.xero_invoice_id}: now ${inv.Status}`)
-          } else if (inv) {
-            // Still AUTHORISED/SUBMITTED — just update synced_at
-            await sb.from('xero_invoices')
-              .update({ synced_at: new Date().toISOString() })
-              .eq('xero_invoice_id', stale.xero_invoice_id)
-              .eq('org_id', DEFAULT_ORG_ID)
-          }
+          if (await reconcileXeroInvoice(sb, DEFAULT_ORG_ID, stale.xero_invoice_id,
+            () => xeroGet(`/Invoices/${stale.xero_invoice_id}`, at2, tid2, {}))) reconciled++
         } catch (e: any) {
-          // If 404, invoice was deleted in Xero
-          console.log(`[xero-sync] Invoice ${stale.xero_invoice_id} not found in Xero — marking DELETED`)
-          await sb.from('xero_invoices')
-            .update({ status: 'DELETED', amount_due: 0, synced_at: new Date().toISOString() })
-            .eq('xero_invoice_id', stale.xero_invoice_id)
-            .eq('org_id', DEFAULT_ORG_ID)
-          reconciled++
+          if (e instanceof XeroCooldownError) throw e
+          // Failed lookup leaves existing balances and freshness untouched.
+          reconciliationError = { error: e.message, invoice_id: stale.xero_invoice_id }
+          break
         }
       }
     }
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    reconciliationError = { error: e.message }
     console.error('[xero-sync] Reconciliation error:', (e as Error).message)
   }
 
@@ -966,11 +831,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep },
+    payload: { synced: totalSynced, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep }
+  return { success: true, synced: totalSynced, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep }
 }
 
 
@@ -1355,6 +1220,7 @@ async function ingestMaterialsActuals(
     console.log(`[materials] ingest: ${JSON.stringify(result)}`)
     return { success: true, ...result }
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     console.error('[materials] ingest failed:', (e as Error).message)
     return { success: false, error: (e as Error).message, ...result }
   }
@@ -1516,6 +1382,7 @@ async function syncReports(sb: any) {
 
     results.profit_and_loss = true
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     console.error('P&L sync failed:', e.message)
     results.profit_and_loss = false
   }
@@ -1543,6 +1410,7 @@ async function syncReports(sb: any) {
 
     results.profit_and_loss_prev = true
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     console.error('Previous P&L sync failed:', e.message)
     results.profit_and_loss_prev = false
   }
@@ -1570,6 +1438,7 @@ async function syncReports(sb: any) {
 
     results.profit_and_loss_ytd = true
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     console.error('YTD P&L sync failed:', e.message)
     results.profit_and_loss_ytd = false
   }
@@ -1868,6 +1737,7 @@ async function syncTrackingPL(sb: any) {
 
       results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
     } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
       console.error(`Tracking P&L sync failed for ${fromDate}:`, e.message)
       results.push({ month: fromDate, status: 'error', error: e.message })
     }
@@ -2361,6 +2231,7 @@ async function createOrFindContact(sb: any, body: any) {
         console.log(`[xero-sync] Found Xero contact by email: ${xeroContact.Name} (${xeroContact.ContactID})`)
       }
     } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
       console.warn('[xero-sync] Email search failed:', e.message)
     }
   }
@@ -2377,6 +2248,7 @@ async function createOrFindContact(sb: any, body: any) {
         console.log(`[xero-sync] Found Xero contact by name: ${xeroContact.Name} (${xeroContact.ContactID})`)
       }
     } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
       console.warn('[xero-sync] Name search failed:', e.message)
     }
   }
@@ -2683,6 +2555,7 @@ async function backfillXeroContacts(sb: any, batchLimit = 10) {
       if (result.created) created++
       else found++
     } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
       console.error(`[xero-sync] backfill contact failed for job ${job.id} (${job.client_name}):`, e.message)
       failed++
     }
@@ -2766,6 +2639,7 @@ async function syncBankBalances(sb: any) {
     console.log(`[xero-sync] Synced ${synced} bank balances from Bank Summary report`)
     return { success: true, accounts_synced: synced }
   } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
     console.error('[xero-sync] Bank Summary report failed, falling back to Accounts API:', (e as Error).message)
 
     // Fallback: GET /Accounts (won't have balances but at least gets account names)

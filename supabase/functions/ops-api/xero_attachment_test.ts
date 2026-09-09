@@ -2,6 +2,7 @@
 
 import {
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   attachPdfBase64ToXeroInvoice,
@@ -15,6 +16,12 @@ import {
   sanitizeXeroPdfFilename,
   XeroPdfAttachError,
 } from "./xero_attachment.ts";
+import {
+  createXeroCooldownFetch,
+  XeroCooldownError,
+  type XeroCooldownState,
+  type XeroCooldownStore,
+} from "../_shared/xero_cooldown.ts";
 
 const PDF_BYTES = (() => {
   const encoded = new TextEncoder().encode("%PDF-1.4\n1 0 obj\nendobj\n");
@@ -36,7 +43,10 @@ Deno.test("decodePdfBase64 rejects a non-PDF payload before any Xero call", () =
     throw new Error("expected throw");
   } catch (error) {
     assertEquals(error instanceof XeroPdfAttachError, true);
-    assertEquals((error as XeroPdfAttachError).message.includes("must be a PDF"), true);
+    assertEquals(
+      (error as XeroPdfAttachError).message.includes("must be a PDF"),
+      true,
+    );
   }
 });
 
@@ -51,7 +61,10 @@ Deno.test("decodePdfBase64 rejects an oversized payload", () => {
 });
 
 Deno.test("sanitizeXeroPdfFilename keeps a safe .pdf name", () => {
-  assertEquals(sanitizeXeroPdfFilename("SW-INV Israel.pdf"), "SW-INV_Israel.pdf");
+  assertEquals(
+    sanitizeXeroPdfFilename("SW-INV Israel.pdf"),
+    "SW-INV_Israel.pdf",
+  );
   assertEquals(sanitizeXeroPdfFilename("tax invoice"), "tax_invoice.pdf");
 });
 
@@ -67,13 +80,15 @@ Deno.test("audit and client PDFs never share a Xero attachment name", () => {
 
 Deno.test("attachPdfBase64ToXeroInvoice PUTs the PDF onto the Xero bill", async () => {
   const calls: Array<{ url: string; method: string; contentType: string }> = [];
-  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+  const fetchImpl = ((url: string | URL, init?: RequestInit) => {
     calls.push({
       url: String(url),
       method: String(init?.method || "GET"),
-      contentType: String((init?.headers as Record<string, string>)?.["Content-Type"] || ""),
+      contentType: String(
+        (init?.headers as Record<string, string>)?.["Content-Type"] || "",
+      ),
     });
-    return new Response("{}", { status: 200 });
+    return Promise.resolve(new Response("{}", { status: 200 }));
   }) as typeof fetch;
 
   const result = await attachPdfBase64ToXeroInvoice({
@@ -100,10 +115,12 @@ Deno.test("hasXeroPdfBase64Payload is false when there were never any bytes", ()
 
 Deno.test("PDF attach retries transient Xero failures then succeeds", async () => {
   let calls = 0;
-  const fetchImpl = (async () => {
+  const fetchImpl = (() => {
     calls += 1;
-    if (calls < 3) return new Response("busy", { status: 502 });
-    return new Response("{}", { status: 200 });
+    if (calls < 3) {
+      return Promise.resolve(new Response("busy", { status: 502 }));
+    }
+    return Promise.resolve(new Response("{}", { status: 200 }));
   }) as typeof fetch;
   await attachPdfToXeroInvoiceUntilAttached({
     invoiceId: "bill-1",
@@ -116,8 +133,62 @@ Deno.test("PDF attach retries transient Xero failures then succeeds", async () =
   assertEquals(calls, 3);
 });
 
+Deno.test("PDF429 is attempted once, persists shared hold and blocks later attachment writes", async () => {
+  let state: XeroCooldownState | null = null;
+  const store: XeroCooldownStore = {
+    read: () => Promise.resolve(structuredClone(state)),
+    compareAndSwap: (_scope, expected, next) => {
+      if ((state?.revision ?? null) !== expected) return Promise.resolve(false);
+      state = structuredClone(next);
+      return Promise.resolve(true);
+    },
+  };
+  let calls = 0;
+  const fetchImpl = createXeroCooldownFetch({
+    store,
+    orgId: "fixture-org",
+    appKey: "fixture-app",
+    timeoutMs: 90_000,
+    fetchFn: (_url, init) => {
+      calls++;
+      assertEquals(init?.method, "PUT");
+      assertEquals(init?.body, PDF_BYTES);
+      return Promise.resolve(
+        new Response(null, {
+          status: 429,
+          headers: {
+            "Retry-After": "19079",
+            "Xero-Correlation-Id": "pdf-request",
+          },
+        }),
+      );
+    },
+  });
+  const attach = () =>
+    attachPdfToXeroInvoiceUntilAttached({
+      invoiceId: "bill-1",
+      filename: "audit.pdf",
+      pdfBytes: PDF_BYTES,
+      accessToken: "fixture-token",
+      tenantId: "fixture-tenant",
+      fetchImpl,
+    });
+  const first = await assertRejects(attach, XeroCooldownError);
+  assertEquals(first.details.provider_call_made, true);
+  assertEquals(first.details.request_id, "pdf-request");
+  assertEquals(first.details.xero_invoice_id, "bill-1");
+  assertEquals(first.details.provider_operation, "invoice_pdf_attachment");
+  assertEquals(first.details.pdf_attachment_confirmed, false);
+  const held = await assertRejects(attach, XeroCooldownError);
+  assertEquals(held.details.provider_call_made, false);
+  assertEquals(held.code, "XERO_COOLDOWN_ACTIVE");
+  assertEquals(calls, 1);
+});
+
 Deno.test("PDF attach does not retry an invalid payload as success", async () => {
-  const fetchImpl = (async () => new Response("bad", { status: 400 })) as typeof fetch;
+  const fetchImpl =
+    (() =>
+      Promise.resolve(new Response("bad", { status: 400 }))) as typeof fetch;
   try {
     await attachPdfBase64ToXeroInvoice({
       invoiceId: "bill-1",
@@ -137,11 +208,13 @@ Deno.test("PDF attach does not retry an invalid payload as success", async () =>
 Deno.test("push can retry PDF attach onto an existing bill after pushed_to_xero", () => {
   assertEquals(canEnterPushTradeInvoiceToXero("acknowledged", null), true);
   assertEquals(canEnterPushTradeInvoiceToXero("approved", ""), true);
-  assertEquals(canEnterPushTradeInvoiceToXero("pushed_to_xero", "bill-1"), true);
+  assertEquals(
+    canEnterPushTradeInvoiceToXero("pushed_to_xero", "bill-1"),
+    true,
+  );
   assertEquals(canEnterPushTradeInvoiceToXero("pushed_to_xero", "  "), false);
   assertEquals(canEnterPushTradeInvoiceToXero("pushed_to_xero", null), false);
   assertEquals(canEnterPushTradeInvoiceToXero("paid", "bill-1"), false);
   assertEquals(mustReuseExistingXeroBillForPdfRetry("pushed_to_xero"), true);
   assertEquals(mustReuseExistingXeroBillForPdfRetry("approved"), false);
 });
-

@@ -125,6 +125,92 @@ Deno.test("get_supplier_bill reads the live Xero ACCPAY and refuses a sales invo
   );
 });
 
+Deno.test("get_supplier_bill accepts each ID alias from query params and records", async () => {
+  const billId = "aaaaaaaa-1111-4111-8111-111111111111";
+  for (const alias of ["xero_invoice_id", "xero_bill_id", "xero_id"]) {
+    for (
+      const params of [
+        { [alias]: ` ${billId} ` },
+        new URLSearchParams({ [alias]: ` ${billId} ` }),
+      ]
+    ) {
+      const paths: string[] = [];
+      const got = await getSupplierBill(makeClient(), params, {
+        getToken: () => Promise.resolve({ accessToken: "fixture", tenantId: "fixture" }),
+        xeroGet: (path) => {
+          paths.push(path);
+          return Promise.resolve({ Invoices: [{ InvoiceID: billId, Type: "ACCPAY" }] });
+        },
+      });
+      assertEquals(paths, [`/Invoices/${billId}`]);
+      assertEquals(got.bill.xero_invoice_id, billId);
+    }
+  }
+});
+
+Deno.test("get_supplier_bill accepts matching aliases and ignores blank aliases", async () => {
+  const billId = "aaaaaaaa-1111-4111-8111-111111111111";
+  for (
+    const params of [
+      {
+        xero_invoice_id: billId,
+        xero_bill_id: billId.toUpperCase(),
+        xero_id: ` ${billId} `,
+      },
+      { xero_invoice_id: " ", xero_bill_id: billId, xero_id: "" },
+    ]
+  ) {
+    const paths: string[] = [];
+    await getSupplierBill(makeClient(), params, {
+      getToken: () => Promise.resolve({ accessToken: "fixture", tenantId: "fixture" }),
+      xeroGet: (path) => {
+        paths.push(path);
+        return Promise.resolve({ Invoices: [{ InvoiceID: billId, Type: "ACCPAY" }] });
+      },
+    });
+    assertEquals(paths, [`/Invoices/${billId}`]);
+  }
+});
+
+Deno.test("get_supplier_bill rejects conflicting aliases before credentials, provider or cache calls", async () => {
+  const aliases = ["xero_invoice_id", "xero_bill_id", "xero_id"];
+  const calls: string[] = [];
+  const client = {
+    from() {
+      calls.push("cache");
+      throw new Error("Unexpected cache access");
+    },
+  };
+  const deps = {
+    getToken: () => {
+      calls.push("credentials");
+      return Promise.resolve({ accessToken: "fixture", tenantId: "fixture" });
+    },
+    xeroGet: () => {
+      calls.push("provider");
+      return Promise.resolve({ Invoices: [{ InvoiceID: "bill-a", Type: "ACCPAY" }] });
+    },
+  };
+  for (let first = 0; first < aliases.length; first++) {
+    for (let second = first + 1; second < aliases.length; second++) {
+      const values = {
+        [aliases[first]]: "bill-a",
+        [aliases[second]]: "bill-b",
+      };
+      for (const params of [values, new URLSearchParams(values)]) {
+        const error = await assertRejects(
+          () => getSupplierBill(client, params, deps),
+          SupplierBillError,
+          "Conflicting supplier bill IDs",
+        );
+        assertEquals(error.status, 400);
+        assertEquals(error.code, "SUPPLIER_BILL_ID_CONFLICT");
+        assertEquals(calls, []);
+      }
+    }
+  }
+});
+
 Deno.test("get_xero_invoice is a read-only point-get that returns ACCPAY or ACCREC type", async () => {
   const calls: string[] = [];
   const xeroGet = async (path: string) => {

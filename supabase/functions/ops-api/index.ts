@@ -101,6 +101,13 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.99.3'
 import { logQueryErrors, pgrestIlikeOrContains } from '../_shared/pgrest.ts'
 import {
+  genericInvoiceIdempotencyKey,
+  invoiceEmailAccepted,
+  invoiceEmailErrorMetadata,
+  type InvoiceEmailStatus,
+  rejectedInvoiceEmailStatus,
+} from './invoice_create_contract.ts'
+import {
   xeroAccrecReferenceContainsWhere,
   xeroContactNameContainsWhere,
 } from './xero_where_clause.ts'
@@ -429,8 +436,16 @@ import {
   readXeroSettlementRecord,
   readXeroTrackingCategories,
   XeroReceivablesReadError,
-  xeroReadGet,
+  createXeroReadGet,
 } from './xero_receivables_read.ts'
+import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
+import {
+  createOrgConfigXeroCooldownStore,
+  createXeroCooldownFetch,
+  XeroCooldownError,
+  xeroAppKey,
+  xeroRateLimitError,
+} from '../_shared/xero_cooldown.ts'
 import {
   createTradeInvoiceBeforeExternalWrite,
   replaceTradeInvoiceDraftKeepingPrior,
@@ -1571,6 +1586,7 @@ async function attachTradeInvoiceBillPdfs(input: {
       pdfBytes: audit.bytes,
       accessToken: input.accessToken,
       tenantId: input.tenantId,
+      fetchImpl: xeroAccountingFetch,
     })
     await attachTradeInvoicePdfIfPresent({
       invoiceId: input.xeroBillId,
@@ -1578,6 +1594,7 @@ async function attachTradeInvoiceBillPdfs(input: {
       pdfBase64: input.clientPdfBase64,
       accessToken: input.accessToken,
       tenantId: input.tenantId,
+      fetchImpl: xeroAccountingFetch,
     })
     return true
   } catch (error) {
@@ -3209,16 +3226,37 @@ async function getToken(client: any): Promise<{ accessToken: string; tenantId: s
   return { accessToken: token.access_token, tenantId: token.tenant_id }
 }
 
-// Xero API GET with rate limit retry
+// One durable app/tenant cooldown for ops-api Accounting reads and writes.
+// Lazy construction avoids any database/config access during module import.
+let _xeroAppKey: Promise<string> | null = null
+function lazyXeroAccountingFetch(timeoutMs: number): typeof fetch {
+  let requestFetch: typeof fetch | null = null
+  return (input, init) => {
+    requestFetch ??= createXeroCooldownFetch({
+      store: createOrgConfigXeroCooldownStore(sb()),
+      orgId: DEFAULT_ORG_ID,
+      appKey: () => (_xeroAppKey ??= xeroAppKey(XERO_CLIENT_ID)),
+      timeoutMs,
+      onPersistenceFailure: () => console.warn('[ops-api] Xero cooldown persistence failed; shared protection is degraded'),
+    })
+    return requestFetch(input, init)
+  }
+}
+// Leave time inside the 120s write/PDF client budget for database and publication.
+const xeroAccountingFetch = lazyXeroAccountingFetch(90_000)
+const xeroLegacyReadFetch = lazyXeroAccountingFetch(30_000)
+const xeroReadGet = createXeroReadGet({ fetchFn: lazyXeroAccountingFetch(12_000) })
+
+// Xero GET: shared cooldown, bounded request, no inline 429 sleep/retry.
 async function xeroGet(
   path: string, accessToken: string, tenantId: string,
-  params?: Record<string, string>, retryCount = 0
+  params?: Record<string, string>
 ): Promise<any> {
   const url = new URL(`${XERO_API_BASE}${path}`)
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   const fetchUrl = url.toString().replace(/%2C/g, ',')
 
-  const resp = await fetch(fetchUrl, {
+  const resp = await xeroLegacyReadFetch(fetchUrl, {
     headers: {
       'Authorization': `Bearer ${accessToken}`,
       'Xero-tenant-id': tenantId,
@@ -3227,56 +3265,19 @@ async function xeroGet(
   })
 
   if (resp.status === 429) {
-    if (retryCount >= 3) throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
-    const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
-    await new Promise(r => setTimeout(r, retryAfter * 1000))
-    return xeroGet(path, accessToken, tenantId, params, retryCount + 1)
+    throw xeroRateLimitError(resp)
   }
   if (!resp.ok) throw new Error(`Xero API ${path} failed (${resp.status}): ${await resp.text()}`)
   return resp.json()
 }
 
-// Xero API POST/PUT
-//
-// 429 RETRY IS GATED ON THE IDEMPOTENCY KEY, and that gate is the whole safety
-// argument. xeroGet has always retried a rate limit; this write path did not,
-// so a transient 60-calls-per-minute rejection surfaced as a thrown dispatch.
-// For a sealed SES mint that is not a slow card, it is a DEAD one: the throw
-// lands in executeSesExternalEffect's catch, the effect goes to `unknown`, and
-// every later call on the same operation_key can only reconcile — so the card
-// cannot mint again until a fresh invoice obligation revision is prepared. A
-// rate limit is exactly the failure that appears only at batch size, so at one
-// card a minute it never showed.
-//
-// Retrying is safe ONLY where Xero can collapse the repeat: it honours
-// Idempotency-Key for 12 hours, so a keyed create/authorise/void returns the
-// same record rather than a second one. The un-keyed calls here are not merely
-// unproven, they are the ones that must never repeat — POST /Invoices/{id}/Email
-// sends the client a real email every time it succeeds. So an un-keyed 429
-// still throws immediately, exactly as before.
-//
-// THE BACKOFF IS BOUNDED IN BOTH DIRECTIONS, and that is load-bearing for the
-// same reason. Sleeping for an arbitrary Retry-After inside the dispatch swaps
-// one poisoning mechanism for a worse one: if the isolate or caller dies
-// mid-sleep the effect row never leaves `dispatching` and carries no failure
-// message at all. Only the 60-calls-per-minute window is worth waiting out, and
-// it clears in seconds; a daily-limit or concurrency 429 carries a large
-// delta-seconds value that must never be slept through here. So a Retry-After
-// above the per-sleep ceiling, or one that would overrun the cumulative budget,
-// throws immediately — the pre-change behaviour, and the honest outcome.
-const XERO_POST_RETRY_SLEEP_CEILING_MS = 5_000
-const XERO_POST_RETRY_SLEEP_BUDGET_MS = 15_000
-
-function xeroPostRetryAfterMs(header: string | null): number {
-  const parsed = parseInt(header || '', 10)
-  if (!Number.isFinite(parsed) || parsed < 0) return XERO_POST_RETRY_SLEEP_CEILING_MS
-  return parsed * 1000
-}
-
+// Xero writes dispatch once with the existing caller idempotency key.
+// Shared cooldown coordinates later attempts across agents and cron consumers;
+// Inline retries can outlive the 120s caller even when each sleep is short.
 async function xeroPost(
   path: string, accessToken: string, tenantId: string,
-  body: any, method = 'POST', idempotencyKey?: string, retryCount = 0,
-  sleptMs = 0
+  body: any, method = 'POST', idempotencyKey?: string,
+  requestFetch: typeof fetch = xeroAccountingFetch
 ): Promise<any> {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${accessToken}`,
@@ -3284,37 +3285,17 @@ async function xeroPost(
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   }
-  // Xero honours Idempotency-Key for 12 hours — prevents duplicate
-  // creation on retries or double-clicks
+  // Keep the caller's existing key. Provider replay protection is short-lived;
+  // durable business duplicate checks remain separate.
   if (idempotencyKey) {
     headers['Idempotency-Key'] = idempotencyKey
   }
-  const resp = await fetch(`${XERO_API_BASE}${path}`, {
+  const resp = await requestFetch(`${XERO_API_BASE}${path}`, {
     method,
     headers,
     body: JSON.stringify(body),
   })
-  if (resp.status === 429 && idempotencyKey) {
-    if (retryCount >= 3) {
-      throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
-    }
-    const retryAfterMs = xeroPostRetryAfterMs(resp.headers.get('Retry-After'))
-    if (retryAfterMs > XERO_POST_RETRY_SLEEP_CEILING_MS) {
-      throw new Error(
-        `Xero rate limited on ${path}: Retry-After ${retryAfterMs / 1000}s exceeds the ${XERO_POST_RETRY_SLEEP_CEILING_MS / 1000}s backoff ceiling`,
-      )
-    }
-    if (sleptMs + retryAfterMs > XERO_POST_RETRY_SLEEP_BUDGET_MS) {
-      throw new Error(
-        `Xero rate limited on ${path}: backoff budget of ${XERO_POST_RETRY_SLEEP_BUDGET_MS / 1000}s exhausted`,
-      )
-    }
-    await new Promise(r => setTimeout(r, retryAfterMs))
-    return xeroPost(
-      path, accessToken, tenantId, body, method, idempotencyKey, retryCount + 1,
-      sleptMs + retryAfterMs,
-    )
-  }
+  if (resp.status === 429) throw xeroRateLimitError(resp)
   if (!resp.ok) {
     const errText = await resp.text()
     // Extract the actual validation message from Xero's verbose response
@@ -3328,12 +3309,18 @@ async function xeroPost(
     }
     throw new Error(`Xero API ${path} failed (${resp.status}): ${errText}`)
   }
+  // The invoice Email endpoint confirms acceptance with an empty 204 response.
+  // Other writes still require their normal JSON record response.
+  if (resp.status === 204 && method === 'POST' && /^\/Invoices\/[^/?#]+\/Email$/.test(path)) return {}
   return resp.json()
 }
 
 // Test seam: the rate-limit contract above is a runtime capability, so its test
 // drives the real function rather than a mirrored copy.
-export const _xeroPostForTest = xeroPost
+export const _xeroPostForTest = (
+  path: string, accessToken: string, tenantId: string, body: any,
+  method = 'POST', idempotencyKey?: string, requestFetch: typeof fetch = fetch,
+) => xeroPost(path, accessToken, tenantId, body, method, idempotencyKey, requestFetch)
 
 function xeroContactWherePath(field: string, value: string): string {
   const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
@@ -3366,7 +3353,8 @@ async function resolveTradeXeroSupplierContact(
         }
         return contact.ContactID
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof XeroCooldownError) throw error
       // Fall through to email/name/create when the cache misses or Xero rejects it.
     }
   }
@@ -3395,7 +3383,10 @@ async function resolveTradeXeroSupplierContact(
     try {
       const contacts = await xeroGet(xeroContactWherePath('EmailAddress', tradeEmail), args.accessToken, args.tenantId)
       xeroContactId = await pickContactId(contacts)
-    } catch { /* fallback to name lookup/create */ }
+    } catch (error) {
+      if (error instanceof XeroCooldownError) throw error
+      /* fallback to name lookup/create */
+    }
   }
 
   // 2) Exact name match covers Jean-style contacts where the Xero supplier
@@ -3406,7 +3397,10 @@ async function resolveTradeXeroSupplierContact(
     try {
       const contacts = await xeroGet(xeroContactWherePath('Name', tradeName), args.accessToken, args.tenantId)
       xeroContactId = await pickContactId(contacts)
-    } catch { /* fallback to create */ }
+    } catch (error) {
+      if (error instanceof XeroCooldownError) throw error
+      /* fallback to create */
+    }
   }
 
   // 3) Create only when the contact is genuinely absent.
@@ -3439,6 +3433,7 @@ export type SendInvoiceVerifyDeps = {
   xeroGet: (path: string, accessToken: string, tenantId: string, params?: any) => Promise<any>
   logBusinessEvent: (client: any, event: any) => Promise<void>
   fetch: typeof globalThis.fetch
+  xeroFetch: typeof globalThis.fetch
   env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string }
 }
 
@@ -3534,6 +3529,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     }
     xeroLookupOk = true
   } catch (e) {
+    if (e instanceof XeroCooldownError) throw e
     xeroLookupErr = (e as Error).message || 'unknown error'
     console.log('[send_invoice_email] xero contact lookup failed:', xeroLookupErr)
   }
@@ -3660,9 +3656,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   const siCcSafe = ccVerified.join(',')
 
   // Download PDF from Xero
-  const siPdfResp = await dfetch(`${env.XERO_API_BASE}/Invoices/${siId}`, {
+  const siPdfResp = await deps.xeroFetch(`${env.XERO_API_BASE}/Invoices/${siId}`, {
     headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
   })
+  if (siPdfResp.status === 429) throw xeroRateLimitError(siPdfResp)
   if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
   const siBuffer = await siPdfResp.arrayBuffer()
   const siBytes = new Uint8Array(siBuffer)
@@ -4626,6 +4623,29 @@ async function vaultSyncSwApiKeyAction(
 }
 
 export const _vaultSyncSwApiKeyActionForTest = vaultSyncSwApiKeyAction
+
+export async function _readJobRecordAction(
+  client: any,
+  params: URLSearchParams,
+  method: string,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'role' | 'orgId'> | null,
+  serverSecretPresented: boolean,
+): Promise<Response> {
+  if (!((authMode === 'api_key' && serverSecretPresented) ||
+        (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role)))) {
+    return json({ ok: false, code: 'operator_access_required', error: 'An authorised operator or server connection is required' }, 403)
+  }
+  if (method !== 'GET') return json({ ok: false, code: 'METHOD_NOT_ALLOWED', error: 'Job record reads require GET' }, 405)
+  try {
+    // Never substitute the server org for a JWT caller with a missing profile org.
+    const orgId = authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID
+    return json(await readJobRecord(client, params, orgId))
+  } catch (error) {
+    if (error instanceof JobRecordReadError) return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+    return json({ ok: false, code: 'JOB_RECORD_READ_FAILED', error: 'The stored job record could not be read' }, 502)
+  }
+}
 
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
@@ -5886,6 +5906,8 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json({ ...canary, generated_at: new Date().toISOString() })
       }
+      case 'read_job_record':
+        return await _readJobRecordAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'job_detail': {
         let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
         // If not a UUID, try resolving as job_number (e.g. SWF-26037)
@@ -6939,7 +6961,7 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
         } catch (error) {
-          if (error instanceof XeroReceivablesReadError) {
+          if (error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
             return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
           }
           // The existing credential helper can include a provider error body in
@@ -6958,7 +6980,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_supplier_bill':
       case 'get_xero_bill': {
         try {
-          return json(await getSupplierBill(client, url.searchParams, { getToken, xeroGet }))
+          return json(await getSupplierBill(client, {
+            xero_invoice_id: url.searchParams.get('xero_invoice_id') || '',
+            xero_bill_id: url.searchParams.get('xero_bill_id') || '',
+            xero_id: url.searchParams.get('xero_id') || '',
+          }, { getToken, xeroGet }))
         } catch (error) {
           return supplierBillApiError(error)
         }
@@ -6966,7 +6992,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'create_supplier_bill':
       case 'create_xero_bill': {
         try {
-          return json(await createSupplierBill(client, body, { getToken, xeroGet, xeroPost }))
+          return json(await createSupplierBill(client, body, { getToken, xeroGet, xeroPost, fetchImpl: xeroAccountingFetch }))
         } catch (error) {
           return supplierBillApiError(error)
         }
@@ -6982,7 +7008,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'attach_supplier_bill_pdf':
       case 'attach_xero_bill_pdf': {
         try {
-          return json(await attachSupplierBillPdf(client, body, { getToken, xeroGet }))
+          return json(await attachSupplierBillPdf(client, body, { getToken, xeroGet, fetchImpl: xeroAccountingFetch }))
         } catch (error) {
           return supplierBillApiError(error)
         }
@@ -7738,6 +7764,7 @@ if (import.meta.main) serve(async (req: Request) => {
           client, body,
           getToken, xeroGet, logBusinessEvent,
           fetch: globalThis.fetch.bind(globalThis),
+          xeroFetch: xeroAccountingFetch,
           env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
         })
       }
@@ -8456,13 +8483,13 @@ if (import.meta.main) serve(async (req: Request) => {
                 send_email: false,
                 bypass_preflight: true,
                 bypass_reason: 'captain_lock_draft_remint',
-                makesafe_idempotency_key: `clk-${
+              }, {
+                makesafeIdempotencyKey: `clk-${
                   String(args.decision_key || 'lock')
                     .toLowerCase()
                     .replace(/[^a-z0-9]+/g, '')
                     .slice(0, 32)
                 }`.slice(0, 36),
-              }, {
                 captainLock: { decision_key: args.decision_key },
               })
               return {
@@ -10168,7 +10195,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const attachFilename = ((attachInv.invoice_number || 'trade-invoice').replace(/[^A-Za-z0-9._-]/g, '_') || 'trade-invoice') + '.pdf'
             try {
               const { accessToken, tenantId } = await getToken(client)
-              const attachRes = await fetch(
+              const attachRes = await xeroAccountingFetch(
                 `https://api.xero.com/api.xro/2.0/Invoices/${attachBillId}/Attachments/${encodeURIComponent(attachFilename)}`,
                 {
                   method: 'PUT',
@@ -10181,6 +10208,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   body: pdfBytes,
                 }
               )
+              if (attachRes.status === 429) throw xeroRateLimitError(attachRes)
               if (!attachRes.ok) {
                 const errText = await attachRes.text()
                 console.log('[ops-api] Xero PDF attach failed:', attachRes.status, errText)
@@ -10188,6 +10216,12 @@ if (import.meta.main) serve(async (req: Request) => {
               }
               return json({ success: true })
             } catch (e) {
+              if (e instanceof XeroCooldownError) {
+                throw new XeroCooldownError(e.message, e.status, e.code, {
+                  ...e.details, provider_operation: 'invoice_pdf_attachment',
+                  xero_invoice_id: attachBillId, pdf_attachment_confirmed: false,
+                })
+              }
               console.log('[ops-api] PDF attachment error:', (e as Error).message)
               return json({ success: false, error: (e as Error).message }, 500)
             }
@@ -11897,6 +11931,9 @@ if (import.meta.main) serve(async (req: Request) => {
       default: return json({ error: 'Unknown action' }, 400)
     }
   } catch (err) {
+    if (err instanceof XeroCooldownError) {
+      return json({ ok: false, code: err.code, error: err.message, ...err.details }, err.status)
+    }
     const sesError = sesActionErrorResponse(err)
     if (sesError) {
       // Defect 2 (2026-08-14): a refused SES money-chain press must leave a
@@ -32188,15 +32225,18 @@ async function updateJobStatus(client: any, body: any) {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`
       const ghlResp = await fetch(ghlUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+        },
         body: JSON.stringify({
           opportunityId: data.ghl_opportunity_id,
           status: status,
           jobType: data.type || 'patio',
         }),
       })
-      const ghlResult = await ghlResp.json()
-      if (ghlResult.success) {
+      const ghlResult = await ghlResp.json().catch(() => ({}))
+      if (ghlResp.ok && ghlResult.success) {
         console.log(`[ops-api] GHL stage synced: ${data.ghl_opportunity_id} → ${status}`)
         await client.from('job_events').insert({
           job_id: jId,
@@ -32204,7 +32244,7 @@ async function updateJobStatus(client: any, body: any) {
           detail_json: { status, opportunity_id: data.ghl_opportunity_id, stage_id: ghlResult.stageId },
         })
       } else {
-        console.log(`[ops-api] GHL stage sync failed (non-blocking): ${ghlResult.error}`)
+        console.log(`[ops-api] GHL stage sync failed (non-blocking): HTTP ${ghlResp.status}; ${ghlResult.error || 'No success confirmation'}`)
       }
     } catch (e) {
       console.log('[ops-api] GHL stage push failed (non-blocking):', (e as Error).message)
@@ -32867,23 +32907,14 @@ async function getInvoicePdf(
   const { accessToken, tenantId } = await getToken(client)
 
   // Fetch PDF from Xero — raw binary, not JSON
-  let resp: Response | null = null
-  for (let attempt = 0; attempt <= 3; attempt++) {
-    resp = await fetch(`${XERO_API_BASE}/Invoices/${xeroInvoiceId}`, {
+  const resp = await xeroAccountingFetch(`${XERO_API_BASE}/Invoices/${xeroInvoiceId}`, {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Xero-tenant-id': tenantId,
         'Accept': 'application/pdf',
       },
     })
-    if (resp.status === 429) {
-      if (attempt >= 3) throw new ApiError('Xero rate limited after retries', 429)
-      const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
-      await new Promise(r => setTimeout(r, retryAfter * 1000))
-      continue
-    }
-    break
-  }
+  if (resp.status === 429) throw xeroRateLimitError(resp)
 
   if (!resp || !resp.ok) {
     const errText = resp ? await resp.text() : 'No response'
@@ -33578,6 +33609,8 @@ async function assertSealedSesInvoiceCreateIsUnique(
 }
 
 interface CreateInvoiceInternalOptions {
+  /** Stable key generated by a trusted internal caller, never from body. */
+  makesafeIdempotencyKey?: string
   ses?: {
     obligationRevisionId: string
     externalToken: string
@@ -33859,23 +33892,23 @@ async function createInvoice(
     }],
   }
 
-  // Idempotency key. Default: job_id + reference + minute (prevents duplicate on
-  // retry/double-click within a minute). The make-safe DRAFT path (and ONLY that
-  // internal path) threads an explicit stable key via the INTERNAL-ONLY property
-  // `makesafe_idempotency_key`, so the key is STABLE across calls regardless of
-  // time (Xero collapses identical keys to one invoice for 12h). We deliberately
-  // do NOT read a generic `body.idempotency_key`: the public `create_invoice`
-  // route forwards the request body verbatim, so honouring an arbitrary
-  // caller-supplied key would let an external caller force key collisions and get
-  // back the WRONG existing invoice. `makesafe_idempotency_key` is set only by
-  // createMakesafeDraftInvoice (server-side), never by the public route's body.
-  // (Adversarial review finding 4.)
+  // Hash the resolved invoice and its business scope so retries retain the key
+  // across clock boundaries and materially different invoices cannot collide.
+  // Only trusted internal options may override it; no request-body key is read.
+  // Xero retains idempotency results for six minutes, not indefinitely.
   const jIdForKey = job_id || jobId || 'nojob'
   const invIdempotencyKey = sesContext
     ? `ses-invoice-create-${sesContext.obligationRevisionId}`
-    : (body.makesafe_idempotency_key
-      ? String(body.makesafe_idempotency_key)
-      : `inv-${jIdForKey}-${reference || 'noref'}-${new Date().toISOString().slice(0, 16)}`)
+    : (internal.makesafeIdempotencyKey || await genericInvoiceIdempotencyKey({
+      orgId: DEFAULT_ORG_ID,
+      tenantId,
+      jobId: String(jIdForKey),
+      contactId: resolvedContactId ? String(resolvedContactId) : null,
+      jobContactId: traceCtx?.job_contact?.id ? String(traceCtx.job_contact.id) : null,
+      runLabel: body.run_label ? String(body.run_label) : null,
+      reference: ref,
+      invoice,
+    }))
   const result = await xeroPost('/Invoices', accessToken, tenantId, invoice, 'PUT', invIdempotencyKey)
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
@@ -33905,12 +33938,22 @@ async function createInvoice(
     }
   }
 
-  // If approve & send, email the invoice to the client via Xero
-  if (!sesContext && !internal.captainLock && send_email && xeroInvId) {
+  // Email acceptance is separate from successful invoice creation. A timeout or
+  // incomplete response leaves the delivery outcome unknown; never retry here.
+  const emailRequested = !sesContext && !internal.captainLock && !!send_email
+  let emailStatus: InvoiceEmailStatus = emailRequested ? 'failed' : 'not_requested'
+  let emailError: Record<string, unknown> | null = null
+  if (emailRequested && xeroInvId) {
     try {
       await xeroPost(`/Invoices/${xeroInvId}/Email`, accessToken, tenantId, {}, 'POST')
+      emailStatus = 'accepted'
     } catch (emailErr: any) {
-      console.error('Failed to email invoice:', emailErr.message)
+      emailStatus = rejectedInvoiceEmailStatus(emailErr)
+      emailError = invoiceEmailErrorMetadata(emailErr, {
+        xeroInvoiceId: String(xeroInvId),
+        invoiceNumber: invNumber ? String(invNumber) : null,
+      })
+      console.error('Invoice email outcome:', emailStatus, emailErr.message)
       // Non-blocking — invoice was still created
     }
   }
@@ -33989,7 +34032,9 @@ async function createInvoice(
         invoice_number: invNumber,
         status: xeroInv?.Status || invoiceStatus,
         total: invTotal,
-        emailed: !sesContext && !internal.captainLock && !!send_email,
+        emailed: invoiceEmailAccepted(emailStatus),
+        email_status: emailStatus,
+        email_error: emailError,
         ses_operation_key: sesContext?.operationKey || null,
       },
     })
@@ -34016,6 +34061,9 @@ async function createInvoice(
     total: invTotal,
     status: xeroInv?.Status || invoiceStatus,
     reference: xeroInv?.Reference || ref,
+    emailed: invoiceEmailAccepted(emailStatus),
+    email_status: emailStatus,
+    email_error: emailError,
   }
 }
 
@@ -41949,7 +41997,7 @@ interface CreateMakesafeDraftInvoiceDeps {
     operator?: string | null
     reason?: string | null
   }) => Promise<any>
-  createInvoiceFn?: (client: any, body: any) => Promise<any>
+  createInvoiceFn?: (client: any, body: any, internal?: CreateInvoiceInternalOptions) => Promise<any>
   // W2-C item-14 portal-truth guard (default: assertMakesafePortalVerifiedForDraftInvoice).
   // Overridable so pricing/dup-guard unit tests with a stub client can opt out.
   assertPortalVerified?: (client: any, jobId: string | null) => Promise<void>
@@ -42398,7 +42446,7 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
   // D2 — STABLE Xero idempotency key per (job, reference), NO time component.
   // The old key baked the current minute, so a retry a minute later created a
   // second DRAFT. A stable key makes Xero collapse identical create calls to one
-  // invoice (12h window), so this path is idempotent even when the non-atomic
+  // invoice within Xero's six-minute retention window when the non-atomic
   // pre-read dup-guard above races. Kept short (Xero caps the header) and
   // namespaced to the make-safe draft path.
   const stableIdempotencyKey = _makesafeDraftIdempotencyKey(jobId, reference)
@@ -42410,10 +42458,9 @@ async function createMakesafeDraftInvoice(client: any, body: any, deps: CreateMa
     reference,
     xero_status: 'DRAFT', // guardrail
     send_email: false,    // guardrail
-    // D2 — deterministic per (job, reference). INTERNAL-ONLY property name so the
-    // public create_invoice route can never inject it (adversarial review #4).
-    makesafe_idempotency_key: stableIdempotencyKey,
     operator: body.operator || 'makesafe reporting autopilot (draft-only)',
+  }, {
+    makesafeIdempotencyKey: stableIdempotencyKey,
   })
   return {
     success: true,
@@ -45347,13 +45394,14 @@ export function _bytesToBase64(bytes: Uint8Array): string {
 async function _fetchXeroInvoicePdfBytes(
   accessToken: string, tenantId: string, xeroInvoiceId: string,
 ): Promise<Uint8Array> {
-  const resp = await fetch(`${XERO_API_BASE}/Invoices/${xeroInvoiceId}`, {
+  const resp = await xeroAccountingFetch(`${XERO_API_BASE}/Invoices/${xeroInvoiceId}`, {
     headers: {
       'Authorization': `Bearer ${accessToken}`,
       'Xero-tenant-id': tenantId,
       'Accept': 'application/pdf',
     },
   })
+  if (resp.status === 429) throw xeroRateLimitError(resp)
   if (!resp.ok) throw new ApiError(`Failed to fetch invoice PDF from Xero: ${resp.status}`, 502)
   return new Uint8Array(await resp.arrayBuffer())
 }

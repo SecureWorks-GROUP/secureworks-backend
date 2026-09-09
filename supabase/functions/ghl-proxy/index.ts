@@ -45,11 +45,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // matching ladder (single_recent_active_job confidence 0.55 falls below
 // floor → match_status='unresolved', job_id NOT leaked through).
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
+import { computeHash } from '../_shared/evidence/storage.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { MatchMethod } from '../_shared/evidence/types.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
   assignJobNumberWithNullCas,
+  buildGhlContactUpdate,
+  buildGhlOpportunitySearchRequest,
   buildLeadSearchRows,
   classifyScopeCasReread,
   cleanIdentity,
@@ -66,9 +69,11 @@ import {
   leadJobFallbackRows,
   matchesFirstWordRetry,
   normalizeIdentity,
+  recentSmsEventMatchesMessage,
   requestedBaseScopeHash,
   requiresBaseScopeCursor,
   rejectSharedKeyForBrowserAction,
+  resolveLeadOpportunityRoute,
   scopeLeadJobQuery,
   scopeJsonHash,
   stalePreparedContactIds,
@@ -332,19 +337,23 @@ async function fetchOpportunityPages(args: {
     // Stop before spending another page's timeout past the budget. exhausted
     // stays false, so callers that must not act on an absence fail closed.
     if (Date.now() - startedAt >= budgetMs) break
-    const params = new URLSearchParams({
-      location_id: args.locationId || PRODUCTION_GHL_LOCATION_ID,
-      limit: String(limit),
+    const searchRequest = buildGhlOpportunitySearchRequest({
+      locationId: args.locationId || PRODUCTION_GHL_LOCATION_ID,
+      fallbackLocationId: PRODUCTION_GHL_LOCATION_ID,
+      pipelineId: args.pipelineId,
+      contactId: args.contactId,
+      q: args.q,
+      limit,
+      startAfter,
+      startAfterId,
     })
-    if (args.pipelineId) params.set('pipeline_id', args.pipelineId)
-    if (args.contactId) params.set('contact_id', args.contactId)
-    if (args.q) params.set('q', args.q)
-    if (startAfter != null) params.set('startAfter', String(startAfter))
-    if (startAfterId) params.set('startAfterId', startAfterId)
 
     const data = await ghl(
-      `/opportunities/search?${params.toString()}`,
-      args.perPageTimeoutMs ? { signal: AbortSignal.timeout(args.perPageTimeoutMs) } : {},
+      searchRequest.path,
+      {
+        ...(args.perPageTimeoutMs ? { signal: AbortSignal.timeout(args.perPageTimeoutMs) } : {}),
+        headers: searchRequest.headers,
+      },
     )
     const rows = data.opportunities || []
     const meta = data.meta || {}
@@ -2385,7 +2394,10 @@ serve(async (req: Request) => {
     // ── Auto-create GHL contact + opportunity for walk-up clients ──
     if (action === 'create_contact_and_opportunity' && req.method === 'POST') {
       const body = await req.json()
-      const { firstName, lastName, email, phone, address, suburb, toolType, skipOpportunity, name } = body
+      const { firstName, lastName, email, phone, address, suburb, skipOpportunity, name } = body
+      const toolType = body.toolType ?? body.tool_type ?? body.jobType ?? body.job_type
+      const leadRoute = resolveLeadOpportunityRoute(toolType)
+      if (!leadRoute.ok) return json({ error: leadRoute.error, code: leadRoute.code, allowed: [...leadRoute.allowed] }, leadRoute.status)
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
       // a NEW opportunity in the pipeline. oppName is built from the FETCHED
@@ -2497,7 +2509,8 @@ serve(async (req: Request) => {
       // Create opportunity in the correct pipeline (skip for neighbours)
       let opportunityId: string | null = null
       if (!skipOpportunity) {
-        const pipelineId = PIPELINES[toolType] || PIPELINES.patio
+        const pipelineId = PIPELINES[leadRoute.pipelineKey]
+        if (!pipelineId) return json({ error: `No GHL pipeline configured for ${leadRoute.pipelineKey}`, code: 'pipeline_not_configured' }, 500)
         try {
           const contactLabel = contactDisplayIdentity({
             firstName: resolvedFirst,
@@ -2506,7 +2519,7 @@ serve(async (req: Request) => {
             email,
             address,
           })
-          const oppName = contactLabel + ' — ' + (toolType === 'fencing' ? 'Fencing' : 'Patio')
+          const oppName = contactLabel + ' — ' + leadRoute.label
           const oppRes = await ghl('/opportunities/', {
             method: 'POST',
             body: JSON.stringify({
@@ -3052,24 +3065,10 @@ serve(async (req: Request) => {
     // ── Update GHL contact with details from tool ──
     if (action === 'update_contact' && req.method === 'POST') {
       const body = await req.json()
-      const { contactId, name, firstName, lastName, email, phone, address, suburb } = body
+      const { contactId } = body
       if (!contactId) return json({ error: 'contactId required' }, 400)
 
-      const update: Record<string, string> = {}
-      // Prefer structured firstName/lastName over combined name to avoid round-trip mangling
-      if (firstName !== undefined) {
-        update.firstName = firstName
-        update.lastName = lastName || ''
-      } else if (name) {
-        const parts = name.trim().split(/\s+/)
-        update.firstName = parts[0]
-        if (parts.length > 1) update.lastName = parts.slice(1).join(' ')
-      }
-      if (email) update.email = email
-      if (phone) update.phone = phone
-      if (address) update.address1 = address
-      // suburb === '' explicitly clears city; GHL needs a space to accept clearing
-      if (suburb !== undefined) update.city = suburb || ' '
+      const update = buildGhlContactUpdate(body)
 
       await ghl(`/contacts/${contactId}`, { method: 'PUT', body: JSON.stringify(update) })
       return json({ success: true })
@@ -3990,16 +3989,16 @@ serve(async (req: Request) => {
       try {
         const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+        const messageBodyHash = await computeHash(message)
         const { data: recentSms } = await sb.from('business_events')
-          .select('payload')
-          .eq('event_type', 'sms_sent')
+          .select('event_type,payload,body_preview,body_hash')
+          .in('event_type', ['sms_sent', 'client.sms_out'])
           .eq('entity_id', contactId)
           .gte('occurred_at', tenMinsAgo)
-        // Only block if the SAME message content was sent recently
-        const isDuplicate = (recentSms || []).some((e: any) => {
-          const prevMsg = e.payload?.message || ''
-          return prevMsg === message.slice(0, 500) // Compare against what we'd store
-        })
+        // Only block if the SAME message content was sent recently. Handles both
+        // legacy sms_sent payload.message and the current client.sms_out evidence
+        // payload/body_preview shapes.
+        const isDuplicate = (recentSms || []).some((e: any) => recentSmsEventMatchesMessage(e, message, messageBodyHash))
         if (isDuplicate) {
           console.log(`[ghl-proxy] DEDUP BLOCKED: identical SMS to ${contactId} sent within last 10 min`)
           return json({ success: false, error: 'This exact SMS was already sent to this contact within the last 10 minutes.', dedup_blocked: true }, 409)
@@ -4100,6 +4099,7 @@ serve(async (req: Request) => {
                 match_method: matchMethod,
                 match_confidence: matchConfidence,
                 body_preview: message.slice(0, 500),
+                body_full: message,
                 privacy_classification: 'staff_only',
                 retention_class: '7y_audit',
                 payload: {

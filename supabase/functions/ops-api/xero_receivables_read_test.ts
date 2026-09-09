@@ -14,6 +14,11 @@ import {
   readXeroTrackingCategories,
   XeroReceivablesReadError,
 } from "./xero_receivables_read.ts";
+import {
+  createXeroCooldownFetch,
+  XeroCooldownError,
+  type XeroCooldownStore,
+} from "../_shared/xero_cooldown.ts";
 
 const TENANT = "10000000-0000-4000-8000-000000000001";
 const ID = "20000000-0000-4000-8000-000000000002";
@@ -21,6 +26,7 @@ const ID2 = "20000000-0000-4000-8000-000000000003";
 const CONTACT = "30000000-0000-4000-8000-000000000003";
 const NOW = "2026-09-09T08:00:00.000Z";
 const EMPTY_RESPONSE_METADATA = {
+  shared_cooldown: null,
   request_id: null,
   quota: {
     minute_remaining: null,
@@ -29,6 +35,32 @@ const EMPTY_RESPONSE_METADATA = {
     limit_problem: null,
   },
 };
+
+Deno.test("new read adapter preserves an early shared-guard refusal and sends no provider call", async () => {
+  let providerCalls = 0;
+  const store: XeroCooldownStore = {
+    read: () => Promise.reject(new Error("Fixture store unavailable")),
+    compareAndSwap: () => Promise.resolve(false),
+  };
+  const read = createXeroReadGet({
+    fetchFn: createXeroCooldownFetch({
+      store,
+      orgId: "fixture-org",
+      appKey: "fixture-app",
+      fetchFn: () => {
+        providerCalls++;
+        return Promise.resolve(Response.json({}));
+      },
+    }),
+  });
+  const error = await assertRejects(
+    () => read("/Organisation", "fixture-token", TENANT),
+    XeroCooldownError,
+  );
+  assertEquals(error.code, "XERO_GUARD_UNAVAILABLE");
+  assertEquals(error.details.provider_call_made, false);
+  assertEquals(providerCalls, 0);
+});
 
 Deno.test("bounded provider GET returns 429 immediately with retry and quota metadata, no retries", async () => {
   let calls = 0;

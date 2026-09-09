@@ -1,6 +1,8 @@
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts"
 import {
   assignJobNumberWithNullCas,
+  buildGhlContactUpdate,
+  buildGhlOpportunitySearchRequest,
   classifyAuthCredential,
   classifyScopeCasReread,
   contactDisplayIdentity,
@@ -8,13 +10,16 @@ import {
   deterministicMediaStorageKey,
   isProfileRequestBoundToJwt,
   isSameOrg,
+  recentSmsEventMatchesMessage,
   rejectSharedKeyForBrowserAction,
+  resolveLeadOpportunityRoute,
   requestedBaseScopeHash,
   requiresBaseScopeCursor,
   scopeJsonHash,
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
 } from './hardening_helpers.ts'
+import { computeHash } from '../_shared/evidence/storage.ts'
 
 Deno.test('browser-facing actions reject the shared SW_API_KEY when the rollout gate is enabled', () => {
   const credential = classifyAuthCredential({
@@ -83,6 +88,89 @@ Deno.test('phone-only contacts have a useful opportunity identity without invent
   assertEquals(contactDisplayIdentity({ phone: '+61 400 111 222' }), 'Phone lead +61 400 111 222')
   assertEquals(contactDisplayIdentity({ firstName: 'Ada', lastName: 'Lovelace', phone: '0400' }), 'Ada Lovelace')
   assertEquals(contactDisplayIdentity({ email: 'lead@example.com' }), 'lead@example.com')
+})
+
+Deno.test('lead opportunity tool types validate explicitly while legacy missing type defaults to patio', () => {
+  assertEquals(resolveLeadOpportunityRoute(undefined), {
+    ok: true,
+    toolType: 'patio',
+    pipelineKey: 'patio',
+    label: 'Patio',
+    defaulted: true,
+  })
+  assertEquals(resolveLeadOpportunityRoute('fence'), {
+    ok: true,
+    toolType: 'fencing',
+    pipelineKey: 'fencing',
+    label: 'Fencing',
+    defaulted: false,
+  })
+  assertEquals(resolveLeadOpportunityRoute('decking'), {
+    ok: true,
+    toolType: 'decking',
+    pipelineKey: 'patio',
+    label: 'Decking',
+    defaulted: false,
+  })
+  assertEquals(resolveLeadOpportunityRoute('combo'), {
+    ok: true,
+    toolType: 'combo',
+    pipelineKey: 'patio',
+    label: 'Combo',
+    defaulted: false,
+  })
+  const invalid = resolveLeadOpportunityRoute('roofing')
+  assertEquals(invalid.ok, false)
+  if (!invalid.ok) {
+    assertEquals(invalid.code, 'invalid_tool_type')
+    assertEquals(invalid.allowed, ['fencing', 'patio', 'decking', 'combo'])
+  }
+})
+
+Deno.test('recentSmsEventMatchesMessage requires exact message or body hash proof', async () => {
+  const message = 'Client update: we are booked for tomorrow morning.'
+  assertEquals(recentSmsEventMatchesMessage({ payload: { message } }, message), true)
+  assertEquals(recentSmsEventMatchesMessage({ payload: { body_preview: message } }, message), true)
+  assertEquals(recentSmsEventMatchesMessage({ payload: { message_preview: message } }, message), true)
+  assertEquals(recentSmsEventMatchesMessage({ body_preview: message }, message), true)
+  assertEquals(recentSmsEventMatchesMessage({ payload: { message: 'Different message' } }, message), false)
+  const first500 = 'a'.repeat(500)
+  const longA = `${first500} alpha`
+  const longB = `${first500} beta`
+  assertEquals(recentSmsEventMatchesMessage({ body_preview: first500 }, longA), false)
+  assertEquals(recentSmsEventMatchesMessage({ payload: { message: first500 } }, longA), false)
+  assertEquals(recentSmsEventMatchesMessage({ body_hash: await computeHash(longA) }, longA, await computeHash(longA)), true)
+  assertEquals(recentSmsEventMatchesMessage({ body_hash: await computeHash(longA) }, longB, await computeHash(longB)), false)
+})
+
+Deno.test('buildGhlContactUpdate preserves absent name fields but allows explicit lastName clearing', () => {
+  assertEquals(buildGhlContactUpdate({ firstName: 'Maya' }), { firstName: 'Maya' })
+  assertEquals(buildGhlContactUpdate({ lastName: 'Singh' }), { lastName: 'Singh' })
+  assertEquals(buildGhlContactUpdate({ firstName: 'Maya', lastName: '' }), { firstName: 'Maya', lastName: '' })
+  assertEquals(buildGhlContactUpdate({ name: 'Maya Singh' }), { firstName: 'Maya', lastName: 'Singh' })
+  assertEquals(buildGhlContactUpdate({ name: 'Maya', suburb: '' }), { firstName: 'Maya', city: ' ' })
+})
+
+Deno.test('buildGhlOpportunitySearchRequest returns v3 headers and camelCase query params', () => {
+  const request = buildGhlOpportunitySearchRequest({
+    locationId: 'loc-1',
+    fallbackLocationId: 'prod-loc',
+    pipelineId: 'pipe-1',
+    contactId: 'ct-1',
+    q: 'smith',
+    limit: 25,
+    startAfter: 2,
+    startAfterId: 'opp-2',
+  })
+  const url = new URL(`https://services.leadconnectorhq.com${request.path}`)
+  assertEquals(url.pathname, '/opportunities/search')
+  assertEquals(url.searchParams.get('locationId'), 'loc-1')
+  assertEquals(url.searchParams.get('pipelineId'), 'pipe-1')
+  assertEquals(url.searchParams.get('contactId'), 'ct-1')
+  assertEquals(url.searchParams.get('location_id'), null)
+  assertEquals(url.searchParams.get('pipeline_id'), null)
+  assertEquals(url.searchParams.get('contact_id'), null)
+  assertEquals(request.headers.Version, 'v3')
 })
 
 Deno.test('save_scope requires a base cursor for already-nonempty scope', async () => {

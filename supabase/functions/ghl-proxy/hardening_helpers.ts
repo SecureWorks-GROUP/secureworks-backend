@@ -68,6 +68,101 @@ export function contactDisplayIdentity(args: {
   return cleanIdentity(args.email) || cleanIdentity(args.address) || 'Unnamed lead'
 }
 
+export const LEAD_OPPORTUNITY_TOOL_TYPES = ['fencing', 'patio', 'decking', 'combo'] as const
+
+export type LeadOpportunityToolType = typeof LEAD_OPPORTUNITY_TOOL_TYPES[number]
+
+export type LeadOpportunityRoute = {
+  ok: true
+  toolType: LeadOpportunityToolType
+  pipelineKey: 'fencing' | 'patio'
+  label: 'Fencing' | 'Patio' | 'Decking' | 'Combo'
+  defaulted: boolean
+} | {
+  ok: false
+  status: 400
+  code: 'invalid_tool_type'
+  error: string
+  allowed: readonly LeadOpportunityToolType[]
+}
+
+export function resolveLeadOpportunityRoute(toolType: unknown): LeadOpportunityRoute {
+  const raw = typeof toolType === 'string' ? toolType.trim().toLowerCase() : ''
+  const normalised = raw === 'fence' ? 'fencing' : raw
+  if (!normalised) return { ok: true, toolType: 'patio', pipelineKey: 'patio', label: 'Patio', defaulted: true }
+  if (normalised === 'fencing') return { ok: true, toolType: 'fencing', pipelineKey: 'fencing', label: 'Fencing', defaulted: false }
+  if (normalised === 'patio') return { ok: true, toolType: 'patio', pipelineKey: 'patio', label: 'Patio', defaulted: false }
+  if (normalised === 'decking') return { ok: true, toolType: 'decking', pipelineKey: 'patio', label: 'Decking', defaulted: false }
+  if (normalised === 'combo') return { ok: true, toolType: 'combo', pipelineKey: 'patio', label: 'Combo', defaulted: false }
+  return {
+    ok: false,
+    status: 400,
+    code: 'invalid_tool_type',
+    error: `Unsupported toolType "${String(toolType)}". Use: ${LEAD_OPPORTUNITY_TOOL_TYPES.join(', ')}`,
+    allowed: LEAD_OPPORTUNITY_TOOL_TYPES,
+  }
+}
+
+export function buildGhlOpportunitySearchRequest(args: {
+  locationId: string
+  fallbackLocationId: string
+  pipelineId?: string
+  contactId?: string
+  q?: string
+  limit: number
+  startAfter?: string | number | null
+  startAfterId?: string | null
+}) {
+  const params = new URLSearchParams({
+    locationId: args.locationId || args.fallbackLocationId,
+    limit: String(args.limit),
+  })
+  if (args.pipelineId) params.set('pipelineId', args.pipelineId)
+  if (args.contactId) params.set('contactId', args.contactId)
+  if (args.q) params.set('q', args.q)
+  if (args.startAfter != null) params.set('startAfter', String(args.startAfter))
+  if (args.startAfterId) params.set('startAfterId', args.startAfterId)
+  return {
+    path: `/opportunities/search?${params.toString()}`,
+    headers: { Version: 'v3' },
+  }
+}
+
+export function recentSmsEventMatchesMessage(event: unknown, message: string, messageBodyHash?: string): boolean {
+  const row = event && typeof event === 'object' ? event as Record<string, unknown> : {}
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : {}
+  const bodyHash = typeof row.body_hash === 'string' ? row.body_hash : typeof payload.body_hash === 'string' ? payload.body_hash : ''
+  if (messageBodyHash && bodyHash && bodyHash === messageBodyHash) return true
+  const candidates = [
+    payload.message,
+    payload.message_preview,
+    payload.body_preview,
+    row.body_preview,
+  ].filter((value): value is string => typeof value === 'string')
+  return candidates.some((candidate) => candidate === message)
+}
+
+export function buildGhlContactUpdate(body: Record<string, unknown>): Record<string, string> {
+  const update: Record<string, string> = {}
+  const { name, firstName, lastName, email, phone, address, suburb } = body
+  // Prefer structured fields, but do not make a partial firstName update clear
+  // lastName by accident. A present lastName, including '', is intentional.
+  if (firstName !== undefined) {
+    update.firstName = String(firstName)
+  } else if (name) {
+    const parts = String(name).trim().split(/\s+/)
+    update.firstName = parts[0]
+    if (parts.length > 1) update.lastName = parts.slice(1).join(' ')
+  }
+  if (lastName !== undefined) update.lastName = String(lastName)
+  if (email) update.email = String(email)
+  if (phone) update.phone = String(phone)
+  if (address) update.address1 = String(address)
+  // suburb === '' explicitly clears city; GHL needs a space to accept clearing
+  if (suburb !== undefined) update.city = String(suburb) || ' '
+  return update
+}
+
 export function isRealJobRef(value: unknown): boolean {
   if (typeof value !== 'string') return false
   return /^SW[PF]?-?\d/i.test(value.trim())
@@ -509,7 +604,8 @@ export function leadOppNameForContact(
     email: contact.email,
     address: contact.address1 ?? contact.address,
   })
-  return label + ' — ' + (toolType === 'fencing' ? 'Fencing' : 'Patio')
+  const route = resolveLeadOpportunityRoute(toolType)
+  return label + ' — ' + (route.ok ? route.label : 'Patio')
 }
 
 // Orchestrates the create_contact_and_opportunity contactId branch (B2/AM-B):
@@ -552,9 +648,17 @@ export async function createOpportunityForExistingContact(args: {
     return { status: 200, body: { contactId: fetchedContact.id, opportunityId: null, contactExisted: true } }
   }
 
-  const pipelineId = pipelines[toolType as string] || pipelines.patio
+  const route = resolveLeadOpportunityRoute(toolType)
+  if (!route.ok) {
+    return { status: route.status, body: { error: route.error, code: route.code, allowed: [...route.allowed] } }
+  }
+
+  const pipelineId = pipelines[route.pipelineKey]
+  if (!pipelineId) {
+    return { status: 500, body: { error: `No GHL pipeline configured for ${route.pipelineKey}`, code: 'pipeline_not_configured' } }
+  }
   try {
-    const oppName = leadOppNameForContact(fetchedContact, toolType)
+    const oppName = leadOppNameForContact(fetchedContact, route.toolType)
     const oppRes = await ghl('/opportunities/', {
       method: 'POST',
       body: JSON.stringify({

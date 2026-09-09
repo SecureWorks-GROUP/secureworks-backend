@@ -2,8 +2,9 @@
 // Tests the exported _verifyAndSendInvoiceEmail helper with stubbed deps.
 // No network. No live Xero. No live Supabase.
 
-import { assertEquals, assert } from "https://deno.land/std@0.224.0/assert/mod.ts"
+import { assertEquals, assert, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts"
 import { _verifyAndSendInvoiceEmail } from "./index.ts"
+import { XeroCooldownError } from "../_shared/xero_cooldown.ts"
 import {
   makeStubClient,
   makeStubXeroGet,
@@ -29,8 +30,25 @@ function makeDeps(overrides: Partial<Parameters<typeof _verifyAndSendInvoiceEmai
     getToken, xeroGet, logBusinessEvent, fetch,
     env: STUB_ENV,
     ...overrides,
+    xeroFetch: overrides.xeroFetch ?? overrides.fetch ?? fetch,
   }
 }
+
+Deno.test("branded invoice PDF cooldown prevents Outlook send and preserves structured refusal", async () => {
+  let emailCalls = 0;
+  const refusal = new XeroCooldownError("Shared Xero cooldown is active", 429, "XERO_COOLDOWN_ACTIVE", {
+    provider_call_made: false, retry_at: "2026-09-09T09:46:00Z",
+  });
+  for (const rejectedStep of ["xeroGet", "xeroFetch"] as const) {
+    const deps = makeDeps({
+      [rejectedStep]: () => Promise.reject(refusal),
+      fetch: () => { emailCalls++; return Promise.resolve(new Response(null, { status: 200 })); },
+    });
+    const error = await assertRejects(() => _verifyAndSendInvoiceEmail(deps), XeroCooldownError);
+    assertEquals(error, refusal);
+    assertEquals(emailCalls, 0);
+  }
+});
 
 // ─────────────────────────────────────────────────────────────────
 // T1 — Bilal/Richard incident replay
@@ -46,7 +64,7 @@ Deno.test("T1: mismatched to_email → 400 recipient_mismatch, no PDF/Outlook ca
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ to_email: "stranger@hotmail.com" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 400)
@@ -73,7 +91,7 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody(),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -112,7 +130,7 @@ Deno.test("T3: mismatched CC → 400 cc_recipient_mismatch, Outlook not called",
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ cc: "stranger@hotmail.com" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 400)
@@ -155,7 +173,7 @@ Deno.test("T4: xeroGet throws → 400 xero_contact_lookup_failed, no PDF/Outlook
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody(),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 400)
@@ -179,7 +197,7 @@ Deno.test("T5: body.job_id != xero_invoices.job_id → 409 job_invoice_mismatch"
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ job_id: "different-job-uuid" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 409)
@@ -214,7 +232,7 @@ Deno.test("T6: Xero contact empty + jobs.client_email null → 400 recipient_unv
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody(),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 400)
@@ -261,7 +279,7 @@ Deno.test("T7: unlinked ACCREC invoice + caller job_id → invoice_link_required
   const resp = await _verifyAndSendInvoiceEmail({
     client,
     body: { xero_invoice_id: "inv-999", to_email: "client@example.com", job_id: "attacker-chosen-job" },
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 409)
@@ -302,7 +320,7 @@ Deno.test("T8: drift case (Xero=A, jobs.client_email=B, to=B) → contact_job_re
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ to_email: "drifted@hotmail.com" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 400)
@@ -358,7 +376,7 @@ Deno.test("T10: CC string 'a@x,b@x' both in allowlist → 200, normalized CC sen
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ cc: "ops@example.com, accounts@example.com" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -398,7 +416,7 @@ Deno.test("T11: CC array ['a@x','b@x'] both in allowlist → 200, joined CC sent
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ cc: ["ops@example.com", "accounts@example.com"] }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -438,7 +456,7 @@ Deno.test("T12: CC array with comma-injected entry ['a@x,b@x'] → split, both v
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ cc: ["ops@example.com,accounts@example.com"] }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -474,7 +492,7 @@ Deno.test("T13: linked invoice + matching body.job_id → audit job_id = xero_in
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ job_id: "job-uuid-1" }),  // matches siInv.job_id
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -515,7 +533,7 @@ Deno.test("T14: Xero contact has no email but jobs.client_email matches → 200 
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ to_email: "legacy@example.com" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -534,7 +552,7 @@ Deno.test("T14b: malformed Xero contact email does not fall back to jobs.client_
   const { logBusinessEvent } = makeStubLogBusinessEvent()
 
   const response = await _verifyAndSendInvoiceEmail({
-    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(response.status, 400)
@@ -555,7 +573,7 @@ Deno.test("T14c: non-string Xero contact email does not fall back to jobs.client
   const { logBusinessEvent } = makeStubLogBusinessEvent()
 
   const response = await _verifyAndSendInvoiceEmail({
-    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(response.status, 400)
@@ -576,7 +594,7 @@ Deno.test("T14d: delimiter-only Xero contact email does not fall back to jobs.cl
   const { logBusinessEvent } = makeStubLogBusinessEvent()
 
   const response = await _verifyAndSendInvoiceEmail({
-    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(response.status, 400)
@@ -612,7 +630,7 @@ Deno.test("T15: ContactPersons email authorizes send", async () => {
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ to_email: "secondary@example.com" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -632,7 +650,7 @@ Deno.test("T15b: missing invoice → sealed_ses_fence_check_failed, getToken NOT
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ xero_invoice_id: "nonexistent-id" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 503)
@@ -657,7 +675,7 @@ Deno.test("T15c: linkage mismatch → typed 409, getToken NOT called", async () 
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ job_id: "different-job-uuid" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 409)
@@ -683,7 +701,7 @@ Deno.test("T15d: happy path → getToken called exactly once", async () => {
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody(),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -704,7 +722,7 @@ Deno.test("T15e: getToken throws → 400 xero_contact_lookup_failed (folded), no
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody(),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 400)
@@ -735,7 +753,7 @@ Deno.test("T16: omitted body.job_id → cache linkage drives audit", async () =>
   const resp = await _verifyAndSendInvoiceEmail({
     client,
     body: { xero_invoice_id: "inv-123", to_email: "client@example.com" },  // no job_id
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -943,7 +961,7 @@ Deno.test("company report recipient anchor authorizes", async () => {
 
   const response = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({ to_email: "reports@builder.test" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
   assertEquals(response.status, 200)
 })
