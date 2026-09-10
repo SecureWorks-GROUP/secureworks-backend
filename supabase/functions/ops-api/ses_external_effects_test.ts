@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildSesEffect,
@@ -11,13 +12,17 @@ import {
   type SesEffectClaim,
   type SesEffectState,
   type SesExternalContext,
+  SesExternalDefiniteNoDispatchError,
   type SesExternalEffect,
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
 import {
+  createSesInvoiceCreateAdapter,
   createSupabaseSesEffectStore,
   type SesSupabaseClient,
+  type SesXeroGateway,
 } from "./ses_reporting_actions.ts";
+import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import {
   createSesGraphMailGateway,
   SES_OPERATION_HEADER,
@@ -138,7 +143,11 @@ class MemoryEffectStore implements SesExternalEffectStore {
       !this.row ||
       this.row.operation_key !== effect.operation_key ||
       this.row.state !== effect.state ||
-      !["unknown", "failed"].includes(effect.state)
+      !["unknown", "failed"].includes(effect.state) ||
+      (effect.effect_kind !== "route_send" &&
+        !(effect.effect_kind === "invoice_create" &&
+          effect.state === "failed" &&
+          effect.failure?.disposition === "definite_no_dispatch"))
     ) {
       return Promise.resolve(null);
     }
@@ -150,7 +159,581 @@ class MemoryEffectStore implements SesExternalEffectStore {
     };
     return Promise.resolve({ ...this.row });
   }
+
+  claimProvenNoDispatchRetry(
+    effect: SesExternalEffect,
+    leaseOwner: string,
+    _actor: string,
+  ): Promise<SesExternalEffect | null> {
+    if (
+      !this.row ||
+      this.row.operation_key !== effect.operation_key ||
+      this.row.id !== effect.id ||
+      this.row.invoice_obligation_revision_id !==
+        effect.invoice_obligation_revision_id ||
+      this.row.external_token !== effect.external_token ||
+      this.row.payload_hash !== effect.payload_hash ||
+      this.row.state !== "failed" ||
+      effect.effect_kind !== "invoice_create" ||
+      effect.failure?.disposition !== "definite_no_dispatch" ||
+      effect.failure?.proof !== "provider_called_false" ||
+      effect.failure?.provider_called !== false ||
+      effect.failure?.provider_call_made !== false ||
+      String(this.row.external_id || "").trim().length > 0
+    ) return Promise.resolve(null);
+    this.row = {
+      ...this.row,
+      state: "dispatching",
+      lease_owner: leaseOwner,
+      lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
+    };
+    return Promise.resolve({ ...this.row });
+  }
 }
+
+Deno.test(
+  "invoice adapter wraps only typed pre-mutation cooldown proof",
+  async () => {
+    const cooldown = new XeroCooldownError(
+      "Xero shared cooldown is active; no provider request was sent",
+      429,
+      "XERO_COOLDOWN_ACTIVE",
+      { provider_called: false, provider_call_made: false },
+    );
+    let createError: unknown = cooldown;
+    const gateway = {
+      createDraft: () => Promise.reject(createError),
+      reconcileCreate: () => Promise.resolve([]),
+      authorise: () => Promise.reject(new Error("unused")),
+      reconcileAuthorise: () => Promise.resolve([]),
+      fetchAuthorisedPdf: () => Promise.resolve(new Uint8Array()),
+    } as unknown as SesXeroGateway;
+    const adapter = createSesInvoiceCreateAdapter(gateway);
+    const context = {
+      external_token: "SES-test",
+      operation_key: "ses:invoice_create:test",
+    } as SesExternalContext;
+
+    const wrapped = await assertRejects(
+      () => adapter.dispatch({} as never, context),
+      SesExternalDefiniteNoDispatchError,
+    );
+    assertEquals(wrapped.details.provider_called, false);
+
+    createError = Object.assign(
+      new Error("local mirror failed after Xero accepted the invoice"),
+      { details: { provider_called: false } },
+    );
+    const downstream = await assertRejects(
+      () => adapter.dispatch({} as never, context),
+      Error,
+    );
+    assert(!(downstream instanceof SesExternalDefiniteNoDispatchError));
+
+    createError = new XeroCooldownError(
+      "cooldown details contradict the provider call outcome",
+      429,
+      "XERO_COOLDOWN_ACTIVE",
+      { provider_called: false, provider_call_made: true },
+    );
+    const contradictory = await assertRejects(
+      () => adapter.dispatch({} as never, context),
+      XeroCooldownError,
+    );
+    assert(!(contradictory instanceof SesExternalDefiniteNoDispatchError));
+
+    createError = Object.assign(
+      new Error("required trace fields are missing"),
+      {
+        code: "PREFLIGHT_FAILED",
+        missing_dimensions: ["payment_terms"],
+      },
+    );
+    const preflight = await assertRejects(
+      () => adapter.dispatch({} as never, context),
+      SesExternalDefiniteNoDispatchError,
+    );
+    assertEquals(preflight.details.code, "PREFLIGHT_FAILED");
+    assertEquals(preflight.details.missing_dimensions, ["payment_terms"]);
+  },
+);
+
+Deno.test(
+  "a post-mutation reconcile/read failure stays ambiguous even with a false flag",
+  async () => {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000016",
+      payload: { total: 107 },
+    });
+    let reconciles = 0;
+    let dispatches = 0;
+    const adapter = {
+      dispatch() {
+        dispatches++;
+        return Promise.resolve({ InvoiceID: "accepted-before-read-failure" });
+      },
+      reconcilePreflight() {
+        reconciles++;
+        return Promise.resolve([] as Array<{ InvoiceID: string }>);
+      },
+      reconcile() {
+        reconciles++;
+        return Promise.reject(
+          Object.assign(
+            new Error("Xero accepted the invoice; follow-up read failed"),
+            { details: { provider_called: false } },
+          ),
+        );
+      },
+      identify: (row: { InvoiceID: string }) => row.InvoiceID,
+      digest: (row: { InvoiceID: string }) => row,
+    };
+    const result = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 107 },
+      adapter,
+      actor: "post-mutation-read-test",
+    });
+    assertEquals(result.state, "refused");
+    assertEquals(result.dispatched, true);
+    assertEquals(result.effect.state, "dispatching");
+    assertEquals(result.effect.failure?.disposition, undefined);
+    assertEquals(dispatches, 1);
+    assertEquals(reconciles, 2);
+  },
+);
+
+Deno.test(
+  "preflight definite refusal is durably failed before dispatching",
+  async () => {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000010",
+      payload: { total: 101 },
+    });
+    let dispatches = 0;
+    const result = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 101 },
+      adapter: {
+        dispatch() {
+          dispatches++;
+          return Promise.resolve({ InvoiceID: "must-not-dispatch" });
+        },
+        reconcilePreflight() {
+          return Promise.reject(
+            new SesExternalDefiniteNoDispatchError(
+              "Xero cooldown active before the invoice write",
+              { code: "XERO_COOLDOWN_ACTIVE" },
+            ),
+          );
+        },
+        reconcile() {
+          return Promise.resolve([] as Array<{ InvoiceID: string }>);
+        },
+        identify(result: { InvoiceID: string }) {
+          return result.InvoiceID;
+        },
+        digest(result: { InvoiceID: string }) {
+          return result;
+        },
+      },
+      actor: "preflight-test",
+    });
+
+    assertEquals(result.state, "refused");
+    assertEquals(result.dispatched, false);
+    assertEquals(result.effect.state, "failed");
+    assertEquals(store.row?.state, "failed");
+    assertEquals(store.row?.failure?.disposition, "definite_no_dispatch");
+    assertEquals(store.row?.failure?.phase, "preflight");
+    assertEquals(dispatches, 0);
+  },
+);
+
+Deno.test(
+  "invoice dispatch records provider_called false separately from an ambiguous timeout",
+  async () => {
+    const makeEffect = () =>
+      buildSesEffect({
+        org_id: "00000000-0000-4000-8000-000000000001",
+        job_id: "10000000-0000-4000-8000-000000000001",
+        effect_kind: "invoice_create" as const,
+        invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000011",
+        payload: { total: 102 },
+      });
+    let definiteDispatches = 0;
+    const definite = await makeEffect();
+    const definiteResult = await executeSesExternalEffect({
+      store: new MemoryEffectStore(),
+      effect: definite,
+      payload: { total: 102 },
+      adapter: {
+        dispatch() {
+          definiteDispatches++;
+          return Promise.reject(
+            new SesExternalDefiniteNoDispatchError(
+              "shared Xero cooldown is active",
+              { code: "XERO_COOLDOWN_ACTIVE" },
+            ),
+          );
+        },
+        reconcile: () => Promise.resolve([] as Array<{ InvoiceID: string }>),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "dispatch-proof-test",
+    });
+    assertEquals(definiteResult.effect.state, "failed");
+    assertEquals(definiteResult.dispatched, false);
+    assertEquals(definiteResult.effect.failure?.provider_called, false);
+    assertEquals(definiteDispatches, 1);
+
+    const ambiguous = await makeEffect();
+    const ambiguousStore = new MemoryEffectStore();
+    const ambiguousResult = await executeSesExternalEffect({
+      store: ambiguousStore,
+      effect: ambiguous,
+      payload: { total: 102 },
+      adapter: {
+        dispatch() {
+          return Promise.reject(
+            new Error("timeout after Xero may have accepted"),
+          );
+        },
+        reconcile: () => Promise.resolve([] as Array<{ InvoiceID: string }>),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "dispatch-proof-test",
+    });
+    assertEquals(ambiguousResult.effect.state, "unknown");
+    assertEquals(ambiguousResult.dispatched, true);
+    assertEquals(ambiguousStore.row?.failure?.disposition, undefined);
+
+    const contradictory = await makeEffect();
+    const contradictoryStore = new MemoryEffectStore();
+    const contradictoryResult = await executeSesExternalEffect({
+      store: contradictoryStore,
+      effect: contradictory,
+      payload: { total: 102 },
+      adapter: {
+        dispatch() {
+          return Promise.reject(
+            new SesExternalDefiniteNoDispatchError(
+              "provider outcome flags disagree",
+              { provider_called: false, provider_call_made: true },
+            ),
+          );
+        },
+        reconcile: () => Promise.resolve([] as Array<{ InvoiceID: string }>),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "dispatch-proof-test",
+    });
+    assertEquals(contradictoryResult.effect.state, "unknown");
+    assertEquals(contradictoryResult.dispatched, true);
+    assertEquals(contradictoryResult.effect.failure?.disposition, undefined);
+  },
+);
+
+Deno.test(
+  "invoice retry uses the same token under one proof-gated lease and reuses an exact match",
+  async () => {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000012",
+      payload: { total: 103 },
+    });
+    store.row = {
+      ...effect,
+      state: "failed",
+      failure: {
+        disposition: "definite_no_dispatch",
+        proof: "provider_called_false",
+        provider_called: false,
+        provider_call_made: false,
+        phase: "dispatch",
+      },
+    };
+    let dispatches = 0;
+    let provider: Array<{ InvoiceID: string }> = [];
+    const adapter = {
+      dispatch(_payload: { total: number }, context: SesExternalContext) {
+        dispatches++;
+        assertEquals(context.external_token, effect.external_token);
+        provider = [{ InvoiceID: "invoice-retry-103" }];
+        return Promise.resolve(provider[0]);
+      },
+      reconcile() {
+        return Promise.resolve(provider);
+      },
+      identify: (row: { InvoiceID: string }) => row.InvoiceID,
+      digest: (row: { InvoiceID: string }) => row,
+    };
+    const retried = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 103 },
+      adapter,
+      actor: "retry-proof-test",
+    });
+    assertEquals(retried.state, "confirmed");
+    assertEquals(retried.dispatched, true);
+    assertEquals(dispatches, 1);
+    assertEquals(retried.effect.external_id, "invoice-retry-103");
+    assertEquals(store.row?.state, "confirmed");
+
+    const replay = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 103 },
+      adapter,
+      actor: "retry-proof-test",
+    });
+    assertEquals(replay.state, "confirmed");
+    assertEquals(replay.dispatched, false);
+    assertEquals(dispatches, 1);
+  },
+);
+
+Deno.test(
+  "invoice effects without durable no-dispatch proof stay held and never dispatch",
+  async () => {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000013",
+      payload: { total: 104 },
+    });
+    store.row = {
+      ...effect,
+      state: "dispatching",
+      lease_owner: "old-worker",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+    };
+    let dispatches = 0;
+    const result = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 104 },
+      adapter: {
+        dispatch() {
+          dispatches++;
+          return Promise.resolve({ InvoiceID: "must-not-dispatch" });
+        },
+        reconcile: () => Promise.resolve([] as Array<{ InvoiceID: string }>),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "held-effect-test",
+    });
+    assertEquals(result.state, "refused");
+    assertEquals(result.dispatched, false);
+    assertEquals(result.effect.state, "dispatching");
+    assertEquals(dispatches, 0);
+  },
+);
+
+Deno.test(
+  "real RPC store only leases an invoice retry with exact durable no-dispatch proof",
+  async () => {
+    const harness = createRpcEffectHarness();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000015",
+      payload: { total: 106 },
+    });
+    harness.seed({
+      ...effect,
+      state: "failed",
+      failure: {
+        disposition: "definite_no_dispatch",
+        proof: "provider_called_false",
+        provider_called: false,
+        provider_call_made: false,
+        phase: "dispatch",
+      },
+    }, { noDispatchEvent: true });
+    let dispatches = 0;
+    let provider: Array<{ InvoiceID: string }> = [];
+    const result = await executeSesExternalEffect({
+      store: harness.store,
+      effect,
+      payload: { total: 106 },
+      adapter: {
+        dispatch(_payload: { total: number }, context: SesExternalContext) {
+          dispatches++;
+          assertEquals(context.external_token, effect.external_token);
+          provider = [{ InvoiceID: "invoice-rpc-retry" }];
+          return Promise.resolve(provider[0]);
+        },
+        reconcile: () => Promise.resolve(provider),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "rpc-retry-test",
+    });
+    assertEquals(result.state, "confirmed");
+    assertEquals(result.dispatched, true);
+    assertEquals(dispatches, 1);
+    assertEquals(harness.row()?.state, "confirmed");
+    assertEquals(harness.transitions[0], {
+      from: "failed",
+      to: "dispatching",
+      event_kind: "definite_no_dispatch_redispatch_claimed",
+    });
+
+    const heldHarness = createRpcEffectHarness();
+    heldHarness.seed({
+      ...effect,
+      state: "failed",
+      failure: {
+        disposition: "definite_no_dispatch",
+        proof: "provider_called_false",
+        provider_called: false,
+        provider_call_made: true,
+        phase: "dispatch",
+      },
+    });
+    let heldDispatches = 0;
+    const held = await executeSesExternalEffect({
+      store: heldHarness.store,
+      effect,
+      payload: { total: 106 },
+      adapter: {
+        dispatch() {
+          heldDispatches++;
+          return Promise.resolve({ InvoiceID: "must-not-dispatch" });
+        },
+        reconcile: () => Promise.resolve([] as Array<{ InvoiceID: string }>),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "rpc-retry-test",
+    });
+    assertEquals(held.state, "refused");
+    assertEquals(held.dispatched, false);
+    assertEquals(heldDispatches, 0);
+    assertEquals(heldHarness.row()?.state, "failed");
+    assertEquals(heldHarness.transitions, []);
+
+    const noEventHarness = createRpcEffectHarness();
+    noEventHarness.seed({
+      ...effect,
+      state: "failed",
+      failure: {
+        disposition: "definite_no_dispatch",
+        proof: "provider_called_false",
+        provider_called: false,
+        provider_call_made: false,
+        phase: "dispatch",
+      },
+    });
+    let noEventDispatches = 0;
+    const noEvent = await executeSesExternalEffect({
+      store: noEventHarness.store,
+      effect,
+      payload: { total: 106 },
+      adapter: {
+        dispatch() {
+          noEventDispatches++;
+          return Promise.resolve({ InvoiceID: "must-not-dispatch" });
+        },
+        reconcile: () => Promise.resolve([] as Array<{ InvoiceID: string }>),
+        identify: (row: { InvoiceID: string }) => row.InvoiceID,
+        digest: (row: { InvoiceID: string }) => row,
+      },
+      actor: "rpc-retry-test",
+    });
+    assertEquals(noEvent.state, "refused");
+    assertEquals(noEvent.dispatched, false);
+    assertEquals(noEventDispatches, 0);
+    assertEquals(noEventHarness.row()?.state, "failed");
+    assertEquals(noEventHarness.transitions, []);
+  },
+);
+
+Deno.test(
+  "concurrent proof-gated invoice retries have one dispatch winner",
+  async () => {
+    const store = new MemoryEffectStore();
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "10000000-0000-4000-8000-000000000001",
+      effect_kind: "invoice_create",
+      invoice_obligation_revision_id: "20000000-0000-4000-8000-000000000014",
+      payload: { total: 105 },
+    });
+    store.row = {
+      ...effect,
+      state: "failed",
+      failure: {
+        disposition: "definite_no_dispatch",
+        proof: "provider_called_false",
+        provider_called: false,
+        provider_call_made: false,
+        phase: "dispatch",
+      },
+    };
+    let dispatches = 0;
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => release = resolve);
+    let provider: Array<{ InvoiceID: string }> = [];
+    const adapter = {
+      async dispatch(_payload: { total: number }, context: SesExternalContext) {
+        dispatches++;
+        assertEquals(context.external_token, effect.external_token);
+        await wait;
+        provider = [{ InvoiceID: "invoice-concurrent-winner" }];
+        return provider[0];
+      },
+      reconcile: () => Promise.resolve(provider),
+      identify: (row: { InvoiceID: string }) => row.InvoiceID,
+      digest: (row: { InvoiceID: string }) => row,
+    };
+    const first = executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 105 },
+      adapter,
+      actor: "winner",
+    });
+    // The first call reaches its exclusive lease and then waits in dispatch.
+    while (store.row?.state !== "dispatching") await Promise.resolve();
+    const loser = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { total: 105 },
+      adapter,
+      actor: "loser",
+    });
+    assertEquals(loser.state, "refused");
+    assertEquals(loser.dispatched, false);
+    assertEquals(dispatches, 1);
+    release();
+    const winner = await first;
+    assertEquals(winner.state, "confirmed");
+    assertEquals(dispatches, 1);
+  },
+);
 
 interface EffectTableBuilder {
   update(payload: Record<string, unknown>): EffectTableBuilder;
@@ -172,6 +755,7 @@ function effectField(row: SesExternalEffect, column: string): unknown {
 
 function createRpcEffectHarness() {
   let row: SesExternalEffect | null = null;
+  const retainedNoDispatchEvents = new Set<string>();
   const transitions: Array<{
     from: SesEffectState;
     to: SesEffectState;
@@ -360,6 +944,42 @@ function createRpcEffectHarness() {
         });
         return { data: { ...row }, error: null };
       }
+      if (name === "claim_ses_invoice_no_dispatch_retry_v1") {
+        const expectation = args.p_expectation as Record<string, unknown>;
+        const eligible = row &&
+          row.effect_kind === "invoice_create" && row.state === "failed" &&
+          String(row.id || "") === String(expectation.effect_id || "") &&
+          String(row.invoice_obligation_revision_id || "") ===
+            String(expectation.invoice_obligation_revision_id || "") &&
+          String(row.operation_key || "") ===
+            String(expectation.operation_key || "") &&
+          String(row.effect_kind || "") ===
+            String(expectation.effect_kind || "") &&
+          String(expectation.state || "") === "failed" &&
+          String(row.external_token || "") ===
+            String(expectation.external_token || "") &&
+          String(row.payload_hash || "") ===
+            String(expectation.payload_hash || "") &&
+          row.failure?.disposition === "definite_no_dispatch" &&
+          row.failure?.proof === "provider_called_false" &&
+          row.failure?.provider_called === false &&
+          row.failure?.provider_call_made === false &&
+          !String(row.external_id || "").trim() &&
+          retainedNoDispatchEvents.has(String(row.id || ""));
+        if (!eligible || !row) return { data: null, error: null };
+        row = {
+          ...row,
+          state: "dispatching",
+          lease_owner: String(args.p_lease_owner || ""),
+          lease_expires_at: new Date(Date.now() + 120_000).toISOString(),
+        };
+        transitions.push({
+          from: "failed",
+          to: "dispatching",
+          event_kind: "definite_no_dispatch_redispatch_claimed",
+        });
+        return { data: { ...row }, error: null };
+      }
       if (name === "renew_ses_route_dispatch_lease_v1") {
         const expectation = args.p_expectation as Record<string, unknown>;
         const live = expectationMatches(expectation, "dispatching") &&
@@ -448,8 +1068,14 @@ function createRpcEffectHarness() {
     ),
     transitions,
     row: () => row ? { ...row } : null,
-    seed(effect: SesExternalEffect) {
+    seed(
+      effect: SesExternalEffect,
+      options: { noDispatchEvent?: boolean } = {},
+    ) {
       row = { id: effect.id || "effect-row-1", ...effect };
+      if (options.noDispatchEvent && row.id) {
+        retainedNoDispatchEvents.add(String(row.id));
+      }
     },
   };
 }
@@ -1568,6 +2194,9 @@ Deno.test("direct token reconcile finds an existing Xero invoice before dispatch
     dispatch() {
       dispatches++;
       return Promise.resolve({ InvoiceID: "should-never-dispatch" });
+    },
+    reconcilePreflight() {
+      return Promise.resolve([{ InvoiceID: "xero-existing-token-match" }]);
     },
     reconcile() {
       return Promise.resolve([{ InvoiceID: "xero-existing-token-match" }]);

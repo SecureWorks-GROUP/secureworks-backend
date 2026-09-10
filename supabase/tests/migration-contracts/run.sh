@@ -75,6 +75,17 @@ run_sql_file() {
   psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$sql_file"
 }
 
+run_concurrent_case() {
+  local case_directory=$1
+  local concurrent_script="$case_directory/concurrent.sh"
+  if [ ! -f "$concurrent_script" ]; then
+    return
+  fi
+  echo "== $(basename "$case_directory") concurrent sessions =="
+  CONTRACT_DATABASE_URL="$CONTRACT_DATABASE_URL" \
+    bash "$concurrent_script"
+}
+
 expect_sql_file_failure() {
   local label=$1
   local sql_file=$2
@@ -163,6 +174,7 @@ apply_registered_stack
 for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
   run_sql_file "$case_name contract" "$case_directory/contract.sql"
+  run_concurrent_case "$case_directory"
 done
 
 # Prove an optional down migration executes cleanly against the exact forward
