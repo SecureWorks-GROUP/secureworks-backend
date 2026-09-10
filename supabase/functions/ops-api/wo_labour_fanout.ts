@@ -34,6 +34,26 @@ export type WoLabourProblem = {
 // Client/sales (ACCREC) invoice routing is deliberately untouched.
 export const TRADE_INVOICE_XERO_ACCOUNT_CODE = "306";
 
+// Where the withheld 12% super line lands. 2026-09-10 (Alyx audit): it was a
+// negative line on 306, so Xero showed labour net of super and nothing showed
+// what is owed to the funds. Point this at the Superannuation Payable liability
+// account once the bookkeeper names it (env TRADE_SUPER_XERO_ACCOUNT_CODE);
+// until then it stays on 306 so nothing changes silently.
+export const TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE: string =
+  (typeof Deno !== "undefined" && Deno.env.get("TRADE_SUPER_XERO_ACCOUNT_CODE")?.trim()) ||
+  TRADE_INVOICE_XERO_ACCOUNT_CODE;
+
+// Xero drops `Reference` on ACCPAY. The supplier-bill field a bookkeeper sees
+// as "Reference" is `InvoiceNumber` (non-unique, max 255 for ACCPAY). Every
+// trade bill push must set it, or the bill lands with a blank reference.
+export function tradeBillInvoiceNumber(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    const v = String(c ?? "").trim();
+    if (v) return v.slice(0, 255);
+  }
+  return "";
+}
+
 export function _tradeInvoiceXeroTax(
   gst: unknown,
 ): { taxType: "INPUT" | "NONE"; lineAmountTypes: "Exclusive" | "NoTax" } {
