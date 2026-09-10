@@ -467,13 +467,29 @@ export async function readGhlProvider(
       : null;
     const hasProviderNext = typeof meta.nextPage === "number" &&
       meta.nextPage > 0;
-    if (!cursor && !isContacts && hasProviderNext) {
+    const cursorMode = isContacts || after !== null;
+    if (!cursor && !cursorMode && hasProviderNext) {
       cursor = { page: meta.nextPage as number };
     }
-    if (!cursor && !isContacts && !after && items.length === limit) {
+    if (!cursor && !cursorMode && items.length === limit) {
       cursor = { page: intArg(params, "page", 1, 1000000) + 1 };
     }
-    const hasMore = hasProviderNext || !!nonempty(meta.nextPageUrl)
+    // Cursor responses can retain nextPage: 2 after exhaustion. Do not use
+    // that stale page counter to restart an opportunity cursor traversal.
+    // Only an empty page with no cursor/URL signal proves cursor exhaustion;
+    // incomplete or malformed signals must remain visible as incomplete.
+    const hasCursorSignal = [
+      meta.startAfter,
+      meta.startAfterId,
+      meta.nextPageUrl,
+    ].some((value) => value !== null && value !== undefined && value !== "");
+    const hasMore = cursorMode
+      ? items.length === 0 && !hasCursorSignal
+        ? false
+        : hasCursorSignal || hasProviderNext
+        ? true
+        : null
+      : hasProviderNext || !!nonempty(meta.nextPageUrl)
       ? true
       : items.length < limit
       ? false
