@@ -136,7 +136,8 @@ Deno.test("a failed cache update cannot report completed reconciliation", async 
   );
 });
 
-function selectionClient(result: { data: unknown; error: unknown }) {
+type SelectionResult = { data: unknown; error: unknown };
+function selectionClient(result: SelectionResult | SelectionResult[]) {
   const calls: Array<[string, ...unknown[]]> = [];
   const query = {
     select(value: string) {
@@ -159,9 +160,16 @@ function selectionClient(result: { data: unknown; error: unknown }) {
       calls.push(["lt", field, value]);
       return query;
     },
+    order(field: string, options: unknown) {
+      calls.push(["order", field, options]);
+      return query;
+    },
     limit(value: number) {
       calls.push(["limit", value]);
-      return Promise.resolve(result);
+      // One result per query, in call order; the last result repeats.
+      const results = Array.isArray(result) ? result : [result];
+      const index = calls.filter((c) => c[0] === "limit").length - 1;
+      return Promise.resolve(results[Math.min(index, results.length - 1)]);
     },
   };
   return {
@@ -195,13 +203,29 @@ Deno.test("stale selection errors and malformed data cannot become an empty succ
       Error,
       "selection failed",
     );
+    // A healthy open-receivable query never hides a failed draft query.
+    const second = selectionClient([{ data: [], error: null }, result]);
+    await assertRejects(
+      () => listStaleXeroInvoices(second.client, ORG, NOW),
+      Error,
+      "selection failed",
+    );
   }
 });
 
-Deno.test("successful stale selection retains the tenant-independent org, receivable, status and batch scope", async () => {
-  for (const data of [[], [{ xero_invoice_id: INVOICE }]]) {
-    const { client, calls } = selectionClient({ data, error: null });
-    assertEquals(await listStaleXeroInvoices(client, ORG, NOW), data);
+Deno.test("successful stale selection retains the tenant-independent org, receivable, status and batch scope, and adds cached drafts daily", async () => {
+  const DRAFT = "40000000-0000-4000-8000-000000000004";
+  for (
+    const [open, drafts, expected] of [
+      [[], [], []],
+      [[{ xero_invoice_id: INVOICE }], [], [{ xero_invoice_id: INVOICE }]],
+      [[], [{ xero_invoice_id: DRAFT }], [{ xero_invoice_id: DRAFT }]],
+      // The same identity in both selections is verified once.
+      [[{ xero_invoice_id: INVOICE }], [{ xero_invoice_id: INVOICE }, { xero_invoice_id: DRAFT }], [{ xero_invoice_id: INVOICE }, { xero_invoice_id: DRAFT }]],
+    ] as Array<[Array<{ xero_invoice_id: string }>, Array<{ xero_invoice_id: string }>, Array<{ xero_invoice_id: string }>]>
+  ) {
+    const { client, calls } = selectionClient([{ data: open, error: null }, { data: drafts, error: null }]);
+    assertEquals(await listStaleXeroInvoices(client, ORG, NOW), expected);
     assertEquals(calls, [
       ["select", "xero_invoice_id"],
       ["eq", "org_id", ORG],
@@ -210,8 +234,36 @@ Deno.test("successful stale selection retains the tenant-independent org, receiv
       ["gt", "amount_due", 0],
       ["lt", "synced_at", "2026-09-09T02:00:00.000Z"],
       ["limit", 50],
+      ["select", "xero_invoice_id"],
+      ["eq", "org_id", ORG],
+      ["eq", "invoice_type", "ACCREC"],
+      ["eq", "status", "DRAFT"],
+      ["lt", "synced_at", "2026-09-08T03:00:00.000Z"],
+      ["order", "synced_at", { ascending: true }],
+      ["limit", 25],
     ]);
   }
+});
+
+Deno.test("a cached draft that Xero has deleted reconciles to DELETED with a zero balance", async () => {
+  const DRAFT = "40000000-0000-4000-8000-000000000004";
+  const patches: Array<Record<string, unknown>> = [];
+  const client = {
+    from(table: string) {
+      assertEquals(table, "xero_invoices");
+      return {
+        update(patch: Record<string, unknown>) {
+          patches.push(patch);
+          return { eq: () => ({ eq: () => Promise.resolve({ error: null }) }) };
+        },
+      };
+    },
+  };
+  const ok = await reconcileXeroInvoice(client, ORG, DRAFT, () =>
+    Promise.resolve({ Invoices: [{ InvoiceID: DRAFT, Type: "ACCREC", Status: "DELETED", AmountDue: 0, AmountPaid: 0, UpdatedDateUTC: "/Date(1756901000000+0000)/" }] }), NOW);
+  assertEquals(ok, true);
+  assertEquals(patches[0].status, "DELETED");
+  assertEquals(patches[0].amount_due, 0);
 });
 
 Deno.test("reconciliation refreshes the verified provider copy, due date and lines for every accepted status", async () => {

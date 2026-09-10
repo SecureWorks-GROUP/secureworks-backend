@@ -71,22 +71,48 @@ export async function listStaleXeroInvoices(
   orgId: string,
   now: Date = new Date(),
 ): Promise<Array<{ xero_invoice_id: string }>> {
-  const { data, error } = await client.from("xero_invoices")
+  const invalid = (data: unknown, error: unknown) =>
+    error || !Array.isArray(data) ||
+    data.some((row) =>
+      !row || typeof row.xero_invoice_id !== "string" || !row.xero_invoice_id
+    );
+  // Open receivables: verified hourly while money is owed.
+  const open = await client.from("xero_invoices")
     .select("xero_invoice_id")
     .eq("org_id", orgId).eq("invoice_type", "ACCREC")
     .in("status", ["AUTHORISED", "SUBMITTED"])
     .gt("amount_due", 0)
     .lt("synced_at", new Date(now.getTime() - 60 * 60 * 1000).toISOString())
     .limit(50);
-  if (
-    error || !Array.isArray(data) ||
-    data.some((row) =>
-      !row || typeof row.xero_invoice_id !== "string" || !row.xero_invoice_id
-    )
-  ) {
+  if (invalid(open.data, open.error)) {
     throw new Error(
       "Invoice reconciliation is incomplete: stale invoice selection failed",
     );
   }
-  return data;
+  // Cached drafts: a draft deleted in Xero never comes back through the
+  // incremental list (Xero omits deleted drafts there), so the cache kept
+  // showing DRAFT for invoices Xero had removed (BOOKKEEPING, 10 Sep 2026:
+  // INV-0441, INV-1228 to INV-1231, INV-1248). Verify each cached draft by
+  // identity once a day; the single-record read returns DELETED honestly.
+  const drafts = await client.from("xero_invoices")
+    .select("xero_invoice_id")
+    .eq("org_id", orgId).eq("invoice_type", "ACCREC")
+    .eq("status", "DRAFT")
+    .lt("synced_at", new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString())
+    .order("synced_at", { ascending: true })
+    .limit(25);
+  if (invalid(drafts.data, drafts.error)) {
+    throw new Error(
+      "Invoice reconciliation is incomplete: stale draft selection failed",
+    );
+  }
+  const seen = new Set<string>();
+  const merged: Array<{ xero_invoice_id: string }> = [];
+  for (const row of [...open.data, ...drafts.data]) {
+    if (seen.has(row.xero_invoice_id)) continue;
+    seen.add(row.xero_invoice_id);
+    merged.push({ xero_invoice_id: row.xero_invoice_id });
+    if (merged.length >= 50) break;
+  }
+  return merged;
 }
