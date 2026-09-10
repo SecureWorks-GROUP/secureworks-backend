@@ -212,33 +212,77 @@ export function buildAccpayLineItems(rawLines: unknown): any[] {
   return lines;
 }
 
+function accpayCacheRow(inv: any): Record<string, unknown> {
+  const now = new Date().toISOString();
+  return {
+    org_id: DEFAULT_ORG_ID,
+    xero_invoice_id: inv.InvoiceID,
+    xero_contact_id: inv.Contact?.ContactID || null,
+    contact_name: inv.Contact?.Name || null,
+    invoice_number: inv.InvoiceNumber || null,
+    invoice_type: inv.Type || "ACCPAY",
+    status: inv.Status || "DRAFT",
+    reference: inv.Reference || null,
+    sub_total: inv.SubTotal || 0,
+    total_tax: inv.TotalTax || 0,
+    total: inv.Total || 0,
+    amount_due: inv.AmountDue || 0,
+    amount_paid: inv.AmountPaid || 0,
+    invoice_date: inv.DateString || null,
+    due_date: inv.DueDateString || null,
+    line_items: inv.LineItems || [],
+    raw_json: inv,
+    synced_at: now,
+    updated_at: now,
+  };
+}
+
 async function cacheAccpay(
   client: any,
   inv: any,
 ): Promise<void> {
   if (!inv?.InvoiceID) return;
   try {
-    await client.from("xero_invoices").upsert({
-      org_id: DEFAULT_ORG_ID,
-      xero_invoice_id: inv.InvoiceID,
-      xero_contact_id: inv.Contact?.ContactID || null,
-      contact_name: inv.Contact?.Name || null,
-      invoice_number: inv.InvoiceNumber || null,
-      invoice_type: inv.Type || "ACCPAY",
-      status: inv.Status || "DRAFT",
-      reference: inv.Reference || null,
-      sub_total: inv.SubTotal || 0,
-      total_tax: inv.TotalTax || 0,
-      total: inv.Total || 0,
-      amount_due: inv.AmountDue || 0,
-      amount_paid: inv.AmountPaid || 0,
-      invoice_date: inv.DateString || null,
-      due_date: inv.DueDateString || null,
-      line_items: inv.LineItems || [],
-      raw_json: inv,
-      synced_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: "org_id,xero_invoice_id" });
+    await client.from("xero_invoices").upsert(accpayCacheRow(inv), {
+      onConflict: "org_id,xero_invoice_id",
+    });
+  } catch {
+    /* local cache is best-effort */
+  }
+}
+
+export const SUPPLIER_BILL_MAX_PAGE_SIZE = 100;
+export const SUPPLIER_BILL_DEFAULT_PAGE_SIZE = 50;
+
+/**
+ * Bounded page size for the ACCPAY list door.
+ * Xero caps /Invoices at 100 rows per page, so anything larger is a caller
+ * mistake rather than a bigger read. Clamp instead of rejecting so an existing
+ * `limit=1000` caller keeps working on a single bounded page.
+ */
+export function clampBillPageSize(raw: unknown): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return SUPPLIER_BILL_DEFAULT_PAGE_SIZE;
+  }
+  return Math.min(SUPPLIER_BILL_MAX_PAGE_SIZE, Math.floor(parsed));
+}
+
+/**
+ * Cache a whole provider page in one upsert.
+ * The old per-invoice awaited loop cost one Postgres round trip per bill, so a
+ * full page of 100 ACCPAY rows (each carrying raw_json) routinely outran the
+ * MCP per-attempt abort budget before any rows reached the caller.
+ */
+async function cacheAccpayBatch(client: any, invoices: any[]): Promise<void> {
+  const rows = (invoices || [])
+    .filter((inv) => inv?.InvoiceID)
+    .map((inv) => accpayCacheRow(inv));
+  if (rows.length === 0) return;
+  try {
+    await client.from("xero_invoices").upsert(rows, {
+      onConflict: "org_id,xero_invoice_id",
+    });
   } catch {
     /* local cache is best-effort */
   }
@@ -399,6 +443,9 @@ export async function listSupplierBills(
       read("ref") || "",
   ).trim();
   const page = Math.max(1, Number(read("page") || 1) || 1);
+  const pageSize = clampBillPageSize(
+    read("page_size") ?? read("limit") ?? null,
+  );
   const where = buildSupplierBillWhere({
     contactName,
     invoiceRef: invoiceRef || null,
@@ -408,15 +455,22 @@ export async function listSupplierBills(
   const result = await deps.xeroGet("/Invoices", accessToken, tenantId, {
     where,
     page: String(page),
+    pageSize: String(pageSize),
     order: "Date DESC",
   });
-  const invoices = result?.Invoices || [];
-  for (const inv of invoices) await cacheAccpay(client, inv);
+  // One bounded provider page only. This door never traverses Xero pages: the
+  // caller pages explicitly, so a full ACCPAY ledger cannot blow the MCP
+  // per-attempt abort budget on a single read.
+  const invoices = (result?.Invoices || []).slice(0, pageSize);
+  await cacheAccpayBatch(client, invoices);
   return {
     ok: true,
     bills: invoices.map(presentBill),
     page,
+    page_size: pageSize,
     count: invoices.length,
+    has_more: invoices.length >= pageSize,
+    next_page: invoices.length >= pageSize ? page + 1 : null,
   };
 }
 

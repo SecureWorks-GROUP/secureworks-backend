@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildAccpayLineItems,
+  clampBillPageSize,
   buildSupplierBillWhere,
   createSupplierBill,
   createSupplierCreditNote,
@@ -329,6 +330,126 @@ Deno.test("list_supplier_bills searches Xero by contact and draft status", async
   assertEquals(where.includes('Type=="ACCPAY"'), true);
   assertEquals(where.includes('Status=="DRAFT"'), true);
   assertEquals(where.includes("Israel"), true);
+});
+
+Deno.test("list page size is clamped to one bounded Xero page", () => {
+  assertEquals(clampBillPageSize(null), 50);
+  assertEquals(clampBillPageSize(undefined), 50);
+  assertEquals(clampBillPageSize(""), 50);
+  assertEquals(clampBillPageSize(0), 50);
+  assertEquals(clampBillPageSize(-5), 50);
+  assertEquals(clampBillPageSize("25"), 25);
+  assertEquals(clampBillPageSize(100), 100);
+  assertEquals(clampBillPageSize(1000), 100);
+});
+
+Deno.test("list_supplier_bills asks Xero for one bounded page and reports pagination", async () => {
+  let params: Record<string, string> = {};
+  const listed = await listSupplierBills(
+    makeClient(),
+    { status: "awaiting_payment", limit: "1000" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async (_p: string, _a: string, _t: string, q?: Record<string, string>) => {
+        params = q || {};
+        return {
+          Invoices: Array.from({ length: 100 }, (_v, i) => ({
+            InvoiceID: `bill-${i}`,
+            Type: "ACCPAY",
+            Status: "AUTHORISED",
+            Contact: { Name: "Supplier" },
+            LineItems: [],
+          })),
+        };
+      }) as any,
+    },
+  );
+  // limit=1000 must not become an unbounded read.
+  assertEquals(params.pageSize, "100");
+  assertEquals(params.page, "1");
+  assertEquals(listed.count, 100);
+  assertEquals(listed.page_size, 100);
+  assertEquals(listed.has_more, true);
+  assertEquals(listed.next_page, 2);
+});
+
+Deno.test("list_supplier_bills truncates a provider page that overruns page_size", async () => {
+  const listed = await listSupplierBills(
+    makeClient(),
+    { page_size: "5", page: "3" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async () => ({
+        Invoices: Array.from({ length: 9 }, (_v, i) => ({
+          InvoiceID: `bill-${i}`,
+          Type: "ACCPAY",
+          Status: "DRAFT",
+          Contact: { Name: "Supplier" },
+          LineItems: [],
+        })),
+      })) as any,
+    },
+  );
+  assertEquals(listed.count, 5);
+  assertEquals(listed.bills.length, 5);
+  assertEquals(listed.page, 3);
+  assertEquals(listed.has_more, true);
+});
+
+Deno.test("list_supplier_bills caches a whole page in one upsert, not one per bill", async () => {
+  const upserts: any[] = [];
+  const client = {
+    from() {
+      return {
+        upsert: async (rows: any) => {
+          upserts.push(rows);
+          return { error: null };
+        },
+      };
+    },
+  };
+  const listed = await listSupplierBills(
+    client,
+    { status: "paid" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async () => ({
+        Invoices: Array.from({ length: 40 }, (_v, i) => ({
+          InvoiceID: `bill-${i}`,
+          Type: "ACCPAY",
+          Status: "PAID",
+          Contact: { Name: "Supplier" },
+          LineItems: [],
+        })),
+      })) as any,
+    },
+  );
+  assertEquals(listed.count, 40);
+  assertEquals(upserts.length, 1);
+  assertEquals(Array.isArray(upserts[0]), true);
+  assertEquals(upserts[0].length, 40);
+});
+
+Deno.test("list_supplier_bills reports the last page as complete", async () => {
+  const listed = await listSupplierBills(
+    makeClient(),
+    { page_size: "10" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async () => ({
+        Invoices: [{
+          InvoiceID: "bill-1",
+          Type: "ACCPAY",
+          Status: "DRAFT",
+          Contact: { Name: "Supplier" },
+          LineItems: [],
+        }],
+      })) as any,
+    },
+  );
+  assertEquals(listed.count, 1);
+  assertEquals(listed.has_more, false);
+  assertEquals(listed.next_page, null);
 });
 
 Deno.test("create_supplier_bill always mints DRAFT ACCPAY and can attach a PDF", async () => {
