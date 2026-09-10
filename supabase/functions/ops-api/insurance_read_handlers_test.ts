@@ -464,6 +464,162 @@ Deno.test("document bytes use canonical storage path, stream limit, hash, MIME, 
   );
 });
 
+Deno.test("current job-pdfs namespace is bound to the caller organisation and job", async () => {
+  const references = [
+    `${ORG}/${JOB}/work_order_v1.pdf`,
+    `job-pdfs/${ORG}/${JOB}/work_order_v1.pdf`,
+    PROJECT + "/storage/v1/object/public/job-pdfs/" +
+    `${ORG}/${JOB}/work_order_v1.pdf`,
+  ];
+  for (const reference of references) {
+    const tables = baseTables();
+    tables.job_documents = [docRow({ storage_url: reference, pdf_url: null })];
+    const source = new TextEncoder().encode("%PDF-1.7\ncurrent-job-pdf");
+    let seenUrl = "";
+    const result = await insuranceReadAction(
+      deps(tables, {
+        fetchImpl: (input) => {
+          seenUrl = String(input);
+          return Promise.resolve(
+            new Response(source, {
+              headers: { "content-type": "application/pdf" },
+            }),
+          );
+        },
+      }),
+      new URLSearchParams({
+        action: "get_job_document",
+        job_id: JOB,
+        document_id: DOC,
+      }),
+      "GET",
+      owner,
+    );
+    assertEqual(result.status, 200, "current job-pdfs document should read");
+    assertEqual(
+      seenUrl,
+      PROJECT + "/storage/v1/object/authenticated/job-pdfs/" +
+        `${ORG}/${JOB}/work_order_v1.pdf`,
+      "job-pdfs must use the authenticated canonical bucket URL",
+    );
+    assertEqual(
+      (result.body.provenance as Record<string, unknown>).storage_bucket,
+      "job-pdfs",
+      "the response must identify the selected storage bucket",
+    );
+  }
+});
+
+Deno.test("job-pdfs foreign organisation or job parent is rejected before fetch", async () => {
+  const references = [
+    `${OTHER_ORG}/${JOB}/work_order_v1.pdf`,
+    `${ORG}/${OTHER_JOB}/work_order_v1.pdf`,
+    `job-pdfs/${OTHER_ORG}/${JOB}/work_order_v1.pdf`,
+    PROJECT + "/storage/v1/object/public/job-pdfs/" +
+    `${ORG}/${OTHER_JOB}/work_order_v1.pdf`,
+  ];
+  for (const reference of references) {
+    const tables = baseTables();
+    tables.job_documents = [docRow({ storage_url: reference, pdf_url: null })];
+    let fetchCount = 0;
+    const result = await insuranceReadAction(
+      deps(tables, {
+        fetchImpl: () => {
+          fetchCount++;
+          return Promise.resolve(new Response("%PDF-1.7\nunexpected"));
+        },
+      }),
+      new URLSearchParams({
+        action: "get_job_document",
+        job_id: JOB,
+        document_id: DOC,
+      }),
+      "GET",
+      owner,
+    );
+    assertEqual(
+      (result.body as { code: string }).code,
+      "DOCUMENT_STORAGE_REFERENCE_INVALID",
+      "foreign job-pdfs parent must fail closed",
+    );
+    assertEqual(fetchCount, 0, "foreign job-pdfs parent must not fetch");
+  }
+});
+
+Deno.test("encoded job-pdfs prefixes are rejected before fetch", async () => {
+  const references = [
+    `job-pdfs%2F${ORG}%2F${JOB}%2Fwork_order_v1.pdf`,
+    PROJECT + "/storage/v1/object/public/job-pdfs%2F" +
+    `${ORG}%2F${JOB}%2Fwork_order_v1.pdf`,
+    `%6Aob-pdfs/${ORG}/${JOB}/work_order_v1.pdf`,
+    PROJECT + "/storage/v1/object/public/job-pdfs/%30" +
+    `${ORG.slice(1)}/${JOB}/work_order_v1.pdf`,
+    `job-pdfs/%30${ORG.slice(1)}/${JOB}/work_order_v1.pdf`,
+    `job-pdfs/${ORG}/%30${JOB.slice(1)}/work_order_v1.pdf`,
+    `job-pdfs/${ORG}/%31${JOB.slice(1)}/work_order_v1.pdf`,
+    `${ORG}/%30${JOB.slice(1)}/work_order_v1.pdf`,
+    `${ORG}/%31${JOB.slice(1)}/work_order_v1.pdf`,
+  ];
+  for (const reference of references) {
+    const tables = baseTables();
+    tables.job_documents = [docRow({ storage_url: reference, pdf_url: null })];
+    let fetchCount = 0;
+    const result = await insuranceReadAction(
+      deps(tables, {
+        fetchImpl: () => {
+          fetchCount++;
+          return Promise.resolve(new Response("%PDF-1.7\nunexpected"));
+        },
+      }),
+      new URLSearchParams({
+        action: "get_job_document",
+        job_id: JOB,
+        document_id: DOC,
+      }),
+      "GET",
+      owner,
+    );
+    assertEqual(
+      (result.body as { code: string }).code,
+      "DOCUMENT_STORAGE_REFERENCE_INVALID",
+      "encoded bucket prefixes must fail closed",
+    );
+    assertEqual(fetchCount, 0, "encoded bucket prefixes must not fetch");
+  }
+});
+
+Deno.test("job-pdfs redirects remain rejected", async () => {
+  const tables = baseTables();
+  tables.job_documents = [docRow({
+    storage_url: `${ORG}/${JOB}/work_order_v1.pdf`,
+    pdf_url: null,
+  })];
+  const redirected = new Response("%PDF-1.7\nredirected", {
+    headers: { "content-type": "application/pdf" },
+  });
+  Object.defineProperty(redirected, "redirected", { value: true });
+  const result = await insuranceReadAction(
+    deps(tables, { fetchImpl: () => Promise.resolve(redirected) }),
+    new URLSearchParams({
+      action: "get_job_document",
+      job_id: JOB,
+      document_id: DOC,
+    }),
+    "GET",
+    owner,
+  );
+  assertEqual(
+    (result.body as { code: string }).code,
+    "DOCUMENT_FETCH_FAILED",
+    "job-pdfs redirects must fail closed",
+  );
+  assertEqual(
+    (result.body as Record<string, unknown>).provider_failure_reason,
+    "redirected_response",
+    "redirect diagnostics must remain safe and classified",
+  );
+});
+
 Deno.test("storage SSRF, traversal, ambiguity, MIME mismatch, and oversize errors are explicit", async () => {
   const failureCases = [
     {
