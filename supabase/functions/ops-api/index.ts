@@ -95,6 +95,7 @@
 //   push_trade_invoice_to_xero — Push acknowledged trade invoice to Xero as ACCPAY bill
 // ════════════════════════════════════════════════════════════
 
+import { isCurrentContextFact } from './context_visibility.ts'
 import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -15113,7 +15114,8 @@ async function getJobContextFacts(client: any, body: any) {
     .order('updated_at', { ascending: false })
     .limit(limit * jobUuids.length)
   if (error) throw new Error(error.message)
-  return { rows: data || [] }
+  const rows = (data || []).filter((row: any) => isCurrentContextFact(row))
+  return { rows, excluded_count: (data || []).length - rows.length, coverage: 'bounded_rows_only' }
 }
 
 // Conversation reader for the Job Brain. 5-source merge into a normalized
@@ -15566,7 +15568,9 @@ async function assembleJobDossier(client: any, body: any) {
     if (error) throw new Error(error.message)
     return data
   })
-  sourceStatus.facts = factsRead.status
+  const visibleFacts = factsRead.data.filter((row: any) => isCurrentContextFact(row))
+  const excludedFacts = factsRead.data.length - visibleFacts.length
+  sourceStatus.facts = { ...factsRead.status, count: visibleFacts.length }
 
   // ── Proposed actions: ai_proposed_actions (status=proposed only by default) ──
   const nowIso = new Date().toISOString()
@@ -15585,7 +15589,8 @@ async function assembleJobDossier(client: any, body: any) {
 
   // ── Diagnostics ──
   const warnings: string[] = []
-  if (factsRead.status.ok && factsRead.status.count === 0) {
+  if (excludedFacts) warnings.push(`facts: ${excludedFacts} superseded, retracted, untrusted or expired rows withheld from this bounded read`)
+  if (factsRead.status.ok && visibleFacts.length === 0) {
     warnings.push('facts: 0 rows — extractor may not have written for this job yet')
   }
   warnings.push('transcripts: not yet implemented (M4 deferred — privacy/consent decision required)')
@@ -15596,7 +15601,7 @@ async function assembleJobDossier(client: any, body: any) {
   const evidenceRefs: { type: string; source_table: string; id: string }[] = []
   for (const r of eventsRead.data) evidenceRefs.push({ type: 'event', source_table: 'business_events', id: r.id })
   for (const m of conversationAsc) evidenceRefs.push({ type: 'message', source_table: m.source_system || 'conversation', id: String(m.source_ref || m.id || '') })
-  for (const f of factsRead.data) evidenceRefs.push({ type: 'fact', source_table: 'job_context', id: f.id })
+  for (const f of visibleFacts) evidenceRefs.push({ type: 'fact', source_table: 'job_context', id: f.id })
 
   // ── Strip internal-only columns from job before returning ──
   // Production jobs schema does not expose `value_inc_gst` or `sent_at`;
@@ -15633,7 +15638,7 @@ async function assembleJobDossier(client: any, body: any) {
     },
     events: eventsRead.data,
     conversation: conversationAsc,
-    facts: factsRead.data,
+    facts: visibleFacts,
     proposedActions: proposedRead.data,
     transcripts: [] as any[],
     reasoning: [] as any[],
@@ -58272,3 +58277,6 @@ export const _attachCurrentWikiCuratedReportForTest =
 export const _bindCurrentCycleCuratedMakesafeReportForTest =
   bindCurrentCycleCuratedMakesafeReport
 export const _updateInvoiceForTest = updateInvoice
+
+export const _getJobContextFactsForTest = getJobContextFacts
+export const _assembleJobDossierForTest = assembleJobDossier
