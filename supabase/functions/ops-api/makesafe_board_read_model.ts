@@ -40,6 +40,7 @@ import {
 import {
   deriveSesStageV2,
   sesOverlayDecisionKind,
+  sesStageOwnRoofReportIn,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
@@ -1543,7 +1544,10 @@ export function buildCanonicalMakesafeRows(
       ses_family: sesFamily,
       nowIso: computedAt,
     };
-    const reportIn = reportInEvidence(statusInput);
+    const legacyReportIn = reportInEvidence(statusInput);
+    const reportIn = sesFamily === "own_template_roof"
+      ? sesStageOwnRoofReportIn(statusInput)
+      : legacyReportIn;
     const stageV2 = deriveSesStageV2(statusInput);
     const derivedStage = String(stageV2.stage || "").toLowerCase();
     // R8 — ATTESTATIONS CAN NEVER BIND. The `decisionKind` test is FIRST and
@@ -1636,7 +1640,7 @@ export function buildCanonicalMakesafeRows(
       report_doc_id: pack?.report_doc_id || null,
       report_doc_resolved: pack?.report_doc_resolved,
       requires_bound_report_doc: artifactRequirements.requires_bound_report_doc,
-      requires_selected_current_cycle_trade_report:
+      requires_selected_current_cycle_trade_report: needsBoundReportPdf &&
         artifactRequirements.requires_bound_report_doc,
       invoice_doc_id: pack?.invoice_doc_id || null,
       invoice_doc_resolved: pack?.invoice_doc_resolved,
@@ -1657,7 +1661,8 @@ export function buildCanonicalMakesafeRows(
     const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
       (artifactRequirements.requires_bound_report_doc &&
         !reportPointerReady) ||
-      (artifactRequirements.requires_bound_report_doc && !report) ||
+      (needsBoundReportPdf && artifactRequirements.requires_bound_report_doc &&
+        !report) ||
       (artifactRequirements.requires_bound_invoice_doc &&
         !invoicePointerReady) ||
       (swmsRequired && !swmsPointerReady) ||
@@ -1897,7 +1902,7 @@ export function buildCanonicalMakesafeRows(
           ),
         has_current_portal_capture:
           computation.job_type !== "physical_makesafe" &&
-          reportIn.satisfied,
+          legacyReportIn.satisfied,
         portal_capture_revisions: ledgerPortalCaptures.map((capture: any) => ({
           id: capture.revision_id || null,
           role: capture.role || null,

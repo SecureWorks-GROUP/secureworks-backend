@@ -1241,6 +1241,20 @@ Deno.test("board reuses the assembler roof route for own-letterhead evidence", (
   });
   assertEquals(boardRowSesFamily(portal), "ordinary_roof_portal");
 
+  // Commercial exceptions can explicitly request our letterhead without a
+  // strata client-name marker. Ordinary roofs above remain portal jobs.
+  const commercial = {
+    ...portal,
+    id: "commercial-own-letterhead-roof",
+    client_name: "Commercial Warehouse",
+    metadata: {
+      makesafe_job_family: "roof_report",
+      roof_report_mode: "own_template",
+    },
+  };
+  assertEquals(boardRowSesFamily(commercial), "own_template_roof");
+  assertEquals(ownTemplateRoofJobIdsForBoard([commercial]), [commercial.id]);
+
   const conflict = baseRow({
     id: "conflicting-roof-board-route",
     client_name: "The Owners Corporation of a Strata Plan",
@@ -1314,6 +1328,8 @@ Deno.test("board own-letterhead route lets exact draft evidence reach Docs Ready
   assertEquals(card.ses_family, "own_template_roof");
   assertEquals(card.canonical_stage, "report_ready");
   assertEquals(card.derived_stage_v2_missing, []);
+  assertEquals(card.pack.presentation_kind, "ready");
+  assertEquals(card.pack.pre_xero_docs_ready, true);
 });
 
 Deno.test("own roof: the reader names what is missing, per fact", () => {
