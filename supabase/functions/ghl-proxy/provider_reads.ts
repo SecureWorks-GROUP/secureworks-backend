@@ -184,6 +184,89 @@ function boundId(row: JsonObject, id: string) {
   }
 }
 
+// Diagnostic-only allowlist: no provider scalar values or arbitrary keys escape.
+// Kept inside the existing sanitized error message to avoid widening all errors.
+function transcriptShape(value: unknown): JsonObject {
+  let budget = 24;
+  const keys = [
+    "data",
+    "result",
+    "results",
+    "transcription",
+    "transcriptions",
+    "transcript",
+    "sentences",
+    "mediaChannel",
+    "sentenceIndex",
+    "startTime",
+    "endTime",
+    "confidence",
+  ];
+  function shape(input: unknown, depth: number): JsonObject {
+    if (--budget < 0) return { type: "omitted", bounded: true };
+    const type = input === null
+      ? "null"
+      : Array.isArray(input)
+      ? "array"
+      : typeof input;
+    if (type !== "object" && type !== "array") return { type };
+    if (depth >= 4) return { type, bounded: true };
+    if (Array.isArray(input)) {
+      return {
+        type,
+        length: Math.min(input.length, 10000),
+        ...(input.length > 10000 ? { length_capped: true } : {}),
+        items: input.slice(0, 2).map((item) => shape(item, depth + 1)),
+      };
+    }
+    const obj = object(input);
+    const fields: JsonObject = {};
+    for (const key of keys) {
+      if (Object.hasOwn(obj, key)) fields[key] = shape(obj[key], depth + 1);
+    }
+    return { type, fields };
+  }
+  return shape(value, 0);
+}
+
+function transcriptValidationReason(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return "sentence_not_object";
+  }
+  const sentence = object(value);
+  if (!Object.hasOwn(sentence, "transcript")) return "missing_field:transcript";
+  if (typeof sentence.transcript !== "string") return "invalid_type:transcript";
+  if (!sentence.transcript.trim()) return "empty_transcript";
+  for (
+    const key of [
+      "mediaChannel",
+      "sentenceIndex",
+      "startTime",
+      "endTime",
+      "confidence",
+    ]
+  ) {
+    if (!Object.hasOwn(sentence, key)) return `missing_field:${key}`;
+    const number = sentence[key];
+    if (
+      !((typeof number === "number" ||
+        (typeof number === "string" && /^\d+(?:\.\d+)?$/.test(number))) &&
+        Number.isFinite(Number(number)) && Number(number) >= 0)
+    ) return `invalid_numeric:${key}`;
+  }
+  if (Number(sentence.endTime) < Number(sentence.startTime)) {
+    return "reversed_timing";
+  }
+  if (!Number.isInteger(Number(sentence.mediaChannel))) {
+    return "invalid_integer:mediaChannel";
+  }
+  if (!Number.isInteger(Number(sentence.sentenceIndex))) {
+    return "invalid_integer:sentenceIndex";
+  }
+  if (Number(sentence.confidence) > 1) return "invalid_range:confidence";
+  return null;
+}
+
 type Cursor = Record<string, string | number>;
 function pagination(
   returned: number,
@@ -714,30 +797,18 @@ export async function readGhlProvider(
     const raw = await getJson(path, undefined, "v3");
     const sentences = raw === null ? [] : Array.isArray(raw) ? raw : [raw];
     for (const value of sentences) {
-      const sentence = object(value);
-      const numericFields = [
-        "mediaChannel",
-        "sentenceIndex",
-        "startTime",
-        "endTime",
-        "confidence",
-      ];
-      if (
-        typeof sentence.transcript !== "string" ||
-        !sentence.transcript.trim() ||
-        !numericFields.every((key) => {
-          const number = sentence[key];
-          return (typeof number === "number" ||
-            (typeof number === "string" && /^\d+(?:\.\d+)?$/.test(number))) &&
-            Number.isFinite(Number(number)) && Number(number) >= 0;
-        }) || Number(sentence.endTime) < Number(sentence.startTime) ||
-        !Number.isInteger(Number(sentence.mediaChannel)) ||
-        !Number.isInteger(Number(sentence.sentenceIndex)) ||
-        Number(sentence.confidence) > 1
-      ) {
+      const reason = transcriptValidationReason(value);
+      if (reason) {
+        const diagnostic = {
+          reason,
+          shape: transcriptShape(raw),
+          invalid_sentence: transcriptShape(value),
+        };
         throw new GhlProviderReadError(
           "provider_response_invalid",
-          "GHL returned malformed transcript sentences",
+          `GHL returned malformed transcript sentences; diagnostic=${
+            JSON.stringify(diagnostic)
+          }`,
           502,
         );
       }
