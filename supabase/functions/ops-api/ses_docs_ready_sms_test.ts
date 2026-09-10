@@ -25,6 +25,7 @@ import {
 import type { SesExternalEffectStore } from "./ses_external_effects.ts";
 
 function readyResult(jobId: string, cycleId: string, overrides: any = {}): any {
+  // A persisted pre-Xero docket has no invoice artifact for the SMS to claim.
   return {
     state: "ready",
     persisted: true,
@@ -88,7 +89,7 @@ function makeDeps(
   };
 }
 
-Deno.test("ready persisted result sends one SMS and confirms the effect", async () => {
+Deno.test("pre-Xero ready docket SMS omits a nonexistent draft invoice", async () => {
   const { store, transitions } = makeFakeStore(new Set());
   const sent: string[] = [];
   const outcomes = await notifySesDocsReadySms(
@@ -100,6 +101,11 @@ Deno.test("ready persisted result sends one SMS and confirms the effect", async 
   assertStringIncludes(sent[0], "Docs Ready: SWMS-261000");
   assertStringIncludes(sent[0], "12 Sample St, Duncraig");
   assertStringIncludes(sent[0], "MLB-99999");
+  assertStringIncludes(sent[0], "Docket awaits your press.");
+  assert(
+    !sent[0].includes("draft invoice"),
+    "pre-Xero docket SMS must not claim that a draft invoice exists",
+  );
   assertEquals(transitions, ["reserved->dispatching", "dispatching->confirmed"]);
 });
 
