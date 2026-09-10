@@ -391,13 +391,14 @@ Deno.test("document bytes use canonical storage path, stream limit, hash, MIME, 
   const source = new TextEncoder().encode("%PDF-1.7\noriginal-bytes");
   let seenUrl = "";
   let seenAuth = "";
+  let seenApiKey = "";
   const result = await insuranceReadAction(
     deps(tables, {
       fetchImpl: (input, init) => {
         seenUrl = String(input);
-        seenAuth = String(
-          (init?.headers as Record<string, string>)?.Authorization,
-        );
+        const headers = init?.headers as Record<string, string>;
+        seenAuth = String(headers?.Authorization);
+        seenApiKey = String(headers?.apikey);
         return Promise.resolve(
           new Response(source, {
             headers: { "content-type": "application/pdf; charset=binary" },
@@ -424,6 +425,11 @@ Deno.test("document bytes use canonical storage path, stream limit, hash, MIME, 
     seenAuth,
     "Bearer server-secret-fixture",
     "server auth is injected",
+  );
+  assertEqual(
+    seenApiKey,
+    "server-secret-fixture",
+    "storage gateway API key is injected",
   );
   const body = result.body as {
     document: Record<string, unknown>;
@@ -695,6 +701,21 @@ Deno.test("document response status, encoding, length and redirect checks are st
     "DOCUMENT_FETCH_FAILED",
     "foreign response URL must be rejected",
   );
+  const foreignBody = result.body as Record<string, unknown>;
+  assertEqual(
+    foreignBody.provider_status,
+    200,
+    "foreign response status remains safe to diagnose",
+  );
+  assertEqual(
+    foreignBody.provider_failure_reason,
+    "response_url_mismatch",
+    "foreign response URL failure is classified",
+  );
+  assert(
+    !JSON.stringify(foreignBody).includes("foreign.example"),
+    "foreign response URL must not escape",
+  );
 });
 
 Deno.test("double encoded traversal and query delimiters are rejected before fetch", async () => {
@@ -795,6 +816,70 @@ Deno.test("document byte reads require the injected server storage credential", 
     "missing credential failure must be explicit",
   );
   assertEqual(fetchCount, 0, "missing credential must not trigger fetch");
+});
+
+Deno.test("storage provider failures preserve safe status diagnostics only", async () => {
+  const tables = baseTables();
+  tables.job_documents = [docRow()];
+  const result = await insuranceReadAction(
+    deps(tables, {
+      fetchImpl: () =>
+        Promise.resolve(
+          new Response("provider details must not escape", { status: 401 }),
+        ),
+    }),
+    new URLSearchParams({
+      action: "get_job_document",
+      job_id: JOB,
+      document_id: DOC,
+    }),
+    "GET",
+    owner,
+  );
+  assertEqual(
+    result.status,
+    502,
+    "provider auth failure remains an upstream read failure",
+  );
+  const body = result.body as Record<string, unknown>;
+  assertEqual(body.ok, false, "provider failure must remain unsuccessful");
+  assertEqual(
+    body.code,
+    "DOCUMENT_FETCH_FAILED",
+    "provider failure code remains stable",
+  );
+  assertEqual(
+    body.error,
+    "The stored document could not be fetched",
+    "provider failure message remains stable",
+  );
+  assertEqual(
+    body.provider_status,
+    401,
+    "provider status is exposed without response details",
+  );
+  assertEqual(
+    body.provider_failure_reason,
+    "unexpected_http_status",
+    "provider failure reason is classified",
+  );
+  assertEqual(
+    Object.keys(body).sort(),
+    ["code", "error", "ok", "provider_failure_reason", "provider_status"],
+    "provider diagnostics contain only the safe fields",
+  );
+  assert(
+    !JSON.stringify(result.body).includes("provider details"),
+    "provider body must not escape",
+  );
+  assert(
+    !JSON.stringify(result.body).includes(PROJECT),
+    "provider URL must not escape",
+  );
+  assert(
+    !JSON.stringify(result.body).includes("server-secret-fixture"),
+    "provider credentials must not escape",
+  );
 });
 
 Deno.test("credential-shaped storage paths are redacted in returned metadata", async () => {
