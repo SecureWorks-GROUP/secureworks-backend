@@ -132,6 +132,7 @@ class InsuranceReadError extends Error {
     public code: string,
     public status: number,
     message: string,
+    public details: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -140,7 +141,12 @@ class InsuranceReadError extends Error {
 function errorResult(error: InsuranceReadError): InsuranceReadResult {
   return {
     status: error.status,
-    body: { ok: false, code: error.code, error: error.message },
+    body: {
+      ...error.details,
+      ok: false,
+      code: error.code,
+      error: error.message,
+    },
   };
 }
 
@@ -1196,6 +1202,10 @@ async function fetchDocumentBytes(
       response = await fetchImpl(url, {
         method: "GET",
         headers: {
+          // The storage gateway identifies the calling Supabase project with
+          // apikey. Keep the server credential in Authorization as well so
+          // private-bucket RLS is evaluated with the same service identity.
+          apikey: deps.storageBearerToken,
           Authorization: "Bearer " + deps.storageBearerToken,
           Accept: "application/pdf,application/octet-stream,*/*",
           "Accept-Encoding": "identity",
@@ -1217,16 +1227,26 @@ async function fetchDocumentBytes(
         "The stored document could not be fetched",
       );
     }
+    const responseUrlMismatch = Boolean(response.url && response.url !== url);
     if (
-      response.redirected ||
-      response.status !== 200 ||
-      !response.ok ||
-      (response.url && response.url !== url)
+      response.redirected || response.status !== 200 || !response.ok ||
+      responseUrlMismatch
     ) {
+      const failureReason = response.redirected
+        ? "redirected_response"
+        : responseUrlMismatch
+        ? "response_url_mismatch"
+        : "unexpected_http_status";
       throw new InsuranceReadError(
         "DOCUMENT_FETCH_FAILED",
         502,
         "The stored document could not be fetched",
+        {
+          // Safe provider diagnostics only. Never reflect the URL, headers,
+          // response body, or any credential-bearing value.
+          provider_status: response.status,
+          provider_failure_reason: failureReason,
+        },
       );
     }
     const encoding = response.headers.get("content-encoding")?.trim()
