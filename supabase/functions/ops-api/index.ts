@@ -440,6 +440,7 @@ import {
   createXeroReadGet,
 } from './xero_receivables_read.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
+import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
   createOrgConfigXeroCooldownStore,
   createXeroCooldownFetch,
@@ -4648,6 +4649,28 @@ export async function _readJobRecordAction(
   }
 }
 
+export async function _readInsuranceEvidenceAction(
+  client: any,
+  params: URLSearchParams,
+  method: string,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'role' | 'orgId'> | null,
+  serverSecretPresented: boolean,
+): Promise<Response> {
+  const result = await insuranceReadAction({
+    from: (table) => client.from(table),
+    storageProjectUrl: SUPABASE_URL,
+    storageBearerToken: SUPABASE_SERVICE_KEY,
+    defaultOrgId: DEFAULT_ORG_ID,
+  }, params, method, {
+    mode: authMode,
+    orgId: authUser?.orgId,
+    role: authUser?.role,
+    serverSecretPresented,
+  })
+  return json(result.body, result.status)
+}
+
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -5909,6 +5932,11 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'read_job_record':
         return await _readJobRecordAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
+      case 'list_job_service_reports':
+      case 'list_job_roof_report_drafts':
+      case 'list_job_documents':
+      case 'get_job_document':
+        return await _readInsuranceEvidenceAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'job_detail': {
         let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
         // If not a UUID, try resolving as job_number (e.g. SWF-26037)
