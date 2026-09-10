@@ -246,6 +246,9 @@ function transcriptValidationReason(value: unknown): string | null {
       "confidence",
     ]
   ) {
+    // Live v3 responses can omit confidence. Preserve that absence rather than
+    // assigning a score; a supplied confidence must still pass validation.
+    if (key === "confidence" && !Object.hasOwn(sentence, key)) continue;
     if (!Object.hasOwn(sentence, key)) return `missing_field:${key}`;
     const number = sentence[key];
     if (
@@ -840,6 +843,13 @@ export async function readGhlProvider(
         },
         limitations: [
           "Provider transcript only; accuracy and completeness against the recording are not independently verified",
+          ...(sentences.some((value) =>
+              !Object.hasOwn(object(value), "confidence")
+            )
+            ? [
+              "Provider omitted confidence for one or more sentences; no confidence score has been inferred",
+            ]
+            : []),
           ...(sentences.length
             ? []
             : ["Transcript unavailable; this does not mean no call occurred"]),
