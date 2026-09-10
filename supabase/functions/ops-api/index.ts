@@ -338,6 +338,7 @@ import {
   notifySesDocsReadySms,
   SES_DOCS_READY_SMS_DEFAULT_TO,
 } from './ses_docs_ready_sms.ts'
+import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
 } from './ses_trade_chase.ts'
@@ -43155,6 +43156,12 @@ export const CURATED_BIND_JOB_MEDIA_COLUMNS =
 type CuratedBindMaterialsSourceAccounting = {
   service_report_items: string[]
   report_items: string[]
+  display_mappings?: Array<{
+    source_item: string
+    display_item: string
+    source_quantity: number
+    reason: 'source_quantity_omitted'
+  }>
   excluded: Array<{ item: string; reason: string }>
 }
 
@@ -43243,19 +43250,31 @@ async function assertCurrentWikiSourceEvidence(
     ? suppliedMaterials.items.map((item: string) => String(item).trim())
     : []
   const remainingServiceItems = expectedMaterialItems.slice()
+  const displayMappings: NonNullable<
+    CuratedBindMaterialsSourceAccounting['display_mappings']
+  > = []
   for (const item of suppliedMaterialItems) {
-    const matchIndex = remainingServiceItems.indexOf(item)
-    if (matchIndex < 0) {
+    const match = matchSesMaterialDisplay(item, remainingServiceItems)
+    if (!match) {
       throw curatedBindError(
         'curated_bind_materials_source_mismatch',
         'materials_evidence contains item(s) absent from the selected current-cycle service report',
       )
     }
-    remainingServiceItems.splice(matchIndex, 1)
+    remainingServiceItems.splice(match.source_index, 1)
+    if (match.match_kind === 'quantity_suffix_omitted') {
+      displayMappings.push({
+        source_item: match.source_item,
+        display_item: match.display_item,
+        source_quantity: match.source_quantity,
+        reason: 'source_quantity_omitted',
+      })
+    }
   }
   const materialsSourceAccounting: CuratedBindMaterialsSourceAccounting = {
     service_report_items: expectedMaterialItems,
     report_items: suppliedMaterialItems,
+    ...(displayMappings.length > 0 ? { display_mappings: displayMappings } : {}),
     excluded: remainingServiceItems.map((item) => ({
       item,
       reason: CURATED_BIND_MATERIALS_OMISSION_REASON,
