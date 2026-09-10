@@ -65,50 +65,80 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
+  -- Read the row through jsonb so a job_events shape without these columns
+  -- (older fixtures, partial schemas) yields NULL and the trigger stands aside
+  -- instead of raising inside someone else's insert.
+  v_row jsonb := to_jsonb(NEW);
+  v_event_type text := v_row->>'event_type';
+  v_event_id uuid;
+  v_job_id uuid;
+  v_detail jsonb;
   v_cycle_id uuid;
   v_cycle_number integer;
   v_identity text;
   v_key text;
   v_source jsonb;
 BEGIN
-  IF NEW.event_type NOT IN ('roof_report_submitted', 'makesafe_report_submitted', 'makesafe_portal_report_done') THEN
+  IF v_event_type IS NULL
+     OR v_event_type NOT IN ('roof_report_submitted', 'makesafe_report_submitted', 'makesafe_portal_report_done') THEN
     RETURN NEW;
   END IF;
-  IF NEW.job_id IS NULL THEN
+  BEGIN
+    v_job_id := NULLIF(v_row->>'job_id', '')::uuid;
+    v_event_id := NULLIF(v_row->>'id', '')::uuid;
+  EXCEPTION WHEN OTHERS THEN
+    RETURN NEW;
+  END;
+  IF v_job_id IS NULL THEN
     RETURN NEW;
   END IF;
+  v_detail := CASE WHEN jsonb_typeof(v_row->'detail_json') = 'object' THEN v_row->'detail_json' ELSE '{}'::jsonb END;
 
-  v_cycle_id := NULLIF(NEW.detail_json->>'attendance_cycle_id', '')::uuid;
-  v_cycle_number := NULLIF(NEW.detail_json->>'cycle_number', '')::integer;
+  -- Malformed cycle values must not block the audit insert; the ops-api
+  -- handler re-reads the current cycle before any effect regardless.
+  BEGIN
+    v_cycle_id := NULLIF(v_detail->>'attendance_cycle_id', '')::uuid;
+  EXCEPTION WHEN OTHERS THEN
+    v_cycle_id := NULL;
+  END;
+  BEGIN
+    v_cycle_number := NULLIF(v_detail->>'cycle_number', '')::integer;
+  EXCEPTION WHEN OTHERS THEN
+    v_cycle_number := NULL;
+  END;
 
-  IF NEW.event_type = 'roof_report_submitted' THEN
-    v_identity := 'roof:' || coalesce(NEW.detail_json->>'report_doc_id', '') || ':' || coalesce(NEW.detail_json->>'render_hash', '');
+  IF v_event_type = 'roof_report_submitted' THEN
+    v_identity := 'roof:' || coalesce(v_detail->>'report_doc_id', '') || ':' || coalesce(v_detail->>'render_hash', '');
     v_source := jsonb_build_object(
       'kind', 'own_roof_report',
-      'report_doc_id', NEW.detail_json->>'report_doc_id',
-      'render_hash', NEW.detail_json->>'render_hash',
-      'draft_id', NEW.detail_json->>'draft_id',
-      'report_type_job', NEW.detail_json->'report_type_job'
+      'report_doc_id', v_detail->>'report_doc_id',
+      'render_hash', v_detail->>'render_hash',
+      'draft_id', v_detail->>'draft_id',
+      'report_type_job', v_detail->'report_type_job'
     );
-  ELSIF NEW.event_type = 'makesafe_report_submitted' THEN
-    v_identity := 'report:' || coalesce(NEW.detail_json->>'report_id', NEW.id::text);
+  ELSIF v_event_type = 'makesafe_report_submitted' THEN
+    v_identity := 'report:' || coalesce(v_detail->>'report_id', v_event_id::text, 'unknown');
     v_source := jsonb_build_object(
       'kind', 'makesafe_report',
-      'report_id', coalesce(NEW.detail_json->>'report_id', NEW.id::text)
+      'report_id', coalesce(v_detail->>'report_id', v_event_id::text)
     );
   ELSE
-    v_identity := 'portal:' || NEW.id::text;
-    v_source := jsonb_build_object('kind', 'portal_verification', 'event_id', NEW.id);
+    v_identity := 'portal:' || coalesce(v_event_id::text, 'unknown');
+    v_source := jsonb_build_object('kind', 'portal_verification', 'event_id', v_event_id);
   END IF;
 
-  v_key := NEW.job_id::text || ':' || coalesce(v_cycle_id::text, 'cycle?') || ':' || v_identity;
+  v_key := v_job_id::text || ':' || coalesce(v_cycle_id::text, 'cycle?') || ':' || v_identity;
 
   INSERT INTO public.ses_report_trigger_runs (dedupe_key, job_id, attendance_cycle_id, cycle_number, event_id, event_type, source, state)
-  VALUES (v_key, NEW.job_id, v_cycle_id, v_cycle_number, NEW.id, NEW.event_type, v_source, 'pending')
+  VALUES (v_key, v_job_id, v_cycle_id, v_cycle_number, v_event_id, v_event_type, v_source, 'pending')
   ON CONFLICT (dedupe_key) DO UPDATE
     SET duplicate_events = public.ses_report_trigger_runs.duplicate_events + 1,
         updated_at = clock_timestamp();
 
+  RETURN NEW;
+EXCEPTION WHEN foreign_key_violation THEN
+  -- A job_events row for a job this database does not know (fixtures, partial
+  -- restores) must never block the audit insert. Production jobs always exist.
   RETURN NEW;
 END;
 $$;
