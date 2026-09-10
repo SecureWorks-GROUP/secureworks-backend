@@ -42,7 +42,8 @@
 //   - reconcile :743  /SW[PFDRIM]-\d{5}/i  (strict — MISSED SWMS, SWB, 4-digit)
 // so both passes now agree on what a job reference is.
 // ─────────────────────────────────────────────────────────────
-export const JOB_NUMBER_RE = /SW(?:MS|[A-Z])-\d{4,5}(?!\d)/i;
+// 2026-09-10: job numbers are now six digits (SWP-261376, SWMS-261156).
+export const JOB_NUMBER_RE = /SW(?:MS|[A-Z])-\d{4,6}(?!\d)/i;
 
 export function extractJobNumber(
   ref: string | null | undefined,

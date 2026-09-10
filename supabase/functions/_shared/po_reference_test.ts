@@ -20,8 +20,8 @@ import {
   isPoPickup,
 } from "./po_reference.ts";
 
-const SYNC_REGEX = /SWMS-\d{4,5}|SW[A-Z]?-?\d{3,5}/i; // xero-sync :486
-const RECONCILE_REGEX = /SW[PFDRIM]-\d{5}/i; // xero-sync :743
+const SYNC_REGEX = /SWMS-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i; // xero-sync primary linker
+const RECONCILE_REGEX = /SW[PFDRIM]-\d{5,6}(?!\d)/i; // strict reconcile form (division letter, 5 or 6 digits)
 
 function survivesBothLinkers(ref: string): boolean {
   return SYNC_REGEX.test(ref) && RECONCILE_REGEX.test(ref);
@@ -34,6 +34,15 @@ Deno.test("canonicalJobRef: already-canonical refs pass through verbatim (upper)
   // multi-order suffix preserved
   assertEquals(canonicalJobRef("SWF-25010-01"), "SWF-25010-01");
   assertEquals(canonicalJobRef("SWF-25030-REAR-A"), "SWF-25030-REAR-A");
+});
+
+Deno.test("canonicalJobRef: six-digit job numbers (2026) are canonical and never truncated", () => {
+  assertEquals(canonicalJobRef("SWP-261376"), "SWP-261376");
+  assertEquals(canonicalJobRef("SWF-261151-01"), "SWF-261151-01");
+  assertEquals(canonicalJobRef("SWMS-261156"), "SWMS-261156");
+  assertEquals(canonicalJobRef("Job SWP-261376 Stratco order"), "SWP-261376");
+  assertEquals(canonicalJobRef("SW-261376", "SWP-261376"), "SWP-261376");
+  assertEquals(survivesBothLinkers("SWP-261376"), true);
 });
 
 Deno.test("canonicalJobRef: embedded canonical token is extracted", () => {

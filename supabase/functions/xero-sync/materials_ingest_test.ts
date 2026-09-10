@@ -74,6 +74,9 @@ Deno.test("extractJobNumber — U1 test strings that MUST match", () => {
   // The UNIFICATION fix — these failed the old strict reconcile regex:
   assertEquals(extractJobNumber("SWMS-26878"), "SWMS-26878"); // make-safe
   assertEquals(extractJobNumber("SWB-26073"), "SWB-26073"); // division letter B (live data)
+  assertEquals(extractJobNumber("SWP-261376-DEP20"), "SWP-261376"); // six-digit (2026)
+  assertEquals(extractJobNumber("SWMS-261156"), "SWMS-261156");
+  assertEquals(extractJobNumber("INV SWF-261151 balance"), "SWF-261151");
   assertEquals(extractJobNumber("SWD-26071"), "SWD-26071"); // division letter D
   // multi-order suffix still resolves to the embedded job
   assertEquals(extractJobNumber("SWF-25010-01"), "SWF-25010");
@@ -84,7 +87,7 @@ Deno.test("extractJobNumber — U1 test strings that MUST match", () => {
 Deno.test("extractJobNumber — must NOT match (ambiguous/malformed)", () => {
   assertEquals(extractJobNumber("SW-25010"), null); // bare, no division letter (U1: avoid)
   assertEquals(extractJobNumber("SWF25010"), null); // no hyphen
-  assertEquals(extractJobNumber("SWF-250100"), null); // 6 digits — (?!\d) guard, no silent truncation
+  assertEquals(extractJobNumber("SWF-2501000"), null); // 7 digits — (?!\d) guard, no silent truncation
   assertEquals(extractJobNumber("SW1615"), null); // legacy Tradify — routed via xero_projects, not here
   assertEquals(extractJobNumber(""), null);
   assertEquals(extractJobNumber(null), null);
