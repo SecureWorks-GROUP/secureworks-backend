@@ -15594,7 +15594,7 @@ async function assembleJobDossier(client: any, body: any) {
   const warnings: string[] = []
   if (excludedFacts) warnings.push(`facts: ${excludedFacts} superseded, retracted, untrusted or expired rows withheld from this bounded read`)
   if (factsRead.status.ok && currentFacts.length === 0) {
-    warnings.push('facts: 0 rows — extractor may not have written for this job yet')
+    warnings.push('facts: no current rows returned; historical or out-of-window evidence may still exist')
   }
   warnings.push('transcripts: not yet implemented (M4 deferred — privacy/consent decision required)')
   warnings.push('reasoning/outcomes: Layer 7 schema not yet job-linked')
