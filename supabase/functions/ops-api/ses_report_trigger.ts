@@ -38,6 +38,7 @@ export interface SesReportTriggerRun {
   next_attempt_at: string | null;
   claimed_by: string | null;
   claimed_at: string | null;
+  claim_token: string | null;
   lease_expires_at: string | null;
   last_error: string | null;
   recovery_action: string | null;
@@ -79,11 +80,14 @@ async function readRun(client: any, id: string): Promise<SesReportTriggerRun | n
   return (data as SesReportTriggerRun) || null;
 }
 
-/** CAS transition: only the holder of the claim moves the row. */
+/** CAS transition: only the holder of THIS claim moves the row. The per-claim
+ * token minted by claim_ses_report_trigger_run is the key, so a late worker
+ * whose lease expired cannot overwrite a newer claim that shares its actor. */
 async function transition(client: any, run: SesReportTriggerRun, patch: Record<string, unknown>) {
+  if (!run.claim_token) throw new SesReportTriggerError("ses_trigger_lease_lost", "The run carries no claim token; refusing to transition.", 409);
   const { data, error } = await client.from("ses_report_trigger_runs")
     .update({ ...patch, updated_at: new Date().toISOString() })
-    .eq("id", run.id).eq("state", "claimed").eq("claimed_by", run.claimed_by)
+    .eq("id", run.id).eq("state", "claimed").eq("claim_token", run.claim_token)
     .select("*").maybeSingle();
   if (error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `run transition failed: ${error.message || error}`, 503);
   if (!data) throw new SesReportTriggerError("ses_trigger_lease_lost", "The run lease was lost before the transition; nothing further was written.", 409);
@@ -103,9 +107,24 @@ async function fileManualRun(client: any, body: Record<string, unknown>): Promis
   if (!UUID.test(cycleId)) throw new SesReportTriggerError("ses_trigger_cycle_required", "attendance_cycle_id must be the exact current attendance cycle UUID.");
   if (!identity) throw new SesReportTriggerError("ses_trigger_source_identity_required", "source_identity is required (for example report:<report_id> or roof:<doc_id>:<render_hash>).");
   const key = `${jobId}:${cycleId}:${identity}`;
-  const existing = await client.from("ses_report_trigger_runs").select("id").eq("dedupe_key", key).maybeSingle();
+  const existing = await client.from("ses_report_trigger_runs").select("id, state").eq("dedupe_key", key).maybeSingle();
   if (existing.error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `run lookup failed: ${existing.error.message || existing.error}`, 503);
-  if (existing.data?.id) return existing.data.id as string;
+  if (existing.data?.id) {
+    // Explicit refile: a human moves a refused or parked run back to pending,
+    // with their name on it. Never done rows; never implicit.
+    if (body.refile === true && ["refused_stale", "refused_conflict", "refused_gate", "failed", "unknown"].includes(String(existing.data.state))) {
+      const refiled = await client.from("ses_report_trigger_runs")
+        .update({ state: "pending", next_attempt_at: null, claimed_by: null, claim_token: null, lease_expires_at: null, last_error: null,
+          recovery_action: null, completed_at: null, updated_at: new Date().toISOString(),
+          result: { refiled: { by: text(body.actor) || "manual", at: new Date().toISOString(), from_state: existing.data.state } } })
+        .eq("id", existing.data.id).eq("state", existing.data.state).select("id").maybeSingle();
+      if (refiled.error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `refile failed: ${refiled.error.message || refiled.error}`, 503);
+      if (!refiled.data) throw new SesReportTriggerError("ses_trigger_refile_raced", "The run changed state before the refile; read it again.", 409);
+    } else if (body.refile === true) {
+      throw new SesReportTriggerError("ses_trigger_refile_not_allowed", `A run in state ${existing.data.state} cannot be refiled.`, 409, { state: existing.data.state });
+    }
+    return existing.data.id as string;
+  }
   const inserted = await client.from("ses_report_trigger_runs").insert({
     dedupe_key: key, job_id: jobId, attendance_cycle_id: cycleId, event_type: "manual",
     source: { kind: "manual", identity, filed_by: text(body.actor) || "manual" }, state: "pending",

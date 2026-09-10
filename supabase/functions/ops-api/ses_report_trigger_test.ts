@@ -42,6 +42,8 @@ type Fixture = {
   job?: any;
   siblings?: any[];
   claimable?: boolean;
+  /** Simulate a second worker reclaiming the row (new token) right after our claim. */
+  stealClaimAfterClaim?: boolean;
 };
 
 /** A tiny query-builder stand-in that records writes and answers the reads the handler makes. */
@@ -53,8 +55,11 @@ function fakeClient(fx: Fixture) {
       const run = fx.runs[args.p_run_id];
       const claimable = fx.claimable ?? (run && (run.state === "pending" || (run.state === "failed" && (!run.next_attempt_at || Date.parse(run.next_attempt_at) <= NOW.getTime()))));
       if (!run || !claimable) return Promise.resolve({ data: [], error: null });
-      Object.assign(run, { state: "claimed", attempts: run.attempts + 1, claimed_by: args.p_owner, claimed_at: NOW.toISOString(), lease_expires_at: new Date(NOW.getTime() + 300_000).toISOString() });
-      return Promise.resolve({ data: [{ ...run }], error: null });
+      Object.assign(run, { state: "claimed", attempts: run.attempts + 1, claimed_by: args.p_owner, claimed_at: NOW.toISOString(),
+        claim_token: `token-${run.attempts + 1}`, lease_expires_at: new Date(NOW.getTime() + 600_000).toISOString() });
+      const snapshot = { ...run };
+      if (fx.stealClaimAfterClaim) Object.assign(run, { claim_token: "token-stolen", claimed_by: args.p_owner });
+      return Promise.resolve({ data: [snapshot], error: null });
     },
     from(table: string) {
       const q: any = { _table: table, _filters: [] as any[], _op: "select", _patch: null as any, _order: null as any, _limit: null as any };
@@ -90,7 +95,7 @@ function fakeClient(fx: Fixture) {
             return { data: { id }, error: null };
           }
           const key = q._filters.find((f: any) => f[1] === "dedupe_key")?.[2];
-          if (key) { const hit = Object.values(fx.runs).find((r: any) => r.dedupe_key === key); return { data: hit ? { id: hit.id } : null, error: null }; }
+          if (key) { const hit = Object.values(fx.runs).find((r: any) => r.dedupe_key === key); return { data: hit ? { id: hit.id, state: hit.state } : null, error: null }; }
           const stateEq = q._filters.find((f: any) => f[0] === "eq" && f[1] === "state")?.[2];
           if (stateEq === "done") { const s = (fx.siblings || [])[0]; return { data: s ?? null, error: null }; }
           const id = q._filters.find((f: any) => f[1] === "id")?.[2];
@@ -228,6 +233,46 @@ Deno.test("7. manual entry needs exact job, cycle and identity; reuses an existi
   const fresh = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r2" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
   assert(writes.some((w) => w.insert?.dedupe_key === `${JOB}:${CYCLE1}:report:r2`));
   assertEquals((fresh as any).run.event_type, "manual");
+});
+
+Deno.test("9. a stolen lease (new claim token) means the late worker cannot write its outcome", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }], stealClaimAfterClaim: true };
+  const { client, writes } = fakeClient(fx);
+  let threw: any = null;
+  try { await runSesReportTrigger({ run_id: RUN }, { client, actor: "late-worker", now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
+  assert(threw instanceof SesReportTriggerError && threw.code === "ses_trigger_lease_lost", `expected lease lost, got ${threw}`);
+  assertEquals(writes.filter((w) => w.patch).length, 0, "no transition may land under a foreign token");
+  assertEquals(fx.runs[RUN].claim_token, "token-stolen");
+});
+
+Deno.test("10. a job with no attendance cycle is refused_gate with an executable recovery action", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun({ attendance_cycle_id: null, cycle_number: null }) }, cycles: [] };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  assertEquals(out.outcome, "refused");
+  assertEquals(fx.runs[RUN].state, "refused_gate");
+  assertEquals(prepared, 0);
+  assertStringIncludes(fx.runs[RUN].recovery_action, "attendance cycle");
+});
+
+Deno.test("11. refile moves a refused or parked run back to pending with the actor recorded; done rows cannot be refiled", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun({ state: "refused_gate", last_error: "SWMS missing", recovery_action: "fix then refile", completed_at: "2026-09-11T02:30:00.000Z" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client, writes } = fakeClient(fx);
+  const out = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1", refile: true, actor: "insurance-desk" },
+    { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+  assertEquals(out.outcome, "done", JSON.stringify(out));
+  const refile = writes.find((w) => w.patch?.state === "pending");
+  assert(refile, "refile must move the row to pending before the claim");
+  assertEquals(refile.patch.result.refiled.by, "insurance-desk");
+  assertEquals(refile.patch.result.refiled.from_state, "refused_gate");
+
+  const fxDone: Fixture = { runs: { [RUN]: baseRun({ state: "done" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const d = fakeClient(fxDone);
+  let threw: any = null;
+  try { await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1", refile: true }, { client: d.client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
+  assert(threw instanceof SesReportTriggerError && threw.code === "ses_trigger_refile_not_allowed");
+  assertEquals(fxDone.runs[RUN].state, "done");
 });
 
 Deno.test("8. pending list excludes done rows and carries age and recovery action", async () => {

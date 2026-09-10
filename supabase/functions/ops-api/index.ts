@@ -6846,9 +6846,12 @@ if (import.meta.main) serve(async (req: Request) => {
       // go through the same bounded handler, which hands the one card to the
       // prepare path above and records the outcome on the run ledger.
       case 'run_ses_report_trigger': {
-        const triggerIsPrivileged = authMode === 'api_key' || authMode === 'routine'
+        // Reachable only with the server-owned ops key (the drain and the agent
+        // seat). Staff sessions and the routine key are refused: the manual path
+        // is an operator tool, not a browser action.
+        const triggerIsPrivileged = authMode === 'api_key'
         if (!triggerIsPrivileged) {
-          return json({ error: 'forbidden: run_ses_report_trigger requires the privileged ops key or the make-safe reporting routine' }, 403)
+          return json({ error: 'forbidden: run_ses_report_trigger requires the privileged ops key' }, 403)
         }
         if (req.method !== 'POST') {
           return json({ error: 'run_ses_report_trigger requires POST' }, 405)

@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS public.ses_report_trigger_runs (
   next_attempt_at timestamptz,
   claimed_by text,
   claimed_at timestamptz,
+  -- Minted per claim; every transition is CAS'd on it so a late worker whose
+  -- lease expired cannot overwrite a newer claim that shares its actor name.
+  claim_token uuid,
   lease_expires_at timestamptz,
   last_error text,
   recovery_action text,
@@ -50,6 +53,12 @@ CREATE INDEX IF NOT EXISTS idx_ses_report_trigger_runs_job
 
 COMMENT ON TABLE public.ses_report_trigger_runs IS
   'Outbox and pending-work view for the SES report-submitted trigger. One row per (job, attendance cycle, source identity). job_events remains audit only.';
+
+-- Server-owned ledger: no browser role may read dedupe keys or flip a done row
+-- back to pending (that would be the blind replay the contract forbids).
+ALTER TABLE public.ses_report_trigger_runs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.ses_report_trigger_runs FROM PUBLIC, anon, authenticated;
+GRANT ALL ON TABLE public.ses_report_trigger_runs TO service_role, postgres;
 
 -- Producer trigger: file one run per submitted report identity. The dedupe key
 -- is job + attendance cycle + source identity (document id and render hash for
@@ -106,6 +115,21 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     v_cycle_number := NULL;
   END;
+  -- Producers that do not carry the cycle (own-template roof, portal
+  -- verification) are pinned to the job's current cycle AT SUBMISSION TIME, so
+  -- a delayed event from a closed cycle is refused as stale later rather than
+  -- adopting whatever cycle is current when it is finally processed.
+  IF v_cycle_id IS NULL AND to_regclass('public.makesafe_attendance_cycles') IS NOT NULL THEN
+    BEGIN
+      SELECT c.id, c.cycle_number INTO v_cycle_id, v_cycle_number
+        FROM public.makesafe_attendance_cycles c
+       WHERE c.job_id = v_job_id
+       ORDER BY c.cycle_number DESC
+       LIMIT 1;
+    EXCEPTION WHEN OTHERS THEN
+      v_cycle_id := NULL;
+    END;
+  END IF;
 
   IF v_event_type = 'roof_report_submitted' THEN
     v_identity := 'roof:' || coalesce(v_detail->>'report_doc_id', '') || ':' || coalesce(v_detail->>'render_hash', '');
@@ -156,7 +180,7 @@ EXECUTE FUNCTION public.enqueue_ses_report_trigger_run();
 CREATE OR REPLACE FUNCTION public.claim_ses_report_trigger_run(
   p_run_id uuid,
   p_owner text,
-  p_lease_seconds integer DEFAULT 300
+  p_lease_seconds integer DEFAULT 600
 )
 RETURNS SETOF public.ses_report_trigger_runs
 LANGUAGE plpgsql
@@ -165,6 +189,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_row public.ses_report_trigger_runs;
+  v_max_attempts constant integer := 6;
 BEGIN
   SELECT * INTO v_row
     FROM public.ses_report_trigger_runs
@@ -178,11 +203,25 @@ BEGIN
   IF NOT FOUND THEN
     RETURN;
   END IF;
+  -- Attempt ceiling is enforced here, not only in the worker's error path: a
+  -- worker that died after claiming leaves an expired lease, and without this
+  -- the row would be reclaimed and re-run every lease period forever.
+  IF v_row.attempts >= v_max_attempts THEN
+    UPDATE public.ses_report_trigger_runs
+       SET state = 'unknown',
+           last_error = coalesce(last_error, '') || ' | attempt ceiling reached at claim',
+           recovery_action = 'attempts exhausted: read back the docket by dedupe key, then mark done or refile',
+           claimed_by = NULL, claim_token = NULL, lease_expires_at = NULL,
+           updated_at = clock_timestamp()
+     WHERE id = p_run_id;
+    RETURN;
+  END IF;
   UPDATE public.ses_report_trigger_runs
      SET state = 'claimed',
          attempts = attempts + 1,
          claimed_by = p_owner,
          claimed_at = clock_timestamp(),
+         claim_token = gen_random_uuid(),
          lease_expires_at = clock_timestamp() + make_interval(secs => greatest(30, least(p_lease_seconds, 1800))),
          updated_at = clock_timestamp()
    WHERE id = p_run_id

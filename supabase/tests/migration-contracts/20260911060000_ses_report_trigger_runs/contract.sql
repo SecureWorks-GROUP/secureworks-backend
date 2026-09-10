@@ -67,8 +67,8 @@ DECLARE r public.ses_report_trigger_runs; n integer; run uuid;
 BEGIN
   SELECT id INTO run FROM public.ses_report_trigger_runs WHERE event_type = 'makesafe_report_submitted';
   SELECT * INTO r FROM public.claim_ses_report_trigger_run(run, 'contract-worker', 300);
-  IF r.state <> 'claimed' OR r.attempts <> 1 OR r.claimed_by <> 'contract-worker' OR r.lease_expires_at IS NULL THEN
-    RAISE EXCEPTION 'contract: claim did not lease the row: %', row_to_json(r);
+  IF r.state <> 'claimed' OR r.attempts <> 1 OR r.claimed_by <> 'contract-worker' OR r.lease_expires_at IS NULL OR r.claim_token IS NULL THEN
+    RAISE EXCEPTION 'contract: claim did not lease the row with a token: %', row_to_json(r);
   END IF;
   SELECT count(*) INTO n FROM public.claim_ses_report_trigger_run(run, 'second-worker', 300);
   IF n <> 0 THEN RAISE EXCEPTION 'contract: a live lease was reclaimed'; END IF;
@@ -93,7 +93,29 @@ BEGIN
   IF n <> 1 THEN RAISE EXCEPTION 'contract: due failed row could not be claimed'; END IF;
 END $$;
 
--- 6. The drain is gated: with the cron gate false it performs no HTTP call and does not error.
+-- 6. The attempt ceiling is enforced at claim time: a row already at six attempts is parked unknown, not re-run.
+DO $$
+DECLARE run uuid; n integer; st text;
+BEGIN
+  SELECT id INTO run FROM public.ses_report_trigger_runs WHERE event_type = 'roof_report_submitted';
+  UPDATE public.ses_report_trigger_runs SET state = 'failed', attempts = 6, next_attempt_at = NULL WHERE id = run;
+  SELECT count(*) INTO n FROM public.claim_ses_report_trigger_run(run, 'ceiling-worker', 600);
+  SELECT state INTO st FROM public.ses_report_trigger_runs WHERE id = run;
+  IF n <> 0 OR st <> 'unknown' THEN RAISE EXCEPTION 'contract: attempt ceiling did not park the row unknown (claimed=%, state=%)', n, st; END IF;
+END $$;
+
+-- 7. The ledger is server-owned: row level security on, browser roles hold no privilege.
+DO $$
+BEGIN
+  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.ses_report_trigger_runs'::regclass) THEN
+    RAISE EXCEPTION 'contract: row level security is not enabled on ses_report_trigger_runs';
+  END IF;
+  IF has_table_privilege('anon', 'public.ses_report_trigger_runs', 'SELECT') OR has_table_privilege('authenticated', 'public.ses_report_trigger_runs', 'UPDATE') THEN
+    RAISE EXCEPTION 'contract: browser roles still hold privileges on ses_report_trigger_runs';
+  END IF;
+END $$;
+
+-- 8. The drain is gated: with the cron gate false it performs no HTTP call and does not error.
 SELECT public.trigger_ses_report_trigger_drain();
 
 ROLLBACK;
