@@ -350,7 +350,7 @@ Deno.test("organisation read preserves legal identity and provenance without dat
     action: "read_xero_organisation",
   }, f.deps);
   assertStrictEquals(result.organisations, organisations);
-  assertEquals(result.provenance, {
+  assertEquals(result.provenance as Record<string, unknown>, {
     source: "xero",
     tenant_id: TENANT,
     retrieved_at: NOW,
@@ -361,6 +361,10 @@ Deno.test("organisation read preserves legal identity and provenance without dat
     provider_response_id: ID,
     provider_date_time_utc: "provider-time",
     cache_used: false,
+    content_redacted: false,
+    redacted_paths: [],
+    redaction_policy: "structured_credential_fields_v1",
+    redacted_paths_root: "provider_response",
   });
   assertEquals(f.calls, [{
     path: "/Organisation",
@@ -369,6 +373,213 @@ Deno.test("organisation read preserves legal identity and provenance without dat
   }]);
   assertEquals(f.tokenReads(), 1);
   assertEquals(JSON.stringify(result).includes("fixture-only-token"), false);
+});
+
+Deno.test("organisation boundary redacts provider credentials and records raw JSON paths without changing business evidence", async () => {
+  const secret = "fixture-credential-not-a-real-key";
+  const payload = {
+    APIKey: secret,
+    Id: ID,
+    DateTimeUTC: "provider-time",
+    Organisations: [{
+      OrganisationID: TENANT,
+      Name: "Fixture Pty Ltd",
+      LegalName: "Fixture Legal Pty Ltd",
+      TaxNumber: "FIXTURE-TAX",
+      BankAccountNumber: "FIXTURE-BANK",
+      ShortCode: "FIXTURE",
+      APIKey: secret,
+      Contacts: [{ Name: "Fixture contact", access_token: secret }],
+      Settings: {
+        "Division/West~": { client_secret: secret, CurrencyCode: "AUD" },
+      },
+      Credentials: { private_key: secret },
+      Notes: "Ordinary business prose mentioning API keys remains unchanged.",
+      Website: "https://example.test/business",
+    }],
+  };
+  const original = structuredClone(payload);
+  const f = fixture(payload);
+  const result = await readXeroOrganisation(noDatabase, {}, {
+    ...f.deps,
+    xeroGet: createXeroReadGet({
+      fetchFn: (_input, init) => {
+        assertEquals(init?.method, "GET");
+        return Promise.resolve(Response.json(payload, {
+          headers: {
+            "Xero-Correlation-Id": "fixture-request",
+            "X-MinLimit-Remaining": "57",
+          },
+        }));
+      },
+    }),
+  });
+  assertEquals(JSON.stringify(result).includes(secret), false);
+  assertEquals(payload, original);
+  assertEquals(result.organisations, [{
+    ...payload.Organisations[0],
+    APIKey: "[REDACTED_CREDENTIAL]",
+    Contacts: [{
+      Name: "Fixture contact",
+      access_token: "[REDACTED_CREDENTIAL]",
+    }],
+    Settings: {
+      "Division/West~": {
+        client_secret: "[REDACTED_CREDENTIAL]",
+        CurrencyCode: "AUD",
+      },
+    },
+    Credentials: "[REDACTED_CREDENTIAL]",
+  }]);
+  const provenance = result.provenance as Record<string, unknown>;
+  assertEquals(provenance.redacted_paths, [
+    "/APIKey",
+    "/Organisations/0/APIKey",
+    "/Organisations/0/Contacts/0/access_token",
+    "/Organisations/0/Credentials",
+    "/Organisations/0/Settings/Division~1West~0/client_secret",
+  ]);
+  assertEquals(provenance.content_redacted, true);
+  assertEquals(provenance.redaction_policy, "structured_credential_fields_v1");
+  assertEquals(provenance.redacted_paths_root, "provider_response");
+  assertEquals(provenance.provider_response_id, ID);
+  assertEquals(provenance.provider_date_time_utc, "provider-time");
+  assertEquals(provenance.request_id, "fixture-request");
+  assertEquals(result.provenance.quota.minute_remaining, "57");
+  assertEquals(provenance.tenant_id, TENANT);
+  assertEquals(provenance.retrieved_at, NOW);
+});
+
+Deno.test("structured credential labels are case and separator insensitive without matching business field names", async () => {
+  const names = [
+    "APIKey",
+    "api_key",
+    "x-api-key",
+    "APISecret",
+    "AccessToken",
+    "refresh_token",
+    "IDToken",
+    "OAuthToken",
+    "OAuthTokenSecret",
+    "clientSecret",
+    "ConsumerSecret",
+    "SecretAccessKey",
+    "AccessKeyId",
+    "service_role_key",
+    "private_key",
+    "Password",
+    "passwd",
+    "Authorization",
+    "authentication",
+    "bearer",
+    "cookie",
+    "Credentials",
+    "connection_string",
+  ];
+  const credentials = Object.fromEntries(
+    names.map((name) => [name, "fixture-credential"]),
+  );
+  const business = {
+    Key: "business lookup key",
+    PublicKey: "business reference",
+    TokenDescription: "business description",
+    TaxNumber: "FIXTURE",
+    CurrencyCode: "AUD",
+  };
+  const f = fixture({ Organisations: [{ ...credentials, ...business }] });
+  const result = await readXeroOrganisation(noDatabase, {}, f.deps);
+  assertEquals(JSON.stringify(result).includes("fixture-credential"), false);
+  assertEquals(result.organisations[0], {
+    ...Object.fromEntries(names.map((name) => [name, "[REDACTED_CREDENTIAL]"])),
+    ...business,
+  });
+  assertEquals(
+    (result.provenance as Record<string, unknown>).redacted_paths,
+    names.map((name) => `/Organisations/0/${name}`).sort(),
+  );
+});
+
+Deno.test("unsupported nesting fails closed without returning a partially sanitized provider record", async () => {
+  let nested: Record<string, unknown> = { APIKey: "fixture-credential" };
+  for (let depth = 0; depth < 70; depth++) nested = { child: nested };
+  const f = fixture({ Organisations: [{ OrganisationID: TENANT, nested }] });
+  const error = await assertRejects(
+    () => readXeroOrganisation(noDatabase, {}, f.deps),
+    XeroReceivablesReadError,
+  );
+  assertEquals(error.code, "XERO_RESPONSE_INVALID");
+  assertEquals(error.status, 502);
+  assertEquals(error.message.includes("fixture-credential"), false);
+  assertEquals(f.calls.length, 1);
+});
+
+Deno.test("every exported record reader redacts at the common boundary, including metadata copies", async () => {
+  const extra = {
+    Nested: { api_key: "fixture-credential", BusinessField: "retained" },
+  };
+  const payment = { PaymentID: ID, PaymentType: "ACCRECPAYMENT", ...extra };
+  const cases = [
+    {
+      collection: "Organisations",
+      row: { OrganisationID: TENANT, ...extra },
+      run: (deps: ReturnType<typeof fixture>["deps"]) =>
+        readXeroOrganisation(noDatabase, {}, deps),
+    },
+    {
+      collection: "TrackingCategories",
+      row: { TrackingCategoryID: ID, ...extra },
+      run: (deps: ReturnType<typeof fixture>["deps"]) =>
+        readXeroTrackingCategories(noDatabase, {}, deps),
+    },
+    {
+      collection: "Invoices",
+      row: invoice(extra),
+      run: (deps: ReturnType<typeof fixture>["deps"]) =>
+        listXeroReceivables(noDatabase, {}, deps),
+    },
+    {
+      collection: "Invoices",
+      row: invoice(extra),
+      run: (deps: ReturnType<typeof fixture>["deps"]) =>
+        getXeroReceivable(noDatabase, { xero_invoice_id: ID }, deps),
+    },
+    {
+      collection: "Payments",
+      row: payment,
+      run: (deps: ReturnType<typeof fixture>["deps"]) =>
+        listXeroSettlementRecords(noDatabase, { record_type: "payment" }, deps),
+    },
+    {
+      collection: "Payments",
+      row: payment,
+      run: (deps: ReturnType<typeof fixture>["deps"]) =>
+        readXeroSettlementRecord(noDatabase, {
+          record_type: "payment",
+          record_id: ID,
+        }, deps),
+    },
+  ];
+  for (const c of cases) {
+    const payload = {
+      [c.collection]: [c.row],
+      Id: { client_secret: "fixture-credential", Label: "provider metadata" },
+    };
+    const original = structuredClone(payload);
+    const f = fixture(payload);
+    const result = await c.run(f.deps);
+    assertEquals(JSON.stringify(result).includes("fixture-credential"), false);
+    assertEquals(JSON.stringify(result).includes("retained"), true);
+    assertEquals(payload, original);
+    assertEquals(
+      (result.provenance as Record<string, unknown>).redacted_paths,
+      [`/${c.collection}/0/Nested/api_key`, "/Id/client_secret"].sort(),
+    );
+    assertEquals(result.provenance.provider_response_id, {
+      client_secret: "[REDACTED_CREDENTIAL]",
+      Label: "provider metadata",
+    });
+    assertEquals(f.calls.length, 1);
+  }
 });
 
 Deno.test("tracking categories include archived options and retain provider fields", async () => {
