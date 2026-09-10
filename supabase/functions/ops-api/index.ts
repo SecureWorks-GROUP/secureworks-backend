@@ -7679,8 +7679,9 @@ if (import.meta.main) serve(async (req: Request) => {
         const previousStatus = voidInvRecord?.status || 'UNKNOWN'
         const { accessToken: vAt, tenantId: vTi } = await getToken(client)
         const newStatus = body.void ? 'VOIDED' : 'DELETED'
-        await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
-        await client.from('xero_invoices').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('xero_invoice_id', vid)
+        const vRes = await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
+        const vReturned = String(vRes?.Invoices?.[0]?.Status || newStatus).toUpperCase()
+        await client.from('xero_invoices').update({ status: vReturned, amount_due: 0 }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
         // Log business event (non-blocking)
         try {
           await client.from('business_events').insert({
@@ -7719,7 +7720,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const { accessToken: aAt, tenantId: aTi } = await getToken(client)
         const aRes = await xeroPost(`/Invoices/${aid}`, aAt, aTi, { Invoices: [{ InvoiceID: aid, Status: 'AUTHORISED' }] }, 'POST')
         const approved = aRes?.Invoices?.[0]
-        await client.from('xero_invoices').update({ status: 'AUTHORISED', updated_at: new Date().toISOString() }).eq('xero_invoice_id', aid)
+        await client.from('xero_invoices').update({ status: String(approved?.Status || 'AUTHORISED').toUpperCase() }).eq('xero_invoice_id', aid).eq('org_id', DEFAULT_ORG_ID)
 
         // H3: write business_events.invoice.authorised — mirrors void_invoice's existing pattern.
         // Wrapped in try/catch so a business_events outage does not break the customer-side AUTHORISE.
@@ -7811,8 +7812,8 @@ if (import.meta.main) serve(async (req: Request) => {
         const asInvNumber = asApproved?.InvoiceNumber || ''
         const asTotal = asApproved?.Total || 0
 
-        // Update local record
-        await client.from('xero_invoices').update({ status: 'AUTHORISED', updated_at: new Date().toISOString() }).eq('xero_invoice_id', asId)
+        // Update local record with what Xero actually returned
+        await client.from('xero_invoices').update({ status: String(asApproved?.Status || 'AUTHORISED').toUpperCase() }).eq('xero_invoice_id', asId).eq('org_id', DEFAULT_ORG_ID)
 
         // H3 (Loop 1B-a): write business_events.invoice.authorised — same shape as approve_invoice.
         try {
@@ -8178,7 +8179,7 @@ if (import.meta.main) serve(async (req: Request) => {
             due_date: dueDate,
             contact_name: tradeName,
             xero_contact_id: xeroContactId,
-          }, { onConflict: 'xero_invoice_id' })
+          }, { onConflict: 'org_id,xero_invoice_id' })
         } catch (e) { /* non-blocking */ }
 
         return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
@@ -32698,18 +32699,23 @@ async function reconcilePayment(client: any, body: any) {
   // Update cached invoice in xero_invoices table if it exists
   try {
     const newAmountPaid = Number(payment.Amount || amount)
+    // xero_invoices has no invoice_id column; this filtered on it and the
+    // swallowed 42703 meant a recorded payment never reached the mirror.
     const { data: cachedInv } = await client.from('xero_invoices')
       .select('amount_due, amount_paid')
-      .eq('invoice_id', invoice_id)
+      .eq('xero_invoice_id', invoice_id)
+      .eq('org_id', DEFAULT_ORG_ID)
       .maybeSingle()
 
     if (cachedInv) {
-      await client.from('xero_invoices').update({
+      const remaining = Math.max(0, (Number(cachedInv.amount_due) || 0) - newAmountPaid)
+      const { error: payMirrorErr } = await client.from('xero_invoices').update({
         amount_paid: (Number(cachedInv.amount_paid) || 0) + newAmountPaid,
-        amount_due: Math.max(0, (Number(cachedInv.amount_due) || 0) - newAmountPaid),
-        status: payment.Invoice?.Status || 'PAID',
-        updated_at: new Date().toISOString(),
-      }).eq('invoice_id', invoice_id)
+        amount_due: remaining,
+        status: payment.Invoice?.Status || (remaining <= 0 ? 'PAID' : 'AUTHORISED'),
+        ...(remaining <= 0 ? { fully_paid_on: normalizedDate } : {}),
+      }).eq('xero_invoice_id', invoice_id).eq('org_id', DEFAULT_ORG_ID)
+      if (payMirrorErr) console.log('[ops-api] cache update after payment failed:', payMirrorErr.message)
     }
   } catch (e) {
     console.log('[ops-api] cache update after payment failed:', e)
@@ -34304,9 +34310,9 @@ async function createInvoice(
       sub_total: invSubTotal,
       total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
       total: invTotal,
-      amount_due: invTotal,
-      amount_paid: 0,
-      invoice_date: new Date().toISOString().slice(0, 10),
+      amount_due: xeroInv?.AmountDue ?? invTotal,
+      amount_paid: xeroInv?.AmountPaid ?? 0,
+      invoice_date: xeroInv?.DateString || new Date().toISOString().slice(0, 10),
       due_date: xeroDueDate,
       job_id: jId || null,
       run_label: body.run_label || null,
@@ -34340,6 +34346,12 @@ async function createInvoice(
       }
       console.error('Non-blocking: failed to cache invoice locally:', upsertErr.message)
     }
+  }
+
+  if (!xeroInvId) {
+    // Xero answered without an invoice: nothing exists there or here, so the
+    // job must not be marked invoiced.
+    throw new ApiError('Xero returned no invoice for this request; nothing was created', 502)
   }
 
   if (jId) {

@@ -114,11 +114,19 @@ async function linkContactInvoicesToJob(
   targetJobId: string,
   action: string,
 ): Promise<SealedSesMoneyRefusal[]> {
-  const { data: invoices, error } = await client.from('xero_invoices')
+  // Only invoices raised in this job's lifetime. A repeat client's unlinked
+  // history used to be swept onto whichever job triggered the contact link.
+  const { data: targetJob } = await client.from('jobs').select('created_at').eq('id', targetJobId).maybeSingle()
+  const sinceDate = targetJob?.created_at
+    ? new Date(new Date(targetJob.created_at).getTime() - 7 * 86400000).toISOString().slice(0, 10)
+    : null
+  let candidateQuery = client.from('xero_invoices')
     .select('id,xero_invoice_id,invoice_number,invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
     .eq('xero_contact_id', xeroContactId)
     .eq('org_id', DEFAULT_ORG_ID)
     .is('job_id', null)
+  if (sinceDate) candidateQuery = candidateQuery.or(`invoice_date.is.null,invoice_date.gte.${sinceDate}`)
+  const { data: invoices, error } = await candidateQuery
   if (error) {
     throw new Error(
       `The invoice link candidates could not be checked before ${action} (${error.message || 'unknown database error'}).`,
@@ -388,7 +396,7 @@ const TRADE_PDF_BACKFILL_PER_RUN = 15
 
 // Render the audit PDF for a trade bill from the bill's own labour lines plus the
 // persisted money split, and PUT it onto the bill. Returns true when attached.
-async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: string, tenantId: string): Promise<boolean> {
+async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: string, tenantId: string): Promise<true | string> {
   try {
     const money = validatePersistedTradeInvoiceMoney(tradeInv)
     const labour = (inv.LineItems as any[]).filter((l) => !isTradeInvoiceSuperXeroLine(l)).map((l) => ({
@@ -416,15 +424,20 @@ async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: str
     return true
   } catch (pdfErr: any) {
     if (pdfErr instanceof XeroCooldownError) throw pdfErr
-    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfill skipped:', pdfErr?.message || pdfErr)
-    return false
+    const msg = String(pdfErr?.message || pdfErr)
+    console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' PDF backfill skipped:', msg)
+    return msg
   }
 }
 
 // Targeted sweep. The invoice sync is incremental (If-Modified-Since), so a bill
 // that has sat untouched in Xero since it was pushed is never re-read by the
 // loop above. Pull the cached "no attachment" trade bills by id and fix them.
-const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, users:user_id(name)'
+// week_end / week_start / submitted_at / created_at: the money validator resolves
+// the statutory super rate from the earnings date. Without them every backfill
+// failed with SUPER_RATE_UNRESOLVED (2026-09-10).
+const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, week_start, week_end, submitted_at, created_at, pdf_backfill_attempts, user_id, users:user_id(name)'
+const TRADE_PDF_BACKFILL_MAX_ATTEMPTS = 3
 // ════════════════════════════════════════════════════════════
 // CONTACT ADDRESS SWEEP (2026-09-10)
 // Customer contacts our automation created before this date carry either no
@@ -500,6 +513,7 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
     if (!ids.length) return out
     const { data: tradeRows, error: tErr } = await sb.from('trade_invoices')
       .select(TRADE_PDF_SWEEP_COLUMNS).in('xero_bill_id', ids)
+      .lt('pdf_backfill_attempts', TRADE_PDF_BACKFILL_MAX_ATTEMPTS)
     if (tErr) throw tErr
     for (const tradeInv of (tradeRows || [])) {
       if (out.attached >= cap) break
@@ -514,11 +528,18 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
           out.skipped++
           continue
         }
-        if (await attachTradeBillAuditPdf(inv, tradeInv, accessToken, tenantId)) {
+        const attached = await attachTradeBillAuditPdf(inv, tradeInv, accessToken, tenantId)
+        if (attached === true) {
           out.attached++
           await sb.from('xero_invoices').update({ raw_json: { ...inv, HasAttachments: true }, synced_at: new Date().toISOString() }).eq('xero_invoice_id', inv.InvoiceID)
         } else {
           out.skipped++
+          // A bill with no money split can never be rendered: park it for good.
+          const permanent = /missing its super\/GST split/i.test(attached)
+          await sb.from('trade_invoices').update({
+            pdf_backfill_attempts: permanent ? 99 : (Number(tradeInv.pdf_backfill_attempts) || 0) + 1,
+            pdf_backfill_last_error: attached.slice(0, 500),
+          }).eq('id', tradeInv.id)
         }
       } catch (e: any) {
         if (e instanceof XeroCooldownError) throw e
@@ -550,9 +571,12 @@ async function syncInvoices(sb: any) {
     .order('updated_at', { ascending: false })
     .limit(1)
 
-  // updated_at is really our last write time (table trigger), so look back a
-  // little further than that; see sync_window.ts.
-  const modifiedSince = incrementalModifiedSince(lastInvoice?.[0]?.updated_at)
+  // Explicit cursor (xero_sync_state) advanced only after a run fetched every
+  // type and page. Falls back to the newest local updated_at on first use.
+  // Either way we look back a little further; see sync_window.ts.
+  const runStartedAt = new Date().toISOString()
+  const { data: cursorRow } = await sb.from('xero_sync_state').select('cursor_at').eq('key', 'sync_invoices').maybeSingle()
+  const modifiedSince = incrementalModifiedSince(cursorRow?.cursor_at || lastInvoice?.[0]?.updated_at)
 
   let totalSynced = 0
   const sesLinkRefusals: SealedSesMoneyRefusal[] = []
@@ -840,6 +864,12 @@ async function syncInvoices(sb: any) {
     }
   }
 
+  // Every type and page above completed without throwing: advance the cursor.
+  await sb.from('xero_sync_state').upsert(
+    { key: 'sync_invoices', cursor_at: runStartedAt, note: `synced ${totalSynced} since ${modifiedSince || 'the beginning'}`, updated_at: new Date().toISOString() },
+    { onConflict: 'key' },
+  )
+
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
@@ -924,14 +954,27 @@ export async function matchUnlinkedInvoices(client: any) {
   let flagged = 0
   const refusals: SealedSesMoneyRefusal[] = []
   try {
-    // Get invoices with no job_id
-    const { data: unlinked } = await client.from('xero_invoices')
+    // Invoices with no job_id, newest first, customer invoices ahead of the
+    // 1,600-odd unlinked supplier bills. With no order the old 100-row cap was
+    // filled by years-old bills and this week's invoices never reached here.
+    const unlinkedQuery = (type: string, cap: number) => client.from('xero_invoices')
       .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token')
       .is('job_id', null)
+      .eq('invoice_type', type)
       .not('status', 'in', '("VOIDED","DELETED")')
-      .limit(100)
+      .order('invoice_date', { ascending: false, nullsFirst: false })
+      .limit(cap)
+    const { data: unlinkedSales } = await unlinkedQuery('ACCREC', 150)
+    const { data: unlinkedBills } = await unlinkedQuery('ACCPAY', 100)
+    const seenUnlinked = new Set<string>()
+    const unlinked = [...(unlinkedSales || []), ...(unlinkedBills || [])].filter((inv: any) => {
+      const key = String(inv.id || inv.xero_invoice_id)
+      if (seenUnlinked.has(key)) return false
+      seenUnlinked.add(key)
+      return true
+    })
 
-    if (!unlinked || unlinked.length === 0) return { matched: 0, flagged: 0 }
+    if (unlinked.length === 0) return { matched: 0, flagged: 0 }
 
     for (const inv of unlinked) {
       const ref = inv.reference || ''
@@ -2814,6 +2857,8 @@ async function syncBankTransactions(sb: any) {
 
   // Xero Accounting API: GET /BankTransactions
   // Filter to reconciled transactions in the last 90 days
+  // No page param: Xero returns the whole 90-day window in one call for this
+  // endpoint (607 rows today). Adding page=N would cap each call at 100.
   const data = await xeroGet('/BankTransactions', accessToken, tenantId, {
     where: `Date>DateTime(${ninetyDaysAgo.replace(/-/g, ',')})&&IsReconciled==true`,
     order: 'Date DESC',
