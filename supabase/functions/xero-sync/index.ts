@@ -966,7 +966,13 @@ export async function matchUnlinkedInvoices(client: any) {
       .limit(cap)
     const { data: unlinkedSales } = await unlinkedQuery('ACCREC', 150)
     const { data: unlinkedBills } = await unlinkedQuery('ACCPAY', 100)
-    const unlinked = [...(unlinkedSales || []), ...(unlinkedBills || [])]
+    const seenUnlinked = new Set<string>()
+    const unlinked = [...(unlinkedSales || []), ...(unlinkedBills || [])].filter((inv: any) => {
+      const key = String(inv.id || inv.xero_invoice_id)
+      if (seenUnlinked.has(key)) return false
+      seenUnlinked.add(key)
+      return true
+    })
 
     if (unlinked.length === 0) return { matched: 0, flagged: 0 }
 
