@@ -692,9 +692,13 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function isoDate(value: unknown, field: string): string | null {
   if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string" || !ISO_DATE.test(value) || Number.isNaN(Date.parse(value + "T00:00:00Z"))) {
-    throw new XeroReceivablesReadError(`${field} must be an ISO date (YYYY-MM-DD)`);
-  }
+  const bad = () => new XeroReceivablesReadError(`${field} must be an ISO date (YYYY-MM-DD)`);
+  if (typeof value !== "string" || !ISO_DATE.test(value)) throw bad();
+  // Shape alone accepts impossible days (2026-02-30, 2026-13-01): Date rolls
+  // them forward silently. Round-trip the parsed date back to YYYY-MM-DD and
+  // require it to equal the input, so only a real calendar date survives.
+  const parsed = new Date(value + "T00:00:00Z");
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw bad();
   return value;
 }
 
@@ -729,7 +733,7 @@ export async function listXeroBankTransactions(
   const query: Record<string, string> = {
     page: String(page),
     pageSize: String(pageSize),
-    order: "Date DESC, BankTransactionID ASC",
+    order: "Date DESC",
   };
   if (where.length) query.where = where.join(" AND ");
   const { result, provenance } = await providerRead(client, deps, "/BankTransactions", query);
@@ -747,6 +751,9 @@ export async function listXeroBankTransactions(
     if (status === "UNRECONCILED" && row.IsReconciled !== false) {
       throw new XeroReceivablesReadError("Xero returned a reconciled transaction outside the requested filter", 502, "XERO_FILTER_MISMATCH");
     }
+    if ((status === "AUTHORISED" || status === "DELETED") && row.Status !== status) {
+      throw new XeroReceivablesReadError("Xero returned a transaction outside the requested status filter", 502, "XERO_FILTER_MISMATCH");
+    }
   }
   // Matching inputs the BOOKKEEPING rules read, lifted beside the raw row so a
   // matcher never has to re-derive them; the raw record stays for evidence.
@@ -758,6 +765,7 @@ export async function listXeroBankTransactions(
     date: row.DateString ?? row.Date ?? null,
     total: typeof row.Total === "number" ? row.Total : null,
     sub_total: typeof row.SubTotal === "number" ? row.SubTotal : null,
+    currency_code: typeof row.CurrencyCode === "string" ? row.CurrencyCode : null,
     reference: typeof row.Reference === "string" ? row.Reference : null,
     contact_name: rawRecord(row.Contact) && typeof row.Contact.Name === "string" ? row.Contact.Name : null,
     contact_id: rawRecord(row.Contact) && typeof row.Contact.ContactID === "string" ? row.Contact.ContactID.toLowerCase() : null,
@@ -777,7 +785,12 @@ export async function listXeroBankTransactions(
     coverage: {
       source: "xero_bank_transactions",
       statement_lines: "not_exposed_by_xero_api",
-      note: "IsReconciled=false means a Xero bank transaction not yet matched. A bank statement line with no Xero transaction is not visible here. An allocation in Xero is not bank cash.",
+      note: [
+        "IsReconciled=false means a Xero bank transaction not yet matched. A bank statement line with no Xero transaction is not visible here. An allocation in Xero is not bank cash.",
+        "Customer invoice payments are Xero Payments (record_type=payment in list_xero_settlement_records), not BankTransactions. A matcher chasing client cash must union both sources; this read alone will miss invoice receipts.",
+        "total and sub_total are unsigned. Direction lives in type: RECEIVE* brings money in, SPEND* takes it out. RECEIVE-TRANSFER and SPEND-TRANSFER are inter-account moves between our own bank accounts, not client cash.",
+        "currency_code is the transaction currency; totals are not converted to base currency here.",
+      ].join(" "),
     },
   };
 }
@@ -807,15 +820,22 @@ export async function readXeroBankSummary(
   const accounts: Array<Record<string, unknown>> = [];
   const sections = Array.isArray(report.Rows) ? report.Rows.filter(rawRecord) : [];
   for (const section of sections) {
-    if (section.RowType === "Header" && Array.isArray(section.Cells)) {
-      for (const cell of section.Cells) headerCells.push(rawRecord(cell) && typeof cell.Value === "string" ? cell.Value : "");
-    }
+    const pushHeader = (candidate: Record<string, unknown>) => {
+      if (candidate.RowType !== "Header" || !Array.isArray(candidate.Cells) || headerCells.length) return;
+      for (const cell of candidate.Cells) headerCells.push(rawRecord(cell) && typeof cell.Value === "string" ? cell.Value : "");
+    };
+    pushHeader(section);
     const rows = Array.isArray(section.Rows) ? section.Rows.filter(rawRecord) : [];
+    // Xero puts the header row at the top level in some payloads and inside the
+    // section in others, so scan both before reading cells by column name.
+    for (const row of rows) pushHeader(row);
     for (const row of rows) {
       if (row.RowType !== "Row" || !Array.isArray(row.Cells)) continue;
       const cells = row.Cells.filter(rawRecord);
       const value = (i: number) => (cells[i] && typeof cells[i].Value === "string" ? cells[i].Value : null);
-      const number = (i: number) => { const v = value(i); const n = v === null ? NaN : Number(v); return Number.isFinite(n) ? n : null; };
+      // An empty or whitespace-only cell is "no figure", not zero: Number("")
+      // is 0 and would report a fabricated balance.
+      const number = (i: number) => { const v = value(i); if (v === null || v.trim() === "") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
       const attrs = cells[0] && Array.isArray(cells[0].Attributes) ? cells[0].Attributes.filter(rawRecord) : [];
       const accountId = attrs.find((a) => a.Id === "accountID" && typeof a.Value === "string")?.Value;
       const byHeader = (name: string) => { const i = headerCells.indexOf(name); return i >= 0 ? number(i) : null; };
