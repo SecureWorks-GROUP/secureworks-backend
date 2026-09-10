@@ -178,13 +178,21 @@ Deno.test("audit 3: a live invoice for the week is found; drafts are released", 
   assertEquals(await _findLiveTradeInvoiceForWeek(draftsOnly.client, USER_ID, WEEK_END), null);
 });
 
-Deno.test("audit 3: generate_trade_invoice returns the existing live invoice instead of a second bill", () => {
+Deno.test("audit 3: generate_trade_invoice refuses a second submit for a live week as a 409, never success", () => {
   const guardAt = INDEX.indexOf("const liveWeekInvoice = await _findLiveTradeInvoiceForWeek(client, tradeUser.id, weekEnd)");
   const insertAt = INDEX.indexOf("const invoicePayload = {");
   assert(guardAt > 0, "weekly dedupe guard must be wired into generate_trade_invoice");
   assert(guardAt < insertAt, "the guard must run before the invoice is persisted");
-  const guard = INDEX.slice(guardAt, guardAt + 1500);
+  const guard = INDEX.slice(guardAt, INDEX.indexOf("if (weeklyShape && (!week_start || !weekEnd))", guardAt));
+  // 2026-09-10 Alyx: the old `success: true` answer made the trade app paint
+  // "Invoice Submitted" for a week of work that was never saved.
   assertStringIncludes(guard, "already_submitted: true");
+  assertStringIncludes(guard, "code: 'WEEK_ALREADY_INVOICED'");
+  assertStringIncludes(guard, "success: false");
+  assertStringIncludes(guard, "saved: false");
+  assertStringIncludes(guard, "}, 409)");
+  assertEquals(guard.includes("success: true"), false, "a live-week collision must never read as a saved invoice");
+  assertStringIncludes(guard, "This submission was NOT saved");
 });
 
 // ── 4. legacy hourly lane applies the assignment lock ───────────────────────
