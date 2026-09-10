@@ -105,10 +105,11 @@ Deno.test("Outlook refuses a PDF with no authoritative provenance", async () => 
 
 Deno.test("Outlook forward binds opaque attachments to the stored source job", async () => {
   const mismatch = await refusal(
-    clientFor({ inbox: { job_id: JOB_ID } }),
+    clientFor({ inbox: { job_id: JOB_ID, mailbox: "admin@secureworkswa.com.au" } }),
     {
       action: "forward",
       message_id: "graph-message-1",
+      mailbox: "admin@secureworkswa.com.au",
       job_id: "20000000-0000-4000-8000-000000000002",
     },
   );
@@ -131,12 +132,13 @@ Deno.test("Outlook forward binds opaque attachments to the stored source job", a
 
   await assertOutlookSesDeliveryAllowed(
     clientFor({
-      inbox: { job_id: JOB_ID },
+      inbox: { job_id: JOB_ID, mailbox: "admin@secureworkswa.com.au" },
       job: { id: JOB_ID, type: "patio", job_number: "SWP-1" },
     }),
     {
       action: "forward",
       message_id: "graph-message-1",
+      mailbox: "admin@secureworkswa.com.au",
       job_id: JOB_ID,
     },
   );

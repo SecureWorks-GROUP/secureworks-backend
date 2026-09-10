@@ -19,7 +19,11 @@ export function resolveXeroInvoiceDueDate(
     if (candidate == null || candidate === "") continue;
     const fromDotNet = parseXeroDotNetDate(candidate);
     if (fromDotNet) return fromDotNet;
-    const parsed = new Date(String(candidate));
+    const text = String(candidate);
+    // Xero's zone-less calendar date must not move to the previous day when
+    // this code runs in Perth. Explicit offsets retain their instant semantics.
+    const zoneLess = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text);
+    const parsed = new Date(zoneLess ? `${text}Z` : text);
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return fallback;

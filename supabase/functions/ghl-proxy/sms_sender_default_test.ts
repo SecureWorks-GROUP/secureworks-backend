@@ -78,3 +78,29 @@ Deno.test("no send path keeps a private copy of the sender allowlist that could 
   assertStrictEquals(ghlProxySource.includes("SW_FROM_NUMBERS"), false);
   assertStrictEquals(opsApiSource.includes("SW_FROM_NUMBERS"), false);
 });
+
+Deno.test("ghl-proxy send_sms dedups legacy and current outbound event shapes before provider POST", () => {
+  const smsHandler = ghlProxySource.indexOf("action === 'send_sms'");
+  assertStrictEquals(smsHandler >= 0, true);
+  const hashSelect = ghlProxySource.indexOf(".select('event_type,payload,body_preview,body_hash')", smsHandler);
+  assertStrictEquals(hashSelect > smsHandler, true);
+  const dedupQuery = ghlProxySource.indexOf(".in('event_type', ['sms_sent', 'client.sms_out'])", smsHandler);
+  assertStrictEquals(dedupQuery > hashSelect, true);
+  const helperCall = ghlProxySource.indexOf("recentSmsEventMatchesMessage(e, message, messageBodyHash)", dedupQuery);
+  assertStrictEquals(helperCall > dedupQuery, true);
+  const providerPost = ghlProxySource.indexOf("ghl('/conversations/messages'", smsHandler);
+  assertStrictEquals(providerPost > helperCall, true);
+  const dedupReturn = ghlProxySource.indexOf("dedup_blocked: true", helperCall);
+  assertStrictEquals(dedupReturn > helperCall && dedupReturn < providerPost, true);
+});
+
+Deno.test("ghl-proxy create_contact_and_opportunity validates explicit toolType before contact create", () => {
+  const handler = ghlProxySource.indexOf("action === 'create_contact_and_opportunity'");
+  assertStrictEquals(handler >= 0, true);
+  const routeValidation = ghlProxySource.indexOf("const leadRoute = resolveLeadOpportunityRoute(toolType)", handler);
+  assertStrictEquals(routeValidation > handler, true);
+  const invalidReturn = ghlProxySource.indexOf("leadRoute.status", routeValidation);
+  assertStrictEquals(invalidReturn > routeValidation, true);
+  const contactCreate = ghlProxySource.indexOf("ghl('/contacts/'", handler);
+  assertStrictEquals(contactCreate > invalidReturn, true);
+});

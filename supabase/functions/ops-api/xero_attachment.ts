@@ -1,6 +1,10 @@
 // Shared Xero invoice/bill PDF attach. Used by the trade submit path
 // (so a tax invoice cannot be skipped after the ACCPAY draft is created)
 // and by the Books supplier-bill door.
+import {
+  XeroCooldownError,
+  xeroRateLimitError,
+} from "../_shared/xero_cooldown.ts";
 
 export const XERO_API_BASE = "https://api.xero.com/api.xro/2.0";
 export const MAX_XERO_PDF_BYTES = 5 * 1024 * 1024;
@@ -17,7 +21,10 @@ export class XeroPdfAttachError extends Error {
   }
 }
 
-export function sanitizeXeroPdfFilename(raw: unknown, fallback = "invoice"): string {
+export function sanitizeXeroPdfFilename(
+  raw: unknown,
+  fallback = "invoice",
+): string {
   const cleaned = String(raw || "")
     .replace(/[^A-Za-z0-9._-]/g, "_")
     .replace(/_+/g, "_")
@@ -45,10 +52,14 @@ export function distinctXeroPdfFilenames(invoiceNumber: unknown): {
 }
 
 /** Push may create/reuse an ACCPAY from acknowledged|approved, or retry PDF attach onto an existing bill. */
-export function canEnterPushTradeInvoiceToXero(status: unknown, xeroBillId?: unknown): boolean {
+export function canEnterPushTradeInvoiceToXero(
+  status: unknown,
+  xeroBillId?: unknown,
+): boolean {
   const current = String(status || "");
   if (current === "acknowledged" || current === "approved") return true;
-  return current === "pushed_to_xero" && Boolean(String(xeroBillId || "").trim());
+  return current === "pushed_to_xero" &&
+    Boolean(String(xeroBillId || "").trim());
 }
 
 /** Rows already pushed_to_xero must attach onto the existing xero_bill_id — never mint a second ACCPAY. */
@@ -77,7 +88,10 @@ export function decodePdfBase64(raw: unknown): Uint8Array<ArrayBuffer> {
   }
   let pdfBytes: Uint8Array<ArrayBuffer>;
   try {
-    const decoded = Uint8Array.from(atob(pdfBase64), (c: string) => c.charCodeAt(0));
+    const decoded = Uint8Array.from(
+      atob(pdfBase64),
+      (c: string) => c.charCodeAt(0),
+    );
     pdfBytes = new Uint8Array(decoded.byteLength);
     pdfBytes.set(decoded);
   } catch {
@@ -99,6 +113,7 @@ export async function attachPdfToXeroInvoice(input: {
   accessToken: string;
   tenantId: string;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<void> {
   const invoiceId = String(input.invoiceId || "").trim();
   if (!invoiceId) {
@@ -106,34 +121,52 @@ export async function attachPdfToXeroInvoice(input: {
   }
   const filename = sanitizeXeroPdfFilename(input.filename);
   const fetchImpl = input.fetchImpl || fetch;
-  const attachRes = await fetchImpl(
-    `${XERO_API_BASE}/Invoices/${
-      encodeURIComponent(invoiceId)
-    }/Attachments/${encodeURIComponent(filename)}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${input.accessToken}`,
-        "Xero-tenant-id": input.tenantId,
-        "Content-Type": "application/pdf",
-        "Content-Length": String(input.pdfBytes.length),
+  let attachRes: Response;
+  try {
+    attachRes = await fetchImpl(
+      `${XERO_API_BASE}/Invoices/${encodeURIComponent(invoiceId)}/Attachments/${
+        encodeURIComponent(filename)
+      }`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${input.accessToken}`,
+          "Xero-tenant-id": input.tenantId,
+          "Content-Type": "application/pdf",
+          "Content-Length": String(input.pdfBytes.length),
+        },
+        body: input.pdfBytes,
+        signal: input.signal,
       },
-      body: input.pdfBytes,
-    },
-  );
+    );
+    if (attachRes.status === 429) throw xeroRateLimitError(attachRes);
+  } catch (error) {
+    if (error instanceof XeroCooldownError) {
+      throw new XeroCooldownError(error.message, error.status, error.code, {
+        ...error.details,
+        provider_operation: "invoice_pdf_attachment",
+        xero_invoice_id: invoiceId,
+        pdf_attachment_confirmed: false,
+      });
+    }
+    throw error;
+  }
   if (!attachRes.ok) {
     const errText = await attachRes.text();
     throw new XeroPdfAttachError(
       `Xero attachment failed: ${attachRes.status} ${errText}`.slice(0, 500),
-      attachRes.status >= 400 && attachRes.status < 600 ? attachRes.status : 502,
+      attachRes.status >= 400 && attachRes.status < 600
+        ? attachRes.status
+        : 502,
       "XERO_PDF_ATTACH_FAILED",
     );
   }
 }
 
 function isRetryablePdfAttachError(error: unknown): boolean {
+  if (error instanceof XeroCooldownError) return false;
   if (!(error instanceof XeroPdfAttachError)) return true;
-  if (error.status === 429) return true;
+  if (error.status === 429) return false;
   return error.status >= 500 || error.status === 0;
 }
 
@@ -143,14 +176,23 @@ export async function attachPdfToXeroInvoiceUntilAttached(
   },
 ): Promise<void> {
   const attempts = Math.max(1, input.attempts ?? XERO_PDF_ATTACH_ATTEMPTS);
+  // Replacing the same named PDF remains retryable for transient failures, but
+  // the whole operation must fit inside its120s caller including persistence.
+  const deadline = AbortSignal.timeout(90_000);
+  const signal = input.signal
+    ? AbortSignal.any([input.signal, deadline])
+    : deadline;
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      await attachPdfToXeroInvoice(input);
+      await attachPdfToXeroInvoice({ ...input, signal });
       return;
     } catch (error) {
       lastError = error;
-      if (!isRetryablePdfAttachError(error) || attempt === attempts) {
+      if (
+        signal.aborted || !isRetryablePdfAttachError(error) ||
+        attempt === attempts
+      ) {
         throw error;
       }
     }

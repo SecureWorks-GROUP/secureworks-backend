@@ -26,7 +26,9 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey, xeroRateLimitDetails, xeroRateLimitError } from '../_shared/xero_cooldown.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
@@ -85,6 +87,7 @@ import {
   touchInvoiceEmailSendClaim,
 } from './invoice_email_send_claim.ts'
 import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
+import { sendRunsJobTypeRefusal, sendRunsRequestRefusal } from './send_runs_request.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
@@ -103,6 +106,8 @@ const FROM_NAME = Deno.env.get('FROM_NAME') || 'SecureWorks Group'
 const BASE_URL = Deno.env.get('PUBLIC_URL') || SUPABASE_URL
 const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://secureworks-website.pages.dev/quote.html'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
+const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
+let _xeroAppKey: Promise<string> | null = null
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
@@ -695,6 +700,7 @@ serve(async (req: Request) => {
 
     // ── SEND QUOTE EMAIL ──
     if (path === 'send' && req.method === 'POST') {
+      let xeroQuoteWarning: Record<string, unknown> | null = null
       const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
 
       if (!document_id) {
@@ -1211,6 +1217,9 @@ serve(async (req: Request) => {
               console.log(`[send-quote] Xero Quote created: ${xeroQuoteId}`)
             }
           } catch (e) {
+            // Email publication already succeeded. Preserve that success and
+            // expose the deferred Xero step without encouraging a duplicate send.
+            xeroQuoteWarning = xeroQuoteFailureWarning(e)
             console.log('[send-quote] Xero Quote creation failed (non-blocking):', (e as Error).message)
           }
         }
@@ -1245,7 +1254,7 @@ serve(async (req: Request) => {
         }
       }
 
-      return jsonResponse({ success: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
+      return jsonResponse({ success: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number, ...(xeroQuoteWarning ? { xero_quote_warning: xeroQuoteWarning } : {}) }, 200, corsHeaders)
     }
 
     // ── QUOTE STATUS (for toolbar badges) ──
@@ -2336,12 +2345,14 @@ serve(async (req: Request) => {
 
     // ── SEND PER-RUN FENCING QUOTES (multi-neighbour) ──
     if (path === 'send-runs' && req.method === 'POST') {
+      const requestBody = await req.json()
+      const requestRefusal = sendRunsRequestRefusal(requestBody)
+      if (requestRefusal) return jsonResponse(requestRefusal.body, requestRefusal.status, corsHeaders)
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
-      const { job_id, message, run_pdfs } = await req.json()
+      const { job_id, message, run_pdfs } = requestBody
       // run_pdfs: optional map { 'REAR': 'https://...pdf', 'LHS': 'https://...pdf' }
-      if (!job_id) return jsonResponse({ error: 'job_id required' }, 400, corsHeaders)
 
       // Load job with contacts and pricing
       const { data: job, error: jobErr } = await sb.from('jobs')
@@ -2370,6 +2381,11 @@ serve(async (req: Request) => {
           return jsonResponse(refused.body, refused.status, corsHeaders)
         }
       }
+
+      // MCP supplies this scope marker; legacy clients omit it. Check after
+      // tenant access and before pricing, claims, documents, or provider sends.
+      const scopeRefusal = sendRunsJobTypeRefusal(requestBody, job.type)
+      if (scopeRefusal) return jsonResponse(scopeRefusal.body, scopeRefusal.status, corsHeaders)
 
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []
@@ -3630,6 +3646,9 @@ serve(async (req: Request) => {
     return jsonResponse({ error: 'Not found' }, 404, corsHeaders)
 
   } catch (err) {
+    if (err instanceof XeroCooldownError) {
+      return jsonResponse({ ok: false, code: err.code, error: err.message, ...err.details }, err.status, corsHeaders)
+    }
     console.error('Send-quote error:', err)
     return jsonResponse({ error: err.message || 'Internal error' }, 500, corsHeaders)
   }
@@ -4580,7 +4599,7 @@ async function getXeroToken(sb: any): Promise<{ accessToken: string; tenantId: s
   return { accessToken: token.access_token, tenantId: token.tenant_id }
 }
 
-async function createXeroQuote(sb: any, job: any, doc?: any): Promise<string | null> {
+async function createXeroQuote(sb: any, job: any, doc?: any, requestFetch?: typeof fetch): Promise<string | null> {
   const xeroAuth = await getXeroToken(sb)
   if (!xeroAuth) return null
 
@@ -4653,29 +4672,60 @@ async function createXeroQuote(sb: any, job: any, doc?: any): Promise<string | n
     }],
   }
 
-  const resp = await fetch(`${XERO_API_BASE}/Quotes`, {
-    method: 'PUT',
-    headers: {
-      'Authorization': `Bearer ${xeroAuth.accessToken}`,
-      'Xero-tenant-id': xeroAuth.tenantId,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Idempotency-Key': `${job.id}-xero-quote-${doc?.quote_number || 'v1'}`,
-    },
-    body: JSON.stringify(quotePayload),
+  // Existing keyed quote PUT, single attempt. Transport maintenance shares the
+  // same app/tenant row as ops-api and sync; authentication stays unchanged.
+  const guardedFetch = requestFetch ?? createXeroCooldownFetch({
+    store: createOrgConfigXeroCooldownStore(sb),
+    orgId: DEFAULT_ORG_ID,
+    appKey: () => (_xeroAppKey ??= xeroAppKey(XERO_CLIENT_ID)),
+    timeoutMs: 90_000,
+    onPersistenceFailure: () => console.warn('[send-quote] Xero cooldown persistence failed; shared protection is degraded'),
   })
-
-  if (!resp.ok) {
-    const errText = await resp.text()
-    console.error(`[send-quote] Xero Quote API error (${resp.status}):`, errText)
-    return null
+  let resp: Response
+  try {
+    resp = await guardedFetch(`${XERO_API_BASE}/Quotes`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${xeroAuth.accessToken}`,
+        'Xero-tenant-id': xeroAuth.tenantId,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Idempotency-Key': `${job.id}-xero-quote-${doc?.quote_number || 'v1'}`,
+      },
+      body: JSON.stringify(quotePayload),
+    })
+  } catch (error) {
+    if (error instanceof XeroCooldownError) throw error
+    throw new XeroQuoteWriteError('unknown', { provider_call_made: true })
   }
 
-  const result = await resp.json()
+  if (resp.status === 429) throw xeroRateLimitError(resp)
+
+  const responseDetails = { ...xeroRateLimitDetails(resp), provider_call_made: true }
+  if (!resp.ok) {
+    void resp.body?.cancel().catch(() => {})
+    const rejected = resp.status >= 400 && resp.status < 500 && resp.status !== 408
+    throw new XeroQuoteWriteError(rejected ? 'failed' : 'unknown', responseDetails)
+  }
+
+  let result: any
+  try {
+    result = await resp.json()
+  } catch {
+    throw new XeroQuoteWriteError('unknown', responseDetails)
+  }
   const quote = result?.Quotes?.[0]
-  return quote?.QuoteID || null
+  if (quote?.HasValidationErrors === true || quote?.ValidationErrors?.length > 0) {
+    throw new XeroQuoteWriteError('failed', responseDetails)
+  }
+  if (!Array.isArray(result?.Quotes) || result.Quotes.length !== 1 || typeof quote?.QuoteID !== 'string' || !quote.QuoteID.trim()) {
+    throw new XeroQuoteWriteError('unknown', responseDetails)
+  }
+  return quote.QuoteID
 }
 
+
+export const _createXeroQuoteForTest = createXeroQuote
 
 // ════════════════════════════════════════════════════════════
 // NEXT STEPS PAGE (shown after quote acceptance)

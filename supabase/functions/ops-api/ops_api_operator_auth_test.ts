@@ -56,6 +56,66 @@ function scopedDispatchStatus(
   return 200;
 }
 
+
+Deno.test("create_invoice_draft is privileged server or staff JWT only at the ops-api front door", () => {
+  const action = "create_invoice_draft";
+  assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true);
+  assertEquals(_opsApiActionNeedsStaffRole(actionUrl(action)), true);
+  assertEquals(authorizationStatus({ action, authMode: "none" }), 401);
+  assertEquals(authorizationStatus({ action, authMode: "api_key" }), 401);
+  assertEquals(
+    authorizationStatus({ action, authMode: "api_key", serverSecretPresented: true }),
+    200,
+  );
+  for (const role of ["admin", "owner", "ops_manager"]) {
+    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200, role);
+  }
+  for (const role of ["crew", "installer", "lead_installer"]) {
+    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 403, role);
+  }
+  assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
+});
+
+Deno.test("direct Xero evidence reads retain staff/server auth and refuse public or trade callers", () => {
+  for (
+    const action of [
+      "read_xero_organisation",
+      "read_xero_tracking_categories",
+      "list_xero_receivables",
+      "get_xero_receivable",
+      "list_xero_settlement_records",
+      "read_xero_settlement_record",
+    ]
+  ) {
+    for (const authMode of ["none", "api_key"] as const) {
+      assertEquals(authorizationStatus({ action, authMode }), 401);
+    }
+    assertEquals(
+      authorizationStatus({
+        action,
+        authMode: "api_key",
+        serverSecretPresented: true,
+      }),
+      200,
+    );
+    for (const role of ["admin", "owner", "ops_manager"]) {
+      assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200);
+    }
+    for (const role of ["crew", "installer", "lead_installer"]) {
+      assertEquals(
+        authorizationStatus({
+          action,
+          authMode: "jwt",
+          role,
+          managedVerticals: ["roofing"],
+        }),
+        403,
+      );
+    }
+    assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
+  }
+});
+
 Deno.test("operator board and money data reject missing, anon-only, and shared-key-only auth with 401", () => {
   for (const action of ["makesafe_board", "job_financials"]) {
     for (const authMode of ["none", "jwt", "api_key"] as const) {
