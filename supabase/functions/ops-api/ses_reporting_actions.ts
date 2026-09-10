@@ -49,9 +49,11 @@ import {
   type SesEffectClaim,
   type SesExternalAdapter,
   type SesExternalContext,
+  SesExternalDefiniteNoDispatchError,
   type SesExternalEffect,
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
+import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import {
   assertSesRouteRecipients,
   buildSesCockpitView,
@@ -2941,20 +2943,7 @@ export async function createSesInvoiceDraftAction(
     artifact_hash: retryArtifactHash,
     payload: proposal,
   });
-  const createAdapter: SesExternalAdapter<
-    SesInvoiceProposalV1,
-    SesXeroInvoiceResult
-  > = {
-    dispatch: (payload, context) => gateway.createDraft(payload, context),
-    reconcile: (context) => gateway.reconcileCreate(context.external_token),
-    identify: (result) => result.xero_invoice_id,
-    digest: (result) => ({
-      invoice_number: result.invoice_number,
-      status: result.status,
-      reference: result.reference,
-      total: result.total,
-    }),
-  };
+  const createAdapter = createSesInvoiceCreateAdapter(gateway);
   const created = await executeSesExternalEffect({
     store,
     effect: createEffect,
@@ -3072,6 +3061,32 @@ function exactRouteEffectExpectation(
   };
 }
 
+function exactInvoiceNoDispatchExpectation(
+  effect: SesExternalEffect,
+): Record<string, unknown> | null {
+  const effectId = String(effect.id || "").trim();
+  const obligationRevisionId = String(
+    effect.invoice_obligation_revision_id || "",
+  ).trim();
+  const operationKey = String(effect.operation_key || "").trim();
+  const externalToken = String(effect.external_token || "").trim();
+  const payloadHash = String(effect.payload_hash || "").trim();
+  if (
+    effect.effect_kind !== "invoice_create" || effect.state !== "failed" ||
+    !effectId ||
+    !obligationRevisionId || !operationKey || !externalToken || !payloadHash
+  ) return null;
+  return {
+    effect_id: effectId,
+    invoice_obligation_revision_id: obligationRevisionId,
+    operation_key: operationKey,
+    effect_kind: effect.effect_kind,
+    external_token: externalToken,
+    payload_hash: payloadHash,
+    state: effect.state,
+  };
+}
+
 /**
  * `claim_ses_external_effect_v1` raises SQLSTATE 23505 when an existing
  * operation_key's stored content no longer matches the caller's. That guard is
@@ -3179,6 +3194,27 @@ export function createSupabaseSesEffectStore(
           state: "refused",
           fact:
             "The exact-token-absent route could not acquire its exclusive redispatch lease.",
+        });
+      }
+      return claimed.data ? claimed.data as SesExternalEffect : null;
+    },
+    async claimProvenNoDispatchRetry(effect, leaseOwner, actor) {
+      const expectation = exactInvoiceNoDispatchExpectation(effect);
+      if (!expectation) return null;
+      const claimed = await client.rpc(
+        "claim_ses_invoice_no_dispatch_retry_v1",
+        {
+          p_expectation: expectation,
+          p_lease_owner: leaseOwner,
+          p_actor: actor,
+          p_lease_seconds: 120,
+        },
+      );
+      if (claimed.error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            "The proven-no-dispatch invoice effect could not acquire its exclusive retry lease.",
         });
       }
       return claimed.data ? claimed.data as SesExternalEffect : null;
@@ -4383,6 +4419,77 @@ export interface SesXeroGateway {
    * local HTML/proposal invention).
    */
   fetchAuthorisedPdf(invoiceId: string): Promise<Uint8Array>;
+}
+
+/**
+ * Adapt the Xero create boundary to the SES effect state machine. Only the
+ * explicit local `PREFLIGHT_FAILED` result or a typed shared-cooldown refusal
+ * carrying provider_called:false becomes retryable no-dispatch proof. The
+ * ordinary reconcile method stays unwrapped: a read-time error about an old
+ * attempt cannot prove that its provider mutation was never called.
+ */
+export function createSesInvoiceCreateAdapter(
+  gateway: SesXeroGateway,
+): SesExternalAdapter<SesInvoiceProposalV1, SesXeroInvoiceResult> {
+  const asNoDispatch = (error: unknown): Error => {
+    if (error instanceof SesExternalDefiniteNoDispatchError) return error;
+    const root = object(error);
+    const details = object(root.details);
+    const code = String(root.code || details.code || "").trim();
+    // Both independent flags must affirm that the invoice mutation was not
+    // called. A contradictory or partial payload is ambiguous and must stay
+    // held, even when it arrived through the typed cooldown class.
+    const providerNotCalled = details.provider_called === false &&
+      details.provider_call_made === false;
+    const safePreflight = code === "PREFLIGHT_FAILED" ||
+      (error instanceof XeroCooldownError && providerNotCalled);
+    if (!safePreflight) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+    return new SesExternalDefiniteNoDispatchError(
+      error instanceof Error
+        ? error.message
+        : "Xero invoice creation was refused before its provider mutation",
+      {
+        ...(code ? { code } : {}),
+        ...(error instanceof XeroCooldownError ? { ...details } : {}),
+        ...(code === "PREFLIGHT_FAILED" && root.missing_dimensions
+          ? { missing_dimensions: root.missing_dimensions }
+          : {}),
+      },
+    );
+  };
+  const dispatch = async (
+    payload: SesInvoiceProposalV1,
+    context: SesExternalContext,
+  ): Promise<SesXeroInvoiceResult> => {
+    try {
+      return await gateway.createDraft(payload, context);
+    } catch (error) {
+      throw asNoDispatch(error);
+    }
+  };
+  const reconcilePreflight = async (
+    context: SesExternalContext,
+  ): Promise<SesXeroInvoiceResult[]> => {
+    try {
+      return await gateway.reconcileCreate(context.external_token);
+    } catch (error) {
+      throw asNoDispatch(error);
+    }
+  };
+  return {
+    dispatch,
+    reconcile: (context) => gateway.reconcileCreate(context.external_token),
+    reconcilePreflight,
+    identify: (result) => result.xero_invoice_id,
+    digest: (result) => ({
+      invoice_number: result.invoice_number,
+      status: result.status,
+      reference: result.reference,
+      total: result.total,
+    }),
+  };
 }
 
 /** Stored Xero DRAFT PDF pointer written onto the obligation binding. */
@@ -5832,20 +5939,7 @@ export async function executeSesInvoiceRevisionAction(
       invoice_obligation_revision_id: revision.id,
       payload: proposal,
     });
-    const createAdapter: SesExternalAdapter<
-      SesInvoiceProposalV1,
-      SesXeroInvoiceResult
-    > = {
-      dispatch: (payload, context) => gateway.createDraft(payload, context),
-      reconcile: (context) => gateway.reconcileCreate(context.external_token),
-      identify: (result) => result.xero_invoice_id,
-      digest: (result) => ({
-        invoice_number: result.invoice_number,
-        status: result.status,
-        reference: result.reference,
-        total: result.total,
-      }),
-    };
+    const createAdapter = createSesInvoiceCreateAdapter(gateway);
     const created = await executeSesExternalEffect({
       store,
       effect: createEffect,

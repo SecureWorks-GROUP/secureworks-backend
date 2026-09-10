@@ -1,0 +1,2 @@
+-- The earlier SES ledger contract setup supplies the pre-migration effect
+-- tables. This case needs no additional schema objects.
