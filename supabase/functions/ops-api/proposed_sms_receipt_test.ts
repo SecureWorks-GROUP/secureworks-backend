@@ -21,6 +21,14 @@ function fixture(overrides: Record<string, unknown> = {}) {
     action_payload: { loop: "booking_scope" },
     ...overrides,
   };
+  const allowedStatuses = new Set([
+    "pending",
+    "auto_approved",
+    "approved",
+    "rejected",
+    "expired",
+    "sent",
+  ]);
   const events: any[] = [];
   const calls: any[] = [];
   const failures = {
@@ -98,6 +106,15 @@ function fixture(overrides: Record<string, unknown> = {}) {
                 ? action.action_payload.sms_dispatch ?? null
                 : action[key]) === value
             );
+            if (patch?.status && !allowedStatuses.has(patch.status)) {
+              return {
+                data: null,
+                error: {
+                  code: "23514",
+                  message: "ai_proposed_actions_status_check",
+                },
+              };
+            }
             const failure = patch &&
               (patch.status === "sent"
                 ? failures.finalize
@@ -126,6 +143,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
   };
   return {
     action,
+    allowedStatuses,
     events,
     calls,
     failures,
@@ -465,4 +483,18 @@ Deno.test("proxy upstream failure envelope after acceptance is unknown, never de
   assertEquals(f.events[0].row.event_type, "proposed_action.dispatch_unknown");
   assertEquals(f.events[0].row.payload.outcome, "unknown");
   assertEquals(f.events[0].row.payload.ghl_message_id, null);
+});
+
+Deno.test("legacy status constraint cannot turn accepted send into success or replay", async () => {
+  const f = fixture();
+  f.allowedStatuses.delete("sent");
+  const { result, fetches } = await run(f);
+  assertEquals(fetches, 1);
+  assertEquals(result.success, false);
+  assertEquals(result.error, "dispatch_finalize_unconfirmed");
+  assertEquals(result.outcome, "provider_accepted");
+  assertEquals(result.ghl_message_id, "message-fixture");
+  assertEquals(f.action.status, "approved");
+  assertEquals(f.events[0].row.event_type, "proposed_action.dispatched");
+  await assertRejects(() => run(f));
 });
