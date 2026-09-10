@@ -1110,7 +1110,10 @@ export async function matchUnlinkedInvoices(client: any) {
       .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token')
       .is('job_id', null)
       .not('status', 'in', '("VOIDED","DELETED")')
-      .limit(100)
+      // Newest first: with no order the 100-row cap was filled by years-old
+      // rows and the invoices raised this week never reached the matcher.
+      .order('invoice_date', { ascending: false, nullsFirst: false })
+      .limit(200)
 
     if (!unlinked || unlinked.length === 0) return { matched: 0, flagged: 0 }
 
