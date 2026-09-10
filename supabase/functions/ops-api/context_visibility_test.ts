@@ -14,6 +14,8 @@ const active = {
   job_id: "job",
   kind: "note",
   value: { text: "CURRENT_SOURCE" },
+  _context_store: "job_context",
+  expires_at: null,
   provenance: { safety: { memory_trusted: true } },
 };
 const rows = [
@@ -63,13 +65,15 @@ function client() {
         gt() {
           return q;
         },
-        contains() { return q; },
-      maybeSingle() {
+        contains() {
+          return q;
+        },
+        maybeSingle() {
           single = true;
           return q;
         },
         then(resolve: any) {
-          const data = table === "job_context"
+          const data = table === "current_job_context_facts"
             ? rows
             : table === "jobs"
             ? [{ id: "job", job_number: "SWF-fixture" }]
@@ -139,4 +143,28 @@ Deno.test("actual dossier excludes obsolete facts and their current evidence ref
     result.diagnostics.warnings.some((w: string) => w.includes("4 superseded")),
   );
   assert(!JSON.stringify(result).includes("OLD_SOURCE"));
+});
+
+Deno.test("view permanent null expiry remains visible, current temporary facts reach dossier", async () => {
+  const future = {
+    ...active,
+    id: "temporary-current",
+    kind: "pending_action",
+    _context_store: "job_temporary_context",
+    expires_at: "2999-01-01T00:00:00Z",
+  };
+  rows.push(future);
+  try {
+    const result = await _assembleJobDossierForTest(client(), {
+      job_id: "job",
+    });
+    assertEquals(result.facts, [active]);
+    assertEquals(result.temporaryFacts, [future]);
+    assertEquals(
+      result.evidenceRefs.find((r: any) => r.id === future.id)?.source_table,
+      "job_temporary_context",
+    );
+  } finally {
+    rows.pop();
+  }
 });

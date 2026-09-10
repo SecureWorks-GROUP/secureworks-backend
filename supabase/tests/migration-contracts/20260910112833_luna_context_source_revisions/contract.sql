@@ -33,7 +33,7 @@ INSERT INTO public.job_events (id,job_id,detail_json) VALUES
 
 DO $$
 DECLARE
- s jsonb; old_s jsonb; other_s jsonb; f jsonb; original jsonb; r jsonb; altered jsonb; tab text; source_id text;
+ s jsonb; old_s jsonb; other_s jsonb; f jsonb; original jsonb; r jsonb; tab text;
  a constant text := '33333333-0000-4000-8000-000000000001';
  b constant text := '33333333-0000-4000-8000-000000000002';
  c constant text := '33333333-0000-4000-8000-000000000003';
@@ -189,5 +189,56 @@ BEGIN
   RAISE EXCEPTION 'expected wrong extractor refusal';
  EXCEPTION WHEN OTHERS THEN IF SQLERRM <> 'luna_fact_source_mismatch' THEN RAISE; END IF; END;
  RAISE NOTICE 'Luna revision contracts: correction/store/job switch, replay, human edits, tombstones, source adapters, attribution and ACL passed';
+END $$;
+
+-- An isolated job shows that the view filters retirement BEFORE order/limit.
+INSERT INTO public.jobs (id,org_id,status,type,job_number) VALUES
+ ('11111111-0000-4000-8000-000000000003','00000000-0000-0000-0000-000000000001','new','patio','LUNA-CONTRACT-VIEW');
+INSERT INTO public.job_context (id,job_id,kind,value,provenance,updated_at) SELECT
+ ('44444444-0000-4000-8000-' || lpad(n::text,12,'0'))::uuid,
+ '11111111-0000-4000-8000-000000000003'::uuid,'note','{"text":"recent retired row"}',
+ CASE n % 5
+  WHEN 0 THEN '{"lifecycle":"superseded"}'::jsonb
+  WHEN 1 THEN '{"lifecycle":{"state":"retracted"}}'::jsonb
+  WHEN 2 THEN '{"safety":{"memory_trusted":false}}'::jsonb
+  WHEN 3 THEN '{"superseded_by":"replacement-fact"}'::jsonb
+  ELSE '{"retracted_at":"2026-09-10T00:00:00Z"}'::jsonb END,
+ now() FROM generate_series(1,20) n;
+INSERT INTO public.job_context (id,job_id,kind,value,provenance,updated_at) VALUES
+ ('44444444-0000-4000-8000-000000000099','11111111-0000-4000-8000-000000000003','note',
+  '{"text":"older active legacy human evidence"}','{}',now()-interval '1 day');
+DO $$
+DECLARE ids uuid[];
+BEGIN
+ SET LOCAL ROLE service_role;
+ SELECT array_agg(id) INTO ids FROM (
+  SELECT id FROM public.current_job_context_facts
+   WHERE job_id='11111111-0000-4000-8000-000000000003' ORDER BY updated_at DESC LIMIT 12
+ ) page;
+ RESET ROLE;
+ PERFORM pg_temp.assert_luna(ids=ARRAY['44444444-0000-4000-8000-000000000099'::uuid],
+  'twenty recent retired rows must not hide older active row from limit 12');
+END $$;
+INSERT INTO public.job_context (id,job_id,kind,value,provenance) VALUES
+ ('44444444-0000-4000-8000-000000000100','11111111-0000-4000-8000-000000000003','pending_action',
+  '{"text":"legacy transient without expiry"}','{}');
+INSERT INTO public.job_temporary_context (id,job_id,kind,value,provenance,expires_at) VALUES
+ ('44444444-0000-4000-8000-000000000101','11111111-0000-4000-8000-000000000003','pending_action','{"text":"live temporary evidence"}','{}',now()+interval '1 day'),
+ ('44444444-0000-4000-8000-000000000102','11111111-0000-4000-8000-000000000003','pending_action','{"text":"expired temporary evidence"}','{}',now()-interval '1 day'),
+ ('44444444-0000-4000-8000-000000000103','11111111-0000-4000-8000-000000000003','pending_action','{"text":"retired temporary evidence"}','{"lifecycle":"retracted"}',now()+interval '1 day');
+DO $$
+BEGIN
+ PERFORM pg_temp.assert_luna((SELECT count(*)=2 FROM public.current_job_context_facts
+  WHERE job_id='11111111-0000-4000-8000-000000000003'),'only permanent and unexpired current temporary rows visible');
+ PERFORM pg_temp.assert_luna((SELECT _context_store='job_temporary_context' AND expires_at>now()
+  FROM public.current_job_context_facts WHERE id='44444444-0000-4000-8000-000000000101'),'temporary store/expiry retained');
+ PERFORM pg_temp.assert_luna((SELECT _context_store='job_context' AND expires_at IS NULL
+  FROM public.current_job_context_facts WHERE id='44444444-0000-4000-8000-000000000099'),'permanent store/NULL expiry retained');
+ PERFORM pg_temp.assert_luna(NOT has_table_privilege('anon','public.current_job_context_facts','SELECT'),'anon cannot read view');
+ PERFORM pg_temp.assert_luna(NOT has_table_privilege('authenticated','public.current_job_context_facts','SELECT'),'authenticated cannot read service-only view');
+ PERFORM pg_temp.assert_luna(has_table_privilege('service_role','public.current_job_context_facts','SELECT'),'service role can read view');
+ PERFORM pg_temp.assert_luna((SELECT reloptions @> ARRAY['security_invoker=true'] FROM pg_class
+  WHERE oid='public.current_job_context_facts'::regclass),'view must respect caller permissions');
+ RAISE NOTICE 'Current context view: pre-limit visibility, temporary expiry and service-only invoker permissions passed';
 END $$;
 ROLLBACK;

@@ -215,4 +215,29 @@ REVOKE ALL ON FUNCTION public.persist_luna_context_revision(text,text,jsonb,text
 GRANT EXECUTE ON FUNCTION public.persist_luna_context_revision(text,text,jsonb,text,jsonb) TO service_role;
 COMMENT ON FUNCTION public.persist_luna_context_revision(text,text,jsonb,text,jsonb) IS
   'Service-only source-row CAS, immutable revision receipts, and atomic Luna fact replacement/retraction. No provider or business actions.';
+
+-- Apply visibility before caller ordering/limits, so recent retirement writes
+-- cannot crowd older current evidence off the first page. This includes legacy
+-- and human context under the same visibility contract, not only Luna rows.
+CREATE VIEW public.current_job_context_facts WITH (security_invoker = true) AS
+SELECT visible.* FROM (
+  SELECT id,job_id,kind,value,provenance,correlation_id,created_at,updated_at,
+    NULL::timestamptz AS expires_at, 'job_context'::text AS _context_store
+  FROM public.job_context
+  WHERE kind NOT IN ('current_state','pending_action','quote_issue')
+  UNION ALL
+  SELECT id,job_id,kind,value,provenance,correlation_id,created_at,updated_at,
+    expires_at, 'job_temporary_context'::text AS _context_store
+  FROM public.job_temporary_context WHERE expires_at > now()
+) visible
+WHERE provenance#>'{safety,memory_trusted}' IS DISTINCT FROM 'false'::jsonb
+  AND coalesce(CASE WHEN jsonb_typeof(provenance->'lifecycle') = 'object'
+    THEN provenance#>>'{lifecycle,state}' ELSE provenance->>'lifecycle' END, 'active')
+    NOT IN ('superseded','retracted')
+  AND nullif(provenance->>'superseded_by','') IS NULL
+  AND nullif(provenance->>'retracted_at','') IS NULL;
+REVOKE ALL ON public.current_job_context_facts FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.current_job_context_facts TO service_role;
+COMMENT ON VIEW public.current_job_context_facts IS
+  'Service-only invoker view: current permanent and unexpired temporary evidence, filtered before pagination. Stored history is unchanged.';
 COMMIT;

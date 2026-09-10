@@ -15,7 +15,8 @@ export function isCurrentContextFact(
   const temporary = ["current_state", "pending_action", "quote_issue"].includes(
     String(row.kind),
   ) ||
-    Object.hasOwn(row, "expires_at");
+    row._context_store === "job_temporary_context" ||
+    (row._context_store !== "job_context" && Object.hasOwn(row, "expires_at"));
   if (!temporary) return true;
   const expiry = typeof row.expires_at === "string"
     ? Date.parse(row.expires_at)
