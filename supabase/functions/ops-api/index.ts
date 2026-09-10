@@ -95,6 +95,8 @@
 //   push_trade_invoice_to_xero — Push acknowledged trade invoice to Xero as ACCPAY bill
 // ════════════════════════════════════════════════════════════
 
+import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
+
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 // Pin the CDN dependency so CI import-resolution does not first resolve the
 // moving @2 tag through esm.sh's package metadata endpoint.
@@ -338,6 +340,7 @@ import {
   notifySesDocsReadySms,
   SES_DOCS_READY_SMS_DEFAULT_TO,
 } from './ses_docs_ready_sms.ts'
+import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
 } from './ses_trade_chase.ts'
@@ -43189,6 +43192,12 @@ export const CURATED_BIND_JOB_MEDIA_COLUMNS =
 type CuratedBindMaterialsSourceAccounting = {
   service_report_items: string[]
   report_items: string[]
+  display_mappings?: Array<{
+    source_item: string
+    display_item: string
+    source_quantity: number
+    reason: 'source_quantity_omitted'
+  }>
   excluded: Array<{ item: string; reason: string }>
 }
 
@@ -43277,19 +43286,31 @@ async function assertCurrentWikiSourceEvidence(
     ? suppliedMaterials.items.map((item: string) => String(item).trim())
     : []
   const remainingServiceItems = expectedMaterialItems.slice()
+  const displayMappings: NonNullable<
+    CuratedBindMaterialsSourceAccounting['display_mappings']
+  > = []
   for (const item of suppliedMaterialItems) {
-    const matchIndex = remainingServiceItems.indexOf(item)
-    if (matchIndex < 0) {
+    const match = matchSesMaterialDisplay(item, remainingServiceItems)
+    if (!match) {
       throw curatedBindError(
         'curated_bind_materials_source_mismatch',
         'materials_evidence contains item(s) absent from the selected current-cycle service report',
       )
     }
-    remainingServiceItems.splice(matchIndex, 1)
+    remainingServiceItems.splice(match.source_index, 1)
+    if (match.match_kind === 'quantity_suffix_omitted') {
+      displayMappings.push({
+        source_item: match.source_item,
+        display_item: match.display_item,
+        source_quantity: match.source_quantity,
+        reason: 'source_quantity_omitted',
+      })
+    }
   }
   const materialsSourceAccounting: CuratedBindMaterialsSourceAccounting = {
     service_report_items: expectedMaterialItems,
     report_items: suppliedMaterialItems,
+    ...(displayMappings.length > 0 ? { display_mappings: displayMappings } : {}),
     excluded: remainingServiceItems.map((item) => ({
       item,
       reason: CURATED_BIND_MATERIALS_OMISSION_REASON,
@@ -52671,9 +52692,9 @@ export function validateCanarySmsRecipient(args: {
   return { ok: true }
 }
 
-async function sendProposedSms(client: any, body: any) {
-  const { action_id } = body
-  if (!action_id) throw new Error('action_id required')
+export async function sendProposedSms(client: any, body: any) {
+  const action_id = body?.action_id
+  if (typeof action_id !== 'string' || !action_id.trim()) throw new ApiError('action_id required', 400)
 
   // Get the proposed action
   const { data: action, error } = await client.from('ai_proposed_actions')
@@ -52682,7 +52703,11 @@ async function sendProposedSms(client: any, body: any) {
     .eq('status', 'pending')
     .single()
 
-  if (error || !action) throw new Error('Action not found or already processed')
+  if (error || !action) throw new ApiError('Action not found or already processed; do not replay an uncertain dispatch', 409)
+  if (typeof action.contact_id !== 'string' || !action.contact_id.trim() ||
+      typeof action.drafted_message !== 'string' || !action.drafted_message.trim()) {
+    return { success: false, action_id, error: 'recipient_and_message_required', auto_retry: false }
+  }
   if (!action.job_id) throw new ApiError('Proposed action has no authoritative job link', 409)
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -52709,50 +52734,17 @@ async function sendProposedSms(client: any, body: any) {
     }
   }
 
-  // Send SMS via ghl-proxy
-  const ghlUrl = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  // Claim before the external effect; unknown outcomes stay held for reconciliation.
+  const base = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '')
   const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
-
-  if (action.contact_id && action.drafted_message) {
-    try {
-      await fetch(`${ghlUrl}?action=send_sms`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${ghlKey}`,
-        },
-        body: JSON.stringify({
-          contactId: action.contact_id,
-          message: action.drafted_message,
-          jobId: action.job_id,
-        }),
-      })
-    } catch (e: any) {
-      console.error('[ops-api] Failed to send SMS via ghl-proxy:', e.message)
-      throw new Error('SMS sending failed — check ghl-proxy logs')
-    }
-  }
-
-  // Mark as sent
-  await client.from('ai_proposed_actions')
-    .update({ status: 'sent', sent_at: new Date().toISOString() })
-    .eq('proposal_id', action_id)
-
-  // Log as job event
-  if (action.job_id) {
-    await client.from('job_events').insert({
-      job_id: action.job_id,
-      event_type: 'sms_sent',
-      detail_json: {
-        type: action.action_type,
-        message: action.drafted_message,
-        contact_name: action.contact_name,
-        source: 'ai_proposed_action',
-      },
-    })
-  }
-
-  return { success: true, action_id }
+  if (!base || !ghlKey) return { success: false, action_id, error: 'sms_provider_unconfigured', auto_retry: false }
+  const ghlUrl = base + '/functions/v1/ghl-proxy'
+  return await dispatchProposedSmsWithReceipt(client, action, () => fetch(`${ghlUrl}?action=send_sms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ghlKey}` },
+    body: JSON.stringify({ contactId: action.contact_id, message: action.drafted_message, jobId: action.job_id }),
+    signal: AbortSignal.timeout(20_000),
+  }))
 }
 
 // ════════════════════════════════════════════════════════════

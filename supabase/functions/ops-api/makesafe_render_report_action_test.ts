@@ -164,7 +164,7 @@ function bindClient(
     pdf_url: options.documentPdfUrl === undefined
       ? "https://storage.example.test/privacy-safe-report.pdf"
       : options.documentPdfUrl,
-    storage_url: null,
+    storage_url: null as string | null,
     visible_to_trades: options.visibleToTrades ?? true,
     attendance_cycle_id: options.documentCycleId === undefined
       ? "cycle-fixture"
@@ -420,12 +420,12 @@ function withDocumentStorageAdmin(opts?: { failUpload?: boolean }) {
   const uploads: Array<{ path: string; bytes: Uint8Array }> = [];
   _setMakesafeDocumentStorageAdminForTest(() => ({
     storage: {
-      createBucket: async () => ({}),
+      createBucket: () => Promise.resolve({}),
       from: () => ({
-        upload: async (path: string, bytes: Uint8Array) => {
-          if (opts?.failUpload) return { error: { message: "denied" } };
+        upload: (path: string, bytes: Uint8Array) => {
+          if (opts?.failUpload) return Promise.resolve({ error: { message: "denied" } });
           uploads.push({ path, bytes });
-          return { error: null };
+          return Promise.resolve({ error: null });
         },
         getPublicUrl: (path: string) => ({
           data: {
@@ -815,7 +815,7 @@ Deno.test("storage GET 404 plus matching pdf_base64 persists onto the attached r
     assertEquals(result.success, true);
     assertEquals(result.writes, 2);
     assertEquals(storage.uploads.length, 1);
-    assertEquals(document.pdf_url.startsWith("https://"), true);
+    assertEquals(document.pdf_url?.startsWith("https://"), true);
   } finally {
     storage.restore();
   }
@@ -844,7 +844,7 @@ Deno.test("empty document URL plus matching pdf_base64 persists without fetching
     assertEquals(result.writes, 2);
     assertEquals(fetched, false);
     assertEquals(storage.uploads.length, 1);
-    assertEquals(document.pdf_url.startsWith("https://"), true);
+    assertEquals(document.pdf_url?.startsWith("https://"), true);
   } finally {
     globalThis.fetch = originalFetch;
     storage.restore();
@@ -1780,6 +1780,192 @@ Deno.test("materials evidence trims whitespace before source compare", async () 
   assertEquals(result.success, true);
   assertEquals(mutations.length > 0, true);
 });
+
+Deno.test(
+  "materials evidence allows quantity-only display omission and records its mapping",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nmaterials quantity display fixture",
+    );
+    const { client, document } = bindClient(bytes, {
+      serviceReport: {
+        id: SERVICE_REPORT_ID,
+        status: "submitted",
+        checklist_json: { materials_used: ["Screws x 20"] },
+        attendance_cycle_id: "cycle-fixture",
+        cycle_attribution: "bound",
+        cycle_number: 1,
+      },
+    });
+    const body: Record<string, unknown> = await bindBody(bytes);
+    body.report_job = {
+      ...(body.report_job as Record<string, unknown>),
+      materials: "Screws",
+      materials_evidence: {
+        state: "recorded_used",
+        items: ["Screws"],
+      },
+    };
+    const result = await withStoredPdf(
+      bytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          body,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(result.success, true);
+    assertEquals(document.data_snapshot_json.materials_source_accounting, {
+      service_report_items: ["Screws x 20"],
+      report_items: ["Screws"],
+      display_mappings: [{
+        source_item: "Screws x 20",
+        display_item: "Screws",
+        source_quantity: 20,
+        reason: "source_quantity_omitted",
+      }],
+      excluded: [],
+    });
+  },
+);
+
+Deno.test("materials evidence still allows an original exact match", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\nmaterials exact display fixture",
+  );
+  const { client, document } = bindClient(bytes, {
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: ["Screws"] },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  const body: Record<string, unknown> = await bindBody(bytes);
+  body.report_job = {
+    ...(body.report_job as Record<string, unknown>),
+    materials: "Screws",
+    materials_evidence: { state: "recorded_used", items: ["Screws"] },
+  };
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(result.success, true);
+  assertEquals(document.data_snapshot_json.materials_source_accounting, {
+    service_report_items: ["Screws"],
+    report_items: ["Screws"],
+    excluded: [],
+  });
+});
+
+Deno.test(
+  "materials evidence cannot consume one quantity source for duplicate report entries",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nmaterials duplicate display fixture",
+    );
+    const { client, mutations } = bindClient(bytes, {
+      serviceReport: {
+        id: SERVICE_REPORT_ID,
+        status: "submitted",
+        checklist_json: { materials_used: ["Screws x 20"] },
+        attendance_cycle_id: "cycle-fixture",
+        cycle_attribution: "bound",
+        cycle_number: 1,
+      },
+    });
+    const body: Record<string, unknown> = await bindBody(bytes);
+    body.report_job = {
+      ...(body.report_job as Record<string, unknown>),
+      materials: "Screws; Screws",
+      materials_evidence: {
+        state: "recorded_used",
+        items: ["Screws", "Screws"],
+      },
+    };
+    const error = await assertRejects(
+      () =>
+        withStoredPdf(
+          bytes,
+          () =>
+            _bindCurrentCycleCuratedMakesafeReportForTest(
+              client,
+              body,
+              FIXTURE_ACTOR,
+            ),
+        ),
+      ApiError,
+      "absent from the selected current-cycle service report",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(mutations, []);
+  },
+);
+
+Deno.test(
+  "materials evidence refuses unsafe quantity suffix stripping",
+  async () => {
+    const cases = [
+      ["Timber 90 x 45", "Timber 90"],
+      ["Screws x 20mm", "Screws"],
+      ["Screws x 2.5", "Screws"],
+      ["Screws x 1/2", "Screws"],
+      ["Screws x -2", "Screws"],
+      ["Screws x 0", "Screws"],
+      ["Screws x 9007199254740992", "Screws"],
+      ["Screws x 20", "screws"],
+    ] as const;
+    for (const [sourceItem, displayItem] of cases) {
+      const bytes = new TextEncoder().encode(
+        `%PDF-1.7\nmaterials unsafe suffix ${sourceItem}`,
+      );
+      const { client, mutations } = bindClient(bytes, {
+        serviceReport: {
+          id: SERVICE_REPORT_ID,
+          status: "submitted",
+          checklist_json: { materials_used: [sourceItem] },
+          attendance_cycle_id: "cycle-fixture",
+          cycle_attribution: "bound",
+          cycle_number: 1,
+        },
+      });
+      const body: Record<string, unknown> = await bindBody(bytes);
+      body.report_job = {
+        ...(body.report_job as Record<string, unknown>),
+        materials: displayItem,
+        materials_evidence: {
+          state: "recorded_used",
+          items: [displayItem],
+        },
+      };
+      const error = await assertRejects(
+        () =>
+          withStoredPdf(
+            bytes,
+            () =>
+              _bindCurrentCycleCuratedMakesafeReportForTest(
+                client,
+                body,
+                FIXTURE_ACTOR,
+              ),
+          ),
+        ApiError,
+        "absent from the selected current-cycle service report",
+      );
+      assertEquals((error as ApiError).status, 409, sourceItem);
+      assertEquals(mutations, [], sourceItem);
+    }
+  },
+);
 
 Deno.test(
   "materials subset binds when report strips boilerplate ticks and records exclusions",
