@@ -64,14 +64,15 @@ async function providerReceipt(
     ? ids[0] as string
     : null;
   const refused = row.success === false || row.dedup_blocked === true;
-  if (refused && ids.length === 0) {
+  // The proxy collapses upstream transport/JSON failures into success:false,
+  // including failures after possible acceptance. Only its explicit pre-send
+  // dedup guard proves that this attempt did not issue a new provider request.
+  if (row.dedup_blocked === true && ids.length === 0) {
     return {
       outcome: "rejected",
       ghl_message_id: null,
       ghl_status: status,
-      error: row.dedup_blocked === true
-        ? "provider_dedup_blocked"
-        : "provider_rejected",
+      error: "provider_dedup_blocked",
     };
   }
   // A positive receipt proves acceptance, not delivery. Never accept arbitrary

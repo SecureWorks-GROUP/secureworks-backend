@@ -275,13 +275,13 @@ const failures: Array<[string, () => Response | Promise<Response>, string]> = [
     "unknown",
   ],
   [
-    "success false",
+    "proxy success false after possible acceptance",
     () =>
       Response.json({
         success: false,
         error: "synthetic-private-provider-error",
       }),
-    "rejected",
+    "unknown",
   ],
   [
     "dedup",
@@ -449,4 +449,20 @@ Deno.test("recipient edits during provider request cannot finalize the edited pr
   assertEquals(f.action.status, "approved");
   assertEquals(f.events[0].row.payload.contact_id, "contact-fixture");
   assertEquals(f.events[0].row.payload.ghl_message_id, "message-fixture");
+});
+
+Deno.test("proxy upstream failure envelope after acceptance is unknown, never definite rejection", async () => {
+  const f = fixture();
+  const { result } = await run(f, () =>
+    Response.json({
+      success: false,
+      error: "GHL upstream connection lost after request acceptance",
+    }, { status: 500 }));
+  assertEquals(result.outcome, "unknown");
+  assertEquals(result.requires_reconciliation, true);
+  assertEquals(result.auto_retry, false);
+  assertEquals(f.action.status, "approved");
+  assertEquals(f.events[0].row.event_type, "proposed_action.dispatch_unknown");
+  assertEquals(f.events[0].row.payload.outcome, "unknown");
+  assertEquals(f.events[0].row.payload.ghl_message_id, null);
 });
