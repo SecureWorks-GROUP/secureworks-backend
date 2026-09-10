@@ -23,6 +23,7 @@ import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
+import { incrementalModifiedSince } from './sync_window.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -659,9 +660,9 @@ async function syncInvoices(sb: any) {
     .order('updated_at', { ascending: false })
     .limit(1)
 
-  const modifiedSince = lastInvoice?.[0]?.updated_at
-    ? new Date(lastInvoice[0].updated_at).toISOString()
-    : undefined
+  // updated_at is really our last write time (table trigger), so look back a
+  // little further than that; see sync_window.ts.
+  const modifiedSince = incrementalModifiedSince(lastInvoice?.[0]?.updated_at)
 
   let totalSynced = 0
   const sesLinkRefusals: SealedSesMoneyRefusal[] = []
@@ -747,7 +748,9 @@ async function syncInvoices(sb: any) {
           // Auto-link invoice to job via SW reference number in Reference field.
           // Matches patterns like SWP-25001, SWF-25002, SW1615, etc.
           const ref = inv.Reference || ''
-          const swMatch = ref.match(/SWMS-\d{4,5}|SW[A-Z]?-?\d{3,5}/i)
+          // Job numbers grew to six digits in 2026 (SWP-261376); the old
+          // \d{3,5} cap matched the first five and never found the job.
+          const swMatch = ref.match(/SWMS-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i)
           if (swMatch) {
             const swNumber = swMatch[0].toUpperCase()
             const { data: job } = await sb.from('jobs')
@@ -1005,9 +1008,18 @@ async function syncInvoices(sb: any) {
             reconciled++
             console.log(`[xero-sync] Reconciled ${stale.xero_invoice_id}: now ${inv.Status}`)
           } else if (inv) {
-            // Still AUTHORISED/SUBMITTED — just update synced_at
+            // Still AUTHORISED/SUBMITTED. Refresh the stored copy too: rows
+            // used to keep the DRAFT-era raw_json from creation forever, so
+            // status said AUTHORISED while raw_json said DRAFT.
             await sb.from('xero_invoices')
-              .update({ synced_at: new Date().toISOString() })
+              .update({
+                amount_due: inv.AmountDue || 0,
+                amount_paid: inv.AmountPaid || 0,
+                due_date: inv.DueDateString || null,
+                line_items: inv.LineItems || [],
+                raw_json: inv,
+                synced_at: new Date().toISOString(),
+              })
               .eq('xero_invoice_id', stale.xero_invoice_id)
               .eq('org_id', DEFAULT_ORG_ID)
           }
@@ -2604,7 +2616,7 @@ async function matchInvoicesByReference(sb: any) {
   }
 
   // Filter to only those with SW-like references
-  const swPattern = /SWMS-\d{4,5}|SW[A-Z]?-?\d{3,5}/i
+  const swPattern = /SWMS-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i
   const candidates = invoices.filter((inv: any) => swPattern.test(inv.reference || ''))
 
   if (candidates.length === 0) {
