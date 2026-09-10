@@ -77,6 +77,9 @@ import {
 } from "./roof_report_render.ts";
 import { deriveExistingFencePicketDecision } from "./makesafe_existing_fence_pickets.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
+import {
+  resolveOwnRoofReportArtifact as resolveExactOwnRoofReportArtifact,
+} from "./ses_roof_report_artifact.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 import { renderSesSwmsPdf } from "./ses_swms_render.ts";
 import {
@@ -3270,6 +3273,37 @@ export function createSesAssemblerRuntimeDependencies(
         media_type: "application/pdf",
         bytes: rendered.bytes,
         render_hash: rendered.renderHash,
+      };
+    },
+    resolveOwnRoofReportArtifact: async (input) => {
+      const snapshot = snapshotFor(input);
+      const resolved = await resolveExactOwnRoofReportArtifact({
+        job_id: input.identity.job_id,
+        current_cycle_number: input.attendance.cycle_number,
+        current_attendance_cycle_id:
+          input.attendance.current_attendance_cycle_id,
+        draft: snapshot.roof_draft as unknown as Parameters<
+          typeof resolveExactOwnRoofReportArtifact
+        >[0]["draft"],
+        documents: snapshot.documents as unknown as Parameters<
+          typeof resolveExactOwnRoofReportArtifact
+        >[0]["documents"],
+        download: (url) => fetchBytes(url, "own roof report source"),
+      });
+      if (!resolved.ok) {
+        throw new SesAssemblerAdapterError(
+          resolved.code,
+          resolved.reason,
+          409,
+        );
+      }
+      // `render_hash` is deliberately absent: this is a committed source
+      // reader, and the source_raw_sha256 in provenance is the PDF-byte hash.
+      return {
+        file_name: resolved.artifact.file_name,
+        media_type: resolved.artifact.media_type,
+        bytes: resolved.artifact.bytes,
+        provenance: resolved.artifact.provenance,
       };
     },
     resolveBundledReportArtifact: async (input) => {

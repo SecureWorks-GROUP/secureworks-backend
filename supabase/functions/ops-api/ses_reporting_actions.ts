@@ -145,6 +145,12 @@ import {
   resolveSesMailTransport,
   sesPhotoMailVolumeRefusal,
 } from "./ses_photo_mail_volume_guard.ts";
+import {
+  inspectOwnRoofReportArtifactTrust,
+  rawSha256Bytes,
+  type OwnRoofReportDocumentRow,
+  type OwnRoofReportDraftRow,
+} from "./ses_roof_report_artifact.ts";
 
 interface SupabaseResponse<T> {
   data: T | null;
@@ -377,6 +383,111 @@ async function verifyStoredSupportingReport(
     return { trusted: false, reason: "served_pdf_raw_sha256_mismatch" };
   }
   return { trusted: true };
+}
+
+/**
+ * Own-template roof reports are already complete PDFs supplied by the reviewed
+ * current-cycle source document. Read trust therefore re-resolves the exact
+ * current draft pointer, recovers both source and docket bytes, and checks the
+ * separately stamped raw source hash. It never calls the roof renderer or
+ * selects a latest document by recency.
+ */
+async function verifyStoredOwnRoofReport(
+  client: SesSupabaseClient,
+  artifact: Record<string, any>,
+  docket: Record<string, any>,
+): Promise<{ trusted: true } | { trusted: false; reason: string }> {
+  const metadata = object(artifact.metadata);
+  const jobId = String(docket.job_id || metadata.source_job_id || "").trim();
+  const documentId = String(metadata.source_document_id || "").trim();
+  const draftId = String(metadata.source_draft_id || "").trim();
+  if (!jobId || !documentId || !draftId) {
+    return { trusted: false, reason: "own_roof_source_identity_missing" };
+  }
+  const [detailRead, draftRead, documentRead] = await Promise.all([
+    client.from("makesafe_job_details")
+      .select("job_id,attendance_cycle_id,cycle_number")
+      .eq("job_id", jobId).maybeSingle(),
+    client.from("makesafe_roof_report_drafts")
+      .select("id,job_id,status,submitted_cycle,report_doc_id,updated_at")
+      .eq("id", draftId).eq("job_id", jobId).eq("pack_kind", "roof")
+      .maybeSingle(),
+    client.from("job_documents")
+      .select("id,job_id,type,file_name,pdf_url,storage_url,visible_to_trades,attendance_cycle_id,cycle_attribution,data_snapshot_json")
+      .eq("id", documentId).eq("job_id", jobId).maybeSingle(),
+  ]);
+  if (detailRead.error || draftRead.error || documentRead.error) {
+    return { trusted: false, reason: "own_roof_source_authority_unreadable" };
+  }
+  const currentCycle = Number(detailRead.data?.cycle_number);
+  const cycleId = String(detailRead.data?.attendance_cycle_id || "").trim();
+  if (!Number.isSafeInteger(currentCycle) || currentCycle < 1 || !cycleId) {
+    return { trusted: false, reason: "own_roof_current_cycle_unreadable" };
+  }
+  const document = documentRead.data as OwnRoofReportDocumentRow | null;
+  const draft = draftRead.data as OwnRoofReportDraftRow | null;
+  const sourceUrl = document
+    ? [document.pdf_url, document.storage_url, document.url]
+      .map((value) => String(value || "").trim())
+      .find((value) => value.startsWith("https://")) || ""
+    : "";
+  if (!document || !draft || !sourceUrl) {
+    return { trusted: false, reason: "own_roof_source_document_missing" };
+  }
+  let sourceResponse: Response;
+  try {
+    sourceResponse = await fetch(sourceUrl, {
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    return { trusted: false, reason: "own_roof_source_bytes_unrecoverable" };
+  }
+  if (!sourceResponse.ok) {
+    return { trusted: false, reason: "own_roof_source_bytes_unrecoverable" };
+  }
+  const sourceBytes = new Uint8Array(await sourceResponse.arrayBuffer());
+  const sourceRawSha256 = await rawSha256Bytes(sourceBytes);
+  if (new TextDecoder().decode(sourceBytes.slice(0, 5)) !== "%PDF-" ||
+      sourceRawSha256 !== String(metadata.source_raw_sha256 || "").trim() ||
+      sourceBytes.byteLength !== Number(metadata.source_raw_size_bytes)) {
+    return { trusted: false, reason: "own_roof_source_bytes_mismatch" };
+  }
+  const prefix = `${SES_DOCKET_BUCKET}/`;
+  const objectKey = String(artifact.object_key || "");
+  if (!objectKey.startsWith(prefix)) {
+    return { trusted: false, reason: "source_object_outside_private_bucket" };
+  }
+  const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+    .download(objectKey.slice(prefix.length));
+  if (recovered.error || !recovered.data) {
+    return { trusted: false, reason: "own_roof_docket_bytes_unrecoverable" };
+  }
+  const docketBytes = new Uint8Array(await recovered.data.arrayBuffer());
+  const docketRawSha256 = await rawSha256Bytes(docketBytes);
+  const docketContentHash = await sesSha256Bytes(docketBytes);
+  if (docketRawSha256 !== sourceRawSha256) {
+    return { trusted: false, reason: "own_roof_source_docket_bytes_diverged" };
+  }
+  const proof = inspectOwnRoofReportArtifactTrust({
+    artifact,
+    job_id: jobId,
+    current_cycle_number: currentCycle,
+    current_attendance_cycle_id: cycleId,
+    draft,
+    document,
+    served_raw_sha256: docketRawSha256,
+    served_raw_size_bytes: docketBytes.byteLength,
+    served_content_hash: docketContentHash,
+  });
+  return proof.ok ? { trusted: true } : { trusted: false, reason: proof.code };
+}
+
+function ownRoofSourceMissingRefusal(reason: string): SesRefusal {
+  return sesRefusal(
+    "own_roof_source_missing",
+    "The own-template roof pack no longer proves the exact submitted current-cycle roof PDF. Re-bind the reviewed roof_report document with the expected old pointer and draft updated_at, then re-prepare the U4 docket.",
+    { evidence: { suppression_reason: reason } },
+  );
 }
 
 export const SES_SUPERSEDED_SOURCE_RECOVERY_ACTION =
@@ -1303,6 +1414,7 @@ async function readSesPackArtifactTruth(
     review_family: string;
     pack_obligation: Record<string, any> | null;
     review_blockers?: SesRefusal[];
+    source_refusal?: SesRefusal | null;
   },
 ): Promise<SesPackArtifactTruthRead> {
   const {
@@ -1327,6 +1439,31 @@ async function readSesPackArtifactTruth(
       "The current docket has no job identity for artifact revalidation.",
       { requirements: requirements(manifestSwmsRequired) },
     );
+  }
+  let sourceRefusal = args.source_refusal || null;
+  if (reviewFamily === "own_template_roof" && !sourceRefusal) {
+    const ownArtifactsRead = await client.from("makesafe_docket_artifacts")
+      .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
+      .eq("revision_id", docket.id)
+      .eq("role", "supporting_report_pdf");
+    if (ownArtifactsRead.error) {
+      sourceRefusal = ownRoofSourceMissingRefusal(
+        "own_roof_docket_artifact_unreadable",
+      );
+    } else if ((ownArtifactsRead.data || []).length !== 1) {
+      sourceRefusal = ownRoofSourceMissingRefusal(
+        (ownArtifactsRead.data || []).length === 0
+          ? "own_roof_supporting_report_pdf_missing"
+          : "own_roof_multiple_supporting_report_pdfs",
+      );
+    } else {
+      const trust = await verifyStoredOwnRoofReport(
+        client,
+        ownArtifactsRead.data[0],
+        docket,
+      );
+      if (!trust.trusted) sourceRefusal = ownRoofSourceMissingRefusal(trust.reason);
+    }
   }
   const [packRead, jobRead, detailRead, documentsRead, reportsRead] =
     await Promise.all([
@@ -1446,6 +1583,11 @@ async function readSesPackArtifactTruth(
   const familyReportEvidenceSatisfied = needsBoundReportPdf
     ? true
     : reportInEvidence(honestyStatusInput).satisfied;
+  const ownSourceUntrusted = reviewFamily === "own_template_roof" &&
+    !!sourceRefusal;
+  const trustedFamilyReportEvidence = ownSourceUntrusted
+    ? false
+    : familyReportEvidenceSatisfied;
   const swmsRequired = requiresMakesafeSwms(detailRow, jobRow);
   const envelope = object(docket.envelope);
   const presentation = presentSesPackHonesty({
@@ -1456,7 +1598,10 @@ async function readSesPackArtifactTruth(
         docket.pre_xero_docs_ready === true,
       blockers: docket.blockers,
     },
-    review_blockers: args.review_blockers || [],
+    review_blockers: [
+      ...(args.review_blockers || []),
+      ...(ownSourceUntrusted ? [sourceRefusal!] : []),
+    ],
     report_doc_id: packRow?.report_doc_id || null,
     report_doc_resolved: packPointerResolution.report_doc_resolved,
     requires_bound_report_doc: artifactRequirements.requires_bound_report_doc,
@@ -1469,9 +1614,10 @@ async function readSesPackArtifactTruth(
     swms_doc_id: packRow?.swms_doc_id || null,
     swms_doc_resolved: packPointerResolution.swms_doc_resolved,
     requires_bound_swms: swmsRequired,
-    family_report_evidence_satisfied: familyReportEvidenceSatisfied,
+    family_report_evidence_satisfied: trustedFamilyReportEvidence,
   });
-  const reportCloseout = packPointerResolution.report_doc_resolved &&
+  const reportCloseout = !ownSourceUntrusted &&
+    packPointerResolution.report_doc_resolved &&
     (!artifactRequirements.requires_bound_report_doc ||
       !!selectedCurrentCycleTradeReport);
   const invoiceCloseout = packPointerResolution.invoice_doc_resolved;
@@ -1516,7 +1662,7 @@ async function readSesPackArtifactTruth(
       status: String(selectedCurrentCycleTradeReport?.status || "").trim() ||
         null,
     },
-    family_report_evidence_satisfied: familyReportEvidenceSatisfied,
+    family_report_evidence_satisfied: trustedFamilyReportEvidence,
     missing_required: missingRequired,
     unresolved_required: missingRequired,
     read_error: null,
@@ -1602,6 +1748,26 @@ export async function loadSesCockpitDocket(
           artifact.role !== "supporting_report_pdf"
         );
       }
+    }
+  }
+  const ownRoofReview = family === "own_template_roof";
+  if (ownRoofReview && !sourceRefusal) {
+    const reportArtifacts = cockpitArtifacts.filter((artifact: any) =>
+      artifact.role === "supporting_report_pdf"
+    );
+    const trust = reportArtifacts.length === 1
+      ? await verifyStoredOwnRoofReport(client, reportArtifacts[0], docket)
+      : {
+        trusted: false as const,
+        reason: reportArtifacts.length === 0
+          ? "own_roof_supporting_report_pdf_missing"
+          : "own_roof_multiple_supporting_report_pdfs",
+      };
+    if (!trust.trusted) {
+      sourceRefusal = ownRoofSourceMissingRefusal(trust.reason);
+      cockpitArtifacts = cockpitArtifacts.filter((artifact: any) =>
+        artifact.role !== "supporting_report_pdf"
+      );
     }
   }
   const [assignmentsResponse, reportsResponse] = await Promise.all([
@@ -1739,6 +1905,7 @@ export async function loadSesCockpitDocket(
     review_family: family,
     pack_obligation: obligation,
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
+    source_refusal: sourceRefusal,
   });
   const invoiceRouteCaveat = sesInvoiceRouteArtifactCaveat({
     routes,
@@ -3410,6 +3577,7 @@ export async function getSesReviewablePackAction(
   );
   const physicalReview = reviewFamily === "physical_makesafe" ||
     reviewFamily === "temporary_fencing";
+  const ownRoofReview = reviewFamily === "own_template_roof";
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
     .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docketRevisionId)
@@ -3428,14 +3596,13 @@ export async function getSesReviewablePackAction(
   const projectedArtifacts = await Promise.all(
     (artifactsResponse.data || []).map(async (artifact: any) => {
       let sourceCaveat: SesReviewCaveat | null = null;
-      if (physicalReview && artifact.role === "supporting_report_pdf") {
-        const trust = await verifyStoredSupportingReport(
-          client,
-          artifact,
-          bindAudit,
-        );
+      if ((physicalReview || ownRoofReview) &&
+          artifact.role === "supporting_report_pdf") {
+        const trust = ownRoofReview
+          ? await verifyStoredOwnRoofReport(client, artifact, docket)
+          : await verifyStoredSupportingReport(client, artifact, bindAudit);
         if (!trust.trusted) {
-          if (isSesSoftReviewSourceFinding(trust.reason)) {
+          if (!ownRoofReview && isSesSoftReviewSourceFinding(trust.reason)) {
             sourceCaveat = curatedSourceCaveat(trust.reason);
           } else {
             return {
@@ -3448,7 +3615,9 @@ export async function getSesReviewablePackAction(
                 size_bytes: artifact.size_bytes,
                 signed_url: null,
                 trust_state: "blocked",
-                blocker_code: "curated_source_missing",
+                blocker_code: ownRoofReview
+                  ? "own_roof_source_missing"
+                  : "curated_source_missing",
                 suppression_reason: trust.reason,
               },
             };
@@ -3518,6 +3687,20 @@ export async function getSesReviewablePackAction(
       } else {
         sourceRefusal = curatedSourceMissingRefusal(reason);
       }
+    }
+  }
+  if (ownRoofReview) {
+    const servedReports = artifacts.filter((artifact: any) =>
+      artifact.role === "supporting_report_pdf"
+    );
+    if (servedReports.length !== 1) {
+      const reason = String(
+        suppressedArtifacts[0]?.suppression_reason ||
+          (servedReports.length === 0
+            ? "own_roof_supporting_report_pdf_missing"
+            : "own_roof_multiple_supporting_report_pdfs"),
+      );
+      sourceRefusal = ownRoofSourceMissingRefusal(reason);
     }
   }
 
@@ -3623,6 +3806,7 @@ export async function getSesReviewablePackAction(
     review_family: reviewFamily,
     pack_obligation: packObligation,
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
+    source_refusal: sourceRefusal,
   });
   const presentation = artifactRead.presentation;
   const artifactTruth = artifactRead.truth;

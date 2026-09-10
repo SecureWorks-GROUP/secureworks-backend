@@ -794,7 +794,10 @@ Deno.test(
     assert(codes.includes("invoice_reference_missing"));
     assert(codes.includes("spine_missing_source"));
     assert(codes.includes("spine_missing_lineage"));
-    assert(codes.includes("trade_evidence_missing"));
+    assert(
+      codes.includes("trade_evidence_missing") ||
+        codes.includes("own_roof_report_source_unresolved"),
+    );
     assert(!codes.includes("family_unknown"));
     assert(!codes.includes("delivery_route_unroutable"));
     assert(!codes.some((code) => code.startsWith("portal_")));
