@@ -22,6 +22,7 @@ import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_s
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
+import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -202,6 +203,11 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'match_invoices_by_reference':
         return json(await matchInvoicesByReference(sb))
+      case 'sweep_contact_addresses': {
+        const cap = parseInt(url.searchParams.get('limit') || String(CONTACT_ADDRESS_SWEEP_PER_RUN), 10)
+        const { accessToken, tenantId } = await getToken(sb)
+        return json(await sweepContactAddresses(sb, accessToken, tenantId, cap))
+      }
       case 'backfill_xero_contacts': {
         const batchLimit = parseInt(url.searchParams.get('limit') || '10', 10)
         return json(await backfillXeroContacts(sb, batchLimit))
@@ -530,6 +536,62 @@ async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: str
 // that has sat untouched in Xero since it was pushed is never re-read by the
 // loop above. Pull the cached "no attachment" trade bills by id and fix them.
 const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, users:user_id(name)'
+// ════════════════════════════════════════════════════════════
+// CONTACT ADDRESS SWEEP (2026-09-10)
+// Customer contacts our automation created before this date carry either no
+// address or a STREET-only address with the raw Google string in line 1.
+// Xero prints the POBOX address on invoices, so those clients get invoices
+// with no address block. Each run reads a handful of linked contacts back
+// from Xero and adds a split postal address where it is missing. A contact
+// that already has a postal address is stamped so it is never re-read.
+// ════════════════════════════════════════════════════════════
+const CONTACT_ADDRESS_SWEEP_PER_RUN = 8
+
+async function sweepContactAddresses(sb: any, accessToken: string, tenantId: string, cap = CONTACT_ADDRESS_SWEEP_PER_RUN) {
+  const out = { checked: 0, updated: 0, skipped: 0, failed: 0, remaining: 0 }
+  try {
+    // Candidate contacts: linked to a job with an address, not yet verified.
+    const { data: rows, error } = await sb
+      .from('jobs')
+      .select('id, xero_contact_id, site_address, site_suburb, scope_json')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .not('xero_contact_id', 'is', null)
+      .not('site_address', 'is', null)
+      .is('xero_contact_address_checked_at', null)
+      .order('created_at', { ascending: false })
+      .limit(cap * 3)
+    if (error) throw error
+    const byContact = new Map<string, any>()
+    for (const r of rows || []) if (!byContact.has(r.xero_contact_id)) byContact.set(r.xero_contact_id, r)
+    const batch = Array.from(byContact.values()).slice(0, cap)
+    out.remaining = Math.max(0, byContact.size - batch.length)
+
+    for (const job of batch) {
+      out.checked++
+      const stamp = () => sb.from('jobs').update({ xero_contact_address_checked_at: new Date().toISOString() })
+        .eq('org_id', DEFAULT_ORG_ID).eq('xero_contact_id', job.xero_contact_id).is('xero_contact_address_checked_at', null)
+      try {
+        const got = await xeroGet(`/Contacts/${job.xero_contact_id}`, accessToken, tenantId)
+        const contact = got?.Contacts?.[0]
+        if (!contact) { out.skipped++; await stamp(); continue }
+        const client = (job.scope_json && job.scope_json.client) || {}
+        const patch = contactAddressUpdate(contact, client.address || job.site_address, client.suburb || job.site_suburb)
+        if (!patch) { out.skipped++; await stamp(); continue }
+        await xeroPost('/Contacts', accessToken, tenantId, { Contacts: [patch] })
+        out.updated++
+        await stamp()
+        console.log(`[xero-sync] contact address sweep: added postal address to ${contact.Name} (${job.xero_contact_id})`)
+      } catch (e: any) {
+        out.failed++
+        console.warn('[xero-sync] contact address sweep failed for', job.xero_contact_id, e.message)
+      }
+    }
+  } catch (e: any) {
+    console.warn('[xero-sync] contact address sweep aborted:', e.message)
+  }
+  return out
+}
+
 async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string, cap = TRADE_PDF_BACKFILL_PER_RUN) {
   const out = { checked: 0, attached: 0, skipped: 0 }
   try {
@@ -885,6 +947,9 @@ async function syncInvoices(sb: any) {
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
+  // ── Customer contacts created without a postal address: heal a few per run ──
+  const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
+
   // ── Match unlinked invoices after sync ──
   const matchResult = await matchUnlinkedInvoices(sb)
 
@@ -966,11 +1031,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep },
+    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep }
+  return { success: true, synced: totalSynced, reconciled, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
 }
 
 
@@ -2390,15 +2455,9 @@ async function createOrFindContact(sb: any, body: any) {
     if (phone) {
       newContact.Phones = [{ PhoneType: 'MOBILE', PhoneNumber: phone }]
     }
-    if (address || suburb) {
-      newContact.Addresses = [{
-        AddressType: 'STREET',
-        AddressLine1: address || '',
-        City: suburb || '',
-        Region: 'WA',
-        Country: 'AU',
-      }]
-    }
+    // Postal (what Xero prints on invoices) and street, split into fields.
+    const newAddresses = xeroAddressesFor(address, suburb)
+    if (newAddresses.length) newContact.Addresses = newAddresses
 
     const result = await xeroPost('/Contacts', accessToken, tenantId, {
       Contacts: [newContact],
@@ -2412,6 +2471,22 @@ async function createOrFindContact(sb: any, body: any) {
   }
 
   const xeroContactId = xeroContact.ContactID
+
+  // Found an existing contact with no postal address: give it ours. Existing
+  // contacts used to be left blank forever, so invoices printed no address.
+  let addressUpdated = false
+  if (!created) {
+    const addrPatch = contactAddressUpdate(xeroContact, address, suburb)
+    if (addrPatch) {
+      try {
+        await xeroPost('/Contacts', accessToken, tenantId, { Contacts: [addrPatch] })
+        addressUpdated = true
+        console.log(`[xero-sync] Added postal address to Xero contact ${xeroContact.Name} (${xeroContactId})`)
+      } catch (e: any) {
+        console.warn('[xero-sync] Contact address update failed:', e.message)
+      }
+    }
+  }
 
   // Update the job's xero_contact_id
   if (job_id) {
@@ -2490,6 +2565,7 @@ async function createOrFindContact(sb: any, body: any) {
       email,
       xero_contact_id: xeroContactId,
       created,
+      address_updated: addressUpdated,
       job_id,
       ses_link_refusals: sesLinkRefusals,
     },
@@ -2500,6 +2576,7 @@ async function createOrFindContact(sb: any, body: any) {
     success: true,
     xero_contact_id: xeroContactId,
     created,
+    address_updated: addressUpdated,
     contact_name: xeroContact.Name,
     refused: sesLinkRefusals.length,
     refusals: sesLinkRefusals,

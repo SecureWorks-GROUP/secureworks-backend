@@ -100,6 +100,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 // moving @2 tag through esm.sh's package metadata endpoint.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.99.3'
 import { logQueryErrors, pgrestIlikeOrContains } from '../_shared/pgrest.ts'
+import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import {
   xeroAccrecReferenceContainsWhere,
   xeroContactNameContainsWhere,
@@ -33681,23 +33682,29 @@ async function createInvoice(
       // Xero customer.
       let contactEmail: string | undefined
       let contactPhone: string | undefined
+      let contactAddress: string | undefined
+      let contactSuburb: string | undefined
       if (sesContext) {
         contactEmail = undefined
         contactPhone = undefined
       } else if (job_contact_id) {
         const { data: jcData } = await client.from('job_contacts')
-          .select('client_email, client_phone')
+          .select('client_email, client_phone, site_address')
           .eq('id', job_contact_id)
           .maybeSingle()
         contactEmail = jcData?.client_email || undefined
         contactPhone = jcData?.client_phone || undefined
+        contactAddress = jcData?.site_address || undefined
       } else {
         const { data: jobData } = jId ? await client.from('jobs')
-          .select('client_email, client_phone')
+          .select('client_email, client_phone, site_address, site_suburb, scope_json')
           .eq('id', jId)
           .maybeSingle() : { data: null }
         contactEmail = jobData?.client_email || undefined
         contactPhone = jobData?.client_phone || undefined
+        const scopeClient = (jobData?.scope_json && jobData.scope_json.client) || {}
+        contactAddress = scopeClient.address || jobData?.site_address || undefined
+        contactSuburb = scopeClient.suburb || jobData?.site_suburb || undefined
       }
 
       // 1. Search by EMAIL first (most reliable dedup — avoids name variation duplicates)
@@ -33720,10 +33727,22 @@ async function createInvoice(
 
       if (existing) {
         resolvedContactId = existing.ContactID
+        // Found, but with no postal address (what Xero prints on the invoice): add ours.
+        const addrPatch = sesContext ? null : contactAddressUpdate(existing, contactAddress, contactSuburb)
+        if (addrPatch) {
+          try { await xeroPost('/Contacts', accessToken, tenantId, { Contacts: [addrPatch] }) }
+          catch (e) { console.log('[ops-api] Xero contact address update failed (non-blocking):', (e as Error).message) }
+        }
       } else {
-        // 3. Create new contact in Xero
+        // 3. Create new contact in Xero, with a split postal + street address
+        const newAddresses = sesContext ? [] : xeroAddressesFor(contactAddress, contactSuburb)
         const newContact = await xeroPost('/Contacts', accessToken, tenantId, {
-          Contacts: [{ Name: contact, EmailAddress: contactEmail || undefined, Phones: contactPhone ? [{ PhoneType: 'DEFAULT', PhoneNumber: contactPhone }] : undefined }],
+          Contacts: [{
+            Name: contact,
+            EmailAddress: contactEmail || undefined,
+            Phones: contactPhone ? [{ PhoneType: 'DEFAULT', PhoneNumber: contactPhone }] : undefined,
+            ...(newAddresses.length ? { Addresses: newAddresses } : {}),
+          }],
         }, 'PUT', `contact-${contact.replace(/\s/g, '-')}`)
         resolvedContactId = newContact?.Contacts?.[0]?.ContactID
       }
