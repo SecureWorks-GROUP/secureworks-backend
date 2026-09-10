@@ -10344,18 +10344,29 @@ if (import.meta.main) serve(async (req: Request) => {
               // ── Duplicate-week guard (Layer A) RESTORED ───────────────────
               // Removed 2026-06-18, restored after the 2026-09 money audit: a
               // second submit for the same trade + week_end must never mint a
-              // second Xero bill. A LIVE invoice for the week is returned as-is
-              // (idempotent). A draft / ops-reject row is released and falls
+              // second Xero bill. A draft / ops-reject row is released and falls
               // through to the prior-draft replacement below, so drafts can
               // still be overwritten. Per-assignment protection via invoiced_in
               // is unchanged.                                              [F3]
+              //
+              // 2026-09-10 (Alyx audit): a LIVE invoice for the week is a HARD
+              // 409, never `success: true`. The trade app carried a stale
+              // week_start from a viewed invoice / restored draft, this branch
+              // answered with the OLD invoice as a success, and the app painted
+              // "Invoice Submitted" for a week of work that was never saved.
+              // The existing invoice identity is still returned so the app can
+              // name it, but nothing about this response may read as saved.
               const liveWeekInvoice = await _findLiveTradeInvoiceForWeek(client, tradeUser.id, weekEnd)
               if (liveWeekInvoice) {
                 const liveNet = Number(liveWeekInvoice.net_pay)
                 const liveGst = Number(liveWeekInvoice.gst)
+                const liveLabel = liveWeekInvoice.invoice_number ? ` (${liveWeekInvoice.invoice_number})` : ''
                 return json({
-                  success: true,
+                  ok: false,
+                  success: false,
+                  code: 'WEEK_ALREADY_INVOICED',
                   already_submitted: true,
+                  saved: false,
                   invoice_id: liveWeekInvoice.id,
                   invoice_number: liveWeekInvoice.invoice_number || null,
                   status: liveWeekInvoice.status,
@@ -10372,8 +10383,8 @@ if (import.meta.main) serve(async (req: Request) => {
                   trade_payable: Number.isFinite(liveNet) && Number.isFinite(liveGst)
                     ? Math.round((liveNet + liveGst) * 100) / 100
                     : null,
-                  userMessage: 'An invoice for this week has already been submitted. It was returned unchanged; contact the office if it needs changing.',
-                })
+                  userMessage: `You already have an invoice for the week ${week_start} to ${weekEnd}${liveLabel}. This submission was NOT saved. Check the week shown at the top of the invoice, or contact the office if that invoice needs changing.`,
+                }, 409)
               }
             }
             if (weeklyShape && (!week_start || !weekEnd)) {
