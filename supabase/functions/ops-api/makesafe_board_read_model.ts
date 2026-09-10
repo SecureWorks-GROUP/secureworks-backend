@@ -1640,7 +1640,8 @@ export function buildCanonicalMakesafeRows(
       report_doc_id: pack?.report_doc_id || null,
       report_doc_resolved: pack?.report_doc_resolved,
       requires_bound_report_doc: artifactRequirements.requires_bound_report_doc,
-      requires_selected_current_cycle_trade_report: needsBoundReportPdf &&
+      requires_selected_current_cycle_trade_report:
+        sesFamily !== "own_template_roof" &&
         artifactRequirements.requires_bound_report_doc,
       invoice_doc_id: pack?.invoice_doc_id || null,
       invoice_doc_resolved: pack?.invoice_doc_resolved,
@@ -1661,8 +1662,8 @@ export function buildCanonicalMakesafeRows(
     const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
       (artifactRequirements.requires_bound_report_doc &&
         !reportPointerReady) ||
-      (needsBoundReportPdf && artifactRequirements.requires_bound_report_doc &&
-        !report) ||
+      (sesFamily !== "own_template_roof" &&
+        artifactRequirements.requires_bound_report_doc && !report) ||
       (artifactRequirements.requires_bound_invoice_doc &&
         !invoicePointerReady) ||
       (swmsRequired && !swmsPointerReady) ||
