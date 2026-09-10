@@ -78,6 +78,7 @@ import {
 } from "./ses_preparation_issue_policy.ts";
 import { extractSesRateCardMaterialFacts } from "./ses_materials_rate_card.ts";
 import { buildSesReviewPackMaterials } from "./ses_review_pack_materials.ts";
+import { SES_OWN_ROOF_REPORT_MAX_BYTES } from "./ses_roof_report_artifact.ts";
 import {
   type DraftPackContext,
   type DraftPackOutput,
@@ -322,6 +323,14 @@ export interface SesPrepareDependencies {
     proof?: SesPhysicalReportProof,
   ) => Promise<SesRenderResult>;
   renderOwnRoofReport?: (
+    input: SesAssemblerInputV1,
+  ) => Promise<SesRenderResult>;
+  /**
+   * Reads the exact submitted current-cycle own-roof document. This is kept
+   * separate from the own-letterhead renderer because U4 must consume the
+   * selected reviewed bytes rather than minting a replacement PDF.
+   */
+  resolveOwnRoofReportArtifact?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesRenderResult>;
   resolveBundledReportArtifact?: (
@@ -3136,6 +3145,7 @@ async function prepareOne(
   let persistenceRefused = false;
   const portalEvidence: SesPortalCapture[] = [];
   let reportFile: string | null = null;
+  let ownRoofSourceProvenance: Record<string, unknown> | null = null;
   let swmsFile: string | null = null;
   const photoFiles: string[] = [];
 
@@ -4072,29 +4082,84 @@ async function prepareOne(
       input.classification.delivery_render_route ===
         "secureworks_own_letterhead"
     ) {
-      if (!input.cycle_facts.roof_report_fields || !deps.renderOwnRoofReport) {
+      if (!deps.resolveOwnRoofReportArtifact) {
         const itemBlocker = addBlocker(
           blockers,
           blocked(
-            "trade_evidence_missing",
-            "Own-template roof requires submitted trade-authored fields and the existing roof renderer.",
-            "Submit the current-cycle roof template and resume its deterministic renderer.",
+            "own_roof_report_source_unresolved",
+            "Own-template roof requires the exact submitted current-cycle roof document; no source resolver is available.",
+            "Bind the reviewed roof_report document to the submitted current-cycle roof draft, then restore the exact source resolver and re-run U4.",
+            ["current-cycle-own-roof-document"],
+            [],
+            undefined,
+            "identity_safety_hard",
           ),
         );
         manifest.items.supporting_report_pdf = itemBlocker;
       } else {
-        const rendered = await deps.renderOwnRoofReport(input);
-        reportFile = `ARTIFACTS/${rendered.file_name}`;
-        artifacts.push(
-          await artifactFromBytes({
-            role: "supporting_report_pdf",
-            path: reportFile,
-            media_type: rendered.media_type,
-            bytes: rendered.bytes,
-            metadata: { render_hash: rendered.render_hash || null },
-          }),
-        );
-        manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
+        try {
+          const resolved = await deps.resolveOwnRoofReportArtifact(input);
+          const rawHash = await rawArtifactSha256(resolved.bytes);
+          const contentHash = await sesSha256Bytes(resolved.bytes);
+          const sourceRawHash = text(
+            resolved.provenance?.source_raw_sha256,
+          );
+          const sourceRawSize = Number(
+            resolved.provenance?.source_raw_size_bytes,
+          );
+          const validPdf = resolved.media_type === "application/pdf" &&
+            resolved.bytes.byteLength > 0 &&
+            resolved.bytes.byteLength <= SES_OWN_ROOF_REPORT_MAX_BYTES &&
+            new TextDecoder().decode(resolved.bytes.slice(0, 5)) === "%PDF-";
+          if (
+            !validPdf ||
+            !/^sha256:[0-9a-f]{64}$/.test(sourceRawHash) ||
+            sourceRawHash !== rawHash ||
+            sourceRawSize !== resolved.bytes.byteLength
+          ) {
+            throw new Error(
+              "exact own-roof source bytes failed PDF, raw SHA-256 or size verification",
+            );
+          }
+          const metadata: Record<string, unknown> = {
+            ...(resolved.provenance || {}),
+            source_raw_sha256: rawHash,
+            source_raw_size_bytes: resolved.bytes.byteLength,
+            output_content_hash: contentHash,
+          };
+          ownRoofSourceProvenance = metadata;
+          reportFile = `ARTIFACTS/${resolved.file_name}`;
+          artifacts.push(
+            await artifactFromBytes({
+              role: "supporting_report_pdf",
+              path: reportFile,
+              media_type: resolved.media_type,
+              bytes: resolved.bytes,
+              metadata,
+            }),
+          );
+          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
+        } catch (error) {
+          const errorRecord = error && typeof error === "object"
+            ? error as Record<string, unknown>
+            : {};
+          const itemBlocker = addBlocker(
+            blockers,
+            blocked(
+              "own_roof_report_source_unresolved",
+              "The exact submitted current-cycle own-roof document could not be resolved and byte-verified.",
+              "Bind the reviewed roof_report document to the submitted current-cycle roof draft and recover its exact PDF bytes before re-running U4.",
+              ["current-cycle-own-roof-document", "own-roof-raw-pdf"],
+              [],
+              {
+                source_error_code: text(errorRecord.code) || null,
+                source_error: error instanceof Error ? error.message : String(error),
+              },
+              "identity_safety_hard",
+            ),
+          );
+          manifest.items.supporting_report_pdf = itemBlocker;
+        }
       }
     }
     if (swms.required) {
@@ -4507,6 +4572,9 @@ async function prepareOne(
         job_id: input.identity.job_id,
         family: row?.family || input.classification.family,
         builder_reference: input.source.builder_reference,
+        ...(row?.family === "own_template_roof"
+          ? { own_roof_source: ownRoofSourceProvenance }
+          : {}),
         trade_report: reviewTradeReport(input),
         review_materials: reviewMaterials,
         portal_proof: portalEvidence,

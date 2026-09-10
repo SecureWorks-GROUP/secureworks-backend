@@ -19,6 +19,7 @@ import {
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
   sesSha256,
+  sesSha256Bytes,
 } from "./ses_docket_envelope.ts";
 import {
   isSesPhysicalShapedFamily,
@@ -57,6 +58,7 @@ import {
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
+import { rawSha256Bytes } from "./ses_roof_report_artifact.ts";
 
 const FIXED_HASH =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
@@ -340,6 +342,26 @@ function dependencies(
       bytes: new Uint8Array([37, 80, 68, 70, 2]),
       render_hash: "roof-render-v1",
     }),
+    resolveOwnRoofReportArtifact: async () => {
+      const bytes = new Uint8Array([37, 80, 68, 70, 45, 2]);
+      return {
+        file_name: "Roof Report - REF-70062.pdf",
+        media_type: "application/pdf" as const,
+        bytes,
+        provenance: {
+          evidence_source: "current_cycle_own_template_roof_report",
+          source_kind: "submitted_roof_report_document",
+          source_identity: "own-roof:fixture",
+          source_job_id: "job-fixture",
+          source_draft_id: "roof-draft-fixture",
+          source_document_id: "roof-document-fixture",
+          source_attendance_cycle_id: "cycle-fixture",
+          source_cycle_number: 1,
+          source_raw_sha256: await rawSha256Bytes(bytes),
+          source_raw_size_bytes: bytes.byteLength,
+        },
+      };
+    },
     renderSwmsArtifact: async () => ({
       file_name: "SWMS - REF-70062.pdf",
       media_type: "application/pdf",
@@ -6035,4 +6057,59 @@ Deno.test("F26 negative: a persisted curated_source_missing pack serves no trust
     blockerCodes(result).includes("synthetic_livefire_release_forbidden"),
     true,
   );
+});
+
+Deno.test("own-template roof U4 consumes the exact source artifact and never calls the renderer", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "own_template_roof"
+  )!;
+  const input = fixtureInput(row);
+  const sourceBytes = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
+  const sourceHash = await rawSha256Bytes(sourceBytes);
+  let rendererCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, true),
+    dependencies(input, {
+      renderOwnRoofReport: async () => {
+        rendererCalls++;
+        return {
+          file_name: "wrong-rendered-roof.pdf",
+          media_type: "application/pdf" as const,
+          bytes: new Uint8Array([37, 80, 68, 70, 99]),
+          render_hash: "renderer-input-hash",
+        };
+      },
+      resolveOwnRoofReportArtifact: async () => ({
+        file_name: "reviewed-roof.pdf",
+        media_type: "application/pdf" as const,
+        bytes: sourceBytes,
+        provenance: {
+          evidence_source: "current_cycle_own_template_roof_report",
+          source_kind: "submitted_roof_report_document",
+          source_identity: "own-roof:job-fixture/cycle:cycle-fixture/document:reviewed",
+          source_job_id: input.identity.job_id,
+          source_draft_id: "roof-draft-fixture",
+          source_document_id: "reviewed-roof-document",
+          source_attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+          source_cycle_number: input.attendance.cycle_number,
+          source_raw_sha256: sourceHash,
+          source_raw_size_bytes: sourceBytes.byteLength,
+        },
+      }),
+    }),
+  )).results[0];
+  const artifact = result.artifacts.find((candidate) =>
+    candidate.role === "supporting_report_pdf"
+  );
+  assert(artifact);
+  assertEquals(artifact.bytes, sourceBytes);
+  assertEquals(artifact.metadata.source_raw_sha256, sourceHash);
+  assertEquals(artifact.metadata.source_raw_size_bytes, sourceBytes.byteLength);
+  assertEquals(artifact.metadata.render_hash, undefined);
+  assertEquals(rendererCalls, 0);
+  assert(Array.isArray(result.review_spec.cards));
+  assertEquals((result.review_spec.cards[0] as Record<string, unknown>).own_roof_source, {
+    ...artifact.metadata,
+  });
 });

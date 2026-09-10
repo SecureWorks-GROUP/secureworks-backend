@@ -1011,6 +1011,14 @@ import {
   buildRoofReportJob,
 } from './roof_report_template.ts'
 import { summariseTradeMoney, tradeMoneyRow } from './trade_money.ts'
+import {
+  SES_OWN_ROOF_REPORT_SOURCE_KIND,
+  SES_OWN_ROOF_REPORT_EVIDENCE_SOURCE,
+  buildOwnRoofSupersessionAudit,
+  resolveOwnRoofReportArtifact,
+  validateOwnRoofReportBind,
+  type OwnRoofReportBindRequest,
+} from './ses_roof_report_artifact.ts'
 // M2/U4 — materials reconciliation queue (ops worklist that drains unmatched
 // non-mirror ACCPAY bills into manual materials facts, auditably).
 import {
@@ -4962,6 +4970,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // producer-trust, PNG and server-computed content-hash validation.
       'record_ses_portal_capture_evidence',
       'bind_current_cycle_curated_makesafe_report',
+      // Existing-document own-template roof source bind. This is a bounded
+      // document/draft/pack pointer repair; it cannot render, send, invoice or
+      // mutate a board stage.
+      'bind_current_cycle_own_roof_report',
       // Captain 2026-08-13: bind one explicitly named, already-existing Xero
       // invoice PDF to an unsent pack. The handler cannot mint, authorise,
       // void, send, update Xero, or rewrite a contact.
@@ -6914,6 +6926,28 @@ if (import.meta.main) serve(async (req: Request) => {
             : 'api_key') as 'api_key' | 'jwt' | 'routine',
         }
         return json(await bindCurrentCycleCuratedMakesafeReport(client, body, bindActor))
+      }
+      case 'bind_current_cycle_own_roof_report': {
+        const bindIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!bindIsPrivileged) {
+          return json({
+            error: 'forbidden: bind_current_cycle_own_roof_report requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'bind_current_cycle_own_roof_report requires POST' }, 405)
+        }
+        const bindActor = {
+          id: String(authUser?.email || authUser?.id || `ops-api:${authMode}`),
+          auth_mode: (authMode === 'jwt'
+            ? 'jwt'
+            : authMode === 'routine'
+            ? 'routine'
+            : 'api_key') as 'api_key' | 'jwt' | 'routine',
+        }
+        return json(await bindCurrentCycleOwnRoofReport(client, body, bindActor))
       }
       case 'record_ses_portal_capture_evidence': {
         const captureIsPrivileged = authMode === 'api_key' ||
@@ -43661,6 +43695,545 @@ async function ensureCuratedReportPackPointer(
   }
 }
 
+type OwnRoofBindActor = {
+  id: string
+  auth_mode: 'api_key' | 'jwt' | 'routine'
+}
+
+function ownRoofBindError(
+  code: string,
+  message: string,
+  status = 409,
+): ApiError {
+  return new ApiError(message, status, {
+    success: false,
+    code,
+    error: message,
+  })
+}
+
+/**
+ * Bind one explicitly named, already-attached typed roof PDF to the submitted
+ * current-cycle own-template draft. The operation is deliberately separate
+ * from render_roof_report: it consumes the source bytes and records their raw
+ * hash, while preserving the existing draft `last_render_hash` renderer-input
+ * meaning. Every pointer/version write is guarded by the caller's expected
+ * old identity. A stale caller receives a refusal rather than overwriting a
+ * newer review.
+ */
+async function bindCurrentCycleOwnRoofReport(
+  client: any,
+  body: any,
+  actor: OwnRoofBindActor,
+) {
+  const jobId = String(body.job_id || '').trim()
+  const documentId = String(body.document_id || '').trim()
+  const hasExpectedPointer = Object.prototype.hasOwnProperty.call(
+    body,
+    'expected_current_document_id',
+  )
+  const expectedCurrentDocumentId = hasExpectedPointer
+    ? (String(body.expected_current_document_id || '').trim() || null)
+    : null
+  const expectedDraftUpdatedAt = String(body.expected_draft_updated_at || '').trim()
+  const expectedCurrentCycle = Number(body.expected_current_cycle)
+  const expectedRawSha256 = String(body.expected_raw_sha256 || '').trim()
+  const expectedRawSizeBytes = Number(body.expected_raw_size_bytes)
+  if (!jobId || !documentId || !hasExpectedPointer ||
+      !expectedDraftUpdatedAt) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_required_fields_missing',
+      'job_id, document_id, expected_current_document_id and expected_draft_updated_at are required',
+      400,
+    )
+  }
+  const request: OwnRoofReportBindRequest = {
+    job_id: jobId,
+    document_id: documentId,
+    expected_current_document_id: expectedCurrentDocumentId,
+    expected_draft_updated_at: expectedDraftUpdatedAt,
+    expected_current_cycle: expectedCurrentCycle,
+    expected_raw_sha256: expectedRawSha256,
+    expected_raw_size_bytes: expectedRawSizeBytes,
+    reason: String(body.reason || '').trim() || null,
+    operator: actor.id,
+  }
+
+  const [jobRead, detailRead, draftRead, documentRead, priorRead, packRead] =
+    await Promise.all([
+      client.from('jobs').select('id,job_number,type,metadata')
+        .eq('id', jobId).maybeSingle(),
+      client.from('makesafe_job_details')
+        .select('job_id,attendance_cycle_id,cycle_number,report_type')
+        .eq('job_id', jobId).maybeSingle(),
+      client.from('makesafe_roof_report_drafts')
+        .select('*').eq('job_id', jobId).eq('pack_kind', 'roof')
+        .maybeSingle(),
+      client.from('job_documents')
+        .select('id,job_id,type,file_name,pdf_url,storage_url,visible_to_trades,attendance_cycle_id,cycle_attribution,data_snapshot_json,version')
+        .eq('id', documentId).eq('job_id', jobId).maybeSingle(),
+      expectedCurrentDocumentId
+        ? client.from('job_documents')
+          .select('id,job_id,type,data_snapshot_json,version')
+          .eq('id', expectedCurrentDocumentId).eq('job_id', jobId)
+          .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      client.from('makesafe_report_packs')
+        .select('id,status,report_doc_id,sent_at,send_started_at')
+        .eq('job_id', jobId).eq('pack_kind', 'main').maybeSingle(),
+    ])
+  if (jobRead.error || !jobRead.data || detailRead.error || !detailRead.data ||
+      draftRead.error || !draftRead.data || documentRead.error ||
+      !documentRead.data || priorRead.error || packRead.error) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_authority_read_failed',
+      'current-cycle own-roof bind authority rows could not be read',
+      503,
+    )
+  }
+  if (jobRead.data.type !== 'makesafe' && jobRead.data.type !== 'insurance') {
+    throw ownRoofBindError(
+      'own_roof_report_bind_job_type_invalid',
+      'own-template roof binding requires a makesafe or insurance job',
+    )
+  }
+  const currentCycle = Number(detailRead.data.cycle_number)
+  const attendanceCycleId = String(detailRead.data.attendance_cycle_id || '').trim()
+  if (!Number.isSafeInteger(currentCycle) || currentCycle < 1 ||
+      !attendanceCycleId) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_current_cycle_missing',
+      'the selected job has no verified current attendance cycle',
+    )
+  }
+  const validation = validateOwnRoofReportBind({
+    request,
+    draft: draftRead.data,
+    current_cycle_number: currentCycle,
+    document: documentRead.data,
+  })
+  if (!validation.ok) {
+    throw ownRoofBindError(validation.code, validation.reason)
+  }
+
+  // The main pack has its own pointer. Use an explicit request value when the
+  // caller supplied one; otherwise the draft's expected old pointer is the
+  // expected pack pointer as well. This keeps a Scarborough-style old pointer
+  // replacement a deliberate CAS rather than a silent overwrite.
+  const hasExpectedPackPointer = Object.prototype.hasOwnProperty.call(
+    body,
+    'expected_current_pack_document_id',
+  )
+  const expectedPackPointer = hasExpectedPackPointer
+    ? (String(body.expected_current_pack_document_id || '').trim() || null)
+    : expectedCurrentDocumentId
+  const pack = packRead.data
+  if (pack) {
+    const livePackPointer = String(pack.report_doc_id || '').trim() || null
+    if (livePackPointer !== expectedPackPointer) {
+      throw ownRoofBindError(
+        'own_roof_report_bind_pack_pointer_stale',
+        'the main pack report pointer changed since the bind was prepared',
+      )
+    }
+    const sendStarted = pack.sent_at != null || pack.send_started_at != null
+    const bindableStatus = (BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES as readonly string[])
+      .includes(String(pack.status || ''))
+    if (livePackPointer !== documentId && (sendStarted || !bindableStatus)) {
+      throw ownRoofBindError(
+        'own_roof_report_bind_pack_not_bindable',
+        sendStarted
+          ? 'the main pack has started or completed a send and cannot replace its roof pointer'
+          : `the main pack status '${String(pack.status || 'unknown')}' is not bindable for a roof pointer`,
+      )
+    }
+  }
+  const priorVersion = Number(documentRead.data.version)
+  if (!Number.isSafeInteger(priorVersion) || priorVersion < 1) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_document_version_invalid',
+      'the selected roof document has no stable version for compare-and-swap',
+    )
+  }
+
+  const resolved = await resolveOwnRoofReportArtifact({
+    job_id: jobId,
+    current_cycle_number: currentCycle,
+    current_attendance_cycle_id: attendanceCycleId,
+    // Bind validation above proves the live draft still carries the expected
+    // old pointer. For source recovery, select the explicitly requested new
+    // document in a value-only projection; the live pointer is changed only
+    // by the guarded draft UPDATE below.
+    draft: { ...draftRead.data, report_doc_id: documentId },
+    documents: [documentRead.data],
+    expected_raw_sha256: expectedRawSha256,
+    expected_raw_size_bytes: expectedRawSizeBytes,
+    allow_expected_hash_supersession: true,
+    download: async (url) => {
+      let response: Response
+      try {
+        response = await fetch(url, { signal: AbortSignal.timeout(20_000) })
+      } catch {
+        throw ownRoofBindError(
+          'own_roof_report_bind_source_unreadable',
+          'the selected roof document bytes could not be recovered',
+        )
+      }
+      if (!response.ok) {
+        throw ownRoofBindError(
+          'own_roof_report_bind_source_unreadable',
+          `the selected roof document returned HTTP ${response.status}`,
+        )
+      }
+      return new Uint8Array(await response.arrayBuffer())
+    },
+  })
+  if (!resolved.ok) throw ownRoofBindError(resolved.code, resolved.reason)
+  if (resolved.raw_sha256 !== expectedRawSha256.toLowerCase() ||
+      resolved.raw_size_bytes !== expectedRawSizeBytes) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_source_hash_mismatch',
+      'the selected roof document bytes do not match the expected raw hash or size',
+    )
+  }
+
+  // Source recovery is network-bound. Re-read every CAS coordinate after that
+  // wait so a cycle/draft/document/pack change during download cannot be
+  // paired with the bytes we just recovered.
+  const [latestDetailRead, latestDraftRead, latestDocumentRead, latestPackRead] =
+    await Promise.all([
+      client.from('makesafe_job_details')
+        .select('job_id,attendance_cycle_id,cycle_number')
+        .eq('job_id', jobId).maybeSingle(),
+      client.from('makesafe_roof_report_drafts')
+        .select('id,job_id,status,submitted_cycle,report_doc_id,updated_at')
+        .eq('id', draftRead.data.id).eq('job_id', jobId).eq('pack_kind', 'roof')
+        .maybeSingle(),
+      client.from('job_documents')
+        .select('id,job_id,type,file_name,pdf_url,storage_url,visible_to_trades,attendance_cycle_id,cycle_attribution,data_snapshot_json,version')
+        .eq('id', documentId).eq('job_id', jobId).maybeSingle(),
+      pack
+        ? client.from('makesafe_report_packs')
+          .select('id,status,report_doc_id,sent_at,send_started_at')
+          .eq('id', pack.id).eq('job_id', jobId).eq('pack_kind', 'main')
+          .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ])
+  if (latestDetailRead.error || latestDraftRead.error ||
+      latestDocumentRead.error || latestPackRead.error ||
+      !latestDetailRead.data || !latestDraftRead.data ||
+      !latestDocumentRead.data || (pack && !latestPackRead.data)) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_cas_reread_failed',
+      'bind authority rows could not be re-read after source recovery',
+      503,
+    )
+  }
+  const latestCycle = Number(latestDetailRead.data.cycle_number)
+  const latestCycleId = String(latestDetailRead.data.attendance_cycle_id || '').trim()
+  const latestValidation = validateOwnRoofReportBind({
+    request,
+    draft: latestDraftRead.data,
+    current_cycle_number: latestCycle,
+    document: latestDocumentRead.data,
+  })
+  const latestPackBindable = !pack ||
+    (BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES as readonly string[])
+      .includes(String(latestPackRead.data?.status || ''))
+  if (!latestValidation.ok || latestCycle !== currentCycle ||
+      latestCycleId !== attendanceCycleId ||
+      Number(latestDocumentRead.data.version) !== priorVersion ||
+      (pack && (
+        (String(latestPackRead.data.report_doc_id || '').trim() || null) !==
+          expectedPackPointer ||
+        latestPackRead.data.sent_at != null ||
+        latestPackRead.data.send_started_at != null ||
+        (expectedPackPointer !== documentId && !latestPackBindable)
+      ))) {
+    throw ownRoofBindError(
+      'own_roof_report_bind_compare_and_swap_drift',
+      latestValidation.ok
+        ? 'the current-cycle roof bind authority changed during source recovery'
+        : latestValidation.reason,
+    )
+  }
+
+  const priorSnapshot = documentRead.data.data_snapshot_json &&
+      typeof documentRead.data.data_snapshot_json === 'object'
+    ? documentRead.data.data_snapshot_json as Record<string, unknown>
+    : {}
+  const previousDocumentSnapshot = priorRead.data?.data_snapshot_json &&
+      typeof priorRead.data.data_snapshot_json === 'object'
+    ? priorRead.data.data_snapshot_json as Record<string, unknown>
+    : {}
+  const priorSourceIdentity = String(
+    previousDocumentSnapshot.own_roof_source_identity ||
+      previousDocumentSnapshot.source_identity || '',
+  ).trim() || null
+  const priorSourceRawSha256 = String(
+    previousDocumentSnapshot.own_roof_source_raw_sha256 ||
+      previousDocumentSnapshot.source_raw_sha256 || '',
+  ).trim() || null
+  const exactSnapshot: Record<string, unknown> = {
+    ...priorSnapshot,
+    evidence_source: SES_OWN_ROOF_REPORT_EVIDENCE_SOURCE,
+    source_kind: SES_OWN_ROOF_REPORT_SOURCE_KIND,
+    own_roof_source_identity: resolved.artifact.provenance.source_identity,
+    own_roof_source_job_id: jobId,
+    own_roof_source_draft_id: draftRead.data.id,
+    own_roof_source_document_id: documentId,
+    own_roof_source_attendance_cycle_id: attendanceCycleId,
+    own_roof_source_cycle_number: currentCycle,
+    own_roof_source_raw_sha256: resolved.raw_sha256,
+    own_roof_source_raw_size_bytes: resolved.raw_size_bytes,
+    // Generic keys make the byte stamp discoverable to older read tooling;
+    // last_render_hash stays untouched because it is the renderer input hash.
+    source_identity: resolved.artifact.provenance.source_identity,
+    source_document_id: documentId,
+    source_raw_sha256: resolved.raw_sha256,
+    source_raw_size_bytes: resolved.raw_size_bytes,
+    source_file_name: resolved.artifact.file_name,
+    own_roof_source_bound_by: actor.id,
+    own_roof_source_bound_at: new Date().toISOString(),
+  }
+  const audit = buildOwnRoofSupersessionAudit({
+    request,
+    draft: draftRead.data,
+    document: {
+      ...documentRead.data,
+      attendance_cycle_id: attendanceCycleId,
+      data_snapshot_json: exactSnapshot,
+    },
+    source_raw_sha256: resolved.raw_sha256,
+    source_raw_size_bytes: resolved.raw_size_bytes,
+    actor: actor.id,
+    reason: request.reason,
+    prior_source_identity: priorSourceIdentity,
+    prior_source_raw_sha256: priorSourceRawSha256,
+  })
+  const eventId = stableUuidFromSha256(await sesSha256({
+    domain: 'ses-own-roof-source-bind/v1',
+    job_id: jobId,
+    draft_id: draftRead.data.id,
+    document_id: documentId,
+    expected_current_document_id: expectedCurrentDocumentId,
+    expected_draft_updated_at: expectedDraftUpdatedAt,
+    source_identity: audit.source_identity,
+    source_raw_sha256: resolved.raw_sha256,
+  }))
+  const event = await client.from('job_events').insert({
+    id: eventId,
+    job_id: jobId,
+    event_type: 'ses_own_roof_report_source_bind_validated',
+    detail_json: {
+      ...audit,
+      auth_mode: actor.auth_mode,
+      prior_document_version: priorVersion,
+      prior_data_snapshot_json: previousDocumentSnapshot,
+      attestation: 'privileged_ops_own_roof_bind_exact_source_bytes',
+    },
+  })
+  if (event.error) {
+    if (event.error.code === '23505') {
+      throw ownRoofBindError(
+        'own_roof_report_bind_reservation_conflict',
+        'this own-roof source bind is already reserved or completed; re-read the current draft/document/pack pointers and reconcile the retained reservation before retrying',
+      )
+    }
+    throw ownRoofBindError(
+      'own_roof_report_bind_audit_write_failed',
+      'the own-roof source bind audit event could not be written',
+      503,
+    )
+  }
+  let documentWritten = false
+  let draftWritten = false
+  let packWritten = false
+  let documentWriteAttempted = false
+  let draftWriteAttempted = false
+  let packWriteAttempted = false
+  try {
+    documentWriteAttempted = true
+    const documentUpdate = await client.from('job_documents').update({
+      data_snapshot_json: exactSnapshot,
+      attendance_cycle_id: attendanceCycleId,
+      cycle_attribution: 'bound',
+      version: priorVersion + 1,
+    }).eq('id', documentId).eq('job_id', jobId).eq('version', priorVersion)
+      .select('id')
+    if (documentUpdate.error || !Array.isArray(documentUpdate.data) ||
+        documentUpdate.data.length !== 1) {
+      throw ownRoofBindError(
+        'own_roof_report_bind_document_compare_and_swap_drift',
+        'the selected roof document changed before provenance could be stamped',
+      )
+    }
+    documentWritten = true
+    draftWriteAttempted = true
+    let draftUpdate = client.from('makesafe_roof_report_drafts').update({
+      report_doc_id: documentId,
+      updated_at: new Date().toISOString(),
+    }).eq('id', draftRead.data.id).eq('job_id', jobId).eq('pack_kind', 'roof')
+      .eq('updated_at', expectedDraftUpdatedAt)
+      .eq('status', 'submitted').eq('submitted_cycle', currentCycle)
+    draftUpdate = expectedCurrentDocumentId === null
+      ? draftUpdate.is('report_doc_id', null)
+      : draftUpdate.eq('report_doc_id', expectedCurrentDocumentId)
+    const updatedDraft = await draftUpdate.select('id,report_doc_id,updated_at')
+    if (updatedDraft.error || !Array.isArray(updatedDraft.data) ||
+        updatedDraft.data.length !== 1) {
+      throw ownRoofBindError(
+        'own_roof_report_bind_draft_compare_and_swap_drift',
+        'the submitted roof draft changed before its document pointer could be bound',
+      )
+    }
+    draftWritten = true
+    if (pack) {
+      packWriteAttempted = true
+      let packUpdate = client.from('makesafe_report_packs').update({
+        report_doc_id: documentId,
+        updated_at: new Date().toISOString(),
+      }).eq('id', pack.id).eq('job_id', jobId).eq('pack_kind', 'main')
+        .is('sent_at', null).is('send_started_at', null)
+        .in('status', [...BIND_EXISTING_INVOICE_PACK_RECOVERABLE_STATUSES])
+      packUpdate = expectedPackPointer === null
+        ? packUpdate.is('report_doc_id', null)
+        : packUpdate.eq('report_doc_id', expectedPackPointer)
+      const updatedPack = await packUpdate.select('id,report_doc_id')
+      if (updatedPack.error || !Array.isArray(updatedPack.data) ||
+          updatedPack.data.length !== 1) {
+        throw ownRoofBindError(
+          'own_roof_report_bind_pack_compare_and_swap_drift',
+          'the main pack changed before its roof document pointer could be bound',
+        )
+      }
+      packWritten = true
+    }
+
+    // A multi-row sequence cannot be made globally atomic with these existing
+    // tables. Re-read the complete authority tuple before reporting success so
+    // a concurrent cycle/pointer/send change after the writes is returned as a
+    // retained partial/unknown outcome instead of a false successful bind.
+    const [finalDetailRead, finalDraftRead, finalDocumentRead, finalPackRead] =
+      await Promise.all([
+        client.from('makesafe_job_details')
+          .select('job_id,attendance_cycle_id,cycle_number')
+          .eq('job_id', jobId).maybeSingle(),
+        client.from('makesafe_roof_report_drafts')
+          .select('id,job_id,status,submitted_cycle,report_doc_id,updated_at')
+          .eq('id', draftRead.data.id).eq('job_id', jobId).eq('pack_kind', 'roof')
+          .maybeSingle(),
+        client.from('job_documents')
+          .select('id,job_id,type,attendance_cycle_id,cycle_attribution,data_snapshot_json,version')
+          .eq('id', documentId).eq('job_id', jobId).maybeSingle(),
+        pack
+          ? client.from('makesafe_report_packs')
+            .select('id,status,report_doc_id,sent_at,send_started_at')
+            .eq('id', pack.id).eq('job_id', jobId).eq('pack_kind', 'main')
+            .maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
+      ])
+    const finalSnapshot = finalDocumentRead.data?.data_snapshot_json
+    const finalSnapshotObject = finalSnapshot &&
+        typeof finalSnapshot === 'object'
+      ? finalSnapshot as Record<string, unknown>
+      : {}
+    const finalRawHash = String(
+      finalSnapshotObject.own_roof_source_raw_sha256 || '',
+    ).trim().toLowerCase()
+    const finalRawSize = Number(
+      finalSnapshotObject.own_roof_source_raw_size_bytes,
+    )
+    const finalDraft = finalDraftRead.data
+    const finalDocument = finalDocumentRead.data
+    const finalPack = finalPackRead.data
+    const finalTupleValid = !finalDetailRead.error &&
+      !finalDraftRead.error && !finalDocumentRead.error &&
+      !finalPackRead.error && finalDetailRead.data && finalDraft &&
+      finalDocument && (!pack || finalPack) &&
+      Number(finalDetailRead.data.cycle_number) === currentCycle &&
+      String(finalDetailRead.data.attendance_cycle_id || '').trim() ===
+        attendanceCycleId &&
+      String(finalDraft.report_doc_id || '').trim() === documentId &&
+      String(finalDraft.status || '').toLowerCase() === 'submitted' &&
+      Number(finalDraft.submitted_cycle) === currentCycle &&
+      String(finalDocument.type || '').toLowerCase() === 'roof_report' &&
+      String(finalDocument.attendance_cycle_id || '').trim() === attendanceCycleId &&
+      String(finalDocument.cycle_attribution || '').toLowerCase() === 'bound' &&
+      Number(finalDocument.version) === priorVersion + 1 &&
+      finalRawHash === resolved.raw_sha256.toLowerCase() &&
+      finalRawSize === resolved.raw_size_bytes &&
+      (!pack || (
+        String(finalPack.report_doc_id || '').trim() === documentId &&
+        finalPack.sent_at == null && finalPack.send_started_at == null
+      ))
+    if (!finalTupleValid) {
+      throw ownRoofBindError(
+        'own_roof_report_bind_final_read_drift',
+        'the bound roof document, submitted draft, cycle or pack changed before bind completion could be confirmed',
+      )
+    }
+  } catch (error) {
+    // Never delete an admitted reservation after a write was attempted. A
+    // transport failure or incomplete response can follow a committed DB write,
+    // so the outcome is completed/unknown until a fresh read reconciles it.
+    const partial = await client.from('job_events').update({
+      detail_json: {
+        ...audit,
+        auth_mode: actor.auth_mode,
+        prior_document_version: priorVersion,
+        prior_data_snapshot_json: previousDocumentSnapshot,
+        attestation: 'privileged_ops_own_roof_bind_partial_failure',
+        partial_failure: true,
+        writes_attempted: {
+          document: documentWriteAttempted,
+          draft: draftWriteAttempted,
+          pack: packWriteAttempted,
+        },
+        completed_writes: {
+          document: documentWritten,
+          draft: draftWritten,
+          pack: packWritten,
+        },
+        unknown_write_outcomes: {
+          document: documentWriteAttempted && !documentWritten,
+          draft: draftWriteAttempted && !draftWritten,
+          pack: packWriteAttempted && !packWritten,
+        },
+        recovery_action: 'Re-read the current draft/document/pack pointers and reconcile this retained bind reservation before retrying.',
+      },
+    }).eq('id', eventId)
+    if (partial.error) {
+      console.error('[ops-api] own roof bind partial audit update failed', partial.error)
+    }
+    throw error
+  }
+  return {
+    success: true,
+    skipped: false,
+    document_id: documentId,
+    document_version: priorVersion + 1,
+    report_doc_id: documentId,
+    attendance_cycle_id: attendanceCycleId,
+    cycle_attribution: 'bound',
+    source_kind: SES_OWN_ROOF_REPORT_SOURCE_KIND,
+    evidence_source: SES_OWN_ROOF_REPORT_EVIDENCE_SOURCE,
+    source_identity: resolved.artifact.provenance.source_identity,
+    source_raw_sha256: resolved.raw_sha256,
+    source_raw_size_bytes: resolved.raw_size_bytes,
+    supersedes_prior_bind: audit.supersedes_prior_bind,
+    prior_document_id: audit.prior_document_id,
+    prior_source_identity: audit.prior_source_identity,
+    prior_source_raw_sha256: audit.prior_source_raw_sha256,
+    audit_event_id: eventId,
+    writes: 3 + (pack ? 1 : 0),
+    // retained locals make partial-write facts visible while keeping this
+    // action's success response honest if future maintenance changes ordering.
+    document_written: documentWritten,
+    draft_written: draftWritten,
+  }
+}
+
 /**
  * POST ops-api?action=bind_current_cycle_curated_makesafe_report
  *
@@ -58280,6 +58853,8 @@ export const _attachCurrentWikiCuratedReportForTest =
   attachCurrentWikiCuratedReport
 export const _bindCurrentCycleCuratedMakesafeReportForTest =
   bindCurrentCycleCuratedMakesafeReport
+export const _bindCurrentCycleOwnRoofReportForTest =
+  bindCurrentCycleOwnRoofReport
 export const _updateInvoiceForTest = updateInvoice
 
 export const _getJobContextFactsForTest = getJobContextFacts

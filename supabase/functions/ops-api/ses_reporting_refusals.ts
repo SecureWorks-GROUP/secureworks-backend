@@ -35,6 +35,8 @@ const FACTS = {
     "New evidence landed after this review, so the displayed approval is stale.",
   curated_source_missing:
     "The completion report lacks an independently byte-bound current-cycle curated source, so it is hidden from the trusted pack.",
+  own_roof_source_missing:
+    "The own-template roof pack lacks an independently byte-bound submitted current-cycle roof source, so it is hidden from the trusted pack.",
   xero_not_authorised:
     "The current Xero invoice is not AUTHORISED, so its real invoice PDF cannot be released.",
   authorised_derivative_mismatch:
