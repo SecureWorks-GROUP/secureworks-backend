@@ -11,6 +11,7 @@ export const GHL_PROVIDER_READ_ACTIONS = [
   "list_ghl_messages",
   "get_ghl_message",
   "get_ghl_email",
+  "get_ghl_call_transcript",
 ] as const;
 export type GhlProviderReadAction = typeof GHL_PROVIDER_READ_ACTIONS[number];
 export function isGhlProviderReadAction(
@@ -224,6 +225,7 @@ const ARGUMENTS: Record<GhlProviderReadAction, string[]> = {
   ],
   get_ghl_message: ["message_id", "contact_id", "conversation_id"],
   get_ghl_email: ["message_id", "contact_id", "conversation_id"],
+  get_ghl_call_transcript: ["message_id", "contact_id", "conversation_id"],
 };
 
 export async function readGhlProvider(
@@ -259,11 +261,11 @@ export async function readGhlProvider(
   const fetchFn = options.fetchFn || fetch;
   const deadline = Date.now() + 45000;
   const requests: { path: string; version: string; status: number }[] = [];
-  async function get(
+  async function getJson(
     path: string,
     query?: URLSearchParams,
     version = "2021-07-28",
-  ): Promise<JsonObject> {
+  ): Promise<unknown> {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       throw new GhlProviderReadError(
@@ -317,6 +319,14 @@ export async function readGhlProvider(
         502,
       );
     }
+    return payload;
+  }
+  async function get(
+    path: string,
+    query?: URLSearchParams,
+    version = "2021-07-28",
+  ): Promise<JsonObject> {
+    const payload = await getJson(path, query, version);
     if (
       payload === null || typeof payload !== "object" || Array.isArray(payload)
     ) {
@@ -636,6 +646,15 @@ export async function readGhlProvider(
   }
   const messageId = requireId(params.get("message_id"), "message_id");
   if (
+    action === "get_ghl_call_transcript" &&
+    (!requestedContact || !requestedConversation)
+  ) {
+    throw new GhlProviderReadError(
+      "transcript_scope_required",
+      "contact_id and conversation_id are required",
+    );
+  }
+  if (
     action === "get_ghl_email" && (!requestedContact || !requestedConversation)
   ) {
     throw new GhlProviderReadError(
@@ -674,6 +693,89 @@ export async function readGhlProvider(
     );
   }
   if (!requestedConversation) await conversation(conversationId, contactId);
+  if (action === "get_ghl_call_transcript") {
+    const typeMarkers = [message.type, message.typeString, message.messageType]
+      .filter((value): value is string => typeof value === "string");
+    if (
+      !typeMarkers.length ||
+      !typeMarkers.every((value) => ["TYPE_CALL", "CALL"].includes(value))
+    ) {
+      throw new GhlProviderReadError(
+        "call_type_required",
+        "Validated message is not unambiguously a call",
+        422,
+      );
+    }
+    const path = `/conversations/locations/${
+      encodeURIComponent(locationId)
+    }/messages/${encodeURIComponent(messageId)}/transcription`;
+    // The v3 docs show a sentence object and numeric strings. Accept an array
+    // of those same sentences, but never guess undocumented wrapper shapes.
+    const raw = await getJson(path, undefined, "v3");
+    const sentences = raw === null ? [] : Array.isArray(raw) ? raw : [raw];
+    for (const value of sentences) {
+      const sentence = object(value);
+      const numericFields = [
+        "mediaChannel",
+        "sentenceIndex",
+        "startTime",
+        "endTime",
+        "confidence",
+      ];
+      if (
+        typeof sentence.transcript !== "string" ||
+        !sentence.transcript.trim() ||
+        !numericFields.every((key) => {
+          const number = sentence[key];
+          return (typeof number === "number" ||
+            (typeof number === "string" && /^\d+(?:\.\d+)?$/.test(number))) &&
+            Number.isFinite(Number(number)) && Number(number) >= 0;
+        }) || Number(sentence.endTime) < Number(sentence.startTime) ||
+        !Number.isInteger(Number(sentence.mediaChannel)) ||
+        !Number.isInteger(Number(sentence.sentenceIndex)) ||
+        Number(sentence.confidence) > 1
+      ) {
+        throw new GhlProviderReadError(
+          "provider_response_invalid",
+          "GHL returned malformed transcript sentences",
+          502,
+        );
+      }
+    }
+    return result(
+      {
+        message: data,
+        transcript: {
+          status: sentences.length ? "available" : "unavailable",
+          sentences,
+        },
+      },
+      null,
+      {
+        provenance: {
+          contact_id: contactId,
+          conversation_id: conversationId,
+          message_id: messageId,
+          message_occurred_at: message.dateAdded ?? null,
+          endpoint: path,
+          version: "v3",
+        },
+        media_coverage: {
+          call: "validated",
+          transcript: sentences.length
+            ? "provider_sentences_returned"
+            : "not_returned_by_provider",
+          recording: "not_requested",
+        },
+        limitations: [
+          "Provider transcript only; accuracy and completeness against the recording are not independently verified",
+          ...(sentences.length
+            ? []
+            : ["Transcript unavailable; this does not mean no call occurred"]),
+        ],
+      },
+    );
+  }
   if (action === "get_ghl_email") {
     const emailMeta = object(object(message.meta).email);
     const references = object(emailMeta.email).messageIds ??

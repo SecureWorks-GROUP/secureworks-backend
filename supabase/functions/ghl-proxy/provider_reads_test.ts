@@ -672,3 +672,182 @@ Deno.test("provider 429 and malformed responses never look like empty successful
     "omitted",
   );
 });
+
+const callArgs = {
+  contact_id: contactId,
+  conversation_id: conversationId,
+  message_id: "call_a",
+};
+const callMessage = (extra: Record<string, unknown> = {}) =>
+  msg("call_a", { messageType: "TYPE_CALL", ...extra });
+const callReplies = (
+  extra: Record<string, unknown> = {},
+): Reply[] => [contactReply(), conversationReply(), {
+  path: "/conversations/messages/call_a",
+  body: callMessage(extra),
+}];
+const transcriptPath =
+  `/conversations/locations/${locationId}/messages/call_a/transcription`;
+const sentence = {
+  mediaChannel: "1",
+  sentenceIndex: "1",
+  startTime: "34",
+  endTime: "45",
+  transcript: "Tuesday after ten.",
+  confidence: "0.5",
+};
+
+Deno.test("call transcript binds all identities, uses v3 and retains original evidence", async () => {
+  for (
+    const body of [sentence, [sentence, {
+      ...sentence,
+      sentenceIndex: 2,
+      startTime: 46,
+      endTime: 50,
+      confidence: 0.9,
+    }]]
+  ) {
+    const f = fixture([...callReplies(), { path: transcriptPath, body }]);
+    const result = await f.run("get_ghl_call_transcript", callArgs);
+    assertEquals(result.data.transcript, {
+      status: "available",
+      sentences: Array.isArray(body) ? body : [body],
+    });
+    assertEquals(new Headers(f.calls[3].init.headers).get("version"), "v3");
+    assertEquals(result.provider_requests.length, 4);
+    assertEquals(result.retrieved_at, "2026-09-09T01:00:00.000Z");
+    assertEquals((result as Record<string, unknown>).provenance, {
+      contact_id: contactId,
+      conversation_id: conversationId,
+      message_id: "call_a",
+      message_occurred_at: "2026-09-09T00:00:00Z",
+      endpoint: transcriptPath,
+      version: "v3",
+    });
+    f.done();
+  }
+});
+
+Deno.test("empty transcript differs from absent call; unrecognised shapes fail closed", async () => {
+  for (const body of [null, []]) {
+    const f = fixture([...callReplies(), { path: transcriptPath, body }]);
+    const result = await f.run("get_ghl_call_transcript", callArgs);
+    assertEquals(result.data.transcript, {
+      status: "unavailable",
+      sentences: [],
+    });
+    assertEquals((result as Record<string, unknown>).media_coverage, {
+      call: "validated",
+      transcript: "not_returned_by_provider",
+      recording: "not_requested",
+    });
+    f.done();
+  }
+  for (
+    const body of [
+      {},
+      { data: [sentence] },
+      "text",
+      [sentence, {}],
+      { ...sentence, confidence: "NaN" },
+      { ...sentence, startTime: 99 },
+      { ...sentence, transcript: "" },
+      { ...sentence, sentenceIndex: 0.5 },
+    ]
+  ) {
+    const f = fixture([...callReplies(), { path: transcriptPath, body }]);
+    const err = await assertRejects(
+      () => f.run("get_ghl_call_transcript", callArgs),
+      GhlProviderReadError,
+    );
+    assertEquals(err.code, "provider_response_invalid");
+    f.done();
+  }
+});
+
+Deno.test("transcript requires all selectors and refuses injected routing before any read", async () => {
+  for (const key of Object.keys(callArgs)) {
+    const args: Record<string, string> = { ...callArgs };
+    delete args[key];
+    const f = fixture([]);
+    await assertRejects(
+      () => f.run("get_ghl_call_transcript", args),
+      GhlProviderReadError,
+    );
+    f.done();
+  }
+  for (const key of ["location_id", "url", "endpoint", "token"]) {
+    const f = fixture([]);
+    await assertRejects(
+      () =>
+        f.run("get_ghl_call_transcript", { ...callArgs, [key]: "injected" }),
+      GhlProviderReadError,
+    );
+    f.done();
+  }
+});
+
+Deno.test("wrong identity, location or non-call never reaches transcript endpoint", async () => {
+  for (
+    const [extra, code] of [
+      [{ id: "wrong" }, "provider_id_mismatch"],
+      [{ locationId: "other_location" }, "provider_location_mismatch"],
+      [{ contactId: "other_contact" }, "provider_contact_mismatch"],
+      [
+        { conversationId: "other_conversation" },
+        "provider_conversation_mismatch",
+      ],
+      [{ messageType: "SMS" }, "call_type_required"],
+      [{ messageType: undefined }, "call_type_required"],
+      [{ typeString: "TYPE_SMS" }, "call_type_required"],
+    ] as const
+  ) {
+    const f = fixture(callReplies(extra));
+    const err = await assertRejects(
+      () => f.run("get_ghl_call_transcript", callArgs),
+      GhlProviderReadError,
+    );
+    assertEquals(err.code, code);
+    f.done();
+  }
+  for (
+    const replies of [
+      [{
+        ...contactReply(),
+        body: { contact: { ...contact, locationId: "other" } },
+      }],
+      [contactReply(), {
+        ...conversationReply(),
+        body: { ...conversation, contactId: "other" },
+      }],
+    ]
+  ) {
+    const f = fixture(replies);
+    await assertRejects(
+      () => f.run("get_ghl_call_transcript", callArgs),
+      GhlProviderReadError,
+    );
+    f.done();
+  }
+});
+
+Deno.test("transcript provider denial, absence and throttling retain error status without body leaks", async () => {
+  for (const status of [403, 404, 429]) {
+    const f = fixture([...callReplies(), {
+      path: transcriptPath,
+      status,
+      body: { error: "SECRET_SHOULD_NOT_LEAK" },
+      headers: { "retry-after": "120" },
+    }]);
+    const err = await assertRejects(
+      () => f.run("get_ghl_call_transcript", callArgs),
+      GhlProviderReadError,
+    );
+    assertEquals(err.code, "provider_request_failed");
+    assertEquals(err.providerStatus, status);
+    assertEquals(err.status, status === 429 ? 429 : 502);
+    assertEquals(err.retryAfter, "120");
+    assert(!err.message.includes("SECRET_SHOULD_NOT_LEAK"));
+    f.done();
+  }
+});
