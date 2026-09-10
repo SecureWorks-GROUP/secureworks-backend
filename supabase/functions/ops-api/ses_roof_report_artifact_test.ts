@@ -20,6 +20,7 @@ const OLD_DOCUMENT_ID = "eca01792-1574-41e7-9d3b-0d2ff6670844";
 const REVIEWED_DOCUMENT_ID = "c23f2cff-af3f-4b31-8fb4-f7b1b9f0247f";
 const REVIEWED_BYTES = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
 const REVIEWED_SHA = "sha256:86edbaa24831badfa0a8b04bb410141e2ee4182b6d0014493fe262a7a331c20b";
+const DRAFT_UPDATED_AT = "2026-09-10T08:00:00.000Z";
 
 function draft(
   overrides: Partial<OwnRoofReportDraftRow> = {},
@@ -30,7 +31,7 @@ function draft(
     status: "submitted",
     submitted_cycle: 1,
     report_doc_id: OLD_DOCUMENT_ID,
-    updated_at: "2026-09-10T08:00:00.000Z",
+    updated_at: DRAFT_UPDATED_AT,
     ...overrides,
   };
 }
@@ -73,7 +74,7 @@ Deno.test("own roof resolver consumes the exact submitted-cycle pointer bytes", 
   assertEquals(result.artifact.provenance.source_cycle_number, 1);
   assertEquals(result.artifact.provenance.source_raw_size_bytes, REVIEWED_BYTES.byteLength);
   assertEquals(result.artifact.provenance.source_raw_sha256, await result.raw_sha256);
-  assertEquals(result.artifact.render_hash, undefined);
+  assertEquals("render_hash" in result.artifact, false);
 });
 
 Deno.test("own roof resolver refuses wrong job, type, cycle, URL, PDF and hash", async () => {
@@ -116,7 +117,7 @@ Deno.test("own roof bind accepts explicit old-pointer supersession and preserves
     job_id: JOB_ID,
     document_id: REVIEWED_DOCUMENT_ID,
     expected_current_document_id: OLD_DOCUMENT_ID,
-    expected_draft_updated_at: draft().updated_at,
+    expected_draft_updated_at: DRAFT_UPDATED_AT,
     expected_current_cycle: 1,
     expected_raw_sha256: REVIEWED_SHA,
     expected_raw_size_bytes: REVIEWED_BYTES.byteLength,
@@ -149,7 +150,7 @@ Deno.test("own roof bind refuses stale expected pointer/version/cycle and wrong 
     job_id: JOB_ID,
     document_id: REVIEWED_DOCUMENT_ID,
     expected_current_document_id: OLD_DOCUMENT_ID,
-    expected_draft_updated_at: draft().updated_at,
+    expected_draft_updated_at: DRAFT_UPDATED_AT,
     expected_current_cycle: 1,
     expected_raw_sha256: REVIEWED_SHA,
     expected_raw_size_bytes: REVIEWED_BYTES.byteLength,
@@ -180,7 +181,7 @@ Deno.test("renderer input hash cannot stand in for own roof raw PDF hash", async
     download: async () => REVIEWED_BYTES,
   });
   assert(result.ok);
-  assertEquals(result.artifact.render_hash, undefined);
+  assertEquals("render_hash" in result.artifact, false);
   assertEquals(result.artifact.provenance.source_raw_sha256, await result.raw_sha256);
   assertEquals(result.artifact.provenance.source_raw_sha256, REVIEWED_SHA);
 });

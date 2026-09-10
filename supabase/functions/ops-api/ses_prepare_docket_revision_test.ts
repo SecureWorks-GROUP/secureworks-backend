@@ -6108,6 +6108,7 @@ Deno.test("own-template roof U4 consumes the exact source artifact and never cal
   assertEquals(artifact.metadata.source_raw_size_bytes, sourceBytes.byteLength);
   assertEquals(artifact.metadata.render_hash, undefined);
   assertEquals(rendererCalls, 0);
+  assert(Array.isArray(result.review_spec.cards));
   assertEquals((result.review_spec.cards[0] as Record<string, unknown>).own_roof_source, {
     ...artifact.metadata,
   });
