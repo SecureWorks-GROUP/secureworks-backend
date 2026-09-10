@@ -392,6 +392,8 @@ import {
   _formatWoLabourBreakdown,
   _tradeInvoiceXeroTax,
   TRADE_INVOICE_XERO_ACCOUNT_CODE,
+  TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+  tradeBillInvoiceNumber,
   _woLabourProblemNote,
   _woNetMismatch,
   type WoLabourProblem,
@@ -8091,7 +8093,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const xeroLineItems = splitTradeInvoiceXeroLines(
           grossXeroLineItems,
           invMoney,
-          { tradeName, superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+          { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
         )
 
         if (inv.xero_bill_id) {
@@ -8155,6 +8157,7 @@ if (import.meta.main) serve(async (req: Request) => {
             Type: 'ACCPAY',
             Contact: { ContactID: xeroContactId },
             Reference: reference,
+            InvoiceNumber: tradeBillInvoiceNumber(inv.invoice_number, reference),
             DueDate: dueDate,
             Status: 'DRAFT',
             LineAmountTypes: xeroTax.lineAmountTypes,
@@ -9760,7 +9763,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const woXeroLineItems = splitTradeInvoiceXeroLines(
               lineItems,
               woMoney,
-              { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+              { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
             )
 
             const workOrderLines: Array<Record<string, unknown>> = pricedScope.map((item) => {
@@ -9862,6 +9865,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 Type: 'ACCPAY',
                 Contact: { ContactID: woXeroContactId },
                 Reference: `${tradeName} | ${wo.wo_number} | ${woJobNum}`,
+                InvoiceNumber: tradeBillInvoiceNumber(`${tradeName} | ${wo.wo_number} | ${woJobNum}`),
                 DueDate: dueDate,
                 Status: 'DRAFT',
                 LineAmountTypes: woGstOn ? 'Exclusive' : 'NoTax',
@@ -11469,7 +11473,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 const allLines = splitTradeInvoiceXeroLines(
                   grossXeroLines,
                   money,
-                  { tradeName, superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+                  { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
                 )
 
                 // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
@@ -11494,6 +11498,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     Type: 'ACCPAY',
                     Contact: { ContactID: xeroContactId },
                     Reference: xeroReference,
+                    InvoiceNumber: tradeBillInvoiceNumber(invoiceNumber, xeroReference),
                     Date: now.toISOString().slice(0, 10),
                     DueDate: dueDate,
                     Status: 'DRAFT',
@@ -49553,7 +49558,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   const stXeroLineItems = splitTradeInvoiceXeroLines(
     lineItems,
     stMoney,
-    { tradeName, superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE },
+    { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
   )
 
   const persistedLineSubtotal = Object.values(jobLines).reduce(
@@ -49704,6 +49709,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       Type: 'ACCPAY',
       Contact: { ContactID: stXeroContactId },
       Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`,
+      InvoiceNumber: tradeBillInvoiceNumber(`${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`),
       DueDate: dueDate,
       Status: 'DRAFT',
       LineAmountTypes: stGstOn ? 'Exclusive' : 'NoTax',
