@@ -95,6 +95,8 @@
 //   push_trade_invoice_to_xero — Push acknowledged trade invoice to Xero as ACCPAY bill
 // ════════════════════════════════════════════════════════════
 
+import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
+
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 // Pin the CDN dependency so CI import-resolution does not first resolve the
 // moving @2 tag through esm.sh's package metadata endpoint.
@@ -52117,9 +52119,9 @@ export function validateCanarySmsRecipient(args: {
   return { ok: true }
 }
 
-async function sendProposedSms(client: any, body: any) {
-  const { action_id } = body
-  if (!action_id) throw new Error('action_id required')
+export async function sendProposedSms(client: any, body: any) {
+  const action_id = body?.action_id
+  if (typeof action_id !== 'string' || !action_id.trim()) throw new ApiError('action_id required', 400)
 
   // Get the proposed action
   const { data: action, error } = await client.from('ai_proposed_actions')
@@ -52128,7 +52130,11 @@ async function sendProposedSms(client: any, body: any) {
     .eq('status', 'pending')
     .single()
 
-  if (error || !action) throw new Error('Action not found or already processed')
+  if (error || !action) throw new ApiError('Action not found or already processed; do not replay an uncertain dispatch', 409)
+  if (typeof action.contact_id !== 'string' || !action.contact_id.trim() ||
+      typeof action.drafted_message !== 'string' || !action.drafted_message.trim()) {
+    return { success: false, action_id, error: 'recipient_and_message_required', auto_retry: false }
+  }
   if (!action.job_id) throw new ApiError('Proposed action has no authoritative job link', 409)
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -52155,50 +52161,17 @@ async function sendProposedSms(client: any, body: any) {
     }
   }
 
-  // Send SMS via ghl-proxy
-  const ghlUrl = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
+  // Claim before the external effect; unknown outcomes stay held for reconciliation.
+  const base = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '')
   const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
-
-  if (action.contact_id && action.drafted_message) {
-    try {
-      await fetch(`${ghlUrl}?action=send_sms`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${ghlKey}`,
-        },
-        body: JSON.stringify({
-          contactId: action.contact_id,
-          message: action.drafted_message,
-          jobId: action.job_id,
-        }),
-      })
-    } catch (e: any) {
-      console.error('[ops-api] Failed to send SMS via ghl-proxy:', e.message)
-      throw new Error('SMS sending failed — check ghl-proxy logs')
-    }
-  }
-
-  // Mark as sent
-  await client.from('ai_proposed_actions')
-    .update({ status: 'sent', sent_at: new Date().toISOString() })
-    .eq('proposal_id', action_id)
-
-  // Log as job event
-  if (action.job_id) {
-    await client.from('job_events').insert({
-      job_id: action.job_id,
-      event_type: 'sms_sent',
-      detail_json: {
-        type: action.action_type,
-        message: action.drafted_message,
-        contact_name: action.contact_name,
-        source: 'ai_proposed_action',
-      },
-    })
-  }
-
-  return { success: true, action_id }
+  if (!base || !ghlKey) return { success: false, action_id, error: 'sms_provider_unconfigured', auto_retry: false }
+  const ghlUrl = base + '/functions/v1/ghl-proxy'
+  return await dispatchProposedSmsWithReceipt(client, action, () => fetch(`${ghlUrl}?action=send_sms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ghlKey}` },
+    body: JSON.stringify({ contactId: action.contact_id, message: action.drafted_message, jobId: action.job_id }),
+    signal: AbortSignal.timeout(20_000),
+  }))
 }
 
 // ════════════════════════════════════════════════════════════

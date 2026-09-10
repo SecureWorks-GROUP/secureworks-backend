@@ -247,6 +247,11 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
+      - name: Test proposed SMS receipts and replay holds
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/proposed_sms_receipt_test.ts
+
       - name: Test shared Xero transport and uncertain outcomes
         run: |
           deno test --no-check --allow-read --allow-env \

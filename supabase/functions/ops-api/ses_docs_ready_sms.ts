@@ -58,7 +58,7 @@ function smsText(
       commercialCaveatCount === 1 ? "" : "s"
     }.`
     : "";
-  return `Docs Ready: ${name}${at}${ref}. Docket and draft invoice await your press.${caveats}`;
+  return `Docs Ready: ${name}${at}${ref}. Docket awaits your press.${caveats}`;
 }
 
 function readReviewCard(result: SesPreparedRevision): {
