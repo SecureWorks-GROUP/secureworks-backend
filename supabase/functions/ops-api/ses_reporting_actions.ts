@@ -3925,7 +3925,8 @@ export async function signOffSesDocketAction(
     args.docket_revision_id,
   );
   const sourceRefusal = displayedPack.blockers.find((blocker) =>
-    blocker.code === "curated_source_missing"
+    blocker.code === "curated_source_missing" ||
+    blocker.code === "own_roof_source_missing"
   );
   if (sourceRefusal) {
     throw new SesActionError(409, sourceRefusal);
@@ -7098,7 +7099,7 @@ async function assertSesReleasedSourcesNotSuperseded(
 ): Promise<void> {
   for (const revisionId of docketRevisionIds) {
     const revision = await client.from("makesafe_docket_revisions")
-      .select("id,job_id").eq("id", revisionId).maybeSingle();
+      .select("id,job_id,envelope").eq("id", revisionId).maybeSingle();
     const jobId = String(object(revision.data).job_id || "").trim();
     const artifacts = jobId
       ? await client.from("makesafe_docket_artifacts")
@@ -7124,6 +7125,37 @@ async function assertSesReleasedSourcesNotSuperseded(
         409,
         curatedSourceMissingRefusal(SES_CURATED_SOURCE_SUPERSEDED_REASON),
       );
+    }
+
+    // Own-template roof reports are a separate source contract from curated
+    // physical reports. The display-time read below used to expose an
+    // untrusted own-roof artifact as a caveat, after which an already approved
+    // release could still dispatch the old bytes. Re-read the exact current
+    // source before execution and make the same named refusal a send wall.
+    const family = String(
+      object(object(object(revision.data).envelope).v2).classification?.family ||
+        "",
+    );
+    if (family !== "own_template_roof") continue;
+    const ownArtifacts = await client.from("makesafe_docket_artifacts")
+      .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
+      .eq("revision_id", revisionId)
+      .eq("role", "supporting_report_pdf");
+    if (ownArtifacts.error || (ownArtifacts.data || []).length !== 1) {
+      const reason = ownArtifacts.error
+        ? "own_roof_docket_artifact_unreadable"
+        : (ownArtifacts.data || []).length === 0
+        ? "own_roof_supporting_report_pdf_missing"
+        : "own_roof_multiple_supporting_report_pdfs";
+      throw new SesActionError(409, ownRoofSourceMissingRefusal(reason));
+    }
+    const trust = await verifyStoredOwnRoofReport(
+      client,
+      ownArtifacts.data[0],
+      revision.data,
+    );
+    if (!trust.trusted) {
+      throw new SesActionError(409, ownRoofSourceMissingRefusal(trust.reason));
     }
   }
 }
@@ -7204,6 +7236,7 @@ async function readSesReleaseArtifactTruthForDisplay(
         job_id: String(docket.job_id || "") || null,
         docket_revision_id: String(docket.id || "") || null,
         artifact_truth: read.truth,
+        blockers: read.presentation.blockers,
         caveats: read.caveats,
       });
     }
@@ -7223,6 +7256,7 @@ async function readSesReleaseArtifactTruthForDisplay(
         job_id: String(member.job_id || "") || null,
         docket_revision_id: String(member.docket_revision_id || "") || null,
         artifact_truth: read.truth,
+        blockers: read.presentation.blockers,
         caveats: read.caveats,
       };
     });
@@ -7668,10 +7702,21 @@ export async function executeSesReleaseRevisionAction(
       }
     }
     // Re-read exact artifact truth immediately before this route dispatches.
-    // Missing/unreadable documents are recorded as Captain-facing honesty and
-    // never become a new refusal: the approved route, recipients and attachment
-    // hashes remain the send authority.
+    // Missing/unreadable documents remain Captain-facing caveats. Integrity
+    // refusals for an own-template roof source are different: this route must
+    // never dispatch bytes that no longer match the submitted current-cycle
+    // source selected by the current draft.
     if (!confirmedEffect) {
+      const releaseArtifactTruth = await readSesReleaseArtifactTruthForDisplay(
+        client,
+        members,
+      );
+      const ownRoofSourceRefusal = releaseArtifactTruth.flatMap((member: any) =>
+        Array.isArray(member.blockers) ? member.blockers : []
+      ).find((blocker: any) => blocker.code === "own_roof_source_missing");
+      if (ownRoofSourceRefusal) {
+        throw new SesActionError(409, ownRoofSourceRefusal);
+      }
       dispatchPreviews.push({
         route_kind: kind,
         recipients: Array.isArray(sendRoute.recipients)
@@ -7681,7 +7726,7 @@ export async function executeSesReleaseRevisionAction(
         attachment_hashes: Array.isArray(sendRoute.attachment_hashes)
           ? sendRoute.attachment_hashes
           : [],
-        members: await readSesReleaseArtifactTruthForDisplay(client, members),
+        members: releaseArtifactTruth,
       });
     }
     const mlbExceptionRouteFields = mlbOrdinaryMailSendEffectPayloadFields(
