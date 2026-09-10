@@ -1,6 +1,6 @@
 -- Source-revision custody for the Luna writer. No source bodies are copied here.
 -- Generated filename manually: local CLI telemetry attempted an unavailable home write.
-BEGIN;
+-- The reviewed deploy runner owns the migration transaction.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
@@ -240,4 +240,3 @@ REVOKE ALL ON public.current_job_context_facts FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.current_job_context_facts TO service_role;
 COMMENT ON VIEW public.current_job_context_facts IS
   'Service-only invoker view: current permanent and unexpired temporary evidence, filtered before pagination. Stored history is unchanged.';
-COMMIT;
