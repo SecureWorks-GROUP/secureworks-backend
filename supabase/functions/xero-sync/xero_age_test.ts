@@ -36,3 +36,10 @@ Deno.test("age buckets match Xero aged-payables windows", () => {
   assertEquals(ageBucketDaysOverdue(91), "90+");
   assertEquals(ageBucketDaysOverdue(Number.NaN), "current");
 });
+
+Deno.test("zone-less fractional dates are stable and explicit offsets remain explicit", () => {
+  const fallback = new Date("2026-09-11T00:00:00Z");
+  assertEquals(resolveXeroInvoiceDueDate({ DueDateString: "2026-08-01T00:00:00.000" }, fallback).toISOString(), "2026-08-01T00:00:00.000Z");
+  assertEquals(resolveXeroInvoiceDueDate({ DueDateString: "2026-08-01T00:00:00+08:00" }, fallback).toISOString(), "2026-07-31T16:00:00.000Z");
+  assertEquals(resolveXeroInvoiceDueDate({ DueDateString: "invalid", due_date: "2026-08-02" }, fallback).toISOString(), "2026-08-02T00:00:00.000Z");
+});

@@ -11,6 +11,7 @@ import {
   leadJobFallbackRows,
   leadOppNameForContact,
   matchesFirstWordRetry,
+  resolveLeadOpportunityRoute,
   scopeLeadJobQuery,
   type LeadContact,
   type LeadLookup,
@@ -202,6 +203,14 @@ Deno.test("leadOppNameForContact: falls back to phone identity when name absent"
   assertEquals(leadOppNameForContact(fetched, "fencing"), "Phone lead 0400111222 — Fencing");
 });
 
+Deno.test("leadOppNameForContact: known non-fencing tool types keep their own labels while routing can stay patio", () => {
+  const contact = { firstName: "Nina", lastName: "Deck" };
+  assertEquals(leadOppNameForContact(contact, "decking"), "Nina Deck — Decking");
+  assertEquals(leadOppNameForContact(contact, "combo"), "Nina Deck — Combo");
+  const route = resolveLeadOpportunityRoute("decking");
+  assertEquals(route.ok && route.pipelineKey, "patio");
+});
+
 // ── create_contact_and_opportunity contactId branch (B2/AM-B) — mocked ghl ──
 
 // Records every ghl() call so tests can assert what was / was not attempted.
@@ -339,6 +348,45 @@ Deno.test("createOpportunityForExistingContact: skipOpportunity → contact veri
   assertEquals(result.body, { contactId: "ct-3", opportunityId: null, contactExisted: true });
   assertEquals(calls.length, 1);
   assertEquals(calls[0].path, "/contacts/ct-3");
+});
+
+Deno.test("createOpportunityForExistingContact: invalid explicit toolType returns 400 before provider opportunity POST", async () => {
+  const { ghl, calls } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-invalid", firstName: "Ivy", lastName: "Badtype" } }),
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-invalid",
+    toolType: "roofing",
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 400);
+  assertEquals(result.body.code, "invalid_tool_type");
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].path, "/contacts/ct-invalid");
+});
+
+Deno.test("createOpportunityForExistingContact: missing legacy toolType preserves patio default", async () => {
+  const { ghl, calls } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-legacy", firstName: "Pat", lastName: "Legacy" } }),
+    opp: () => ({ opportunity: { id: "opp-legacy" } }),
+  });
+
+  const result = await createOpportunityForExistingContact({
+    contactId: "ct-legacy",
+    toolType: undefined,
+    locationId: "loc-1",
+    pipelines: PIPELINES,
+    ghl,
+  });
+
+  assertEquals(result.status, 200);
+  const oppBody = JSON.parse(String(calls[1].init?.body));
+  assertEquals(oppBody.pipelineId, PATIO);
+  assertEquals(oppBody.name, "Pat Legacy — Patio");
 });
 
 Deno.test("createOpportunityForExistingContact: skipOpportunity falsy → opportunity still created", async () => {

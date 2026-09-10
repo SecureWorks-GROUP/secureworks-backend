@@ -304,11 +304,19 @@ export async function getSupplierBill(
     params instanceof URLSearchParams
       ? params.get(key)
       : (params as Record<string, string>)[key];
-  const xeroInvoiceId = String(
-    read("xero_invoice_id") || read("xero_id") || "",
-  ).trim();
+  const ids = ["xero_invoice_id", "xero_bill_id", "xero_id"]
+    .map((key) => String(read(key) ?? "").trim())
+    .filter((id) => id.length > 0);
+  const xeroInvoiceId = ids[0];
   if (!xeroInvoiceId) {
     throw new SupplierBillError("xero_invoice_id required", 400);
+  }
+  if (ids.some((id) => id.toLowerCase() !== xeroInvoiceId.toLowerCase())) {
+    throw new SupplierBillError(
+      "Conflicting supplier bill IDs; supply one ID or matching aliases",
+      400,
+      "SUPPLIER_BILL_ID_CONFLICT",
+    );
   }
   const { accessToken, tenantId } = await deps.getToken(client);
   const inv = await loadAccpayFromXero(
