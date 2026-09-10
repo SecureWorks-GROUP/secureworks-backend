@@ -5562,6 +5562,83 @@ Deno.test("Maverick output is explicit, current-card bound, and part of revision
   );
 });
 
+Deno.test("canonical fixed-fee roof output does not require physical make-safe labour", async () => {
+  for (const family of ["own_template_roof", "ordinary_roof_portal"] as const) {
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === "MLB" && candidate.family === family
+    )!;
+    const input = fixtureInput(row);
+    const supplied = request(input.identity.job_id);
+    const draft = supplied.draft_pack_output as Record<string, unknown>;
+    object(draft.report).billing_note =
+      "Single-storey roof inspection and report.";
+    object(draft.invoice).line_items = [{
+      description: "Single Storey roof report",
+      quantity: 1,
+      unit_price: 250,
+    }];
+    const result =
+      (await prepareSesDocketRevision(supplied, dependencies(input)))
+        .results[0];
+    assert(
+      !blockerCodes(result).includes("canonical_draft_pack_output_invalid"),
+    );
+    const report = object(
+      object(reviewCard(result).review_materials).make_safe_report,
+    );
+    assertEquals(
+      object(report.report).billing_note,
+      object(draft.report).billing_note,
+    );
+    assertEquals(result.invoice_proposal?.basis, "roof_storey_fixed");
+    assertEquals(result.invoice_proposal?.total_inc_gst, 275);
+  }
+});
+
+Deno.test("physical make-safe cannot claim fixed-fee report pricing through draft content", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" && candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const supplied = request(input.identity.job_id);
+  const draft = supplied.draft_pack_output as Record<string, unknown>;
+  draft.report_only_pricing = "roof_storey_fixed";
+  object(draft.invoice).line_items = [{
+    description: "Single Storey roof report",
+    quantity: 1,
+    unit_price: 250,
+  }];
+  const result =
+    (await prepareSesDocketRevision(supplied, dependencies(input))).results[0];
+  assert(blockerCodes(result).includes("canonical_draft_pack_output_invalid"));
+  assertStringIncludes(
+    result.blockers.find((blocker) =>
+      blocker.reason_code === "canonical_draft_pack_output_invalid"
+    )?.reason || "",
+    "MLB/Major Loss make-safe drafts must include a labour line",
+  );
+});
+
+Deno.test("canonical fixed-fee assessment output preserves its family price without labour", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" && candidate.family === "assessment_quote"
+  )!;
+  const input = fixtureInput(row);
+  const supplied = request(input.identity.job_id);
+  const draft = supplied.draft_pack_output as Record<string, unknown>;
+  object(draft.report).billing_note = "Assessment report and quote.";
+  object(draft.invoice).line_items = [{
+    description: "Assessment report and quote",
+    quantity: 1,
+    unit_price: 150,
+  }];
+  const result =
+    (await prepareSesDocketRevision(supplied, dependencies(input))).results[0];
+  assert(!blockerCodes(result).includes("canonical_draft_pack_output_invalid"));
+  assertEquals(result.invoice_proposal?.basis, "assessment_fixed");
+  assertEquals(result.invoice_proposal?.total_inc_gst, 165);
+});
+
 Deno.test("canonical output exceptions retain an honest review pack and wrong-card output cannot draft email", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" && candidate.family === "physical_makesafe"
@@ -6087,11 +6164,13 @@ Deno.test("own-template roof U4 consumes the exact source artifact and never cal
         provenance: {
           evidence_source: "current_cycle_own_template_roof_report",
           source_kind: "submitted_roof_report_document",
-          source_identity: "own-roof:job-fixture/cycle:cycle-fixture/document:reviewed",
+          source_identity:
+            "own-roof:job-fixture/cycle:cycle-fixture/document:reviewed",
           source_job_id: input.identity.job_id,
           source_draft_id: "roof-draft-fixture",
           source_document_id: "reviewed-roof-document",
-          source_attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+          source_attendance_cycle_id:
+            input.attendance.current_attendance_cycle_id,
           source_cycle_number: input.attendance.cycle_number,
           source_raw_sha256: sourceHash,
           source_raw_size_bytes: sourceBytes.byteLength,
@@ -6109,7 +6188,10 @@ Deno.test("own-template roof U4 consumes the exact source artifact and never cal
   assertEquals(artifact.metadata.render_hash, undefined);
   assertEquals(rendererCalls, 0);
   assert(Array.isArray(result.review_spec.cards));
-  assertEquals((result.review_spec.cards[0] as Record<string, unknown>).own_roof_source, {
-    ...artifact.metadata,
-  });
+  assertEquals(
+    (result.review_spec.cards[0] as Record<string, unknown>).own_roof_source,
+    {
+      ...artifact.metadata,
+    },
+  );
 });

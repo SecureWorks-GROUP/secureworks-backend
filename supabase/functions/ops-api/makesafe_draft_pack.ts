@@ -53,6 +53,8 @@ export interface DraftPackOutput {
 }
 
 export interface DraftPackContext {
+  /** Server-resolved report-only family pricing; never inferred from draft wording. */
+  report_only_pricing?: "roof_storey_fixed" | "assessment_fixed";
   job?: Record<string, unknown> | null;
   detail?: Record<string, unknown> | null;
   service_report?: Record<string, unknown> | null;
@@ -779,6 +781,8 @@ export function verifyDraftPackOutput(
   const nonFeedbackSearchText = contextSearchText(output, ctx, "");
   const labourLines = invoiceLabourLines(output);
   const labourHours = totalLabourHours(output);
+  const fixedReportPricing = ctx.report_only_pricing === "roof_storey_fixed" ||
+    ctx.report_only_pricing === "assessment_fixed";
   const humanSpecificLabour = hasHumanSpecificLabourInstruction(
     bodies,
     output,
@@ -803,7 +807,7 @@ export function verifyDraftPackOutput(
     }
   }
 
-  if (isAjsDraft(ctx, output)) {
+  if (!fixedReportPricing && isAjsDraft(ctx, output)) {
     applied.add("AJS_LABOUR_80");
     const specialRate = hasSpecialRateEvidence(sourceText);
     if (labourLines.length === 0) {
@@ -830,7 +834,7 @@ export function verifyDraftPackOutput(
     );
   }
 
-  if (isMlbDraft(ctx, output)) {
+  if (!fixedReportPricing && isMlbDraft(ctx, output)) {
     applied.add("MLB_ROUTINE_MIN_3H_85");
     const removedTempFence = removalTerms.some((term) =>
       /temp(?:orary)?\s+fenc/.test(term)
