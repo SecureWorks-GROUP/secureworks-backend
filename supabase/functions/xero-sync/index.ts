@@ -954,17 +954,21 @@ export async function matchUnlinkedInvoices(client: any) {
   let flagged = 0
   const refusals: SealedSesMoneyRefusal[] = []
   try {
-    // Get invoices with no job_id
-    const { data: unlinked } = await client.from('xero_invoices')
+    // Invoices with no job_id, newest first, customer invoices ahead of the
+    // 1,600-odd unlinked supplier bills. With no order the old 100-row cap was
+    // filled by years-old bills and this week's invoices never reached here.
+    const unlinkedQuery = (type: string, cap: number) => client.from('xero_invoices')
       .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token')
       .is('job_id', null)
+      .eq('invoice_type', type)
       .not('status', 'in', '("VOIDED","DELETED")')
-      // Newest first: with no order the 100-row cap was filled by years-old
-      // rows and the invoices raised this week never reached the matcher.
       .order('invoice_date', { ascending: false, nullsFirst: false })
-      .limit(200)
+      .limit(cap)
+    const { data: unlinkedSales } = await unlinkedQuery('ACCREC', 150)
+    const { data: unlinkedBills } = await unlinkedQuery('ACCPAY', 100)
+    const unlinked = [...(unlinkedSales || []), ...(unlinkedBills || [])]
 
-    if (!unlinked || unlinked.length === 0) return { matched: 0, flagged: 0 }
+    if (unlinked.length === 0) return { matched: 0, flagged: 0 }
 
     for (const inv of unlinked) {
       const ref = inv.reference || ''
