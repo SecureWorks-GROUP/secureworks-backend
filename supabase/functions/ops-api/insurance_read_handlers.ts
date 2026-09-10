@@ -13,11 +13,27 @@ export const INSURANCE_READ_MAX_PAGE_SIZE = 100;
 export const INSURANCE_READ_DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 export const INSURANCE_READ_MAX_BYTES = 10 * 1024 * 1024;
 export const INSURANCE_READ_STORAGE_BUCKET = "job-documents";
+export const INSURANCE_READ_JOB_PDFS_BUCKET = "job-pdfs";
 export const INSURANCE_READ_MAX_JSON_BYTES = 4 * 1024 * 1024;
 const CURSOR_MAX_LENGTH = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CURSOR_CHARS = /^[A-Za-z0-9_-]+$/;
 const OPERATOR_ROLES = new Set(["admin", "owner", "ops_manager"]);
+type InsuranceReadStorageBucket =
+  | typeof INSURANCE_READ_STORAGE_BUCKET
+  | typeof INSURANCE_READ_JOB_PDFS_BUCKET;
+const INSURANCE_READ_STORAGE_BUCKETS = new Set<InsuranceReadStorageBucket>([
+  INSURANCE_READ_STORAGE_BUCKET,
+  INSURANCE_READ_JOB_PDFS_BUCKET,
+]);
+
+function isInsuranceReadStorageBucket(
+  value: string,
+): value is InsuranceReadStorageBucket {
+  return INSURANCE_READ_STORAGE_BUCKETS.has(
+    value as InsuranceReadStorageBucket,
+  );
+}
 const DOCUMENT_COLUMNS = [
   "id",
   "job_id",
@@ -757,6 +773,7 @@ function assertSafePathEncoding(value: string, allowLeadingSlash: boolean) {
       probe.includes("\\") ||
       probe.includes("?") ||
       probe.includes("#") ||
+      /%(?:2f|5c)/i.test(probe) ||
       probe.includes("\u0000") ||
       [...probe].some((char) => char.charCodeAt(0) < 32)
     ) {
@@ -824,10 +841,6 @@ function validateRelativeStoragePath(value: string): string {
       "The stored document reference is invalid",
     );
   }
-  const bucketPrefix = INSURANCE_READ_STORAGE_BUCKET + "/";
-  if (decoded.startsWith(bucketPrefix)) {
-    decoded = decoded.slice(bucketPrefix.length);
-  }
   if (!decoded) {
     throw new InsuranceReadError(
       "DOCUMENT_STORAGE_REFERENCE_INVALID",
@@ -838,10 +851,123 @@ function validateRelativeStoragePath(value: string): string {
   return decoded;
 }
 
+interface DocumentStorageReference {
+  bucket: InsuranceReadStorageBucket;
+  path: string;
+}
+
+function invalidStorageReference(): never {
+  throw new InsuranceReadError(
+    "DOCUMENT_STORAGE_REFERENCE_INVALID",
+    502,
+    "The stored document reference is invalid",
+  );
+}
+
+function validateDocumentStorageNamespace(
+  reference: DocumentStorageReference,
+  orgId: string,
+  jobId: string,
+): DocumentStorageReference {
+  if (!INSURANCE_READ_STORAGE_BUCKETS.has(reference.bucket)) {
+    return invalidStorageReference();
+  }
+  if (
+    reference.bucket === INSURANCE_READ_JOB_PDFS_BUCKET &&
+    reference.path.split("/").slice(0, 2).some((segment) =>
+      /%[0-9a-f]{2}/i.test(segment)
+    )
+  ) {
+    return invalidStorageReference();
+  }
+  const path = validateRelativeStoragePath(reference.path);
+  if (reference.bucket === INSURANCE_READ_JOB_PDFS_BUCKET) {
+    const segments = path.split("/");
+    // job-pdfs is the current project namespace: {org_uuid}/{job_uuid}/file.
+    // Bind both parents to the already authenticated organisation and job before
+    // constructing the storage URL, even though the row itself is job-scoped.
+    if (
+      segments.length < 3 ||
+      segments[0].toLowerCase() !== orgId ||
+      segments[1].toLowerCase() !== jobId
+    ) {
+      return invalidStorageReference();
+    }
+  }
+  return { bucket: reference.bucket, path };
+}
+
+function relativeStorageReference(
+  value: string,
+  orgId: string,
+  jobId: string,
+): DocumentStorageReference {
+  const decoded = validateRelativeStoragePath(value);
+  const rawSegments = value.split("/");
+  const segments = decoded.split("/");
+  const first = segments[0];
+  const rawFirst = rawSegments[0];
+  if (
+    /%[0-9a-f]{2}/i.test(rawFirst) &&
+    (first.toLowerCase() === INSURANCE_READ_STORAGE_BUCKET ||
+      first.toLowerCase() === INSURANCE_READ_JOB_PDFS_BUCKET ||
+      UUID.test(first))
+  ) {
+    return invalidStorageReference();
+  }
+  if (
+    first.toLowerCase() === INSURANCE_READ_STORAGE_BUCKET ||
+    first.toLowerCase() === INSURANCE_READ_JOB_PDFS_BUCKET
+  ) {
+    if (first !== first.toLowerCase() || segments.length < 2) {
+      return invalidStorageReference();
+    }
+    if (!isInsuranceReadStorageBucket(first)) {
+      return invalidStorageReference();
+    }
+    return validateDocumentStorageNamespace(
+      {
+        bucket: first,
+        // Keep encoded parents intact through namespace validation. The
+        // decoded value is used only to classify the bucket-qualified form.
+        path: rawSegments.slice(1).join("/"),
+      },
+      orgId,
+      jobId,
+    );
+  }
+
+  // Legacy job-documents rows store a job-relative path. A bare UUID/UUID/file
+  // path is the current job-pdfs shape, so classify it explicitly rather than
+  // silently fetching it from the legacy bucket.
+  if (
+    segments.length >= 2 && UUID.test(segments[0]) && UUID.test(segments[1])
+  ) {
+    return validateDocumentStorageNamespace(
+      {
+        bucket: INSURANCE_READ_JOB_PDFS_BUCKET,
+        path: value,
+      },
+      orgId,
+      jobId,
+    );
+  }
+  return validateDocumentStorageNamespace(
+    {
+      bucket: INSURANCE_READ_STORAGE_BUCKET,
+      path: value,
+    },
+    orgId,
+    jobId,
+  );
+}
+
 function storagePathFromReference(
   raw: string,
   configuredProjectUrl: string,
-): string {
+  orgId: string,
+  jobId: string,
+): DocumentStorageReference {
   if (!raw) {
     throw new InsuranceReadError(
       "DOCUMENT_STORAGE_REFERENCE_MISSING",
@@ -849,7 +975,9 @@ function storagePathFromReference(
       "The stored document has no usable storage reference",
     );
   }
-  if (!/^https?:\/\//i.test(raw)) return validateRelativeStoragePath(raw);
+  if (!/^https?:\/\//i.test(raw)) {
+    return relativeStorageReference(raw, orgId, jobId);
+  }
   const rawPathMatch = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*(\/[^?#]*)?$/i.exec(raw);
   if (!rawPathMatch) {
     throw new InsuranceReadError(
@@ -895,24 +1023,32 @@ function storagePathFromReference(
     );
   }
   const remainder = parsed.pathname.slice(prefix.length);
-  const bucketPrefix = new RegExp(
-    "^(?:public|authenticated|sign)/" +
-      INSURANCE_READ_STORAGE_BUCKET + "/(.+)$",
-  ).exec(remainder);
-  if (!bucketPrefix) {
-    throw new InsuranceReadError(
-      "DOCUMENT_STORAGE_REFERENCE_INVALID",
-      502,
-      "The stored document reference is invalid",
+  const bucketPrefix =
+    /^(?:public|authenticated|sign)\/(job-documents|job-pdfs)\/(.+)$/.exec(
+      remainder,
     );
+  if (!bucketPrefix) {
+    return invalidStorageReference();
   }
-  return validateRelativeStoragePath(bucketPrefix[1]);
+  if (!isInsuranceReadStorageBucket(bucketPrefix[1])) {
+    return invalidStorageReference();
+  }
+  return validateDocumentStorageNamespace(
+    {
+      bucket: bucketPrefix[1],
+      path: bucketPrefix[2],
+    },
+    orgId,
+    jobId,
+  );
 }
 
-function documentStoragePath(
+function documentStorageReference(
   row: Row,
   configuredProjectUrl: string,
-): string {
+  orgId: string,
+  jobId: string,
+): DocumentStorageReference {
   const references = [
     typeof row.storage_url === "string" ? row.storage_url.trim() : "",
     typeof row.pdf_url === "string" ? row.pdf_url.trim() : "",
@@ -925,9 +1061,13 @@ function documentStoragePath(
     );
   }
   const paths = references.map((reference) =>
-    storagePathFromReference(reference, configuredProjectUrl)
+    storagePathFromReference(reference, configuredProjectUrl, orgId, jobId)
   );
-  if (paths.some((path) => path !== paths[0])) {
+  if (
+    paths.some((reference) =>
+      reference.bucket !== paths[0].bucket || reference.path !== paths[0].path
+    )
+  ) {
     throw new InsuranceReadError(
       "DOCUMENT_STORAGE_REFERENCE_AMBIGUOUS",
       502,
@@ -939,7 +1079,7 @@ function documentStoragePath(
 
 function canonicalStorageUrl(
   projectUrl: string,
-  path: string,
+  reference: DocumentStorageReference,
 ): string {
   let project: URL;
   try {
@@ -961,9 +1101,14 @@ function canonicalStorageUrl(
       "The current storage project is not configured",
     );
   }
-  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  if (!INSURANCE_READ_STORAGE_BUCKETS.has(reference.bucket)) {
+    return invalidStorageReference();
+  }
+  const encodedPath = reference.path.split("/").map(encodeURIComponent).join(
+    "/",
+  );
   return project.origin + "/storage/v1/object/authenticated/" +
-    INSURANCE_READ_STORAGE_BUCKET + "/" + encodedPath;
+    reference.bucket + "/" + encodedPath;
 }
 
 async function readResponseBytes(
@@ -1178,9 +1323,9 @@ async function fetchDocumentBytes(
   deps: InsuranceReadDeps,
   row: Row,
   maxBytes: number,
+  reference: DocumentStorageReference,
 ): Promise<{ bytes: Uint8Array; sha256: string; mime: string }> {
-  const path = documentStoragePath(row, deps.storageProjectUrl);
-  const url = canonicalStorageUrl(deps.storageProjectUrl, path);
+  const url = canonicalStorageUrl(deps.storageProjectUrl, reference);
   if (!deps.storageBearerToken?.trim()) {
     throw new InsuranceReadError(
       "DOCUMENT_STORAGE_AUTH_UNAVAILABLE",
@@ -1411,7 +1556,13 @@ export async function getJobDocument(
       "The stored document row did not match the requested identity",
     );
   }
-  const storagePath = documentStoragePath(row, deps.storageProjectUrl);
+  const storageReference = documentStorageReference(
+    row,
+    deps.storageProjectUrl,
+    orgId,
+    request.jobId,
+  );
+  const storagePath = storageReference.path;
   const inspected = sanitizeJobRecord({ ...row, storage_path: storagePath });
   const safeDocument = inspected.job;
   // These fields are excluded by the projection; retain this defense if the
@@ -1420,7 +1571,12 @@ export async function getJobDocument(
   delete safeDocument.send_claim_token;
   delete safeDocument.send_resend_idempotency_key;
   assertJsonResponseWithinLimit(safeDocument);
-  const fetched = await fetchDocumentBytes(deps, row, request.maxBytes);
+  const fetched = await fetchDocumentBytes(
+    deps,
+    row,
+    request.maxBytes,
+    storageReference,
+  );
   return {
     status: 200,
     body: {
@@ -1441,7 +1597,7 @@ export async function getJobDocument(
         provider_live: false,
         organisation: orgId,
         retrieved_at: currentTime(deps),
-        storage_bucket: INSURANCE_READ_STORAGE_BUCKET,
+        storage_bucket: storageReference.bucket,
         storage_path: safeDocument.storage_path,
         redacted_paths: inspected.redactedPaths,
         redactions: inspected.redactedPaths.map((path) => ({
