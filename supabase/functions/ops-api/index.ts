@@ -437,6 +437,8 @@ import {
 } from './xero_accpay_books.ts'
 import {
   getXeroReceivable,
+  listXeroBankTransactions,
+  readXeroBankSummary,
   listXeroReceivables,
   listXeroSettlementRecords,
   readXeroOrganisation,
@@ -7015,7 +7017,9 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_xero_receivables':
       case 'get_xero_receivable':
       case 'list_xero_settlement_records':
-      case 'read_xero_settlement_record': {
+      case 'read_xero_settlement_record':
+      case 'list_xero_bank_transactions':
+      case 'read_xero_bank_summary': {
         if (req.method !== 'GET') {
           return json({ ok: false, error: 'Xero receivables reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
         }
@@ -7027,6 +7031,8 @@ if (import.meta.main) serve(async (req: Request) => {
             get_xero_receivable: getXeroReceivable,
             list_xero_settlement_records: listXeroSettlementRecords,
             read_xero_settlement_record: readXeroSettlementRecord,
+            list_xero_bank_transactions: listXeroBankTransactions,
+            read_xero_bank_summary: readXeroBankSummary,
           }
           return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
         } catch (error) {
