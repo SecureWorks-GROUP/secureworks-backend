@@ -193,6 +193,7 @@ AS $$
 DECLARE
   expectation jsonb;
   candidate public.ses_external_effects%ROWTYPE;
+  invalid_input_rejected boolean := false;
 BEGIN
   SELECT jsonb_build_object(
     'effect_id', id,
@@ -206,15 +207,37 @@ BEGIN
   FROM public.ses_external_effects
   WHERE id = p_effect_id;
 
-  SELECT * INTO candidate
-  FROM public.claim_ses_invoice_no_dispatch_retry_v1(
-    expectation,
-    'worker-invalid',
-    'contract-invalid'
-  );
+  BEGIN
+    SELECT * INTO candidate
+    FROM public.claim_ses_invoice_no_dispatch_retry_v1(
+      expectation,
+      'worker-invalid',
+      'contract-invalid'
+    );
+  EXCEPTION WHEN SQLSTATE '22023' THEN
+    -- Wrong effect kinds and non-failed expectations are rejected at the
+    -- public input boundary, before the stored-proof lookup can return null.
+    IF expectation->>'effect_kind' = 'invoice_create'
+       AND expectation->>'state' = 'failed' THEN
+      RAISE;
+    END IF;
+    invalid_input_rejected := true;
+  END;
+  IF (expectation->>'effect_kind' <> 'invoice_create'
+      OR expectation->>'state' <> 'failed')
+     AND NOT invalid_input_rejected THEN
+    RAISE EXCEPTION 'invalid expectation was not rejected for effect %', p_effect_id;
+  END IF;
   IF candidate.id IS NOT NULL THEN
     RAISE EXCEPTION 'ineligible effect % acquired an invoice retry lease',
       p_effect_id;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.ses_external_effect_events
+    WHERE effect_id = p_effect_id
+      AND event_kind = 'definite_no_dispatch_redispatch_claimed'
+  ) THEN
+    RAISE EXCEPTION 'ineligible effect % retained a retry claim event', p_effect_id;
   END IF;
 END;
 $$;
