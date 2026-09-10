@@ -17,6 +17,13 @@ const NEW_DOCUMENT_ID = "reviewed-roof-document";
 const DRAFT_ID = "roof-draft-fixture";
 const BYTES = new TextEncoder().encode("%PDF-1.7\nreviewed roof bytes");
 
+function assertApiErrorCode(error: unknown, expected: string) {
+  assert(error instanceof ApiError);
+  assert(error.body !== null && typeof error.body === "object");
+  assert("code" in error.body);
+  assertEquals(error.body.code, expected);
+}
+
 function bindClient(options: {
   packCasFail?: boolean;
   documentResponseError?: boolean;
@@ -233,7 +240,7 @@ Deno.test("own roof bind refuses stale old pointer before reading source bytes",
       ),
       ApiError,
     );
-    assertEquals(error.body.code, "own_roof_report_bind_stale_pointer");
+    assertApiErrorCode(error, "own_roof_report_bind_stale_pointer");
     assertEquals(fetchCalls, 0);
     assertEquals(fixture.mutations.length, 0);
   } finally {
@@ -253,7 +260,7 @@ Deno.test("own roof bind keeps partial-write audit when the independent pack CAS
       ),
       ApiError,
     ));
-  assertEquals(error.body.code, "own_roof_report_bind_pack_compare_and_swap_drift");
+  assertApiErrorCode(error, "own_roof_report_bind_pack_compare_and_swap_drift");
   assertEquals(fixture.document.version, 2);
   assertEquals(fixture.draft.report_doc_id, NEW_DOCUMENT_ID);
   assertEquals(fixture.pack.report_doc_id, OLD_DOCUMENT_ID);
@@ -277,7 +284,7 @@ Deno.test("own roof bind rereads the current cycle after source recovery before 
       fixture.detail.cycle_number = 2;
     },
   );
-  assertEquals(error.body.code, "own_roof_report_bind_compare_and_swap_drift");
+  assertApiErrorCode(error, "own_roof_report_bind_compare_and_swap_drift");
   assertEquals(fixture.document.version, 1);
   assertEquals(fixture.draft.report_doc_id, OLD_DOCUMENT_ID);
   assertEquals(
@@ -302,7 +309,7 @@ Deno.test("own roof bind retains audit when document write response is lost afte
       ),
       ApiError,
     ));
-  assertEquals(error.body.code, "own_roof_report_bind_document_compare_and_swap_drift");
+  assertApiErrorCode(error, "own_roof_report_bind_document_compare_and_swap_drift");
   assertEquals(fixture.document.version, 2);
   assertEquals(fixture.draft.report_doc_id, OLD_DOCUMENT_ID);
   const retained = fixture.mutations.filter((item) => item.table === "job_events").at(-1);
@@ -331,7 +338,7 @@ Deno.test("own roof bind refuses a cycle change observed by the final completion
       ),
       ApiError,
     ));
-  assertEquals(error.body.code, "own_roof_report_bind_final_read_drift");
+  assertApiErrorCode(error, "own_roof_report_bind_final_read_drift");
   assertEquals(fixture.document.version, 2);
   assertEquals(fixture.draft.report_doc_id, NEW_DOCUMENT_ID);
   assertEquals(fixture.pack.report_doc_id, NEW_DOCUMENT_ID);
