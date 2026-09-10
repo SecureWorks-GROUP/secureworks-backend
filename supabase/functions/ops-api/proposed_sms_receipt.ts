@@ -242,10 +242,18 @@ export async function dispatchProposedSmsWithReceipt(
   }
   let finalized = false;
   try {
-    finalized = one(await owned({ status: "sent", sent_at: observedAt }));
+    // status is the approval lifecycle. Dispatch truth belongs to the receipt,
+    // so do not widen the enum or activate legacy writers of status=sent.
+    finalized = one(await owned({ sent_at: observedAt }));
   } catch {
     /* Receipt remains authoritative even if proposal finalization failed. */
   }
   if (!finalized) return { ...result, error: "dispatch_finalize_unconfirmed" };
-  return { ...result, success: true, requires_reconciliation: false };
+  return {
+    ...result,
+    success: true,
+    requires_reconciliation: false,
+    proposal_status: "approved",
+    sent_at: observedAt,
+  };
 }

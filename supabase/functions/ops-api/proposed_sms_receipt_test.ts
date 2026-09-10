@@ -27,7 +27,6 @@ function fixture(overrides: Record<string, unknown> = {}) {
     "approved",
     "rejected",
     "expired",
-    "sent",
   ]);
   const events: any[] = [];
   const calls: any[] = [];
@@ -116,7 +115,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
               };
             }
             const failure = patch &&
-              (patch.status === "sent"
+              (patch.sent_at != null
                 ? failures.finalize
                 : patch.status === "approved"
                 ? failures.claim
@@ -252,7 +251,10 @@ Deno.test("actual handler binds accepted receipt to action, recipient, body, job
   assertEquals(result.success, true);
   assertEquals(result.outcome, "provider_accepted");
   assertEquals(result.ghl_message_id, "message-fixture");
-  assertEquals(f.action.status, "sent");
+  assertEquals(f.action.status, "approved");
+  assertEquals(result.proposal_status, "approved");
+  assertEquals(result.sent_at, f.action.sent_at);
+  assert(f.action.sent_at);
   assertEquals(f.events.length, 1);
   const event = f.events[0].row;
   assertEquals(f.events[0].table, "business_events");
@@ -485,16 +487,18 @@ Deno.test("proxy upstream failure envelope after acceptance is unknown, never de
   assertEquals(f.events[0].row.payload.ghl_message_id, null);
 });
 
-Deno.test("legacy status constraint cannot turn accepted send into success or replay", async () => {
+Deno.test("existing five-value approval enum permits accepted receipt without schema expansion or replay", async () => {
   const f = fixture();
-  f.allowedStatuses.delete("sent");
+  assert(!f.allowedStatuses.has("sent"));
   const { result, fetches } = await run(f);
   assertEquals(fetches, 1);
-  assertEquals(result.success, false);
-  assertEquals(result.error, "dispatch_finalize_unconfirmed");
+  assertEquals(result.success, true);
+  assertEquals(result.proposal_status, "approved");
   assertEquals(result.outcome, "provider_accepted");
   assertEquals(result.ghl_message_id, "message-fixture");
   assertEquals(f.action.status, "approved");
+  assert(f.action.sent_at);
+  assert(!f.calls.some((call) => call.patch.status === "sent"));
   assertEquals(f.events[0].row.event_type, "proposed_action.dispatched");
   await assertRejects(() => run(f));
 });
