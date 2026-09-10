@@ -851,3 +851,89 @@ Deno.test("transcript provider denial, absence and throttling retain error statu
     f.done();
   }
 });
+
+Deno.test("transcript shape diagnostics expose only bounded allowlisted structure", async () => {
+  const secret = "PRIVATE_TRANSCRIPT_OR_TOKEN";
+  const body = {
+    data: {
+      transcriptions: [{
+        ...sentence,
+        transcript: secret,
+        confidence: null,
+        SECRET_KEY: secret,
+      }],
+    },
+    [secret]: secret,
+    token: secret,
+  };
+  const f = fixture([...callReplies(), { path: transcriptPath, body }]);
+  const err = await assertRejects(
+    () => f.run("get_ghl_call_transcript", callArgs),
+    GhlProviderReadError,
+  );
+  assert(!err.message.includes(secret));
+  assert(!err.message.includes("SECRET_KEY"));
+  assert(!err.message.includes("token"));
+  const diagnostic = JSON.parse(err.message.split("diagnostic=")[1]);
+  assertEquals(diagnostic.reason, "missing_field:transcript");
+  assertEquals(
+    diagnostic.shape.fields.data.fields.transcriptions.type,
+    "array",
+  );
+  assertEquals(diagnostic.shape.fields.data.fields.transcriptions.length, 1);
+  assertEquals(
+    diagnostic.shape.fields.data.fields.transcriptions.items[0].fields
+      .transcript,
+    { type: "string" },
+  );
+  assertEquals(
+    diagnostic.shape.fields.data.fields.transcriptions.items[0].fields
+      .confidence,
+    { type: "null" },
+  );
+  f.done();
+});
+
+Deno.test("transcript diagnostic reasons distinguish absent and invalid optional provider fields without relaxation", async () => {
+  for (
+    const [body, reason] of [
+      [{ transcript: "PRIVATE_WORDS" }, "missing_field:mediaChannel"],
+      [{ ...sentence, confidence: null }, "invalid_numeric:confidence"],
+      [{ ...sentence, transcript: 123 }, "invalid_type:transcript"],
+      [[sentence, { ...sentence, endTime: 0 }], "reversed_timing"],
+    ] as const
+  ) {
+    const f = fixture([...callReplies(), { path: transcriptPath, body }]);
+    const err = await assertRejects(
+      () => f.run("get_ghl_call_transcript", callArgs),
+      GhlProviderReadError,
+    );
+    assertEquals(
+      JSON.parse(err.message.split("diagnostic=")[1]).reason,
+      reason,
+    );
+    assert(!err.message.includes("PRIVATE_WORDS"));
+    assert(!err.message.includes(sentence.transcript));
+    f.done();
+  }
+});
+
+Deno.test("transcript shape diagnostics bound nested structures and large arrays", async () => {
+  let body: unknown = { transcript: "PRIVATE_VALUE" };
+  for (let i = 0; i < 10; i++) body = { data: body, results: body };
+  const f = fixture([...callReplies(), {
+    path: transcriptPath,
+    body: { data: [body], results: Array(10001).fill(null) },
+  }]);
+  const err = await assertRejects(
+    () => f.run("get_ghl_call_transcript", callArgs),
+    GhlProviderReadError,
+  );
+  const diagnostic = JSON.parse(err.message.split("diagnostic=")[1]);
+  assertEquals(diagnostic.shape.fields.results.length, 10000);
+  assertEquals(diagnostic.shape.fields.results.length_capped, true);
+  assertEquals(diagnostic.shape.fields.results.items.length, 2);
+  assert(err.message.length < 8000);
+  assert(!err.message.includes("PRIVATE_VALUE"));
+  f.done();
+});
