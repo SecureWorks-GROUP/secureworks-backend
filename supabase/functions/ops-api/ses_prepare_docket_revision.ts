@@ -2735,8 +2735,14 @@ function validateRequest(request: SesPrepareRequest): void {
 
 function draftPackContextForInput(
   input: SesAssemblerInputV1,
+  row?: SesFamilyMatrixRow,
 ): DraftPackContext {
   return {
+    ...(row?.report_only &&
+        (row.invoice_basis === "roof_storey_fixed" ||
+          row.invoice_basis === "assessment_fixed")
+      ? { report_only_pricing: row.invoice_basis }
+      : {}),
     job: {
       job_number: input.identity.job_number,
       site_address: input.source.site_address,
@@ -2758,6 +2764,7 @@ function normalisedDraftPackReference(value: unknown): string {
 function suppliedDraftPackOutput(
   request: SesPrepareRequest,
   input: SesAssemblerInputV1,
+  row?: SesFamilyMatrixRow,
 ): { output: DraftPackOutput | null; blocker: SesBlocker | null } {
   if (request.draft_pack_output === undefined) {
     return {
@@ -2808,7 +2815,7 @@ function suppliedDraftPackOutput(
     }
     const verification = verifyDraftPackOutput(
       output,
-      draftPackContextForInput(input),
+      draftPackContextForInput(input, row),
     );
     if (!verification.ok) {
       return {
@@ -2912,10 +2919,6 @@ async function prepareOne(
   stagesMs.T0 = 0;
   const input = await measure("T1", () => deps.resolveInput(selection));
   const blockers = inputBlockers(input);
-  const suppliedDraftPack = suppliedDraftPackOutput(request, input);
-  if (suppliedDraftPack.blocker) {
-    addBlocker(blockers, suppliedDraftPack.blocker);
-  }
   const matrix = resolveSesFamilyMatrixRow({
     builder_key: input.classification.builder_key,
     family: input.classification.family,
@@ -2923,6 +2926,14 @@ async function prepareOne(
     own_template_requested: input.classification.own_template_requested,
     site_suburb: input.source.site_suburb,
   });
+  const suppliedDraftPack = suppliedDraftPackOutput(
+    request,
+    input,
+    matrix.ok ? matrix.row : undefined,
+  );
+  if (suppliedDraftPack.blocker) {
+    addBlocker(blockers, suppliedDraftPack.blocker);
+  }
   // The card carries a standing materials-charge decision — UNSET, SET or
   // NONE — and it changes what the invoice says, so the decided states belong
   // inside the revision identity. UNSET wraps nothing, which keeps the ordinary
@@ -4153,7 +4164,9 @@ async function prepareOne(
               [],
               {
                 source_error_code: text(errorRecord.code) || null,
-                source_error: error instanceof Error ? error.message : String(error),
+                source_error: error instanceof Error
+                  ? error.message
+                  : String(error),
               },
               "identity_safety_hard",
             ),
