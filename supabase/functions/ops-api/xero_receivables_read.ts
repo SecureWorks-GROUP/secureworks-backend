@@ -275,6 +275,50 @@ function oneRecord(
   return rows[0];
 }
 
+// Match structured credential labels, not business values, prose, or URLs.
+// Generic Key/PublicKey and identity/tax/bank fields are not credential labels.
+const CREDENTIAL_FIELD =
+  /^(?:(?:oauth)?(?:access|refresh|id|auth|authentication|authorization|bearer|api|portal|share|download|session|reset|invite|invitation|verification|sas)?token(?:secret)?|(?:oauth)?(?:x?api|service(?:role)?|private|secret|signing|encryption|client|consumer|access|secretaccess)(?:key|secret)(?:id)?|secret|password|passwd|pwd|bearer|auth|authentication|authorization|cookie|setcookie|credential|credentials|connectionstring|signedurl|signeddownloadurl)$/i;
+
+function redactXeroCredentialFields(providerResult: unknown) {
+  const redactedPaths: string[] = [];
+  let nodes = 0;
+  const visit = (value: unknown, path: string, depth: number): unknown => {
+    if (++nodes > 1_000_000 || depth > 64) {
+      throw new XeroReceivablesReadError(
+        "Xero response exceeds the supported redaction structure",
+        502,
+        "XERO_RESPONSE_INVALID",
+      );
+    }
+    if (Array.isArray(value)) {
+      const next = value.map((item, index) =>
+        visit(item, `${path}/${index}`, depth + 1)
+      );
+      return next.some((item, index) => item !== value[index]) ? next : value;
+    }
+    if (!rawRecord(value)) return value;
+    let changed = false;
+    const entries = Object.entries(value).map(([key, item]) => {
+      const nextPath = `${path}/${
+        key.replace(/~/g, "~0").replace(/\//g, "~1")
+      }`;
+      let next: unknown;
+      if (CREDENTIAL_FIELD.test(key.replace(/[^a-z0-9]/gi, ""))) {
+        redactedPaths.push(nextPath);
+        next = "[REDACTED_CREDENTIAL]";
+      } else next = visit(item, nextPath, depth + 1);
+      if (next !== item) changed = true;
+      return [key, next];
+    });
+    // Do not mutate the provider response; untouched business records retain
+    // their original values and identity, including future provider fields.
+    return changed ? Object.fromEntries(entries) : value;
+  };
+  const result = visit(providerResult, "", 0);
+  return { result, redactedPaths: redactedPaths.sort() };
+}
+
 async function providerRead(
   client: unknown,
   deps: ReadDeps,
@@ -284,12 +328,16 @@ async function providerRead(
   const { accessToken, tenantId } = await deps.getToken(client);
   // Tenant is selected by existing server credential handling, never by caller input.
   const tenant = uuid(tenantId, "Configured Xero tenant_id", 502);
-  const { data: result, metadata } = await deps.xeroGet(
+  const { data, metadata } = await deps.xeroGet(
     path,
     accessToken,
     tenant,
     params,
   );
+  // Every exported record reader passes this boundary before selecting records
+  // or copying provider fields into provenance. Paths refer to the raw provider
+  // JSON, not the renamed/plucked collections in the outward response.
+  const { result, redactedPaths } = redactXeroCredentialFields(data);
   return {
     result,
     provenance: {
@@ -305,6 +353,10 @@ async function providerRead(
         ? result.DateTimeUTC ?? null
         : null,
       cache_used: false,
+      content_redacted: redactedPaths.length > 0,
+      redacted_paths: redactedPaths,
+      redaction_policy: "structured_credential_fields_v1",
+      redacted_paths_root: "provider_response",
     },
   };
 }
