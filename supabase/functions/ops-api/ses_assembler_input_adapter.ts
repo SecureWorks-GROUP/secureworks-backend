@@ -657,7 +657,9 @@ function structuredSourceFact(
   return distinct.size === 1 ? [...distinct.values()][0] : undefined;
 }
 
-function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
+export function builderKey(
+  snapshot: Pick<SesAssemblerLiveSnapshot, "job" | "detail">,
+): SesBuilderKey {
   const detail = snapshot.detail || {};
   const company = record(detail.makesafe_companies);
   const profileSlugs = [
@@ -726,7 +728,7 @@ function clientRelationshipMarker(value: unknown): string | null {
 }
 
 export function resolveSesDeliveryRenderRoute(
-  snapshot: SesAssemblerLiveSnapshot,
+  snapshot: Pick<SesAssemblerLiveSnapshot, "job" | "detail" | "roof_draft">,
   builder: SesBuilderKey,
   familyId: SesFamilyId,
 ): SesDeliveryRenderRouteSelection {

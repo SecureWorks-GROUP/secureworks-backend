@@ -49,6 +49,10 @@ import {
   makesafePackArtifactRequirements,
 } from "./makesafe_document_truth.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
+import {
+  builderKey as sesAssemblerBuilderKey,
+  resolveSesDeliveryRenderRoute,
+} from "./ses_assembler_input_adapter.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1.2";
 
@@ -375,13 +379,59 @@ export function boardRowSesFamily(base: any) {
   ) {
     return "repair";
   }
-  return canonicalSesFamilyFromCard({
+  const canonicalFamily = canonicalSesFamilyFromCard({
     makesafe_job_family: base?.metadata?.makesafe_job_family,
     insurance_job_type: base?.metadata?.insurance_job_type,
     own_template_requested: base?.metadata?.own_template_requested,
     strata: base?.metadata?.strata,
     report_delivery: base?.metadata?.report_delivery || detail?.report_delivery,
   });
+  // Roof delivery is a second, persisted decision layered over the canonical
+  // family. The assembler already owns this route resolver; use the same
+  // resolver here so a roof draft and the board cannot disagree about whether
+  // the card has a SecureWorks own-letterhead route. Board rows do not carry
+  // the full assembler snapshot, but these are the route resolver's complete
+  // job/detail inputs; a loaded draft is included when an older caller has one.
+  if (
+    canonicalFamily === "ordinary_roof_portal" ||
+    canonicalFamily === "own_template_roof"
+  ) {
+    const routeSnapshot = {
+      job: base,
+      detail: {
+        ...detail,
+        requesting_company_name: detail?.requesting_company_name ||
+          base?.requesting_company_name,
+        requesting_company_slug: detail?.requesting_company_slug ||
+          base?.requesting_company_slug,
+        external_ref: detail?.external_ref || base?.external_ref,
+      },
+      roof_draft: base?.roof_draft || null,
+    };
+    const route = resolveSesDeliveryRenderRoute(
+      routeSnapshot,
+      sesAssemblerBuilderKey(routeSnapshot),
+      canonicalFamily,
+    );
+    if (route.route === "secureworks_own_letterhead") {
+      return "own_template_roof";
+    }
+    if (route.route === "unroutable") {
+      // Refuse contradictory/invalid delivery facts. Builder recipe sealing
+      // stays with the assembler; do not change existing family placement
+      // merely because a compact row cannot identify its builder.
+      return route.reason_code.endsWith("_unsealed")
+        ? canonicalFamily
+        : "unknown";
+    }
+    if (
+      route.route === "builder_portal" &&
+      canonicalFamily === "own_template_roof"
+    ) {
+      return "ordinary_roof_portal";
+    }
+  }
+  return canonicalFamily;
 }
 
 /**

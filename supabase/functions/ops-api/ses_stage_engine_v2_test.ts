@@ -4,6 +4,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  boardRowSesFamily,
   buildCanonicalMakesafeRows,
   ownTemplateRoofJobIdsForBoard,
   projectOpsMakesafeBoard,
@@ -1206,6 +1207,113 @@ Deno.test("own roof: the loader only asks for drafts when such a card exists", (
     }),
   ];
   assertEquals(ownTemplateRoofJobIdsForBoard(withOwnRoof), ["j2"]);
+});
+
+Deno.test("board reuses the assembler roof route for own-letterhead evidence", () => {
+  const id = "scarborough-roof-board-route";
+  const own = baseRow({
+    id,
+    client_name:
+      "The Owners of 151 Deanmore Road Scarborough Strata Plan 10444",
+    requesting_company_name: "Major Loss Builders",
+    external_ref: "MLB-24267",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      cycle_number: 1,
+      report_type: null,
+      requesting_company_name: "Major Loss Builders",
+      external_ref: "MLB-24267",
+    },
+  });
+  assertEquals(boardRowSesFamily(own), "own_template_roof");
+  assertEquals(ownTemplateRoofJobIdsForBoard([own]), [id]);
+
+  const portal = baseRow({
+    id: "ordinary-roof-board-route",
+    client_name: "Ordinary insured client",
+    requesting_company_name: "Major Loss Builders",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      cycle_number: 1,
+      report_type: null,
+      requesting_company_name: "Major Loss Builders",
+    },
+  });
+  assertEquals(boardRowSesFamily(portal), "ordinary_roof_portal");
+
+  const conflict = baseRow({
+    id: "conflicting-roof-board-route",
+    client_name: "The Owners Corporation of a Strata Plan",
+    requesting_company_name: "Major Loss Builders",
+    metadata: {
+      makesafe_job_family: "roof_report",
+      report_delivery: "own_document",
+    },
+    makesafe_details: {
+      cycle_number: 1,
+      report_type: null,
+      requesting_company_name: "Major Loss Builders",
+      report_delivery: "portal",
+    },
+  });
+  assertEquals(boardRowSesFamily(conflict), "unknown");
+
+  const physical = baseRow({
+    id: "physical-board-route",
+    metadata: { makesafe_job_family: "general_makesafe" },
+  });
+  assertEquals(boardRowSesFamily(physical), "physical_makesafe");
+});
+
+Deno.test("board own-letterhead route lets exact draft evidence reach Docs Ready", () => {
+  const id = "scarborough-roof-docs-ready";
+  const reportDocId = "scarborough-roof-report-doc";
+  const [card] = buildCanonicalMakesafeRows([
+    baseRow({
+      id,
+      client_name:
+        "The Owners of 151 Deanmore Road Scarborough Strata Plan 10444",
+      requesting_company_name: "Major Loss Builders",
+      external_ref: "MLB-24267",
+      metadata: { makesafe_job_family: "roof_report" },
+      makesafe_details: {
+        cycle_number: 1,
+        report_type: null,
+        requesting_company_name: "Major Loss Builders",
+        external_ref: "MLB-24267",
+      },
+      report_pack: {
+        status: "drafted",
+        report_doc_id: reportDocId,
+        invoice_doc_id: "scarborough-invoice-doc",
+        report_doc_resolved: true,
+        invoice_doc_resolved: true,
+        review_state: "READY",
+        docket_revision_id: "scarborough-docket-revision",
+        pre_xero_docs_ready: true,
+        blockers: [],
+      },
+      invoice_status: "draft",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+    }),
+  ], {
+    ownRoofDraftByJobId: {
+      [id]: {
+        status: "submitted",
+        cycle_number: 1,
+        report_doc_id: reportDocId,
+      },
+    },
+    ownRoofReportDocumentIdsByJobId: {
+      [id]: new Set([reportDocId]),
+    },
+    computedAt: NOW,
+  }, "full");
+  assertEquals(card.ses_family, "own_template_roof");
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.derived_stage_v2_missing, []);
 });
 
 Deno.test("own roof: the reader names what is missing, per fact", () => {
