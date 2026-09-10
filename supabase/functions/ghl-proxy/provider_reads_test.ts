@@ -937,3 +937,41 @@ Deno.test("transcript shape diagnostics bound nested structures and large arrays
   assert(!err.message.includes("PRIVATE_VALUE"));
   f.done();
 });
+
+Deno.test("live v3 transcript without confidence retains original sentences and explicit omission coverage", async () => {
+  const withoutConfidence: Record<string, unknown> = { ...sentence };
+  delete withoutConfidence.confidence;
+  for (const body of [withoutConfidence, [withoutConfidence, sentence]]) {
+    const f = fixture([...callReplies(), { path: transcriptPath, body }]);
+    const result = await f.run("get_ghl_call_transcript", callArgs);
+    const expected = Array.isArray(body) ? body : [body];
+    assertEquals(result.data.transcript, {
+      status: "available",
+      sentences: expected,
+    });
+    const returned =
+      (result.data.transcript as { sentences: Record<string, unknown>[] })
+        .sentences;
+    assert(!Object.hasOwn(returned[0], "confidence"));
+    assertEquals(returned[0].transcript, sentence.transcript);
+    assertEquals(returned[0].startTime, sentence.startTime);
+    assert(
+      (result as { limitations?: string[] }).limitations?.includes(
+        "Provider omitted confidence for one or more sentences; no confidence score has been inferred",
+      ),
+    );
+    f.done();
+  }
+  for (const confidence of [null, "invalid", -1, 1.1]) {
+    const f = fixture([...callReplies(), {
+      path: transcriptPath,
+      body: { ...sentence, confidence },
+    }]);
+    const err = await assertRejects(
+      () => f.run("get_ghl_call_transcript", callArgs),
+      GhlProviderReadError,
+    );
+    assertEquals(err.code, "provider_response_invalid");
+    f.done();
+  }
+});
