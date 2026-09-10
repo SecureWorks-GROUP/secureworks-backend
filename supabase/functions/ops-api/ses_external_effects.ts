@@ -91,6 +91,17 @@ export interface SesExternalEffectStore {
     leaseOwner: string,
     actor: string,
   ): Promise<SesExternalEffect | null>;
+  /**
+   * Atomically lease an invoice effect whose durable failure proves that the
+   * provider mutation was never called. This is deliberately separate from
+   * route redispatch: a failed invoice may only retry through this proof-gated
+   * database function, never through a route-only claim.
+   */
+  claimProvenNoDispatchRetry?(
+    effect: SesExternalEffect,
+    leaseOwner: string,
+    actor: string,
+  ): Promise<SesExternalEffect | null>;
   /** Database-clock/exact-coordinate proof that this dispatch lease is stale. */
   inspectStaleDispatching?(
     effect: SesExternalEffect,
@@ -114,6 +125,14 @@ export interface SesExternalAdapter<TPayload, TResult> {
     context: SesExternalContext,
   ): Promise<TResult>;
   reconcile(
+    context: SesExternalContext,
+  ): Promise<TResult[]>;
+  /**
+   * Optional first-attempt read boundary. A typed no-dispatch refusal here is
+   * scoped to a still-reserved operation; retries use `reconcile` so a
+   * read-time cooldown can never bless an uncertain prior mutation.
+   */
+  reconcilePreflight?(
     context: SesExternalContext,
   ): Promise<TResult[]>;
   /** Read-only, exhaustive provider proof used only after DB-proven expiry. */
@@ -157,6 +176,95 @@ export class SesDispatchGenerationLostError extends Error {
     super(message);
     this.name = "SesDispatchGenerationLostError";
   }
+}
+
+/**
+ * A typed refusal from a preflight or provider boundary that proves no
+ * external mutation was attempted. The executor persists this proof as a
+ * failed effect, making a later retry possible only through the dedicated
+ * proof-gated lease path.
+ */
+export class SesExternalDefiniteNoDispatchError extends Error {
+  readonly details: Record<string, unknown>;
+
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "SesExternalDefiniteNoDispatchError";
+    this.details = {
+      ...details,
+      ...(Object.prototype.hasOwnProperty.call(details, "provider_called")
+        ? {}
+        : { provider_called: false }),
+      ...(Object.prototype.hasOwnProperty.call(details, "provider_call_made")
+        ? {}
+        : { provider_call_made: false }),
+    };
+  }
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function definiteNoDispatchFailure(
+  error: unknown,
+  phase: "preflight" | "dispatch",
+): Record<string, unknown> | null {
+  if (!(error instanceof SesExternalDefiniteNoDispatchError)) return null;
+  const details = error.details;
+  // The typed class is the adapter boundary, but its two independent outcome
+  // flags still have to agree. Preserve a contradiction as ambiguous rather
+  // than normalising it into retry permission.
+  if (
+    details.provider_called !== false || details.provider_call_made !== false
+  ) {
+    return null;
+  }
+  const message = String(
+    error.message || "provider mutation was not called",
+  ).trim().slice(0, 500);
+  const code = String(details.code || "EXTERNAL_NO_DISPATCH").trim().slice(
+    0,
+    120,
+  );
+  const status = details.status ?? details.http_status;
+  return {
+    ...details,
+    disposition: "definite_no_dispatch",
+    proof: "provider_called_false",
+    phase,
+    provider_called: false,
+    provider_call_made: false,
+    ...(code ? { code } : {}),
+    ...(Number.isFinite(Number(status)) ? { status: Number(status) } : {}),
+    message,
+  };
+}
+
+function storedDefiniteNoDispatchFailure(
+  failure: Record<string, unknown> | undefined,
+): boolean {
+  return failure?.disposition === "definite_no_dispatch" &&
+    failure?.proof === "provider_called_false" &&
+    failure?.provider_called === false &&
+    failure?.provider_call_made === false;
+}
+
+function noDispatchRefusal(
+  effectKind: SesEffectKind,
+  failure: Record<string, unknown>,
+): SesRefusal {
+  return {
+    state: "refused",
+    code: "external_effect_not_dispatched",
+    fact:
+      `The ${effectKind} provider mutation was refused before dispatch; the exact immutable operation is retained with durable provider_called:false proof.`,
+    recovery_action:
+      "Resolve the provider preflight refusal, then retry the same immutable operation. A second operation key must not be minted.",
+    evidence: failure,
+  };
 }
 
 export async function buildSesEffect(args: {
@@ -351,9 +459,13 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
 
   const retainOutcomeUnknown = (
     active: SesExternalEffect,
-    error: SesExternalOutcomeUnknownError,
+    error: unknown,
+    dispatched: boolean,
   ): SesExecuteEffectResult<TResult> => {
-    const message = String(error.message || "provider outcome unknown")
+    const message = String(
+      error instanceof Error ? error.message : record(error).message || error ||
+        "provider outcome unknown",
+    )
       .trim()
       .slice(0, 500);
 
@@ -368,9 +480,15 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       state: "refused",
       effect: { ...active, failure: { message } } as SesExternalEffect,
       refusal: unknownRefusal(active.effect_kind, message),
-      dispatched: true,
+      dispatched,
     };
   };
+
+  const retainPreflightUnknown = (
+    active: SesExternalEffect,
+    error: unknown,
+  ): SesExecuteEffectResult<TResult> =>
+    retainOutcomeUnknown(active, error, false);
 
   const dispatchFrom = async (
     active: SesExternalEffect,
@@ -387,6 +505,23 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
           state: "refused",
           effect: { ...active, failure: { message } } as SesExternalEffect,
           refusal: unknownRefusal(active.effect_kind, message),
+          dispatched: false,
+        };
+      }
+      const definite = definiteNoDispatchFailure(error, "dispatch");
+      if (definite) {
+        const failed = await args.store.transition(
+          active.operation_key,
+          active.state,
+          "failed",
+          "dispatch_refused_before_provider",
+          { failure: definite },
+          args.actor,
+        );
+        return {
+          state: "refused",
+          effect: failed,
+          refusal: noDispatchRefusal(failed.effect_kind, definite),
           dispatched: false,
         };
       }
@@ -412,10 +547,11 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     try {
       matches = await args.adapter.reconcile(contextFor(active));
     } catch (error) {
-      if (error instanceof SesExternalOutcomeUnknownError) {
-        return retainOutcomeUnknown(active, error);
-      }
-      throw error;
+      // A read failure after the provider mutation cannot prove that the
+      // mutation did not happen. Preserve the dispatching fence for every
+      // untyped error, including a provider_called:false flag that describes
+      // only this follow-up read.
+      return retainOutcomeUnknown(active, error, true);
     }
     if (matches.length !== 1) {
       const unknown = await args.store.transition(
@@ -490,10 +626,12 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       matches = await args.adapter.reconcile(contextFor(retry));
     } catch (error) {
       if (error instanceof SesExternalOutcomeUnknownError) {
-        return retainOutcomeUnknown(retry, error);
+        return retainOutcomeUnknown(retry, error, true);
       }
       if (error instanceof SesDispatchGenerationLostError) {
-        const message = String(error.message || "dispatch generation lost");
+        const message = String(
+          error instanceof Error ? error.message : "dispatch generation lost",
+        );
         return {
           state: "refused",
           effect: { ...retry, failure: { message } } as SesExternalEffect,
@@ -501,7 +639,7 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
           dispatched: false,
         };
       }
-      throw error;
+      return retainOutcomeUnknown(retry, error, true);
     }
     if (matches.length === 1) {
       const result = matches[0];
@@ -534,6 +672,80 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
         refusal: unknownRefusal(
           unknown.effect_kind,
           `redispatch reconcile match_count=${matches.length}`,
+        ),
+        dispatched: false,
+      };
+    }
+    return await dispatchFrom(retry);
+  };
+
+  const redispatchInvoice = async (
+    uncertain: SesExternalEffect,
+  ): Promise<SesExecuteEffectResult<TResult>> => {
+    // Invoice reconciliation is read-only. Probe first so an exact provider
+    // match is reused without acquiring a mutation lease; only a zero-match
+    // result reaches the proof-gated CAS below.
+    let matches: TResult[];
+    try {
+      matches = await args.adapter.reconcile(contextFor(uncertain));
+    } catch (error) {
+      return retainOutcomeUnknown(uncertain, error, false);
+    }
+    if (matches.length === 1) {
+      const result = matches[0];
+      const confirmed = await args.store.transition(
+        uncertain.operation_key,
+        "failed",
+        "confirmed",
+        "reconciled_after_definite_no_dispatch",
+        {
+          external_id: args.adapter.identify(result),
+          provider_digest: args.adapter.digest(result),
+          failure: {},
+        },
+        args.actor,
+      );
+      return {
+        state: "confirmed",
+        effect: confirmed,
+        result,
+        dispatched: false,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        state: "refused",
+        effect: uncertain,
+        refusal: unknownRefusal(
+          uncertain.effect_kind,
+          `retry reconcile match_count=${matches.length}`,
+        ),
+        dispatched: false,
+      };
+    }
+    if (!args.store.claimProvenNoDispatchRetry) {
+      return {
+        state: "refused",
+        effect: uncertain,
+        refusal: noDispatchRefusal(
+          uncertain.effect_kind,
+          uncertain.failure || {},
+        ),
+        dispatched: false,
+      };
+    }
+    const retry = await args.store.claimProvenNoDispatchRetry(
+      uncertain,
+      `${args.actor}:${crypto.randomUUID()}`,
+      args.actor,
+    );
+    if (!retry) {
+      return {
+        state: "refused",
+        effect: uncertain,
+        refusal: noDispatchRefusal(
+          uncertain.effect_kind,
+          uncertain.failure || {},
         ),
         dispatched: false,
       };
@@ -665,7 +877,12 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       return await redispatchRoute(settled);
     }
 
-    const matches = await args.adapter.reconcile(contextFor(claim.effect));
+    let matches: TResult[];
+    try {
+      matches = await args.adapter.reconcile(contextFor(claim.effect));
+    } catch (error) {
+      return retainOutcomeUnknown(claim.effect, error, false);
+    }
     if (matches.length === 1) {
       const result = matches[0];
       const confirmable = claim.effect.state === "reserved"
@@ -691,6 +908,13 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       );
       return { state: "confirmed", effect, result, dispatched: false };
     }
+    if (
+      claim.effect.effect_kind === "invoice_create" &&
+      claim.effect.state === "failed" &&
+      storedDefiniteNoDispatchFailure(claim.effect.failure)
+    ) {
+      return await redispatchInvoice(claim.effect);
+    }
     return {
       state: "refused",
       effect: claim.effect,
@@ -699,25 +923,59 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     };
   }
 
-  const dispatching = await args.store.transition(
-    claim.effect.operation_key,
-    "reserved",
-    "dispatching",
-    "dispatch_started",
-    {},
-    args.actor,
-  );
+  // Only adapters that explicitly expose an invoice preflight may read before
+  // acquiring the normal dispatching lease. Some other adapters use
+  // `reconcile` to complete a recovered Graph Draft, which is itself a
+  // provider mutation and must remain behind `dispatching`.
+  if (!args.adapter.reconcilePreflight) {
+    const dispatching = await args.store.transition(
+      claim.effect.operation_key,
+      "reserved",
+      "dispatching",
+      "dispatch_started",
+      {},
+      args.actor,
+    );
+    return await dispatchFrom(dispatching);
+  }
+
   let preDispatchMatches: TResult[];
   try {
-    preDispatchMatches = await args.adapter.reconcile(contextFor(dispatching));
+    // Reconcile while the effect is still reserved. A preflight refusal must
+    // be durably recorded as no-dispatch and must never strand dispatching.
+    preDispatchMatches = await args.adapter.reconcilePreflight(
+      contextFor(claim.effect),
+    );
   } catch (error) {
-    if (error instanceof SesExternalOutcomeUnknownError) {
-      return retainOutcomeUnknown(dispatching, error);
+    const definite = definiteNoDispatchFailure(error, "preflight");
+    if (definite) {
+      const failed = await args.store.transition(
+        claim.effect.operation_key,
+        "reserved",
+        "failed",
+        "preflight_refused_before_dispatch",
+        { failure: definite },
+        args.actor,
+      );
+      return {
+        state: "refused",
+        effect: failed,
+        refusal: noDispatchRefusal(failed.effect_kind, definite),
+        dispatched: false,
+      };
     }
-    throw error;
+    return retainPreflightUnknown(claim.effect, error);
   }
   if (preDispatchMatches.length === 1) {
     const result = preDispatchMatches[0];
+    const dispatching = await args.store.transition(
+      claim.effect.operation_key,
+      "reserved",
+      "dispatching",
+      "dispatch_started",
+      {},
+      args.actor,
+    );
     const confirmed = await args.store.transition(
       dispatching.operation_key,
       "dispatching",
@@ -737,20 +995,23 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     };
   }
   if (preDispatchMatches.length > 1) {
-    const unknown = await args.store.transition(
-      dispatching.operation_key,
-      "dispatching",
-      "unknown",
-      "pre_dispatch_reconcile_ambiguous",
-      { match_count: preDispatchMatches.length },
-      args.actor,
-    );
     return {
       state: "refused",
-      effect: unknown,
-      refusal: unknownRefusal(unknown.effect_kind),
+      effect: claim.effect,
+      refusal: unknownRefusal(
+        claim.effect.effect_kind,
+        `preflight reconcile match_count=${preDispatchMatches.length}`,
+      ),
       dispatched: false,
     };
   }
+  const dispatching = await args.store.transition(
+    claim.effect.operation_key,
+    "reserved",
+    "dispatching",
+    "dispatch_started",
+    {},
+    args.actor,
+  );
   return await dispatchFrom(dispatching);
 }
