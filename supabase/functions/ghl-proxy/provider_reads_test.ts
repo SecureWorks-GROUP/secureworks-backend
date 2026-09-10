@@ -200,6 +200,181 @@ Deno.test("full contacts page with no cursor never claims completeness", async (
   );
 });
 
+// Sanitised metadata shapes from the 2026-09-10 traversal: contacts pages
+// 35/36 and opportunities pages 26/27. Provider nextPage stayed 2 even after
+// the cursor had exhausted; it was not an instruction to restart at page 2.
+for (
+  const population of [
+    { key: "contacts", path: "/contacts/", total: 3421, lastCount: 21 },
+    {
+      key: "opportunities",
+      path: "/opportunities/search",
+      total: 2582,
+      lastCount: 82,
+    },
+  ] as const
+) {
+  const action = `list_ghl_${population.key}` as GhlProviderReadAction;
+  const cursorArgs = {
+    limit: "100",
+    start_after: "1744612543212",
+    start_after_id: "previous_record",
+  };
+  Deno.test(`${population.key} cursor traversal ends on the observed empty terminal page`, async () => {
+    const lastRows = Array.from({ length: population.lastCount }, (_, i) => ({
+      id: `record_${i}`,
+      locationId,
+      monetaryValue: 0,
+      customValue: null,
+    }));
+    const lastPayload = {
+      [population.key]: lastRows,
+      meta: {
+        total: population.total,
+        nextPageUrl:
+          `https://services.leadconnectorhq.com${population.path}?locationId=${locationId}&limit=100&startAfter=1742799368769&startAfterId=last_record`,
+        startAfterId: "last_record",
+        startAfter: 1742799368769,
+        currentPage: 1,
+        nextPage: 2,
+        prevPage: null,
+      },
+    };
+    const emptyPayload = {
+      [population.key]: [],
+      meta: {
+        total: population.total,
+        nextPageUrl: null,
+        startAfterId: null,
+        startAfter: null,
+        currentPage: 1,
+        nextPage: 2,
+        prevPage: null,
+      },
+    };
+    const f = fixture([
+      { path: population.path, body: lastPayload },
+      { path: population.path, body: emptyPayload },
+    ]);
+    const last = await f.run(action, cursorArgs);
+    assertEquals(last.data, lastPayload);
+    assertEquals(last.pagination?.has_more, true);
+    assertEquals(last.pagination?.complete, false);
+    assertEquals(last.pagination?.next_cursor, {
+      start_after: "1742799368769",
+      start_after_id: "last_record",
+    });
+    const terminal = await f.run(action, {
+      limit: "100",
+      ...last.pagination?.next_cursor,
+    } as Record<string, string>);
+    assertEquals(terminal.data, emptyPayload);
+    assertEquals(terminal.pagination?.has_more, false);
+    assertEquals(terminal.pagination?.next_cursor, null);
+    assertEquals(terminal.pagination?.complete, true);
+    assertEquals(terminal.pagination?.warning, undefined);
+    assertEquals(f.calls[1].url.searchParams.has("page"), false);
+    assertEquals(
+      f.calls[1].url.searchParams.get("startAfterId"),
+      "last_record",
+    );
+    f.done();
+  });
+
+  Deno.test(`${population.key} nonempty cursor pages with missing cursors remain incomplete`, async () => {
+    for (const meta of [{ nextPage: 2 }, {}]) {
+      const f = fixture([{
+        path: population.path,
+        body: { [population.key]: [{ id: "remaining", locationId }], meta },
+      }]);
+      const result = await f.run(action, cursorArgs);
+      assertEquals(
+        result.pagination?.has_more,
+        "nextPage" in meta ? true : null,
+      );
+      assertEquals(result.pagination?.next_cursor, null);
+      assertEquals(result.pagination?.complete, false);
+      assertEquals(
+        result.pagination?.warning,
+        "provider_did_not_supply_a_usable_next_cursor",
+      );
+      f.done();
+    }
+  });
+
+  Deno.test(`${population.key} empty pages preserve incomplete and explicit cursor signals`, async () => {
+    for (
+      const meta of [
+        { startAfter: 0 },
+        { startAfterId: "next_record" },
+        { nextPageUrl: "https://services.leadconnectorhq.com/next" },
+        { startAfter: false },
+      ]
+    ) {
+      const f = fixture([{
+        path: population.path,
+        body: { [population.key]: [], meta },
+      }]);
+      const result = await f.run(action, cursorArgs);
+      assertEquals(result.pagination?.has_more, true);
+      assertEquals(result.pagination?.next_cursor, null);
+      assertEquals(result.pagination?.complete, false);
+      assertEquals(
+        result.pagination?.warning,
+        "provider_did_not_supply_a_usable_next_cursor",
+      );
+      f.done();
+    }
+    const f = fixture([{
+      path: population.path,
+      body: {
+        [population.key]: [],
+        meta: { startAfter: 0, startAfterId: "next_record" },
+      },
+    }]);
+    const result = await f.run(action, cursorArgs);
+    assertEquals(result.pagination?.has_more, true);
+    assertEquals(result.pagination?.next_cursor, {
+      start_after: "0",
+      start_after_id: "next_record",
+    });
+    assertEquals(result.pagination?.complete, false);
+    f.done();
+  });
+
+  Deno.test(`${population.key} repeated cursors stop without a numeric page fallback`, async () => {
+    const f = fixture([{
+      path: population.path,
+      body: {
+        [population.key]: [],
+        meta: {
+          startAfter: Number(cursorArgs.start_after),
+          startAfterId: cursorArgs.start_after_id,
+          nextPage: 2,
+        },
+      },
+    }]);
+    const result = await f.run(action, cursorArgs);
+    assertEquals(result.pagination?.has_more, true);
+    assertEquals(result.pagination?.next_cursor, null);
+    assertEquals(result.pagination?.complete, false);
+    assertEquals(result.pagination?.warning, "provider_cursor_stalled");
+    f.done();
+  });
+}
+
+Deno.test("contacts are cursor-only even on an empty initial request", async () => {
+  const f = fixture([{
+    path: "/contacts/",
+    body: { contacts: [], meta: { nextPage: 2 } },
+  }]);
+  const result = await f.run("list_ghl_contacts");
+  assertEquals(result.pagination?.has_more, false);
+  assertEquals(result.pagination?.next_cursor, null);
+  assertEquals(result.pagination?.complete, true);
+  f.done();
+});
+
 Deno.test("arbitrary Roof Repair pipeline is verified by provider membership", async () => {
   const pipelineId = "repair-pipeline";
   const opportunity = {
