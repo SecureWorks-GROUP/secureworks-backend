@@ -1,6 +1,23 @@
 BEGIN;
 
-INSERT INTO public.jobs (id, job_number) VALUES ('70000000-0000-4000-8000-000000000001', 'SWMS-261403');
+-- The shared fixture jobs table may carry NOT NULL columns from earlier cases
+-- (org_id, type, status). Insert with whatever of those exist.
+DO $$
+DECLARE
+  cols text := 'id, job_number';
+  vals text := quote_literal('70000000-0000-4000-8000-000000000001') || ', ' || quote_literal('SWMS-261403');
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'org_id') THEN
+    cols := cols || ', org_id'; vals := vals || ', ' || quote_literal('00000000-0000-4000-8000-000000000001');
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'type') THEN
+    cols := cols || ', type'; vals := vals || ', ' || quote_literal('makesafe');
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'status') THEN
+    cols := cols || ', status'; vals := vals || ', ' || quote_literal('scheduled');
+  END IF;
+  EXECUTE format('INSERT INTO public.jobs (%s) VALUES (%s)', cols, vals);
+END $$;
 
 -- 1. A make-safe report submission files exactly one pending run keyed by job, cycle and report id.
 INSERT INTO public.job_events (id, job_id, event_type, detail_json) VALUES
