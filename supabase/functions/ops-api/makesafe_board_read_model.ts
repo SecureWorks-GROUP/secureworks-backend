@@ -40,6 +40,7 @@ import {
 import {
   deriveSesStageV2,
   sesOverlayDecisionKind,
+  sesStageOwnRoofReportIn,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
@@ -49,6 +50,10 @@ import {
   makesafePackArtifactRequirements,
 } from "./makesafe_document_truth.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
+import {
+  builderKey as sesAssemblerBuilderKey,
+  resolveSesDeliveryRenderRoute,
+} from "./ses_assembler_input_adapter.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1.2";
 
@@ -375,13 +380,59 @@ export function boardRowSesFamily(base: any) {
   ) {
     return "repair";
   }
-  return canonicalSesFamilyFromCard({
+  const canonicalFamily = canonicalSesFamilyFromCard({
     makesafe_job_family: base?.metadata?.makesafe_job_family,
     insurance_job_type: base?.metadata?.insurance_job_type,
     own_template_requested: base?.metadata?.own_template_requested,
     strata: base?.metadata?.strata,
     report_delivery: base?.metadata?.report_delivery || detail?.report_delivery,
   });
+  // Roof delivery is a second, persisted decision layered over the canonical
+  // family. The assembler already owns this route resolver; use the same
+  // resolver here so a roof draft and the board cannot disagree about whether
+  // the card has a SecureWorks own-letterhead route. Board rows do not carry
+  // the full assembler snapshot, but these are the route resolver's complete
+  // job/detail inputs; a loaded draft is included when an older caller has one.
+  if (
+    canonicalFamily === "ordinary_roof_portal" ||
+    canonicalFamily === "own_template_roof"
+  ) {
+    const routeSnapshot = {
+      job: base,
+      detail: {
+        ...detail,
+        requesting_company_name: detail?.requesting_company_name ||
+          base?.requesting_company_name,
+        requesting_company_slug: detail?.requesting_company_slug ||
+          base?.requesting_company_slug,
+        external_ref: detail?.external_ref || base?.external_ref,
+      },
+      roof_draft: base?.roof_draft || null,
+    };
+    const route = resolveSesDeliveryRenderRoute(
+      routeSnapshot,
+      sesAssemblerBuilderKey(routeSnapshot),
+      canonicalFamily,
+    );
+    if (route.route === "secureworks_own_letterhead") {
+      return "own_template_roof";
+    }
+    if (route.route === "unroutable") {
+      // Refuse contradictory/invalid delivery facts. Builder recipe sealing
+      // stays with the assembler; do not change existing family placement
+      // merely because a compact row cannot identify its builder.
+      return route.reason_code.endsWith("_unsealed")
+        ? canonicalFamily
+        : "unknown";
+    }
+    if (
+      route.route === "builder_portal" &&
+      canonicalFamily === "own_template_roof"
+    ) {
+      return "ordinary_roof_portal";
+    }
+  }
+  return canonicalFamily;
 }
 
 /**
@@ -1493,7 +1544,10 @@ export function buildCanonicalMakesafeRows(
       ses_family: sesFamily,
       nowIso: computedAt,
     };
-    const reportIn = reportInEvidence(statusInput);
+    const legacyReportIn = reportInEvidence(statusInput);
+    const reportIn = sesFamily === "own_template_roof"
+      ? sesStageOwnRoofReportIn(statusInput)
+      : legacyReportIn;
     const stageV2 = deriveSesStageV2(statusInput);
     const derivedStage = String(stageV2.stage || "").toLowerCase();
     // R8 — ATTESTATIONS CAN NEVER BIND. The `decisionKind` test is FIRST and
@@ -1587,6 +1641,7 @@ export function buildCanonicalMakesafeRows(
       report_doc_resolved: pack?.report_doc_resolved,
       requires_bound_report_doc: artifactRequirements.requires_bound_report_doc,
       requires_selected_current_cycle_trade_report:
+        sesFamily !== "own_template_roof" &&
         artifactRequirements.requires_bound_report_doc,
       invoice_doc_id: pack?.invoice_doc_id || null,
       invoice_doc_resolved: pack?.invoice_doc_resolved,
@@ -1607,7 +1662,8 @@ export function buildCanonicalMakesafeRows(
     const stampedReadyDishonest = String(stamped?.kind || "") === "ready" && (
       (artifactRequirements.requires_bound_report_doc &&
         !reportPointerReady) ||
-      (artifactRequirements.requires_bound_report_doc && !report) ||
+      (sesFamily !== "own_template_roof" &&
+        artifactRequirements.requires_bound_report_doc && !report) ||
       (artifactRequirements.requires_bound_invoice_doc &&
         !invoicePointerReady) ||
       (swmsRequired && !swmsPointerReady) ||
@@ -1847,7 +1903,7 @@ export function buildCanonicalMakesafeRows(
           ),
         has_current_portal_capture:
           computation.job_type !== "physical_makesafe" &&
-          reportIn.satisfied,
+          legacyReportIn.satisfied,
         portal_capture_revisions: ledgerPortalCaptures.map((capture: any) => ({
           id: capture.revision_id || null,
           role: capture.role || null,
