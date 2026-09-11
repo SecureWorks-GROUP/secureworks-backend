@@ -254,7 +254,8 @@ jobs:
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
-            supabase/functions/ops-api/proposed_sms_receipt_test.ts
+            supabase/functions/ops-api/proposed_sms_receipt_test.ts \
+            supabase/functions/ops-api/invoice_context_test.ts
 
       - name: Test shared Xero transport and uncertain outcomes
         run: |

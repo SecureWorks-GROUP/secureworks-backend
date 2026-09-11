@@ -351,6 +351,7 @@ import {
   runSesReportTrigger,
   SesReportTriggerError,
 } from './ses_report_trigger.ts'
+import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -6901,6 +6902,27 @@ if (import.meta.main) serve(async (req: Request) => {
         } catch (error) {
           if (error instanceof SesReportTriggerError) {
             return json({ error: error.message, code: error.code, ...(error.detail || {}) }, error.status)
+          }
+          throw error
+        }
+      }
+      // ── Invoice context door (CIO, debt dashboard directive 2026-09-11) ──
+      // invoice in; job, facts, conversation, Xero cache state and owned
+      // blockers out. SELECT-only. Shape: wiki
+      // lanes/handoffs/CIO-to-DEBT-invoice-context-door.md.
+      case 'invoice_context':
+      case 'debt_context_coverage': {
+        if (req.method !== 'GET') {
+          return json({ error: `${action} requires GET` }, 405)
+        }
+        try {
+          const deps = { client, orgId: DEFAULT_ORG_ID, getJobConversation, isCurrentContextFact }
+          return json(action === 'invoice_context'
+            ? await invoiceContext(url.searchParams, deps)
+            : await debtContextCoverage(url.searchParams, deps))
+        } catch (error) {
+          if (error instanceof InvoiceContextError) {
+            return json({ error: error.message, code: error.code }, error.status)
           }
           throw error
         }
