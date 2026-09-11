@@ -8,7 +8,7 @@ case "$url" in
  *) echo 'Refusing non-local test database' >&2; exit 2 ;;
 esac
 psql "$url" -X -v ON_ERROR_STOP=1 -f "$root/supabase/tests/fixtures/context_b1.sql"
-for pass in 1 2; do
+for _pass in 1 2; do
  for migration in 20260911170000_automation_switches 20260911170001_context_run_ledger; do
   psql "$url" -X -v ON_ERROR_STOP=1 -1 -f "$root/supabase/migrations/$migration.sql"
  done
