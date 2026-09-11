@@ -238,6 +238,8 @@ write_response() {
   SEND_CLAIMED_AT_EXPECTED_SHA="$(send_claimed_at_migration_sha)" \
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
+  CONTEXT_SWITCH_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170000_automation_switches.sql" | awk '{print $1}')" \
+  CONTEXT_LEDGER_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170001_context_run_ledger.sql" | awk '{print $1}')" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
@@ -626,6 +628,12 @@ debt_picture_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+context_rows = []
+for version, name, key in [("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"), ("20260911170001", "context_run_ledger", "CONTEXT_LEDGER_EXPECTED_SHA")]:
+    context_rows.append({"function_name": "ops-api", "migration_version": version,
+        "expected_migration_name": name, "expected_statement_sha256": os.environ[key],
+        "actual_migration_version": version, "actual_migration_name": name,
+        "actual_statement_count": 2, "actual_statement_sha256": None, "missing_markers": []})
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -663,6 +671,7 @@ with open(sys.argv[1], "w") as f:
             send_runs_claimed_at_row,
             send_claim_token_row,
             debt_picture_row,
+            *context_rows,
         ],
         f,
     )

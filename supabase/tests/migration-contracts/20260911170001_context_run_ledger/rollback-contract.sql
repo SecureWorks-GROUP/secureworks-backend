@@ -1,0 +1,1 @@
+DO $$ BEGIN IF has_function_privilege('service_role','public.claim_context_pass(date)','EXECUTE') THEN RAISE EXCEPTION 'rollback admissions'; END IF; IF to_regclass('public.context_extraction_event_receipts') IS NULL THEN RAISE EXCEPTION 'lost receipts'; END IF; END $$;

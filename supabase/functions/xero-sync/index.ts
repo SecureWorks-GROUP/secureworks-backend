@@ -1,3 +1,4 @@
+import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Xero Sync Edge Function
 //
@@ -186,6 +187,10 @@ if (import.meta.main) serve(async (req: Request) => {
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   try {
+    const lane = action === 'sync_invoices' ? 'capture' : action === 'match_contacts' ? 'attribution' : null
+    if (lane && !(await automationLaneEnabled(sb, lane))) {
+      return json({ skipped: true, reason: 'automation_lane_disabled', lane })
+    }
     switch (action) {
       case 'token_refresh':
         return json(await refreshToken(sb))
