@@ -50,9 +50,21 @@ GRANT EXECUTE ON FUNCTION public.context_attribution_jobs(text) TO service_role;
 -- A composite-row helper is callable; trigger functions cannot be invoked through RPC.
 CREATE FUNCTION public.resolve_context_attribution(e public.business_events) RETURNS public.business_events
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
-DECLARE words text; ids uuid[]; candidate uuid; n int; line text; contact_ids text[]; prior_status text;
+DECLARE words text; ids uuid[]; candidate uuid; n int; line text; contact_ids text[]; prior_status text; source_method text;
 BEGIN
  prior_status:=e.attribution_status;
+ source_method:=e.match_method;
+ -- Keep explicit source custody while attribution is paused; confidence hints never enter it.
+ IF e.job_id IS NOT NULL AND source_method IN ('direct_job_id','direct_reference','manual') THEN
+   e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('source_job_binding',jsonb_build_object('job_id',e.job_id,'match_method',source_method));
+ ELSIF e.job_id IS NULL AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
+   SELECT id INTO e.job_id FROM public.jobs WHERE id::text=e.metadata->'source_job_binding'->>'job_id';
+   source_method:=e.metadata->'source_job_binding'->>'match_method';
+ END IF;
+ IF e.job_id IS NOT NULL AND coalesce(source_method,'none') NOT IN ('direct_job_id','direct_reference','manual') THEN
+   e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
+   e.job_id:=NULL;
+ END IF;
  e.attribution_checked_at:=clock_timestamp();
  -- Provider evidence without a source timestamp stays undated; ingestion is not occurrence.
  words:=public.context_event_text(e);
@@ -137,7 +149,6 @@ BEGIN
  FOR e IN SELECT * FROM public.business_events
  WHERE (attribution_status='admin_bucket' OR attribution_status IS NULL)
  AND job_id IS NULL AND (p_contact_id IS NULL OR contact_id=p_contact_id)
- AND (event_at IS NULL OR event_at>now()-interval '90 days')
  ORDER BY attribution_checked_at NULLS FIRST,occurred_at,id
  LIMIT greatest(0,least(coalesce(p_limit,250),1000)) FOR UPDATE SKIP LOCKED LOOP
   resolved:=public.resolve_context_attribution(e);
@@ -146,7 +157,7 @@ BEGIN
    attribution_confidence=resolved.attribution_confidence,attributed_at=resolved.attributed_at,
    attribution_checked_at=resolved.attribution_checked_at,event_at=resolved.event_at,
    match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,
-   payload=resolved.payload WHERE id=e.id;
+   payload=resolved.payload,metadata=resolved.metadata WHERE id=e.id;
   n:=n+1;
  END LOOP;
  RETURN n;
@@ -240,7 +251,7 @@ BEGIN
     attribution_status=resolved.attribution_status,attribution_step=resolved.attribution_step,
     attribution_confidence=resolved.attribution_confidence,attributed_at=resolved.attributed_at,
     attribution_checked_at=resolved.attribution_checked_at,event_at=resolved.event_at,
-    match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,payload=resolved.payload WHERE id=e.id;
+    match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,payload=resolved.payload,metadata=resolved.metadata WHERE id=e.id;
    cursor_id:=e.id; batch_count:=batch_count+1;
   END LOOP;
   EXIT WHEN batch_count=0;

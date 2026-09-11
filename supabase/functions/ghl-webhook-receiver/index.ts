@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Receiver (All Event Types)
@@ -596,8 +597,8 @@ serve(async (req) => {
     }
 
     // Attach job context to payload
-    eventPayload.job_id = job?.id || null;
-    eventPayload.job_number = job?.job_number || null;
+    eventPayload.suggested_job_id = job?.id || null;
+    eventPayload.suggested_job_number = job?.job_number || null;
     eventPayload.client_name = job?.client_name || null;
     eventPayload.job_type = job?.type || null;
     eventPayload.match_reason = jobMatch.match_reason;
@@ -654,16 +655,12 @@ serve(async (req) => {
         direction = "internal";
         break;
     }
-    const match = resolveMatch({
-      job_id: job?.id || null,
-      match_method: jobMatch.match_method,
-      match_confidence: jobMatch.match_confidence,
-    });
+    const evidenceJobId = typeof body.job_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.job_id) ? body.job_id : null;
+    const match = resolveMatch({ job_id: evidenceJobId,
+      match_method: evidenceJobId ? "direct_job_id" : "none" });
     const bodyPreview = previewFromPayload(eventPayload);
-    // The database owns contact attribution. Do not disguise a heuristic match as a direct id.
-    const evidenceJobId = type === "InboundMessage" || type === "OutboundMessage"
-      ? (typeof body.job_id === "string" && /^[0-9a-f-]{36}$/i.test(body.job_id) ? body.job_id : null)
-      : match.job_id;
+    eventPayload.attribution_hint = { job_id: job?.id || null,
+      match_method: jobMatch.match_method, match_confidence: jobMatch.match_confidence };
 
     // Legacy spine row shape — emitted either by the T7 fallback path
     // OR when the flag is OFF. It still carries the extractor-readable
@@ -708,8 +705,8 @@ serve(async (req) => {
           channel,
           direction,
           occurred_at: occurredAt,
-      event_at: eventAt,
-      provider_message_id: providerMessageId,
+          event_at: eventAt,
+          provider_message_id: providerMessageId,
           // Source: GHL conversation cache when conversation_id present;
           // else the webhook event id when GHL supplies one; else a synthetic.
           source_table: "ghl_webhook",
@@ -718,8 +715,8 @@ serve(async (req) => {
           contact_id: contactId || null,
           entity_type: job ? "contact" : "unmatched_contact",
           entity_id: contactId || null,
-          match_method: jobMatch.match_method,
-          match_confidence: jobMatch.match_confidence,
+          match_method: match.match_method,
+          match_confidence: match.match_confidence ?? undefined,
           body_preview: bodyPreview || undefined,
           thread_key: conversationKey,
           // Inbound client comms: 7y; system events: 12m.
@@ -746,7 +743,7 @@ serve(async (req) => {
     }
 
     if (!t7Enabled || t7Failed) {
-      const { error } = await supabase.from("business_events").insert(legacySpineRow);
+      const { error } = await insertCapturedEvidence(supabase, legacySpineRow);
       eventError = error?.code === "23505" && providerMessageId ? null : error;
     }
 
@@ -769,7 +766,7 @@ serve(async (req) => {
       // Capture closure-stable copies before the async block.
       const initialRecordingUrl = nullableString(eventPayload.recording_url);
       const ghlEventId = nullableString(eventPayload.event_id);
-      const _job_id = job?.id || null;
+      const _job_id = evidenceJobId;
       const _contact_id = contactId || null;
       const _direction = nullableString(eventPayload.direction) || "internal";
       const _duration = (eventPayload.duration as number | null);
@@ -814,6 +811,8 @@ serve(async (req) => {
             contact_id: _contact_id,
             call_direction: _direction,
             occurred_at: webhookOccurredAt.toISOString(),
+            event_at: eventAt,
+            job_match_method: evidenceJobId ? "direct_job_id" : "none",
             duration_seconds: _duration,
             phone: _phone,
             ghl_call_id: callSourceId,

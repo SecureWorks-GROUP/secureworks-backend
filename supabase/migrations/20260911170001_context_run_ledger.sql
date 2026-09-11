@@ -36,6 +36,55 @@ ALTER TABLE public.context_extraction_event_receipts ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.context_pass_days,public.context_extraction_runs,public.context_extraction_event_receipts FROM PUBLIC,anon,authenticated;
 GRANT ALL ON public.context_pass_days,public.context_extraction_runs,public.context_extraction_event_receipts TO service_role;
 
+CREATE TABLE IF NOT EXISTS public.context_model_call_reservations (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ run_date date NOT NULL,
+ ordinal integer NOT NULL CHECK (ordinal BETWEEN 1 AND 400),
+ phase text NOT NULL CHECK (phase IN ('attribution','extraction','bucket')),
+ run_id uuid REFERENCES public.context_extraction_runs(id),
+ lease_token uuid,
+ reserved_at timestamptz NOT NULL,
+ CHECK ((run_id IS NULL) = (lease_token IS NULL)),
+ CHECK (phase <> 'extraction' OR run_id IS NOT NULL),
+ UNIQUE (run_date,ordinal)
+);
+ALTER TABLE public.context_model_call_reservations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.context_model_call_reservations FROM PUBLIC,anon,authenticated,service_role;
+GRANT SELECT ON public.context_model_call_reservations TO service_role;
+
+CREATE OR REPLACE FUNCTION public.reserve_context_model_call(p_phase text,p_run_id uuid,p_lease_token uuid)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE v_now timestamptz; v_date date; v_ordinal integer; v_id uuid; r public.context_extraction_runs;
+BEGIN
+ IF p_phase IS NULL OR p_phase NOT IN ('attribution','extraction','bucket')
+ OR (p_run_id IS NULL) <> (p_lease_token IS NULL)
+ OR (p_phase='extraction' AND p_run_id IS NULL) THEN
+  RAISE EXCEPTION 'Invalid model call identity';
+ END IF;
+ PERFORM pg_advisory_xact_lock(20260911,1);
+ IF NOT public.automation_lane_enabled(CASE WHEN p_phase='extraction' THEN 'extraction' ELSE 'attribution' END)
+ THEN RETURN jsonb_build_object('outcome','paused'); END IF;
+ PERFORM 1 FROM public.automation_switches WHERE id=1 FOR SHARE;
+ IF NOT public.automation_lane_enabled(CASE WHEN p_phase='extraction' THEN 'extraction' ELSE 'attribution' END)
+ THEN RETURN jsonb_build_object('outcome','paused'); END IF;
+ IF p_run_id IS NOT NULL THEN
+  SELECT * INTO r FROM public.context_extraction_runs WHERE id=p_run_id FOR UPDATE;
+ END IF;
+ v_now := clock_timestamp();
+ v_date := (v_now AT TIME ZONE 'Australia/Perth')::date;
+ IF p_run_id IS NOT NULL AND (r.id IS NULL OR r.lease_token IS DISTINCT FROM p_lease_token
+ OR r.phase IS DISTINCT FROM p_phase OR r.status <> 'running'
+ OR r.lease_expires_at IS NULL OR r.lease_expires_at <= v_now OR r.run_date <> v_date)
+ THEN RETURN jsonb_build_object('outcome','stale'); END IF;
+ SELECT coalesce(max(ordinal),0)+1 INTO v_ordinal FROM public.context_model_call_reservations WHERE run_date=v_date;
+ IF v_ordinal>400 THEN RETURN jsonb_build_object('outcome','cap'); END IF;
+ INSERT INTO public.context_model_call_reservations(run_date,ordinal,phase,run_id,lease_token,reserved_at)
+ VALUES(v_date,v_ordinal,p_phase,p_run_id,p_lease_token,v_now) RETURNING id INTO v_id;
+ RETURN jsonb_build_object('outcome','reserved','reservation_id',v_id,'run_date',v_date,'ordinal',v_ordinal);
+END $$;
+REVOKE ALL ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.claim_context_extraction_run(p_job_id uuid,p_run_date date,p_phase text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE r public.context_extraction_runs; v_lane text;
@@ -46,7 +95,6 @@ BEGIN
  END IF;
  v_lane := CASE WHEN p_phase='extraction' THEN 'extraction' ELSE 'attribution' END;
  IF NOT public.automation_lane_enabled(v_lane) THEN RETURN jsonb_build_object('outcome','paused'); END IF;
- -- Serialize cap admission, including concurrent workers on distinct jobs.
  PERFORM pg_advisory_xact_lock(20260911,1);
  SELECT * INTO r FROM public.context_extraction_runs WHERE job_id=p_job_id AND run_date=p_run_date AND phase=p_phase FOR UPDATE;
  IF FOUND THEN
@@ -56,8 +104,6 @@ BEGIN
   UPDATE public.context_extraction_runs SET status='running',lease_token=gen_random_uuid(),lease_expires_at=now()+interval '30 minutes',
     retry_at=NULL,finished_at=NULL,attempts=attempts+1 WHERE id=r.id RETURNING * INTO r;
  ELSE
-  IF p_phase='extraction' AND (SELECT count(*) FROM public.context_extraction_runs WHERE run_date=p_run_date AND phase='extraction') >= 400
-   THEN RETURN jsonb_build_object('outcome','cap'); END IF;
   INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,lease_token,lease_expires_at)
    VALUES(p_job_id,p_run_date,p_phase,'running',gen_random_uuid(),now()+interval '30 minutes') RETURNING * INTO r;
  END IF;
@@ -117,7 +163,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp
 BEGIN
  IF p_status IS NULL OR p_status NOT IN ('done','failed','skipped') THEN RAISE EXCEPTION 'Invalid pass completion'; END IF;
  UPDATE public.context_pass_days SET status=p_status,finished_at=now(),retry_at=p_retry_at,error=p_error,lease_expires_at=NULL,
-  runs=(SELECT count(*) FROM public.context_extraction_runs WHERE run_date=p_run_date AND phase='extraction')
+  runs=(SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=p_run_date)
  WHERE run_date=p_run_date AND lease_token=p_lease_token AND status='running' AND lease_expires_at>now();
  RETURN FOUND;
 END $$;

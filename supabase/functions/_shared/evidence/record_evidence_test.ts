@@ -74,6 +74,7 @@ function makeFakeSupabase(opts: FakeOpts = {}): { client: any; calls: InsertCall
 
   // deno-lint-ignore no-explicit-any
   const client: any = {
+    rpc: () => Promise.resolve({ data: true, error: null }),
     from(table: string) {
       return {
         // SELECT chain used by the feature_flag reader.
@@ -149,13 +150,13 @@ Deno.test("match: confidence below floor downgrades to unresolved and drops job_
   assertEquals(r.match_status, "unresolved");
   assertEquals(r.job_id, null, "low-confidence guess must not leak job_id");
   assertEquals(r.match_confidence, 0.4);
-  assert(r.notes.some((n) => n.includes("below floor")));
+  assert(r.notes.some((n) => n.includes("non-direct method")));
 });
 
-Deno.test("match: confidence at floor keeps matched", () => {
-  const r = resolveMatch({ job_id: "SWP-1", match_method: "contact_id", match_confidence: 0.6 });
-  assertEquals(r.match_status, "matched");
-  assertEquals(r.job_id, "SWP-1");
+Deno.test("match: confidence cannot promote a contact hint", () => {
+  const r = resolveMatch({ job_id: "SWP-1", match_method: "contact_id", match_confidence: 0.85 });
+  assertEquals(r.match_status, "unresolved");
+  assertEquals(r.job_id, null);
 });
 
 Deno.test("match: no job_id but positive confidence -> ambiguous", () => {
@@ -660,7 +661,7 @@ Deno.test("recordEvidence: SWP-26090 fixture (T5 verification job)", async () =>
   }, { org_id: "org-marninstobbe-default" });
   assertEquals(r.spine_row.match_status, "matched");
   assertEquals(r.spine_row.match_method, "direct_reference");
-  assertEquals(r.spine_row.match_confidence, 0.9);
+  assertEquals(r.spine_row.match_confidence, 0.99);
   assertEquals(r.evidence_ref.job_id, "SWP-26090");
   assertEquals(r.evidence_ref.thread_key, "<thread-id-xyz@graph>");
   // matched + email channel + job_id present -> extraction enqueued.
@@ -727,6 +728,7 @@ function makeProposalFake(refsMode: "off" | "soft-warn" | "strict"): FakeProposa
   let lastFlagName = "";
   // deno-lint-ignore no-explicit-any
   const client: any = {
+    rpc: () => Promise.resolve({ data: true, error: null }),
     from(table: string) {
       const chain = {
         select(_cols: string) {
@@ -946,4 +948,82 @@ Deno.test("context envelope retains provider time and full SMS beyond preview", 
   assertEquals(row.occurred_at, "2026-09-11T01:02:03.000Z");
   assertEquals(row.contact_id, "contact-fixture");
   assertEquals((row.payload as Record<string,unknown>).message_text, body);
+});
+
+Deno.test("recordEvidence: high-confidence contact hint retained without binding or enqueue", async () => {
+  const { client, calls } = makeFakeSupabase({ spineId: "weak-contact-event" });
+  const r = await recordEvidence(client, {
+    event_type: "call.transcript_completed", source: "transcribe-call", channel: "call",
+    direction: "inbound", source_table: "business_events", source_id: "provider-call",
+    job_id: "00000000-0000-0000-0000-000000000012", contact_id: "repeat-contact",
+    match_method: "contact_id", match_confidence: 1,
+    occurred_at: "2026-09-11T02:00:00.000Z", event_at: null,
+    body_preview: "Please call about the other job",
+  }, { org_id: "test-org", extractor_eligible_channels: ["call"] });
+  assertEquals(r.spine_row.job_id, null);
+  assertEquals((calls[0].values as Record<string, unknown>).event_at, null);
+  assertEquals((calls[0].values as Record<string, unknown>).occurred_at, "2026-09-11T02:00:00.000Z");
+  assertEquals(((calls[0].values as Record<string, unknown>).metadata as Record<string, unknown>).attribution_hint, {
+    job_id: "00000000-0000-0000-0000-000000000012", match_method: "contact_id", match_confidence: 1,
+  });
+  assertEquals(calls.filter((c) => c.table === "extraction_jobs").length, 0);
+});
+
+Deno.test("recordEvidence: provider date survives capture and malformed date stays unknown", async () => {
+  for (const [input, expected] of [["2025-01-02T10:00:00+08:00", "2025-01-02T02:00:00.000Z"], ["not-a-date", null], [undefined, null]]) {
+    const { client, calls } = makeFakeSupabase({ spineId: "dated-call" });
+    await recordEvidence(client, {
+      event_type: "call.transcript_completed", source: "transcribe-call", channel: "call",
+      direction: "inbound", source_table: "business_events", source_id: "provider-call",
+      job_id: null, event_at: input, occurred_at: "2026-09-11T02:00:00.000Z",
+      body_preview: "Original statement",
+    }, { org_id: "test-org" });
+    assertEquals((calls[0].values as Record<string, unknown>).event_at, expected);
+  }
+});
+
+for (const mode of ["off", "missing", "error", "throw", "missing_rpc"] as const) {
+  Deno.test(`recordEvidence: central capture ${mode} blocks body, row and enqueue even with feature bypass`, async () => {
+    const { client, calls } = makeFakeSupabase();
+    client.rpc = () => mode === "throw" ? Promise.reject(new Error("offline")) : Promise.resolve({
+      data: mode === "off" ? false : mode === "missing" ? null : true,
+      error: mode === "error" ? { message: "missing schema" } : null,
+    });
+    if (mode === "missing_rpc") delete client.rpc;
+    let uploads = 0;
+    await assertRejects(() => recordEvidence(client, {
+      event_type: "note.added", source: "test", channel: "note", direction: "internal",
+      source_table: "job_events", source_id: "note-1", job_id: "job-1",
+      match_method: "direct_job_id", body_full: "Private note", body_preview: "Private note",
+    }, { org_id: "test-org", bypass_feature_flag: true,
+      storage_client: { from: () => ({ upload: () => { uploads++; return Promise.resolve({ error: null }); } }) },
+    }), Error, "capture disabled or unavailable");
+    assertEquals(uploads, 0);
+    assertEquals(calls.length, 0);
+  });
+}
+
+Deno.test("recordEvidence: capture switch is reread before row insert after body storage", async () => {
+  const { client, calls } = makeFakeSupabase();
+  let reads = 0;
+  client.rpc = () => Promise.resolve({ data: ++reads === 1, error: null });
+  await assertRejects(() => recordEvidence(client, {
+    event_type: "note.added", source: "test", channel: "note", direction: "internal",
+    source_table: "job_events", source_id: "note-2", job_id: null, body_preview: "A note",
+  }, { org_id: "test-org", bypass_feature_flag: true }), Error, "capture disabled");
+  assertEquals(reads, 2);
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("recordEvidence: disabled capture after row write prevents extraction enqueue", async () => {
+  const { client, calls } = makeFakeSupabase();
+  let reads = 0;
+  client.rpc = () => Promise.resolve({ data: ++reads <= 2, error: null });
+  await recordEvidence(client, {
+    event_type: "note.added", source: "test", channel: "note", direction: "internal",
+    source_table: "job_events", source_id: "note-3", job_id: "job-1",
+    match_method: "direct_job_id", body_preview: "A note",
+  }, { org_id: "test-org", bypass_feature_flag: true });
+  assertEquals(calls.filter((c) => c.table === "business_events").length, 1);
+  assertEquals(calls.filter((c) => c.table === "extraction_jobs").length, 0);
 });

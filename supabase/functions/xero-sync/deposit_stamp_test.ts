@@ -118,6 +118,7 @@ interface FakeOptions {
   updateRows?: Array<Record<string, unknown>>;
   contradictionLogged?: boolean;
   contradictionLookupError?: boolean;
+  captureEnabled?: boolean;
 }
 
 function fakeClient(opts: FakeOptions = {}) {
@@ -167,7 +168,13 @@ function fakeClient(opts: FakeOptions = {}) {
     };
     return api;
   };
-  return { client: { from }, writes };
+  return {
+    client: {
+      from,
+      rpc: () => Promise.resolve({ data: opts.captureEnabled ?? true, error: null }),
+    },
+    writes,
+  };
 }
 
 Deno.test("applyDepositStamp writes deposit_at guarded on null, logs the event, leaves status alone", async () => {
@@ -192,7 +199,20 @@ Deno.test("applyDepositStamp writes deposit_at guarded on null, logs the event, 
 
   const evt = writes.find((w) => w.table === "business_events");
   assertEquals(evt?.values.event_type, "job.deposit_stamped");
+  assertEquals(evt?.values.event_at, "2025-09-08T00:00:00.000Z");
+  assertEquals(evt?.values.match_method, "direct_job_id");
   assertEquals((evt?.values.payload as Record<string, unknown>).timestamp_source, "fully_paid_on");
+});
+
+Deno.test("capture-off still stamps deposit_at without writing business_events", async () => {
+  const { client, writes } = fakeClient({ captureEnabled: false });
+  const out = await applyDepositStamp(client, "org", paidInvoice(), new Date("2026-09-11T02:00:00.000Z"));
+  assertEquals(out?.action, "stamped");
+  assertEquals(
+    writes.some((w) => w.table === "jobs" && w.op === "update" && w.values.deposit_at === "2025-09-08T00:00:00.000Z"),
+    true,
+  );
+  assertEquals(writes.filter((w) => w.table === "business_events").length, 0);
 });
 
 Deno.test("a concurrent run that stamped first leaves us with no write and no event", async () => {
@@ -239,4 +259,15 @@ Deno.test("applyDepositStamp: irrelevant invoice, missing job and failed lookup 
   const c = fakeClient({ lookupError: true });
   assertEquals(await applyDepositStamp(c.client, "org", paidInvoice()), null);
   assertEquals(c.writes.length, 0);
+});
+
+Deno.test("deposit capture never presents operational fallback as payment source time", async () => {
+  const { client, writes } = fakeClient();
+  const now = new Date("2026-09-11T02:00:00.000Z");
+  const inv = { ...paidInvoice(), FullyPaidOnDate: null, UpdatedDateUTC: null };
+  await applyDepositStamp(client, "org", inv, now);
+  assertEquals(writes.find((w) => w.table === "jobs")?.values.deposit_at, now.toISOString());
+  const evt = writes.find((w) => w.table === "business_events");
+  assertEquals(evt?.values.event_at, null);
+  assertEquals(evt?.values.occurred_at, now.toISOString());
 });

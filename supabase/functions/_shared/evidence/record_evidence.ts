@@ -1,3 +1,6 @@
+import { assertCaptureEnabled, insertCapturedEvidence } from "./capture_guard.ts";
+import { automationLaneEnabled } from "../automation_switch.ts";
+import { sourceTime } from "../source_time.ts";
 // T7 Loop 1 — recordEvidence: the single capture choke point
 //
 // Roadmap: cio/operations/2026-05-02-t7-evidence-capture-spine-roadmap.md (Section 5)
@@ -69,8 +72,8 @@ export interface RecordEvidenceOptions {
 
   /**
    * When true, skip the evidence_capture_v1 feature-flag check. Used by
-   * tests + the agent_audit_log writer (which is structurally safe to log
-   * even when capture is OFF). Default false.
+   * tests + the agent_audit_log writer. Never bypasses the central capture
+   * switch. Default false.
    */
   bypass_feature_flag?: boolean;
 
@@ -127,6 +130,8 @@ export async function recordEvidence(
     warnings.push(`body_preview truncated from ${capture.body_preview.length} to ${BODY_PREVIEW_MAX}`);
   }
 
+  if (!effectiveDryRun) await assertCaptureEnabled(supabase);
+
   // Body storage. In dry-run, writeBody computes the pointer + hash but
   // does not upload. In live mode with a storage_client, the body is
   // uploaded to the bucket implied by the channel.
@@ -171,7 +176,7 @@ export async function recordEvidence(
     event_type: capture.event_type,
     source: capture.source,
     occurred_at,
-    ...(capture.event_at ? { event_at: capture.event_at } : {}),
+    event_at: sourceTime(capture.event_at),
     ...(capture.provider_message_id ? { provider_message_id: capture.provider_message_id } : {}),
     entity_type: capture.entity_type ?? entityTypeForChannel(capture.channel),
     entity_id: capture.entity_id ?? capture.source_id,
@@ -179,6 +184,10 @@ export async function recordEvidence(
     payload: capture.payload ?? {},
     metadata: {
       ...(capture.metadata ?? {}),
+      ...(capture.job_id && !match.job_id ? { attribution_hint: {
+        job_id: capture.job_id, match_method: capture.match_method ?? "none",
+        match_confidence: capture.match_confidence ?? null,
+      } } : {}),
       t7_envelope_version: 1,
       match_notes: match.notes,
       warnings,
@@ -216,6 +225,7 @@ export async function recordEvidence(
     // backref columns) point at a real row. Use .select('id, occurred_at')
     // and read [0]; .single() would throw on the empty case which we
     // already handle below.
+    await assertCaptureEnabled(supabase);
     const result = await supabase.from("business_events")
       .insert(spineRow)
       .select("id, occurred_at");
@@ -225,7 +235,7 @@ export async function recordEvidence(
       // because we don't need the row back and the row itself is just a
       // tombstone. If even this fails, silent-drop is unavoidable.
       try {
-        await supabase.from("business_events").insert({
+        await insertCapturedEvidence(supabase, {
           event_type: "system.evidence_capture_failed",
           source: "recordEvidence",
           occurred_at: new Date().toISOString(),
@@ -265,7 +275,9 @@ export async function recordEvidence(
     (capture.enqueueExtraction ?? eligibleChannels.includes(capture.channel)) &&
     match.match_status === "matched" &&
     match.job_id !== null;
-  if (extractionEligible && !effectiveDryRun) {
+  if (extractionEligible && !effectiveDryRun &&
+      await automationLaneEnabled(supabase, "capture") &&
+      await automationLaneEnabled(supabase, "extraction")) {
     const enqueueResult = await supabase.from("extraction_jobs")
       .insert({
         job_id: match.job_id,
