@@ -1,0 +1,32 @@
+BEGIN;
+DO $$
+DECLARE claim jsonb; lease uuid; second jsonb; ok boolean;
+BEGIN
+ IF (SELECT count(*) FROM public.context_mail_streams)<>17 THEN RAISE EXCEPTION 'mail coverage registry missing streams'; END IF;
+ IF (SELECT count(*) FROM public.context_mail_streams WHERE kind='group')<>3 THEN RAISE EXCEPTION 'groups must use distinct streams'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.context_mail_streams WHERE stream_key='khairo:inbox' AND NOT enabled AND unavailable_reason='mailbox_not_provisioned') THEN RAISE EXCEPTION 'Khairo falsely provisioned'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM storage.buckets WHERE id='context-mail-evidence' AND NOT public) THEN RAISE EXCEPTION 'mail evidence not private'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM storage.buckets WHERE id='b5-existing-public-fixture' AND public) THEN RAISE EXCEPTION 'unrelated bucket was flipped'; END IF;
+ claim:=public.claim_context_mail_stream('marnin:inbox');
+ IF claim->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'claim failed: %',claim; END IF;
+ lease:=(claim->'stream'->>'lease_token')::uuid;
+ second:=public.claim_context_mail_stream('marnin:inbox');
+ IF second->>'outcome'<>'busy' THEN RAISE EXCEPTION 'concurrent lease admitted'; END IF;
+ ok:=public.checkpoint_context_mail_stream('marnin:inbox',gen_random_uuid(),'{"next":"wrong"}',false,NULL,false);
+ IF ok THEN RAISE EXCEPTION 'stale worker changed cursor'; END IF;
+ ok:=public.checkpoint_context_mail_stream('marnin:inbox',lease,'{"next":"page2"}',false,NULL,false);
+ IF NOT ok THEN RAISE EXCEPTION 'checkpoint failed'; END IF;
+ IF EXISTS(SELECT 1 FROM public.context_mail_streams WHERE stream_key='marnin:inbox' AND last_completed_at IS NOT NULL) THEN RAISE EXCEPTION 'partial page falsely completed'; END IF;
+ ok:=public.checkpoint_context_mail_stream('marnin:inbox',lease,'{"next":"page2"}',false,'storage_failed',true);
+ IF NOT ok THEN RAISE EXCEPTION 'failure receipt rejected'; END IF;
+ claim:=public.claim_context_mail_stream('marnin:inbox');lease:=(claim->'stream'->>'lease_token')::uuid;
+ IF claim->'stream'->'state'->>'next'<>'page2' THEN RAISE EXCEPTION 'failure lost continuation'; END IF;
+ ok:=public.checkpoint_context_mail_stream('marnin:inbox',lease,'{"delta":"complete"}',true,NULL,false);
+ IF NOT ok THEN RAISE EXCEPTION 'completion failed'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.context_mail_streams WHERE stream_key='marnin:inbox' AND last_completed_at IS NOT NULL AND lease_token IS NULL AND last_error IS NULL) THEN RAISE EXCEPTION 'completion custody incomplete'; END IF;
+ UPDATE public.automation_switches SET capture=false WHERE id=1;
+ claim:=public.claim_context_mail_stream('jan:inbox');
+ IF claim->>'outcome'<>'paused' THEN RAISE EXCEPTION 'capture switch ignored'; END IF;
+ IF has_function_privilege('authenticated','public.claim_context_mail_stream(text)','EXECUTE') THEN RAISE EXCEPTION 'public can mutate cursor'; END IF;
+END $$;
+ROLLBACK;
