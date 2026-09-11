@@ -126,6 +126,8 @@ import {
   isClockedAssignmentBillable,
   planAssignmentLock,
   selectUnlockedAssignments,
+  selectWorkOrderLineAssignmentIds,
+  workOrderLockJobs,
 } from './trade_invoice_assignment_lock.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
@@ -11250,11 +11252,60 @@ if (import.meta.main) serve(async (req: Request) => {
                 wo_labour_lines: dbLine.wo_labour_lines ?? null,
               }
             }
-            const includedAssignmentIds = lineItems
-              .flatMap((line: any) =>
+            // ── Work Order / Commission lines lock the trade's job cards ────
+            // These lines bill the whole job, so they carry no assignment ids.
+            // Without this the job card stayed unstamped, my_hours showed it
+            // again under the paid week, and the job could be billed twice
+            // (Alyx, SW-INV-A-260830-025, SWF-261063, 2026-09-11). Resolved
+            // BEFORE persisting so the prior-draft transfer and the Layer B
+            // stamp below lock the same set.
+            const woLock = workOrderLockJobs(extraLineItems)
+            let woLineAssignmentIds: string[] = []
+            const woLineJobLabels: Record<string, string> = {}
+            if (woLock.jobIds.length > 0) {
+              let woCardQuery = client.from('job_assignments')
+                .select('id, job_id, scheduled_date, invoiced_in')
+                .eq('user_id', tradeUser.id)
+                .in('job_id', woLock.jobIds)
+              if (week_start && weekEnd) {
+                woCardQuery = woCardQuery.gte('scheduled_date', week_start).lte('scheduled_date', weekEnd)
+              }
+              const { data: woCards, error: woCardErr } = await woCardQuery
+              if (woCardErr) {
+                throw new Error('Failed to load the job cards behind work-order lines: ' + woCardErr.message)
+              }
+              const woCardRefIds = [...new Set((woCards || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+              let woCardLiveRefIds = new Set<string>()
+              if (woCardRefIds.length > 0) {
+                const { data: woCardRefInv, error: woCardRefErr } = await client.from('trade_invoices')
+                  .select('id, status').in('id', woCardRefIds)
+                if (woCardRefErr) {
+                  throw new Error('Failed to check which job cards are already on a live invoice: ' + woCardRefErr.message)
+                }
+                woCardLiveRefIds = new Set((woCardRefInv || [])
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
+                  .map((ti: any) => String(ti.id)))
+              }
+              woLineAssignmentIds = selectWorkOrderLineAssignmentIds({
+                candidates: (woCards || []) as any,
+                weekStart: week_start || null,
+                weekEnd,
+                liveInvoiceIds: woCardLiveRefIds,
+                // Perth business date: a non-week invoice never locks a card
+                // scheduled after the day it was submitted.
+                notAfter: new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10),
+              })
+              for (const card of (woCards || [])) {
+                const label = woLock.jobLabelByJobId[String(card.job_id)]
+                if (label) woLineJobLabels[String(card.id)] = label
+              }
+            }
+            const includedAssignmentIds = [...new Set([
+              ...lineItems.flatMap((line: any) =>
                 Array.isArray(line.assignment_ids) ? line.assignment_ids : []
-              )
-              .filter(Boolean)
+              ),
+              ...woLineAssignmentIds,
+            ].filter(Boolean).map(String))]
             const invoiceId = weeklyInvoice
               ? await _persistWeeklyTradeInvoice(
                 client,
@@ -11310,7 +11361,7 @@ if (import.meta.main) serve(async (req: Request) => {
               const expectedAssignmentIds = [...new Set(includedAssignmentIds)]
               // assignment id → job number, so a refusal names the offending job
               // cards instead of an opaque "0 of 6".
-              const stampJobLabels: Record<string, string> = {}
+              const stampJobLabels: Record<string, string> = { ...woLineJobLabels }
               for (const l of lineItems) {
                 for (const aid of (Array.isArray(l?.assignment_ids) ? l.assignment_ids : [])) {
                   if (aid && l?.job_number) stampJobLabels[String(aid)] = String(l.job_number)

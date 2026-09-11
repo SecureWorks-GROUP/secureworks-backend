@@ -164,3 +164,112 @@ export function describeAssignmentLockBlock(
   }
   return parts.join("; ") || "no claimable job cards";
 }
+
+// ── Work Order / Commission job lines lock the trade's job cards ────────────
+//
+// Production gap (2026-09-11, trade "Alyx", invoice SW-INV-A-260830-025, week
+// 2026-08-24..30, PAID in Xero): the first line billed SWF-261063 as a Work
+// Order ("Work order $1477.00. Less labour: ..."). Layer B only stamped the
+// assignment ids carried by LABOUR lines, so the lead_installer card on
+// SWF-261063 kept invoiced_in NULL. my_hours kept showing it under the paid
+// week, prefilled from the work order subtotal: a second bill for the same job
+// was one tap away.
+//
+// A Work Order or Commission line bills the job, not hours, so it carries no
+// assignment ids. These helpers decide which of the submitting trade's own
+// job cards that line consumes, so the same Layer B stamp can lock them.
+
+/** Line types the trade app writes for job-level (non-hours) lines. */
+export const WORK_ORDER_LOCK_LINE_TYPES: readonly string[] = [
+  "work order", // trade app: type 'Work Order', lower-cased by the submit path
+  "work_order",
+  "commission", // trade app: type 'Commission'
+];
+
+/** Negative weekly lines move money between crews; they never bill a job card. */
+const WEEKLY_DEDUCTION_LINE_TYPES: ReadonlySet<string> = new Set([
+  "crew_work_order_deduction",
+  "labour_deduction",
+  "travel_logistics_deduction",
+  "materials_deduction",
+  "final_payout_deduction",
+]);
+
+export interface WorkOrderLockLine {
+  job_id?: string | null;
+  job_number?: string | null;
+  line_type?: string | null;
+  source_work_order_id?: string | null;
+}
+
+/**
+ * True when an invoice line bills a whole job for the submitting trade:
+ * a Work Order or Commission line with a job, or a positive weekly
+ * work-order scope line (server-resolved from a work order).
+ */
+export function isWorkOrderLockLine(line: WorkOrderLockLine): boolean {
+  if (!line?.job_id) return false;
+  const lineType = String(line.line_type || "").trim().toLowerCase();
+  if (WORK_ORDER_LOCK_LINE_TYPES.includes(lineType)) return true;
+  return Boolean(line.source_work_order_id) &&
+    !WEEKLY_DEDUCTION_LINE_TYPES.has(lineType);
+}
+
+/** Distinct job ids billed by Work Order / Commission lines, with a label each. */
+export function workOrderLockJobs(
+  lines: readonly WorkOrderLockLine[],
+): { jobIds: string[]; jobLabelByJobId: Record<string, string> } {
+  const jobLabelByJobId: Record<string, string> = {};
+  const jobIds: string[] = [];
+  for (const line of lines || []) {
+    if (!isWorkOrderLockLine(line)) continue;
+    const jobId = String(line.job_id);
+    if (!jobIds.includes(jobId)) jobIds.push(jobId);
+    if (line.job_number && !jobLabelByJobId[jobId]) {
+      jobLabelByJobId[jobId] = String(line.job_number);
+    }
+  }
+  return { jobIds, jobLabelByJobId };
+}
+
+export interface WorkOrderLockCandidate extends AssignmentLockRef {
+  job_id: string;
+  scheduled_date?: string | null;
+}
+
+/**
+ * Pick the trade's own job cards a Work Order / Commission line consumes.
+ * Candidates must already be scoped to the submitting trade and to the billed
+ * jobs.
+ *
+ *  - Weekly invoice (weekStart and weekEnd set): every card on the job
+ *    scheduled inside the week. A card already held by a LIVE invoice is still
+ *    returned, so the Layer B lock plan refuses and names it instead of billing
+ *    the job twice.
+ *  - Non-week invoice: every card on the job that is not already on a live
+ *    invoice and is not scheduled after `notAfter` (the submit date). A future
+ *    card is work not yet done; locking it would hide real work from the trade.
+ */
+export function selectWorkOrderLineAssignmentIds(params: {
+  candidates: readonly WorkOrderLockCandidate[];
+  weekStart?: string | null;
+  weekEnd?: string | null;
+  liveInvoiceIds: ReadonlySet<string>;
+  notAfter: string;
+}): string[] {
+  const { weekStart, weekEnd, liveInvoiceIds, notAfter } = params;
+  const weekly = Boolean(weekStart && weekEnd);
+  const ids: string[] = [];
+  for (const c of params.candidates || []) {
+    const date = c.scheduled_date ? String(c.scheduled_date).slice(0, 10) : null;
+    if (weekly) {
+      if (!date || date < String(weekStart) || date > String(weekEnd)) continue;
+    } else {
+      if (c.invoiced_in && liveInvoiceIds.has(String(c.invoiced_in))) continue;
+      if (date && date > notAfter) continue;
+    }
+    const id = String(c.id);
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
