@@ -125,7 +125,6 @@ AS $fn$
   SELECT * FROM (VALUES
     -- capture: pollers that write evidence rows into business_events
     ('monitor-inbox-poll', 'capture'),
-    ('xero-invoice-sync',  'capture'),
     -- attribution: the contact match the ladder resolves a job through
     ('contact-matching',   'attribution')
   ) AS t(cron_jobname, lane);
