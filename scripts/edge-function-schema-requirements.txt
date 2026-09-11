@@ -310,3 +310,5 @@ ops-api|supabase/migrations/20260911170001_context_run_ledger.sql|function|finis
 ops-api|supabase/migrations/20260911170001_context_run_ledger.sql|function|claim_context_pass
 ops-api|supabase/migrations/20260911170001_context_run_ledger.sql|function|finish_context_pass
 ops-api|supabase/migrations/20260911170001_context_run_ledger.sql|function|renew_context_pass
+ops-api|supabase/migrations/20260911170001_context_run_ledger.sql|table|context_model_call_reservations
+ops-api|supabase/migrations/20260911170001_context_run_ledger.sql|function|reserve_context_model_call

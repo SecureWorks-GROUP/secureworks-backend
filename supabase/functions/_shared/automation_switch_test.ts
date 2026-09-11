@@ -11,6 +11,7 @@ Deno.test('lane reads fail closed on errors and nonboolean values, never cache',
   equal(await automationLaneEnabled({ rpc: () => { throw Error('transport') } }, 'extraction'), false)
 })
 Deno.test('ops capture action gate is bounded', () => {
- for (const action of ['backfill_ghl_conversations','backfill_call_transcripts','trigger_xero_sync']) equal(contextActionLane(action), 'capture')
+ for (const action of ['backfill_ghl_conversations','backfill_call_transcripts']) equal(contextActionLane(action), 'capture')
  for (const action of ['job_detail','invoice_context','sync_suppliers','send_payment_link']) equal(contextActionLane(action), null)
+ equal(contextActionLane('trigger_xero_sync'), null)
 })

@@ -187,7 +187,7 @@ if (import.meta.main) serve(async (req: Request) => {
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   try {
-    const lane = action === 'sync_invoices' ? 'capture' : action === 'match_contacts' ? 'attribution' : null
+    const lane = action === 'match_contacts' ? 'attribution' : null
     if (lane && !(await automationLaneEnabled(sb, lane))) {
       return json({ skipped: true, reason: 'automation_lane_disabled', lane })
     }
@@ -1044,14 +1044,16 @@ export async function matchUnlinkedInvoices(client: any) {
             .update({ job_id: job.id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
 
-          await client.from('business_events').insert({
-            event_type: 'invoice.auto_linked',
-            source: 'xero-sync',
-            entity_type: 'invoice',
-            entity_id: inv.xero_invoice_id,
-            job_id: job.job_number,
-            payload: { invoice_number: inv.invoice_number, job_number: job.job_number, method: 'reference_match' },
-          }).then(() => undefined, () => undefined)
+          if (await automationLaneEnabled(client, 'capture')) {
+            await client.from('business_events').insert({
+              event_type: 'invoice.auto_linked',
+              source: 'xero-sync',
+              entity_type: 'invoice',
+              entity_id: inv.xero_invoice_id,
+              job_id: job.job_number,
+              payload: { invoice_number: inv.invoice_number, job_number: job.job_number, method: 'reference_match' },
+            }).then(() => undefined, () => undefined)
+          }
 
           matched++
           continue
@@ -1093,14 +1095,16 @@ export async function matchUnlinkedInvoices(client: any) {
             .update({ job_id: jobs[0].id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
 
-          await client.from('business_events').insert({
-            event_type: 'invoice.auto_linked',
-            source: 'xero-sync',
-            entity_type: 'invoice',
-            entity_id: inv.xero_invoice_id,
-            job_id: jobs[0].job_number,
-            payload: { invoice_number: inv.invoice_number, job_number: jobs[0].job_number, method: 'client_name_exact' },
-          }).then(() => undefined, () => undefined)
+          if (await automationLaneEnabled(client, 'capture')) {
+            await client.from('business_events').insert({
+              event_type: 'invoice.auto_linked',
+              source: 'xero-sync',
+              entity_type: 'invoice',
+              entity_id: inv.xero_invoice_id,
+              job_id: jobs[0].job_number,
+              payload: { invoice_number: inv.invoice_number, job_number: jobs[0].job_number, method: 'client_name_exact' },
+            }).then(() => undefined, () => undefined)
+          }
 
           matched++
           continue

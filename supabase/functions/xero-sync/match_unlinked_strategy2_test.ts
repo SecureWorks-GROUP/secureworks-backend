@@ -33,6 +33,7 @@ type Call = {
 function makeClient(opts: {
   unlinked?: any[];
   jobsByContact?: Record<string, { data: any[] | null; error: any | null }>;
+  captureEnabled?: boolean;
 }) {
   const calls: Call[] = [];
   const updates: Array<{ table: string; row: any; id?: string }> = [];
@@ -152,7 +153,10 @@ function makeClient(opts: {
   }
 
   return {
-    client: { from: (t: string) => builder(t) },
+    client: {
+      from: (t: string) => builder(t),
+      rpc: () => Promise.resolve({ data: opts.captureEnabled ?? true, error: null }),
+    },
     calls,
     updates,
     inserts,
@@ -266,6 +270,31 @@ Deno.test("Strategy 2: single client_name match auto-links the invoice", async (
     u.table === "xero_invoices" && u.row?.job_id === "job-1"
   );
   assert(link, "expected xero_invoices update with job_id");
+});
+
+Deno.test("Strategy 2: capture-off still auto-links without business_events", async () => {
+  const { client, updates, inserts } = makeClient({
+    unlinked: UNLINKED,
+    captureEnabled: false,
+    jobsByContact: {
+      "Jane Client": {
+        data: [{
+          id: "job-1",
+          job_number: "SWP-25001",
+          client_name: "Jane Client",
+        }],
+        error: null,
+      },
+    },
+  });
+
+  const result = await matchUnlinkedInvoices(client);
+  assertEquals(result.matched, 1);
+  assert(
+    updates.some((u) => u.table === "xero_invoices" && u.row?.job_id === "job-1"),
+    "expected xero_invoices update with job_id",
+  );
+  assertEquals(inserts.filter((i) => i.table === "business_events").length, 0);
 });
 
 Deno.test("Strategy 2: multiple client_name matches flag, do not auto-link", async () => {

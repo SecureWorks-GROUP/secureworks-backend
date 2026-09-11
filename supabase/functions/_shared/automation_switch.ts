@@ -12,6 +12,6 @@ export async function automationLaneEnabled(
 }
 
 export function contextActionLane(action: string): 'capture' | 'attribution' | null {
-  if (['backfill_ghl_conversations', 'backfill_call_transcripts', 'trigger_xero_sync'].includes(action)) return 'capture'
+  if (['backfill_ghl_conversations', 'backfill_call_transcripts'].includes(action)) return 'capture'
   return null
 }
