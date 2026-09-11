@@ -43219,6 +43219,33 @@ type CuratedBindPhotoSourceScope =
   | 'current_cycle'
   | 'same_job_all_attendances'
 
+/**
+ * The one exclusion reason a curated bind accepts for a row that IS a photo.
+ *
+ * A trade who uploads the same batch twice used to force repeat pages into the
+ * builder report, because applicable_ids/selected_ids had to equal EVERY
+ * current-cycle job_media photo row. A `duplicate_bytes` exclusion drops the
+ * repeat page without dropping evidence: the server refetches the excluded
+ * row's bytes and proves the SHA-256 equals an EARLIER row that is still
+ * applicable. Nothing else is accepted here — every other exclusion reason
+ * still has to be a non-photo row, and source_count still has to account for
+ * the complete media set.
+ */
+const CURATED_BIND_DUPLICATE_BYTES_REASON = 'duplicate_bytes'
+
+/**
+ * Server-proved duplicate-photo exclusions, sealed onto the bind provenance
+ * beside materials_source_accounting so "why is this page not in the report?"
+ * is answerable from the record rather than from the uploader's word.
+ */
+type CuratedBindPhotoSourceAccounting = {
+  excluded_duplicates: Array<{
+    evidence_id: string
+    duplicate_of: string
+    sha256: string
+  }>
+}
+
 const CURATED_BIND_MATERIALS_OMISSION_REASON =
   'omitted_from_report_materials_evidence'
 
@@ -43233,6 +43260,8 @@ async function assertCurrentWikiSourceEvidence(
   photo_source_scope: CuratedBindPhotoSourceScope
   /** Ordered ids the bind accounted for — sealed onto the snapshot for packs. */
   photo_selected_ids: string[]
+  /** Present only when byte-identical repeat uploads were excluded. */
+  photo_source_accounting?: CuratedBindPhotoSourceAccounting
 }> {
   const [reportsResponse, mediaResponse] = await Promise.all([
     client.from('job_service_reports')
@@ -43362,9 +43391,26 @@ async function assertCurrentWikiSourceEvidence(
   // Compare parsed instants, never raw timestamp strings. The shared comparator
   // also preserves Postgres microseconds and puts missing timestamps last.
   const photoEvidence = (validated.supplied as any).photo_evidence
-  const suppliedExcludedIds = photoEvidence.excluded.map((item: any) =>
-    String(item?.evidence_id || '').trim()
-  )
+  const suppliedExcludedEntries = photoEvidence.excluded.map((item: any) => ({
+    evidence_id: String(item?.evidence_id || '').trim(),
+    reason: String(item?.reason || '').trim(),
+    duplicate_of: String(item?.duplicate_of || '').trim(),
+  }))
+  // Split the caller's exclusions once. Non-photo rows keep the established
+  // "must equal the server's non-applicable set, in order" contract; the
+  // duplicate_bytes entries are the only exclusions allowed to name a photo,
+  // and they are proved by bytes further down, not by their reason string.
+  const suppliedDuplicateEntries = suppliedExcludedEntries.filter((
+    entry: { reason: string },
+  ) => entry.reason === CURATED_BIND_DUPLICATE_BYTES_REASON)
+  const suppliedDuplicateIds = suppliedDuplicateEntries.map((
+    entry: { evidence_id: string },
+  ) => entry.evidence_id)
+  const suppliedExcludedIds = suppliedExcludedEntries.filter((
+    entry: { reason: string },
+  ) => entry.reason !== CURATED_BIND_DUPLICATE_BYTES_REASON).map((
+    entry: { evidence_id: string },
+  ) => entry.evidence_id)
   const describeIdMismatch = (
     label: string,
     supplied: unknown,
@@ -43386,19 +43432,46 @@ async function assertCurrentWikiSourceEvidence(
     sourceLabel: string,
     media: any[],
   ) => {
-    const applicable = media.filter(photoIsApplicable).slice()
+    const photoRows = media.filter(photoIsApplicable).slice()
       .sort(comparePackMediaCreatedAtThenId)
     const excluded = media.filter((item: any) => !photoIsApplicable(item))
       .slice().sort(comparePackMediaCreatedAtThenId)
-    const applicableIds = applicable.map((item: any) =>
+    const photoRowIds = photoRows.map((item: any) =>
       String(item.id || '').trim()
     )
     const excludedIds = excluded.map((item: any) =>
       String(item.id || '').trim()
     )
+    // A duplicate_bytes exclusion may only name a photo row of THIS candidate
+    // set. Anything else is an unaccounted identity, not a duplicate.
+    const duplicateIdSet = new Set<string>(suppliedDuplicateIds)
+    const unknownDuplicateIds = suppliedDuplicateIds.filter((id: string) =>
+      !photoRowIds.includes(id)
+    )
+    const duplicates = photoRows.filter((item: any) =>
+      duplicateIdSet.has(String(item.id || '').trim())
+    )
+    // The remaining photo rows are what the report must carry, in the same
+    // created_at-then-id order the source set already fixes.
+    const applicable = photoRows.filter((item: any) =>
+      !duplicateIdSet.has(String(item.id || '').trim())
+    )
+    const applicableIds = applicable.map((item: any) =>
+      String(item.id || '').trim()
+    )
+    const duplicateIds = duplicates.map((item: any) =>
+      String(item.id || '').trim()
+    )
     const mismatches = [
+      // source_count still accounts for EVERY row of the set: kept photos,
+      // excluded duplicates and non-photo rows together.
       photoEvidence.source_count !== media.length
         ? `source_count ${photoEvidence.source_count} does not equal the ${sourceLabel} job_media count ${media.length}`
+        : null,
+      unknownDuplicateIds.length
+        ? `excluded duplicate_bytes evidence_id(s) ${
+          unknownDuplicateIds.join(', ')
+        } are not ${sourceLabel} photo rows`
         : null,
       describeIdMismatch(
         'applicable_ids',
@@ -43418,8 +43491,14 @@ async function assertCurrentWikiSourceEvidence(
         excludedIds,
         sourceLabel,
       ),
+      describeIdMismatch(
+        'excluded duplicate_bytes evidence_ids',
+        suppliedDuplicateIds,
+        duplicateIds,
+        sourceLabel,
+      ),
     ].filter((entry): entry is string => Boolean(entry))
-    return { scope, sourceLabel, applicable, mismatches }
+    return { scope, sourceLabel, applicable, duplicates, mismatches }
   }
 
   // Current-cycle remains the first/default match, preserving the established
@@ -43447,9 +43526,8 @@ async function assertCurrentWikiSourceEvidence(
     )
   }
   const suppliedPhotos = (validated.supplied as any).photos as any[]
-  for (let index = 0; index < selectedPhotoSource.applicable.length; index++) {
-    const source = selectedPhotoSource.applicable[index]
-    // Full object only — never hash a thumbnail derivative into report trust.
+  // Full object only — never hash a thumbnail derivative into report trust.
+  const recoverSourceBytes = async (source: any): Promise<Uint8Array> => {
     const sourceUrl = String(source.storage_url || '').trim()
     if (!sourceUrl.startsWith('https://')) {
       throw curatedBindError(
@@ -43472,7 +43550,12 @@ async function assertCurrentWikiSourceEvidence(
         `${selectedPhotoSource.sourceLabel} photo ${String(source.id || '')} byte recovery failed`,
       )
     }
-    const sourceBytes = new Uint8Array(await response.arrayBuffer())
+    return new Uint8Array(await response.arrayBuffer())
+  }
+  const applicableHashes = new Map<string, string>()
+  for (let index = 0; index < selectedPhotoSource.applicable.length; index++) {
+    const source = selectedPhotoSource.applicable[index]
+    const sourceBytes = await recoverSourceBytes(source)
     const expectedHash = requireCuratedBindSha256(
       suppliedPhotos[index]?.content_sha256,
       `report_job.photos[${index}].content_sha256`,
@@ -43484,10 +43567,72 @@ async function assertCurrentWikiSourceEvidence(
         `${selectedPhotoSource.sourceLabel} photo ${String(source.id || '')} SHA-256 mismatch`,
       )
     }
+    applicableHashes.set(String(source.id || '').trim(), actualHash)
+  }
+  // Prove every duplicate_bytes exclusion from bytes we fetched ourselves. The
+  // original must be a row this bind is actually carrying AND must be earlier
+  // in the sealed created_at-then-id order, so the report keeps the first
+  // upload and drops only the repeat.
+  const excludedDuplicates:
+    CuratedBindPhotoSourceAccounting['excluded_duplicates'] = []
+  for (const duplicate of selectedPhotoSource.duplicates) {
+    const duplicateId = String(duplicate.id || '').trim()
+    const duplicateHash = `sha256:${
+      await sha256BytesHex(await recoverSourceBytes(duplicate))
+    }`
+    const earlierApplicable = selectedPhotoSource.applicable.filter((
+      candidate: any,
+    ) => comparePackMediaCreatedAtThenId(candidate, duplicate) < 0)
+    const declaredOriginal = (suppliedDuplicateEntries.find((
+      entry: { evidence_id: string },
+    ) => entry.evidence_id === duplicateId)?.duplicate_of || '').trim()
+    let original: any = null
+    if (declaredOriginal) {
+      original = earlierApplicable.find((candidate: any) =>
+        String(candidate.id || '').trim() === declaredOriginal
+      ) || null
+      if (!original) {
+        throw curatedBindError(
+          'curated_bind_photo_source_mismatch',
+          `duplicate_bytes exclusion ${duplicateId} names duplicate_of ${declaredOriginal}, which is not an earlier applicable ${selectedPhotoSource.sourceLabel} photo`,
+        )
+      }
+      if (applicableHashes.get(declaredOriginal) !== duplicateHash) {
+        throw curatedBindError(
+          'curated_bind_photo_source_mismatch',
+          `duplicate_bytes exclusion ${duplicateId} does not have the same SHA-256 as applicable ${selectedPhotoSource.sourceLabel} photo ${declaredOriginal}`,
+        )
+      }
+    } else {
+      original = earlierApplicable.find((candidate: any) =>
+        applicableHashes.get(String(candidate.id || '').trim()) ===
+          duplicateHash
+      ) || null
+      if (!original) {
+        throw curatedBindError(
+          'curated_bind_photo_source_mismatch',
+          `duplicate_bytes exclusion ${duplicateId} has no earlier applicable ${selectedPhotoSource.sourceLabel} photo with the same SHA-256`,
+        )
+      }
+    }
+    excludedDuplicates.push({
+      evidence_id: duplicateId,
+      duplicate_of: String(original.id || '').trim(),
+      sha256: duplicateHash,
+    })
   }
   return {
     materials_source_accounting: materialsSourceAccounting,
     photo_source_scope: selectedPhotoSource.scope,
+    // Legacy binds with no duplicate exclusion stay byte-for-byte stable: the
+    // key only appears when the server actually proved a repeat upload.
+    ...(excludedDuplicates.length > 0
+      ? {
+        photo_source_accounting: {
+          excluded_duplicates: excludedDuplicates,
+        } as CuratedBindPhotoSourceAccounting,
+      }
+      : {}),
     // Sealed bind selection (created_at then id). Pack/board honour this list
     // so a later live upload cannot grow the builder photo email past the report.
     photo_selected_ids: selectedPhotoSource.applicable.map((item: any) =>
@@ -44657,6 +44802,11 @@ async function bindCurrentCycleCuratedMakesafeReport(
     // Omitted service-report ticks (boilerplate strip or genuine drop) land
     // here so under-billing is never silent. Super-set still refused above.
     materials_source_accounting: sourceEvidence.materials_source_accounting,
+    // Byte-identical repeat uploads the server proved and dropped. Absent on
+    // every bind that excluded no duplicate, so legacy snapshots do not churn.
+    ...(sourceEvidence.photo_source_accounting
+      ? { photo_source_accounting: sourceEvidence.photo_source_accounting }
+      : {}),
     // Keep legacy current-cycle snapshots byte-for-byte stable. Multi-visit
     // binds carry an explicit durable marker plus the sealed selected ids so
     // the photo route and board count honour the bind, never live traffic.
@@ -44864,6 +45014,9 @@ async function bindCurrentCycleCuratedMakesafeReport(
       // answers "what did the trade record that the report did not carry?"
       // without reading job_documents.
       materials_source_accounting: sourceEvidence.materials_source_accounting,
+      ...(sourceEvidence.photo_source_accounting
+        ? { photo_source_accounting: sourceEvidence.photo_source_accounting }
+        : {}),
       photo_source_scope: sourceEvidence.photo_source_scope,
       ...(sourceEvidence.photo_source_scope === 'same_job_all_attendances'
         ? { photo_selected_ids: sourceEvidence.photo_selected_ids }
