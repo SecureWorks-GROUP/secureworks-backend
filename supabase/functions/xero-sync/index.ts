@@ -20,7 +20,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
-import { listStaleXeroInvoices, reconcileXeroInvoice } from './xero_invoice_reconciliation.ts'
+import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
@@ -921,45 +921,34 @@ async function syncInvoices(sb: any) {
   // ── Reconciliation: verify stale local invoices against Xero ──
   // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in one hour
   // and check if they still exist in Xero with that status
+  // One unverifiable invoice used to break the loop, and the same row is first
+  // in every selection, so a single bad identity froze reconciliation forever.
+  // reconcileStaleXeroInvoices continues past per-invoice provider failures,
+  // records them, and only a cooldown or a token failure stops the batch.
   let reconciled = 0
   let reconciliationError: Record<string, unknown> | null = null
+  let reconciliationSummary: Record<string, unknown> | null = null
   try {
-    const staleInvoices = await listStaleXeroInvoices(sb, DEFAULT_ORG_ID)
-
-    if (staleInvoices && staleInvoices.length > 0) {
-      const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
-      for (const stale of staleInvoices) {
-        try {
-          // Keep the verified provider payload: an invoice that reconciles from
-          // AUTHORISED to PAID is exactly the deposit the incremental loop's
-          // If-Modified-Since window can have already passed over.
-          let verified: any = null
-          const readInvoice = async () => {
-            const d = await xeroGet(`/Invoices/${stale.xero_invoice_id}`, at2, tid2, {})
-            verified = d?.Invoices?.[0] ?? null
-            return d
-          }
-          if (await reconcileXeroInvoice(sb, DEFAULT_ORG_ID, stale.xero_invoice_id, readInvoice)) {
-            reconciled++
-            if (verified && depositStampRelevant(verified)) {
-              try {
-                const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
-                if (stamped?.action === 'stamped') depositStamps++
-                else if (stamped?.action === 'contradiction_logged') depositStampContradictions++
-              } catch (stampErr: any) {
-                if (stampErr instanceof XeroCooldownError) throw stampErr
-                console.error('[xero-sync] Deposit stamp (reconcile) failed:', (stampErr as Error).message)
-              }
-            }
-          }
-        } catch (e: any) {
-          if (e instanceof XeroCooldownError) throw e
-          // Failed lookup leaves existing balances and freshness untouched.
-          reconciliationError = { error: e.message, invoice_id: stale.xero_invoice_id }
-          break
-        }
-      }
-    }
+    // A token failure here is a run-wide fact and still stops reconciliation.
+    const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
+    const summary = await reconcileStaleXeroInvoices(
+      sb,
+      DEFAULT_ORG_ID,
+      (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at2, tid2, {}),
+      undefined,
+      // An invoice that reconciles from AUTHORISED to PAID is exactly the
+      // deposit the incremental loop's If-Modified-Since window can pass over.
+      async (_invoiceId: string, payload: any) => {
+        const verified = payload?.Invoices?.[0] ?? null
+        if (!verified || !depositStampRelevant(verified)) return
+        const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
+        if (stamped?.action === 'stamped') depositStamps++
+        else if (stamped?.action === 'contradiction_logged') depositStampContradictions++
+      },
+    )
+    reconciled = summary.reconciled
+    reconciliationSummary = { ...summary }
+    if (summary.failed > 0) reconciliationError = summary.last_error
   } catch (e: any) {
     if (e instanceof XeroCooldownError) throw e
     reconciliationError = { error: e.message }
@@ -971,11 +960,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
+    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
+  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
 }
 
 
