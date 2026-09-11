@@ -8,11 +8,10 @@ ALTER TABLE public.jobs
   ADD COLUMN IF NOT EXISTS deposit_invoice_id text,
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
--- business_events.job_id carries the job NUMBER in production (text). The
--- earlier fixture declared it uuid; align it so this contract exercises the
--- real insert rather than a shape production does not have.
+-- business_events.job_id is uuid in production (the 11 Sep deploy proved it); the
+-- earlier registered fixture already declares it uuid and it is NOT retyped here.
+-- That fixture omits the event columns the backfill writes, so add only those.
 ALTER TABLE public.business_events
-  ALTER COLUMN job_id TYPE text USING job_id::text,
   ALTER COLUMN id SET DEFAULT gen_random_uuid(),
   ADD COLUMN IF NOT EXISTS event_type text,
   ADD COLUMN IF NOT EXISTS source text,

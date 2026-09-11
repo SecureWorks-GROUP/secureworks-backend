@@ -59,7 +59,7 @@ SELECT
   'cio_deposit_backfill',
   'invoice',
   s.xero_invoice_id,
-  COALESCE(s.job_number, s.job_id::text),
+  s.job_id,
   jsonb_build_object(
     'invoice_number', s.invoice_number,
     'deposit_at', s.deposit_at,

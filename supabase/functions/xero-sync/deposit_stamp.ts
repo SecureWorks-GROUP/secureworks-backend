@@ -200,7 +200,7 @@ export async function applyDepositStamp(
       source: "xero-sync",
       entity_type: "invoice",
       entity_id: inv.InvoiceID,
-      job_id: job.job_number || job.id,
+      job_id: job.id,
       payload: {
         invoice_number: inv.InvoiceNumber || null,
         invoice_status: decision.invoice_status,
@@ -236,7 +236,7 @@ export async function applyDepositStamp(
     source: "xero-sync",
     entity_type: "invoice",
     entity_id: inv.InvoiceID,
-    job_id: job.job_number || job.id,
+    job_id: job.id,
     payload: {
       invoice_number: inv.InvoiceNumber || null,
       deposit_at: decision.deposit_at,

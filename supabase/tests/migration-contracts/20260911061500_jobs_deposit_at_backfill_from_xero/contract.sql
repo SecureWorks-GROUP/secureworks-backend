@@ -74,14 +74,14 @@ BEGIN
 
   SELECT payload->>'timestamp_source' INTO source_label
   FROM public.business_events
-  WHERE source = 'cio_deposit_backfill' AND job_id = 'SWF-CONTRACT-PAID';
+  WHERE source = 'cio_deposit_backfill' AND job_id = 'd0000000-0000-4000-8000-000000000001';
   IF source_label IS DISTINCT FROM 'fully_paid_on' THEN
     RAISE EXCEPTION 'backfill event did not record the provider timestamp source (got %)', source_label;
   END IF;
 
   SELECT payload->>'timestamp_source' INTO source_label
   FROM public.business_events
-  WHERE source = 'cio_deposit_backfill' AND job_id = 'SWP-CONTRACT-NODATE';
+  WHERE source = 'cio_deposit_backfill' AND job_id = 'd0000000-0000-4000-8000-000000000002';
   IF source_label IS DISTINCT FROM 'invoice_updated_at' THEN
     RAISE EXCEPTION 'fallback stamp was not recorded as a fallback (got %)', source_label;
   END IF;
@@ -89,7 +89,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM public.business_events
     WHERE source = 'cio_deposit_backfill'
-      AND job_id = 'SWF-CONTRACT-PAID'
+      AND job_id = 'd0000000-0000-4000-8000-000000000001'
       AND entity_id = 'xinv-paid-with-date'
       AND entity_type = 'invoice'
       AND payload->>'invoice_number' = 'INV-9001'
