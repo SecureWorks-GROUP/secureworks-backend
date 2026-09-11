@@ -9,16 +9,18 @@ Service-role APIs:
 - `context_attribution_jobs(p_contact_id text)` returns id, job_number, type, status, site_suburb, updated_at.
 - `attribute_context_event_with_luna(p_event_id uuid,p_job_id uuid,p_confidence numeric)` atomically locks a pending row and binds its thread. Null job means bucket. An existing racing thread winner is preserved and returned. Missing/not-pending/disabled/invalid candidate calls fail explicitly.
 - `rerun_context_attribution(p_limit integer=250,p_contact_id text=null)` returns rows reconsidered. Oldest checked rows rotate first, max 1000. Jobs invoke a bounded pass at creation. The daily worker runs remaining rows; ambiguous rows become pending Luna.
-- `context_extraction_candidates(p_limit integer=400)` returns job IDs ordered by oldest unreceipted evidence, excludes today's completed/skipped jobs. Closed jobs with new evidence are included.
+- `context_extraction_candidates(p_limit integer=400)` returns job IDs with today's unfinished runs first, then oldest unreceipted evidence; excludes today's completed/skipped jobs. Closed jobs with new evidence are included.
 - `context_extraction_events(p_job_id uuid,p_limit integer=25)` returns events in source-date order, with at most 25. It uses B1 receipts, preserving delayed attribution and multi-day backlogs. A retained incoming message accompanies outbound tails; this anchor may already have a receipt and receipt insertion must remain idempotent.
 
 Historical rows are deterministically classified in 250-row batches without assigning `context_captured_at`. A job becomes eligible only after a fresh attributed incoming capture; its historical evidence can then drain. No extraction backfill, model call, cron or production action is performed by B2.
 
 Rollback removes triggers and callable code while preserving captured rows and thread custody. It does not reverse historic attribution or delete evidence. Restore prior endpoint code with the rollback; the retained additive columns keep those writes compatible.
 
+Undated provider evidence retains a null `event_at`; attribution never substitutes ingestion time. The fact writer must hold such sources until a true occurrence date exists. Internal event producers likewise supply their occurrence date explicitly.
+
 ## Checks and evidence boundary
 
-Local PostgreSQL 17: real B1 migrations + B2 migration + behavior assertions + rollback assertions passed. Deno endpoint checks pass; evidence helper tests: 49 passed. Behavior assertions cover repeat customers, Luna and thread binding, matching line, direct/ambiguous references, empty pointer retention, automated rows, job-created reconsideration, dedupe, provider time, closed jobs, 25-row cap, receipt backlog, outbound tail and fail-closed attribution.
+Local PostgreSQL 17: real B1 migrations + B2 migration + behavior assertions + rollback assertions passed. Deno endpoint checks pass; evidence helper tests: 49 passed. Behavior assertions cover repeat customers, Luna and thread binding, matching line, direct/ambiguous references, empty pointer retention, automated rows, job-created reconsideration, dedupe, provider time, missing-date retention, retry discovery under a bounded candidate list, closed jobs, 25-row cap, receipt backlog, outbound tail and fail-closed attribution.
 
 Fixtures use UUID job IDs and checked-in T7 match_status values. Production schema query returned HTTP401; current live constraints were not observed. No live capture/provider receipt or deployment is claimed.
 
