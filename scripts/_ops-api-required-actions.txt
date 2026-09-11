@@ -254,3 +254,5 @@ upsert_debt_picture
 add_debt_note
 debt_notes
 debt_proposal_mark
+
+debt_proposal_save
