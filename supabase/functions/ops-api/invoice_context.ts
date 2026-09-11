@@ -20,6 +20,13 @@ const JOB_NUMBER = /\b(SW[A-Z]{1,3}-\d{4,8})\b/i;
 const OPEN_STATUSES = ["AUTHORISED", "SUBMITTED"];
 const XERO_STALE_HOURS = 24;
 const IN_CHUNK = 100;
+// PostgREST caps any response at 1000 rows, so .limit(n > 1000) truncates in
+// silence. Every multi-row read here pages with .range() instead.
+const PAGE_SIZE = 1000;
+const MAX_PAGES = 20;
+// An invoice number we are willing to match on. No spaces, no wildcards, and
+// short enough that the escaped form cannot be used to build a pattern.
+const INVOICE_NUMBER = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,63}$/;
 
 const MODE_BOUNDS = {
   card: { conversation: 20, facts: 24 },
@@ -124,6 +131,38 @@ function unwrap(result: { data: any; error: any }): any {
   return result?.data;
 }
 
+/**
+ * Cap-safe read. PostgREST returns at most 1000 rows per response, so a
+ * `.limit(5000)` silently drops everything past the first thousand. This pages
+ * with `.range()` until a short page comes back, ordered by a stable key so a
+ * page boundary cannot skip a row. The page ceiling is a warning naming the
+ * table, never a silent truncation.
+ *
+ * `build` must return a fresh query builder on every call (filters and select
+ * re-applied); the reader owns the order and range.
+ */
+async function pageThrough(
+  table: string,
+  build: () => any,
+  warnings: string[],
+  orderColumn = "id",
+): Promise<any[]> {
+  const rows: any[] = [];
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const from = page * PAGE_SIZE;
+    const data = unwrap(await build().order(orderColumn, { ascending: true }).range(from, from + PAGE_SIZE - 1)) || [];
+    rows.push(...data);
+    if (data.length < PAGE_SIZE) return rows;
+  }
+  warnings.push(`${table}: page ceiling ${MAX_PAGES * PAGE_SIZE} rows reached; not every row was read`);
+  return rows;
+}
+
+/** Escapes the PostgREST LIKE metacharacters so an ilike match is literal. */
+export function escapeLikeLiteral(value: string): string {
+  return value.replace(/([\\%_])/g, "\\$1");
+}
+
 // ── job link resolution ─────────────────────────────────────────────────────
 
 export interface JobLink {
@@ -131,7 +170,10 @@ export interface JobLink {
   method: "invoice.job_id" | "invoice.job_number" | "reference_job_number" | "contact_single_job" | null;
   job_id: string | null;
   job_number: string | null;
+  /** Only populated when status is "ambiguous". */
   candidates: Array<{ job_id: string; job_number: string | null; status: string | null; why: string }>;
+  /** Why the link failed, for the no_job_linked blocker detail. Not part of the wire shape. */
+  hint?: string | null;
 }
 
 const JOB_LINK_COLS = "id, job_number, status, ghl_contact_id";
@@ -144,9 +186,8 @@ const JOB_LINK_COLS = "id, job_number, status, ghl_contact_id";
  */
 export async function resolveJobLinks(client: any, invoices: any[]): Promise<Map<string, JobLink>> {
   const links = new Map<string, JobLink>();
-  const none = (): JobLink => ({ status: "none", method: null, job_id: null, job_number: null, candidates: [] });
+  const none = (): JobLink => ({ status: "none", method: null, job_id: null, job_number: null, candidates: [], hint: null });
 
-  const byId = new Map<string, any>();
   const wantIds = new Set<string>();
   const wantNumbers = new Set<string>();
   const wantContacts = new Set<string>();
@@ -208,8 +249,7 @@ export async function resolveJobLinks(client: any, invoices: any[]): Promise<Map
       const j = jobsById.get(inv.job_id);
       links.set(key, j
         ? { status: "linked", method: "invoice.job_id", job_id: j.id, job_number: j.job_number ?? null, candidates: [] }
-        : { ...none(), candidates: [{ job_id: inv.job_id, job_number: null, status: null, why: "invoice.job_id points at a job that does not exist" }] });
-      byId.set(key, j);
+        : { ...none(), hint: `the invoice's job_id ${inv.job_id} points at a job that does not exist` });
       continue;
     }
     const stored = str(inv.job_number)?.toUpperCase();
@@ -221,7 +261,7 @@ export async function resolveJobLinks(client: any, invoices: any[]): Promise<Map
         links.set(key, { status: "linked", method: stored ? "invoice.job_number" : "reference_job_number", job_id: j.id, job_number: j.job_number ?? null, candidates: [] });
         continue;
       }
-      links.set(key, { ...none(), candidates: [{ job_id: "", job_number: n, status: null, why: "job number in the invoice does not match any job" }] });
+      links.set(key, { ...none(), hint: `job number ${n} in the invoice does not match any job` });
       continue;
     }
     if (inv.xero_contact_id) {
@@ -248,15 +288,14 @@ export async function resolveJobLinks(client: any, invoices: any[]): Promise<Map
 
 // ── facts, queue, conversation counts (batched, for coverage) ───────────────
 
-async function factsCountByJob(deps: InvoiceContextDeps, jobIds: string[]): Promise<{ counts: Map<string, number>; status: SourceStatus }> {
+async function factsCountByJob(deps: InvoiceContextDeps, jobIds: string[], warnings: string[]): Promise<{ counts: Map<string, number>; status: SourceStatus }> {
   const counts = new Map<string, number>();
   const now = (deps.now ?? (() => new Date()))().getTime();
   const read = await safeRead("current_job_context_facts", async () => {
     const rows: any[] = [];
     for (const ids of chunk(jobIds)) {
-      const data = unwrap(await deps.client.from("current_job_context_facts")
-        .select("job_id, kind, provenance, expires_at, _context_store").in("job_id", ids).limit(5000));
-      rows.push(...(data || []));
+      rows.push(...await pageThrough("current_job_context_facts", () => deps.client.from("current_job_context_facts")
+        .select("id, job_id, kind, provenance, expires_at, _context_store").in("job_id", ids), warnings));
     }
     return rows;
   });
@@ -269,14 +308,13 @@ async function factsCountByJob(deps: InvoiceContextDeps, jobIds: string[]): Prom
 
 export interface QueueSummary { pending: number; processing: number; done: number; skipped: number; failed: number; dead_letter: number; skip_reasons: string[]; errors: string[] }
 
-async function queueByJob(client: any, jobIds: string[]): Promise<{ queues: Map<string, QueueSummary>; status: SourceStatus }> {
+async function queueByJob(client: any, jobIds: string[], warnings: string[]): Promise<{ queues: Map<string, QueueSummary>; status: SourceStatus }> {
   const queues = new Map<string, QueueSummary>();
   const read = await safeRead("extraction_jobs", async () => {
     const rows: any[] = [];
     for (const ids of chunk(jobIds)) {
-      const data = unwrap(await client.from("extraction_jobs")
-        .select("job_id, status, skip_reason, error").in("job_id", ids).limit(10000));
-      rows.push(...(data || []));
+      rows.push(...await pageThrough("extraction_jobs", () => client.from("extraction_jobs")
+        .select("id, job_id, status, skip_reason, error").in("job_id", ids), warnings));
     }
     return rows;
   });
@@ -290,7 +328,10 @@ async function queueByJob(client: any, jobIds: string[]): Promise<{ queues: Map<
   return { queues, status: read.status };
 }
 
-export function queueDetail(q: QueueSummary | undefined): string {
+export function queueDetail(q: QueueSummary | undefined, queueReadOk = true): string {
+  // A failed queue read is not evidence of an empty queue. Saying
+  // "never_enqueued" there would assert something we did not read.
+  if (!queueReadOk) return "unknown (queue unreadable)";
   if (!q) return "never_enqueued";
   const parts: string[] = [];
   if (q.pending) parts.push(`pending:${q.pending}`);
@@ -304,7 +345,7 @@ export function queueDetail(q: QueueSummary | undefined): string {
 
 interface ConversationCounts { ghl_cache: number; inbox: number; job_events: number; business_events: number; last_client_message_at: string | null }
 
-async function conversationCountsByJob(client: any, jobs: Array<{ id: string; ghl_contact_id: string | null }>): Promise<{ counts: Map<string, ConversationCounts>; status: SourceStatus }> {
+async function conversationCountsByJob(client: any, jobs: Array<{ id: string; ghl_contact_id: string | null }>, warnings: string[]): Promise<{ counts: Map<string, ConversationCounts>; status: SourceStatus }> {
   const counts = new Map<string, ConversationCounts>();
   const get = (id: string) => counts.get(id) ?? counts.set(id, { ghl_cache: 0, inbox: 0, job_events: 0, business_events: 0, last_client_message_at: null }).get(id)!;
   const jobIds = jobs.map((j) => j.id);
@@ -312,34 +353,34 @@ async function conversationCountsByJob(client: any, jobs: Array<{ id: string; gh
   const ghlToJob = new Map<string, string>();
   for (const j of jobs) if (j.ghl_contact_id) ghlToJob.set(j.ghl_contact_id, j.id);
 
-  // GHL cache: one row per contact or job, with message_count and messages.
+  // GHL cache: one row per contact or job. The `messages` jsonb is NOT selected
+  // here. Pulling it would drag the whole conversation body of every job in the
+  // population through one coverage call. The count comes from message_count;
+  // the GHL last-message timestamp lives only in the door, which reads the
+  // merged conversation for the one job. Coverage derives
+  // last_client_message_at from inbox_events and inbound business_events only.
+  const GHL_COLS = "contact_id, job_id, message_count, synced_at";
   try {
     const seen = new Set<string>();
     const apply = (row: any, jobId: string) => {
       if (!jobId || seen.has(`${jobId}:${row.contact_id ?? ""}:${row.job_id ?? ""}`)) return;
       seen.add(`${jobId}:${row.contact_id ?? ""}:${row.job_id ?? ""}`);
-      const c = get(jobId);
-      const msgs: any[] = Array.isArray(row.messages) ? row.messages : [];
-      c.ghl_cache += num(row.message_count) ?? msgs.length;
-      for (const m of msgs) {
-        const ts = typeof m?.timestamp === "string" ? m.timestamp : null;
-        if (ts && (m?.direction ?? "inbound") === "inbound" && (!c.last_client_message_at || ts > c.last_client_message_at)) c.last_client_message_at = ts;
-      }
+      get(jobId).ghl_cache += num(row.message_count) ?? 0;
     };
     for (const ids of chunk([...ghlToJob.keys()])) {
-      const data = unwrap(await client.from("ghl_conversation_cache").select("contact_id, job_id, message_count, messages").in("contact_id", ids));
+      const data = unwrap(await client.from("ghl_conversation_cache").select(GHL_COLS).in("contact_id", ids));
       for (const row of data || []) apply(row, ghlToJob.get(row.contact_id) ?? row.job_id);
     }
     for (const ids of chunk(jobIds)) {
-      const data = unwrap(await client.from("ghl_conversation_cache").select("contact_id, job_id, message_count, messages").in("job_id", ids));
+      const data = unwrap(await client.from("ghl_conversation_cache").select(GHL_COLS).in("job_id", ids));
       for (const row of data || []) apply(row, row.job_id);
     }
   } catch (e) { errors.push(`ghl_cache: ${e instanceof Error ? e.message : String(e)}`); }
 
   try {
     for (const ids of chunk(jobIds)) {
-      const data = unwrap(await client.from("inbox_events").select("job_id, received_at").in("job_id", ids).limit(10000));
-      for (const row of data || []) {
+      const rows = await pageThrough("inbox_events", () => client.from("inbox_events").select("id, job_id, received_at").in("job_id", ids), warnings);
+      for (const row of rows) {
         const c = get(row.job_id); c.inbox += 1;
         if (row.received_at && (!c.last_client_message_at || row.received_at > c.last_client_message_at)) c.last_client_message_at = row.received_at;
       }
@@ -348,15 +389,15 @@ async function conversationCountsByJob(client: any, jobs: Array<{ id: string; gh
 
   try {
     for (const ids of chunk(jobIds)) {
-      const data = unwrap(await client.from("job_events").select("job_id").eq("event_type", "note").in("job_id", ids).limit(10000));
-      for (const row of data || []) get(row.job_id).job_events += 1;
+      const rows = await pageThrough("job_events", () => client.from("job_events").select("id, job_id").eq("event_type", "note").in("job_id", ids), warnings);
+      for (const row of rows) get(row.job_id).job_events += 1;
     }
   } catch (e) { errors.push(`job_events: ${e instanceof Error ? e.message : String(e)}`); }
 
   try {
     for (const ids of chunk(jobIds)) {
-      const data = unwrap(await client.from("business_events").select("job_id, event_type, occurred_at").in("event_type", MESSAGE_EVENT_TYPES).in("job_id", ids).limit(10000));
-      for (const row of data || []) {
+      const rows = await pageThrough("business_events", () => client.from("business_events").select("id, job_id, event_type, occurred_at").in("event_type", MESSAGE_EVENT_TYPES).in("job_id", ids), warnings);
+      for (const row of rows) {
         const c = get(row.job_id); c.business_events += 1;
         const inbound = String(row.event_type).endsWith("_in") || row.event_type === "client.reply";
         if (inbound && row.occurred_at && (!c.last_client_message_at || row.occurred_at > c.last_client_message_at)) c.last_client_message_at = row.occurred_at;
@@ -415,7 +456,12 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
   const xeroId = str(params.get("xero_invoice_id"));
   if (!invoiceNo && !xeroId) throw new InvoiceContextError("invoice or xero_invoice_id is required");
   if (xeroId && !UUID.test(xeroId)) throw new InvoiceContextError("xero_invoice_id must be a UUID");
-  if (invoiceNo && (invoiceNo.length > 64 || /[ -]/.test(invoiceNo))) throw new InvoiceContextError("invoice is not a valid invoice number");
+  if (invoiceNo) {
+    // % and _ are LIKE metacharacters. Rejecting them by name beats a generic
+    // "invalid" so a caller with a genuinely odd invoice number knows why.
+    if (/[%_]/.test(invoiceNo)) throw new InvoiceContextError("invoice must not contain the wildcard characters % or _");
+    if (!INVOICE_NUMBER.test(invoiceNo)) throw new InvoiceContextError("invoice is not a valid invoice number");
+  }
   const modeRaw = str(params.get("mode")) ?? "card";
   if (!(modeRaw in MODE_BOUNDS)) throw new InvoiceContextError("mode must be card or full");
   const mode = modeRaw as Mode;
@@ -426,7 +472,11 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
   // 1. Invoice row. An invoice number can appear once per org in practice, but
   //    read two rows so a duplicate is refused rather than silently picked.
   let q = client.from("xero_invoices").select(INVOICE_COLS).eq("org_id", deps.orgId).eq("invoice_type", "ACCREC");
-  q = xeroId ? q.eq("xero_invoice_id", xeroId) : q.ilike("invoice_number", invoiceNo!);
+  // xero-sync stores InvoiceNumber exactly as Xero returns it (no case
+  // normalisation, see xero-sync/index.ts:633), so an .eq on an uppercased
+  // value would miss. ilike on the escaped literal is an exact,
+  // case-insensitive match with no pattern left in it.
+  q = xeroId ? q.eq("xero_invoice_id", xeroId) : q.ilike("invoice_number", escapeLikeLiteral(invoiceNo!));
   const invRows = unwrap(await q.limit(2));
   if (!invRows || invRows.length === 0) throw new InvoiceContextError(`invoice not found: ${xeroId ?? invoiceNo}`, 404, "invoice_not_found");
   if (invRows.length > 1) throw new InvoiceContextError(`invoice number matches ${invRows.length} rows; pass xero_invoice_id`, 409, "invoice_ambiguous");
@@ -446,7 +496,13 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
   let facts: any[] = [];
   let conversation: any[] = [];
   let queue: QueueSummary | undefined;
+  let queueOk = true;
   let otherOpen: any[] = [];
+  // Conversation presence is decided by the same batched counter the coverage
+  // read uses, so the door and the coverage table can never disagree about
+  // conversation_present. The mode-sliced merge below is for display only.
+  let conversationPresenceOk = true;
+  let clientMessageCount = 0;
   if (link.status === "linked" && link.job_id) {
     const jobRead = await safeRead("jobs", async () => unwrap(await client.from("jobs")
       .select("id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, ghl_contact_id, deposit_amount, deposit_at, pricing_json, quoted_at, accepted_at, scheduled_at, completed_at, created_at")
@@ -454,14 +510,15 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
     sources.job = jobRead.status;
     const jobRow = jobRead.data;
     if (jobRow) {
-      const [variations, workOrders, council, factsRead, convRead, queueRead, openRead] = await Promise.all([
+      const [variations, workOrders, council, factsRead, convRead, queueRead, presenceRead, openRead] = await Promise.all([
         safeRead("job_variations", async () => unwrap(await client.from("job_variations").select("variation_number, amount, status, sent_at").eq("job_id", jobRow.id).order("variation_number", { ascending: true }).limit(50))),
         safeRead("work_orders", async () => unwrap(await client.from("work_orders").select("wo_number, trade_name, status, scheduled_date, completed_at").eq("job_id", jobRow.id).order("created_at", { ascending: false }).limit(50))),
         safeRead("council_submissions", async () => unwrap(await client.from("council_submissions").select("template_type, overall_status").eq("job_id", jobRow.id).order("updated_at", { ascending: false }).limit(1))),
         safeRead("current_job_context_facts", async () => unwrap(await client.from("current_job_context_facts")
           .select("id, job_id, kind, value, provenance, expires_at, _context_store, updated_at").eq("job_id", jobRow.id).order("updated_at", { ascending: false }).limit(factsLimit * 2))),
         safeRead("conversation", async () => (await deps.getJobConversation(client, { job_id: jobRow.id, limit: conversationLimit })).messages || []),
-        queueByJob(client, [jobRow.id]),
+        queueByJob(client, [jobRow.id], warnings),
+        conversationCountsByJob(client, [{ id: jobRow.id, ghl_contact_id: jobRow.ghl_contact_id ?? null }], warnings),
         safeRead("other_open_invoices", async () => unwrap(await client.from("xero_invoices").select("invoice_number, xero_invoice_id, amount_due, due_date, status")
           .eq("org_id", deps.orgId).eq("invoice_type", "ACCREC").eq("job_id", jobRow.id).in("status", OPEN_STATUSES).gt("amount_due", 0).neq("xero_invoice_id", inv.xero_invoice_id).limit(20))),
       ]);
@@ -469,11 +526,16 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       sources.facts = factsRead.status;
       sources.conversation = convRead.status;
       sources.extraction_queue = queueRead.status;
+      sources.conversation_presence = presenceRead.status;
       sources.other_open_invoices = openRead.status;
       facts = (factsRead.data || []).filter((row: any) => deps.isCurrentContextFact(row, now.getTime())).slice(0, factsLimit);
       if (facts.length < (factsRead.data || []).length && (factsRead.data || []).length >= factsLimit * 2) warnings.push(`facts: read cap ${factsLimit * 2} reached; older facts not shown`);
       conversation = [...(convRead.data || [])].reverse();
       queue = queueRead.queues.get(jobRow.id);
+      queueOk = queueRead.status.ok;
+      conversationPresenceOk = presenceRead.status.ok;
+      const presence = presenceRead.counts.get(jobRow.id);
+      clientMessageCount = presence ? presence.ghl_cache + presence.inbox + presence.business_events : 0;
       otherOpen = openRead.data || [];
       job = {
         id: jobRow.id, job_number: jobRow.job_number ?? null, type: jobRow.type ?? null, status: jobRow.status ?? null,
@@ -491,6 +553,10 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       };
     } else if (jobRead.status.ok) {
       blockers.push({ code: "no_job_linked", owner: "BOOKKEEPING", detail: `Link points at job ${link.job_id} which no longer exists; link the invoice to the right job` });
+    } else {
+      // The link is good; we simply could not read the job. Never report that
+      // as "no job linked".
+      blockers.push({ code: "job_read_failed", owner: "CIO", detail: `Job ${link.job_id} could not be read (${jobRead.status.error ?? "unknown error"}); the job picture is unknown` });
     }
   }
 
@@ -505,16 +571,28 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
   const contactKnown = Boolean(inv.xero_contact_id);
   if (!contactKnown) blockers.push({ code: "no_contact", owner: "BOOKKEEPING", detail: "Invoice has no Xero contact" });
   if (link.status === "none" && !blockers.some((b) => b.code === "no_job_linked")) {
-    const hint = link.candidates[0]?.job_number ? `; reference names ${link.candidates[0].job_number} but no such job exists` : "";
-    blockers.push({ code: "no_job_linked", owner: "BOOKKEEPING", detail: `No job on the invoice and no job number in the reference${hint}; link it or name the job` });
+    blockers.push({
+      code: "no_job_linked", owner: "BOOKKEEPING",
+      detail: link.hint
+        ? `${link.hint}; link it or name the job`
+        : "No job on the invoice and no job number in the reference; link it or name the job",
+    });
   }
   if (link.status === "ambiguous") {
     blockers.push({ code: "job_link_ambiguous", owner: "BOOKKEEPING", detail: `Contact has ${link.candidates.length} jobs; pick one (candidates listed)` });
   }
   if (job && !job.ghl_contact_id) blockers.push({ code: "no_ghl_contact", owner: "CIO", detail: "Job has no GHL contact, so SMS and call history cannot attach" });
-  if (job && facts.length === 0) blockers.push({ code: "facts_missing", owner: "CIO", detail: `Luna has not extracted this job yet (queue status: ${queueDetail(queue)})` });
+  if (job && sources.facts?.ok === false) {
+    blockers.push({ code: "facts_unreadable", owner: "CIO", detail: `The job_context read failed (${sources.facts.error ?? "unknown error"}); whether Luna has extracted this job is unknown` });
+  } else if (job && facts.length === 0) {
+    blockers.push({ code: "facts_missing", owner: "CIO", detail: `Luna has not extracted this job yet (queue status: ${queueDetail(queue, queueOk)})` });
+  }
   const clientMessages = conversation.filter((m: any) => m.direction !== "internal");
-  if (job && clientMessages.length === 0) blockers.push({ code: "conversation_missing", owner: "CIO", detail: "No stored client messages for this job in any source" });
+  if (job && !conversationPresenceOk) {
+    blockers.push({ code: "conversation_unreadable", owner: "CIO", detail: `The stored message counts could not be read (${sources.conversation_presence?.error ?? "unknown error"}); whether this job has client messages is unknown` });
+  } else if (job && clientMessageCount === 0) {
+    blockers.push({ code: "conversation_missing", owner: "CIO", detail: "No stored client messages for this job in any source" });
+  }
   const cacheAgeMinutes = inv.synced_at ? (now.getTime() - Date.parse(inv.synced_at)) / 60_000 : null;
   const xeroFresh = cacheAgeMinutes !== null && cacheAgeMinutes <= XERO_STALE_HOURS * 60;
   if (!xeroFresh) blockers.push({ code: "xero_stale", owner: "CIO", detail: cacheAgeMinutes === null ? "Invoice row has no sync time" : `Cache older than ${XERO_STALE_HOURS} h; balance may be wrong` });
@@ -524,8 +602,13 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
   const lastClient = [...clientMessages].reverse().find((m: any) => m.direction === "inbound") ?? null;
   const lastOutbound = [...clientMessages].reverse().find((m: any) => m.direction === "outbound") ?? null;
   const brief = (m: any) => m ? { at: m.occurred_at ?? null, channel: m.channel ?? null, preview: m.preview ?? String(m.body ?? "").slice(0, 500) } : null;
-  const perSource: Record<string, number> = {};
-  for (const m of conversation) perSource[m.source_system ?? "unknown"] = (perSource[m.source_system ?? "unknown"] ?? 0) + 1;
+  // All five merge sources are always present, zero included, so the screen
+  // never has to tell "no rows" apart from "key absent".
+  const perSource: Record<string, number> = { ghl_cache: 0, inbox: 0, job_events: 0, business_events: 0, chat_logs: 0 };
+  for (const m of conversation) {
+    const key = m.source_system ?? "unknown";
+    perSource[key] = (perSource[key] ?? 0) + 1;
+  }
 
   return {
     version: INVOICE_CONTEXT_VERSION,
@@ -535,7 +618,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       ...invoiceView(inv, now),
       chase: { count: chaseRows.length, last: chaseRows[0] ? { at: chaseRows[0].created_at, method: chaseRows[0].method, outcome: chaseRows[0].outcome ?? null, notes: chaseRows[0].notes ?? null, by: chaseRows[0].chased_by ?? null } : null, next_follow_up: nextFollowUp },
     },
-    link,
+    link: { status: link.status, method: link.method, job_id: link.job_id, job_number: link.job_number, candidates: link.status === "ambiguous" ? link.candidates : [] },
     job,
     facts: facts.map((f: any) => ({ id: f.id, kind: f.kind, value: f.value, provenance: f.provenance ?? null, updated_at: f.updated_at ?? null })),
     conversation: {
@@ -551,7 +634,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       job_linked: link.status === "linked" && Boolean(job),
       contact_known: contactKnown,
       facts_present: facts.length > 0,
-      conversation_present: clientMessages.length > 0,
+      conversation_present: conversationPresenceOk && clientMessageCount > 0,
       xero_fresh: xeroFresh,
     },
     sources,
@@ -575,7 +658,11 @@ export async function debtContextCoverage(params: URLSearchParams, deps: Invoice
   if (population === "overdue") q = q.lt("due_date", today);
   const invoices: any[] = unwrap(await q) || [];
   const sources: Record<string, SourceStatus> = { invoices: { ok: true, count: invoices.length } };
-  if (invoices.length >= 1000) sources.invoices = { ok: true, count: invoices.length, error: "read cap 1000 reached; population may be larger" };
+  const warnings: string[] = [];
+  // The population read is deliberately capped at one page: 1000 open
+  // receivables is already far past the real book. A cap hit is a warning, not
+  // a source failure (contract rule 6).
+  if (invoices.length >= PAGE_SIZE) warnings.push(`invoices: read cap ${PAGE_SIZE} reached; the open population may be larger than this page`);
 
   const linkRead = await safeRead("job_link", () => resolveJobLinks(client, invoices));
   sources.job_link = linkRead.status;
@@ -584,7 +671,9 @@ export async function debtContextCoverage(params: URLSearchParams, deps: Invoice
 
   const jobsRead = await safeRead("jobs", async () => {
     const rows: any[] = [];
-    for (const ids of chunk(linkedIds)) rows.push(...(unwrap(await client.from("jobs").select("id, job_number, ghl_contact_id").in("id", ids)) || []));
+    for (const ids of chunk(linkedIds)) {
+      rows.push(...await pageThrough("jobs", () => client.from("jobs").select("id, job_number, ghl_contact_id").in("id", ids), warnings));
+    }
     return rows;
   });
   sources.jobs = jobsRead.status;
@@ -592,13 +681,20 @@ export async function debtContextCoverage(params: URLSearchParams, deps: Invoice
   for (const j of jobsRead.data || []) jobs.set(j.id, j);
 
   const [facts, queues, conv] = await Promise.all([
-    factsCountByJob(deps, linkedIds),
-    queueByJob(client, linkedIds),
-    conversationCountsByJob(client, linkedIds.map((id) => ({ id, ghl_contact_id: jobs.get(id)?.ghl_contact_id ?? null }))),
+    factsCountByJob(deps, linkedIds, warnings),
+    queueByJob(client, linkedIds, warnings),
+    conversationCountsByJob(client, linkedIds.map((id) => ({ id, ghl_contact_id: jobs.get(id)?.ghl_contact_id ?? null })), warnings),
   ]);
   sources.facts = facts.status;
   sources.extraction_queue = queues.status;
   sources.conversation = conv.status;
+
+  // Rule 1 holds on every row: a false flag always carries a blocker, and an
+  // unreadable source is never reported as an empty one.
+  const factsOk = facts.status.ok;
+  const conversationOk = conv.status.ok;
+  const jobsOk = jobsRead.status.ok;
+  for (const [label, st] of Object.entries(sources)) if (!st.ok) warnings.push(`${label}: read failed (${st.error ?? "unknown"})`);
 
   const totals = { invoices: invoices.length, amount_due: 0, overdue: 0, linked: 0, ambiguous: 0, none: 0, contact_known: 0, ghl_contact_known: 0, facts_present: 0, conversation_present: 0, xero_fresh: 0, complete: 0, distinct_linked_jobs: linkedIds.length };
   const rows = invoices.map((inv) => {
@@ -608,6 +704,8 @@ export async function debtContextCoverage(params: URLSearchParams, deps: Invoice
     const factsCount = jobId ? facts.counts.get(jobId) ?? 0 : 0;
     const c = jobId ? conv.counts.get(jobId) : undefined;
     const clientCount = c ? c.ghl_cache + c.inbox + c.business_events : 0;
+    const factsPresent = Boolean(jobId) && factsOk && factsCount > 0;
+    const conversationPresent = Boolean(jobId) && conversationOk && clientCount > 0;
     const contactKnown = Boolean(inv.xero_contact_id);
     const ghlKnown = Boolean(job?.ghl_contact_id);
     const ageMinutes = inv.synced_at ? (now.getTime() - Date.parse(inv.synced_at)) / 60_000 : null;
@@ -616,20 +714,21 @@ export async function debtContextCoverage(params: URLSearchParams, deps: Invoice
     if (!contactKnown) blockers.push("no_contact");
     if (link.status === "none") blockers.push("no_job_linked");
     if (link.status === "ambiguous") blockers.push("job_link_ambiguous");
-    if (jobId && !ghlKnown) blockers.push("no_ghl_contact");
-    if (jobId && factsCount === 0) blockers.push("facts_missing");
-    if (jobId && clientCount === 0) blockers.push("conversation_missing");
+    if (link.status === "linked" && !job) blockers.push(jobsOk ? "no_job_linked" : "job_read_failed");
+    if (jobId && job && !ghlKnown) blockers.push("no_ghl_contact");
+    if (jobId && !factsOk) blockers.push("facts_unreadable"); else if (jobId && factsCount === 0) blockers.push("facts_missing");
+    if (jobId && !conversationOk) blockers.push("conversation_unreadable"); else if (jobId && clientCount === 0) blockers.push("conversation_missing");
     if (!xeroFresh) blockers.push("xero_stale");
     const dueDays = daysBetween(str(inv.due_date), now);
     const overdue = dueDays !== null && dueDays > 0;
-    const complete = Boolean(jobId) && contactKnown && factsCount > 0 && clientCount > 0 && xeroFresh;
+    const complete = Boolean(jobId) && Boolean(job) && contactKnown && factsPresent && conversationPresent && xeroFresh;
     totals.amount_due += num(inv.amount_due) ?? 0;
     if (overdue) totals.overdue += 1;
     if (link.status === "linked") totals.linked += 1; else if (link.status === "ambiguous") totals.ambiguous += 1; else totals.none += 1;
     if (contactKnown) totals.contact_known += 1;
     if (ghlKnown) totals.ghl_contact_known += 1;
-    if (factsCount > 0) totals.facts_present += 1;
-    if (clientCount > 0) totals.conversation_present += 1;
+    if (factsPresent) totals.facts_present += 1;
+    if (conversationPresent) totals.conversation_present += 1;
     if (xeroFresh) totals.xero_fresh += 1;
     if (complete) totals.complete += 1;
     return {
@@ -637,17 +736,17 @@ export async function debtContextCoverage(params: URLSearchParams, deps: Invoice
       amount_due: num(inv.amount_due), due_date: inv.due_date ?? null, days_overdue: dueDays === null ? null : Math.max(0, dueDays),
       classification: inv.debt_classification ?? null,
       link_status: link.status, link_method: link.method, job_id: jobId, job_number: link.job_number ?? job?.job_number ?? null,
-      candidates: link.status === "ambiguous" ? link.candidates : undefined,
+      candidates: link.status === "ambiguous" ? link.candidates : [],
       contact_known: contactKnown, ghl_contact_known: jobId ? ghlKnown : null,
-      facts_count: jobId ? factsCount : null,
-      conversation_count: jobId ? clientCount : null,
+      facts_count: jobId && factsOk ? factsCount : null,
+      conversation_count: jobId && conversationOk ? clientCount : null,
       conversation_sources: c ? { ghl_cache: c.ghl_cache, inbox: c.inbox, business_events: c.business_events, notes: c.job_events } : null,
       last_client_message_at: c?.last_client_message_at ?? null,
-      extraction_queue: jobId ? queueDetail(queues.queues.get(jobId)) : null,
+      extraction_queue: jobId ? queueDetail(queues.queues.get(jobId), queues.status.ok) : null,
       xero_fresh: xeroFresh, blockers, complete,
     };
   });
   totals.amount_due = Math.round(totals.amount_due * 100) / 100;
 
-  return { version: INVOICE_CONTEXT_VERSION, as_of: now.toISOString(), population, totals, rows, sources };
+  return { version: INVOICE_CONTEXT_VERSION, as_of: now.toISOString(), population, totals, rows, sources, warnings };
 }

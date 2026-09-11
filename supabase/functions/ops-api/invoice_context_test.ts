@@ -14,9 +14,16 @@
 //   5. Invalid input and unknown invoices are refused with a status, not thrown.
 //   6. Coverage aggregates the whole open population with the same rules and counts
 //      client messages, not internal notes, as conversation.
+//   7. Every multi-row read pages past the PostgREST 1000-row cap instead of
+//      truncating in silence.
+//   8. An invoice number carrying a LIKE wildcard is refused, never matched.
+//   9. An unreadable source is an "unreadable" blocker, never a "missing" one:
+//      the door never asserts "Luna has not extracted" after a failed read.
+//  10. The door and the coverage read agree, invoice for invoice, on every
+//      coverage flag and every blocker code.
 
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { debtContextCoverage, invoiceContext, InvoiceContextError, jobNumberFromReference, parseXeroDate, queueDetail } from "./invoice_context.ts";
+import { debtContextCoverage, escapeLikeLiteral, invoiceContext, InvoiceContextError, jobNumberFromReference, parseXeroDate, queueDetail } from "./invoice_context.ts";
 import { isCurrentContextFact } from "./context_visibility.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -95,13 +102,27 @@ function baseTables(): Tables {
   };
 }
 
-/** Minimal in-memory PostgREST-style client: enough of the builder chain for the door. */
-function fakeClient(tables: Tables, failing: Set<string> = new Set()) {
+/**
+ * Minimal in-memory PostgREST-style client: enough of the builder chain for the
+ * door. It enforces the real 1000-row response cap, so a read that does not
+ * page with .range() truncates here exactly as it does in production.
+ *
+ * `failFrom` fails a table from its Nth call onward (1-based), which is how the
+ * job-link read can succeed while the job detail read fails.
+ */
+const PG_ROW_CAP = 1000;
+
+function fakeClient(tables: Tables, failing: Set<string> = new Set(), failFrom: Record<string, number> = {}) {
+  const calls: Record<string, number> = {};
   return {
+    _calls: calls,
     from(table: string) {
+      calls[table] = (calls[table] ?? 0) + 1;
+      const callNo = calls[table];
       const filters: Array<(row: any) => boolean> = [];
       let order: { col: string; asc: boolean } | null = null;
       let limit: number | null = null;
+      let range: { from: number; to: number } | null = null;
       const q: any = {};
       const chain = (fn: () => void) => (...args: any[]) => { (fn as any)(...args); return q; };
       q.select = chain(() => {});
@@ -113,12 +134,17 @@ function fakeClient(tables: Tables, failing: Set<string> = new Set()) {
       q.ilike = chain((c: string, v: string) => filters.push((r) => String(r[c] ?? "").toLowerCase() === v.toLowerCase()));
       q.order = chain((c: string, o: any) => { order = { col: c, asc: o?.ascending !== false }; });
       q.limit = chain((n: number) => { limit = n; });
+      q.range = chain((from: number, to: number) => { range = { from, to }; });
       const run = () => {
-        if (failing.has(table)) return { data: null, error: { message: `${table} unavailable` } };
+        if (failing.has(table) || (failFrom[table] !== undefined && callNo >= failFrom[table])) {
+          return { data: null, error: { message: `${table} unavailable` } };
+        }
         let rows = (tables[table] ?? []).filter((r) => filters.every((f) => f(r)));
         if (order) rows = [...rows].sort((a, b) => (a[order!.col] < b[order!.col] ? -1 : a[order!.col] > b[order!.col] ? 1 : 0) * (order!.asc ? 1 : -1));
         if (limit !== null) rows = rows.slice(0, limit);
-        return { data: rows, error: null };
+        if (range) rows = rows.slice(range.from, range.to + 1);
+        // PostgREST never returns more than 1000 rows in one response.
+        return { data: rows.slice(0, PG_ROW_CAP), error: null };
       };
       q.maybeSingle = async () => { const r = run(); return { data: r.error ? null : (r.data?.[0] ?? null), error: r.error }; };
       q.then = (resolve: any, reject: any) => Promise.resolve(run()).then(resolve, reject);
@@ -142,8 +168,8 @@ function fakeConversation(tables: Tables) {
   };
 }
 
-function deps(tables: Tables, failing?: Set<string>) {
-  return { client: fakeClient(tables, failing), orgId: ORG, getJobConversation: fakeConversation(tables), isCurrentContextFact, now: () => NOW };
+function deps(tables: Tables, failing?: Set<string>, failFrom?: Record<string, number>) {
+  return { client: fakeClient(tables, failing, failFrom), orgId: ORG, getJobConversation: fakeConversation(tables), isCurrentContextFact, now: () => NOW };
 }
 
 Deno.test("1. a linked invoice returns the complete picture with no blockers", async () => {
@@ -164,7 +190,8 @@ Deno.test("1. a linked invoice returns the complete picture with no blockers", a
   assertEquals(out.conversation.messages.map((m: any) => m.source_ref), ["m1", "1", "1", "m2"]);
   assertEquals(out.conversation.last_client_message?.preview, "Will pay Friday");
   assertEquals(out.conversation.last_outbound?.preview, "Invoice sent");
-  assertEquals(out.conversation.sources, { ghl_cache: 2, job_events: 1, business_events: 1 });
+  // all five merge sources are always present, zero included
+  assertEquals(out.conversation.sources, { ghl_cache: 2, inbox: 0, job_events: 1, business_events: 1, chat_logs: 0 });
   assertEquals(out.bank.xero_payments, [{ date: "2025-09-10", amount: 1000, reference: "part" }]);
   assertEquals(out.bank.paid_in_bank_unreconciled, null);
   assertEquals(out.blockers, []);
@@ -223,8 +250,12 @@ Deno.test("4. one failing source is reported, the rest of the picture still retu
   assertEquals(out.job.job_number, "SWMS-261399");
   assertEquals(out.conversation.messages.length, 4);
   assert(out.warnings.some((w) => w.startsWith("facts: read failed")));
-  // a failed facts read still surfaces as a facts blocker so the card is never blank
-  assert(out.blockers.some((b) => b.code === "facts_missing"));
+  // a failed facts read still surfaces as a blocker so the card is never blank,
+  // but it must NOT claim Luna has not extracted the job (M2)
+  assert(out.blockers.some((b) => b.code === "facts_unreadable" && b.owner === "CIO"));
+  assertEquals(out.blockers.some((b) => b.code === "facts_missing"), false);
+  assertEquals(out.blockers.every((b) => !b.detail.includes("has not extracted")), true);
+  assertEquals(out.coverage.facts_present, false);
 });
 
 Deno.test("5. bad input and unknown invoices are refused with a status", async () => {
@@ -232,6 +263,13 @@ Deno.test("5. bad input and unknown invoices are refused with a status", async (
   await assertRejects(() => invoiceContext(new URLSearchParams({}), deps(t)), InvoiceContextError, "invoice or xero_invoice_id is required");
   await assertRejects(() => invoiceContext(new URLSearchParams({ xero_invoice_id: "nope" }), deps(t)), InvoiceContextError, "must be a UUID");
   await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "INV-1419", mode: "everything" }), deps(t)), InvoiceContextError, "mode must be card or full");
+  // LIKE wildcards are refused by name, so no invoice number can become a pattern
+  await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "INV-%" }), deps(t)), InvoiceContextError, "wildcard characters % or _");
+  await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "%" }), deps(t)), InvoiceContextError, "wildcard characters % or _");
+  await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "INV_1419" }), deps(t)), InvoiceContextError, "wildcard characters % or _");
+  await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "INV 1419" }), deps(t)), InvoiceContextError, "not a valid invoice number");
+  await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "-INV-1419" }), deps(t)), InvoiceContextError, "not a valid invoice number");
+  await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "I".repeat(65) }), deps(t)), InvoiceContextError, "not a valid invoice number");
   const err = await assertRejects(() => invoiceContext(new URLSearchParams({ invoice: "INV-9999" }), deps(t)), InvoiceContextError);
   assertEquals(err.status, 404);
   assertEquals(err.code, "invoice_not_found");
@@ -252,7 +290,14 @@ Deno.test("6. coverage counts the open population with the same rules", async ()
   assertEquals(byNo["INV-1419"].complete, true);
   assertEquals(byNo["INV-1419"].conversation_count, 3);
   assertEquals(byNo["INV-1419"].conversation_sources, { ghl_cache: 2, inbox: 0, business_events: 1, notes: 1 });
-  assertEquals(byNo["INV-1419"].last_client_message_at, "2026-09-10T01:00:00.000Z");
+  // H2: coverage derives the last client message from inbox_events and inbound
+  // business_events only. The GHL cache time lives in the door, which reads the
+  // merged conversation for the one job.
+  assertEquals(byNo["INV-1419"].last_client_message_at, "2026-09-03T00:00:00.000Z");
+  assertEquals(out.warnings, []);
+  // candidates are empty unless the link is ambiguous (L2)
+  assertEquals(byNo["INV-1419"].candidates, []);
+  assertEquals(byNo["INV-1373"].candidates, []);
   assertEquals(byNo["INV-1373"].blockers, ["no_ghl_contact", "facts_missing", "conversation_missing", "xero_stale"]);
   assertEquals(byNo["INV-1373"].extraction_queue, "skipped:1 (source_attribution_unproven), dead_letter:1 (source_attribution_ambiguous)");
   assertEquals(byNo["INV-1500"].link_status, "ambiguous");
@@ -272,4 +317,122 @@ Deno.test("helpers: Xero dates, reference job numbers, queue detail", () => {
   assertEquals(jobNumberFromReference("Deposit swp-261180 patio"), "SWP-261180");
   assertEquals(jobNumberFromReference("MLB-24911", "INV-1419"), null);
   assertEquals(queueDetail(undefined), "never_enqueued");
+});
+
+Deno.test("7. multi-row reads page past the PostgREST 1000-row cap", async () => {
+  const t = baseTables();
+  // The fake client enforces the real 1000-row response cap, so an unpaged
+  // .limit(5000) would come back with exactly 1000 of these.
+  t.business_events = [];
+  for (let i = 0; i < 2500; i += 1) {
+    t.business_events.push({ id: `be-${String(i).padStart(5, "0")}`, job_id: JOB1, event_type: "client.email_in", occurred_at: `2026-08-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z` });
+  }
+  t.current_job_context_facts = [];
+  for (let i = 0; i < 1500; i += 1) {
+    t.current_job_context_facts.push({ id: `f-${String(i).padStart(5, "0")}`, job_id: JOB1, kind: "note", value: `n${i}`, provenance: {}, updated_at: "2026-09-10T00:00:00.000Z", _context_store: "job_context" });
+  }
+
+  const out = await debtContextCoverage(new URLSearchParams({}), deps(t));
+  const row = out.rows.find((r: any) => r.invoice_number === "INV-1419")!;
+  assertEquals(row.conversation_sources!.business_events, 2500);
+  assertEquals(row.conversation_count, 2502); // 2500 business_events + 2 ghl_cache
+  assertEquals(row.facts_count, 1500);
+  assertEquals(out.warnings, []);
+  assertEquals(out.totals.facts_present, 1);
+
+  // the door agrees, through the same batched counter
+  const door = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t));
+  assertEquals(door.coverage.conversation_present, true);
+  assertEquals(door.coverage.facts_present, true);
+});
+
+Deno.test("8. a LIKE wildcard is escaped, never interpreted", () => {
+  assertEquals(escapeLikeLiteral("INV-1419"), "INV-1419");
+  assertEquals(escapeLikeLiteral("INV%19"), "INV\\%19");
+  assertEquals(escapeLikeLiteral("INV_19"), "INV\\_19");
+  assertEquals(escapeLikeLiteral("INV\\19"), "INV\\\\19");
+});
+
+Deno.test("9. an unreadable source is an unreadable blocker, never a missing one", async () => {
+  // facts view down: the door must not say Luna has not extracted the job
+  const t1 = baseTables();
+  const facts = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t1, new Set(["current_job_context_facts"])));
+  assertEquals(facts.blockers.map((b) => b.code), ["facts_unreadable"]);
+  assertEquals(facts.blockers[0].owner, "CIO");
+  assertStringIncludes(facts.blockers[0].detail, "is unknown");
+  assertEquals(facts.coverage.facts_present, false);
+
+  // extraction queue down: queue detail is "unknown", never "never_enqueued" (L1)
+  const t2 = baseTables();
+  t2.current_job_context_facts = [];
+  const queue = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t2, new Set(["extraction_jobs"])));
+  const missing = queue.blockers.find((b) => b.code === "facts_missing")!;
+  assertStringIncludes(missing.detail, "unknown (queue unreadable)");
+  assertEquals(queueDetail(undefined, false), "unknown (queue unreadable)");
+  assertEquals(queueDetail(undefined, true), "never_enqueued");
+
+  // message counts down: conversation_unreadable, and the flag is false
+  const t3 = baseTables();
+  const conv = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t3, new Set(["inbox_events"])));
+  assert(conv.blockers.some((b) => b.code === "conversation_unreadable" && b.owner === "CIO"));
+  assertEquals(conv.blockers.some((b) => b.code === "conversation_missing"), false);
+  assertEquals(conv.coverage.conversation_present, false);
+  assert(conv.warnings.some((w) => w.startsWith("conversation_presence: read failed")));
+
+  // job detail read down while the link itself resolved: job_read_failed (M2)
+  const t4 = baseTables();
+  const jobDown = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t4, undefined, { jobs: 2 }));
+  assert(jobDown.blockers.some((b) => b.code === "job_read_failed" && b.owner === "CIO"));
+  assertEquals(jobDown.blockers.some((b) => b.code === "no_job_linked"), false);
+  assertEquals(jobDown.link.status, "linked");
+  assertEquals(jobDown.coverage.job_linked, false);
+
+  // coverage carries the same codes
+  const cov = await debtContextCoverage(new URLSearchParams({}), deps(baseTables(), new Set(["current_job_context_facts", "inbox_events"])));
+  const row = cov.rows.find((r: any) => r.invoice_number === "INV-1419")!;
+  assertEquals(row.blockers, ["facts_unreadable", "conversation_unreadable"]);
+  assertEquals(row.facts_count, null);
+  assertEquals(row.conversation_count, null);
+  assertEquals(row.complete, false);
+  assert(cov.warnings.some((w) => w.startsWith("facts: read failed")));
+});
+
+Deno.test("10. the door and the coverage read agree on every flag and blocker", async () => {
+  const t = baseTables();
+  const cov = await debtContextCoverage(new URLSearchParams({}), deps(t));
+  assert(cov.rows.length > 0);
+  for (const row of cov.rows) {
+    const door = await invoiceContext(new URLSearchParams({ xero_invoice_id: row.xero_invoice_id }), deps(t));
+    assertEquals(door.link.status, row.link_status, `${row.invoice_number} link status`);
+    assertEquals(door.coverage.job_linked, Boolean(row.job_id), `${row.invoice_number} job_linked`);
+    assertEquals(door.coverage.contact_known, row.contact_known, `${row.invoice_number} contact_known`);
+    assertEquals(door.coverage.facts_present, (row.facts_count ?? 0) > 0, `${row.invoice_number} facts_present`);
+    assertEquals(door.coverage.conversation_present, (row.conversation_count ?? 0) > 0, `${row.invoice_number} conversation_present`);
+    assertEquals(door.coverage.xero_fresh, row.xero_fresh, `${row.invoice_number} xero_fresh`);
+    assertEquals(
+      door.blockers.map((b) => b.code).sort(),
+      [...row.blockers].sort(),
+      `${row.invoice_number} blockers`,
+    );
+    // candidates only when ambiguous (L2)
+    assertEquals(door.link.candidates.length > 0, door.link.status === "ambiguous", `${row.invoice_number} candidates`);
+  }
+});
+
+Deno.test("11. a job number that matches nothing is named in the blocker, not in candidates", async () => {
+  const t = baseTables();
+  t.jobs = t.jobs.filter((j) => j.job_number !== "SWP-261180");
+  const out = await invoiceContext(new URLSearchParams({ invoice: "INV-1373" }), deps(t));
+  assertEquals(out.link.status, "none");
+  assertEquals(out.link.candidates, []);
+  const b = out.blockers.find((x) => x.code === "no_job_linked")!;
+  assertStringIncludes(b.detail, "SWP-261180");
+  assertStringIncludes(b.detail, "does not match any job");
+
+  // a stored job_id pointing at nothing is also a blocker detail, not a candidate
+  const t2 = baseTables();
+  t2.jobs = t2.jobs.filter((j) => j.id !== JOB1);
+  const ghost = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t2));
+  assertEquals(ghost.link.candidates, []);
+  assertStringIncludes(ghost.blockers.find((x) => x.code === "no_job_linked")!.detail, "points at a job that does not exist");
 });
