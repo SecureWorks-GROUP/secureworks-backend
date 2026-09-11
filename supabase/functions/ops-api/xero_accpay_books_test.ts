@@ -333,11 +333,12 @@ Deno.test("list_supplier_bills searches Xero by contact and draft status", async
 });
 
 Deno.test("list page size is clamped to one bounded Xero page", () => {
-  assertEquals(clampBillPageSize(null), 50);
-  assertEquals(clampBillPageSize(undefined), 50);
-  assertEquals(clampBillPageSize(""), 50);
-  assertEquals(clampBillPageSize(0), 50);
-  assertEquals(clampBillPageSize(-5), 50);
+  // Default is 100, the page Xero already returned before this door asked.
+  assertEquals(clampBillPageSize(null), 100);
+  assertEquals(clampBillPageSize(undefined), 100);
+  assertEquals(clampBillPageSize(""), 100);
+  assertEquals(clampBillPageSize(0), 100);
+  assertEquals(clampBillPageSize(-5), 100);
   assertEquals(clampBillPageSize("25"), 25);
   assertEquals(clampBillPageSize(100), 100);
   assertEquals(clampBillPageSize(1000), 100);
@@ -373,14 +374,54 @@ Deno.test("list_supplier_bills asks Xero for one bounded page and reports pagina
   assertEquals(listed.next_page, 2);
 });
 
-Deno.test("list_supplier_bills truncates a provider page that overruns page_size", async () => {
+Deno.test("list_supplier_bills rejects a provider page that overruns page_size", async () => {
+  // Silently trimming would hide supplier bills from a books read and return a
+  // has_more the caller cannot trust. Fail loudly instead.
+  let cached = 0;
+  const client = {
+    from() {
+      return {
+        upsert: async () => {
+          cached += 1;
+          return { error: null };
+        },
+      };
+    },
+  };
+  const err = await assertRejects(
+    () =>
+      listSupplierBills(
+        client,
+        { page_size: "5", page: "3" },
+        {
+          getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+          xeroGet: (async () => ({
+            Invoices: Array.from({ length: 9 }, (_v, i) => ({
+              InvoiceID: `bill-${i}`,
+              Type: "ACCPAY",
+              Status: "DRAFT",
+              Contact: { Name: "Supplier" },
+              LineItems: [],
+            })),
+          })) as any,
+        },
+      ),
+    SupplierBillError,
+  );
+  assertEquals(err.status, 502);
+  assertEquals(err.code, "XERO_RESPONSE_INVALID");
+  // The bad page must not reach the cache either.
+  assertEquals(cached, 0);
+});
+
+Deno.test("list_supplier_bills accepts an exactly full page", async () => {
   const listed = await listSupplierBills(
     makeClient(),
     { page_size: "5", page: "3" },
     {
       getToken: async () => ({ accessToken: "t", tenantId: "n" }),
       xeroGet: (async () => ({
-        Invoices: Array.from({ length: 9 }, (_v, i) => ({
+        Invoices: Array.from({ length: 5 }, (_v, i) => ({
           InvoiceID: `bill-${i}`,
           Type: "ACCPAY",
           Status: "DRAFT",
@@ -391,9 +432,9 @@ Deno.test("list_supplier_bills truncates a provider page that overruns page_size
     },
   );
   assertEquals(listed.count, 5);
-  assertEquals(listed.bills.length, 5);
   assertEquals(listed.page, 3);
   assertEquals(listed.has_more, true);
+  assertEquals(listed.next_page, 4);
 });
 
 Deno.test("list_supplier_bills caches a whole page in one upsert, not one per bill", async () => {
@@ -428,6 +469,99 @@ Deno.test("list_supplier_bills caches a whole page in one upsert, not one per bi
   assertEquals(upserts.length, 1);
   assertEquals(Array.isArray(upserts[0]), true);
   assertEquals(upserts[0].length, 40);
+});
+
+Deno.test("cache batch dedupes by InvoiceID so one duplicate cannot fail the page", async () => {
+  const upserts: any[] = [];
+  const client = {
+    from() {
+      return {
+        upsert: async (rows: any) => {
+          upserts.push(rows);
+          return { error: null };
+        },
+      };
+    },
+  };
+  const listed = await listSupplierBills(
+    client,
+    { page_size: "10" },
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async () => ({
+        Invoices: [
+          { InvoiceID: "dup", Type: "ACCPAY", Status: "DRAFT", Contact: { Name: "A" }, LineItems: [] },
+          { InvoiceID: "dup", Type: "ACCPAY", Status: "AUTHORISED", Contact: { Name: "A" }, LineItems: [] },
+          { InvoiceID: "other", Type: "ACCPAY", Status: "DRAFT", Contact: { Name: "B" }, LineItems: [] },
+          { Type: "ACCPAY", Status: "DRAFT", Contact: { Name: "No ID" }, LineItems: [] },
+        ],
+      })) as any,
+    },
+  );
+  // The caller still sees every row Xero returned; only the cache is deduped.
+  assertEquals(listed.count, 4);
+  assertEquals(upserts.length, 1);
+  const rows = upserts[0];
+  assertEquals(rows.length, 2);
+  assertEquals(rows.map((r: any) => r.xero_invoice_id).sort(), ["dup", "other"]);
+  // Last write for a duplicated id wins.
+  assertEquals(rows.find((r: any) => r.xero_invoice_id === "dup").status, "AUTHORISED");
+});
+
+Deno.test("cached bill rows carry Xero fields only, never job or SES columns", async () => {
+  const upserts: any[] = [];
+  const client = {
+    from() {
+      return {
+        upsert: async (rows: any) => {
+          upserts.push(rows);
+          return { error: null };
+        },
+      };
+    },
+  };
+  await listSupplierBills(
+    client,
+    {},
+    {
+      getToken: async () => ({ accessToken: "t", tenantId: "n" }),
+      xeroGet: (async () => ({
+        Invoices: [{
+          InvoiceID: "bill-1",
+          Type: "ACCPAY",
+          Status: "DRAFT",
+          Contact: { ContactID: "c1", Name: "Supplier" },
+          LineItems: [],
+          // A provider payload must never steer the cache row's shape.
+          job_id: "should-not-land",
+          run_label: "should-not-land",
+        }],
+      })) as any,
+    },
+  );
+  const row = upserts[0][0];
+  for (
+    const forbidden of [
+      "job_id",
+      "invoice_obligation_revision_id",
+      "ses_external_token",
+      "debt_classification",
+      "debt_classification_at",
+      "debt_classification_by",
+      "quote_document_ids",
+      "run_label",
+    ]
+  ) {
+    assertEquals(
+      Object.keys(row).includes(forbidden),
+      false,
+      `cache row must not write ${forbidden}`,
+    );
+  }
+  assertEquals(row.xero_invoice_id, "bill-1");
+  assertEquals(row.invoice_type, "ACCPAY");
+  // The untouched provider payload is still preserved under raw_json.
+  assertEquals(row.raw_json.job_id, "should-not-land");
 });
 
 Deno.test("list_supplier_bills reports the last page as complete", async () => {

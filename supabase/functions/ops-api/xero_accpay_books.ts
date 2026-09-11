@@ -252,13 +252,15 @@ async function cacheAccpay(
 }
 
 export const SUPPLIER_BILL_MAX_PAGE_SIZE = 100;
-export const SUPPLIER_BILL_DEFAULT_PAGE_SIZE = 50;
+export const SUPPLIER_BILL_DEFAULT_PAGE_SIZE = 100;
 
 /**
  * Bounded page size for the ACCPAY list door.
  * Xero caps /Invoices at 100 rows per page, so anything larger is a caller
  * mistake rather than a bigger read. Clamp instead of rejecting so an existing
- * `limit=1000` caller keeps working on a single bounded page.
+ * `limit=1000` caller keeps working on a single bounded page. The default is
+ * 100 to match the page Xero already returned before this door asked for one,
+ * so omitting page_size cannot silently shrink an existing caller's result.
  */
 export function clampBillPageSize(raw: unknown): number {
   const parsed = Number(raw);
@@ -275,9 +277,15 @@ export function clampBillPageSize(raw: unknown): number {
  * MCP per-attempt abort budget before any rows reached the caller.
  */
 async function cacheAccpayBatch(client: any, invoices: any[]): Promise<void> {
-  const rows = (invoices || [])
-    .filter((inv) => inv?.InvoiceID)
-    .map((inv) => accpayCacheRow(inv));
+  // Dedupe by InvoiceID first. An ON CONFLICT batch that touches the same key
+  // twice is rejected whole, so one duplicate row from the provider would drop
+  // the entire page's cache instead of just its own.
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const inv of invoices || []) {
+    if (!inv?.InvoiceID) continue;
+    byId.set(String(inv.InvoiceID), accpayCacheRow(inv));
+  }
+  const rows = [...byId.values()];
   if (rows.length === 0) return;
   try {
     await client.from("xero_invoices").upsert(rows, {
@@ -461,7 +469,17 @@ export async function listSupplierBills(
   // One bounded provider page only. This door never traverses Xero pages: the
   // caller pages explicitly, so a full ACCPAY ledger cannot blow the MCP
   // per-attempt abort budget on a single read.
-  const invoices = (result?.Invoices || []).slice(0, pageSize);
+  const invoices = result?.Invoices || [];
+  // An over-run page means Xero ignored pageSize. Trimming it silently would
+  // hide supplier bills from a books read and hand back has_more the caller
+  // cannot trust, so fail the way listXeroReceivables does.
+  if (invoices.length > pageSize) {
+    throw new SupplierBillError(
+      "Xero exceeded the requested page size",
+      502,
+      "XERO_RESPONSE_INVALID",
+    );
+  }
   await cacheAccpayBatch(client, invoices);
   return {
     ok: true,
