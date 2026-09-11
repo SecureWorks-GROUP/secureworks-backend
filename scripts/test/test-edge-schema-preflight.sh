@@ -239,6 +239,7 @@ write_response() {
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
   CONTEXT_B2_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" | awk '{print $1}')" \
+  CONTEXT_B4_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" | awk '{print $1}')" \
   CONTEXT_B3_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
   CONTEXT_SWITCH_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170000_automation_switches.sql" | awk '{print $1}')" \
   CONTEXT_LEDGER_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170001_context_run_ledger.sql" | awk '{print $1}')" \
@@ -631,7 +632,7 @@ debt_picture_row = {
     "missing_markers": [],
 }
 context_rows = []
-for version, name, key in [("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"), ("20260911170001", "context_run_ledger", "CONTEXT_LEDGER_EXPECTED_SHA"), ("20260911171000", "context_capture_attribution", "CONTEXT_B2_EXPECTED_SHA"), ("20260911172000", "context_job_fact_custody", "CONTEXT_B3_EXPECTED_SHA")]:
+for version, name, key in [("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"), ("20260911170001", "context_run_ledger", "CONTEXT_LEDGER_EXPECTED_SHA"), ("20260911171000", "context_capture_attribution", "CONTEXT_B2_EXPECTED_SHA"), ("20260911172000", "context_job_fact_custody", "CONTEXT_B3_EXPECTED_SHA"), ("20260911173000", "context_accuracy_and_status", "CONTEXT_B4_EXPECTED_SHA")]:
     context_rows.append({"function_name": "ops-api", "migration_version": version,
         "expected_migration_name": name, "expected_statement_sha256": os.environ[key],
         "actual_migration_version": version, "actual_migration_name": name,

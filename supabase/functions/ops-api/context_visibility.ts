@@ -3,6 +3,11 @@ export function isCurrentContextFact(
   row: Record<string, unknown>,
   now = Date.now(),
 ): boolean {
+  if (row.lifecycle === 'superseded' || row.lifecycle === 'retracted') return false;
+  if (row.expires_at !== undefined && row.expires_at !== null) {
+    const expiry = typeof row.expires_at === 'string' ? Date.parse(row.expires_at) : NaN;
+    if (!Number.isFinite(expiry) || expiry <= now) return false;
+  }
   const p = row.provenance as Record<string, unknown> | null;
   const safety = p?.safety as Record<string, unknown> | null;
   const lifecycle = typeof p?.lifecycle === "string"
