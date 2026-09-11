@@ -352,6 +352,7 @@ import {
   SesReportTriggerError,
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
+import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12237,6 +12238,31 @@ if (import.meta.main) serve(async (req: Request) => {
 
       // ── Clear Debt: Payment Chase ──
       case 'list_overdue_invoices': return json(await listOverdueInvoices(client))
+      // ── Debt picture (DEBT COLLECTION desk, design accepted 11 Sep 2026) ──
+      // Classification data behind the Clear Debt screen. Writes the desk's own
+      // columns on xero_invoices and payment_chase_logs only; never GHL, never Xero.
+      case 'list_debt_picture':
+      case 'upsert_debt_picture':
+      case 'add_debt_note':
+      case 'debt_proposal_mark':
+      case 'debt_notes': {
+        try {
+          if (action === 'list_debt_picture') return json(await listDebtPicture(client, DEFAULT_ORG_ID))
+          if (action === 'debt_notes') {
+            const xid = String(body?.xero_invoice_id || url.searchParams.get('xero_invoice_id') || '')
+            if (!xid) return json({ error: 'xero_invoice_id required' }, 400)
+            const { data: inv, error: invErr } = await client.from('xero_invoices').select('job_id').eq('org_id', DEFAULT_ORG_ID).eq('xero_invoice_id', xid).maybeSingle()
+            if (invErr) throw invErr
+            return json({ thread: await debtNotes(client, xid, inv?.job_id ?? null) })
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          if (action === 'debt_proposal_mark') return json(await debtProposalMark(client, body))
+          return json(action === 'upsert_debt_picture' ? await upsertDebtPicture(client, body, DEFAULT_ORG_ID) : await debtNote(client, body))
+        } catch (error) {
+          if (error instanceof DebtPictureError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       case 'classify_invoice': return json(await classifyInvoice(client, body))
       case 'log_chase': return json(await logChase(client, body))
       case 'resolve_follow_up': return json(await resolveFollowUp(client, body))
