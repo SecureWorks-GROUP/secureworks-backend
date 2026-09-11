@@ -41,6 +41,7 @@ SEND_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906140000_job_doc
 SEND_RUNS_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906150000_jobs_send_runs_claimed_at.sql"
 SEND_CLAIM_TOKEN_MIGRATION="$REPO_ROOT/supabase/migrations/20260906160000_job_documents_send_claim_token.sql"
 DEBT_PICTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911120000_debt_picture.sql"
+SALES_PERFORMANCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911000001_sales_performance_weeks.sql"
 
 
 PASS_COUNT=0
@@ -239,6 +240,7 @@ write_response() {
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
+  SALES_PERFORMANCE_EXPECTED_SHA="$(shasum -a 256 "$SALES_PERFORMANCE_MIGRATION" | awk '{print $1}')" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -626,6 +628,17 @@ debt_picture_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+sales_performance_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260911000001",
+    "expected_migration_name": "sales_performance_weeks",
+    "expected_statement_sha256": os.environ["SALES_PERFORMANCE_EXPECTED_SHA"],
+    "actual_migration_version": "20260911000001",
+    "actual_migration_name": "sales_performance_weeks",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SALES_PERFORMANCE_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -663,6 +676,7 @@ with open(sys.argv[1], "w") as f:
             send_runs_claimed_at_row,
             send_claim_token_row,
             debt_picture_row,
+            sales_performance_row,
         ],
         f,
     )
