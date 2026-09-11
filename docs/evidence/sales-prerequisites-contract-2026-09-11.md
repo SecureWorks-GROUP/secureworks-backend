@@ -1,4 +1,4 @@
-# Sales prerequisites 1 and 2
+# Sales prerequisites 1, 2 and 4
 
 The current webhook delegates forward stage changes to ops-api, whose accepted
 status path already writes `accepted_at`. It formerly returned success even when
@@ -53,15 +53,24 @@ returns an error, never an empty/zero population.
 The join is restricted by the verified organisation and exact job type. The
 projection contains document identities, revision/supersession metadata and dates.
 It does not read `scope_json`, whole pricing JSON or whole document snapshots.
-Scalar totals retain their source path: snapshot pricing if that specific path
-exists; current job pricing is labelled current and is not historical sent-quote
-value. Missing values stay null. No synthetic amounts or value fallbacks are
+Scalar totals are returned separately as `snapshot_total_inc_gst` and
+`jobs.pricing_total_inc_gst`; the latter is current job pricing, not historical
+sent-quote value. Missing values stay null. No synthetic amounts or value fallbacks are
 created. Quote revisions remain separate source records; this reader does not
 invent a revision-deduplicated sales count.
 
 The public API key and trade users cannot use this mode. A supplied org_id or a
 cursor from another organisation/filter is refused. No provider, send, booking,
 status or financial write is performed by the document reader.
+
+## Perth reporting week and UTC query interval
+
+Label the reporting week in `Australia/Perth` separately from the UTC timestamps
+sent to the API. For the example above, the reporting interval is
+`2026-09-07 00:00 +08:00` inclusive to `2026-09-14 00:00 +08:00` exclusive;
+the corresponding UTC query interval is shown in `sent_at_from` and `sent_at_to`.
+The response normalises those filters to UTC and does not supply a local-week
+label. Report consumers must retain both the Perth label and UTC bounds.
 
 ## Validation boundary
 
