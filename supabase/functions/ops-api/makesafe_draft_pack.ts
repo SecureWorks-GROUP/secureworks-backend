@@ -1240,26 +1240,29 @@ function verifyMlbTempFenceInvoiceLines(
  * trade-recorded text only — never against model-generated draft wording,
  * which could invent the phrase and launder away the hire card.
  *
- * Every phrase names WHOSE supplies they were. A bare "own supplies" is banned:
- * "used our own supplies" is the trade saying SecureWorks supplied the fencing,
- * and matching it would invert the gate and withhold a hire the builder owes.
+ * Every phrase must NAME the supplier, and that name must be the client, the
+ * customer, the insured or the owner. Two shapes are banned outright:
+ *
+ * - a bare "own supplies", because "used our own supplies" is the trade saying
+ *   SecureWorks supplied the fencing, and matching it would invert the gate and
+ *   withhold a hire the builder owes;
+ * - an unattributed possessive such as "their own supplies", "his own supplies"
+ *   or a bare "client's own", because the pronoun can just as easily point at
+ *   our own crew, and the bare possessive never says what was supplied.
  */
 const CLIENT_SUPPLIED_FENCE_PHRASES = [
   "client used own supplies",
+  "client used their own supplies",
+  "client supplied",
   "client's own supplies",
   "clients own supplies",
+  "customer supplied",
   "customer's own supplies",
   "customers own supplies",
-  "builder's own supplies",
-  "builders own supplies",
-  "their own supplies",
-  "used their own supplies",
-  "his own supplies",
-  "her own supplies",
-  "own supplies to put up",
-  "client's own",
-  "client supplied",
-  "customer supplied",
+  "insured supplied",
+  "owner supplied",
+  "owner's own supplies",
+  "owners own supplies",
   "no fencing installed",
   "no temporary fencing installed",
 ];

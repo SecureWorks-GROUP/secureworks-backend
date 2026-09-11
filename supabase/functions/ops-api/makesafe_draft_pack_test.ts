@@ -1288,7 +1288,7 @@ Deno.test("MLB labour-only temp-fence pack is accepted when the trade report rec
         job_type: "Temporary fencing",
         materials_used: [". x .", "", ". x ."],
         work_done:
-          "Builder had the temp fencing on site already, used his own supplies. We attended and made it safe.",
+          "Temp fencing was on site already, client supplied. We attended and made it safe.",
       },
     },
   });
@@ -1574,5 +1574,84 @@ Deno.test("the sealed $85 rate is still enforced on the client-supplied labour-o
     `expected the sealed $85 rate to fire, got ${
       JSON.stringify(verification.blockers)
     }`,
+  );
+});
+
+// --- Review round 2: the phrase must name the supplier ---------------------
+
+Deno.test("an unattributed 'their own supplies' does not unlock the labour-only path", () => {
+  // Whose supplies? The pronoun can point at our own crew just as easily as at
+  // the builder, so it is not evidence that the client supplied the fence.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Temp fencing was already up, they used their own supplies. Made safe.",
+    ),
+  );
+});
+
+Deno.test("an unattributed possessive 'his own supplies' does not unlock the labour-only path", () => {
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Fencing was on site when we arrived, he used his own supplies.",
+    ),
+  );
+});
+
+Deno.test('a bare "client\'s own" without naming the supplies does not unlock the labour-only path', () => {
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Attended the client's own property and made the temporary fencing safe.",
+    ),
+  );
+});
+
+Deno.test("'client used their own supplies' names the client and unlocks the labour-only path", () => {
+  const verification = mlbLabourOnlyVerification(
+    "Client used their own supplies for the temp fencing. We attended and made it safe.",
+  );
+
+  assertEquals(verification.ok, true);
+  assertEquals(verification.blockers, []);
+  assert(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+  );
+  assertEquals(
+    verification.review_assumptions?.[0].reason_code,
+    "temporary_fence_hire_withheld_client_supplied",
+  );
+});
+
+Deno.test("'insured supplied' and 'owner supplied' name the supplier and unlock the labour-only path", () => {
+  for (
+    const wording of [
+      "Temp fencing insured supplied, already standing. Attended and made safe.",
+      "Owner supplied the temporary fencing. We attended and made it safe.",
+      "Owner's own supplies used for the temp fencing.",
+    ]
+  ) {
+    const verification = mlbLabourOnlyVerification(wording);
+    assertEquals(
+      verification.ok,
+      true,
+      `expected ${wording} to unlock, got ${
+        JSON.stringify(verification.blockers)
+      }`,
+    );
+    assert(
+      verification.applied_rule_ids.includes(
+        "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+      ),
+    );
+  }
+});
+
+Deno.test("the SecureWorks-supplied guard still outranks a named client phrase", () => {
+  // Round 1 behaviour, re-pinned against the tightened phrase list.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Client used their own supplies for some of it, we supplied the rest.",
+    ),
   );
 });
