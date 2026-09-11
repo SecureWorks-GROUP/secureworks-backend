@@ -712,3 +712,46 @@ Deno.test("missing or malformed optional provider fields never erase cached date
     assertEquals(patches[0].raw_json, record);
   }
 });
+
+// ── After-reconcile hook (deposit stamp runs here, merged with PR823) ──
+
+Deno.test("the after-reconcile hook sees each verified payload, and a hook failure is not a reconcile failure", async () => {
+  const { client, readInvoice } = staleClient({
+    open: {
+      data: [{ xero_invoice_id: "open-0" }, { xero_invoice_id: "open-1" }],
+      error: null,
+    },
+    cursorAt: FRESH_CURSOR,
+  });
+  const seen: string[] = [];
+  const summary = await reconcileStaleXeroInvoices(
+    client,
+    ORG,
+    readInvoice,
+    NOW,
+    async (invoiceId: string, payload: unknown) => {
+      seen.push(invoiceId);
+      // deno-lint-ignore no-explicit-any
+      assertEquals((payload as any)?.Invoices?.[0]?.InvoiceID, invoiceId);
+      if (invoiceId === "open-0") throw new Error("fixture-only stamp failure");
+    },
+  );
+  assertEquals(seen, ["open-0", "open-1"]);
+  assertEquals(summary.reconciled, 2);
+  assertEquals(summary.failed, 0);
+});
+
+Deno.test("a cooldown raised by the after-reconcile hook still stops the run", async () => {
+  const { client, readInvoice } = staleClient({
+    open: { data: [{ xero_invoice_id: "open-0" }], error: null },
+    cursorAt: FRESH_CURSOR,
+  });
+  await assertRejects(
+    () =>
+      reconcileStaleXeroInvoices(client, ORG, readInvoice, NOW, () =>
+        Promise.reject(
+          new XeroCooldownError("fixture-only cooldown", 429, "xero_cooldown"),
+        )),
+    XeroCooldownError,
+  );
+});

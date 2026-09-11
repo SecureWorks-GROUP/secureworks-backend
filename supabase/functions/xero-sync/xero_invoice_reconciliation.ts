@@ -261,6 +261,10 @@ export async function reconcileStaleXeroInvoices(
   orgId: string,
   readInvoice: (invoiceId: string) => Promise<unknown>,
   now: Date = new Date(),
+  // Called once per invoice that reconciled, with the verified provider
+  // payload. Used by the deposit stamp. A cooldown propagates; any other
+  // hook failure is logged and never counts as a reconcile failure.
+  onReconciled?: (invoiceId: string, verifiedPayload: unknown) => Promise<void>,
 ): Promise<StaleReconcileSummary> {
   const selection = await listStaleXeroInvoices(client, orgId, now);
   const summary: StaleReconcileSummary = {
@@ -276,15 +280,32 @@ export async function reconcileStaleXeroInvoices(
     for (const stale of selection.invoices) {
       summary.attempted++;
       try {
+        let verifiedPayload: unknown = null;
         if (
           await reconcileXeroInvoice(
             client,
             orgId,
             stale.xero_invoice_id,
-            () => readInvoice(stale.xero_invoice_id),
+            async () => {
+              verifiedPayload = await readInvoice(stale.xero_invoice_id);
+              return verifiedPayload;
+            },
             now,
           )
-        ) summary.reconciled++;
+        ) {
+          summary.reconciled++;
+          if (onReconciled) {
+            try {
+              await onReconciled(stale.xero_invoice_id, verifiedPayload);
+            } catch (hookError) {
+              if (hookError instanceof XeroCooldownError) throw hookError;
+              console.error(
+                "[xero-sync] after-reconcile hook failed:",
+                (hookError as Error).message,
+              );
+            }
+          }
+        }
       } catch (error) {
         // A cooldown is a transport-wide fact: stop and let the caller raise.
         if (error instanceof XeroCooldownError) throw error;

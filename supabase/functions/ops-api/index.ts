@@ -341,6 +341,11 @@ import {
   notifySesDocsReadySms,
   SES_DOCS_READY_SMS_DEFAULT_TO,
 } from './ses_docs_ready_sms.ts'
+import {
+  listSesReportTriggerRuns,
+  runSesReportTrigger,
+  SesReportTriggerError,
+} from './ses_report_trigger.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -437,6 +442,8 @@ import {
 } from './xero_accpay_books.ts'
 import {
   getXeroReceivable,
+  listXeroBankTransactions,
+  readXeroBankSummary,
   listXeroReceivables,
   listXeroSettlementRecords,
   readXeroOrganisation,
@@ -6836,6 +6843,76 @@ if (import.meta.main) serve(async (req: Request) => {
           throw error
         }
       }
+      // SES report-submitted trigger (CIO, 2026-09-11). The drain posts one
+      // run id; a human may post an exact job, cycle and source identity. Both
+      // go through the same bounded handler, which hands the one card to the
+      // prepare path above and records the outcome on the run ledger.
+      case 'run_ses_report_trigger': {
+        // Reachable only with the server-owned ops key (the drain and the agent
+        // seat). Staff sessions and the routine key are refused: the manual path
+        // is an operator tool, not a browser action.
+        const triggerIsPrivileged = authMode === 'api_key'
+        if (!triggerIsPrivileged) {
+          return json({ error: 'forbidden: run_ses_report_trigger requires the privileged ops key' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'run_ses_report_trigger requires POST' }, 405)
+        }
+        const triggerActor = typeof body?.actor === 'string' && body.actor.trim()
+          ? `ses-report-trigger:${body.actor.trim().slice(0, 64)}`
+          : `ses-report-trigger:${authMode}`
+        try {
+          const outcome = await runSesReportTrigger(body || {}, {
+            client,
+            actor: triggerActor,
+            prepare: async (request) => {
+              const response = await prepareSesDocketRevisionAtHttpBoundary(
+                request,
+                createSesAssemblerRuntimeDependencies(client, { org_id: DEFAULT_ORG_ID, created_by: triggerActor }),
+                {
+                  preserveError: (error) =>
+                    error instanceof SesAssemblerAdapterError ||
+                    error instanceof ApiError ||
+                    error instanceof SesPortalCaptureEvidenceError ||
+                    error instanceof SesRoofConfirmationError ||
+                    sesActionErrorResponse(error) !== null,
+                },
+              )
+              const docsReadySms = await notifySesDocsReadySms(response.results, {
+                org_id: DEFAULT_ORG_ID,
+                store: createSupabaseSesEffectStore(client),
+                sendSms: (phone, message) => sendSmsViaGhl(phone, message),
+                phone: Deno.env.get('SES_DOCS_READY_SMS_TO') || SES_DOCS_READY_SMS_DEFAULT_TO,
+                lookupJobNumber: async (jobId) => {
+                  const { data } = await client.from('jobs').select('job_number').eq('id', jobId).maybeSingle()
+                  return data?.job_number || null
+                },
+                actor: triggerActor,
+              })
+              return { ...response, docs_ready_sms: docsReadySms }
+            },
+          })
+          return json(outcome, outcome.ok === false && outcome.code === 'ses_trigger_run_not_claimable' ? 409 : 200)
+        } catch (error) {
+          if (error instanceof SesReportTriggerError) {
+            return json({ error: error.message, code: error.code, ...(error.detail || {}) }, error.status)
+          }
+          throw error
+        }
+      }
+      case 'list_ses_report_trigger_runs': {
+        if (req.method !== 'GET') {
+          return json({ error: 'list_ses_report_trigger_runs requires GET' }, 405)
+        }
+        try {
+          return json(await listSesReportTriggerRuns(url.searchParams, client))
+        } catch (error) {
+          if (error instanceof SesReportTriggerError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          throw error
+        }
+      }
       case 'generate_attach_makesafe_swms': {
         const swmsIsPrivileged = authMode === 'api_key' ||
           authMode === 'routine' ||
@@ -7015,7 +7092,9 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_xero_receivables':
       case 'get_xero_receivable':
       case 'list_xero_settlement_records':
-      case 'read_xero_settlement_record': {
+      case 'read_xero_settlement_record':
+      case 'list_xero_bank_transactions':
+      case 'read_xero_bank_summary': {
         if (req.method !== 'GET') {
           return json({ ok: false, error: 'Xero receivables reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
         }
@@ -7027,6 +7106,8 @@ if (import.meta.main) serve(async (req: Request) => {
             get_xero_receivable: getXeroReceivable,
             list_xero_settlement_records: listXeroSettlementRecords,
             read_xero_settlement_record: readXeroSettlementRecord,
+            list_xero_bank_transactions: listXeroBankTransactions,
+            read_xero_bank_summary: readXeroBankSummary,
           }
           return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
         } catch (error) {

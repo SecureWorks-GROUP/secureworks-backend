@@ -85,6 +85,8 @@ Deno.test("direct Xero evidence reads retain staff/server auth and refuse public
       "get_xero_receivable",
       "list_xero_settlement_records",
       "read_xero_settlement_record",
+      "list_xero_bank_transactions",
+      "read_xero_bank_summary",
     ]
   ) {
     for (const authMode of ["none", "api_key"] as const) {
