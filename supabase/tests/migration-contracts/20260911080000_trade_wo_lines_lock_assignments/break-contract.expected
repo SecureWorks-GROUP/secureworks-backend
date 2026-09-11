@@ -1,1 +1,1 @@
-paid invoice work order line did not lock the trade's in-week card
+a non-week commission line locked a card from weeks before its own billed window

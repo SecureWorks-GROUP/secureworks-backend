@@ -18,12 +18,24 @@
 -- Rules, identical to the runtime stamp:
 --   * only invoices that are LIVE (status not draft / failed / ops-reject);
 --   * only lines with a job that bill the job: line_type 'work order',
---     'work_order' or 'commission', or a positive weekly work-order scope line
---     (source_work_order_id set, not a deduction type);
+--     'work_order' or 'commission', or a weekly work-order scope line
+--     (source_work_order_id set) whose line_type is 'labour' or 'patio' — the
+--     only two weeklyScopeLineType values that bill the crew's work. A weekly
+--     'travel', 'materials' or 'other' scope line reimburses a cost and must
+--     never consume a lead installer's day card, and the five deduction types
+--     are excluded by not being on that list;
 --   * only the invoice owner's own cards on that job (user_id matches);
---   * weekly invoice: only cards scheduled inside week_start..week_end;
---   * non-week invoice: only cards not scheduled after the day it was submitted
---     (a future card is work not yet done);
+--   * THE BILLED DATE WINDOW, per invoice and per job:
+--       - weekly invoice (week_start and week_end set): week_start..week_end;
+--       - non-week invoice: min(line_date)..max(line_date) across THAT job's
+--         own job-level billing lines on THAT invoice, upper bound clamped to
+--         the day the invoice was submitted (a card scheduled later is work not
+--         yet done). A job whose billing lines carry no line_date gets no
+--         window and locks NOTHING — guessing a range is what let a $200
+--         commission line swallow a trade's unbilled day cards back to the
+--         beginning of time;
+--     in both cases a card with a NULL scheduled_date is never locked: it
+--     cannot be shown to fall inside the window;
 --   * only cards whose invoiced_in is still NULL. An existing stamp is never
 --     overwritten;
 --   * when two live invoices could claim the same card, the earliest submitted
@@ -31,47 +43,61 @@
 -- One business_events row per stamped card. Re-running is harmless: the
 -- invoiced_in IS NULL guard makes the second pass match nothing.
 
-WITH candidate AS (
-  SELECT DISTINCT ON (ja.id)
-    ja.id AS assignment_id,
-    ja.job_id,
-    ti.id AS invoice_id,
+WITH billed_job AS (
+  SELECT
+    ti.id            AS invoice_id,
+    ti.user_id,
     ti.invoice_number,
-    ti.status AS invoice_status,
+    ti.status        AS invoice_status,
     ti.week_start,
     ti.week_end,
-    l.line_type
+    COALESCE(ti.submitted_at, ti.created_at, now())          AS submitted_at_eff,
+    COALESCE(ti.submitted_at, ti.created_at, now())::date    AS submitted_on,
+    l.job_id,
+    min(l.line_date) AS window_from,
+    max(l.line_date) AS window_to,
+    (array_agg(lower(btrim(COALESCE(l.line_type, '')))
+       ORDER BY l.line_date NULLS LAST, l.id))[1] AS line_type
   FROM public.trade_invoices ti
   JOIN public.trade_invoice_lines l
     ON l.trade_invoice_id = ti.id
-  JOIN public.job_assignments ja
-    ON ja.job_id = l.job_id
-   AND ja.user_id = ti.user_id
   WHERE ti.status NOT IN ('draft', 'failed', 'ops-reject')
     AND l.job_id IS NOT NULL
     AND (
       lower(btrim(COALESCE(l.line_type, ''))) IN ('work order', 'work_order', 'commission')
       OR (
         l.source_work_order_id IS NOT NULL
-        AND COALESCE(l.line_type, '') NOT IN (
-          'crew_work_order_deduction',
-          'labour_deduction',
-          'travel_logistics_deduction',
-          'materials_deduction',
-          'final_payout_deduction'
-        )
+        AND lower(btrim(COALESCE(l.line_type, ''))) IN ('labour', 'patio')
       )
     )
-    AND ja.invoiced_in IS NULL
+  GROUP BY ti.id, ti.user_id, ti.invoice_number, ti.status,
+           ti.week_start, ti.week_end, ti.submitted_at, ti.created_at, l.job_id
+),
+candidate AS (
+  SELECT DISTINCT ON (ja.id)
+    ja.id AS assignment_id,
+    ja.job_id,
+    b.invoice_id,
+    b.invoice_number,
+    b.invoice_status,
+    b.line_type
+  FROM billed_job b
+  JOIN public.job_assignments ja
+    ON ja.job_id = b.job_id
+   AND ja.user_id = b.user_id
+  WHERE ja.invoiced_in IS NULL
+    AND ja.scheduled_date IS NOT NULL
     AND (
       CASE
-        WHEN ti.week_start IS NOT NULL AND ti.week_end IS NOT NULL
-          THEN ja.scheduled_date BETWEEN ti.week_start AND ti.week_end
-        ELSE ja.scheduled_date IS NULL
-          OR ja.scheduled_date <= COALESCE(ti.submitted_at, ti.created_at, now())::date
+        WHEN b.week_start IS NOT NULL AND b.week_end IS NOT NULL
+          THEN ja.scheduled_date BETWEEN b.week_start AND b.week_end
+        ELSE b.window_from IS NOT NULL
+          AND b.window_to IS NOT NULL
+          AND ja.scheduled_date
+              BETWEEN b.window_from AND LEAST(b.window_to, b.submitted_on)
       END
     )
-  ORDER BY ja.id, COALESCE(ti.submitted_at, ti.created_at) ASC NULLS LAST, ti.id
+  ORDER BY ja.id, b.submitted_at_eff ASC NULLS LAST, b.invoice_id
 ),
 stamped AS (
   UPDATE public.job_assignments ja

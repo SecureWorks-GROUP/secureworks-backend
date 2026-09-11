@@ -19,7 +19,7 @@ INSERT INTO wo_lock_expected VALUES
   ('e5000000-0000-4000-8000-000000000006', NULL,
    'a draft invoice stamped a card'),
   ('e5000000-0000-4000-8000-000000000007', 'e4000000-0000-4000-8000-000000000005',
-   'a live non-week commission line did not lock the trade''s past card'),
+   'a live non-week commission line did not lock the card inside its own billed window'),
   ('e5000000-0000-4000-8000-000000000008', NULL,
    'a card scheduled after the non-week invoice was submitted was stamped'),
   ('e5000000-0000-4000-8000-000000000009', 'e4000000-0000-4000-8000-000000000006',
@@ -27,7 +27,13 @@ INSERT INTO wo_lock_expected VALUES
   ('e5000000-0000-4000-8000-000000000010', NULL,
    'a weekly deduction line stamped a card'),
   ('e5000000-0000-4000-8000-000000000011', NULL,
-   'an hours line was treated as a work order line');
+   'an hours line was treated as a work order line'),
+  ('e5000000-0000-4000-8000-000000000012', NULL,
+   'a non-week commission line locked a card from weeks before its own billed window'),
+  ('e5000000-0000-4000-8000-000000000013', NULL,
+   'a non-week line with no line_date guessed a window instead of locking nothing'),
+  ('e5000000-0000-4000-8000-000000000014', NULL,
+   'a weekly travel scope line locked a day card');
 
 CREATE OR REPLACE FUNCTION pg_temp.assert_wo_lock_state(pass_label text)
 RETURNS void
@@ -48,7 +54,7 @@ BEGIN
     RAISE EXCEPTION '%: % (expected %, got %)', pass_label, mismatch.why, mismatch.expected, mismatch.actual;
   END LOOP;
 
-  IF (SELECT count(*) FROM wo_lock_expected e JOIN public.job_assignments ja ON ja.id = e.assignment_id) <> 11 THEN
+  IF (SELECT count(*) FROM wo_lock_expected e JOIN public.job_assignments ja ON ja.id = e.assignment_id) <> 14 THEN
     RAISE EXCEPTION '%: a fixture card is missing', pass_label;
   END IF;
 
@@ -98,7 +104,8 @@ BEGIN
      IS DISTINCT FROM
      'SW-INV-A-260830-025=paid,SW-INV-A-WOLOCK-COMMISSION=pushed_to_xero,'
      'SW-INV-A-WOLOCK-DRAFT=draft,SW-INV-A-WOLOCK-HELD=pushed_to_xero,'
-     'SW-INV-A-WOLOCK-REJECT=ops-reject,SW-INV-A-WOLOCK-WEEKLY=pending_acknowledgment' THEN
+     'SW-INV-A-WOLOCK-NODATE=pushed_to_xero,SW-INV-A-WOLOCK-REJECT=ops-reject,'
+     'SW-INV-A-WOLOCK-WEEKLY=pending_acknowledgment' THEN
     RAISE EXCEPTION 'the backfill changed a trade invoice status';
   END IF;
   IF EXISTS (
