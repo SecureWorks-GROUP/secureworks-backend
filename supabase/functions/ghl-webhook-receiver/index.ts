@@ -104,7 +104,7 @@ function previewFromPayload(payload: Record<string, unknown>): string | null {
     null;
   if (raw == null) return null;
   const text = String(raw).trim();
-  return text ? text.slice(0, 500) : null;
+  return text ? text.slice(0, 4096) : null;
 }
 
 interface WebhookJobCandidate {
@@ -491,7 +491,8 @@ serve(async (req) => {
         const channel = phone ? "sms" : email ? "email" : "chat";
         eventType = "client.reply";
         eventPayload = {
-          message_text: (message || "").slice(0, 500),
+          message_text: (body.body || message || ""),
+          line: body.line || null,
           phone: phone || null,
           email: email || null,
           conversation_id: conversationId || null,
@@ -505,7 +506,7 @@ serve(async (req) => {
         const channel = body.messageType === "Email" || body.channel === "email" ? "email" : "sms";
         eventType = channel === "email" ? "client.email_out" : "client.sms_out";
         eventPayload = {
-          message_text: (body.body || body.message || "").slice(0, 500),
+          message_text: (body.body || body.message || ""),
           phone: body.phone || null,
           email: body.email || null,
           conversation_id: conversationId || null,
@@ -609,9 +610,12 @@ serve(async (req) => {
     const sourceId = String(
       (body as { eventId?: string; id?: string }).eventId ??
       (body as { id?: string }).id ??
-      conversationId ??
       crypto.randomUUID(),
     );
+    const providerId = body.messageId || body.message_id || body.id || body.eventId;
+    const providerMessageId = providerId && (type === "InboundMessage" || type === "OutboundMessage") ? `ghl:${providerId}` : null;
+    const providerTime = body.dateAdded || body.createdAt || body.timestamp;
+    const eventAt = providerTime && !Number.isNaN(Date.parse(String(providerTime))) ? new Date(providerTime).toISOString() : occurredAt;
     let channel: Channel = "system";
     let direction: Direction = "system";
     let conversationKey: string | null = (conversationId as string) || null;
@@ -651,6 +655,10 @@ serve(async (req) => {
       match_confidence: jobMatch.match_confidence,
     });
     const bodyPreview = previewFromPayload(eventPayload);
+    // The database owns contact attribution. Do not disguise a heuristic match as a direct id.
+    const evidenceJobId = type === "InboundMessage" || type === "OutboundMessage"
+      ? (typeof body.job_id === "string" && /^[0-9a-f-]{36}$/i.test(body.job_id) ? body.job_id : null)
+      : match.job_id;
 
     // Legacy spine row shape — emitted either by the T7 fallback path
     // OR when the flag is OFF. It still carries the extractor-readable
@@ -660,8 +668,10 @@ serve(async (req) => {
       source: "ghl_webhook_receiver",
       entity_type: job ? "contact" : "unmatched_contact",
       entity_id: contactId || null,
-      job_id: match.job_id,
+      job_id: evidenceJobId,
       occurred_at: occurredAt,
+      event_at: eventAt,
+      provider_message_id: providerMessageId,
       source_table: "ghl_webhook",
       source_id: sourceId,
       channel,
@@ -693,11 +703,13 @@ serve(async (req) => {
           channel,
           direction,
           occurred_at: occurredAt,
+      event_at: eventAt,
+      provider_message_id: providerMessageId,
           // Source: GHL conversation cache when conversation_id present;
           // else the webhook event id when GHL supplies one; else a synthetic.
           source_table: "ghl_webhook",
           source_id: sourceId,
-          job_id: job?.id || null,
+          job_id: evidenceJobId,
           contact_id: contactId || null,
           entity_type: job ? "contact" : "unmatched_contact",
           entity_id: contactId || null,
@@ -730,7 +742,7 @@ serve(async (req) => {
 
     if (!t7Enabled || t7Failed) {
       const { error } = await supabase.from("business_events").insert(legacySpineRow);
-      eventError = error;
+      eventError = error?.code === "23505" && providerMessageId ? null : error;
     }
 
     if (eventError) {
