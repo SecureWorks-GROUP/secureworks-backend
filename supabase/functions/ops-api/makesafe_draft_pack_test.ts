@@ -1403,3 +1403,176 @@ Deno.test("client-supplied wording in the draft's own text cannot launder away t
     false,
   );
 });
+
+// --- Review round 1: whose supplies, what shape, which floors ---------------
+
+function mlbLabourOnlyVerification(
+  workDone: string,
+  overrides: {
+    materials_used?: unknown;
+    labour_quantity?: number;
+    labour_unit_price?: number;
+  } = {},
+) {
+  const output = normaliseDraftPackOutput({
+    report: MLB_LABOUR_ONLY_REPORT,
+    invoice: {
+      ...MLB_LABOUR_ONLY_INVOICE,
+      line_items: [{
+        description: "Make-safe attendance labour",
+        quantity: overrides.labour_quantity ?? 8,
+        unit_price: overrides.labour_unit_price ?? 85,
+      }],
+    },
+    change_summary: "Billed attendance labour only.",
+  });
+  return verifyDraftPackOutput(output, {
+    job: { site_suburb: "Marangaroo" },
+    detail: {
+      external_ref: "MLB-26310",
+      requesting_company_name: "Major Loss Builders",
+    },
+    service_report: {
+      checklist_json: {
+        job_type: "Temporary fencing",
+        materials_used: "materials_used" in overrides
+          ? overrides.materials_used
+          : [". x .", "", ". x ."],
+        work_done: workDone,
+      },
+    },
+  });
+}
+
+function assertHireCardStillDemanded(
+  verification: ReturnType<typeof verifyDraftPackOutput>,
+) {
+  assertEquals(verification.ok, false);
+  assert(
+    verification.blockers.some((blocker) =>
+      /retrieval allowance/i.test(blocker)
+    ),
+    `expected a retrieval-allowance blocker, got ${
+      JSON.stringify(verification.blockers)
+    }`,
+  );
+  assertEquals(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+    false,
+  );
+}
+
+Deno.test("'used our own supplies' is SecureWorks-supplied and never unlocks the labour-only path", () => {
+  // The old bare "own supplies" phrase matched this, which inverted the gate:
+  // the trade is saying WE supplied the fencing, so the builder owes the hire.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Put the temp fencing up, used our own supplies. Made safe on departure.",
+    ),
+  );
+});
+
+Deno.test("a SecureWorks-supplied mention outranks a client phrase in the same report", () => {
+  // Ambiguity must fall back to billing the hire card, not withholding it.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Client supplied some of it but we supplied the panels and pickets.",
+    ),
+  );
+});
+
+Deno.test("'client used own supplies' names whose supplies they were and unlocks the labour-only path", () => {
+  const verification = mlbLabourOnlyVerification(
+    "Client used own supplies for the temp fencing. We attended and made it safe.",
+  );
+
+  assertEquals(verification.ok, true);
+  assertEquals(verification.blockers, []);
+  assert(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+  );
+  assertEquals(
+    verification.review_assumptions?.[0].reason_code,
+    "temporary_fence_hire_withheld_client_supplied",
+  );
+});
+
+Deno.test("the hyphenated 'client-supplied' form matches the spaced phrase list", () => {
+  const verification = mlbLabourOnlyVerification(
+    "Temp fencing was client-supplied. Attended and made safe.",
+  );
+
+  assertEquals(verification.ok, true);
+  assert(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+  );
+});
+
+Deno.test("a materials_used that is present but not a list is unknown, not empty", () => {
+  // Trade-app schema drift to an object shape recorded real quantities. Unknown
+  // materials must keep the hire card rather than read as "none supplied".
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Client's own supplies used for the temp fencing.",
+      {
+        materials_used: {
+          "Temp fence panels": 3,
+          "Star picket": 11,
+        },
+      },
+    ),
+  );
+
+  // A string shape is equally unreadable and equally refused.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Client's own supplies used for the temp fencing.",
+      { materials_used: "Temp fence panels x 3, Star picket x 11" },
+    ),
+  );
+});
+
+Deno.test("the 4-hour solo floor still blocks a client-supplied labour-only draft", () => {
+  // The whole safety claim is that no existing gate was weakened. This pins it.
+  const verification = mlbLabourOnlyVerification(
+    "Client's own supplies used for the temp fencing. Attended and made safe.",
+    { labour_quantity: 2 },
+  );
+
+  assertEquals(verification.ok, false);
+  assert(
+    verification.blockers.some((blocker) => /at least 4 hours/i.test(blocker)),
+    `expected the solo 4-hour floor to fire, got ${
+      JSON.stringify(verification.blockers)
+    }`,
+  );
+  assert(
+    verification.blockers.some((blocker) =>
+      /not be below 3 hours/i.test(blocker)
+    ),
+    `expected the 3-hour floor to fire, got ${
+      JSON.stringify(verification.blockers)
+    }`,
+  );
+});
+
+Deno.test("the sealed $85 rate is still enforced on the client-supplied labour-only path", () => {
+  const verification = mlbLabourOnlyVerification(
+    "Client's own supplies used for the temp fencing. Attended and made safe.",
+    { labour_unit_price: 95 },
+  );
+
+  assertEquals(verification.ok, false);
+  assert(
+    verification.blockers.some((blocker) => /\$85 ex\/hr/i.test(blocker)),
+    `expected the sealed $85 rate to fire, got ${
+      JSON.stringify(verification.blockers)
+    }`,
+  );
+});

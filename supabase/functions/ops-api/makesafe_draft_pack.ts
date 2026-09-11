@@ -1239,20 +1239,70 @@ function verifyMlbTempFenceInvoiceLines(
  * SecureWorks attendance is labour only. Matched case-insensitively against
  * trade-recorded text only — never against model-generated draft wording,
  * which could invent the phrase and launder away the hire card.
+ *
+ * Every phrase names WHOSE supplies they were. A bare "own supplies" is banned:
+ * "used our own supplies" is the trade saying SecureWorks supplied the fencing,
+ * and matching it would invert the gate and withhold a hire the builder owes.
  */
 const CLIENT_SUPPLIED_FENCE_PHRASES = [
-  "own supplies",
-  "client supplied",
+  "client used own supplies",
+  "client's own supplies",
+  "clients own supplies",
+  "customer's own supplies",
+  "customers own supplies",
+  "builder's own supplies",
+  "builders own supplies",
+  "their own supplies",
+  "used their own supplies",
+  "his own supplies",
+  "her own supplies",
+  "own supplies to put up",
   "client's own",
+  "client supplied",
   "customer supplied",
   "no fencing installed",
   "no temporary fencing installed",
 ];
 
-function hasClientSuppliedFenceWording(text: string): boolean {
-  const lower = String(text || "").toLowerCase().replace(/[\u2018\u2019]/g, "'");
-  return CLIENT_SUPPLIED_FENCE_PHRASES.some((phrase) =>
+/**
+ * Phrases that say the supplies were OURS. Any one of these locks the
+ * labour-only path shut even when a client phrase also matches somewhere in the
+ * same text: a report that says both is ambiguous, and ambiguity must fall back
+ * to billing the hire card rather than withholding it.
+ */
+const SECUREWORKS_SUPPLIED_FENCE_PHRASES = [
+  "our own",
+  "we supplied",
+  "secureworks supplied",
+  "our supplies",
+  "our panels",
+];
+
+/**
+ * Lowercase, straighten smart quotes and flatten hyphens to spaces, so the
+ * natural written form "client-supplied" matches the spaced phrase list.
+ */
+function normaliseFenceWordingText(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u2010-\u2015\-]+/g, " ");
+}
+
+function hasSecureworksSuppliedFenceWording(text: string): boolean {
+  const lower = normaliseFenceWordingText(text);
+  return SECUREWORKS_SUPPLIED_FENCE_PHRASES.some((phrase) =>
     lower.includes(phrase)
+  );
+}
+
+function hasClientSuppliedFenceWording(text: string): boolean {
+  // A SecureWorks-supplied mention wins outright, so "used our own supplies"
+  // can never unlock the labour-only path.
+  if (hasSecureworksSuppliedFenceWording(text)) return false;
+  const lower = normaliseFenceWordingText(text);
+  return CLIENT_SUPPLIED_FENCE_PHRASES.some((phrase) =>
+    lower.includes(normaliseFenceWordingText(phrase))
   );
 }
 
@@ -1266,17 +1316,26 @@ function isPlaceholderMaterialItem(item: unknown): boolean {
   return !/[a-z0-9]/i.test(value.replace(/\bx\b/gi, " "));
 }
 
+/**
+ * True only when the trade report positively shows no SecureWorks materials.
+ *
+ * A `materials_used` that is present but is not a list is UNKNOWN, not empty.
+ * The trade app could have drifted to an object or a string that records real
+ * quantities we cannot read here, so that case keeps the hire card rather than
+ * reading as "nothing was supplied". Absent entirely still reads as nothing
+ * recorded, which is the placeholder case this path exists for.
+ */
 function serviceReportRecordsNoSecureworksMaterials(
   ctx: DraftPackContext,
 ): boolean {
   const report = asRecord(ctx.service_report);
   const checklist = asRecord(report.checklist_json);
-  const raw = Array.isArray(checklist.materials_used)
-    ? checklist.materials_used
-    : Array.isArray(report.materials_used)
-    ? report.materials_used
-    : [];
-  return raw.every((item) => isPlaceholderMaterialItem(item));
+  for (const candidate of [checklist.materials_used, report.materials_used]) {
+    if (candidate === undefined || candidate === null) continue;
+    if (!Array.isArray(candidate)) return false;
+    return candidate.every((item) => isPlaceholderMaterialItem(item));
+  }
+  return true;
 }
 
 function clientSuppliedFenceEvidenceText(ctx: DraftPackContext): string {
