@@ -458,6 +458,19 @@ export async function assertOutlookSesDeliveryAllowed(
   if (body.action === 'reply') {
     const requestedMailbox = String(body.mailbox || '').trim()
     const mailboxMessageId = String(body.message_id || '').trim()
+    // A job_id that is present but blank must refuse outright. Treating it as
+    // absent would let a malformed anchor select the sender-only path, which
+    // is the one path that does not run the stored-job fence.
+    if (hasOwn(body, 'job_id') && body.job_id !== null && !bodyJobId) {
+      throw new OutlookFenceError(409, {
+        state: 'refused',
+        code: 'pdf_provenance_required',
+        fact: 'job_id was supplied but is blank, so no job anchor could be resolved.',
+        recovery_action:
+          'Send the exact job_id stored against this source message, or omit job_id entirely for a sender-only reply.',
+        evidence: { message_id: mailboxMessageId || null },
+      })
+    }
     if (!requestedMailbox || !mailboxMessageId || body.post_id) {
       throw new OutlookFenceError(409, {
         state: 'refused',
@@ -1827,6 +1840,10 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
         if (!opsAuthorized) {
           return json({ error: 'Operations credential required' }, 401)
         }
+        // The MCP client pins this string exactly, so changing it makes every
+        // Outlook action refuse until both sides deploy together. The
+        // sender-only reply path was added without a bump for that reason:
+        // deploy this function first, then the MCP server.
         return json({
           contract_version: '2026-09-09.1',
           actions: ['send', 'forward', 'reply', 'draft'],
