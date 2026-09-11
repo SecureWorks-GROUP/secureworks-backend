@@ -1310,13 +1310,21 @@ function hasClientSuppliedFenceWording(text: string): boolean {
 }
 
 /**
- * A checklist row that carries no material. Blank, or a placeholder skeleton
- * like ". x ." that the trade app leaves behind when nothing was entered.
+ * A checklist row that carries no material: one of the placeholder skeletons
+ * the trade app leaves behind when nothing was entered.
+ *
+ * The 11 Sep real-report check over 22 live service reports found four shapes
+ * in the field - ". x .", ". x 1", "1 x 1" and blanks - so this is a shape
+ * rule rather than a list of known strings. Drop the separator "x", and an item
+ * with no letters left has no material NAME, only quantity punctuation. Any
+ * item that still carries a letter is a real material, which keeps
+ * "Screws x 20" and units baked into the quantity such as
+ * "Flashing tape x 1.5m" and "Pollyweave x 45m2" on the SecureWorks side.
  */
 function isPlaceholderMaterialItem(item: unknown): boolean {
   const value = String(item ?? "").trim();
   if (!value) return true;
-  return !/[a-z0-9]/i.test(value.replace(/\bx\b/gi, " "));
+  return !/\p{L}/u.test(value.replace(/\bx\b/gi, " "));
 }
 
 /**

@@ -1655,3 +1655,131 @@ Deno.test("the SecureWorks-supplied guard still outranks a named client phrase",
     ),
   );
 });
+
+// --- Real-report check, 11 Sep: the four placeholder shapes ----------------
+//
+// PHRASE-CHECK-2026-09-11.md read 22 live trade service reports and found
+// materials_used placeholders in four shapes: ". x .", ". x 1", "1 x 1" and
+// blanks. The old rule only recognised the first and the last, so a real
+// client-supplied card carrying ". x 1" or "1 x 1" was read as having recorded
+// SecureWorks materials and kept the hire card it did not owe.
+
+Deno.test("every placeholder shape the real-report check found reads as no materials", () => {
+  for (
+    const materials of [
+      [". x ."],
+      [". x 1"],
+      ["1 x 1"],
+      [""],
+      [". x .", ". x 1", "1 x 1", ""],
+    ]
+  ) {
+    const verification = mlbLabourOnlyVerification(
+      "Client used own supplies for the temp fencing. Attended and made safe.",
+      { materials_used: materials },
+    );
+    assertEquals(
+      verification.ok,
+      true,
+      `expected ${JSON.stringify(materials)} to read as placeholders, got ${
+        JSON.stringify(verification.blockers)
+      }`,
+    );
+    assert(
+      verification.applied_rule_ids.includes(
+        "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+      ),
+    );
+  }
+});
+
+Deno.test("a named material is never a placeholder, however short its quantity", () => {
+  // "Screws x 20" is the coordinator's case. The other three are verbatim from
+  // the real-report check and must all stay on the SecureWorks side.
+  for (
+    const materials of [
+      ["Screws x 20"],
+      ["Flashing tape x 1.5m"],
+      ["Pollyweave x 45m2"],
+      ["starpicket x 4"],
+    ]
+  ) {
+    assertHireCardStillDemanded(
+      mlbLabourOnlyVerification(
+        "Client used own supplies for the temp fencing. Attended and made safe.",
+        { materials_used: materials },
+      ),
+    );
+  }
+});
+
+Deno.test("one real material among placeholders still keeps the hire card", () => {
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Client used own supplies for the temp fencing. Attended and made safe.",
+      { materials_used: [". x .", "Star pickets x 2", "1 x 1"] },
+    ),
+  );
+});
+
+Deno.test("SWMS-261403 verbatim: the one genuine client-supplied card in the corpus", () => {
+  // work_done and materials_used copied exactly from the real-report check.
+  const verification = mlbLabourOnlyVerification(
+    "Stacked up hardy neatly in a pile, client used own supplies to put up temporary fence",
+    { materials_used: [". x ."] },
+  );
+
+  assertEquals(verification.ok, true);
+  assertEquals(verification.blockers, []);
+  assert(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+  );
+  assertEquals(
+    verification.review_assumptions?.[0].reason_code,
+    "temporary_fence_hire_withheld_client_supplied",
+  );
+});
+
+Deno.test("SWMS-26508 verbatim: a retrieval attendance keeps the hire card", () => {
+  // "picked up temp fencing" with the "1 x 1" placeholder. The placeholder now
+  // reads as no materials, but no phrase names a client supplier, so the gate
+  // stays locked and the retrieval allowance is still demanded. Generalising
+  // the placeholder rule must not open this card.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification("picked up temp fencing", {
+      materials_used: ["1 x 1"],
+    }),
+  );
+});
+
+Deno.test("SWMS-261285 verbatim: 'Photos supplied' never unlocks the labour-only path", () => {
+  // A bare "supplied" test would unlock a card where SecureWorks drove seven of
+  // its own star pickets. The phrase list requires a named supplier, so it does
+  // not, and the recorded star pickets keep the hire card independently.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "Stood and secured the existing storm-damaged Colorabond fence. Drove seven star pickets to prop and support the existing fence. Photos supplied from WhatsApp folder.",
+      { materials_used: ["Star pickets x 7"] },
+    ),
+  );
+});
+
+Deno.test("SWMS-26585 verbatim: 'Client wanted more protection' never unlocks the labour-only path", () => {
+  // A bare "client" test would unlock a three-attendance job where SecureWorks
+  // supplied 5 panels, 5 bases, 2 star pickets and 40 zip ties.
+  assertHireCardStillDemanded(
+    mlbLabourOnlyVerification(
+      "3rd attendance, Client wanted more protection, added 4 temporary fence panels creating triangles.",
+      {
+        materials_used: [
+          "fence panels x 5",
+          "base x 5",
+          "starpicket x 2",
+          "zipties x 40",
+        ],
+      },
+    ),
+  );
+});
