@@ -1508,11 +1508,176 @@ export function listJobRoofReportDrafts(
   return listAction(deps, params, auth, "list_job_roof_report_drafts");
 }
 
+/** Staff-only, date-bounded cross-job document population. Exact-job mode below is unchanged. */
+async function listSentJobDocuments(
+  deps: InsuranceReadDeps,
+  params: URLSearchParams,
+  auth: InsuranceReadAuth,
+): Promise<InsuranceReadResult> {
+  const org = operatorOrg(deps, auth);
+  assertAllowedParams(params, [
+    "action",
+    "scope",
+    "type",
+    "job_type",
+    "sent_at_from",
+    "sent_at_to",
+    "page_size",
+    "cursor",
+  ]);
+  if (
+    oneParam(params, "scope") !== "all_jobs" ||
+    oneParam(params, "action") !== "list_job_documents"
+  ) {
+    throw new InsuranceReadError(
+      "INVALID_QUERY",
+      400,
+      "Use scope=all_jobs for the sent document population",
+    );
+  }
+  const type = oneParam(params, "type"), jobType = oneParam(params, "job_type");
+  if (
+    !type || !/^[a-z][a-z0-9_]{0,63}$/.test(type) || !jobType ||
+    !/^[a-z][a-z0-9_]{0,63}$/.test(jobType)
+  ) {
+    throw new InsuranceReadError(
+      "INVALID_QUERY",
+      400,
+      "Exact type and job_type are required",
+    );
+  }
+  const timestamp = (key: string) => {
+    const raw = oneParam(params, key);
+    if (
+      !raw ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/
+        .test(raw) ||
+      !Number.isFinite(Date.parse(raw))
+    ) {
+      throw new InsuranceReadError(
+        "INVALID_QUERY",
+        400,
+        `${key} must be an ISO timestamp with timezone`,
+      );
+    }
+    const [year, month, day] = raw.slice(0, 10).split("-").map(Number);
+    if (
+      month < 1 || month > 12 || day < 1 ||
+      day > new Date(Date.UTC(year, month, 0)).getUTCDate()
+    ) {
+      throw new InsuranceReadError(
+        "INVALID_QUERY",
+        400,
+        `${key} has an invalid calendar date`,
+      );
+    }
+    return new Date(raw).toISOString();
+  };
+  const from = timestamp("sent_at_from"), to = timestamp("sent_at_to");
+  if (from >= to) {
+    throw new InsuranceReadError(
+      "INVALID_QUERY",
+      400,
+      "sent_at_from must precede sent_at_to",
+    );
+  }
+  const pageSize = parsePageSize(oneParam(params, "page_size"));
+  const scope = JSON.stringify({ type, job_type: jobType, from, to });
+  const cursor = cursorFor(
+    "list_job_documents:all_jobs",
+    org,
+    scope,
+    oneParam(params, "cursor"),
+  );
+  // Project only document metadata and explicit scalar value sources, never
+  // jobs.scope_json, whole pricing JSON or the potentially media-heavy snapshot.
+  // deno-lint-ignore no-explicit-any
+  let query: any = deps.from("job_documents").select([
+    "id",
+    "job_id",
+    "type",
+    "version",
+    "quote_number",
+    "sent_at",
+    "sent_to_client",
+    "accepted_at",
+    "declined_at",
+    "created_at",
+    "quote_revision_id",
+    "superseded_at",
+    "superseded_by_revision_id",
+    "snapshot_total_inc_gst:data_snapshot_json->pricing_json->totalIncGST",
+    "jobs!inner(id,org_id,job_number,type,pricing_total_inc_gst:pricing_json->totalIncGST)",
+  ].join(",")).eq("type", type).eq("jobs.org_id", org).eq("jobs.type", jobType);
+  query = query.gte("sent_at", from).lt("sent_at", to);
+  if (cursor) query = query.gt("id", cursor.id);
+  const rows = await runQuery(
+    query.order("id", { ascending: true }).limit(pageSize + 1),
+  );
+  for (const row of rows) {
+    const job = row.jobs as Row | null;
+    if (
+      !job || Array.isArray(job) || job.id !== row.job_id ||
+      job.org_id !== org || job.type !== jobType || row.type !== type ||
+      typeof row.sent_at !== "string" ||
+      !Number.isFinite(Date.parse(row.sent_at)) ||
+      Date.parse(row.sent_at) < Date.parse(from) ||
+      Date.parse(row.sent_at) >= Date.parse(to)
+    ) {
+      throw new InsuranceReadError(
+        "READ_FAILED",
+        502,
+        "Document population did not retain its authorised scope",
+      );
+    }
+  }
+  const result = pageResponse(
+    "list_job_documents:all_jobs",
+    org,
+    scope,
+    pageSize,
+    rows,
+    `${from}/${to}`,
+    currentTime(deps),
+  );
+  const hasMore = rows.length > pageSize;
+  const body = {
+    ...result,
+    action: "list_job_documents",
+    scope: "all_jobs",
+    job_id: null,
+    filters: {
+      type,
+      job_type: jobType,
+      sent_at_from: from,
+      sent_at_to: to,
+      interval: "inclusive_from_exclusive_to",
+    },
+    coverage: {
+      page_complete: true,
+      population_complete: !cursor && !hasMore,
+      has_more: hasMore,
+      population_count: null,
+      note:
+        "Follow next_cursor through has_more=false; page counts are not population totals. Missing sent_at rows cannot be assigned to the interval.",
+    },
+    value_sources: {
+      snapshot_total_inc_gst:
+        "job_documents.data_snapshot_json.pricing_json.totalIncGST (null means unavailable)",
+      "jobs.pricing_total_inc_gst":
+        "jobs.pricing_json.totalIncGST (current job pricing, not historical sent quote value)",
+    },
+  };
+  assertJsonResponseWithinLimit(body);
+  return { status: 200, body };
+}
+
 export function listJobDocuments(
   deps: InsuranceReadDeps,
   params: URLSearchParams,
   auth: InsuranceReadAuth,
 ): Promise<InsuranceReadResult> {
+  if (params.has("scope")) return listSentJobDocuments(deps, params, auth);
   return listAction(deps, params, auth, "list_job_documents");
 }
 
