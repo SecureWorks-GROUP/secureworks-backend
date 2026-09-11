@@ -335,6 +335,20 @@ export interface SesReportCronSchedulerPulse {
   last_status: string | null;
 }
 
+export interface SesReportDrainCronVisibility {
+  pg_cron_present: boolean | null;
+  cron_run_details_present: boolean | null;
+  /** The role every reader here sees pg_cron through (the functions' owner). */
+  definer_role: string | null;
+  definer_bypasses_rls: boolean | null;
+  /** true when a plain SELECT on cron.job raised insufficient_privilege; null when pg_cron is absent. */
+  cron_job_select_denied: boolean | null;
+}
+
+/** What an empty cron_job / scheduler_pulse actually means, given cron_visibility. */
+export const SES_REPORT_DRAIN_VISIBILITY_NOTE =
+  "An empty cron_job or scheduler_pulse is only 'the job is not scheduled' when cron_visibility says pg_cron_present true, cron_job_select_denied false and definer_bypasses_rls true. With definer_bypasses_rls false it may instead be scheduled under another database role and hidden by pg_cron row security.";
+
 export interface SesReportDrainState {
   /** true/false from public.ses_report_trigger_settings; null when it could not be read. */
   drain_enabled: boolean | null;
@@ -367,6 +381,10 @@ export interface SesReportDrainState {
    */
   scheduler_pulse: SesReportCronSchedulerPulse[] | null;
   scheduler_pulse_error: string | null;
+  /** Tells absent pg_cron, an unreadable cron schema and row-security hiding apart. Null when unreadable. */
+  cron_visibility: SesReportDrainCronVisibility | null;
+  cron_visibility_error: string | null;
+  visibility_note: string;
   gate: string;
   cron_job_name: string;
   note: string;
@@ -402,6 +420,8 @@ export async function readSesReportDrainState(client: any): Promise<SesReportDra
     cron_run_count: null, cron_run_count_error: null,
     recent_http_responses: null, http_responses_error: null,
     scheduler_pulse: null, scheduler_pulse_error: null,
+    cron_visibility: null, cron_visibility_error: null,
+    visibility_note: SES_REPORT_DRAIN_VISIBILITY_NOTE,
     http_responses_scope:
       "Latest net._http_response rows from every pg_net caller. pg_net does not keep the request URL with a response, so a row here is not proven to be a drain post. pg_net deletes responses after its TTL (6 hours by default).",
     gate: "public.ses_report_drain_enabled() (public.ses_report_trigger_settings.drain_enabled; missing row = off)",
@@ -427,12 +447,13 @@ export async function readSesReportDrainState(client: any): Promise<SesReportDra
     out.settings_error = error instanceof Error ? error.message : String(error);
   }
 
-  const [runs, job, count, http, pulse] = await Promise.all([
+  const [runs, job, count, http, pulse, visibility] = await Promise.all([
     readDrainRpc(client, "ses_report_drain_cron_runs", { p_limit: 5 }),
     readDrainRpc(client, "ses_report_drain_cron_job", {}),
     readDrainRpc(client, "ses_report_drain_cron_run_count", {}),
     readDrainRpc(client, "ses_report_drain_http_responses", { p_limit: 5 }),
     readDrainRpc(client, "ses_report_cron_scheduler_pulse", { p_limit: 30 }),
+    readDrainRpc(client, "ses_report_drain_cron_visibility", {}),
   ]);
 
   if (runs.error !== null) {
@@ -456,9 +477,18 @@ export async function readSesReportDrainState(client: any): Promise<SesReportDra
   if (count.error !== null) {
     out.cron_run_count_error = count.error;
   } else if (count.data !== null && count.data !== undefined) {
-    // bigint may arrive as a number or a numeric string; null stays null (pg_cron absent or not permitted).
+    // bigint may arrive as a number or a numeric string. null stays null and means
+    // pg_cron is absent; -1 is the reader's sentinel for "this role may not read
+    // cron.job_run_details" and is reported as an error, not as a count.
     const n = Number(count.data);
-    out.cron_run_count = Number.isFinite(n) ? n : null;
+    if (!Number.isFinite(n)) {
+      out.cron_run_count = null;
+    } else if (n === -1) {
+      out.cron_run_count_error =
+        "insufficient_privilege: the reader's database role may not SELECT cron.job_run_details (missing grant, or pg_cron row security). Not the same as pg_cron being absent, which reads as a null count with no error.";
+    } else {
+      out.cron_run_count = n;
+    }
   }
 
   if (http.error !== null) {
@@ -478,6 +508,20 @@ export async function readSesReportDrainState(client: any): Promise<SesReportDra
       active: (r.active as boolean) ?? null, username: (r.username as string) ?? null,
       last_start_time: (r.last_start_time as string) ?? null, last_status: (r.last_status as string) ?? null,
     }));
+  }
+
+  if (visibility.error !== null) {
+    out.cron_visibility_error = visibility.error;
+  } else {
+    // The function always returns exactly one row; PostgREST hands back an array.
+    const row = drainRows(visibility.data)[0];
+    out.cron_visibility = row === undefined ? null : {
+      pg_cron_present: (row.pg_cron_present as boolean) ?? null,
+      cron_run_details_present: (row.cron_run_details_present as boolean) ?? null,
+      definer_role: (row.definer_role as string) ?? null,
+      definer_bypasses_rls: (row.definer_bypasses_rls as boolean) ?? null,
+      cron_job_select_denied: (row.cron_job_select_denied as boolean) ?? null,
+    };
   }
 
   return out;

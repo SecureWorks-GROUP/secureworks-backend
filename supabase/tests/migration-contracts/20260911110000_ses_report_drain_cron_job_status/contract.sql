@@ -19,13 +19,34 @@ BEGIN
   IF n <> 0 THEN RAISE EXCEPTION 'contract: scheduler pulse returned rows without a cron schema (rows=%)', n; END IF;
 END $$;
 
+-- 1b. The visibility reader always answers, and without pg_cron it says so
+--     rather than joining the other readers in a silent empty. The probe is
+--     not attempted, so cron_job_select_denied is null, not false.
+DO $$
+DECLARE v record; n integer;
+BEGIN
+  SELECT count(*) INTO n FROM public.ses_report_drain_cron_visibility();
+  IF n <> 1 THEN RAISE EXCEPTION 'contract: visibility reader did not return exactly one row (rows=%)', n; END IF;
+  SELECT * INTO v FROM public.ses_report_drain_cron_visibility();
+  IF v.pg_cron_present IS DISTINCT FROM false OR v.cron_run_details_present IS DISTINCT FROM false
+     OR v.cron_job_select_denied IS NOT NULL THEN
+    RAISE EXCEPTION 'contract: visibility reader did not report pg_cron absent: %', row_to_json(v);
+  END IF;
+  IF v.definer_role <> current_user THEN
+    RAISE EXCEPTION 'contract: visibility reader did not report the definer role (got %, expected %)', v.definer_role, current_user;
+  END IF;
+  IF v.definer_bypasses_rls IS DISTINCT FROM (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'contract: visibility reader did not report rolbypassrls for the definer: %', row_to_json(v);
+  END IF;
+END $$;
+
 -- 2. Server-only readers: SECURITY DEFINER with a fixed search_path, no browser
 --    role can execute them, service_role and postgres can. The settings table
 --    comment says disable with UPDATE and never DELETE.
 DO $$
 DECLARE r text; f text; c text;
 BEGIN
-  FOREACH f IN ARRAY ARRAY['public.ses_report_drain_cron_job()', 'public.ses_report_drain_cron_run_count()', 'public.ses_report_drain_http_responses(integer)', 'public.ses_report_cron_scheduler_pulse(integer)'] LOOP
+  FOREACH f IN ARRAY ARRAY['public.ses_report_drain_cron_job()', 'public.ses_report_drain_cron_run_count()', 'public.ses_report_drain_http_responses(integer)', 'public.ses_report_cron_scheduler_pulse(integer)', 'public.ses_report_drain_cron_visibility()'] LOOP
     FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
       IF has_function_privilege(r, f, 'EXECUTE') THEN RAISE EXCEPTION 'contract: % can execute %', r, f; END IF;
     END LOOP;
@@ -146,6 +167,19 @@ DECLARE v bigint;
 BEGIN
   v := public.ses_report_drain_cron_run_count();
   IF v IS DISTINCT FROM 27 THEN RAISE EXCEPTION 'contract: cron run count is not every visible drain run (count=%)', v; END IF;
+END $$;
+
+-- 5a. With pg_cron present and readable, the visibility reader says so: present
+--     true and the cron.job probe not denied. This is the state in which an
+--     empty ses_report_drain_cron_job() may honestly be read as "not scheduled".
+DO $$
+DECLARE v record;
+BEGIN
+  SELECT * INTO v FROM public.ses_report_drain_cron_visibility();
+  IF v.pg_cron_present IS DISTINCT FROM true OR v.cron_run_details_present IS DISTINCT FROM true
+     OR v.cron_job_select_denied IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'contract: visibility reader wrong with a readable cron schema: %', row_to_json(v);
+  END IF;
 END $$;
 
 -- 5b. ses_report_cron_scheduler_pulse: every visible job, not only the drain,
@@ -300,13 +334,42 @@ BEGIN
   END IF;
 END $$;
 
--- 8. A definer without SELECT on job_run_details gets NULL from the count
---    helper (insufficient_privilege caught), not an error.
+-- 8. A definer without SELECT on job_run_details gets -1 from the count helper
+--    (insufficient_privilege caught), not an error and NOT null. NULL is
+--    reserved for "pg_cron is absent": the two are different diagnoses and the
+--    reader must not collapse them.
 REVOKE SELECT ON cron.job_run_details FROM contract_drain_definer;
 DO $$
+DECLARE v bigint;
 BEGIN
-  IF public.ses_report_drain_cron_run_count() IS NOT NULL THEN
-    RAISE EXCEPTION 'contract: cron run count did not return null without privilege on job_run_details';
+  v := public.ses_report_drain_cron_run_count();
+  IF v IS DISTINCT FROM -1 THEN
+    RAISE EXCEPTION 'contract: cron run count did not return -1 without privilege on job_run_details (got %)', v;
+  END IF;
+END $$;
+
+-- 8b. A definer that cannot read cron.job at all: the visibility reader reports
+--     pg_cron present with the SELECT denied, so an empty job reader is read as
+--     "unreadable by this role", not as "not scheduled". It also reports the
+--     definer role and that the role does not bypass row security, which is the
+--     third cause the empty answers used to hide.
+ALTER FUNCTION public.ses_report_drain_cron_visibility() OWNER TO contract_drain_definer;
+DO $$
+DECLARE v record;
+BEGIN
+  SELECT * INTO v FROM public.ses_report_drain_cron_visibility();
+  IF v.pg_cron_present IS DISTINCT FROM true OR v.cron_job_select_denied IS DISTINCT FROM false
+     OR v.definer_role <> 'contract_drain_definer' OR v.definer_bypasses_rls IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'contract: visibility reader wrong for a row-security-bound definer: %', row_to_json(v);
+  END IF;
+END $$;
+REVOKE SELECT ON cron.job FROM contract_drain_definer;
+DO $$
+DECLARE v record;
+BEGIN
+  SELECT * INTO v FROM public.ses_report_drain_cron_visibility();
+  IF v.pg_cron_present IS DISTINCT FROM true OR v.cron_job_select_denied IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'contract: visibility reader did not report cron.job as unreadable: %', row_to_json(v);
   END IF;
 END $$;
 

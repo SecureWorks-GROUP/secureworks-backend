@@ -14,7 +14,13 @@
 --     means no such job exists for this role (absent, or owned by another role).
 --   * ses_report_drain_cron_run_count(): every job_run_details row for that
 --     jobname the definer can see, across all its jobids and without a username
---     filter. NULL when pg_cron is absent or the definer lacks privilege.
+--     filter. NULL when pg_cron is absent, -1 when the definer lacks privilege
+--     on cron.job_run_details. Those are different diagnoses, so they are
+--     different answers.
+--   * ses_report_drain_cron_visibility(): always one row saying whether pg_cron
+--     is installed, which role the readers see through, whether that role
+--     bypasses row security, and whether cron.job is readable at all. This is
+--     what turns an empty answer above into a diagnosis.
 --   * ses_report_cron_scheduler_pulse(p_limit): every visible cron.job row with
 --     its newest run, newest first. If every job's newest run is old, the whole
 --     pg_cron scheduler stopped rather than this one job.
@@ -22,7 +28,7 @@
 --     rows. pg_net does not keep the request URL with a response, so these are
 --     the latest responses overall from every net.http_post caller, not only
 --     drain posts.
--- All four: fixed search_path, service_role and postgres only, dynamic SQL
+-- All five: fixed search_path, service_role and postgres only, dynamic SQL
 -- behind a to_regclass guard so a database without pg_cron or pg_net (the
 -- contract runner, a partial restore) returns an empty answer.
 
@@ -75,7 +81,9 @@ BEGIN
       INTO v_count
       USING 'ses-report-trigger-drain';
   EXCEPTION WHEN insufficient_privilege THEN
-    RETURN NULL;
+    -- -1, not NULL: NULL already means "pg_cron is absent", and conflating the
+    -- two hides the "hidden from this role" case the whole migration exists for.
+    RETURN -1;
   END;
   RETURN v_count;
 END;
@@ -165,6 +173,57 @@ BEGIN
 END;
 $$;
 
+-- Which of "empty" is it? Every reader above answers with an empty set or NULL
+-- for three different causes: pg_cron is not installed, the job is not
+-- scheduled, or the job exists but is hidden from this definer by pg_cron row
+-- security. This reader always returns exactly one row and separates them:
+--   pg_cron_present false                      -> the extension is absent
+--   pg_cron_present true, cron_job_select_denied true
+--                                              -> the role cannot read cron.job at all
+--   pg_cron_present true, denied false, definer_bypasses_rls false, and an
+--   empty ses_report_drain_cron_job()          -> either genuinely unscheduled
+--                                                 or owned by another role
+--   definer_bypasses_rls true and an empty job reader
+--                                              -> genuinely unscheduled; row
+--                                                 security cannot be hiding it
+-- definer_role is current_user, which inside a SECURITY DEFINER function is the
+-- function's owner, i.e. the role whose pg_cron visibility every reader here has.
+CREATE OR REPLACE FUNCTION public.ses_report_drain_cron_visibility()
+RETURNS TABLE (
+  pg_cron_present boolean,
+  cron_run_details_present boolean,
+  definer_role text,
+  definer_bypasses_rls boolean,
+  cron_job_select_denied boolean
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_present boolean := to_regclass('cron.job') IS NOT NULL;
+  v_runs_present boolean := to_regclass('cron.job_run_details') IS NOT NULL;
+  v_denied boolean := NULL;
+  v_probe integer;
+BEGIN
+  IF v_present THEN
+    BEGIN
+      EXECUTE 'SELECT 1 FROM cron.job LIMIT 1' INTO v_probe;
+      v_denied := false;
+    EXCEPTION WHEN insufficient_privilege THEN
+      v_denied := true;
+    END;
+  END IF;
+  RETURN QUERY SELECT
+    v_present,
+    v_runs_present,
+    current_user::text,
+    COALESCE((SELECT r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user), false),
+    v_denied;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.ses_report_drain_cron_job() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.ses_report_drain_cron_run_count() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.ses_report_drain_http_responses(integer) FROM PUBLIC, anon, authenticated;
@@ -173,6 +232,8 @@ GRANT EXECUTE ON FUNCTION public.ses_report_drain_cron_run_count() TO service_ro
 REVOKE ALL ON FUNCTION public.ses_report_cron_scheduler_pulse(integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.ses_report_drain_http_responses(integer) TO service_role, postgres;
 GRANT EXECUTE ON FUNCTION public.ses_report_cron_scheduler_pulse(integer) TO service_role, postgres;
+REVOKE ALL ON FUNCTION public.ses_report_drain_cron_visibility() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.ses_report_drain_cron_visibility() TO service_role, postgres;
 
 COMMENT ON TABLE public.ses_report_trigger_settings IS
   'Single-row enable switch for the SES report-submitted drain (ses-report-trigger-drain cron). Independent of makesafe_cron_settings, which gates make-safe email polling only. Disable with UPDATE public.ses_report_trigger_settings SET drain_enabled = false, updated_by = <who>, updated_at = now(). Never DELETE the row: a missing row reads as off, but a re-apply of 20260911090000_ses_report_drain_own_flag re-seeds it as enabled.';
