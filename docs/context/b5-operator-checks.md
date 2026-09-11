@@ -6,4 +6,6 @@
 4. Apply B1, B2, then B5 through the approved migration route before deploying monitor-inbox. No new environment variable is required; the endpoint uses existing MICROSOFT_TENANT_ID, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and service credentials. No values belong in this document.
 5. Verify private bucket visibility, per-stream response coverage, actual group attachment expansion and initial metadata-scan completion. No source can be called complete while continuing, unavailable, deferred or failed.
 
+6. Verify a permitted job detail read opens a private PDF/image and a forbidden trade document remains absent. Inspect compatibility counts separately from Graph coverage; cached classification and partial-file retries must converge. Existing business Haiku credentials are used only within the predecessor unread/recent/user-mailbox boundary; no new credential is required.
+
 No live commands, cron activation, permission grants, mail sends or credential changes are authorized by this checklist.

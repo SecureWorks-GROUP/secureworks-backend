@@ -1,3 +1,4 @@
+import { projectContextMailFiles } from "./context_mail_file_projection.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
@@ -14995,9 +14996,9 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
       authority: 'typed_job_metadata',
     }),
     assignments: assignRes.data || [],
-    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, thumbnail_url: d.thumbnail_url, label: d.label, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, accepted_at: d.accepted_at, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
+    documents: (await projectContextMailFiles(client, docsRes.data || [], jobId)).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, thumbnail_url: d.thumbnail_url, label: d.label, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, accepted_at: d.accepted_at, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number, file_unavailable: d.file_unavailable, file_unavailable_reason: d.file_unavailable_reason })),
     events: eventsRes.data || [],
-    media: mediaRes.data || [],
+    media: await projectContextMailFiles(client, mediaRes.data || [], jobId),
     purchase_orders: posLite,
     work_orders: woRes.data || [],
     xero_project: xeroRes.data,
@@ -40536,8 +40537,8 @@ async function tradeJobDetail(
       family: _tradeJobMetadata?.makesafe_job_family,
       authority: 'typed_job_metadata',
     }),
-    documents: visibleDocuments,
-    media: allocatedMedia,
+    documents: await projectContextMailFiles(client, visibleDocuments, jobId),
+    media: await projectContextMailFiles(client, allocatedMedia, jobId),
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
     // notes thread. The markers stay in job_events untouched.

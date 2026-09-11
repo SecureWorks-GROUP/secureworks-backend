@@ -499,3 +499,66 @@ Deno.test("initial delta scans old metadata without historical evidence backfill
   assertEquals(ids, ["m1"]);
   assert(!new URL(initialDelta(stream)).searchParams.has("$filter"));
 });
+
+Deno.test("paid eligibility snapshot preserves only unread recent predecessor user mailboxes", async () => {
+  const recent = new Date().toISOString();
+  const cases = [
+    {
+      isRead: false,
+      mailbox: "marnin@secureworkswa.com.au",
+      at: recent,
+      expected: true,
+    },
+    {
+      isRead: true,
+      mailbox: "marnin@secureworkswa.com.au",
+      at: recent,
+      expected: false,
+    },
+    {
+      isRead: undefined,
+      mailbox: "marnin@secureworkswa.com.au",
+      at: recent,
+      expected: false,
+    },
+    {
+      isRead: false,
+      mailbox: "marnin@secureworkswa.com.au",
+      at: "2020-01-01T00:00:00Z",
+      expected: false,
+    },
+    {
+      isRead: false,
+      mailbox: "orders@secureworkswa.com.au",
+      at: recent,
+      expected: false,
+    },
+    {
+      isRead: false,
+      mailbox: "ses@secureworkswa.com.au",
+      at: recent,
+      expected: false,
+    },
+  ];
+  for (const c of cases) {
+    const fake = persistenceFake();
+    await persistMail(
+      fake.sb,
+      async () => ({}),
+      {
+        ...message,
+        hasAttachments: false,
+        isRead: c.isRead,
+        receivedDateTime: c.at,
+        bodyPreview: "x".repeat(600),
+      },
+      { ...stream, mailbox: c.mailbox },
+      "https://graph.microsoft.com/v1.0/message",
+    );
+    const inbox = fake.observations.find((r) => r.table === "inbox_events")!;
+    const metadata = inbox.metadata as Record<string, unknown>;
+    assertEquals(metadata.legacy_classifier_eligible, c.expected);
+    assertEquals((metadata.legacy_body_preview as string).length, 500);
+    assertEquals(fake.rows.length, 1); // Even read/old/new-mailbox messages keep canonical evidence.
+  }
+});

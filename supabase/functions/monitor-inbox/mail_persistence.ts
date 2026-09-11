@@ -68,7 +68,7 @@ export async function persistMail(
       ...message,
       ...await get(
         stream.kind === "user"
-          ? `${resourceUrl}?$select=id,internetMessageId,conversationId,from,sender,toRecipients,subject,body,receivedDateTime,sentDateTime,hasAttachments,internetMessageHeaders`
+          ? `${resourceUrl}?$select=id,internetMessageId,conversationId,from,sender,toRecipients,subject,body,receivedDateTime,sentDateTime,hasAttachments,isRead,bodyPreview,internetMessageHeaders`
           : resourceUrl,
       ),
     };
@@ -233,6 +233,16 @@ export async function persistMail(
         body_hash: body.hash,
         attachments,
         capture_version: "mail_v2",
+        compatibility: { status: "pending" },
+        legacy_classifier_eligible: stream.kind === "user" &&
+          message.isRead === false &&
+          Date.parse(providerAt) >= Date.now() - 15 * 60_000 &&
+          ["marnin", "jan", "nithin", "shaun", "admin", "patios", "fencing"]
+            .some(
+              (name) => stream.mailbox === `${name}@secureworkswa.com.au`,
+            ),
+        legacy_body_preview: (message.bodyPreview || "").slice(0, 500),
+        legacy_graph_message_id: message.id,
       },
     }, { onConflict: "graph_message_id", ignoreDuplicates: true });
     if (inboxError) throw new Error("mail_inbox_bridge_failed");

@@ -1,3 +1,5 @@
+import { runMailCompatibility } from "./mail_compatibility.ts";
+import { classifyEmail } from "./mail_classifier.ts";
 import { runMailStreams } from "./mail_run.ts";
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // deno-lint-ignore no-import-prefix
@@ -110,11 +112,15 @@ Deno.serve(async (req) => {
         (mail, stream, url) => persistMail(sb, get, mail, stream, url),
       ),
     );
+    const compatibility = await runMailCompatibility(sb, classifyEmail).catch(
+      () => ({ error: "mail_compatibility_failed" }),
+    );
     const success = coverage.every((row) => row.status === "complete");
     return new Response(
       JSON.stringify({
         success,
         coverage,
+        compatibility,
         timestamp: new Date().toISOString(),
       }),
       { status: success ? 200 : 207, headers },

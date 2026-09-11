@@ -21,6 +21,7 @@ export interface Mail {
   sentDateTime?: string;
   createdDateTime?: string;
   hasAttachments?: boolean;
+  isRead?: boolean;
   internetMessageHeaders?: { name: string; value: string }[];
   "@removed"?: unknown;
 }
@@ -118,7 +119,7 @@ export function mailIdentity(message: Mail, stream: Stream): string {
 export function initialDelta(stream: Stream): string {
   const query = new URLSearchParams({
     "$select":
-      "id,internetMessageId,conversationId,from,sender,toRecipients,subject,receivedDateTime,sentDateTime,hasAttachments",
+      "id,internetMessageId,conversationId,from,sender,toRecipients,subject,receivedDateTime,sentDateTime,hasAttachments,isRead,bodyPreview",
     "$orderby": "receivedDateTime desc",
   });
   return `${GRAPH}/users/${
