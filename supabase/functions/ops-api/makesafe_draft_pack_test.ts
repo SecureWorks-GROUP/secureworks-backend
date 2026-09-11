@@ -1244,3 +1244,162 @@ Deno.test("assertRejects import smoke", async () => {
   await assertRejects(() => Promise.reject(new Error("ok")), Error, "ok");
   assert(true);
 });
+
+// --- Labour-only MLB temporary-fence verifier -------------------------------
+//
+// The builder put his own fencing up, so there is no SecureWorks hire to bill.
+// The verifier accepts attendance labour on its own, but ONLY when the trade
+// report itself proves it: no SecureWorks materials, and trade-recorded wording
+// that says the fencing was client supplied. Draft wording never counts.
+
+const MLB_LABOUR_ONLY_INVOICE = {
+  reference: "MLB-26310",
+  contact_name: "Major Loss Builders",
+  line_items: [{
+    description: "Make-safe attendance labour",
+    quantity: 8,
+    unit_price: 85,
+  }],
+};
+
+const MLB_LABOUR_ONLY_REPORT = {
+  ref: "MLB-26310",
+  address: "12 Marangaroo Dr",
+  billing_note: "2 trades x 4 hours",
+  scope: "Temporary fencing make-safe.",
+  works: "Attended site and made the temporary fencing safe.",
+};
+
+Deno.test("MLB labour-only temp-fence pack is accepted when the trade report records client-supplied fencing", () => {
+  const output = normaliseDraftPackOutput({
+    report: MLB_LABOUR_ONLY_REPORT,
+    invoice: MLB_LABOUR_ONLY_INVOICE,
+    change_summary: "Billed attendance labour only.",
+  });
+
+  const verification = verifyDraftPackOutput(output, {
+    job: { site_suburb: "Marangaroo" },
+    detail: {
+      external_ref: "MLB-26310",
+      requesting_company_name: "Major Loss Builders",
+    },
+    service_report: {
+      checklist_json: {
+        job_type: "Temporary fencing",
+        materials_used: [". x .", "", ". x ."],
+        work_done:
+          "Builder had the temp fencing on site already, used his own supplies. We attended and made it safe.",
+      },
+    },
+  });
+
+  assertEquals(verification.ok, true);
+  assertEquals(verification.blockers, []);
+  assert(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+  );
+  const assumptions = verification.review_assumptions ?? [];
+  assertEquals(assumptions.length, 1);
+  assertEquals(
+    assumptions[0].reason_code,
+    "temporary_fence_hire_withheld_client_supplied",
+  );
+  assertStringIncludes(assumptions[0].reason, "client-supplied");
+});
+
+Deno.test("MLB labour-only temp-fence pack is still refused when the trade report lacks client-supplied wording", () => {
+  const output = normaliseDraftPackOutput({
+    report: MLB_LABOUR_ONLY_REPORT,
+    invoice: MLB_LABOUR_ONLY_INVOICE,
+    change_summary: "Billed attendance labour only.",
+  });
+
+  const verification = verifyDraftPackOutput(output, {
+    job: { site_suburb: "Marangaroo" },
+    detail: {
+      external_ref: "MLB-26310",
+      requesting_company_name: "Major Loss Builders",
+    },
+    service_report: {
+      checklist_json: {
+        job_type: "Temporary fencing",
+        materials_used: [". x .", "", ". x ."],
+        work_done:
+          "Attended site and made the temporary fencing safe. All secure on departure.",
+      },
+    },
+  });
+
+  assertEquals(verification.ok, false);
+  assert(
+    verification.blockers.some((blocker) =>
+      /retrieval allowance/i.test(blocker)
+    ),
+    `expected a retrieval-allowance blocker, got ${
+      JSON.stringify(verification.blockers)
+    }`,
+  );
+  assertEquals(verification.review_assumptions, undefined);
+  assertEquals(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+    false,
+  );
+});
+
+Deno.test("client-supplied wording in the draft's own text cannot launder away the MLB hire card", () => {
+  // The model wrote "client supplied" into the report and the invoice line. The
+  // trade evidence says nothing of the sort, so the hire card still stands.
+  const output = normaliseDraftPackOutput({
+    report: {
+      ...MLB_LABOUR_ONLY_REPORT,
+      works:
+        "Attended site. Temporary fencing was client supplied, so no hire has been charged.",
+      materials: "Nil - client supplied fencing, client's own panels.",
+    },
+    invoice: {
+      ...MLB_LABOUR_ONLY_INVOICE,
+      line_items: [{
+        description: "Make-safe attendance labour - client supplied fencing",
+        quantity: 8,
+        unit_price: 85,
+      }],
+    },
+    change_summary: "Billed attendance labour only, customer supplied fencing.",
+  });
+
+  const verification = verifyDraftPackOutput(output, {
+    job: { site_suburb: "Marangaroo" },
+    detail: {
+      external_ref: "MLB-26310",
+      requesting_company_name: "Major Loss Builders",
+    },
+    service_report: {
+      checklist_json: {
+        job_type: "Temporary fencing",
+        materials_used: [". x .", "", ". x ."],
+        work_done: "Attended site and made the temporary fencing safe.",
+      },
+    },
+  });
+
+  assertEquals(verification.ok, false);
+  assert(
+    verification.blockers.some((blocker) =>
+      /retrieval allowance/i.test(blocker)
+    ),
+    `expected a retrieval-allowance blocker, got ${
+      JSON.stringify(verification.blockers)
+    }`,
+  );
+  assertEquals(verification.review_assumptions, undefined);
+  assertEquals(
+    verification.applied_rule_ids.includes(
+      "MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY",
+    ),
+    false,
+  );
+});
