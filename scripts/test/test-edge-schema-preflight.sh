@@ -40,6 +40,7 @@ TRADE_PACK_MIGRATION="$REPO_ROOT/supabase/migrations/20260904090000_job_document
 SEND_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906140000_job_documents_send_claimed_at.sql"
 SEND_RUNS_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906150000_jobs_send_runs_claimed_at.sql"
 SEND_CLAIM_TOKEN_MIGRATION="$REPO_ROOT/supabase/migrations/20260906160000_job_documents_send_claim_token.sql"
+DEBT_PICTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911120000_debt_picture.sql"
 
 
 PASS_COUNT=0
@@ -194,6 +195,10 @@ send_claim_token_migration_sha() {
   shasum -a 256 "$SEND_CLAIM_TOKEN_MIGRATION" | awk '{print $1}'
 }
 
+debt_picture_migration_sha() {
+  shasum -a 256 "$DEBT_PICTURE_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -233,6 +238,7 @@ write_response() {
   SEND_CLAIMED_AT_EXPECTED_SHA="$(send_claimed_at_migration_sha)" \
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
+  DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -609,6 +615,17 @@ send_claim_token_row = {
     "actual_statement_sha256": os.environ["SEND_CLAIM_TOKEN_EXPECTED_SHA"],
     "missing_markers": [],
 }
+debt_picture_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260911120000",
+    "expected_migration_name": "debt_picture",
+    "expected_statement_sha256": os.environ["DEBT_PICTURE_EXPECTED_SHA"],
+    "actual_migration_version": "20260911120000",
+    "actual_migration_name": "debt_picture",
+    "actual_statement_count": 34,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -645,6 +662,7 @@ with open(sys.argv[1], "w") as f:
             send_claimed_at_row,
             send_runs_claimed_at_row,
             send_claim_token_row,
+            debt_picture_row,
         ],
         f,
     )
@@ -882,7 +900,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" || ! -f "$DEBT_PICTURE_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
