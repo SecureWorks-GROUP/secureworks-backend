@@ -6,7 +6,7 @@ import {
   xeroDateToIsoTimestamp,
 } from "./deposit_stamp.ts";
 
-const INV = "11111111-2222-3333-4444-555555555555";
+const INV = "a1b2c3d4-2222-3333-4444-55555566cdef";
 const paidInvoice = (extra: Record<string, unknown> = {}) => ({
   Type: "ACCREC",
   InvoiceID: INV,
@@ -80,11 +80,9 @@ Deno.test("idempotent: an already stamped job is never re-stamped", () => {
 Deno.test("only the job's OWN deposit invoice stamps it", () => {
   assertEquals(depositStampDecision(paidInvoice(), job({ deposit_invoice_id: "other-id" })), null);
   assertEquals(depositStampDecision(paidInvoice(), job({ deposit_invoice_id: null })), null);
-  // Xero ids are case-stable but compare defensively.
-  assertEquals(
-    depositStampDecision(paidInvoice(), job({ deposit_invoice_id: INV.toUpperCase() }))?.action,
-    "stamp",
-  );
+  // Matching is exact, the same as the `.eq` lookup that found the job.
+  assertEquals(depositStampDecision(paidInvoice(), job({ deposit_invoice_id: INV.toUpperCase() })), null);
+  assertEquals(depositStampDecision(paidInvoice(), job({ deposit_invoice_id: ` ${INV} ` }))?.action, "stamp");
 });
 
 Deno.test("a PAID payload that still reports money due does not stamp", () => {
@@ -114,54 +112,66 @@ Deno.test("a voided deposit invoice logs a contradiction and never clears the st
 
 interface Write { table: string; op: string; values: Record<string, unknown>; filters: unknown[] }
 
-function fakeClient(jobRow: Record<string, unknown> | null, opts: { lookupError?: boolean } = {}) {
+interface FakeOptions {
+  jobRow?: Record<string, unknown> | null;
+  lookupError?: boolean;
+  updateRows?: Array<Record<string, unknown>>;
+  contradictionLogged?: boolean;
+  contradictionLookupError?: boolean;
+}
+
+function fakeClient(opts: FakeOptions = {}) {
   const writes: Write[] = [];
-  const builder = (table: string) => {
-    const chain: Record<string, unknown> = {};
+  const jobRow = opts.jobRow === undefined ? job() : opts.jobRow;
+  const from = (table: string) => {
     const filters: unknown[] = [];
-    let pending: { op: string; values: Record<string, unknown> } | null = null;
-    const self = () => chain;
-    for (const k of ["eq", "is", "not", "select", "limit", "order"]) {
-      chain[k] = (...args: unknown[]) => {
+    let mode: "read" | "update" = "read";
+    let values: Record<string, unknown> = {};
+    // deno-lint-ignore no-explicit-any
+    const api: any = {};
+    for (const k of ["select", "eq", "is", "limit", "not", "order"]) {
+      api[k] = (...args: unknown[]) => {
         filters.push([k, ...args]);
-        return self();
+        return api;
       };
     }
-    chain.maybeSingle = () =>
+    api.maybeSingle = () =>
       Promise.resolve(
         opts.lookupError
-          ? { data: null, error: { message: "boom" } }
+          ? { data: null, error: { message: "job lookup exploded" } }
           : { data: jobRow, error: null },
       );
-    chain.update = (values: Record<string, unknown>) => {
-      pending = { op: "update", values };
-      const p: Record<string, unknown> = {};
-      for (const k of ["eq", "is"]) {
-        p[k] = (...args: unknown[]) => {
-          filters.push([k, ...args]);
-          return p;
-        };
-      }
-      // deno-lint-ignore no-explicit-any
-      (p as any).then = (res: (v: unknown) => unknown) => {
-        writes.push({ table, op: "update", values, filters: [...filters] });
-        return Promise.resolve(res({ error: null }));
-      };
-      return p;
+    api.update = (v: Record<string, unknown>) => {
+      mode = "update";
+      values = v;
+      return api;
     };
-    chain.insert = (values: Record<string, unknown>) => {
-      pending = { op: "insert", values };
-      writes.push({ table, op: "insert", values, filters: [...filters] });
+    api.insert = (v: Record<string, unknown>) => {
+      writes.push({ table, op: "insert", values: v, filters: [...filters] });
       return Promise.resolve({ error: null });
     };
-    void pending;
-    return chain;
+    api.then = (resolve: (v: unknown) => unknown) => {
+      if (mode === "update") {
+        writes.push({ table, op: "update", values, filters: [...filters] });
+        return Promise.resolve(
+          resolve({ data: opts.updateRows ?? [{ id: "job-uuid" }], error: null }),
+        );
+      }
+      if (table === "business_events") {
+        return Promise.resolve(resolve({
+          data: opts.contradictionLogged ? [{ id: "existing-event" }] : [],
+          error: opts.contradictionLookupError ? { message: "event lookup exploded" } : null,
+        }));
+      }
+      return Promise.resolve(resolve({ data: [], error: null }));
+    };
+    return api;
   };
-  return { client: { from: (t: string) => builder(t) }, writes };
+  return { client: { from }, writes };
 }
 
 Deno.test("applyDepositStamp writes deposit_at guarded on null, logs the event, leaves status alone", async () => {
-  const { client, writes } = fakeClient(job());
+  const { client, writes } = fakeClient();
   const out = await applyDepositStamp(client, "org", paidInvoice(), new Date("2026-09-11T02:00:00.000Z"));
   assertEquals(out?.action, "stamped");
   assertEquals(out?.deposit_at, "2025-09-08T00:00:00.000Z");
@@ -174,30 +184,59 @@ Deno.test("applyDepositStamp writes deposit_at guarded on null, logs the event, 
     (upd?.filters ?? []).some((f) => Array.isArray(f) && f[0] === "is" && f[1] === "deposit_at"),
     true,
   );
+  // The write is read back, so a zero-row update cannot be logged as a stamp.
+  assertEquals(
+    (upd?.filters ?? []).some((f) => Array.isArray(f) && f[0] === "select"),
+    true,
+  );
 
   const evt = writes.find((w) => w.table === "business_events");
   assertEquals(evt?.values.event_type, "job.deposit_stamped");
   assertEquals((evt?.values.payload as Record<string, unknown>).timestamp_source, "fully_paid_on");
 });
 
+Deno.test("a concurrent run that stamped first leaves us with no write and no event", async () => {
+  const { client, writes } = fakeClient({ updateRows: [] });
+  assertEquals(await applyDepositStamp(client, "org", paidInvoice()), null);
+  assertEquals(writes.filter((w) => w.table === "business_events").length, 0);
+});
+
 Deno.test("applyDepositStamp on a voided invoice writes only a business event", async () => {
-  const { client, writes } = fakeClient(job({ deposit_at: "2026-08-01T00:00:00.000Z" }));
+  const { client, writes } = fakeClient({ jobRow: job({ deposit_at: "2026-08-01T00:00:00.000Z" }) });
   const out = await applyDepositStamp(client, "org", paidInvoice({ Status: "VOIDED" }));
   assertEquals(out?.action, "contradiction_logged");
   assertEquals(writes.filter((w) => w.table === "jobs" && w.op === "update").length, 0);
   assertEquals(writes[0].values.event_type, "job.deposit_stamp_contradicted");
 });
 
+Deno.test("a contradiction already logged for this invoice is not logged again", async () => {
+  const { client, writes } = fakeClient({
+    jobRow: job({ deposit_at: "2026-08-01T00:00:00.000Z" }),
+    contradictionLogged: true,
+  });
+  assertEquals(await applyDepositStamp(client, "org", paidInvoice({ Status: "VOIDED" })), null);
+  assertEquals(writes.length, 0);
+});
+
+Deno.test("a failed contradiction lookup logs nothing rather than duplicating", async () => {
+  const { client, writes } = fakeClient({
+    jobRow: job({ deposit_at: "2026-08-01T00:00:00.000Z" }),
+    contradictionLookupError: true,
+  });
+  assertEquals(await applyDepositStamp(client, "org", paidInvoice({ Status: "VOIDED" })), null);
+  assertEquals(writes.length, 0);
+});
+
 Deno.test("applyDepositStamp: irrelevant invoice, missing job and failed lookup all write nothing", async () => {
-  const a = fakeClient(job());
+  const a = fakeClient();
   assertEquals(await applyDepositStamp(a.client, "org", paidInvoice({ Status: "AUTHORISED" })), null);
   assertEquals(a.writes.length, 0);
 
-  const b = fakeClient(null);
+  const b = fakeClient({ jobRow: null });
   assertEquals(await applyDepositStamp(b.client, "org", paidInvoice()), null);
   assertEquals(b.writes.length, 0);
 
-  const c = fakeClient(job(), { lookupError: true });
+  const c = fakeClient({ lookupError: true });
   assertEquals(await applyDepositStamp(c.client, "org", paidInvoice()), null);
   assertEquals(c.writes.length, 0);
 });

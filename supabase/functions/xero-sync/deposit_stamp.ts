@@ -74,9 +74,12 @@ export function depositStampRelevant(inv: any): boolean {
   return status === "PAID" || VOID_STATUSES.has(status);
 }
 
+// Exact match, deliberately. The database lookup that finds the job is an
+// exact `.eq('deposit_invoice_id', InvoiceID)`, so a looser comparison here
+// would only ever disagree with the row we were handed.
 const sameInvoice = (a: unknown, b: unknown) => {
-  const x = String(a ?? "").trim().toLowerCase();
-  const y = String(b ?? "").trim().toLowerCase();
+  const x = String(a ?? "").trim();
+  const y = String(b ?? "").trim();
   return !!x && x === y;
 };
 
@@ -140,8 +143,9 @@ export interface DepositStampOutcome {
  * Looks the job up by its deposit_invoice_id and applies the decision.
  * Returns null when there is nothing to do. Never writes jobs.status.
  *
- * The jobs update carries `.is('deposit_at', null)` so two concurrent syncs
- * cannot double-stamp: the second one writes nothing.
+ * The jobs update carries `.is('deposit_at', null)` and returns the rows it
+ * wrote, so two concurrent syncs cannot double-stamp: the second one writes
+ * nothing and logs nothing.
  */
 export async function applyDepositStamp(
   // deno-lint-ignore no-explicit-any
@@ -158,13 +162,39 @@ export async function applyDepositStamp(
     .eq("org_id", orgId)
     .eq("deposit_invoice_id", inv.InvoiceID)
     .maybeSingle();
-  // A failed lookup is not "no such job" — leave it for the next run.
-  if (error || !job) return null;
+  // A failed lookup is not "no such job" — leave it for the next run, but say
+  // so out loud: a silent null here is indistinguishable from a genuine miss.
+  if (error) {
+    console.error(
+      "[xero-sync] deposit stamp job lookup failed for invoice " +
+        (inv.InvoiceNumber || inv.InvoiceID) + ":",
+      error.message,
+    );
+    return null;
+  }
+  if (!job) return null;
 
   const decision = depositStampDecision(inv, job, now);
   if (!decision) return null;
 
   if (decision.action === "log_contradiction") {
+    // The sync window overlaps by 15 minutes, so a voided deposit invoice is
+    // re-read every run. One contradiction per invoice, not one per run.
+    const { data: logged, error: loggedErr } = await client.from("business_events")
+      .select("id")
+      .eq("event_type", "job.deposit_stamp_contradicted")
+      .eq("entity_id", inv.InvoiceID)
+      .limit(1);
+    if (loggedErr) {
+      console.error(
+        "[xero-sync] deposit contradiction lookup failed for invoice " +
+          (inv.InvoiceNumber || inv.InvoiceID) + ":",
+        loggedErr.message,
+      );
+      return null;
+    }
+    if (Array.isArray(logged) && logged.length > 0) return null;
+
     await client.from("business_events").insert({
       event_type: "job.deposit_stamp_contradicted",
       source: "xero-sync",
@@ -185,10 +215,11 @@ export async function applyDepositStamp(
     };
   }
 
-  const { error: updErr } = await client.from("jobs")
+  const { data: stampedRows, error: updErr } = await client.from("jobs")
     .update({ deposit_at: decision.deposit_at, updated_at: now.toISOString() })
     .eq("id", job.id)
-    .is("deposit_at", null);
+    .is("deposit_at", null)
+    .select("id");
   if (updErr) {
     console.error(
       "[xero-sync] deposit_at stamp failed for job " + (job.job_number || job.id) + ":",
@@ -196,6 +227,9 @@ export async function applyDepositStamp(
     );
     return null;
   }
+  // Zero rows means another run won the race and stamped first. Claiming a
+  // stamp we did not write would put a false event in the business log.
+  if (!Array.isArray(stampedRows) || stampedRows.length === 0) return null;
 
   await client.from("business_events").insert({
     event_type: "job.deposit_stamped",
