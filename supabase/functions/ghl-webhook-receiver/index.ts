@@ -1,3 +1,4 @@
+import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Receiver (All Event Types)
 //
@@ -367,6 +368,10 @@ serve(async (req) => {
         // Debug logging must not block webhook ingestion.
       }
     })();
+
+    if (!(await automationLaneEnabled(supabase, "capture"))) {
+      return jsonResponse({ received: true, event_created: false, reason: "capture_disabled" });
+    }
 
     // Supported event types
     const SUPPORTED_TYPES = [
