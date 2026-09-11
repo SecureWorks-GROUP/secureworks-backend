@@ -22,6 +22,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { listStaleXeroInvoices, reconcileXeroInvoice } from './xero_invoice_reconciliation.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
+import { applyDepositStamp, depositStampRelevant } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
@@ -579,6 +580,8 @@ async function syncInvoices(sb: any) {
   const modifiedSince = incrementalModifiedSince(cursorRow?.cursor_at || lastInvoice?.[0]?.updated_at)
 
   let totalSynced = 0
+  let depositStamps = 0
+  let depositStampContradictions = 0
   const sesLinkRefusals: SealedSesMoneyRefusal[] = []
   const syncBoth = ['ACCREC', 'ACCPAY'] // Sales invoices + Bills
 
@@ -731,6 +734,25 @@ async function syncInvoices(sb: any) {
                   .eq('org_id', DEFAULT_ORG_ID)
                   .is('job_id', null)
               }
+            }
+          }
+
+          // ── Deposit stamp: a PAID deposit invoice lands on jobs.deposit_at ──
+          // Independent of the status automation below: it never moves the job,
+          // it only records that the deposit money arrived, so the sales desks
+          // and BOOKKEEPING read the same fact. Non-blocking.
+          if (depositStampRelevant(inv)) {
+            try {
+              const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, inv)
+              if (stamped?.action === 'stamped') {
+                depositStamps++
+                console.log(`[xero-sync] Job ${stamped.job_number} deposit_at stamped ${stamped.deposit_at} (${stamped.source})`)
+              } else if (stamped?.action === 'contradiction_logged') {
+                depositStampContradictions++
+              }
+            } catch (e: any) {
+              if (e instanceof XeroCooldownError) throw e
+              console.error('[xero-sync] Deposit stamp failed:', (e as Error).message)
             }
           }
 
@@ -908,8 +930,28 @@ async function syncInvoices(sb: any) {
       const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
       for (const stale of staleInvoices) {
         try {
-          if (await reconcileXeroInvoice(sb, DEFAULT_ORG_ID, stale.xero_invoice_id,
-            () => xeroGet(`/Invoices/${stale.xero_invoice_id}`, at2, tid2, {}))) reconciled++
+          // Keep the verified provider payload: an invoice that reconciles from
+          // AUTHORISED to PAID is exactly the deposit the incremental loop's
+          // If-Modified-Since window can have already passed over.
+          let verified: any = null
+          const readInvoice = async () => {
+            const d = await xeroGet(`/Invoices/${stale.xero_invoice_id}`, at2, tid2, {})
+            verified = d?.Invoices?.[0] ?? null
+            return d
+          }
+          if (await reconcileXeroInvoice(sb, DEFAULT_ORG_ID, stale.xero_invoice_id, readInvoice)) {
+            reconciled++
+            if (verified && depositStampRelevant(verified)) {
+              try {
+                const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
+                if (stamped?.action === 'stamped') depositStamps++
+                else if (stamped?.action === 'contradiction_logged') depositStampContradictions++
+              } catch (stampErr: any) {
+                if (stampErr instanceof XeroCooldownError) throw stampErr
+                console.error('[xero-sync] Deposit stamp (reconcile) failed:', (stampErr as Error).message)
+              }
+            }
+          }
         } catch (e: any) {
           if (e instanceof XeroCooldownError) throw e
           // Failed lookup leaves existing balances and freshness untouched.
@@ -929,11 +971,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
+    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
+  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
 }
 
 
