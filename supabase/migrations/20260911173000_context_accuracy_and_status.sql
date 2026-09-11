@@ -53,13 +53,18 @@ GRANT SELECT ON public.context_accuracy_population TO service_role;
 CREATE FUNCTION public.context_coverage() RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  WITH facts AS (SELECT DISTINCT job_id FROM public.current_job_context_facts),
+ evidence AS (SELECT DISTINCT job_id FROM public.business_events WHERE job_id IS NOT NULL),
  open_jobs AS (SELECT j.id FROM public.jobs j WHERE coalesce(j.status::text,'unknown') NOT IN ('cancelled','archived','lost','closed','complete','completed')),
  open_invoices AS (SELECT i.job_id FROM public.xero_invoices i WHERE upper(coalesce(i.status,''))='AUTHORISED' AND i.amount_due>0 AND upper(coalesce(i.type,'ACCREC'))='ACCREC')
  SELECT jsonb_build_object(
   'jobs',jsonb_build_object('total',(SELECT count(*) FROM open_jobs),'with_current_fact',(SELECT count(*) FROM open_jobs j JOIN facts f ON f.job_id=j.id),
-   'no_evidence_yet',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id))),
+   'no_current_fact',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id)),
+   'evidence_without_current_fact',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id) AND EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=j.id)),
+   'no_evidence_yet',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id) AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=j.id))),
   'invoices',jsonb_build_object('total',(SELECT count(*) FROM open_invoices),'with_current_fact',(SELECT count(*) FROM open_invoices i JOIN facts f ON f.job_id=i.job_id),
-   'no_evidence_yet',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id)),
+   'no_current_fact',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id)),
+   'evidence_without_current_fact',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id) AND EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=i.job_id)),
+   'no_evidence_yet',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id) AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=i.job_id)),
    'unlinked',(SELECT count(*) FROM open_invoices WHERE job_id IS NULL)))
 $$;
 
@@ -94,7 +99,7 @@ END $$;
 
 CREATE FUNCTION public.context_accuracy_publish(p_week_start date) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
-DECLARE w public.context_accuracy_weeks; prior public.context_accuracy_weeks; coverage jsonb; bad boolean; reason text; n integer;
+DECLARE w public.context_accuracy_weeks; affected_weeks date[]; coverage jsonb; bad boolean; reason text; n integer;
 BEGIN
  PERFORM pg_advisory_xact_lock(20260911,4);
  SELECT * INTO w FROM public.context_accuracy_weeks WHERE week_start=p_week_start FOR UPDATE;
@@ -104,9 +109,10 @@ BEGIN
  coverage:=public.context_coverage();
  IF EXISTS(SELECT 1 FROM public.context_accuracy_samples WHERE week_start=p_week_start AND invented_payment AND verdict='false') THEN reason:='invented_payment'; END IF;
  bad:=w.n_wrong_job>2 OR (n=40 AND w.n_true+w.n_false+w.n_wrong_job=40 AND w.n_true<36);
- SELECT * INTO prior FROM public.context_accuracy_weeks WHERE week_start=p_week_start-7;
- IF reason IS NULL AND bad AND (prior.n_wrong_job>2 OR (prior.n_sampled=40 AND prior.n_true+prior.n_false+prior.n_wrong_job=40 AND prior.n_true<36))
- THEN reason:='accuracy_two_weeks'; END IF;
+ SELECT array_agg(greatest(p_week_start,other.week_start)) INTO affected_weeks
+ FROM public.context_accuracy_weeks other WHERE other.week_start IN (p_week_start-7,p_week_start+7)
+  AND (other.n_wrong_job>2 OR (other.n_sampled=40 AND other.n_true+other.n_false+other.n_wrong_job=40 AND other.n_true<36));
+ IF reason IS NULL AND bad AND cardinality(affected_weeks)>0 THEN reason:='accuracy_two_weeks'; END IF;
  UPDATE public.context_accuracy_weeks SET n_sampled=n,n_true=w.n_true,n_false=w.n_false,n_wrong_job=w.n_wrong_job,
   coverage_jobs=coverage->'jobs',coverage_invoices=coverage->'invoices',
   published_at=CASE WHEN n>0 AND w.n_true+w.n_false+w.n_wrong_job=n THEN coalesce(published_at,now()) ELSE NULL END,
@@ -114,7 +120,12 @@ BEGIN
  IF reason IS NOT NULL THEN
   -- Missing switch remains off; never recreate a deleted operator switch row.
   UPDATE public.automation_switches SET extraction=false,updated_at=now(),updated_by='context_accuracy_publish',note='accuracy tripwire '||p_week_start::text WHERE id=1;
-  INSERT INTO public.context_accuracy_alerts(week_start,reason) VALUES(p_week_start,reason) ON CONFLICT DO NOTHING;
+  IF reason='invented_payment' THEN
+   INSERT INTO public.context_accuracy_alerts(week_start,reason) VALUES(p_week_start,reason) ON CONFLICT DO NOTHING;
+  ELSE
+   INSERT INTO public.context_accuracy_alerts(week_start,reason) SELECT pair_end,reason FROM unnest(affected_weeks) pair_end ON CONFLICT DO NOTHING;
+   UPDATE public.context_accuracy_weeks SET tripwire_reason=coalesce(tripwire_reason,reason) WHERE week_start=ANY(affected_weeks);
+  END IF;
  END IF;
  RETURN jsonb_build_object('week',to_jsonb(w),'accuracy',CASE WHEN w.published_at IS NOT NULL THEN w.n_true::numeric/n ELSE NULL END,
   'reviewed',w.n_true+w.n_false+w.n_wrong_job,'requested',40,'missing',40-n,
