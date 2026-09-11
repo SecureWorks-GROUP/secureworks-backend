@@ -28,10 +28,12 @@ import {
   WEEKLY_WORK_ORDER_SCOPE_LOCK_LINE_TYPES,
   describeAlreadyHeldWorkOrderCards,
   describeAssignmentLockBlock,
+  describeWorkOrderLinesWithoutWindow,
   isWorkOrderLockLine,
   planAssignmentLock,
   selectWorkOrderLineAssignmentIds,
   workOrderLockJobs,
+  workOrderLockJobsWithoutWindow,
 } from "./trade_invoice_assignment_lock.ts";
 
 const INDEX = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
@@ -313,7 +315,7 @@ Deno.test("the billed window comes from the job's own job-level lines' line_date
 Deno.test("index.ts reads WO job cards for the submitting trade only, before persisting", () => {
   const readAt = INDEX.indexOf("const woLock = workOrderLockJobs(extraLineItems)");
   assert(readAt > 0, "submit path must derive WO lock jobs from the extra lines");
-  const block = INDEX.slice(readAt, readAt + 2600);
+  const block = INDEX.slice(readAt, readAt + 3200);
   assertStringIncludes(block, ".eq('user_id', tradeUser.id)");
   assertStringIncludes(block, ".in('job_id', woLock.jobIds)");
   assertStringIncludes(block, ".gte('scheduled_date', week_start).lte('scheduled_date', weekEnd)");
@@ -338,6 +340,60 @@ Deno.test("index.ts folds WO line cards into the same Layer B stamp and prior-dr
     submit,
     "const stampJobLabels: Record<string, string> = { ...woLineJobLabels }",
   );
+});
+
+Deno.test("a billed job with no line date is reported, not silently skipped", () => {
+  const entries = workOrderLockJobsWithoutWindow([
+    // dated: has a window, so it is NOT reported
+    { line_type: "commission", job_id: "j1", job_number: "SWF-1", line_date: "2026-08-10" },
+    // undated commission line: locks nothing, must be reported
+    { line_type: "commission", job_id: "j2", job_number: "SWF-2", line_date: null },
+    // a second undated line on the same job adds its type, not a second entry
+    { line_type: "work order", job_id: "j2", job_number: "SWF-2" },
+    // a job with no job_number still reports by id
+    { line_type: "work order", job_id: "j3", line_date: "not-a-date" },
+    // hours lines are not job-level billing and are never reported
+    { line_type: "labour", job_id: "j4", job_number: "SWF-4", line_date: null },
+  ]);
+  assertEquals(entries, [
+    { jobId: "j2", jobNumber: "SWF-2", lineTypes: ["commission", "work order"] },
+    { jobId: "j3", jobNumber: null, lineTypes: ["work order"] },
+  ]);
+  const note = describeWorkOrderLinesWithoutWindow(entries);
+  assertStringIncludes(note, "2 job(s) billed with no line date");
+  assertStringIncludes(note, "SWF-2 (commission, work order)");
+  assertStringIncludes(note, "j3 (work order)");
+  assertEquals(describeWorkOrderLinesWithoutWindow([]), "");
+});
+
+Deno.test("a job that does get a window is never reported as window-less", () => {
+  assertEquals(
+    workOrderLockJobsWithoutWindow([
+      { line_type: "commission", job_id: "j1", job_number: "SWF-1", line_date: "2026-08-10" },
+      // an undated second line on the SAME job: the dated one still gives it a window
+      { line_type: "commission", job_id: "j1", job_number: "SWF-1", line_date: null },
+    ]),
+    [],
+  );
+});
+
+Deno.test("index.ts reports WO lines that locked nothing for want of a date", () => {
+  // Only for non-week invoices: a weekly invoice's window is the invoice week.
+  assertStringIncludes(
+    INDEX,
+    "const woLineNoWindowJobs = (week_start && weekEnd)\n              ? []\n              : workOrderLockJobsWithoutWindow(extraLineItems)",
+  );
+  const reportAt = INDEX.indexOf("if (woLineNoWindowJobs.length > 0) {");
+  assert(reportAt > 0, "window-less billed jobs must be reported");
+  const block = INDEX.slice(reportAt, reportAt + 2200);
+  assertStringIncludes(block, "describeWorkOrderLinesWithoutWindow(woLineNoWindowJobs)");
+  assertStringIncludes(block, "query_note: mergedNoWindowNote");
+  assertStringIncludes(block, "'trade_invoice.wo_line_no_window'");
+  assertStringIncludes(block, "invoice_number: invoiceNumber,");
+  assertStringIncludes(block, "line_types: entry.lineTypes,");
+  // Telemetry only: it must not touch the lock decision or fail the submit.
+  assert(!block.includes("failAssignmentStamp"), "reporting must not fail the submit");
+  assert(!block.includes("woLineAssignmentIds"), "reporting must not change the stamp set");
 });
 
 Deno.test("index.ts passes the per-job billed window into the non-week lock", () => {

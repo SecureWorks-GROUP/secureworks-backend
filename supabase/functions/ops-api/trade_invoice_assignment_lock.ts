@@ -275,6 +275,65 @@ function normalizedLockDate(value: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
 }
 
+/** A billed job whose job-level lines carry no usable line_date. */
+export interface WorkOrderLockJobWithoutWindow {
+  jobId: string;
+  jobNumber: string | null;
+  lineTypes: string[];
+}
+
+/**
+ * Billed jobs that get NO date window, and the line types that billed them.
+ *
+ * A non-week invoice can only lock inside the window its own job-level lines
+ * bill, so a Work Order or Commission line with no `line_date` locks nothing.
+ * That is the deliberate safe choice — guessing a range is what over-locked a
+ * trade's unbilled day cards — but it is silent, and silence on the money path
+ * is how the original double-bill survived. This is what the submit path
+ * reports so ops can see the line went through without locking its job.
+ *
+ * Weekly invoices are unaffected: their window is the invoice week.
+ */
+export function workOrderLockJobsWithoutWindow(
+  lines: readonly WorkOrderLockLine[],
+): WorkOrderLockJobWithoutWindow[] {
+  const { jobIds, jobLabelByJobId, jobWindowByJobId } = workOrderLockJobs(lines);
+  const lineTypesByJobId: Record<string, string[]> = {};
+  for (const line of lines || []) {
+    if (!isWorkOrderLockLine(line)) continue;
+    const jobId = String(line.job_id);
+    if (jobWindowByJobId[jobId]) continue;
+    const lineType = String(line.line_type || "").trim().toLowerCase() ||
+      "(none)";
+    const seen = lineTypesByJobId[jobId] || (lineTypesByJobId[jobId] = []);
+    if (!seen.includes(lineType)) seen.push(lineType);
+  }
+  return jobIds
+    .filter((jobId) => !jobWindowByJobId[jobId])
+    .map((jobId) => ({
+      jobId,
+      jobNumber: jobLabelByJobId[jobId] || null,
+      lineTypes: lineTypesByJobId[jobId] || [],
+    }));
+}
+
+/** Operator-facing note for billed jobs that locked nothing for want of a date. */
+export function describeWorkOrderLinesWithoutWindow(
+  entries: readonly WorkOrderLockJobWithoutWindow[],
+): string {
+  const rows = entries || [];
+  if (rows.length === 0) return "";
+  const described = rows.map((entry) => {
+    const lineTypes = entry.lineTypes.length > 0
+      ? " (" + entry.lineTypes.join(", ") + ")"
+      : "";
+    return (entry.jobNumber || entry.jobId) + lineTypes;
+  });
+  return rows.length +
+    " job(s) billed with no line date, so no job cards were locked for them: " +
+    described.join(", ");
+}
+
 export interface WorkOrderLockCandidate extends AssignmentLockRef {
   job_id: string;
   scheduled_date?: string | null;
