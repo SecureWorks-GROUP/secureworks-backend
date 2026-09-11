@@ -136,7 +136,7 @@ serve(async (req: Request) => {
       const words = typeof body.body === 'string' ? body.body : typeof body.message === 'string' ? body.message : ''
       const providerId = body.messageId || body.message_id || body.id || body.eventId
       const rawTime = body.dateAdded || body.createdAt || body.timestamp
-      const eventAt = rawTime && !Number.isNaN(Date.parse(String(rawTime))) ? new Date(rawTime).toISOString() : new Date().toISOString()
+      const eventAt = rawTime && !Number.isNaN(Date.parse(String(rawTime))) ? new Date(rawTime).toISOString() : null
       const outbound = body.type === 'OutboundMessage'
       const channel = body.messageType === 'Email' || body.channel === 'email' ? 'email' : 'sms'
       const { error } = await sb.from('business_events').insert({

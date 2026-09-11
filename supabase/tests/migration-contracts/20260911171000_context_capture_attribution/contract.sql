@@ -27,6 +27,8 @@ BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES(j3,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-3','b2-future');
  SELECT * INTO e FROM public.business_events WHERE id=eid;
  IF e.job_id<>j3 OR e.attribution_status<>'single_open' THEN RAISE EXCEPTION 'job-created reconsideration failed'; END IF;
+ INSERT INTO public.business_events(payload,occurred_at) VALUES('{"body":"No provider date"}',now()) RETURNING * INTO e;
+ IF e.event_at IS NOT NULL THEN RAISE EXCEPTION 'missing provider source date became ingestion date'; END IF;
  INSERT INTO public.business_events(payload,provider_message_id,event_at) VALUES('{"body":"source words"}','ghl:b2-id','2025-01-01Z');
  BEGIN
   INSERT INTO public.business_events(payload,provider_message_id) VALUES('{"body":"duplicate"}','ghl:b2-id');
@@ -54,5 +56,24 @@ BEGIN
  IF e.attribution_status<>'admin_bucket' OR e.job_id IS NOT NULL THEN RAISE EXCEPTION 'attribution switch did not close'; END IF;
  IF public.rerun_context_attribution(250,NULL)<>0 THEN RAISE EXCEPTION 'rerun ignored switch'; END IF;
  IF has_function_privilege('authenticated','public.attribute_context_event_with_luna(uuid,uuid,numeric)','EXECUTE') THEN RAISE EXCEPTION 'public Luna RPC'; END IF;
+END $$;
+ROLLBACK;
+
+-- A retry already owns today's budget slot and must remain discoverable when
+-- older unadmitted jobs exceed a candidate page.
+BEGIN;
+DO $$
+DECLARE older_job uuid:=gen_random_uuid(); retry_job uuid:=gen_random_uuid(); selected_job uuid;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
+ (older_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-FAIR-OLD','b2-fair-old'),
+ (retry_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-FAIR-RETRY','b2-fair-retry');
+ INSERT INTO public.business_events(payload,job_id,event_at,direction) VALUES
+ ('{"body":"Older unadmitted evidence"}',older_job,'2000-01-01Z','inbound'),
+ ('{"body":"Retry evidence"}',retry_job,'2099-01-01Z','inbound');
+ INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status)
+ VALUES(retry_job,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction','failed');
+ SELECT job_id INTO selected_job FROM public.context_extraction_candidates(1);
+ IF selected_job IS DISTINCT FROM retry_job THEN RAISE EXCEPTION 'budgeted retry hidden behind unadmitted work'; END IF;
 END $$;
 ROLLBACK;
