@@ -358,6 +358,86 @@ async function resolveOutlookInvoiceJob(
   return mirror.data.job_id || null
 }
 
+/**
+ * Sender-only reply fence.
+ *
+ * A mailbox message with no stored job can still be answered, but only by
+ * replying to that message's own stored inbound sender, from the mailbox that
+ * received it, with nothing else attached to the send. Every widening — a CC,
+ * a reply-all, a second recipient, a recipient override or an attachment — is
+ * refused here, before any Graph call. Graph's own reply draft is checked
+ * against the same expected_to list in handleReply, so the message can only
+ * leave if the stored record and the provider agree on the recipient.
+ */
+export function assertSenderOnlyReplyAllowed(
+  body: Record<string, unknown>,
+  source: { message_id: string; mailbox: string; sender: string },
+) {
+  const refuse = (fact: string, recovery_action: string): never => {
+    throw new OutlookFenceError(409, {
+      state: 'refused',
+      code: 'reply_sender_only_required',
+      fact,
+      recovery_action,
+      evidence: {
+        message_id: source.message_id,
+        mailbox: source.mailbox,
+        stored_sender: source.sender || null,
+      },
+    })
+  }
+
+  const sender = source.sender.toLowerCase()
+  if (!sender || !isEmail(sender)) {
+    refuse(
+      'The source message has no usable stored sender, so a reply with no job has no verified recipient.',
+      'Link the message to a job and reply on the job-anchored path.',
+    )
+  }
+  if (KNOWN_GROUP_ADDRESSES.has(sender)) {
+    refuse(
+      'The stored sender is a Microsoft 365 Group address, not an external correspondent.',
+      'Answer group traffic through the supported Group action.',
+    )
+  }
+  if (body.reply_all === true) {
+    refuse(
+      'A reply with no stored job cannot be a reply-all.',
+      'Reply to the original sender only, or supply the job_id that owns this message.',
+    )
+  }
+  for (const field of ['to', 'to_email', 'cc', 'bcc']) {
+    if (hasOwn(body, field)) {
+      refuse(
+        `A native reply never accepts ${field}.`,
+        'Remove the recipient override; provider reply routing is preserved.',
+      )
+    }
+  }
+  const expectedTo = splitRecipientInput(body.expected_to, 'expected_to', true)
+  if (
+    expectedTo.length !== 1 || expectedTo[0].trim().toLowerCase() !== sender
+  ) {
+    refuse(
+      'A reply with no stored job may go only to the stored sender of that exact message.',
+      'Set expected_to to exactly the stored sender of this message, or supply the job_id.',
+    )
+  }
+  const expectedCc = splitRecipientInput(body.expected_cc, 'expected_cc')
+  if (expectedCc.length > 0) {
+    refuse(
+      'A reply with no stored job cannot carry CC recipients.',
+      'Remove every CC recipient, or supply the job_id that owns this message.',
+    )
+  }
+  if (Array.isArray(body.attachments) ? body.attachments.length > 0 : Boolean(body.attachments)) {
+    refuse(
+      'A reply with no stored job cannot carry attachments; attachment provenance is expressed through the job.',
+      'Send the attachment from the job-anchored path once the message is linked to a job.',
+    )
+  }
+}
+
 export async function assertOutlookSesDeliveryAllowed(
   client: any,
   body: Record<string, any>,
@@ -378,18 +458,18 @@ export async function assertOutlookSesDeliveryAllowed(
   if (body.action === 'reply') {
     const requestedMailbox = String(body.mailbox || '').trim()
     const mailboxMessageId = String(body.message_id || '').trim()
-    if (!bodyJobId || !requestedMailbox || !mailboxMessageId || body.post_id) {
+    if (!requestedMailbox || !mailboxMessageId || body.post_id) {
       throw new OutlookFenceError(409, {
         state: 'refused',
         code: 'pdf_provenance_required',
         fact:
-          'A native mailbox reply requires an exact mailbox, authoritative source message, and job_id before replying.',
+          'A native mailbox reply requires an exact mailbox and an authoritative source message before replying.',
         recovery_action:
-          'Resolve the source message to its stored job, then retry with those exact identities.',
+          'Resolve the source message in the stored inbox record, then retry with those exact identities.',
       })
     }
     const source = await client.from('inbox_events')
-      .select('job_id,mailbox')
+      .select('job_id,mailbox,from_email')
       .eq('graph_message_id', mailboxMessageId)
       .maybeSingle()
     if (source.error) {
@@ -404,26 +484,72 @@ export async function assertOutlookSesDeliveryAllowed(
     }
     const sourceJobId = String(source.data?.job_id || '').trim()
     const sourceMailbox = String(source.data?.mailbox || '').trim()
+    const sourceSender = String(source.data?.from_email || '').trim()
+    // The mailbox that received the message is the only mailbox allowed to
+    // answer it, on both the job-anchored and the sender-only path. An
+    // unknown source message can never be replied to at all.
     if (
-      !sourceJobId || sourceJobId !== bodyJobId ||
-      !sourceMailbox || sourceMailbox.toLowerCase() !== requestedMailbox.toLowerCase()
+      !source.data || !sourceMailbox ||
+      sourceMailbox.toLowerCase() !== requestedMailbox.toLowerCase()
     ) {
       throw new OutlookFenceError(409, {
         state: 'refused',
         code: 'pdf_provenance_required',
-        fact: 'The reply source message is not authoritatively linked to the supplied job_id.',
+        fact:
+          'The reply source message is not authoritatively stored against the requested mailbox.',
         recovery_action:
-          'Use the source message and job identities stored together; never use a decoy job.',
+          'Reply only from the mailbox that received the message, using the stored source identity.',
         evidence: {
           message_id: mailboxMessageId,
           requested_mailbox: requestedMailbox,
           stored_mailbox: sourceMailbox || null,
-          stored_job_id: sourceJobId || null,
-          received_job_id: bodyJobId,
         },
       })
     }
-    await assertOutlookJobAllowed(client, sourceJobId, 'reply_outlook_email')
+    if (bodyJobId) {
+      if (!sourceJobId || sourceJobId !== bodyJobId) {
+        throw new OutlookFenceError(409, {
+          state: 'refused',
+          code: 'pdf_provenance_required',
+          fact:
+            'The reply source message is not authoritatively linked to the supplied job_id.',
+          recovery_action:
+            'Use the source message and job identities stored together; never use a decoy job.',
+          evidence: {
+            message_id: mailboxMessageId,
+            requested_mailbox: requestedMailbox,
+            stored_mailbox: sourceMailbox,
+            stored_job_id: sourceJobId || null,
+            received_job_id: bodyJobId,
+          },
+        })
+      }
+      await assertOutlookJobAllowed(client, sourceJobId, 'reply_outlook_email')
+      return
+    }
+    // No job supplied. This is only allowed for a message that genuinely has
+    // no stored job, and only as a reply to that message's own stored sender.
+    if (sourceJobId) {
+      throw new OutlookFenceError(409, {
+        state: 'refused',
+        code: 'pdf_provenance_required',
+        fact:
+          'The reply source message has a stored job, so the reply must name that job_id.',
+        recovery_action:
+          'Retry with the job_id stored against this source message.',
+        evidence: {
+          message_id: mailboxMessageId,
+          requested_mailbox: requestedMailbox,
+          stored_job_id: sourceJobId,
+          received_job_id: null,
+        },
+      })
+    }
+    assertSenderOnlyReplyAllowed(body, {
+      message_id: mailboxMessageId,
+      mailbox: requestedMailbox,
+      sender: sourceSender,
+    })
     return
   }
 
