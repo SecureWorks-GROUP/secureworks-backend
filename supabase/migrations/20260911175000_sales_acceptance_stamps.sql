@@ -8,8 +8,8 @@ WITH evidence AS (
  SELECT j.id,j.updated_at,
    (SELECT jsonb_build_object('id',e.id,'at',e.created_at)
     FROM public.job_events e WHERE e.job_id=j.id AND e.created_at IS NOT NULL
-      AND ((e.event_type IN ('status_changed','status_change','job.status_changed') AND e.detail_json->>'new_status'='accepted')
-        OR e.event_type='quote_accepted')
+      AND e.event_type IN ('status_changed','status_change','job.status_changed','quote_accepted')
+      AND e.detail_json->>'new_status'='accepted'
     ORDER BY e.created_at,e.id LIMIT 1) AS witnessed
  FROM public.jobs j WHERE j.accepted_at IS NULL
 ), candidates AS (

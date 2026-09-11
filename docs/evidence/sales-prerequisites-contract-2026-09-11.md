@@ -5,7 +5,9 @@ status path already writes `accepted_at`. It formerly returned success even when
 that request failed; this change checks the HTTP and application response.
 
 Migration `20260911175000_sales_acceptance_stamps.sql` fills null acceptance dates
-from the earliest witnessed `job_events` acceptance/status-to-accepted event. If
+from the earliest witnessed `job_events` acceptance/status-to-accepted event
+with explicit `detail_json.new_status = accepted`. Partial-contact acceptances
+and historical quote events without that full-acceptance status are excluded. If
 no such event exists, only an acceptance-chain job may use its previous
 `updated_at`, labelled `BACKFILLED` in `accepted_at_evidence`. A quoted job or a
 rejected/backward stage conflict is not an acceptance. Existing stamps are never
