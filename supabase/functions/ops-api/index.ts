@@ -122,10 +122,15 @@ import {
   RecipientAnchorLookupError,
 } from './recipient_anchors.ts'
 import {
+  describeAlreadyHeldWorkOrderCards,
   describeAssignmentLockBlock,
+  describeWorkOrderLinesWithoutWindow,
   isClockedAssignmentBillable,
   planAssignmentLock,
   selectUnlockedAssignments,
+  selectWorkOrderLineAssignmentIds,
+  workOrderLockJobs,
+  workOrderLockJobsWithoutWindow,
 } from './trade_invoice_assignment_lock.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
@@ -11250,11 +11255,83 @@ if (import.meta.main) serve(async (req: Request) => {
                 wo_labour_lines: dbLine.wo_labour_lines ?? null,
               }
             }
-            const includedAssignmentIds = lineItems
-              .flatMap((line: any) =>
+            // ── Work Order / Commission lines lock the trade's job cards ────
+            // These lines bill the whole job, so they carry no assignment ids.
+            // Without this the job card stayed unstamped, my_hours showed it
+            // again under the paid week, and the job could be billed twice
+            // (Alyx, SW-INV-A-260830-025, SWF-261063, 2026-09-11). Resolved
+            // BEFORE persisting so the prior-draft transfer and the Layer B
+            // stamp below lock the same set.
+            const woLock = workOrderLockJobs(extraLineItems)
+            let woLineAssignmentIds: string[] = []
+            // In-scope cards another LIVE invoice already holds. They are NOT
+            // stamped and NOT double-billed; they are reported on the invoice.
+            // Failing the whole submit over one already-billed card blocked a
+            // trade's entire week for work that was already paid.
+            let woLineHeldCardIds: string[] = []
+            const woLineJobLabels: Record<string, string> = {}
+            // Jobs billed by a job-level line that carries no line_date. A
+            // non-week invoice can only lock inside the window its own lines
+            // bill, so those jobs lock NOTHING. That is the safe choice, but it
+            // is silent, and silence on the money path is how the original
+            // double-bill survived. Weekly invoices are unaffected: their
+            // window is the invoice week. The lock decision is not changed here
+            // — this only reports it.
+            const woLineNoWindowJobs = (week_start && weekEnd)
+              ? []
+              : workOrderLockJobsWithoutWindow(extraLineItems)
+            if (woLock.jobIds.length > 0) {
+              let woCardQuery = client.from('job_assignments')
+                .select('id, job_id, scheduled_date, invoiced_in')
+                .eq('user_id', tradeUser.id)
+                .in('job_id', woLock.jobIds)
+              if (week_start && weekEnd) {
+                woCardQuery = woCardQuery.gte('scheduled_date', week_start).lte('scheduled_date', weekEnd)
+              }
+              const { data: woCards, error: woCardErr } = await woCardQuery
+              if (woCardErr) {
+                throw new Error('Failed to load the job cards behind work-order lines: ' + woCardErr.message)
+              }
+              const woCardRefIds = [...new Set((woCards || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+              let woCardLiveRefIds = new Set<string>()
+              if (woCardRefIds.length > 0) {
+                const { data: woCardRefInv, error: woCardRefErr } = await client.from('trade_invoices')
+                  .select('id, status').in('id', woCardRefIds)
+                if (woCardRefErr) {
+                  throw new Error('Failed to check which job cards are already on a live invoice: ' + woCardRefErr.message)
+                }
+                woCardLiveRefIds = new Set((woCardRefInv || [])
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
+                  .map((ti: any) => String(ti.id)))
+              }
+              const woSelection = selectWorkOrderLineAssignmentIds({
+                candidates: (woCards || []) as any,
+                weekStart: week_start || null,
+                weekEnd,
+                liveInvoiceIds: woCardLiveRefIds,
+                // Perth business date: a non-week invoice never locks a card
+                // scheduled after the day it was submitted.
+                notAfter: new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10),
+                // A non-week invoice locks only the window its OWN job-level
+                // lines bill (their min..max line_date). Without this a $200
+                // commission line swallowed every unbilled day card the trade
+                // had on that job back to the beginning of time, and they were
+                // never paid for them. No window derivable -> lock nothing.
+                jobWindows: woLock.jobWindowByJobId,
+              })
+              woLineAssignmentIds = woSelection.assignmentIds
+              woLineHeldCardIds = woSelection.alreadyHeldIds
+              for (const card of (woCards || [])) {
+                const label = woLock.jobLabelByJobId[String(card.job_id)]
+                if (label) woLineJobLabels[String(card.id)] = label
+              }
+            }
+            const includedAssignmentIds = [...new Set([
+              ...lineItems.flatMap((line: any) =>
                 Array.isArray(line.assignment_ids) ? line.assignment_ids : []
-              )
-              .filter(Boolean)
+              ),
+              ...woLineAssignmentIds,
+            ].filter(Boolean).map(String))]
             const invoiceId = weeklyInvoice
               ? await _persistWeeklyTradeInvoice(
                 client,
@@ -11310,7 +11387,7 @@ if (import.meta.main) serve(async (req: Request) => {
               const expectedAssignmentIds = [...new Set(includedAssignmentIds)]
               // assignment id → job number, so a refusal names the offending job
               // cards instead of an opaque "0 of 6".
-              const stampJobLabels: Record<string, string> = {}
+              const stampJobLabels: Record<string, string> = { ...woLineJobLabels }
               for (const l of lineItems) {
                 for (const aid of (Array.isArray(l?.assignment_ids) ? l.assignment_ids : [])) {
                   if (aid && l?.job_number) stampJobLabels[String(aid)] = String(l.job_number)
@@ -11407,6 +11484,72 @@ if (import.meta.main) serve(async (req: Request) => {
                     (rollbackErr ? ' FAILED — assignments may still be held' : '') + ')'
                 await failAssignmentStamp(stampMsg)
               }
+            }
+
+            // ── WO/Commission cards another live invoice already holds ───────
+            // These are in scope for this invoice's job-level lines but are
+            // already billed elsewhere, so they are never stamped (the
+            // invoiced_in guard above is untouched) and never billed twice.
+            // Previously they were pushed into the stamp set, planAssignmentLock
+            // refused, and failAssignmentStamp dropped the WHOLE invoice back to
+            // draft — one already-billed card blocked a trade's entire week.
+            // Now the invoice records them and proceeds. The double-billing
+            // protection on LABOUR lines (assignment ids the trade ticked) is
+            // unchanged: those still refuse.
+            if (woLineHeldCardIds.length > 0) {
+              const heldNote = describeAlreadyHeldWorkOrderCards(woLineHeldCardIds, woLineJobLabels)
+              const { data: heldInv, error: heldReadErr } = await client.from('trade_invoices')
+                .select('query_note').eq('id', invoice.id).maybeSingle()
+              if (heldReadErr) console.error('[ops-api] WO held-card note read failed:', heldReadErr.message)
+              const mergedHeldNote = [heldInv?.query_note, heldNote].filter(Boolean).join(' | ').slice(0, 2000)
+              const { error: heldNoteErr } = await client.from('trade_invoices')
+                .update({ query_note: mergedHeldNote }).eq('id', invoice.id)
+              if (heldNoteErr) console.error('[ops-api] WO held-card note update failed:', heldNoteErr.message)
+              try {
+                const { error: heldEventErr } = await client.from('business_events').insert({
+                  event_type: 'trade_invoice.wo_line_card_already_invoiced',
+                  source: 'ops-api/generate_trade_invoice',
+                  entity_type: 'trade_invoice',
+                  entity_id: invoice.id,
+                  payload: {
+                    invoice_number: invoiceNumber,
+                    assignment_ids: woLineHeldCardIds,
+                    job_labels: woLineHeldCardIds.map((id: string) => woLineJobLabels[id] || null),
+                  },
+                })
+                if (heldEventErr) console.error('[ops-api] WO held-card event insert failed:', heldEventErr.message)
+              } catch (e) { /* non-blocking */ }
+            }
+
+            // ── WO/Commission lines that locked nothing for want of a date ───
+            // Reported, not repaired: ops sees the line billed the job without
+            // consuming any job card, so the card can still be billed again.
+            if (woLineNoWindowJobs.length > 0) {
+              const noWindowNote = describeWorkOrderLinesWithoutWindow(woLineNoWindowJobs)
+              const { data: noWindowInv, error: noWindowReadErr } = await client.from('trade_invoices')
+                .select('query_note').eq('id', invoice.id).maybeSingle()
+              if (noWindowReadErr) console.error('[ops-api] WO no-window note read failed:', noWindowReadErr.message)
+              const mergedNoWindowNote = [noWindowInv?.query_note, noWindowNote].filter(Boolean).join(' | ').slice(0, 2000)
+              const { error: noWindowNoteErr } = await client.from('trade_invoices')
+                .update({ query_note: mergedNoWindowNote }).eq('id', invoice.id)
+              if (noWindowNoteErr) console.error('[ops-api] WO no-window note update failed:', noWindowNoteErr.message)
+              try {
+                const { error: noWindowEventErr } = await client.from('business_events').insert({
+                  event_type: 'trade_invoice.wo_line_no_window',
+                  source: 'ops-api/generate_trade_invoice',
+                  entity_type: 'trade_invoice',
+                  entity_id: invoice.id,
+                  payload: {
+                    invoice_number: invoiceNumber,
+                    jobs: woLineNoWindowJobs.map((entry: any) => ({
+                      job_id: entry.jobId,
+                      job_number: entry.jobNumber,
+                      line_types: entry.lineTypes,
+                    })),
+                  },
+                })
+                if (noWindowEventErr) console.error('[ops-api] WO no-window event insert failed:', noWindowEventErr.message)
+              } catch (e) { /* non-blocking */ }
             }
 
             // ── Change 6 (Q18): straight-to-Xero-draft, no in-app approval hold ──

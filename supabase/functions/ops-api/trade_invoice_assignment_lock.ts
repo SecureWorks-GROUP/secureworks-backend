@@ -164,3 +164,258 @@ export function describeAssignmentLockBlock(
   }
   return parts.join("; ") || "no claimable job cards";
 }
+
+// ── Work Order / Commission job lines lock the trade's job cards ────────────
+//
+// Production gap (2026-09-11, trade "Alyx", invoice SW-INV-A-260830-025, week
+// 2026-08-24..30, PAID in Xero): the first line billed SWF-261063 as a Work
+// Order ("Work order $1477.00. Less labour: ..."). Layer B only stamped the
+// assignment ids carried by LABOUR lines, so the lead_installer card on
+// SWF-261063 kept invoiced_in NULL. my_hours kept showing it under the paid
+// week, prefilled from the work order subtotal: a second bill for the same job
+// was one tap away.
+//
+// A Work Order or Commission line bills the job, not hours, so it carries no
+// assignment ids. These helpers decide which of the submitting trade's own
+// job cards that line consumes, so the same Layer B stamp can lock them.
+
+/** Line types the trade app writes for job-level (non-hours) lines. */
+export const WORK_ORDER_LOCK_LINE_TYPES: readonly string[] = [
+  "work order", // trade app: type 'Work Order', lower-cased by the submit path
+  "work_order",
+  "commission", // trade app: type 'Commission'
+];
+
+/**
+ * Weekly work-order scope line types that bill the job's own work.
+ *
+ * `weeklyScopeLineType` (trade_invoice_weekly.ts) classifies every server-
+ * resolved work-order scope line as one of: travel, materials, patio, labour,
+ * other. Only 'labour' and 'patio' bill the crew's work on the job; a travel or
+ * materials line reimburses a cost and must never consume a lead installer's
+ * day card. Listed explicitly, not by excluding deduction types: the five
+ * deduction types are excluded automatically by not being on this list, and a
+ * future scope line type is excluded until someone decides it bills the job.
+ */
+export const WEEKLY_WORK_ORDER_SCOPE_LOCK_LINE_TYPES: readonly string[] = [
+  "labour",
+  "patio",
+];
+
+export interface WorkOrderLockLine {
+  job_id?: string | null;
+  job_number?: string | null;
+  line_type?: string | null;
+  line_date?: string | null;
+  source_work_order_id?: string | null;
+}
+
+/**
+ * True when an invoice line bills a whole job for the submitting trade:
+ * a Work Order or Commission line with a job, or a weekly work-order scope
+ * line (server-resolved from a work order) whose type bills the job's work.
+ */
+export function isWorkOrderLockLine(line: WorkOrderLockLine): boolean {
+  if (!line?.job_id) return false;
+  const lineType = String(line.line_type || "").trim().toLowerCase();
+  if (WORK_ORDER_LOCK_LINE_TYPES.includes(lineType)) return true;
+  return Boolean(line.source_work_order_id) &&
+    WEEKLY_WORK_ORDER_SCOPE_LOCK_LINE_TYPES.includes(lineType);
+}
+
+/** Inclusive date window a non-week invoice bills on one job. */
+export interface WorkOrderLockWindow {
+  from: string;
+  to: string;
+}
+
+/**
+ * Distinct job ids billed by Work Order / Commission lines, with a label and a
+ * billed date window each.
+ *
+ * The window is the min and max `line_date` across that job's OWN job-level
+ * billing lines on this invoice. It is what bounds a non-week invoice's lock:
+ * without it a $200 commission line silently swallowed every unbilled day card
+ * the trade ever had on that job. A job whose billing lines carry no usable
+ * `line_date` gets no window, and therefore locks nothing.
+ */
+export function workOrderLockJobs(
+  lines: readonly WorkOrderLockLine[],
+): {
+  jobIds: string[];
+  jobLabelByJobId: Record<string, string>;
+  jobWindowByJobId: Record<string, WorkOrderLockWindow>;
+} {
+  const jobLabelByJobId: Record<string, string> = {};
+  const jobWindowByJobId: Record<string, WorkOrderLockWindow> = {};
+  const jobIds: string[] = [];
+  for (const line of lines || []) {
+    if (!isWorkOrderLockLine(line)) continue;
+    const jobId = String(line.job_id);
+    if (!jobIds.includes(jobId)) jobIds.push(jobId);
+    if (line.job_number && !jobLabelByJobId[jobId]) {
+      jobLabelByJobId[jobId] = String(line.job_number);
+    }
+    const date = normalizedLockDate(line.line_date);
+    if (!date) continue;
+    const window = jobWindowByJobId[jobId];
+    if (!window) {
+      jobWindowByJobId[jobId] = { from: date, to: date };
+      continue;
+    }
+    if (date < window.from) window.from = date;
+    if (date > window.to) window.to = date;
+  }
+  return { jobIds, jobLabelByJobId, jobWindowByJobId };
+}
+
+/** `YYYY-MM-DD`, or null when the value is absent or not a calendar date. */
+function normalizedLockDate(value: unknown): string | null {
+  const date = String(value ?? "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
+}
+
+/** A billed job whose job-level lines carry no usable line_date. */
+export interface WorkOrderLockJobWithoutWindow {
+  jobId: string;
+  jobNumber: string | null;
+  lineTypes: string[];
+}
+
+/**
+ * Billed jobs that get NO date window, and the line types that billed them.
+ *
+ * A non-week invoice can only lock inside the window its own job-level lines
+ * bill, so a Work Order or Commission line with no `line_date` locks nothing.
+ * That is the deliberate safe choice — guessing a range is what over-locked a
+ * trade's unbilled day cards — but it is silent, and silence on the money path
+ * is how the original double-bill survived. This is what the submit path
+ * reports so ops can see the line went through without locking its job.
+ *
+ * Weekly invoices are unaffected: their window is the invoice week.
+ */
+export function workOrderLockJobsWithoutWindow(
+  lines: readonly WorkOrderLockLine[],
+): WorkOrderLockJobWithoutWindow[] {
+  const { jobIds, jobLabelByJobId, jobWindowByJobId } = workOrderLockJobs(lines);
+  const lineTypesByJobId: Record<string, string[]> = {};
+  for (const line of lines || []) {
+    if (!isWorkOrderLockLine(line)) continue;
+    const jobId = String(line.job_id);
+    if (jobWindowByJobId[jobId]) continue;
+    const lineType = String(line.line_type || "").trim().toLowerCase() ||
+      "(none)";
+    const seen = lineTypesByJobId[jobId] || (lineTypesByJobId[jobId] = []);
+    if (!seen.includes(lineType)) seen.push(lineType);
+  }
+  return jobIds
+    .filter((jobId) => !jobWindowByJobId[jobId])
+    .map((jobId) => ({
+      jobId,
+      jobNumber: jobLabelByJobId[jobId] || null,
+      lineTypes: lineTypesByJobId[jobId] || [],
+    }));
+}
+
+/** Operator-facing note for billed jobs that locked nothing for want of a date. */
+export function describeWorkOrderLinesWithoutWindow(
+  entries: readonly WorkOrderLockJobWithoutWindow[],
+): string {
+  const rows = entries || [];
+  if (rows.length === 0) return "";
+  const described = rows.map((entry) => {
+    const lineTypes = entry.lineTypes.length > 0
+      ? " (" + entry.lineTypes.join(", ") + ")"
+      : "";
+    return (entry.jobNumber || entry.jobId) + lineTypes;
+  });
+  return rows.length +
+    " job(s) billed with no line date, so no job cards were locked for them: " +
+    described.join(", ");
+}
+
+export interface WorkOrderLockCandidate extends AssignmentLockRef {
+  job_id: string;
+  scheduled_date?: string | null;
+}
+
+export interface WorkOrderLineAssignmentSelection {
+  /** Cards this invoice's job-level lines consume and may stamp. */
+  assignmentIds: string[];
+  /**
+   * In-scope cards a DIFFERENT live invoice already holds. Left out of the
+   * stamp set and reported on the invoice instead of failing the submit.
+   */
+  alreadyHeldIds: string[];
+}
+
+/**
+ * Pick the trade's own job cards a Work Order / Commission line consumes.
+ * Candidates must already be scoped to the submitting trade and to the billed
+ * jobs.
+ *
+ *  - Weekly invoice (weekStart and weekEnd set): every card on the job
+ *    scheduled inside the week.
+ *  - Non-week invoice: every card on the job scheduled inside the window this
+ *    invoice's own job-level lines bill (`jobWindows`, from their line_date),
+ *    clamped at `notAfter` (the submit date) because a card scheduled later is
+ *    work not yet done. A job with no derivable window locks NOTHING rather
+ *    than guessing a range, and an undated card is never locked because it
+ *    cannot be shown to fall inside the window.
+ *
+ * A card already held by a different LIVE invoice is never stamped and is
+ * returned separately: it is already billed, and blocking the trade's whole
+ * week over it is worse than noting it on the invoice.
+ */
+export function selectWorkOrderLineAssignmentIds(params: {
+  candidates: readonly WorkOrderLockCandidate[];
+  weekStart?: string | null;
+  weekEnd?: string | null;
+  liveInvoiceIds: ReadonlySet<string>;
+  notAfter: string;
+  jobWindows?: Readonly<Record<string, WorkOrderLockWindow>>;
+}): WorkOrderLineAssignmentSelection {
+  const { weekStart, weekEnd, liveInvoiceIds, notAfter } = params;
+  const jobWindows = params.jobWindows || {};
+  const weekly = Boolean(weekStart && weekEnd);
+  const assignmentIds: string[] = [];
+  const alreadyHeldIds: string[] = [];
+  for (const c of params.candidates || []) {
+    const date = normalizedLockDate(c.scheduled_date);
+    if (weekly) {
+      if (!date || date < String(weekStart) || date > String(weekEnd)) continue;
+    } else {
+      const window = jobWindows[String(c.job_id)];
+      if (!window) continue;
+      if (!date) continue;
+      const upper = window.to < notAfter ? window.to : notAfter;
+      if (date < window.from || date > upper) continue;
+    }
+    const id = String(c.id);
+    if (c.invoiced_in && liveInvoiceIds.has(String(c.invoiced_in))) {
+      if (!alreadyHeldIds.includes(id)) alreadyHeldIds.push(id);
+      continue;
+    }
+    if (!assignmentIds.includes(id)) assignmentIds.push(id);
+  }
+  return { assignmentIds, alreadyHeldIds };
+}
+
+/**
+ * Operator-facing note for in-scope cards a live invoice already holds.
+ *
+ * They are dropped from this invoice's stamp set, so the money record has to
+ * say which ones and why, otherwise a card silently vanishes from the lock.
+ */
+export function describeAlreadyHeldWorkOrderCards(
+  alreadyHeldIds: readonly string[],
+  jobLabelById: Readonly<Record<string, string>> = {},
+): string {
+  const ids = alreadyHeldIds || [];
+  if (ids.length === 0) return "";
+  const labelled = ids.map((id) => jobLabelById[id] || id);
+  return ids.length +
+    " job card(s) on this invoice's work-order/commission job(s) are already " +
+    "held by another live invoice and were left unstamped: " +
+    labelled.join(", ");
+}
