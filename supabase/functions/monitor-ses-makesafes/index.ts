@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // MONITOR-SES-MAKESAFES — group-poll ingestion for the make-safe sync engine
 // Mission: makesafe-live-truth-2026-06-14 (Phase 1: schema + ingestion + attachments)
@@ -1985,7 +1986,7 @@ async function logMailReadFailureEvent(
     const tokenExpired =
       /lifetime validation failed|token is expired|invalidauthenticationtoken/i
         .test(msg);
-    await sb.from("business_events").insert({
+    await insertCapturedEvidence(sb, {
       event_type: "makesafe.intake.mail_read_failed",
       source: "monitor-ses-makesafes",
       entity_type: "mailbox",
@@ -2085,7 +2086,7 @@ async function recordIntakeSourceFates(
       );
     }
   }
-  const { error: eventError } = await sb.from("business_events").insert({
+  const { error: eventError } = await insertCapturedEvidence(sb, {
     event_type: deferred
       ? "makesafe.intake.scan_handoff_deferred"
       : "makesafe.intake.scan_handoff_failed",
@@ -2217,7 +2218,7 @@ async function recordPdfExtractionHandoffFailure(
       `pdf extraction handoff reason write failed for ${attachmentId}: ${rowError.message}`,
     );
   }
-  const { error: eventError } = await sb.from("business_events").insert({
+  const { error: eventError } = await insertCapturedEvidence(sb, {
     event_type: "makesafe.intake.pdf_extraction_handoff_failed",
     source: "monitor-ses-makesafes",
     channel: "system", direction: "system",

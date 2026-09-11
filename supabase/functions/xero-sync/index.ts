@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Xero Sync Edge Function
@@ -847,7 +848,7 @@ async function syncInvoices(sb: any) {
                     },
                   })
                   if (await automationLaneEnabled(sb, 'capture')) {
-                    const { error: captureError } = await sb.from('business_events').insert({
+                    const { error: captureError } = await insertCapturedEvidence(sb, {
                       event_type: 'invoice.payment_received', source: 'xero-sync',
                       entity_type: 'invoice', entity_id: inv.InvoiceID,
                       job_id: jobData.id, match_method: 'direct_job_id',
@@ -1060,7 +1061,7 @@ export async function matchUnlinkedInvoices(client: any) {
             .eq('id', inv.id)
 
           if (await automationLaneEnabled(client, 'capture')) {
-            await client.from('business_events').insert({
+            await insertCapturedEvidence(client, {
               event_type: 'invoice.auto_linked',
               source: 'xero-sync',
               entity_type: 'invoice',
@@ -1114,7 +1115,7 @@ export async function matchUnlinkedInvoices(client: any) {
             .eq('id', inv.id)
 
           if (await automationLaneEnabled(client, 'capture')) {
-            await client.from('business_events').insert({
+            await insertCapturedEvidence(client, {
               event_type: 'invoice.auto_linked',
               source: 'xero-sync',
               entity_type: 'invoice',

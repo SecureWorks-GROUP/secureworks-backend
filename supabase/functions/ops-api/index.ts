@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
@@ -2379,7 +2380,7 @@ async function logBusinessEvent(client: any, event: {
       : null
     const sourceId = payload.inbox_events_id || payload.source_job_event_id || null
     if (!(await automationLaneEnabled(client, 'capture'))) return
-    const { error } = await client.from('business_events').insert({
+    const { error } = await insertCapturedEvidence(client, {
       event_type: event.event_type,
       source: event.source || 'app/office',
       entity_type: event.entity_type,
@@ -12203,7 +12204,7 @@ if (import.meta.main) serve(async (req: Request) => {
 
             // Persist the source action time separately from receipt time.
             if (await automationLaneEnabled(client, 'capture')) {
-              const { error: captureError } = await client.from('business_events').insert({
+              const { error: captureError } = await insertCapturedEvidence(client, {
                 event_type: 'trade.' + event,
                 source: 'ops-api/clock_event',
                 entity_type: 'assignment', entity_id: assignment_id,

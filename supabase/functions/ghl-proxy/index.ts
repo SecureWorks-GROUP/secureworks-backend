@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
@@ -1495,7 +1496,7 @@ serve(async (req: Request) => {
         } catch { /* leave actualStatus null so event carries "unknown" rather than lying */ }
 
         try {
-          await sbLink.from('business_events').insert({
+          await insertCapturedEvidence(sbLink, {
             event_type: 'scope.completed',
             source: 'scoping_tool',
             entity_type: 'job',
@@ -4093,7 +4094,7 @@ serve(async (req: Request) => {
             }
           }
           if (!t7Enabled || t7Failed) {
-            const { error } = await sb.from('business_events').insert(legacyRow)
+            const { error } = await insertCapturedEvidence(sb, legacyRow)
             if (error) console.error('[ghl-proxy] legacy business_events insert failed:', error.message)
           }
         } catch { /* non-blocking */ }
@@ -4554,7 +4555,7 @@ serve(async (req: Request) => {
         // 2026-04-24 fix (rev 3): walk-up re-saves must also emit scope.completed so
         // Jarvis/downstream sees every walk-up sign-off, not just first-time ones.
         try {
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'scope.completed',
             source: 'scoping_tool_walkup',
             entity_type: 'job',
@@ -4580,7 +4581,7 @@ serve(async (req: Request) => {
         // 2026-04-24 Phase 4b: write business_events on first-time walk-up.
         // Read actual status from DB rather than assuming, so false state cannot be emitted.
         try {
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'scope.completed',
             source: 'scoping_tool_walkup',
             entity_type: 'job',

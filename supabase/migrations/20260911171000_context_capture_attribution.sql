@@ -54,6 +54,13 @@ DECLARE words text; ids uuid[]; candidate uuid; n int; line text; contact_ids te
 BEGIN
  prior_status:=e.attribution_status;
  source_method:=e.match_method;
+ -- Keep explicit source custody while attribution is paused; confidence hints never enter it.
+ IF e.job_id IS NOT NULL AND source_method IN ('direct_job_id','direct_reference','manual') THEN
+   e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('source_job_binding',jsonb_build_object('job_id',e.job_id,'match_method',source_method));
+ ELSIF e.job_id IS NULL AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
+   SELECT id INTO e.job_id FROM public.jobs WHERE id::text=e.metadata->'source_job_binding'->>'job_id';
+   source_method:=e.metadata->'source_job_binding'->>'match_method';
+ END IF;
  IF e.job_id IS NOT NULL AND coalesce(source_method,'none') NOT IN ('direct_job_id','direct_reference','manual') THEN
    e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
    e.job_id:=NULL;
@@ -142,7 +149,6 @@ BEGIN
  FOR e IN SELECT * FROM public.business_events
  WHERE (attribution_status='admin_bucket' OR attribution_status IS NULL)
  AND job_id IS NULL AND (p_contact_id IS NULL OR contact_id=p_contact_id)
- AND (event_at IS NULL OR event_at>now()-interval '90 days')
  ORDER BY attribution_checked_at NULLS FIRST,occurred_at,id
  LIMIT greatest(0,least(coalesce(p_limit,250),1000)) FOR UPDATE SKIP LOCKED LOOP
   resolved:=public.resolve_context_attribution(e);

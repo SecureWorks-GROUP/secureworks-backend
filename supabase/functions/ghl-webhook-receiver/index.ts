@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Receiver (All Event Types)
@@ -742,7 +743,7 @@ serve(async (req) => {
     }
 
     if (!t7Enabled || t7Failed) {
-      const { error } = await supabase.from("business_events").insert(legacySpineRow);
+      const { error } = await insertCapturedEvidence(supabase, legacySpineRow);
       eventError = error?.code === "23505" && providerMessageId ? null : error;
     }
 

@@ -74,6 +74,7 @@ function makeFakeSupabase(opts: FakeOpts = {}): { client: any; calls: InsertCall
 
   // deno-lint-ignore no-explicit-any
   const client: any = {
+    rpc: () => Promise.resolve({ data: true, error: null }),
     from(table: string) {
       return {
         // SELECT chain used by the feature_flag reader.
@@ -727,6 +728,7 @@ function makeProposalFake(refsMode: "off" | "soft-warn" | "strict"): FakeProposa
   let lastFlagName = "";
   // deno-lint-ignore no-explicit-any
   const client: any = {
+    rpc: () => Promise.resolve({ data: true, error: null }),
     from(table: string) {
       const chain = {
         select(_cols: string) {
@@ -978,4 +980,50 @@ Deno.test("recordEvidence: provider date survives capture and malformed date sta
     }, { org_id: "test-org" });
     assertEquals((calls[0].values as Record<string, unknown>).event_at, expected);
   }
+});
+
+for (const mode of ["off", "missing", "error", "throw", "missing_rpc"] as const) {
+  Deno.test(`recordEvidence: central capture ${mode} blocks body, row and enqueue even with feature bypass`, async () => {
+    const { client, calls } = makeFakeSupabase();
+    client.rpc = () => mode === "throw" ? Promise.reject(new Error("offline")) : Promise.resolve({
+      data: mode === "off" ? false : mode === "missing" ? null : true,
+      error: mode === "error" ? { message: "missing schema" } : null,
+    });
+    if (mode === "missing_rpc") delete client.rpc;
+    let uploads = 0;
+    await assertRejects(() => recordEvidence(client, {
+      event_type: "note.added", source: "test", channel: "note", direction: "internal",
+      source_table: "job_events", source_id: "note-1", job_id: "job-1",
+      match_method: "direct_job_id", body_full: "Private note", body_preview: "Private note",
+    }, { org_id: "test-org", bypass_feature_flag: true,
+      storage_client: { from: () => ({ upload: () => { uploads++; return Promise.resolve({ error: null }); } }) },
+    }), Error, "capture disabled or unavailable");
+    assertEquals(uploads, 0);
+    assertEquals(calls.length, 0);
+  });
+}
+
+Deno.test("recordEvidence: capture switch is reread before row insert after body storage", async () => {
+  const { client, calls } = makeFakeSupabase();
+  let reads = 0;
+  client.rpc = () => Promise.resolve({ data: ++reads === 1, error: null });
+  await assertRejects(() => recordEvidence(client, {
+    event_type: "note.added", source: "test", channel: "note", direction: "internal",
+    source_table: "job_events", source_id: "note-2", job_id: null, body_preview: "A note",
+  }, { org_id: "test-org", bypass_feature_flag: true }), Error, "capture disabled");
+  assertEquals(reads, 2);
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("recordEvidence: disabled capture after row write prevents extraction enqueue", async () => {
+  const { client, calls } = makeFakeSupabase();
+  let reads = 0;
+  client.rpc = () => Promise.resolve({ data: ++reads <= 2, error: null });
+  await recordEvidence(client, {
+    event_type: "note.added", source: "test", channel: "note", direction: "internal",
+    source_table: "job_events", source_id: "note-3", job_id: "job-1",
+    match_method: "direct_job_id", body_preview: "A note",
+  }, { org_id: "test-org", bypass_feature_flag: true });
+  assertEquals(calls.filter((c) => c.table === "business_events").length, 1);
+  assertEquals(calls.filter((c) => c.table === "extraction_jobs").length, 0);
 });

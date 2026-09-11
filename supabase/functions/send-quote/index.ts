@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Send Quote Edge Function
 //
@@ -253,9 +254,9 @@ async function safeBusinessEventInsert(
   row: Record<string, any>,
   ctx: { handler: string; job_id: string | null }
 ): Promise<void> {
-  // Tier-1 release-truth invariant: this function MUST emit a canonical
-  // business_events row whenever called. The T7 path is preferred when
-  // evidence_capture_v1 is ON, but a T7 failure must NEVER silently drop
+  // The central capture switch controls this evidence projection only.
+  // When enabled, the T7 path is preferred when
+  // evidence_capture_v1 is ON, and a T7 failure must not silently drop
   // the row — fall back to the legacy raw insert.
   let t7Failed = false
   try {
@@ -314,7 +315,7 @@ async function safeBusinessEventInsert(
       }
     }
     // Legacy path. Runs when (a) flag OFF or (b) T7 path threw.
-    const { error } = await sb.from('business_events').insert(row)
+    const { error } = await insertCapturedEvidence(sb, row)
     if (error) {
       console.error('[canonical-event-fail]', JSON.stringify({
         event_type: row?.event_type ?? null,
@@ -1503,7 +1504,7 @@ serve(async (req: Request) => {
       if (path === 'accept') {
         await sb.from('job_variations').update({ status: 'accepted', accepted_at: new Date().toISOString() }).eq('id', variation.id)
         if (variation.job_id) {
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'variation.accepted',
             entity_type: 'job',
             entity_id: variation.job_id,
@@ -1515,7 +1516,7 @@ serve(async (req: Request) => {
         const body = await req.json().catch(() => ({}))
         await sb.from('job_variations').update({ status: 'declined', declined_at: new Date().toISOString() }).eq('id', variation.id)
         if (variation.job_id) {
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'variation.declined',
             entity_type: 'job',
             entity_id: variation.job_id,
@@ -1682,7 +1683,7 @@ serve(async (req: Request) => {
           }
         }
         if (!t7Enabled || !acceptanceJobId || acceptT7Failed) {
-          await sb.from('business_events').insert(legacyAcceptRow)
+          await insertCapturedEvidence(sb, legacyAcceptRow)
         }
       } catch (e: any) {
         console.error('[canonical-event-fail]', JSON.stringify({
@@ -1737,7 +1738,7 @@ serve(async (req: Request) => {
           : (runAccepts || []).some((ra: any) => ra.status === 'accepted')
 
         // Log acceptance event
-        await sb.from('business_events').insert({
+        await insertCapturedEvidence(sb, {
           event_type: 'quote.run_accepted',
           source: 'send-quote',
           occurred_at: new Date().toISOString(),
@@ -1793,7 +1794,7 @@ serve(async (req: Request) => {
           // Acceptance notification event
           const clientName = job?.client_name || 'Client'
           const neighbourName = run?.neighbour_name || 'Neighbour'
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'quote.run_fully_accepted.notify',
             source: 'send-quote',
             occurred_at: new Date().toISOString(),
@@ -2284,7 +2285,7 @@ serve(async (req: Request) => {
           const p = typeof doc.jobs?.pricing_json === 'string' ? JSON.parse(doc.jobs.pricing_json) : doc.jobs?.pricing_json
           quotedAmount = p?.totalIncGST || p?.total || null
         } catch {}
-        await sb.from('business_events').insert({
+        await insertCapturedEvidence(sb, {
           event_type: 'quote.declined',
           entity_type: 'job',
           entity_id: doc.job_id,
@@ -2331,7 +2332,7 @@ serve(async (req: Request) => {
       if (doc.job_id) {
         const reasonLabel = body.reason_label || body.reason || 'No reason given'
         const clientName = doc.jobs?.job_number ? `${doc.jobs.job_number}` : 'Unknown'
-        await sb.from('business_events').insert({
+        await insertCapturedEvidence(sb, {
           event_type: 'quote.declined.notify_scoper',
           entity_type: 'job',
           entity_id: doc.job_id,
@@ -2986,7 +2987,7 @@ serve(async (req: Request) => {
       // Analytics event (preserved): records the runs-bundle send attempt regardless of outcome.
       // job_id is now the row uuid (was previously job_number || id, which wrote a number string
       // into a uuid column). This adjustment ships with the send-runs release-truth refactor.
-      sb.from('business_events').insert({
+      insertCapturedEvidence(sb, {
         event_type: 'quote.runs_sent',
         source: 'send-quote',
         occurred_at: new Date().toISOString(),
@@ -3427,7 +3428,7 @@ serve(async (req: Request) => {
       })
 
       // Insert business_event for Terminal D / daily-digest pickup
-      await sb.from('business_events').insert({
+      await insertCapturedEvidence(sb, {
         event_type: 'payment.claimed',
         entity_type: 'job',
         entity_id: doc.job_id,
@@ -3487,7 +3488,7 @@ serve(async (req: Request) => {
       const { data: urlData } = sb.storage.from('job-documents').getPublicUrl(filePath)
 
       // Business event
-      await sb.from('business_events').insert({
+      await insertCapturedEvidence(sb, {
         event_type: 'council.plans_received',
         entity_type: 'job',
         entity_id: jId,

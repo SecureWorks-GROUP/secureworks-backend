@@ -1,3 +1,4 @@
+import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — transcribe-call (T7 Loop 7 / WhisperFlow path)
@@ -100,6 +101,7 @@ serve(async (req) => {
   }
 
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  if (!(await automationLaneEnabled(sb, "capture"))) return jsonResponse({ ok: false, reason: "capture_disabled" })
 
   // Feature-flag gate. This is the ONLY thing standing between "specific
   // call we just tested" and "every call the company makes". Flip
@@ -176,6 +178,7 @@ serve(async (req) => {
   // when the call could not be matched to a job.
   const pathScope = input.job_id || DEFAULT_ORG_ID
   const audioPath = `${pathScope}/call/${source_id}.${ext}`
+  if (!(await automationLaneEnabled(sb, "capture"))) return jsonResponse({ ok: false, reason: "capture_disabled" })
   try {
     const { error: upErr } = await sb.storage
       .from('evidence-audio')
@@ -187,6 +190,7 @@ serve(async (req) => {
     return jsonResponse({ ok: false, reason: `audio storage failed: ${(e as Error).message}` }, 502)
   }
 
+  if (!(await automationLaneEnabled(sb, "capture"))) return jsonResponse({ ok: false, reason: "capture_disabled" })
   // 3. Call OpenAI Whisper API
   let transcript_text: string
   try {
@@ -293,7 +297,7 @@ serve(async (req) => {
     // row that recordEvidence just inserted. Idempotent via the
     // (source_table, source_id, extractor_version) unique key.
     let extraction_job_id: string | null = null
-    if (result.spine_row.job_id) {
+    if (result.spine_row.job_id && await automationLaneEnabled(sb, "capture") && await automationLaneEnabled(sb, "extraction")) {
       const { data: enqueueData, error: enqueueErr } = await sb
         .from('extraction_jobs')
         .insert({
