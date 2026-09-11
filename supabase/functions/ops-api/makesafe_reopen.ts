@@ -115,15 +115,41 @@ export function buildReopenDetailPatch(args: {
   }
 }
 
+// ── Per-cycle pack_kind key (SAME-REASON REPEAT safety) ──────────────────────
+//
+// The pack key is UNIQUE(job_id, pack_kind).  If pack_kind were JUST the reason,
+// a SECOND reattendance would collide with the first and be swallowed (no distinct
+// state — a re-cycle would silently reuse a terminal 'sent' pack).  To give every
+// re-open cycle a DISTINCT pack row we encode the cycle_number into the pack_kind:
+//
+//   cycle 1 (original)            -> pack_kind = 'main'         (unchanged)
+//   cycle 2, reason reattendance  -> pack_kind = 'reattendance#2'
+//   cycle 3, reason reattendance  -> pack_kind = 'reattendance#3'  (DISTINCT)
+//   cycle 2, reason rectification -> pack_kind = 'rectification#2'
+//
+// Every re-open pack_kind starts with the reason word and is NEVER 'main', so the
+// `packKind !== 'main'` test (no_charge / cycle-scoping / per-cycle marker) holds.
+// The reason can still be recovered with reopenReasonFromPackKind().
+export function reopenPackKindForCycle(reason: ReopenReason, cycleNumber: number): string {
+  return `${reason}#${cycleNumber}`
+}
+
+// Recover the reason word from a per-cycle pack_kind (e.g. 'reattendance#3' ->
+// 'reattendance'). Returns null for 'main' or any non-reopen key.
+export function reopenReasonFromPackKind(packKind: string | null | undefined): ReopenReason | null {
+  const base = String(packKind ?? '').split('#')[0]
+  return isValidReopenReason(base) ? base : null
+}
+
 // ── New pack row to create on re-open ─────────────────────────────────────────
 //
-// Each re-open creates a NEW makesafe_report_packs row with pack_kind = the
-// reason (e.g. 'reattendance').  The prior 'main' pack row is NEVER touched.
-// UNIQUE(job_id, pack_kind) enforces one pack per re-open reason per job.
+// Each re-open creates a NEW makesafe_report_packs row with a per-cycle pack_kind
+// (reason#cycleNumber).  The prior 'main' pack row + any prior re-open pack are
+// NEVER touched.  UNIQUE(job_id, pack_kind) enforces one pack per cycle.
 export interface NewPackRow {
   org_id: string
   job_id: string
-  pack_kind: ReopenReason
+  pack_kind: string
   status: 'drafted'
   created_at: string
   updated_at: string
@@ -135,13 +161,14 @@ export const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 export function buildNewPackRow(args: {
   jobId: string
   reason: ReopenReason
+  cycleNumber: number
   orgId?: string
   nowIso: string
 }): NewPackRow {
   return {
     org_id: args.orgId || DEFAULT_ORG_ID,
     job_id: args.jobId,
-    pack_kind: args.reason,
+    pack_kind: reopenPackKindForCycle(args.reason, args.cycleNumber),
     status: 'drafted',
     created_at: args.nowIso,
     updated_at: args.nowIso,
@@ -272,10 +299,48 @@ export function isCyclePackSentEvent(ev: any, packKind: string): boolean {
   }
   const text = dj && typeof dj === 'object' ? dj.text : null
   if (typeof text !== 'string') return false
-  const prefix = `${MAKESAFE_PACK_SENT_PREFIX} ${packKind}`
-  return text.trim().startsWith(prefix)
+  // Match EXACTLY this pack_kind token (delimited by ' | ' on both sides) so that
+  // e.g. packKind='re' does NOT prefix-match 'reattendance'. The marker text is
+  // `MAKESAFE_PACK_SENT | <packKind> | <inv> | ...`.
+  const t = text.trim()
+  const prefix = `${MAKESAFE_PACK_SENT_PREFIX} ${packKind} |`
+  // Allow a marker with no trailing fields too: `MAKESAFE_PACK_SENT | <packKind>`
+  // exactly (defensive — production always writes the full form).
+  return t.startsWith(prefix) || t === `${MAKESAFE_PACK_SENT_PREFIX} ${packKind}`
 }
 
 export function hasCyclePackSentMarker(events: any[] | null | undefined, packKind: string): boolean {
   return (events || []).some((ev) => isCyclePackSentEvent(ev, packKind))
+}
+
+// ── Unified packKind-aware marker dispatchers (used by makesafeSendPack) ──────
+//
+// The send state machine must use the RIGHT marker per pack_kind:
+//   - packKind === 'main'  -> the existing MAKESAFE_PACK_SENT | main marker
+//     (so the board's isPackSentMainEvent / buildPackSentMap stay correct and the
+//     main behaviour is byte-identical to before this change).
+//   - any other packKind   -> the per-cycle marker (e.g. ... | reattendance | ...)
+//
+// These dispatchers take the main builder/matcher (imported from
+// makesafe_send_pack.ts in the orchestrator) by injection so this module does not
+// create an import cycle, and so a packKind='main' send is provably unchanged.
+export function buildPackSentMarkerForKind(
+  packKind: string,
+  mainBuilder: (args: { invoiceNumber: string | null | undefined; to: string; nowIso: string; messageId?: string | null }) => string,
+  args: { invoiceNumber: string | null | undefined; to: string; nowIso: string; messageId?: string | null },
+): string {
+  if (packKind === 'main') return mainBuilder(args)
+  return buildCyclePackSentMarkerText({ packKind, ...args })
+}
+
+// True if ANY event carries the send marker for THIS pack_kind.
+//   main  -> use the injected main matcher (identical to the existing behaviour).
+//   other -> use the per-cycle matcher.
+export function hasPackSentMarkerForKind(
+  packKind: string,
+  events: any[] | null | undefined,
+  mainMatcher: (ev: any) => boolean,
+): boolean {
+  if (packKind === 'main') return (events || []).some((ev) => mainMatcher(ev))
+  return hasCyclePackSentMarker(events, packKind)
 }

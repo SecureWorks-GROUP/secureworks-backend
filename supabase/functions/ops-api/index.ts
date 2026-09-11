@@ -263,11 +263,12 @@ import {
   validateReopenInput,
   buildReopenDetailPatch,
   buildNewPackRow,
+  reopenPackKindForCycle,
   checkNoChargeInvoiceGate,
   checkNoChargeSendGate,
   filterInvoicesToCurrentCycle,
-  buildCyclePackSentMarkerText,
-  hasCyclePackSentMarker,
+  buildPackSentMarkerForKind,
+  hasPackSentMarkerForKind,
   noChargeFromReason,
   isValidReopenReason,
   type ReopenReason,
@@ -8232,6 +8233,35 @@ export function _makesafeMissingCloseoutDocs(
   return missing
 }
 
+// Stage 4 Phase A — CYCLE-AWARE closeout-doc preflight (used by makesafeSendPack).
+//   - A CHARGE cycle requires report + invoice (+swms if needed) — same as before.
+//   - A no_charge cycle (rectification/pickup) requires report (+swms) ONLY and
+//     must have ZERO current-cycle invoice docs. We pass currentCycleHasInvoiceDoc
+//     so a STALE original-cycle invoice doc does NOT satisfy (or violate) the gate:
+//     for no_charge we ignore the all-docs has_invoice_doc entirely and instead
+//     reject only if THIS cycle produced an invoice doc (which it must not).
+export function _makesafeMissingCloseoutDocsCycle(
+  docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
+  requiresSwms: boolean,
+  opts: { noCharge: boolean; currentCycleHasInvoiceDoc?: boolean },
+): { missing: string[]; unexpected: string[] } {
+  const d = docs || {}
+  const missing: string[] = []
+  const unexpected: string[] = []
+  if (!d.has_report_doc) missing.push('report')
+  if (requiresSwms && !d.has_swms_doc) missing.push('swms')
+  if (opts.noCharge) {
+    // No invoice required. But this cycle must NOT have raised an invoice doc.
+    if (opts.currentCycleHasInvoiceDoc) unexpected.push('invoice (no_charge cycle must have 0 invoice docs)')
+  } else {
+    // Charge cycle: invoice required (all-docs flag is sufficient at the job level
+    // for cycle 1; the send-pack invoice preflight handles cycle-scoping of the
+    // live invoice itself).
+    if (!d.has_invoice_doc) missing.push('invoice')
+  }
+  return { missing, unexpected }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // SHARED surfacing predicate — single source of truth for the board derivation
 // (_deriveMakesafeBoardStage / enrichMakesafeBoardJob) AND the report-drafts
@@ -15978,8 +16008,15 @@ async function _fetchAllAccrecInvoices(client: any): Promise<any[]> {
 // D2 — deterministic make-safe DRAFT idempotency key. STABLE per (job, reference)
 // with NO time component, so two sequential create calls collapse to one invoice
 // at the Xero layer (12h idempotency window). Pure + exported for testing.
-export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, reference: any): string {
-  return `msafe-draft-${jobId || 'nojob'}-${_makesafeNormRef(reference)}`.slice(0, 120)
+//
+// Stage 4 Phase A: cycle_number is appended ONLY for re-open cycles (>1) so a
+// reattendance draft is a DISTINCT Xero idempotency key from the original cycle's
+// invoice (otherwise Xero would collapse the new charge into the original). Cycle
+// 1 (the default) is byte-identical to the original key — no behaviour change.
+export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, reference: any, cycleNumber: number = 1): string {
+  const base = `msafe-draft-${jobId || 'nojob'}-${_makesafeNormRef(reference)}`
+  const keyed = cycleNumber > 1 ? `${base}-c${cycleNumber}` : base
+  return keyed.slice(0, 120)
 }
 
 // (3a) create_makesafe_draft_invoice — DRAFT only, never authorise/send. Runs the
@@ -15987,19 +16024,35 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
 // job, returns {skipped:true, existing_invoice} and creates nothing. Routine-safe
 // (drafts only) — NO human-only gate.
 //
-// Stage 4 Phase A: honours no_charge flag.  When body.no_charge=true (set by a
-// re-open cycle of type rectification/pickup), skips the Xero call entirely and
-// returns {skipped:true, reason:'no_charge'} + writes a job note.
+// Stage 4 Phase A:
+//   - no_charge is read SERVER-SIDE from makesafe_job_details.no_charge (the
+//     caller's body.no_charge is IGNORED for the money decision so neither the
+//     routine nor a UI can flip charge vs no-charge). When true, skips the Xero
+//     call entirely and returns {skipped:true, reason:'no_charge'} + a job note.
+//   - the duplicate guard is CYCLE-SCOPED for a re-open cycle (cycle_number > 1):
+//     the original paid invoice from a prior cycle must NOT block this cycle's new
+//     charge. We scope the dedup to only THIS cycle's invoice (the current pack's
+//     xero_invoice_id), so a reattendance raises a NEW draft alongside the original.
 async function createMakesafeDraftInvoice(client: any, body: any) {
   const jobId = body.job_id || body.jobId || null
   const reference = body.reference
   const contact = body.contact_name || body.contactName
   const lines = body.line_items || body.lineItems || body.lines
 
-  // Stage 4 Phase A — no_charge gate: skip invoice creation for
-  // rectification/pickup re-open cycles.  The caller sets body.no_charge=true
-  // (derived from makesafe_job_details.no_charge at re-open time).
-  const noChargeSignal = checkNoChargeInvoiceGate(body.no_charge === true)
+  // ── Load the make-safe detail SERVER-SIDE (no_charge + cycle_number). The
+  // caller value is NEVER trusted for the money decision. ──
+  let serverNoCharge = false
+  let cycleNumber = 1
+  if (jobId) {
+    const { data: msd } = await client.from('makesafe_job_details')
+      .select('no_charge, cycle_number, reopen_reason').eq('job_id', jobId).maybeSingle()
+    serverNoCharge = msd?.no_charge === true
+    cycleNumber = msd?.cycle_number || 1
+  }
+
+  // Stage 4 Phase A — no_charge gate (SERVER-SIDE): skip invoice creation for
+  // rectification/pickup re-open cycles. Decided by makesafe_job_details.no_charge.
+  const noChargeSignal = checkNoChargeInvoiceGate(serverNoCharge)
   if (noChargeSignal) {
     // Write a job note so the audit trail shows the skip.
     if (jobId) {
@@ -16025,16 +16078,40 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
 
   // DUPLICATE-INVOICE GUARD (mandatory, cannot be skipped). external_ref defaults
   // to the make-safe reference. A VOIDED/DELETED invoice never blocks.
+  //
+  // CYCLE-SCOPING (Stage 4 Phase A): for a re-open cycle (cycle_number > 1) the
+  // dedup must consider ONLY this cycle's invoice, not the original (paid) one —
+  // otherwise the reattendance's new charge is wrongly swallowed. We identify this
+  // cycle's invoice by the current charge-cycle pack's xero_invoice_id and scope
+  // the scan to it. If this cycle has no invoice yet, the scoped set is empty and
+  // a fresh draft is created (the intended re-charge).
   const externalRef = body.external_ref || reference
   const allInvoices = await _fetchAllAccrecInvoices(client)
-  const existing = resolveExistingInvoice(allInvoices, jobId, externalRef)
-  if (existing) {
+  let dedupScope = allInvoices
+  if (cycleNumber > 1 && jobId) {
+    // Find the charge-cycle pack for this cycle (pack_kind reattendance#<cycle>).
+    const cyclePackKind = body.pack_kind ||
+      reopenPackKindForCycle('reattendance' as ReopenReason, cycleNumber)
+    const { data: cyclePack } = await client.from('makesafe_report_packs')
+      .select('xero_invoice_id').eq('job_id', jobId).eq('pack_kind', cyclePackKind).maybeSingle()
+    dedupScope = filterInvoicesToCurrentCycle({
+      allInvoices,
+      currentPackXeroInvoiceId: cyclePack?.xero_invoice_id || null,
+    })
+  }
+  const existing = resolveExistingInvoice(dedupScope, cycleNumber > 1 ? null : jobId, externalRef)
+  // For a re-open cycle we also must NOT match the original via external_ref/job_id
+  // tiers — only an invoice already in THIS cycle's scoped set may block. The
+  // scoped set above already excludes the original, so existing is non-null only
+  // when this cycle truly already has its own invoice.
+  if (existing && (cycleNumber === 1 || dedupScope.length > 0)) {
     return {
       skipped: true,
       reference,
       existing_invoice: existing,
-      scanned: allInvoices.length,
-      note: `live invoice ${existing.invoice_number} (${existing.status}) already maps to this job via ${existing.match_method}; no new invoice created`,
+      scanned: dedupScope.length,
+      cycle_number: cycleNumber,
+      note: `live invoice ${existing.invoice_number} (${existing.status}) already maps to this cycle via ${existing.match_method}; no new invoice created`,
     }
   }
 
@@ -16053,7 +16130,7 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
   // invoice (12h window), so this path is idempotent even when the non-atomic
   // pre-read dup-guard above races. Kept short (Xero caps the header) and
   // namespaced to the make-safe draft path.
-  const stableIdempotencyKey = _makesafeDraftIdempotencyKey(jobId, reference)
+  const stableIdempotencyKey = _makesafeDraftIdempotencyKey(jobId, reference, cycleNumber)
   const created = await createInvoice(client, {
     job_id: jobId || undefined,
     contact_name: contact,
@@ -16062,11 +16139,26 @@ async function createMakesafeDraftInvoice(client: any, body: any) {
     reference,
     xero_status: 'DRAFT', // guardrail
     send_email: false,    // guardrail
-    // D2 — deterministic per (job, reference). INTERNAL-ONLY property name so the
-    // public create_invoice route can never inject it (adversarial review #4).
+    // D2 — deterministic per (job, reference [, cycle]). INTERNAL-ONLY property name
+    // so the public create_invoice route can never inject it (adversarial review #4).
     makesafe_idempotency_key: stableIdempotencyKey,
     operator: body.operator || 'makesafe reporting autopilot (draft-only)',
   })
+
+  // Stage 4 Phase A — for a re-open cycle, LINK the new draft to THIS cycle's pack
+  // (set xero_invoice_id on the pack row) so the cycle-scoped dedup above finds it
+  // on a subsequent call (idempotency between draft-create and send). The 'main'
+  // cycle never sets a pack invoice id here (its send step links it as before).
+  if (cycleNumber > 1 && jobId && created.xero_invoice_id) {
+    const cyclePackKind = body.pack_kind ||
+      reopenPackKindForCycle('reattendance' as ReopenReason, cycleNumber)
+    try {
+      await client.from('makesafe_report_packs')
+        .update({ xero_invoice_id: created.xero_invoice_id, updated_at: new Date().toISOString() })
+        .eq('job_id', jobId).eq('pack_kind', cyclePackKind)
+    } catch (_) { /* non-blocking — the send-step preflight will re-resolve */ }
+  }
+
   return {
     success: true,
     skipped: false,
@@ -16083,8 +16175,9 @@ export const _createMakesafeDraftInvoiceForTest = createMakesafeDraftInvoice
 //
 // Re-activates a completed/archived make-safe job (status -> scheduled) with a
 // reason + charge flag.  Creates a NEW makesafe_report_packs row for the new cycle
-// (pack_kind = reason).  Leaves the prior 'main' pack + its invoice + its docs
-// INTACT.  Does NOT delete or void any prior invoice.
+// (pack_kind = reason#cycleNumber, so a SECOND same-reason re-open gets a DISTINCT
+// pack, never swallowed).  Leaves the prior 'main' pack + any prior re-open pack +
+// the prior invoice + docs INTACT.  Does NOT delete or void any prior invoice.
 async function reopenMakesafe(client: any, body: any) {
   const jobId = body.job_id || body.jobId || null
   const reason = body.reason
@@ -16108,6 +16201,9 @@ async function reopenMakesafe(client: any, body: any) {
     priorCycleNumber: detail.cycle_number || 1,
     nowIso,
   })
+  // The per-cycle pack key (e.g. 'reattendance#2'). A repeat same-reason re-open
+  // increments cycle_number so it gets a DISTINCT key (#3) — never swallowed.
+  const newPackKind = reopenPackKindForCycle(reason as ReopenReason, patch.cycle_number)
 
   // 1. Re-activate the job: set status back to 'scheduled' so it enters the pipeline.
   const { error: jobUpdateErr } = await client.from('jobs')
@@ -16121,12 +16217,15 @@ async function reopenMakesafe(client: any, body: any) {
   if (detailUpdateErr) throw new ApiError('failed to patch makesafe_job_details: ' + detailUpdateErr.message, 500)
 
   // 3. Create a new makesafe_report_packs row for this cycle.
-  //    UNIQUE(job_id, pack_kind) ensures one pack per reason per job.
-  const newPack = buildNewPackRow({ jobId, reason: reason as ReopenReason, nowIso })
+  //    UNIQUE(job_id, pack_kind) + the cycle-numbered key ensures one pack PER
+  //    CYCLE — a 2nd reattendance is a NEW cycle, never a collision with the 1st.
+  const newPack = buildNewPackRow({ jobId, reason: reason as ReopenReason, cycleNumber: patch.cycle_number, nowIso })
   const { error: packInsertErr } = await client.from('makesafe_report_packs')
     .insert(newPack)
   if (packInsertErr) {
-    // A 23505 (unique violation) means this reason's pack already exists: idempotent.
+    // A 23505 here would mean this exact cycle's pack already exists (e.g. a
+    // duplicate re_open call for the same cycle): genuinely idempotent. Any other
+    // error is a real failure.
     if (!String(packInsertErr.code || '').includes('23505')) {
       throw new ApiError('failed to create new report pack: ' + packInsertErr.message, 500)
     }
@@ -16138,7 +16237,7 @@ async function reopenMakesafe(client: any, body: any) {
       job_id: jobId,
       event_type: 'note',
       detail_json: {
-        text: `[re_open_makesafe] job re-opened: reason=${reason}, no_charge=${patch.no_charge}, cycle_number=${patch.cycle_number}`,
+        text: `[re_open_makesafe] job re-opened: reason=${reason}, no_charge=${patch.no_charge}, cycle_number=${patch.cycle_number}, pack_kind=${newPackKind}`,
       },
     })
   } catch (_) { /* non-blocking */ }
@@ -16149,8 +16248,8 @@ async function reopenMakesafe(client: any, body: any) {
     reason,
     no_charge: patch.no_charge,
     cycle_number: patch.cycle_number,
-    pack_kind: reason,
-    note: `job re-opened as cycle ${patch.cycle_number} (${reason}); new pack row created; prior invoice/docs preserved`,
+    pack_kind: newPackKind,
+    note: `job re-opened as cycle ${patch.cycle_number} (${reason}); new pack '${newPackKind}' created; prior invoice/docs preserved`,
   }
 }
 
@@ -16292,12 +16391,16 @@ async function makesafeSendPack(
   const nowIso = () => new Date().toISOString()
 
   // ── PARTIAL-FAILURE / IDEMPOTENCY STOP (before anything irreversible) ──
-  // If the MAKESAFE_PACK_SENT | main marker already exists, UNCONDITIONAL STOP.
+  // If the send marker FOR THIS pack_kind already exists, UNCONDITIONAL STOP.
+  // packKind='main' uses MAKESAFE_PACK_SENT | main (unchanged). A re-open cycle
+  // uses its OWN per-cycle marker (e.g. MAKESAFE_PACK_SENT | reattendance#2) so:
+  //   - a reattendance is NOT blocked by the original main marker, AND
+  //   - a non-main send never writes a main marker that would poison the main pack.
   const { data: priorEvents } = await client.from('job_events')
     .select('job_id, event_type, detail_json')
     .eq('job_id', jobId).eq('event_type', 'note')
-  if ((priorEvents || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))) {
-    return { already_sent: true, reason: 'MAKESAFE_PACK_SENT marker present', job_id: jobId }
+  if (hasPackSentMarkerForKind(packKind, priorEvents, _sendPackIsPackSentMainEvent)) {
+    return { already_sent: true, reason: `MAKESAFE_PACK_SENT marker present for pack_kind '${packKind}'`, job_id: jobId, pack_kind: packKind }
   }
 
   // ── RESUME RE-ENTRY (C-1 + P-1) — RECOVERY of a CONFIRMED send / hard-crash
@@ -16306,7 +16409,7 @@ async function makesafeSendPack(
   // re-authorise. This is reconciliation of an email that ALREADY went out (or a
   // human-confirmed not-sent), not a re-send. ──
   const { data: priorPack } = await client.from('makesafe_report_packs')
-    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status')
+    .select('status, send_started_at, sent_at, xero_invoice_id, invoice_status, invoice_doc_id')
     .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
   const priorStatus = priorPack?.status || null
 
@@ -16335,7 +16438,8 @@ async function makesafeSendPack(
           .select('invoice_number').eq('xero_invoice_id', xeroId).maybeSingle()
         recoverInvNo = inv?.invoice_number || null
       }
-      const markerText = buildPackSentMarkerText({ invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
+      // packKind-aware marker (main -> main marker; re-open -> per-cycle marker).
+      const markerText = buildPackSentMarkerForKind(packKind, buildPackSentMarkerText, { invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
       await client.from('job_events').insert({ job_id: jobId, event_type: 'note', detail_json: { text: markerText } })
     }
     if (postSendPlan.applyClose) await _applyMakesafeClose()
@@ -16369,7 +16473,8 @@ async function makesafeSendPack(
           .select('invoice_number').eq('xero_invoice_id', xeroId).maybeSingle()
         recoverInvNo = inv?.invoice_number || null
       }
-      const markerText = buildPackSentMarkerText({ invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
+      // packKind-aware marker (main -> main marker; re-open -> per-cycle marker).
+      const markerText = buildPackSentMarkerForKind(packKind, buildPackSentMarkerText, { invoiceNumber: recoverInvNo, to: recipientEmail, nowIso: nowIso(), messageId: null })
       await client.from('job_events').insert({ job_id: jobId, event_type: 'note', detail_json: { text: markerText } })
       await _applyMakesafeClose()
       await _patchPack(client, jobId, packKind, { status: 'sent', sent_at: priorPack?.sent_at || nowIso(), failed_step: null, error_detail: null })
@@ -16423,11 +16528,23 @@ async function makesafeSendPack(
   const { data: docRows } = await client.from('job_documents')
     .select('id, type, file_name').eq('job_id', jobId)
   const docFlags = makesafeDocBooleans(docRows || [])
-  const missing = _makesafeMissingCloseoutDocs(docFlags, requiresSwms)
-  if (missing.length > 0) {
+  // Stage 4 Phase A — CYCLE-AWARE doc preflight. A no_charge cycle requires the
+  // report (+swms) ONLY and must have ZERO invoice doc raised on THIS cycle (a
+  // stale ORIGINAL invoice doc must not satisfy/violate the gate). The current
+  // cycle's invoice doc, if any, is tracked on the pack row's invoice_doc_id.
+  const currentCycleHasInvoiceDoc = !!priorPack?.invoice_doc_id
+  const docCheck = _makesafeMissingCloseoutDocsCycle(docFlags, requiresSwms, {
+    noCharge: isNoChargeCycle,
+    currentCycleHasInvoiceDoc,
+  })
+  if (docCheck.missing.length > 0 || docCheck.unexpected.length > 0) {
     await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_docs', error_detail: 'missing close-out docs: ' + missing.join(', ') })
-    throw new ApiError('preflight failed: missing close-out docs: ' + missing.join(', '), 412)
+    const detailMsg = [
+      docCheck.missing.length ? 'missing close-out docs: ' + docCheck.missing.join(', ') : '',
+      docCheck.unexpected.length ? 'unexpected docs: ' + docCheck.unexpected.join(', ') : '',
+    ].filter(Boolean).join('; ')
+    await _patchPack(client, jobId, packKind, { status: 'failed', failed_step: 'preflight_docs', error_detail: detailMsg })
+    throw new ApiError('preflight failed: ' + detailMsg, 412)
   }
 
   // ── PREFLIGHT: a Xero invoice (draft or authorised) must be linked to the job ──
@@ -16707,8 +16824,10 @@ async function makesafeSendPack(
     try { emailResult = await emailResp.json() } catch { emailResult = {} }
     const messageId = emailResult?.message_id || emailResult?.id || null
 
-    // ── STEP 6: SEND CONFIRMED. Write the MAKESAFE_PACK_SENT | main marker ──
-    const markerText = buildPackSentMarkerText({ invoiceNumber, to: recipientEmail, nowIso: nowIso(), messageId })
+    // ── STEP 6: SEND CONFIRMED. Write the MAKESAFE_PACK_SENT marker FOR THIS
+    // pack_kind (main -> | main; a re-open cycle -> | reattendance#2 etc.) so a
+    // non-main send never poisons the main pack's marker. ──
+    const markerText = buildPackSentMarkerForKind(packKind, buildPackSentMarkerText, { invoiceNumber, to: recipientEmail, nowIso: nowIso(), messageId })
     try {
       await client.from('job_events').insert({
         job_id: jobId,
@@ -16825,12 +16944,13 @@ async function makesafeResumeClose(client: any, body: any) {
     .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
   if (!pack) throw new ApiError('makesafe_resume_close: no pack row for this job', 404)
 
-  // ASSERT 2 — the marker MUST be present (reuse _sendPackIsPackSentMainEvent over
-  // job_events). No marker == no proof of send == refuse to close fail-closed.
+  // ASSERT 2 — the send marker FOR THIS pack_kind MUST be present (proof the email
+  // went out for THIS cycle). main -> main marker; a re-open cycle -> its per-cycle
+  // marker. No marker == no proof of send == refuse to close (fail-closed).
   const { data: events } = await client.from('job_events')
     .select('job_id, event_type, detail_json')
     .eq('job_id', jobId).eq('event_type', 'note')
-  const markerPresent = (events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))
+  const markerPresent = hasPackSentMarkerForKind(packKind, events, _sendPackIsPackSentMainEvent)
 
   const gate = checkResumeCloseGate({ packStatus: pack.status, markerPresent })
   if (!gate.ok) {
@@ -16881,11 +17001,12 @@ async function makesafeResetFailedPack(client: any, body: any) {
     .eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
   if (!pack) throw new ApiError('makesafe_reset_failed_pack: no pack row for this job', 404)
 
-  // Fail-closed on a marker: a marker means the email went out -> never reset.
+  // Fail-closed on a marker: a marker FOR THIS pack_kind means the email went out
+  // for THIS cycle -> never reset. main -> main marker; re-open -> per-cycle marker.
   const { data: events } = await client.from('job_events')
     .select('job_id, event_type, detail_json')
     .eq('job_id', jobId).eq('event_type', 'note')
-  const markerPresent = (events || []).some((ev: any) => _sendPackIsPackSentMainEvent(ev))
+  const markerPresent = hasPackSentMarkerForKind(packKind, events, _sendPackIsPackSentMainEvent)
 
   const gate = checkResetFailedGate({ packStatus: pack.status, failedStep: pack.failed_step, markerPresent })
   if (!gate.ok) {

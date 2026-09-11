@@ -35,12 +35,16 @@ import {
   validateReopenInput,
   buildReopenDetailPatch,
   buildNewPackRow,
+  reopenPackKindForCycle,
+  reopenReasonFromPackKind,
   checkNoChargeInvoiceGate,
   checkNoChargeSendGate,
   filterInvoicesToCurrentCycle,
   buildCyclePackSentMarkerText,
   isCyclePackSentEvent,
   hasCyclePackSentMarker,
+  buildPackSentMarkerForKind,
+  hasPackSentMarkerForKind,
   REOPEN_ELIGIBLE_STATUSES,
   REOPEN_REASONS,
   DEFAULT_ORG_ID,
@@ -50,11 +54,16 @@ import {
 import {
   isPackSentMainEvent,
   hasPackSentMainMarker,
+  buildPackSentMarkerText,
   MAKESAFE_PACK_SENT_MAIN_PREFIX,
 } from "./makesafe_send_pack.ts";
 
 // Import the orchestration for end-to-end tests.
-import { _reopenMakesafeForTest } from "./index.ts";
+import {
+  _reopenMakesafeForTest,
+  _makesafeDraftIdempotencyKey,
+  _makesafeMissingCloseoutDocsCycle,
+} from "./index.ts";
 
 // ─────────────────────────────────────────────────────────────────
 // HELPERS
@@ -196,12 +205,30 @@ Deno.test("buildReopenDetailPatch: increments cycle_number, sets no_charge corre
   assertEquals(p3.no_charge, true);
 });
 
-Deno.test("buildNewPackRow: sets pack_kind=reason, status=drafted, org_id", () => {
-  const row = buildNewPackRow({ jobId: "job-1", reason: "reattendance", nowIso: NOW });
-  assertEquals(row.pack_kind, "reattendance");
+Deno.test("buildNewPackRow: sets per-cycle pack_kind (reason#cycle), status=drafted, org_id", () => {
+  const row = buildNewPackRow({ jobId: "job-1", reason: "reattendance", cycleNumber: 2, nowIso: NOW });
+  assertEquals(row.pack_kind, "reattendance#2");
   assertEquals(row.status, "drafted");
   assertEquals(row.org_id, DEFAULT_ORG_ID);
   assertEquals(row.job_id, "job-1");
+});
+
+// ── SAME-REASON REPEAT (Item 5): distinct pack key per cycle ─────────────────
+Deno.test("reopenPackKindForCycle: a 2nd same-reason re-open gets a DISTINCT key", () => {
+  assertEquals(reopenPackKindForCycle("reattendance", 2), "reattendance#2");
+  assertEquals(reopenPackKindForCycle("reattendance", 4), "reattendance#4");
+  // Two reattendances on the same job get DIFFERENT keys -> no collision, not swallowed.
+  assert(reopenPackKindForCycle("reattendance", 2) !== reopenPackKindForCycle("reattendance", 4));
+  assertEquals(reopenPackKindForCycle("rectification", 3), "rectification#3");
+});
+
+Deno.test("reopenReasonFromPackKind: recovers the reason; null for main/non-reopen", () => {
+  assertEquals(reopenReasonFromPackKind("reattendance#2"), "reattendance");
+  assertEquals(reopenReasonFromPackKind("rectification#5"), "rectification");
+  assertEquals(reopenReasonFromPackKind("pickup#3"), "pickup");
+  assertEquals(reopenReasonFromPackKind("main"), null);
+  assertEquals(reopenReasonFromPackKind("photo"), null);
+  assertEquals(reopenReasonFromPackKind(null), null);
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -495,10 +522,10 @@ Deno.test("reattendance re-open: creates pack on charge path (no_charge=false, c
   assertEquals(result.reason, "reattendance");
   assertEquals(result.no_charge, false);
   assertEquals(result.cycle_number, 2);
-  assertEquals(result.pack_kind, "reattendance");
+  assertEquals(result.pack_kind, "reattendance#2");
 
   assertEquals(insertedPacks.length, 1, "should insert exactly one new pack row");
-  assertEquals(insertedPacks[0].pack_kind, "reattendance");
+  assertEquals(insertedPacks[0].pack_kind, "reattendance#2");
   assertEquals(insertedPacks[0].status, "drafted");
 
   // Job should be set back to 'scheduled'.
@@ -524,7 +551,7 @@ Deno.test("rectification re-open: no_charge=true, cycle incremented, pack create
   assertEquals(result.cycle_number, 2);
 
   assertEquals(insertedPacks.length, 1);
-  assertEquals(insertedPacks[0].pack_kind, "rectification");
+  assertEquals(insertedPacks[0].pack_kind, "rectification#2");
 
   assertEquals(detailUpdates[0].no_charge, true);
 });
@@ -539,7 +566,7 @@ Deno.test("pickup re-open: no_charge=true, cycle incremented, pack created", asy
   assertEquals(result.ok, true);
   assertEquals(result.no_charge, true);
   assertEquals(result.cycle_number, 2);
-  assertEquals(insertedPacks[0].pack_kind, "pickup");
+  assertEquals(insertedPacks[0].pack_kind, "pickup#2");
   assertEquals(detailUpdates[0].no_charge, true);
 });
 
@@ -601,4 +628,212 @@ Deno.test("re-open with invalid reason is rejected (400)", async () => {
     assert(e.message.includes("must be one of") || e.status === 400);
   }
   assert(threw, "invalid reason must throw");
+});
+
+// 7h. SAME-REASON REPEAT (Item 5): a 2nd reattendance (cycle 2 -> 3) gets a
+// DISTINCT pack key, NOT swallowed.
+Deno.test("re-open: 2nd same-reason re-open gets a DISTINCT pack key (not swallowed)", async () => {
+  // Job already had one reattendance (cycle_number now 2). A 2nd reattendance.
+  const { client, insertedPacks } = makeReopenClient("complete", 2);
+  const result: any = await _reopenMakesafeForTest(client, { job_id: "job-1", reason: "reattendance" });
+  assertEquals(result.cycle_number, 3);
+  assertEquals(result.pack_kind, "reattendance#3", "2nd reattendance must be cycle 3 with a distinct key");
+  assertEquals(insertedPacks[0].pack_kind, "reattendance#3");
+});
+
+// ═════════════════════════════════════════════════════════════════
+// 8. RE-VALIDATION FIXES (per independent + Codex review).
+// ═════════════════════════════════════════════════════════════════
+
+// ── Item 1: per-cycle send markers (unified dispatcher) ──────────────────────
+Deno.test("Item 1 — buildPackSentMarkerForKind: main -> main marker; re-open -> per-cycle", () => {
+  // main -> byte-identical to the existing main builder.
+  const mainText = buildPackSentMarkerForKind("main", buildPackSentMarkerText, {
+    invoiceNumber: "INV-100", to: "b@x.com", nowIso: NOW, messageId: "m1",
+  });
+  const directMain = buildPackSentMarkerText({ invoiceNumber: "INV-100", to: "b@x.com", nowIso: NOW, messageId: "m1" });
+  assertEquals(mainText, directMain, "main must delegate to the existing main builder");
+  assert(isPackSentMainEvent({ event_type: "note", detail_json: { text: mainText } }));
+
+  // re-open -> per-cycle marker, NOT a main marker.
+  const cycleText = buildPackSentMarkerForKind("reattendance#2", buildPackSentMarkerText, {
+    invoiceNumber: "INV-200", to: "b@x.com", nowIso: NOW,
+  });
+  assert(!isPackSentMainEvent({ event_type: "note", detail_json: { text: cycleText } }), "re-open marker must NOT be a main marker");
+  assert(isCyclePackSentEvent({ event_type: "note", detail_json: { text: cycleText } }, "reattendance#2"));
+});
+
+Deno.test("Item 1 — hasPackSentMarkerForKind: a reattendance marker does NOT block a reattendance#3 send and vice versa", () => {
+  const reattendance2Marker = buildPackSentMarkerForKind("reattendance#2", buildPackSentMarkerText, {
+    invoiceNumber: "INV-200", to: "b@x.com", nowIso: NOW,
+  });
+  const events = [{ event_type: "note", detail_json: { text: reattendance2Marker } }];
+
+  // The reattendance#2 marker is detected for reattendance#2.
+  assertEquals(hasPackSentMarkerForKind("reattendance#2", events, isPackSentMainEvent), true);
+  // It does NOT block a DIFFERENT cycle (reattendance#3) or the main pack.
+  assertEquals(hasPackSentMarkerForKind("reattendance#3", events, isPackSentMainEvent), false);
+  assertEquals(hasPackSentMarkerForKind("main", events, isPackSentMainEvent), false,
+    "a re-open send must NOT poison the main pack's marker check");
+});
+
+Deno.test("Item 1 — a MAIN marker does NOT block a reattendance send (the original bug)", () => {
+  const mainMarker = `${MAKESAFE_PACK_SENT_MAIN_PREFIX} | INV-100 | to=x | ${NOW}`;
+  const events = [{ event_type: "note", detail_json: { text: mainMarker } }];
+  // Entry stop-check for a reattendance#2 cycle: must NOT see the main marker.
+  assertEquals(hasPackSentMarkerForKind("reattendance#2", events, isPackSentMainEvent), false,
+    "the original main marker must NOT block a reattendance cycle's send");
+  // The main pack itself is still correctly blocked.
+  assertEquals(hasPackSentMarkerForKind("main", events, isPackSentMainEvent), true);
+});
+
+// ── Item 5 cont: per-cycle marker token does not prefix-collide ──────────────
+Deno.test("Item 5 — reattendance#2 marker does NOT match reattendance#20 (token-exact)", () => {
+  const m2 = buildCyclePackSentMarkerText({ packKind: "reattendance#2", invoiceNumber: "INV-2", to: "x", nowIso: NOW });
+  assert(isCyclePackSentEvent({ event_type: "note", detail_json: { text: m2 } }, "reattendance#2"));
+  assert(!isCyclePackSentEvent({ event_type: "note", detail_json: { text: m2 } }, "reattendance#20"),
+    "the '#2' token must not prefix-match '#20'");
+});
+
+// ── Item 3: no_charge decided SERVER-SIDE (createMakesafeDraftInvoice) ────────
+// createMakesafeDraftInvoice loads makesafe_job_details.no_charge by job_id and
+// ignores body.no_charge for the money decision. We exercise the orchestration
+// with a mock whose detail row says no_charge=true while the caller passes
+// no_charge=false; the invoice must be SKIPPED.
+function makeDraftClient(opts: {
+  detailNoCharge: boolean;
+  cycleNumber: number;
+}) {
+  const jobEvents: any[] = [];
+  function builder(table: string) {
+    const b: any = {
+      select: (_c?: string) => b,
+      eq: (_col: string, _val: any) => b,
+      order: () => b,
+      maybeSingle: async () => {
+        if (table === "makesafe_job_details") {
+          return { data: { no_charge: opts.detailNoCharge, cycle_number: opts.cycleNumber, reopen_reason: opts.detailNoCharge ? "rectification" : "reattendance" }, error: null };
+        }
+        return { data: null, error: null };
+      },
+      insert: async (row: any) => {
+        if (table === "job_events") jobEvents.push(row);
+        return { data: [row], error: null };
+      },
+    };
+    return b;
+  }
+  return { client: { from: (t: string) => builder(t) }, jobEvents };
+}
+
+Deno.test("Item 3 — createMakesafeDraftInvoice IGNORES caller no_charge, uses SERVER value (skips)", async () => {
+  // We need the real handler. It is not exported, so we re-test the SERVER-SIDE
+  // decision via the orchestration's observable effect: the draft is skipped.
+  const { _createMakesafeDraftInvoiceForTest } = await import("./index.ts");
+  const { client, jobEvents } = makeDraftClient({ detailNoCharge: true, cycleNumber: 2 });
+  // Caller maliciously/incorrectly passes no_charge=false — must be IGNORED.
+  const result: any = await _createMakesafeDraftInvoiceForTest(client, {
+    job_id: "job-1",
+    reference: "AJBR-67200",
+    contact_name: "MLB",
+    line_items: [{ description: "labour", quantity: 1, unit_price: 100 }],
+    no_charge: false, // caller value — MUST be ignored
+  });
+  assertEquals(result.skipped, true, "server no_charge=true must skip even when caller says false");
+  assertEquals(result.reason, "no_charge");
+  // A skip note must be written.
+  assert(jobEvents.some((e) => String(e.detail_json?.text || "").includes("[no_charge]")));
+});
+
+Deno.test("Item 3 — no_charge gate keys on the SERVER value, not the caller", () => {
+  assert(checkNoChargeInvoiceGate(true) !== null, "server no_charge=true must skip");
+  assertEquals(checkNoChargeInvoiceGate(false), null, "server no_charge=false must create");
+});
+
+// ── Item 4: cycle-aware closeout-doc preflight ───────────────────────────────
+Deno.test("Item 4 — charge cycle requires invoice + report (+swms)", () => {
+  // Missing invoice -> reported missing.
+  const r1 = _makesafeMissingCloseoutDocsCycle(
+    { has_invoice_doc: false, has_report_doc: true, has_swms_doc: true },
+    false,
+    { noCharge: false },
+  );
+  assert(r1.missing.includes("invoice"));
+  assertEquals(r1.unexpected.length, 0);
+
+  // All present -> clean.
+  const r2 = _makesafeMissingCloseoutDocsCycle(
+    { has_invoice_doc: true, has_report_doc: true, has_swms_doc: true },
+    true,
+    { noCharge: false },
+  );
+  assertEquals(r2.missing.length, 0);
+  assertEquals(r2.unexpected.length, 0);
+});
+
+Deno.test("Item 4 — no_charge cycle requires report ONLY, NOT an invoice doc", () => {
+  // no_charge: report present, NO invoice doc on this cycle -> clean (the original
+  // invoice doc at the job level must NOT be required NOR satisfy anything here).
+  const r = _makesafeMissingCloseoutDocsCycle(
+    { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false }, // stale original invoice doc present
+    false,
+    { noCharge: true, currentCycleHasInvoiceDoc: false },
+  );
+  assertEquals(r.missing.length, 0, "no_charge must NOT require an invoice doc");
+  assertEquals(r.unexpected.length, 0, "a stale ORIGINAL invoice doc must not be flagged unexpected");
+});
+
+Deno.test("Item 4 — no_charge cycle still requires the report (+swms when needed)", () => {
+  const r = _makesafeMissingCloseoutDocsCycle(
+    { has_invoice_doc: false, has_report_doc: false, has_swms_doc: false },
+    true,
+    { noCharge: true, currentCycleHasInvoiceDoc: false },
+  );
+  assert(r.missing.includes("report"));
+  assert(r.missing.includes("swms"));
+  assert(!r.missing.includes("invoice"), "no_charge must never require an invoice");
+});
+
+Deno.test("Item 4 — no_charge cycle that raised THIS cycle's invoice doc is FLAGGED unexpected", () => {
+  const r = _makesafeMissingCloseoutDocsCycle(
+    { has_invoice_doc: true, has_report_doc: true, has_swms_doc: true },
+    false,
+    { noCharge: true, currentCycleHasInvoiceDoc: true }, // this cycle wrongly produced an invoice
+  );
+  assertEquals(r.missing.length, 0);
+  assert(r.unexpected.some((u) => u.includes("invoice")), "an invoice on a no_charge cycle is unexpected");
+});
+
+// ── Item 2: cycle-scoped draft dedup (idempotency key is cycle-distinct) ──────
+Deno.test("Item 2 — draft idempotency key is DISTINCT per cycle (reattendance != original)", () => {
+  const cycle1 = _makesafeDraftIdempotencyKey("job-1", "AJBR-67200", 1);
+  const cycle1Default = _makesafeDraftIdempotencyKey("job-1", "AJBR-67200"); // default cycle 1
+  assertEquals(cycle1, cycle1Default, "cycle 1 must be byte-identical to the original key (no regression)");
+
+  const cycle2 = _makesafeDraftIdempotencyKey("job-1", "AJBR-67200", 2);
+  const cycle3 = _makesafeDraftIdempotencyKey("job-1", "AJBR-67200", 3);
+  assert(cycle2 !== cycle1, "cycle 2 key must DIFFER from cycle 1 (so Xero does not collapse the new charge)");
+  assert(cycle3 !== cycle2, "cycle 3 key must DIFFER from cycle 2");
+  assert(cycle2.includes("c2"));
+  assert(cycle3.includes("c3"));
+});
+
+Deno.test("Item 2 — cycle-scoped dedup: a reattendance draft is NOT blocked by the original paid invoice", () => {
+  // Original (paid) + reattendance (none yet). Scoped to the reattendance cycle
+  // (whose pack has no xero_invoice_id yet) -> empty set -> no block -> create.
+  const allInvoices = [
+    { xero_invoice_id: "xero-original", invoice_number: "INV-100", status: "PAID", job_id: "job-1", reference: "AJBR-67200" },
+  ];
+  const scoped = filterInvoicesToCurrentCycle({ allInvoices, currentPackXeroInvoiceId: null });
+  assertEquals(scoped.length, 0, "reattendance cycle (no invoice yet) -> empty scoped set -> new draft allowed");
+
+  // After the reattendance draft exists and is linked to the cycle pack, the
+  // dedup finds it (idempotent) and does NOT double-create.
+  const allInvoices2 = [
+    ...allInvoices,
+    { xero_invoice_id: "xero-reattend", invoice_number: "INV-200", status: "DRAFT", job_id: "job-1", reference: "AJBR-67200" },
+  ];
+  const scoped2 = filterInvoicesToCurrentCycle({ allInvoices: allInvoices2, currentPackXeroInvoiceId: "xero-reattend" });
+  assertEquals(scoped2.length, 1);
+  assertEquals(scoped2[0].xero_invoice_id, "xero-reattend", "dedup scoped to the reattendance invoice only");
 });
