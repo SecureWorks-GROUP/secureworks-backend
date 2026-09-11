@@ -620,7 +620,7 @@ serve(async (req) => {
     const providerId = body.messageId || body.message_id || body.id || body.eventId;
     const providerMessageId = providerId && (type === "InboundMessage" || type === "OutboundMessage") ? `ghl:${providerId}` : null;
     const providerTime = body.dateAdded || body.createdAt || body.timestamp;
-    const eventAt = providerTime && !Number.isNaN(Date.parse(String(providerTime))) ? new Date(providerTime).toISOString() : occurredAt;
+    const eventAt = providerTime && !Number.isNaN(Date.parse(String(providerTime))) ? new Date(providerTime).toISOString() : null;
     let channel: Channel = "system";
     let direction: Direction = "system";
     let conversationKey: string | null = (conversationId as string) || null;
