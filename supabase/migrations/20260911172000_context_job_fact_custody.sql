@@ -311,7 +311,7 @@ SELECT visible.* FROM (
  FROM public.job_temporary_context
 ) visible
 WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
- AND (kind NOT IN ('current_state','pending_action','quote_issue') OR expires_at IS NOT NULL)
+ AND (kind NOT IN ('current_state','pending_action','quote_issue','proposal') OR expires_at IS NOT NULL)
  AND (extractor_version IS DISTINCT FROM 'luna_v2' OR (
   cardinality(source_event_ids)>0 AND NOT EXISTS (
    SELECT 1 FROM unnest(visible.source_event_ids) source_id
