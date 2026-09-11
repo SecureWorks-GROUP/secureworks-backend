@@ -101,3 +101,61 @@ BEGIN
  IF has_function_privilege('anon','public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)','EXECUTE') THEN RAISE EXCEPTION 'B3 public write'; END IF;
 END $$;
 ROLLBACK;
+
+BEGIN;
+DO $$
+DECLARE text_value text; got date; anchor timestamptz:='2026-09-11 17:00:00+08';
+BEGIN
+ FOREACH text_value IN ARRAY ARRAY['14/09/2026','14-09-2026','14 September 2026','14th Sep 2026','14 Sep. 2026','Sept. 14th, 2026','September 14th, 2026','14 Sept','September 14','14/09','2026-09-14','Monday 14 September 2026'] LOOP
+  got:=public.context_supported_due_date(text_value,anchor);
+  IF got IS DISTINCT FROM '2026-09-14'::date THEN RAISE EXCEPTION 'B3 named date failed: % -> %',text_value,got; END IF;
+ END LOOP;
+ IF public.context_supported_due_date('today',anchor) IS DISTINCT FROM '2026-09-11'::date
+ OR public.context_supported_due_date('tomorrow',anchor) IS DISTINCT FROM '2026-09-12'::date
+ OR public.context_supported_due_date('14 September','2025-09-11 17:00+08') IS DISTINCT FROM '2025-09-14'::date
+ THEN RAISE EXCEPTION 'B3 source date anchor moved'; END IF;
+ IF public.context_fact_expiry('pending_action',anchor,public.context_supported_due_date('tomorrow',anchor)) IS DISTINCT FROM '2026-09-13 00:00+08'::timestamptz
+ OR public.context_fact_expiry('current_state',anchor) IS DISTINCT FROM '2026-09-12 00:00+08'::timestamptz
+ THEN RAISE EXCEPTION 'B3 named-date expiry changed source 17h rules'; END IF;
+ FOREACH text_value IN ARRAY ARRAY['31/02/2026','31 April 2026','14 September or 15 September','next Monday','last Friday','Monday','Tuesday 14 September 2026','not tomorrow','day after tomorrow','14/09/26','14 September 26','September 14 26'] LOOP
+  BEGIN
+   PERFORM public.context_supported_due_date(text_value,anchor);
+   RAISE EXCEPTION 'B3 ambiguous date accepted: %',text_value USING ERRCODE='ZX001';
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM NOT LIKE 'luna_due_date_%' THEN RAISE; END IF;
+  END;
+ END LOOP;
+ BEGIN
+  PERFORM public.context_supported_due_date('4 January','2026-12-30 17:00+08');
+  RAISE EXCEPTION 'B3 ambiguous rollover accepted' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_due_date_ambiguous_year' THEN RAISE; END IF; END;
+ IF public.context_supported_due_date('when the crew is ready',anchor) IS NOT NULL THEN RAISE EXCEPTION 'B3 invented unsupported date'; END IF;
+END $$;
+ROLLBACK;
+
+BEGIN;
+DO $$
+DECLARE j uuid:=gen_random_uuid(); e uuid; ev jsonb; claim jsonb; run uuid; token uuid; f jsonb; result jsonb;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-DATE-'||j);
+ INSERT INTO public.business_events(job_id,event_at,payload) VALUES(j,'2026-09-11 17:00+08','{"body":"Delivery 14 September 2026. Pickup 15 September 2026."}') RETURNING id,to_jsonb(business_events) INTO e,ev;
+ claim:=public.claim_context_extraction_run(j,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction');run:=(claim->'run'->>'id')::uuid;token:=(claim->'run'->>'lease_token')::uuid;
+ f:=jsonb_build_object('kind','pending_action','text','Delivery is arranged.','confidence',0.9,'source_event_ids',jsonb_build_array(e),'due_date','2026-09-14','evidence_excerpt','Delivery 14 September 2026. Pickup 15 September 2026.');
+ BEGIN
+  PERFORM public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev),jsonb_build_array(f),'[]','[]');
+  RAISE EXCEPTION 'B3 conflicting source dates allowed' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_due_date_conflicting_dates' THEN RAISE; END IF; END;
+ f:=jsonb_set(f,'{evidence_excerpt}','"Delivery 14 September 2026."');
+ BEGIN
+  PERFORM public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev),jsonb_build_array(jsonb_set(f,'{due_date}','"2026-09-15"')),'[]','[]');
+  RAISE EXCEPTION 'B3 model date mismatch allowed' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_due_date_unsupported' THEN RAISE; END IF; END;
+ BEGIN
+  PERFORM public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev),jsonb_build_array(jsonb_set(f,'{due_date}','"tomorrow"')),'[]','[]');
+  RAISE EXCEPTION 'B3 clock-relative payload allowed' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_due_date_shape_invalid' THEN RAISE; END IF; END;
+ result:=public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev),jsonb_build_array(f),'[]','[]');
+ IF result->>'outcome'<>'inserted' OR NOT EXISTS(SELECT 1 FROM public.job_temporary_context WHERE job_id=j AND expires_at='2026-09-15 00:00+08'::timestamptz AND event_date='2026-09-11'::date)
+ THEN RAISE EXCEPTION 'B3 named-date RPC failed'; END IF;
+END $$;
+ROLLBACK;

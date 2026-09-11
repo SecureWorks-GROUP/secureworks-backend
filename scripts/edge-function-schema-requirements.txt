@@ -331,3 +331,4 @@ ops-api|supabase/migrations/20260911172000_context_job_fact_custody.sql|column|j
 ops-api|supabase/migrations/20260911172000_context_job_fact_custody.sql|column|job_temporary_context.lifecycle
 ops-api|supabase/migrations/20260911172000_context_job_fact_custody.sql|table|luna_context_job_revisions
 ops-api|supabase/migrations/20260911172000_context_job_fact_custody.sql|table|luna_context_fact_custody
+ops-api|supabase/migrations/20260911172000_context_job_fact_custody.sql|function|context_supported_due_date
