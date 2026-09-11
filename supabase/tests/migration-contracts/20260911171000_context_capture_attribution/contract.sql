@@ -5,6 +5,16 @@ BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  (j1,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-1','b2-repeat'),
  (j2,'00000000-0000-0000-0000-000000000001','accepted','fencing','B2-JOB-2','b2-repeat');
+ -- High confidence is not source provenance, including raw legacy inserts.
+ INSERT INTO public.business_events(payload,contact_id,job_id,match_method,match_confidence)
+ VALUES('{"body":"Please revise the height"}','b2-repeat',j1,'contact_id',0.99) RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status<>'pending_luna' OR e.metadata->'attribution_hint'->>'job_id'<>j1::text THEN RAISE EXCEPTION 'weak match bypassed ladder'; END IF;
+ INSERT INTO public.business_events(payload,contact_id,job_id)
+ VALUES('{"body":"Unmarked suggestion"}','b2-repeat',j1) RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status<>'pending_luna' THEN RAISE EXCEPTION 'unmarked job bypassed ladder'; END IF;
+ INSERT INTO public.business_events(payload,contact_id,job_id,match_method)
+ VALUES('{"body":"Explicit source job"}','b2-repeat',j1,'direct_job_id') RETURNING * INTO e;
+ IF e.job_id<>j1 OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'explicit source binding lost'; END IF;
  INSERT INTO public.business_events(payload,contact_id,thread_key) VALUES('{"body":"Please revise height"}','b2-repeat','b2-thread') RETURNING * INTO e;
  IF e.attribution_status<>'pending_luna' THEN RAISE EXCEPTION 'repeat customer must reach Luna, got % %',e.attribution_status,e.payload; END IF;
  eid:=e.id;
@@ -37,7 +47,7 @@ BEGIN
  UPDATE public.jobs SET status='closed' WHERE id=j3;
  SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
  IF n<>1 THEN RAISE EXCEPTION 'closed job new evidence omitted'; END IF;
- INSERT INTO public.business_events(payload,job_id,direction) SELECT jsonb_build_object('body','batch event '||v),j3,'inbound' FROM generate_series(1,30) v;
+ INSERT INTO public.business_events(payload,job_id,direction,match_method) SELECT jsonb_build_object('body','batch event '||v),j3,'inbound','direct_job_id' FROM generate_series(1,30) v;
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,99);
  IF n<>25 THEN RAISE EXCEPTION 'batch must cap at25, got %',n; END IF;
  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status) VALUES(j3,current_date,'extraction','running') RETURNING id INTO runid;
@@ -46,7 +56,7 @@ BEGIN
  IF n<>6 THEN RAISE EXCEPTION 'receipt backlog lost, got %',n; END IF;
  -- An outbound tail is readable with a retained inbound anchor, never by itself.
  INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25) ON CONFLICT DO NOTHING;
- INSERT INTO public.business_events(payload,job_id,direction) VALUES('{"body":"Our answer"}',j3,'outbound');
+ INSERT INTO public.business_events(payload,job_id,direction,match_method) VALUES('{"body":"Our answer"}',j3,'outbound','direct_job_id');
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
  IF n<>2 THEN RAISE EXCEPTION 'outbound tail lost or sent alone, got %',n; END IF;
  SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
@@ -68,9 +78,9 @@ BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  (older_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-FAIR-OLD','b2-fair-old'),
  (retry_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-FAIR-RETRY','b2-fair-retry');
- INSERT INTO public.business_events(payload,job_id,event_at,direction) VALUES
- ('{"body":"Older unadmitted evidence"}',older_job,'2000-01-01Z','inbound'),
- ('{"body":"Retry evidence"}',retry_job,'2099-01-01Z','inbound');
+ INSERT INTO public.business_events(payload,job_id,event_at,direction,match_method) VALUES
+ ('{"body":"Older unadmitted evidence"}',older_job,'2000-01-01Z','inbound','direct_job_id'),
+ ('{"body":"Retry evidence"}',retry_job,'2099-01-01Z','inbound','direct_job_id');
  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status)
  VALUES(retry_job,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction','failed');
  SELECT job_id INTO selected_job FROM public.context_extraction_candidates(1);

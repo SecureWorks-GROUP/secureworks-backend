@@ -1,3 +1,4 @@
+import { sourceTime } from "../source_time.ts";
 // T7 Loop 1 — recordEvidence: the single capture choke point
 //
 // Roadmap: cio/operations/2026-05-02-t7-evidence-capture-spine-roadmap.md (Section 5)
@@ -171,7 +172,7 @@ export async function recordEvidence(
     event_type: capture.event_type,
     source: capture.source,
     occurred_at,
-    ...(capture.event_at ? { event_at: capture.event_at } : {}),
+    event_at: sourceTime(capture.event_at),
     ...(capture.provider_message_id ? { provider_message_id: capture.provider_message_id } : {}),
     entity_type: capture.entity_type ?? entityTypeForChannel(capture.channel),
     entity_id: capture.entity_id ?? capture.source_id,
@@ -179,6 +180,10 @@ export async function recordEvidence(
     payload: capture.payload ?? {},
     metadata: {
       ...(capture.metadata ?? {}),
+      ...(capture.job_id && !match.job_id ? { attribution_hint: {
+        job_id: capture.job_id, match_method: capture.match_method ?? "none",
+        match_confidence: capture.match_confidence ?? null,
+      } } : {}),
       t7_envelope_version: 1,
       match_notes: match.notes,
       warnings,

@@ -1,3 +1,4 @@
+import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — transcribe-call (T7 Loop 7 / WhisperFlow path)
 //
@@ -68,6 +69,8 @@ interface TranscribeCallInput {
   contact_id?: string
   call_direction?: 'inbound' | 'outbound' | 'internal'
   occurred_at?: string
+  event_at?: string | null
+  job_match_method?: MatchMethod
   duration_seconds?: number
   phone?: string
   ghl_call_id?: string
@@ -117,7 +120,7 @@ serve(async (req) => {
     return jsonResponse({ ok: false, reason: 'recording_url required' }, 400)
   }
 
-  const occurred_at = input.occurred_at || new Date().toISOString()
+  const occurred_at = new Date().toISOString()
   const direction: Direction = (input.call_direction === 'inbound' || input.call_direction === 'outbound')
     ? input.call_direction
     : 'internal'
@@ -178,10 +181,10 @@ serve(async (req) => {
       .from('evidence-audio')
       .upload(audioPath, audioBytes, { contentType, upsert: true })
     if (upErr) {
-      console.warn('[transcribe-call] audio bucket upload failed (non-fatal):', upErr.message)
+      return jsonResponse({ ok: false, reason: `audio storage failed: ${upErr.message}` }, 502)
     }
   } catch (e) {
-    console.warn('[transcribe-call] audio bucket upload threw (non-fatal):', (e as Error).message)
+    return jsonResponse({ ok: false, reason: `audio storage failed: ${(e as Error).message}` }, 502)
   }
 
   // 3. Call OpenAI Whisper API
@@ -215,9 +218,7 @@ serve(async (req) => {
 
   // 4. Write transcript via recordEvidence. channel='call'. The local
   //    extractor_eligible_channels override lets it flow to extraction_jobs.
-  const match_method: MatchMethod = input.job_id ? 'direct_job_id'
-                                  : input.contact_id ? 'contact_id'
-                                  : 'none'
+  const match_method: MatchMethod = input.job_match_method || 'none'
   const channel: Channel = 'call'
   const safe_summary = transcript_text.slice(0, 280).replace(/\s+/g, ' ').trim()
 
@@ -228,6 +229,7 @@ serve(async (req) => {
       channel,
       direction,
       occurred_at,
+      event_at: sourceTime(input.event_at),
       // T5 extractor's loadSourceRow allowlist: business_events,
       // inbox_events, job_events, ghl_conversation_cache. The synthetic
       // 'transcribed_call' table doesn't exist; using business_events as
@@ -275,6 +277,7 @@ serve(async (req) => {
         whisper_model: WHISPER_MODEL,
         char_count: transcript_text.length,
         ghl_call_id: input.ghl_call_id || null,
+        job_match_method: match_method,
         whisperflow_synthetic_source_id: source_id,
       },
       metadata: {
@@ -290,11 +293,11 @@ serve(async (req) => {
     // row that recordEvidence just inserted. Idempotent via the
     // (source_table, source_id, extractor_version) unique key.
     let extraction_job_id: string | null = null
-    if (input.job_id) {
+    if (result.spine_row.job_id) {
       const { data: enqueueData, error: enqueueErr } = await sb
         .from('extraction_jobs')
         .insert({
-          job_id: input.job_id,
+          job_id: result.spine_row.job_id,
           source_table: 'business_events',
           source_id: result.spine_event_id,
           source_event_type: 'call.transcript_completed',
