@@ -248,3 +248,9 @@ create_supplier_bill # probe=source-only
 update_supplier_bill # probe=source-only
 attach_supplier_bill_pdf # probe=source-only
 create_supplier_credit_note # probe=source-only
+# Clear Debt picture (DEBT COLLECTION desk, 11 Sep 2026)
+list_debt_picture
+upsert_debt_picture
+add_debt_note
+debt_notes
+debt_proposal_mark
