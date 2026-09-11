@@ -171,6 +171,8 @@ export async function recordEvidence(
     event_type: capture.event_type,
     source: capture.source,
     occurred_at,
+    ...(capture.event_at ? { event_at: capture.event_at } : {}),
+    ...(capture.provider_message_id ? { provider_message_id: capture.provider_message_id } : {}),
     entity_type: capture.entity_type ?? entityTypeForChannel(capture.channel),
     entity_id: capture.entity_id ?? capture.source_id,
     job_id: match.job_id,

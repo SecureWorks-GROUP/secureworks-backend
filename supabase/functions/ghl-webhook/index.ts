@@ -120,13 +120,38 @@ serve(async (req: Request) => {
     const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
     // Log raw webhook for debugging
-    await sb.from('webhook_log').insert({
+    const { error: logError } = await sb.from('webhook_log').insert({
       org_id: DEFAULT_ORG_ID,
       source: 'ghl',
       event_type: body.type || 'unknown',
       payload: body,
       status: 'received',
-    }).catch(() => {}) // Non-blocking
+    })
+    if (logError) console.warn('[ghl-webhook] webhook log failed:', logError.message)
+
+    // Communication webhooks are evidence, never form submissions or new jobs.
+    if (body.type === 'InboundMessage' || body.type === 'OutboundMessage') {
+      const { data: enabled, error: gateError } = await sb.rpc('automation_lane_enabled', { lane: 'capture' })
+      if (gateError || enabled !== true) return jsonResponse({ received: true, captured: false, reason: 'capture_disabled' })
+      const words = typeof body.body === 'string' ? body.body : typeof body.message === 'string' ? body.message : ''
+      const providerId = body.messageId || body.message_id || body.id || body.eventId
+      const rawTime = body.dateAdded || body.createdAt || body.timestamp
+      const eventAt = rawTime && !Number.isNaN(Date.parse(String(rawTime))) ? new Date(rawTime).toISOString() : new Date().toISOString()
+      const outbound = body.type === 'OutboundMessage'
+      const channel = body.messageType === 'Email' || body.channel === 'email' ? 'email' : 'sms'
+      const { error } = await sb.from('business_events').insert({
+        event_type: outbound ? `client.${channel}_out` : 'client.reply', source: 'ghl_webhook',
+        entity_type: 'contact', entity_id: body.contactId || body.contact_id || null,
+        contact_id: body.contactId || body.contact_id || null,
+        provider_message_id: providerId ? `ghl:${providerId}` : null,
+        thread_key: body.conversationId || body.conversation_id || null,
+        event_at: eventAt, occurred_at: new Date().toISOString(), channel,
+        direction: outbound ? 'outbound' : 'inbound', body_preview: words.slice(0,4096),
+        payload: { body: words, phone: body.phone || null, email: body.email || null, line: body.line || null },
+      })
+      if (error && error.code !== '23505') return jsonResponse({ received: true, captured: false, error: error.message }, 500)
+      return jsonResponse({ received: true, captured: true, duplicate: error?.code === '23505' })
+    }
 
     // ── Route by event type ──
     if (isStageChangeEvent(body)) {

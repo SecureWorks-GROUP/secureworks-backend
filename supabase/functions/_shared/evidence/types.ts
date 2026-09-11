@@ -119,6 +119,8 @@ export interface EvidenceCapture {
   event_type: string;
   source: string;                                     // e.g. "monitor-inbox", "send-quote/send"
   occurred_at?: string;
+  event_at?: string;
+  provider_message_id?: string | null;
   channel: Channel;
   direction: Direction;
 

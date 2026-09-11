@@ -1044,7 +1044,7 @@ export async function matchUnlinkedInvoices(client: any) {
             source: 'xero-sync',
             entity_type: 'invoice',
             entity_id: inv.xero_invoice_id,
-            job_id: job.job_number,
+            job_id: job.id,
             payload: { invoice_number: inv.invoice_number, job_number: job.job_number, method: 'reference_match' },
           }).then(() => undefined, () => undefined)
 
@@ -1093,7 +1093,7 @@ export async function matchUnlinkedInvoices(client: any) {
             source: 'xero-sync',
             entity_type: 'invoice',
             entity_id: inv.xero_invoice_id,
-            job_id: jobs[0].job_number,
+            job_id: jobs[0].id,
             payload: { invoice_number: inv.invoice_number, job_number: jobs[0].job_number, method: 'client_name_exact' },
           }).then(() => undefined, () => undefined)
 

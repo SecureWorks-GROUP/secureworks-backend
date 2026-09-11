@@ -1,0 +1,58 @@
+BEGIN;
+DO $$
+DECLARE j1 uuid:=gen_random_uuid(); j2 uuid:=gen_random_uuid(); j3 uuid:=gen_random_uuid(); e public.business_events; eid uuid; runid uuid; n integer; t text;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
+ (j1,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-1','b2-repeat'),
+ (j2,'00000000-0000-0000-0000-000000000001','accepted','fencing','B2-JOB-2','b2-repeat');
+ INSERT INTO public.business_events(payload,contact_id,thread_key) VALUES('{"body":"Please revise height"}','b2-repeat','b2-thread') RETURNING * INTO e;
+ IF e.attribution_status<>'pending_luna' THEN RAISE EXCEPTION 'repeat customer must reach Luna, got % %',e.attribution_status,e.payload; END IF;
+ eid:=e.id;
+ e:=public.attribute_context_event_with_luna(eid,j1,0.91);
+ IF e.job_id<>j1 OR e.attribution_status<>'luna' THEN RAISE EXCEPTION 'Luna binding failed'; END IF;
+ INSERT INTO public.business_events(payload,thread_key) VALUES('{"body":"The next reply"}','b2-thread') RETURNING * INTO e;
+ IF e.job_id<>j1 OR e.attribution_status<>'thread' THEN RAISE EXCEPTION 'thread follow failed'; END IF;
+ INSERT INTO public.business_events(payload,contact_id) VALUES('{"body":"Fence height","line":"fencing"}','b2-repeat') RETURNING * INTO e;
+ IF e.job_id<>j2 OR e.attribution_status<>'single_line' THEN RAISE EXCEPTION 'single line failed'; END IF;
+ INSERT INTO public.business_events(payload) VALUES('{"body":"Please check B2-JOB-1."}') RETURNING * INTO e;
+ IF e.job_id<>j1 OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'direct number failed: %',e.payload; END IF;
+ INSERT INTO public.business_events(payload) VALUES('{"body":"Both B2-JOB-1 and B2-JOB-2"}') RETURNING * INTO e;
+ IF e.job_id IS NOT NULL THEN RAISE EXCEPTION 'ambiguous identifiers incorrectly bound'; END IF;
+ INSERT INTO public.business_events(payload) VALUES('{"body_pointer":"private/test-document"}') RETURNING * INTO e;
+ IF e.attribution_status<>'empty' OR e.payload->>'body_pointer'<>'private/test-document' THEN RAISE EXCEPTION 'pointer-only evidence lost'; END IF;
+ INSERT INTO public.business_events(payload) VALUES('{"body":"Away","automated":true}') RETURNING * INTO e;
+ IF e.attribution_status<>'automated' THEN RAISE EXCEPTION 'automated detection failed'; END IF;
+ INSERT INTO public.business_events(payload,contact_id) VALUES('{"body":"A new enquiry"}','b2-future') RETURNING * INTO e;
+ eid:=e.id;
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES(j3,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-3','b2-future');
+ SELECT * INTO e FROM public.business_events WHERE id=eid;
+ IF e.job_id<>j3 OR e.attribution_status<>'single_open' THEN RAISE EXCEPTION 'job-created reconsideration failed'; END IF;
+ INSERT INTO public.business_events(payload,provider_message_id,event_at) VALUES('{"body":"source words"}','ghl:b2-id','2025-01-01Z');
+ BEGIN
+  INSERT INTO public.business_events(payload,provider_message_id) VALUES('{"body":"duplicate"}','ghl:b2-id');
+  RAISE EXCEPTION 'duplicate was accepted';
+ EXCEPTION WHEN unique_violation THEN NULL; END;
+ UPDATE public.jobs SET status='closed' WHERE id=j3;
+ SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
+ IF n<>1 THEN RAISE EXCEPTION 'closed job new evidence omitted'; END IF;
+ INSERT INTO public.business_events(payload,job_id,direction) SELECT jsonb_build_object('body','batch event '||v),j3,'inbound' FROM generate_series(1,30) v;
+ SELECT count(*) INTO n FROM public.context_extraction_events(j3,99);
+ IF n<>25 THEN RAISE EXCEPTION 'batch must cap at25, got %',n; END IF;
+ INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status) VALUES(j3,current_date,'extraction','running') RETURNING id INTO runid;
+ INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25);
+ SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
+ IF n<>6 THEN RAISE EXCEPTION 'receipt backlog lost, got %',n; END IF;
+ -- An outbound tail is readable with a retained inbound anchor, never by itself.
+ INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25) ON CONFLICT DO NOTHING;
+ INSERT INTO public.business_events(payload,job_id,direction) VALUES('{"body":"Our answer"}',j3,'outbound');
+ SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
+ IF n<>2 THEN RAISE EXCEPTION 'outbound tail lost or sent alone, got %',n; END IF;
+ SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
+ IF n<>1 THEN RAISE EXCEPTION 'outbound tail missing candidate'; END IF;
+ UPDATE public.automation_switches SET attribution=false WHERE id=1;
+ INSERT INTO public.business_events(payload,job_id) VALUES('{"body":"retained while off"}',j1) RETURNING * INTO e;
+ IF e.attribution_status<>'admin_bucket' OR e.job_id IS NOT NULL THEN RAISE EXCEPTION 'attribution switch did not close'; END IF;
+ IF public.rerun_context_attribution(250,NULL)<>0 THEN RAISE EXCEPTION 'rerun ignored switch'; END IF;
+ IF has_function_privilege('authenticated','public.attribute_context_event_with_luna(uuid,uuid,numeric)','EXECUTE') THEN RAISE EXCEPTION 'public Luna RPC'; END IF;
+END $$;
+ROLLBACK;

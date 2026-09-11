@@ -929,3 +929,21 @@ Deno.test("regression: mock honors real Supabase semantics (bare insert returns 
   assert(Array.isArray(withSelect.data));
   assertEquals((withSelect.data as Array<{ id: string }>)[0].id, "guard-row");
 });
+
+Deno.test("context envelope retains provider time and full SMS beyond preview", async () => {
+  const { client, calls } = makeFakeSupabase();
+  const body = "Full message ".repeat(600);
+  await recordEvidence(client, {
+    event_type: "client.reply", source: "ghl-webhook-receiver", channel: "sms", direction: "inbound",
+    source_table: "ghl_webhook", source_id: "message-7", job_id: null,
+    contact_id: "contact-fixture", provider_message_id: "ghl:message-7", thread_key: "conversation-2",
+    event_at: "2026-09-10T01:02:03.000Z", occurred_at: "2026-09-11T01:02:03.000Z",
+    body_preview: body, payload: { message_text: body },
+  }, { org_id: "org-1" });
+  const row = calls.find(c => c.table === "business_events")!.values;
+  assertEquals(row.provider_message_id, "ghl:message-7");
+  assertEquals(row.event_at, "2026-09-10T01:02:03.000Z");
+  assertEquals(row.occurred_at, "2026-09-11T01:02:03.000Z");
+  assertEquals(row.contact_id, "contact-fixture");
+  assertEquals((row.payload as Record<string,unknown>).message_text, body);
+});
