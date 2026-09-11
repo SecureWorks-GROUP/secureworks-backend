@@ -29,3 +29,5 @@ All helper contracts are registered in the standard PostgreSQL migration suite, 
 Production schema/ledger readback is unavailable because the configured token returned HTTP 401 in the parent session. Local fixture checks do not claim live schema equivalence or deployed acceptance. No production mutation, model call, send or financial action is part of this packet.
 
 For multiple source dates, the worker must cite the relevant verbatim evidence_excerpt; the RPC validates that excerpt against each matching source event and requires every resulting date to equal due_date. Without an excerpt, parsing is allowed only with one source event. Two-digit years, conflicting dates within the excerpt, invalid calendars, ambiguous relative weekday wording and unsupported language remain explicit errors. This is a bounded calendar parser, not universal natural-language understanding.
+
+Independent review repair: legacy proposals without trustworthy expiry remain in audit but are excluded from current facts. Source-dated new proposals retain the 504-hour expiry; ingestion dates are not substituted.

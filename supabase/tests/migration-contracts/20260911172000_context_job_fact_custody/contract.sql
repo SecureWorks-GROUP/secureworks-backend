@@ -5,10 +5,11 @@ DECLARE j uuid:=gen_random_uuid(); other_job uuid:=gen_random_uuid(); ev jsonb; 
  old uuid; temp uuid; legacy uuid:=gen_random_uuid(); due date:=(now() AT TIME ZONE 'Australia/Perth')::date+2;
  source_time timestamptz:=now()-interval '1 hour'; d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
 BEGIN
+ IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE id='b3000000-0000-0000-0000-000000000002') OR EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id='b3000000-0000-0000-0000-000000000002') THEN RAISE EXCEPTION 'B3 legacy undated proposal must be held, not deleted or current'; END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES
  (j,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-'||j),
  (other_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-'||other_job);
- INSERT INTO public.business_events(job_id,payload,event_at) VALUES(j,jsonb_build_object('body','Blue roof. Gate access on '||due::text),source_time) RETURNING id,to_jsonb(business_events) INTO e,ev;
+ INSERT INTO public.business_events(job_id,match_method,payload,event_at) VALUES(j,'direct_job_id',jsonb_build_object('body','Blue roof. Gate access on '||due::text),source_time) RETURNING id,to_jsonb(business_events) INTO e,ev;
  claimed:=public.claim_context_extraction_run(j,d,'extraction'); run:=(claimed->'run'->>'id')::uuid;tok:=(claimed->'run'->>'lease_token')::uuid;
  facts:=jsonb_build_array(
   jsonb_build_object('kind','scope_spec','text','Blue roof.','confidence',0.9,'source_event_ids',jsonb_build_array(e),'evidence_excerpt','Blue roof.'),
@@ -37,7 +38,7 @@ BEGIN
  OR public.context_fact_expiry('quote_issue','2026-09-10 12:00+08') IS DISTINCT FROM '2026-09-24 12:00+08'::timestamptz
  THEN RAISE EXCEPTION 'B3 source expiry'; END IF;
  -- A second logical run uses a separate day slot to exercise revision transitions.
- INSERT INTO public.business_events(job_id,payload,event_at) VALUES(j,'{"body":"Use green instead. Gate access cancelled."}',now()) RETURNING id,to_jsonb(business_events) INTO e2,ev2;
+ INSERT INTO public.business_events(job_id,match_method,payload,event_at) VALUES(j,'direct_job_id','{"body":"Use green instead. Gate access cancelled."}',now()) RETURNING id,to_jsonb(business_events) INTO e2,ev2;
  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,lease_token,lease_expires_at)
  VALUES(j,d-1,'extraction','running',gen_random_uuid(),now()+interval '20 minutes') RETURNING id,lease_token INTO run,tok;
  SELECT to_jsonb(v) INTO snap FROM public.current_job_context_facts v WHERE id=old;
@@ -138,7 +139,7 @@ DO $$
 DECLARE j uuid:=gen_random_uuid(); e uuid; ev jsonb; claim jsonb; run uuid; token uuid; f jsonb; result jsonb;
 BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-DATE-'||j);
- INSERT INTO public.business_events(job_id,event_at,payload) VALUES(j,'2026-09-11 17:00+08','{"body":"Delivery 14 September 2026. Pickup 15 September 2026."}') RETURNING id,to_jsonb(business_events) INTO e,ev;
+ INSERT INTO public.business_events(job_id,match_method,event_at,payload) VALUES(j,'direct_job_id','2026-09-11 17:00+08','{"body":"Delivery 14 September 2026. Pickup 15 September 2026."}') RETURNING id,to_jsonb(business_events) INTO e,ev;
  claim:=public.claim_context_extraction_run(j,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction');run:=(claim->'run'->>'id')::uuid;token:=(claim->'run'->>'lease_token')::uuid;
  f:=jsonb_build_object('kind','pending_action','text','Delivery is arranged.','confidence',0.9,'source_event_ids',jsonb_build_array(e),'due_date','2026-09-14','evidence_excerpt','Delivery 14 September 2026. Pickup 15 September 2026.');
  BEGIN
