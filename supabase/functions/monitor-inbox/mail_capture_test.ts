@@ -288,6 +288,7 @@ function persistenceFake(
     storageFail?: boolean;
     bridgeFail?: boolean;
     publicBucket?: boolean;
+    captureDisabled?: boolean;
   } = {},
 ) {
   const rows: Record<string, unknown>[] = [],
@@ -295,6 +296,7 @@ function persistenceFake(
     observations: Record<string, unknown>[] = [];
   const event = { id: "event1", job_id: null, contact_id: null };
   const sb = {
+    rpc: async () => ({ data: !options.captureDisabled, error: null }),
     storage: {
       getBucket: async () => ({
         data: { public: !!options.publicBucket },
@@ -561,4 +563,28 @@ Deno.test("paid eligibility snapshot preserves only unread recent predecessor us
     assertEquals((metadata.legacy_body_preview as string).length, 500);
     assertEquals(fake.rows.length, 1); // Even read/old/new-mailbox messages keep canonical evidence.
   }
+});
+
+Deno.test("disabled capture refuses mailbox persistence before provider or storage work", async () => {
+  const fake = persistenceFake({ captureDisabled: true });
+  let providerReads = 0;
+  await assertRejects(
+    () =>
+      persistMail(
+        fake.sb,
+        async () => {
+          providerReads++;
+          return {};
+        },
+        message,
+        stream,
+        "https://graph.microsoft.com/v1.0/message",
+      ),
+    Error,
+    "capture disabled",
+  );
+  assertEquals(providerReads, 0);
+  assertEquals(fake.files.length, 0);
+  assertEquals(fake.rows.length, 0);
+  assertEquals(fake.observations.length, 0);
 });

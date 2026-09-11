@@ -9,6 +9,7 @@ import {
   type StoredFile,
   type Stream,
 } from "./mail_capture.ts";
+import { assertCaptureEnabled } from "../_shared/evidence/capture_guard.ts";
 const ORG = "00000000-0000-0000-0000-000000000001";
 type GraphGet = (url: string) => Promise<Record<string, any>>;
 async function attachmentFiles(
@@ -58,6 +59,7 @@ export async function persistMail(
   stream: Stream,
   resourceUrl: string,
 ): Promise<void> {
+  await assertCaptureEnabled(sb);
   let message = input;
   if (
     !message.body ||
@@ -192,6 +194,7 @@ export async function persistMail(
     },
     metadata: { capture_version: "mail_v2", provider_resource: resourceUrl },
   };
+  await assertCaptureEnabled(sb);
   let { data: event, error } = await sb.from("business_events").insert(row)
     .select("id,job_id,contact_id").single();
   if (error?.code === "23505") {
