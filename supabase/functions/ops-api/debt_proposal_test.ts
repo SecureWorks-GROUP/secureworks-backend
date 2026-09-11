@@ -1,7 +1,7 @@
-import { debtProposalSave, debtProposalMark } from './debt_picture.ts'
+import { DebtPictureError, debtProposalSave, debtProposalMark } from './debt_picture.ts'
 function assert(value: unknown, message = 'assertion failed'): asserts value { if (!value) throw new Error(message) }
 const xid = '11111111-1111-4111-8111-111111111111'
-function fake(extra: Record<string, unknown> = {}) {
+function fake(extra: Record<string, unknown> = {}, beforeUpdate?: (row: any) => void) {
   const row: any = { xero_invoice_id: xid, org_id: 'org', invoice_type: 'ACCREC', status: 'AUTHORISED', amount_due: 100, debt_proposal_status: 'approved', debt_proposal_at: null, debt_proposal_approved_by: 'previous', ...extra }
   const writes: any[] = [], logs: any[] = []
   const client = { from(table: string) {
@@ -10,7 +10,7 @@ function fake(extra: Record<string, unknown> = {}) {
     const q: any = {
       select() { return q }, eq(k: string,v: unknown) { filters.push(r=>r[k]===v); return q }, is(k: string,v: unknown) { filters.push(r=>(r[k]??null)===v);return q }, gt(k: string,v: number) {filters.push(r=>r[k]>v);return q},
       update(value: any) {update=value;return q},
-      maybeSingle() {if (!filters.every(f=>f(row))) return Promise.resolve({data:null,error:null}); if(update){writes.push(update);Object.assign(row,update)} return Promise.resolve({data:{...row},error:null})},
+      maybeSingle() {if (update) beforeUpdate?.(row); if (!filters.every(f=>f(row))) return Promise.resolve({data:null,error:null}); if(update){writes.push(update);Object.assign(row,update)} return Promise.resolve({data:{...row},error:null})},
       insert(value: any) {logs.push(value);return Promise.resolve({error:null})},
     }; return q
   } }
@@ -40,4 +40,49 @@ Deno.test('route refuses non-staff and GET; authenticated identity overrides bod
  assert((await invoke('GET',user)).status===405);assert((await invoke('POST',{...user,role:'installer'})).status===403);assert(!f.writes.length)
  const result=await invoke('POST',user);assert(result.status===200 && result.body.status==='pending');assert(f.logs[0].chased_by==='verified@example.test')
  assert((await invoke('POST',{...user,orgId:'different'})).status===404)
+})
+
+Deno.test('pending proposal audit preserves the authenticated tenant and actor', async () => {
+  const orgId = '22222222-2222-4222-8222-222222222222'
+  const f = fake({ org_id: orgId })
+  await debtProposalSave(f.client, { ...request, operator_email: 'spoof@example.test' }, orgId, 'verified@example.test')
+  assert(f.writes.length === 1 && f.logs.length === 1)
+  assert(f.row.org_id === orgId && f.logs[0].org_id === orgId)
+  assert(f.logs[0].xero_invoice_id === xid && f.logs[0].chased_by === 'verified@example.test')
+})
+
+Deno.test('concurrent proposal decisions and content changes refuse stale saves', async () => {
+  const observed = {
+    debt_proposal_at: '2026-09-11T00:00:00.000Z',
+    debt_proposal_status: 'pending', debt_proposal_kind: 'sms',
+    debt_proposal_text: 'Original draft', debt_proposal_to: '+61400000000',
+  }
+  const changes = [
+    { debt_proposal_status: 'declined' }, { debt_proposal_status: 'expired' },
+    { debt_proposal_kind: 'email' }, { debt_proposal_text: 'Concurrent edit' },
+    { debt_proposal_to: 'new@example.test' }, { debt_proposal_at: '2026-09-11T00:01:00.000Z' },
+  ]
+  for (const change of changes) {
+    const f = fake(observed, row => Object.assign(row, change))
+    const expected = { ...f.row, ...change }
+    let error: unknown
+    try { await debtProposalSave(f.client, request, 'org', 'staff') } catch (e) { error = e }
+    assert(error instanceof DebtPictureError && error.status === 409, 'Expected stale proposal conflict')
+    assert(JSON.stringify(f.row) === JSON.stringify(expected), 'Concurrent state must survive')
+    assert(f.writes.length === 0 && f.logs.length === 0, 'Conflict must not persist or audit a save')
+  }
+})
+
+Deno.test('nullable proposal fields allow unchanged saves and reject concurrent initialization', async () => {
+  for (const field of ['debt_proposal_at', 'debt_proposal_status', 'debt_proposal_kind', 'debt_proposal_text', 'debt_proposal_to']) {
+    const initial = { [field]: null }
+    const unchanged = fake(initial)
+    assert((await debtProposalSave(unchanged.client, request, 'org', 'staff')).changed)
+    const concurrent = fake(initial, row => { row[field] = 'concurrently initialized' })
+    let error: unknown
+    try { await debtProposalSave(concurrent.client, request, 'org', 'staff') } catch (e) { error = e }
+    assert(error instanceof DebtPictureError && error.status === 409)
+    assert(concurrent.row[field] === 'concurrently initialized')
+    assert(concurrent.writes.length === 0 && concurrent.logs.length === 0)
+  }
 })

@@ -330,10 +330,12 @@ export async function debtProposalSave(client: any, body: any, orgId: string, ac
     debt_proposal_approved_by: null, debt_proposal_approved_at: null, debt_proposal_sent_ref: null }
   let query = client.from('xero_invoices').update(update).eq('org_id', orgId).eq('xero_invoice_id', xid)
     .eq('invoice_type', 'ACCREC').eq('status', 'AUTHORISED').gt('amount_due', 0)
-  query = inv.debt_proposal_at ? query.eq('debt_proposal_at', inv.debt_proposal_at) : query.is('debt_proposal_at', null)
+  for (const field of ['debt_proposal_at', 'debt_proposal_status', 'debt_proposal_kind', 'debt_proposal_text', 'debt_proposal_to']) {
+    query = inv[field] == null ? query.is(field, null) : query.eq(field, inv[field])
+  }
   const { data: saved, error: saveError } = await query.select('xero_invoice_id').maybeSingle()
   if (saveError) throw saveError
   if (!saved) throw new DebtPictureError('Invoice or proposal changed. Refresh before saving again.', 409)
-  const { error: logError } = await client.from('payment_chase_logs').insert({ xero_invoice_id: xid, job_id: inv.job_id ?? null, method: 'proposal', outcome: 'pending', notes: `${kind} proposal saved for individual Marnin approval. Nothing sent.`, chased_by: actor })
+  const { error: logError } = await client.from('payment_chase_logs').insert({ org_id: orgId, xero_invoice_id: xid, job_id: inv.job_id ?? null, method: 'proposal', outcome: 'pending', notes: `${kind} proposal saved for individual Marnin approval. Nothing sent.`, chased_by: actor })
   return { ok: true, status: 'pending', changed: true, at, audit_warning: logError ? 'Proposal saved; audit log unavailable' : null }
 }
