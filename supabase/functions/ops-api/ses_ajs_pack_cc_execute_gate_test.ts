@@ -98,6 +98,8 @@ interface Harness {
   effects: Map<string, any>;
   confirmedTokens: Set<string>;
   graphCalls: any[];
+  /** SAMPLE walk: builder_reference SAMPLE-* so execute skips the AJS pack CC lock. */
+  sampleDocket?: boolean;
 }
 
 function scriptedClient(harness: Harness): SesSupabaseClient {
@@ -147,9 +149,18 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
                     family: "physical_makesafe",
                   },
                   routing: {},
+                  identity: harness.sampleDocket
+                    ? {
+                      job_number: "SWMS-261237",
+                      builder_reference: "SAMPLE-AJS-WALK-1",
+                    }
+                    : {},
                 },
               },
               review_spec: {},
+              local_invoice_proposal: harness.sampleDocket
+                ? { builder_reference: "SAMPLE-AJS-WALK-1" }
+                : {},
             },
             error: null,
           });
@@ -287,6 +298,19 @@ async function execute(state: Harness) {
     xeroReader as any,
   );
 }
+
+Deno.test("SEND IT skips the AJS pack CC lock on a SAMPLE docket with blank cc", async () => {
+  const sampleRoutes = ajsRoutes([]).map((route) => ({
+    ...route,
+    recipients: ["captain-personal@example.test"],
+    cc: [],
+  }));
+  const state = harness({ routes: sampleRoutes, sampleDocket: true });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls.length, 2);
+  assertEquals(state.graphCalls.every((call) => (call.cc || []).length === 0), true);
+});
 
 Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanent pack CC", async () => {
   const state = harness({ routes: ajsRoutes(LEGACY_CC) });

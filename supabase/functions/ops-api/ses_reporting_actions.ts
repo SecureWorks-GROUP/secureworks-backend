@@ -65,6 +65,8 @@ import {
 import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
   applySesSampleDestinationOverride,
+  isSesSampleDocket,
+  sesReleaseUsesSampleDestinationOverride,
 } from "./ses_sample_destination.ts";
 import {
   ajsPackCc,
@@ -1984,7 +1986,7 @@ export async function prepareSesInvoiceObligationAction(
   };
 }
 
-async function requireSesInvoiceMintAuthority(
+export async function requireSesInvoiceMintAuthority(
   client: SesSupabaseClient,
   auth: SesActionAuth,
 ) {
@@ -6531,7 +6533,7 @@ export async function executeSesReleaseRevisionAction(
   // even when release_revision_routes has no reply columns (no migration).
   const primaryDocket = members[0]
     ? await client.from("makesafe_docket_revisions").select(
-      "id,envelope,review_spec",
+      "id,envelope,review_spec,local_invoice_proposal,xero_binding",
     ).eq("id", members[0].docket_revision_id).maybeSingle()
     : { data: null, error: null };
   const primaryEnvelope = object(primaryDocket.data?.envelope);
@@ -6585,6 +6587,20 @@ export async function executeSesReleaseRevisionAction(
     releaseSendInFlight = (priorSends.data || []).length > 0;
   }
 
+  const primaryIdentity = object(object(primaryEnvelope.v2).identity);
+  const skipAjsPackCc = isSesSampleDocket({
+    job_number: primaryIdentity.job_number,
+    identity: primaryIdentity,
+    envelope: primaryEnvelope,
+    local_invoice_proposal: object(
+      (primaryDocket.data as { local_invoice_proposal?: unknown } | null)
+        ?.local_invoice_proposal,
+    ),
+    xero_binding: object(
+      (primaryDocket.data as { xero_binding?: unknown } | null)?.xero_binding,
+    ),
+  }) || sesReleaseUsesSampleDestinationOverride(routes);
+
   for (const kind of requiredOrder) {
     const route = routes.find((candidate: any) =>
       candidate.route_kind === kind
@@ -6621,10 +6637,13 @@ export async function executeSesReleaseRevisionAction(
     // set (ses@ + vanessa@ajs.build + mandi@ajs.build), TO present. A release
     // already in flight keeps the ses@ floor that governed at approval — see
     // releaseSendInFlight above.
+    // SAMPLE rewrite blanks those CCs on purpose (personal inbox only). Do not
+    // refuse a SAMPLE send for missing vanessa/mandi/ses@ — that lock is for
+    // live AJS packs, not the Captain's SAMPLE override.
     // Filename-level client-send gates (report+invoice PDFs / photo images) are
     // applied when operators build the payload; at execute we only have content
     // hashes, so we enforce the sealed envelope facts that survive hashing.
-    if (isAjsRelease) {
+    if (isAjsRelease && !skipAjsPackCc) {
       const ccList = (Array.isArray(route.cc) ? route.cc : []).map((
         v: string,
       ) => String(v || "").trim().toLowerCase());

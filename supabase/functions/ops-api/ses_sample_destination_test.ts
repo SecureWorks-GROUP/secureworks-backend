@@ -8,6 +8,7 @@ import {
   assertSesSampleSendAllowed,
   isSesSampleDocket,
   isSesSampleJobNumber,
+  sesReleaseUsesSampleDestinationOverride,
   SES_SAMPLE_DESTINATION_ENV,
 } from "./ses_sample_destination.ts";
 
@@ -29,6 +30,13 @@ Deno.test("SAMPLE docket is detected from job_number or SAMPLE builder_reference
     isSesSampleDocket({
       job_number: "SWMS-261205",
       local_invoice_proposal: { builder_reference: "SAMPLE-AJS-0001" },
+    }),
+    true,
+  );
+  assertEquals(
+    isSesSampleDocket({
+      job_number: "SWMS-261237",
+      identity: { builder_reference: "SAMPLE-AJS-WALK-1" },
     }),
     true,
   );
@@ -113,5 +121,32 @@ Deno.test("Graph send refuses a SAMPLE envelope that still names a builder", () 
     () => assertSesSampleSendAllowed({ sample_destination_blocked: true }),
     Error,
     "SES_SAMPLE_DESTINATION_OVERRIDE",
+  );
+});
+
+Deno.test("frozen SAMPLE routes with personal To and blank cc match the override", () => {
+  const env = {
+    get: (key: string) => key === SES_SAMPLE_DESTINATION_ENV ? PERSONAL : undefined,
+  };
+  assertEquals(
+    sesReleaseUsesSampleDestinationOverride(
+      [{ recipients: [PERSONAL], cc: [] }, { recipients: [PERSONAL], cc: [] }],
+      env,
+    ),
+    true,
+  );
+  assertEquals(
+    sesReleaseUsesSampleDestinationOverride(
+      [{ recipients: [PERSONAL], cc: ["ses@secureworkswa.com.au"] }],
+      env,
+    ),
+    false,
+  );
+  assertEquals(
+    sesReleaseUsesSampleDestinationOverride(
+      [{ recipients: [AJS_WORK_ORDERS_MAILBOX], cc: [] }],
+      env,
+    ),
+    false,
   );
 });
