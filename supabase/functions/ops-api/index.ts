@@ -15891,13 +15891,13 @@ async function assembleJobDossier(client: any, body: any) {
   sourceStatus.facts = { ...factsRead.status, count: visibleFacts.length }
   sourceStatus.temporaryFacts = { ...factsRead.status, count: temporaryFacts.length }
 
-  // ── Proposed actions: ai_proposed_actions (status=proposed only by default) ──
+  // ── Proposed actions: ai_proposed_actions (status=pending only by default) ──
   const nowIso = new Date().toISOString()
   const proposedRead = await safeRead('ai_proposed_actions', async () => {
     const { data, error } = await client.from('ai_proposed_actions')
       .select('proposal_id, action_type, action_payload, confidence_score, status, job_id, expires_at, created_at, drafted_message, contact_id')
       .eq('job_id', jobId)
-      .eq('status', 'proposed')
+      .eq('status', 'pending')
       .gt('expires_at', nowIso)
       .order('created_at', { ascending: false })
       .limit(50)
