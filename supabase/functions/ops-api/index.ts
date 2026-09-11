@@ -1,4 +1,6 @@
 import { contextPipelineStatus, contextAccuracySample, contextAccuracyVerdict, contextReviewWeek, ContextPipelineError } from './context_pipeline.ts'
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
+import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
@@ -2342,6 +2344,9 @@ async function logBusinessEvent(client: any, event: {
   // when present. Used by quote.sent emitters so the v2 extractor's
   // pre-filter sees a structured one-line summary, not the UUID stub.
   body_preview?: string;
+  event_at?: string | null;
+  channel?: string;
+  direction?: string;
 }) {
   try {
     const payload = event.payload || {}
@@ -2375,7 +2380,8 @@ async function logBusinessEvent(client: any, event: {
       : payload.source_job_event_id ? 'job_events'
       : null
     const sourceId = payload.inbox_events_id || payload.source_job_event_id || null
-    await client.from('business_events').insert({
+    if (!(await automationLaneEnabled(client, 'capture'))) return
+    const { error } = await insertCapturedEvidence(client, {
       event_type: event.event_type,
       source: event.source || 'app/office',
       entity_type: event.entity_type,
@@ -2383,8 +2389,9 @@ async function logBusinessEvent(client: any, event: {
       correlation_id: event.correlation_id || null,
       causation_id: event.causation_id || null,
       job_id: event.job_id || null,
-      channel: inferredChannel,
-      direction: inferredDirection,
+      event_at: sourceTime(event.event_at),
+      channel: event.channel || inferredChannel,
+      direction: event.direction || inferredDirection,
       source_table: sourceTable,
       source_id: sourceId,
       body_preview: textish ? textish.slice(0, 500) : null,
@@ -2400,6 +2407,7 @@ async function logBusinessEvent(client: any, event: {
       },
       schema_version: '1.0',
     })
+    if (error) throw error
   } catch (e) {
     // Non-blocking — log but don't fail the main operation
     console.log('[ops-api] business_events write failed (table may not exist yet):', (e as Error).message)
@@ -12210,17 +12218,23 @@ if (import.meta.main) serve(async (req: Request) => {
               } catch (e) { console.log('[clock_event] makesafe auto-advance error:', e) }
             }
 
-            // Log business event for clock_on and clock_off
-            if (event === 'clock_on' || event === 'clock_off' || event === 'start_travel' || event === 'undo_travel') {
-              try {
-                await client.from('business_events').insert({
-                  event_type: 'trade.' + event,
-                  source: 'ops-api/clock_event',
-                  entity_type: 'assignment',
-                  entity_id: assignment_id,
-                  payload: { job_id: assignment.job_id, user_id: tradeUser.id, event, hours_worked: updateFields.hours_worked },
-                })
-              } catch (e) { /* non-blocking */ }
+            // Persist the source action time separately from receipt time.
+            if (await automationLaneEnabled(client, 'capture')) {
+              const { error: captureError } = await insertCapturedEvidence(client, {
+                event_type: 'trade.' + event,
+                source: 'ops-api/clock_event',
+                entity_type: 'assignment', entity_id: assignment_id,
+                job_id: assignment.job_id, match_method: 'direct_job_id',
+                channel: 'status', direction: 'internal',
+                event_at: timestamp == null ? now : sourceTime(timestamp),
+                occurred_at: now,
+                body_preview: `Trade action: ${event}`,
+                payload: { job_id: assignment.job_id, user_id: tradeUser.id, event,
+                  client_timestamp: timestamp || null, location: location || null,
+                  timestamp_source: timestamp == null ? 'server_action' : 'client_timestamp',
+                  hours_worked: updateFields.hours_worked },
+              })
+              if (captureError) console.error('[clock_event] evidence capture failed:', captureError.message)
             }
 
             // Return the updated assignment
@@ -14877,7 +14891,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('work_orders').select('*').eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
-    client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
+    client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at, event_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
     client.from('job_service_reports').select('*, submitted_user:submitted_by(id, name)').eq('job_id', jobId).order('created_at', { ascending: false }),
   ])
 
@@ -32515,14 +32529,15 @@ async function updateJobStatus(client: any, body: any) {
   // End Cap 1C shadow-mode wrapper. Existing write logic unchanged.
   // ════════════════════════════════════════════════════════════════
 
-  const update: Record<string, unknown> = { status }
-  if (status === 'quoted') update.quoted_at = new Date().toISOString()
-  if (status === 'accepted') update.accepted_at = new Date().toISOString()
-  if (status === 'approvals') update.approvals_at = new Date().toISOString()
-  if (status === 'deposit') update.deposit_at = new Date().toISOString()
-  if (status === 'processing') update.processing_at = new Date().toISOString()
-  if (status === 'scheduled') update.scheduled_at = new Date().toISOString()
-  if (status === 'complete') update.completed_at = new Date().toISOString()
+  const statusChangedAt = new Date().toISOString()
+  const update: Record<string, unknown> = { status, updated_at: statusChangedAt }
+  if (status === 'quoted') update.quoted_at = statusChangedAt
+  if (status === 'accepted') update.accepted_at = statusChangedAt
+  if (status === 'approvals') update.approvals_at = statusChangedAt
+  if (status === 'deposit') update.deposit_at = statusChangedAt
+  if (status === 'processing') update.processing_at = statusChangedAt
+  if (status === 'scheduled') update.scheduled_at = statusChangedAt
+  if (status === 'complete') update.completed_at = statusChangedAt
 
   // Accept optional field updates (from acceptance review modal)
   if (body.updates) {
@@ -32570,7 +32585,10 @@ async function updateJobStatus(client: any, body: any) {
     event_type: 'job.status_changed',
     entity_type: 'job',
     entity_id: jId,
-    job_id: jobBefore?.job_number || jId,
+    job_id: jId,
+    event_at: statusChangedAt,
+    channel: 'status', direction: 'internal',
+    body_preview: `Status changed from ${oldStatus} to ${status}`,
     correlation_id: jId,
     payload: {
       entity: { id: jId, name: jobBefore?.client_name || '' },
@@ -40847,10 +40865,12 @@ async function addNote(client: any, body: any, isAdmin = false, access?: TradeJo
     entity_type: 'job',
     entity_id: jId,
     job_id: jId,
+    event_at: sourceTime(data?.created_at),
     correlation_id: jId,
     payload: {
       entity: { id: jId },
       related_entities: [{ type: 'user', id: uId || null }],
+      author_id: data?.user_id || uId || null,
       note_text: noteText,
       note_preview: noteText.slice(0, 500),
       visibility: noteVisibility,
@@ -40869,6 +40889,7 @@ async function addNote(client: any, body: any, isAdmin = false, access?: TradeJo
         source_table: 'job_events',
         source_id: String(data?.id || crypto.randomUUID()),
         job_id: jId,
+        event_at: sourceTime(data?.created_at),
         entity_type: 'job',
         entity_id: jId,
         match_method: 'direct_job_id',
@@ -40881,6 +40902,7 @@ async function addNote(client: any, body: any, isAdmin = false, access?: TradeJo
         payload: {
           entity: { id: jId },
           related_entities: [{ type: 'user', id: uId || null }],
+          author_id: data?.user_id || uId || null,
           note_text: noteText,                  // preserved for backward-compat
           note_preview: noteText.slice(0, 500),
           source_job_event_id: data?.id || null,
@@ -54997,7 +55019,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
     ghl_message_id: string
     recording_url: string
     direction: 'inbound' | 'outbound'
-    occurred_at: string
+    event_at: string | null
     duration_seconds: number | null
     phone: string | null
   }
@@ -55125,8 +55147,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
           ghl_message_id: cm.id,
           recording_url: rec,
           direction: (j?.direction === 'outbound' || cm.direction === 'outbound') ? 'outbound' : 'inbound',
-          occurred_at: cm.timestamp ? new Date(cm.timestamp).toISOString()
-                     : (j?.occurred_at ? new Date(j.occurred_at).toISOString() : new Date().toISOString()),
+          event_at: sourceTime(cm.timestamp),
           duration_seconds: cm.duration ?? (typeof j?.duration === 'number' ? j.duration : null),
           phone: null,
         })
@@ -55191,7 +55212,8 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
               job_id: c.job_id || undefined,
               contact_id: c.opp.contactId,
               call_direction: c.direction,
-              occurred_at: c.occurred_at,
+              event_at: c.event_at,
+              job_match_method: "none",
               duration_seconds: c.duration_seconds || undefined,
               phone: c.phone || undefined,
               ghl_call_id: c.ghl_message_id,

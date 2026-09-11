@@ -64,6 +64,87 @@ END $$;
 REVOKE ALL ON FUNCTION public.context_fact_expiry(text,timestamptz,date) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_fact_expiry(text,timestamptz,date) TO service_role;
 
+-- Deterministic calendar evidence only; never infer from the extraction clock.
+CREATE OR REPLACE FUNCTION public.context_supported_due_date(p_text text,p_event_at timestamptz)
+RETURNS date LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $due$
+DECLARE
+ s text:=lower(regexp_replace(replace(coalesce(p_text,''),',',' '),'\s+',' ','g')); pattern text; m text[];
+ anchor date:=(p_event_at AT TIME ZONE 'Australia/Perth')::date;
+ candidates date[]:='{}'; candidate date; y integer; mo integer; dy integer; no_year boolean;
+ month_names constant text[]:=ARRAY['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+ weekdays constant text[]:=ARRAY['mon','tue','wed','thu','fri','sat','sun'];
+ weekday_text text;
+BEGIN
+ IF p_event_at IS NULL THEN RAISE EXCEPTION 'luna_due_date_source_time_missing'; END IF;
+ IF btrim(s)='' THEN RETURN NULL; END IF;
+ IF s ~ '\m(next|last|this)\s+(mon(day)?|tue(sday)?|wed(nesday)?|thu(rsday)?|fri(day)?|sat(urday)?|sun(day)?)\M'
+  OR s ~ '\m(day after tomorrow|yesterday|next year|last year)\M'
+  OR s ~ '\m(not|except)\s+(today|tomorrow)\M'
+ THEN RAISE EXCEPTION 'luna_due_date_ambiguous'; END IF;
+ -- A written year cannot be silently dropped by the optional-year grammar.
+ FOR m IN SELECT regexp_matches(s,'\m[0-9]{1,2}[/-][0-9]{1,2}[/-]([0-9]+)\M','g') LOOP
+  IF length(m[1])<>4 THEN RAISE EXCEPTION 'luna_due_date_ambiguous_year'; END IF;
+ END LOOP;
+ FOR m IN SELECT regexp_matches(s,'\m[0-9]{1,2}(st|nd|rd|th)?\s+(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?\s+([0-9]+)\M','g') LOOP
+  IF length(m[3])<>4 THEN RAISE EXCEPTION 'luna_due_date_ambiguous_year'; END IF;
+ END LOOP;
+ FOR m IN SELECT regexp_matches(s,'\m(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?\s+[0-9]{1,2}(st|nd|rd|th)?,?\s+([0-9]+)\M','g') LOOP
+  IF length(m[3])<>4 THEN RAISE EXCEPTION 'luna_due_date_ambiguous_year'; END IF;
+ END LOOP;
+ -- Consume full ISO dates first so their suffix cannot be mistaken for DD-MM.
+ pattern:='\m([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})\M';
+ FOR m IN SELECT regexp_matches(s,pattern,'g') LOOP
+  BEGIN candidate:=make_date(m[1]::integer,m[2]::integer,m[3]::integer);
+  EXCEPTION WHEN datetime_field_overflow THEN RAISE EXCEPTION 'luna_due_date_invalid_calendar'; END;
+  candidates:=array_append(candidates,candidate);
+ END LOOP;
+ s:=regexp_replace(s,pattern,' ','g');
+ -- Australian day-first numeric dates. Missing years must be a forward date
+ -- within the event's own year; a year rollover needs an explicit source year.
+ FOREACH pattern IN ARRAY ARRAY['\m([0-9]{1,2})/([0-9]{1,2})(/([0-9]{4}))?\M','\m([0-9]{1,2})-([0-9]{1,2})(-([0-9]{4}))?\M'] LOOP
+  FOR m IN SELECT regexp_matches(s,pattern,'g') LOOP
+   no_year:=m[4] IS NULL;y:=coalesce(m[4]::integer,extract(year FROM anchor)::integer);
+   BEGIN candidate:=make_date(y,m[2]::integer,m[1]::integer);
+   EXCEPTION WHEN datetime_field_overflow THEN RAISE EXCEPTION 'luna_due_date_invalid_calendar'; END;
+   IF no_year AND candidate<anchor THEN RAISE EXCEPTION 'luna_due_date_ambiguous_year'; END IF;
+   candidates:=array_append(candidates,candidate);
+  END LOOP;
+  s:=regexp_replace(s,pattern,' ','g');
+ END LOOP;
+ pattern:='\m([0-9]{1,2})(st|nd|rd|th)?\s+(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?(\s+([0-9]{4}))?\M';
+ FOR m IN SELECT regexp_matches(s,pattern,'g') LOOP
+  no_year:=m[5] IS NULL;y:=coalesce(m[5]::integer,extract(year FROM anchor)::integer);mo:=array_position(month_names,left(m[3],3));dy:=m[1]::integer;
+  BEGIN candidate:=make_date(y,mo,dy);
+  EXCEPTION WHEN datetime_field_overflow THEN RAISE EXCEPTION 'luna_due_date_invalid_calendar'; END;
+  IF no_year AND candidate<anchor THEN RAISE EXCEPTION 'luna_due_date_ambiguous_year'; END IF;
+  candidates:=array_append(candidates,candidate);
+ END LOOP;
+ s:=regexp_replace(s,pattern,' ','g');
+ pattern:='\m(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?\s+([0-9]{1,2})(st|nd|rd|th)?(,?\s+([0-9]{4}))?\M';
+ FOR m IN SELECT regexp_matches(s,pattern,'g') LOOP
+  no_year:=m[5] IS NULL;y:=coalesce(m[5]::integer,extract(year FROM anchor)::integer);mo:=array_position(month_names,left(m[1],3));dy:=m[2]::integer;
+  BEGIN candidate:=make_date(y,mo,dy);
+  EXCEPTION WHEN datetime_field_overflow THEN RAISE EXCEPTION 'luna_due_date_invalid_calendar'; END;
+  IF no_year AND candidate<anchor THEN RAISE EXCEPTION 'luna_due_date_ambiguous_year'; END IF;
+  candidates:=array_append(candidates,candidate);
+ END LOOP;
+ s:=regexp_replace(s,pattern,' ','g');
+ IF s ~ '\mtoday\M' THEN candidates:=array_append(candidates,anchor); END IF;
+ IF s ~ '\mtomorrow\M' THEN candidates:=array_append(candidates,anchor+1); END IF;
+ IF (SELECT count(DISTINCT d) FROM unnest(candidates) d)>1 THEN RAISE EXCEPTION 'luna_due_date_conflicting_dates'; END IF;
+ candidate:=candidates[1];
+ -- Bare weekdays are ambiguous. A weekday decorating a concrete date is a
+ -- consistency check, not permission to choose a future occurrence.
+ FOR m IN SELECT regexp_matches(s,'\m(mon(day)?|tue(sday)?|wed(nesday)?|thu(rsday)?|fri(day)?|sat(urday)?|sun(day)?)\M','g') LOOP
+  weekday_text:=left(m[1],3);
+  IF candidate IS NULL OR extract(isodow FROM candidate)::integer<>array_position(weekdays,weekday_text)
+   THEN RAISE EXCEPTION 'luna_due_date_ambiguous_weekday'; END IF;
+ END LOOP;
+ RETURN candidate;
+END $due$;
+REVOKE ALL ON FUNCTION public.context_supported_due_date(text,timestamptz) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.context_supported_due_date(text,timestamptz) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.persist_luna_context_revision(
  p_run_id uuid,p_lease_token uuid,p_job_id uuid,p_events jsonb,p_new jsonb,p_supersedes jsonb,p_retracts jsonb,
  p_extractor_version text DEFAULT 'luna_v2',p_tokens_in integer DEFAULT 0)
@@ -73,7 +154,7 @@ DECLARE
  event_ids uuid[]:='{}'; refs uuid[]; new_ids uuid[]:='{}'; transition_ids uuid[]:='{}';
  target text; kind text; fact_id uuid; ref uuid; old_id uuid; new_index integer; link uuid;
  event_time timestamptz; confidence numeric; due date; expiry timestamptz; review_time timestamptz;
- source_text text; source_refs jsonb; digest text; request_hash text; receipt public.luna_context_job_revisions;
+ source_text text; source_refs jsonb; source_event jsonb; supported_date date; supported_dates date[]; excerpt text; digest text; request_hash text; receipt public.luna_context_job_revisions;
  result jsonb; n integer:=0; ns integer:=0; nr integer:=0; mode text; now_time timestamptz:=clock_timestamp();
 BEGIN
  IF p_run_id IS NULL OR p_lease_token IS NULL OR p_job_id IS NULL OR p_extractor_version IS DISTINCT FROM 'luna_v2'
@@ -157,10 +238,27 @@ BEGIN
   SELECT max((value->>'event_at')::timestamptz),min((value->>'attribution_confidence')::numeric),
     string_agg(public.context_event_text(jsonb_populate_record(NULL::public.business_events,value)),' ')
    INTO event_time,confidence,source_text FROM jsonb_array_elements(p_events) WHERE (value->>'id')::uuid=ANY(refs);
+  IF f->>'due_date' IS NOT NULL AND f->>'due_date' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN RAISE EXCEPTION 'luna_due_date_shape_invalid'; END IF;
   due:=(f->>'due_date')::date;
-  IF due IS NOT NULL AND (kind<>'pending_action' OR position(to_char(due,'YYYY-MM-DD') in source_text)=0)
-   THEN RAISE EXCEPTION 'luna_due_date_unsupported'; END IF;
-  IF nullif(f->>'evidence_excerpt','') IS NOT NULL AND position(f->>'evidence_excerpt' in source_text)=0 THEN RAISE EXCEPTION 'luna_excerpt_unsupported'; END IF;
+  excerpt:=nullif(f->>'evidence_excerpt','');
+  IF excerpt IS NOT NULL AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(p_events) cited
+   WHERE (cited->>'id')::uuid=ANY(refs) AND position(excerpt in public.context_event_text(jsonb_populate_record(NULL::public.business_events,cited)))>0)
+   THEN RAISE EXCEPTION 'luna_excerpt_unsupported'; END IF;
+  IF due IS NOT NULL THEN
+   IF kind<>'pending_action' THEN RAISE EXCEPTION 'luna_due_date_unsupported'; END IF;
+   supported_dates:='{}';
+   FOR source_event IN SELECT value FROM jsonb_array_elements(p_events) WHERE (value->>'id')::uuid=ANY(refs) LOOP
+    source_text:=public.context_event_text(jsonb_populate_record(NULL::public.business_events,source_event));
+    IF excerpt IS NOT NULL THEN
+     IF position(excerpt in source_text)=0 THEN CONTINUE; END IF;
+     source_text:=excerpt;
+    ELSIF cardinality(refs)<>1 THEN RAISE EXCEPTION 'luna_due_date_excerpt_required'; END IF;
+    supported_date:=public.context_supported_due_date(source_text,(source_event->>'event_at')::timestamptz);
+    IF supported_date IS NULL OR supported_date IS DISTINCT FROM due THEN RAISE EXCEPTION 'luna_due_date_unsupported'; END IF;
+    supported_dates:=array_append(supported_dates,supported_date);
+   END LOOP;
+   IF cardinality(supported_dates)=0 THEN RAISE EXCEPTION 'luna_due_date_unsupported'; END IF;
+  END IF;
   expiry:=public.context_fact_expiry(kind,event_time,due);
   review_time:=CASE WHEN kind='client_preference' THEN ((event_time AT TIME ZONE 'Australia/Perth')+interval '1 year') AT TIME ZONE 'Australia/Perth' ELSE NULL END;
   target:=CASE WHEN kind IN ('current_state','pending_action','quote_issue') THEN 'job_temporary_context' ELSE 'job_context' END;
