@@ -1578,10 +1578,12 @@ serve(async (req: Request) => {
         }
       }
 
-      await sb
+      const acceptedAt = new Date().toISOString()
+      const { error: acceptError } = await sb
         .from('job_documents')
-        .update({ accepted_at: new Date().toISOString() })
+        .update({ accepted_at: acceptedAt })
         .eq('id', doc.id)
+      if (acceptError) throw acceptError
 
       // ── SUPERSEDE SIBLING OPTIONS ON ACCEPT (money-path, awaited) ──
       // Right after the accepted_at write: mark the OTHER whole-quote options for
@@ -1614,7 +1616,6 @@ serve(async (req: Request) => {
       // We always emit the canonical row from this point forward; the T7
       // wrapper picks recordEvidence (full envelope) when the flag is ON.
       try {
-        const acceptedAt = new Date().toISOString()
         const t7Enabled = await isFlagOn(sb, 'evidence_capture_v1', DEFAULT_ORG_ID)
         const acceptanceJobId = doc.job_id || null
         const sharedPayload = {
@@ -1630,10 +1631,13 @@ serve(async (req: Request) => {
           event_type: 'quote.accepted',
           source: 'send-quote/accept',
           occurred_at: acceptedAt,
+          event_at: acceptedAt,
           recorded_at: acceptedAt,
           entity_type: 'quote',
           entity_id: doc.id,
           job_id: acceptanceJobId,
+          match_method: 'direct_job_id',
+          body_preview: `Client accepted quote ${doc.quote_number || doc.id}`,
           payload: sharedPayload,
         }
         let acceptT7Failed = false
@@ -1645,6 +1649,7 @@ serve(async (req: Request) => {
               channel: 'quote',
               direction: 'inbound',                  // client-initiated
               occurred_at: acceptedAt,
+              event_at: acceptedAt,
               source_table: 'job_documents',
               source_id: String(doc.id),
               job_id: acceptanceJobId,

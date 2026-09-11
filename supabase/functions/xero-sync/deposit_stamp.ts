@@ -205,6 +205,11 @@ export async function applyDepositStamp(
       entity_type: "invoice",
       entity_id: inv.InvoiceID,
       job_id: job.id,
+      match_method: "direct_job_id",
+      channel: "invoice", direction: "internal",
+      occurred_at: now.toISOString(),
+      event_at: xeroDateToIsoTimestamp(inv.UpdatedDateUTC),
+      body_preview: `Deposit invoice ${inv.InvoiceNumber || inv.InvoiceID} is ${decision.invoice_status}; prior deposit stamp retained.`,
       payload: {
         invoice_number: inv.InvoiceNumber || null,
         invoice_status: decision.invoice_status,
@@ -242,6 +247,11 @@ export async function applyDepositStamp(
       entity_type: "invoice",
       entity_id: inv.InvoiceID,
       job_id: job.id,
+      match_method: "direct_job_id",
+      channel: "invoice", direction: "internal",
+      occurred_at: now.toISOString(),
+      event_at: xeroDateToIsoTimestamp(inv.FullyPaidOnDate),
+      body_preview: `Xero marks deposit invoice ${inv.InvoiceNumber || inv.InvoiceID} PAID.`,
       payload: {
         invoice_number: inv.InvoiceNumber || null,
         deposit_at: decision.deposit_at,

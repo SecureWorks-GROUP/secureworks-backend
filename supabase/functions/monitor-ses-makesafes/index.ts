@@ -2090,6 +2090,8 @@ async function recordIntakeSourceFates(
       ? "makesafe.intake.scan_handoff_deferred"
       : "makesafe.intake.scan_handoff_failed",
     source: "monitor-ses-makesafes",
+    channel: "system", direction: "system",
+    event_at: new Date().toISOString(),
     entity_type: "mailbox",
     entity_id: MAILBOX,
     body_preview: summary.slice(0, 500),
@@ -2218,6 +2220,8 @@ async function recordPdfExtractionHandoffFailure(
   const { error: eventError } = await sb.from("business_events").insert({
     event_type: "makesafe.intake.pdf_extraction_handoff_failed",
     source: "monitor-ses-makesafes",
+    channel: "system", direction: "system",
+    event_at: new Date().toISOString(),
     entity_type: "email_attachment",
     entity_id: attachmentId,
     body_preview: `PDF extraction worker handoff failed (${failure.kind}${
