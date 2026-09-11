@@ -8,7 +8,8 @@ ALTER TABLE public.business_events
  ADD COLUMN IF NOT EXISTS provider_message_id text,
  ADD COLUMN IF NOT EXISTS thread_key text,
  ADD COLUMN IF NOT EXISTS attribution_checked_at timestamptz,
- ADD COLUMN IF NOT EXISTS context_captured_at timestamptz;
+ ADD COLUMN IF NOT EXISTS context_captured_at timestamptz,
+ ADD COLUMN IF NOT EXISTS context_activates_extraction boolean NOT NULL DEFAULT false;
 -- Existing rows stay dormant until a fresh event reaches their job.
 ALTER TABLE public.business_events ALTER COLUMN context_captured_at SET DEFAULT now();
 ALTER TABLE public.business_events ADD CONSTRAINT business_events_attribution_status_check
@@ -138,7 +139,10 @@ EXCEPTION WHEN OTHERS THEN
  RETURN e;
 END $$;
 CREATE FUNCTION public.attribute_business_event() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
-BEGIN NEW:=public.resolve_context_attribution(NEW); RETURN NEW; END $$;
+BEGIN
+ NEW.context_activates_extraction:=NEW.context_captured_at IS NOT NULL AND coalesce(NEW.metadata->>'context_capture_origin','operational')='operational';
+ NEW:=public.resolve_context_attribution(NEW); RETURN NEW;
+END $$;
 CREATE TRIGGER context_attribute_business_event BEFORE INSERT ON public.business_events FOR EACH ROW EXECUTE FUNCTION public.attribute_business_event();
 
 CREATE FUNCTION public.rerun_context_attribution(p_limit integer DEFAULT 250,p_contact_id text DEFAULT NULL) RETURNS integer
@@ -181,17 +185,20 @@ BEGIN
  IF p_job_id IS NOT NULL THEN
   IF p_confidence IS NULL OR p_confidence<0 OR p_confidence>1 OR p_confidence='NaN'::numeric THEN RAISE EXCEPTION 'invalid confidence'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.context_contact_jobs(e.contact_id) WHERE id=p_job_id) THEN RAISE EXCEPTION 'job is not a contact candidate'; END IF;
+ END IF;
+ SELECT job_id INTO chosen FROM public.event_threads WHERE thread_key=e.thread_key;
+ IF chosen IS NOT NULL THEN p_confidence:=1;
+ ELSIF p_job_id IS NOT NULL THEN
   chosen:=p_job_id;
   IF nullif(e.thread_key,'') IS NOT NULL THEN
    INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,p_job_id,'luna',e.id) ON CONFLICT DO NOTHING;
    SELECT job_id INTO chosen FROM public.event_threads WHERE thread_key=e.thread_key;
-   -- A racing reply follows the thread winner; it never overwrites that binding.
-   IF chosen<>p_job_id THEN p_confidence:=1; END IF;
+   IF chosen IS DISTINCT FROM p_job_id THEN p_confidence:=1; END IF;
   END IF;
  END IF;
  UPDATE public.business_events SET job_id=chosen,
- attribution_status=CASE WHEN chosen IS NULL THEN 'admin_bucket' WHEN chosen<>p_job_id THEN 'thread' ELSE 'luna' END,
- attribution_step=CASE WHEN chosen IS NULL THEN 6 WHEN chosen<>p_job_id THEN 2 ELSE 5 END,
+ attribution_status=CASE WHEN chosen IS NULL THEN 'admin_bucket' WHEN chosen IS DISTINCT FROM p_job_id THEN 'thread' ELSE 'luna' END,
+ attribution_step=CASE WHEN chosen IS NULL THEN 6 WHEN chosen IS DISTINCT FROM p_job_id THEN 2 ELSE 5 END,
  attribution_confidence=CASE WHEN chosen IS NOT NULL THEN p_confidence END,
  attributed_at=CASE WHEN chosen IS NOT NULL THEN clock_timestamp() END,
  attribution_checked_at=clock_timestamp(),match_status=CASE WHEN chosen IS NULL THEN 'unresolved' ELSE 'matched' END,
@@ -209,7 +216,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  AND e.attribution_status IN ('direct','thread','single_open','single_line','luna')
  AND btrim(public.context_event_text(e))<>''
  AND NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=p_job_id AND r.extractor_version='luna_v2')
- AND EXISTS(SELECT 1 FROM public.business_events fresh WHERE fresh.job_id=p_job_id AND fresh.context_captured_at IS NOT NULL
+ AND EXISTS(SELECT 1 FROM public.business_events fresh WHERE fresh.job_id=p_job_id AND fresh.context_activates_extraction
   AND fresh.attribution_status IN ('direct','thread','single_open','single_line','luna') AND fresh.direction IS DISTINCT FROM 'outbound')
  ), anchor AS (
  SELECT e.* FROM public.business_events e WHERE e.job_id=p_job_id
@@ -228,7 +235,7 @@ CREATE FUNCTION public.context_extraction_candidates(p_limit integer DEFAULT 400
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT e.job_id FROM public.business_events e WHERE public.automation_lane_enabled('extraction') AND e.job_id IS NOT NULL
  AND btrim(public.context_event_text(e))<>''
- AND EXISTS(SELECT 1 FROM public.business_events fresh WHERE fresh.job_id=e.job_id AND fresh.context_captured_at IS NOT NULL AND fresh.attribution_status IN ('direct','thread','single_open','single_line','luna') AND fresh.direction IS DISTINCT FROM 'outbound')
+ AND EXISTS(SELECT 1 FROM public.business_events fresh WHERE fresh.job_id=e.job_id AND fresh.context_activates_extraction AND fresh.attribution_status IN ('direct','thread','single_open','single_line','luna') AND fresh.direction IS DISTINCT FROM 'outbound')
  AND e.attribution_status IN ('direct','thread','single_open','single_line','luna')
  AND NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=e.job_id AND r.extractor_version='luna_v2')
  AND NOT EXISTS(SELECT 1 FROM public.context_extraction_runs r WHERE r.job_id=e.job_id AND r.run_date=(now() AT TIME ZONE 'Australia/Perth')::date AND r.phase='extraction' AND r.status IN ('done','skipped'))

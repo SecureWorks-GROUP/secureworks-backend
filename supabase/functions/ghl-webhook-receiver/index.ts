@@ -1,3 +1,4 @@
+import { ghlWebhookAuthenticated, resolveGhlExplicitJob } from "../_shared/evidence/ghl_provenance.ts";
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
@@ -333,7 +334,7 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
-serve(async (req) => {
+export async function handleGhlWebhookReceiver(req: Request, dependencies = { createClient, recordEvidence, insertCapturedEvidence }) {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: CORS });
   }
@@ -350,7 +351,7 @@ serve(async (req) => {
       `[ghl-webhook-receiver] Received: type=${type || "unknown"} contactId=${contactId || "none"} keys=${Object.keys(body).join(",")}`
     );
 
-    const supabase = createClient(
+    const supabase = dependencies.createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
@@ -370,9 +371,7 @@ serve(async (req) => {
       }
     })();
 
-    if (!(await automationLaneEnabled(supabase, "capture"))) {
-      return jsonResponse({ received: true, event_created: false, reason: "capture_disabled" });
-    }
+    const evidenceAuthenticated = ghlWebhookAuthenticated(req.headers, Deno.env.get("GHL_WEBHOOK_SECRET"));
 
     // Supported event types
     const SUPPORTED_TYPES = [
@@ -468,7 +467,7 @@ serve(async (req) => {
 
       // ContactCreate/ContactUpdate don't produce a business_event in the old branching below
       // unless you want one. Return early — attribution capture is the whole payload for now.
-      return jsonResponse({ received: true, type, attribution_captured: true });
+      return jsonResponse({ received: true, type, attribution_captured: true, event_created: false, ...(!evidenceAuthenticated ? { reason: "evidence_auth_unverified" } : {}) });
     }
 
     // ── Match to an active job via ghl_contact_id ──
@@ -577,7 +576,7 @@ serve(async (req) => {
       case "NoteAdded": {
         eventType = "ghl.note_added";
         eventPayload = {
-          note_text: (body.body || body.note || "").slice(0, 500),
+          note_text: String(body.body || body.note || ""),
           added_by: body.userId || body.addedBy || "unknown",
           source: "ghl_webhook",
         };
@@ -610,6 +609,9 @@ serve(async (req) => {
     // Inbound: client.reply (SMS/email/chat). Outbound: client.sms_out / client.email_out.
     // Call: client.call_complete. Note: ghl.note_added. Stage: ghl.stage_changed.
     // Appointment: client.appointment.
+    let eventCreated = false;
+    let evidenceReason = evidenceAuthenticated ? "capture_disabled" : "evidence_auth_unverified";
+    if (evidenceAuthenticated && await automationLaneEnabled(supabase, "capture")) {
     const t7Enabled = await isFlagOn(supabase, "evidence_capture_v1", DEFAULT_ORG_ID);
     let eventError: { message: string } | null = null;
     const occurredAt = new Date().toISOString();
@@ -655,9 +657,11 @@ serve(async (req) => {
         direction = "internal";
         break;
     }
-    const evidenceJobId = typeof body.job_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.job_id) ? body.job_id : null;
-    const match = resolveMatch({ job_id: evidenceJobId,
-      match_method: evidenceJobId ? "direct_job_id" : "none" });
+    const explicit = await resolveGhlExplicitJob(supabase, body);
+    const evidenceJobId = explicit.job_id;
+    const match = resolveMatch(explicit);
+    let persistedJobId: string | null = null;
+    let persistedMatchMethod: MatchMethod = "none";
     const bodyPreview = previewFromPayload(eventPayload);
     eventPayload.attribution_hint = { job_id: job?.id || null,
       match_method: jobMatch.match_method, match_confidence: jobMatch.match_confidence };
@@ -690,6 +694,7 @@ serve(async (req) => {
       retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
       payload: eventPayload,
       metadata: {
+        context_capture_origin: body.context_capture_origin,
         t7_fallback_envelope: true,
         match_notes: match.notes,
       },
@@ -699,7 +704,7 @@ serve(async (req) => {
     let t7Failed = false;
     if (t7Enabled) {
       try {
-        await recordEvidence(supabase, {
+        const captured = await dependencies.recordEvidence(supabase, {
           event_type: eventType,
           source: "ghl-webhook-receiver",
           channel,
@@ -718,15 +723,20 @@ serve(async (req) => {
           match_method: match.match_method,
           match_confidence: match.match_confidence ?? undefined,
           body_preview: bodyPreview || undefined,
+          body_full: String(eventPayload.message_text ?? eventPayload.note_text ?? "") || undefined,
           thread_key: conversationKey,
           // Inbound client comms: 7y; system events: 12m.
           retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
           privacy_classification: "staff_only",
           payload: eventPayload,
+          metadata: { context_capture_origin: body.context_capture_origin },
         }, {
           org_id: DEFAULT_ORG_ID,
           storage_client: supabase.storage,
         });
+        persistedJobId = captured.spine_row.job_id;
+        persistedMatchMethod = captured.spine_row.match_method ?? "none";
+        eventCreated = true;
       } catch (e) {
         // T7 path failed (helper threw, validator rejected, transient
         // Postgres error, etc.). Mark for fallback so the canonical event
@@ -743,8 +753,12 @@ serve(async (req) => {
     }
 
     if (!t7Enabled || t7Failed) {
-      const { error } = await insertCapturedEvidence(supabase, legacySpineRow);
+      const { data, error, skipped } = await dependencies.insertCapturedEvidence(supabase, legacySpineRow, "id,job_id,match_method,attribution_status");
       eventError = error?.code === "23505" && providerMessageId ? null : error;
+      eventCreated = !skipped && !!data?.id;
+      evidenceReason = skipped ? "capture_disabled" : error?.code === "23505" ? "duplicate" : "evidence_not_created";
+      persistedJobId = data?.job_id ?? null;
+      persistedMatchMethod = data?.match_method ?? "none";
     }
 
     if (eventError) {
@@ -762,11 +776,11 @@ serve(async (req) => {
     // We don't block the webhook response on this. Twilio/GHL recording URLs
     // can take 10-30s to finalise; we fork off, optionally do a short delayed
     // GHL lookup if the workflow body lacked a real recordingUrl, then invoke.
-    if (type === "CallCompleted") {
+    if (eventCreated && type === "CallCompleted") {
       // Capture closure-stable copies before the async block.
       const initialRecordingUrl = nullableString(eventPayload.recording_url);
       const ghlEventId = nullableString(eventPayload.event_id);
-      const _job_id = evidenceJobId;
+      const _job_id = persistedJobId;
       const _contact_id = contactId || null;
       const _direction = nullableString(eventPayload.direction) || "internal";
       const _duration = (eventPayload.duration as number | null);
@@ -812,10 +826,11 @@ serve(async (req) => {
             call_direction: _direction,
             occurred_at: webhookOccurredAt.toISOString(),
             event_at: eventAt,
-            job_match_method: evidenceJobId ? "direct_job_id" : "none",
+            job_match_method: persistedMatchMethod,
             duration_seconds: _duration,
             phone: _phone,
             ghl_call_id: callSourceId,
+            context_capture_origin: body.context_capture_origin,
           };
           // GHL audio URLs require the bearer token; pass it through so
           // transcribe-call can fetch with it.
@@ -826,6 +841,7 @@ serve(async (req) => {
           // attach the service-role JWT so transcribe-call's verify_jwt:true
           // ingress accepts the call (F1 fix). The supabase-js Deno client did
           // not propagate auth on inter-function invokes (cf. 401 logs).
+          if (!(await automationLaneEnabled(supabase, "capture"))) return;
           const tcResp = await fetch(`${_supabaseUrl}/functions/v1/transcribe-call`, {
             method: "POST",
             headers: {
@@ -854,6 +870,8 @@ serve(async (req) => {
       } catch (_e) {
         // No-op if EdgeRuntime is not available (e.g. local Deno).
       }
+    }
+
     }
 
     // ── Auto-cancel pending nudges/chases on inbound reply ──
@@ -887,7 +905,8 @@ serve(async (req) => {
     return jsonResponse({
       received: true,
       event_type: eventType,
-      event_created: true,
+      event_created: eventCreated,
+      ...(!eventCreated ? { reason: evidenceReason } : {}),
       job_matched: !!job,
       job_number: job?.job_number || null,
       nudges_cancelled: nudgesCancelled,
@@ -896,4 +915,6 @@ serve(async (req) => {
     console.error("[ghl-webhook-receiver] ERROR:", err);
     return jsonResponse({ error: (err as Error).message || "Internal error" }, 500);
   }
-});
+}
+
+if (import.meta.main) serve((req) => handleGhlWebhookReceiver(req));

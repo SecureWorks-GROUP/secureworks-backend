@@ -1,3 +1,5 @@
+import { ghlWebhookAuthenticated, resolveGhlExplicitJob } from "../_shared/evidence/ghl_provenance.ts";
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Edge Function
 //
@@ -108,8 +110,7 @@ serve(async (req: Request) => {
     console.error('[ghl-webhook] GHL_WEBHOOK_SECRET not configured — rejecting request')
     return jsonResponse({ error: 'Webhook secret not configured' }, 500)
   }
-  const secret = req.headers.get('X-Webhook-Secret') || req.headers.get('authorization')
-  if (secret !== GHL_WEBHOOK_SECRET && secret !== `Bearer ${GHL_WEBHOOK_SECRET}`) {
+  if (!ghlWebhookAuthenticated(req.headers, GHL_WEBHOOK_SECRET)) {
     return jsonResponse({ error: 'Unauthorized' }, 401)
   }
 
@@ -139,7 +140,10 @@ serve(async (req: Request) => {
       const eventAt = rawTime && !Number.isNaN(Date.parse(String(rawTime))) ? new Date(rawTime).toISOString() : null
       const outbound = body.type === 'OutboundMessage'
       const channel = body.messageType === 'Email' || body.channel === 'email' ? 'email' : 'sms'
-      const { error } = await sb.from('business_events').insert({
+      const explicit = await resolveGhlExplicitJob(sb, body)
+      const { error, skipped } = await insertCapturedEvidence(sb, {
+        ...explicit,
+        metadata: { context_capture_origin: body.context_capture_origin },
         event_type: outbound ? `client.${channel}_out` : 'client.reply', source: 'ghl_webhook',
         entity_type: 'contact', entity_id: body.contactId || body.contact_id || null,
         contact_id: body.contactId || body.contact_id || null,
@@ -150,7 +154,7 @@ serve(async (req: Request) => {
         payload: { body: words, phone: body.phone || null, email: body.email || null, line: body.line || null },
       })
       if (error && error.code !== '23505') return jsonResponse({ received: true, captured: false, error: error.message }, 500)
-      return jsonResponse({ received: true, captured: true, duplicate: error?.code === '23505' })
+      return jsonResponse({ received: true, captured: !skipped, duplicate: error?.code === '23505' })
     }
 
     // ── Route by event type ──

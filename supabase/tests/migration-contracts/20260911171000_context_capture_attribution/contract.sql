@@ -1,6 +1,6 @@
 BEGIN;
 DO $$
-DECLARE j1 uuid:=gen_random_uuid(); j2 uuid:=gen_random_uuid(); j3 uuid:=gen_random_uuid(); e public.business_events; eid uuid; runid uuid; n integer; t text;
+DECLARE j1 uuid:=gen_random_uuid(); j2 uuid:=gen_random_uuid(); j3 uuid:=gen_random_uuid(); e public.business_events; eid uuid; pending_eid uuid; runid uuid; n integer; t text;
 BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  (j1,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-1','b2-repeat'),
@@ -18,8 +18,11 @@ BEGIN
  INSERT INTO public.business_events(payload,contact_id,thread_key) VALUES('{"body":"Please revise height"}','b2-repeat','b2-thread') RETURNING * INTO e;
  IF e.attribution_status<>'pending_luna' THEN RAISE EXCEPTION 'repeat customer must reach Luna, got % %',e.attribution_status,e.payload; END IF;
  eid:=e.id;
+ INSERT INTO public.business_events(payload,contact_id,thread_key) VALUES('{"body":"Pending second reply"}','b2-repeat','b2-thread') RETURNING id INTO pending_eid;
  e:=public.attribute_context_event_with_luna(eid,j1,0.91);
  IF e.job_id<>j1 OR e.attribution_status<>'luna' THEN RAISE EXCEPTION 'Luna binding failed'; END IF;
+ e:=public.attribute_context_event_with_luna(pending_eid,NULL,NULL);
+ IF e.job_id IS DISTINCT FROM j1 OR e.attribution_status<>'thread' OR e.attribution_confidence IS DISTINCT FROM 1 THEN RAISE EXCEPTION 'null Luna decision ignored existing thread custody'; END IF;
  INSERT INTO public.business_events(payload,thread_key) VALUES('{"body":"The next reply"}','b2-thread') RETURNING * INTO e;
  IF e.job_id<>j1 OR e.attribution_status<>'thread' THEN RAISE EXCEPTION 'thread follow failed'; END IF;
  INSERT INTO public.business_events(payload,contact_id) VALUES('{"body":"Fence height","line":"fencing"}','b2-repeat') RETURNING * INTO e;
@@ -97,5 +100,38 @@ BEGIN
  VALUES(retry_job,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction','failed');
  SELECT job_id INTO selected_job FROM public.context_extraction_candidates(1);
  IF selected_job IS DISTINCT FROM retry_job THEN RAISE EXCEPTION 'budgeted retry hidden behind unadmitted work'; END IF;
+END $$;
+ROLLBACK;
+
+BEGIN;
+DO $$
+DECLARE j uuid:=gen_random_uuid(); e public.business_events; delayed_id uuid; n integer; origin text;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id)
+ VALUES(j,'00000000-0000-0000-0000-000000000001','closed','patio','B2-ORIGIN','b2-origin');
+ FOREACH origin IN ARRAY ARRAY['historical','import','backfill','unknown'] LOOP
+  INSERT INTO public.business_events(payload,metadata,job_id,match_method,direction,event_at,context_activates_extraction)
+  VALUES('{"body":"Retained historical source"}',jsonb_build_object('context_capture_origin',origin),j,'direct_job_id','inbound','2000-01-01Z',true) RETURNING * INTO e;
+  IF e.job_id IS DISTINCT FROM j OR e.context_captured_at IS NULL OR e.context_activates_extraction THEN RAISE EXCEPTION 'historical origin became an activating capture: %',origin; END IF;
+ END LOOP;
+ SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j;
+ IF n<>0 THEN RAISE EXCEPTION 'historical ingestion activated candidates'; END IF;
+ SELECT count(*) INTO n FROM public.context_extraction_events(j,25);
+ IF n<>0 THEN RAISE EXCEPTION 'historical ingestion activated extraction'; END IF;
+ UPDATE public.automation_switches SET attribution=false WHERE id=1;
+ INSERT INTO public.business_events(payload,metadata,job_id,match_method,direction,event_at)
+ VALUES('{"body":"Newly received delayed provider event"}','{"context_capture_origin":"operational"}',j,'direct_job_id','inbound','1999-01-01Z') RETURNING * INTO e;
+ delayed_id:=e.id;
+ IF e.job_id IS NOT NULL OR NOT e.context_activates_extraction OR e.context_captured_at IS NULL THEN RAISE EXCEPTION 'paused operational capture lost admission provenance'; END IF;
+ SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j;
+ IF n<>0 THEN RAISE EXCEPTION 'unattributed capture activated historical extraction'; END IF;
+ UPDATE public.automation_switches SET attribution=true WHERE id=1;
+ PERFORM public.rerun_context_attribution(250,NULL);
+ SELECT * INTO e FROM public.business_events WHERE id=delayed_id;
+ IF e.job_id IS DISTINCT FROM j OR NOT e.context_activates_extraction OR e.event_at IS DISTINCT FROM '1999-01-01Z'::timestamptz THEN RAISE EXCEPTION 'delayed attribution lost operational activation or source time'; END IF;
+ SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j;
+ IF n<>1 THEN RAISE EXCEPTION 'operational old source date failed to activate'; END IF;
+ SELECT count(*) INTO n FROM public.context_extraction_events(j,25);
+ IF n<>5 THEN RAISE EXCEPTION 'fresh signal failed to retain historical context'; END IF;
 END $$;
 ROLLBACK;

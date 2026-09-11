@@ -55197,6 +55197,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
               contact_id: c.opp.contactId,
               call_direction: c.direction,
               event_at: c.event_at,
+              context_capture_origin: "backfill",
               job_match_method: "none",
               duration_seconds: c.duration_seconds || undefined,
               phone: c.phone || undefined,

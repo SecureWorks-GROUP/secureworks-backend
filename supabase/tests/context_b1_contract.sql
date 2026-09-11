@@ -47,7 +47,7 @@ BEGIN
  EXCEPTION WHEN raise_exception THEN NULL;
  END;
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,gen_random_uuid(),'draft','patio','B1-'||j);
- INSERT INTO public.business_events(id,job_id) VALUES(e,j);
+ INSERT INTO public.business_events(id,job_id,match_method) VALUES(e,j,'direct_job_id');
  r:=public.claim_context_extraction_run(j,d,'extraction');
  IF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'claim %',r; END IF;
  run:=(r->'run'->>'id')::uuid;tok:=(r->'run'->>'lease_token')::uuid;

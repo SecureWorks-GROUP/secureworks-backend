@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from '../_shared/evidence/capture_guard.ts'
 import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // MONITOR-INBOX — Microsoft Graph inbox polling for JARVIS
@@ -635,7 +636,7 @@ async function processMailbox(
       }
 
       if (!t7Enabled || !inboxEventId || t7Failed) {
-        const { error: legacyErr } = await sb.from('business_events').insert(legacySpineRow)
+        const { error: legacyErr } = await insertCapturedEvidence(sb, legacySpineRow)
         if (legacyErr) {
           console.error('[monitor-inbox] legacy business_event insert failed:', legacyErr.message)
         }

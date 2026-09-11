@@ -39,6 +39,7 @@ interface FakeOpts {
   failOn?: string;
   spineId?: string;
   enqueueId?: string;
+  persisted?: Record<string, unknown>;
   /** When true (default), the flag reader returns evidence_capture_v1 enabled. */
   flagOn?: boolean;
 }
@@ -56,13 +57,16 @@ function makeFakeSupabase(opts: FakeOpts = {}): { client: any; calls: InsertCall
   // The mock honors all three so a writer that forgets to chain .select()
   // gets data:null in the test (matching prod behavior) instead of being
   // saved by an over-generous fake.
-  function insertResultForTable(table: string) {
+  function insertResultForTable(table: string, values: Record<string, unknown>) {
     if (opts.failOn === table) {
       return { rows: null as Array<Record<string, unknown>> | null, error: { message: "simulated failure" } };
     }
     if (table === "business_events") {
       return {
-        rows: [{ id: opts.spineId ?? "spine-uuid-1", occurred_at: "2026-05-02T00:00:00Z" }],
+        rows: [{ ...values, id: opts.spineId ?? "spine-uuid-1", occurred_at: "2026-05-02T00:00:00Z",
+          attribution_status: values.job_id ? "direct" : "admin_bucket",
+          context_activates_extraction: String((values.metadata as Record<string, unknown>)?.context_capture_origin ?? "operational") === "operational",
+          ...opts.persisted }],
         error: null as { message: string } | null,
       };
     }
@@ -99,7 +103,7 @@ function makeFakeSupabase(opts: FakeOpts = {}): { client: any; calls: InsertCall
         // deno-lint-ignore no-explicit-any
         insert(values: unknown): any {
           calls.push({ table, values: values as Record<string, unknown> });
-          const r = insertResultForTable(table);
+          const r = insertResultForTable(table, values as Record<string, unknown>);
           // Thenable: awaiting the insert directly returns data:null,
           // mirroring real Supabase (which only returns rows when you
           // chain .select()).
@@ -1026,4 +1030,57 @@ Deno.test("recordEvidence: disabled capture after row write prevents extraction 
   }, { org_id: "test-org", bypass_feature_flag: true });
   assertEquals(calls.filter((c) => c.table === "business_events").length, 1);
   assertEquals(calls.filter((c) => c.table === "extraction_jobs").length, 0);
+});
+
+for (const status of ["admin_bucket", "pending_luna"]) {
+  Deno.test(`recordEvidence: database ${status} clears queue and returned job identity`, async () => {
+    const { client, calls } = makeFakeSupabase({ persisted: {
+      job_id: null, match_status: "unresolved", match_method: "none", match_confidence: null,
+      attribution_status: status,
+    } });
+    const result = await recordEvidence(client, {
+      event_type: "note.added", source: "test", channel: "note", direction: "internal",
+      source_table: "job_events", source_id: "note-paused", job_id: "caller-job",
+      match_method: "direct_job_id", body_preview: "Retained note",
+    }, { org_id: "test-org", bypass_feature_flag: true });
+    assertEquals(result.spine_row.job_id, null);
+    assertEquals(result.evidence_ref.job_id, null);
+    assertEquals(result.spine_row.match_method, "none");
+    assertEquals(result.spine_row.match_status, "unresolved");
+    assertEquals(result.spine_row.match_confidence, null);
+    assertEquals(result.spine_row.attribution_status, status);
+    assertEquals(result.extraction_job_id, undefined);
+    assertEquals(calls.filter(c => c.table === "extraction_jobs").length, 0);
+  });
+}
+
+Deno.test("recordEvidence: database thread winner owns queue and references", async () => {
+  const { client, calls } = makeFakeSupabase({ persisted: {
+    job_id: "thread-job", contact_id: "persisted-contact", match_status: "matched", match_method: "contact_id", match_confidence: 1,
+    attribution_status: "thread",
+  } });
+  const result = await recordEvidence(client, {
+    event_type: "note.added", source: "test", channel: "note", direction: "internal",
+    source_table: "job_events", source_id: "note-thread", job_id: null, body_preview: "Retained note",
+  }, { org_id: "test-org", bypass_feature_flag: true });
+  assertEquals(result.spine_row.job_id, "thread-job");
+  assertEquals(result.evidence_ref.job_id, "thread-job");
+  assertEquals(result.spine_row.contact_id, "persisted-contact");
+  assertEquals(result.evidence_ref.contact_id, "persisted-contact");
+  assertEquals(result.spine_row.match_method, "contact_id");
+  assertEquals(calls.find(c => c.table === "extraction_jobs")?.values.job_id, "thread-job");
+});
+
+Deno.test("recordEvidence: historical admission retains evidence without queue activation", async () => {
+  const { client, calls } = makeFakeSupabase({ persisted: { context_activates_extraction: false } });
+  const result = await recordEvidence(client, {
+    event_type: "note.added", source: "test", channel: "note", direction: "internal",
+    source_table: "job_events", source_id: "historical-note", job_id: "job-1",
+    match_method: "direct_job_id", body_preview: "Imported note", metadata: { context_capture_origin: "backfill" },
+  }, { org_id: "test-org", bypass_feature_flag: true });
+  assertEquals(result.spine_row.job_id, "job-1");
+  assertEquals(result.spine_row.context_activates_extraction, false);
+  assertEquals(calls.filter(c => c.table === "business_events").length, 1);
+  assertEquals(calls.filter(c => c.table === "extraction_jobs").length, 0);
+  assertEquals((calls[0].values.metadata as Record<string, unknown>).context_capture_origin, "backfill");
 });

@@ -171,6 +171,8 @@ export interface RecordEvidenceResult {
     contact_id: string | null;
     channel: Channel;
     direction: Direction;
+    attribution_status: string | null;
+    context_activates_extraction: boolean;
     match_status: MatchStatus;
     match_confidence: number | null;
     match_method: MatchMethod | null;

@@ -215,20 +215,17 @@ export async function recordEvidence(
   // Insert (or simulate).
   let spine_event_id: string;
   let inserted_occurred_at: string;
+  let persistedMatch: Pick<RecordEvidenceResult["spine_row"], "job_id" | "contact_id" | "match_status" | "match_method" | "match_confidence" | "attribution_status" | "context_activates_extraction"> = {
+    ...match, contact_id: capture.contact_id ?? null, attribution_status: null, context_activates_extraction: false,
+  };
   if (effectiveDryRun) {
     spine_event_id = `dry-run-${cryptoRandom()}`;
     inserted_occurred_at = occurred_at;
   } else {
-    // Real Supabase insert returns data:null unless we chain .select().
-    // We need the inserted row's id + occurred_at so downstream consumers
-    // (evidence_ref, extraction_jobs.metadata.spine_event_id, source-table
-    // backref columns) point at a real row. Use .select('id, occurred_at')
-    // and read [0]; .single() would throw on the empty case which we
-    // already handle below.
     await assertCaptureEnabled(supabase);
     const result = await supabase.from("business_events")
       .insert(spineRow)
-      .select("id, occurred_at");
+      .select("id, occurred_at, job_id, contact_id, match_status, match_method, match_confidence, attribution_status, context_activates_extraction");
     if (result.error) {
       warnings.push(`spine insert failed: ${result.error.message}`);
       // Best-effort drop-visibility log. Use a direct insert (NOT .select())
@@ -255,7 +252,7 @@ export async function recordEvidence(
       }
       throw new Error(`recordEvidence: spine insert failed: ${result.error.message}`);
     }
-    const data = result.data as Array<{ id: string; occurred_at: string }> | null;
+    const data = result.data as Array<RecordEvidenceResult["spine_row"]> | null;
     if (!Array.isArray(data) || data.length === 0 || !data[0]?.id) {
       // The select chain returned no row even though the insert reported
       // no error. This shouldn't happen in normal Postgres semantics; if
@@ -264,6 +261,15 @@ export async function recordEvidence(
       // legacy path.
       throw new Error("recordEvidence: spine insert returned no row");
     }
+    persistedMatch = {
+      job_id: data[0].job_id ?? null,
+      contact_id: data[0].contact_id ?? null,
+      match_status: data[0].match_status,
+      match_method: data[0].match_method,
+      match_confidence: data[0].match_confidence,
+      attribution_status: data[0].attribution_status,
+      context_activates_extraction: data[0].context_activates_extraction,
+    };
     spine_event_id = data[0].id;
     inserted_occurred_at = data[0].occurred_at ?? occurred_at;
   }
@@ -273,14 +279,16 @@ export async function recordEvidence(
   const eligibleChannels = options.extractor_eligible_channels ?? EXTRACTOR_ELIGIBLE_CHANNELS;
   const extractionEligible =
     (capture.enqueueExtraction ?? eligibleChannels.includes(capture.channel)) &&
-    match.match_status === "matched" &&
-    match.job_id !== null;
+    persistedMatch.match_status === "matched" &&
+    persistedMatch.job_id !== null &&
+    ["direct", "thread", "single_open", "single_line", "luna"].includes(persistedMatch.attribution_status ?? "") &&
+    persistedMatch.context_activates_extraction === true;
   if (extractionEligible && !effectiveDryRun &&
       await automationLaneEnabled(supabase, "capture") &&
       await automationLaneEnabled(supabase, "extraction")) {
     const enqueueResult = await supabase.from("extraction_jobs")
       .insert({
-        job_id: match.job_id,
+        job_id: persistedMatch.job_id,
         source_table: "business_events",
         source_id: spine_event_id,
         source_event_type: capture.event_type,
@@ -320,8 +328,8 @@ export async function recordEvidence(
     channel: capture.channel,
     direction: capture.direction,
     occurred_at: inserted_occurred_at,
-    job_id: match.job_id,
-    contact_id: capture.contact_id ?? null,
+    job_id: persistedMatch.job_id,
+    contact_id: persistedMatch.contact_id,
     thread_key: capture.thread_key ?? null,
     safe_summary,
     body_preview,
@@ -332,13 +340,15 @@ export async function recordEvidence(
     spine_row: {
       id: spine_event_id,
       occurred_at: inserted_occurred_at,
-      job_id: match.job_id,
-      contact_id: capture.contact_id ?? null,
+      job_id: persistedMatch.job_id,
+      contact_id: persistedMatch.contact_id,
       channel: capture.channel,
       direction: capture.direction,
-      match_status: match.match_status,
-      match_confidence: match.match_confidence,
-      match_method: match.match_method,
+      match_status: persistedMatch.match_status,
+      match_confidence: persistedMatch.match_confidence,
+      match_method: persistedMatch.match_method,
+      attribution_status: persistedMatch.attribution_status,
+      context_activates_extraction: persistedMatch.context_activates_extraction,
       body_pointer: body_pointer ?? null,
       body_hash: body_hash ?? null,
     },

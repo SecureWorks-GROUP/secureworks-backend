@@ -71,6 +71,7 @@ interface TranscribeCallInput {
   call_direction?: 'inbound' | 'outbound' | 'internal'
   occurred_at?: string
   event_at?: string | null
+  context_capture_origin?: string
   job_match_method?: MatchMethod
   duration_seconds?: number
   phone?: string
@@ -285,6 +286,7 @@ serve(async (req) => {
         whisperflow_synthetic_source_id: source_id,
       },
       metadata: {
+        context_capture_origin: input.context_capture_origin ?? 'operational',
         provider: 'openai-whisper',
         whisperflow_synthetic_source_id: source_id,
       },
@@ -297,7 +299,7 @@ serve(async (req) => {
     // row that recordEvidence just inserted. Idempotent via the
     // (source_table, source_id, extractor_version) unique key.
     let extraction_job_id: string | null = null
-    if (result.spine_row.job_id && await automationLaneEnabled(sb, "capture") && await automationLaneEnabled(sb, "extraction")) {
+    if (result.spine_row.job_id && result.spine_row.context_activates_extraction === true && ["direct", "thread", "single_open", "single_line", "luna"].includes(result.spine_row.attribution_status ?? "") && await automationLaneEnabled(sb, "capture") && await automationLaneEnabled(sb, "extraction")) {
       const { data: enqueueData, error: enqueueErr } = await sb
         .from('extraction_jobs')
         .insert({

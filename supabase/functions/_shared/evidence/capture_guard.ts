@@ -12,9 +12,10 @@ export async function assertCaptureEnabled(client: any): Promise<void> {
 
 /** Evidence-only guard: callers continue their ordinary business operation. */
 // deno-lint-ignore no-explicit-any
-export async function insertCapturedEvidence(client: any, row: unknown): Promise<any> {
+export async function insertCapturedEvidence(client: any, row: unknown, selectColumns?: string): Promise<any> {
   if (!(await automationLaneEnabled(client, "capture"))) {
     return { data: null, error: null, skipped: true };
   }
-  return await client.from("business_events").insert(row);
+  const insert = client.from("business_events").insert(row);
+  return await (selectColumns ? insert.select(selectColumns).maybeSingle() : insert);
 }
