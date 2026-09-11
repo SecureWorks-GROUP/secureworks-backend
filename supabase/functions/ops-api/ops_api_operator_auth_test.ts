@@ -967,3 +967,24 @@ Deno.test("allocate_job behaviour is unchanged beside set_job_lead", async () =>
     )
   );
 });
+
+Deno.test("sales performance actions retain the staff front door and no routine/read exceptions", () => {
+  for (
+    const action of [
+      "sales_performance_write",
+      "sales_performance_read",
+      "sales_performance_note",
+    ]
+  ) {
+    assertEquals(authorizationStatus({ action, authMode: "api_key" }), 401);
+    assertEquals(
+      authorizationStatus({ action, authMode: "jwt", role: "installer" }),
+      403,
+    );
+    for (const role of ["admin", "owner", "ops_manager"]) {
+      assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200);
+    }
+    assertEquals(AGENT_READ_ALLOWED_ACTIONS.has(action), false);
+    assertEquals(LEAD_INSTALLER_READ_ACTIONS.has(action), false);
+  }
+});

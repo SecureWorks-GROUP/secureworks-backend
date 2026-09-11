@@ -254,3 +254,7 @@ upsert_debt_picture
 add_debt_note
 debt_notes
 debt_proposal_mark
+# Sales performance snapshots (service write; authenticated staff read/note)
+sales_performance_write # probe=source-only
+sales_performance_read # probe=source-only
+sales_performance_note # probe=source-only

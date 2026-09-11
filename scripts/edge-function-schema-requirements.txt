@@ -294,3 +294,6 @@ ops-api|supabase/migrations/20260911120000_debt_picture.sql|column|xero_invoices
 ops-api|supabase/migrations/20260911120000_debt_picture.sql|column|xero_invoices.debt_brief
 ops-api|supabase/migrations/20260911120000_debt_picture.sql|column|xero_invoices.debt_proposal_status
 ops-api|supabase/migrations/20260911120000_debt_picture.sql|constraint|xero_invoices_debt_classification_check
+ops-api|supabase/migrations/20260911000001_sales_performance_weeks.sql|table|sales_performance_weeks
+ops-api|supabase/migrations/20260911000001_sales_performance_weeks.sql|function|sales_performance_write_v1
+ops-api|supabase/migrations/20260911000001_sales_performance_weeks.sql|function|sales_performance_note_v1

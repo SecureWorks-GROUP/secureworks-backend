@@ -1,3 +1,4 @@
+import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
 // deploy-lane-validate: 2026-05-30.v4
@@ -5060,6 +5061,29 @@ if (import.meta.main) serve(async (req: Request) => {
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
 
     switch (action) {
+      case 'sales_performance_write':
+      case 'sales_performance_read':
+      case 'sales_performance_note': {
+        // Browser reads/notes carry the verified JWT through to RLS/RPC; the
+        // shared and agent server keys are never collector write credentials.
+        const performanceClient = authMode === 'jwt'
+          ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+              global: { headers: { Authorization: `Bearer ${bearerToken}` } },
+              auth: { persistSession: false, autoRefreshToken: false },
+            })
+          : client
+        const result = await salesPerformanceAction(
+          salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
+            mode: authMode,
+            serviceRole: !!serviceKey && serviceKey !== validKey && serviceKey !== routineKey &&
+              serviceKey !== agentServerKey && (xApiKey === serviceKey || bearerToken === serviceKey),
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            orgId: authUser?.orgId,
+            userId: authUser?.id,
+          },
+        )
+        return json(result.body, result.status)
+      }
       case 'ops_api_version': return json(opsApiVersion())
       case 'ses_synthetic_livefire_capabilities': {
         return json({
