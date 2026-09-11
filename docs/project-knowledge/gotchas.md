@@ -81,7 +81,7 @@ If you redeploy without the flag, the dashboard/scoping tools break with 401 err
 - 12 jobs have phone numbers as client_name (can't create Xero contacts for these)
 - Duplicate opportunities exist
 - Stages not always updated correctly
-- `quoted_at` and `accepted_at` timestamps rarely set (Pipeline Velocity metrics broken)
+- `quoted_at` coverage remains a Pipeline Velocity limitation. For acceptance timestamp semantics and release boundaries, see the [sales prerequisites contract](../evidence/sales-prerequisites-contract-2026-09-11.md).
 
 ### Xero name matching is exact
 `create_or_find_contact` searches by email first (reliable), then exact name. "Brett Hunt" won't match "Brett and Steph Hunt". Client email from scoping tool is the reliable path to avoid duplicates.

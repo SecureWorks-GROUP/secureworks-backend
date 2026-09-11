@@ -13,7 +13,8 @@ no such event exists, only an acceptance-chain job may use its previous
 rejected/backward stage conflict is not an acceptance. Existing stamps are never
 rewritten; status and deposit fields are untouched.
 
-The new trigger stamps accepted writes at the database boundary, covering the
+The new trigger stamps writes with status `accepted` or an explicit non-null
+`accepted_at` at the database boundary, covering the
 webhook/ops-api path and protecting first stamps against repeated status updates.
 It records `OBSERVED_WRITE`; that means the database observed the write, not that
 we independently verified client acceptance. `OBSERVED_EVENT` is a historical
@@ -28,7 +29,8 @@ Deposit PR823/825 behaviour is unchanged.
 ## Complete sent-document pagination
 
 The existing exact-job `list_job_documents` mode remains unchanged. Authorised
-staff or the verified server connection may opt into:
+JWT operators (`admin`, `owner`, or `ops_manager`) or the verified server
+connection may opt into:
 
 ```
 action=list_job_documents
@@ -42,7 +44,8 @@ page_size=100
 
 That is the Perth week starting Monday 7 September: lower bound inclusive,
 upper bound exclusive. Follow `pagination.next_cursor` until `has_more=false`.
-There is no total-row cap. The cursor is bound to the caller organisation and
+Pages default to 25 rows and allow at most 100; rows use ascending document-ID
+keyset pagination. There is no total-row cap. The cursor is bound to the caller organisation and
 all filters. Page row counts are not population totals, and the API explicitly
 states its mutable-snapshot and missing-sent-date coverage limits. A failed read
 returns an error, never an empty/zero population.
