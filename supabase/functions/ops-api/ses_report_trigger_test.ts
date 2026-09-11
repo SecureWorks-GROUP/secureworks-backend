@@ -17,6 +17,15 @@
 //   8. The pending list excludes done rows and reports age and recovery action.
 //  12. The pending list reports the drain's own enable flag and recent cron runs,
 //      fails closed on a missing settings row, and never fails on a drain read error.
+//  15. The drain status says which "empty" it is: pg_cron absent, cron.job unreadable,
+//      or a definer that does not bypass row security. A -1 run count is reported as
+//      an insufficient_privilege error, not as a count and not as "pg_cron absent".
+//  14. The drain status carries the whole-scheduler pulse: every visible cron job with
+//      its newest run, newest first, so a stopped pg_cron is distinguishable from one
+//      stopped job. Its read error is its own field.
+//  13. The drain status carries the pg_cron job rows, the visible run count, the latest
+//      pg_net responses and the "succeeded is not processed" note; each read reports
+//      its own error (or thrown exception) and never fails the list.
 
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { listSesReportTriggerRuns, runSesReportTrigger, SesReportTriggerError } from "./ses_report_trigger.ts";
@@ -51,6 +60,20 @@ type Fixture = {
   drainSettingsError?: string;
   cronRuns?: any[];
   cronRunsError?: string;
+  cronJob?: any[];
+  cronJobError?: string;
+  /** undefined = 0, null = pg_cron absent or not permitted. */
+  cronRunCount?: any;
+  cronRunCountError?: string;
+  httpResponses?: any[];
+  httpResponsesError?: string;
+  /** Make the rpc call itself throw, to prove the list survives an exception. */
+  httpResponsesThrow?: string;
+  schedulerPulse?: any[];
+  schedulerPulseError?: string;
+  /** undefined = a default readable row; null = the rpc returned no row at all. */
+  cronVisibility?: any;
+  cronVisibilityError?: string;
 };
 
 /** A tiny query-builder stand-in that records writes and answers the reads the handler makes. */
@@ -62,6 +85,36 @@ function fakeClient(fx: Fixture) {
         assertEquals(args, { p_limit: 5 });
         if (fx.cronRunsError) return Promise.resolve({ data: null, error: { message: fx.cronRunsError } });
         return Promise.resolve({ data: fx.cronRuns ?? [], error: null });
+      }
+      if (name === "ses_report_drain_cron_job") {
+        assertEquals(args, {});
+        if (fx.cronJobError) return Promise.resolve({ data: null, error: { message: fx.cronJobError } });
+        return Promise.resolve({ data: fx.cronJob ?? [], error: null });
+      }
+      if (name === "ses_report_drain_cron_run_count") {
+        assertEquals(args, {});
+        if (fx.cronRunCountError) return Promise.resolve({ data: null, error: { message: fx.cronRunCountError } });
+        return Promise.resolve({ data: fx.cronRunCount === undefined ? 0 : fx.cronRunCount, error: null });
+      }
+      if (name === "ses_report_drain_cron_visibility") {
+        assertEquals(args, {});
+        if (fx.cronVisibilityError) return Promise.resolve({ data: null, error: { message: fx.cronVisibilityError } });
+        if (fx.cronVisibility === null) return Promise.resolve({ data: [], error: null });
+        return Promise.resolve({
+          data: [fx.cronVisibility ?? { pg_cron_present: true, cron_run_details_present: true, definer_role: "postgres", definer_bypasses_rls: true, cron_job_select_denied: false }],
+          error: null,
+        });
+      }
+      if (name === "ses_report_cron_scheduler_pulse") {
+        assertEquals(args, { p_limit: 30 });
+        if (fx.schedulerPulseError) return Promise.resolve({ data: null, error: { message: fx.schedulerPulseError } });
+        return Promise.resolve({ data: fx.schedulerPulse ?? [], error: null });
+      }
+      if (name === "ses_report_drain_http_responses") {
+        assertEquals(args, { p_limit: 5 });
+        if (fx.httpResponsesThrow) throw new Error(fx.httpResponsesThrow);
+        if (fx.httpResponsesError) return Promise.resolve({ data: null, error: { message: fx.httpResponsesError } });
+        return Promise.resolve({ data: fx.httpResponses ?? [], error: null });
       }
       assertEquals(name, "claim_ses_report_trigger_run");
       const run = fx.runs[args.p_run_id];
@@ -319,7 +372,7 @@ Deno.test("12. pending list carries the drain's own flag and recent cron runs; r
   assertEquals(d.settings_error, null);
   assertEquals(d.recent_cron_runs, [cronRow]);
   assertEquals(d.cron_runs_error, null);
-  assertEquals(d.cron_job, "ses-report-trigger-drain");
+  assertEquals(d.cron_job_name, "ses-report-trigger-drain");
   assertStringIncludes(d.gate, "ses_report_drain_enabled");
 
   const off = await listSesReportTriggerRuns(new URLSearchParams(""), fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], drainSettings: { drain_enabled: false, updated_at: null, updated_by: "ops" } }).client, () => NOW);
@@ -342,4 +395,177 @@ Deno.test("12. pending list carries the drain's own flag and recent cron runs; r
   assertEquals((broken as any).drain.recent_cron_runs, null);
   assertEquals((broken as any).drain.cron_runs_error, "function missing");
   assert(!("drain_enabled" in broken));
+});
+
+Deno.test("13. drain status carries the cron job, visible run count, recent pg_net responses and the note; each read fails on its own", async () => {
+  const run = baseRun();
+  const cronRow = { status: "succeeded", return_message: "1 row", start_time: "2026-09-11T00:07:00.000Z", end_time: "2026-09-11T00:07:00.050Z" };
+  const jobRow = { jobid: 41, jobname: "ses-report-trigger-drain", schedule: "* * * * *", active: false, username: "postgres", command_preview: "SELECT public.trigger_ses_report_trigger_drain()" };
+  const httpRow = { id: 9001, status_code: 200, content_preview: "{\"ok\":true}", created: "2026-09-11T00:07:01.000Z", timed_out: false, error_msg: null };
+
+  const ok = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronRuns: [cronRow], cronJob: [jobRow], cronRunCount: "187", httpResponses: [httpRow] }).client,
+    () => NOW,
+  );
+  const d = (ok as any).drain;
+  assertEquals(d.cron_job, [jobRow]);
+  assertEquals(d.cron_job[0].active, false);
+  assertEquals(d.cron_job_error, null);
+  assertEquals(d.cron_run_count, 187);
+  assertEquals(d.cron_run_count_error, null);
+  assertEquals(d.recent_http_responses, [httpRow]);
+  assertEquals(d.http_responses_error, null);
+  assertStringIncludes(d.http_responses_scope, "not proven to be a drain post");
+  assertEquals(d.note, "A cron run marked succeeded means the drain query ran and a post was queued; it does not prove ops-api processed the run.");
+  assertEquals(d.cron_job_name, "ses-report-trigger-drain");
+  assertEquals(d.recent_cron_runs, [cronRow]);
+
+  // No visible job and a null count (pg_cron absent, hidden by another role, or not permitted) stay empty and null, not 0.
+  const hidden = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronJob: [], cronRunCount: null }).client,
+    () => NOW,
+  );
+  assertEquals((hidden as any).drain.cron_job, []);
+  assertEquals((hidden as any).drain.cron_run_count, null);
+  assertEquals((hidden as any).drain.cron_run_count_error, null);
+
+  // Each read fails alone, including a thrown exception; the list and the other reads survive.
+  const broken = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({
+      runs: { [RUN]: { ...run } }, cycles: [], cronRuns: [cronRow],
+      cronJobError: "permission denied for schema cron", cronRunCountError: "function missing", httpResponsesThrow: "socket closed",
+    }).client,
+    () => NOW,
+  );
+  assertEquals(broken.ok, true);
+  assertEquals(broken.count, 1);
+  const b = (broken as any).drain;
+  assertEquals(b.drain_enabled, true);
+  assertEquals(b.recent_cron_runs, [cronRow]);
+  assertEquals(b.cron_runs_error, null);
+  assertEquals(b.cron_job, null);
+  assertEquals(b.cron_job_error, "permission denied for schema cron");
+  assertEquals(b.cron_run_count, null);
+  assertEquals(b.cron_run_count_error, "function missing");
+  assertEquals(b.recent_http_responses, null);
+  assertEquals(b.http_responses_error, "socket closed");
+  assertEquals(b.note, "A cron run marked succeeded means the drain query ran and a post was queued; it does not prove ops-api processed the run.");
+});
+
+Deno.test("14. drain status carries the whole-scheduler pulse, and its read fails on its own", async () => {
+  const run = baseRun();
+  const drainJob = { jobid: 41, jobname: "ses-report-trigger-drain", schedule: "* * * * *", active: true, username: "postgres", last_start_time: "2026-09-11T00:07:00.000Z", last_status: "succeeded" };
+  const neverRan = { jobid: 42, jobname: "makesafe-email-poll", schedule: "*/5 * * * *", active: true, username: "postgres", last_start_time: null, last_status: null };
+
+  const ok = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], schedulerPulse: [drainJob, neverRan] }).client,
+    () => NOW,
+  );
+  const d = (ok as any).drain;
+  assertEquals(d.scheduler_pulse, [drainJob, neverRan]);
+  assertEquals(d.scheduler_pulse[1].last_start_time, null);
+  assertEquals(d.scheduler_pulse_error, null);
+
+  // pg_cron absent, or every job hidden by pg_cron row security: empty, not null.
+  const empty = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], schedulerPulse: [] }).client,
+    () => NOW,
+  );
+  assertEquals((empty as any).drain.scheduler_pulse, []);
+  assertEquals((empty as any).drain.scheduler_pulse_error, null);
+
+  // The pulse read fails alone; the list and the other drain reads survive.
+  const broken = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], schedulerPulseError: "permission denied for schema cron" }).client,
+    () => NOW,
+  );
+  assertEquals(broken.ok, true);
+  assertEquals(broken.count, 1);
+  assertEquals((broken as any).drain.scheduler_pulse, null);
+  assertEquals((broken as any).drain.scheduler_pulse_error, "permission denied for schema cron");
+  assertEquals((broken as any).drain.drain_enabled, true);
+});
+
+Deno.test("15. drain status tells absent pg_cron, an unreadable cron schema and row-security hiding apart", async () => {
+  const run = baseRun();
+
+  // pg_cron absent: present false, the denied probe not attempted (null), and a
+  // null run count with NO error, which is the documented "absent" reading.
+  const absent = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({
+      runs: { [RUN]: { ...run } }, cycles: [], cronJob: [], cronRunCount: null,
+      cronVisibility: { pg_cron_present: false, cron_run_details_present: false, definer_role: "postgres", definer_bypasses_rls: true, cron_job_select_denied: null },
+    }).client,
+    () => NOW,
+  );
+  const a = (absent as any).drain;
+  assertEquals(a.cron_visibility.pg_cron_present, false);
+  assertEquals(a.cron_visibility.cron_job_select_denied, null);
+  assertEquals(a.cron_visibility_error, null);
+  assertEquals(a.cron_run_count, null);
+  assertEquals(a.cron_run_count_error, null);
+  assertStringIncludes(a.visibility_note, "hidden by pg_cron row security");
+
+  // pg_cron present but cron.job unreadable by this role: denied true.
+  const denied = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({
+      runs: { [RUN]: { ...run } }, cycles: [], cronJob: [],
+      cronVisibility: { pg_cron_present: true, cron_run_details_present: true, definer_role: "ops_definer", definer_bypasses_rls: false, cron_job_select_denied: true },
+    }).client,
+    () => NOW,
+  );
+  const dn = (denied as any).drain.cron_visibility;
+  assertEquals(dn.pg_cron_present, true);
+  assertEquals(dn.cron_job_select_denied, true);
+  assertEquals(dn.definer_bypasses_rls, false);
+  assertEquals(dn.definer_role, "ops_definer");
+
+  // -1 from the run count is insufficient_privilege, reported as an error and
+  // never as a count. This is the case a plain null used to swallow.
+  const hidden = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronJob: [], cronRunCount: "-1" }).client,
+    () => NOW,
+  );
+  const h = (hidden as any).drain;
+  assertEquals(h.cron_run_count, null);
+  assertStringIncludes(h.cron_run_count_error, "insufficient_privilege");
+  assertStringIncludes(h.cron_run_count_error, "cron.job_run_details");
+  assertEquals(h.cron_visibility.definer_bypasses_rls, true);
+
+  // A real zero is still a zero, not an error.
+  const zero = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronRunCount: 0 }).client,
+    () => NOW,
+  );
+  assertEquals((zero as any).drain.cron_run_count, 0);
+  assertEquals((zero as any).drain.cron_run_count_error, null);
+
+  // The visibility read fails alone, and a no-row answer is null, not invented.
+  const broken = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronVisibilityError: "permission denied for function ses_report_drain_cron_visibility" }).client,
+    () => NOW,
+  );
+  assertEquals(broken.ok, true);
+  assertEquals((broken as any).drain.cron_visibility, null);
+  assertStringIncludes((broken as any).drain.cron_visibility_error, "permission denied");
+  assertEquals((broken as any).drain.drain_enabled, true);
+
+  const noRow = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronVisibility: null }).client,
+    () => NOW,
+  );
+  assertEquals((noRow as any).drain.cron_visibility, null);
+  assertEquals((noRow as any).drain.cron_visibility_error, null);
 });
