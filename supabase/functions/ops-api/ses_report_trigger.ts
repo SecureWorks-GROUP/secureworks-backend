@@ -289,8 +289,10 @@ export async function listSesReportTriggerRuns(
   if (error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `list failed: ${error.message || error}`, 503);
   const rows = (data as SesReportTriggerRun[]) || [];
   const t = now().getTime();
+  const drain = await readSesReportDrainState(client);
   return {
     version: SES_REPORT_TRIGGER_VERSION, ok: true, count: rows.length, include_done: includeDone, retrieved_at: now().toISOString(),
+    drain,
     runs: rows.map((r) => ({
       id: r.id, dedupe_key: r.dedupe_key, job_id: r.job_id, attendance_cycle_id: r.attendance_cycle_id, cycle_number: r.cycle_number,
       event_type: r.event_type, source: r.source, state: r.state, attempts: r.attempts, duplicate_events: r.duplicate_events,
@@ -300,4 +302,63 @@ export async function listSesReportTriggerRuns(
     })),
     coverage: "public.ses_report_trigger_runs only; job_events is audit and is not read here",
   };
+}
+
+export interface SesReportDrainState {
+  /** true/false from public.ses_report_trigger_settings; null when it could not be read. */
+  drain_enabled: boolean | null;
+  settings_row_present: boolean | null;
+  updated_at: string | null;
+  updated_by: string | null;
+  settings_error: string | null;
+  /** Newest first. Empty when the cron job has not run or pg_cron is absent; null when unreadable. */
+  recent_cron_runs: Array<{ status: string | null; return_message: string | null; start_time: string | null; end_time: string | null }> | null;
+  cron_runs_error: string | null;
+  gate: string;
+  cron_job: string;
+}
+
+/**
+ * Observable drain state for the pending list: the drain's own enable flag and
+ * the last few pg_cron runs of ses-report-trigger-drain. Read failures are
+ * reported in the object and never fail the list itself.
+ */
+export async function readSesReportDrainState(client: any): Promise<SesReportDrainState> {
+  const out: SesReportDrainState = {
+    drain_enabled: null, settings_row_present: null, updated_at: null, updated_by: null, settings_error: null,
+    recent_cron_runs: null, cron_runs_error: null,
+    gate: "public.ses_report_drain_enabled() (public.ses_report_trigger_settings.drain_enabled; missing row = off)",
+    cron_job: "ses-report-trigger-drain",
+  };
+  try {
+    const { data, error } = await client.from("ses_report_trigger_settings")
+      .select("drain_enabled, updated_at, updated_by").eq("id", true).maybeSingle();
+    if (error) {
+      out.settings_error = String(error.message || error);
+    } else if (!data) {
+      // Mirrors the SQL helper: a missing row means the drain is off.
+      out.drain_enabled = false;
+      out.settings_row_present = false;
+    } else {
+      out.drain_enabled = data.drain_enabled === true;
+      out.settings_row_present = true;
+      out.updated_at = data.updated_at ?? null;
+      out.updated_by = data.updated_by ?? null;
+    }
+  } catch (error) {
+    out.settings_error = error instanceof Error ? error.message : String(error);
+  }
+  try {
+    const { data, error } = await client.rpc("ses_report_drain_cron_runs", { p_limit: 5 });
+    if (error) {
+      out.cron_runs_error = String(error.message || error);
+    } else {
+      out.recent_cron_runs = ((data as any[]) || []).map((r) => ({
+        status: r.status ?? null, return_message: r.return_message ?? null, start_time: r.start_time ?? null, end_time: r.end_time ?? null,
+      }));
+    }
+  } catch (error) {
+    out.cron_runs_error = error instanceof Error ? error.message : String(error);
+  }
+  return out;
 }

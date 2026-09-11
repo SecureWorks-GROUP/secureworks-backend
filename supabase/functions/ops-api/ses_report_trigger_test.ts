@@ -15,6 +15,8 @@
 //   6. An unclaimable run (done, leased, terminal, missing) returns the honest state.
 //   7. The manual entry requires exact job, cycle and source identity and reuses an existing run.
 //   8. The pending list excludes done rows and reports age and recovery action.
+//  12. The pending list reports the drain's own enable flag and recent cron runs,
+//      fails closed on a missing settings row, and never fails on a drain read error.
 
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { listSesReportTriggerRuns, runSesReportTrigger, SesReportTriggerError } from "./ses_report_trigger.ts";
@@ -44,6 +46,11 @@ type Fixture = {
   claimable?: boolean;
   /** Simulate a second worker reclaiming the row (new token) right after our claim. */
   stealClaimAfterClaim?: boolean;
+  /** Drain flag row; undefined = default enabled row, null = row missing. */
+  drainSettings?: any;
+  drainSettingsError?: string;
+  cronRuns?: any[];
+  cronRunsError?: string;
 };
 
 /** A tiny query-builder stand-in that records writes and answers the reads the handler makes. */
@@ -51,6 +58,11 @@ function fakeClient(fx: Fixture) {
   const writes: any[] = [];
   const client = {
     rpc(name: string, args: any) {
+      if (name === "ses_report_drain_cron_runs") {
+        assertEquals(args, { p_limit: 5 });
+        if (fx.cronRunsError) return Promise.resolve({ data: null, error: { message: fx.cronRunsError } });
+        return Promise.resolve({ data: fx.cronRuns ?? [], error: null });
+      }
       assertEquals(name, "claim_ses_report_trigger_run");
       const run = fx.runs[args.p_run_id];
       const claimable = fx.claimable ?? (run && (run.state === "pending" || (run.state === "failed" && (!run.next_attempt_at || Date.parse(run.next_attempt_at) <= NOW.getTime()))));
@@ -74,6 +86,11 @@ function fakeClient(fx: Fixture) {
       q.single = () => q.maybeSingle();
       const run = () => {
         if (table === "jobs") return { data: fx.job === undefined ? { id: JOB, job_number: "SWMS-261403", type: "makesafe", status: "scheduled" } : fx.job, error: null };
+        if (table === "ses_report_trigger_settings") {
+          if (fx.drainSettingsError) return { data: null, error: { message: fx.drainSettingsError } };
+          const row = fx.drainSettings === undefined ? { drain_enabled: true, updated_at: "2026-09-11T09:00:00.000Z", updated_by: "migration" } : fx.drainSettings;
+          return { data: row, error: null };
+        }
         if (table === "makesafe_attendance_cycles") {
           const sorted = [...fx.cycles].sort((a, b) => b.cycle_number - a.cycle_number);
           return { data: sorted[0] ?? null, error: null };
@@ -289,4 +306,40 @@ Deno.test("8. pending list excludes done rows and carries age and recovery actio
   assertEquals(row.recovery_action, "automatic retry");
   const all = await listSesReportTriggerRuns(new URLSearchParams("include_done=true"), client, () => NOW);
   assertEquals(all.count, 2);
+});
+
+Deno.test("12. pending list carries the drain's own flag and recent cron runs; read errors never fail the list", async () => {
+  const run = baseRun();
+  const cronRow = { status: "succeeded", return_message: "1 row", start_time: "2026-09-11T02:59:00.000Z", end_time: "2026-09-11T02:59:00.050Z" };
+  const on = await listSesReportTriggerRuns(new URLSearchParams(""), fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], cronRuns: [cronRow] }).client, () => NOW);
+  const d = (on as any).drain;
+  assertEquals(d.drain_enabled, true);
+  assertEquals(d.settings_row_present, true);
+  assertEquals(d.updated_by, "migration");
+  assertEquals(d.settings_error, null);
+  assertEquals(d.recent_cron_runs, [cronRow]);
+  assertEquals(d.cron_runs_error, null);
+  assertEquals(d.cron_job, "ses-report-trigger-drain");
+  assertStringIncludes(d.gate, "ses_report_drain_enabled");
+
+  const off = await listSesReportTriggerRuns(new URLSearchParams(""), fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], drainSettings: { drain_enabled: false, updated_at: null, updated_by: "ops" } }).client, () => NOW);
+  assertEquals((off as any).drain.drain_enabled, false);
+  assertEquals((off as any).drain.recent_cron_runs, []);
+
+  const missing = await listSesReportTriggerRuns(new URLSearchParams(""), fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], drainSettings: null }).client, () => NOW);
+  assertEquals((missing as any).drain.drain_enabled, false);
+  assertEquals((missing as any).drain.settings_row_present, false);
+
+  const broken = await listSesReportTriggerRuns(
+    new URLSearchParams(""),
+    fakeClient({ runs: { [RUN]: { ...run } }, cycles: [], drainSettingsError: "permission denied", cronRunsError: "function missing" }).client,
+    () => NOW,
+  );
+  assertEquals(broken.ok, true);
+  assertEquals(broken.count, 1);
+  assertEquals((broken as any).drain.drain_enabled, null);
+  assertEquals((broken as any).drain.settings_error, "permission denied");
+  assertEquals((broken as any).drain.recent_cron_runs, null);
+  assertEquals((broken as any).drain.cron_runs_error, "function missing");
+  assert(!("drain_enabled" in broken));
 });
