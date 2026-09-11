@@ -11,6 +11,24 @@ const id = (n: number) =>
 const assert = (value: unknown, message: string) => {
   if (!value) throw new Error(message);
 };
+type FixtureRow = Record<string, unknown> & {
+  id: string;
+  jobs?: Record<string, unknown>;
+};
+type FixtureResult = {
+  data: FixtureRow[] | null;
+  error: { message: string } | null;
+};
+interface FixtureQuery {
+  select(columns: string): FixtureQuery;
+  eq(key: string, val: unknown): FixtureQuery;
+  gte(key: string, val: string): FixtureQuery;
+  lt(key: string, val: string): FixtureQuery;
+  gt(key: string, val: string): FixtureQuery;
+  order(): FixtureQuery;
+  limit(n: number): FixtureQuery;
+  then(resolve: (result: FixtureResult) => unknown): Promise<unknown>;
+}
 function fixture() {
   const jobs = [
     {
@@ -59,17 +77,17 @@ function fixture() {
     snapshot_total_inc_gst: null,
   });
   let failure = false;
-  const calls: any[] = [];
+  const calls: Array<{ table: string; columns: string; limit: number }> = [];
   const deps = {
     defaultOrgId: ORG,
     storageProjectUrl: "https://fixture.invalid",
     from(table: string) {
       const state = {
-        filters: [] as Array<(r: any) => boolean>,
+        filters: [] as Array<(r: FixtureRow) => boolean>,
         columns: "",
         limit: 1000,
       };
-      const q: any = {
+      const q: FixtureQuery = {
         select(columns: string) {
           state.columns = columns;
           return q;
@@ -83,15 +101,15 @@ function fixture() {
           return q;
         },
         gte(key: string, val: string) {
-          state.filters.push((r) => r[key] >= val);
+          state.filters.push((r) => (r[key] as string) >= val);
           return q;
         },
         lt(key: string, val: string) {
-          state.filters.push((r) => r[key] < val);
+          state.filters.push((r) => (r[key] as string) < val);
           return q;
         },
         gt(key: string, val: string) {
-          state.filters.push((r) => r[key] > val);
+          state.filters.push((r) => (r[key] as string) > val);
           return q;
         },
         order() {
@@ -101,7 +119,7 @@ function fixture() {
           state.limit = n;
           return q;
         },
-        then(resolve: any) {
+        then(resolve: (result: FixtureResult) => unknown) {
           calls.push({ table, ...state });
           const source = table === "jobs" ? jobs : documents.map((d) => ({
             ...d,
@@ -141,7 +159,8 @@ function params(extra: Record<string, string> = {}) {
 const auth = { mode: "api_key" as const, serverSecretPresented: true };
 Deno.test("all 237 quotes traverse deterministic pages with scoped joins and half-open Perth week", async () => {
   const f = fixture();
-  let cursor = "", seen: string[] = [];
+  let cursor = "";
+  const seen: string[] = [];
   let pages = 0;
   do {
     const result = await insuranceReadAction(
@@ -151,9 +170,12 @@ Deno.test("all 237 quotes traverse deterministic pages with scoped joins and hal
       auth,
     );
     assert(result.status === 200, JSON.stringify(result.body));
-    const rows = result.body.rows as any[];
+    const rows = result.body.rows as Array<{
+      id: string;
+      snapshot_total_inc_gst: number | null;
+    }>;
     seen.push(...rows.map((r) => r.id));
-    const page = result.body.pagination as any;
+    const page = result.body.pagination as { next_cursor: string | null };
     cursor = page.next_cursor || "";
     pages++;
     assert(result.body.job_id === null, "not an exact-job population");
@@ -177,7 +199,7 @@ Deno.test("all 237 quotes traverse deterministic pages with scoped joins and hal
 Deno.test("cursor is bound to org and exact filters", async () => {
   const f = fixture();
   const first = await insuranceReadAction(f.deps, params(), "GET", auth);
-  const cursor = (first.body.pagination as any).next_cursor;
+  const cursor = (first.body.pagination as { next_cursor: string }).next_cursor;
   const changed = await insuranceReadAction(
     f.deps,
     params({ cursor, job_type: "patio" }),
