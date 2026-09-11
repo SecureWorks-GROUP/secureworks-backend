@@ -166,7 +166,7 @@ export async function persistMail(
       ? `graph:${message.conversationId}`
       : null,
     source_table: "graph_mail",
-    source_id: message.id,
+    source_id: `${stream.kind}:${stream.mailbox}:${message.id}`,
     body_preview: preview,
     body_pointer: body.pointer,
     body_hash: body.hash,
