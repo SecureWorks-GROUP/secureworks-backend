@@ -1,3 +1,4 @@
+import { assertStatusUpdateResponse } from "./status_response.ts"
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Edge Function
 //
@@ -126,7 +127,9 @@ serve(async (req: Request) => {
       event_type: body.type || 'unknown',
       payload: body,
       status: 'received',
-    }).catch(() => {}) // Non-blocking
+    }).then(({ error }) => {
+      if (error) console.warn('[ghl-webhook] webhook_log write unavailable')
+    }, () => {}) // Diagnostic log failure does not block processing
 
     // ── Route by event type ──
     if (isStageChangeEvent(body)) {
@@ -249,6 +252,7 @@ async function handleStageChange(sb: any, body: any) {
       }),
     })
     const result = await resp.json()
+    assertStatusUpdateResponse(resp, result)
     console.log(`[ghl-webhook] Status updated: ${job.id} ${job.status} → ${newStatus}`, result)
 
     return jsonResponse({
