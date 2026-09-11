@@ -9,7 +9,14 @@ ALTER TABLE public.jobs
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 -- business_events.job_id is uuid in production (the 11 Sep deploy proved it); the
--- earlier registered fixture already declares it uuid, so nothing is altered here.
+-- earlier registered fixture already declares it uuid and it is NOT retyped here.
+-- That fixture omits the event columns the backfill writes, so add only those.
+ALTER TABLE public.business_events
+  ALTER COLUMN id SET DEFAULT gen_random_uuid(),
+  ADD COLUMN IF NOT EXISTS event_type text,
+  ADD COLUMN IF NOT EXISTS source text,
+  ADD COLUMN IF NOT EXISTS entity_type text,
+  ADD COLUMN IF NOT EXISTS entity_id text;
 
 CREATE TABLE IF NOT EXISTS public.xero_invoices (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
