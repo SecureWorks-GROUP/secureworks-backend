@@ -15455,7 +15455,7 @@ async function getJobContextFacts(client: any, body: any) {
     : 12
   const { data, error } = await client
     .from('current_job_context_facts')
-    .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
+    .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store, validity_basis, last_verified_at, source_event_at, event_date, lifecycle')
     .in('job_id', jobUuids)
     .order('updated_at', { ascending: false })
     .limit(limit * jobUuids.length)
@@ -15907,7 +15907,7 @@ async function assembleJobDossier(client: any, body: any) {
   // SQL view filters retired/expired facts BEFORE this bounded order/limit.
   const factsRead = await safeRead('current_job_context_facts', async () => {
     const { data, error } = await client.from('current_job_context_facts')
-      .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
+      .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store, validity_basis, last_verified_at, source_event_at, event_date, lifecycle')
       .eq('job_id', jobId)
       .order('updated_at', { ascending: false })
       .limit(factsLimit)

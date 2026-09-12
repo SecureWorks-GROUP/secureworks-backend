@@ -1,6 +1,6 @@
 # Context accuracy and pipeline status (B4)
 
-Implements target sections 5 and 7 plus build contracts 8 and 9. Reads remain synchronous database reads with no provider or model calls. Existing job and invoice response shapes remain unchanged. Their shared visibility helper now also honours top-level lifecycle and expiry on permanent proposals.
+Implements target sections 5 and 7 plus build contracts 8 and 9. Reads remain synchronous database reads with no provider or model calls. Existing job and invoice response shapes remain unchanged. Their shared visibility helper honours top-level lifecycle and an explicit validity end; null expiry is ongoing or unknown, not an invented TTL.
 
 ## API
 

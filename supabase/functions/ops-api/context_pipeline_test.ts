@@ -25,4 +25,6 @@ Deno.test('reader defense respects top-level retirement and expiry on permanent 
  eq(isCurrentContextFact({kind:'note',_context_store:'job_context',lifecycle:'retracted'}),false)
  eq(isCurrentContextFact({kind:'proposal',_context_store:'job_context',expires_at:'2020-01-01T00:00:00Z'}),false)
  eq(isCurrentContextFact({kind:'client_preference',_context_store:'job_context',expires_at:null}),true)
+ eq(isCurrentContextFact({kind:'pending_action',_context_store:'job_temporary_context',expires_at:null,validity_basis:'ongoing'}),true)
+ eq(isCurrentContextFact({kind:'current_state',_context_store:'job_temporary_context',expires_at:null,validity_basis:'uncertain'}),true)
 })

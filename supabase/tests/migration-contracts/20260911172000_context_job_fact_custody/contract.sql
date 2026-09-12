@@ -27,16 +27,23 @@ BEGIN
  old:=(result->'fact_ids'->>0)::uuid;temp:=(result->'fact_ids'->>1)::uuid;
  IF NOT EXISTS(SELECT 1 FROM public.context_extraction_runs WHERE id=run AND status='done' AND tokens_in=120)
  OR NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts WHERE run_id=run AND event_id=e) THEN RAISE EXCEPTION 'B3 atomic completion'; END IF;
- IF (SELECT expires_at FROM public.job_temporary_context WHERE id=temp) IS DISTINCT FROM ((due+1)::timestamp AT TIME ZONE 'Australia/Perth') THEN RAISE EXCEPTION 'B3 due expiry'; END IF;
+ IF (SELECT expires_at FROM public.job_temporary_context WHERE id=temp) IS NOT NULL
+  OR (SELECT value->>'due_date' FROM public.job_temporary_context WHERE id=temp) IS DISTINCT FROM due::text
+  OR NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=temp AND expires_at IS NULL)
+ THEN RAISE EXCEPTION 'B3 due date used as expiry'; END IF;
  IF (SELECT attribution_confidence FROM public.job_context WHERE id=old) IS DISTINCT FROM (ev->>'attribution_confidence')::numeric THEN RAISE EXCEPTION 'B3 derived confidence'; END IF;
- IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE job_id=j AND kind='proposal' AND expires_at=source_time+interval '504 hours') THEN RAISE EXCEPTION 'B3 proposal expiry'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE job_id=j AND kind='proposal' AND expires_at IS NULL AND last_verified_at IS NULL)
+  OR NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=j AND kind='proposal' AND expires_at IS NULL)
+ THEN RAISE EXCEPTION 'B3 invented proposal expiry'; END IF;
  IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE job_id=j AND kind='client_preference' AND review_at IS NOT NULL AND expires_at IS NULL) THEN RAISE EXCEPTION 'B3 preference review'; END IF;
  result:=public.persist_luna_context_revision(run,tok,j,jsonb_build_array(ev),facts,'[]','[]');
  IF result->>'outcome'<>'idempotent' OR (SELECT count(*) FROM public.job_context WHERE job_id=j)<>3 THEN RAISE EXCEPTION 'B3 retry duplicate'; END IF;
- IF public.context_fact_expiry('current_state','2026-09-10 12:00+08') IS DISTINCT FROM '2026-09-11 00:00+08'::timestamptz
- OR public.context_fact_expiry('pending_action','2026-09-10 12:00+08') IS DISTINCT FROM '2026-09-17 12:00+08'::timestamptz
- OR public.context_fact_expiry('quote_issue','2026-09-10 12:00+08') IS DISTINCT FROM '2026-09-24 12:00+08'::timestamptz
- THEN RAISE EXCEPTION 'B3 source expiry'; END IF;
+ IF public.context_fact_expiry('current_state','2026-09-10 12:00+08') IS NOT NULL
+ OR public.context_fact_expiry('pending_action','2026-09-10 12:00+08') IS NOT NULL
+ OR public.context_fact_expiry('quote_issue','2026-09-10 12:00+08') IS NOT NULL
+ OR public.context_fact_expiry('proposal','2026-09-10 12:00+08') IS NOT NULL
+ OR public.context_fact_expiry('pending_action','2026-09-10 12:00+08','2026-09-20') IS NOT NULL
+ THEN RAISE EXCEPTION 'B3 invented source expiry'; END IF;
  -- A second logical run uses a separate day slot to exercise revision transitions.
  INSERT INTO public.business_events(job_id,match_method,payload,event_at) VALUES(j,'direct_job_id','{"body":"Use green instead. Gate access cancelled."}',now()) RETURNING id,to_jsonb(business_events) INTO e2,ev2;
  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,lease_token,lease_expires_at)
@@ -115,9 +122,18 @@ BEGIN
  OR public.context_supported_due_date('tomorrow',anchor) IS DISTINCT FROM '2026-09-12'::date
  OR public.context_supported_due_date('14 September','2025-09-11 17:00+08') IS DISTINCT FROM '2025-09-14'::date
  THEN RAISE EXCEPTION 'B3 source date anchor moved'; END IF;
- IF public.context_fact_expiry('pending_action',anchor,public.context_supported_due_date('tomorrow',anchor)) IS DISTINCT FROM '2026-09-13 00:00+08'::timestamptz
- OR public.context_fact_expiry('current_state',anchor) IS DISTINCT FROM '2026-09-12 00:00+08'::timestamptz
- THEN RAISE EXCEPTION 'B3 named-date expiry changed source 17h rules'; END IF;
+ IF public.context_fact_expiry('pending_action',anchor,public.context_supported_due_date('tomorrow',anchor)) IS NOT NULL
+ OR public.context_fact_expiry('current_state',anchor) IS NOT NULL
+ THEN RAISE EXCEPTION 'B3 due date used as expiry'; END IF;
+ IF public.context_supported_validity_end('explicit_end','2026-09-12') IS DISTINCT FROM '2026-09-13 00:00+08'::timestamptz
+ OR public.context_supported_validity_end('ongoing',NULL) IS NOT NULL
+ OR public.context_supported_validity_end('uncertain',NULL) IS NOT NULL
+ OR public.context_supported_validity_end('unknown_end',NULL) IS NOT NULL
+ THEN RAISE EXCEPTION 'B3 explicit validity end'; END IF;
+ BEGIN
+  PERFORM public.context_supported_validity_end('ongoing','2026-09-12');
+  RAISE EXCEPTION 'B3 ongoing accepted an end' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_validity_end_without_basis' THEN RAISE; END IF; END;
  FOREACH text_value IN ARRAY ARRAY['31/02/2026','31 April 2026','14 September or 15 September','next Monday','last Friday','Monday','Tuesday 14 September 2026','not tomorrow','day after tomorrow','14/09/26','14 September 26','September 14 26'] LOOP
   BEGIN
    PERFORM public.context_supported_due_date(text_value,anchor);
@@ -156,7 +172,74 @@ BEGIN
   RAISE EXCEPTION 'B3 clock-relative payload allowed' USING ERRCODE='ZX001';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_due_date_shape_invalid' THEN RAISE; END IF; END;
  result:=public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev),jsonb_build_array(f),'[]','[]');
- IF result->>'outcome'<>'inserted' OR NOT EXISTS(SELECT 1 FROM public.job_temporary_context WHERE job_id=j AND expires_at='2026-09-15 00:00+08'::timestamptz AND event_date='2026-09-11'::date)
+ IF result->>'outcome'<>'inserted' OR NOT EXISTS(SELECT 1 FROM public.job_temporary_context WHERE job_id=j AND expires_at IS NULL AND event_date='2026-09-11'::date AND value->>'due_date'='2026-09-14' AND last_verified_at IS NULL)
  THEN RAISE EXCEPTION 'B3 named-date RPC failed'; END IF;
+END $$;
+ROLLBACK;
+
+BEGIN;
+DO $$
+DECLARE j uuid:=gen_random_uuid(); e uuid; ev jsonb; claim jsonb; run uuid; token uuid; result jsonb; fact uuid;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-VALID-'||j);
+ INSERT INTO public.business_events(job_id,match_method,event_at,payload)
+  VALUES(j,'direct_job_id','2026-09-11 17:00+08','{"body":"Offer valid until 14 September 2026. Gate stays open."}')
+  RETURNING id,to_jsonb(business_events) INTO e,ev;
+ claim:=public.claim_context_extraction_run(j,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction');
+ run:=(claim->'run'->>'id')::uuid;token:=(claim->'run'->>'lease_token')::uuid;
+ result:=public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev),jsonb_build_array(
+  jsonb_build_object('kind','proposal','text','Offer stands.','confidence',0.9,'source_event_ids',jsonb_build_array(e),'evidence_excerpt','Offer valid until 14 September 2026.','validity_basis','explicit_end','validity_end','2026-09-14'),
+  jsonb_build_object('kind','current_state','text','Gate stays open.','confidence',0.8,'source_event_ids',jsonb_build_array(e),'evidence_excerpt','Gate stays open.','validity_basis','ongoing'),
+  jsonb_build_object('kind','note','text','Wording is ambiguous.','confidence',0.5,'source_event_ids',jsonb_build_array(e),'validity_basis','uncertain')
+ ),'[]','[]');
+ IF result->>'outcome'<>'inserted' THEN RAISE EXCEPTION 'B3 validity insert %',result; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE job_id=j AND kind='proposal' AND expires_at='2026-09-15 00:00+08'::timestamptz AND validity_basis='explicit_end' AND last_verified_at IS NULL)
+  OR NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=j AND kind='proposal')
+ THEN RAISE EXCEPTION 'B3 explicit validity end missing'; END IF;
+ SELECT id INTO fact FROM public.job_temporary_context WHERE job_id=j AND kind='current_state';
+ IF (SELECT expires_at FROM public.job_temporary_context WHERE id=fact) IS NOT NULL
+  OR NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact AND validity_basis='ongoing' AND last_verified_at IS NULL)
+ THEN RAISE EXCEPTION 'B3 ongoing current_state not current'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=j AND kind='note' AND validity_basis='uncertain' AND last_verified_at IS NULL)
+ THEN RAISE EXCEPTION 'B3 uncertain fact silently dropped or verified'; END IF;
+ -- A cited past end is stored, then excluded from current reads.
+ INSERT INTO public.job_context(id,job_id,kind,value,provenance,expires_at,validity_basis,extractor_version,trust,event_date,source_event_ids,source_event_at)
+  VALUES(gen_random_uuid(),j,'proposal','{"text":"Expired correction"}','{}','2020-01-02 00:00+08','explicit_end','luna_v2','luna','2020-01-01',ARRAY[e],'2020-01-01 12:00+08');
+ IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=j AND value->>'text'='Expired correction')
+ THEN RAISE EXCEPTION 'B3 expired explicit end still current'; END IF;
+END $$;
+ROLLBACK;
+
+BEGIN;
+DO $$
+DECLARE j uuid:=gen_random_uuid(); e_new uuid; e_old uuid; ev_new jsonb; ev_old jsonb;
+ claim jsonb; run uuid; token uuid; result jsonb; snap jsonb; fact uuid; d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-LATE-'||j);
+ INSERT INTO public.business_events(job_id,match_method,event_at,payload)
+  VALUES(j,'direct_job_id','2026-09-12 12:00+08','{"body":"Use blue roof."}') RETURNING id,to_jsonb(business_events) INTO e_new,ev_new;
+ claim:=public.claim_context_extraction_run(j,d,'extraction');run:=(claim->'run'->>'id')::uuid;token:=(claim->'run'->>'lease_token')::uuid;
+ result:=public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev_new),jsonb_build_array(
+  jsonb_build_object('kind','scope_spec','text','Use blue roof.','confidence',0.9,'source_event_ids',jsonb_build_array(e_new),'evidence_excerpt','Use blue roof.','validity_basis','ongoing')
+ ),'[]','[]');
+ fact:=(result->'fact_ids'->>0)::uuid;
+ IF (SELECT last_verified_at FROM public.job_context WHERE id=fact) IS NOT NULL
+  OR (SELECT source_event_at FROM public.job_context WHERE id=fact) IS DISTINCT FROM '2026-09-12 12:00+08'::timestamptz
+ THEN RAISE EXCEPTION 'B3 silently claimed recently verified'; END IF;
+ INSERT INTO public.business_events(job_id,match_method,event_at,payload)
+  VALUES(j,'direct_job_id','2026-09-10 12:00+08','{"body":"Use green roof."}') RETURNING id,to_jsonb(business_events) INTO e_old,ev_old;
+ INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,lease_token,lease_expires_at)
+  VALUES(j,d-1,'extraction','running',gen_random_uuid(),now()+interval '20 minutes') RETURNING id,lease_token INTO run,token;
+ SELECT to_jsonb(v) INTO snap FROM public.current_job_context_facts v WHERE id=fact;
+ BEGIN
+  PERFORM public.persist_luna_context_revision(run,token,j,jsonb_build_array(ev_old),jsonb_build_array(
+    jsonb_build_object('kind','scope_spec','text','Use green roof.','confidence',0.9,'source_event_ids',jsonb_build_array(e_old),'evidence_excerpt','Use green roof.','validity_basis','ongoing')
+   ),jsonb_build_array(jsonb_build_object('fact_id',fact,'fact_store','job_context','reason','Late older mail','source_event_ids',jsonb_build_array(e_old),'new_fact_index',0,'expected_fact',snap)),'[]');
+  RAISE EXCEPTION 'B3 late old event overrode newer' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_stale_event_override' THEN RAISE; END IF; END;
+ IF (SELECT lifecycle FROM public.job_context WHERE id=fact)<>'current'
+  OR (SELECT value->>'text' FROM public.job_context WHERE id=fact)<>'Use blue roof.'
+  OR EXISTS(SELECT 1 FROM public.context_extraction_event_receipts WHERE event_id=e_old)
+ THEN RAISE EXCEPTION 'B3 late old event mutated newer fact'; END IF;
 END $$;
 ROLLBACK;

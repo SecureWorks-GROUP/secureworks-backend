@@ -17,14 +17,8 @@ export function isCurrentContextFact(
     safety?.memory_trusted === false || p?.superseded_by || p?.retracted_at ||
     lifecycle === "superseded" || lifecycle === "retracted"
   ) return false;
-  const temporary = ["current_state", "pending_action", "quote_issue"].includes(
-    String(row.kind),
-  ) ||
-    row._context_store === "job_temporary_context" ||
-    (row._context_store !== "job_context" && Object.hasOwn(row, "expires_at"));
-  if (!temporary) return true;
-  const expiry = typeof row.expires_at === "string"
-    ? Date.parse(row.expires_at)
-    : NaN;
-  return Number.isFinite(expiry) && expiry > now;
+  // Evidence-led: null expiry is ongoing/unknown, not an invented TTL.
+  // Temporary kinds stay current until resolved, superseded, retracted, or an
+  // explicit validity end. Uncertain facts remain visible and labelled.
+  return true;
 }
