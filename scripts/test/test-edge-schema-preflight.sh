@@ -248,6 +248,7 @@ write_response() {
   CONTEXT_FACTS_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
   CONTEXT_ACCURACY_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" | awk '{print $1}')" \
   CONTEXT_MAIL_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" | awk '{print $1}')" \
+  CONTEXT_MAIL_OCCURRENCE_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260913160000_context_mail_logical_occurrence.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260913160000_context_mail_logical_occurrence.sql" | awk '{print $1}')" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
@@ -644,6 +645,7 @@ for version, name, key in [
     ("20260911172000", "context_job_fact_custody", "CONTEXT_FACTS_EXPECTED_SHA"),
     ("20260911173000", "context_accuracy_and_status", "CONTEXT_ACCURACY_EXPECTED_SHA"),
     ("20260911174000", "context_mail_capture", "CONTEXT_MAIL_EXPECTED_SHA"),
+    ("20260913160000", "context_mail_logical_occurrence", "CONTEXT_MAIL_OCCURRENCE_EXPECTED_SHA"),
 ]:
     sha = os.environ.get(key) or ""
     if not sha:
