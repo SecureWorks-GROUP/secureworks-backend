@@ -353,6 +353,9 @@ import {
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
+import { createStore as createSalesBookingStore, dispatch as dispatchSalesBooking, SalesBookingError } from './sales_booking.ts'
+
+const _salesBookingStore = createSalesBookingStore()
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12241,6 +12244,33 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Debt picture (DEBT COLLECTION desk, design accepted 11 Sep 2026) ──
       // Classification data behind the Clear Debt screen. Writes the desk's own
       // columns on xero_invoices and payment_chase_logs only; never GHL, never Xero.
+      case 'sales_booking_read':
+      case 'sales_booking_policy':
+      case 'sales_booking_draft':
+      case 'sales_booking_assess':
+      case 'sales_booking_archive':
+      case 'sales_booking_restore':
+      case 'sales_booking_approve':
+      case 'sales_booking_confirm':
+      case 'sales_booking_on_event':
+      case 'sales_booking_reconcile':
+      case 'sales_booking_runner': {
+        try {
+          const params: Record<string, string> = {}
+          url.searchParams.forEach((v, k) => { params[k] = v })
+          const heldAdapters = {
+            // Live isolate: do not invent an empty pipeline. Preview/tests bind real or fake providers.
+            listOpportunities: async () => ({ items: [], next: null, complete: false }),
+            calendarEvents: async () => ({ ok: false, events: [], coverage: { operational_leave: 'not_read' } }),
+            sendSms: async () => ({ held: true, sent: false }),
+            writeCalendar: async () => ({ held: true, written: false }),
+          }
+          return json(await dispatchSalesBooking(action, params, body || {}, heldAdapters, _salesBookingStore, req.method))
+        } catch (error) {
+          if (error instanceof SalesBookingError) return json({ error: error.message, code: error.code, ok: false }, error.status)
+          throw error
+        }
+      }
       case 'list_debt_picture':
       case 'upsert_debt_picture':
       case 'add_debt_note':
