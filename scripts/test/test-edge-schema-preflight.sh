@@ -243,6 +243,14 @@ write_response() {
   CONTEXT_B3_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
   CONTEXT_SWITCH_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170000_automation_switches.sql" | awk '{print $1}')" \
   CONTEXT_LEDGER_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170001_context_run_ledger.sql" | awk '{print $1}')" \
+  CONTEXT_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" \
+  CONTEXT_FACTS_MIGRATION="$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" \
+  CONTEXT_ACCURACY_MIGRATION="$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" \
+  CONTEXT_MAIL_MIGRATION="$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" \
+  CONTEXT_CAPTURE_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" | awk '{print $1}')" \
+  CONTEXT_FACTS_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
+  CONTEXT_ACCURACY_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" | awk '{print $1}')" \
+  CONTEXT_MAIL_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" | awk '{print $1}')" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
@@ -632,11 +640,26 @@ debt_picture_row = {
     "missing_markers": [],
 }
 context_rows = []
-for version, name, key in [("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"), ("20260911170001", "context_run_ledger", "CONTEXT_LEDGER_EXPECTED_SHA"), ("20260911171000", "context_capture_attribution", "CONTEXT_B2_EXPECTED_SHA"), ("20260911172000", "context_job_fact_custody", "CONTEXT_B3_EXPECTED_SHA"), ("20260911173000", "context_accuracy_and_status", "CONTEXT_B4_EXPECTED_SHA")]:
+for version, name, key in [
+    ("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"),
+    ("20260911170001", "context_run_ledger", "CONTEXT_LEDGER_EXPECTED_SHA"),
+    ("20260911171000", "context_capture_attribution", "CONTEXT_CAPTURE_EXPECTED_SHA"),
+    ("20260911172000", "context_job_fact_custody", "CONTEXT_FACTS_EXPECTED_SHA"),
+    ("20260911173000", "context_accuracy_and_status", "CONTEXT_ACCURACY_EXPECTED_SHA"),
+    ("20260911174000", "context_mail_capture", "CONTEXT_MAIL_EXPECTED_SHA"),
+]:
+    sha = os.environ.get(key) or ""
+    if not sha:
+        continue
     context_rows.append({"function_name": "ops-api", "migration_version": version,
-        "expected_migration_name": name, "expected_statement_sha256": os.environ[key],
+        "expected_migration_name": name, "expected_statement_sha256": sha,
         "actual_migration_version": version, "actual_migration_name": name,
         "actual_statement_count": 2, "actual_statement_sha256": None, "missing_markers": []})
+    if name == "context_mail_capture":
+        context_rows.append({"function_name": "monitor-inbox", "migration_version": version,
+            "expected_migration_name": name, "expected_statement_sha256": sha,
+            "actual_migration_version": version, "actual_migration_name": name,
+            "actual_statement_count": 2, "actual_statement_sha256": None, "missing_markers": []})
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -820,7 +843,7 @@ test_unrelated_function_without_requirements_passes_without_credentials() {
   local name="test_unrelated_function_without_requirements_passes_without_credentials"
   local output rc
   output="$(env -u SUPABASE_ACCESS_TOKEN -u SUPABASE_SCHEMA_PREFLIGHT_RESPONSE_FILE \
-    bash "$PREFLIGHT" ghl-proxy 2>&1)"
+    bash "$PREFLIGHT" daily-digest 2>&1)"
   rc=$?
   if [[ "$rc" -eq 0 ]] && grep -q 'no declared requirements' <<<"$output"; then
     pass "$name"
