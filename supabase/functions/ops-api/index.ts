@@ -6009,17 +6009,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_job_documents':
       case 'get_job_document':
         return await _readInsuranceEvidenceAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
-      case 'job_detail': {
-        let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
-        // If not a UUID, try resolving as job_number (e.g. SWF-26037)
-        if (jid && !jid.match(/^[0-9a-f]{8}-/i)) {
-          const { data: found } = await client.from('jobs').select('id').ilike('job_number', jid).limit(1)
-          if (found?.[0]) jid = found[0].id
-        }
-        if (!jid) return json({ error: 'jobId required' }, 400)
-        const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
-        return json(await jobDetail(client, jid, { slim }))
-      }
+      case 'job_detail':
+        return await _jobDetailAction(client, url.searchParams, req.method, authMode, authUser)
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -14875,19 +14866,69 @@ async function pipeline(client: any, params: URLSearchParams) {
 
 export const _pipelineForTest = pipeline
 
-async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
+type JobDetailAccess = {
+  orgId?: string | null
+}
+
+async function _jobDetailAction(
+  client: any,
+  params: URLSearchParams,
+  _method: string,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'orgId'> | null,
+): Promise<Response> {
+  let jobId = params.get('jobId') || params.get('job_id') || ''
+  const callerOrgId = authMode === 'jwt'
+    ? String(authUser?.orgId || '').trim()
+    : authMode === 'routine'
+    ? DEFAULT_ORG_ID
+    : ''
+  if (authMode === 'jwt' && !callerOrgId) {
+    return json({ error: 'An authorised operator session is required.' }, 403)
+  }
+  if (jobId && !jobId.match(/^[0-9a-f]{8}-/i)) {
+    let lookup = client.from('jobs').select('id').ilike('job_number', jobId)
+    if (callerOrgId) lookup = lookup.eq('org_id', callerOrgId)
+    const { data: found } = await lookup.limit(1)
+    if (found?.[0]) jobId = found[0].id
+  }
+  if (!jobId) return json({ error: 'jobId required' }, 400)
+  const slim = params.get('slim') === 'true' || params.get('slim') === '1'
+  try {
+    return json(await jobDetail(client, jobId, {
+      slim,
+      access: callerOrgId ? { orgId: callerOrgId } : undefined,
+    }))
+  } catch (error) {
+    if (error instanceof ApiError) return json(error.body || { error: error.message }, error.status)
+    throw error
+  }
+}
+
+async function jobDetail(client: any, jobId: string, opts: { slim?: boolean; access?: JobDetailAccess } = {}) {
   if (!jobId) throw new Error('jobId required')
+  const accessOrgId = String(opts.access?.orgId || '').trim()
+  if (opts.access && !accessOrgId) {
+    throw new ApiError('An authorised operator session is required.', 403)
+  }
 
   // If job_number passed instead of UUID, resolve it
   // 2026-04-24 fix: widen from [PFDRI] to [A-Z]+ so all prefixes work (SWM, SWG, etc.)
   if (/^SW[A-Z]+-\d+$/i.test(jobId)) {
-    const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
+    let lookup = client.from('jobs').select('id').ilike('job_number', jobId)
+    if (accessOrgId) lookup = lookup.eq('org_id', accessOrgId)
+    const { data: found } = await lookup.limit(1).maybeSingle()
     if (!found) throw new ApiError(`Job ${jobId} not found`, 404)
     jobId = found.id
   }
 
-  const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes, serviceReportsRes] = await Promise.all([
-    client.from('jobs').select('*').eq('id', jobId).single(),
+  let jobQuery = client.from('jobs').select('*').eq('id', jobId)
+  if (accessOrgId) jobQuery = jobQuery.eq('org_id', accessOrgId)
+  const jobRes = await jobQuery.maybeSingle()
+  if (jobRes.error) throw jobRes.error
+  if (!jobRes.data) throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+
+  const [assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes, serviceReportsRes] = await Promise.all([
     client.from('job_assignments').select('*, users:user_id(name, phone, email)').eq('job_id', jobId).order('scheduled_date'),
     client.from('job_documents').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
@@ -14899,8 +14940,6 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
     client.from('job_service_reports').select('*, submitted_user:submitted_by(id, name)').eq('job_id', jobId).order('created_at', { ascending: false }),
   ])
-
-  if (jobRes.error) throw jobRes.error
 
   // Find matching invoices — try direct job_id first, fallback to client name
   let invoices: any[] = []
@@ -14916,7 +14955,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     if (clientName) {
       const { data } = await client.from('xero_invoices')
         .select('*')
-        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('org_id', accessOrgId || DEFAULT_ORG_ID)
         .ilike('contact_name', `%${clientName.replace(/'/g, "''")}%`)
         .order('invoice_date', { ascending: false })
         .limit(20)
@@ -59153,6 +59192,7 @@ async function getJobFinancialsDetail(client: any, jobId: string) {
 
 // Test-only exports for Issue A + B + C safety guards.
 export const _createInvoiceForTest = createInvoice
+export const _jobDetailActionForTest = _jobDetailAction
 export const _createInvoiceDraftActionForTest = createInvoiceDraftAction
 export const _createInvoiceDraftHttpStatusForTest = createInvoiceDraftHttpStatus
 export const _makeSesXeroGatewayForTest = makeSesXeroGateway

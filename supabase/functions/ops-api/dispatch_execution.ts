@@ -15,6 +15,19 @@ const check = (r: any) => {
   if (r.error) throw new DispatchError(r.error.message, 503);
   return r.data;
 };
+const assertPurchaseAuthority = (draft: any) => {
+  const requiresPurchaseApproval = Boolean(draft.po_id) ||
+    draft.purchase_commitment !== false;
+  if (
+    requiresPurchaseApproval &&
+    draft.approval?.purchase_approved !== true
+  ) {
+    throw new DispatchError(
+      "Communications and supplier commitment approvals are separate",
+      403,
+    );
+  }
+};
 export async function executeDispatchDraft(
   client: any,
   org: string,
@@ -40,6 +53,7 @@ export async function executeDispatchDraft(
     draft.approval.content_hash !== draft.content_hash ||
     draft.approval.source_version !== job.source_version
   ) throw new DispatchError("Exact current approval required", 409);
+  assertPurchaseAuthority(draft);
   const claim = check(
     await client.rpc("dispatch_claim_execution", {
       p_org: org,
@@ -218,6 +232,10 @@ export function outlookDispatchProvider(
     "Content-Type": "application/json",
     Prefer: 'IdType="ImmutableId"',
   };
+  const textReadHeaders = {
+    ...headers,
+    Prefer: `${headers.Prefer}, outlook.body-content-type="text"`,
+  };
   return {
     async prepare(d: any, id: string, jobId: string) {
       allowed(d.sender);
@@ -227,12 +245,26 @@ export function outlookDispatchProvider(
           "Native reply requires verified mailbox message identity; captured PO thread is not an Outlook message",
         );
       }
-      await deps.guard(client, {
-        job_id: jobId,
-        from: d.sender,
-        to: d.to,
-        cc: d.cc,
-      });
+      await deps.guard(
+        client,
+        d.graph_message_id
+          ? {
+            action: "reply",
+            mailbox: d.sender,
+            message_id: d.graph_message_id,
+            job_id: jobId,
+            expected_to: d.to,
+            expected_cc: d.cc,
+            reply_all: d.reply_all === true,
+            attachments: d.attachments,
+          }
+          : {
+            job_id: jobId,
+            from: d.sender,
+            to: d.to,
+            cc: d.cc,
+          },
+      );
       await deps.verify(d.sender);
       const attachments = [];
       for (const a of d.attachments) {
@@ -324,10 +356,11 @@ export function outlookDispatchProvider(
               body: JSON.stringify(file),
             }, { mutating: true });
           }
-          const current =
-            await (await deps.request(path(receipt), { headers }, {
-              mutating: false,
-            })).json();
+          const current = await (await deps.request(
+            path(receipt),
+            { headers: textReadHeaders },
+            { mutating: false },
+          )).json();
           if (
             current.subject !== d.subject ||
             String(current.body?.content || "").replaceAll("\r\n", "\n") !==

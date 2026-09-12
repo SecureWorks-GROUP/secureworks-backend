@@ -20,8 +20,9 @@ do $$ declare prior text; begin
  if prior=dispatch_source_version('00000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001') then raise exception 'reply failed to invalidate';end if;
 end $$;
 -- Preparation writes the incumbent PO owner once, retaining unknown financials.
-select dispatch_commit('00000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000002',0,'20000000-0000-4000-8000-000000000010','order-hash','fixture','order_prepare',dispatch_source_version('00000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000002'),'{"allocations":[],"prepared_order_id":"60000000-0000-4000-8000-000000000001","order_drafts":[{"id":"60000000-0000-4000-8000-000000000001","supplier_name":"Fixture supplier","line_items":[{"quantity":2,"unit_price":null}],"delivery_address":"Fixture site"}]}');
+select dispatch_commit('00000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000002',0,'20000000-0000-4000-8000-000000000010','order-hash','fixture','order_prepare',dispatch_source_version('00000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000002'),'{"allocations":[],"prepared_order_id":"60000000-0000-4000-8000-000000000001","order_drafts":[{"id":"60000000-0000-4000-8000-000000000001","supplier_name":"Fixture supplier","line_items":[{"quantity":2,"unit_price":null}],"delivery_address":"Fixture site","po_notes":"Deliver to: Fixture site"}]}');
 do $$ begin
  if (select count(*) from purchase_orders where id='60000000-0000-4000-8000-000000000001' and status='draft' and total is null)<>1 then raise exception 'actual PO draft absent or falsely priced';end if;
+ if (select notes from purchase_orders where id='60000000-0000-4000-8000-000000000001')<>'Deliver to: Fixture site' then raise exception 'canonical PO destination not persisted';end if;
 end $$;
 reset role;

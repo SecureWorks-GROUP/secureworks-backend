@@ -278,3 +278,129 @@ Deno.test("partial yard transfer conserves usable and damaged custody", async ()
     [[2, 2, "yard"], [2, 0, "site"]],
   );
 });
+
+Deno.test("receipt edits retain allocation and split transfer custody", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", requirement);
+  for (const n of [2, 3]) {
+    s = await apply(s, "allocation_upsert", {
+      id: id(n),
+      requirement_id: id(1),
+      supply_id: `stock:${id(n)}`,
+      quantity: 5,
+    });
+  }
+  const receipt = {
+    id: id(4),
+    allocation_id: id(2),
+    usable_quantity: 5,
+    damaged_quantity: 0,
+    location: "yard",
+    evidence: "Counted",
+  };
+  s = await apply(s, "receipt_upsert", receipt);
+  await assertRejects(
+    () =>
+      apply(s, "receipt_upsert", {
+        ...receipt,
+        allocation_id: id(3),
+      }),
+    DispatchError,
+    "allocation is immutable",
+  );
+  s = await apply(s, "receipt_transfer", {
+    id: id(4),
+    new_id: id(5),
+    quantity: 2,
+    location: "site",
+    evidence: "Delivered",
+  });
+  const split = structuredClone(s.receipts[1]);
+  s = await apply(s, "receipt_upsert", {
+    ...split,
+    evidence: "Delivery photo added",
+    transfers: [],
+    split_from: null,
+  });
+  assertEquals(s.receipts[1].transfers, split.transfers);
+  assertEquals(s.receipts[1].split_from, id(4));
+  assertEquals(
+    s.receipts.reduce(
+      (n: number, r: { usable_quantity: number }) => n + r.usable_quantity,
+      0,
+    ),
+    5,
+  );
+  await assertRejects(
+    () => apply(s, "allocation_delete", { id: id(2) }),
+    DispatchError,
+  );
+  await assertRejects(
+    () => apply(s, "receipt_upsert", { ...split, location: "yard" }),
+    DispatchError,
+    "receipt transfer",
+  );
+});
+
+Deno.test("zero is a valid physical stock count; invalid counts remain refused", async () => {
+  const stock = {
+    id: id(2),
+    description: "Sheets",
+    quantity: 0,
+    unit: "each",
+    location: "yard",
+    evidence: "Empty rack",
+  };
+  await apply(emptyState(), "stock_record", stock);
+  for (const value of [-1, NaN, Infinity, "0", null]) {
+    await assertRejects(
+      () => apply(emptyState(), "stock_record", { ...stock, quantity: value }),
+      DispatchError,
+    );
+  }
+  await assertRejects(
+    () =>
+      apply(emptyState(), "requirement_upsert", {
+        ...requirement,
+        quantity: 0,
+      }),
+    DispatchError,
+  );
+});
+
+Deno.test("unlinked commitments require purchase approval and classification changes invalidate review", async () => {
+  const draft = {
+    id: id(3),
+    sender: "office@example.test",
+    to: ["supplier@example.test"],
+    subject: "Supply",
+    body: "Please supply ten sheets",
+  };
+  let s = await apply(emptyState(), "draft_upsert", draft);
+  assertEquals(s.drafts[0].purchase_commitment, true);
+  s = await apply(s, "draft_review", { id: id(3) });
+  const approval = {
+    id: id(3),
+    approval_id: id(4),
+    content_hash: s.drafts[0].content_hash,
+    communications_approved: true,
+  };
+  await assertRejects(() => apply(s, "draft_approve", approval), DispatchError);
+  s = await apply(s, "draft_approve", { ...approval, purchase_approved: true });
+  assertEquals(s.drafts[0].approval.purchase_approved, true);
+  const commitmentHash = s.drafts[0].content_hash;
+  s = await apply(s, "draft_upsert", { ...draft, purchase_commitment: false });
+  assert(s.drafts[0].content_hash !== commitmentHash);
+  assertEquals(s.drafts[0].approval, undefined);
+  s = await apply(s, "draft_review", { id: id(3) });
+  s = await apply(s, "draft_approve", {
+    ...approval,
+    content_hash: s.drafts[0].content_hash,
+  });
+  assertEquals(s.drafts[0].approval.purchase_approved, false);
+  s = await apply(s, "draft_upsert", {
+    ...draft,
+    po_id: id(9),
+    purchase_commitment: false,
+  });
+  assertEquals(s.drafts[0].purchase_commitment, true);
+});

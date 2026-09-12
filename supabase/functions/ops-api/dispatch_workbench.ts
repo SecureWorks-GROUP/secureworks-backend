@@ -1,6 +1,19 @@
 // deno-lint-ignore-file no-explicit-any
 import { resolveDispatchAttachments } from "./dispatch_attachments.ts";
 import { isCurrentContextFact } from "./context_visibility.ts";
+import {
+  formatPoDeliveryNotes,
+  parsePoDeliveryAddress,
+} from "../_shared/po_reference.ts";
+const sourceLimit = 998;
+const orderedStatuses = [
+  "submitted",
+  "authorised",
+  "sent",
+  "confirmed",
+  "delivered",
+  "billed",
+];
 // Dispatch owns human review state, never source ingestion or outbound execution.
 export class DispatchError extends Error {
   constructor(message: string, public status = 400) {
@@ -39,6 +52,12 @@ function text(v: any, label: string, max = 10000): string {
 function quantity(v: any): number {
   if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
     throw new DispatchError("Quantity must be positive");
+  }
+  return v;
+}
+function stockQuantity(v: any): number {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+    throw new DispatchError("Stock quantity must be nonnegative");
   }
   return v;
 }
@@ -121,9 +140,10 @@ export function assessment(state: any, source: string, now: string) {
     const allocations = state.allocations.filter((a: any) =>
       a.requirement_id === r.id
     );
-    const allocated = allocations.reduce((sum: number, a: any) =>
+    const verified = allocations.filter((a: any) => a.supply_valid !== false);
+    const allocated = verified.reduce((sum: number, a: any) =>
       sum + a.quantity, 0) - state.receipts.filter((x: any) =>
-        allocations.some((a: any) =>
+        verified.some((a: any) =>
           a.id === x.allocation_id
         )
       ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
@@ -143,14 +163,16 @@ export function assessment(state: any, source: string, now: string) {
       });
     }
     if (
-      allocated > r.quantity || allocations.some((a: any) => a.unit !== r.unit)
+      allocated > r.quantity || allocations.some((a: any) =>
+        a.unit !== r.unit || a.supply_valid === false
+      )
     ) {
       obligations.push({
         code: "supply_reconciliation",
         requirement_id: r.id,
         owner: r.owner || "Shaun",
         next_action:
-          "Resolve excess or unit mismatch while preserving receipt custody",
+          "Resolve changed supply, excess or unit mismatch while preserving receipt custody",
       });
     }
     if (r.quantity && allocated < r.quantity) {
@@ -336,13 +358,21 @@ export async function reduceCommand(
         const allocations = s.allocations.filter((a: any) =>
           a.requirement_id === r.id
         );
+        if (allocations.some((a: any) => a.supply_valid === false)) {
+          throw new DispatchError(
+            "Reconcile changed supply before preparing an order",
+            409,
+          );
+        }
         const allocated = allocations.reduce((n: number, a: any) =>
           n + a.quantity, 0) - s.receipts.filter((x: any) =>
             allocations.some((a: any) =>
               a.id === x.allocation_id
             )
           ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
-        const prepared = s.order_drafts.filter((o: any) => o.id !== p.id)
+        const prepared = s.order_drafts.filter((o: any) =>
+          o.id !== p.id && ["draft", ...orderedStatuses].includes(o.status)
+        )
           .reduce((n: number, o: any) => {
             const ordered = o.line_items.filter((l: any) =>
               l.dispatch_requirement_id === r.id
@@ -375,6 +405,10 @@ export async function reduceCommand(
         xero_contact_id: p.xero_contact_id || null,
         delivery_date: date(p.delivery_date),
         delivery_address: text(p.delivery_address, "delivery address"),
+        po_notes: formatPoDeliveryNotes(
+          text(p.delivery_address, "delivery address"),
+          p.notes,
+        ),
         line_items: lines,
         notes: p.notes || "",
         incomplete: lines.some((l: any) => l.unit_price === null),
@@ -404,6 +438,7 @@ export async function reduceCommand(
           revision: text(a.revision, "attachment revision"),
         })),
         po_id: p.po_id ? uuid(p.po_id) : null,
+        purchase_commitment: !!p.po_id || p.purchase_commitment !== false,
         thread_id: p.thread_id || null,
         graph_message_id: p.graph_message_id
           ? text(p.graph_message_id, "native message id")
@@ -447,7 +482,8 @@ export async function reduceCommand(
       }
       if (
         p.communications_approved !== true ||
-        (d.po_id && p.purchase_approved !== true)
+        ((d.po_id || d.purchase_commitment !== false) &&
+          p.purchase_approved !== true)
       ) {
         throw new DispatchError(
           "Communications and supplier commitment approvals are separate",
@@ -506,7 +542,7 @@ export async function reduceCommand(
     case "stock_record":
       uuid(p.id);
       text(p.description, "stock description");
-      quantity(p.quantity);
+      stockQuantity(p.quantity);
       text(p.unit, "unit");
       text(p.location, "stock location");
       text(p.evidence, "stock count evidence");
@@ -545,6 +581,18 @@ export async function reduceCommand(
       s.allocations = s.allocations.filter((a: any) => a.id !== p.id);
       break;
     case "receipt_upsert": {
+      const previousReceipt = s.receipts.find((r: any) => r.id === uuid(p.id));
+      if (
+        previousReceipt && previousReceipt.allocation_id !== p.allocation_id
+      ) {
+        throw new DispatchError("Receipt allocation is immutable", 409);
+      }
+      if (previousReceipt && previousReceipt.location !== p.location) {
+        throw new DispatchError(
+          "Use receipt transfer to change custody location",
+          409,
+        );
+      }
       const a = find(s.allocations, p.allocation_id);
       const usable = Number(p.usable_quantity),
         damaged = Number(p.damaged_quantity || 0);
@@ -562,6 +610,7 @@ export async function reduceCommand(
         throw new DispatchError("Receipts exceed allocation");
       }
       upsert(s.receipts, {
+        ...previousReceipt,
         id: uuid(p.id),
         allocation_id: a.id,
         usable_quantity: usable,
@@ -648,8 +697,25 @@ async function rows(client: any, table: string, org: string, job: string) {
     await client.from(table).select("*, jobs!inner(org_id)").eq(
       "jobs.org_id",
       org,
-    ).eq("job_id", job).order("id").limit(1001),
+    ).eq("job_id", job).order("id").limit(sourceLimit + 1),
   ) || [];
+}
+async function referencedRows(
+  client: any,
+  table: string,
+  org: string,
+  ids: string[],
+) {
+  const unique = [...new Set(ids)], result: any[] = [];
+  for (let start = 0; start < unique.length; start += 100) {
+    result.push(
+      ...(checked(
+        await client.from(table).select("*").eq("org_id", org)
+          .in("id", unique.slice(start, start + 100)).limit(101),
+      ) || []),
+    );
+  }
+  return result;
 }
 export async function readDispatchJob(client: any, org: string, jobId: string) {
   uuid(jobId);
@@ -672,6 +738,47 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
     rows(client, "job_media", org, jobId),
   ]);
   const plan = checked(planResult);
+  const state = { ...emptyState(), ...structuredClone(plan?.state) };
+  const allocatedLots = await referencedRows(
+    client,
+    "dispatch_supply_lots",
+    org,
+    state.allocations.map((a: any) => a.supply_id),
+  );
+  const referencedPo = await referencedRows(
+    client,
+    "purchase_orders",
+    org,
+    allocatedLots.filter((lot: any) =>
+      lot.source_ref?.kind === "purchase_order_line"
+    )
+      .map((lot: any) => lot.source_ref.po_id),
+  );
+  for (const allocation of state.allocations) {
+    const lot = allocatedLots.find((l: any) => l.id === allocation.supply_id);
+    let valid = !!lot && lot.unit === allocation.unit &&
+      Number.isFinite(Number(lot.quantity)) &&
+      Number(lot.quantity) >= allocation.quantity;
+    if (lot?.source_ref?.kind === "purchase_order_line") {
+      const p = referencedPo.find((p: any) => p.id === lot.source_ref.po_id);
+      const line = p?.line_items?.[lot.source_ref.index];
+      valid = valid && !!p && orderedStatuses.includes(p.status) && !!line &&
+        line.unit === allocation.unit &&
+        Number(line.quantity) >= allocation.quantity &&
+        await hash(line) === lot.source_version &&
+        await hash(p.line_items) === await hash(lot.source_ref.po_lines);
+    } else if (lot?.source_ref?.kind !== "stock_count") valid = false;
+    allocation.supply_valid = valid;
+  }
+  state.order_drafts = state.order_drafts.map((draft: any) => {
+    const current = po.find((p: any) => p.id === draft.id && p.org_id === org);
+    return {
+      ...draft,
+      status: current?.status || "missing",
+      line_items: Array.isArray(current?.line_items) ? current.line_items : [],
+      delivery_address: current ? parsePoDeliveryAddress(current.notes) : null,
+    };
+  });
   const sourceVersion = checked(
     await client.rpc("dispatch_source_version", { p_org: org, p_job: jobId }),
   );
@@ -680,15 +787,14 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
   }
   const contextResult = await client.from("current_job_context_facts").select(
     "*",
-  ).eq("job_id", jobId).order("id").limit(1001);
+  ).eq("job_id", jobId).order("id").limit(sourceLimit + 1);
   const contextRows = contextResult.error
     ? []
     : (contextResult.data || []).filter((r: any) => isCurrentContextFact(r));
   const supplyLots = [];
   for (
-    const p of po.filter((p: any) =>
-      ["submitted", "authorised", "sent", "confirmed", "delivered", "billed"]
-        .includes(p.status)
+    const p of po.slice(0, sourceLimit).filter((p: any) =>
+      orderedStatuses.includes(p.status)
     )
   ) {
     for (
@@ -712,9 +818,9 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
   if (beforeVersion !== sourceVersion || sourceVersion !== afterVersion) {
     throw new DispatchError("Sources changed during read; retry", 409);
   }
-  const state = { ...emptyState(), ...plan?.state };
-  const complete = po.length <= 1000 && documents.length <= 1000 &&
-    communications.length <= 1000 && media.length <= 1000;
+  const complete = po.length <= sourceLimit &&
+    documents.length <= sourceLimit &&
+    communications.length <= sourceLimit && media.length <= sourceLimit;
   return {
     job: { ...job, eligibility: eligibility(job, documents) },
     version: plan?.version || 0,
@@ -727,15 +833,18 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
           state.assessment.source_version !== sourceVersion,
       }
       : null,
-    purchase_orders: po.slice(0, 1000),
-    documents: documents.slice(0, 1000),
-    communications: communications.slice(0, 1000),
-    media: media.slice(0, 1000),
+    purchase_orders: po.slice(0, sourceLimit).map((p: any) => ({
+      ...p,
+      delivery_address: parsePoDeliveryAddress(p.notes),
+    })),
+    documents: documents.slice(0, sourceLimit),
+    communications: communications.slice(0, sourceLimit),
+    media: media.slice(0, sourceLimit),
     supply_lots: supplyLots,
-    context_facts: contextRows.slice(0, 1000),
+    context_facts: contextRows.slice(0, sourceLimit),
     upstream_context_facts: contextRows.filter(isUpstreamDispatchFact).slice(
       0,
-      1000,
+      sourceLimit,
     ),
     coverage: {
       complete,
@@ -745,7 +854,7 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
       context: {
         available: !contextResult.error,
         complete: !contextResult.error &&
-          (contextResult.data || []).length <= 1000,
+          (contextResult.data || []).length <= sourceLimit,
         source: "current_job_context_facts",
         reason: contextResult.error
           ? "Current context source read failed"
@@ -1057,11 +1166,11 @@ export async function dispatchCalendar(
   }
   const [plans, po, staff] = await Promise.all([
     client.from("dispatch_plans").select("job_id,state").eq("org_id", org)
-      .order("job_id").limit(1001),
+      .order("job_id").limit(sourceLimit + 1),
     client.from("purchase_orders").select("*,jobs!inner(org_id,job_number)").eq(
       "jobs.org_id",
       org,
-    ).neq("status", "deleted").order("id").limit(1001),
+    ).neq("status", "deleted").order("id").limit(sourceLimit + 1),
     client.from("calendar_events").select(
       "assignment_id,job_id,job_number,user_id,scheduled_date,scheduled_end,start_time,end_time,crew_name,assignment_status,org_id",
     ).eq("org_id", org).neq("assignment_status", "cancelled").lte(
@@ -1069,7 +1178,7 @@ export async function dispatchCalendar(
       to,
     ).or(
       `scheduled_end.gte.${from},and(scheduled_end.is.null,scheduled_date.gte.${from})`,
-    ).order("assignment_id").limit(1001),
+    ).order("assignment_id").limit(sourceLimit + 1),
   ]);
   const planRows = checked(plans) || [],
     poRows = checked(po) || [],
@@ -1079,7 +1188,7 @@ export async function dispatchCalendar(
     if (!e.date) undated.push(e);
     else if (e.date <= to && (e.end_date || e.date) >= from) events.push(e);
   };
-  for (const p of planRows.slice(0, 1000)) {
+  for (const p of planRows.slice(0, sourceLimit)) {
     for (const m of p.state.movements || []) {
       add({
         ...m,
@@ -1094,7 +1203,7 @@ export async function dispatchCalendar(
       });
     }
   }
-  for (const p of poRows.slice(0, 1000)) {
+  for (const p of poRows.slice(0, sourceLimit)) {
     add({
       id: `po:${p.id}`,
       job_id: p.job_id,
@@ -1106,7 +1215,7 @@ export async function dispatchCalendar(
       source_ref: { table: "purchase_orders", id: p.id },
     });
   }
-  for (const a of staffRows.slice(0, 1000)) {
+  for (const a of staffRows.slice(0, sourceLimit)) {
     add({
       id: `assignment:${a.assignment_id}`,
       job_id: a.job_id,
@@ -1126,9 +1235,10 @@ export async function dispatchCalendar(
     events,
     undated,
     coverage: {
-      complete: planRows.length <= 1000 && poRows.length <= 1000 &&
-        staffRows.length <= 1000,
-      limit_per_source: 1000,
+      complete: planRows.length <= sourceLimit &&
+        poRows.length <= sourceLimit &&
+        staffRows.length <= sourceLimit,
+      limit_per_source: sourceLimit,
       source:
         "Existing PO/assignment identities plus proposed Dispatch movements",
     },
@@ -1138,24 +1248,30 @@ export async function dispatchCalendar(
 // A bounded durable trigger/worker. Repeated triggers deduplicate by source hash;
 // crashed leases can be reclaimed; failure leaves retry evidence instead of success.
 export async function dispatchTrigger(client: any, org: string, body: any) {
+  if (body.job_ids === undefined) {
+    const limit = body.limit ?? 25;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 25) {
+      throw new DispatchError("Reconciliation limit must be between 1 and 25");
+    }
+    return checked(
+      await client.rpc("dispatch_reconcile_eligible_jobs", {
+        p_org: org,
+        p_limit: limit,
+      }),
+    );
+  }
   if (!Array.isArray(body.job_ids) || body.job_ids.length > 25) {
     throw new DispatchError("Provide up to 25 job IDs");
   }
   const queued = [];
   for (const id of body.job_ids) {
-    const j = await readDispatchJob(client, org, uuid(id));
-    checked(
-      await client.from("dispatch_tasks").upsert({
-        org_id: org,
-        job_id: id,
-        source_version: j.source_version,
-        plan_version: j.version,
-      }, {
-        onConflict: "org_id,job_id,source_version,plan_version",
-        ignoreDuplicates: true,
+    queued.push(checked(
+      await client.rpc("dispatch_enqueue_job", {
+        p_org: org,
+        p_job: uuid(id),
+        p_reason: "manual",
       }),
-    );
-    queued.push({ job_id: id, source_version: j.source_version });
+    ));
   }
   return { queued, live_actions_enabled: false };
 }
@@ -1167,21 +1283,35 @@ export async function dispatchRun(client: any, org: string, actor: string) {
   for (const task of tasks) {
     try {
       const j = await readDispatchJob(client, org, task.job_id);
+      let result;
       if (
         j.source_version !== task.source_version ||
         j.version !== task.plan_version
-      ) await dispatchTrigger(client, org, { job_ids: [task.job_id] });
-      else {await dispatchCommand(client, org, actor, {
+      ) {
+        const replacement = await dispatchTrigger(client, org, {
+          job_ids: [task.job_id],
+        });
+        result = { status: "superseded", replacement: replacement.queued };
+      } else {
+        const assessed = await dispatchCommand(client, org, actor, {
           job_id: j.job.id,
           expected_version: j.version,
           source_version: j.source_version,
           request_id: crypto.randomUUID(),
           command: "assess",
           payload: {},
-        }, task);}
+        }, task);
+        result = {
+          status: "assessed",
+          version: assessed.version,
+          assessment: assessed.assessment,
+        };
+      }
       checked(
         await client.from("dispatch_tasks").update({
           status: "done",
+          result,
+          last_error: null,
           lease_until: null,
           updated_at: new Date().toISOString(),
         }).eq("org_id", org).eq("job_id", task.job_id).eq(
@@ -1192,12 +1322,13 @@ export async function dispatchRun(client: any, org: string, actor: string) {
           task.lease_token,
         ),
       );
-      results.push({ job_id: task.job_id, status: "done" });
+      results.push({ job_id: task.job_id, ...result });
     } catch (e) {
       checked(
         await client.from("dispatch_tasks").update({
           status: "failed",
           last_error: (e as Error).message,
+          result: { status: "failed", error: (e as Error).message },
           lease_until: null,
           available_at: new Date(Date.now() + 60000).toISOString(),
         }).eq("org_id", org).eq("job_id", task.job_id).eq(

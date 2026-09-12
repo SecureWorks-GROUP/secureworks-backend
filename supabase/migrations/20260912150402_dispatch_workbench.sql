@@ -53,17 +53,26 @@ create table public.dispatch_tasks (
   lease_until timestamptz,
   lease_token uuid,
   last_error text,
+  result jsonb,
   updated_at timestamptz not null default now(),
   primary key(org_id,job_id,source_version,plan_version)
 );
 create index dispatch_tasks_due on public.dispatch_tasks(org_id,status,available_at);
+create table public.dispatch_reconcile_cursors (
+  org_id uuid not null,
+  name text not null default 'eligible_jobs',
+  cursor_job_id uuid,
+  updated_at timestamptz not null default now(),
+  primary key(org_id,name)
+);
 alter table public.dispatch_plans enable row level security;
 alter table public.dispatch_commands enable row level security;
 alter table public.dispatch_supply_lots enable row level security;
 alter table public.dispatch_reservations enable row level security;
 alter table public.dispatch_tasks enable row level security;
-revoke all on public.dispatch_plans, public.dispatch_commands, public.dispatch_supply_lots, public.dispatch_reservations, public.dispatch_tasks from anon, authenticated;
-grant all on public.dispatch_plans, public.dispatch_commands, public.dispatch_supply_lots, public.dispatch_reservations, public.dispatch_tasks to service_role;
+alter table public.dispatch_reconcile_cursors enable row level security;
+revoke all on public.dispatch_plans, public.dispatch_commands, public.dispatch_supply_lots, public.dispatch_reservations, public.dispatch_tasks, public.dispatch_reconcile_cursors from anon, authenticated;
+grant all on public.dispatch_plans, public.dispatch_commands, public.dispatch_supply_lots, public.dispatch_reservations, public.dispatch_tasks, public.dispatch_reconcile_cursors to service_role;
 
 -- Database-owned revision covers source owners; Dispatch never edits these tables.
 create function public.dispatch_source_version(p_org uuid,p_job uuid)
@@ -71,6 +80,8 @@ returns text language sql stable security invoker set search_path=public,pg_temp
  select md5(jsonb_build_object(
  'job',jsonb_build_object('scope',j.scope_json,'pricing',j.pricing_json,'accepted',j.accepted_at,'status',j.status,'address',j.site_address,'scheduled',j.scheduled_at),
  'purchase_orders',(select coalesce(jsonb_agg(to_jsonb(p) order by p.id),'[]') from purchase_orders p where p.job_id=j.id),
+ 'allocated_supply',(select coalesce(jsonb_agg(jsonb_build_object('reservation',jsonb_build_object('id',r.id,'requirement_id',r.requirement_id,'supply_id',r.supply_id,'quantity',r.quantity),'lot',jsonb_build_object('id',l.id,'source_ref',l.source_ref,'source_version',l.source_version,'quantity',l.quantity,'unit',l.unit)) order by r.id),'[]') from dispatch_reservations r join dispatch_supply_lots l on l.org_id=r.org_id and l.id=r.supply_id where r.org_id=j.org_id and r.job_id=j.id),
+ 'referenced_purchase_orders',(select coalesce(jsonb_agg(to_jsonb(p) order by p.id),'[]') from purchase_orders p where p.org_id=j.org_id and p.id in (select (l.source_ref->>'po_id')::uuid from dispatch_reservations r join dispatch_supply_lots l on l.org_id=r.org_id and l.id=r.supply_id where r.org_id=j.org_id and r.job_id=j.id and l.source_ref->>'kind'='purchase_order_line' and l.source_ref->>'po_id' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$')),
  'documents',(select coalesce(jsonb_agg(to_jsonb(d) order by d.id),'[]') from job_documents d where d.job_id=j.id),
  'communications',(select coalesce(jsonb_agg(to_jsonb(c) order by c.id),'[]') from po_communications c where c.job_id=j.id),
  'media',(select coalesce(jsonb_agg(to_jsonb(m) order by m.id),'[]') from job_media m where m.job_id=j.id),
@@ -105,7 +116,7 @@ begin
       is distinct from (select value from jsonb_array_elements(plan.state->'drafts') where value->>'id'=e.draft_id::text))
   then raise exception 'draft_send_in_progress' using errcode='40001'; end if;
 
-  for lot in select value from jsonb_array_elements(p_lots) loop
+  for lot in select value from jsonb_array_elements(coalesce(p_lots,'[]'::jsonb)) loop
     if lot#>>'{source_ref,kind}'='purchase_order_line' and not exists(
       select 1 from purchase_orders where id=(lot#>>'{source_ref,po_id}')::uuid and org_id=p_org
       and status in ('submitted','authorised','sent','confirmed','delivered','billed')
@@ -127,7 +138,7 @@ begin
         quantity=excluded.quantity,unit=excluded.unit,updated_at=now();
   end loop;
   delete from dispatch_reservations where org_id=p_org and job_id=p_job;
-  for a in select value from jsonb_array_elements(p_state->'allocations') loop
+  for a in select value from jsonb_array_elements(coalesce(p_state->'allocations','[]'::jsonb)) loop
     if not exists(select 1 from dispatch_supply_lots where org_id=p_org and id=a->>'supply_id' and unit=a->>'unit') then raise exception 'supply_unit_mismatch'; end if;
     select quantity into cap from dispatch_supply_lots where org_id=p_org and id=a->>'supply_id';
     if not found then raise exception 'supply_unverified'; end if;
@@ -137,23 +148,24 @@ begin
       values(p_org,p_job,(a->>'id')::uuid,(a->>'requirement_id')::uuid,a->>'supply_id',(a->>'quantity')::numeric);
   end loop;
   if p_command='order_prepare' then
-    for draft in select value from jsonb_array_elements(p_state->'order_drafts') where value->>'id'=p_state->>'prepared_order_id' loop
+    for draft in select value from jsonb_array_elements(coalesce(p_state->'order_drafts','[]'::jsonb)) where value->>'id'=p_state->>'prepared_order_id' loop
       order_id=(draft->>'id')::uuid;
       if exists(select 1 from purchase_orders where id=order_id and (org_id<>p_org or job_id<>p_job or status<>'draft' or reference is distinct from 'dispatch:'||order_id::text or xero_po_id is not null)) then raise exception 'order_not_editable'; end if;
       insert into purchase_orders(id,org_id,job_id,po_number,supplier_name,xero_contact_id,status,line_items,subtotal,tax,total,delivery_date,reference,notes)
-        values(order_id,p_org,p_job,'PO-D-'||order_id::text,draft->>'supplier_name',draft->>'xero_contact_id','draft',draft->'line_items',null,null,null,(draft->>'delivery_date')::date,'dispatch:'||order_id::text,'Delivery: '||(draft->>'delivery_address')||E'\n'||coalesce(draft->>'notes',''))
+        values(order_id,p_org,p_job,'PO-D-'||order_id::text,draft->>'supplier_name',draft->>'xero_contact_id','draft',draft->'line_items',null,null,null,(draft->>'delivery_date')::date,'dispatch:'||order_id::text,draft->>'po_notes')
       on conflict(id) do update set supplier_name=excluded.supplier_name,xero_contact_id=excluded.xero_contact_id,line_items=excluded.line_items,delivery_date=excluded.delivery_date,notes=excluded.notes,subtotal=null,tax=null,total=null,updated_at=now();
     end loop;
-    p_source=dispatch_source_version(p_org,p_job);
   end if;
+  p_source=dispatch_source_version(p_org,p_job);
   update dispatch_plans set version=version+1,state=p_state,source_version=p_source,updated_at=now()
     where org_id=p_org and job_id=p_job returning * into plan;
   result=jsonb_build_object('version',plan.version,'source_version',p_source,'state',p_state,'live_actions_enabled',false);
   insert into dispatch_commands(org_id,request_id,job_id,request_hash,actor,command,result)
     values(p_org,p_request,p_job,p_hash,p_actor,p_command,result);
   if p_command<>'assess' then
-  insert into business_events(event_type,source,entity_type,entity_id,correlation_id,job_id,payload,metadata)
+  insert into business_events(event_type,source,entity_type,entity_id,correlation_id,job_id,match_status,match_method,payload,metadata)
     values('dispatch.plan.changed','ops-api','dispatch_plan',p_job::text,p_request,p_job::text,
+      'matched','direct_job_id',
       jsonb_build_object('contract_version','dispatch-context/v1','org_id',p_org,'job_id',p_job,'plan_version',plan.version,'source_version',p_source,'command',p_command,'state',p_state),
       jsonb_build_object('source_ref',jsonb_build_object('table','dispatch_plans','org_id',p_org,'job_id',p_job,'version',plan.version),'evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',p_request,'plan_version',plan.version)));
   end if;
@@ -161,6 +173,91 @@ begin
 end $$;
 revoke all on function public.dispatch_commit(uuid,uuid,bigint,uuid,text,text,text,text,jsonb,jsonb,jsonb) from public,anon,authenticated;
 grant execute on function public.dispatch_commit(uuid,uuid,bigint,uuid,text,text,text,text,jsonb,jsonb,jsonb) to service_role;
+
+create function public.dispatch_enqueue_job(p_org uuid,p_job uuid,p_reason text default 'manual')
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare source text; plan_version bigint; inserted integer;
+begin
+  if not exists(select 1 from jobs where id=p_job and org_id=p_org) then raise exception 'job_not_found'; end if;
+  source=dispatch_source_version(p_org,p_job);
+  if source is null then raise exception 'source_unavailable'; end if;
+  select coalesce(version,0) into plan_version from dispatch_plans where org_id=p_org and job_id=p_job;
+  if plan_version is null then plan_version=0; end if;
+  if exists(select 1 from dispatch_plans where org_id=p_org and job_id=p_job and state#>>'{assessment,source_version}'=source and coalesce((state#>>'{assessment,stale}')::boolean,false)=false) then
+    return jsonb_build_object('queued',false,'job_id',p_job,'source_version',source,'plan_version',plan_version,'reason','assessment_current');
+  end if;
+  insert into dispatch_tasks(org_id,job_id,source_version,plan_version)
+    values(p_org,p_job,source,plan_version) on conflict do nothing;
+  get diagnostics inserted = row_count;
+  return jsonb_build_object('queued',inserted=1,'job_id',p_job,'source_version',source,'plan_version',plan_version,'reason',p_reason);
+end $$;
+revoke all on function public.dispatch_enqueue_job(uuid,uuid,text) from public,anon,authenticated;
+grant execute on function public.dispatch_enqueue_job(uuid,uuid,text) to service_role;
+
+create function public.dispatch_enqueue_from_business_event(p_event_id uuid)
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare e business_events; target_job uuid; payload_job uuid; target_org uuid;
+begin
+  select * into e from business_events where id=p_event_id;
+  if not found then raise exception 'business_event_not_found'; end if;
+  if e.metadata#>>'{derivation,owner}'='dispatch' then return jsonb_build_object('queued',false,'reason','dispatch_echo'); end if;
+  if e.match_status is not null and e.match_status<>'matched' then return jsonb_build_object('queued',false,'reason','unmatched_source'); end if;
+  begin
+    target_job=nullif(e.job_id,'')::uuid;
+    payload_job=nullif(e.payload->>'job_id','')::uuid;
+  exception when invalid_text_representation then return jsonb_build_object('queued',false,'reason','invalid_job_id'); end;
+  if target_job is not null and payload_job is not null and target_job<>payload_job then return jsonb_build_object('queued',false,'reason','job_id_mismatch'); end if;
+  target_job=coalesce(target_job,payload_job);
+  if target_job is null then return jsonb_build_object('queued',false,'reason','missing_job_id'); end if;
+  select org_id into target_org from jobs where id=target_job;
+  if target_org is null then return jsonb_build_object('queued',false,'reason','job_not_found'); end if;
+  if (e.metadata->>'org_id' is not null and e.metadata->>'org_id'<>target_org::text)
+    or (e.payload->>'org_id' is not null and e.payload->>'org_id'<>target_org::text)
+    or (e.metadata#>>'{source_ref,org_id}' is not null and e.metadata#>>'{source_ref,org_id}'<>target_org::text)
+    or (e.payload#>>'{source_ref,org_id}' is not null and e.payload#>>'{source_ref,org_id}'<>target_org::text)
+  then return jsonb_build_object('queued',false,'reason','org_mismatch'); end if;
+  return dispatch_enqueue_job(target_org,target_job,'business_event:'||p_event_id::text);
+end $$;
+revoke all on function public.dispatch_enqueue_from_business_event(uuid) from public,anon,authenticated;
+grant execute on function public.dispatch_enqueue_from_business_event(uuid) to service_role;
+
+create function public.dispatch_business_event_enqueue_trigger()
+returns trigger language plpgsql security invoker set search_path=public,pg_temp as $$
+begin
+  perform dispatch_enqueue_from_business_event(new.id);
+  return new;
+exception when others then
+  raise warning 'dispatch business_event enqueue failed for %: %', new.id, sqlerrm;
+  return new;
+end $$;
+revoke all on function public.dispatch_business_event_enqueue_trigger() from public,anon,authenticated;
+create trigger dispatch_business_events_enqueue after insert on public.business_events
+for each row execute function public.dispatch_business_event_enqueue_trigger();
+
+create function public.dispatch_reconcile_eligible_jobs(p_org uuid,p_limit integer default 25)
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare cursor_id uuid; job_ids uuid[]; jid uuid; queued jsonb='[]'::jsonb; limit_n integer; wrapped boolean=false;
+begin
+  limit_n=greatest(1,least(coalesce(p_limit,25),25));
+  insert into dispatch_reconcile_cursors(org_id,name) values(p_org,'eligible_jobs') on conflict do nothing;
+  select cursor_job_id into cursor_id from dispatch_reconcile_cursors where org_id=p_org and name='eligible_jobs' for update;
+  select coalesce(array_agg(id order by id),'{}'::uuid[]) into job_ids from (
+    select id from dispatch_eligible_jobs where org_id=p_org and (cursor_id is null or id>cursor_id) order by id limit limit_n
+  ) s;
+  if coalesce(array_length(job_ids,1),0)=0 and cursor_id is not null then
+    wrapped=true;
+    select coalesce(array_agg(id order by id),'{}'::uuid[]) into job_ids from (
+      select id from dispatch_eligible_jobs where org_id=p_org order by id limit limit_n
+    ) s;
+  end if;
+  foreach jid in array job_ids loop
+    queued=queued||dispatch_enqueue_job(p_org,jid,'eligible_reconcile');
+  end loop;
+  update dispatch_reconcile_cursors set cursor_job_id=case when coalesce(array_length(job_ids,1),0)=0 then cursor_id else job_ids[array_length(job_ids,1)] end,updated_at=now() where org_id=p_org and name='eligible_jobs';
+  return jsonb_build_object('queued',queued,'count',coalesce(array_length(job_ids,1),0),'cursor_job_id',(select cursor_job_id from dispatch_reconcile_cursors where org_id=p_org and name='eligible_jobs'),'wrapped',wrapped,'live_actions_enabled',false);
+end $$;
+revoke all on function public.dispatch_reconcile_eligible_jobs(uuid,integer) from public,anon,authenticated;
+grant execute on function public.dispatch_reconcile_eligible_jobs(uuid,integer) to service_role;
 
 create function public.dispatch_claim_tasks(p_org uuid,p_limit integer default 10)
 returns setof public.dispatch_tasks language sql security invoker set search_path=public,pg_temp as $$
@@ -214,7 +311,7 @@ begin
  if d is null or d->>'content_hash' is distinct from p_hash or d#>>'{approval,id}' is distinct from p_approval::text
    or d#>>'{approval,content_hash}' is distinct from p_hash or d#>>'{approval,source_version}' is distinct from p_source
    or d#>>'{approval,communications_approved}' is distinct from 'true'
-   or (d->>'po_id' is not null and d#>>'{approval,purchase_approved}' is distinct from 'true')
+   or ((d->>'po_id' is not null or d->>'purchase_commitment' is distinct from 'false') and d#>>'{approval,purchase_approved}' is distinct from 'true')
    or dispatch_source_version(p_org,p_job) is distinct from p_source
  then raise exception 'draft_approval_changed' using errcode='40001'; end if;
  if exists(select 1 from dispatch_executions where org_id=p_org and draft_id=p_draft and status in ('claimed','provider_draft_ready','sending','accepted_not_delivered','outcome_unknown')) then raise exception 'draft_already_executed_or_uncertain' using errcode='40001'; end if;
@@ -238,6 +335,7 @@ begin
  if not exists(select 1 from dispatch_release_controls where org_id=p_org and communications_enabled)
  or d->>'content_hash' is distinct from a.content_hash
  or d->'approval' is distinct from a.snapshot->'approval'
+ or ((d->>'po_id' is not null or d->>'purchase_commitment' is distinct from 'false') and d#>>'{approval,purchase_approved}' is distinct from 'true')
  or dispatch_source_version(p_org,a.job_id) is distinct from a.source_version then
   update dispatch_executions set status='not_sent',last_error='Approval, source or release changed during preparation',updated_at=now() where org_id=p_org and id=p_action;
   return jsonb_build_object('allowed',false,'reason','approval_source_or_release_changed');

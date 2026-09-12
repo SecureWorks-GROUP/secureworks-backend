@@ -21,7 +21,7 @@ end $$;
 do $$ declare org uuid='00000000-0000-4000-8000-000000000001'; job uuid='10000000-0000-4000-8000-000000000002'; draft uuid=gen_random_uuid(); approval uuid=gen_random_uuid(); source text; result jsonb;
 begin
  source=dispatch_source_version(org,job);
- update dispatch_plans set state=jsonb_build_object('drafts',jsonb_build_array(jsonb_build_object('id',draft,'content_hash','exact','source_version',source,'body','Exact approved fixture','approval',jsonb_build_object('id',approval,'content_hash','exact','source_version',source,'communications_approved',true)))) where org_id=org and job_id=job;
+ update dispatch_plans set state=jsonb_build_object('drafts',jsonb_build_array(jsonb_build_object('id',draft,'content_hash','exact','source_version',source,'body','Exact approved fixture','purchase_commitment',false,'approval',jsonb_build_object('id',approval,'content_hash','exact','source_version',source,'communications_approved',true)))) where org_id=org and job_id=job;
  result=dispatch_claim_execution(org,job,draft,approval,'exact',source);
  if result#>>'{action,status}'<>'held' then raise exception 'missing default hold';end if;
  insert into dispatch_release_controls values(org,true);
@@ -56,9 +56,9 @@ set role service_role;
 do $$ declare org uuid='00000000-0000-4000-8000-000000000001';job uuid='10000000-0000-4000-8000-000000000001';before text;
 begin
  before=dispatch_source_version(org,job);
- insert into current_job_context_facts(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'workflow_state','{"note":"Own Dispatch projection"}','{"derivation":{"owner":"dispatch","plan_version":1}}');
+ insert into job_context(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'workflow_state','{"note":"Own Dispatch projection"}','{"derivation":{"owner":"dispatch","plan_version":1}}');
  if before<>dispatch_source_version(org,job) then raise exception 'own context echo invalidated its source review';end if;
- insert into current_job_context_facts(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'instruction','{"note":"External access constraint"}','{"derivation":{"owner":"external_email"}}');
+ insert into job_context(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'instruction','{"note":"External access constraint"}','{"derivation":{"owner":"external_email"}}');
  if before=dispatch_source_version(org,job) then raise exception 'external context failed to invalidate';end if;
 end $$;
 reset role;
