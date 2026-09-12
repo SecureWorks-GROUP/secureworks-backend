@@ -1,3 +1,4 @@
+import { contextPipelineStatus, contextAccuracySample, contextAccuracyVerdict, contextReviewWeek, ContextPipelineError } from './context_pipeline.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
@@ -6924,6 +6925,21 @@ if (import.meta.main) serve(async (req: Request) => {
       // invoice in; job, facts, conversation, Xero cache state and owned
       // blockers out. SELECT-only. Shape: wiki
       // lanes/handoffs/CIO-to-DEBT-invoice-context-door.md.
+      case 'context_pipeline_status':
+      case 'context_accuracy_sample':
+      case 'context_accuracy_verdict': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        const expectedMethod = action === 'context_accuracy_verdict' ? 'POST' : 'GET'
+        if (req.method !== expectedMethod) return json({ error: `${action} requires ${expectedMethod}` }, 405)
+        try {
+          if (action === 'context_pipeline_status') return json(await contextPipelineStatus(client))
+          if (action === 'context_accuracy_sample') return json(await contextAccuracySample(client, contextReviewWeek(url.searchParams.get('week_start'))))
+          return json(await contextAccuracyVerdict(client, body, authMode === 'jwt' && authUser ? { id: authUser.id, orgId: authUser.orgId } : null, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       case 'invoice_context':
       case 'debt_context_coverage': {
         if (req.method !== 'GET') {
@@ -15439,7 +15455,7 @@ async function getJobContextFacts(client: any, body: any) {
     : 12
   const { data, error } = await client
     .from('current_job_context_facts')
-    .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
+    .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store, validity_basis, last_verified_at, source_event_at, event_date, lifecycle')
     .in('job_id', jobUuids)
     .order('updated_at', { ascending: false })
     .limit(limit * jobUuids.length)
@@ -15891,7 +15907,7 @@ async function assembleJobDossier(client: any, body: any) {
   // SQL view filters retired/expired facts BEFORE this bounded order/limit.
   const factsRead = await safeRead('current_job_context_facts', async () => {
     const { data, error } = await client.from('current_job_context_facts')
-      .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
+      .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store, validity_basis, last_verified_at, source_event_at, event_date, lifecycle')
       .eq('job_id', jobId)
       .order('updated_at', { ascending: false })
       .limit(factsLimit)

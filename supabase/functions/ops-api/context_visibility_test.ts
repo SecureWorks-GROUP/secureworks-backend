@@ -145,6 +145,39 @@ Deno.test("actual dossier excludes obsolete facts and their current evidence ref
   assert(!JSON.stringify(result).includes("OLD_SOURCE"));
 });
 
+Deno.test("ongoing temporary facts with null expiry remain current", () => {
+  assertEquals(
+    isCurrentContextFact({
+      ...active,
+      kind: "pending_action",
+      _context_store: "job_temporary_context",
+      expires_at: null,
+      validity_basis: "ongoing",
+    }),
+    true,
+  );
+  assertEquals(
+    isCurrentContextFact({
+      ...active,
+      kind: "current_state",
+      _context_store: "job_temporary_context",
+      expires_at: null,
+      validity_basis: "uncertain",
+    }),
+    true,
+  );
+  assertEquals(
+    isCurrentContextFact({
+      ...active,
+      kind: "proposal",
+      expires_at: null,
+      validity_basis: "unknown_end",
+      last_verified_at: null,
+    }),
+    true,
+  );
+});
+
 Deno.test("view permanent null expiry remains visible, current temporary facts reach dossier", async () => {
   const future = {
     ...active,

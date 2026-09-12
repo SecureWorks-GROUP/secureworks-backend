@@ -239,6 +239,7 @@ write_response() {
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
   CONTEXT_B2_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" | awk '{print $1}')" \
+  CONTEXT_B4_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" | awk '{print $1}')" \
   CONTEXT_B3_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
   CONTEXT_SWITCH_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170000_automation_switches.sql" | awk '{print $1}')" \
   CONTEXT_LEDGER_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170001_context_run_ledger.sql" | awk '{print $1}')" \
@@ -250,6 +251,7 @@ write_response() {
   CONTEXT_FACTS_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
   CONTEXT_ACCURACY_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" | awk '{print $1}')" \
   CONTEXT_MAIL_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" | awk '{print $1}')" \
+  CONTEXT_DISPATCH_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260913120000_context_dispatch_projection.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260913120000_context_dispatch_projection.sql" | awk '{print $1}')" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
@@ -646,6 +648,7 @@ for version, name, key in [
     ("20260911172000", "context_job_fact_custody", "CONTEXT_FACTS_EXPECTED_SHA"),
     ("20260911173000", "context_accuracy_and_status", "CONTEXT_ACCURACY_EXPECTED_SHA"),
     ("20260911174000", "context_mail_capture", "CONTEXT_MAIL_EXPECTED_SHA"),
+    ("20260913120000", "context_dispatch_projection", "CONTEXT_DISPATCH_EXPECTED_SHA"),
 ]:
     sha = os.environ.get(key) or ""
     if not sha:

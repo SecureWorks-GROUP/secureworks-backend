@@ -150,6 +150,10 @@ function fakeClient(tables: Tables, failing: Set<string> = new Set(), failFrom: 
       q.then = (resolve: any, reject: any) => Promise.resolve(run()).then(resolve, reject);
       return q;
     },
+    rpc: async (name: string) => {
+      if (failing.has(name)) return { data: null, error: { message: `${name} unavailable` } };
+      return { data: null, error: null };
+    },
   };
 }
 

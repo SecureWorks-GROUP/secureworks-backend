@@ -14,7 +14,10 @@ BEGIN
    ADD COLUMN IF NOT EXISTS extractor_version text,
    ADD COLUMN IF NOT EXISTS superseded_by uuid,
    ADD COLUMN IF NOT EXISTS lifecycle_reason text,
-   ADD COLUMN IF NOT EXISTS trust text NOT NULL DEFAULT ''legacy''',t);
+   ADD COLUMN IF NOT EXISTS trust text NOT NULL DEFAULT ''legacy'',
+   ADD COLUMN IF NOT EXISTS validity_basis text NOT NULL DEFAULT ''unknown_end'',
+   ADD COLUMN IF NOT EXISTS last_verified_at timestamptz,
+   ADD COLUMN IF NOT EXISTS source_event_at timestamptz',t);
   -- Replace only kind-only checks, retaining every unrelated production guard.
   FOR c IN SELECT conname FROM pg_constraint WHERE conrelid=format('public.%I',t)::regclass AND contype='c'
    AND conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=format('public.%I',t)::regclass AND attname='kind')] LOOP
@@ -30,7 +33,12 @@ BEGIN
    EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (lifecycle IN (''current'',''superseded'',''retracted''))',t,t||'_lifecycle_v2_check');
    EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (trust IN (''luna'',''legacy''))',t,t||'_trust_v2_check');
   END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=format('public.%I',t)::regclass AND conname=t||'_validity_basis_v2_check') THEN
+   EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (validity_basis IN (''explicit_end'',''ongoing'',''uncertain'',''unknown_end''))',t,t||'_validity_basis_v2_check');
+  END IF;
  END LOOP;
+ -- Unknown/ongoing ends stay null. Temporary rows no longer require an invented TTL.
+ ALTER TABLE public.job_temporary_context ALTER COLUMN expires_at DROP NOT NULL;
 END $$;
 
 CREATE TABLE IF NOT EXISTS public.luna_context_job_revisions (
@@ -48,21 +56,35 @@ ALTER TABLE public.luna_context_fact_custody ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.luna_context_job_revisions,public.luna_context_fact_custody FROM PUBLIC,anon,authenticated;
 GRANT SELECT ON public.luna_context_job_revisions,public.luna_context_fact_custody TO service_role;
 
+-- Evidence-led validity: no invented midnight / 7 / 14 / 21 day TTLs.
+-- Due date is a deadline, never an expiry. Unknown end stays null.
 CREATE OR REPLACE FUNCTION public.context_fact_expiry(p_kind text,p_event_at timestamptz,p_due_date date DEFAULT NULL)
 RETURNS timestamptz LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $$
 BEGIN
  IF p_event_at IS NULL OR p_kind IS NULL OR p_kind NOT IN ('scope_spec','access_note','alternative_contact','client_preference','note','proposal','current_state','pending_action','quote_issue')
  THEN RAISE EXCEPTION 'luna_fact_expiry_invalid'; END IF;
  IF p_due_date IS NOT NULL AND p_kind<>'pending_action' THEN RAISE EXCEPTION 'luna_fact_due_date_invalid'; END IF;
- RETURN CASE p_kind
-  WHEN 'current_state' THEN (((p_event_at AT TIME ZONE 'Australia/Perth')::date+1)::timestamp AT TIME ZONE 'Australia/Perth')
-  WHEN 'pending_action' THEN CASE WHEN p_due_date IS NOT NULL THEN ((p_due_date+1)::timestamp AT TIME ZONE 'Australia/Perth') ELSE p_event_at+interval '168 hours' END
-  WHEN 'quote_issue' THEN p_event_at+interval '336 hours'
-  WHEN 'proposal' THEN p_event_at+interval '504 hours'
-  ELSE NULL END;
+ RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION public.context_fact_expiry(text,timestamptz,date) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_fact_expiry(text,timestamptz,date) TO service_role;
+
+-- Exclusive Perth midnight after a cited calendar date is a representation of
+-- that date, not an invented duration. Only explicit_end may return a timestamp.
+CREATE OR REPLACE FUNCTION public.context_supported_validity_end(p_basis text, p_end date)
+RETURNS timestamptz LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $$
+BEGIN
+ IF p_basis IS NULL OR p_basis NOT IN ('explicit_end','ongoing','uncertain','unknown_end')
+ THEN RAISE EXCEPTION 'luna_validity_basis_invalid'; END IF;
+ IF p_basis='explicit_end' THEN
+  IF p_end IS NULL THEN RAISE EXCEPTION 'luna_validity_end_required'; END IF;
+  RETURN ((p_end+1)::timestamp AT TIME ZONE 'Australia/Perth');
+ END IF;
+ IF p_end IS NOT NULL THEN RAISE EXCEPTION 'luna_validity_end_without_basis'; END IF;
+ RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION public.context_supported_validity_end(text,date) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.context_supported_validity_end(text,date) TO service_role;
 
 -- Deterministic calendar evidence only; never infer from the extraction clock.
 CREATE OR REPLACE FUNCTION public.context_supported_due_date(p_text text,p_event_at timestamptz)
@@ -154,6 +176,7 @@ DECLARE
  event_ids uuid[]:='{}'; refs uuid[]; new_ids uuid[]:='{}'; transition_ids uuid[]:='{}';
  target text; kind text; fact_id uuid; ref uuid; old_id uuid; new_index integer; link uuid;
  event_time timestamptz; confidence numeric; due date; expiry timestamptz; review_time timestamptz;
+ validity_end date; validity_basis text; incoming_event_at timestamptz; existing_event_at timestamptz;
  source_text text; source_refs jsonb; source_event jsonb; supported_date date; supported_dates date[]; excerpt text; digest text; request_hash text; receipt public.luna_context_job_revisions;
  result jsonb; n integer:=0; ns integer:=0; nr integer:=0; mode text; now_time timestamptz:=clock_timestamp();
 BEGIN
@@ -221,6 +244,15 @@ BEGIN
      OR coalesce(previous#>>'{provenance,writer_role}','classifier')<>'classifier' THEN
     RETURN jsonb_build_object('outcome','held','reason','human_fact');
    END IF;
+   -- Event time, not write time, decides recency. Late older evidence cannot supersede.
+   SELECT max((value->>'event_at')::timestamptz) INTO incoming_event_at
+    FROM jsonb_array_elements(p_events) WHERE (value->>'id')::uuid=ANY(refs);
+   existing_event_at:=coalesce((previous->>'source_event_at')::timestamptz,(previous#>>'{provenance,event_at}')::timestamptz);
+   IF existing_event_at IS NULL AND previous->>'event_date' IS NOT NULL THEN
+    existing_event_at:=((previous->>'event_date')::date)::timestamp AT TIME ZONE 'Australia/Perth';
+   END IF;
+   IF existing_event_at IS NOT NULL AND incoming_event_at IS NOT NULL AND incoming_event_at<existing_event_at
+    THEN RAISE EXCEPTION 'luna_stale_event_override'; END IF;
    transition_ids:=array_append(transition_ids,old_id);
   END LOOP;
  END LOOP;
@@ -231,7 +263,7 @@ BEGIN
    OR nullif(btrim(f->>'text'),'') IS NULL OR length(f->>'text')>4000
    OR jsonb_typeof(f->'confidence') IS DISTINCT FROM 'number' OR (f->>'confidence')::numeric NOT BETWEEN 0 AND 1
    OR jsonb_typeof(f->'source_event_ids') IS DISTINCT FROM 'array' OR jsonb_array_length(f->'source_event_ids')=0
-   OR EXISTS(SELECT 1 FROM jsonb_object_keys(f) k WHERE k NOT IN ('kind','text','confidence','source_event_ids','evidence_excerpt','due_date'))
+   OR EXISTS(SELECT 1 FROM jsonb_object_keys(f) k WHERE k NOT IN ('kind','text','confidence','source_event_ids','evidence_excerpt','due_date','validity_end','validity_basis'))
   THEN RAISE EXCEPTION 'luna_fact_shape_invalid'; END IF;
   SELECT array_agg(DISTINCT value::uuid ORDER BY value::uuid) INTO refs FROM jsonb_array_elements_text(f->'source_event_ids');
   IF NOT refs <@ event_ids THEN RAISE EXCEPTION 'luna_fact_source_mismatch'; END IF;
@@ -259,18 +291,40 @@ BEGIN
    END LOOP;
    IF cardinality(supported_dates)=0 THEN RAISE EXCEPTION 'luna_due_date_unsupported'; END IF;
   END IF;
-  expiry:=public.context_fact_expiry(kind,event_time,due);
+  validity_basis:=coalesce(nullif(btrim(f->>'validity_basis'),''), CASE WHEN f->>'validity_end' IS NOT NULL THEN 'explicit_end' ELSE 'unknown_end' END);
+  IF validity_basis NOT IN ('explicit_end','ongoing','uncertain','unknown_end') THEN RAISE EXCEPTION 'luna_validity_basis_invalid'; END IF;
+  IF f->>'validity_end' IS NOT NULL AND f->>'validity_end' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN RAISE EXCEPTION 'luna_validity_end_shape_invalid'; END IF;
+  validity_end:=(f->>'validity_end')::date;
+  IF due IS NOT NULL AND validity_end IS NOT NULL AND due IS DISTINCT FROM validity_end THEN RAISE EXCEPTION 'luna_validity_end_unsupported'; END IF;
+  IF validity_end IS NOT NULL THEN
+   IF validity_basis<>'explicit_end' THEN RAISE EXCEPTION 'luna_validity_end_without_basis'; END IF;
+   supported_dates:='{}';
+   FOR source_event IN SELECT value FROM jsonb_array_elements(p_events) WHERE (value->>'id')::uuid=ANY(refs) LOOP
+    source_text:=public.context_event_text(jsonb_populate_record(NULL::public.business_events,source_event));
+    IF excerpt IS NOT NULL THEN
+     IF position(excerpt in source_text)=0 THEN CONTINUE; END IF;
+     source_text:=excerpt;
+    ELSIF cardinality(refs)<>1 THEN RAISE EXCEPTION 'luna_validity_end_excerpt_required'; END IF;
+    supported_date:=public.context_supported_due_date(source_text,(source_event->>'event_at')::timestamptz);
+    IF supported_date IS NULL OR supported_date IS DISTINCT FROM validity_end THEN RAISE EXCEPTION 'luna_validity_end_unsupported'; END IF;
+    supported_dates:=array_append(supported_dates,supported_date);
+   END LOOP;
+   IF cardinality(supported_dates)=0 THEN RAISE EXCEPTION 'luna_validity_end_unsupported'; END IF;
+  ELSIF validity_basis='explicit_end' THEN RAISE EXCEPTION 'luna_validity_end_required'; END IF;
+  -- Refuse any restored invented midnight/7/14/21-day helper. Due date is not expiry.
+  IF public.context_fact_expiry(kind,event_time,due) IS NOT NULL THEN RAISE EXCEPTION 'luna_invented_expiry'; END IF;
+  expiry:=public.context_supported_validity_end(validity_basis,validity_end);
   review_time:=CASE WHEN kind='client_preference' THEN ((event_time AT TIME ZONE 'Australia/Perth')+interval '1 year') AT TIME ZONE 'Australia/Perth' ELSE NULL END;
   target:=CASE WHEN kind IN ('current_state','pending_action','quote_issue') THEN 'job_temporary_context' ELSE 'job_context' END;
   fact_id:=md5(p_run_id::text||':luna_v2:'||n::text)::uuid;
   SELECT jsonb_agg(jsonb_build_object('table','business_events','id',id::text) ORDER BY id) INTO source_refs FROM unnest(refs) id;
-  EXECUTE format('INSERT INTO public.%I(id,job_id,kind,value,provenance,correlation_id,lifecycle,event_date,expires_at,review_at,source_event_ids,attribution_confidence,extractor_version,trust)
-   VALUES($1,$2,$3,$4,$5,$6,''current'',$7,$8,$9,$10,$11,''luna_v2'',''luna'') RETURNING to_jsonb(%I)',target,target)
+  EXECUTE format('INSERT INTO public.%I(id,job_id,kind,value,provenance,correlation_id,lifecycle,event_date,expires_at,review_at,source_event_ids,attribution_confidence,extractor_version,trust,validity_basis,last_verified_at,source_event_at)
+   VALUES($1,$2,$3,$4,$5,$6,''current'',$7,$8,$9,$10,$11,''luna_v2'',''luna'',$12,NULL,$13) RETURNING to_jsonb(%I)',target,target)
   INTO actual USING fact_id,p_job_id,kind,
-   jsonb_strip_nulls(jsonb_build_object('text',f->>'text','confidence',(f->>'confidence')::numeric,'source_refs',source_refs,'evidence_excerpt',f->>'evidence_excerpt','due_date',due)),
+   jsonb_strip_nulls(jsonb_build_object('text',f->>'text','confidence',(f->>'confidence')::numeric,'source_refs',source_refs,'evidence_excerpt',f->>'evidence_excerpt','due_date',due,'validity_end',validity_end)),
    jsonb_build_object('extractor','luna_v2','writer_role','classifier','untrusted',false,'lifecycle','active','source_event_ids',to_jsonb(refs),
-    'event_at',event_time,'safety',jsonb_build_object('memory_trusted',true,'action_safe',false,'state_change_safe',false,'outbound_safe',false)),
-   p_run_id,(event_time AT TIME ZONE 'Australia/Perth')::date,expiry,review_time,refs,confidence;
+    'event_at',event_time,'validity_basis',validity_basis,'source_event_at',event_time,'safety',jsonb_build_object('memory_trusted',true,'action_safe',false,'state_change_safe',false,'outbound_safe',false)),
+   p_run_id,(event_time AT TIME ZONE 'Australia/Perth')::date,expiry,review_time,refs,confidence,validity_basis,event_time;
   INSERT INTO public.luna_context_fact_custody(fact_store,fact_id,fact_sha256,run_id)
    VALUES(target,fact_id,encode(sha256(convert_to(actual::text,'UTF8')),'hex'),p_run_id);
   new_ids:=array_append(new_ids,fact_id);n:=n+1;
@@ -303,15 +357,17 @@ GRANT EXECUTE ON FUNCTION public.persist_luna_context_revision(uuid,uuid,uuid,js
 CREATE OR REPLACE VIEW public.current_job_context_facts WITH (security_invoker=true) AS
 SELECT visible.* FROM (
  SELECT id,job_id,kind,value,provenance,correlation_id,created_at,updated_at,expires_at,'job_context'::text AS _context_store,
-  lifecycle,event_date,source_event_ids,attribution_confidence,extractor_version,superseded_by,lifecycle_reason,trust,review_at
+  lifecycle,event_date,source_event_ids,attribution_confidence,extractor_version,superseded_by,lifecycle_reason,trust,review_at,
+  validity_basis,last_verified_at,source_event_at
  FROM public.job_context
  UNION ALL
  SELECT id,job_id,kind,value,provenance,correlation_id,created_at,updated_at,expires_at,'job_temporary_context'::text AS _context_store,
-  lifecycle,event_date,source_event_ids,attribution_confidence,extractor_version,superseded_by,lifecycle_reason,trust,review_at
+  lifecycle,event_date,source_event_ids,attribution_confidence,extractor_version,superseded_by,lifecycle_reason,trust,review_at,
+  validity_basis,last_verified_at,source_event_at
  FROM public.job_temporary_context
 ) visible
 WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
- AND (kind NOT IN ('current_state','pending_action','quote_issue','proposal') OR expires_at IS NOT NULL)
+ AND (extractor_version='luna_v2' OR kind NOT IN ('current_state','pending_action','quote_issue','proposal') OR expires_at IS NOT NULL)
  AND (extractor_version IS DISTINCT FROM 'luna_v2' OR (
   cardinality(source_event_ids)>0 AND NOT EXISTS (
    SELECT 1 FROM unnest(visible.source_event_ids) source_id
