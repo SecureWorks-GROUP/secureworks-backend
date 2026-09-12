@@ -14,6 +14,12 @@ export type DispatchContextEvent = {
   metadata?: Record<string, unknown> | null;
 };
 
+export type DispatchDerivation = {
+  owner: "dispatch";
+  event_id: string;
+  plan_version: number;
+};
+
 export type DispatchWorkingState = {
   present: true;
   not_provider_fact: true;
@@ -28,6 +34,16 @@ export type DispatchWorkingState = {
   snapshot: unknown;
   event_id: string;
   correlation_id: string | null;
+  derivation: DispatchDerivation;
+};
+
+export type ProjectedDispatchFact = {
+  id: string;
+  job_id: string;
+  kind: string;
+  value: { text: string; command: unknown; plan_version: number };
+  provenance: { derivation: DispatchDerivation; writer_role: "projection" };
+  _context_store: "dispatch_projection";
 };
 
 export function isDispatchWorkingStateEvent(event: DispatchContextEvent): boolean {
@@ -55,6 +71,17 @@ function planVersionOf(event: DispatchContextEvent): number {
   return typeof v === "number" && Number.isFinite(v) ? v : -1;
 }
 
+export function derivationOf(event: DispatchContextEvent): DispatchDerivation | null {
+  const raw = event.metadata?.derivation as Record<string, unknown> | undefined;
+  const planVersion = typeof raw?.plan_version === "number" ? raw.plan_version : planVersionOf(event);
+  const eventId = typeof raw?.event_id === "string" && UUID.test(raw.event_id)
+    ? raw.event_id
+    : (typeof event.correlation_id === "string" && UUID.test(event.correlation_id) ? event.correlation_id : null);
+  if (!eventId || planVersion < 0) return null;
+  if (raw && raw.owner !== undefined && raw.owner !== "dispatch") return null;
+  return { owner: "dispatch", event_id: eventId, plan_version: planVersion };
+}
+
 /** Latest human Dispatch review state for a job. Never a provider fact. */
 export function currentDispatchWorkingState(
   events: DispatchContextEvent[],
@@ -64,6 +91,7 @@ export function currentDispatchWorkingState(
   for (const event of events) {
     if (!isDispatchWorkingStateEvent(event)) continue;
     if (!jobIdOf(event)) continue;
+    if (!derivationOf(event)) continue;
     const key = event.correlation_id || event.id;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -77,6 +105,8 @@ export function currentDispatchWorkingState(
     if (ev > cv) current = event;
   }
   const jobId = jobIdOf(current)!;
+  const derivation = derivationOf(current);
+  if (!derivation) return { present: false };
   return {
     present: true,
     not_provider_fact: true,
@@ -91,5 +121,65 @@ export function currentDispatchWorkingState(
     snapshot: current.payload?.state ?? null,
     event_id: current.id,
     correlation_id: current.correlation_id ?? null,
+    derivation,
+  };
+}
+
+/** Read-time fact projection. Does not persist. Lineage must survive for Dispatch source-hash exclusion. */
+export function projectDispatchDerivedFacts(
+  state: DispatchWorkingState | { present: false },
+): ProjectedDispatchFact[] {
+  if (!state.present) return [];
+  return [{
+    id: `dispatch-derived:${state.derivation.event_id}`,
+    job_id: state.job_id,
+    kind: "note",
+    value: {
+      text: "Dispatch working review state. Not a claim that an order was sent, purchased, delivered or paid.",
+      command: state.command,
+      plan_version: state.plan_version,
+    },
+    provenance: { derivation: { ...state.derivation }, writer_role: "projection" },
+    _context_store: "dispatch_projection",
+  }];
+}
+
+/** Mirrors Dispatch SQL: source hash excludes facts whose derivation.owner is dispatch. */
+export function factsForDispatchSourceHash(facts: Array<{ provenance?: { derivation?: { owner?: string } } }>): typeof facts {
+  return facts.filter((fact) => fact.provenance?.derivation?.owner !== "dispatch");
+}
+
+export function dispatchSourceFingerprint(facts: Array<{ id?: string; provenance?: { derivation?: { owner?: string } } }>): string {
+  return JSON.stringify(factsForDispatchSourceHash(facts).map((fact) => fact.id).sort());
+}
+
+export type OrgRollupToJob = {
+  facts: ProjectedDispatchFact[];
+  needs_richer_lineage: boolean;
+};
+
+/** Org summaries that feed a job keep Dispatch lineage. Mixed own+independent inputs are not silently merged. */
+export function projectOrgRollupOntoJob(
+  orgFacts: Array<{ id: string; kind: string; value: unknown; provenance?: { derivation?: DispatchDerivation | { owner?: string } } }>,
+  jobId: string,
+): OrgRollupToJob {
+  const dispatchOwned = orgFacts.filter((fact) => fact.provenance?.derivation?.owner === "dispatch");
+  const independent = orgFacts.filter((fact) => fact.provenance?.derivation?.owner !== "dispatch");
+  if (dispatchOwned.length > 0 && independent.length > 0) {
+    return { facts: [], needs_richer_lineage: true };
+  }
+  return {
+    needs_richer_lineage: false,
+    facts: dispatchOwned.map((fact) => {
+      const derivation = fact.provenance?.derivation as DispatchDerivation;
+      return {
+        id: `org-rollup:${fact.id}`,
+        job_id: jobId,
+        kind: "note",
+        value: { text: "Organisation summary derived from Dispatch. Not a provider claim.", command: null, plan_version: derivation.plan_version },
+        provenance: { derivation: { ...derivation }, writer_role: "projection" },
+        _context_store: "dispatch_projection",
+      };
+    }),
   };
 }

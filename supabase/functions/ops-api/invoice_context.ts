@@ -13,7 +13,7 @@
 // open receivable in one call so the screen and the coverage table do not need
 // one door call per invoice.
 
-import { currentDispatchWorkingState } from "./dispatch_context.ts";
+import { currentDispatchWorkingState, projectDispatchDerivedFacts } from "./dispatch_context.ts";
 
 export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
@@ -628,7 +628,16 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
     },
     link: { status: link.status, method: link.method, job_id: link.job_id, job_number: link.job_number, candidates: link.status === "ambiguous" ? link.candidates : [] },
     job,
-    facts: facts.map((f: any) => ({ id: f.id, kind: f.kind, value: f.value, provenance: f.provenance ?? null, updated_at: f.updated_at ?? null })),
+    facts: [
+      ...facts.map((f: any) => ({ id: f.id, kind: f.kind, value: f.value, provenance: f.provenance ?? null, updated_at: f.updated_at ?? null })),
+      ...projectDispatchDerivedFacts(dispatchWorkingState).map((f) => ({
+        id: f.id,
+        kind: f.kind,
+        value: f.value,
+        provenance: f.provenance,
+        updated_at: null,
+      })),
+    ],
     dispatch_working_state: dispatchWorkingState,
     conversation: {
       messages: conversation.map((m: any) => ({

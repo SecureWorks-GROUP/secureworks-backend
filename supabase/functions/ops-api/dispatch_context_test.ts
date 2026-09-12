@@ -1,17 +1,22 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   currentDispatchWorkingState,
+  derivationOf,
+  dispatchSourceFingerprint,
   isProviderExtractableEvent,
+  projectDispatchDerivedFacts,
+  projectOrgRollupOntoJob,
   type DispatchContextEvent,
 } from "./dispatch_context.ts";
 
 const JOB = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const REQ = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 function evt(partial: Partial<DispatchContextEvent> & { id: string }): DispatchContextEvent {
   return {
     event_type: "dispatch.plan.changed",
     job_id: JOB,
-    correlation_id: partial.correlation_id ?? partial.id,
+    correlation_id: partial.correlation_id ?? REQ,
     payload: {
       contract_version: "dispatch-context/v1",
       org_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -26,6 +31,7 @@ function evt(partial: Partial<DispatchContextEvent> & { id: string }): DispatchC
       evidence_role: "human_working_state",
       provider_action: false,
       source_ref: { table: "dispatch_plans", job_id: JOB, version: 1 },
+      derivation: { owner: "dispatch", event_id: REQ, plan_version: (partial.payload as { plan_version?: number } | undefined)?.plan_version ?? 1 },
       ...(partial.metadata as object || {}),
     },
     ...partial,
@@ -78,6 +84,50 @@ Deno.test("working-state drafts are not extractable provider facts", () => {
     assertEquals(cur.evidence_role, "human_working_state");
     assertEquals(cur.command, "order_prepare");
   }
+});
+
+Deno.test("derivation survives from event metadata onto projected fact provenance", () => {
+  const event = evt({ id: "e-save", payload: { plan_version: 7, command: "save" } });
+  assertEquals(derivationOf(event), { owner: "dispatch", event_id: REQ, plan_version: 7 });
+  const state = currentDispatchWorkingState([event]);
+  const projected = projectDispatchDerivedFacts(state);
+  assertEquals(projected.length, 1);
+  assertEquals(projected[0].provenance.derivation, { owner: "dispatch", event_id: REQ, plan_version: 7 });
+});
+
+Deno.test("save/review echo of own projection does not change Dispatch source fingerprint", () => {
+  const before: Array<{ id: string; provenance?: { derivation?: { owner?: string } } }> = [
+    { id: "scope-1" },
+  ];
+  const event = evt({ id: "echo", payload: { plan_version: 1, command: "save" } });
+  const own = projectDispatchDerivedFacts(currentDispatchWorkingState([event]));
+  assertEquals(dispatchSourceFingerprint(before), dispatchSourceFingerprint([...before, ...own]));
+});
+
+Deno.test("external independent fact still changes Dispatch source fingerprint", () => {
+  const before: Array<{ id: string; provenance?: { derivation?: { owner?: string } } }> = [
+    { id: "scope-1" },
+  ];
+  const external = { id: "email-1", provenance: { derivation: { owner: "external_email" } } };
+  assertEquals(dispatchSourceFingerprint(before) === dispatchSourceFingerprint([...before, external]), false);
+});
+
+Deno.test("org rollup preserves Dispatch lineage; mixed inputs are not silently merged", () => {
+  const dispatchOrg = {
+    id: "org-d",
+    kind: "note",
+    value: {},
+    provenance: { derivation: { owner: "dispatch" as const, event_id: REQ, plan_version: 2 } },
+  };
+  const onlyOwn = projectOrgRollupOntoJob([dispatchOrg], JOB);
+  assertEquals(onlyOwn.needs_richer_lineage, false);
+  assertEquals(onlyOwn.facts[0].provenance.derivation.owner, "dispatch");
+  const mixed = projectOrgRollupOntoJob([
+    dispatchOrg,
+    { id: "org-x", kind: "note", value: {}, provenance: { derivation: { owner: "external_email" } } },
+  ], JOB);
+  assertEquals(mixed.needs_richer_lineage, true);
+  assertEquals(mixed.facts.length, 0);
 });
 
 Deno.test("ordinary client evidence remains extractable", () => {
