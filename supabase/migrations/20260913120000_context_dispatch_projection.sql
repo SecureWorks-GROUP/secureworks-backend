@@ -140,15 +140,7 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
 REVOKE ALL ON public.current_job_context_facts,public.context_dispatch_working_facts FROM PUBLIC,anon,authenticated;
 GRANT SELECT ON public.current_job_context_facts,public.context_dispatch_working_facts TO service_role;
 
--- Exact Dispatch SQL78 context predicate: full row JSON, not fact IDs.
-CREATE OR REPLACE FUNCTION public.context_facts_for_dispatch_source(p_job uuid)
-RETURNS jsonb LANGUAGE sql STABLE SECURITY INVOKER SET search_path=public,pg_temp AS $$
- SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.id),'[]'::jsonb)
- FROM public.current_job_context_facts c
- WHERE c.job_id=p_job AND c.provenance#>>'{derivation,owner}' IS DISTINCT FROM 'dispatch'
-$$;
-REVOKE ALL ON FUNCTION public.context_facts_for_dispatch_source(uuid) FROM PUBLIC,anon,authenticated;
-GRANT EXECUTE ON FUNCTION public.context_facts_for_dispatch_source(uuid) TO service_role;
+-- Dispatch owns dispatch_source_version. CIO does not ship an owner-only hash mirror.
 
 CREATE OR REPLACE FUNCTION public.context_dispatch_current(p_org uuid, p_job uuid)
 RETURNS jsonb LANGUAGE sql STABLE SECURITY INVOKER SET search_path=public,pg_temp AS $$

@@ -2,7 +2,6 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   currentDispatchWorkingState,
   derivationOf,
-  dispatchSourceFingerprint,
   isProviderExtractableEvent,
   projectDispatchDerivedFacts,
   projectOrgRollupOntoJob,
@@ -95,23 +94,6 @@ Deno.test("derivation survives from event metadata onto projected fact provenanc
   const projected = projectDispatchDerivedFacts(state);
   assertEquals(projected.length, 1);
   assertEquals(projected[0].provenance.derivation, { owner: "dispatch", event_id: REQ, plan_version: 7 });
-});
-
-Deno.test("save/review echo of own projection does not change Dispatch source fingerprint", () => {
-  const before: Array<{ id: string; provenance?: { derivation?: { owner?: string } } }> = [
-    { id: "scope-1" },
-  ];
-  const event = evt({ id: "echo", payload: { plan_version: 1, command: "save" } });
-  const own = projectDispatchDerivedFacts(currentDispatchWorkingState([event]));
-  assertEquals(dispatchSourceFingerprint(before), dispatchSourceFingerprint([...before, ...own]));
-});
-
-Deno.test("external independent fact still changes Dispatch source fingerprint", () => {
-  const before: Array<{ id: string; provenance?: { derivation?: { owner?: string } } }> = [
-    { id: "scope-1" },
-  ];
-  const external = { id: "email-1", provenance: { derivation: { owner: "external_email" } } };
-  assertEquals(dispatchSourceFingerprint(before) === dispatchSourceFingerprint([...before, external]), false);
 });
 
 Deno.test("mixed org rollup does not feed job actions or current facts", () => {

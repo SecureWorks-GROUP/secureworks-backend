@@ -152,15 +152,6 @@ export function projectDispatchDerivedFacts(
   }];
 }
 
-/** Mirrors Dispatch SQL: source hash excludes facts whose derivation.owner is dispatch. */
-export function factsForDispatchSourceHash<T extends { provenance?: { derivation?: { owner?: string } } }>(facts: T[]): T[] {
-  return facts.filter((fact) => fact.provenance?.derivation?.owner !== "dispatch");
-}
-
-export function dispatchSourceFingerprint(facts: Array<{ id: string; provenance?: { derivation?: { owner?: string } } }>): string {
-  return JSON.stringify(factsForDispatchSourceHash(facts).map((fact) => fact.id).sort());
-}
-
 export type OrgRollupToJob = {
   facts: ProjectedDispatchFact[];
   feeds_job_actions: false;

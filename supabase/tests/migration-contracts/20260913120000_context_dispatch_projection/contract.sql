@@ -1,3 +1,19 @@
+-- Dispatch-owned predicate, verbatim from
+-- /private/tmp/dispatch-core-20260912/supabase/migrations/20260912150402_dispatch_workbench.sql
+-- at 7c0adfaa. Snapshot e32c1d6e was not in this clone. CIO does not own this function.
+CREATE OR REPLACE FUNCTION public.dispatch_source_version(p_org uuid,p_job uuid)
+RETURNS text LANGUAGE sql STABLE SECURITY INVOKER SET search_path=public,pg_temp AS $$
+ SELECT md5(jsonb_build_object(
+  'job',jsonb_build_object('scope',j.scope_json,'pricing',j.pricing_json,'accepted',j.accepted_at,'status',j.status,'address',j.site_address,'scheduled',j.scheduled_at),
+  'purchase_orders',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.id),'[]') FROM purchase_orders p WHERE p.job_id=j.id),
+  'documents',(SELECT coalesce(jsonb_agg(to_jsonb(d) ORDER BY d.id),'[]') FROM job_documents d WHERE d.job_id=j.id),
+  'communications',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.id),'[]') FROM po_communications c WHERE c.job_id=j.id),
+  'media',(SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY m.id),'[]') FROM job_media m WHERE m.job_id=j.id),
+  'assignments',(SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]') FROM job_assignments a WHERE a.job_id=j.id),
+  'context',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.id),'[]') FROM current_job_context_facts c WHERE c.job_id=j.id AND c.provenance#>>'{derivation,owner}' IS DISTINCT FROM 'dispatch')
+ )::text) FROM jobs j WHERE j.id=p_job AND j.org_id=p_org;
+$$;
+
 BEGIN;
 DO $$
 DECLARE
@@ -10,14 +26,14 @@ DECLARE
  ev_old uuid:='ee000000-0000-4000-8000-000000000001';
  ev_new uuid:='ee000000-0000-4000-8000-0000000000ff';
  ev_unproven uuid:='ee000000-0000-4000-8000-0000000000ee';
- before jsonb; after_own jsonb; after_rev jsonb; other jsonb;
+ before text; after_own text; after_rev text; other text;
 BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES
   (job_a,org_a,'accepted','patio','DISP-A'),
   (job_b,org_b,'accepted','patio','DISP-B');
  INSERT INTO public.job_context(id,job_id,kind,value,provenance)
   VALUES(fact_id,job_a,'note','{"text":"deliver Monday"}','{"derivation":{"owner":"supplier"}}');
- before:=public.context_facts_for_dispatch_source(job_a);
+ before:=public.dispatch_source_version(org_a,job_a);
 
  -- Unproven emit (no match_status/method) must not appear on the view.
  INSERT INTO public.business_events(id,job_id,event_type,payload,metadata,match_status,match_method)
@@ -28,8 +44,8 @@ BEGIN
  IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=ev_unproven) THEN
   RAISE EXCEPTION 'unproven dispatch event was projected';
  END IF;
- IF public.context_facts_for_dispatch_source(job_a) IS DISTINCT FROM before THEN
-  RAISE EXCEPTION 'unproven emit changed dispatch source context';
+ IF public.dispatch_source_version(org_a,job_a) IS DISTINCT FROM before THEN
+  RAISE EXCEPTION 'unproven emit changed real dispatch_source_version';
  END IF;
 
  -- Attributed own event: general query exposes it; source hash ignores owner=dispatch.
@@ -52,16 +68,16 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_a AND value->'state'->'notes'@>'[{"text":"site note"}]' AND jsonb_typeof(value->'state')='object') THEN
   RAISE EXCEPTION 'projected value dropped payload.state';
  END IF;
- after_own:=public.context_facts_for_dispatch_source(job_a);
+ after_own:=public.dispatch_source_version(org_a,job_a);
  IF after_own IS DISTINCT FROM before THEN
-  RAISE EXCEPTION 'own dispatch echo changed the real source context JSON';
+  RAISE EXCEPTION 'own dispatch echo changed real dispatch_source_version';
  END IF;
 
  -- Same-ID external revision must change the full-row hash.
  UPDATE public.job_context SET value='{"text":"delivery cancelled"}',provenance='{"derivation":{"owner":"supplier"},"rev":2}' WHERE id=fact_id;
- after_rev:=public.context_facts_for_dispatch_source(job_a);
+ after_rev:=public.dispatch_source_version(org_a,job_a);
  IF after_rev IS NOT DISTINCT FROM after_own THEN
-  RAISE EXCEPTION 'same-ID external revision was invisible to dispatch source context';
+  RAISE EXCEPTION 'same-ID external revision was invisible to real dispatch_source_version';
  END IF;
 
  -- Tenant: org B must not see org A dispatch projection.
@@ -71,9 +87,12 @@ BEGIN
  IF EXISTS(SELECT 1 FROM public.current_job_context_facts c JOIN public.jobs j ON j.id=c.job_id WHERE c.job_id=job_a AND j.org_id=org_b) THEN
   RAISE EXCEPTION 'tenant-crossed job facts';
  END IF;
- other:=public.context_facts_for_dispatch_source(job_b);
- IF other IS DISTINCT FROM '[]'::jsonb THEN
-  RAISE EXCEPTION 'other tenant job inherited context';
+ other:=public.dispatch_source_version(org_b,job_b);
+ IF other IS NULL THEN
+  RAISE EXCEPTION 'tenant job B should still have a source version';
+ END IF;
+ IF public.dispatch_source_version(org_b,job_a) IS NOT NULL THEN
+  RAISE EXCEPTION 'org B read of job A was not tenant-scoped';
  END IF;
 
  -- Malformed uuid must be excluded, not throw across all job queries.
