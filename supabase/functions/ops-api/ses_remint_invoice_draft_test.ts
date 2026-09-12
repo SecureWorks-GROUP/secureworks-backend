@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA } from "./ses_commercial_quantity_override.ts";
 import {
+  makeDefaultRemintDeps,
   remintSesInvoiceDraftAction,
   REMINT_DRAFT_DELETED_MINT_FAILED,
   REMINT_REQUIRES_DRAFT,
@@ -140,6 +141,44 @@ Deno.test("invalid lock never deletes", async () => {
     SesActionError,
   );
   assertEquals(calls.includes("delete"), false);
+});
+
+Deno.test("loadLiveInvoice prefers AUTHORISED over a newer DRAFT", async () => {
+  const impl = makeDefaultRemintDeps({
+    requireMintAuthority: async () => {},
+    prepareOverride: async () => ({}),
+    createDraft: async () => ({}),
+    deleteDraftOnXero: async () => ({ status: "DELETED" }),
+  });
+  const client = {
+    from() {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        order: async () => ({
+          data: [
+            {
+              xero_invoice_id: "d",
+              invoice_number: "INV-NEW",
+              status: "DRAFT",
+            },
+            {
+              xero_invoice_id: "a",
+              invoice_number: "INV-0702",
+              status: "AUTHORISED",
+            },
+          ],
+        }),
+      };
+    },
+  };
+  const live = await impl.loadLiveInvoice(client, JOB);
+  assertEquals(live?.invoice_number, "INV-0702");
+  assertEquals(live?.status, "AUTHORISED");
 });
 
 Deno.test("AUTHORISED never deletes", async () => {

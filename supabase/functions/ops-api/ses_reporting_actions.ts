@@ -66,7 +66,6 @@ import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
   applySesSampleDestinationOverride,
   isSesSampleDocket,
-  sesReleaseUsesSampleDestinationOverride,
 } from "./ses_sample_destination.ts";
 import {
   ajsPackCc,
@@ -6588,6 +6587,9 @@ export async function executeSesReleaseRevisionAction(
   }
 
   const primaryIdentity = object(object(primaryEnvelope.v2).identity);
+  // Fail closed: only a SAMPLE docket may skip the live AJS pack CC lock.
+  // Matching the personal-inbox rewrite on routes alone would let a live AJS
+  // pack send without vanessa/mandi/ses@ if the SAMPLE env happened to be set.
   const skipAjsPackCc = isSesSampleDocket({
     job_number: primaryIdentity.job_number,
     identity: primaryIdentity,
@@ -6599,7 +6601,7 @@ export async function executeSesReleaseRevisionAction(
     xero_binding: object(
       (primaryDocket.data as { xero_binding?: unknown } | null)?.xero_binding,
     ),
-  }) || sesReleaseUsesSampleDestinationOverride(routes);
+  });
 
   for (const kind of requiredOrder) {
     const route = routes.find((candidate: any) =>

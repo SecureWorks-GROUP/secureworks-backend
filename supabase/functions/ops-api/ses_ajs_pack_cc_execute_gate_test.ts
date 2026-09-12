@@ -312,6 +312,39 @@ Deno.test("SEND IT skips the AJS pack CC lock on a SAMPLE docket with blank cc",
   assertEquals(state.graphCalls.every((call) => (call.cc || []).length === 0), true);
 });
 
+Deno.test("SEND IT still demands AJS pack CCs on a live docket even if routes look like SAMPLE", async () => {
+  const previous = Deno.env.get("SES_SAMPLE_DESTINATION_OVERRIDE");
+  Deno.env.set(
+    "SES_SAMPLE_DESTINATION_OVERRIDE",
+    "captain-personal@example.test",
+  );
+  try {
+    const sampleShapedRoutes = ajsRoutes([]).map((route) => ({
+      ...route,
+      recipients: ["captain-personal@example.test"],
+      cc: [],
+    }));
+    const state = harness({
+      routes: sampleShapedRoutes,
+      sampleDocket: false,
+    });
+    let error: SesActionError | null = null;
+    try {
+      await execute(state);
+    } catch (err) {
+      error = err as SesActionError;
+    }
+    assert(error instanceof SesActionError, "expected a typed SES refusal");
+    assertEquals(error!.status, 409);
+    const refusal = error!.refusal as any;
+    assertEquals(refusal.code, "route_recipient_invalid");
+    assertEquals(state.graphCalls.length, 0);
+  } finally {
+    if (previous == null) Deno.env.delete("SES_SAMPLE_DESTINATION_OVERRIDE");
+    else Deno.env.set("SES_SAMPLE_DESTINATION_OVERRIDE", previous);
+  }
+});
+
 Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanent pack CC", async () => {
   const state = harness({ routes: ajsRoutes(LEGACY_CC) });
   let error: SesActionError | null = null;
