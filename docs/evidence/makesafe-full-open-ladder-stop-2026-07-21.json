@@ -1,0 +1,150 @@
+{
+  "recorded_at": "2026-07-21T12:04:00Z",
+  "production_source": {
+    "repo": "SecureWorks-GROUP/secureworks-site",
+    "branch": "main",
+    "commit": "9fd9e07404f2fccc102aeeb063b082d85e2be26e",
+    "ops_api_version": 854,
+    "verify_jwt": false,
+    "guarded_smoke": {
+      "passed": 9,
+      "failed": 0,
+      "active_client_key_persisted_locally": true,
+      "credential_recorded": false
+    }
+  },
+  "migration": {
+    "name": "20260721000002_makesafe_intake_full_open.sql",
+    "applied_before_edge_deploy": true,
+    "selection_constraint_present": true,
+    "mixed_full_open_allowlist_constraint_present": true
+  },
+  "legacy_baseline_context": {
+    "classification": "pre_existing_legacy_ai_condition_not_deterministic_anomaly",
+    "observed_at": "2026-07-21T11:29:11.498Z",
+    "extraction_status": "degraded",
+    "degraded_reason": "usage_cap",
+    "model_calls": 1,
+    "captain_ruling": "Proceed because this is the legacy AI path the deterministic cutover replaces. Stop only on deterministic-path anomalies."
+  },
+  "activation": {
+    "activated_at": "2026-07-21T11:47:32.639256Z",
+    "intake_mode": "deterministic",
+    "selection_mode": "full_open",
+    "case_cap": 1,
+    "source_allowlist_count": 0,
+    "instruction_allowlist_count": 0
+  },
+  "baseline_counts": {
+    "cases": 2,
+    "sources": 8,
+    "artifacts": 4,
+    "deterministic_drafts": 2,
+    "cases_with_jobs": 0
+  },
+  "cap_1_observation": {
+    "scheduled_health_at": "2026-07-21T11:53:01.750Z",
+    "extraction_status": "ok",
+    "degraded_reason": null,
+    "model_calls": 0,
+    "new_case_shape": {
+      "state": "exception",
+      "reason_code": "adapter_parse_failure",
+      "missing_fields": ["client_name"],
+      "adapter_id": "mlb",
+      "source_count": 3,
+      "artifact_count": 0,
+      "has_job": false,
+      "side_effects_suppressed": true
+    },
+    "manual_diagnostic_report": {
+      "http_status": 200,
+      "mode": "deterministic",
+      "selection_mode": "full_open",
+      "sources": 339,
+      "cases": 215,
+      "unaccounted": 0,
+      "case_rows_created": 1,
+      "source_rows_created": 1,
+      "artifacts_created": 0,
+      "drafts_created": 0,
+      "jobs_created": 0,
+      "write_failures": 0,
+      "cases_attempted": 1,
+      "cases_deferred": 214,
+      "cases_failed": 0,
+      "ai_calls": 0,
+      "source_read_cap_reached": true,
+      "expected_caveats": ["source_read_capped", "source_sweep_partial"]
+    },
+    "result": "clean"
+  },
+  "cap_2_observation": {
+    "scheduled_health_at": "2026-07-21T11:55:02.131Z",
+    "extraction_status": "ok",
+    "degraded_reason": null,
+    "model_calls": 0,
+    "drafts_created": 0,
+    "auto_filed": 0,
+    "insert_conflicts_healed": 0,
+    "insert_conflicts_live": 0,
+    "dropped_work_orders": 0,
+    "counts_after": {
+      "cases": 5,
+      "sources": 14,
+      "artifacts": 4,
+      "deterministic_drafts": 2,
+      "cases_with_jobs": 0
+    },
+    "sweep_cursor_reset": true,
+    "result": "clean"
+  },
+  "cap_5_stop": {
+    "cap_changed_at": "2026-07-21T11:56:04.441672Z",
+    "scheduled_requests": [
+      {
+        "created_at": "2026-07-21T11:57:00.857590Z",
+        "scheduler_timeout_ms": 5000,
+        "timed_out": true
+      },
+      {
+        "created_at": "2026-07-21T11:59:00.053707Z",
+        "scheduler_timeout_ms": 5000,
+        "timed_out": true
+      },
+      {
+        "created_at": "2026-07-21T12:01:00.074895Z",
+        "scheduler_timeout_ms": 5000,
+        "timed_out": true
+      }
+    ],
+    "last_deterministic_health_at": "2026-07-21T11:55:02.131Z",
+    "health_advanced_during_cap_5": false,
+    "business_counts_changed_during_cap_5": false,
+    "cursor_advanced_without_completed_health": true,
+    "classification": "deterministic_scheduler_timeout_and_health_truthfulness_anomaly",
+    "result": "stop_and_rollback"
+  },
+  "rollback": {
+    "rolled_back_at": "2026-07-21T12:01:17.046572Z",
+    "intake_mode": "legacy",
+    "selection_mode": "full_open",
+    "case_cap": 5,
+    "selection_controls_inert_while_legacy": true,
+    "final_counts": {
+      "cases": 5,
+      "sources": 14,
+      "artifacts": 4,
+      "deterministic_drafts": 2,
+      "cases_with_jobs": 0
+    }
+  },
+  "post_rollback_legacy_context": {
+    "observed_at": "2026-07-21T12:03:09.511Z",
+    "extraction_status": "degraded",
+    "degraded_reason": "usage_cap",
+    "model_calls": 1,
+    "classification": "legacy_ai_condition_after_authority_rollback"
+  },
+  "credential_or_personal_data_in_evidence": false
+}
