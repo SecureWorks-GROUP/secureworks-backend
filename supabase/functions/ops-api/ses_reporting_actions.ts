@@ -76,7 +76,10 @@ import {
   presentSesPackHonesty,
   type SesPackPresentation,
 } from "./ses_pack_presentation.ts";
-import { applySesSampleDestinationOverride } from "./ses_sample_destination.ts";
+import {
+  applySesSampleDestinationOverride,
+  isSesSampleDocket,
+} from "./ses_sample_destination.ts";
 import {
   ajsPackRecipients,
   isAjsBuilderKey,
@@ -6793,9 +6796,11 @@ export async function buildSesReleaseRevisionPlanForDockets(args: {
       builderKeys.every((key) => isAjsBuilderKey(key))
     ? builderKeys[0]
     : (builderKeys.length === 1 ? builderKeys[0] : null);
+  const sampleRelease = dockets.length > 0 &&
+    dockets.every((docket) => isSesSampleDocket(docket));
   const effectiveRoutes = routes.map((route) => ({
     ...route,
-    cc: repairSesReleaseRouteCc({
+    cc: sampleRelease ? (route.cc || []) : repairSesReleaseRouteCc({
       routeKind: route.route_kind,
       builderKeys,
       storedCc: route.cc || [],
@@ -7515,7 +7520,7 @@ export async function executeSesReleaseRevisionAction(
     }
     const docket = requireValue(
       await client.from("makesafe_docket_revisions").select(
-        "id,xero_binding,invoice_obligation_revision_id,envelope,review_spec",
+        "id,xero_binding,invoice_obligation_revision_id,envelope,review_spec,local_invoice_proposal",
       ).eq("id", member.docket_revision_id).maybeSingle(),
       "A release member's exact docket revision no longer exists.",
     );
@@ -7628,6 +7633,20 @@ export async function executeSesReleaseRevisionAction(
     const routeKind = String(effect.route_kind || "");
     if (routeKind) confirmedEffectsByKind.set(routeKind, effect);
   }
+  // Fail closed: only a SAMPLE docket may skip live AJS CC repair. Matching
+  // a personal-inbox rewrite on routes alone would leak vanessa/mandi/ses@
+  // off a live pack, or skip repair when the SAMPLE env happens to be set.
+  const skipCcRepair = memberDockets.length > 0 &&
+    memberDockets.every((docket: Record<string, any>) =>
+      isSesSampleDocket({
+        job_number: object(object(object(docket.envelope).v2).identity)
+          .job_number,
+        identity: object(object(object(docket.envelope).v2).identity),
+        envelope: docket.envelope,
+        local_invoice_proposal: object(docket.local_invoice_proposal),
+        xero_binding: object(docket.xero_binding),
+      })
+    );
 
   for (const kind of requiredOrder) {
     const route = routes.find((candidate: any) =>
@@ -7673,7 +7692,7 @@ export async function executeSesReleaseRevisionAction(
     // and actual gateway payload consume the same repaired route object.
     const effectiveRoute = {
       ...route,
-      cc: repairSesReleaseRouteCc({
+      cc: skipCcRepair ? (Array.isArray(route.cc) ? route.cc : []) : repairSesReleaseRouteCc({
         routeKind: kind,
         builderKeys: memberBuilderKeys,
         storedCc: Array.isArray(route.cc) ? route.cc : [],
