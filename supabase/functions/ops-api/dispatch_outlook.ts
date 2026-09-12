@@ -1,6 +1,9 @@
 // Read adapter only. Native M365 mailbox search is distinct from Resend/captured PO mail.
 // https://learn.microsoft.com/en-us/graph/api/user-list-messages
-import { graphRequest } from "../send-outlook-email/index.ts";
+import {
+  GraphProviderError,
+  graphRequest,
+} from "../send-outlook-email/index.ts";
 export async function dispatchOutlookSearch(
   params: URLSearchParams,
   allowedMailboxes: string[],
@@ -46,13 +49,16 @@ export async function dispatchOutlookSearch(
       target.searchParams.get("$select") !== initial.searchParams.get("$select")
     ) throw new Error("Invalid Outlook continuation");
   }
-  const response = await request(target.toString(), {
-    method: "GET",
-    headers: {
-      Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"',
-    },
-  }, { mutating: false });
-  if (!response.ok) {
+  let response: Response;
+  try {
+    response = await request(target.toString(), {
+      method: "GET",
+      headers: {
+        Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"',
+      },
+    }, { mutating: false });
+  } catch (error) {
+    if (!(error instanceof GraphProviderError)) throw error;
     return {
       records: [],
       next_cursor: null,
@@ -60,7 +66,7 @@ export async function dispatchOutlookSearch(
         complete: false,
         available: false,
         source: "Microsoft Graph",
-        reason: `Mailbox read failed (${response.status})`,
+        reason: `Mailbox read failed (${error.status})`,
       },
     };
   }

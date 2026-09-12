@@ -9,6 +9,7 @@ import {
   dispatchCommand,
   DispatchError,
   dispatchRun,
+  dispatchSupply,
   dispatchTrigger,
   emptyState,
   handleDispatch,
@@ -39,6 +40,7 @@ class Fixture {
     calendar_events: [],
     dispatch_tasks: [],
   };
+  contextFailure: "general" | "upstream" | null = null;
   commits: any[] = [];
   enqueued: any[] = [];
   from(table: string) {
@@ -47,6 +49,9 @@ class Fixture {
   async rpc(name: string, args: any) {
     if (name === "dispatch_order_reservations") return { data: [] };
     if (name === "dispatch_context_facts_for_source") {
+      if (this.contextFailure === "upstream") {
+        return { data: null, error: { message: "Unavailable context" } };
+      }
       return {
         data: this.tables.current_job_context_facts.filter((r) =>
           r.job_id === args.p_job
@@ -166,6 +171,14 @@ class Query {
     return this;
   }
   then(resolve: (r: any) => any) {
+    if (
+      this.table === "current_job_context_facts" &&
+      this.db.contextFailure === "general"
+    ) {
+      return Promise.resolve(
+        resolve({ data: null, error: { message: "Unavailable context" } }),
+      );
+    }
     if (this.patch) {
       for (
         const row of this.db.tables[this.table].filter((r) =>
@@ -333,6 +346,11 @@ Deno.test("truncated calendar, job and context reads fail closed beneath the RES
     const current = await readDispatchJob(db, org, job);
     if (table === "current_job_context_facts") {
       assertEquals(current.coverage.context.complete, false);
+      await assertRejects(
+        () => command(db, "context_review", {}),
+        DispatchError,
+        "coverage incomplete",
+      );
     } else assertEquals(current.coverage.complete, false);
     await assertRejects(
       () => command(db, "assess", {}),
@@ -505,4 +523,66 @@ Deno.test("task status and explicit retry use bounded tenant and actor coordinat
     DispatchError,
   );
   assertEquals(calls.length, 2);
+});
+
+Deno.test("unavailable context cannot be acknowledged then silently recover as reviewed", async () => {
+  for (const failure of ["general", "upstream"] as const) {
+    const db = new Fixture();
+    db.tables.current_job_context_facts.push({
+      id: id(900),
+      job_id: job,
+      kind: "note",
+      value: { text: "Unseen installation instruction" },
+    });
+    const before = await readDispatchJob(db, org, job);
+    db.contextFailure = failure;
+    await assertRejects(
+      () => command(db, "context_review", {}),
+      DispatchError,
+      "context coverage incomplete",
+    );
+    assertEquals(db.commits.length, 0);
+    db.contextFailure = null;
+    const recovered = await command(db, "assess", {});
+    assertEquals(recovered.source_version, before.source_version);
+    assertEquals(recovered.assessment.context_review_required, true);
+    assertEquals(recovered.assessment.ready, false);
+  }
+});
+
+Deno.test("supply kind accepts only omitted, po or stock", async () => {
+  const db = new Fixture();
+  for (const kind of ["stocks", "", "PO", "inventory"]) {
+    await assertRejects(
+      () => dispatchSupply(db, org, new URLSearchParams({ kind })),
+      DispatchError,
+      "Unsupported supply kind",
+    );
+  }
+  assertEquals(
+    (await dispatchSupply(db, org, new URLSearchParams())).supply_lots,
+    [],
+  );
+  assertEquals(
+    (await dispatchSupply(db, org, new URLSearchParams({ kind: "po" })))
+      .supply_lots,
+    [],
+  );
+  const client = {
+    from: () => {
+      const q: any = {
+        select: () => q,
+        eq: () => q,
+        like: () => q,
+        order: () => q,
+        limit: () => Promise.resolve({ data: [] }),
+      };
+      return q;
+    },
+  };
+  assertEquals(
+    (await dispatchSupply(client, org, new URLSearchParams({ kind: "stock" })))
+      .supply_lots,
+    [],
+  );
 });

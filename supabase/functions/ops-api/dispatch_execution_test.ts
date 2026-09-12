@@ -45,29 +45,58 @@ function fixture(fail = false) {
   let action: any = null;
   let sends = 0;
   const client: any = {
-    rpc: (name: string) => {
-      if (name === "dispatch_begin_send") {
-        return Promise.resolve({ data: { allowed: true } });
-      }
-      if (action) return Promise.resolve({ data: { claimed: false, action } });
-      action = {
-        id: id(3),
-        status: "claimed",
-        snapshot: structuredClone(draft),
-      };
-      return Promise.resolve({ data: { claimed: true, action } });
-    },
-    from: () => ({
-      update: (patch: any) => {
-        Object.assign(action, patch);
-        const q: any = {
-          eq: () => q,
-          then: (resolve: any) =>
-            Promise.resolve({ data: [action] }).then(resolve),
+    rpc: (name: string, args: any) => {
+      if (name === "dispatch_claim_execution") {
+        if (action) {
+          return Promise.resolve({ data: { claimed: false, action } });
+        }
+        action = {
+          id: id(3),
+          job_id: id(1),
+          draft_id: id(2),
+          content_hash: "content1",
+          source_version: "source1",
+          status: "claimed",
+          receipt: null,
+          lease_token: "lease1",
+          snapshot: structuredClone(draft),
         };
-        return q;
-      },
-    }),
+        return Promise.resolve({ data: { claimed: true, action } });
+      }
+      if (name === "dispatch_record_execution_progress") {
+        assertEquals(args.p_expected_status, action.status);
+        assertEquals(args.p_expected_receipt, action.receipt ?? null);
+        assertEquals(args.p_expected_source, action.source_version);
+        assertEquals(args.p_lease_token, action.lease_token ?? null);
+        action = {
+          ...action,
+          status: args.p_status,
+          receipt: args.p_receipt,
+          last_error: args.p_error,
+          lease_token: args.p_status === "provider_draft_ready"
+            ? action.lease_token
+            : null,
+        };
+        return Promise.resolve({
+          data: {
+            recorded: true,
+            action,
+            readback_required: action.status === "outcome_unknown",
+          },
+        });
+      }
+      if (name === "dispatch_begin_send") {
+        assertEquals(args.p_lease_token, action.lease_token ?? null);
+        if (!["provider_draft_ready", "sending"].includes(action.status)) {
+          return Promise.resolve({
+            data: { allowed: false, reason: "not_ready", action },
+          });
+        }
+        action = { ...action, status: "sending" };
+        return Promise.resolve({ data: { allowed: true, action } });
+      }
+      throw new Error(`unexpected rpc ${name}`);
+    },
   };
   const provider = {
     prepare: (d: any) => {
@@ -500,15 +529,11 @@ Deno.test("readback records verified sent immutable id through SQL fence", async
   };
   let rpcArgs: any = null;
   const client: any = {
-    from: () => {
-      const builder: any = {
-        select: () => builder,
-        eq: () => builder,
-        maybeSingle: () => Promise.resolve({ data: structuredClone(action) }),
-      };
-      return builder;
-    },
     rpc: (name: string, args: any) => {
+      if (name === "dispatch_get_execution") {
+        assertEquals(args.p_action, action.id);
+        return Promise.resolve({ data: structuredClone(action) });
+      }
       rpcArgs = { name, args };
       assertEquals(name, "dispatch_record_execution_readback");
       assertEquals(args.p_expected_status, "outcome_unknown");
@@ -560,23 +585,19 @@ Deno.test("stale readback result cannot overwrite concurrent execution status", 
     receipt: { mailbox: "ops@example.test", draft_id: "immutable-draft" },
   };
   const client: any = {
-    from: () => {
-      const builder: any = {
-        select: () => builder,
-        eq: () => builder,
-        maybeSingle: () => Promise.resolve({ data: structuredClone(action) }),
-      };
-      return builder;
-    },
-    rpc: () =>
-      Promise.resolve({
+    rpc: (name: string) => {
+      if (name === "dispatch_get_execution") {
+        return Promise.resolve({ data: structuredClone(action) });
+      }
+      return Promise.resolve({
         data: {
           recorded: false,
           reason: "stale_action",
           readback_required: false,
           action: { ...action, status: "not_sent" },
         },
-      }),
+      });
+    },
   };
   const provider = {
     prepare: () => Promise.reject(Error("unused")),
@@ -593,6 +614,99 @@ Deno.test("stale readback result cannot overwrite concurrent execution status", 
   const r = await readbackDispatchExecution(client, id(9), id(3), provider);
   assertEquals(r.action.status, "not_sent");
   assertEquals(r.readback_recorded, false);
+});
+
+Deno.test("late provider success cannot overwrite verified readback recovery", async () => {
+  const draft = {
+    id: id(2),
+    content_hash: "content1",
+    purchase_commitment: false,
+    approval: {
+      id: id(3),
+      content_hash: "content1",
+      source_version: "source1",
+    },
+    body: "Exact reviewed body",
+    to: ["supplier@example.test"],
+    attachments: [],
+  };
+  const job: any = { source_version: "source1", drafts: [draft] };
+  let action: any = {
+    id: id(3),
+    job_id: id(1),
+    draft_id: id(2),
+    content_hash: "content1",
+    source_version: "source1",
+    status: "claimed",
+    receipt: null,
+    lease_token: "lease1",
+    snapshot: structuredClone(draft),
+  };
+  const readbackAction = {
+    ...action,
+    status: "accepted_not_delivered",
+    receipt: {
+      draft_id: "native1",
+      readback: {
+        verified: true,
+        id: "native1",
+        is_draft: false,
+        sent_at: "2026-09-13T01:00:00Z",
+        delivered: null,
+      },
+    },
+    lease_token: null,
+  };
+  let finalProgress = 0;
+  const client: any = {
+    rpc: (name: string, args: any) => {
+      if (name === "dispatch_claim_execution") {
+        return Promise.resolve({ data: { claimed: true, action } });
+      }
+      if (name === "dispatch_record_execution_progress") {
+        if (args.p_status === "provider_draft_ready") {
+          action = {
+            ...action,
+            status: "provider_draft_ready",
+            receipt: args.p_receipt,
+          };
+          return Promise.resolve({
+            data: { recorded: true, action, readback_required: false },
+          });
+        }
+        finalProgress++;
+        return Promise.resolve({
+          data: {
+            recorded: false,
+            reason: "stale_action",
+            action: readbackAction,
+            readback_required: false,
+          },
+        });
+      }
+      if (name === "dispatch_begin_send") {
+        action = { ...action, status: "sending" };
+        return Promise.resolve({ data: { allowed: true, action } });
+      }
+      throw new Error(`unexpected rpc ${name}`);
+    },
+  };
+  const provider = {
+    prepare: () => Promise.resolve({ draft_id: "native1" }),
+    send: () => Promise.resolve({ provider_accepted: true, delivered: null }),
+    readback: () => Promise.reject(Error("unused")),
+  };
+  const result = await executeDispatchDraft(
+    client,
+    id(9),
+    body,
+    provider,
+    true,
+    () => Promise.resolve(job),
+  );
+  assertEquals(finalProgress, 1);
+  assertEquals(result.action.status, "accepted_not_delivered");
+  assertEquals(result.action.receipt.readback.sent_at, "2026-09-13T01:00:00Z");
 });
 
 Deno.test("execution refuses supplier commitment without purchase approval", async () => {

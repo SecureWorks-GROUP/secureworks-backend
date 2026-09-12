@@ -177,6 +177,35 @@ Deno.test("acceptance never inferred from paid/stage alone; canonical hashes sta
   );
   assertEquals(await hash({ a: 1, b: 2 }), await hash({ b: 2, a: 1 }));
 });
+Deno.test("prepared sheets cannot cover a reconciled insulated panel requirement", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", requirement);
+  s = await apply(s, "requirement_review", { id: id(1) });
+  const order = {
+    id: id(2),
+    supplier_name: "Fixture supplier",
+    delivery_address: "Fixture site",
+    requirement_ids: [id(1)],
+    existing_supply_reviewed: true,
+  };
+  s = await apply(s, "order_prepare", order);
+  s = await apply(s, "requirement_reconcile", {
+    id: id(1),
+    description: "Insulated panels",
+    specification: "50mm insulated panel",
+    reason: "Signed physical specification changed",
+  });
+  s = await apply(s, "requirement_review", { id: id(1) });
+  s = await apply(s, "order_prepare", { ...order, id: id(3) });
+  assertEquals(
+    s.order_drafts[0].line_items[0].specification,
+    requirement.specification,
+  );
+  assertEquals(
+    s.order_drafts[1].line_items[0].specification,
+    "50mm insulated panel",
+  );
+  assertEquals(s.order_drafts[1].line_items[0].quantity, requirement.quantity);
+});
 Deno.test("partial supply orders only uncovered balance and supports two suppliers", async () => {
   let s = await apply(emptyState(), "requirement_upsert", requirement);
   s = await apply(s, "requirement_review", { id: id(1) });

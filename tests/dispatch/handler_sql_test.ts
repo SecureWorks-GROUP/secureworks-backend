@@ -412,17 +412,17 @@ Deno.test("handler SQL rejects alternate PO identity and conserves capacity", as
   }
 });
 
-Deno.test("handler SQL readback recovers exact sent immutable receipt without resend", async () => {
+Deno.test("handler SQL expires interrupted send then recovers exact sent immutable receipt without resend", async () => {
   const pg = await openDispatchPg();
   try {
     const action = id(741), jobId = id(742), draft = id(743);
     await insertAcceptedJob(pg, jobId);
     const inserted = await pg.query(
-      `insert into dispatch_executions(org_id,id,job_id,draft_id,content_hash,source_version,snapshot,status,receipt,last_error) values(${
+      `insert into dispatch_executions(org_id,id,job_id,draft_id,content_hash,source_version,snapshot,status,receipt,last_error,lease_token,lease_until) values(${
         literal(org)
       },${literal(action)},${literal(jobId)},${
         literal(draft)
-      },'hash-741','source-741','{}','outcome_unknown',jsonb_build_object('mailbox','ops@example.test','draft_id','immutable-readback-741','change_key','ck-741'),'timeout after provider mutation') returning jsonb_build_object('status',status)`,
+      },'hash-741','source-741','{}','sending',jsonb_build_object('mailbox','ops@example.test','draft_id','immutable-readback-741','change_key','ck-741'),'process stopped after send request',gen_random_uuid(),now()-interval '1 second') returning jsonb_build_object('status',status)`,
     );
     if (inserted.error) throw new Error(inserted.error.message);
     const calls: Array<{ method: string; path: string }> = [];
@@ -457,6 +457,7 @@ Deno.test("handler SQL readback recovers exact sent immutable receipt without re
       provider,
     );
     assertEquals(first.action.status, "outcome_unknown");
+    assertEquals(first.action.lease_until, null);
     assertEquals(first.readback_required, true);
     assertEquals(first.action.receipt.readback, {
       verified: false,

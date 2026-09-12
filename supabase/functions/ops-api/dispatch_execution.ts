@@ -71,18 +71,31 @@ export async function executeDispatchDraft(
       live_actions_enabled: claim.action?.status === "held" ? false : true,
     };
   }
-  const persist = async (patch: any) =>
-    check(
-      await client.from("dispatch_executions").update({
-        ...patch,
-        updated_at: new Date().toISOString(),
-      }).eq("org_id", org).eq("id", b.approval_id),
+  let action = claim.action;
+  const recordProgress = async (
+    status: string,
+    nextReceipt: any,
+    error?: string,
+  ) => {
+    const result = check(
+      await client.rpc("dispatch_record_execution_progress", {
+        p_org: org,
+        p_action: b.approval_id,
+        p_expected_status: action.status,
+        p_expected_receipt: action.receipt ?? null,
+        p_expected_source: action.source_version,
+        p_lease_token: action.lease_token ?? null,
+        p_status: status,
+        p_receipt: nextReceipt ?? null,
+        p_error: error ?? null,
+      }),
     );
+    if (result.action) action = result.action;
+    return result;
+  };
   let receipt: any = null;
   let preparationStarted = false;
   try {
-    // Recheck after claim before any provider mutation. SQL claim already binds
-    // exact content, actor approval, source, job, order and attachment revisions.
     const latest = await readJob(client, org, b.job_id);
     if (
       latest.source_version !== job.source_version ||
@@ -95,11 +108,18 @@ export async function executeDispatchDraft(
     }
     preparationStarted = true;
     receipt = await provider.prepare(
-      claim.action.snapshot,
+      action.snapshot,
       b.approval_id,
       b.job_id,
     );
-    await persist({ status: "provider_draft_ready", receipt });
+    const ready = await recordProgress("provider_draft_ready", receipt);
+    if (!ready.recorded || action.status !== "provider_draft_ready") {
+      return {
+        action,
+        retry_safe: false,
+        readback_required: ready.readback_required,
+      };
+    }
     const beforeSend = await readJob(client, org, b.job_id);
     const currentDraft = beforeSend.drafts.find((d: any) =>
       d.id === b.draft_id
@@ -108,28 +128,36 @@ export async function executeDispatchDraft(
       !releaseCheck() || beforeSend.source_version !== job.source_version ||
       currentDraft?.content_hash !== draft.content_hash ||
       JSON.stringify(currentDraft?.approval) !==
-        JSON.stringify(claim.action.snapshot.approval)
+        JSON.stringify(action.snapshot.approval)
     ) {
-      await persist({
-        status: "not_sent",
+      const stopped = await recordProgress(
+        "not_sent",
         receipt,
-        last_error: "Approval, source or release changed during preparation",
-      });
+        "Approval, source or release changed during preparation",
+      );
       return {
-        action: { id: b.approval_id, status: "not_sent", receipt },
+        action,
         retry_safe: false,
+        readback_required: stopped.readback_required,
       };
     }
     const finalClaim = check(
       await client.rpc("dispatch_begin_send", {
         p_org: org,
         p_action: b.approval_id,
+        p_lease_token: action.lease_token ?? null,
       }),
     );
+    if (finalClaim.action) action = finalClaim.action;
     if (!finalClaim.allowed) {
       return {
-        action: { id: b.approval_id, status: "not_sent", receipt },
+        action: finalClaim.action || action || {
+          id: b.approval_id,
+          status: "not_sent",
+          receipt,
+        },
         retry_safe: false,
+        readback_required: action?.status === "outcome_unknown",
       };
     }
     const sent = await provider.send(receipt, async () => {
@@ -139,7 +167,7 @@ export async function executeDispatchDraft(
         !releaseCheck() || final.source_version !== job.source_version ||
         current?.content_hash !== draft.content_hash ||
         JSON.stringify(current?.approval) !==
-          JSON.stringify(claim.action.snapshot.approval)
+          JSON.stringify(action.snapshot.approval)
       ) {
         throw Object.assign(new Error("Final send authority changed"), {
           known_not_sent: true,
@@ -149,44 +177,42 @@ export async function executeDispatchDraft(
         await client.rpc("dispatch_begin_send", {
           p_org: org,
           p_action: b.approval_id,
+          p_lease_token: action.lease_token ?? null,
         }),
       );
+      if (fence.action) action = fence.action;
       if (!fence.allowed) {
         throw Object.assign(new Error("Final send fence refused"), {
-          known_not_sent: true,
+          action,
+          known_not_sent: fence.reason === "approval_source_or_release_changed",
         });
       }
     });
-    await persist({
-      status: "accepted_not_delivered",
-      receipt: { ...receipt, ...sent },
-    });
+    const mergedReceipt = { ...receipt, ...sent };
+    const accepted = await recordProgress(
+      "accepted_not_delivered",
+      mergedReceipt,
+    );
     return {
-      action: {
-        id: b.approval_id,
-        status: "accepted_not_delivered",
-        receipt: { ...receipt, ...sent },
-      },
+      action,
       live_actions_enabled: true,
+      readback_required: accepted.readback_required,
     };
   } catch (e) {
-    receipt = receipt || (e as any).receipt || null;
+    if ((e as any).action) action = (e as any).action;
+    receipt = receipt || (e as any).receipt || action?.receipt || null;
     const status = !preparationStarted || (e as any).known_not_sent
       ? "not_sent"
       : "outcome_unknown";
-    await persist({
-      status,
-      receipt,
-      last_error: (e as Error).message,
-    });
+    let recorded: any = null;
+    if (!["accepted_not_delivered", "not_sent"].includes(action?.status)) {
+      recorded = await recordProgress(status, receipt, (e as Error).message);
+    }
     return {
-      action: {
-        id: b.approval_id,
-        status,
-        receipt,
-      },
+      action,
       retry_safe: false,
-      readback_required: true,
+      readback_required: recorded?.readback_required ??
+        action?.status === "outcome_unknown",
     };
   }
 }
@@ -197,10 +223,10 @@ export async function readbackDispatchExecution(
   provider: DispatchMailProvider,
 ) {
   const action = check(
-    await client.from("dispatch_executions").select("*").eq("org_id", org).eq(
-      "id",
-      uuid(id),
-    ).maybeSingle(),
+    await client.rpc("dispatch_get_execution", {
+      p_org: org,
+      p_action: uuid(id),
+    }),
   );
   if (!action) throw new DispatchError("Action not found", 404);
   if (!action.receipt) {
@@ -501,6 +527,12 @@ export async function dispatchExecutionState(
   canApprove = false,
 ) {
   await readDispatchJob(client, org, uuid(jobId));
+  check(
+    await client.rpc("dispatch_expire_execution_leases", {
+      p_org: org,
+      p_action: null,
+    }),
+  );
   const rows = check(
     await client.from("dispatch_executions").select("*").eq("org_id", org).eq(
       "job_id",

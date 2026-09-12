@@ -36,13 +36,13 @@ set role service_role;
 do $$ declare a dispatch_executions; source text; changed jsonb; result jsonb;
 begin
  select * into a from dispatch_executions limit 1;
- update dispatch_executions set status='provider_draft_ready' where id=a.id;
+ update dispatch_executions set status='provider_draft_ready',lease_token=gen_random_uuid(),lease_until=now()+interval '2 minutes' where id=a.id returning * into a;
  update dispatch_release_controls set communications_enabled=false where org_id=a.org_id;
- result=dispatch_begin_send(a.org_id,a.id);
+ result=dispatch_begin_send(a.org_id,a.id,a.lease_token);
  if result->>'allowed'<>'false' then raise exception 'late release hold ignored';end if;
  update dispatch_release_controls set communications_enabled=true where org_id=a.org_id;
- update dispatch_executions set status='provider_draft_ready' where id=a.id;
- result=dispatch_begin_send(a.org_id,a.id);
+ update dispatch_executions set status='provider_draft_ready',lease_token=gen_random_uuid(),lease_until=now()+interval '2 minutes' where id=a.id returning * into a;
+ result=dispatch_begin_send(a.org_id,a.id,a.lease_token);
  if result->>'allowed'<>'true' then raise exception 'exact final claim failed';end if;
  select state into changed from dispatch_plans where org_id=a.org_id and job_id=a.job_id;
  changed=jsonb_set(changed,'{drafts,0,body}','"changed during send"');

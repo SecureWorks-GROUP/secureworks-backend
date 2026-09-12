@@ -4,6 +4,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { dispatchOutlookSearch } from "./dispatch_outlook.ts";
+import { GraphProviderError } from "../send-outlook-email/index.ts";
 Deno.test("Outlook refuses unconfigured mailbox without a provider request", async () => {
   let called = false;
   const r = await dispatchOutlookSearch(
@@ -44,6 +45,40 @@ Deno.test("Outlook preserves message custody and provider continuation", async (
   assertEquals(r.coverage.complete, false);
   assertEquals(r.records[0].source_ref.graph_message_id, "m1");
   assertEquals(r.records[0].job_id, null);
+});
+Deno.test("Outlook reports thrown provider read failures as unavailable coverage", async () => {
+  for (const status of [403, 429]) {
+    const r = await dispatchOutlookSearch(
+      new URLSearchParams({ mailbox: "ops@example.com", search: "Job 123" }),
+      ["ops@example.com"],
+      () => {
+        throw new GraphProviderError(
+          status,
+          `Graph request failed: ${status}`,
+          false,
+        );
+      },
+    );
+    assertEquals(r.records, []);
+    assertEquals(r.next_cursor, null);
+    assertEquals(r.coverage.available, false);
+    assertEquals(r.coverage.complete, false);
+    assertEquals(r.coverage.reason, `Mailbox read failed (${status})`);
+  }
+});
+Deno.test("Outlook preserves unexpected provider adapter failures", async () => {
+  await assertRejects(
+    () =>
+      dispatchOutlookSearch(
+        new URLSearchParams({ mailbox: "ops@example.com", search: "Job 123" }),
+        ["ops@example.com"],
+        () => {
+          throw new Error("adapter invariant failed");
+        },
+      ),
+    Error,
+    "adapter invariant failed",
+  );
 });
 Deno.test("Outlook rejects cross-mailbox or attacker continuation before obtaining credentials", async () => {
   for (

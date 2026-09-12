@@ -57,7 +57,7 @@ class Query {
   operation = "select";
   values: any;
   options: any;
-  constructor(public table: string) {
+  constructor(public table: string, private run = sql) {
     identifier(table);
   }
   select(columns = "*") {
@@ -96,12 +96,14 @@ class Query {
     } else this.filters.push(`t.${identifier(k)} ${op} ${literal(v)}`);
     return this;
   }
-  order(k: string) {
-    this.orders.push(`t.${identifier(k)}`);
+  order(k: string, options?: any) {
+    this.orders.push(
+      `t.${identifier(k)} ${options?.ascending === false ? "desc" : "asc"}`,
+    );
     return this;
   }
   limit(n: number) {
-    this.take = n;
+    this.take = Math.min(1000, n);
     return this;
   }
   maybeSingle() {
@@ -186,7 +188,7 @@ class Query {
               : ""
           } returning *)select coalesce(jsonb_agg(to_jsonb(changed)),'[]') from changed`;}
       }
-      const data = JSON.parse(await sql(query));
+      const data = JSON.parse(await this.run(query));
       return { data: this.single ? (data[0] || null) : data, error: null };
     } catch (e) {
       return {
@@ -204,88 +206,128 @@ class Query {
     return this.execute().then(resolve, reject);
   }
 }
-const client = {
-  from: (table: string) => new Query(table),
-  rpc: async (name: string, args: any) => {
-    try {
-      if (
-        !["dispatch_commit", "dispatch_source_version", "dispatch_claim_tasks"]
-          .includes(name)
-      ) throw Error("Fixture RPC not allowed");
-      const expression = `${identifier(name)}(${
-        Object.entries(args).map(([k, v]) => `${identifier(k)}=>${literal(v)}`)
-          .join(",")
-      })`;
-      const query = name === "dispatch_claim_tasks"
-        ? `select coalesce(jsonb_agg(to_jsonb(x)),'[]') from ${expression} x`
-        : `select to_jsonb(${expression})`;
-      return { data: JSON.parse(await sql(query)), error: null };
-    } catch (e) {
-      return {
-        data: null,
-        error: {
-          message: (e as Error).message,
-          code: (e as Error).message.includes("conflict")
-            ? "40001"
-            : "fixture_error",
-        },
-      };
-    }
-  },
-};
-Deno.serve({ hostname: "127.0.0.1", port: 55582 }, async (req) => {
-  const headers = {
-    "content-type": "application/json",
-    "access-control-allow-origin": "*",
-    "access-control-allow-headers": "content-type",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
+export function createDispatchSqlClient(run = sql) {
+  return {
+    from: (table: string) => new Query(table, run),
+    rpc: async (name: string, args: any) => {
+      try {
+        if (
+          ![
+            "dispatch_begin_send",
+            "dispatch_claim_execution",
+            "dispatch_claim_tasks",
+            "dispatch_commit",
+            "dispatch_context_facts_for_source",
+            "dispatch_enqueue_job",
+            "dispatch_expire_execution_leases",
+            "dispatch_finalize_task",
+            "dispatch_get_execution",
+            "dispatch_list_tasks",
+            "dispatch_order_reservations",
+            "dispatch_reconcile_eligible_jobs",
+            "dispatch_record_execution_progress",
+            "dispatch_record_execution_readback",
+            "dispatch_retry_task",
+            "dispatch_source_version",
+          ]
+            .includes(name)
+        ) throw Error("Fixture RPC not allowed");
+        const expression = `${identifier(name)}(${
+          Object.entries(args).map(([k, v]) =>
+            `${identifier(k)}=>${literal(v)}`
+          )
+            .join(",")
+        })`;
+        const setReturning = [
+          "dispatch_claim_tasks",
+          "dispatch_context_facts_for_source",
+          "dispatch_order_reservations",
+        ].includes(name);
+        const query = setReturning
+          ? `select coalesce(jsonb_agg(to_jsonb(x)),'[]') from ${expression} x`
+          : `select to_jsonb(${expression})`;
+        return { data: JSON.parse(await run(query)), error: null };
+      } catch (e) {
+        return {
+          data: null,
+          error: {
+            message: (e as Error).message,
+            code: (e as Error).message.includes("conflict")
+              ? "40001"
+              : "fixture_error",
+          },
+        };
+      }
+    },
   };
-  if (req.method === "OPTIONS") return new Response(null, { headers });
-  const url = new URL(req.url);
-  try {
-    const body = req.method === "POST" ? await req.json() : {};
-    let action = url.searchParams.get("action") || "";
-    if (action === "dispatch_execution") {
-      return new Response(
-        JSON.stringify(
-          await dispatchExecutionState(
-            client,
-            ORG,
-            url.searchParams.get("job_id") || "",
-            false,
-            true,
+}
+export const localDispatchClient = createDispatchSqlClient();
+export function createDispatchLocalHandler(
+  fixtureClient: any = localDispatchClient,
+  fixtureOrg = ORG,
+  fixtureActor = "local-fixture-operator",
+) {
+  return async (req: Request) => {
+    const headers = {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "content-type",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+    };
+    if (req.method === "OPTIONS") return new Response(null, { headers });
+    const url = new URL(req.url);
+    try {
+      const body = req.method === "POST" ? await req.json() : {};
+      let action = url.searchParams.get("action") || "";
+      if (action === "dispatch_execution") {
+        return new Response(
+          JSON.stringify(
+            await dispatchExecutionState(
+              fixtureClient,
+              fixtureOrg,
+              url.searchParams.get("job_id") || "",
+              false,
+              true,
+            ),
           ),
-        ),
-        { headers },
+          { headers },
+        );
+      }
+      if (action === "dispatch_execute") {
+        return new Response(
+          JSON.stringify({
+            action: { id: body.approval_id, status: "held" },
+            live_actions_enabled: false,
+          }),
+          { headers },
+        );
+      }
+      if (action === "dispatch_draft_approve") {
+        action = "dispatch_command";
+        body.command = "draft_approve";
+      }
+      const result = await handleDispatch(
+        fixtureClient,
+        fixtureOrg,
+        fixtureActor,
+        action,
+        req.method,
+        url.searchParams,
+        body,
       );
-    }
-    if (action === "dispatch_execute") {
+      return new Response(JSON.stringify(result), { headers });
+    } catch (e) {
       return new Response(
-        JSON.stringify({
-          action: { id: body.approval_id, status: "held" },
-          live_actions_enabled: false,
-        }),
-        { headers },
+        JSON.stringify({ error: (e as Error).message, fixture: true }),
+        { status: e instanceof DispatchError ? e.status : 500, headers },
       );
     }
-    if (action === "dispatch_draft_approve") {
-      action = "dispatch_command";
-      body.command = "draft_approve";
-    }
-    const result = await handleDispatch(
-      client,
-      ORG,
-      "local-fixture-operator",
-      action,
-      req.method,
-      url.searchParams,
-      body,
-    );
-    return new Response(JSON.stringify(result), { headers });
-  } catch (e) {
-    return new Response(
-      JSON.stringify({ error: (e as Error).message, fixture: true }),
-      { status: e instanceof DispatchError ? e.status : 500, headers },
-    );
-  }
-});
+  };
+}
+
+if (import.meta.main) {
+  Deno.serve(
+    { hostname: "127.0.0.1", port: 55582 },
+    createDispatchLocalHandler(),
+  );
+}

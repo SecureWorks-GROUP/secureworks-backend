@@ -619,18 +619,52 @@ create table public.dispatch_executions(
  org_id uuid not null, id uuid not null, job_id uuid not null, draft_id uuid not null,
  content_hash text not null,source_version text not null,snapshot jsonb not null,
  status text not null check(status in ('claimed','provider_draft_ready','accepted_not_delivered','outcome_unknown','not_sent')),
- receipt jsonb, last_error text, created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
+ receipt jsonb, last_error text, lease_token uuid, lease_until timestamptz, created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
  primary key(org_id,id)
 );
 alter table public.dispatch_release_controls enable row level security;
 alter table public.dispatch_executions enable row level security;
 revoke all on public.dispatch_release_controls,public.dispatch_executions from anon,authenticated;
 grant all on public.dispatch_release_controls,public.dispatch_executions to service_role;
+
+create function public.dispatch_expire_execution_leases(p_org uuid,p_action uuid default null)
+returns integer language plpgsql security invoker set search_path=public,pg_temp as $$
+declare expired integer;
+begin
+ update dispatch_executions
+ set status='outcome_unknown',
+     last_error=coalesce(last_error,'Execution lease expired before final provider outcome was recorded'),
+     lease_until=null,
+     updated_at=now()
+ where org_id=p_org
+   and (p_action is null or id=p_action)
+   and status in ('claimed','provider_draft_ready','sending')
+   and (lease_until<now() or (lease_until is null and updated_at<now()-interval '2 minutes'));
+ get diagnostics expired = row_count;
+ return expired;
+end $$;
+revoke all on function public.dispatch_expire_execution_leases(uuid,uuid) from public,anon,authenticated;
+grant execute on function public.dispatch_expire_execution_leases(uuid,uuid) to service_role;
+
+create function public.dispatch_get_execution(p_org uuid,p_action uuid)
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare a dispatch_executions;
+begin
+ perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ perform dispatch_expire_execution_leases(p_org,p_action);
+ select * into a from dispatch_executions where org_id=p_org and id=p_action;
+ if not found then return null; end if;
+ return to_jsonb(a);
+end $$;
+revoke all on function public.dispatch_get_execution(uuid,uuid) from public,anon,authenticated;
+grant execute on function public.dispatch_get_execution(uuid,uuid) to service_role;
+
 create function public.dispatch_claim_execution(p_org uuid,p_job uuid,p_draft uuid,p_approval uuid,p_hash text,p_source text)
 returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
 declare d jsonb; prior dispatch_executions;
 begin
  perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ perform dispatch_expire_execution_leases(p_org,null);
  select * into prior from dispatch_executions where org_id=p_org and id=p_approval;
  if found then return jsonb_build_object('claimed',false,'action',to_jsonb(prior)); end if;
  if not exists(select 1 from dispatch_release_controls where org_id=p_org and communications_enabled) then return jsonb_build_object('claimed',false,'action',jsonb_build_object('id',p_approval,'status','held')); end if;
@@ -643,8 +677,8 @@ begin
    or dispatch_source_version(p_org,p_job) is distinct from p_source
  then raise exception 'draft_approval_changed' using errcode='40001'; end if;
  if exists(select 1 from dispatch_executions where org_id=p_org and draft_id=p_draft and status in ('claimed','provider_draft_ready','sending','accepted_not_delivered','outcome_unknown')) then raise exception 'draft_already_executed_or_uncertain' using errcode='40001'; end if;
- insert into dispatch_executions(org_id,id,job_id,draft_id,content_hash,source_version,snapshot,status)
- values(p_org,p_approval,p_job,p_draft,p_hash,p_source,d,'claimed') returning * into prior;
+ insert into dispatch_executions(org_id,id,job_id,draft_id,content_hash,source_version,snapshot,status,lease_token,lease_until)
+ values(p_org,p_approval,p_job,p_draft,p_hash,p_source,d,'claimed',gen_random_uuid(),now()+interval '2 minutes') returning * into prior;
  return jsonb_build_object('claimed',true,'action',to_jsonb(prior));
 end $$;
 revoke all on function public.dispatch_claim_execution(uuid,uuid,uuid,uuid,text,text) from public,anon,authenticated;
@@ -652,47 +686,109 @@ grant execute on function public.dispatch_claim_execution(uuid,uuid,uuid,uuid,te
 
 alter table public.dispatch_executions drop constraint dispatch_executions_status_check;
 alter table public.dispatch_executions add constraint dispatch_executions_status_check check(status in ('claimed','provider_draft_ready','sending','accepted_not_delivered','outcome_unknown','not_sent'));
-create function public.dispatch_begin_send(p_org uuid,p_action uuid)
+create function public.dispatch_record_execution_progress(p_org uuid,p_action uuid,p_expected_status text,p_expected_receipt jsonb,p_expected_source text,p_lease_token uuid,p_status text,p_receipt jsonb default null,p_error text default null)
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare a dispatch_executions; active boolean; next_lease uuid; next_until timestamptz;
+begin
+ perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ perform dispatch_expire_execution_leases(p_org,p_action);
+ select * into a from dispatch_executions where org_id=p_org and id=p_action for update;
+ if not found then return jsonb_build_object('recorded',false,'reason','not_found','readback_required',true); end if;
+ if a.status='outcome_unknown'
+  and a.source_version is not distinct from p_expected_source
+  and a.lease_token is not distinct from p_lease_token
+  and p_lease_token is not null
+  and p_expected_status in ('claimed','provider_draft_ready')
+  and p_expected_receipt is null
+  and a.receipt is null
+  and p_receipt is not null
+  and p_status in ('provider_draft_ready','outcome_unknown') then
+  update dispatch_executions
+  set receipt=p_receipt,
+      last_error=p_error,
+      updated_at=now()
+  where org_id=p_org and id=p_action
+  returning * into a;
+  return jsonb_build_object('recorded',true,'action',to_jsonb(a),'readback_required',true);
+ end if;
+ if a.status not in ('claimed','provider_draft_ready','sending')
+  or a.status is distinct from p_expected_status
+  or a.source_version is distinct from p_expected_source
+  or a.receipt is distinct from p_expected_receipt
+  or p_lease_token is null
+  or a.lease_token is distinct from p_lease_token then
+  return jsonb_build_object('recorded',false,'reason','stale_action','action',to_jsonb(a),'readback_required',a.status in ('outcome_unknown','sending'));
+ end if;
+ if p_status not in ('provider_draft_ready','accepted_not_delivered','outcome_unknown','not_sent') then raise exception 'invalid_execution_status'; end if;
+ active=p_status='provider_draft_ready';
+ next_lease=case when active then coalesce(a.lease_token,gen_random_uuid()) else null end;
+ next_until=case when active then now()+interval '2 minutes' else null end;
+ update dispatch_executions
+ set status=p_status,
+     receipt=p_receipt,
+     last_error=p_error,
+     lease_token=next_lease,
+     lease_until=next_until,
+     updated_at=now()
+ where org_id=p_org and id=p_action
+ returning * into a;
+ return jsonb_build_object('recorded',true,'action',to_jsonb(a),'readback_required',a.status='outcome_unknown');
+end $$;
+revoke all on function public.dispatch_record_execution_progress(uuid,uuid,text,jsonb,text,uuid,text,jsonb,text) from public,anon,authenticated;
+grant execute on function public.dispatch_record_execution_progress(uuid,uuid,text,jsonb,text,uuid,text,jsonb,text) to service_role;
+
+create function public.dispatch_begin_send(p_org uuid,p_action uuid,p_lease_token uuid)
 returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
 declare a dispatch_executions; d jsonb;
 begin
  perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ perform dispatch_expire_execution_leases(p_org,p_action);
  select * into a from dispatch_executions where org_id=p_org and id=p_action for update;
- if not found or a.status not in ('provider_draft_ready','sending') then return jsonb_build_object('allowed',false,'reason','not_ready');end if;
+ if not found then return jsonb_build_object('allowed',false,'reason','not_found'); end if;
+ if a.status not in ('provider_draft_ready','sending') then return jsonb_build_object('allowed',false,'reason','not_ready','action',to_jsonb(a)); end if;
+ if p_lease_token is null or a.lease_token is null or a.lease_token is distinct from p_lease_token then return jsonb_build_object('allowed',false,'reason','stale_action','action',to_jsonb(a)); end if;
  select value into d from dispatch_plans p cross join lateral jsonb_array_elements(p.state->'drafts') where p.org_id=p_org and p.job_id=a.job_id and value->>'id'=a.draft_id::text;
  if not exists(select 1 from dispatch_release_controls where org_id=p_org and communications_enabled)
  or d->>'content_hash' is distinct from a.content_hash
  or d->'approval' is distinct from a.snapshot->'approval'
  or ((d->>'po_id' is not null or d->>'purchase_commitment' is distinct from 'false') and d#>>'{approval,purchase_approved}' is distinct from 'true')
  or dispatch_source_version(p_org,a.job_id) is distinct from a.source_version then
-  update dispatch_executions set status='not_sent',last_error='Approval, source or release changed during preparation',updated_at=now() where org_id=p_org and id=p_action;
-  return jsonb_build_object('allowed',false,'reason','approval_source_or_release_changed');
+  update dispatch_executions set status='not_sent',last_error='Approval, source or release changed during preparation',lease_until=null,lease_token=null,updated_at=now() where org_id=p_org and id=p_action returning * into a;
+  return jsonb_build_object('allowed',false,'reason','approval_source_or_release_changed','action',to_jsonb(a));
  end if;
- update dispatch_executions set status='sending',updated_at=now() where org_id=p_org and id=p_action;
- return jsonb_build_object('allowed',true);
+ update dispatch_executions set status='sending',lease_token=coalesce(lease_token,gen_random_uuid()),lease_until=now()+interval '2 minutes',updated_at=now() where org_id=p_org and id=p_action returning * into a;
+ return jsonb_build_object('allowed',true,'action',to_jsonb(a));
 end $$;
-revoke all on function public.dispatch_begin_send(uuid,uuid) from public,anon,authenticated;
-grant execute on function public.dispatch_begin_send(uuid,uuid) to service_role;
+revoke all on function public.dispatch_begin_send(uuid,uuid,uuid) from public,anon,authenticated;
+grant execute on function public.dispatch_begin_send(uuid,uuid,uuid) to service_role;
 
 create function public.dispatch_record_execution_readback(p_org uuid,p_action uuid,p_expected_status text,p_expected_receipt jsonb,p_expected_source text,p_readback jsonb)
 returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
 declare a dispatch_executions; merged jsonb; next_status text; sent_exact boolean;
 begin
  perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ perform dispatch_expire_execution_leases(p_org,p_action);
  select * into a from dispatch_executions where org_id=p_org and id=p_action for update;
  if not found then return jsonb_build_object('recorded',false,'reason','not_found','readback_required',true); end if;
  if a.status is distinct from p_expected_status or a.receipt is distinct from p_expected_receipt or a.source_version is distinct from p_expected_source then
-  return jsonb_build_object('recorded',false,'reason','stale_action','action',to_jsonb(a),'readback_required',a.status='outcome_unknown');
+ return jsonb_build_object('recorded',false,'reason','stale_action','action',to_jsonb(a),'readback_required',a.status in ('outcome_unknown','sending'));
  end if;
  merged=coalesce(a.receipt,'{}'::jsonb)||jsonb_build_object('readback',p_readback);
- sent_exact=a.status='outcome_unknown'
+ sent_exact=a.status in ('outcome_unknown','sending')
   and p_readback->>'verified'='true'
   and p_readback->>'is_draft'='false'
   and p_readback->>'id'=a.receipt->>'draft_id'
   and coalesce(p_readback->>'sent_at','')<>'';
- next_status=case when sent_exact then 'accepted_not_delivered' else a.status end;
- update dispatch_executions set status=next_status,receipt=merged,updated_at=now(),last_error=case when sent_exact then null else last_error end where org_id=p_org and id=p_action returning * into a;
- return jsonb_build_object('recorded',true,'action',to_jsonb(a),'readback_required',a.status='outcome_unknown');
+ next_status=case when sent_exact then 'accepted_not_delivered' when a.status='sending' then 'outcome_unknown' else a.status end;
+ update dispatch_executions
+ set status=next_status,
+     receipt=merged,
+     updated_at=now(),
+     lease_until=case when next_status in ('claimed','provider_draft_ready','sending') then lease_until else null end,
+     lease_token=case when next_status in ('claimed','provider_draft_ready','sending') then lease_token else null end,
+     last_error=case when sent_exact then null else last_error end
+ where org_id=p_org and id=p_action returning * into a;
+ return jsonb_build_object('recorded',true,'action',to_jsonb(a),'readback_required',a.status in ('outcome_unknown','sending'));
 end $$;
 revoke all on function public.dispatch_record_execution_readback(uuid,uuid,text,jsonb,text,jsonb) from public,anon,authenticated;
 grant execute on function public.dispatch_record_execution_readback(uuid,uuid,text,jsonb,text,jsonb) to service_role;

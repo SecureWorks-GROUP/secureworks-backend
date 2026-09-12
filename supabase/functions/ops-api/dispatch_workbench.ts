@@ -122,6 +122,22 @@ export function eligibility(job: any, documents: any[] = []) {
   }
   return { state: evidence.length ? "accepted" : "unresolved", evidence };
 }
+const physicalRequirement = (r: any) => ({
+  description: r.description ?? null,
+  unit: r.unit ?? null,
+  specification: r.specification ?? null,
+});
+const allocationSuitable = (a: any, r: any) =>
+  !!r.physical_revision && a.requirement_revision === r.physical_revision &&
+  a.suitability_status !== "stale" && a.supply_valid !== false;
+const suitabilityObligation = (a: any, r: any) => ({
+  code: "allocation_suitability",
+  allocation_id: a.id,
+  requirement_id: r.id,
+  owner: r.owner || "Shaun",
+  next_action:
+    "Confirm this supply suits the current material specification with evidence, or allocate replacement supply",
+});
 export function assessment(state: any, source: string, now: string) {
   const obligations: any[] = [];
   if (state.reviewed_source_version !== source) {
@@ -136,7 +152,7 @@ export function assessment(state: any, source: string, now: string) {
     const allocations = state.allocations.filter((a: any) =>
       a.requirement_id === r.id
     );
-    const verified = allocations.filter((a: any) => a.supply_valid !== false);
+    const verified = allocations.filter((a: any) => allocationSuitable(a, r));
     const allocated = verified.reduce((sum: number, a: any) =>
       sum + a.quantity, 0) - state.receipts.filter((x: any) =>
         verified.some((a: any) =>
@@ -144,9 +160,16 @@ export function assessment(state: any, source: string, now: string) {
         )
       ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
     const usable = state.receipts.filter((x: any) =>
-      allocations.some((a: any) => a.id === x.allocation_id) &&
+      verified.some((a: any) => a.id === x.allocation_id) &&
       x.location === (r.destination || "site")
     ).reduce((sum: number, x: any) => sum + x.usable_quantity, 0);
+    if (allocated < r.quantity || usable < r.quantity) {
+      for (
+        const a of allocations.filter((a: any) => !allocationSuitable(a, r))
+      ) {
+        obligations.push(suitabilityObligation(a, r));
+      }
+    }
     if (
       !r.quantity || !r.unit || !r.specification ||
       r.reviewed_source_version !== source
@@ -159,9 +182,10 @@ export function assessment(state: any, source: string, now: string) {
       });
     }
     if (
-      allocated > r.quantity || allocations.some((a: any) =>
+      allocated > r.quantity ||
+      (allocated < r.quantity && allocations.some((a: any) =>
         a.unit !== r.unit || a.supply_valid === false
-      )
+      ))
     ) {
       obligations.push({
         code: "supply_reconciliation",
@@ -209,6 +233,9 @@ export async function reduceCommand(
 ): Promise<any> {
   const s = { ...emptyState(), ...structuredClone(previous) };
   const mark = { updated_at: now, updated_by: actor };
+  for (const r of s.requirements) {
+    r.physical_revision = await hash(physicalRequirement(r));
+  }
   const group = (id: any) => id == null ? null : find(s.groups, id).id;
   const requirement = (v: any) => ({
     id: uuid(v.id),
@@ -248,7 +275,11 @@ export async function reduceCommand(
     case "requirement_upsert":
     case "requirement_reconcile": {
       const old = s.requirements.find((r: any) => r.id === p.id);
-      const updated = requirement({ ...old, ...p });
+      const updated = {
+        ...requirement({ ...old, ...p }),
+        physical_revision: "",
+      };
+      updated.physical_revision = await hash(physicalRequirement(updated));
       const physicalChanged = old &&
         ["quantity", "unit", "specification", "description"].some((k) =>
           old[k] !== (updated as any)[k]
@@ -352,14 +383,8 @@ export async function reduceCommand(
           (typeof price !== "number" || !Number.isFinite(price) || price < 0)
         ) throw new DispatchError("Invalid price");
         const allocations = s.allocations.filter((a: any) =>
-          a.requirement_id === r.id
+          a.requirement_id === r.id && allocationSuitable(a, r)
         );
-        if (allocations.some((a: any) => a.supply_valid === false)) {
-          throw new DispatchError(
-            "Reconcile changed supply before preparing an order",
-            409,
-          );
-        }
         const allocated = allocations.reduce((n: number, a: any) =>
           n + a.quantity, 0) - s.receipts.filter((x: any) =>
             allocations.some((a: any) =>
@@ -371,7 +396,9 @@ export async function reduceCommand(
         )
           .reduce((n: number, o: any) => {
             const ordered = o.line_items.filter((l: any) =>
-              l.dispatch_requirement_id === r.id
+              l.dispatch_requirement_id === r.id &&
+              JSON.stringify(physicalRequirement(l)) ===
+                JSON.stringify(physicalRequirement(r))
             ).reduce((sum: number, l: any) =>
               sum +
               Math.max(
@@ -549,7 +576,7 @@ export async function reduceCommand(
       const r = find(s.requirements, p.requirement_id);
       const q = quantity(p.quantity);
       const siblings = s.allocations.filter((a: any) =>
-        a.requirement_id === r.id && a.id !== p.id
+        a.requirement_id === r.id && a.id !== p.id && allocationSuitable(a, r)
       );
       const others = siblings.reduce((n: number, a: any) => n + a.quantity, 0) -
         s.receipts.filter((x: any) =>
@@ -567,8 +594,38 @@ export async function reduceCommand(
         supply_id: text(p.supply_id, "supply reference"),
         quantity: q,
         unit: r.unit,
+        requirement_revision: r.physical_revision,
+        suitability_status: "current",
         ...mark,
       });
+      break;
+    }
+    case "allocation_confirm_suitability": {
+      const a = find(s.allocations, uuid(p.id));
+      const r = find(s.requirements, a.requirement_id);
+      if (
+        a.supply_valid !== true || !a.current_supply_revision ||
+        a.unit !== r.unit ||
+        (a.supply_revision && a.supply_revision !== a.current_supply_revision)
+      ) {
+        throw new DispatchError(
+          "Current verified supply is required for suitability confirmation",
+          409,
+        );
+      }
+      a.requirement_revision = r.physical_revision;
+      a.supply_revision = a.current_supply_revision;
+      a.suitability_status = "current";
+      a.suitability_obligation = null;
+      a.suitability_confirmation = {
+        reason: text(p.reason, "suitability reason"),
+        evidence: text(p.evidence, "suitability evidence"),
+        requirement_revision: r.physical_revision,
+        supply_revision: a.current_supply_revision,
+        source_version: source,
+        actor,
+        at: now,
+      };
       break;
     }
     case "allocation_delete":
@@ -737,6 +794,9 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
   ]);
   const plan = checked(planResult);
   const state = { ...emptyState(), ...structuredClone(plan?.state) };
+  for (const r of state.requirements) {
+    r.physical_revision = await hash(physicalRequirement(r));
+  }
   const allocatedLots = await referencedRows(
     client,
     "dispatch_supply_lots",
@@ -766,7 +826,25 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
         await hash(line) === lot.source_version &&
         await hash(p.line_items) === await hash(lot.source_ref.po_lines);
     } else if (lot?.source_ref?.kind !== "stock_count") valid = false;
+    if (
+      allocation.supply_revision &&
+      allocation.supply_revision !== lot?.source_version
+    ) valid = false;
     allocation.supply_valid = valid;
+    allocation.current_supply_revision = lot?.source_version || null;
+    const r = state.requirements.find((r: any) =>
+      r.id === allocation.requirement_id
+    );
+    allocation.suitability_status =
+      valid && !!r && allocation.unit === r.unit &&
+        allocation.requirement_revision === r.physical_revision &&
+        allocation.supply_revision === lot?.source_version
+        ? "current"
+        : "stale";
+    allocation.suitability_obligation =
+      allocation.suitability_status === "current" || !r
+        ? null
+        : suitabilityObligation(allocation, r);
   }
   const orderReservations = checked(
     await client.rpc("dispatch_order_reservations", {
@@ -928,7 +1006,7 @@ export async function dispatchCommand(
     ),
   );
   if (
-    b.command === "assess" &&
+    ["assess", "context_review"].includes(b.command) &&
     (!current.coverage.context.available || !current.coverage.context.complete)
   ) throw new DispatchError("Current context coverage incomplete", 409);
   if (b.command === "communication_link") {
@@ -998,12 +1076,16 @@ export async function dispatchCommand(
   }
   if (b.command === "allocation_upsert") {
     const supply = String(b.payload.supply_id || "");
+    const allocation = find(next.allocations, b.payload.id);
     if (supply.startsWith("stock:")) {
       const lot = checked(
         await client.from("dispatch_supply_lots").select("*").eq("org_id", org)
           .eq("id", supply).maybeSingle(),
       );
-      if (!lot) throw new DispatchError("Counted stock source not found");
+      if (!lot || lot.source_ref?.kind !== "stock_count") {
+        throw new DispatchError("Counted stock source not found");
+      }
+      allocation.supply_revision = lot.source_version;
     } else {
       const match = /^po:([0-9a-f-]{36}):(0|[1-9]\d*)$/.exec(supply);
       if (!match) throw new DispatchError("Invalid PO supply identity");
@@ -1033,6 +1115,7 @@ export async function dispatchCommand(
           "PO line has no verified physical unit; review material specification instead of treating a lump-sum line as stock",
         );
       }
+      allocation.supply_revision = await hash(line);
       lots.push({
         id: supply,
         quantity: Number(line.quantity),
@@ -1044,7 +1127,7 @@ export async function dispatchCommand(
           job_id: po.job_id,
           po_lines: po.line_items,
         },
-        source_version: await hash(line),
+        source_version: allocation.supply_revision,
         source_snapshot: line,
       });
     }
@@ -1489,7 +1572,10 @@ export async function dispatchSupply(
   org: string,
   params: URLSearchParams,
 ) {
-  const kind = params.get("kind") || "po";
+  const kind = params.get("kind") ?? "po";
+  if (!["po", "stock"].includes(kind)) {
+    throw new DispatchError("Unsupported supply kind");
+  }
   if (kind === "stock") {
     let q = client.from("dispatch_supply_lots").select("*").eq("org_id", org)
       .like("id", "stock:%").order("id").limit(51);
