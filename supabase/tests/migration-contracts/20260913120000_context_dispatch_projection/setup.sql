@@ -1,3 +1,4 @@
+-- Canonical job_id is TEXT. Do not ALTER it to uuid.
 ALTER TABLE public.business_events ADD COLUMN IF NOT EXISTS event_type text;
 ALTER TABLE public.business_events ADD COLUMN IF NOT EXISTS source text;
 ALTER TABLE public.business_events ADD COLUMN IF NOT EXISTS entity_type text;

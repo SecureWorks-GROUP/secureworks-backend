@@ -37,7 +37,7 @@ BEGIN
 
  -- Unproven emit (no match_status/method) must not appear on the view.
  INSERT INTO public.business_events(id,job_id,event_type,payload,metadata,match_status,match_method)
-  VALUES(ev_unproven,job_a,'dispatch.plan.changed',
+  VALUES(ev_unproven,job_a::text,'dispatch.plan.changed',
    jsonb_build_object('org_id',org_a,'job_id',job_a,'plan_version',9,'command','save','state','{}'),
    jsonb_build_object('evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',req,'plan_version',9)),
    NULL,NULL);
@@ -134,6 +134,19 @@ BEGIN
    'matched','direct_job_id','direct',now(),1,req);
  IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id='ee000000-0000-4000-8000-0000000000a4') THEN
   RAISE EXCEPTION 'non-ops-api producer was projected';
+ END IF;
+
+ INSERT INTO public.business_events(id,job_id,event_type,source,entity_type,entity_id,payload,metadata,match_status,match_method,attribution_status,event_at,attribution_confidence,correlation_id)
+  VALUES('ee000000-0000-4000-8000-0000000000a5',job_a::text,'dispatch.plan.changed','ops-api','dispatch_plan',job_a::text,
+   jsonb_build_object('contract_version','dispatch-context/v1','org_id',org_a,'job_id',job_a,'plan_version','999999999999999999999','command','save','state',jsonb_build_object('x',1),'body','x'),
+   jsonb_build_object('source_ref',jsonb_build_object('table','dispatch_plans','org_id',org_a,'job_id',job_a,'version','999999999999999999999'),'evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',req,'plan_version','999999999999999999999')),
+   'matched','direct_job_id','direct',now(),1,req);
+ PERFORM 1 FROM public.current_job_context_facts;
+ IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id='ee000000-0000-4000-8000-0000000000a5') THEN
+  RAISE EXCEPTION 'overflow plan_version poisoned projection';
+ END IF;
+ IF pg_typeof((SELECT job_id FROM public.current_job_context_facts WHERE id=ev_new))::text IS DISTINCT FROM 'uuid' THEN
+  RAISE EXCEPTION 'projected job_id is not uuid';
  END IF;
 END $$;
 ROLLBACK;

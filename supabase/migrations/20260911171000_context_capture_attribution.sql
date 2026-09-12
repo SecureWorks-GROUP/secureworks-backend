@@ -77,7 +77,7 @@ BEGIN
  IF prior_status='automated' OR e.payload->>'automated'='true' OR e.payload->>'auto_submitted' IN ('auto-generated','auto-replied')
  THEN e.attribution_status:='automated'; RETURN e; END IF;
  -- Direct ids are checked against jobs, never interpreted as job numbers.
- SELECT id INTO candidate FROM public.jobs WHERE id=e.job_id;
+ SELECT id INTO candidate FROM public.jobs WHERE id::text=e.job_id::text;
  IF candidate IS NULL THEN
    SELECT array_agg(DISTINCT id) INTO ids FROM (
      SELECT j.id FROM public.jobs j WHERE j.job_number IS NOT NULL
