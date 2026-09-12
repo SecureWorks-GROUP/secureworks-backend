@@ -354,6 +354,7 @@ import {
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { dispatch as dispatchSalesBooking, SalesBookingError, supabaseBookingDb } from './sales_booking.ts'
+import { sendBookingSms, writeBookingCalendar } from './sales_booking_providers.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12256,14 +12257,19 @@ if (import.meta.main) serve(async (req: Request) => {
         try {
           const params: Record<string, string> = {}
           url.searchParams.forEach((v, k) => { params[k] = v })
+          if (!_opsApiStaffOperatorRole(authUser?.role) && authMode !== 'api_key') {
+            return json({ error: 'Staff operator role required', code: 'operator_forbidden' }, 403)
+          }
+          const orgId = authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID
+          if (!orgId) return json({ error: 'Organisation required', code: 'org_required' }, 403)
+          const actor = { org_id: orgId, user_id: String(authUser?.id || 'server'), role: String(authUser?.role || 'admin') }
           const heldAdapters = {
-            // Live isolate: do not invent an empty pipeline. Preview/tests bind real or fake providers.
             listOpportunities: async () => ({ items: [], next: null, complete: false }),
             calendarEvents: async () => ({ ok: false, events: [], coverage: { operational_leave: 'not_read' } }),
-            sendSms: async () => ({ held: true, sent: false }),
-            writeCalendar: async () => ({ held: true, written: false }),
+            sendSms: sendBookingSms,
+            writeCalendar: writeBookingCalendar,
           }
-          return json(await dispatchSalesBooking(action, params, body || {}, heldAdapters, supabaseBookingDb(client), req.method))
+          return json(await dispatchSalesBooking(action, params, body || {}, heldAdapters, supabaseBookingDb(client), req.method, actor))
         } catch (error) {
           if (error instanceof SalesBookingError) return json({ error: error.message, code: error.code, ok: false }, error.status)
           throw error
