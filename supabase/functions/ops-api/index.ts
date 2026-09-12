@@ -95,6 +95,8 @@
 //   push_trade_invoice_to_xero — Push acknowledged trade invoice to Xero as ACCPAY bill
 // ════════════════════════════════════════════════════════════
 
+import { dispatchOutlookSearch } from './dispatch_outlook.ts'
+import { handleDispatch, DispatchError } from './dispatch_workbench.ts'
 import { isCurrentContextFact } from './context_visibility.ts'
 import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
 
@@ -5058,6 +5060,23 @@ if (import.meta.main) serve(async (req: Request) => {
     // admin/owner; the routine is never that). No behaviour change for existing callers;
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
+
+    if (action?.startsWith('dispatch_')) {
+      if (!_opsApiCallerIsStaffOperator(authMode, authUser)) return json({error:'Office operator access required'},403)
+      const dispatchOrg = authMode === 'jwt' ? authUser!.orgId : DEFAULT_ORG_ID
+      try {
+        if (action === 'dispatch_outlook_search') {
+          if (req.method !== 'GET') return json({error:'GET required'},405)
+          // Tenant-bound server configuration, never caller-selected arbitrary mailboxes.
+          const mailboxConfig = JSON.parse(Deno.env.get('DISPATCH_READ_MAILBOXES_BY_ORG') || '{}')
+          return json(await dispatchOutlookSearch(url.searchParams,Array.isArray(mailboxConfig[dispatchOrg]) ? mailboxConfig[dispatchOrg] : []))
+        }
+        return json(await handleDispatch(client,dispatchOrg,authUser?.id || 'server-operator',action,req.method,url.searchParams,body))
+      } catch (e) {
+        if (e instanceof DispatchError) return json({error:e.message,live_actions_enabled:false},e.status)
+        throw e
+      }
+    }
 
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
