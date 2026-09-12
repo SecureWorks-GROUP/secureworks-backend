@@ -16,7 +16,7 @@ WITH evidence AS (
  SELECT j.id,coalesce((e.witnessed->>'at')::timestamptz,e.updated_at) AS stamp,e.witnessed
  FROM evidence e JOIN public.jobs j ON j.id=e.id
  WHERE e.witnessed IS NOT NULL OR j.status IN
- ('accepted','approvals','deposit','processing','order_materials','scheduled','in_progress','complete')
+ ('accepted','approvals','deposit','awaiting_deposit','awaiting_supplier','processing','order_materials','schedule_install','scheduled','in_progress','complete','invoiced','rectification')
 )
 UPDATE public.jobs j SET accepted_at=c.stamp,
  accepted_at_evidence=jsonb_build_object(

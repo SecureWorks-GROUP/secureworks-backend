@@ -8,10 +8,14 @@ Migration `20260911175000_sales_acceptance_stamps.sql` fills null acceptance dat
 from the earliest witnessed `job_events` acceptance/status-to-accepted event
 with explicit `detail_json.new_status = accepted`. Partial-contact acceptances
 and historical quote events without that full-acceptance status are excluded. If
-no such event exists, only an acceptance-chain job may use its previous
-`updated_at`, labelled `BACKFILLED` in `accepted_at_evidence`. A quoted job or a
-rejected/backward stage conflict is not an acceptance. Existing stamps are never
-rewritten; status and deposit fields are untouched.
+no such event exists, only an acceptance-chain or later sold job may use its
+previous `updated_at`, labelled `BACKFILLED` in `accepted_at_evidence`. The
+estimate list is fencing's verified accept-chain plus downstream sold statuses
+`complete`, `invoiced` and `rectification`. It does not include `quoted`,
+`partially_accepted`, `archived`, `lost` or `cancelled`: those are not proof of
+a whole-job acceptance. A quoted job or a rejected/backward stage conflict is
+not an acceptance. Existing stamps are never rewritten; status and deposit
+fields are untouched.
 
 The new trigger stamps writes with status `accepted` or an explicit non-null
 `accepted_at` at the database boundary, covering the

@@ -22,6 +22,18 @@ BEGIN
  IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' OR j.accepted_at_evidence->>'source_event_id' IS NOT NULL THEN RAISE EXCEPTION 'downstream estimate misclassified for job 8'; END IF;
  SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000010';
  IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' OR j.accepted_at_evidence->>'source_event_id' IS NOT NULL THEN RAISE EXCEPTION 'downstream estimate misclassified for job 10'; END IF;
+ SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000011';
+ IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' THEN RAISE EXCEPTION 'invoiced chain job not backfilled'; END IF;
+ SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000012';
+ IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' THEN RAISE EXCEPTION 'awaiting_deposit chain job not backfilled'; END IF;
+ SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000013';
+ IF j.accepted_at IS NOT NULL OR j.accepted_at_evidence IS NOT NULL THEN RAISE EXCEPTION 'archived job without a witness was treated as accepted'; END IF;
+ SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000014';
+ IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' THEN RAISE EXCEPTION 'schedule_install chain job not backfilled'; END IF;
+ SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000015';
+ IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' THEN RAISE EXCEPTION 'awaiting_supplier chain job not backfilled'; END IF;
+ SELECT * INTO j FROM public.jobs WHERE id='ea000000-0000-4000-8000-000000000016';
+ IF j.accepted_at IS DISTINCT FROM '2026-09-09T00:00:00Z'::timestamptz OR j.accepted_at_evidence->>'quality' IS DISTINCT FROM 'BACKFILLED' THEN RAISE EXCEPTION 'rectification chain job not backfilled'; END IF;
  IF EXISTS (SELECT 1 FROM public.jobs WHERE job_number IN ('TEST-MULTI-LATER-FULL','TEST-MULTI-PARTIAL-ONLY','TEST-AMBIGUOUS','TEST-PARTIAL-DOWNSTREAM','TEST-SINGLE-FULL','TEST-AMBIGUOUS-DOWNSTREAM') AND deposit_at IS DISTINCT FROM '2026-07-01T00:00:00Z'::timestamptz) THEN RAISE EXCEPTION 'historical deposit changed'; END IF;
  UPDATE public.jobs SET status='accepted',accepted_at='2026-08-04T00:00:00Z' WHERE id='ea000000-0000-4000-8000-000000000006' RETURNING * INTO j;
  IF j.accepted_at IS DISTINCT FROM '2026-08-04T00:00:00Z'::timestamptz THEN RAISE EXCEPTION 'partial event prevented later full acceptance'; END IF;

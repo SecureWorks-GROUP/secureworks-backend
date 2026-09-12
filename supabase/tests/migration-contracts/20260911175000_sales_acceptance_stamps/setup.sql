@@ -29,3 +29,11 @@ INSERT INTO public.job_events(id,job_id,event_type,detail_json,created_at) VALUE
  ('eb000000-0000-4000-8000-000000000016','ea000000-0000-4000-8000-000000000009','quote_accepted','{"document_id": "ec000000-0000-4000-8000-000000000091", "accepted_via": "share_link", "accepted_at": "2026-08-03T00:00:00Z", "job_number": "TEST-9", "client_name": "Contact 1", "contact_label": "Owner 1", "amount": 1100, "is_multi_contact": false, "new_status": "accepted", "message": "Contact 1 accepted quote"}','2026-08-03T00:00:00Z'),
  ('eb000000-0000-4000-8000-000000000017','ea000000-0000-4000-8000-000000000007','quote_accepted','{"accepted_via": "share_link", "accepted_at": "2026-08-01T00:00:00Z", "is_multi_contact": false}','2026-08-01T00:00:00Z'),
  ('eb000000-0000-4000-8000-000000000018','ea000000-0000-4000-8000-000000000010','quote_accepted','{"accepted_via": "share_link", "accepted_at": "2026-08-01T00:00:00Z", "is_multi_contact": false}','2026-08-01T00:00:00Z');
+
+INSERT INTO public.jobs(id,org_id,status,type,job_number,accepted_at,updated_at) VALUES
+ ('ea000000-0000-4000-8000-000000000011','00000000-0000-4000-8000-0000000000aa','invoiced','fencing','TEST-INVOICED-CHAIN',null,'2026-09-09T00:00:00Z'),
+ ('ea000000-0000-4000-8000-000000000012','00000000-0000-4000-8000-0000000000aa','awaiting_deposit','patio','TEST-AWAIT-DEPOSIT',null,'2026-09-09T00:00:00Z'),
+ ('ea000000-0000-4000-8000-000000000013','00000000-0000-4000-8000-0000000000aa','archived','fencing','TEST-ARCHIVED-NOT-CHAIN',null,'2026-09-09T00:00:00Z'),
+ ('ea000000-0000-4000-8000-000000000014','00000000-0000-4000-8000-0000000000aa','schedule_install','fencing','TEST-SCHEDULE-INSTALL',null,'2026-09-09T00:00:00Z'),
+ ('ea000000-0000-4000-8000-000000000015','00000000-0000-4000-8000-0000000000aa','awaiting_supplier','fencing','TEST-AWAIT-SUPPLIER',null,'2026-09-09T00:00:00Z'),
+ ('ea000000-0000-4000-8000-000000000016','00000000-0000-4000-8000-0000000000aa','rectification','patio','TEST-RECTIFICATION',null,'2026-09-09T00:00:00Z');
