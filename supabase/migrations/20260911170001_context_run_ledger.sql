@@ -123,7 +123,7 @@ BEGIN
  IF p_status='done' AND r.phase='extraction' THEN
   -- Receipt ownership cannot silently acknowledge another job's evidence.
   IF EXISTS (SELECT 1 FROM unnest(coalesce(p_event_ids,'{}'::uuid[])) e(id)
-    LEFT JOIN public.business_events b ON b.id=e.id WHERE b.id IS NULL OR b.job_id IS DISTINCT FROM r.job_id)
+    LEFT JOIN public.business_events b ON b.id=e.id WHERE b.id IS NULL OR b.job_id::text IS DISTINCT FROM r.job_id::text)
     THEN RAISE EXCEPTION 'Event does not belong to run job'; END IF;
   INSERT INTO public.context_extraction_event_receipts(event_id,job_id,run_id)
    SELECT DISTINCT id,r.job_id,r.id FROM unnest(coalesce(p_event_ids,'{}'::uuid[])) e(id)

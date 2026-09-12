@@ -59,12 +59,12 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT jsonb_build_object(
   'jobs',jsonb_build_object('total',(SELECT count(*) FROM open_jobs),'with_current_fact',(SELECT count(*) FROM open_jobs j JOIN facts f ON f.job_id=j.id),
    'no_current_fact',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id)),
-   'evidence_without_current_fact',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id) AND EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=j.id)),
-   'no_evidence_yet',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id) AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=j.id))),
+   'evidence_without_current_fact',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id) AND EXISTS(SELECT 1 FROM evidence e WHERE e.job_id::text=j.id::text)),
+   'no_evidence_yet',(SELECT count(*) FROM open_jobs j WHERE NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=j.id) AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id::text=j.id::text))),
   'invoices',jsonb_build_object('total',(SELECT count(*) FROM open_invoices),'with_current_fact',(SELECT count(*) FROM open_invoices i JOIN facts f ON f.job_id=i.job_id),
    'no_current_fact',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id)),
-   'evidence_without_current_fact',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id) AND EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=i.job_id)),
-   'no_evidence_yet',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id) AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=i.job_id)),
+   'evidence_without_current_fact',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id) AND EXISTS(SELECT 1 FROM evidence e WHERE e.job_id::text=i.job_id::text)),
+   'no_evidence_yet',(SELECT count(*) FROM open_invoices i WHERE i.job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM facts f WHERE f.job_id=i.job_id) AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id::text=i.job_id::text)),
    'unlinked',(SELECT count(*) FROM open_invoices WHERE job_id IS NULL)))
 $$;
 
@@ -155,7 +155,7 @@ DECLARE d date:=(now() AT TIME ZONE 'Australia/Perth')::date; switches jsonb; qu
 BEGIN
  SELECT to_jsonb(s) INTO switches FROM public.automation_switches s WHERE id=1;
  SELECT jsonb_object_agg(status,n) INTO queue FROM (SELECT coalesce(e.attribution_status,'unknown') status,count(*) n
- FROM public.business_events e WHERE NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=e.job_id AND r.extractor_version='luna_v2')
+ FROM public.business_events e WHERE NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id::text=e.job_id::text AND r.extractor_version='luna_v2')
  GROUP BY e.attribution_status) q;
  BEGIN
   EXECUTE 'SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=$1' INTO calls USING d;
@@ -168,7 +168,7 @@ BEGIN
   'evidence_by_attribution_status',coalesce(queue,'{}'::jsonb),'ready_jobs',ready,'ready_jobs_is_lower_bound',ready=400,
   'admin_bucket_size',(SELECT count(*) FROM public.business_events WHERE attribution_status='admin_bucket'),
   'missing_event_time',(SELECT count(*) FROM public.business_events WHERE event_at IS NULL AND attribution_status NOT IN ('empty','automated')),
-  'oldest_pending_event_at',(SELECT min(e.event_at) FROM public.business_events e WHERE e.attribution_status NOT IN ('empty','automated') AND NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=e.job_id AND r.extractor_version='luna_v2')),
+  'oldest_pending_event_at',(SELECT min(e.event_at) FROM public.business_events e WHERE e.attribution_status NOT IN ('empty','automated') AND NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id::text=e.job_id::text AND r.extractor_version='luna_v2')),
   'last_pass_finished_at',(SELECT max(finished_at) FROM public.context_pass_days WHERE status='done'),
   'today_pass',(SELECT to_jsonb(p) FROM public.context_pass_days p WHERE run_date=d),
   'coverage',public.context_coverage(),

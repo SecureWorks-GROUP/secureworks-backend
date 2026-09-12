@@ -356,6 +356,7 @@ import {
   SesReportTriggerError,
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
+import { organisationContext, OrganisationContextError } from './organisation_context.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -6937,6 +6938,19 @@ if (import.meta.main) serve(async (req: Request) => {
           return json(await contextAccuracyVerdict(client, body, authMode === 'jwt' && authUser ? { id: authUser.id, orgId: authUser.orgId } : null, DEFAULT_ORG_ID))
         } catch (error) {
           if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
+      case 'organisation_context': {
+        if (req.method !== 'GET') {
+          return json({ error: 'organisation_context requires GET' }, 405)
+        }
+        try {
+          return json(await organisationContext(client, { org_id: url.searchParams.get('org_id') || DEFAULT_ORG_ID }))
+        } catch (error) {
+          if (error instanceof OrganisationContextError) {
+            return json({ error: error.message }, error.status)
+          }
           throw error
         }
       }

@@ -3,7 +3,7 @@
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS ghl_contact_id text;
 CREATE TABLE public.contact_matches (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), job_id uuid, ghl_contact_id text);
 CREATE TABLE public.business_events (
-  id uuid PRIMARY KEY, job_id uuid, payload jsonb NOT NULL DEFAULT '{}',
+  id uuid PRIMARY KEY, job_id text, payload jsonb NOT NULL DEFAULT '{}',
   match_status text, match_method text, contact_id text, metadata jsonb NOT NULL DEFAULT '{}',
   occurred_at timestamptz NOT NULL DEFAULT now()
 );

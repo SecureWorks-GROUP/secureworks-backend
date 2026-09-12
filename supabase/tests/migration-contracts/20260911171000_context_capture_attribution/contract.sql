@@ -14,18 +14,18 @@ BEGIN
  IF e.job_id IS NOT NULL OR e.attribution_status<>'pending_luna' THEN RAISE EXCEPTION 'unmarked job bypassed ladder'; END IF;
  INSERT INTO public.business_events(payload,contact_id,job_id,match_method)
  VALUES('{"body":"Explicit source job"}','b2-repeat',j1,'direct_job_id') RETURNING * INTO e;
- IF e.job_id<>j1 OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'explicit source binding lost'; END IF;
+ IF e.job_id::text IS DISTINCT FROM j1::text OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'explicit source binding lost'; END IF;
  INSERT INTO public.business_events(payload,contact_id,thread_key) VALUES('{"body":"Please revise height"}','b2-repeat','b2-thread') RETURNING * INTO e;
  IF e.attribution_status<>'pending_luna' THEN RAISE EXCEPTION 'repeat customer must reach Luna, got % %',e.attribution_status,e.payload; END IF;
  eid:=e.id;
  e:=public.attribute_context_event_with_luna(eid,j1,0.91);
- IF e.job_id<>j1 OR e.attribution_status<>'luna' THEN RAISE EXCEPTION 'Luna binding failed'; END IF;
+ IF e.job_id::text IS DISTINCT FROM j1::text OR e.attribution_status<>'luna' THEN RAISE EXCEPTION 'Luna binding failed'; END IF;
  INSERT INTO public.business_events(payload,thread_key) VALUES('{"body":"The next reply"}','b2-thread') RETURNING * INTO e;
- IF e.job_id<>j1 OR e.attribution_status<>'thread' THEN RAISE EXCEPTION 'thread follow failed'; END IF;
+ IF e.job_id::text IS DISTINCT FROM j1::text OR e.attribution_status<>'thread' THEN RAISE EXCEPTION 'thread follow failed'; END IF;
  INSERT INTO public.business_events(payload,contact_id) VALUES('{"body":"Fence height","line":"fencing"}','b2-repeat') RETURNING * INTO e;
- IF e.job_id<>j2 OR e.attribution_status<>'single_line' THEN RAISE EXCEPTION 'single line failed'; END IF;
+ IF e.job_id::text IS DISTINCT FROM j2::text OR e.attribution_status<>'single_line' THEN RAISE EXCEPTION 'single line failed'; END IF;
  INSERT INTO public.business_events(payload) VALUES('{"body":"Please check B2-JOB-1."}') RETURNING * INTO e;
- IF e.job_id<>j1 OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'direct number failed: %',e.payload; END IF;
+ IF e.job_id::text IS DISTINCT FROM j1::text OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'direct number failed: %',e.payload; END IF;
  INSERT INTO public.business_events(payload) VALUES('{"body":"Both B2-JOB-1 and B2-JOB-2"}') RETURNING * INTO e;
  IF e.job_id IS NOT NULL THEN RAISE EXCEPTION 'ambiguous identifiers incorrectly bound'; END IF;
  INSERT INTO public.business_events(payload) VALUES('{"body_pointer":"private/test-document"}') RETURNING * INTO e;
@@ -36,7 +36,7 @@ BEGIN
  eid:=e.id;
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES(j3,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-3','b2-future');
  SELECT * INTO e FROM public.business_events WHERE id=eid;
- IF e.job_id<>j3 OR e.attribution_status<>'single_open' THEN RAISE EXCEPTION 'job-created reconsideration must include old bucket evidence'; END IF;
+ IF e.job_id::text IS DISTINCT FROM j3::text OR e.attribution_status<>'single_open' THEN RAISE EXCEPTION 'job-created reconsideration must include old bucket evidence'; END IF;
  INSERT INTO public.business_events(payload,occurred_at) VALUES('{"body":"No provider date"}',now()) RETURNING * INTO e;
  IF e.event_at IS NOT NULL THEN RAISE EXCEPTION 'missing provider source date became ingestion date'; END IF;
  INSERT INTO public.business_events(payload,provider_message_id,event_at) VALUES('{"body":"source words"}','ghl:b2-id','2025-01-01Z');
@@ -72,7 +72,7 @@ BEGIN
  UPDATE public.automation_switches SET attribution=true WHERE id=1;
  PERFORM public.rerun_context_attribution(250,NULL);
  SELECT * INTO e FROM public.business_events WHERE id=eid;
- IF e.job_id IS DISTINCT FROM j1 OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'explicit custody did not recover after resume'; END IF;
+ IF e.job_id::text IS DISTINCT FROM j1::text OR e.attribution_status<>'direct' THEN RAISE EXCEPTION 'explicit custody did not recover after resume'; END IF;
  UPDATE public.automation_switches SET attribution=false WHERE id=1;
  INSERT INTO public.business_events(payload,job_id) VALUES('{"body":"retained while off"}',j1) RETURNING * INTO e;
  IF e.attribution_status<>'admin_bucket' OR e.job_id IS NOT NULL THEN RAISE EXCEPTION 'attribution switch did not close'; END IF;

@@ -372,7 +372,7 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
   cardinality(source_event_ids)>0 AND NOT EXISTS (
    SELECT 1 FROM unnest(visible.source_event_ids) source_id
    LEFT JOIN public.business_events b ON b.id=source_id
-   WHERE b.id IS NULL OR b.job_id IS DISTINCT FROM visible.job_id
+   WHERE b.id IS NULL OR b.job_id::text IS DISTINCT FROM visible.job_id::text
     OR b.attribution_status IS NULL OR b.attribution_status NOT IN ('direct','thread','single_open','single_line','luna')
     OR b.event_at IS NULL OR b.attribution_confidence IS NULL OR b.attribution_confidence NOT BETWEEN 0 AND 1
     OR to_jsonb(b)->>'retracted_at' IS NOT NULL
