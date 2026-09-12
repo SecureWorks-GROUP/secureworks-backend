@@ -1,0 +1,1 @@
+-- Uses real UUID jobs/business_events supplied by prior registered fixtures.

@@ -1,3 +1,5 @@
+import { automationLaneEnabled } from "../_shared/automation_switch.ts";
+
 // Deposit stamp (ACCREC) — projects "the deposit invoice is PAID in Xero" onto
 // jobs.deposit_at.
 //
@@ -178,6 +180,8 @@ export async function applyDepositStamp(
   if (!decision) return null;
 
   if (decision.action === "log_contradiction") {
+    if (!(await automationLaneEnabled(client, "capture"))) return null;
+
     // The sync window overlaps by 15 minutes, so a voided deposit invoice is
     // re-read every run. One contradiction per invoice, not one per run.
     const { data: logged, error: loggedErr } = await client.from("business_events")
@@ -231,19 +235,21 @@ export async function applyDepositStamp(
   // stamp we did not write would put a false event in the business log.
   if (!Array.isArray(stampedRows) || stampedRows.length === 0) return null;
 
-  await client.from("business_events").insert({
-    event_type: "job.deposit_stamped",
-    source: "xero-sync",
-    entity_type: "invoice",
-    entity_id: inv.InvoiceID,
-    job_id: job.id,
-    payload: {
-      invoice_number: inv.InvoiceNumber || null,
-      deposit_at: decision.deposit_at,
-      timestamp_source: decision.source,
-      amount_paid: inv.AmountPaid ?? null,
-    },
-  }).then(() => undefined, () => undefined);
+  if (await automationLaneEnabled(client, "capture")) {
+    await client.from("business_events").insert({
+      event_type: "job.deposit_stamped",
+      source: "xero-sync",
+      entity_type: "invoice",
+      entity_id: inv.InvoiceID,
+      job_id: job.id,
+      payload: {
+        invoice_number: inv.InvoiceNumber || null,
+        deposit_at: decision.deposit_at,
+        timestamp_source: decision.source,
+        amount_paid: inv.AmountPaid ?? null,
+      },
+    }).then(() => undefined, () => undefined);
+  }
 
   return {
     job_id: job.id,

@@ -1,3 +1,4 @@
+import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
 // deploy-lane-validate: 2026-05-30.v4
@@ -5050,6 +5051,10 @@ if (import.meta.main) serve(async (req: Request) => {
     auditBody = body
 
     const client = sb()
+    const contextLane = contextActionLane(action || '')
+    if (contextLane && !(await automationLaneEnabled(client, contextLane))) {
+      return json({ skipped: true, reason: 'automation_lane_disabled', lane: contextLane })
+    }
 
     // Legacy auth-mode alias for pre-existing handlers (expenses, booking proposals)
     // whose signatures predate authMode='routine' and only know 'api_key' | 'jwt'. A
