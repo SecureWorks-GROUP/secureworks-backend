@@ -47,7 +47,9 @@ BEGIN
  EXCEPTION WHEN raise_exception THEN NULL;
  END;
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,gen_random_uuid(),'draft','patio','B1-'||j);
- INSERT INTO public.business_events(id,job_id) VALUES(e,j);
+ -- B2 provenance: a job_id without an explicit method is a hint and is cleared.
+ INSERT INTO public.business_events(id,job_id,match_method,payload)
+  VALUES(e,j,'direct_job_id',jsonb_build_object('body','B1 contract source'));
  r:=public.claim_context_extraction_run(j,d,'extraction');
  IF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'claim %',r; END IF;
  run:=(r->'run'->>'id')::uuid;tok:=(r->'run'->>'lease_token')::uuid;
