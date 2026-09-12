@@ -1,3 +1,5 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
+import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Receiver (All Event Types)
 //
@@ -104,7 +106,7 @@ function previewFromPayload(payload: Record<string, unknown>): string | null {
     null;
   if (raw == null) return null;
   const text = String(raw).trim();
-  return text ? text.slice(0, 500) : null;
+  return text ? text.slice(0, 4096) : null;
 }
 
 interface WebhookJobCandidate {
@@ -368,6 +370,10 @@ serve(async (req) => {
       }
     })();
 
+    if (!(await automationLaneEnabled(supabase, "capture"))) {
+      return jsonResponse({ received: true, event_created: false, reason: "capture_disabled" });
+    }
+
     // Supported event types
     const SUPPORTED_TYPES = [
       "InboundMessage",
@@ -491,7 +497,8 @@ serve(async (req) => {
         const channel = phone ? "sms" : email ? "email" : "chat";
         eventType = "client.reply";
         eventPayload = {
-          message_text: (message || "").slice(0, 500),
+          message_text: (body.body || message || ""),
+          line: body.line || null,
           phone: phone || null,
           email: email || null,
           conversation_id: conversationId || null,
@@ -505,7 +512,7 @@ serve(async (req) => {
         const channel = body.messageType === "Email" || body.channel === "email" ? "email" : "sms";
         eventType = channel === "email" ? "client.email_out" : "client.sms_out";
         eventPayload = {
-          message_text: (body.body || body.message || "").slice(0, 500),
+          message_text: (body.body || body.message || ""),
           phone: body.phone || null,
           email: body.email || null,
           conversation_id: conversationId || null,
@@ -590,8 +597,8 @@ serve(async (req) => {
     }
 
     // Attach job context to payload
-    eventPayload.job_id = job?.id || null;
-    eventPayload.job_number = job?.job_number || null;
+    eventPayload.suggested_job_id = job?.id || null;
+    eventPayload.suggested_job_number = job?.job_number || null;
     eventPayload.client_name = job?.client_name || null;
     eventPayload.job_type = job?.type || null;
     eventPayload.match_reason = jobMatch.match_reason;
@@ -609,9 +616,12 @@ serve(async (req) => {
     const sourceId = String(
       (body as { eventId?: string; id?: string }).eventId ??
       (body as { id?: string }).id ??
-      conversationId ??
       crypto.randomUUID(),
     );
+    const providerId = body.messageId || body.message_id || body.id || body.eventId;
+    const providerMessageId = providerId && (type === "InboundMessage" || type === "OutboundMessage") ? `ghl:${providerId}` : null;
+    const providerTime = body.dateAdded || body.createdAt || body.timestamp;
+    const eventAt = providerTime && !Number.isNaN(Date.parse(String(providerTime))) ? new Date(providerTime).toISOString() : null;
     let channel: Channel = "system";
     let direction: Direction = "system";
     let conversationKey: string | null = (conversationId as string) || null;
@@ -645,12 +655,12 @@ serve(async (req) => {
         direction = "internal";
         break;
     }
-    const match = resolveMatch({
-      job_id: job?.id || null,
-      match_method: jobMatch.match_method,
-      match_confidence: jobMatch.match_confidence,
-    });
+    const evidenceJobId = typeof body.job_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.job_id) ? body.job_id : null;
+    const match = resolveMatch({ job_id: evidenceJobId,
+      match_method: evidenceJobId ? "direct_job_id" : "none" });
     const bodyPreview = previewFromPayload(eventPayload);
+    eventPayload.attribution_hint = { job_id: job?.id || null,
+      match_method: jobMatch.match_method, match_confidence: jobMatch.match_confidence };
 
     // Legacy spine row shape — emitted either by the T7 fallback path
     // OR when the flag is OFF. It still carries the extractor-readable
@@ -660,8 +670,10 @@ serve(async (req) => {
       source: "ghl_webhook_receiver",
       entity_type: job ? "contact" : "unmatched_contact",
       entity_id: contactId || null,
-      job_id: match.job_id,
+      job_id: evidenceJobId,
       occurred_at: occurredAt,
+      event_at: eventAt,
+      provider_message_id: providerMessageId,
       source_table: "ghl_webhook",
       source_id: sourceId,
       channel,
@@ -693,16 +705,18 @@ serve(async (req) => {
           channel,
           direction,
           occurred_at: occurredAt,
+          event_at: eventAt,
+          provider_message_id: providerMessageId,
           // Source: GHL conversation cache when conversation_id present;
           // else the webhook event id when GHL supplies one; else a synthetic.
           source_table: "ghl_webhook",
           source_id: sourceId,
-          job_id: job?.id || null,
+          job_id: evidenceJobId,
           contact_id: contactId || null,
           entity_type: job ? "contact" : "unmatched_contact",
           entity_id: contactId || null,
-          match_method: jobMatch.match_method,
-          match_confidence: jobMatch.match_confidence,
+          match_method: match.match_method,
+          match_confidence: match.match_confidence ?? undefined,
           body_preview: bodyPreview || undefined,
           thread_key: conversationKey,
           // Inbound client comms: 7y; system events: 12m.
@@ -729,8 +743,8 @@ serve(async (req) => {
     }
 
     if (!t7Enabled || t7Failed) {
-      const { error } = await supabase.from("business_events").insert(legacySpineRow);
-      eventError = error;
+      const { error } = await insertCapturedEvidence(supabase, legacySpineRow);
+      eventError = error?.code === "23505" && providerMessageId ? null : error;
     }
 
     if (eventError) {
@@ -752,7 +766,7 @@ serve(async (req) => {
       // Capture closure-stable copies before the async block.
       const initialRecordingUrl = nullableString(eventPayload.recording_url);
       const ghlEventId = nullableString(eventPayload.event_id);
-      const _job_id = job?.id || null;
+      const _job_id = evidenceJobId;
       const _contact_id = contactId || null;
       const _direction = nullableString(eventPayload.direction) || "internal";
       const _duration = (eventPayload.duration as number | null);
@@ -797,6 +811,8 @@ serve(async (req) => {
             contact_id: _contact_id,
             call_direction: _direction,
             occurred_at: webhookOccurredAt.toISOString(),
+            event_at: eventAt,
+            job_match_method: evidenceJobId ? "direct_job_id" : "none",
             duration_seconds: _duration,
             phone: _phone,
             ghl_call_id: callSourceId,

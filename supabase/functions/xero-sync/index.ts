@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Xero Sync Edge Function
@@ -23,7 +24,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
-import { applyDepositStamp, depositStampRelevant } from './deposit_stamp.ts'
+import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
@@ -846,6 +847,21 @@ async function syncInvoices(sb: any) {
                       fully_paid_on: inv.FullyPaidOnDate,
                     },
                   })
+                  if (await automationLaneEnabled(sb, 'capture')) {
+                    const { error: captureError } = await insertCapturedEvidence(sb, {
+                      event_type: 'invoice.payment_received', source: 'xero-sync',
+                      entity_type: 'invoice', entity_id: inv.InvoiceID,
+                      job_id: jobData.id, match_method: 'direct_job_id',
+                      channel: 'invoice', direction: 'internal',
+                      occurred_at: new Date().toISOString(),
+                      event_at: xeroDateToIsoTimestamp(inv.FullyPaidOnDate),
+                      provider_message_id: `xero:invoice:${inv.InvoiceID}:paid`,
+                      body_preview: `Xero marks invoice ${inv.InvoiceNumber || inv.InvoiceID} PAID.`,
+                      payload: { invoice_number: inv.InvoiceNumber, amount_paid: inv.AmountPaid,
+                        fully_paid_on: inv.FullyPaidOnDate || null },
+                    })
+                    if (captureError && captureError.code !== '23505') console.error('[xero-sync] payment evidence failed:', captureError.message)
+                  }
                   console.log(`[xero-sync] Job ${jobData.id} fully paid — payment event logged`)
                 }
               }
@@ -1045,12 +1061,15 @@ export async function matchUnlinkedInvoices(client: any) {
             .eq('id', inv.id)
 
           if (await automationLaneEnabled(client, 'capture')) {
-            await client.from('business_events').insert({
+            await insertCapturedEvidence(client, {
               event_type: 'invoice.auto_linked',
               source: 'xero-sync',
               entity_type: 'invoice',
               entity_id: inv.xero_invoice_id,
-              job_id: job.job_number,
+              job_id: job.id,
+              match_method: 'direct_reference',
+              event_at: new Date().toISOString(),
+              channel: 'system', direction: 'system',
               payload: { invoice_number: inv.invoice_number, job_number: job.job_number, method: 'reference_match' },
             }).then(() => undefined, () => undefined)
           }
@@ -1096,12 +1115,16 @@ export async function matchUnlinkedInvoices(client: any) {
             .eq('id', inv.id)
 
           if (await automationLaneEnabled(client, 'capture')) {
-            await client.from('business_events').insert({
+            await insertCapturedEvidence(client, {
               event_type: 'invoice.auto_linked',
               source: 'xero-sync',
               entity_type: 'invoice',
               entity_id: inv.xero_invoice_id,
-              job_id: jobs[0].job_number,
+              job_id: null,
+              match_method: 'none',
+              event_at: new Date().toISOString(),
+              channel: 'system', direction: 'system',
+              metadata: { attribution_hint: { job_id: jobs[0].id, match_method: 'client_name_exact' } },
               payload: { invoice_number: inv.invoice_number, job_number: jobs[0].job_number, method: 'client_name_exact' },
             }).then(() => undefined, () => undefined)
           }

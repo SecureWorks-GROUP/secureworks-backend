@@ -1,0 +1,1 @@
+DO $$ BEGIN IF to_regprocedure('public.rerun_context_attribution(integer,text)') IS NOT NULL THEN RAISE EXCEPTION 'B2 rollback left rerun active'; END IF; IF to_regclass('public.event_threads') IS NULL THEN RAISE EXCEPTION 'rollback removed custody'; END IF; END $$;

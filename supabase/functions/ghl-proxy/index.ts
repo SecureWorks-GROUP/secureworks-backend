@@ -1,3 +1,5 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
+import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
 //
@@ -1494,7 +1496,7 @@ serve(async (req: Request) => {
         } catch { /* leave actualStatus null so event carries "unknown" rather than lying */ }
 
         try {
-          await sbLink.from('business_events').insert({
+          await insertCapturedEvidence(sbLink, {
             event_type: 'scope.completed',
             source: 'scoping_tool',
             entity_type: 'job',
@@ -4041,49 +4043,19 @@ serve(async (req: Request) => {
             entity_type: 'contact',
             entity_id: contactId,
             job_id: jobId || null,
-            payload: { message: message.slice(0, 500), message_id: result.messageId || result.id },
+            event_at: sourceTime(result.dateAdded || result.createdAt),
+            occurred_at: new Date().toISOString(),
+            contact_id: contactId,
+            channel: 'sms', direction: 'outbound',
+            match_method: jobId ? 'direct_job_id' : 'none',
+            provider_message_id: result.messageId || result.id ? `ghl:${result.messageId || result.id}` : null,
+            body_preview: message.slice(0, 500),
+            payload: { body: message, message_id: result.messageId || result.id },
           }
           let t7Failed = false
           if (t7Enabled) {
-            // Resolve job_id when caller didn't supply one.
-            let resolvedJobId: string | null = jobId || null
-            let matchMethod: MatchMethod = jobId ? 'direct_job_id' : 'none'
-            let matchConfidence: number | undefined = jobId ? undefined : undefined
-            if (!resolvedJobId && contactId) {
-              try {
-                const { data: cMatch } = await sb.from('contact_matches')
-                  .select('job_id')
-                  .eq('ghl_contact_id', contactId)
-                  .order('matched_at', { ascending: false })
-                  .limit(1)
-                if (cMatch?.[0]?.job_id) {
-                  resolvedJobId = cMatch[0].job_id
-                  matchMethod = 'contact_id'
-                  matchConfidence = 0.85
-                }
-              } catch { /* non-blocking */ }
-              if (!resolvedJobId) {
-                // Last-ditch: most-recent active job for this contact via
-                // jobs.ghl_contact_id. Confidence intentionally below floor;
-                // recordEvidence will quarantine instead of leaking.
-                try {
-                  const { data: recent } = await sb.from('jobs')
-                    .select('id')
-                    .eq('ghl_contact_id', contactId)
-                    .not('archived', 'is', true)
-                    .order('updated_at', { ascending: false })
-                    .limit(2) // 2 so we can detect ambiguity
-                  if (recent && recent.length === 1) {
-                    resolvedJobId = recent[0].id
-                    matchMethod = 'single_recent_active_job'
-                    matchConfidence = 0.55 // below floor → unresolved
-                  } else if (recent && recent.length > 1) {
-                    matchMethod = 'single_recent_active_job'
-                    matchConfidence = 0.40 // ambiguous
-                  }
-                } catch { /* non-blocking */ }
-              }
-            }
+            const resolvedJobId = jobId || null
+            const matchMethod: MatchMethod = jobId ? 'direct_job_id' : 'none'
             try {
               await recordEvidence(sb, {
                 event_type: 'client.sms_out',
@@ -4097,13 +4069,14 @@ serve(async (req: Request) => {
                 entity_type: 'contact',
                 entity_id: contactId,
                 match_method: matchMethod,
-                match_confidence: matchConfidence,
+                event_at: sourceTime(result.dateAdded || result.createdAt),
+                provider_message_id: result.messageId || result.id ? `ghl:${result.messageId || result.id}` : undefined,
                 body_preview: message.slice(0, 500),
                 body_full: message,
                 privacy_classification: 'staff_only',
                 retention_class: '7y_audit',
                 payload: {
-                  message: message.slice(0, 500),
+                  body: message,
                   message_id: result.messageId || result.id,
                   user_id: userId || null,
                 },
@@ -4121,7 +4094,7 @@ serve(async (req: Request) => {
             }
           }
           if (!t7Enabled || t7Failed) {
-            const { error } = await sb.from('business_events').insert(legacyRow)
+            const { error } = await insertCapturedEvidence(sb, legacyRow)
             if (error) console.error('[ghl-proxy] legacy business_events insert failed:', error.message)
           }
         } catch { /* non-blocking */ }
@@ -4582,7 +4555,7 @@ serve(async (req: Request) => {
         // 2026-04-24 fix (rev 3): walk-up re-saves must also emit scope.completed so
         // Jarvis/downstream sees every walk-up sign-off, not just first-time ones.
         try {
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'scope.completed',
             source: 'scoping_tool_walkup',
             entity_type: 'job',
@@ -4608,7 +4581,7 @@ serve(async (req: Request) => {
         // 2026-04-24 Phase 4b: write business_events on first-time walk-up.
         // Read actual status from DB rather than assuming, so false state cannot be emitted.
         try {
-          await sb.from('business_events').insert({
+          await insertCapturedEvidence(sb, {
             event_type: 'scope.completed',
             source: 'scoping_tool_walkup',
             entity_type: 'job',
