@@ -41,6 +41,7 @@ SEND_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906140000_job_doc
 SEND_RUNS_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906150000_jobs_send_runs_claimed_at.sql"
 SEND_CLAIM_TOKEN_MIGRATION="$REPO_ROOT/supabase/migrations/20260906160000_job_documents_send_claim_token.sql"
 DEBT_PICTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911120000_debt_picture.sql"
+SALES_ACCEPTANCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911175000_sales_acceptance_stamps.sql"
 
 
 PASS_COUNT=0
@@ -199,6 +200,10 @@ debt_picture_migration_sha() {
   shasum -a 256 "$DEBT_PICTURE_MIGRATION" | awk '{print $1}'
 }
 
+sales_acceptance_migration_sha() {
+  shasum -a 256 "$SALES_ACCEPTANCE_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -239,6 +244,7 @@ write_response() {
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
+  SALES_ACCEPTANCE_EXPECTED_SHA="$(sales_acceptance_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -626,6 +632,17 @@ debt_picture_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+sales_acceptance_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260911175000",
+    "expected_migration_name": "sales_acceptance_stamps",
+    "expected_statement_sha256": os.environ["SALES_ACCEPTANCE_EXPECTED_SHA"],
+    "actual_migration_version": "20260911175000",
+    "actual_migration_name": "sales_acceptance_stamps",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SALES_ACCEPTANCE_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -663,6 +680,7 @@ with open(sys.argv[1], "w") as f:
             send_runs_claimed_at_row,
             send_claim_token_row,
             debt_picture_row,
+            sales_acceptance_row,
         ],
         f,
     )

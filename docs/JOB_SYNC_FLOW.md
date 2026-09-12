@@ -47,7 +47,7 @@ Shaun (ops manager) moves jobs through the pipeline:
 
 - `accepted` → `scheduled` → `in_progress` → `complete` → `invoiced`
 - Each status change calls `ops-api?action=update_job_status`
-- Status change records timestamps: `accepted_at`, `scheduled_at`, `completed_at`
+- Status change records `scheduled_at` and `completed_at`; acceptance timestamp preservation and provenance follow the [sales prerequisites contract](evidence/sales-prerequisites-contract-2026-09-11.md).
 - **`complete_and_invoice`** compound action: marks complete + creates Xero invoice
 
 ### Path 3: Trade App → Assignment Status Updates

@@ -134,7 +134,7 @@ scripts/deploy-edge-function.sh ops-api
 - **Auto Xero draft quote** at scope complete (Step 4 of plan) — would create draft quote in Xero with line items and SW reference
 - **Dashboard match rate gate** — dynamically show/hide metrics based on match rate (currently just manually updated)
 - **Quote vs Invoice analysis** — needs dedicated reporting-api endpoint
-- **Pipeline Velocity** — GHL doesn't set quoted_at/accepted_at consistently
+- **Pipeline Velocity** — `quoted_at` coverage remains a limitation; acceptance timestamp semantics and release boundaries are owned by the [sales prerequisites contract](../evidence/sales-prerequisites-contract-2026-09-11.md).
 
 ## Workflow Changes Required
 **Bookkeepers:** Put SW-XXXX in the Reference field on every Xero invoice. Contact should already exist (auto-created at scope complete). Don't create duplicate contacts.

@@ -30,6 +30,7 @@ export const JOB_RECORD_COLUMNS = [
   "council_required",
   "quoted_at",
   "accepted_at",
+  "accepted_at_evidence",
   "approvals_at",
   "deposit_at",
   "processing_at",
