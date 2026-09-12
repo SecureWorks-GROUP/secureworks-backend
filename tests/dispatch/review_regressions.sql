@@ -32,3 +32,33 @@ begin
  if (select count(*) from dispatch_executions)<>1 then raise exception 'execution identity duplicated';end if;
 end $$;
 reset role;
+set role service_role;
+do $$ declare a dispatch_executions; source text; changed jsonb; result jsonb;
+begin
+ select * into a from dispatch_executions limit 1;
+ update dispatch_executions set status='provider_draft_ready' where id=a.id;
+ update dispatch_release_controls set communications_enabled=false where org_id=a.org_id;
+ result=dispatch_begin_send(a.org_id,a.id);
+ if result->>'allowed'<>'false' then raise exception 'late release hold ignored';end if;
+ update dispatch_release_controls set communications_enabled=true where org_id=a.org_id;
+ update dispatch_executions set status='provider_draft_ready' where id=a.id;
+ result=dispatch_begin_send(a.org_id,a.id);
+ if result->>'allowed'<>'true' then raise exception 'exact final claim failed';end if;
+ select state into changed from dispatch_plans where org_id=a.org_id and job_id=a.job_id;
+ changed=jsonb_set(changed,'{drafts,0,body}','"changed during send"');
+ begin
+  perform dispatch_commit(a.org_id,a.job_id,1,gen_random_uuid(),'send-edit','fixture','draft_upsert',dispatch_source_version(a.org_id,a.job_id),changed);
+  raise exception 'in-flight draft edit allowed';
+ exception when serialization_failure then null;end;
+end $$;
+reset role;
+set role service_role;
+do $$ declare org uuid='00000000-0000-4000-8000-000000000001';job uuid='10000000-0000-4000-8000-000000000001';before text;
+begin
+ before=dispatch_source_version(org,job);
+ insert into current_job_context_facts(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'workflow_state','{"note":"Own Dispatch projection"}','{"derivation":{"owner":"dispatch","plan_version":1}}');
+ if before<>dispatch_source_version(org,job) then raise exception 'own context echo invalidated its source review';end if;
+ insert into current_job_context_facts(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'instruction','{"note":"External access constraint"}','{"derivation":{"owner":"external_email"}}');
+ if before=dispatch_source_version(org,job) then raise exception 'external context failed to invalidate';end if;
+end $$;
+reset role;

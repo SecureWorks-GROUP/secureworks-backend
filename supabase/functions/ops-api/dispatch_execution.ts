@@ -8,7 +8,7 @@ import {
 } from "../send-outlook-email/index.ts";
 export interface DispatchMailProvider {
   prepare(snapshot: any, actionId: string, jobId: string): Promise<any>;
-  send(receipt: any): Promise<any>;
+  send(receipt: any, beforeSend?: () => Promise<void>): Promise<any>;
   readback(receipt: any): Promise<any>;
 }
 const check = (r: any) => {
@@ -22,6 +22,7 @@ export async function executeDispatchDraft(
   provider: DispatchMailProvider,
   released = false,
   readJob = readDispatchJob,
+  releaseCheck = () => released,
 ) {
   uuid(b.job_id);
   uuid(b.draft_id);
@@ -32,7 +33,7 @@ export async function executeDispatchDraft(
       live_actions_enabled: false,
     };
   }
-  const job = await readJob(client, org, b.job_id),
+  const job = structuredClone(await readJob(client, org, b.job_id)),
     draft = job.drafts.find((d: any) => d.id === b.draft_id);
   if (
     !draft?.approval || draft.approval.id !== b.approval_id ||
@@ -73,7 +74,63 @@ export async function executeDispatchDraft(
       b.job_id,
     );
     await persist({ status: "provider_draft_ready", receipt });
-    const sent = await provider.send(receipt);
+    const beforeSend = await readJob(client, org, b.job_id);
+    const currentDraft = beforeSend.drafts.find((d: any) =>
+      d.id === b.draft_id
+    );
+    if (
+      !releaseCheck() || beforeSend.source_version !== job.source_version ||
+      currentDraft?.content_hash !== draft.content_hash ||
+      JSON.stringify(currentDraft?.approval) !==
+        JSON.stringify(claim.action.snapshot.approval)
+    ) {
+      await persist({
+        status: "not_sent",
+        receipt,
+        last_error: "Approval, source or release changed during preparation",
+      });
+      return {
+        action: { id: b.approval_id, status: "not_sent", receipt },
+        retry_safe: false,
+      };
+    }
+    const finalClaim = check(
+      await client.rpc("dispatch_begin_send", {
+        p_org: org,
+        p_action: b.approval_id,
+      }),
+    );
+    if (!finalClaim.allowed) {
+      return {
+        action: { id: b.approval_id, status: "not_sent", receipt },
+        retry_safe: false,
+      };
+    }
+    const sent = await provider.send(receipt, async () => {
+      const final = await readJob(client, org, b.job_id),
+        current = final.drafts.find((d: any) => d.id === b.draft_id);
+      if (
+        !releaseCheck() || final.source_version !== job.source_version ||
+        current?.content_hash !== draft.content_hash ||
+        JSON.stringify(current?.approval) !==
+          JSON.stringify(claim.action.snapshot.approval)
+      ) {
+        throw Object.assign(new Error("Final send authority changed"), {
+          known_not_sent: true,
+        });
+      }
+      const fence = check(
+        await client.rpc("dispatch_begin_send", {
+          p_org: org,
+          p_action: b.approval_id,
+        }),
+      );
+      if (!fence.allowed) {
+        throw Object.assign(new Error("Final send fence refused"), {
+          known_not_sent: true,
+        });
+      }
+    });
     await persist({
       status: "accepted_not_delivered",
       receipt: { ...receipt, ...sent },
@@ -87,13 +144,18 @@ export async function executeDispatchDraft(
       live_actions_enabled: true,
     };
   } catch (e) {
+    receipt = receipt || (e as any).receipt || null;
     await persist({
-      status: "outcome_unknown",
+      status: (e as any).known_not_sent ? "not_sent" : "outcome_unknown",
       receipt,
       last_error: (e as Error).message,
     });
     return {
-      action: { id: b.approval_id, status: "outcome_unknown", receipt },
+      action: {
+        id: b.approval_id,
+        status: (e as any).known_not_sent ? "not_sent" : "outcome_unknown",
+        receipt,
+      },
       retry_safe: false,
       readback_required: true,
     };
@@ -134,6 +196,12 @@ export async function readbackDispatchExecution(
 export function outlookDispatchProvider(
   client: any,
   allowedMailboxes: string[],
+  deps = {
+    request: graphRequest,
+    guard: assertOutlookSesDeliveryAllowed,
+    verify: verifyMailboxRoute,
+    attachment: fetchAttachment,
+  },
 ): DispatchMailProvider {
   const allowed = (mailbox: string) => {
     if (
@@ -154,21 +222,21 @@ export function outlookDispatchProvider(
     async prepare(d: any, id: string, jobId: string) {
       allowed(d.sender);
       // Captured Resend thread IDs cannot become native Outlook reply IDs.
-      if (d.thread_id) {
+      if (d.thread_id && !d.graph_message_id) {
         throw new Error(
           "Native reply requires verified mailbox message identity; captured PO thread is not an Outlook message",
         );
       }
-      await assertOutlookSesDeliveryAllowed(client, {
+      await deps.guard(client, {
         job_id: jobId,
         from: d.sender,
         to: d.to,
         cc: d.cc,
       });
-      await verifyMailboxRoute(d.sender);
+      await deps.verify(d.sender);
       const attachments = [];
       for (const a of d.attachments) {
-        const file = await fetchAttachment(a.source_ref, a.name);
+        const file = await deps.attachment(a.source_ref, a.name);
         const bytes = Uint8Array.from(
           atob(file.contentBytes),
           (c) => c.charCodeAt(0),
@@ -182,7 +250,99 @@ export function outlookDispatchProvider(
         }
         attachments.push(file);
       }
-      const response = await graphRequest(
+      if (d.graph_message_id) {
+        const originalPath = `/users/${encodeURIComponent(d.sender)}/messages/${
+          encodeURIComponent(d.graph_message_id)
+        }`;
+        const source = await (await deps.request(
+          originalPath + "?$select=id,conversationId,changeKey",
+          { headers },
+          { mutating: false },
+        )).json();
+        if (
+          source.conversationId !== d.thread_id ||
+          source.changeKey !== d.graph_change_key
+        ) throw new Error("Native reply source identity/revision changed");
+        const created = await (await deps.request(
+          originalPath + (d.reply_all ? "/createReplyAll" : "/createReply"),
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              message: { body: { contentType: "Text", content: d.body } },
+            }),
+          },
+          { mutating: true },
+        )).json();
+        if (!created.id) throw new Error("Native reply draft identity missing");
+        const receipt = {
+          mailbox: d.sender,
+          draft_id: created.id,
+          internet_message_id: created.internetMessageId || null,
+          change_key: created.changeKey,
+          content_hash: d.content_hash,
+        };
+        try {
+          const addresses = (v: any[]) =>
+            (v || []).map((x) =>
+              String(x.emailAddress?.address || "").toLowerCase()
+            ).sort();
+          if (
+            JSON.stringify(addresses(created.toRecipients)) !==
+              JSON.stringify(d.to.map((x: string) => x.toLowerCase()).sort()) ||
+            JSON.stringify(addresses(created.ccRecipients)) !==
+              JSON.stringify(
+                d.cc.map((x: string) => x.toLowerCase()).sort(),
+              )
+          ) {
+            throw new Error(
+              "Native reply recipients differ from exact reviewed To/CC",
+            );
+          }
+          await deps.request(path(receipt), {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({
+              subject: d.subject,
+              body: { contentType: "Text", content: d.body },
+            }),
+          }, { mutating: true });
+          const inherited = await (await deps.request(
+            path(receipt) + "/attachments?$select=id",
+            { headers },
+            { mutating: false },
+          )).json();
+          if (inherited["@odata.nextLink"] || inherited.value?.length) {
+            throw new Error(
+              "Unexpected inherited reply attachments require separate review",
+            );
+          }
+          for (const file of attachments) {
+            await deps.request(path(receipt) + "/attachments", {
+              method: "POST",
+              headers,
+              body: JSON.stringify(file),
+            }, { mutating: true });
+          }
+          const current =
+            await (await deps.request(path(receipt), { headers }, {
+              mutating: false,
+            })).json();
+          if (
+            current.subject !== d.subject ||
+            String(current.body?.content || "").replaceAll("\r\n", "\n") !==
+              d.body.replaceAll("\r\n", "\n")
+          ) {
+            throw new Error(
+              "Provider reply content differs from approved draft",
+            );
+          }
+          return { ...receipt, change_key: current.changeKey };
+        } catch (error) {
+          throw Object.assign(error as Error, { receipt });
+        }
+      }
+      const response = await deps.request(
         `/users/${encodeURIComponent(d.sender)}/messages`,
         {
           method: "POST",
@@ -215,9 +375,9 @@ export function outlookDispatchProvider(
         content_hash: d.content_hash,
       };
     },
-    async send(receipt: any) {
+    async send(receipt: any, beforeSend?: () => Promise<void>) {
       allowed(receipt.mailbox);
-      const check = await graphRequest(path(receipt), { headers }, {
+      const check = await deps.request(path(receipt), { headers }, {
         mutating: false,
       });
       const current = await check.json();
@@ -228,7 +388,8 @@ export function outlookDispatchProvider(
           "Provider draft changed or already sent; readback required",
         );
       }
-      await graphRequest(path(receipt) + "/send", { method: "POST", headers }, {
+      if (beforeSend) await beforeSend();
+      await deps.request(path(receipt) + "/send", { method: "POST", headers }, {
         mutating: true,
       });
       return {
@@ -239,7 +400,7 @@ export function outlookDispatchProvider(
     },
     async readback(receipt: any) {
       allowed(receipt.mailbox);
-      const r = await graphRequest(
+      const r = await deps.request(
         path(receipt) +
           "?$select=id,isDraft,internetMessageId,sentDateTime,changeKey",
         { headers },
@@ -281,7 +442,7 @@ export async function dispatchExecutionState(
     capabilities: {
       release_hold: !released || !control?.communications_enabled,
       approval_enabled: canApprove,
-      supported_transports: ["outlook_new"],
+      supported_transports: ["outlook_new", "outlook_reply"],
       captured_thread_send_available: false,
     },
   };

@@ -75,7 +75,7 @@ returns text language sql stable security invoker set search_path=public,pg_temp
  'communications',(select coalesce(jsonb_agg(to_jsonb(c) order by c.id),'[]') from po_communications c where c.job_id=j.id),
  'media',(select coalesce(jsonb_agg(to_jsonb(m) order by m.id),'[]') from job_media m where m.job_id=j.id),
  'assignments',(select coalesce(jsonb_agg(to_jsonb(a) order by a.id),'[]') from job_assignments a where a.job_id=j.id),
- 'context',(select coalesce(jsonb_agg(to_jsonb(c) order by c.id),'[]') from current_job_context_facts c where c.job_id=j.id)
+ 'context',(select coalesce(jsonb_agg(to_jsonb(c) order by c.id),'[]') from current_job_context_facts c where c.job_id=j.id and c.provenance#>>'{derivation,owner}' is distinct from 'dispatch')
  )::text) from jobs j where j.id=p_job and j.org_id=p_org;
 $$;
 revoke all on function public.dispatch_source_version(uuid,uuid) from public,anon,authenticated;
@@ -100,6 +100,11 @@ begin
   insert into dispatch_plans(org_id,job_id) values(p_org,p_job) on conflict do nothing;
   select * into plan from dispatch_plans where org_id=p_org and job_id=p_job for update;
   if plan.version <> p_expected then raise exception 'version_conflict' using errcode='40001'; end if;
+  if exists(select 1 from dispatch_executions e where e.org_id=p_org and e.job_id=p_job and e.status='sending'
+    and (select value from jsonb_array_elements(p_state->'drafts') where value->>'id'=e.draft_id::text)
+      is distinct from (select value from jsonb_array_elements(plan.state->'drafts') where value->>'id'=e.draft_id::text))
+  then raise exception 'draft_send_in_progress' using errcode='40001'; end if;
+
   for lot in select value from jsonb_array_elements(p_lots) loop
     if lot#>>'{source_ref,kind}'='purchase_order_line' and not exists(
       select 1 from purchase_orders where id=(lot#>>'{source_ref,po_id}')::uuid and org_id=p_org
@@ -146,6 +151,12 @@ begin
   result=jsonb_build_object('version',plan.version,'source_version',p_source,'state',p_state,'live_actions_enabled',false);
   insert into dispatch_commands(org_id,request_id,job_id,request_hash,actor,command,result)
     values(p_org,p_request,p_job,p_hash,p_actor,p_command,result);
+  if p_command<>'assess' then
+  insert into business_events(event_type,source,entity_type,entity_id,correlation_id,job_id,payload,metadata)
+    values('dispatch.plan.changed','ops-api','dispatch_plan',p_job::text,p_request,p_job::text,
+      jsonb_build_object('contract_version','dispatch-context/v1','org_id',p_org,'job_id',p_job,'plan_version',plan.version,'source_version',p_source,'command',p_command,'state',p_state),
+      jsonb_build_object('source_ref',jsonb_build_object('table','dispatch_plans','org_id',p_org,'job_id',p_job,'version',plan.version),'evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',p_request,'plan_version',plan.version)));
+  end if;
   return result;
 end $$;
 revoke all on function public.dispatch_commit(uuid,uuid,bigint,uuid,text,text,text,text,jsonb,jsonb,jsonb) from public,anon,authenticated;
@@ -206,10 +217,33 @@ begin
    or (d->>'po_id' is not null and d#>>'{approval,purchase_approved}' is distinct from 'true')
    or dispatch_source_version(p_org,p_job) is distinct from p_source
  then raise exception 'draft_approval_changed' using errcode='40001'; end if;
- if exists(select 1 from dispatch_executions where org_id=p_org and draft_id=p_draft and status in ('claimed','provider_draft_ready','accepted_not_delivered','outcome_unknown')) then raise exception 'draft_already_executed_or_uncertain' using errcode='40001'; end if;
+ if exists(select 1 from dispatch_executions where org_id=p_org and draft_id=p_draft and status in ('claimed','provider_draft_ready','sending','accepted_not_delivered','outcome_unknown')) then raise exception 'draft_already_executed_or_uncertain' using errcode='40001'; end if;
  insert into dispatch_executions(org_id,id,job_id,draft_id,content_hash,source_version,snapshot,status)
  values(p_org,p_approval,p_job,p_draft,p_hash,p_source,d,'claimed') returning * into prior;
  return jsonb_build_object('claimed',true,'action',to_jsonb(prior));
 end $$;
 revoke all on function public.dispatch_claim_execution(uuid,uuid,uuid,uuid,text,text) from public,anon,authenticated;
 grant execute on function public.dispatch_claim_execution(uuid,uuid,uuid,uuid,text,text) to service_role;
+
+alter table public.dispatch_executions drop constraint dispatch_executions_status_check;
+alter table public.dispatch_executions add constraint dispatch_executions_status_check check(status in ('claimed','provider_draft_ready','sending','accepted_not_delivered','outcome_unknown','not_sent'));
+create function public.dispatch_begin_send(p_org uuid,p_action uuid)
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare a dispatch_executions; d jsonb;
+begin
+ perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ select * into a from dispatch_executions where org_id=p_org and id=p_action for update;
+ if not found or a.status not in ('provider_draft_ready','sending') then return jsonb_build_object('allowed',false,'reason','not_ready');end if;
+ select value into d from dispatch_plans p cross join lateral jsonb_array_elements(p.state->'drafts') where p.org_id=p_org and p.job_id=a.job_id and value->>'id'=a.draft_id::text;
+ if not exists(select 1 from dispatch_release_controls where org_id=p_org and communications_enabled)
+ or d->>'content_hash' is distinct from a.content_hash
+ or d->'approval' is distinct from a.snapshot->'approval'
+ or dispatch_source_version(p_org,a.job_id) is distinct from a.source_version then
+  update dispatch_executions set status='not_sent',last_error='Approval, source or release changed during preparation',updated_at=now() where org_id=p_org and id=p_action;
+  return jsonb_build_object('allowed',false,'reason','approval_source_or_release_changed');
+ end if;
+ update dispatch_executions set status='sending',updated_at=now() where org_id=p_org and id=p_action;
+ return jsonb_build_object('allowed',true);
+end $$;
+revoke all on function public.dispatch_begin_send(uuid,uuid) from public,anon,authenticated;
+grant execute on function public.dispatch_begin_send(uuid,uuid) to service_role;

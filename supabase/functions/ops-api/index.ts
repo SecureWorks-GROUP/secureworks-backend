@@ -5077,7 +5077,7 @@ if (import.meta.main) serve(async (req: Request) => {
           const provider = outlookDispatchProvider(client,Array.isArray(mailboxConfig[dispatchOrg]) ? mailboxConfig[dispatchOrg] : [])
           if (action === 'dispatch_execute') {
             if(req.method !== 'POST')return json({error:'POST required'},405)
-            return json(await executeDispatchDraft(client,dispatchOrg,body,provider,Deno.env.get('DISPATCH_SEND_RELEASED') === 'true'))
+            return json(await executeDispatchDraft(client,dispatchOrg,body,provider,Deno.env.get('DISPATCH_SEND_RELEASED') === 'true',undefined,()=>Deno.env.get('DISPATCH_SEND_RELEASED') === 'true'))
           }
           if(action === 'dispatch_execution_readback') {
             if(req.method !== 'POST')return json({error:'POST required'},405)

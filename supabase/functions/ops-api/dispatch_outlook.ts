@@ -31,7 +31,7 @@ export async function dispatchOutlookSearch(
   initial.searchParams.set("$search", `"${search}"`);
   initial.searchParams.set(
     "$select",
-    "id,internetMessageId,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,webLink",
+    "id,internetMessageId,conversationId,changeKey,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,webLink",
   );
   let target = initial;
   if (params.get("cursor")) {
@@ -48,7 +48,9 @@ export async function dispatchOutlookSearch(
   }
   const response = await request(target.toString(), {
     method: "GET",
-    headers: { Prefer: 'outlook.body-content-type="text"' },
+    headers: {
+      Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"',
+    },
   }, { mutating: false });
   if (!response.ok) {
     return {

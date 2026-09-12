@@ -1,4 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
+import { resolveDispatchAttachments } from "./dispatch_attachments.ts";
 import { isCurrentContextFact } from "./context_visibility.ts";
 // Dispatch owns human review state, never source ingestion or outbound execution.
 export class DispatchError extends Error {
@@ -85,6 +86,10 @@ export async function hash(value: any): Promise<string> {
     new Uint8Array(bytes),
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
+}
+export function isUpstreamDispatchFact(row: any): boolean {
+  return isCurrentContextFact(row) &&
+    row.provenance?.derivation?.owner !== "dispatch";
 }
 export function eligibility(job: any, documents: any[] = []) {
   const evidence = [];
@@ -400,12 +405,32 @@ export async function reduceCommand(
         })),
         po_id: p.po_id ? uuid(p.po_id) : null,
         thread_id: p.thread_id || null,
+        graph_message_id: p.graph_message_id
+          ? text(p.graph_message_id, "native message id")
+          : null,
+        graph_change_key: p.graph_message_id
+          ? text(p.graph_change_key, "native source revision")
+          : null,
+        graph_link_reason: p.graph_message_id
+          ? text(p.graph_link_reason, "explicit job association reason")
+          : null,
+        reply_all: p.reply_all === true,
         proposed_delivery_at: p.proposed_delivery_at || null,
         source_version: source,
         status: "draft",
         ...mark,
       };
       upsert(s.drafts, { ...d, content_hash: await hash(d) });
+      break;
+    }
+    case "draft_revoke": {
+      const d = find(s.drafts, p.id);
+      d.approval = null;
+      d.revocation = {
+        actor,
+        at: now,
+        reason: text(p.reason, "revocation reason"),
+      };
       break;
     }
     case "draft_approve": {
@@ -556,7 +581,7 @@ export async function reduceCommand(
         if (moved > r.usable_quantity) {
           throw new DispatchError("Transfer exceeds usable receipt quantity");
         }
-        if (moved < r.usable_quantity) {
+        if (moved < r.usable_quantity || r.damaged_quantity > 0) {
           const newId = uuid(p.new_id);
           if (s.receipts.some((x: any) => x.id === newId)) {
             throw new DispatchError("Split receipt ID already exists");
@@ -708,6 +733,10 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
     media: media.slice(0, 1000),
     supply_lots: supplyLots,
     context_facts: contextRows.slice(0, 1000),
+    upstream_context_facts: contextRows.filter(isUpstreamDispatchFact).slice(
+      0,
+      1000,
+    ),
     coverage: {
       complete,
       purchase_orders: po.length,
@@ -790,6 +819,7 @@ export async function dispatchCommand(
   ) throw new DispatchError("Draft PO does not belong to this job", 409);
   if (
     b.command === "draft_upsert" && b.payload.thread_id &&
+    !b.payload.graph_message_id &&
     !current.communications.some((c: any) =>
       c.thread_id === b.payload.thread_id
     )
@@ -798,6 +828,19 @@ export async function dispatchCommand(
       "Reply thread is not an authoritative current-job conversation; use an explicit new conversation",
       409,
     );
+  }
+  if (b.command === "draft_upsert") {
+    b = {
+      ...b,
+      payload: {
+        ...b.payload,
+        attachments: await resolveDispatchAttachments(
+          b.payload.attachments || [],
+          current.documents,
+          current.media,
+        ),
+      },
+    };
   }
   const next = await reduceCommand(
     state,
@@ -872,14 +915,16 @@ export async function dispatchCommand(
     }
   }
   if (b.command === "assess") {
-    next.assessment.context_facts = current.context_facts.map((f: any) => ({
+    next.assessment.context_facts = current.upstream_context_facts.map((
+      f: any,
+    ) => ({
       id: f.id,
       kind: f.kind,
       value: f.value,
       source_ref: { table: f._context_store, id: f.id },
     }));
     next.assessment.context_review_required =
-      current.context_facts.length > 0 &&
+      current.upstream_context_facts.length > 0 &&
       next.context_review?.source_version !== current.source_version;
     if (next.assessment.context_review_required) {
       next.assessment.ready = false;
