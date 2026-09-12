@@ -74,6 +74,11 @@ export interface IntakeReconJob {
   jobs?: any;
 }
 
+export interface IntakeReconCaseSource {
+  post_id?: string | null;
+  case_id?: string | null;
+}
+
 export interface IntakeReconItem {
   kind: "source_email" | "draft" | "job";
   state:
@@ -545,7 +550,7 @@ export type IntakeReconcileClassification =
   | "genuinely_unaccounted";
 
 export interface IntakeReconcileEvidencePointer {
-  kind: "draft" | "job" | "classification";
+  kind: "case" | "draft" | "job" | "classification";
   id: string;
 }
 
@@ -579,9 +584,87 @@ export interface IntakeReconcileInvariant {
     genuinely_unaccounted: number;
     unaccounted: number;
   };
+  oldest_unaccounted_received_at: string | null;
   /** One explicit classification per source row. */
   items: IntakeReconcileInvariantItem[];
   unaccounted: IntakeReconcileInvariantItem[];
+}
+
+export function reconcileFreshSourceCoverage(input: {
+  storedUnfatedSourceCount: number | null;
+  storedOldestUnfatedReceivedAt: string | null;
+  storedFreshSourceLagSeconds: number | null;
+  candidateUnaccountedCount: number | null;
+  candidateOldestReceivedAt: string | null;
+  nowIso: string;
+}): {
+  known: boolean;
+  unfatedSourceCount: number | null;
+  oldestUnfatedReceivedAt: string | null;
+  freshSourceLagSeconds: number | null;
+} {
+  const storedCount = input.storedUnfatedSourceCount;
+  const storedLag = input.storedFreshSourceLagSeconds;
+  const candidateCount = input.candidateUnaccountedCount;
+  const validCount = (value: number | null) =>
+    value !== null && Number.isSafeInteger(value) && value >= 0;
+  if (
+    !validCount(storedCount) || !validCount(storedLag) ||
+    !validCount(candidateCount)
+  ) {
+    return {
+      known: false,
+      unfatedSourceCount: null,
+      oldestUnfatedReceivedAt: null,
+      freshSourceLagSeconds: null,
+    };
+  }
+
+  const storedOldestValid = input.storedOldestUnfatedReceivedAt !== null &&
+    !Number.isNaN(Date.parse(input.storedOldestUnfatedReceivedAt));
+  const candidateOldestValid = input.candidateOldestReceivedAt !== null &&
+    !Number.isNaN(Date.parse(input.candidateOldestReceivedAt));
+  const storedShapeKnown = storedCount === 0
+    ? input.storedOldestUnfatedReceivedAt === null && storedLag === 0
+    : storedOldestValid;
+  const candidateShapeKnown = candidateCount === 0
+    ? input.candidateOldestReceivedAt === null
+    : candidateOldestValid;
+  if (!storedShapeKnown || !candidateShapeKnown) {
+    return {
+      known: false,
+      unfatedSourceCount: null,
+      oldestUnfatedReceivedAt: null,
+      freshSourceLagSeconds: null,
+    };
+  }
+
+  const effectiveCount = Math.max(storedCount!, candidateCount!);
+  const oldestCandidates = [
+    storedCount! > 0 ? input.storedOldestUnfatedReceivedAt : null,
+    candidateCount! > 0 ? input.candidateOldestReceivedAt : null,
+  ].filter((value): value is string =>
+    !!value && !Number.isNaN(Date.parse(value))
+  );
+  const oldest =
+    oldestCandidates.sort((left, right) =>
+      Date.parse(left) - Date.parse(right)
+    )[0] ?? null;
+  const known = effectiveCount === 0
+    ? oldest === null && storedLag === 0
+    : oldest !== null;
+  const ageSeconds = oldest
+    ? Math.max(
+      0,
+      Math.floor((Date.parse(input.nowIso) - Date.parse(oldest)) / 1000),
+    )
+    : 0;
+  return {
+    known,
+    unfatedSourceCount: effectiveCount,
+    oldestUnfatedReceivedAt: oldest,
+    freshSourceLagSeconds: known ? Math.max(storedLag!, ageSeconds) : null,
+  };
 }
 
 interface ReconcileIdentity {
@@ -1009,6 +1092,7 @@ export function summarizeIntakeReconcileInvariant(input: {
   emails: IntakeReconEmail[];
   drafts: IntakeReconDraft[];
   jobs: IntakeReconJob[];
+  caseSources?: IntakeReconCaseSource[];
   senderPatterns?: string[];
   nowIso?: string;
   windowDays?: number;
@@ -1023,6 +1107,13 @@ export function summarizeIntakeReconcileInvariant(input: {
 
   const drafts = input.drafts || [];
   const jobs = input.jobs || [];
+  const caseSourceByPostId = new Map(
+    (input.caseSources || []).flatMap((source) =>
+      source.post_id && source.case_id
+        ? [[source.post_id, source] as const]
+        : []
+    ),
+  );
   const draftsByPostId = new Map<string, IntakeReconDraft>();
   const draftsByInternetId = new Map<string, IntakeReconDraft>();
   // Every draft that lands on a fingerprint, not just the first. A draft publishes its
@@ -1116,6 +1207,21 @@ export function summarizeIntakeReconcileInvariant(input: {
     const subject = e.subject || "";
     const fromEmail = e.from_email || "";
     const identity = reconcileIdentity({ subject, bodyText: e.body_preview });
+
+    // The deterministic case-source spine is the authoritative durable fate.
+    // A source may intentionally produce a visible exception rather than a draft
+    // or job; omitting that spine is what made intake_health call a real,
+    // operator-visible exception "unaccounted".
+    const directCaseSource = postId
+      ? caseSourceByPostId.get(postId)
+      : undefined;
+    if (directCaseSource) {
+      record(e, "matched", "source_post_id_matches_canonical_case", {
+        kind: "case",
+        id: directCaseSource.case_id!,
+      }, identity);
+      continue;
+    }
 
     // Exact source evidence linkage remains authoritative and preserves the raw id.
     const directDraft = postId ? draftsByPostId.get(postId) : undefined;
@@ -1294,6 +1400,18 @@ export function summarizeIntakeReconcileInvariant(input: {
       genuinely_unaccounted: unaccounted.length,
       unaccounted: unaccounted.length,
     },
+    oldest_unaccounted_received_at: unaccounted.reduce<string | null>(
+      (oldest, item) => {
+        if (!item.received_at) return oldest;
+        if (
+          !oldest || Date.parse(item.received_at) < Date.parse(oldest)
+        ) {
+          return item.received_at;
+        }
+        return oldest;
+      },
+      null,
+    ),
     items,
     unaccounted: unaccounted.slice(0, limit),
   };
@@ -1308,31 +1426,37 @@ export async function makesafeIntakeReconcileInvariant(
   const nowMs = opts.nowIso ? Date.parse(opts.nowIso) : Date.now();
   const sinceIso = new Date(nowMs - windowDays * 86_400_000).toISOString();
 
-  const [emailsRes, draftsRes, jobsRes, companiesRes] = await Promise.all([
-    client.from("emails")
-      .select(
-        "post_id, internet_message_id, subject, from_email, body_preview, received_at, has_attachments",
-      )
-      .eq("mailbox", "ses@secureworkswa.com.au")
-      .is("pii_purged_at", null)
-      .gte("received_at", sinceIso)
-      .order("received_at", { ascending: false })
-      .limit(1000),
-    client.from("makesafe_intake_drafts")
-      .select(
-        "id, graph_message_id, internet_message_id, external_ref, subject, from_email, body_preview, status, received_at, created_at, builder_claim_ref:extraction_json->>builder_claim_ref, builder_po_number:extraction_json->>builder_po_number, builder_work_order_number:extraction_json->>builder_work_order_number",
-      )
-      .gte("received_at", sinceIso)
-      .order("received_at", { ascending: false })
-      .limit(1000),
-    client.from("makesafe_job_details")
-      .select("job_id, external_ref")
-      .not("external_ref", "is", null)
-      .limit(2000),
-    client.from("makesafe_companies")
-      .select("sender_patterns")
-      .eq("active", true),
-  ]);
+  const [emailsRes, draftsRes, jobsRes, companiesRes, caseSourcesRes] =
+    await Promise.all([
+      client.from("emails")
+        .select(
+          "post_id, internet_message_id, subject, from_email, body_preview, received_at, has_attachments",
+        )
+        .eq("mailbox", "ses@secureworkswa.com.au")
+        .is("pii_purged_at", null)
+        .gte("received_at", sinceIso)
+        .order("received_at", { ascending: false })
+        .limit(1000),
+      client.from("makesafe_intake_drafts")
+        .select(
+          "id, graph_message_id, internet_message_id, external_ref, subject, from_email, body_preview, status, received_at, created_at, builder_claim_ref:extraction_json->>builder_claim_ref, builder_po_number:extraction_json->>builder_po_number, builder_work_order_number:extraction_json->>builder_work_order_number",
+        )
+        .gte("received_at", sinceIso)
+        .order("received_at", { ascending: false })
+        .limit(1000),
+      client.from("makesafe_job_details")
+        .select("job_id, external_ref")
+        .not("external_ref", "is", null)
+        .limit(2000),
+      client.from("makesafe_companies")
+        .select("sender_patterns")
+        .eq("active", true),
+      client.from("makesafe_intake_case_sources")
+        .select("post_id,case_id")
+        .eq("org_id", "00000000-0000-0000-0000-000000000001")
+        .gte("received_at", sinceIso)
+        .limit(2000),
+    ]);
 
   if (emailsRes.error) {
     throw new Error(
@@ -1349,6 +1473,13 @@ export async function makesafeIntakeReconcileInvariant(
   if (jobsRes.error) {
     throw new Error(
       `makesafe jobs read failed: ${jobsRes.error.message ?? jobsRes.error}`,
+    );
+  }
+  if (caseSourcesRes.error) {
+    throw new Error(
+      `intake case sources read failed: ${
+        caseSourcesRes.error.message ?? caseSourcesRes.error
+      }`,
     );
   }
 
@@ -1383,6 +1514,7 @@ export async function makesafeIntakeReconcileInvariant(
     emails: emailsRes.data || [],
     drafts,
     jobs: jobsRes.data || [],
+    caseSources: caseSourcesRes.data || [],
     senderPatterns,
     nowIso: opts.nowIso,
     windowDays,
