@@ -13,7 +13,7 @@
 // open receivable in one call so the screen and the coverage table do not need
 // one door call per invoice.
 
-import { currentDispatchWorkingState, projectDispatchDerivedFacts } from "./dispatch_context.ts";
+import { currentDispatchWorkingState } from "./dispatch_context.ts";
 
 export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
@@ -524,9 +524,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
         conversationCountsByJob(client, [{ id: jobRow.id, ghl_contact_id: jobRow.ghl_contact_id ?? null }], warnings),
         safeRead("other_open_invoices", async () => unwrap(await client.from("xero_invoices").select("invoice_number, xero_invoice_id, amount_due, due_date, status")
           .eq("org_id", deps.orgId).eq("invoice_type", "ACCREC").eq("job_id", jobRow.id).in("status", OPEN_STATUSES).gt("amount_due", 0).neq("xero_invoice_id", inv.xero_invoice_id).limit(20))),
-        safeRead("dispatch_working_state", async () => unwrap(await client.from("business_events")
-          .select("id, event_type, correlation_id, job_id, payload, metadata")
-          .eq("job_id", jobRow.id).eq("event_type", "dispatch.plan.changed").order("id").limit(200))),
+        safeRead("dispatch_working_state", async () => unwrap(await client.rpc("context_dispatch_current", { p_org: deps.orgId, p_job: jobRow.id }))),
       ]);
       sources.promised = { ok: variations.status.ok && workOrders.status.ok && council.status.ok, error: [variations.status.error, workOrders.status.error, council.status.error].filter(Boolean).join("; ") || undefined };
       sources.facts = factsRead.status;
@@ -536,7 +534,9 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       sources.other_open_invoices = openRead.status;
       sources.dispatch_working_state = dispatchRead.status;
       facts = (factsRead.data || []).filter((row: any) => deps.isCurrentContextFact(row, now.getTime())).slice(0, factsLimit);
-      dispatchWorkingState = currentDispatchWorkingState(dispatchRead.data || []);
+      dispatchWorkingState = dispatchRead.data
+        ? { present: true as const, not_provider_fact: true as const, evidence_role: "human_working_state" as const, provider_action: false as const, job_id: jobRow.id, plan_version: Number(dispatchRead.data.value?.plan_version ?? -1), source_version: null, command: dispatchRead.data.value?.command ?? null, contract_version: "dispatch-context/v1", source_ref: null, snapshot: null, event_id: dispatchRead.data.id, correlation_id: dispatchRead.data.correlation_id ?? null, derivation: dispatchRead.data.provenance?.derivation }
+        : { present: false as const };
       if (facts.length < (factsRead.data || []).length && (factsRead.data || []).length >= factsLimit * 2) warnings.push(`facts: read cap ${factsLimit * 2} reached; older facts not shown`);
       conversation = [...(convRead.data || [])].reverse();
       queue = queueRead.queues.get(jobRow.id);
@@ -628,16 +628,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
     },
     link: { status: link.status, method: link.method, job_id: link.job_id, job_number: link.job_number, candidates: link.status === "ambiguous" ? link.candidates : [] },
     job,
-    facts: [
-      ...facts.map((f: any) => ({ id: f.id, kind: f.kind, value: f.value, provenance: f.provenance ?? null, updated_at: f.updated_at ?? null })),
-      ...projectDispatchDerivedFacts(dispatchWorkingState).map((f) => ({
-        id: f.id,
-        kind: f.kind,
-        value: f.value,
-        provenance: f.provenance,
-        updated_at: null,
-      })),
-    ],
+    facts: facts.map((f: any) => ({ id: f.id, kind: f.kind, value: f.value, provenance: f.provenance ?? null, updated_at: f.updated_at ?? null })),
     dispatch_working_state: dispatchWorkingState,
     conversation: {
       messages: conversation.map((m: any) => ({

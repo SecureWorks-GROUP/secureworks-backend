@@ -27,6 +27,8 @@ function evt(partial: Partial<DispatchContextEvent> & { id: string }): DispatchC
       state: { order_drafts: [{ id: "d1", status: "draft" }] },
       ...(partial.payload as object || {}),
     },
+    match_status: "matched",
+    match_method: "direct_job_id",
     metadata: {
       evidence_role: "human_working_state",
       provider_action: false,
@@ -112,22 +114,14 @@ Deno.test("external independent fact still changes Dispatch source fingerprint",
   assertEquals(dispatchSourceFingerprint(before) === dispatchSourceFingerprint([...before, external]), false);
 });
 
-Deno.test("org rollup preserves Dispatch lineage; mixed inputs are not silently merged", () => {
-  const dispatchOrg = {
-    id: "org-d",
-    kind: "note",
-    value: {},
-    provenance: { derivation: { owner: "dispatch" as const, event_id: REQ, plan_version: 2 } },
-  };
-  const onlyOwn = projectOrgRollupOntoJob([dispatchOrg], JOB);
-  assertEquals(onlyOwn.needs_richer_lineage, false);
-  assertEquals(onlyOwn.facts[0].provenance.derivation.owner, "dispatch");
+Deno.test("mixed org rollup does not feed job actions or current facts", () => {
   const mixed = projectOrgRollupOntoJob([
-    dispatchOrg,
+    { id: "org-d", kind: "note", value: {}, provenance: { derivation: { owner: "dispatch" as const, event_id: REQ, plan_version: 2 } } },
     { id: "org-x", kind: "note", value: {}, provenance: { derivation: { owner: "external_email" } } },
   ], JOB);
-  assertEquals(mixed.needs_richer_lineage, true);
+  assertEquals(mixed.feeds_job_actions, false);
   assertEquals(mixed.facts.length, 0);
+  assertEquals(mixed.source_union.length, 2);
 });
 
 Deno.test("ordinary client evidence remains extractable", () => {

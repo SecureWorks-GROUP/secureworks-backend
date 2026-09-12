@@ -10,6 +10,8 @@ export type DispatchContextEvent = {
   event_type: string;
   correlation_id?: string | null;
   job_id?: string | null;
+  match_status?: string | null;
+  match_method?: string | null;
   payload?: Record<string, unknown> | null;
   metadata?: Record<string, unknown> | null;
 };
@@ -52,6 +54,11 @@ export function isDispatchWorkingStateEvent(event: DispatchContextEvent): boolea
   return meta.evidence_role === "human_working_state" && meta.provider_action === false;
 }
 
+export function isCanonicalDispatchAttribution(event: DispatchContextEvent): boolean {
+  return event.match_status === "matched"
+    && (event.match_method === "direct_job_id" || event.match_method === "direct_reference" || event.match_method === "manual");
+}
+
 export function isProviderExtractableEvent(event: DispatchContextEvent): boolean {
   if (event.event_type === DISPATCH_PLAN_CHANGED) return false;
   const meta = event.metadata ?? {};
@@ -90,6 +97,7 @@ export function currentDispatchWorkingState(
   const eligible: DispatchContextEvent[] = [];
   for (const event of events) {
     if (!isDispatchWorkingStateEvent(event)) continue;
+    if (!isCanonicalDispatchAttribution(event)) continue;
     if (!jobIdOf(event)) continue;
     if (!derivationOf(event)) continue;
     const key = event.correlation_id || event.id;
@@ -155,31 +163,18 @@ export function dispatchSourceFingerprint(facts: Array<{ id: string; provenance?
 
 export type OrgRollupToJob = {
   facts: ProjectedDispatchFact[];
-  needs_richer_lineage: boolean;
+  feeds_job_actions: false;
+  source_union: Array<{ id: string; owner?: string }>;
 };
 
-/** Org summaries that feed a job keep Dispatch lineage. Mixed own+independent inputs are not silently merged. */
+/** Mixed org rollups do not feed job actions or current_job_context_facts. Documented boundary, not a writer. */
 export function projectOrgRollupOntoJob(
   orgFacts: Array<{ id: string; kind: string; value: unknown; provenance?: { derivation?: DispatchDerivation | { owner?: string } } }>,
-  jobId: string,
+  _jobId: string,
 ): OrgRollupToJob {
-  const dispatchOwned = orgFacts.filter((fact) => fact.provenance?.derivation?.owner === "dispatch");
-  const independent = orgFacts.filter((fact) => fact.provenance?.derivation?.owner !== "dispatch");
-  if (dispatchOwned.length > 0 && independent.length > 0) {
-    return { facts: [], needs_richer_lineage: true };
-  }
   return {
-    needs_richer_lineage: false,
-    facts: dispatchOwned.map((fact) => {
-      const derivation = fact.provenance?.derivation as DispatchDerivation;
-      return {
-        id: `org-rollup:${fact.id}`,
-        job_id: jobId,
-        kind: "note",
-        value: { text: "Organisation summary derived from Dispatch. Not a provider claim.", command: null, plan_version: derivation.plan_version },
-        provenance: { derivation: { ...derivation }, writer_role: "projection" },
-        _context_store: "dispatch_projection",
-      };
-    }),
+    feeds_job_actions: false,
+    facts: [],
+    source_union: orgFacts.map((fact) => ({ id: fact.id, owner: fact.provenance?.derivation?.owner })),
   };
 }
