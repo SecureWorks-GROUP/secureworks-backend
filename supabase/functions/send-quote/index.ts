@@ -1756,6 +1756,7 @@ serve(async (req: Request) => {
           },
           metadata: {},
         })
+        let runCaptureFailed = Boolean(runAcceptedCaptureError)
         if (runAcceptedCaptureError) {
           console.error('[canonical-event-fail]', JSON.stringify({
             event_type: 'quote.run_accepted',
@@ -1803,21 +1804,33 @@ serve(async (req: Request) => {
           // Acceptance notification event
           const clientName = job?.client_name || 'Client'
           const neighbourName = run?.neighbour_name || 'Neighbour'
-          await insertCapturedEvidence(sb, {
+          const { error: runNotifyCaptureError } = await insertCapturedEvidence(sb, {
             event_type: 'quote.run_fully_accepted.notify',
             source: 'send-quote',
             occurred_at: new Date().toISOString(),
             recorded_at: new Date().toISOString(),
             entity_type: 'job',
             entity_id: doc.job_id,
-            job_id: job?.job_number || '',
+            job_id: doc.job_id,
             payload: {
-              message: `✅ ${job?.job_number || ''} ${runLabel} run fully accepted — both ${clientName} and ${hasNeighbour ? neighbourName : 'parties'} confirmed. Creating deposit invoices.`,
+              message: `Run fully accepted. Both parties confirmed. Creating deposit invoices.`,
               run_label: runLabel,
               run_name: runName,
+              job_number: job?.job_number || null,
+              client_name: clientName,
+              neighbour_name: hasNeighbour ? neighbourName : null,
             },
             metadata: {},
-          }).then(() => {}, () => {})
+          })
+          if (runNotifyCaptureError) {
+            runCaptureFailed = true
+            console.error('[canonical-event-fail]', JSON.stringify({
+              event_type: 'quote.run_fully_accepted.notify',
+              handler: 'send-quote/accept',
+              job_id: doc.job_id || null,
+              error: runNotifyCaptureError?.message ?? String(runNotifyCaptureError),
+            }))
+          }
 
           // Create deposit invoices via ops-api for each party
           const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
@@ -1858,9 +1871,21 @@ serve(async (req: Request) => {
             }
           }
 
+          if (runCaptureFailed) {
+            return new Response('Quote acceptance evidence capture failed', {
+              status: 500,
+              headers: { 'content-type': 'text/plain; charset=utf-8' },
+            })
+          }
           // Return "Next Steps" page for fully accepted run
           return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || ''))
         } else {
+          if (runCaptureFailed) {
+            return new Response('Quote acceptance evidence capture failed', {
+              status: 500,
+              headers: { 'content-type': 'text/plain; charset=utf-8' },
+            })
+          }
           // ── WAITING FOR OTHER PARTY ──
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
         }
