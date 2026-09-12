@@ -353,9 +353,7 @@ import {
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
-import { createStore as createSalesBookingStore, dispatch as dispatchSalesBooking, SalesBookingError } from './sales_booking.ts'
-
-const _salesBookingStore = createSalesBookingStore()
+import { dispatch as dispatchSalesBooking, SalesBookingError, supabaseBookingDb } from './sales_booking.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12265,7 +12263,7 @@ if (import.meta.main) serve(async (req: Request) => {
             sendSms: async () => ({ held: true, sent: false }),
             writeCalendar: async () => ({ held: true, written: false }),
           }
-          return json(await dispatchSalesBooking(action, params, body || {}, heldAdapters, _salesBookingStore, req.method))
+          return json(await dispatchSalesBooking(action, params, body || {}, heldAdapters, supabaseBookingDb(client), req.method))
         } catch (error) {
           if (error instanceof SalesBookingError) return json({ error: error.message, code: error.code, ok: false }, error.status)
           throw error
