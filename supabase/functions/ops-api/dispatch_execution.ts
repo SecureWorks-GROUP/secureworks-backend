@@ -282,6 +282,10 @@ export function outlookDispatchProvider(
     `/users/${encodeURIComponent(r.mailbox)}/messages/${
       encodeURIComponent(r.draft_id)
     }`;
+  const messageReadPath = (r: any) =>
+    path(r) +
+    "?$select=id,isDraft,from,sender,toRecipients,ccRecipients,bccRecipients," +
+    "subject,body,changeKey";
   const headers = {
     "Content-Type": "application/json",
     Prefer: 'IdType="ImmutableId"',
@@ -289,6 +293,163 @@ export function outlookDispatchProvider(
   const textReadHeaders = {
     ...headers,
     Prefer: `${headers.Prefer}, outlook.body-content-type="text"`,
+  };
+  const base64Text = (value: string) =>
+    btoa(
+      Array.from(new TextEncoder().encode(value), (byte) =>
+        String.fromCharCode(byte)).join(""),
+    );
+  const replyMime = (draft: any) => {
+    const subject = [];
+    let part = "";
+    for (const character of draft.subject) {
+      if (new TextEncoder().encode(part + character).length > 45) {
+        subject.push(`=?UTF-8?B?${base64Text(part)}?=`);
+        part = "";
+      }
+      part += character;
+    }
+    subject.push(`=?UTF-8?B?${base64Text(part)}?=`);
+    return base64Text([
+      `From: ${draft.sender}`,
+      `To: ${draft.to.join(",\r\n ")}`,
+      ...(draft.cc.length ? [`Cc: ${draft.cc.join(",\r\n ")}`] : []),
+      `Subject: ${subject.join("\r\n ")}`,
+      "MIME-Version: 1.0",
+      'Content-Type: text/plain; charset="UTF-8"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      base64Text(draft.body).match(/.{1,76}/g)?.join("\r\n") || "",
+      "",
+    ].join("\r\n"));
+  };
+  const addresses = (v: any[]) =>
+    (v || []).map((x) => String(x.emailAddress?.address || "").toLowerCase())
+      .sort();
+  const expectedAddresses = (v: any[]) =>
+    (v || []).map((x: string) => x.toLowerCase()).sort();
+  const addressSetsEqual = (actual: any[], expected: any[]) =>
+    JSON.stringify(addresses(actual)) === JSON.stringify(
+      expectedAddresses(expected),
+    );
+  const mailboxMatches = (message: any, mailbox: string) => {
+    const expected = mailbox.toLowerCase();
+    return String(message.from?.emailAddress?.address || "").toLowerCase() ===
+        expected &&
+      String(message.sender?.emailAddress?.address || "").toLowerCase() ===
+        expected;
+  };
+  const attachmentSignature = (a: any, requireId: boolean) =>
+    JSON.stringify({
+      id: requireId ? String(a.id || "") : "",
+      odataType: String(a["@odata.type"] || ""),
+      name: String(a.name || ""),
+      contentType: String(a.contentType || ""),
+      contentBytes: String(a.contentBytes || ""),
+      isInline: a.isInline === true,
+      contentId: String(a.contentId || ""),
+    });
+  const readDraftMessage = async (receipt: any) =>
+    await (await deps.request(
+      messageReadPath(receipt),
+      { headers: textReadHeaders },
+      { mutating: false },
+    )).json();
+  const assertMessageEnvelope = (current: any, receipt: any, d: any) => {
+    if (
+      current.id !== receipt.draft_id ||
+      current.isDraft !== true ||
+      typeof current.changeKey !== "string" || !current.changeKey ||
+      !mailboxMatches(current, d.sender) ||
+      !Array.isArray(current.toRecipients) ||
+      !addressSetsEqual(current.toRecipients, d.to) ||
+      !Array.isArray(current.ccRecipients) ||
+      !addressSetsEqual(current.ccRecipients, d.cc) ||
+      !Array.isArray(current.bccRecipients) ||
+      !addressSetsEqual(current.bccRecipients, []) ||
+      current.subject !== d.subject ||
+      String(current.body?.content || "").replaceAll("\r\n", "\n") !==
+        d.body.replaceAll("\r\n", "\n")
+    ) {
+      throw new Error(
+        "Provider draft envelope differs from approved draft",
+      );
+    }
+  };
+  const readAttachmentDetails = async (receipt: any, expectedCount: number) => {
+    const listed = await (await deps.request(
+      path(receipt) +
+        "/attachments?$select=id",
+      { headers },
+      { mutating: false },
+    )).json();
+    if (
+      listed["@odata.nextLink"] || !Array.isArray(listed.value) ||
+      listed.value.length !== expectedCount
+    ) {
+      throw new Error(
+        "Provider draft attachments differ from approved draft",
+      );
+    }
+    const details = [];
+    for (const attachment of listed.value) {
+      if (!attachment.id) {
+        throw new Error(
+          "Provider draft attachments differ from approved draft",
+        );
+      }
+      const detail = await (await deps.request(
+        path(receipt) + `/attachments/${encodeURIComponent(attachment.id)}`,
+        { headers },
+        { mutating: false },
+      )).json();
+      if (detail.id !== attachment.id) {
+        throw new Error("Provider draft attachment identity changed");
+      }
+      details.push(detail);
+    }
+    return details;
+  };
+  const assertAttachmentEnvelope = (actual: any[], attachments: any[]) => {
+    const requireId = attachments.some((a) => a.id);
+    const expected = attachments.map((a) => attachmentSignature(a, requireId))
+      .sort();
+    if (
+      actual.some((a) =>
+        a["@odata.type"] !== "#microsoft.graph.fileAttachment" ||
+        a.isInline === true ||
+        typeof a.contentBytes !== "string"
+      ) ||
+      JSON.stringify(
+          actual.map((a) => attachmentSignature(a, requireId)).sort(),
+        ) !==
+        JSON.stringify(expected)
+    ) {
+      throw new Error(
+        "Provider draft attachments differ from approved draft",
+      );
+    }
+  };
+  const assertProviderEnvelope = async (
+    receipt: any,
+    d: any,
+    attachments: any[],
+  ) => {
+    const beforeAttachments = await readDraftMessage(receipt);
+    assertMessageEnvelope(beforeAttachments, receipt, d);
+    const actualAttachments = await readAttachmentDetails(
+      receipt,
+      attachments.length,
+    );
+    const current = await readDraftMessage(receipt);
+    assertMessageEnvelope(current, receipt, d);
+    if (current.changeKey !== beforeAttachments.changeKey) {
+      throw new Error(
+        "Provider draft envelope changed during attachment validation",
+      );
+    }
+    assertAttachmentEnvelope(actualAttachments, attachments);
+    return current;
   };
   return {
     async prepare(d: any, id: string, jobId: string) {
@@ -359,10 +520,8 @@ export function outlookDispatchProvider(
           originalPath + (d.reply_all ? "/createReplyAll" : "/createReply"),
           {
             method: "POST",
-            headers,
-            body: JSON.stringify({
-              message: { body: { contentType: "Text", content: d.body } },
-            }),
+            headers: { ...headers, "Content-Type": "text/plain" },
+            body: replyMime(d),
           },
           { mutating: true },
         )).json();
@@ -375,30 +534,17 @@ export function outlookDispatchProvider(
           content_hash: d.content_hash,
         };
         try {
-          const addresses = (v: any[]) =>
-            (v || []).map((x) =>
-              String(x.emailAddress?.address || "").toLowerCase()
-            ).sort();
+          if (!receipt.change_key) {
+            throw new Error("Native reply draft revision missing");
+          }
           if (
-            JSON.stringify(addresses(created.toRecipients)) !==
-              JSON.stringify(d.to.map((x: string) => x.toLowerCase()).sort()) ||
-            JSON.stringify(addresses(created.ccRecipients)) !==
-              JSON.stringify(
-                d.cc.map((x: string) => x.toLowerCase()).sort(),
-              )
+            !addressSetsEqual(created.toRecipients, d.to) ||
+            !addressSetsEqual(created.ccRecipients, d.cc)
           ) {
             throw new Error(
               "Native reply recipients differ from exact reviewed To/CC",
             );
           }
-          await deps.request(path(receipt), {
-            method: "PATCH",
-            headers,
-            body: JSON.stringify({
-              subject: d.subject,
-              body: { contentType: "Text", content: d.body },
-            }),
-          }, { mutating: true });
           const inherited = await (await deps.request(
             path(receipt) + "/attachments?$select=id",
             { headers },
@@ -409,27 +555,30 @@ export function outlookDispatchProvider(
               "Unexpected inherited reply attachments require separate review",
             );
           }
+          assertMessageEnvelope(await readDraftMessage(receipt), receipt, d);
+          const uploadedAttachments = [];
           for (const file of attachments) {
-            await deps.request(path(receipt) + "/attachments", {
-              method: "POST",
-              headers,
-              body: JSON.stringify(file),
-            }, { mutating: true });
+            const uploaded = await (await deps.request(
+              path(receipt) + "/attachments",
+              {
+                method: "POST",
+                headers,
+                body: JSON.stringify(file),
+              },
+              { mutating: true },
+            )).json();
+            if (!uploaded.id) {
+              throw new Error(
+                "Provider draft attachments differ from approved draft",
+              );
+            }
+            uploadedAttachments.push({ ...file, id: uploaded.id });
           }
-          const current = await (await deps.request(
-            path(receipt),
-            { headers: textReadHeaders },
-            { mutating: false },
-          )).json();
-          if (
-            current.subject !== d.subject ||
-            String(current.body?.content || "").replaceAll("\r\n", "\n") !==
-              d.body.replaceAll("\r\n", "\n")
-          ) {
-            throw new Error(
-              "Provider reply content differs from approved draft",
-            );
-          }
+          const current = await assertProviderEnvelope(
+            receipt,
+            d,
+            uploadedAttachments.length ? uploadedAttachments : attachments,
+          );
           return { ...receipt, change_key: current.changeKey };
         } catch (error) {
           throw Object.assign(error as Error, { receipt });
@@ -460,13 +609,25 @@ export function outlookDispatchProvider(
       );
       const message = await response.json();
       if (!message.id) throw new Error("Provider draft identity missing");
-      return {
+      const receipt = {
         mailbox: d.sender,
         draft_id: message.id,
         internet_message_id: message.internetMessageId || null,
         change_key: message.changeKey,
         content_hash: d.content_hash,
       };
+      try {
+        if (!receipt.change_key) {
+          throw new Error("Provider draft revision missing");
+        }
+        const current = await assertProviderEnvelope(receipt, d, attachments);
+        return {
+          ...receipt,
+          change_key: current.changeKey,
+        };
+      } catch (error) {
+        throw Object.assign(error as Error, { receipt });
+      }
     },
     async send(receipt: any, beforeSend?: () => Promise<void>) {
       allowed(receipt.mailbox);
@@ -475,7 +636,8 @@ export function outlookDispatchProvider(
       });
       const current = await check.json();
       if (
-        current.isDraft !== true || current.changeKey !== receipt.change_key
+        current.id !== receipt.draft_id || current.isDraft !== true ||
+        current.changeKey !== receipt.change_key
       ) {
         throw new Error(
           "Provider draft changed or already sent; readback required",

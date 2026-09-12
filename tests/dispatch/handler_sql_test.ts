@@ -101,6 +101,91 @@ async function setupReviewedRequirement(
   }, id(Number(requirementId.slice(-12)) + 2000));
 }
 
+Deno.test("handler SQL preserves fractional quantities and exact shared capacity", async () => {
+  const pg = await openDispatchPg();
+  try {
+    const job = id(901), req = id(902), stock = id(903);
+    await insertAcceptedJob(pg, job);
+    await setupReviewedRequirement(pg.client, job, req, 0.3);
+    await dispatchCommand(pg.client, job, "stock_record", {
+      id: stock,
+      description: "Fractional supply",
+      quantity: 0.3,
+      unit: "each",
+      location: "yard",
+      evidence: "Measured stock",
+    }, id(4901));
+    for (const [allocation, amount] of [[904, 0.1], [905, 0.2]]) {
+      await dispatchCommand(pg.client, job, "allocation_upsert", {
+        id: id(allocation),
+        requirement_id: req,
+        supply_id: `stock:${stock}`,
+        quantity: amount,
+      }, id(allocation + 4000));
+      await dispatchCommand(pg.client, job, "receipt_upsert", {
+        id: id(allocation + 10),
+        allocation_id: id(allocation),
+        usable_quantity: amount,
+        location: "site",
+        evidence: "Measured receipt",
+      }, id(allocation + 5000));
+    }
+    await dispatchCommand(
+      pg.client,
+      job,
+      "requirement_review",
+      { id: req },
+      id(5901),
+    );
+    await dispatchCommand(pg.client, job, "set_review", {}, id(5902));
+    const result = await dispatchCommand(
+      pg.client,
+      job,
+      "assess",
+      {},
+      id(5903),
+    );
+    assertEquals(result.assessment.ready, true);
+    assertEquals(result.allocations.map((a: any) => a.quantity), [0.1, 0.2]);
+    assertEquals(result.receipts.map((r: any) => r.usable_quantity), [
+      0.1,
+      0.2,
+    ]);
+    const reserved = await pg.query(
+      `select to_jsonb(sum(quantity)) from dispatch_reservations where org_id=${
+        literal(org)
+      } and supply_id=${literal(`stock:${stock}`)}`,
+    );
+    if (reserved.error) throw new Error(reserved.error.message);
+    assertEquals(reserved.data, 0.3);
+    const otherJob = id(921), otherReq = id(922);
+    await insertAcceptedJob(pg, otherJob);
+    await setupReviewedRequirement(pg.client, otherJob, otherReq, 1);
+    for (const [attempt, excess] of [[1, 0.001], [2, 1e-17]]) {
+      await assertRejects(
+        () =>
+          dispatchCommand(pg.client, otherJob, "allocation_upsert", {
+            id: id(923),
+            requirement_id: otherReq,
+            supply_id: `stock:${stock}`,
+            quantity: excess,
+          }, id(5920 + attempt)),
+        DispatchError,
+        "supply_overallocated",
+      );
+    }
+    const after = await pg.query(
+      `select to_jsonb(sum(quantity)) from dispatch_reservations where org_id=${
+        literal(org)
+      } and supply_id=${literal(`stock:${stock}`)}`,
+    );
+    if (after.error) throw new Error(after.error.message);
+    assertEquals(after.data, 0.3);
+  } finally {
+    await pg.close();
+  }
+});
+
 Deno.test("handler SQL receipt split requires stable new id and replays custody lineage", async () => {
   const pg = await openDispatchPg();
   try {

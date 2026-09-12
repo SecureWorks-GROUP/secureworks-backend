@@ -61,6 +61,42 @@ function stockQuantity(v: any): number {
   }
   return v;
 }
+function materialDifference(left: number, right: number): number {
+  const difference = left - right;
+  return Number.isFinite(difference) &&
+      Math.abs(difference) <=
+        4 * Number.EPSILON * Math.max(Math.abs(left), Math.abs(right))
+    ? 0
+    : difference;
+}
+function materialTotal(values: number[]): number {
+  let sum = 0, correction = 0;
+  for (const value of values) {
+    const next = sum + value;
+    if (!Number.isFinite(next)) {
+      throw new DispatchError("Material total must be finite");
+    }
+    correction += Math.abs(sum) >= Math.abs(value)
+      ? (sum - next) + value
+      : (value - next) + sum;
+    sum = next;
+  }
+  const total = sum + correction;
+  if (!Number.isFinite(total)) {
+    throw new DispatchError("Material total must be finite");
+  }
+  return total;
+}
+function allocatedQuantity(allocations: any[], receipts: any[]): number {
+  return materialDifference(
+    materialTotal(allocations.map((a: any) => a.quantity)),
+    materialTotal(
+      receipts.filter((r: any) =>
+        allocations.some((a: any) => a.id === r.allocation_id)
+      ).map((r: any) => r.damaged_quantity),
+    ),
+  );
+}
 function find(rows: any[], id: any): any {
   const r = rows.find((r) => r.id === uuid(id));
   if (!r) throw new DispatchError("Record not found", 404);
@@ -153,17 +189,16 @@ export function assessment(state: any, source: string, now: string) {
       a.requirement_id === r.id
     );
     const verified = allocations.filter((a: any) => allocationSuitable(a, r));
-    const allocated = verified.reduce((sum: number, a: any) =>
-      sum + a.quantity, 0) - state.receipts.filter((x: any) =>
-        verified.some((a: any) =>
-          a.id === x.allocation_id
-        )
-      ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
-    const usable = state.receipts.filter((x: any) =>
-      verified.some((a: any) => a.id === x.allocation_id) &&
-      x.location === (r.destination || "site")
-    ).reduce((sum: number, x: any) => sum + x.usable_quantity, 0);
-    if (allocated < r.quantity || usable < r.quantity) {
+    const allocated = allocatedQuantity(verified, state.receipts);
+    const usable = materialTotal(
+      state.receipts.filter((x: any) =>
+        verified.some((a: any) => a.id === x.allocation_id) &&
+        x.location === (r.destination || "site")
+      ).map((x: any) => x.usable_quantity),
+    );
+    const supplyGap = materialDifference(r.quantity, allocated);
+    const receiptGap = materialDifference(r.quantity, usable);
+    if (supplyGap > 0 || receiptGap > 0) {
       for (
         const a of allocations.filter((a: any) => !allocationSuitable(a, r))
       ) {
@@ -182,10 +217,11 @@ export function assessment(state: any, source: string, now: string) {
       });
     }
     if (
-      allocated > r.quantity ||
-      (allocated < r.quantity && allocations.some((a: any) =>
-        a.unit !== r.unit || a.supply_valid === false
-      ))
+      supplyGap < 0 ||
+      (supplyGap > 0 &&
+        allocations.some((a: any) =>
+          a.unit !== r.unit || a.supply_valid === false
+        ))
     ) {
       obligations.push({
         code: "supply_reconciliation",
@@ -195,20 +231,20 @@ export function assessment(state: any, source: string, now: string) {
           "Resolve changed supply, excess or unit mismatch while preserving receipt custody",
       });
     }
-    if (r.quantity && allocated < r.quantity) {
+    if (r.quantity && supplyGap > 0) {
       obligations.push({
         code: "supply_gap",
         requirement_id: r.id,
-        quantity: r.quantity - allocated,
+        quantity: supplyGap,
         owner: "Shaun",
         next_action: "Allocate verified existing supply or prepare an order",
       });
     }
-    if (r.quantity && usable < r.quantity) {
+    if (r.quantity && receiptGap > 0) {
       obligations.push({
         code: "site_receipt_gap",
         requirement_id: r.id,
-        quantity: r.quantity - usable,
+        quantity: receiptGap,
         owner: "Shaun",
         next_action: "Confirm usable material at site; ordering is not receipt",
       });
@@ -282,7 +318,9 @@ export async function reduceCommand(
       updated.physical_revision = await hash(physicalRequirement(updated));
       const physicalChanged = old &&
         ["quantity", "unit", "specification", "description"].some((k) =>
-          old[k] !== (updated as any)[k]
+          k === "quantity"
+            ? materialDifference(old[k], (updated as any)[k]) !== 0
+            : old[k] !== (updated as any)[k]
         );
       if (
         physicalChanged &&
@@ -385,31 +423,32 @@ export async function reduceCommand(
         const allocations = s.allocations.filter((a: any) =>
           a.requirement_id === r.id && allocationSuitable(a, r)
         );
-        const allocated = allocations.reduce((n: number, a: any) =>
-          n + a.quantity, 0) - s.receipts.filter((x: any) =>
-            allocations.some((a: any) =>
-              a.id === x.allocation_id
-            )
-          ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
-        const prepared = s.order_drafts.filter((o: any) =>
-          o.id !== p.id && ["draft", ...orderedStatuses].includes(o.status)
-        )
-          .reduce((n: number, o: any) => {
-            const ordered = o.line_items.filter((l: any) =>
+        const allocated = allocatedQuantity(allocations, s.receipts);
+        const prepared = materialTotal(
+          s.order_drafts.filter((o: any) =>
+            o.id !== p.id && ["draft", ...orderedStatuses].includes(o.status)
+          ).flatMap((o: any) =>
+            o.line_items.filter((l: any) =>
               l.dispatch_requirement_id === r.id &&
               JSON.stringify(physicalRequirement(l)) ===
                 JSON.stringify(physicalRequirement(r))
-            ).reduce((sum: number, l: any) =>
-              sum +
+            ).map((l: any) =>
               Math.max(
                 0,
-                Number(l.quantity) - Number(l.reserved_quantity || 0),
-              ), 0);
-            return n + ordered;
-          }, 0);
-        const uncovered = Math.max(0, r.quantity - allocated - prepared);
+                materialDifference(
+                  Number(l.quantity),
+                  Number(l.reserved_quantity || 0),
+                ),
+              )
+            )
+          ),
+        );
+        const uncovered = Math.max(
+          0,
+          materialDifference(r.quantity, materialTotal([allocated, prepared])),
+        );
         const orderedQuantity = quantity(p.quantities?.[id] ?? uncovered);
-        if (orderedQuantity > uncovered) {
+        if (materialDifference(orderedQuantity, uncovered) > 0) {
           throw new DispatchError(
             "Order quantity exceeds uncovered reviewed requirement",
             409,
@@ -578,11 +617,11 @@ export async function reduceCommand(
       const siblings = s.allocations.filter((a: any) =>
         a.requirement_id === r.id && a.id !== p.id && allocationSuitable(a, r)
       );
-      const others = siblings.reduce((n: number, a: any) => n + a.quantity, 0) -
-        s.receipts.filter((x: any) =>
-          siblings.some((a: any) => a.id === x.allocation_id)
-        ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
-      if (!r.quantity || q + others > r.quantity) {
+      const others = allocatedQuantity(siblings, s.receipts);
+      if (
+        !r.quantity ||
+        materialDifference(materialTotal([q, others]), r.quantity) > 0
+      ) {
         throw new DispatchError("Allocation exceeds required quantity");
       }
       if (s.receipts.some((x: any) => x.allocation_id === p.id)) {
@@ -655,13 +694,16 @@ export async function reduceCommand(
         !Number.isFinite(usable) || !Number.isFinite(damaged) || usable < 0 ||
         damaged < 0 || usable + damaged <= 0
       ) throw new DispatchError("Invalid receipt quantities");
-      const others = s.receipts.filter((x: any) =>
-        x.allocation_id === a.id && x.id !== p.id
-      ).reduce(
-        (n: number, x: any) => n + x.usable_quantity + x.damaged_quantity,
-        0,
+      const others = materialTotal(
+        s.receipts.filter((x: any) => x.allocation_id === a.id && x.id !== p.id)
+          .flatMap((x: any) => [x.usable_quantity, x.damaged_quantity]),
       );
-      if (others + usable + damaged > a.quantity) {
+      if (
+        materialDifference(
+          materialTotal([others, usable, damaged]),
+          a.quantity,
+        ) > 0
+      ) {
         throw new DispatchError("Receipts exceed allocation");
       }
       upsert(s.receipts, {
@@ -682,15 +724,16 @@ export async function reduceCommand(
         evidence = text(p.evidence, "transfer evidence");
       if (p.quantity !== undefined) {
         const moved = quantity(p.quantity);
-        if (moved > r.usable_quantity) {
+        const remaining = materialDifference(r.usable_quantity, moved);
+        if (remaining < 0) {
           throw new DispatchError("Transfer exceeds usable receipt quantity");
         }
-        if (moved < r.usable_quantity || r.damaged_quantity > 0) {
+        if (remaining > 0 || r.damaged_quantity > 0) {
           const newId = uuid(p.new_id);
           if (s.receipts.some((x: any) => x.id === newId)) {
             throw new DispatchError("Split receipt ID already exists");
           }
-          r.usable_quantity -= moved;
+          r.usable_quantity = remaining;
           s.receipts.push({
             ...r,
             id: newId,
@@ -709,6 +752,7 @@ export async function reduceCommand(
           });
           break;
         }
+        r.usable_quantity = moved;
       }
       r.transfers = [...(r.transfers || []), {
         from_location: r.location,
@@ -816,13 +860,13 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
     const lot = allocatedLots.find((l: any) => l.id === allocation.supply_id);
     let valid = !!lot && lot.unit === allocation.unit &&
       Number.isFinite(Number(lot.quantity)) &&
-      Number(lot.quantity) >= allocation.quantity;
+      materialDifference(Number(lot.quantity), allocation.quantity) >= 0;
     if (lot?.source_ref?.kind === "purchase_order_line") {
       const p = referencedPo.find((p: any) => p.id === lot.source_ref.po_id);
       const line = p?.line_items?.[lot.source_ref.index];
       valid = valid && !!p && orderedStatuses.includes(p.status) && !!line &&
         line.unit === allocation.unit &&
-        Number(line.quantity) >= allocation.quantity &&
+        materialDifference(Number(line.quantity), allocation.quantity) >= 0 &&
         await hash(line) === lot.source_version &&
         await hash(p.line_items) === await hash(lot.source_ref.po_lines);
     } else if (lot?.source_ref?.kind !== "stock_count") valid = false;

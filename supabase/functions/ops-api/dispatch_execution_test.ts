@@ -59,7 +59,7 @@ function fixture(fail = false) {
           status: "claimed",
           receipt: null,
           lease_token: "lease1",
-          snapshot: structuredClone(draft),
+          snapshot: structuredClone(job.drafts[0]),
         };
         return Promise.resolve({ data: { claimed: true, action } });
       }
@@ -124,6 +124,52 @@ function fixture(fail = false) {
   };
 }
 const body = { job_id: id(1), draft_id: id(2), approval_id: id(3) };
+function decodeBase64Utf8(value: string) {
+  const bytes = Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+function decodeMimeHeaderValue(value: string) {
+  return value.replace(/(\?=)[ \t]+(?==\?UTF-8\?B\?)/gi, "$1")
+    .replace(
+      /=\?UTF-8\?B\?([^?]+)\?=/gi,
+      (_match, encoded) => decodeBase64Utf8(encoded),
+    );
+}
+function assertMimeReplyRequest(options: any, draft: any) {
+  assertEquals((options?.headers as any)?.["Content-Type"], "text/plain");
+  const mime = decodeBase64Utf8(String(options?.body || ""));
+  const [rawHeaders, ...bodyParts] = mime.replaceAll("\r\n", "\n").split(
+    "\n\n",
+  );
+  const unfoldedHeaders = rawHeaders.replace(/\n[ \t]+/g, " ");
+  const headers = new Map(
+    unfoldedHeaders.split("\n").map((line) => {
+      const index = line.indexOf(":");
+      return [
+        line.slice(0, index).toLowerCase(),
+        line.slice(index + 1).trim(),
+      ];
+    }),
+  );
+  const subject = decodeMimeHeaderValue(headers.get("subject") || "");
+  if (subject !== draft.subject) {
+    throw new Error("MIME reply is missing approved subject");
+  }
+  if ((headers.get("from") || "") !== draft.sender) {
+    throw new Error("MIME reply is missing approved sender");
+  }
+  if ((headers.get("to") || "") !== draft.to.join(", ")) {
+    throw new Error("MIME reply is missing approved To recipients");
+  }
+  if (draft.cc.length && (headers.get("cc") || "") !== draft.cc.join(", ")) {
+    throw new Error("MIME reply is missing approved Cc recipients");
+  }
+  const encodedBody = bodyParts.join("\n\n").replace(/\s+/g, "");
+  if (decodeBase64Utf8(encodedBody).replaceAll("\r\n", "\n") !== draft.body) {
+    throw new Error("MIME reply is missing approved body");
+  }
+  return mime;
+}
 Deno.test("release hold makes no datastore/provider call", async () => {
   const f = fixture();
   const r = await executeDispatchDraft(
@@ -316,8 +362,8 @@ Deno.test("native Outlook adapter preserves exact reply identity, recipients and
     sender: "ops@example.test",
     to: ["supplier@example.test"],
     cc: [],
-    subject: "Reviewed subject",
-    body: "Reviewed body",
+    subject: "Reviewed subject – café panel ".repeat(4).trim(),
+    body: "Reviewed body\nUnicode café line",
     attachments: [],
     content_hash: "exact",
     purchase_commitment: false,
@@ -343,10 +389,7 @@ Deno.test("native Outlook adapter preserves exact reply identity, recipients and
       if (path.includes("message1?$select")) {
         data = { conversationId: "thread1", changeKey: "source-rev" };
       } else if (path.endsWith("/createReply")) {
-        assertEquals(
-          JSON.parse(String(options?.body)).message.body.content,
-          draft.body,
-        );
+        assertMimeReplyRequest(options, draft);
         data = {
           id: "reply1",
           changeKey: "r1",
@@ -357,7 +400,7 @@ Deno.test("native Outlook adapter preserves exact reply identity, recipients and
         };
       } else if (path.includes("/attachments?")) data = { value: [] };
       else if (
-        path.endsWith("/reply1") &&
+        (path.endsWith("/reply1") || path.includes("/reply1?$select")) &&
         (!options?.method || options.method === "GET")
       ) {
         if (preparing) {
@@ -369,6 +412,13 @@ Deno.test("native Outlook adapter preserves exact reply identity, recipients and
         data = {
           id: "reply1",
           isDraft: true,
+          from: { emailAddress: { address: draft.sender } },
+          sender: { emailAddress: { address: draft.sender } },
+          toRecipients: [{
+            emailAddress: { address: "supplier@example.test" },
+          }],
+          ccRecipients: [],
+          bccRecipients: [],
           subject: draft.subject,
           body: { content: draft.body },
           changeKey: "r2",
@@ -382,8 +432,451 @@ Deno.test("native Outlook adapter preserves exact reply identity, recipients and
   const receipt = await provider.prepare(draft, id(3), id(1));
   preparing = false;
   assertEquals(receipt.draft_id, "reply1");
+  assertEquals(calls.some((x) => x.startsWith("PATCH ")), false);
   await provider.send(receipt);
   assertEquals(calls.filter((x) => x.endsWith("/send")).length, 1);
+});
+
+function dispatchGraphAttachment(name = "approved.pdf", contentBytes = "YXBw") {
+  return {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    name,
+    contentType: "application/pdf",
+    contentBytes,
+  };
+}
+
+function finalDispatchMessage(draft: any, overrides: Record<string, any> = {}) {
+  return {
+    id: overrides.id || "reply1",
+    isDraft: true,
+    from: { emailAddress: { address: draft.sender } },
+    sender: { emailAddress: { address: draft.sender } },
+    toRecipients: draft.to.map((address: string) => ({
+      emailAddress: { address },
+    })),
+    ccRecipients: draft.cc.map((address: string) => ({
+      emailAddress: { address },
+    })),
+    bccRecipients: [],
+    subject: draft.subject,
+    body: { content: draft.body },
+    changeKey: "r2",
+    ...overrides,
+  };
+}
+
+Deno.test("native Outlook reply rejects final recipient drift with approved body", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  const draft = {
+    sender: "ops@example.test",
+    to: ["supplier@example.test"],
+    cc: [],
+    subject: "Reviewed subject",
+    body: "Reviewed body",
+    attachments: [],
+    content_hash: "exact",
+    purchase_commitment: false,
+    thread_id: "thread1",
+    graph_message_id: "message1",
+    graph_change_key: "source-rev",
+  };
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: (path, options) => {
+      let data: any = {};
+      if (path.includes("message1?$select")) {
+        data = { conversationId: "thread1", changeKey: "source-rev" };
+      } else if (path.endsWith("/createReply")) {
+        assertMimeReplyRequest(options, draft);
+        data = {
+          id: "reply1",
+          changeKey: "r1",
+          toRecipients: draft.to.map((address) => ({
+            emailAddress: { address },
+          })),
+          ccRecipients: [],
+        };
+      } else if (path.includes("/attachments?")) {
+        data = { value: [] };
+      } else if (
+        path.includes("/reply1?$select") &&
+        (!options?.method || options.method === "GET")
+      ) {
+        data = finalDispatchMessage(draft, {
+          toRecipients: [{
+            emailAddress: { address: "unapproved@example.test" },
+          }],
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify(data)));
+    },
+  });
+  const error = await assertRejects(
+    () => provider.prepare(draft, id(3), id(1)),
+    Error,
+    "Provider draft envelope differs from approved draft",
+  ) as any;
+  assertEquals(error.receipt.draft_id, "reply1");
+});
+
+Deno.test("native Outlook reply rejects final sender and BCC drift", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  for (const drift of ["sender", "bcc"]) {
+    const draft = {
+      sender: "ops@example.test",
+      to: ["supplier@example.test"],
+      cc: [],
+      subject: "Reviewed subject",
+      body: "Reviewed body",
+      attachments: [],
+      content_hash: "exact",
+      purchase_commitment: false,
+      thread_id: "thread1",
+      graph_message_id: "message1",
+      graph_change_key: "source-rev",
+    };
+    const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+      guard: () => Promise.resolve(),
+      verify: () => Promise.resolve(),
+      attachment: () => Promise.reject(Error("none expected")),
+      request: (path, options) => {
+        let data: any = {};
+        if (path.includes("message1?$select")) {
+          data = { conversationId: "thread1", changeKey: "source-rev" };
+        } else if (path.endsWith("/createReply")) {
+          assertMimeReplyRequest(options, draft);
+          data = {
+            id: "reply1",
+            changeKey: "r1",
+            toRecipients: draft.to.map((address) => ({
+              emailAddress: { address },
+            })),
+            ccRecipients: [],
+          };
+        } else if (path.includes("/attachments?")) {
+          data = { value: [] };
+        } else if (
+          path.includes("/reply1?$select") &&
+          (!options?.method || options.method === "GET")
+        ) {
+          data = finalDispatchMessage(
+            draft,
+            drift === "sender"
+              ? {
+                from: { emailAddress: { address: "other@example.test" } },
+                sender: { emailAddress: { address: "other@example.test" } },
+              }
+              : {
+                bccRecipients: [{
+                  emailAddress: { address: "hidden@example.test" },
+                }],
+              },
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify(data)));
+      },
+    });
+    await assertRejects(
+      () => provider.prepare(draft, id(3), id(1)),
+      Error,
+      "Provider draft envelope differs from approved draft",
+    );
+  }
+});
+
+Deno.test("native Outlook reply rejects final attachment evidence drift", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  for (
+    const drift of [
+      "addition",
+      "removal",
+      "replacement",
+      "inline",
+      "contentId",
+      "item",
+    ]
+  ) {
+    const approved = dispatchGraphAttachment();
+    const uploaded: any[] = [];
+    const draft = {
+      sender: "ops@example.test",
+      to: ["supplier@example.test"],
+      cc: [],
+      subject: "Reviewed subject",
+      body: "Reviewed body",
+      attachments: [{
+        source_ref: "https://storage.example.test/approved.pdf",
+        name: "approved.pdf",
+        revision:
+          "sha256:a172cedcae47474b615c54d510a5d84a8dea3032e958587430b413538be3f333",
+      }],
+      content_hash: "exact",
+      purchase_commitment: false,
+      thread_id: "thread1",
+      graph_message_id: "message1",
+      graph_change_key: "source-rev",
+    };
+    const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+      guard: () => Promise.resolve(),
+      verify: () => Promise.resolve(),
+      attachment: () => Promise.resolve(approved),
+      request: (path, options) => {
+        let data: any = {};
+        if (path.includes("message1?$select")) {
+          data = { conversationId: "thread1", changeKey: "source-rev" };
+        } else if (path.endsWith("/createReply")) {
+          assertMimeReplyRequest(options, draft);
+          data = {
+            id: "reply1",
+            changeKey: "r1",
+            toRecipients: draft.to.map((address) => ({
+              emailAddress: { address },
+            })),
+            ccRecipients: [],
+          };
+        } else if (
+          path.endsWith("/attachments") && options?.method === "POST"
+        ) {
+          const id = `att-${uploaded.length + 1}`;
+          uploaded.push({ ...JSON.parse(String(options.body)), id });
+          data = { id };
+        } else if (path.includes("/attachments/")) {
+          if (drift === "addition" && path.endsWith("att-extra")) {
+            data = {
+              ...dispatchGraphAttachment("extra.pdf", "ZXh0cmE="),
+              id: "att-extra",
+            };
+          } else if (
+            ["replacement", "inline", "contentId", "item"].includes(drift) &&
+            path.endsWith("att-1")
+          ) {
+            data = {
+              ...(
+                drift === "item"
+                  ? { "@odata.type": "#microsoft.graph.itemAttachment" }
+                  : dispatchGraphAttachment(
+                    "approved.pdf",
+                    drift === "replacement" ? "cmVwbGFjZWQ=" : "YXBw",
+                  )
+              ),
+              id: "att-1",
+              ...(drift === "inline" ? { isInline: true } : {}),
+              ...(drift === "contentId" ? { contentId: "cid-1" } : {}),
+            };
+          } else {
+            data = uploaded.find((attachment) =>
+              path.endsWith(attachment.id)
+            ) ||
+              {};
+          }
+        } else if (path.includes("/attachments?")) {
+          const value = uploaded.length === 0 ? [] : drift === "addition"
+            ? [
+              ...uploaded,
+              {
+                ...dispatchGraphAttachment("extra.pdf", "ZXh0cmE="),
+                id: "att-extra",
+              },
+            ]
+            : drift === "removal"
+            ? []
+            : [{
+              ...dispatchGraphAttachment(
+                "approved.pdf",
+                drift === "replacement" ? "cmVwbGFjZWQ=" : "YXBw",
+              ),
+              id: "att-1",
+              ...(drift === "inline" ? { isInline: true } : {}),
+              ...(drift === "contentId" ? { contentId: "cid-1" } : {}),
+              ...(drift === "item"
+                ? { "@odata.type": "#microsoft.graph.itemAttachment" }
+                : {}),
+            }];
+          data = { value };
+        } else if (
+          path.includes("/reply1?$select") &&
+          (!options?.method || options.method === "GET")
+        ) {
+          data = finalDispatchMessage(draft);
+        }
+        return Promise.resolve(new Response(JSON.stringify(data)));
+      },
+    });
+    await assertRejects(
+      () => provider.prepare(draft, id(3), id(1)),
+      Error,
+      "Provider draft attachments differ from approved draft",
+    );
+  }
+});
+
+Deno.test("native Outlook reply accepts approved attachment evidence", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  const approved = dispatchGraphAttachment();
+  const uploaded: any[] = [];
+  const draft = {
+    sender: "ops@example.test",
+    to: ["supplier@example.test"],
+    cc: [],
+    subject: "Reviewed subject",
+    body: "Reviewed body",
+    attachments: [{
+      source_ref: "https://storage.example.test/approved.pdf",
+      name: "approved.pdf",
+      revision:
+        "sha256:a172cedcae47474b615c54d510a5d84a8dea3032e958587430b413538be3f333",
+    }],
+    content_hash: "exact",
+    purchase_commitment: false,
+    thread_id: "thread1",
+    graph_message_id: "message1",
+    graph_change_key: "source-rev",
+  };
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.resolve(approved),
+    request: (path, options) => {
+      let data: any = {};
+      if (path.includes("message1?$select")) {
+        data = { conversationId: "thread1", changeKey: "source-rev" };
+      } else if (path.endsWith("/createReply")) {
+        assertMimeReplyRequest(options, draft);
+        data = {
+          id: "reply1",
+          changeKey: "r1",
+          toRecipients: draft.to.map((address) => ({
+            emailAddress: { address },
+          })),
+          ccRecipients: [],
+        };
+      } else if (path.endsWith("/attachments") && options?.method === "POST") {
+        uploaded.push({ ...JSON.parse(String(options.body)), id: "att-1" });
+        data = { id: "att-1" };
+      } else if (path.includes("/attachments/")) {
+        data = uploaded.find((attachment) => path.endsWith(attachment.id)) ||
+          {};
+      } else if (path.includes("/attachments?")) {
+        data = { value: uploaded.length ? uploaded : [] };
+      } else if (
+        path.includes("/reply1?$select") &&
+        (!options?.method || options.method === "GET")
+      ) {
+        data = finalDispatchMessage(draft);
+      }
+      return Promise.resolve(new Response(JSON.stringify(data)));
+    },
+  });
+  const receipt = await provider.prepare(draft, id(3), id(1));
+  assertEquals(receipt.draft_id, "reply1");
+  assertEquals(receipt.change_key, "r2");
+});
+
+Deno.test("execution holds mutated provider draft with receipt and no send", async () => {
+  const f = fixture();
+  f.job.drafts[0] = {
+    ...f.job.drafts[0],
+    sender: "ops@example.test",
+    cc: [],
+    subject: "Reviewed subject",
+    body: "Reviewed body",
+    attachments: [],
+    thread_id: "thread1",
+    graph_message_id: "message1",
+    graph_change_key: "source-rev",
+  };
+  let sendCalls = 0;
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: (path, options) => {
+      let data: any = {};
+      if (path.includes("message1?$select")) {
+        data = { conversationId: "thread1", changeKey: "source-rev" };
+      } else if (path.endsWith("/createReply")) {
+        assertMimeReplyRequest(options, f.job.drafts[0]);
+        data = {
+          id: "reply1",
+          changeKey: "r1",
+          toRecipients: [{
+            emailAddress: { address: "supplier@example.test" },
+          }],
+          ccRecipients: [],
+        };
+      } else if (path.includes("/attachments?")) {
+        data = { value: [] };
+      } else if (path.includes("/reply1/send")) {
+        sendCalls++;
+      } else if (
+        path.includes("/reply1?$select") &&
+        (!options?.method || options.method === "GET")
+      ) {
+        data = finalDispatchMessage(f.job.drafts[0], {
+          toRecipients: [{
+            emailAddress: { address: "unapproved@example.test" },
+          }],
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify(data)));
+    },
+  });
+  const result = await executeDispatchDraft(
+    f.client,
+    id(9),
+    body,
+    provider,
+    true,
+    f.read,
+  );
+  assertEquals(result.action.status, "outcome_unknown");
+  assertEquals(f.action.receipt.draft_id, "reply1");
+  assertEquals(sendCalls, 0);
+});
+
+Deno.test("native Outlook new mail validates final provider revision before accepting", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  const draft = {
+    sender: "ops@example.test",
+    to: ["supplier@example.test"],
+    cc: [],
+    subject: "Reviewed subject",
+    body: "Reviewed body",
+    attachments: [],
+    content_hash: "exact",
+    purchase_commitment: false,
+  };
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: (path, options) => {
+      let data: any = {};
+      if (path.endsWith("/messages") && options?.method === "POST") {
+        data = { id: "new1", changeKey: "n1" };
+      } else if (path.includes("/new1?$select")) {
+        data = finalDispatchMessage(draft, {
+          id: "new1",
+          toRecipients: [{
+            emailAddress: { address: "unapproved@example.test" },
+          }],
+        });
+      } else if (path.includes("/attachments?")) {
+        data = { value: [] };
+      }
+      return Promise.resolve(new Response(JSON.stringify(data)));
+    },
+  });
+  const error = await assertRejects(
+    () => provider.prepare(draft, id(3), id(1)),
+    Error,
+    "Provider draft envelope differs from approved draft",
+  ) as any;
+  assertEquals(error.receipt.draft_id, "new1");
 });
 
 Deno.test("native Outlook reply guard blocks foreign source before provider mutation", async () => {

@@ -25,6 +25,222 @@ const requirement = {
   destination: "site",
   phase: "roof",
 };
+Deno.test("fractional allocations and receipts reach readiness without admitting real excess", async () => {
+  for (const scale of [1, 1e-12, 1e9]) {
+    let s = await apply(emptyState(), "requirement_upsert", {
+      ...requirement,
+      quantity: 0.3 * scale,
+    });
+    s = await apply(s, "allocation_upsert", {
+      id: id(2),
+      requirement_id: id(1),
+      supply_id: "stock:a",
+      quantity: 0.1 * scale,
+    });
+    await assertRejects(
+      () =>
+        apply(s, "allocation_upsert", {
+          id: id(3),
+          requirement_id: id(1),
+          supply_id: "stock:b",
+          quantity: 0.200001 * scale,
+        }),
+      DispatchError,
+      "Allocation exceeds required quantity",
+    );
+    s = await apply(s, "allocation_upsert", {
+      id: id(3),
+      requirement_id: id(1),
+      supply_id: "stock:b",
+      quantity: 0.2 * scale,
+    });
+    assertEquals(s.allocations.map((a: { quantity: number }) => a.quantity), [
+      0.1 * scale,
+      0.2 * scale,
+    ]);
+    for (const [allocation, amount] of [[2, 0.1 * scale], [3, 0.2 * scale]]) {
+      s = await apply(s, "receipt_upsert", {
+        id: id(allocation + 10),
+        allocation_id: id(allocation),
+        usable_quantity: amount,
+        location: "site",
+        evidence: "Measured at site",
+      });
+    }
+    s = await apply(s, "requirement_review", { id: id(1) });
+    s = await apply(s, "set_review", {});
+    assertEquals(assessment(s, "s1", "now").ready, true);
+    assertEquals(assessment(s, "s1", "now").obligations, []);
+    await assertRejects(
+      () =>
+        apply(s, "receipt_upsert", {
+          id: id(13),
+          allocation_id: id(3),
+          usable_quantity: 0.200001 * scale,
+          location: "site",
+          evidence: "Excess physical receipt",
+        }),
+      DispatchError,
+      "Receipts exceed allocation",
+    );
+  }
+});
+Deno.test("fractional prepared demand normalizes an exhausted gap to zero", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", {
+    ...requirement,
+    quantity: 0.3,
+  });
+  s = await apply(s, "requirement_review", { id: id(1) });
+  const order = {
+    supplier_name: "Supplier",
+    delivery_address: "Site",
+    requirement_ids: [id(1)],
+    existing_supply_reviewed: true,
+  };
+  s = await apply(s, "order_prepare", {
+    ...order,
+    id: id(2),
+    quantities: { [id(1)]: 0.1 },
+  });
+  await assertRejects(
+    () =>
+      apply(s, "order_prepare", {
+        ...order,
+        id: id(3),
+        quantities: { [id(1)]: 0.200001 },
+      }),
+    DispatchError,
+    "Order quantity exceeds uncovered reviewed requirement",
+  );
+  s = await apply(s, "order_prepare", {
+    ...order,
+    id: id(3),
+    quantities: { [id(1)]: 0.2 },
+  });
+  assertEquals(
+    s.order_drafts.map((o: { line_items: { quantity: number }[] }) =>
+      o.line_items[0].quantity
+    ),
+    [0.1, 0.2],
+  );
+  await assertRejects(
+    () => apply(s, "order_prepare", { ...order, id: id(4) }),
+    DispatchError,
+    "Quantity must be positive",
+  );
+  s = await apply(s, "requirement_reconcile", {
+    id: id(1),
+    quantity: 0.1 + 0.2,
+    reason: "Entered total",
+  });
+  s = await apply(s, "requirement_review", { id: id(1) });
+  await assertRejects(
+    () => apply(s, "order_prepare", { ...order, id: id(4) }),
+    DispatchError,
+    "Quantity must be positive",
+  );
+});
+Deno.test("fractional receipt splits retain entered transfers and no microscopic custody gap", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", {
+    ...requirement,
+    quantity: 0.3,
+  });
+  s = await apply(s, "allocation_upsert", {
+    id: id(2),
+    requirement_id: id(1),
+    supply_id: "stock:a",
+    quantity: 0.3,
+  });
+  s = await apply(s, "receipt_upsert", {
+    id: id(3),
+    allocation_id: id(2),
+    usable_quantity: 0.1,
+    location: "yard",
+    evidence: "First receipt",
+  });
+  s = await apply(s, "receipt_upsert", {
+    id: id(4),
+    allocation_id: id(2),
+    usable_quantity: 0.2,
+    location: "site",
+    evidence: "Second receipt",
+  });
+  s = await apply(s, "receipt_transfer", {
+    id: id(3),
+    quantity: 0.03,
+    new_id: id(5),
+    location: "site",
+    evidence: "Partial movement",
+  });
+  await assertRejects(
+    () =>
+      apply(s, "receipt_transfer", {
+        id: id(3),
+        quantity: 0.070001,
+        location: "site",
+        evidence: "Excess movement",
+      }),
+    DispatchError,
+    "Transfer exceeds usable receipt quantity",
+  );
+  s = await apply(s, "receipt_transfer", {
+    id: id(3),
+    quantity: 0.07,
+    location: "site",
+    evidence: "Remaining movement",
+  });
+  assertEquals(s.receipts.length, 3);
+  assertEquals(s.receipts[0].usable_quantity, 0.07);
+  assertEquals(s.receipts[0].transfers[0].quantity, 0.07);
+  s = await apply(s, "requirement_review", { id: id(1) });
+  s = await apply(s, "set_review", {});
+  assertEquals(assessment(s, "s1", "now").ready, true);
+});
+Deno.test("fractional damage is replaced and retained through a zero-remainder split", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", {
+    ...requirement,
+    quantity: 0.3,
+  });
+  s = await apply(s, "allocation_upsert", {
+    id: id(2),
+    requirement_id: id(1),
+    supply_id: "stock:a",
+    quantity: 0.3,
+  });
+  s = await apply(s, "receipt_upsert", {
+    id: id(3),
+    allocation_id: id(2),
+    usable_quantity: 0.3 - 0.1,
+    damaged_quantity: 0.1,
+    location: "yard",
+    evidence: "Damage count",
+  });
+  s = await apply(s, "receipt_transfer", {
+    id: id(3),
+    new_id: id(4),
+    quantity: 0.2,
+    location: "site",
+    evidence: "All usable",
+  });
+  assertEquals(s.receipts[0].usable_quantity, 0);
+  assertEquals(s.receipts[0].damaged_quantity, 0.1);
+  s = await apply(s, "allocation_upsert", {
+    id: id(5),
+    requirement_id: id(1),
+    supply_id: "stock:b",
+    quantity: 0.1,
+  });
+  s = await apply(s, "receipt_upsert", {
+    id: id(6),
+    allocation_id: id(5),
+    usable_quantity: 0.1,
+    location: "site",
+    evidence: "Replacement",
+  });
+  s = await apply(s, "requirement_review", { id: id(1) });
+  s = await apply(s, "set_review", {});
+  assertEquals(assessment(s, "s1", "now").ready, true);
+});
 Deno.test("group deletion preserves stable reviewed requirement and set identity", async () => {
   let s = await apply(emptyState(), "group_upsert", {
     id: id(2),
