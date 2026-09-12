@@ -238,6 +238,8 @@ write_response() {
   SEND_CLAIMED_AT_EXPECTED_SHA="$(send_claimed_at_migration_sha)" \
   SEND_RUNS_CLAIMED_AT_EXPECTED_SHA="$(send_runs_claimed_at_migration_sha)" \
   SEND_CLAIM_TOKEN_EXPECTED_SHA="$(send_claim_token_migration_sha)" \
+  CONTEXT_B2_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" | awk '{print $1}')" \
+  CONTEXT_B3_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
   CONTEXT_SWITCH_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170000_automation_switches.sql" | awk '{print $1}')" \
   CONTEXT_LEDGER_EXPECTED_SHA="$(shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911170001_context_run_ledger.sql" | awk '{print $1}')" \
   CONTEXT_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" \
