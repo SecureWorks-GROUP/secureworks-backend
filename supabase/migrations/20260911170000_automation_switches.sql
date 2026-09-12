@@ -253,4 +253,6 @@ GRANT EXECUTE ON FUNCTION public.automation_switch_unwrap_cron_jobs() TO postgre
 --   SELECT lane, public.automation_lane_enabled(lane)
 --     FROM unnest(ARRAY['capture','attribution','extraction']) AS lane;
 --   SELECT jobname, schedule FROM cron.job
---    WHERE jobname IN ('monitor-inbox-poll','xero-invoice-sync','contact-matching');
+--    WHERE jobname IN ('monitor-inbox-poll','contact-matching');
+-- xero-invoice-sync is deliberately not wrapped: finance updates continue
+-- when capture is off; only business_events emission checks the lane.
