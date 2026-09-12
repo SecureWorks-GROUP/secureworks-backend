@@ -1737,24 +1737,33 @@ serve(async (req: Request) => {
           ? (runAccepts || []).filter((ra: any) => ra.status === 'accepted').length >= 2
           : (runAccepts || []).some((ra: any) => ra.status === 'accepted')
 
-        // Log acceptance event
-        await insertCapturedEvidence(sb, {
+        // Log acceptance event. job_id is the UUID column; job_number is not a UUID.
+        const { error: runAcceptedCaptureError } = await insertCapturedEvidence(sb, {
           event_type: 'quote.run_accepted',
           source: 'send-quote',
           occurred_at: new Date().toISOString(),
           recorded_at: new Date().toISOString(),
           entity_type: 'job',
           entity_id: doc.job_id,
-          job_id: job?.job_number || doc.job_id,
+          job_id: doc.job_id,
           payload: {
             run_label: runLabel,
             run_name: runName,
             contact_id: contactId,
             contact_name: doc.job_contacts?.client_name || '',
             both_accepted: allAccepted,
+            job_number: job?.job_number || null,
           },
           metadata: {},
-        }).then(() => {}, () => {})
+        })
+        if (runAcceptedCaptureError) {
+          console.error('[canonical-event-fail]', JSON.stringify({
+            event_type: 'quote.run_accepted',
+            handler: 'send-quote/accept',
+            job_id: doc.job_id || null,
+            error: runAcceptedCaptureError?.message ?? String(runAcceptedCaptureError),
+          }))
+        }
 
         // Update overall job status
         const { data: allRunAccepts } = await sb.from('run_acceptances')
