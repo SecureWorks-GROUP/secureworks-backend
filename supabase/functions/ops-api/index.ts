@@ -95,6 +95,7 @@
 //   push_trade_invoice_to_xero — Push acknowledged trade invoice to Xero as ACCPAY bill
 // ════════════════════════════════════════════════════════════
 
+import { executeDispatchDraft, readbackDispatchExecution, outlookDispatchProvider, dispatchExecutionState } from './dispatch_execution.ts'
 import { dispatchOutlookSearch } from './dispatch_outlook.ts'
 import { handleDispatch, DispatchError } from './dispatch_workbench.ts'
 import { isCurrentContextFact } from './context_visibility.ts'
@@ -5065,6 +5066,26 @@ if (import.meta.main) serve(async (req: Request) => {
       if (!_opsApiCallerIsStaffOperator(authMode, authUser)) return json({error:'Office operator access required'},403)
       const dispatchOrg = authMode === 'jwt' ? authUser!.orgId : DEFAULT_ORG_ID
       try {
+        const approvers = (Deno.env.get('DISPATCH_APPROVER_USER_IDS') || '').split(',').filter(Boolean)
+        if (action === 'dispatch_draft_approve' || (action === 'dispatch_command' && body.command === 'draft_approve')) {
+          if (authMode !== 'jwt' || !approvers.includes(authUser!.id)) return json({error:'Configured Captain approval required'},403)
+          body.command = 'draft_approve'
+          return json(await handleDispatch(client,dispatchOrg,authUser!.id,'dispatch_command',req.method,url.searchParams,body))
+        }
+        if (['dispatch_execute','dispatch_execution','dispatch_execution_readback'].includes(action)) {
+          const mailboxConfig = JSON.parse(Deno.env.get('DISPATCH_READ_MAILBOXES_BY_ORG') || '{}')
+          const provider = outlookDispatchProvider(client,Array.isArray(mailboxConfig[dispatchOrg]) ? mailboxConfig[dispatchOrg] : [])
+          if (action === 'dispatch_execute') {
+            if(req.method !== 'POST')return json({error:'POST required'},405)
+            return json(await executeDispatchDraft(client,dispatchOrg,body,provider,Deno.env.get('DISPATCH_SEND_RELEASED') === 'true'))
+          }
+          if(action === 'dispatch_execution_readback') {
+            if(req.method !== 'POST')return json({error:'POST required'},405)
+            return json(await readbackDispatchExecution(client,dispatchOrg,body.approval_id,provider))
+          }
+          if(req.method !== 'GET')return json({error:'GET required'},405)
+          return json(await dispatchExecutionState(client,dispatchOrg,url.searchParams.get('job_id') || '',Deno.env.get('DISPATCH_SEND_RELEASED') === 'true',authMode==='jwt' && approvers.includes(authUser!.id)))
+        }
         if (action === 'dispatch_outlook_search') {
           if (req.method !== 'GET') return json({error:'GET required'},405)
           // Tenant-bound server configuration, never caller-selected arbitrary mailboxes.

@@ -17,6 +17,7 @@ export const emptyState = () => ({
   receipts: [],
   order_drafts: [],
   prepared_order_id: null,
+  context_review: null,
   reviewed_source_version: null,
   assessment: null,
 } as any);
@@ -136,6 +137,17 @@ export function assessment(state: any, source: string, now: string) {
         next_action: "Verify quantity, unit and specification against source",
       });
     }
+    if (
+      allocated > r.quantity || allocations.some((a: any) => a.unit !== r.unit)
+    ) {
+      obligations.push({
+        code: "supply_reconciliation",
+        requirement_id: r.id,
+        owner: r.owner || "Shaun",
+        next_action:
+          "Resolve excess or unit mismatch while preserving receipt custody",
+      });
+    }
     if (r.quantity && allocated < r.quantity) {
       obligations.push({
         code: "supply_gap",
@@ -211,13 +223,43 @@ export async function reduceCommand(
       });
       break;
     case "requirement_upsert":
-      if (s.allocations.some((a: any) => a.requirement_id === p.id)) {
+    case "requirement_reconcile": {
+      const old = s.requirements.find((r: any) => r.id === p.id);
+      const updated = requirement({ ...old, ...p });
+      const physicalChanged = old &&
+        ["quantity", "unit", "specification", "description"].some((k) =>
+          old[k] !== (updated as any)[k]
+        );
+      if (
+        physicalChanged &&
+        s.allocations.some((a: any) => a.requirement_id === p.id) &&
+        command !== "requirement_reconcile"
+      ) {
         throw new DispatchError(
-          "Reconcile allocations before changing a supplied requirement",
+          "Use explicit reconciliation with a reason when supplied scope changes",
         );
       }
-      upsert(s.requirements, requirement(p));
+      if (command === "requirement_reconcile") {
+        text(p.reason, "reconciliation reason");
+      }
+      upsert(s.requirements, {
+        ...updated,
+        revisions: [
+          ...(old?.revisions || []),
+          ...(old
+            ? [{
+              previous: { ...old, revisions: undefined },
+              reason: p.reason || "Requirement metadata updated",
+              ...mark,
+            }]
+            : []),
+        ],
+      });
       s.reviewed_source_version = null;
+      break;
+    }
+    case "context_review":
+      s.context_review = { source_version: source, actor, at: now };
       break;
     case "requirement_move":
       find(s.requirements, p.id).group_id = group(p.group_id);
@@ -286,29 +328,42 @@ export async function reduceCommand(
           price !== null &&
           (typeof price !== "number" || !Number.isFinite(price) || price < 0)
         ) throw new DispatchError("Invalid price");
+        const allocations = s.allocations.filter((a: any) =>
+          a.requirement_id === r.id
+        );
+        const allocated = allocations.reduce((n: number, a: any) =>
+          n + a.quantity, 0) - s.receipts.filter((x: any) =>
+            allocations.some((a: any) =>
+              a.id === x.allocation_id
+            )
+          ).reduce((n: number, x: any) => n + x.damaged_quantity, 0);
+        const prepared = s.order_drafts.filter((o: any) => o.id !== p.id)
+          .reduce((n: number, o: any) => {
+            const ordered = o.line_items.filter((l: any) =>
+              l.dispatch_requirement_id === r.id
+            ).reduce((sum: number, l: any) => sum + l.quantity, 0);
+            const assigned = allocations.filter((a: any) =>
+              a.supply_id.startsWith(`po:${o.id}:`)
+            ).reduce((sum: number, a: any) => sum + a.quantity, 0);
+            return n + Math.max(0, ordered - assigned);
+          }, 0);
+        const uncovered = Math.max(0, r.quantity - allocated - prepared);
+        const orderedQuantity = quantity(p.quantities?.[id] ?? uncovered);
+        if (orderedQuantity > uncovered) {
+          throw new DispatchError(
+            "Order quantity exceeds uncovered reviewed requirement",
+            409,
+          );
+        }
         return {
           dispatch_requirement_id: r.id,
           description: r.description,
           specification: r.specification,
-          quantity: r.quantity,
+          quantity: orderedQuantity,
           unit: r.unit,
           unit_price: price,
         };
       });
-      const other = s.order_drafts.find((o: any) =>
-        o.id !== p.id &&
-        o.line_items.some((l: any) =>
-          lines.some((x: any) =>
-            x.dispatch_requirement_id === l.dispatch_requirement_id
-          )
-        )
-      );
-      if (other) {
-        throw new DispatchError(
-          "Requirement already belongs to a prepared order; review existing order first",
-          409,
-        );
-      }
       upsert(s.order_drafts, {
         id: uuid(p.id),
         supplier_name: text(p.supplier_name, "supplier", 200),
@@ -351,6 +406,38 @@ export async function reduceCommand(
         ...mark,
       };
       upsert(s.drafts, { ...d, content_hash: await hash(d) });
+      break;
+    }
+    case "draft_approve": {
+      const d = find(s.drafts, p.id);
+      if (
+        d.source_version !== source ||
+        d.review?.content_hash !== d.content_hash ||
+        d.review?.source_version !== source || p.content_hash !== d.content_hash
+      ) {
+        throw new DispatchError(
+          "Review exact current draft before approval",
+          409,
+        );
+      }
+      if (
+        p.communications_approved !== true ||
+        (d.po_id && p.purchase_approved !== true)
+      ) {
+        throw new DispatchError(
+          "Communications and supplier commitment approvals are separate",
+          403,
+        );
+      }
+      d.approval = {
+        id: uuid(p.approval_id),
+        actor,
+        at: now,
+        content_hash: d.content_hash,
+        source_version: source,
+        communications_approved: true,
+        purchase_approved: p.purchase_approved === true,
+      };
       break;
     }
     case "draft_review": {
@@ -461,14 +548,47 @@ export async function reduceCommand(
       break;
     }
     case "receipt_transfer": {
-      const r = find(s.receipts, p.id);
-      r.location = text(p.location, "destination");
+      const r = find(s.receipts, p.id),
+        destination = text(p.location, "destination"),
+        evidence = text(p.evidence, "transfer evidence");
+      if (p.quantity !== undefined) {
+        const moved = quantity(p.quantity);
+        if (moved > r.usable_quantity) {
+          throw new DispatchError("Transfer exceeds usable receipt quantity");
+        }
+        if (moved < r.usable_quantity) {
+          const newId = uuid(p.new_id);
+          if (s.receipts.some((x: any) => x.id === newId)) {
+            throw new DispatchError("Split receipt ID already exists");
+          }
+          r.usable_quantity -= moved;
+          s.receipts.push({
+            ...r,
+            id: newId,
+            usable_quantity: moved,
+            damaged_quantity: 0,
+            location: destination,
+            split_from: r.id,
+            transfers: [...(r.transfers || []), {
+              from_location: r.location,
+              to_location: destination,
+              quantity: moved,
+              evidence,
+              ...mark,
+            }],
+            ...mark,
+          });
+          break;
+        }
+      }
       r.transfers = [...(r.transfers || []), {
-        from_location: find(previous.receipts, p.id).location,
-        to_location: r.location,
-        evidence: text(p.evidence, "transfer evidence"),
+        from_location: r.location,
+        to_location: destination,
+        quantity: r.usable_quantity,
+        evidence,
         ...mark,
       }];
+      r.location = destination;
       break;
     }
     case "communication_link":
@@ -542,7 +662,8 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
   const supplyLots = [];
   for (
     const p of po.filter((p: any) =>
-      ["submitted", "authorised", "billed"].includes(p.status)
+      ["submitted", "authorised", "sent", "confirmed", "delivered", "billed"]
+        .includes(p.status)
     )
   ) {
     for (
@@ -553,7 +674,7 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
       supplyLots.push({
         id: `po:${p.id}:${index}`,
         quantity: Number(line.quantity),
-        unit: line.unit || "each",
+        unit: line.unit || null,
         description: line.description,
         source_ref: { kind: "purchase_order_line", po_id: p.id, index },
         source_version: revision,
@@ -667,6 +788,17 @@ export async function dispatchCommand(
     b.command === "draft_upsert" && b.payload.po_id &&
     !current.purchase_orders.some((p: any) => p.id === b.payload.po_id)
   ) throw new DispatchError("Draft PO does not belong to this job", 409);
+  if (
+    b.command === "draft_upsert" && b.payload.thread_id &&
+    !current.communications.some((c: any) =>
+      c.thread_id === b.payload.thread_id
+    )
+  ) {
+    throw new DispatchError(
+      "Reply thread is not an authoritative current-job conversation; use an explicit new conversation",
+      409,
+    );
+  }
   const next = await reduceCommand(
     state,
     b.command,
@@ -709,20 +841,30 @@ export async function dispatchCommand(
           uuid(match[1]),
         ).maybeSingle(),
       );
-      if (!po || !["submitted", "authorised", "billed"].includes(po.status)) {
+      if (
+        !po ||
+        !["submitted", "authorised", "sent", "confirmed", "delivered", "billed"]
+          .includes(po.status)
+      ) {
         throw new DispatchError("Supply PO is not ordered");
       }
       const index = Number(match[2]), line = po.line_items?.[index];
       if (!line) throw new DispatchError("Supply line missing");
+      if (!line.unit) {
+        throw new DispatchError(
+          "PO line has no verified physical unit; review material specification instead of treating a lump-sum line as stock",
+        );
+      }
       lots.push({
         id: supply,
         quantity: Number(line.quantity),
-        unit: line.unit || "each",
+        unit: line.unit || null,
         source_ref: {
           kind: "purchase_order_line",
           po_id: po.id,
           index,
           job_id: po.job_id,
+          po_lines: po.line_items,
         },
         source_version: await hash(line),
         source_snapshot: line,
@@ -736,8 +878,10 @@ export async function dispatchCommand(
       value: f.value,
       source_ref: { table: f._context_store, id: f.id },
     }));
-    next.assessment.context_review_required = current.context_facts.length > 0;
-    if (current.context_facts.length) {
+    next.assessment.context_review_required =
+      current.context_facts.length > 0 &&
+      next.context_review?.source_version !== current.source_version;
+    if (next.assessment.context_review_required) {
       next.assessment.ready = false;
       next.assessment.obligations.push({
         code: "context_constraints_review",
@@ -1088,7 +1232,7 @@ export async function dispatchSupply(
   }
   let q = client.from("purchase_orders").select("*").eq("org_id", org).in(
     "status",
-    ["submitted", "authorised", "billed"],
+    ["submitted", "authorised", "sent", "confirmed", "delivered", "billed"],
   ).order("id").limit(51);
   if (params.get("cursor")) q = q.gt("id", uuid(params.get("cursor")));
   const pos = checked(await q) || [], lots = [];
@@ -1101,7 +1245,7 @@ export async function dispatchSupply(
         id: `po:${po.id}:${index}`,
         description: line.description,
         quantity: Number(line.quantity),
-        unit: line.unit || "each",
+        unit: line.unit || null,
         source_ref: {
           kind: "purchase_order_line",
           po_id: po.id,

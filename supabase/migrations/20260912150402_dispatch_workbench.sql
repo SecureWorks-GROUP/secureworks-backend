@@ -103,9 +103,15 @@ begin
   for lot in select value from jsonb_array_elements(p_lots) loop
     if lot#>>'{source_ref,kind}'='purchase_order_line' and not exists(
       select 1 from purchase_orders where id=(lot#>>'{source_ref,po_id}')::uuid and org_id=p_org
-      and status in ('submitted','authorised','billed')
+      and status in ('submitted','authorised','sent','confirmed','delivered','billed')
       and line_items->(lot#>>'{source_ref,index}')::integer = lot->'source_snapshot'
+      and line_items=lot#>'{source_ref,po_lines}'
     ) then raise exception 'supply_source_changed' using errcode='40001'; end if;
+    if lot#>>'{source_ref,kind}'='purchase_order_line' and exists(
+      select 1 from dispatch_reservations r join dispatch_supply_lots l on l.org_id=r.org_id and l.id=r.supply_id
+      where r.org_id=p_org and l.source_ref->>'po_id'=lot#>>'{source_ref,po_id}'
+      and l.source_ref->'po_lines' is distinct from lot#>'{source_ref,po_lines}'
+    ) then raise exception 'po_revision_requires_reconciliation' using errcode='40001'; end if;
     if coalesce((select sum(quantity) from dispatch_reservations where org_id=p_org and supply_id=lot->>'id'),0)>(lot->>'quantity')::numeric then raise exception 'count_below_reserved' using errcode='40001'; end if;
     if exists(select 1 from dispatch_supply_lots l where l.org_id=p_org and l.id=lot->>'id' and l.source_version<>lot->>'source_version')
       and exists(select 1 from dispatch_reservations r where r.org_id=p_org and r.supply_id=lot->>'id')
@@ -131,7 +137,7 @@ begin
       if exists(select 1 from purchase_orders where id=order_id and (org_id<>p_org or job_id<>p_job or status<>'draft' or reference is distinct from 'dispatch:'||order_id::text or xero_po_id is not null)) then raise exception 'order_not_editable'; end if;
       insert into purchase_orders(id,org_id,job_id,po_number,supplier_name,xero_contact_id,status,line_items,subtotal,tax,total,delivery_date,reference,notes)
         values(order_id,p_org,p_job,'PO-D-'||order_id::text,draft->>'supplier_name',draft->>'xero_contact_id','draft',draft->'line_items',null,null,null,(draft->>'delivery_date')::date,'dispatch:'||order_id::text,'Delivery: '||(draft->>'delivery_address')||E'\n'||coalesce(draft->>'notes',''))
-      on conflict(id) do update set supplier_name=excluded.supplier_name,line_items=excluded.line_items,delivery_date=excluded.delivery_date,notes=excluded.notes,subtotal=null,tax=null,total=null,updated_at=now();
+      on conflict(id) do update set supplier_name=excluded.supplier_name,xero_contact_id=excluded.xero_contact_id,line_items=excluded.line_items,delivery_date=excluded.delivery_date,notes=excluded.notes,subtotal=null,tax=null,total=null,updated_at=now();
     end loop;
     p_source=dispatch_source_version(p_org,p_job);
   end if;
@@ -171,3 +177,39 @@ where j.status not in ('archived','cancelled','deleted') and (
 );
 revoke all on public.dispatch_eligible_jobs from anon,authenticated;
 grant select on public.dispatch_eligible_jobs to service_role;
+
+create table public.dispatch_release_controls(org_id uuid primary key,communications_enabled boolean not null default false);
+create table public.dispatch_executions(
+ org_id uuid not null, id uuid not null, job_id uuid not null, draft_id uuid not null,
+ content_hash text not null,source_version text not null,snapshot jsonb not null,
+ status text not null check(status in ('claimed','provider_draft_ready','accepted_not_delivered','outcome_unknown','not_sent')),
+ receipt jsonb, last_error text, created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
+ primary key(org_id,id)
+);
+alter table public.dispatch_release_controls enable row level security;
+alter table public.dispatch_executions enable row level security;
+revoke all on public.dispatch_release_controls,public.dispatch_executions from anon,authenticated;
+grant all on public.dispatch_release_controls,public.dispatch_executions to service_role;
+create function public.dispatch_claim_execution(p_org uuid,p_job uuid,p_draft uuid,p_approval uuid,p_hash text,p_source text)
+returns jsonb language plpgsql security invoker set search_path=public,pg_temp as $$
+declare d jsonb; prior dispatch_executions;
+begin
+ perform pg_advisory_xact_lock(hashtextextended('dispatch:'||p_org::text,0));
+ select * into prior from dispatch_executions where org_id=p_org and id=p_approval;
+ if found then return jsonb_build_object('claimed',false,'action',to_jsonb(prior)); end if;
+ if not exists(select 1 from dispatch_release_controls where org_id=p_org and communications_enabled) then return jsonb_build_object('claimed',false,'action',jsonb_build_object('id',p_approval,'status','held')); end if;
+ select value into d from dispatch_plans p cross join lateral jsonb_array_elements(p.state->'drafts')
+ where p.org_id=p_org and p.job_id=p_job and value->>'id'=p_draft::text;
+ if d is null or d->>'content_hash' is distinct from p_hash or d#>>'{approval,id}' is distinct from p_approval::text
+   or d#>>'{approval,content_hash}' is distinct from p_hash or d#>>'{approval,source_version}' is distinct from p_source
+   or d#>>'{approval,communications_approved}' is distinct from 'true'
+   or (d->>'po_id' is not null and d#>>'{approval,purchase_approved}' is distinct from 'true')
+   or dispatch_source_version(p_org,p_job) is distinct from p_source
+ then raise exception 'draft_approval_changed' using errcode='40001'; end if;
+ if exists(select 1 from dispatch_executions where org_id=p_org and draft_id=p_draft and status in ('claimed','provider_draft_ready','accepted_not_delivered','outcome_unknown')) then raise exception 'draft_already_executed_or_uncertain' using errcode='40001'; end if;
+ insert into dispatch_executions(org_id,id,job_id,draft_id,content_hash,source_version,snapshot,status)
+ values(p_org,p_approval,p_job,p_draft,p_hash,p_source,d,'claimed') returning * into prior;
+ return jsonb_build_object('claimed',true,'action',to_jsonb(prior));
+end $$;
+revoke all on function public.dispatch_claim_execution(uuid,uuid,uuid,uuid,text,text) from public,anon,authenticated;
+grant execute on function public.dispatch_claim_execution(uuid,uuid,uuid,uuid,text,text) to service_role;

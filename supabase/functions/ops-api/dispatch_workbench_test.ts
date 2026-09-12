@@ -177,3 +177,104 @@ Deno.test("acceptance never inferred from paid/stage alone; canonical hashes sta
   );
   assertEquals(await hash({ a: 1, b: 2 }), await hash({ b: 2, a: 1 }));
 });
+Deno.test("partial supply orders only uncovered balance and supports two suppliers", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", requirement);
+  s = await apply(s, "requirement_review", { id: id(1) });
+  s = await apply(s, "allocation_upsert", {
+    id: id(8),
+    requirement_id: id(1),
+    supply_id: "po:existing:0",
+    quantity: 6,
+  });
+  const p = {
+    id: id(2),
+    supplier_name: "Supplier A",
+    delivery_address: "Site",
+    requirement_ids: [id(1)],
+    existing_supply_reviewed: true,
+    quantities: { [id(1)]: 2 },
+  };
+  s = await apply(s, "order_prepare", p);
+  s = await apply(s, "order_prepare", {
+    ...p,
+    id: id(3),
+    supplier_name: "Supplier B",
+  });
+  assertEquals(
+    s.order_drafts.map((o: { line_items: { quantity: number }[] }) =>
+      o.line_items[0].quantity
+    ),
+    [2, 2],
+  );
+  await assertRejects(
+    () => apply(s, "order_prepare", { ...p, id: id(4) }),
+    DispatchError,
+  );
+});
+Deno.test("metadata and explicit scope reconciliation preserve receipts and expose surplus", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", requirement);
+  s = await apply(s, "allocation_upsert", {
+    id: id(8),
+    requirement_id: id(1),
+    supply_id: "po:existing:0",
+    quantity: 10,
+  });
+  s = await apply(s, "receipt_upsert", {
+    id: id(9),
+    allocation_id: id(8),
+    usable_quantity: 10,
+    location: "yard",
+    evidence: "Counted",
+  });
+  s = await apply(s, "requirement_upsert", {
+    id: id(1),
+    needed_by: "2026-10-01",
+    owner: "Fixture operator",
+  });
+  assertEquals(s.receipts[0].usable_quantity, 10);
+  assertEquals(s.requirements[0].owner, "Fixture operator");
+  s = await apply(s, "requirement_reconcile", {
+    id: id(1),
+    quantity: 8,
+    reason: "Signed scope reduction",
+  });
+  assert(
+    assessment(s, "s1", "now").obligations.some((x: Record<string, unknown>) =>
+      x.code === "supply_reconciliation"
+    ),
+  );
+});
+Deno.test("partial yard transfer conserves usable and damaged custody", async () => {
+  let s = await apply(emptyState(), "requirement_upsert", requirement);
+  s = await apply(s, "allocation_upsert", {
+    id: id(8),
+    requirement_id: id(1),
+    supply_id: "po:a:0",
+    quantity: 6,
+  });
+  s = await apply(s, "receipt_upsert", {
+    id: id(9),
+    allocation_id: id(8),
+    usable_quantity: 4,
+    damaged_quantity: 2,
+    location: "yard",
+    evidence: "Count",
+  });
+  s = await apply(s, "receipt_transfer", {
+    id: id(9),
+    new_id: id(10),
+    quantity: 2,
+    location: "site",
+    evidence: "Partial delivery",
+  });
+  assertEquals(
+    s.receipts.map((
+      r: {
+        usable_quantity: number;
+        damaged_quantity: number;
+        location: string;
+      },
+    ) => [r.usable_quantity, r.damaged_quantity, r.location]),
+    [[2, 2, "yard"], [2, 0, "site"]],
+  );
+});
