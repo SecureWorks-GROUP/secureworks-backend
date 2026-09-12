@@ -6,6 +6,7 @@ import {
 import { SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA } from "./ses_commercial_quantity_override.ts";
 import {
   CAPTAIN_LOCK_REMINT_AUTHORITY_REQUIRED,
+  CAPTAIN_LOCK_REMINT_DISPOSITION_REFUSED,
   CAPTAIN_LOCK_REMINT_DUPLICATE_LIVE,
   CAPTAIN_LOCK_REMINT_REQUIRES_DRAFT,
   remintSesCaptainLockDraftAction,
@@ -13,7 +14,9 @@ import {
 import { SesActionError } from "./ses_reporting_actions.ts";
 
 const JOB = "eb4c142b-98ab-4d10-8626-03d162d079fc";
-const auth = { mode: "routine" as const, user: null };
+const MYALUP_MS = "d4653440-6e9e-4451-858a-c30fd52336ba";
+const MYALUP_ASSESS = "a146802e-2db5-4fac-94ed-24fff1d42353";
+const auth = { mode: "api_key" as const, user: null };
 
 const lock = {
   schema: SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA,
@@ -54,6 +57,8 @@ function deps(overrides: Record<string, unknown> = {}) {
         purchase_order: "PO-54048",
         contact_name: "Major Loss Builders",
       }),
+      loadCardFamily: async (_c: any, jobId: string) =>
+        jobId === MYALUP_ASSESS ? "assessment_quote" : "physical_makesafe",
       loadLiveInvoices: async () => [],
       loadLeftoverMutableObligation: async () => null,
       fetchAllAccrecInvoices: async () => {
@@ -377,4 +382,237 @@ Deno.test("invalid lock never deletes", async () => {
     SesActionError,
   );
   assertEquals(calls.includes("delete"), false);
+});
+
+const myalupLock = {
+  ...lock,
+  decision_key: "swms-26782-myalup-second-invoice-375-v1",
+  reason: "Captain lock: 2 trades x 2h x $85 + sikaflex $35 = $375 ex",
+  trade_reported_hours_per_trade: 2,
+  sealed_billable_hours_floor: 3,
+  lines: [
+    {
+      line_kind: "labour",
+      description: "MLB-25284 - make-safe attendance",
+      quantity: 4,
+      unit_price_ex_gst: 85,
+    },
+    {
+      line_kind: "materials",
+      description: "sikaflex",
+      quantity: 1,
+      unit_price_ex_gst: 35,
+    },
+  ],
+};
+
+const siblingPaidAssess = {
+  xero_invoice_id: "xero-0800",
+  invoice_number: "INV-0800",
+  status: "PAID",
+  job_id: MYALUP_ASSESS,
+  reference: "MLB-25284",
+  total: 165,
+};
+
+Deno.test("sibling paid assess does not 409 a later MS remint with second_invoice", async () => {
+  const created: string[] = [];
+  const { impl } = deps({
+    loadCardContext: async () => ({
+      builder_reference: "MLB-25284",
+      purchase_order: null,
+      contact_name: "Major Loss Builders",
+    }),
+    loadLiveInvoices: async () => [],
+    fetchAllAccrecInvoices: async () => [
+      siblingPaidAssess,
+      {
+        xero_invoice_id: "xero-0812",
+        invoice_number: "INV-0812",
+        status: "DELETED",
+        job_id: MYALUP_MS,
+        reference: "MLB-25284",
+      },
+    ],
+    createDraft: async (_c: any, args: any) => {
+      created.push(args.reference);
+      assertEquals(args.line_items[0].unit_price, 85);
+      assertEquals(args.line_items[1].unit_price, 35);
+      return {
+        state: "xero_draft_created",
+        invoice_number: "INV-2001",
+        status: "DRAFT",
+        total: 375,
+        reference: args.reference,
+        invoice: {
+          invoice_number: "INV-2001",
+          status: "DRAFT",
+          total: 375,
+          reference: args.reference,
+        },
+      };
+    },
+  });
+  const result = await remintSesCaptainLockDraftAction(
+    {},
+    auth,
+    {
+      org_id: "org",
+      job_id: MYALUP_MS,
+      actor: "mcp-helper-key",
+      commercial_quantity_override: myalupLock,
+      post_release_disposition: "second invoice",
+    },
+    impl as any,
+  );
+  assertEquals(result.state, "xero_draft_reminted");
+  assertEquals((result.invoice as any).status, "DRAFT");
+  assertEquals(result.post_release_disposition, "second_invoice");
+  assertEquals(
+    (result.second_invoice_sibling as any)?.invoice_number,
+    "INV-0800",
+  );
+  assertEquals((result.second_invoice_sibling as any)?.job_id, MYALUP_ASSESS);
+  assertEquals(
+    (result.second_invoice_sibling as any)?.our_family,
+    "physical_makesafe",
+  );
+  assertEquals(
+    (result.second_invoice_sibling as any)?.sibling_family,
+    "assessment_quote",
+  );
+  assertEquals(created, ["MLB-25284"]);
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
+});
+
+Deno.test("sibling paid assess still 409s without an explicit second_invoice", async () => {
+  const { calls, impl } = deps({
+    loadCardContext: async () => ({
+      builder_reference: "MLB-25284",
+      purchase_order: null,
+      contact_name: "Major Loss Builders",
+    }),
+    loadLiveInvoices: async () => [],
+    fetchAllAccrecInvoices: async () => [siblingPaidAssess],
+  });
+  const err = await assertRejects(
+    () =>
+      remintSesCaptainLockDraftAction(
+        {},
+        auth,
+        {
+          org_id: "org",
+          job_id: MYALUP_MS,
+          actor: "mcp-helper-key",
+          commercial_quantity_override: myalupLock,
+        },
+        impl as any,
+      ),
+    SesActionError,
+  );
+  assertEquals(err.message.includes(CAPTAIN_LOCK_REMINT_DUPLICATE_LIVE), true);
+  assertEquals(err.message.includes("INV-0800"), true);
+  assertEquals(calls.some((c) => c.startsWith("create:")), false);
+});
+
+Deno.test("same-card live ACCREC still 409s even with second_invoice", async () => {
+  const { calls, impl } = deps({
+    loadCardContext: async () => ({
+      builder_reference: "MLB-25284",
+      purchase_order: null,
+      contact_name: "Major Loss Builders",
+    }),
+    loadLiveInvoices: async () => [{
+      xero_invoice_id: "xero-same",
+      invoice_number: "INV-0999",
+      status: "AUTHORISED",
+    }],
+    fetchAllAccrecInvoices: async () => [{
+      xero_invoice_id: "xero-same",
+      invoice_number: "INV-0999",
+      status: "AUTHORISED",
+      job_id: MYALUP_MS,
+      reference: "MLB-25284",
+    }],
+  });
+  const err = await assertRejects(
+    () =>
+      remintSesCaptainLockDraftAction(
+        {},
+        auth,
+        {
+          org_id: "org",
+          job_id: MYALUP_MS,
+          actor: "mcp-helper-key",
+          commercial_quantity_override: myalupLock,
+          post_release_disposition: "second_invoice",
+        },
+        impl as any,
+      ),
+    SesActionError,
+  );
+  assertEquals(err.message.includes(CAPTAIN_LOCK_REMINT_REQUIRES_DRAFT), true);
+  assertEquals(calls.some((c) => c.startsWith("create:")), false);
+});
+
+Deno.test("same-family sibling still 409s with second_invoice", async () => {
+  const twin = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const { calls, impl } = deps({
+    loadCardContext: async () => ({
+      builder_reference: "MLB-25284",
+      purchase_order: null,
+      contact_name: "Major Loss Builders",
+    }),
+    loadCardFamily: async () => "physical_makesafe",
+    loadLiveInvoices: async () => [],
+    fetchAllAccrecInvoices: async () => [{
+      ...siblingPaidAssess,
+      job_id: twin,
+      invoice_number: "INV-0888",
+    }],
+  });
+  const err = await assertRejects(
+    () =>
+      remintSesCaptainLockDraftAction(
+        {},
+        auth,
+        {
+          org_id: "org",
+          job_id: MYALUP_MS,
+          actor: "mcp-helper-key",
+          commercial_quantity_override: myalupLock,
+          post_release_disposition: "second_invoice",
+        },
+        impl as any,
+      ),
+    SesActionError,
+  );
+  assertEquals(err.message.includes(CAPTAIN_LOCK_REMINT_DUPLICATE_LIVE), true);
+  assertEquals(calls.some((c) => c.startsWith("create:")), false);
+});
+
+Deno.test("api_key cannot set combine_credit on remint even with captain_lock", async () => {
+  const { calls, impl } = deps();
+  const err = await assertRejects(
+    () =>
+      remintSesCaptainLockDraftAction(
+        {},
+        auth,
+        {
+          org_id: "org",
+          job_id: MYALUP_MS,
+          actor: "mcp-helper-key",
+          commercial_quantity_override: myalupLock,
+          post_release_disposition: "combine_credit",
+        },
+        impl as any,
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    err.message.includes(CAPTAIN_LOCK_REMINT_DISPOSITION_REFUSED),
+    true,
+  );
+  assertEquals(calls.some((c) => c.startsWith("create:")), false);
 });

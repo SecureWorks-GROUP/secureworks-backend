@@ -729,3 +729,205 @@ Deno.test("the production branch mints an id without an injected allocator", asy
   );
   assertNotEquals(again.obligation.id, minted);
 });
+
+Deno.test("api_key cannot attach post_release_disposition on prepare without a JWT", async () => {
+  const client = {
+    from() {
+      throw new Error("prepare must refuse the disposition before any read");
+    },
+  } as unknown as SesSupabaseClient;
+  const error = await assertRejects(
+    () =>
+      prepareSesInvoiceObligationAction(
+        client,
+        { mode: "api_key", user: null },
+        {
+          org_id: ORG,
+          job_id: JOB,
+          created_by: "mcp-helper-key",
+          post_release_disposition: "second_invoice",
+          commercial_quantity_override: {
+            authority_kind: "captain_lock",
+          },
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 403);
+  assert(
+    error.message.includes("identified human disposition"),
+    `expected the JWT disposition gate, got ${error.message}`,
+  );
+});
+
+const LAKE_PRESTON_MS = "a4f2f7b5-aa02-430c-b648-ee6872bbf883";
+const LAKE_PRESTON_ASSESS = "1caa4531-910c-45af-95c5-d5ce3b99d4e9";
+const jwtCaptain = {
+  mode: "jwt" as const,
+  user: { id: "captain-1", email: "captain@test", role: "admin" },
+};
+
+function lakePrestonPrepareClient(args: {
+  invoices: Array<Record<string, unknown>>;
+}) {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000009790",
+    job_id: LAKE_PRESTON_MS,
+    stage: "pre_xero",
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    attendance_cycle_ids: [CYCLE_1],
+    current_attendance_cycle_id: CYCLE_1,
+    envelope: { v2: { routing: { builder: "Major Loss Builders" } } },
+    local_invoice_proposal: {
+      builder_reference: "MLB-25765",
+      line_items: [{
+        description: "MLB-25765 - make-safe attendance",
+        quantity: 3,
+        unit_price_ex_gst: 85,
+      }, {
+        description: "MLB-25765 - materials",
+        quantity: 1,
+        unit_price_ex_gst: 410,
+      }],
+    },
+    review_spec: { cards: [{ exception_review_codes: [] }] },
+  };
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions: docket,
+    makesafe_invoice_obligation_revisions_current: null,
+    xero_invoices: args.invoices,
+    makesafe_intake_cases: [],
+  };
+  return {
+    docket,
+    client: {
+      from(table: string) {
+        const response = () => ({ data: rows[table] ?? null, error: null });
+        const query = {
+          select() {
+            return query;
+          },
+          eq() {
+            return query;
+          },
+          in() {
+            return query;
+          },
+          not() {
+            return query;
+          },
+          or() {
+            return query;
+          },
+          order() {
+            return query;
+          },
+          limit() {
+            return query;
+          },
+          maybeSingle() {
+            return Promise.resolve(response());
+          },
+          then(resolve: (value: ReturnType<typeof response>) => unknown) {
+            return Promise.resolve(response()).then(resolve);
+          },
+        };
+        return query;
+      },
+      rpc() {
+        return Promise.resolve({
+          data: { state: "proposed", committed: true },
+          error: null,
+        });
+      },
+      storage: { from: () => ({}) },
+    } as unknown as SesSupabaseClient,
+  };
+}
+
+function lakePrestonFamilyLoader(_client: SesSupabaseClient, jobId: string) {
+  if (jobId === LAKE_PRESTON_ASSESS) return Promise.resolve("assessment_quote");
+  if (jobId === LAKE_PRESTON_MS) return Promise.resolve("physical_makesafe");
+  return Promise.resolve("unknown");
+}
+
+const lakePrestonAssessInvoice = {
+  job_id: LAKE_PRESTON_ASSESS,
+  xero_invoice_id: "xero-0876",
+  invoice_number: "INV-0876",
+  status: "AUTHORISED",
+  reference: "MLB-25765",
+  reference_normalized: "mlb25765",
+  invoice_type: "ACCREC",
+};
+
+Deno.test("Lake Preston JWT second_invoice prepares a new MS obligation beside INV-0876", async () => {
+  const { docket, client } = lakePrestonPrepareClient({
+    invoices: [lakePrestonAssessInvoice],
+  });
+  const result = await prepareSesInvoiceObligationAction(
+    client,
+    jwtCaptain,
+    {
+      org_id: ORG,
+      job_id: LAKE_PRESTON_MS,
+      docket_revision_id: docket.id,
+      created_by: "captain@test",
+      post_release_disposition: "second invoice",
+    },
+    { loadCardFamily: lakePrestonFamilyLoader },
+  );
+  assertEquals(result.state, "prepared");
+  assertEquals(result.proposal.pricing_disposition, "priced_from_canon");
+  assertEquals(result.obligation.post_release_disposition, "second_invoice");
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
+});
+
+Deno.test("Lake Preston JWT prepare without second_invoice stays blocked on INV-0876", async () => {
+  const { docket, client } = lakePrestonPrepareClient({
+    invoices: [lakePrestonAssessInvoice],
+  });
+  const result = await prepareSesInvoiceObligationAction(
+    client,
+    jwtCaptain,
+    {
+      org_id: ORG,
+      job_id: LAKE_PRESTON_MS,
+      docket_revision_id: docket.id,
+      created_by: "captain@test",
+    },
+    { loadCardFamily: lakePrestonFamilyLoader },
+  );
+  assertEquals(result.state, "blocked");
+  assertEquals(result.proposal.pricing_disposition, "blocked_duplicate_live");
+});
+
+Deno.test("Lake Preston JWT same-family sibling still blocks prepare with second_invoice", async () => {
+  const twin = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const { docket, client } = lakePrestonPrepareClient({
+    invoices: [{
+      ...lakePrestonAssessInvoice,
+      job_id: twin,
+      invoice_number: "INV-0888",
+    }],
+  });
+  const result = await prepareSesInvoiceObligationAction(
+    client,
+    jwtCaptain,
+    {
+      org_id: ORG,
+      job_id: LAKE_PRESTON_MS,
+      docket_revision_id: docket.id,
+      created_by: "captain@test",
+      post_release_disposition: "second_invoice",
+    },
+    {
+      loadCardFamily: async (_c, jobId) =>
+        jobId === LAKE_PRESTON_MS || jobId === twin
+          ? "physical_makesafe"
+          : "unknown",
+    },
+  );
+  assertEquals(result.state, "blocked");
+  assertEquals(result.proposal.pricing_disposition, "blocked_duplicate_live");
+});
