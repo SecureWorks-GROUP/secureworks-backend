@@ -13,6 +13,8 @@
 // open receivable in one call so the screen and the coverage table do not need
 // one door call per invoice.
 
+import { currentDispatchWorkingState } from "./dispatch_context.ts";
+
 export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -494,6 +496,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
   // 3. Job and everything hanging off it.
   let job: any = null;
   let facts: any[] = [];
+  let dispatchWorkingState: ReturnType<typeof currentDispatchWorkingState> = { present: false };
   let conversation: any[] = [];
   let queue: QueueSummary | undefined;
   let queueOk = true;
@@ -510,7 +513,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
     sources.job = jobRead.status;
     const jobRow = jobRead.data;
     if (jobRow) {
-      const [variations, workOrders, council, factsRead, convRead, queueRead, presenceRead, openRead] = await Promise.all([
+      const [variations, workOrders, council, factsRead, convRead, queueRead, presenceRead, openRead, dispatchRead] = await Promise.all([
         safeRead("job_variations", async () => unwrap(await client.from("job_variations").select("variation_number, amount, status, sent_at").eq("job_id", jobRow.id).order("variation_number", { ascending: true }).limit(50))),
         safeRead("work_orders", async () => unwrap(await client.from("work_orders").select("wo_number, trade_name, status, scheduled_date, completed_at").eq("job_id", jobRow.id).order("created_at", { ascending: false }).limit(50))),
         safeRead("council_submissions", async () => unwrap(await client.from("council_submissions").select("template_type, overall_status").eq("job_id", jobRow.id).order("updated_at", { ascending: false }).limit(1))),
@@ -521,6 +524,9 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
         conversationCountsByJob(client, [{ id: jobRow.id, ghl_contact_id: jobRow.ghl_contact_id ?? null }], warnings),
         safeRead("other_open_invoices", async () => unwrap(await client.from("xero_invoices").select("invoice_number, xero_invoice_id, amount_due, due_date, status")
           .eq("org_id", deps.orgId).eq("invoice_type", "ACCREC").eq("job_id", jobRow.id).in("status", OPEN_STATUSES).gt("amount_due", 0).neq("xero_invoice_id", inv.xero_invoice_id).limit(20))),
+        safeRead("dispatch_working_state", async () => unwrap(await client.from("business_events")
+          .select("id, event_type, correlation_id, job_id, payload, metadata")
+          .eq("job_id", jobRow.id).eq("event_type", "dispatch.plan.changed").order("id").limit(200))),
       ]);
       sources.promised = { ok: variations.status.ok && workOrders.status.ok && council.status.ok, error: [variations.status.error, workOrders.status.error, council.status.error].filter(Boolean).join("; ") || undefined };
       sources.facts = factsRead.status;
@@ -528,7 +534,9 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       sources.extraction_queue = queueRead.status;
       sources.conversation_presence = presenceRead.status;
       sources.other_open_invoices = openRead.status;
+      sources.dispatch_working_state = dispatchRead.status;
       facts = (factsRead.data || []).filter((row: any) => deps.isCurrentContextFact(row, now.getTime())).slice(0, factsLimit);
+      dispatchWorkingState = currentDispatchWorkingState(dispatchRead.data || []);
       if (facts.length < (factsRead.data || []).length && (factsRead.data || []).length >= factsLimit * 2) warnings.push(`facts: read cap ${factsLimit * 2} reached; older facts not shown`);
       conversation = [...(convRead.data || [])].reverse();
       queue = queueRead.queues.get(jobRow.id);
@@ -621,6 +629,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
     link: { status: link.status, method: link.method, job_id: link.job_id, job_number: link.job_number, candidates: link.status === "ambiguous" ? link.candidates : [] },
     job,
     facts: facts.map((f: any) => ({ id: f.id, kind: f.kind, value: f.value, provenance: f.provenance ?? null, updated_at: f.updated_at ?? null })),
+    dispatch_working_state: dispatchWorkingState,
     conversation: {
       messages: conversation.map((m: any) => ({
         at: m.occurred_at ?? null, channel: m.channel ?? null, direction: m.direction ?? null, author: m.author ?? null, subject: m.subject ?? null,
