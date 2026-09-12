@@ -11,6 +11,7 @@ import {
   dispatchRun,
   dispatchTrigger,
   emptyState,
+  handleDispatch,
   hash,
   readDispatchJob,
 } from "./dispatch_workbench.ts";
@@ -44,6 +45,25 @@ class Fixture {
     return new Query(this, table);
   }
   async rpc(name: string, args: any) {
+    if (name === "dispatch_order_reservations") return { data: [] };
+    if (name === "dispatch_context_facts_for_source") {
+      return {
+        data: this.tables.current_job_context_facts.filter((r) =>
+          r.job_id === args.p_job
+        ).slice(0, args.p_limit),
+      };
+    }
+    if (name === "dispatch_finalize_task") {
+      const task = this.tables.dispatch_tasks.find((t) =>
+        t.org_id === args.p_org &&
+        t.job_id === args.p_job && t.source_version === args.p_source_version &&
+        t.plan_version === args.p_plan_version &&
+        t.lease_token === args.p_lease_token
+      );
+      if (!task) return { error: { message: "task_lease_lost" } };
+      Object.assign(task, { status: args.p_status, result: args.p_result });
+      return { data: task };
+    }
     if (name === "dispatch_source_version") {
       return {
         data: await hash({
@@ -405,4 +425,84 @@ Deno.test("worker durably distinguishes assessed, superseded and failed jobs", a
     if (fate === "superseded") assertEquals(db.enqueued[0].p_job, job);
     if (fate === "failed") assertEquals(db.commits.length, 0);
   }
+});
+
+Deno.test("task status and explicit retry use bounded tenant and actor coordinates", async () => {
+  const calls: any[] = [];
+  const db = {
+    rpc: (name: string, args: any) => {
+      calls.push({ name, args });
+      return Promise.resolve({
+        data: { items: [], live_actions_enabled: false },
+      });
+    },
+  };
+  const invoke = (
+    action: string,
+    method: string,
+    params = new URLSearchParams(),
+    body: any = {},
+  ) =>
+    Promise.resolve().then(() =>
+      handleDispatch(db, org, "operator", action, method, params, body)
+    );
+  await invoke(
+    "dispatch_tasks",
+    "GET",
+    new URLSearchParams({ status: "exhausted", limit: "10", offset: "20" }),
+  );
+  assertEquals(calls[0], {
+    name: "dispatch_list_tasks",
+    args: { p_org: org, p_status: "exhausted", p_limit: 10, p_offset: 20 },
+  });
+  for (
+    const params of [{ limit: "101" }, { offset: "-1" }, { status: "all" }]
+  ) {
+    await assertRejects(() =>
+      invoke(
+        "dispatch_tasks",
+        "GET",
+        new URLSearchParams(params as Record<string, string>),
+      ), DispatchError);
+  }
+  const request = id(81);
+  await invoke("dispatch_retry_task", "POST", undefined, {
+    job_id: job,
+    request_id: request,
+    source_version: "source",
+    plan_version: 4,
+    reason: "Source corrected",
+    actor: "spoofed",
+    org_id: id(98),
+  });
+  assertEquals(calls[1], {
+    name: "dispatch_retry_task",
+    args: {
+      p_org: org,
+      p_job: job,
+      p_request: request,
+      p_source_version: "source",
+      p_plan_version: 4,
+      p_actor: "operator",
+      p_reason: "Source corrected",
+    },
+  });
+  for (
+    const body of [{ job_id: job, reason: "Missing request" }, {
+      job_id: job,
+      request_id: request,
+      reason: "Partial coordinate",
+      source_version: "source",
+    }]
+  ) {
+    await assertRejects(
+      () => invoke("dispatch_retry_task", "POST", undefined, body),
+      DispatchError,
+    );
+  }
+  await assertRejects(
+    () => invoke("dispatch_retry_task", "GET"),
+    DispatchError,
+  );
+  assertEquals(calls.length, 2);
 });

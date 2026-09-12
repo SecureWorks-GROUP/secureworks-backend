@@ -3,6 +3,7 @@ import { DispatchError, readDispatchJob, uuid } from "./dispatch_workbench.ts";
 import {
   assertOutlookSesDeliveryAllowed,
   fetchAttachment,
+  GraphProviderError,
   graphRequest,
   verifyMailboxRoute,
 } from "../send-outlook-email/index.ts";
@@ -64,7 +65,12 @@ export async function executeDispatchDraft(
       p_source: job.source_version,
     }),
   );
-  if (!claim.claimed) return { ...claim, live_actions_enabled: true };
+  if (!claim.claimed) {
+    return {
+      ...claim,
+      live_actions_enabled: claim.action?.status === "held" ? false : true,
+    };
+  }
   const persist = async (patch: any) =>
     check(
       await client.from("dispatch_executions").update({
@@ -73,6 +79,7 @@ export async function executeDispatchDraft(
       }).eq("org_id", org).eq("id", b.approval_id),
     );
   let receipt: any = null;
+  let preparationStarted = false;
   try {
     // Recheck after claim before any provider mutation. SQL claim already binds
     // exact content, actor approval, source, job, order and attachment revisions.
@@ -81,7 +88,12 @@ export async function executeDispatchDraft(
       latest.source_version !== job.source_version ||
       latest.drafts.find((d: any) => d.id === b.draft_id)?.content_hash !==
         draft.content_hash
-    ) throw new Error("Source changed after claim");
+    ) {
+      throw Object.assign(new Error("Source changed after claim"), {
+        known_not_sent: true,
+      });
+    }
+    preparationStarted = true;
     receipt = await provider.prepare(
       claim.action.snapshot,
       b.approval_id,
@@ -159,15 +171,18 @@ export async function executeDispatchDraft(
     };
   } catch (e) {
     receipt = receipt || (e as any).receipt || null;
+    const status = !preparationStarted || (e as any).known_not_sent
+      ? "not_sent"
+      : "outcome_unknown";
     await persist({
-      status: (e as any).known_not_sent ? "not_sent" : "outcome_unknown",
+      status,
       receipt,
       last_error: (e as Error).message,
     });
     return {
       action: {
         id: b.approval_id,
-        status: (e as any).known_not_sent ? "not_sent" : "outcome_unknown",
+        status,
         receipt,
       },
       retry_safe: false,
@@ -196,15 +211,24 @@ export async function readbackDispatchExecution(
     };
   }
   const evidence = await provider.readback(action.receipt);
-  check(
-    await client.from("dispatch_executions").update({
-      receipt: { ...action.receipt, readback: evidence },
-      updated_at: new Date().toISOString(),
-    }).eq("org_id", org).eq("id", id),
+  const recorded = check(
+    await client.rpc("dispatch_record_execution_readback", {
+      p_org: org,
+      p_action: uuid(id),
+      p_expected_status: action.status,
+      p_expected_receipt: action.receipt,
+      p_expected_source: action.source_version,
+      p_readback: evidence,
+    }),
   );
   return {
-    action: { ...action, receipt: { ...action.receipt, readback: evidence } },
+    action: recorded.action || {
+      ...action,
+      receipt: { ...action.receipt, readback: evidence },
+    },
     retry_safe: false,
+    readback_required: recorded.readback_required,
+    readback_recorded: recorded.recorded,
   };
 }
 export function outlookDispatchProvider(
@@ -222,7 +246,11 @@ export function outlookDispatchProvider(
       !allowedMailboxes.map((x) => x.toLowerCase()).includes(
         mailbox.toLowerCase(),
       )
-    ) throw new Error("Mailbox not released for Dispatch");
+    ) {
+      throw Object.assign(new Error("Mailbox not released for Dispatch"), {
+        known_not_sent: true,
+      });
+    }
   };
   const path = (r: any) =>
     `/users/${encodeURIComponent(r.mailbox)}/messages/${
@@ -238,63 +266,69 @@ export function outlookDispatchProvider(
   };
   return {
     async prepare(d: any, id: string, jobId: string) {
-      allowed(d.sender);
-      // Captured Resend thread IDs cannot become native Outlook reply IDs.
-      if (d.thread_id && !d.graph_message_id) {
-        throw new Error(
-          "Native reply requires verified mailbox message identity; captured PO thread is not an Outlook message",
-        );
-      }
-      await deps.guard(
-        client,
-        d.graph_message_id
-          ? {
-            action: "reply",
-            mailbox: d.sender,
-            message_id: d.graph_message_id,
-            job_id: jobId,
-            expected_to: d.to,
-            expected_cc: d.cc,
-            reply_all: d.reply_all === true,
-            attachments: d.attachments,
-          }
-          : {
-            job_id: jobId,
-            from: d.sender,
-            to: d.to,
-            cc: d.cc,
-          },
-      );
-      await deps.verify(d.sender);
       const attachments = [];
-      for (const a of d.attachments) {
-        const file = await deps.attachment(a.source_ref, a.name);
-        const bytes = Uint8Array.from(
-          atob(file.contentBytes),
-          (c) => c.charCodeAt(0),
-        );
-        const digest = Array.from(
-          new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-          (b) => b.toString(16).padStart(2, "0"),
-        ).join("");
-        if (a.revision.replace(/^sha256:/, "") !== digest) {
-          throw new Error("Attachment revision changed");
+      let originalPath = "";
+      try {
+        allowed(d.sender);
+        if (d.thread_id && !d.graph_message_id) {
+          throw new Error(
+            "Native reply requires verified mailbox message identity; captured PO thread is not an Outlook message",
+          );
         }
-        attachments.push(file);
+        await deps.guard(
+          client,
+          d.graph_message_id
+            ? {
+              action: "reply",
+              mailbox: d.sender,
+              message_id: d.graph_message_id,
+              job_id: jobId,
+              expected_to: d.to,
+              expected_cc: d.cc,
+              reply_all: d.reply_all === true,
+              attachments: d.attachments,
+            }
+            : {
+              job_id: jobId,
+              from: d.sender,
+              to: d.to,
+              cc: d.cc,
+            },
+        );
+        await deps.verify(d.sender);
+        for (const a of d.attachments) {
+          const file = await deps.attachment(a.source_ref, a.name);
+          const bytes = Uint8Array.from(
+            atob(file.contentBytes),
+            (c) => c.charCodeAt(0),
+          );
+          const digest = Array.from(
+            new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+            (b) => b.toString(16).padStart(2, "0"),
+          ).join("");
+          if (a.revision.replace(/^sha256:/, "") !== digest) {
+            throw new Error("Attachment revision changed");
+          }
+          attachments.push(file);
+        }
+        if (d.graph_message_id) {
+          originalPath = `/users/${encodeURIComponent(d.sender)}/messages/${
+            encodeURIComponent(d.graph_message_id)
+          }`;
+          const source = await (await deps.request(
+            originalPath + "?$select=id,conversationId,changeKey",
+            { headers },
+            { mutating: false },
+          )).json();
+          if (
+            source.conversationId !== d.thread_id ||
+            source.changeKey !== d.graph_change_key
+          ) throw new Error("Native reply source identity/revision changed");
+        }
+      } catch (error) {
+        throw Object.assign(error as Error, { known_not_sent: true });
       }
       if (d.graph_message_id) {
-        const originalPath = `/users/${encodeURIComponent(d.sender)}/messages/${
-          encodeURIComponent(d.graph_message_id)
-        }`;
-        const source = await (await deps.request(
-          originalPath + "?$select=id,conversationId,changeKey",
-          { headers },
-          { mutating: false },
-        )).json();
-        if (
-          source.conversationId !== d.thread_id ||
-          source.changeKey !== d.graph_change_key
-        ) throw new Error("Native reply source identity/revision changed");
         const created = await (await deps.request(
           originalPath + (d.reply_all ? "/createReplyAll" : "/createReply"),
           {
@@ -433,16 +467,24 @@ export function outlookDispatchProvider(
     },
     async readback(receipt: any) {
       allowed(receipt.mailbox);
-      const r = await deps.request(
-        path(receipt) +
-          "?$select=id,isDraft,internetMessageId,sentDateTime,changeKey",
-        { headers },
-        { mutating: false },
-      );
-      if (!r.ok) return { verified: false, status: r.status };
+      let r: Response;
+      try {
+        r = await deps.request(
+          path(receipt) +
+            "?$select=id,isDraft,internetMessageId,sentDateTime,changeKey",
+          { headers },
+          { mutating: false },
+        );
+      } catch (error) {
+        if (error instanceof GraphProviderError) {
+          return { verified: false, status: error.status };
+        }
+        throw error;
+      }
       const m = await r.json();
       return {
         verified: true,
+        id: m.id,
         is_draft: m.isDraft,
         internet_message_id: m.internetMessageId,
         sent_at: m.sentDateTime,

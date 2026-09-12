@@ -1,6 +1,10 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _jobDetailActionForTest } from "./index.ts";
+import {
+  _assembleJobDossierActionForTest,
+  _getJobContextFactsForTest,
+  _jobDetailActionForTest,
+} from "./index.ts";
 
 const ORG_A = "00000000-0000-0000-0000-00000000000a";
 const ORG_B = "00000000-0000-0000-0000-00000000000b";
@@ -219,4 +223,59 @@ Deno.test("job_detail returns dispatch business events for the owning tenant", a
     ),
     true,
   );
+});
+
+Deno.test("dossier and brain shared handler refuses foreign IDs and numbers before event reads", async () => {
+  for (
+    const body of [{ job_id: JOB_A }, { job_number: "SWF-261000" }, {
+      job_id: JOB_A,
+      org_id: ORG_A,
+    }]
+  ) {
+    const calls: any[] = [];
+    const response = await _assembleJobDossierActionForTest(
+      makeClient(seed(), calls),
+      body,
+      "jwt",
+      { orgId: ORG_B },
+    );
+    assertEquals(response.status, 404);
+    assertEquals(calls.map((call) => call.table), ["jobs"]);
+  }
+});
+Deno.test("dossier shared handler retains owning JWT and privileged service access", async () => {
+  for (const mode of ["jwt", "api_key"] as const) {
+    const response = await _assembleJobDossierActionForTest(
+      makeClient(seed()),
+      { job_id: JOB_A },
+      mode,
+      mode === "jwt" ? { orgId: ORG_A } : null,
+    );
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.job.id, JOB_A);
+    assertEquals(
+      body.events[0].payload.draft_body,
+      "Send supplier commitment to protected recipient",
+    );
+  }
+});
+Deno.test("shared context cannot return another tenant's projected Dispatch state", async () => {
+  const data = seed();
+  data.current_job_context_facts = [{
+    id: "projection",
+    job_id: JOB_A,
+    kind: "note",
+    value: { state: "private" },
+  }];
+  const calls: any[] = [];
+  const result = await _getJobContextFactsForTest(makeClient(data, calls), {
+    job_uuids: [JOB_A],
+  }, { access: { orgId: ORG_B } });
+  assertEquals(result.rows, []);
+  assertEquals(calls.map((call) => call.table), ["jobs"]);
+  const own = await _getJobContextFactsForTest(makeClient(data), {
+    job_uuids: [JOB_A],
+  }, { access: { orgId: ORG_A } });
+  assertEquals(own.rows[0].value.state, "private");
 });

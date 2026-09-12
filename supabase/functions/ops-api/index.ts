@@ -7372,25 +7372,11 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestTranscript(client, body, { user_id: userId!, role }))
       }
       case 'resolve_jobs': return json(await resolveJobs(client, body))
-      case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
+      case 'get_job_context_facts': return json(await getJobContextFacts(client, body, { access: authMode === 'jwt' ? { orgId: authUser?.orgId } : authMode === 'routine' ? { orgId: DEFAULT_ORG_ID } : undefined }))
       case 'get_job_conversation': return json(await getJobConversation(client, body))
       case 'assemble_job_dossier':
-      case 'assemble_job_brain': {
-        try {
-          return json(await assembleJobDossier(client, body))
-        } catch (e) {
-          const msg = (e as Error).message || 'assemble failed'
-          // Input/resolution failures are caller-fixable → 400. Per-source
-          // read errors do not throw (they populate diagnostics.sourceStatus
-          // with ok:false), so anything reaching here is a structural
-          // mistake by the caller.
-          if (msg.startsWith('assemble_job_dossier requires') ||
-              msg.startsWith('assemble_job_dossier could not resolve')) {
-            return json({ error: msg }, 400)
-          }
-          throw e
-        }
-      }
+      case 'assemble_job_brain':
+        return await _assembleJobDossierAction(client, body, authMode, authUser)
 
       // ── Ops Dashboard Write ──
       // create/update/delete_assignment were previously ungated: any authenticated
@@ -15491,9 +15477,17 @@ async function resolveJobs(client: any, body: any) {
   return { jobs: data || [] }
 }
 
-async function getJobContextFacts(client: any, body: any) {
-  const jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
+async function getJobContextFacts(client: any, body: any, opts: { access?: JobDetailAccess } = {}) {
+  let jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
+  const accessOrgId = String(opts.access?.orgId || '').trim()
+  if (opts.access && !accessOrgId) throw new ApiError('An authorised operator session is required.', 403)
   if (jobUuids.length === 0) return { rows: [] }
+  if (accessOrgId) {
+    const { data, error } = await client.from('jobs').select('id').eq('org_id', accessOrgId).in('id', jobUuids)
+    if (error) throw error
+    jobUuids = (data || []).map((row: any) => row.id)
+    if (!jobUuids.length) return { rows: [], excluded_count: 0, coverage: 'bounded_rows_only' }
+  }
   const limit = typeof body?.limit === 'number' && body.limit > 0
     ? Math.min(body.limit, 100)
     : 12
@@ -15799,7 +15793,28 @@ async function safeRead(label: string, fn: () => Promise<any>): Promise<{ data: 
   }
 }
 
-async function assembleJobDossier(client: any, body: any) {
+async function _assembleJobDossierAction(
+  client: any,
+  body: any,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'orgId'> | null,
+): Promise<Response> {
+  const access = authMode === 'jwt' ? { orgId: authUser?.orgId }
+    : authMode === 'routine' ? { orgId: DEFAULT_ORG_ID } : undefined
+  try {
+    return json(await assembleJobDossier(client, body, { access }))
+  } catch (error) {
+    if (error instanceof ApiError) return json(error.body || { error: error.message }, error.status)
+    const message = (error as Error).message || 'assemble failed'
+    if (message.startsWith('assemble_job_dossier requires') ||
+        message.startsWith('assemble_job_dossier could not resolve')) return json({ error: message }, 400)
+    throw error
+  }
+}
+
+async function assembleJobDossier(client: any, body: any, opts: { access?: JobDetailAccess } = {}) {
+  const accessOrgId = String(opts.access?.orgId || '').trim()
+  if (opts.access && !accessOrgId) throw new ApiError('An authorised operator session is required.', 403)
   const requestedMode = String(body?.mode || 'chat_summary') as DossierMode
   const mode: DossierMode = requestedMode in DOSSIER_MODE_BOUNDS ? requestedMode : 'chat_summary'
   const modeCaps = DOSSIER_MODE_BOUNDS[mode]
@@ -15827,15 +15842,20 @@ async function assembleJobDossier(client: any, body: any) {
   let jobRow: any = null
   let jobReadError: string | null = null
   if (inputJobId) {
-    const { data, error } = await client.from('jobs').select(JOB_COLS).eq('id', inputJobId).maybeSingle()
+    let query = client.from('jobs').select(JOB_COLS).eq('id', inputJobId)
+    if (accessOrgId) query = query.eq('org_id', accessOrgId)
+    const { data, error } = await query.maybeSingle()
     if (error) jobReadError = error.message
     jobRow = data || null
   } else if (inputJobNumber) {
-    const { data, error } = await client.from('jobs').select(JOB_COLS).ilike('job_number', inputJobNumber).limit(1)
+    let query = client.from('jobs').select(JOB_COLS).ilike('job_number', inputJobNumber)
+    if (accessOrgId) query = query.eq('org_id', accessOrgId)
+    const { data, error } = await query.limit(1)
     if (error) jobReadError = error.message
     jobRow = data?.[0] || null
   }
   if (!jobRow) {
+    if (accessOrgId && !jobReadError) throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
     const detail = jobReadError ? ` (${jobReadError})` : ''
     throw new Error(`assemble_job_dossier could not resolve job: ${inputJobId || inputJobNumber}${detail}`)
   }
@@ -59217,3 +59237,4 @@ export const _updateInvoiceForTest = updateInvoice
 
 export const _getJobContextFactsForTest = getJobContextFacts
 export const _assembleJobDossierForTest = assembleJobDossier
+export const _assembleJobDossierActionForTest = _assembleJobDossierAction

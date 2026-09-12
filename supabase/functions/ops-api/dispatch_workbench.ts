@@ -106,10 +106,6 @@ export async function hash(value: any): Promise<string> {
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
 }
-export function isUpstreamDispatchFact(row: any): boolean {
-  return isCurrentContextFact(row) &&
-    row.provenance?.derivation?.owner !== "dispatch";
-}
 export function eligibility(job: any, documents: any[] = []) {
   const evidence = [];
   if (job.accepted_at) {
@@ -376,11 +372,13 @@ export async function reduceCommand(
           .reduce((n: number, o: any) => {
             const ordered = o.line_items.filter((l: any) =>
               l.dispatch_requirement_id === r.id
-            ).reduce((sum: number, l: any) => sum + l.quantity, 0);
-            const assigned = allocations.filter((a: any) =>
-              a.supply_id.startsWith(`po:${o.id}:`)
-            ).reduce((sum: number, a: any) => sum + a.quantity, 0);
-            return n + Math.max(0, ordered - assigned);
+            ).reduce((sum: number, l: any) =>
+              sum +
+              Math.max(
+                0,
+                Number(l.quantity) - Number(l.reserved_quantity || 0),
+              ), 0);
+            return n + ordered;
           }, 0);
         const uncovered = Math.max(0, r.quantity - allocated - prepared);
         const orderedQuantity = quantity(p.quantities?.[id] ?? uncovered);
@@ -770,12 +768,27 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
     } else if (lot?.source_ref?.kind !== "stock_count") valid = false;
     allocation.supply_valid = valid;
   }
+  const orderReservations = checked(
+    await client.rpc("dispatch_order_reservations", {
+      p_org: org,
+      p_job: jobId,
+    }),
+  ) || [];
   state.order_drafts = state.order_drafts.map((draft: any) => {
     const current = po.find((p: any) => p.id === draft.id && p.org_id === org);
     return {
       ...draft,
       status: current?.status || "missing",
-      line_items: Array.isArray(current?.line_items) ? current.line_items : [],
+      line_items: Array.isArray(current?.line_items)
+        ? current.line_items.map((line: any, index: number) => ({
+          ...line,
+          reserved_quantity: Number(
+            orderReservations.find((r: any) =>
+              r.supply_id === `po:${current.id}:${index}`
+            )?.reserved_quantity || 0,
+          ),
+        }))
+        : [],
       delivery_address: current ? parsePoDeliveryAddress(current.notes) : null,
     };
   });
@@ -785,9 +798,15 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
   if (!sourceVersion) {
     throw new DispatchError("Source revision unavailable", 503);
   }
-  const contextResult = await client.from("current_job_context_facts").select(
-    "*",
-  ).eq("job_id", jobId).order("id").limit(sourceLimit + 1);
+  const [contextResult, upstreamResult] = await Promise.all([
+    client.from("current_job_context_facts").select("*").eq("job_id", jobId)
+      .order("id").limit(sourceLimit + 1),
+    client.rpc("dispatch_context_facts_for_source", {
+      p_org: org,
+      p_job: jobId,
+      p_limit: sourceLimit + 1,
+    }),
+  ]);
   const contextRows = contextResult.error
     ? []
     : (contextResult.data || []).filter((r: any) => isCurrentContextFact(r));
@@ -842,21 +861,22 @@ export async function readDispatchJob(client: any, org: string, jobId: string) {
     media: media.slice(0, sourceLimit),
     supply_lots: supplyLots,
     context_facts: contextRows.slice(0, sourceLimit),
-    upstream_context_facts: contextRows.filter(isUpstreamDispatchFact).slice(
-      0,
-      sourceLimit,
-    ),
+    upstream_context_facts: upstreamResult.error
+      ? []
+      : (upstreamResult.data || [])
+        .filter((r: any) => isCurrentContextFact(r)).slice(0, sourceLimit),
     coverage: {
       complete,
       purchase_orders: po.length,
       documents: documents.length,
       communications: communications.length,
       context: {
-        available: !contextResult.error,
-        complete: !contextResult.error &&
-          (contextResult.data || []).length <= sourceLimit,
+        available: !contextResult.error && !upstreamResult.error,
+        complete: !contextResult.error && !upstreamResult.error &&
+          (contextResult.data || []).length <= sourceLimit &&
+          (upstreamResult.data || []).length <= sourceLimit,
         source: "current_job_context_facts",
-        reason: contextResult.error
+        reason: contextResult.error || upstreamResult.error
           ? "Current context source read failed"
           : null,
       },
@@ -985,8 +1005,11 @@ export async function dispatchCommand(
       );
       if (!lot) throw new DispatchError("Counted stock source not found");
     } else {
-      const match = /^po:([0-9a-f-]{36}):(\d+)$/i.exec(supply);
+      const match = /^po:([0-9a-f-]{36}):(0|[1-9]\d*)$/.exec(supply);
       if (!match) throw new DispatchError("Invalid PO supply identity");
+      if (!Number.isSafeInteger(Number(match[2]))) {
+        throw new DispatchError("Invalid PO line index");
+      }
       const po = checked(
         await client.from("purchase_orders").select("*").eq("org_id", org).eq(
           "id",
@@ -1001,6 +1024,9 @@ export async function dispatchCommand(
         throw new DispatchError("Supply PO is not ordered");
       }
       const index = Number(match[2]), line = po.line_items?.[index];
+      if (supply !== `po:${po.id}:${index}`) {
+        throw new DispatchError("Invalid PO supply identity");
+      }
       if (!line) throw new DispatchError("Supply line missing");
       if (!line.unit) {
         throw new DispatchError(
@@ -1307,42 +1333,104 @@ export async function dispatchRun(client: any, org: string, actor: string) {
           assessment: assessed.assessment,
         };
       }
-      checked(
-        await client.from("dispatch_tasks").update({
-          status: "done",
-          result,
-          last_error: null,
-          lease_until: null,
-          updated_at: new Date().toISOString(),
-        }).eq("org_id", org).eq("job_id", task.job_id).eq(
-          "source_version",
-          task.source_version,
-        ).eq("plan_version", task.plan_version).eq(
-          "lease_token",
-          task.lease_token,
-        ),
+      const finalized = checked(
+        await client.rpc("dispatch_finalize_task", {
+          p_org: org,
+          p_job: task.job_id,
+          p_source_version: task.source_version,
+          p_plan_version: task.plan_version,
+          p_lease_token: task.lease_token,
+          p_status: "done",
+          p_result: result,
+        }),
       );
-      results.push({ job_id: task.job_id, ...result });
+      results.push({
+        job_id: task.job_id,
+        ...result,
+        task_status: finalized.status,
+      });
     } catch (e) {
-      checked(
-        await client.from("dispatch_tasks").update({
-          status: "failed",
-          last_error: (e as Error).message,
-          result: { status: "failed", error: (e as Error).message },
-          lease_until: null,
-          available_at: new Date(Date.now() + 60000).toISOString(),
-        }).eq("org_id", org).eq("job_id", task.job_id).eq(
-          "source_version",
-          task.source_version,
-        ).eq("plan_version", task.plan_version).eq(
-          "lease_token",
-          task.lease_token,
-        ),
-      );
-      results.push({ job_id: task.job_id, status: "failed" });
+      const result = { status: "failed", error: (e as Error).message };
+      const finalized = await client.rpc("dispatch_finalize_task", {
+        p_org: org,
+        p_job: task.job_id,
+        p_source_version: task.source_version,
+        p_plan_version: task.plan_version,
+        p_lease_token: task.lease_token,
+        p_status: "failed",
+        p_error: result.error,
+        p_result: result,
+      });
+      results.push({
+        job_id: task.job_id,
+        ...result,
+        task_status: finalized.error ? "lease_lost" : finalized.data.status,
+      });
     }
   }
   return { results, live_actions_enabled: false };
+}
+export async function dispatchTasks(
+  client: any,
+  org: string,
+  params: URLSearchParams,
+) {
+  const limit = Number(params.get("limit") ?? 25);
+  const offset = Number(params.get("offset") ?? 0);
+  const status = params.get("status");
+  if (
+    !Number.isInteger(limit) || limit < 1 || limit > 100 ||
+    !Number.isSafeInteger(offset) || offset < 0 ||
+    (status !== null &&
+      ![
+        "pending",
+        "running",
+        "done",
+        "failed",
+        "deferred",
+        "exhausted",
+        "resolved",
+      ].includes(status))
+  ) {
+    throw new DispatchError("Invalid task status or pagination");
+  }
+  return checked(
+    await client.rpc("dispatch_list_tasks", {
+      p_org: org,
+      p_status: status,
+      p_limit: limit,
+      p_offset: offset,
+    }),
+  );
+}
+export async function dispatchRetryTask(
+  client: any,
+  org: string,
+  actor: string,
+  body: any,
+) {
+  if (
+    (body.source_version == null) !== (body.plan_version == null) ||
+    (body.plan_version != null &&
+      (!Number.isSafeInteger(body.plan_version) || body.plan_version < 0))
+  ) {
+    throw new DispatchError(
+      "Source and plan version must identify the same task",
+    );
+  }
+  return checked(
+    await client.rpc("dispatch_retry_task", {
+      p_org: org,
+      p_job: uuid(body.job_id),
+      p_request: uuid(body.request_id),
+      p_source_version: body.source_version == null
+        ? null
+        : text(body.source_version, "source_version", 200),
+      p_plan_version: body.plan_version ?? null,
+      p_actor: actor,
+      p_reason: text(body.reason, "reason", 2000),
+    }),
+  );
 }
 export function handleDispatch(
   client: any,
@@ -1354,7 +1442,13 @@ export function handleDispatch(
   body: any,
 ) {
   if (
-    ["dispatch_command", "dispatch_assess", "dispatch_trigger", "dispatch_run"]
+    [
+      "dispatch_command",
+      "dispatch_assess",
+      "dispatch_trigger",
+      "dispatch_run",
+      "dispatch_retry_task",
+    ]
       .includes(action)
   ) {
     if (method !== "POST") throw new DispatchError("POST required", 405);
@@ -1362,6 +1456,9 @@ export function handleDispatch(
       return dispatchTrigger(client, org, body);
     }
     if (action === "dispatch_run") return dispatchRun(client, org, actor);
+    if (action === "dispatch_retry_task") {
+      return dispatchRetryTask(client, org, actor, body);
+    }
     return dispatchCommand(
       client,
       org,
@@ -1373,6 +1470,7 @@ export function handleDispatch(
   }
   if (method !== "GET") throw new DispatchError("GET required", 405);
   if (action === "dispatch_list") return dispatchList(client, org, params);
+  if (action === "dispatch_tasks") return dispatchTasks(client, org, params);
   if (action === "dispatch_job") {
     return readDispatchJob(client, org, uuid(params.get("job_id")));
   }

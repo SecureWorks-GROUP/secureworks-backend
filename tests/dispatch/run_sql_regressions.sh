@@ -30,4 +30,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   -f "${ROOT_DIR}/tests/dispatch/workflow.sql" \
   -f "${ROOT_DIR}/tests/dispatch/review_regressions.sql" \
   -f "${ROOT_DIR}/tests/dispatch/lineage_queue.sql" \
+  -f "${ROOT_DIR}/tests/dispatch/strict_lineage.sql" \
+  -f "${ROOT_DIR}/tests/dispatch/task_recovery.sql" \
+  -f "${ROOT_DIR}/tests/dispatch/execution_recovery.sql" \
   -c "rollback"

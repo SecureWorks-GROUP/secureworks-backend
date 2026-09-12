@@ -14,11 +14,11 @@ begin
   lineage_source=dispatch_source_version(org,job);
   execute 'select public.persist_luna_context_revision($1,$2,$3,$4,$5)'
     into luna using 'business_events',event_row.id::text,to_jsonb(event_row),'job_context',
-    jsonb_build_object('id',fact_id,'job_id',job,'kind','dispatch_lineage_fixture','value',jsonb_build_object('source_refs',jsonb_build_array(jsonb_build_object('table','business_events','id',event_row.id::text))),'correlation_id',event_row.correlation_id,'provenance',jsonb_build_object('extractor','context-luna-subscription:v1','source_event_ids',jsonb_build_array(event_row.id::text),'writer_role','classifier','untrusted',false,'derivation',event_row.metadata->'derivation','safety',jsonb_build_object('memory_trusted',true,'action_safe',false,'state_change_safe',false,'outbound_safe',false)));
+    jsonb_build_object('id',fact_id,'job_id',job,'kind','dispatch_lineage_fixture','value',jsonb_build_object('source_refs',jsonb_build_array(jsonb_build_object('table','business_events','id',event_row.id::text))),'correlation_id',event_row.correlation_id,'provenance',jsonb_build_object('extractor','context-luna-subscription:v1','source_event_ids',jsonb_build_array(event_row.id::text),'writer_role','classifier','untrusted',false,'evidence_role','human_working_state','provider_action',false,'derivation',(event_row.metadata->'derivation')||jsonb_build_object('own_only',true,'org_id',org,'job_id',job,'request_id',event_row.correlation_id,'source_event_ids',jsonb_build_array(event_row.id::text)),'safety',jsonb_build_object('memory_trusted',true,'action_safe',false,'state_change_safe',false,'outbound_safe',false)));
   if luna->>'outcome' not in ('inserted','idempotent') then raise exception 'luna writer rejected dispatch event'; end if;
   select provenance into persisted_provenance from job_context where id=fact_id;
   if persisted_provenance#>>'{derivation,owner}'<>'dispatch' then raise exception 'luna fact lost dispatch derivation'; end if;
-  if dispatch_source_version(org,job)<>lineage_source then raise exception 'dispatch-derived Luna fact invalidated source'; end if;
+  if dispatch_source_version(org,job)=lineage_source then raise exception 'luna fact was hidden as dispatch projector output'; end if;
   begin
     execute 'select public.persist_luna_context_revision($1,$2,$3,$4,$5)'
       using 'business_events',event_row.id::text,to_jsonb(event_row),'job_context',
@@ -48,15 +48,13 @@ begin
   if before=after then raise exception 'referenced PO drift did not alter source revision'; end if;
 end $$;
 do $$
-declare org uuid='00000000-0000-4000-8000-000000000001'; job uuid='10000000-0000-4000-8000-000000000002'; ext_event uuid=gen_random_uuid(); echo_event uuid=gen_random_uuid(); mismatch_event uuid=gen_random_uuid(); before_count integer; after_count integer; result jsonb;
+declare org uuid='00000000-0000-4000-8000-000000000001'; job uuid='10000000-0000-4000-8000-000000000002'; ext_event uuid=gen_random_uuid(); mismatch_event uuid=gen_random_uuid(); before_count integer; after_count integer; result jsonb;
 begin
   delete from dispatch_tasks where org_id=org and job_id=job;
   before_count=(select count(*) from dispatch_tasks where org_id=org and job_id=job);
   insert into business_events(id,event_type,source,entity_type,entity_id,job_id,match_status,match_method,payload,metadata) values(ext_event,'po.reply.received','ops-api','job',job::text,job::text,'matched','direct_job_id',jsonb_build_object('job_id',job),'{}');
   after_count=(select count(*) from dispatch_tasks where org_id=org and job_id=job);
   if after_count<=before_count then raise exception 'external business event did not enqueue dispatch'; end if;
-  insert into business_events(id,event_type,source,entity_type,entity_id,job_id,match_status,match_method,payload,metadata) values(echo_event,'dispatch.plan.changed','ops-api','dispatch_plan',job::text,job::text,'matched','direct_job_id',jsonb_build_object('job_id',job),jsonb_build_object('derivation',jsonb_build_object('owner','dispatch')));
-  if (select count(*) from dispatch_tasks where org_id=org and job_id=job)>after_count then raise exception 'dispatch echo enqueued itself'; end if;
   result=dispatch_enqueue_from_business_event(ext_event);
   if result->>'queued' not in ('false','true') then raise exception 'event enqueue result malformed'; end if;
   insert into business_events(id,event_type,source,entity_type,entity_id,job_id,match_status,match_method,payload,metadata) values(mismatch_event,'po.reply.received','ops-api','job',job::text,job::text,'matched','direct_job_id',jsonb_build_object('job_id',job,'source_ref',jsonb_build_object('org_id','00000000-0000-4000-8000-000000000002')),'{}');

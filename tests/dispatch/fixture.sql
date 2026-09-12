@@ -28,5 +28,5 @@ grant all on current_job_context_facts to service_role;
 \endif
 insert into jobs(id,org_id,status,accepted_at,scope_json,pricing_json) values('10000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000001','accepted',now(),'{}','{}'),('10000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001','scheduled',null,'{}','{}'),('10000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000002','accepted',now(),'{}','{}');
 
-create table business_events(id uuid primary key default gen_random_uuid(),event_type text,source text,entity_type text,entity_id text,correlation_id uuid,job_id text,match_status text,match_method text,payload jsonb,metadata jsonb);
+create table business_events(id uuid primary key default gen_random_uuid(),event_type text,source text,entity_type text,entity_id text,correlation_id uuid,job_id text,match_status text,match_method text,payload jsonb,metadata jsonb,occurred_at timestamptz not null default now());
 grant all on business_events to service_role;

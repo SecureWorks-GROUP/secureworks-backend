@@ -3,7 +3,10 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { executeDispatchDraft } from "./dispatch_execution.ts";
+import {
+  executeDispatchDraft,
+  readbackDispatchExecution,
+} from "./dispatch_execution.ts";
 import { assertOutlookSesDeliveryAllowed } from "../send-outlook-email/index.ts";
 const id = (n: number) =>
   `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -160,6 +163,98 @@ Deno.test("source change during provider preparation prevents send", async () =>
     f.read,
   );
   assertEquals(r.action.status, "not_sent");
+  assertEquals(f.sends, 0);
+});
+Deno.test("source drift after claim is recorded as not sent before provider preparation", async () => {
+  const f = fixture();
+  let reads = 0;
+  let prepared = 0;
+  f.provider.prepare = () => {
+    prepared++;
+    return Promise.resolve({ draft_id: "native1" });
+  };
+  const r = await executeDispatchDraft(
+    f.client,
+    id(9),
+    body,
+    f.provider,
+    true,
+    () => {
+      reads++;
+      if (reads === 2) f.job.source_version = "changed";
+      return Promise.resolve(f.job);
+    },
+  );
+  assertEquals(r.action.status, "not_sent");
+  assertEquals(f.action.status, "not_sent");
+  assertEquals(prepared, 0);
+  assertEquals(f.sends, 0);
+});
+
+Deno.test("source read failure before preparation remains retryable without provider uncertainty", async () => {
+  const f = fixture();
+  let reads = 0;
+  f.provider.prepare = () =>
+    Promise.reject(Error("Provider must not be called"));
+  const result = await executeDispatchDraft(
+    f.client,
+    id(9),
+    body,
+    f.provider,
+    true,
+    () => {
+      if (++reads === 2) throw Error("Source unavailable");
+      return Promise.resolve(f.job);
+    },
+  );
+  assertEquals(result.action.status, "not_sent");
+  assertEquals(f.action.status, "not_sent");
+  assertEquals(f.action.receipt, null);
+  assertEquals(f.sends, 0);
+});
+
+Deno.test("tenant communication hold reports live actions disabled", async () => {
+  const f = fixture();
+  f.client.rpc = () =>
+    Promise.resolve({
+      data: { claimed: false, action: { id: id(3), status: "held" } },
+    });
+  const r = await executeDispatchDraft(
+    f.client,
+    id(9),
+    body,
+    f.provider,
+    true,
+    f.read,
+  );
+  assertEquals(r.action.status, "held");
+  assertEquals(r.live_actions_enabled, false);
+  assertEquals(f.sends, 0);
+});
+
+Deno.test("unreleased mailbox before provider mutation records not sent", async () => {
+  const f = fixture();
+  f.job.drafts[0].sender = "ops@example.test";
+  f.job.drafts[0].cc = [];
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  const provider = outlookDispatchProvider({}, [], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: () => {
+      throw new Error("provider mutation should not start");
+    },
+  });
+  const r = await executeDispatchDraft(
+    f.client,
+    id(9),
+    body,
+    provider,
+    true,
+    f.read,
+  );
+  assertEquals(r.action.status, "not_sent");
+  assertEquals(f.action.receipt, null);
   assertEquals(f.sends, 0);
 });
 Deno.test("approval replacement or release hold during preparation prevents send", async () => {
@@ -372,6 +467,132 @@ Deno.test("native Outlook reply uses incumbent guard to refuse a foreign stored 
   assertEquals(error.refusal.evidence.stored_job_id, sealedJob);
   assertEquals(error.refusal.evidence.received_job_id, ordinaryJob);
   assertEquals(providerMutations, 0);
+});
+
+Deno.test("Outlook readback maps thrown Graph 404 to held evidence", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  const { GraphProviderError } = await import("../send-outlook-email/index.ts");
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: () => {
+      throw new GraphProviderError(404, "Graph request failed: 404", false);
+    },
+  });
+  const evidence = await provider.readback({
+    mailbox: "ops@example.test",
+    draft_id: "immutable-draft",
+  });
+  assertEquals(evidence, { verified: false, status: 404 });
+});
+
+Deno.test("readback records verified sent immutable id through SQL fence", async () => {
+  const action: any = {
+    org_id: id(9),
+    id: id(3),
+    job_id: id(1),
+    draft_id: id(2),
+    content_hash: "content1",
+    source_version: "source1",
+    status: "outcome_unknown",
+    receipt: { mailbox: "ops@example.test", draft_id: "immutable-draft" },
+  };
+  let rpcArgs: any = null;
+  const client: any = {
+    from: () => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: () => Promise.resolve({ data: structuredClone(action) }),
+      };
+      return builder;
+    },
+    rpc: (name: string, args: any) => {
+      rpcArgs = { name, args };
+      assertEquals(name, "dispatch_record_execution_readback");
+      assertEquals(args.p_expected_status, "outcome_unknown");
+      assertEquals(args.p_expected_receipt, action.receipt);
+      return Promise.resolve({
+        data: {
+          recorded: true,
+          readback_required: false,
+          action: {
+            ...action,
+            status: "accepted_not_delivered",
+            receipt: {
+              ...action.receipt,
+              readback: args.p_readback,
+            },
+          },
+        },
+      });
+    },
+  };
+  const provider = {
+    prepare: () => Promise.reject(Error("unused")),
+    send: () => Promise.reject(Error("unused")),
+    readback: () =>
+      Promise.resolve({
+        verified: true,
+        id: "immutable-draft",
+        is_draft: false,
+        sent_at: "2026-09-13T01:00:00Z",
+        delivered: null,
+      }),
+  };
+  const r = await readbackDispatchExecution(client, id(9), id(3), provider);
+  assertEquals(r.action.status, "accepted_not_delivered");
+  assertEquals(r.readback_required, false);
+  assertEquals(r.readback_recorded, true);
+  assertEquals(rpcArgs.args.p_expected_source, "source1");
+});
+
+Deno.test("stale readback result cannot overwrite concurrent execution status", async () => {
+  const action: any = {
+    org_id: id(9),
+    id: id(3),
+    job_id: id(1),
+    draft_id: id(2),
+    content_hash: "content1",
+    source_version: "source1",
+    status: "outcome_unknown",
+    receipt: { mailbox: "ops@example.test", draft_id: "immutable-draft" },
+  };
+  const client: any = {
+    from: () => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: () => Promise.resolve({ data: structuredClone(action) }),
+      };
+      return builder;
+    },
+    rpc: () =>
+      Promise.resolve({
+        data: {
+          recorded: false,
+          reason: "stale_action",
+          readback_required: false,
+          action: { ...action, status: "not_sent" },
+        },
+      }),
+  };
+  const provider = {
+    prepare: () => Promise.reject(Error("unused")),
+    send: () => Promise.reject(Error("unused")),
+    readback: () =>
+      Promise.resolve({
+        verified: true,
+        id: "immutable-draft",
+        is_draft: false,
+        sent_at: "2026-09-13T01:00:00Z",
+        delivered: null,
+      }),
+  };
+  const r = await readbackDispatchExecution(client, id(9), id(3), provider);
+  assertEquals(r.action.status, "not_sent");
+  assertEquals(r.readback_recorded, false);
 });
 
 Deno.test("execution refuses supplier commitment without purchase approval", async () => {

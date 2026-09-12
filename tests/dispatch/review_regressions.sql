@@ -55,9 +55,10 @@ reset role;
 set role service_role;
 do $$ declare org uuid='00000000-0000-4000-8000-000000000001';job uuid='10000000-0000-4000-8000-000000000001';before text;
 begin
+before=dispatch_source_version(org,job);
+insert into job_context(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'workflow_state','{"note":"Own Dispatch projection"}','{"derivation":{"owner":"dispatch","plan_version":1}}');
+ if before=dispatch_source_version(org,job) then raise exception 'owner tag alone was hidden from source review';end if;
  before=dispatch_source_version(org,job);
- insert into job_context(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'workflow_state','{"note":"Own Dispatch projection"}','{"derivation":{"owner":"dispatch","plan_version":1}}');
- if before<>dispatch_source_version(org,job) then raise exception 'own context echo invalidated its source review';end if;
  insert into job_context(id,job_id,kind,value,provenance) values(gen_random_uuid(),job,'instruction','{"note":"External access constraint"}','{"derivation":{"owner":"external_email"}}');
  if before=dispatch_source_version(org,job) then raise exception 'external context failed to invalidate';end if;
 end $$;
