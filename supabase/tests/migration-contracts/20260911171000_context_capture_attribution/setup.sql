@@ -1,4 +1,4 @@
--- Production business_events.job_id is UUID (not old pre-April text).
+-- Canonical business_events.job_id is TEXT (20260316000005). Do not ALTER it to uuid.
 ALTER TABLE public.business_events ADD COLUMN IF NOT EXISTS body_preview text,
  ADD COLUMN IF NOT EXISTS match_confidence numeric,ADD COLUMN IF NOT EXISTS direction text;
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS client_email text, ADD COLUMN IF NOT EXISTS client_phone text;

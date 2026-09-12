@@ -29,35 +29,45 @@ REVOKE ALL ON FUNCTION public.context_safe_uuid(text), public.context_safe_posit
 GRANT EXECUTE ON FUNCTION public.context_safe_uuid(text), public.context_safe_positive_int(text) TO service_role;
 
 CREATE OR REPLACE VIEW public.context_dispatch_working_facts WITH (security_invoker=true) AS
-SELECT DISTINCT ON (public.context_safe_uuid(b.job_id::text))
-  b.id,
-  public.context_safe_uuid(b.job_id::text) AS job_id,
+SELECT
+  latest.id,
+  latest.job_uuid AS job_id,
   'note'::text AS kind,
-  jsonb_build_object(
+  CASE WHEN latest.retracted THEN jsonb_build_object(
+    'text','Dispatch working state has no current supported snapshot. The latest known plan was retracted.',
+    'command',NULL,
+    'plan_version',latest.plan_version,
+    'source_version',latest.payload->>'source_version',
+    'state',NULL,
+    'uncertain',true,
+    'latest_retracted_plan_version',latest.plan_version,
+    'source_refs',jsonb_build_array(jsonb_build_object('table','business_events','id',latest.id::text))
+  ) ELSE jsonb_build_object(
     'text','Dispatch working review state. Not a claim that an order was sent, purchased, delivered or paid.',
-    'command',b.payload->>'command',
-    'plan_version',public.context_safe_positive_int(b.payload->>'plan_version'),
-    'source_version',b.payload->>'source_version',
-    'state',b.payload->'state',
-    'source_refs',jsonb_build_array(jsonb_build_object('table','business_events','id',b.id::text))
-  ) AS value,
+    'command',latest.payload->>'command',
+    'plan_version',latest.plan_version,
+    'source_version',latest.payload->>'source_version',
+    'state',latest.payload->'state',
+    'uncertain',false,
+    'source_refs',jsonb_build_array(jsonb_build_object('table','business_events','id',latest.id::text))
+  ) END AS value,
   jsonb_build_object(
     'extractor','dispatch_working_state_v1',
     'writer_role','dispatch_working_state_projector',
     'untrusted',false,
     'lifecycle','active',
-    'source_event_ids',jsonb_build_array(b.id),
-    'event_at',b.event_at,
-    'validity_basis','ongoing',
-    'source_event_at',b.event_at,
+    'source_event_ids',jsonb_build_array(latest.id),
+    'event_at',latest.event_at,
+    'validity_basis',CASE WHEN latest.retracted THEN 'uncertain' ELSE 'ongoing' END,
+    'source_event_at',latest.event_at,
     'derivation',jsonb_build_object(
       'owner','dispatch',
-      'event_id',b.metadata#>>'{derivation,event_id}',
-      'plan_version',public.context_safe_positive_int(b.payload->>'plan_version'),
-      'org_id',b.payload->>'org_id',
-      'job_id',public.context_safe_uuid(b.job_id::text),
-      'request_id',b.metadata#>>'{derivation,event_id}',
-      'source_event_ids',jsonb_build_array(b.id),
+      'event_id',latest.metadata#>>'{derivation,event_id}',
+      'plan_version',latest.plan_version,
+      'org_id',latest.payload->>'org_id',
+      'job_id',latest.job_uuid,
+      'request_id',latest.metadata#>>'{derivation,event_id}',
+      'source_event_ids',jsonb_build_array(latest.id),
       'rule_version','dispatch_working_state_v1',
       'own_only',true
     ),
@@ -65,26 +75,35 @@ SELECT DISTINCT ON (public.context_safe_uuid(b.job_id::text))
     'provider_action',false,
     'safety',jsonb_build_object('memory_trusted',true,'action_safe',false,'state_change_safe',false,'outbound_safe',false)
   ) AS provenance,
-  b.correlation_id,
-  coalesce(b.event_at,now()) AS created_at,
-  coalesce(b.event_at,now()) AS updated_at,
+  latest.correlation_id,
+  latest.event_at AS created_at,
+  latest.event_at AS updated_at,
   NULL::timestamptz AS expires_at,
   'dispatch_projection'::text AS _context_store,
   'current'::text AS lifecycle,
-  (timezone('Australia/Perth',b.event_at))::date AS event_date,
-  ARRAY[b.id]::uuid[] AS source_event_ids,
+  (timezone('Australia/Perth',latest.event_at))::date AS event_date,
+  ARRAY[latest.id]::uuid[] AS source_event_ids,
   1::numeric AS attribution_confidence,
   'dispatch_working_state_v1'::text AS extractor_version,
   NULL::uuid AS superseded_by,
-  NULL::text AS lifecycle_reason,
+  CASE WHEN latest.retracted THEN 'latest_known_retracted' ELSE NULL END AS lifecycle_reason,
   'dispatch_working_state'::text AS trust,
   NULL::timestamptz AS review_at,
-  'ongoing'::text AS validity_basis,
+  CASE WHEN latest.retracted THEN 'uncertain' ELSE 'ongoing' END AS validity_basis,
   NULL::timestamptz AS last_verified_at,
-  b.event_at AS source_event_at
-FROM public.business_events b
-JOIN public.jobs j ON j.id=public.context_safe_uuid(b.job_id::text)
-WHERE b.event_type='dispatch.plan.changed'
+  latest.event_at AS source_event_at
+FROM (
+ SELECT DISTINCT ON (public.context_safe_uuid(b.job_id::text))
+  b.id, b.payload, b.metadata, b.correlation_id, b.event_at,
+  public.context_safe_uuid(b.job_id::text) AS job_uuid,
+  public.context_safe_positive_int(b.payload->>'plan_version') AS plan_version,
+  (coalesce(to_jsonb(b)->>'retracted_at','')<>''
+    OR coalesce(b.metadata->>'retracted_at','')<>''
+    OR coalesce(to_jsonb(b)->>'retracted','')='true'
+    OR coalesce(b.metadata->>'retracted','')='true') AS retracted
+ FROM public.business_events b
+ JOIN public.jobs j ON j.id=public.context_safe_uuid(b.job_id::text)
+ WHERE b.event_type='dispatch.plan.changed'
   AND b.source='ops-api'
   AND b.entity_type='dispatch_plan'
   AND b.entity_id=b.job_id::text
@@ -112,11 +131,8 @@ WHERE b.event_type='dispatch.plan.changed'
   AND public.context_safe_uuid(b.metadata#>>'{source_ref,org_id}')=public.context_safe_uuid(b.payload->>'org_id')
   AND public.context_safe_uuid(b.metadata#>>'{source_ref,job_id}')=public.context_safe_uuid(b.payload->>'job_id')
   AND public.context_safe_positive_int(b.metadata#>>'{source_ref,version}')=public.context_safe_positive_int(b.payload->>'plan_version')
-  AND coalesce(to_jsonb(b)->>'retracted_at','')=''
-  AND coalesce(b.metadata->>'retracted_at','')=''
-  AND coalesce(to_jsonb(b)->>'retracted','') IS DISTINCT FROM 'true'
-  AND coalesce(b.metadata->>'retracted','') IS DISTINCT FROM 'true'
-ORDER BY public.context_safe_uuid(b.job_id::text), public.context_safe_positive_int(b.payload->>'plan_version') DESC NULLS LAST, b.id DESC;
+ ORDER BY public.context_safe_uuid(b.job_id::text), public.context_safe_positive_int(b.payload->>'plan_version') DESC NULLS LAST, b.id DESC
+) latest;
 
 CREATE OR REPLACE VIEW public.current_job_context_facts WITH (security_invoker=true) AS
 SELECT visible.* FROM (
@@ -141,7 +157,7 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
   cardinality(source_event_ids)>0 AND NOT EXISTS (
    SELECT 1 FROM unnest(visible.source_event_ids) source_id
    LEFT JOIN public.business_events b ON b.id=source_id
-   WHERE b.id IS NULL OR b.job_id IS DISTINCT FROM visible.job_id
+   WHERE b.id IS NULL OR b.job_id::text IS DISTINCT FROM visible.job_id::text
     OR b.attribution_status IS NULL OR b.attribution_status NOT IN ('direct','thread','single_open','single_line','luna')
     OR b.event_at IS NULL OR b.attribution_confidence IS NULL OR b.attribution_confidence NOT BETWEEN 0 AND 1
     OR to_jsonb(b)->>'retracted_at' IS NOT NULL
@@ -151,11 +167,7 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
   cardinality(source_event_ids)>0 AND NOT EXISTS (
    SELECT 1 FROM unnest(visible.source_event_ids) source_id
    LEFT JOIN public.business_events b ON b.id=source_id
-   WHERE b.id IS NULL OR b.job_id IS DISTINCT FROM visible.job_id
-    OR coalesce(to_jsonb(b)->>'retracted_at','')<>''
-    OR coalesce(b.metadata->>'retracted_at','')<>''
-    OR coalesce(to_jsonb(b)->>'retracted','')='true'
-    OR coalesce(b.metadata->>'retracted','')='true'
+   WHERE b.id IS NULL OR b.job_id::text IS DISTINCT FROM visible.job_id::text
   )))
  AND provenance#>'{safety,memory_trusted}' IS DISTINCT FROM 'false'::jsonb
  AND coalesce(CASE WHEN jsonb_typeof(provenance->'lifecycle')='object' THEN provenance#>>'{lifecycle,state}' ELSE provenance->>'lifecycle' END,'active') NOT IN ('superseded','retracted')

@@ -73,6 +73,25 @@ BEGIN
   RAISE EXCEPTION 'own dispatch echo changed real dispatch_source_version';
  END IF;
 
+ -- Retract winning v3. Latest-known/tombstone: do not resurrect superseded v1.
+ -- Older history stays on business_events.
+ UPDATE public.business_events
+  SET metadata=coalesce(metadata,'{}'::jsonb)||jsonb_build_object('retracted','true','retracted_at','2026-09-13T04:00:00Z')
+  WHERE id=ev_new;
+ IF NOT EXISTS(SELECT 1 FROM public.business_events WHERE id=ev_old AND payload->>'plan_version'='1')
+  OR NOT EXISTS(SELECT 1 FROM public.business_events WHERE id=ev_new AND payload->>'plan_version'='3') THEN
+  RAISE EXCEPTION 'retracting v3 deleted older history';
+ END IF;
+ IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_a AND provenance#>>'{derivation,owner}'='dispatch' AND value->>'plan_version'='1' AND coalesce(value->>'uncertain','false')<>'true') THEN
+  RAISE EXCEPTION 'retracting v3 resurrected superseded v1 working state';
+ END IF;
+ IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_a AND provenance#>>'{derivation,owner}'='dispatch' AND jsonb_typeof(value->'state')='object') THEN
+  RAISE EXCEPTION 'retracted latest v3 still exposed live working state';
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_a AND id=ev_new AND provenance#>>'{derivation,owner}'='dispatch' AND validity_basis='uncertain' AND value->>'uncertain'='true' AND value->>'latest_retracted_plan_version'='3') THEN
+  RAISE EXCEPTION 'retracted latest v3 did not surface as uncertain tombstone';
+ END IF;
+
  -- Same-ID external revision must change the full-row hash.
  UPDATE public.job_context SET value='{"text":"delivery cancelled"}',provenance='{"derivation":{"owner":"supplier"},"rev":2}' WHERE id=fact_id;
  after_rev:=public.dispatch_source_version(org_a,job_a);
@@ -116,14 +135,20 @@ BEGIN
   RAISE EXCEPTION 'null request or zero plan_version was projected';
  END IF;
 
- -- Retracted source must leave the projector.
+ -- Sole retracted plan: visible uncertainty, no live working state, history kept.
  INSERT INTO public.business_events(id,job_id,event_type,source,entity_type,entity_id,payload,metadata,match_status,match_method,attribution_status,event_at,attribution_confidence,correlation_id)
   VALUES('ee000000-0000-4000-8000-0000000000a3',job_b,'dispatch.plan.changed','ops-api','dispatch_plan',job_b::text,
    jsonb_build_object('contract_version','dispatch-context/v1','org_id',org_b,'job_id',job_b,'plan_version',1,'command','save','state',jsonb_build_object('notes',jsonb_build_array()),'body','x'),
    jsonb_build_object('source_ref',jsonb_build_object('table','dispatch_plans','org_id',org_b,'job_id',job_b,'version',1),'evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',req,'plan_version',1),'retracted','true'),
    'matched','direct_job_id','direct',now(),1,req);
- IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_b AND provenance#>>'{derivation,owner}'='dispatch') THEN
-  RAISE EXCEPTION 'retracted dispatch event remained visible';
+ IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_b AND provenance#>>'{derivation,owner}'='dispatch' AND jsonb_typeof(value->'state')='object') THEN
+  RAISE EXCEPTION 'sole retracted plan still showed live working state';
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE job_id=job_b AND provenance#>>'{derivation,owner}'='dispatch' AND validity_basis='uncertain' AND value->>'uncertain'='true') THEN
+  RAISE EXCEPTION 'sole retracted plan did not surface as uncertain tombstone';
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.business_events WHERE id='ee000000-0000-4000-8000-0000000000a3') THEN
+  RAISE EXCEPTION 'retracted event history was deleted';
  END IF;
 
  -- Wrong producer identity is excluded.

@@ -81,7 +81,7 @@ BEGIN
   FROM public.business_events be
   WHERE be.source = 'cio_trade_wo_backfill'
     AND be.entity_id = 'a4019f76-8b8c-4c7e-86bd-8ae0758e8635';
-  IF event_row.job_id IS DISTINCT FROM 'e2000000-0000-4000-8000-000000000001'::uuid THEN
+  IF event_row.job_id::text IS DISTINCT FROM 'e2000000-0000-4000-8000-000000000001' THEN
     RAISE EXCEPTION '%: backfill event did not carry the job uuid (got %)', pass_label, event_row.job_id;
   END IF;
   IF event_row.payload->>'invoice_id' IS DISTINCT FROM 'e4000000-0000-4000-8000-000000000001'
