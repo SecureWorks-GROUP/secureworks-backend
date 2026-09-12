@@ -278,11 +278,11 @@ export async function debtNotes(client: any, xeroInvoiceId: string, jobId: strin
   return out
 }
 
-/** Mark the pending proposal on an invoice: approved (the person pressed Send), sent (with the provider ref), or declined. */
+/** Legacy mark path can decline only; a caller-supplied email is not Marnin approval. */
 export async function debtProposalMark(client: any, body: any) {
   const xeroInvoiceId = text(body?.xero_invoice_id, 'xero_invoice_id', 64)
   if (!xeroInvoiceId) throw new DebtPictureError('xero_invoice_id required')
-  const status = oneOf(body?.status, PROPOSAL_STATUSES, 'status', false)!
+  const status = oneOf(body?.status, ['declined'] as const, 'status', false)!
   const operator = text(body?.operator_email, 'operator_email', 200)
   if (!operator) throw new DebtPictureError('operator_email required')
   const sentRef = text(body?.sent_ref, 'sent_ref', 300)
@@ -292,8 +292,6 @@ export async function debtProposalMark(client: any, body: any) {
   if (!inv) throw new DebtPictureError('invoice not found', 404, 'debt_picture_not_found')
   const now = new Date().toISOString()
   const update: Record<string, unknown> = { debt_proposal_status: status }
-  if (status === 'approved' || status === 'sent') Object.assign(update, { debt_proposal_approved_by: operator, debt_proposal_approved_at: now })
-  if (status === 'sent') update.debt_proposal_sent_ref = sentRef
   if (finalText) update.debt_proposal_text = finalText
   const { error: updErr } = await client.from('xero_invoices').update(update).eq('xero_invoice_id', inv.xero_invoice_id)
   if (updErr) throw updErr
@@ -303,4 +301,39 @@ export async function debtProposalMark(client: any, body: any) {
   })
   if (logErr) throw logErr
   return { ok: true, status, at: now }
+}
+
+/** Save a reviewable proposal only. This door has no approval or provider capability. */
+export async function debtProposalSave(client: any, body: any, orgId: string, actor: string) {
+  if (!orgId || !actor) throw new DebtPictureError('Authenticated operator and organisation required', 403)
+  const allowed = new Set(['xero_invoice_id', 'kind', 'text', 'to', 'subject', 'operator_email'])
+  if (Object.keys(body || {}).some((key) => !allowed.has(key))) throw new DebtPictureError('Only pending proposal fields are accepted')
+  const xid = text(body?.xero_invoice_id, 'xero_invoice_id', 64)
+  const kind = oneOf(body?.kind, ['sms', 'email'] as const, 'kind', false)
+  const to = text(body?.to, 'to', 300)
+  const subject = text(body?.subject, 'subject', 300)
+  const draft = text(body?.text, 'text', 2000)
+  if (!xid || !to || !draft) throw new DebtPictureError('Invoice, proposed recipient and complete text required')
+  if (subject && kind !== 'email') throw new DebtPictureError('Subject is only valid for email')
+  const fullText = text(subject ? `Subject: ${subject}\n\n${draft}` : draft, 'text', 2000)!
+  if (/—/.test(fullText)) throw new DebtPictureError('Proposal text contains an em dash')
+  const fields = 'xero_invoice_id, job_id, invoice_type, status, amount_due, debt_proposal_kind, debt_proposal_text, debt_proposal_to, debt_proposal_status, debt_proposal_at'
+  const { data: inv, error } = await client.from('xero_invoices').select(fields).eq('org_id', orgId).eq('xero_invoice_id', xid).maybeSingle()
+  if (error) throw error
+  if (!inv) throw new DebtPictureError('Invoice not found', 404)
+  if (inv.invoice_type !== 'ACCREC' || inv.status !== 'AUTHORISED' || Number(inv.amount_due) <= 0) throw new DebtPictureError('Proposal requires an open receivable', 409)
+  if (inv.debt_proposal_status === 'pending' && inv.debt_proposal_kind === kind && inv.debt_proposal_text === fullText && inv.debt_proposal_to === to) {
+    return { ok: true, status: 'pending', changed: false, at: inv.debt_proposal_at }
+  }
+  const at = new Date().toISOString()
+  const update = { debt_proposal_kind: kind, debt_proposal_text: fullText, debt_proposal_to: to, debt_proposal_status: 'pending', debt_proposal_at: at,
+    debt_proposal_approved_by: null, debt_proposal_approved_at: null, debt_proposal_sent_ref: null }
+  let query = client.from('xero_invoices').update(update).eq('org_id', orgId).eq('xero_invoice_id', xid)
+    .eq('invoice_type', 'ACCREC').eq('status', 'AUTHORISED').gt('amount_due', 0)
+  query = inv.debt_proposal_at ? query.eq('debt_proposal_at', inv.debt_proposal_at) : query.is('debt_proposal_at', null)
+  const { data: saved, error: saveError } = await query.select('xero_invoice_id').maybeSingle()
+  if (saveError) throw saveError
+  if (!saved) throw new DebtPictureError('Invoice or proposal changed. Refresh before saving again.', 409)
+  const { error: logError } = await client.from('payment_chase_logs').insert({ xero_invoice_id: xid, job_id: inv.job_id ?? null, method: 'proposal', outcome: 'pending', notes: `${kind} proposal saved for individual Marnin approval. Nothing sent.`, chased_by: actor })
+  return { ok: true, status: 'pending', changed: true, at, audit_warning: logError ? 'Proposal saved; audit log unavailable' : null }
 }
