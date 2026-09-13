@@ -1608,7 +1608,45 @@ export function handleDispatch(
   if (action === "dispatch_calendar") {
     return dispatchCalendar(client, org, params);
   }
+  if (action === "dispatch_workflow") {
+    return dispatchWorkflow(client, org);
+  }
   throw new DispatchError("Unknown Dispatch action", 404);
+}
+
+export async function dispatchWorkflow(client: any, org: string) {
+  const intendedEnabled = false;
+  const observedEnabled = Deno.env.get("DISPATCH_WORKER_ENABLED") === "true";
+  const controls = checked(
+    await client.from("dispatch_release_controls").select(
+      "communications_enabled",
+    ).eq("org_id", org).limit(1),
+  ) || [];
+  const tasks = await dispatchTasks(
+    client,
+    org,
+    new URLSearchParams({ limit: "1", offset: "0" }),
+  );
+  return {
+    workflow: "dispatch",
+    definition_version: "dispatch-workflow/v1",
+    live_actions_enabled: false,
+    worker: {
+      intended_enabled: intendedEnabled,
+      observed_enabled: observedEnabled,
+      schedule_installed: false,
+      config_path: "scripts/dispatch/worker.disabled.json",
+      manual_command: "bash scripts/dispatch/run-dispatch-worker.sh --once",
+      mismatch: intendedEnabled !== observedEnabled,
+    },
+    communications_enabled: controls[0]?.communications_enabled === true,
+    latest_task: (tasks.items || [])[0] || null,
+    latest_source_failure: (tasks.source_failures || [])[0] || null,
+    coverage: {
+      tasks_complete: tasks.has_more !== true,
+      source_failures_complete: tasks.source_failures_has_more !== true,
+    },
+  };
 }
 
 export async function dispatchSupply(
