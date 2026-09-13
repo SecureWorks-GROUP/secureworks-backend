@@ -1,0 +1,47 @@
+{
+  "as_of": "2026-09-13",
+  "source": "sw_read_job_record SWF-261271; sw_list_pos PO-294460; isolated fixture only",
+  "job_id": "2c64e422-1e6e-4987-841c-a9b4c389fad6",
+  "job_number": "SWF-261271",
+  "type": "fencing",
+  "status": "scheduled",
+  "suburb": "Scarborough",
+  "accepted_at": "2026-08-29T00:15:02.472+00:00",
+  "scheduled_at": "2026-09-02T01:45:46.424+00:00",
+  "quote_material_lines": [
+    {
+      "description": "7x Sameside (16.7m total)",
+      "quantity": 16.7,
+      "unit": "m",
+      "supplier_name": "R&R Fencing",
+      "category": "fencing"
+    },
+    {
+      "description": "Retaining plinths (150mm COLORBOND)",
+      "quantity": 7,
+      "unit": "each",
+      "supplier_name": "R&R Fencing",
+      "category": "materials"
+    }
+  ],
+  "purchase_orders": [
+    {
+      "id": "348e34c3-b11d-4dc2-b05e-f6f0ed8d0725",
+      "po_number": "PO-294460",
+      "supplier_name": "R&R Fencing",
+      "status": "confirmed",
+      "total": 1163.8,
+      "delivery_date": "2026-09-10",
+      "paid_at": null,
+      "delivery_confirmed_at": null,
+      "line_items": [
+        {
+          "quantity": 1,
+          "unit": "lot",
+          "unit_price": 1058,
+          "description": "Monument Sameside fencing 7 panels 16.7 m with posts, rails and 7 x 150 mm Colorbond plinths"
+        }
+      ]
+    }
+  ]
+}

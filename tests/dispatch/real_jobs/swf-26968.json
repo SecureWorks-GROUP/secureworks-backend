@@ -1,0 +1,35 @@
+{
+  "as_of": "2026-09-13",
+  "source": "sw_read_job_record SWF-26968; sw_list_pos empty; isolated fixture only",
+  "job_id": "dbaf7c57-bb27-4c5c-b30e-71459dd25ce6",
+  "job_number": "SWF-26968",
+  "type": "fencing",
+  "status": "scheduled",
+  "suburb": "Spearwood",
+  "accepted_at": "2026-08-28T02:41:43.562+00:00",
+  "scheduled_at": "2026-09-04T03:18:30.529+00:00",
+  "purchase_orders": [],
+  "quote_material_lines": [
+    {
+      "description": "4x Neetascreen (8.5m total)",
+      "quantity": 8.5,
+      "unit": "m",
+      "supplier_name": "Lysaght",
+      "category": "fencing"
+    },
+    {
+      "description": "Retaining plinths (150mm COLORBOND)",
+      "quantity": 14,
+      "unit": "each",
+      "supplier_name": "Lysaght",
+      "category": "materials"
+    },
+    {
+      "description": "Patio tubes (76x38 RHS 3000mm)",
+      "quantity": 5,
+      "unit": "each",
+      "supplier_name": "Lysaght",
+      "category": "materials"
+    }
+  ]
+}

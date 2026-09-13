@@ -95,6 +95,10 @@
 //   push_trade_invoice_to_xero — Push acknowledged trade invoice to Xero as ACCPAY bill
 // ════════════════════════════════════════════════════════════
 
+import { executeDispatchDraft, readbackDispatchExecution, outlookDispatchProvider, dispatchExecutionState } from './dispatch_execution.ts'
+import { dispatchOutlookSearch } from './dispatch_outlook.ts'
+import { handleDispatch, DispatchError } from './dispatch_workbench.ts'
+import { runDispatchRefreshWorker } from './dispatch_refresh_worker.ts'
 import { isCurrentContextFact } from './context_visibility.ts'
 import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
 
@@ -4699,7 +4703,7 @@ export async function _readInsuranceEvidenceAction(
   return json(result.body, result.status)
 }
 
-if (import.meta.main) serve(async (req: Request) => {
+export async function handleOpsApiRequest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Unauthenticated deploy-lane version probe ──
@@ -5058,6 +5062,49 @@ if (import.meta.main) serve(async (req: Request) => {
     // admin/owner; the routine is never that). No behaviour change for existing callers;
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
+
+    if (action && (action.startsWith('dispatch_') || ['workflow_refresh','sales_performance_read','message_work_links'].includes(action))) {
+      if (!_opsApiCallerIsStaffOperator(authMode, authUser)) return json({error:'Office operator access required'},403)
+      const dispatchOrg = authMode === 'jwt' ? authUser!.orgId : DEFAULT_ORG_ID
+      if (!dispatchOrg) return json({error:'Office organisation required'},403)
+      try {
+        if (action === 'dispatch_refresh_worker') {
+          if (authMode !== 'api_key' || !serverSecretPresented) return json({error:'Server worker access required'},403)
+          if (req.method !== 'POST') return json({error:'POST required'},405)
+          return json(await runDispatchRefreshWorker(client,dispatchOrg))
+        }
+        const approvers = (Deno.env.get('DISPATCH_APPROVER_USER_IDS') || '').split(',').filter(Boolean)
+        if (action === 'dispatch_draft_approve' || (action === 'dispatch_command' && body.command === 'draft_approve')) {
+          if (authMode !== 'jwt' || !approvers.includes(authUser!.id)) return json({error:'Configured Captain approval required'},403)
+          body.command = 'draft_approve'
+          return json(await handleDispatch(client,dispatchOrg,authUser!.id,'dispatch_command',req.method,url.searchParams,body))
+        }
+        if (['dispatch_execute','dispatch_execution','dispatch_execution_readback'].includes(action)) {
+          const mailboxConfig = JSON.parse(Deno.env.get('DISPATCH_READ_MAILBOXES_BY_ORG') || '{}')
+          const provider = outlookDispatchProvider(client,Array.isArray(mailboxConfig[dispatchOrg]) ? mailboxConfig[dispatchOrg] : [])
+          if (action === 'dispatch_execute') {
+            if(req.method !== 'POST')return json({error:'POST required'},405)
+            return json(await executeDispatchDraft(client,dispatchOrg,body,provider,Deno.env.get('DISPATCH_SEND_RELEASED') === 'true',undefined,()=>Deno.env.get('DISPATCH_SEND_RELEASED') === 'true'))
+          }
+          if(action === 'dispatch_execution_readback') {
+            if(req.method !== 'POST')return json({error:'POST required'},405)
+            return json(await readbackDispatchExecution(client,dispatchOrg,body.approval_id,provider))
+          }
+          if(req.method !== 'GET')return json({error:'GET required'},405)
+          return json(await dispatchExecutionState(client,dispatchOrg,url.searchParams.get('job_id') || '',Deno.env.get('DISPATCH_SEND_RELEASED') === 'true',authMode==='jwt' && approvers.includes(authUser!.id)))
+        }
+        if (action === 'dispatch_outlook_search') {
+          if (req.method !== 'GET') return json({error:'GET required'},405)
+          // Tenant-bound server configuration, never caller-selected arbitrary mailboxes.
+          const mailboxConfig = JSON.parse(Deno.env.get('DISPATCH_READ_MAILBOXES_BY_ORG') || '{}')
+          return json(await dispatchOutlookSearch(url.searchParams,Array.isArray(mailboxConfig[dispatchOrg]) ? mailboxConfig[dispatchOrg] : []))
+        }
+        return json(await handleDispatch(client,dispatchOrg,authUser?.id || 'server-operator',action,req.method,url.searchParams,body))
+      } catch (e) {
+        if (e instanceof DispatchError) return json({error:e.message,live_actions_enabled:false},e.status)
+        throw e
+      }
+    }
 
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
@@ -5969,17 +6016,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'list_job_documents':
       case 'get_job_document':
         return await _readInsuranceEvidenceAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
-      case 'job_detail': {
-        let jid = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
-        // If not a UUID, try resolving as job_number (e.g. SWF-26037)
-        if (jid && !jid.match(/^[0-9a-f]{8}-/i)) {
-          const { data: found } = await client.from('jobs').select('id').ilike('job_number', jid).limit(1)
-          if (found?.[0]) jid = found[0].id
-        }
-        if (!jid) return json({ error: 'jobId required' }, 400)
-        const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
-        return json(await jobDetail(client, jid, { slim }))
-      }
+      case 'job_detail':
+        return await _jobDetailAction(client, url.searchParams, req.method, authMode, authUser)
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -7341,25 +7379,11 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestTranscript(client, body, { user_id: userId!, role }))
       }
       case 'resolve_jobs': return json(await resolveJobs(client, body))
-      case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
+      case 'get_job_context_facts': return json(await getJobContextFacts(client, body, { access: authMode === 'jwt' ? { orgId: authUser?.orgId } : authMode === 'routine' ? { orgId: DEFAULT_ORG_ID } : undefined }))
       case 'get_job_conversation': return json(await getJobConversation(client, body))
       case 'assemble_job_dossier':
-      case 'assemble_job_brain': {
-        try {
-          return json(await assembleJobDossier(client, body))
-        } catch (e) {
-          const msg = (e as Error).message || 'assemble failed'
-          // Input/resolution failures are caller-fixable → 400. Per-source
-          // read errors do not throw (they populate diagnostics.sourceStatus
-          // with ok:false), so anything reaching here is a structural
-          // mistake by the caller.
-          if (msg.startsWith('assemble_job_dossier requires') ||
-              msg.startsWith('assemble_job_dossier could not resolve')) {
-            return json({ error: msg }, 400)
-          }
-          throw e
-        }
-      }
+      case 'assemble_job_brain':
+        return await _assembleJobDossierAction(client, body, authMode, authUser)
 
       // ── Ops Dashboard Write ──
       // create/update/delete_assignment were previously ungated: any authenticated
@@ -12320,7 +12344,9 @@ if (import.meta.main) serve(async (req: Request) => {
     console.error('[ops-api] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(handleOpsApiRequest)
 
 export async function prepareClockEventAssignment(
   client: any,
@@ -14835,19 +14861,69 @@ async function pipeline(client: any, params: URLSearchParams) {
 
 export const _pipelineForTest = pipeline
 
-async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
+type JobDetailAccess = {
+  orgId?: string | null
+}
+
+async function _jobDetailAction(
+  client: any,
+  params: URLSearchParams,
+  _method: string,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'orgId'> | null,
+): Promise<Response> {
+  let jobId = params.get('jobId') || params.get('job_id') || ''
+  const callerOrgId = authMode === 'jwt'
+    ? String(authUser?.orgId || '').trim()
+    : authMode === 'routine'
+    ? DEFAULT_ORG_ID
+    : ''
+  if (authMode === 'jwt' && !callerOrgId) {
+    return json({ error: 'An authorised operator session is required.' }, 403)
+  }
+  if (jobId && !jobId.match(/^[0-9a-f]{8}-/i)) {
+    let lookup = client.from('jobs').select('id').ilike('job_number', jobId)
+    if (callerOrgId) lookup = lookup.eq('org_id', callerOrgId)
+    const { data: found } = await lookup.limit(1)
+    if (found?.[0]) jobId = found[0].id
+  }
+  if (!jobId) return json({ error: 'jobId required' }, 400)
+  const slim = params.get('slim') === 'true' || params.get('slim') === '1'
+  try {
+    return json(await jobDetail(client, jobId, {
+      slim,
+      access: callerOrgId ? { orgId: callerOrgId } : undefined,
+    }))
+  } catch (error) {
+    if (error instanceof ApiError) return json(error.body || { error: error.message }, error.status)
+    throw error
+  }
+}
+
+async function jobDetail(client: any, jobId: string, opts: { slim?: boolean; access?: JobDetailAccess } = {}) {
   if (!jobId) throw new Error('jobId required')
+  const accessOrgId = String(opts.access?.orgId || '').trim()
+  if (opts.access && !accessOrgId) {
+    throw new ApiError('An authorised operator session is required.', 403)
+  }
 
   // If job_number passed instead of UUID, resolve it
   // 2026-04-24 fix: widen from [PFDRI] to [A-Z]+ so all prefixes work (SWM, SWG, etc.)
   if (/^SW[A-Z]+-\d+$/i.test(jobId)) {
-    const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1).maybeSingle()
+    let lookup = client.from('jobs').select('id').ilike('job_number', jobId)
+    if (accessOrgId) lookup = lookup.eq('org_id', accessOrgId)
+    const { data: found } = await lookup.limit(1).maybeSingle()
     if (!found) throw new ApiError(`Job ${jobId} not found`, 404)
     jobId = found.id
   }
 
-  const [jobRes, assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes, serviceReportsRes] = await Promise.all([
-    client.from('jobs').select('*').eq('id', jobId).single(),
+  let jobQuery = client.from('jobs').select('*').eq('id', jobId)
+  if (accessOrgId) jobQuery = jobQuery.eq('org_id', accessOrgId)
+  const jobRes = await jobQuery.maybeSingle()
+  if (jobRes.error) throw jobRes.error
+  if (!jobRes.data) throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+
+  const [assignRes, docsRes, eventsRes, mediaRes, poRes, woRes, xeroRes, contactsRes, bizEventsRes, serviceReportsRes] = await Promise.all([
     client.from('job_assignments').select('*, users:user_id(name, phone, email)').eq('job_id', jobId).order('scheduled_date'),
     client.from('job_documents').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
@@ -14859,8 +14935,6 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
     client.from('job_service_reports').select('*, submitted_user:submitted_by(id, name)').eq('job_id', jobId).order('created_at', { ascending: false }),
   ])
-
-  if (jobRes.error) throw jobRes.error
 
   // Find matching invoices — try direct job_id first, fallback to client name
   let invoices: any[] = []
@@ -14876,7 +14950,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     if (clientName) {
       const { data } = await client.from('xero_invoices')
         .select('*')
-        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('org_id', accessOrgId || DEFAULT_ORG_ID)
         .ilike('contact_name', `%${clientName.replace(/'/g, "''")}%`)
         .order('invoice_date', { ascending: false })
         .limit(20)
@@ -15412,9 +15486,17 @@ async function resolveJobs(client: any, body: any) {
   return { jobs: data || [] }
 }
 
-async function getJobContextFacts(client: any, body: any) {
-  const jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
+async function getJobContextFacts(client: any, body: any, opts: { access?: JobDetailAccess } = {}) {
+  let jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
+  const accessOrgId = String(opts.access?.orgId || '').trim()
+  if (opts.access && !accessOrgId) throw new ApiError('An authorised operator session is required.', 403)
   if (jobUuids.length === 0) return { rows: [] }
+  if (accessOrgId) {
+    const { data, error } = await client.from('jobs').select('id').eq('org_id', accessOrgId).in('id', jobUuids)
+    if (error) throw error
+    jobUuids = (data || []).map((row: any) => row.id)
+    if (!jobUuids.length) return { rows: [], excluded_count: 0, coverage: 'bounded_rows_only' }
+  }
   const limit = typeof body?.limit === 'number' && body.limit > 0
     ? Math.min(body.limit, 100)
     : 12
@@ -15720,7 +15802,28 @@ async function safeRead(label: string, fn: () => Promise<any>): Promise<{ data: 
   }
 }
 
-async function assembleJobDossier(client: any, body: any) {
+async function _assembleJobDossierAction(
+  client: any,
+  body: any,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'orgId'> | null,
+): Promise<Response> {
+  const access = authMode === 'jwt' ? { orgId: authUser?.orgId }
+    : authMode === 'routine' ? { orgId: DEFAULT_ORG_ID } : undefined
+  try {
+    return json(await assembleJobDossier(client, body, { access }))
+  } catch (error) {
+    if (error instanceof ApiError) return json(error.body || { error: error.message }, error.status)
+    const message = (error as Error).message || 'assemble failed'
+    if (message.startsWith('assemble_job_dossier requires') ||
+        message.startsWith('assemble_job_dossier could not resolve')) return json({ error: message }, 400)
+    throw error
+  }
+}
+
+async function assembleJobDossier(client: any, body: any, opts: { access?: JobDetailAccess } = {}) {
+  const accessOrgId = String(opts.access?.orgId || '').trim()
+  if (opts.access && !accessOrgId) throw new ApiError('An authorised operator session is required.', 403)
   const requestedMode = String(body?.mode || 'chat_summary') as DossierMode
   const mode: DossierMode = requestedMode in DOSSIER_MODE_BOUNDS ? requestedMode : 'chat_summary'
   const modeCaps = DOSSIER_MODE_BOUNDS[mode]
@@ -15748,15 +15851,20 @@ async function assembleJobDossier(client: any, body: any) {
   let jobRow: any = null
   let jobReadError: string | null = null
   if (inputJobId) {
-    const { data, error } = await client.from('jobs').select(JOB_COLS).eq('id', inputJobId).maybeSingle()
+    let query = client.from('jobs').select(JOB_COLS).eq('id', inputJobId)
+    if (accessOrgId) query = query.eq('org_id', accessOrgId)
+    const { data, error } = await query.maybeSingle()
     if (error) jobReadError = error.message
     jobRow = data || null
   } else if (inputJobNumber) {
-    const { data, error } = await client.from('jobs').select(JOB_COLS).ilike('job_number', inputJobNumber).limit(1)
+    let query = client.from('jobs').select(JOB_COLS).ilike('job_number', inputJobNumber)
+    if (accessOrgId) query = query.eq('org_id', accessOrgId)
+    const { data, error } = await query.limit(1)
     if (error) jobReadError = error.message
     jobRow = data?.[0] || null
   }
   if (!jobRow) {
+    if (accessOrgId && !jobReadError) throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
     const detail = jobReadError ? ` (${jobReadError})` : ''
     throw new Error(`assemble_job_dossier could not resolve job: ${inputJobId || inputJobNumber}${detail}`)
   }
@@ -59113,6 +59221,7 @@ async function getJobFinancialsDetail(client: any, jobId: string) {
 
 // Test-only exports for Issue A + B + C safety guards.
 export const _createInvoiceForTest = createInvoice
+export const _jobDetailActionForTest = _jobDetailAction
 export const _createInvoiceDraftActionForTest = createInvoiceDraftAction
 export const _createInvoiceDraftHttpStatusForTest = createInvoiceDraftHttpStatus
 export const _makeSesXeroGatewayForTest = makeSesXeroGateway
@@ -59137,3 +59246,4 @@ export const _updateInvoiceForTest = updateInvoice
 
 export const _getJobContextFactsForTest = getJobContextFacts
 export const _assembleJobDossierForTest = assembleJobDossier
+export const _assembleJobDossierActionForTest = _assembleJobDossierAction
