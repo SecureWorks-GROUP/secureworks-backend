@@ -76,22 +76,51 @@ BEGIN
   SET LOCAL ROLE service_role;
   BEGIN
     PERFORM public.register_workflow_refresh_driver(
-      'debt','debt-collection','debt_refresh/v1','contract-280','registered'
+      'debt','debt-collection','dispatch_refresh/v1','contract-280','registered'
     );
-    RAISE EXCEPTION 'unsupported debt validator unexpectedly registered';
+    RAISE EXCEPTION 'debt registered with dispatch validator';
   EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM = 'debt registered with dispatch validator' THEN RAISE; END IF;
     PERFORM pg_temp.assert_refresh_completion(
       SQLERRM LIKE '%workflow_refresh_validator_unavailable%',
-      'missing domain validator must remain unavailable'
+      'debt must not register as a dispatch validator'
     );
   END;
-  started := public.start_workflow_refresh(
-    'debt',jsonb_build_object('week_start','2026-09-13'),'fixture-ui',org_a
-  );
-  PERFORM pg_temp.assert_refresh_completion(
-    started->>'outcome'='unavailable',
-    'unsupported domain must not queue Refresh work'
-  );
+  IF to_regprocedure('public.debt_source_version(uuid,uuid)') IS NULL
+     OR to_regclass('public.debt_assess_commands') IS NULL THEN
+    BEGIN
+      PERFORM public.register_workflow_refresh_driver(
+        'debt','debt-collection','debt_refresh/v1','contract-280','registered'
+      );
+      RAISE EXCEPTION 'unsupported debt validator unexpectedly registered';
+    EXCEPTION WHEN OTHERS THEN
+      IF SQLERRM = 'unsupported debt validator unexpectedly registered' THEN RAISE; END IF;
+      PERFORM pg_temp.assert_refresh_completion(
+        SQLERRM LIKE '%workflow_refresh_validator_unavailable%',
+        'missing domain validator must remain unavailable'
+      );
+    END;
+    started := public.start_workflow_refresh(
+      'debt',jsonb_build_object('week_start','2026-09-13'),'fixture-ui',org_a
+    );
+    PERFORM pg_temp.assert_refresh_completion(
+      started->>'outcome'='unavailable',
+      'unsupported domain must not queue Refresh work'
+    );
+  ELSE
+    BEGIN
+      PERFORM public.start_workflow_refresh(
+        'debt',jsonb_build_object('week_start','2026-09-13'),'fixture-ui',org_a
+      );
+      RAISE EXCEPTION 'week-only debt start queued';
+    EXCEPTION WHEN OTHERS THEN
+      IF SQLERRM = 'week-only debt start queued' THEN RAISE; END IF;
+      PERFORM pg_temp.assert_refresh_completion(
+        SQLERRM LIKE '%workflow_refresh_scope_missing%',
+        'week-only debt start must not queue after Debt registers'
+      );
+    END;
+  END IF;
 
   PERFORM public.register_workflow_refresh_driver(
     'dispatch','operations','dispatch_refresh/v1','contract-280','registered'

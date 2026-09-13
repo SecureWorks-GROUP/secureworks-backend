@@ -16,46 +16,77 @@ BEGIN
   SET LOCAL ROLE service_role;
   BEGIN
     PERFORM public.register_workflow_refresh_driver(
-      'debt','debt-collection','debt_refresh/v1','contract-293','registered'
-    );
-    RAISE EXCEPTION 'debt registered without domain functions';
-  EXCEPTION WHEN OTHERS THEN
-    PERFORM pg_temp.assert_debt_refresh(
-      SQLERRM LIKE '%workflow_refresh_validator_unavailable%',
-      'register debt without source function must stay unavailable'
-    );
-  END;
-  BEGIN
-    PERFORM public.register_workflow_refresh_driver(
       'debt','debt-collection','dispatch_refresh/v1','contract-293','registered'
     );
     RAISE EXCEPTION 'debt registered with dispatch validator';
   EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM = 'debt registered with dispatch validator' THEN RAISE; END IF;
     PERFORM pg_temp.assert_debt_refresh(
       SQLERRM LIKE '%workflow_refresh_validator_unavailable%',
       'register debt while still a dispatch validator must stay unavailable'
     );
   END;
-  started := public.start_workflow_refresh(
-    'debt',jsonb_build_object('week_start','2026-09-13'),'fixture-ui',org_a
-  );
-  PERFORM pg_temp.assert_debt_refresh(
-    started->>'outcome'='unavailable',
-    'start(debt) stays unavailable until validator_key and source function exist'
-  );
-  started := public.start_workflow_refresh(
-    'debt',jsonb_build_object('xero_invoice_id','29300000-0000-4000-8000-000000000001'),
-    'fixture-ui',org_a
-  );
-  PERFORM pg_temp.assert_debt_refresh(
-    started->>'outcome'='unavailable',
-    'invoice-scoped start(debt) must not queue before Debt registers'
-  );
+  IF to_regprocedure('public.debt_source_version(uuid,uuid)') IS NULL
+     OR to_regclass('public.debt_assess_commands') IS NULL THEN
+    BEGIN
+      PERFORM public.register_workflow_refresh_driver(
+        'debt','debt-collection','debt_refresh/v1','contract-293','registered'
+      );
+      RAISE EXCEPTION 'debt registered without domain functions';
+    EXCEPTION WHEN OTHERS THEN
+      IF SQLERRM = 'debt registered without domain functions' THEN RAISE; END IF;
+      PERFORM pg_temp.assert_debt_refresh(
+        SQLERRM LIKE '%workflow_refresh_validator_unavailable%',
+        'register debt without source function must stay unavailable'
+      );
+    END;
+    started := public.start_workflow_refresh(
+      'debt',jsonb_build_object('week_start','2026-09-13'),'fixture-ui',org_a
+    );
+    PERFORM pg_temp.assert_debt_refresh(
+      started->>'outcome'='unavailable',
+      'start(debt) stays unavailable until validator_key and source function exist'
+    );
+    started := public.start_workflow_refresh(
+      'debt',jsonb_build_object('xero_invoice_id','29300000-0000-4000-8000-000000000001'),
+      'fixture-ui',org_a
+    );
+    PERFORM pg_temp.assert_debt_refresh(
+      started->>'outcome'='unavailable',
+      'invoice-scoped start(debt) must not queue before Debt registers'
+    );
+  ELSE
+    BEGIN
+      PERFORM public.start_workflow_refresh(
+        'debt',jsonb_build_object('week_start','2026-09-13'),'fixture-ui',org_a
+      );
+      RAISE EXCEPTION 'week-only debt start queued';
+    EXCEPTION WHEN OTHERS THEN
+      IF SQLERRM = 'week-only debt start queued' THEN RAISE; END IF;
+      PERFORM pg_temp.assert_debt_refresh(
+        SQLERRM LIKE '%workflow_refresh_scope_missing%',
+        'week-only start(debt) must not queue after Debt registers'
+      );
+    END;
+    BEGIN
+      PERFORM public.start_workflow_refresh(
+        'debt',jsonb_build_object('xero_invoice_id','29300000-0000-4000-8000-000000000001'),
+        'fixture-ui',org_a
+      );
+      RAISE EXCEPTION 'missing-invoice debt start queued';
+    EXCEPTION WHEN OTHERS THEN
+      IF SQLERRM = 'missing-invoice debt start queued' THEN RAISE; END IF;
+      PERFORM pg_temp.assert_debt_refresh(
+        SQLERRM LIKE '%workflow_refresh_scope_missing%',
+        'invoice-scoped start(debt) must not queue a missing invoice'
+      );
+    END;
+  END IF;
   PERFORM pg_temp.assert_debt_refresh(
     NOT EXISTS (
       SELECT 1 FROM public.workflow_refresh_runs WHERE requested_by='fixture-ui'
     ),
-    'unregistered debt must not enqueue runs'
+    'invalid or unregistered debt must not enqueue runs'
   );
   PERFORM pg_temp.assert_debt_refresh(
     NOT has_function_privilege('anon',
@@ -72,7 +103,7 @@ BEGIN
   RESET ROLE;
 END $$;
 
-CREATE TABLE public.debt_assess_commands (
+CREATE TABLE IF NOT EXISTS public.debt_assess_commands (
   request_id uuid NOT NULL,
   org_id uuid NOT NULL,
   xero_invoice_id uuid,
@@ -81,7 +112,7 @@ CREATE TABLE public.debt_assess_commands (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (org_id, request_id)
 );
-CREATE FUNCTION public.debt_source_version(p_org uuid, p_invoice uuid)
+CREATE OR REPLACE FUNCTION public.debt_source_version(p_org uuid, p_invoice uuid)
 RETURNS text LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
   SELECT CASE
     WHEN p_invoice = '00000000-0000-0000-0000-000000000000'::uuid THEN 'debt-book-1'
