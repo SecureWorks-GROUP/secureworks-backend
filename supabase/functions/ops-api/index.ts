@@ -352,7 +352,7 @@ import {
   SesReportTriggerError,
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
-import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
+import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, debtProposalSave, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12241,6 +12241,16 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Debt picture (DEBT COLLECTION desk, design accepted 11 Sep 2026) ──
       // Classification data behind the Clear Debt screen. Writes the desk's own
       // columns on xero_invoices and payment_chase_logs only; never GHL, never Xero.
+      case 'debt_proposal_save': {
+        if (req.method !== 'POST') return json({ error: 'debt_proposal_save requires POST' }, 405)
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) return json({ error: 'Operator access required' }, 403)
+        const orgId = authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID
+        const actor = authMode === 'jwt' ? String(authUser?.email || authUser?.id || '') : 'authenticated server proposal'
+        try { return json(await debtProposalSave(client, body, orgId, actor)) } catch (error) {
+          if (error instanceof DebtPictureError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       case 'list_debt_picture':
       case 'upsert_debt_picture':
       case 'add_debt_note':
