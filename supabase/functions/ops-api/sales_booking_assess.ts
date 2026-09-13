@@ -361,12 +361,17 @@ function occupancyGaps(input) {
     }
   });
   if (input.coverage) {
+    if (input.coverage.leave_state === 'unavailable') gaps.push('leave_unavailable');
+    if (input.coverage.travel_state === 'unavailable') gaps.push('travel_unavailable');
     if (input.coverage.leave_roster_complete === false) gaps.push('leave_roster_incomplete');
     if (input.coverage.leave === 'not_read' || input.coverage.leave === false || input.coverage.calendar === false || input.coverage.travel === false || input.coverage.route === false) {
       gaps.push('coverage_flag_not_ready');
     }
     if ((input.coverage.calendar === true || input.coverage.leave === 'read' || input.coverage.travel === true) && !input.calendar_retrieved_at && !input.leave_retrieved_at) {
       gaps.push('boolean_coverage_is_not_interval_proof');
+    }
+    if (input.coverage.leave_state === 'absent' && input.coverage.leave_roster_complete !== true) {
+      gaps.push('absent_leave_requires_complete_roster');
     }
   }
   return gaps;

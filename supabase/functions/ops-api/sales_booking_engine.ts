@@ -1,5 +1,5 @@
 // Production-shaped assessment entrypoint. Uses the TypeScript engine, not CJS.
-import { assess, assessWithReason, VERSION } from "./sales_booking_assess.ts";
+import { assess, assessWithReason, conservativeExtract, VERSION } from "./sales_booking_assess.ts";
 
 export { VERSION };
 
@@ -73,6 +73,14 @@ export function classify(result: Record<string, unknown>, envelope: Record<strin
   return "assessed";
 }
 
+function reasonMode(): string {
+  try {
+    return (Deno.env.get("BOOKING_REASON_MODE") || "local").toLowerCase();
+  } catch {
+    return "local";
+  }
+}
+
 function reasonUrl(): string {
   try {
     return Deno.env.get("BOOKING_REASON_URL") || "";
@@ -81,18 +89,35 @@ function reasonUrl(): string {
   }
 }
 
-export function createReasonTransport(fetchImpl: typeof fetch = fetch): ReasonTransport | undefined {
-  const url = reasonUrl();
-  if (!url) return undefined;
-  return async (prompt) => {
-    const resp = await fetchImpl(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(prompt),
-    });
-    if (!resp.ok) throw new Error("reason_transport_" + resp.status);
-    return resp.json();
+/** Authorised local reason surface. No paid model. Does not invent customer dates. */
+export async function authorisedLocalReason(prompt: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const input = (prompt.input || prompt) as Record<string, unknown>;
+  conservativeExtract(input);
+  return {
+    customer_windows: [],
+    review_reasons: ["Authorised local reason surface. Paid model is not enabled. Conservative grounding remains the customer-fact source."],
+    paid_model: false,
+    intelligent_automation: false,
+    surface: "authorised_local_reason",
   };
+}
+
+export function createReasonTransport(fetchImpl: typeof fetch = fetch): ReasonTransport | undefined {
+  const mode = reasonMode();
+  if (mode === "off" || mode === "none") return undefined;
+  const url = reasonUrl();
+  if (mode === "url" && url) {
+    return async (prompt) => {
+      const resp = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(prompt),
+      });
+      if (!resp.ok) throw new Error("reason_transport_" + resp.status);
+      return resp.json();
+    };
+  }
+  return authorisedLocalReason;
 }
 
 export async function runAssessment(
@@ -118,10 +143,25 @@ export async function runAssessment(
   if (opts?.cached_hash === hash && opts.cached_payload && opts.cached_payload.version === VERSION) {
     return { ...opts.cached_payload, cache: "hit", source_hash: hash, classification: classify(opts.cached_payload, envelope) };
   }
-  const reason = opts?.reason !== undefined ? opts.reason : createReasonTransport();
+  const injected = opts?.reason !== undefined;
+  const reason = injected ? opts.reason : createReasonTransport();
   const result = reason
     ? await assessWithReason({ ...envelope, reasonAsync: reason })
     : assess(envelope);
   const classification = classify(result as Record<string, unknown>, envelope);
-  return { ...result, version: VERSION, source_hash: hash, cache: "miss", classification, reasoning: reason ? "server_reason_transport" : "conservative_only" };
+  const reasoning = !reason
+    ? "conservative_only"
+    : injected
+    ? "injected_reason"
+    : (reasonMode() === "url" && reasonUrl() ? "server_reason_transport" : "authorised_local_reason");
+  return {
+    ...result,
+    version: VERSION,
+    source_hash: hash,
+    cache: "miss",
+    classification,
+    reasoning,
+    paid_model: false,
+    intelligent_automation: reasoning !== "conservative_only" && reasoning !== "authorised_local_reason" ? true : false,
+  };
 }

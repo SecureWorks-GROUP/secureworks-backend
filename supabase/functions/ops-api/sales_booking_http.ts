@@ -68,10 +68,18 @@ const adapters: Adapters = {
         leave_retrieved_at: null,
         travel_retrieved_at: null,
         leave_roster_complete: false,
+        leave_state: "unavailable",
+        travel_state: "unavailable",
+        travel_source: "drive_time_cache",
         source_row_count: 0,
         matched_rows: 0,
       };
     }
+  },
+  getConversation: async (contactId) => {
+    const raw = await mcpCall("sw_get_conversation", { contact_id: contactId });
+    const messages = Array.isArray(raw.messages) ? raw.messages : [];
+    return { messages: messages.map((m: Record<string, unknown>) => ({ id: m.id, direction: m.direction, timestamp: m.timestamp, body: m.body || m.text || "" })) };
   },
 };
 
@@ -97,10 +105,15 @@ Deno.serve({ hostname: "127.0.0.1", port: PORT }, async (req) => {
     return Response.json({
       ok: true,
       entry: "ops-api",
-      actions: ["sales_booking_assess", "sales_booking_draft", "sales_booking_read"],
+      actions: ["sales_booking_assess", "sales_booking_draft", "sales_booking_read", "sales_booking_runner", "sales_booking_reason"],
       org_id: ACTOR.org_id,
       sql: "booking_test",
       send: "held",
+      calendar_write: "held",
+      reasoning: "authorised_local_reason",
+      paid_model: false,
+      cloud_schedule: { configured: false, observed: "not_configured" },
+      cadence_intended: { debounce_seconds: 60, catch_up_minutes: 15, daily_reconcile: "after CIO 06:00 Perth pass finishes" },
     }, { headers: cors });
   }
   const action = url.searchParams.get("action") || "";

@@ -1,7 +1,7 @@
 // Sales Booking workflow. Production uses Supabase client + SQL RPCs.
 // booking_test/psql is a test transport only. No Deno.Command/psql in this module.
 
-import { runAssessment } from "./sales_booking_engine.ts";
+import { authorisedLocalReason, runAssessment } from "./sales_booking_engine.ts";
 
 export const SALES_BOOKING_VERSION = "sales-booking-api/v1";
 
@@ -12,9 +12,19 @@ export const POLICY = {
   on_inbound: "dedupe_then_assess",
   debounce_seconds: 60,
   catch_up_minutes: 15,
-  daily_reconcile: "06:00 Australia/Perth after CIO context pass",
+  daily_reconcile: "06:00 Australia/Perth after CIO context pass finishes",
   send: "held",
   calendar_write: "held",
+  cloud_schedule: {
+    configured: false,
+    observed: "not_configured",
+    intended: {
+      debounce_seconds: 60,
+      catch_up_minutes: 15,
+      daily_reconcile: "after CIO 06:00 Australia/Perth context pass finishes",
+    },
+    stale_skill_wording: "30-minute poll is stale; not the approved cadence",
+  },
 };
 
 export const PIPELINES: Record<string, string> = {
@@ -78,6 +88,9 @@ export type Adapters = {
     leave_roster_complete?: boolean;
     source_row_count?: number;
     matched_rows?: number;
+    leave_state?: "observed" | "incomplete" | "unavailable" | "unread" | "absent";
+    travel_state?: "observed" | "absent" | "unavailable" | "unread";
+    travel_source?: string;
   }>;
   getConversation?: (contactId: string) => Promise<{ messages: Record<string, unknown>[] }>;
   assessCase?: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -149,13 +162,16 @@ export function staffLeaveFromCrewAvailability(
     travel_retrieved_at: null,
     calendar_retrieved_at: retrievedAt,
     leave_roster_complete: false,
+    leave_state: "incomplete" as const,
+    travel_state: "unavailable" as const,
+    travel_source: "drive_time_cache",
     source_row_count,
     matched_rows: leave_intervals.length,
     gaps: [
       leave_intervals.length
-        ? `Staff availability leave/unavailable days for this scoper were applied from crew_availability (${leave_intervals.length} day(s)).`
-        : `Staff availability was read (${source_row_count} row(s)). None matched this scoper user id. This reader does not declare roster completeness, so missing rows are not proof of no leave.`,
-      "Travel minutes were not read from crew_availability.",
+        ? `Staff availability leave/unavailable days for this scoper were applied from crew_availability (${leave_intervals.length} day(s)). Roster completeness is not declared (incomplete, not absent).`
+        : `Staff availability was read (${source_row_count} row(s)). None matched this scoper user id. That is incomplete roster coverage, not proof of no leave (absent).`,
+      "Travel source drive_time_cache is unavailable in this isolated database. Unavailable is not unread.",
     ],
   };
 }
@@ -181,6 +197,7 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
     sales_booking_leases: [],
     sales_booking_source_revisions: [],
     sales_booking_runner_journal: [],
+    sales_booking_action_journal: [],
   };
   function rows(t: string) { return mem[t] || (mem[t] = []); }
   return {
@@ -334,6 +351,24 @@ function requireUpsert(result: { error: { message: string } | null }) {
   if (result.error) throw new SalesBookingError(result.error.message, 500, "upsert_failed");
 }
 
+async function journalActionStage(
+  db: BookingDb,
+  actor: BookingActor,
+  actionId: string,
+  stage: string,
+  detail: Record<string, unknown>,
+) {
+  requireUpsert(await db.upsert("sales_booking_action_journal", {
+    id: `jnl-${actionId}-${stage}-${Date.now()}`,
+    org_id: actor.org_id,
+    action_id: actionId,
+    stage,
+    actor_id: actor.user_id,
+    detail,
+    at: nowIso(),
+  }));
+}
+
 export async function readWorkspace(
   db: BookingDb,
   adapters: Adapters,
@@ -442,24 +477,30 @@ export async function readWorkspace(
       enumerated,
       total: cursor.total ?? null,
       provider_calls: providerCalls,
+      calendar_state: cal.ok === false ? "unavailable" : "observed",
       calendar_retrieved_at: cov.calendar_retrieved_at || cal.retrieved_at || null,
       leave_retrieved_at: cov.leave_retrieved_at,
       leave_intervals: cov.leave_intervals,
       leave_roster_complete: cov.leave_roster_complete === true,
+      leave_state: cov.leave_state || (cov.leave_retrieved_at ? "incomplete" : "unread"),
       travel_retrieved_at: cov.travel_retrieved_at,
       travel_minutes: cov.travel_minutes,
+      travel_state: cov.travel_state || (cov.travel_retrieved_at ? "observed" : "unavailable"),
+      travel_source: cov.travel_source || "drive_time_cache",
       boolean_flags_are_not_capacity: true,
       gaps: [
         cursor.complete === true ? "Provider reported terminal consumption for this resource/week." : "Provider page is not terminal. Empty or missing-next is not a completed workload.",
         occupancy.dropped_job_rows ? (occupancy.dropped_job_rows + " job-assignment rows were not used as Outlook occupancy.") : "Occupancy is scoper Outlook event_id rows.",
-        Array.isArray(cov.leave_intervals) && cov.leave_retrieved_at
-          ? (cov.leave_roster_complete === true
-            ? "Leave intervals observed against a complete staff roster."
-            : (cov.matched_rows
-              ? "Staff availability leave days for this scoper were applied. Roster completeness is not declared."
-              : "Staff availability was read; no row matched this scoper. Missing rows are not proof of no leave."))
-          : "Leave intervals unobserved.",
-        cov.travel_minutes != null && cov.travel_retrieved_at ? "Travel minutes observed." : "Travel unobserved.",
+        cov.leave_state === "unavailable" ? "Leave source was unavailable (read failed). Unavailable is not absent." :
+        cov.leave_state === "unread" ? "Leave was not read." :
+        cov.leave_roster_complete === true
+          ? (cov.matched_rows ? "Leave intervals observed against a complete staff roster." : "Leave source was read against a complete roster and no leave rows exist for this scoper (absent).")
+          : (cov.matched_rows
+            ? "Staff availability leave days for this scoper were applied. Roster completeness is incomplete, not absent."
+            : "Staff availability was read; no row matched this scoper. Incomplete roster coverage, not proof of no leave (absent)."),
+        cov.travel_state === "observed" ? "Travel minutes observed from drive_time_cache." :
+        cov.travel_state === "unavailable" ? "Travel source drive_time_cache is unavailable in this environment. Unavailable is not unread." :
+        "Travel unread.",
       ],
     },
     events: cal.events || [],
@@ -661,13 +702,33 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
     if (lease.data?.ok === false) continue;
     const observed = String(c.source_version || "");
     try {
-      const result = await assessFn({ case: c, source: "runner", org_id: a.org_id, cached_hash: existing?.source_hash, cached_payload: existing?.payload as Record<string, unknown> | undefined });
+      let messages: Record<string, unknown>[] = [];
+      let conversation_state: "observed" | "empty" | "unavailable" | "unread" = "unread";
+      if (adapters.getConversation && c.contact_id) {
+        try {
+          const convo = await adapters.getConversation(String(c.contact_id));
+          messages = Array.isArray(convo.messages) ? convo.messages : [];
+          conversation_state = messages.length ? "observed" : "empty";
+        } catch {
+          conversation_state = "unavailable";
+        }
+      }
+      const result = await assessFn({
+        case: c,
+        source: "runner",
+        org_id: a.org_id,
+        cached_hash: existing?.source_hash,
+        cached_payload: existing?.payload as Record<string, unknown> | undefined,
+        input: { messages, week_start: String((c as { week_start?: string }).week_start || "2026-09-14"), conversation_state },
+      });
       await persistAssessment(db, {
         case_id: String(c.id), version: String(result.version || SALES_BOOKING_VERSION), payload: result,
         lease_generation: String(lease.data?.generation || ""), observed_source_version: observed,
       }, a);
       requireUpsert(await db.upsert("sales_booking_cases", { ...c, last_runner_at: nowIso() }));
       assessed += 1;
+    } catch {
+      requireUpsert(await db.upsert("sales_booking_cases", { ...c, last_runner_at: nowIso() }));
     } finally {
       await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: leaseId, p_token: invocation });
     }
@@ -728,15 +789,32 @@ export async function approveAction(
   }
   const actionId = `act_${crypto.randomUUID()}`;
   const serverHold = hold || POLICY.send === "held";
+  requireUpsert(await db.upsert("sales_booking_actions", {
+    action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: serverHold && !body.fake ? "held" : "proposed",
+    stage: "proposed", source_version: c.source_version, send_evidence: "held",
+    idempotency_key: idempotencyKey, provider_uncertain: false, created_at: nowIso(),
+  }));
+  await journalActionStage(db, a, actionId, "proposed", { kind: body.kind, source_version: c.source_version, draft_revision: body });
   if (serverHold && !body.fake) {
     requireUpsert(await db.upsert("sales_booking_actions", {
       action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: "held",
-      send_evidence: "held", idempotency_key: idempotencyKey, created_at: nowIso(),
+      stage: "held", source_version: c.source_version, send_evidence: "held",
+      idempotency_key: idempotencyKey, provider_uncertain: false, created_at: nowIso(),
     }));
-    return { ok: false, held: true, sent: false, booked: false, waiting: false, reason: "send_hold", action_id: actionId };
+    await journalActionStage(db, a, actionId, "held", { reason: "send_hold", live: false });
+    return { ok: false, held: true, sent: false, booked: false, waiting: false, reason: "send_hold", action_id: actionId, stage: "held" };
   }
   if (!body.fake) throw new SalesBookingError("Live provider writes are refused", 403, "live_write_refused");
+  await journalActionStage(db, a, actionId, "executing", { fake: true, live: false });
   const sms = await adapters.sendSms?.({ contact_id: c.contact_id, text: body.text, sender: resource?.sender }, { execute: true, fake: true });
+  const uncertain = !sms || sms.held === true || (sms.sent !== true && !sms.message_id);
+  requireUpsert(await db.upsert("sales_booking_actions", {
+    action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind,
+    status: uncertain ? "uncertain" : "complete", stage: uncertain ? "uncertain" : "complete",
+    source_version: c.source_version, send_evidence: sms?.sent ? "sent" : "uncertain",
+    idempotency_key: idempotencyKey, provider_uncertain: uncertain, created_at: nowIso(),
+  }));
+  await journalActionStage(db, a, actionId, uncertain ? "uncertain" : "complete", { fake: true, message_id: sms?.message_id || null, sent: !!sms?.sent });
   requireUpsert(await db.upsert("sales_booking_offers", {
     offer_id: `off_${actionId}`, org_id: a.org_id, case_id: body.case_id, slot_revision: 1, start_iso: body.start_iso, end_iso: body.end_iso,
     send_evidence: sms?.sent ? "sent" : "failed", sent_at: sms?.sent ? nowIso() : null,
@@ -746,8 +824,11 @@ export async function approveAction(
     const cal = await adapters.writeCalendar?.({ scoper_user_id: resource?.scoper_user_id, start_iso: body.start_iso, end_iso: body.end_iso, case_id: body.case_id }, { execute: true, fake: true });
     booked = !!cal?.written;
     if (cal?.event_id) requireUpsert(await db.upsert("sales_booking_cases", { ...c, event_id: cal.event_id, status: "booked" }));
+    if (!cal?.written || !cal?.event_id) {
+      await journalActionStage(db, a, actionId, "uncertain", { calendar: true, written: !!cal?.written, event_id: cal?.event_id || null });
+    }
   }
-  return { ok: true, held: false, sent: !!sms?.sent, booked, fake: true, action_id: actionId };
+  return { ok: true, held: false, sent: !!sms?.sent, booked, fake: true, action_id: actionId, stage: uncertain ? "uncertain" : "complete", provider_uncertain: uncertain };
 }
 
 export async function dispatch(
@@ -761,6 +842,11 @@ export async function dispatch(
 ): Promise<Record<string, unknown>> {
   const a = assertBookingActor(actor);
   if (action === "sales_booking_policy") return { ok: true, policy: POLICY, version: SALES_BOOKING_VERSION };
+  if (action === "sales_booking_reason") {
+    const prompt = (body.prompt || body) as Record<string, unknown>;
+    const out = await authorisedLocalReason(prompt);
+    return { ok: true, ...out };
+  }
   if (action === "sales_booking_read") {
     return await readWorkspace(db, adapters, {
       resource: params.resource || String(body.resource || "nithin"),

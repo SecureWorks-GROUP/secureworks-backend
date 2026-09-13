@@ -39,6 +39,28 @@ Deno.test("unchanged source hash skips a second model call", async () => {
   assertEquals(first.customer_facts && (first.customer_facts as { date_specified: boolean }).date_specified, false);
 });
 
+Deno.test("authorised local reason is configured and is not a paid model", async () => {
+  const r = await runAssessment({
+    input: {
+      week_start: "2026-09-14",
+      now: "2026-09-12T13:00:00Z",
+      messages: [{ id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Afternoons work" }],
+      calendar_retrieved_at: "2026-09-12T13:00:00Z",
+      leave_retrieved_at: "2026-09-12T13:00:00Z",
+      leave_intervals: [],
+      travel_retrieved_at: "2026-09-12T13:00:00Z",
+      travel_minutes: 0,
+      events: [],
+      coverage: { leave_roster_complete: false, leave_state: "incomplete", travel_state: "unavailable" },
+      resource: { name: "Nithin", lane: "patio", desk_rules: { monday_from: 12, no_wednesday: true, last_start: 15.5 } },
+    },
+  });
+  assertEquals(r.reasoning, "authorised_local_reason");
+  assertEquals(r.paid_model, false);
+  assertEquals(r.intelligent_automation, false);
+  assertEquals(r.status === "ready", false);
+});
+
 Deno.test("dispatch assess uses the TypeScript engine when no adapter is supplied", async () => {
   const db = createMemoryBookingDb();
   await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1" });

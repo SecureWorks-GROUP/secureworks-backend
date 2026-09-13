@@ -131,6 +131,27 @@ Deno.test("event failure remains retryable and then assesses", async () => {
   assertEquals(n, 2);
 });
 
+Deno.test("held approval writes proposed then held journal stages", async () => {
+  const db = createMemoryBookingDb();
+  await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters(), db, "GET", ACTOR);
+  const a = await approveAction(db, fakeAdapters(), { case_id: "opp-a", kind: "approve_offer", start_iso: "2026-09-17T13:00:00+08:00", end_iso: "2026-09-17T14:00:00+08:00" }, ACTOR) as { action_id: string; stage?: string };
+  assertEquals(a.stage, "held");
+  const journal = (await db.selectMatch("sales_booking_action_journal", { org_id: ACTOR.org_id, action_id: a.action_id })).data;
+  const stages = journal.map((row) => row.stage);
+  assertEquals(stages.includes("proposed"), true);
+  assertEquals(stages.includes("held"), true);
+});
+
+Deno.test("leave coverage incomplete is not absent", () => {
+  const nithin = "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73";
+  const out = staffLeaveFromCrewAvailability([
+    { user_id: "c9a84f70-6d43-43f2-8a5b-3ec6ba9ade8b", date: "2026-09-17", status: "leave" },
+  ], nithin, "2026-09-13T02:19:54Z");
+  assertEquals(out.leave_state, "incomplete");
+  assertEquals(out.matched_rows, 0);
+  assertEquals(out.travel_state, "unavailable");
+});
+
 Deno.test("held approval retry is idempotent on the same claim", async () => {
   const db = createMemoryBookingDb();
   await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters(), db, "GET", ACTOR);
