@@ -504,6 +504,14 @@ export async function readWorkspace(
       travel_minutes: cov.travel_minutes,
       travel_state: cov.travel_state || (cov.travel_retrieved_at ? "observed" : "unavailable"),
       travel_source: cov.travel_source || "drive_time_cache",
+      population: {
+        opportunities: listed.data.filter((c) => c.opportunity_id && !String(c.id).startsWith("review-")).length,
+        unique_customers: new Set(listed.data.filter((c) => c.contact_id && c.opportunity_id).map((c) => String(c.contact_id))).size,
+        eligible_unscoped_cases: listed.data.filter((c) => c.opportunity_id && c.status !== "completed" && !archives.data.some((ar) => ar.case_id === c.id && !ar.restored)).length,
+        booked_until_visit: listed.data.filter((c) => c.status === "booked" && c.opportunity_id).length,
+        archived_cases: archives.data.filter((ar) => !ar.restored).length,
+        note: "Opportunity count is not unique customers and not scoping visits. Booked stays on the unscoped queue until a scope happens.",
+      },
       boolean_flags_are_not_capacity: true,
       gaps: [
         cursor.complete === true ? "Provider reported terminal consumption for this resource/week." : "Provider page is not terminal. Empty or missing-next is not a completed workload.",

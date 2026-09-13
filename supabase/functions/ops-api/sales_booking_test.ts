@@ -100,6 +100,19 @@ Deno.test("refresh does not persist a partial cursor over a terminal consume key
   assertEquals((cur.payload as { pages?: number }).pages, 26);
 });
 
+Deno.test("read population keeps booked opportunities on the unscoped queue", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "open-1", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "open-1", contact_id: "c1", status: "needs_decision" });
+  await db.upsert("sales_booking_cases", { id: "booked-1", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "booked-1", contact_id: "c2", status: "booked" });
+  await db.upsert("sales_booking_cases", { id: "done-1", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "done-1", contact_id: "c3", status: "completed" });
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true, total: 3 }),
+  }), db, "GET", ACTOR) as { coverage: { population?: { opportunities?: number; eligible_unscoped_cases?: number; booked_until_visit?: number } } };
+  assertEquals(out.coverage.population?.opportunities, 3);
+  assertEquals(out.coverage.population?.eligible_unscoped_cases, 2);
+  assertEquals(out.coverage.population?.booked_until_visit, 1);
+});
+
 Deno.test("unavailable adapter is not a completed workload and remains refreshable", async () => {
   let calls = 0;
   const adapters = fakeAdapters({
