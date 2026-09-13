@@ -4702,7 +4702,7 @@ export async function _readInsuranceEvidenceAction(
   return json(result.body, result.status)
 }
 
-if (import.meta.main) serve(async (req: Request) => {
+export async function handleOpsApiRequest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Unauthenticated deploy-lane version probe ──
@@ -5062,9 +5062,10 @@ if (import.meta.main) serve(async (req: Request) => {
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
 
-    if (action?.startsWith('dispatch_')) {
+    if (action?.startsWith('dispatch_') || ['workflow_refresh','sales_performance_read','message_work_links'].includes(action || '')) {
       if (!_opsApiCallerIsStaffOperator(authMode, authUser)) return json({error:'Office operator access required'},403)
       const dispatchOrg = authMode === 'jwt' ? authUser!.orgId : DEFAULT_ORG_ID
+      if (!dispatchOrg) return json({error:'Office organisation required'},403)
       try {
         const approvers = (Deno.env.get('DISPATCH_APPROVER_USER_IDS') || '').split(',').filter(Boolean)
         if (action === 'dispatch_draft_approve' || (action === 'dispatch_command' && body.command === 'draft_approve')) {
@@ -12337,7 +12338,9 @@ if (import.meta.main) serve(async (req: Request) => {
     console.error('[ops-api] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(handleOpsApiRequest)
 
 export async function prepareClockEventAssignment(
   client: any,

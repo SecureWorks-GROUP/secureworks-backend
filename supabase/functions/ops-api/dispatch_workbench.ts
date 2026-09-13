@@ -7,10 +7,9 @@ import {
 } from "../_shared/po_reference.ts";
 import {
   DISPATCH_REFRESH_OUTPUT,
-  dispatchRefreshResult,
+  operatorRefreshResult,
   pendingRefreshDoor,
   salesPerformanceUnpublished,
-  stripLeaseToken,
 } from "./dispatch_refresh_driver.ts";
 const sourceLimit = 998;
 const orderedStatuses = [
@@ -1645,47 +1644,6 @@ export function handleDispatch(
   throw new DispatchError("Unknown Dispatch action", 404);
 }
 
-async function runDispatchRefreshWork(
-  client: any,
-  org: string,
-  scope: { job_id?: string } = {},
-) {
-  const sourceCutoff = new Date().toISOString();
-  if (scope.job_id) {
-    const job = await readDispatchJob(client, org, uuid(scope.job_id));
-    const from = sourceCutoff.slice(0, 10);
-    const toDate = new Date(`${from}T12:00:00Z`);
-    toDate.setUTCDate(toDate.getUTCDate() + 6);
-    await dispatchCalendar(
-      client,
-      org,
-      new URLSearchParams({
-        from,
-        to: toDate.toISOString().slice(0, 10),
-      }),
-    );
-    return dispatchRefreshResult(1, sourceCutoff, {
-      calendar_read: true,
-      observed_source_revision: job?.source_version || null,
-    });
-  }
-  const seen = new Set<string>();
-  let cursor: string | undefined;
-  do {
-    const pageParams = new URLSearchParams({ limit: "100" });
-    if (cursor) pageParams.set("cursor", cursor);
-    const page = await dispatchList(client, org, pageParams);
-    for (const job of page.jobs || []) seen.add(job.id);
-    cursor = page.next_cursor || undefined;
-  } while (cursor);
-  if (seen.size < 1) {
-    throw new DispatchError("Dispatch Refresh did not read accepted work", 400);
-  }
-  return dispatchRefreshResult(seen.size, sourceCutoff, {
-    calendar_read: false,
-  });
-}
-
 async function handleDispatchRefresh(
   client: any,
   org: string,
@@ -1698,13 +1656,6 @@ async function handleDispatchRefresh(
       "operators may request or read a run, not claim or finish it",
       403,
     );
-  }
-  if (op === "run_once") {
-    if (Deno.env.get("DISPATCH_REFRESH_WORKER") !== "1") {
-      return pendingRefreshDoor("dispatch_refresh_worker_disabled");
-    }
-    const work = await runDispatchRefreshWork(client, org, body?.scope || {});
-    return { outcome: "completed", capability: "registered", work };
   }
   if (op === "readback") {
     if (!body?.id) throw new DispatchError("Refresh run id is required", 400);
@@ -1719,7 +1670,7 @@ async function handleDispatchRefresh(
       }
       throw new DispatchError(error.message, 500);
     }
-    return stripLeaseToken(data);
+    return operatorRefreshResult(data);
   }
   if (op !== "start") throw new DispatchError("Unknown Refresh operation", 400);
   if (typeof client.rpc !== "function") return pendingRefreshDoor();
@@ -1733,8 +1684,7 @@ async function handleDispatchRefresh(
     if (["PGRST202", "42883"].includes(error.code)) return pendingRefreshDoor();
     throw new DispatchError(error.message, 500);
   }
-  if (data?.outcome === "unavailable") return data;
-  return stripLeaseToken(data);
+  return operatorRefreshResult(data);
 }
 
 export async function dispatchWorkflow(client: any, org: string) {

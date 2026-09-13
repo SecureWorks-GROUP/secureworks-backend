@@ -347,10 +347,11 @@ begin
   if p_command='order_prepare' then
     for draft in select value from jsonb_array_elements(coalesce(p_state->'order_drafts','[]'::jsonb)) where value->>'id'=p_state->>'prepared_order_id' loop
       order_id=(draft->>'id')::uuid;
-      if exists(select 1 from purchase_orders where id=order_id and (org_id<>p_org or job_id<>p_job or status<>'draft' or reference is distinct from 'dispatch:'||order_id::text or xero_po_id is not null)) then raise exception 'order_not_editable'; end if;
       insert into purchase_orders(id,org_id,job_id,po_number,supplier_name,xero_contact_id,status,line_items,subtotal,tax,total,delivery_date,reference,notes)
         values(order_id,p_org,p_job,'PO-D-'||order_id::text,draft->>'supplier_name',draft->>'xero_contact_id','draft',draft->'line_items',null,null,null,(draft->>'delivery_date')::date,'dispatch:'||order_id::text,draft->>'po_notes')
-      on conflict(id) do update set supplier_name=excluded.supplier_name,xero_contact_id=excluded.xero_contact_id,line_items=excluded.line_items,delivery_date=excluded.delivery_date,notes=excluded.notes,subtotal=null,tax=null,total=null,updated_at=now();
+      on conflict(id) do update set supplier_name=excluded.supplier_name,xero_contact_id=excluded.xero_contact_id,line_items=excluded.line_items,delivery_date=excluded.delivery_date,notes=excluded.notes,subtotal=null,tax=null,total=null,updated_at=now()
+        where purchase_orders.org_id=excluded.org_id and purchase_orders.job_id=excluded.job_id and purchase_orders.status='draft' and purchase_orders.reference is not distinct from excluded.reference and purchase_orders.xero_po_id is null;
+      if not found then raise exception 'order_not_editable'; end if;
     end loop;
   end if;
   p_source=dispatch_source_version(p_org,p_job);
