@@ -98,6 +98,7 @@
 import { executeDispatchDraft, readbackDispatchExecution, outlookDispatchProvider, dispatchExecutionState } from './dispatch_execution.ts'
 import { dispatchOutlookSearch } from './dispatch_outlook.ts'
 import { handleDispatch, DispatchError } from './dispatch_workbench.ts'
+import { runDispatchRefreshWorker } from './dispatch_refresh_worker.ts'
 import { isCurrentContextFact } from './context_visibility.ts'
 import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
 
@@ -5067,6 +5068,11 @@ export async function handleOpsApiRequest(req: Request): Promise<Response> {
       const dispatchOrg = authMode === 'jwt' ? authUser!.orgId : DEFAULT_ORG_ID
       if (!dispatchOrg) return json({error:'Office organisation required'},403)
       try {
+        if (action === 'dispatch_refresh_worker') {
+          if (authMode !== 'api_key' || !serverSecretPresented) return json({error:'Server worker access required'},403)
+          if (req.method !== 'POST') return json({error:'POST required'},405)
+          return json(await runDispatchRefreshWorker(client,dispatchOrg))
+        }
         const approvers = (Deno.env.get('DISPATCH_APPROVER_USER_IDS') || '').split(',').filter(Boolean)
         if (action === 'dispatch_draft_approve' || (action === 'dispatch_command' && body.command === 'draft_approve')) {
           if (authMode !== 'jwt' || !approvers.includes(authUser!.id)) return json({error:'Configured Captain approval required'},403)

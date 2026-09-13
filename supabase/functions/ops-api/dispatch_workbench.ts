@@ -1232,11 +1232,18 @@ export async function dispatchList(
 ) {
   const limit = Math.min(100, Math.max(1, Number(params.get("limit") || 50)));
   if (!Number.isInteger(limit)) throw new DispatchError("Invalid limit");
+  const queue = params.get("queue") || "current_material";
+  if (!["current_material", "acceptance_review", "historical"].includes(queue)) {
+    throw new DispatchError("Invalid queue");
+  }
   let q = client.from("dispatch_eligible_jobs").select(
-    "id,job_number,client_name,site_address,type,status,accepted_at,dispatch_eligibility",
-  ).eq("org_id", org).order("id").limit(limit + 1);
+    "id,job_number,client_name,site_address,type,status,accepted_at,dispatch_eligibility,dispatch_queue",
+  ).eq("org_id", org).eq("dispatch_queue", queue).order("id").limit(limit + 1);
   if (params.get("cursor")) q = q.gt("id", uuid(params.get("cursor")));
   const data = checked(await q) || [];
+  const coverage = checked(
+    await client.rpc("dispatch_list_coverage", { p_org: org }),
+  ) || {};
   const more = data.length > limit;
   return {
     jobs: data.slice(0, limit).map((j: any) => ({
@@ -1251,15 +1258,19 @@ export async function dispatchList(
       },
       next_action: j.dispatch_eligibility === "unresolved"
         ? "Resolve acceptance evidence"
+        : j.dispatch_queue === "historical"
+        ? "Review completed dispatch history"
         : "Review material obligations",
     })),
     next_cursor: more ? data[limit - 1].id : null,
     coverage: {
+      ...coverage,
       complete: !more,
       has_more: more,
+      queue,
       source: "jobs + accepted job_documents",
       eligibility_policy:
-        "Explicit acceptance or accepted quote; unresolved post-acceptance-stage candidates retained; archived/cancelled/deleted excluded",
+        "Explicit acceptance or unsuperseded accepted quote; unresolved post-acceptance-stage candidates retained; complete/final_payment/invoiced/get_review are historical; archived/cancelled/deleted excluded",
     },
   };
 }

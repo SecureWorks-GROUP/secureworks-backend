@@ -39,7 +39,7 @@ Deno.test("dispatch worker disabled config exits without token or network", asyn
   assertEquals(result.stderr, "");
 });
 
-Deno.test("dispatch worker once posts trigger then run to configured loopback endpoint", async () => {
+Deno.test("dispatch worker posts assessment work and the shared Refresh worker to loopback", async () => {
   const token = "worker-token-secret";
   const controller = new AbortController();
   const requests: Array<{
@@ -93,6 +93,10 @@ Deno.test("dispatch worker once posts trigger then run to configured loopback en
       action: "dispatch_trigger",
     });
     assertEquals(output.dispatch_run, { ok: true, action: "dispatch_run" });
+    assertEquals(output.dispatch_refresh, {
+      ok: true,
+      action: "dispatch_refresh_worker",
+    });
     assertEquals(requests, [
       {
         action: "dispatch_trigger",
@@ -101,6 +105,11 @@ Deno.test("dispatch worker once posts trigger then run to configured loopback en
       },
       {
         action: "dispatch_run",
+        body: {},
+        auth: `Bearer ${token}`,
+      },
+      {
+        action: "dispatch_refresh_worker",
         body: {},
         auth: `Bearer ${token}`,
       },

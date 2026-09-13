@@ -222,6 +222,7 @@ export function createDispatchSqlClient(run = sql) {
             "dispatch_expire_execution_leases",
             "dispatch_finalize_task",
             "dispatch_get_execution",
+            "dispatch_list_coverage",
             "dispatch_list_tasks",
             "dispatch_order_reservations",
             "dispatch_reconcile_eligible_jobs",

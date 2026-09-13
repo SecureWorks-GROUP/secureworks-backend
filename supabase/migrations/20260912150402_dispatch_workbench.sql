@@ -605,17 +605,41 @@ grant execute on function public.dispatch_retry_task(uuid,uuid,text,bigint,uuid,
 
 -- Population does not depend on deposits, an order or an installation date.
 create view public.dispatch_eligible_jobs with (security_invoker=true) as
-select j.*,
-  case when j.accepted_at is not null or exists(select 1 from job_documents d where d.job_id=j.id and d.type='quote' and d.accepted_at is not null and d.superseded_at is null)
-    then 'accepted' else 'unresolved' end as dispatch_eligibility
+select j.id,j.org_id,j.job_number,j.client_name,j.site_address,j.type,j.status,j.accepted_at,
+  case when acceptance.accepted then 'accepted' else 'unresolved' end as dispatch_eligibility,
+  case
+    when j.status in ('complete','final_payment','invoiced','get_review') then 'historical'
+    when acceptance.accepted then 'current_material'
+    else 'acceptance_review'
+  end as dispatch_queue
 from jobs j
+cross join lateral (
+  select j.accepted_at is not null or exists(select 1 from job_documents d where d.job_id=j.id and d.type='quote' and d.accepted_at is not null and d.superseded_at is null) as accepted
+) acceptance
 where j.status not in ('archived','cancelled','deleted') and (
- j.accepted_at is not null
- or exists(select 1 from job_documents d where d.job_id=j.id and d.type='quote' and d.accepted_at is not null and d.superseded_at is null)
+ acceptance.accepted
  or j.status in ('partially_accepted','accepted','deposit','awaiting_deposit','approvals','order_materials','processing','awaiting_supplier','order_confirmed','schedule_install','scheduled','in_progress','rectification','complete','final_payment','invoiced','get_review')
 );
 revoke all on public.dispatch_eligible_jobs from anon,authenticated;
 grant select on public.dispatch_eligible_jobs to service_role;
+
+create function public.dispatch_list_coverage(p_org uuid)
+returns jsonb language sql security invoker set search_path=public,pg_temp as $$
+  select jsonb_build_object(
+    'universe',count(*),
+    'accepted',count(*) filter(where dispatch_eligibility='accepted'),
+    'unresolved',count(*) filter(where dispatch_eligibility='unresolved'),
+    'queues',jsonb_build_object(
+      'current_material',count(*) filter(where dispatch_queue='current_material'),
+      'acceptance_review',count(*) filter(where dispatch_queue='acceptance_review'),
+      'historical',count(*) filter(where dispatch_queue='historical')
+    )
+  )
+  from dispatch_eligible_jobs
+  where org_id=p_org
+$$;
+revoke all on function public.dispatch_list_coverage(uuid) from public,anon,authenticated;
+grant execute on function public.dispatch_list_coverage(uuid) to service_role;
 
 create table public.dispatch_release_controls(org_id uuid primary key,communications_enabled boolean not null default false);
 create table public.dispatch_executions(

@@ -87,10 +87,12 @@ def post(action, body):
 def cycle():
     trigger = post("dispatch_trigger", config.get("trigger_body") or {})
     run = post("dispatch_run", config.get("run_body") or {})
+    refresh = post("dispatch_refresh_worker", {})
     print(json.dumps({
         "dispatch_worker": "cycle_complete",
         "dispatch_trigger": trigger,
         "dispatch_run": run,
+        "dispatch_refresh": refresh,
     }, separators=(",", ":")))
 
 

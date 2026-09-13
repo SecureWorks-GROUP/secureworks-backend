@@ -33,6 +33,7 @@ async function request(
     role?: string;
     orgId?: string;
     sharedKeyOnly?: boolean;
+    serverKeyOnly?: boolean;
     rpc?: (call: RpcCall) => Response;
   } = {},
 ) {
@@ -75,10 +76,14 @@ async function request(
   };
   try {
     const headers: Record<string, string> = {
-      "x-api-key": environment.SW_API_KEY,
+      "x-api-key": options.serverKeyOnly
+        ? environment.SUPABASE_SERVICE_ROLE_KEY
+        : environment.SW_API_KEY,
       "content-type": "application/json",
     };
-    if (!options.sharedKeyOnly) headers.authorization = "Bearer operator-jwt";
+    if (!options.sharedKeyOnly && !options.serverKeyOnly) {
+      headers.authorization = "Bearer operator-jwt";
+    }
     const response = await handleOpsApiRequest(
       new Request(
         `https://example.invalid/ops-api?action=${action}`,
@@ -139,6 +144,9 @@ Deno.test("ops-api routes office Refresh start and readback with canonical tenan
 });
 
 Deno.test("ops-api refuses JWT worker operations and removed run_once without work", async () => {
+  const worker = await request("dispatch_refresh_worker", {});
+  assertEquals(worker.status, 403);
+  assertEquals(worker.calls, []);
   for (const action of ["workflow_refresh", "dispatch_refresh"]) {
     for (const op of ["claim", "consume", "finish", "run_once"]) {
       const result = await request(action, {
@@ -152,6 +160,32 @@ Deno.test("ops-api refuses JWT worker operations and removed run_once without wo
       assertEquals(result.body.outcome, undefined);
     }
   }
+});
+
+Deno.test("ops-api server worker reaches shared claim and holds missing schema", async () => {
+  const result = await request("dispatch_refresh_worker", {}, {
+    serverKeyOnly: true,
+    rpc: () =>
+      Response.json({
+        code: "PGRST202",
+        message: "Missing claim function in schema cache",
+      }, { status: 404 }),
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.outcome, "unavailable");
+  assertEquals(result.calls, [{
+    name: "claim_workflow_refresh",
+    args: {
+      p_workflow: "dispatch",
+      p_org_id: "00000000-0000-0000-0000-000000000001",
+      p_owner: "dispatch",
+    },
+  }]);
+  const browser = await request("dispatch_refresh_worker", {}, {
+    sharedKeyOnly: true,
+  });
+  assertEquals(browser.status, 401);
+  assertEquals(browser.calls, []);
 });
 
 Deno.test("ops-api shared reads reject non-office, missing tenant and browser key callers", async () => {
