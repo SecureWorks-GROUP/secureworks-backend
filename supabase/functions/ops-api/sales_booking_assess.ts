@@ -1,8 +1,8 @@
-'use strict';
-
-var VERSION = 'sales-booking-assess-v2.4';
-var MAX_OBSERVATION_AGE_MS = 72 * 60 * 60 * 1000;
-var INTERPRETER_FALLBACK = 'conservative-fallback';
+// Canonical Booking assessment engine (TypeScript). Shared by ops-api and the local assess server.
+// @ts-nocheck
+export const VERSION = 'sales-booking-assess-v2.4';
+export const MAX_OBSERVATION_AGE_MS = 72 * 60 * 60 * 1000;
+export const INTERPRETER_FALLBACK = 'conservative-fallback';
 var TZ_PERTH = 'Australia/Perth';
 var MONTHS = {
   january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2, april: 3, apr: 3,
@@ -11,7 +11,7 @@ var MONTHS = {
 };
 var WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-function mondayIso(iso) {
+export function mondayIso(iso) {
   var parts = String(iso).slice(0, 10).split('-').map(Number);
   var utc = Date.UTC(parts[0], parts[1] - 1, parts[2]);
   var day = new Date(utc).getUTCDay();
@@ -29,7 +29,7 @@ function hasOffset(iso) {
   return /Z$|[+-]\d{2}:\d{2}$/.test(String(iso || ''));
 }
 
-function toInstant(iso) {
+export function toInstant(iso) {
   if (!iso) return null;
   var s = String(iso);
   if (hasOffset(s)) {
@@ -371,7 +371,7 @@ function occupancyGaps(input) {
   return gaps;
 }
 
-function coverageReady(input) {
+export function coverageReady(input) {
   return occupancyGaps(input).length === 0;
 }
 
@@ -463,7 +463,7 @@ function verifyCitedOffer(input, claimed, inbound, messages) {
   return { ok: true, offer: offer };
 }
 
-function conservativeExtract(input) {
+export function conservativeExtract(input) {
   var messages = sortMessages(input.messages);
   var inbound = [];
   var outbound = [];
@@ -811,7 +811,7 @@ function slotFeasible(slot, input) {
   return true;
 }
 
-function validate(ground, model, input) {
+export function validate(ground, model, input) {
   input = input || {};
   ground = ground || conservativeExtract(input);
   var reasons = (ground.review_reasons || []).slice();
@@ -1021,14 +1021,14 @@ function validate(ground, model, input) {
 
 
 
-function assess(input) {
+export function assess(input) {
   input = input || {};
   var ground = conservativeExtract(input);
   var model = typeof input.reason === 'function' ? input.reason(input) : null;
   return validate(ground, model, input);
 }
 
-function reasonPrompt(input) {
+export function reasonPrompt(input) {
   return {
     task: 'sales_booking_conversation_assessment',
     schema_version: VERSION,
@@ -1059,7 +1059,7 @@ function reasonPrompt(input) {
   };
 }
 
-async function assessWithReason(input) {
+export async function assessWithReason(input) {
   input = input || {};
   var adapter = input.reasonAsync || (typeof globalThis !== 'undefined' && globalThis.SALES_BOOKING_REASON);
   if (typeof adapter !== 'function') return assess(input);
@@ -1068,7 +1068,7 @@ async function assessWithReason(input) {
   return validate(ground, raw, input);
 }
 
-function applyReplyToStatus(currentStatus, replyKind, bound) {
+export function applyReplyToStatus(currentStatus, replyKind, bound) {
   if (replyKind === 'acceptance' && bound) return { status: 'needs_decision', exact_acceptance: true, action: 'confirm_booking' };
   if (replyKind === 'acceptance' && !bound) return { status: 'needs_decision', exact_acceptance: false, action: 'approve_offer' };
   if (replyKind === 'new_availability' || replyKind === 'decline') return { status: 'ready', exact_acceptance: false, action: 'approve_offer' };
@@ -1079,16 +1079,3 @@ function applyReplyToStatus(currentStatus, replyKind, bound) {
   return { status: currentStatus || 'needs_decision', exact_acceptance: false, action: 'approve_offer' };
 }
 
-module.exports = {
-  VERSION: VERSION,
-  INTERPRETER_FALLBACK: INTERPRETER_FALLBACK,
-  mondayIso: mondayIso,
-  toInstant: toInstant,
-  conservativeExtract: conservativeExtract,
-  validate: validate,
-  assess: assess,
-  assessWithReason: assessWithReason,
-  reasonPrompt: reasonPrompt,
-  applyReplyToStatus: applyReplyToStatus,
-  coverageReady: coverageReady
-};

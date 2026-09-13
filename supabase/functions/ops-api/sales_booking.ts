@@ -1,6 +1,8 @@
 // Sales Booking workflow. Production uses Supabase client + SQL RPCs.
 // booking_test/psql is a test transport only. No Deno.Command/psql in this module.
 
+import { runAssessment } from "./sales_booking_engine.ts";
+
 export const SALES_BOOKING_VERSION = "sales-booking-api/v1";
 
 export const POLICY = {
@@ -137,6 +139,7 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
     sales_booking_slot_claims: [],
     sales_booking_leases: [],
     sales_booking_source_revisions: [],
+    sales_booking_runner_journal: [],
   };
   function rows(t: string) { return mem[t] || (mem[t] = []); }
   return {
@@ -331,7 +334,8 @@ export async function readWorkspace(
     const put = await db.rpc("sales_booking_put_consumption_cursor", { p_org_id: a.org_id, p_key: consumeKey, p_payload: cursor });
     if (put.data && put.data.ok === false) throw new SalesBookingError("consumption cursor refused", 400, String(put.data.code));
     pages += 1;
-    if (page.complete !== true) break;
+    if (page.complete !== true && !params.drain) break;
+    if (page.complete !== true && params.drain && !page.next) break;
   }
   const since = `${params.week_start}T00:00:00+08:00`;
   const untilDate = new Date(`${params.week_start}T00:00:00+08:00`);
@@ -424,7 +428,14 @@ export async function persistAssessment(db: BookingDb, body: { case_id: string; 
     const live = leases.data.find((l) => !l.released);
     if (live && live.generation !== body.lease_generation) throw new SalesBookingError("stale lease generation", 409, "stale_lease");
   }
-  const rec = { case_id: body.case_id, org_id: a.org_id, version: body.version, payload: { ...body.payload, source_version: c.source_version, lease_generation: body.lease_generation || null }, at: nowIso() };
+  const rec = {
+    case_id: body.case_id,
+    org_id: a.org_id,
+    version: body.version,
+    source_hash: body.payload.source_hash || null,
+    payload: { ...body.payload, source_version: c.source_version, lease_generation: body.lease_generation || null },
+    at: nowIso(),
+  };
   requireUpsert(await db.upsert("sales_booking_assessments", rec));
   return rec;
 }
@@ -457,8 +468,9 @@ export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_k
   if (!body.event_key) throw new SalesBookingError("event_key required");
   const ingest = await db.rpc("sales_booking_ingest_event", { p_org_id: a.org_id, p_event_key: body.event_key });
   if (ingest.data?.processed) return { ok: true, duplicate: true, assessed: false };
-  if (!body.case_id || !adapters.assessCase) {
-    return { ok: true, duplicate: false, assessed: false, reason: adapters.assessCase ? "no_case" : "no_assess_worker" };
+  const assessFn = adapters.assessCase || ((input: Record<string, unknown>) => runAssessment(input));
+  if (!body.case_id) {
+    return { ok: true, duplicate: false, assessed: false, reason: "no_case" };
   }
   const token = `assess:${a.org_id}:${body.case_id}`;
   const lease = await db.rpc("sales_booking_acquire_lease", {
@@ -474,7 +486,7 @@ export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_k
     requireUpsert(await db.upsert("sales_booking_archives", { ...arch, restored: true, reason: "inbound_reopen" }));
   }
   try {
-    const payload = await adapters.assessCase({ case: c, event: body, org_id: a.org_id });
+    const payload = await assessFn({ case: c, event: body, org_id: a.org_id });
     await persistAssessment(db, {
       case_id: body.case_id, version: String(payload.version || SALES_BOOKING_VERSION), payload,
       lease_generation: String(lease.data?.generation || ""), observed_source_version: String(c.source_version || ""),
@@ -503,8 +515,12 @@ export async function reconcile(db: BookingDb, body: { case_id?: string; reason?
 export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runner_enabled?: boolean } | undefined, actor: BookingActor) {
   const a = assertBookingActor(actor);
   const enabled = opts?.runner_enabled ?? POLICY.runner_enabled;
-  if (!enabled) return { ok: true, ran: false, reason: "runner_held", policy: POLICY, sent: 0 };
-  if (!adapters.assessCase) return { ok: true, ran: false, reason: "no_assess_worker", sent: 0 };
+  requireUpsert(await db.upsert("sales_booking_runner_journal", {
+    id: `j-${Date.now()}`, org_id: a.org_id, kind: "tick", status: enabled ? "running" : "held",
+    detail: { runner_enabled: enabled, send: "held", calendar_write: "held" }, at: nowIso(),
+  }));
+  if (!enabled) return { ok: true, ran: false, reason: "runner_held", policy: POLICY, sent: 0, journaled: true };
+  const assessFn = adapters.assessCase || ((input: Record<string, unknown>) => runAssessment(input));
   const due = await db.selectMatch("sales_booking_cases", { org_id: a.org_id, status: "needs_decision" });
   const ordered = due.data.sort((x, y) => String(x.last_runner_at || "").localeCompare(String(y.last_runner_at || "")));
   let assessed = 0;
@@ -519,7 +535,7 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
     });
     if (lease.data?.ok === false) continue;
     const observed = String(c.source_version || "");
-    const result = await adapters.assessCase({ case: c, source: "runner", org_id: a.org_id });
+    const result = await assessFn({ case: c, source: "runner", org_id: a.org_id, cached_hash: existing?.source_hash, cached_payload: existing?.payload as Record<string, unknown> | undefined });
     await persistAssessment(db, {
       case_id: String(c.id), version: String(result.version || SALES_BOOKING_VERSION), payload: result,
       lease_generation: String(lease.data?.generation || ""), observed_source_version: observed,
@@ -600,11 +616,23 @@ export async function dispatch(
   if (writes.includes(action) && method !== "POST") throw new SalesBookingError(`${action} requires POST`, 405, "method_not_allowed");
   if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; expected_revision?: number }, a);
   if (action === "sales_booking_assess") {
-    if (!adapters.assessCase) throw new SalesBookingError("assess worker required", 400, "no_assess_worker");
     const cases = await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id });
     if (!cases.data[0]) throw new SalesBookingError("unknown case", 404, "unknown_case");
-    const payload = await adapters.assessCase({ case: cases.data[0], input: body.input, org_id: a.org_id });
-    return persistAssessment(db, { case_id: String(body.case_id), version: String(payload.version || SALES_BOOKING_VERSION), payload, observed_source_version: String(cases.data[0].source_version || "") }, a);
+    const prior = (await db.selectMatch("sales_booking_assessments", { case_id: body.case_id, org_id: a.org_id })).data[0];
+    const assessFn = adapters.assessCase || ((input: Record<string, unknown>) => runAssessment(input));
+    const payload = await assessFn({
+      case: cases.data[0],
+      input: body.input,
+      org_id: a.org_id,
+      cached_hash: prior?.source_hash,
+      cached_payload: prior?.payload as Record<string, unknown> | undefined,
+    });
+    return persistAssessment(db, {
+      case_id: String(body.case_id),
+      version: String(payload.version || SALES_BOOKING_VERSION),
+      payload,
+      observed_source_version: String(cases.data[0].source_version || ""),
+    }, a);
   }
   if (action === "sales_booking_archive") return archiveCase(db, body as { case_id: string; reason?: string; note?: string }, a);
   if (action === "sales_booking_restore") return restoreCase(db, String(body.case_id), a);
