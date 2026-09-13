@@ -23,12 +23,12 @@ const SOURCE = "dispatch-source-revision-1";
 Deno.test("startWorkflowRefresh calls the durable RPC", async () => {
   const calls: unknown[] = [];
   const client = {
-    rpc: async (name: string, args: unknown) => {
+    rpc: (name: string, args: unknown) => {
       calls.push({ name, args });
-      return {
+      return Promise.resolve({
         data: { outcome: "started", id: "run-1", status: "queued" },
         error: null,
-      };
+      });
     },
   };
   const out = await startWorkflowRefresh(client, {
@@ -73,7 +73,9 @@ Deno.test("JWT actor is the signed-in operator, not the body", () => {
 Deno.test("finish requires lease token and owner", async () => {
   await assertRejects(
     () =>
-      finishWorkflowRefresh({ rpc: async () => ({ data: {}, error: null }) }, {
+      finishWorkflowRefresh({
+        rpc: () => Promise.resolve({ data: {}, error: null }),
+      }, {
         id: "run-1",
         status: "completed",
       }),
@@ -85,9 +87,9 @@ Deno.test("completed finish requires a persisted driver receipt", async () => {
   await assertRejects(
     () =>
       finishWorkflowRefresh({
-        rpc: async (name: string) => {
+        rpc: (name: string) => {
           calls.push(name);
-          return { data: {}, error: null };
+          return Promise.resolve({ data: {}, error: null });
         },
       }, {
         id: "run-1",
@@ -104,12 +106,12 @@ Deno.test("completed finish requires a persisted driver receipt", async () => {
 Deno.test("UI start does not claim or complete Refresh", async () => {
   const calls: string[] = [];
   const client = {
-    rpc: async (name: string) => {
+    rpc: (name: string) => {
       calls.push(name);
-      return {
+      return Promise.resolve({
         data: { outcome: "unavailable", capability: "unavailable" },
         error: null,
-      };
+      });
     },
   };
   const out = await startWorkflowRefresh(client, {
@@ -125,12 +127,12 @@ Deno.test("UI start does not claim or complete Refresh", async () => {
 Deno.test("consume owner is dispatch", async () => {
   const calls: unknown[] = [];
   const client = {
-    rpc: async (name: string, args: unknown) => {
+    rpc: (name: string, args: unknown) => {
       calls.push({ name, args });
-      return {
+      return Promise.resolve({
         data: { outcome: "unavailable", owner: "dispatch" },
         error: null,
-      };
+      });
     },
   };
   const out = await consumeWorkflowRefresh(client, { owner: "dispatch" });
@@ -160,10 +162,11 @@ Deno.test("readback rejects a payload that still contains a lease token", async 
   await assertRejects(() =>
     readWorkflowRefresh(
       {
-        rpc: async () => ({
-          data: { id: "run-1", lease_token: "secret" },
-          error: null,
-        }),
+        rpc: () =>
+          Promise.resolve({
+            data: { id: "run-1", lease_token: "secret" },
+            error: null,
+          }),
       },
       "run-1",
       ORG,
@@ -174,13 +177,18 @@ Deno.test("readback rejects a payload that still contains a lease token", async 
 Deno.test("simultaneous start retries unique violation into a join", async () => {
   let n = 0;
   const client = {
-    rpc: async () => {
+    rpc: () => {
       n += 1;
-      if (n === 1) return { data: null, error: { message: "duplicate key" } };
-      return {
+      if (n === 1) {
+        return Promise.resolve({
+          data: null,
+          error: { message: "duplicate key" },
+        });
+      }
+      return Promise.resolve({
         data: { outcome: "joined", id: "run-1", status: "queued" },
         error: null,
-      };
+      });
     },
   };
   try {
@@ -204,9 +212,12 @@ Deno.test("simultaneous start retries unique violation into a join", async () =>
 
 Deno.test("worker claim is a separate RPC from finish", async () => {
   const client = {
-    rpc: async (name: string) => {
+    rpc: (name: string) => {
       assertEquals(name, "claim_workflow_refresh");
-      return { data: { status: "running", lease_generation: 1 }, error: null };
+      return Promise.resolve({
+        data: { status: "running", lease_generation: 1 },
+        error: null,
+      });
     },
   };
   const out = await claimWorkflowRefresh(client, {
@@ -219,16 +230,16 @@ Deno.test("worker claim is a separate RPC from finish", async () => {
 Deno.test("receipt helper sends the driver-owned output to the durable RPC", async () => {
   const calls: unknown[] = [];
   const out = await recordWorkflowRefreshReceipt({
-    rpc: async (name: string, args: unknown) => {
+    rpc: (name: string, args: unknown) => {
       calls.push({ name, args });
-      return {
+      return Promise.resolve({
         data: {
           receipt_id: "receipt-1",
           outcome: "persisted",
           observed_source_revision: SOURCE,
         },
         error: null,
-      };
+      });
     },
   }, {
     id: "run-1",
@@ -268,24 +279,24 @@ for (const callerRevision of [undefined, null, "stale-caller-revision"]) {
   Deno.test(`finish uses the persisted revision when caller revision is ${callerRevision}`, async () => {
     const calls: string[] = [];
     const out = await finishWorkflowRefresh({
-      rpc: async (
+      rpc: (
         name: string,
-        args: { p_observed_revision: unknown; p_result?: unknown },
+        args: Record<string, unknown> = {},
       ) => {
         calls.push(name);
         assertEquals(args.p_observed_revision, SOURCE);
         if (name === "record_workflow_refresh_receipt") {
-          return {
+          return Promise.resolve({
             data: {
               receipt_id: "receipt-1",
               outcome: "persisted",
               observed_source_revision: SOURCE,
             },
             error: null,
-          };
+          });
         }
         assertEquals(args.p_result, { receipt_id: "receipt-1" });
-        return { data: { status: "completed" }, error: null };
+        return Promise.resolve({ data: { status: "completed" }, error: null });
       },
     }, {
       id: "run-1",
@@ -325,15 +336,15 @@ Deno.test("finish stops when persistence returns no usable source revision", asy
     await assertRejects(
       () =>
         finishWorkflowRefresh({
-          rpc: async (name: string) => {
+          rpc: (name: string) => {
             calls.push(name);
-            return {
+            return Promise.resolve({
               data: {
                 receipt_id: "receipt-1",
                 observed_source_revision: revision,
               },
               error: null,
-            };
+            });
           },
         }, {
           id: "run-1",

@@ -3,6 +3,9 @@
 -- This migration supplies the shared validator for the Dispatch driver only;
 -- other workflow owners remain unavailable until their validator exists.
 
+ALTER TABLE public.workflow_refresh_runs
+  ADD COLUMN IF NOT EXISTS driver_request_id uuid;
+
 ALTER TABLE public.workflow_refresh_drivers
   ADD COLUMN IF NOT EXISTS validator_key text;
 
@@ -41,11 +44,33 @@ CREATE TABLE IF NOT EXISTS public.workflow_refresh_receipts (
   lease_owner text NOT NULL,
   lease_token uuid NOT NULL,
   lease_generation integer NOT NULL CHECK (lease_generation > 0),
+  driver_request_id uuid NOT NULL,
   observed_source_revision text NOT NULL,
   output jsonb NOT NULL CHECK (jsonb_typeof(output) = 'object'),
   created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (run_id)
+  UNIQUE (run_id, lease_generation)
 );
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid='public.workflow_refresh_receipts'::regclass
+       AND conname='workflow_refresh_receipts_run_id_key'
+  ) THEN
+    ALTER TABLE public.workflow_refresh_receipts
+      DROP CONSTRAINT workflow_refresh_receipts_run_id_key;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid='public.workflow_refresh_receipts'::regclass
+       AND conname='workflow_refresh_receipts_run_generation_key'
+  ) THEN
+    ALTER TABLE public.workflow_refresh_receipts
+      ADD CONSTRAINT workflow_refresh_receipts_run_generation_key
+      UNIQUE (run_id, lease_generation);
+  END IF;
+END $$;
 
 ALTER TABLE public.workflow_refresh_receipts ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.workflow_refresh_receipts FROM PUBLIC, anon, authenticated, service_role;
@@ -222,27 +247,36 @@ BEGIN
     new_lease := gen_random_uuid(); new_gen := 1;
     UPDATE public.workflow_refresh_runs
        SET status='running', lease_token=new_lease, lease_generation=new_gen,
+           driver_request_id=gen_random_uuid(),
            expected_source_revision=source_revision, updated_at=now(),
            result=jsonb_build_object('owner',p_owner,'step','claimed',
              'expected_source_revision',source_revision)
      WHERE id=p_id;
     RETURN jsonb_build_object('ok',true,'id',p_id,'status','running','owner',p_owner,
       'lease_token',new_lease,'lease_generation',new_gen,
-      'expected_source_revision',source_revision);
+      'expected_source_revision',source_revision,'driver_request_id',
+      (SELECT driver_request_id FROM public.workflow_refresh_runs WHERE id=p_id));
   END IF;
   IF run.status='running' THEN
     IF run.lease_token IS DISTINCT FROM p_lease OR run.lease_generation IS DISTINCT FROM p_generation
     THEN RAISE EXCEPTION 'workflow_refresh_lease_mismatch'; END IF;
     IF run.updated_at >= now() - interval '15 minutes'
     THEN RAISE EXCEPTION 'workflow_refresh_not_active'; END IF;
+    source_revision := public.workflow_refresh_source_revision(
+      run.workflow, run.org_id, run.scope, driver.validator_key
+    );
     new_lease := gen_random_uuid(); new_gen := run.lease_generation + 1;
     UPDATE public.workflow_refresh_runs
        SET lease_token=new_lease, lease_generation=new_gen, updated_at=now(),
-           result=jsonb_build_object('owner',p_owner,'step','reclaimed','lease_generation',new_gen)
+           driver_request_id=gen_random_uuid(), expected_source_revision=source_revision,
+           result=jsonb_build_object('owner',p_owner,'step','reclaimed',
+             'lease_generation',new_gen,'expected_source_revision',source_revision)
      WHERE id=p_id;
     RETURN jsonb_build_object('ok',true,'id',p_id,'status','running','owner',p_owner,
       'lease_token',new_lease,'lease_generation',new_gen,
-      'expected_source_revision',run.expected_source_revision,'recovered',true);
+      'expected_source_revision',source_revision,'driver_request_id',
+      (SELECT driver_request_id FROM public.workflow_refresh_runs WHERE id=p_id),
+      'recovered',true);
   END IF;
   RAISE EXCEPTION 'workflow_refresh_not_active';
 END $$;
@@ -287,7 +321,7 @@ BEGIN
   THEN RAISE EXCEPTION 'workflow_refresh_receipt_invalid'; END IF;
 
   SELECT * INTO run FROM public.workflow_refresh_runs WHERE id=p_run_id FOR UPDATE;
-  IF NOT FOUND OR run.status IS DISTINCT FROM 'running'
+  IF NOT FOUND OR run.status NOT IN ('running','completed','partial')
   THEN RAISE EXCEPTION 'workflow_refresh_not_active'; END IF;
   IF run.lease_token IS DISTINCT FROM p_lease OR run.workflow IS DISTINCT FROM p_owner
      OR run.lease_generation IS DISTINCT FROM p_generation
@@ -301,13 +335,33 @@ BEGIN
      OR p_scope IS DISTINCT FROM run.scope
   THEN RAISE EXCEPTION 'workflow_refresh_receipt_scope_mismatch'; END IF;
 
+  -- A completed/partial run is immutable. An exact retry of the same
+  -- generation receipt is a read of the stored evidence, so a lost HTTP
+  -- response does not cause work to be repeated. Any changed receipt conflicts.
+  IF run.status IN ('completed','partial') THEN
+    SELECT * INTO receipt FROM public.workflow_refresh_receipts
+     WHERE run_id=p_run_id AND lease_generation=p_generation;
+    IF NOT FOUND THEN RAISE EXCEPTION 'workflow_refresh_driver_output_missing'; END IF;
+    IF receipt.workflow IS DISTINCT FROM run.workflow
+       OR receipt.org_id IS DISTINCT FROM run.org_id
+       OR receipt.scope IS DISTINCT FROM run.scope
+       OR receipt.driver_version IS DISTINCT FROM p_driver_version
+       OR receipt.lease_owner IS DISTINCT FROM p_owner
+       OR receipt.lease_token IS DISTINCT FROM p_lease
+       OR receipt.lease_generation IS DISTINCT FROM p_generation
+       OR receipt.driver_request_id IS DISTINCT FROM run.driver_request_id
+       OR receipt.observed_source_revision IS DISTINCT FROM p_observed_revision
+       OR receipt.output IS DISTINCT FROM p_output
+    THEN RAISE EXCEPTION 'workflow_refresh_receipt_conflict'; END IF;
+    RETURN jsonb_build_object(
+      'ok',true,'outcome','idempotent','receipt_id',receipt.id,
+      'driver_version',receipt.driver_version,
+      'observed_source_revision',receipt.observed_source_revision
+    );
+  END IF;
+
   IF p_output->>'ok' IS DISTINCT FROM 'true'
      OR p_output->>'declared_output' IS DISTINCT FROM driver.declared_output
-     OR jsonb_typeof(p_output->'work') IS DISTINCT FROM 'object'
-     OR p_output->'work' = '{}'::jsonb
-     OR jsonb_typeof(p_output#>'{work,jobs_read}') IS DISTINCT FROM 'number'
-     OR (p_output#>>'{work,jobs_read}')::numeric < 1
-     OR nullif(btrim(p_output#>>'{work,source_cutoff}'), '') IS NULL
      OR p_output->>'observed_source_revision' IS DISTINCT FROM p_observed_revision
      OR p_output#>>'{output_ref,table}' IS DISTINCT FROM 'dispatch_commands'
      OR p_output#>>'{output_ref,command}' IS DISTINCT FROM 'assess'
@@ -321,6 +375,9 @@ BEGIN
   IF output_request_id IS NULL THEN
     RAISE EXCEPTION 'workflow_refresh_driver_output_invalid';
   END IF;
+  IF run.driver_request_id IS NULL
+     OR output_request_id IS DISTINCT FROM run.driver_request_id
+  THEN RAISE EXCEPTION 'workflow_refresh_driver_output_invalid'; END IF;
   BEGIN
     expected_job_id := (run.scope->>'job_id')::uuid;
   EXCEPTION WHEN invalid_text_representation THEN
@@ -365,16 +422,17 @@ BEGIN
 
   INSERT INTO public.workflow_refresh_receipts(
     run_id,workflow,org_id,scope,driver_version,lease_owner,lease_token,
-    lease_generation,observed_source_revision,output
+    lease_generation,driver_request_id,observed_source_revision,output
   ) VALUES (
     run.id,run.workflow,run.org_id,run.scope,p_driver_version,p_owner,p_lease,
-    p_generation,p_observed_revision,p_output
+    p_generation,run.driver_request_id,p_observed_revision,p_output
   )
-  ON CONFLICT (run_id) DO NOTHING
+  ON CONFLICT (run_id,lease_generation) DO NOTHING
   RETURNING * INTO receipt;
 
   IF NOT FOUND THEN
-    SELECT * INTO receipt FROM public.workflow_refresh_receipts WHERE run_id=p_run_id;
+    SELECT * INTO receipt FROM public.workflow_refresh_receipts
+     WHERE run_id=p_run_id AND lease_generation=p_generation;
     IF receipt.workflow IS DISTINCT FROM run.workflow
        OR receipt.org_id IS DISTINCT FROM run.org_id
        OR receipt.scope IS DISTINCT FROM run.scope
@@ -382,6 +440,7 @@ BEGIN
        OR receipt.lease_owner IS DISTINCT FROM p_owner
        OR receipt.lease_token IS DISTINCT FROM p_lease
        OR receipt.lease_generation IS DISTINCT FROM p_generation
+       OR receipt.driver_request_id IS DISTINCT FROM run.driver_request_id
        OR receipt.observed_source_revision IS DISTINCT FROM p_observed_revision
        OR receipt.output IS DISTINCT FROM p_output
     THEN RAISE EXCEPTION 'workflow_refresh_receipt_conflict'; END IF;
@@ -418,7 +477,27 @@ BEGIN
   SELECT * INTO run FROM public.workflow_refresh_runs WHERE id=p_id FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'workflow_refresh_not_active'; END IF;
   IF run.lease_token IS DISTINCT FROM p_lease OR run.workflow IS DISTINCT FROM p_owner
-     OR run.lease_generation IS DISTINCT FROM p_generation OR run.status IS DISTINCT FROM 'running'
+     OR run.lease_generation IS DISTINCT FROM p_generation
+  THEN RAISE EXCEPTION 'workflow_refresh_lease_mismatch'; END IF;
+
+  -- A lost successful response may be retried with the same run, lease,
+  -- generation, receipt id and observed revision. Return the stored outcome
+  -- without invoking the driver again; different or stale identities cannot
+  -- use this replay path.
+  IF run.status IN ('completed','partial') THEN
+    SELECT * INTO receipt FROM public.workflow_refresh_receipts
+     WHERE run_id=p_id AND lease_generation=p_generation;
+    IF NOT FOUND THEN RAISE EXCEPTION 'workflow_refresh_not_active'; END IF;
+    IF p_status NOT IN ('completed','partial')
+       OR p_observed_revision IS DISTINCT FROM receipt.observed_source_revision
+       OR p_result->>'receipt_id' IS DISTINCT FROM receipt.id::text
+    THEN RAISE EXCEPTION 'workflow_refresh_receipt_retry_mismatch'; END IF;
+    RETURN jsonb_build_object(
+      'ok',true,'id',p_id,'status',run.status,'owner',p_owner,
+      'result',run.result,'replayed',true
+    );
+  END IF;
+  IF run.status IS DISTINCT FROM 'running'
   THEN RAISE EXCEPTION 'workflow_refresh_lease_mismatch'; END IF;
 
   final_status := p_status;
@@ -429,7 +508,8 @@ BEGIN
        OR driver.validator_key IS DISTINCT FROM 'dispatch_source_v1'
     THEN RAISE EXCEPTION 'workflow_refresh_driver_unavailable'; END IF;
 
-    SELECT * INTO receipt FROM public.workflow_refresh_receipts WHERE run_id=p_id;
+    SELECT * INTO receipt FROM public.workflow_refresh_receipts
+     WHERE run_id=p_id AND lease_generation=p_generation;
     IF NOT FOUND
        OR receipt.workflow IS DISTINCT FROM run.workflow
        OR receipt.org_id IS DISTINCT FROM run.org_id
@@ -438,6 +518,7 @@ BEGIN
        OR receipt.lease_owner IS DISTINCT FROM p_owner
        OR receipt.lease_token IS DISTINCT FROM p_lease
        OR receipt.lease_generation IS DISTINCT FROM p_generation
+       OR receipt.driver_request_id IS DISTINCT FROM run.driver_request_id
        OR receipt.observed_source_revision IS NULL
     THEN RAISE EXCEPTION 'workflow_refresh_driver_output_missing'; END IF;
 

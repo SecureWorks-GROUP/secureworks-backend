@@ -19,6 +19,13 @@ RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION '%', message; END IF;
 END $$;
+CREATE FUNCTION pg_temp.refresh_receipt_count(p_run_id uuid, p_generation integer DEFAULT NULL)
+RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path=public AS $$
+  SELECT count(*)::integer
+    FROM public.workflow_refresh_receipts
+   WHERE run_id=p_run_id
+     AND (p_generation IS NULL OR lease_generation=p_generation)
+$$;
 
 DO $$
 DECLARE
@@ -30,10 +37,7 @@ DECLARE
   job_missing constant uuid := '28000000-0000-4000-8000-000000000004';
   job_error constant uuid := '28000000-0000-4000-8000-000000000005';
   job_mutated constant uuid := '28000000-0000-4000-8000-000000000006';
-  request_a constant uuid := '28000000-0000-4000-8000-000000000101';
-  request_capture constant uuid := '28000000-0000-4000-8000-000000000102';
-  request_changed constant uuid := '28000000-0000-4000-8000-000000000103';
-  request_mutated constant uuid := '28000000-0000-4000-8000-000000000104';
+  job_reclaim constant uuid := '28000000-0000-4000-8000-000000000007';
   started jsonb;
   claimed jsonb;
   receipt jsonb;
@@ -46,6 +50,10 @@ DECLARE
   started_a jsonb;
   claimed_a jsonb;
   observed_a text;
+  reclaimed jsonb;
+  retry jsonb;
+  old_lease uuid;
+  unrelated_request uuid;
 BEGIN
   INSERT INTO public.jobs(id,org_id,status,type,job_number)
   VALUES
@@ -54,14 +62,16 @@ BEGIN
     (job_changed,org_a,'new','patio','REFRESH-280-3'),
     (job_missing,org_a,'new','patio','REFRESH-280-4'),
     (job_error,org_a,'new','patio','REFRESH-280-5'),
-    (job_mutated,org_a,'new','patio','REFRESH-280-6');
+    (job_mutated,org_a,'new','patio','REFRESH-280-6'),
+    (job_reclaim,org_a,'new','patio','REFRESH-280-7');
   INSERT INTO public.dispatch_refresh_test_sources(org_id,job_id,revision)
   VALUES
     (org_a,job_a,'source-a1'),
     (org_a,job_capture,'source-capture-before'),
     (org_a,job_changed,'source-change-1'),
     (org_a,job_error,'error'),
-    (org_a,job_mutated,'source-mutation-1');
+    (org_a,job_mutated,'source-mutation-1'),
+    (org_a,job_reclaim,'source-reclaim-1');
 
   SET LOCAL ROLE service_role;
   BEGIN
@@ -137,11 +147,12 @@ BEGIN
     'observed_source_revision',observed_a,
     'work',jsonb_build_object('jobs_read',1,'source_cutoff','2026-09-13T00:00:00Z'),
     'output_ref',jsonb_build_object(
-      'table','dispatch_commands','command','assess','request_id',request_a::text
+      'table','dispatch_commands','command','assess',
+      'request_id',claimed_a->>'driver_request_id'
     )
   );
   PERFORM public.dispatch_commit(
-    org_a,job_a,0,request_a,'hash-a','operations','assess',observed_a,
+    org_a,job_a,0,(claimed_a->>'driver_request_id')::uuid,'hash-a','operations','assess',observed_a,
     jsonb_build_object('assessment',jsonb_build_object('source_version',observed_a))
   );
   receipt := public.record_workflow_refresh_receipt(
@@ -160,7 +171,7 @@ BEGIN
     PERFORM public.record_workflow_refresh_receipt(
       (started_a->>'id')::uuid,'dispatch',(claimed_a->>'lease_token')::uuid,
       (claimed_a->>'lease_generation')::integer,'dispatch_refresh/v1',scope_a,
-      jsonb_set(output_a,'{work,jobs_read}','2'::jsonb),observed_a
+      output_a || jsonb_build_object('retry_metadata','different'),observed_a
     );
     RAISE EXCEPTION 'different receipt unexpectedly replayed';
   EXCEPTION WHEN OTHERS THEN
@@ -224,11 +235,12 @@ BEGIN
     'observed_source_revision',observed,
     'work',jsonb_build_object('jobs_read',1,'source_cutoff','2026-09-13T00:01:00Z'),
     'output_ref',jsonb_build_object(
-      'table','dispatch_commands','command','assess','request_id',request_capture::text
+      'table','dispatch_commands','command','assess',
+      'request_id',claimed->>'driver_request_id'
     )
   );
   PERFORM public.dispatch_commit(
-    org_a,job_capture,0,request_capture,'hash-capture','operations','assess',observed,
+    org_a,job_capture,0,(claimed->>'driver_request_id')::uuid,'hash-capture','operations','assess',observed,
     jsonb_build_object('assessment',jsonb_build_object('source_version',observed))
   );
   PERFORM public.record_workflow_refresh_receipt(
@@ -255,11 +267,12 @@ BEGIN
     'observed_source_revision',observed,
     'work',jsonb_build_object('jobs_read',1,'source_cutoff','2026-09-13T00:02:00Z'),
     'output_ref',jsonb_build_object(
-      'table','dispatch_commands','command','assess','request_id',request_changed::text
+      'table','dispatch_commands','command','assess',
+      'request_id',claimed->>'driver_request_id'
     )
   );
   PERFORM public.dispatch_commit(
-    org_a,job_changed,0,request_changed,'hash-changed','operations','assess',observed,
+    org_a,job_changed,0,(claimed->>'driver_request_id')::uuid,'hash-changed','operations','assess',observed,
     jsonb_build_object('assessment',jsonb_build_object('source_version',observed))
   );
   PERFORM public.record_workflow_refresh_receipt(
@@ -290,11 +303,12 @@ BEGIN
     'observed_source_revision',observed,
     'work',jsonb_build_object('jobs_read',1,'source_cutoff','2026-09-13T00:02:30Z'),
     'output_ref',jsonb_build_object(
-      'table','dispatch_commands','command','assess','request_id',request_mutated::text
+      'table','dispatch_commands','command','assess',
+      'request_id',claimed->>'driver_request_id'
     )
   );
   PERFORM public.dispatch_commit(
-    org_a,job_mutated,0,request_mutated,'hash-mutated','operations','assess',observed,
+    org_a,job_mutated,0,(claimed->>'driver_request_id')::uuid,'hash-mutated','operations','assess',observed,
     jsonb_build_object('assessment',jsonb_build_object('source_version',observed))
   );
   PERFORM public.record_workflow_refresh_receipt(
@@ -318,11 +332,11 @@ BEGIN
   END;
   UPDATE public.dispatch_plans
      SET state=(SELECT result->'state' FROM public.dispatch_commands
-                 WHERE org_id=org_a AND request_id=request_mutated)
+                 WHERE org_id=org_a AND request_id=(claimed->>'driver_request_id')::uuid)
    WHERE org_id=org_a AND job_id=job_mutated;
   UPDATE public.dispatch_commands
      SET result=jsonb_set(result,'{version}','999'::jsonb)
-   WHERE org_id=org_a AND request_id=request_mutated;
+   WHERE org_id=org_a AND request_id=(claimed->>'driver_request_id')::uuid;
   BEGIN
     PERFORM public.finish_workflow_refresh(
       (started->>'id')::uuid,'completed','{}',now(),
@@ -333,6 +347,147 @@ BEGIN
     PERFORM pg_temp.assert_refresh_completion(
       SQLERRM LIKE '%workflow_refresh_driver_output_invalid%',
       'changed Dispatch output must invalidate the receipt'
+    );
+  END;
+
+  -- A server-issued command identity binds the assess output to this run and
+  -- generation. An unrelated same-job assess after claim cannot be borrowed.
+  started := public.start_workflow_refresh(
+    'dispatch',jsonb_build_object('job_id',job_reclaim::text),'fixture-ui-4c',org_a
+  );
+  claimed := public.claim_workflow_refresh((started->>'id')::uuid,'dispatch',NULL,NULL);
+  observed := claimed->>'expected_source_revision';
+  unrelated_request := gen_random_uuid();
+  PERFORM public.dispatch_commit(
+    org_a,job_reclaim,0,unrelated_request,'hash-unrelated','operations','assess',observed,
+    jsonb_build_object('assessment',jsonb_build_object('source_version',observed))
+  );
+  scope_a := jsonb_build_object('job_id',job_reclaim::text,'org_id',org_a::text);
+  output_a := jsonb_build_object(
+    'ok',true,'declared_output','dispatch_refresh/v1',
+    'observed_source_revision',observed,
+    'output_ref',jsonb_build_object(
+      'table','dispatch_commands','command','assess','request_id',unrelated_request::text
+    )
+  );
+  BEGIN
+    PERFORM public.record_workflow_refresh_receipt(
+      (started->>'id')::uuid,'dispatch',(claimed->>'lease_token')::uuid,
+      (claimed->>'lease_generation')::integer,'dispatch_refresh/v1',scope_a,output_a,observed
+    );
+    RAISE EXCEPTION 'unrelated same-job command unexpectedly bound';
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM pg_temp.assert_refresh_completion(
+      SQLERRM LIKE '%workflow_refresh_driver_output_invalid%',
+      'receipt must use the server-issued command identity'
+    );
+  END;
+
+  -- The original generation may leave a verified receipt before interruption.
+  -- Reclaim creates a new command identity and generation while retaining the
+  -- old receipt as immutable history; only generation 2 can finish.
+  PERFORM public.dispatch_commit(
+    org_a,job_reclaim,1,(claimed->>'driver_request_id')::uuid,'hash-generation-1',
+    'operations','assess',observed,jsonb_build_object('assessment',jsonb_build_object('source_version',observed))
+  );
+  output_a := jsonb_build_object(
+    'ok',true,'declared_output','dispatch_refresh/v1',
+    'observed_source_revision',observed,
+    'output_ref',jsonb_build_object(
+      'table','dispatch_commands','command','assess',
+      'request_id',claimed->>'driver_request_id'
+    )
+  );
+  receipt := public.record_workflow_refresh_receipt(
+    (started->>'id')::uuid,'dispatch',(claimed->>'lease_token')::uuid,
+    (claimed->>'lease_generation')::integer,'dispatch_refresh/v1',scope_a,output_a,observed
+  );
+  old_lease := (claimed->>'lease_token')::uuid;
+  UPDATE public.workflow_refresh_runs SET updated_at=now()-interval '16 minutes'
+   WHERE id=(started->>'id')::uuid;
+  reclaimed := public.claim_workflow_refresh(
+    (started->>'id')::uuid,'dispatch',old_lease,(claimed->>'lease_generation')::integer
+  );
+  PERFORM pg_temp.assert_refresh_completion(
+    reclaimed->>'lease_generation'='2'
+      AND reclaimed->>'driver_request_id' IS NOT NULL
+      AND reclaimed->>'driver_request_id' IS DISTINCT FROM claimed->>'driver_request_id',
+    'reclaim must issue a fresh generation command identity'
+  );
+  observed := reclaimed->>'expected_source_revision';
+  PERFORM public.dispatch_commit(
+    org_a,job_reclaim,2,(reclaimed->>'driver_request_id')::uuid,'hash-generation-2',
+    'operations','assess',observed,jsonb_build_object('assessment',jsonb_build_object('source_version',observed))
+  );
+  output_a := jsonb_build_object(
+    'ok',true,'declared_output','dispatch_refresh/v1',
+    'observed_source_revision',observed,
+    'output_ref',jsonb_build_object(
+      'table','dispatch_commands','command','assess',
+      'request_id',reclaimed->>'driver_request_id'
+    )
+  );
+  receipt := public.record_workflow_refresh_receipt(
+    (started->>'id')::uuid,'dispatch',(reclaimed->>'lease_token')::uuid,
+    (reclaimed->>'lease_generation')::integer,'dispatch_refresh/v1',scope_a,output_a,observed
+  );
+  PERFORM pg_temp.assert_refresh_completion(
+    pg_temp.refresh_receipt_count((started->>'id')::uuid)=2
+      AND pg_temp.refresh_receipt_count((started->>'id')::uuid,1)=1
+      AND pg_temp.refresh_receipt_count((started->>'id')::uuid,2)=1,
+    'reclaim must retain one receipt per generation'
+  );
+  finished := public.finish_workflow_refresh(
+    (started->>'id')::uuid,'completed',
+    jsonb_build_object('receipt_id',receipt->>'receipt_id'),now(),
+    (reclaimed->>'lease_token')::uuid,'dispatch',
+    (reclaimed->>'lease_generation')::integer,observed
+  );
+  PERFORM pg_temp.assert_refresh_completion(
+    finished->>'status'='completed','reclaimed generation must finish with its receipt'
+  );
+  retry := public.record_workflow_refresh_receipt(
+    (started->>'id')::uuid,'dispatch',(reclaimed->>'lease_token')::uuid,
+    (reclaimed->>'lease_generation')::integer,'dispatch_refresh/v1',scope_a,output_a,observed
+  );
+  PERFORM pg_temp.assert_refresh_completion(
+    retry->>'outcome'='idempotent' AND retry->>'receipt_id'=receipt->>'receipt_id',
+    'lost receipt response retry must be idempotent'
+  );
+  retry := public.finish_workflow_refresh(
+    (started->>'id')::uuid,'completed',
+    jsonb_build_object('receipt_id',receipt->>'receipt_id'),now(),
+    (reclaimed->>'lease_token')::uuid,'dispatch',
+    (reclaimed->>'lease_generation')::integer,observed
+  );
+  PERFORM pg_temp.assert_refresh_completion(
+    retry->>'replayed'='true' AND retry->>'status'='completed'
+      AND retry->'result'->>'receipt_id'=receipt->>'receipt_id',
+    'lost finish response retry must return stored final result'
+  );
+  BEGIN
+    PERFORM public.finish_workflow_refresh(
+      (started->>'id')::uuid,'completed',jsonb_build_object('receipt_id',gen_random_uuid()::text),
+      now(),(reclaimed->>'lease_token')::uuid,'dispatch',
+      (reclaimed->>'lease_generation')::integer,observed
+    );
+    RAISE EXCEPTION 'different completed payload unexpectedly replayed';
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM pg_temp.assert_refresh_completion(
+      SQLERRM LIKE '%workflow_refresh_receipt_retry_mismatch%',
+      'different completed payload must not replay'
+    );
+  END;
+  BEGIN
+    PERFORM public.finish_workflow_refresh(
+      (started->>'id')::uuid,'completed',
+      jsonb_build_object('receipt_id',receipt->>'receipt_id'),now(),old_lease,'dispatch',1,observed
+    );
+    RAISE EXCEPTION 'stale generation unexpectedly replayed';
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM pg_temp.assert_refresh_completion(
+      SQLERRM LIKE '%workflow_refresh_lease_mismatch%',
+      'stale generation must remain refused after reclaim'
     );
   END;
 
@@ -388,7 +543,8 @@ BEGIN
         'observed_source_revision',observed,
         'work',jsonb_build_object('jobs_read',0,'source_cutoff','2026-09-13T00:03:00Z'),
         'output_ref',jsonb_build_object(
-          'table','dispatch_commands','command','assess','request_id',request_a::text
+          'table','dispatch_commands','command','assess',
+          'request_id',claimed->>'driver_request_id'
         )
       ),observed
     );

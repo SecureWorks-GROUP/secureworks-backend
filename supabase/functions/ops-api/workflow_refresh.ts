@@ -20,6 +20,25 @@ export const WORKFLOW_REFRESH_WORKER_OPS = [
   "consume",
 ] as const;
 
+type WorkflowRefreshRpcData = Record<string, unknown> & {
+  outcome?: string;
+  status?: string;
+  receipt_id?: string;
+  observed_source_revision?: string | null;
+};
+
+type WorkflowRefreshRpcResult = {
+  data: WorkflowRefreshRpcData | null;
+  error: { message: string } | null;
+};
+
+type WorkflowRefreshClient = {
+  rpc: (
+    name: string,
+    args?: Record<string, unknown>,
+  ) => Promise<WorkflowRefreshRpcResult>;
+};
+
 export type WorkflowRefreshReceipt = {
   driver_version: string;
   scope: Record<string, unknown>;
@@ -104,7 +123,7 @@ export function assertRefreshWorkerOp(authMode: string, op: string) {
 }
 
 export async function startWorkflowRefresh(
-  client: { rpc: Function },
+  client: WorkflowRefreshClient,
   body: {
     workflow?: string;
     scope?: Record<string, unknown>;
@@ -123,11 +142,11 @@ export async function startWorkflowRefresh(
     p_org_id: body.org_id,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
-  return data;
+  return data as WorkflowRefreshRpcData;
 }
 
 export async function claimWorkflowRefresh(
-  client: { rpc: Function },
+  client: WorkflowRefreshClient,
   body: {
     id: string;
     owner?: string;
@@ -144,11 +163,11 @@ export async function claimWorkflowRefresh(
     p_generation: body.lease_generation ?? null,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
-  return data;
+  return data as WorkflowRefreshRpcData;
 }
 
 export async function consumeWorkflowRefresh(
-  client: { rpc: Function },
+  client: WorkflowRefreshClient,
   body: { owner?: string },
 ) {
   const owner = String(body.owner || "").trim();
@@ -160,11 +179,11 @@ export async function consumeWorkflowRefresh(
     p_owner: owner,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
-  return data;
+  return data as WorkflowRefreshRpcData;
 }
 
 export async function finishWorkflowRefresh(
-  client: { rpc: Function },
+  client: WorkflowRefreshClient,
   body: {
     id: string;
     status: string;
@@ -221,11 +240,11 @@ export async function finishWorkflowRefresh(
     p_observed_revision: observedRevision,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
-  return data;
+  return data as WorkflowRefreshRpcData;
 }
 
 export async function recordWorkflowRefreshReceipt(
-  client: { rpc: Function },
+  client: WorkflowRefreshClient,
   body: {
     id: string;
     owner: string;
@@ -266,7 +285,7 @@ export async function recordWorkflowRefreshReceipt(
 }
 
 export async function readWorkflowRefresh(
-  client: { rpc: Function },
+  client: WorkflowRefreshClient,
   id: string,
   orgId: string,
 ) {
