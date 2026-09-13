@@ -30,6 +30,7 @@
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { listSesReportTriggerRuns, runSesReportTrigger, SesReportTriggerError } from "./ses_report_trigger.ts";
 import { SesAssemblerAdapterError } from "./ses_assembler_input_adapter.ts";
+import type { SesPackBuildPackTruth } from "./ses_pack_build_admission.ts";
 
 const JOB = "70000000-0000-4000-8000-000000000001";
 const CYCLE1 = "72000000-0000-4000-8000-000000000001";
@@ -52,6 +53,8 @@ type Fixture = {
   cycles: Array<{ id: string; cycle_number: number }>;
   job?: any;
   siblings?: any[];
+  packTruth?: SesPackBuildPackTruth | null;
+  packTruthThrows?: string;
   claimable?: boolean;
   /** Simulate a second worker reclaiming the row (new token) right after our claim. */
   stealClaimAfterClaim?: boolean;
@@ -168,6 +171,12 @@ function fakeClient(fx: Fixture) {
           if (key) { const hit = Object.values(fx.runs).find((r: any) => r.dedupe_key === key); return { data: hit ? { id: hit.id, state: hit.state } : null, error: null }; }
           const stateEq = q._filters.find((f: any) => f[0] === "eq" && f[1] === "state")?.[2];
           if (stateEq === "done") { const s = (fx.siblings || [])[0]; return { data: s ?? null, error: null }; }
+          // Admission reads every OTHER run on the job (no state filter).
+          const idNe = q._filters.find((f: any) => f[0] === "neq" && f[1] === "id")?.[2];
+          if (idNe) {
+            const others = Object.values(fx.runs).filter((r: any) => r.id !== idNe);
+            return { data: [...others, ...(fx.siblings || [])], error: null };
+          }
           const id = q._filters.find((f: any) => f[1] === "id")?.[2];
           if (id) return { data: fx.runs[id] ? { ...fx.runs[id] } : null, error: null };
           const stateNe = q._filters.find((f: any) => f[0] === "neq" && f[1] === "state")?.[2];
@@ -184,6 +193,27 @@ function fakeClient(fx: Fixture) {
   return { client, writes };
 }
 
+/**
+ * Default pack truth: a card with NO pack yet, requirements resolved. That is
+ * the shape every pre-existing pin assumed implicitly, so those pins keep
+ * asserting exactly what they asserted before the admission gate landed.
+ */
+function noPackYet(job = JOB): SesPackBuildPackTruth {
+  return {
+    job_id: job, org_id: null, required_documents_resolved: true,
+    required_documents: { report: true, invoice: true, swms: false },
+    pack: { exists: false, status: null, report_doc_id: null, invoice_doc_id: null, swms_doc_id: null, sent_at: null, send_started_at: null },
+    docket: null, docket_actor_identity: null, invoice: null,
+  };
+}
+
+function packTruthReader(fx: Fixture) {
+  return async (_jobId: string) => {
+    if (fx.packTruthThrows) throw new Error(fx.packTruthThrows);
+    return fx.packTruth === undefined ? noPackYet() : fx.packTruth;
+  };
+}
+
 function readyResponse(cycle = CYCLE1): any {
   return {
     action: "prepare_ses_docket_revision", assembler_version: "ses-pack-assembler/v1", dry_run: false,
@@ -198,7 +228,7 @@ Deno.test("1. pending run: claim, re-read, prepare one card with the dedupe key,
   const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const { client, writes } = fakeClient(fx);
   const prepared: any[] = [];
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "test-drain", now: () => NOW, prepare: async (req) => { prepared.push(req); return readyResponse(); } });
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "test-drain", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async (req) => { prepared.push(req); return readyResponse(); } });
   assertEquals(out.ok, true);
   assertEquals(out.outcome, "done");
   assertEquals(prepared.length, 1);
@@ -218,7 +248,7 @@ Deno.test("2. event cycle no longer current: refused_stale, nothing prepared", a
   const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }, { id: CYCLE2, cycle_number: 2 }] };
   const { client } = fakeClient(fx);
   let prepared = 0;
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
   assertEquals(out.outcome, "refused");
   assertEquals(fx.runs[RUN].state, "refused_stale");
   assertEquals(prepared, 0);
@@ -229,7 +259,7 @@ Deno.test("3. another identity already built this cycle: refused_conflict for re
   const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }], siblings: [{ id: "x", dedupe_key: `${JOB}:${CYCLE1}:roof:d:h`, state: "done", docket_revision_id: "d-1" }] };
   const { client } = fakeClient(fx);
   let prepared = 0;
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
   assertEquals(out.outcome, "refused");
   assertEquals(fx.runs[RUN].state, "refused_conflict");
   assertEquals(prepared, 0);
@@ -239,7 +269,7 @@ Deno.test("3. another identity already built this cycle: refused_conflict for re
 Deno.test("4. the pack path's own refusal or a blocked result is refused_gate, terminal for this identity", async () => {
   const fxA: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const a = fakeClient(fxA);
-  const outA = await runSesReportTrigger({ run_id: RUN }, { client: a.client, actor: "t", now: () => NOW, prepare: async () => { throw new SesAssemblerAdapterError("ses_family_required_document_missing", "SWMS missing", 409); } });
+  const outA = await runSesReportTrigger({ run_id: RUN }, { client: a.client, actor: "t", readPackTruth: packTruthReader(fxA), now: () => NOW, prepare: async () => { throw new SesAssemblerAdapterError("ses_family_required_document_missing", "SWMS missing", 409); } });
   assertEquals(outA.outcome, "refused");
   assertEquals(fxA.runs[RUN].state, "refused_gate");
   assertStringIncludes(fxA.runs[RUN].last_error, "ses_family_required_document_missing");
@@ -247,7 +277,7 @@ Deno.test("4. the pack path's own refusal or a blocked result is refused_gate, t
   const fxB: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const b = fakeClient(fxB);
   const blocked = readyResponse(); blocked.results[0].state = "blocked"; blocked.results[0].persisted = false; blocked.results[0].blockers = ["photo_missing"];
-  const outB = await runSesReportTrigger({ run_id: RUN }, { client: b.client, actor: "t", now: () => NOW, prepare: async () => blocked });
+  const outB = await runSesReportTrigger({ run_id: RUN }, { client: b.client, actor: "t", readPackTruth: packTruthReader(fxB), now: () => NOW, prepare: async () => blocked });
   assertEquals(outB.outcome, "refused");
   assertEquals(fxB.runs[RUN].state, "refused_gate");
   assertEquals(fxB.runs[RUN].result.blockers, ["photo_missing"]);
@@ -256,21 +286,21 @@ Deno.test("4. the pack path's own refusal or a blocked result is refused_gate, t
 Deno.test("5. transport failure parks failed with backoff; at the ceiling it parks unknown; a cycle drift after prepare parks unknown", async () => {
   const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const { client } = fakeClient(fx);
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { throw new Error("fetch timeout"); } });
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => { throw new Error("fetch timeout"); } });
   assertEquals(out.outcome, "failed");
   assertEquals(fx.runs[RUN].state, "failed");
   assertEquals(fx.runs[RUN].next_attempt_at, new Date(NOW.getTime() + 60_000).toISOString());
 
   const fx2: Fixture = { runs: { [RUN]: baseRun({ state: "failed", attempts: 5 }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const c2 = fakeClient(fx2);
-  const out2 = await runSesReportTrigger({ run_id: RUN }, { client: c2.client, actor: "t", now: () => NOW, prepare: async () => { throw new Error("still down"); } });
+  const out2 = await runSesReportTrigger({ run_id: RUN }, { client: c2.client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => { throw new Error("still down"); } });
   assertEquals(out2.outcome, "unknown");
   assertEquals(fx2.runs[RUN].state, "unknown");
   assertStringIncludes(fx2.runs[RUN].recovery_action, "read back the docket");
 
   const fx3: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const c3 = fakeClient(fx3);
-  const out3 = await runSesReportTrigger({ run_id: RUN }, { client: c3.client, actor: "t", now: () => NOW, prepare: async () => readyResponse(CYCLE2) });
+  const out3 = await runSesReportTrigger({ run_id: RUN }, { client: c3.client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse(CYCLE2) });
   assertEquals(out3.outcome, "unknown");
   assertEquals(fx3.runs[RUN].state, "unknown");
   assertEquals(fx3.runs[RUN].docket_revision_id, "b308e68a-4435-5789-b843-59de3837cdc1");
@@ -280,12 +310,12 @@ Deno.test("6. unclaimable runs return the honest state and prepare nothing", asy
   const fx: Fixture = { runs: { [RUN]: baseRun({ state: "done", docket_revision_id: "d" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const { client } = fakeClient(fx);
   let prepared = 0;
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
   assertEquals(out.ok, false);
   assertEquals(out.code, "ses_trigger_run_not_claimable");
   assertEquals(out.state, "done");
   assertEquals(prepared, 0);
-  const missing = await runSesReportTrigger({ run_id: "75000000-0000-4000-8000-000000000009" }, { client, actor: "t", now: () => NOW, prepare: async () => readyResponse() });
+  const missing = await runSesReportTrigger({ run_id: "75000000-0000-4000-8000-000000000009" }, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() });
   assertEquals(missing.state, "missing");
 });
 
@@ -294,13 +324,13 @@ Deno.test("7. manual entry needs exact job, cycle and identity; reuses an existi
   const { client, writes } = fakeClient(fx);
   for (const body of [{ job_id: JOB }, { job_id: JOB, attendance_cycle_id: CYCLE1 }, { attendance_cycle_id: CYCLE1, source_identity: "report:r1" }]) {
     let threw: any = null;
-    try { await runSesReportTrigger(body, { client, actor: "t", now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
+    try { await runSesReportTrigger(body, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
     assert(threw instanceof SesReportTriggerError, "manual entry without exact identity must refuse");
   }
-  const reused = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+  const reused = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1" }, { client, actor: "manual", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() });
   assertEquals((reused as any).run.id, RUN);
   assert(!writes.some((w) => w.insert), "an existing identity must not be re-inserted");
-  const fresh = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r2" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+  const fresh = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r2" }, { client, actor: "manual", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() });
   assert(writes.some((w) => w.insert?.dedupe_key === `${JOB}:${CYCLE1}:report:r2`));
   assertEquals((fresh as any).run.event_type, "manual");
 });
@@ -309,7 +339,7 @@ Deno.test("9. a stolen lease (new claim token) means the late worker cannot writ
   const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }], stealClaimAfterClaim: true };
   const { client, writes } = fakeClient(fx);
   let threw: any = null;
-  try { await runSesReportTrigger({ run_id: RUN }, { client, actor: "late-worker", now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
+  try { await runSesReportTrigger({ run_id: RUN }, { client, actor: "late-worker", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
   assert(threw instanceof SesReportTriggerError && threw.code === "ses_trigger_lease_lost", `expected lease lost, got ${threw}`);
   assertEquals(writes.filter((w) => w.patch).length, 0, "no transition may land under a foreign token");
   assertEquals(fx.runs[RUN].claim_token, "token-stolen");
@@ -319,7 +349,7 @@ Deno.test("10. a job with no attendance cycle is refused_gate with an executable
   const fx: Fixture = { runs: { [RUN]: baseRun({ attendance_cycle_id: null, cycle_number: null }) }, cycles: [] };
   const { client } = fakeClient(fx);
   let prepared = 0;
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
   assertEquals(out.outcome, "refused");
   assertEquals(fx.runs[RUN].state, "refused_gate");
   assertEquals(prepared, 0);
@@ -330,7 +360,7 @@ Deno.test("11. refile moves a refused or parked run back to pending with the act
   const fx: Fixture = { runs: { [RUN]: baseRun({ state: "refused_gate", last_error: "SWMS missing", recovery_action: "fix then refile", completed_at: "2026-09-11T02:30:00.000Z" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const { client, writes } = fakeClient(fx);
   const out = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1", refile: true, actor: "insurance-desk" },
-    { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+    { client, actor: "manual", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() });
   assertEquals(out.outcome, "done", JSON.stringify(out));
   const refile = writes.find((w) => w.patch?.state === "pending");
   assert(refile, "refile must move the row to pending before the claim");
@@ -340,7 +370,7 @@ Deno.test("11. refile moves a refused or parked run back to pending with the act
   const fxDone: Fixture = { runs: { [RUN]: baseRun({ state: "done" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const d = fakeClient(fxDone);
   let threw: any = null;
-  try { await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1", refile: true }, { client: d.client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
+  try { await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1", refile: true }, { client: d.client, actor: "manual", readPackTruth: packTruthReader(fx), now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
   assert(threw instanceof SesReportTriggerError && threw.code === "ses_trigger_refile_not_allowed");
   assertEquals(fxDone.runs[RUN].state, "done");
 });
@@ -568,4 +598,113 @@ Deno.test("15. drain status tells absent pg_cron, an unreadable cron schema and 
   );
   assertEquals((noRow as any).drain.cron_visibility, null);
   assertEquals((noRow as any).drain.cron_visibility_error, null);
+});
+
+// ── Admission, end to end through the real handler ──────────────────────────
+//  16. A repeated trigger on a card whose pack is already complete ADOPTS it:
+//      done, with the existing docket, and prepare is never called — so a
+//      second invoice is not merely unlikely, it is unreachable.
+//  17. A pack another door built but left incomplete parks refused_conflict
+//      with the missing pointer named; prepare is never called.
+//  18. An overlapping attempt releases its claim back to pending instead of
+//      burning the row, and gives back the attempt the claim spent.
+//  19. A pack read fault fails CLOSED: no build on an unreadable card.
+
+function completePackTruth(): SesPackBuildPackTruth {
+  return {
+    job_id: JOB, org_id: null, required_documents_resolved: true,
+    required_documents: { report: true, invoice: true, swms: false },
+    pack: {
+      exists: true, status: "drafted", report_doc_id: "doc-report",
+      invoice_doc_id: "doc-invoice", swms_doc_id: null, sent_at: null, send_started_at: null,
+    },
+    docket: { docket_revision_id: "9983309a", output_content_hash: "sha256:existing" },
+    docket_actor_identity: "makesafe-reporting-routine",
+    invoice: { xero_invoice_id: "9b7a6ecd", number: "INV-1517", status: "DRAFT" },
+  };
+}
+
+Deno.test("16. a repeated trigger on a complete pack adopts it and never calls prepare", async () => {
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }],
+    packTruth: completePackTruth(),
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW,
+    prepare: async () => { prepared++; return readyResponse(); },
+  });
+  assertEquals(prepared, 0, "a complete pack must never be handed to prepare");
+  assertEquals(out.outcome, "done");
+  assertEquals(fx.runs[RUN].state, "done");
+  assertEquals(fx.runs[RUN].docket_revision_id, "9983309a");
+  assertEquals(fx.runs[RUN].output_content_hash, "sha256:existing");
+  assertEquals(fx.runs[RUN].result.adopted_existing_pack, true);
+  assertEquals(fx.runs[RUN].result.admission.decision, "reuse");
+  assertEquals(fx.runs[RUN].result.admission.pack_built_outside_ledger, true);
+});
+
+Deno.test("17. an incomplete pack from another door parks refused_conflict, naming what is missing", async () => {
+  const half = completePackTruth();
+  half.pack.report_doc_id = null;
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }], packTruth: half,
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW,
+    prepare: async () => { prepared++; return readyResponse(); },
+  });
+  assertEquals(prepared, 0, "a bound invoice must never be rebuilt over");
+  assertEquals(out.outcome, "refused");
+  assertEquals(fx.runs[RUN].state, "refused_conflict");
+  assertStringIncludes(fx.runs[RUN].last_error, "the make-safe report document");
+  assertStringIncludes(fx.runs[RUN].recovery_action, "INV-1517");
+  assertEquals(fx.runs[RUN].result.admission.builds_allowed, false);
+});
+
+Deno.test("18. an overlapping attempt releases its claim instead of burning the row", async () => {
+  const other = {
+    id: "75000000-0000-4000-8000-000000000077",
+    dedupe_key: `${JOB}:${CYCLE1}:roof:d:h`, job_id: JOB, state: "claimed",
+    attendance_cycle_id: CYCLE1, docket_revision_id: null,
+    lease_expires_at: new Date(NOW.getTime() + 300_000).toISOString(),
+    created_at: "2026-09-11T02:00:00.000Z", attempts: 1,
+  };
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun(), [other.id]: other as any },
+    cycles: [{ id: CYCLE1, cycle_number: 1 }],
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW,
+    prepare: async () => { prepared++; return readyResponse(); },
+  });
+  assertEquals(prepared, 0, "two attempts must not both build one cycle");
+  assertEquals((out as any).outcome, "joined");
+  assertEquals(fx.runs[RUN].state, "pending", "joining must leave the row runnable");
+  assertEquals(fx.runs[RUN].attempts, 0, "waiting on somebody else is not an attempt");
+  assertEquals(fx.runs[RUN].claim_token, null);
+  assert(fx.runs[RUN].next_attempt_at, "a joined run must come back on its own");
+  assertEquals(fx.runs[RUN].result.admission.join_run_id, other.id);
+});
+
+Deno.test("19. a pack read fault fails closed: no build on an unreadable card", async () => {
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }],
+    packTruthThrows: "inspect_ses_pack timed out",
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", readPackTruth: packTruthReader(fx), now: () => NOW,
+    prepare: async () => { prepared++; return readyResponse(); },
+  });
+  assertEquals(prepared, 0, "an unreadable pack must never be treated as no pack");
+  assertEquals(out.outcome, "refused");
+  assertEquals(fx.runs[RUN].state, "refused_conflict");
+  assertStringIncludes(fx.runs[RUN].last_error, "could not be read");
 });

@@ -16,6 +16,13 @@
 // a human with a recovery_action and is never blindly replayed.
 
 import type { SesPrepareRequest } from "./ses_docket_envelope.ts";
+import {
+  admitSesPackBuild,
+  sesPackBuildAdmissionReceipt,
+  sesPackBuildAdmissionRunState,
+  type SesPackBuildPackTruth,
+  type SesPackBuildSiblingRun,
+} from "./ses_pack_build_admission.ts";
 import type { SesPrepareResponse } from "./ses_prepare_docket_revision.ts";
 import { SesAssemblerAdapterError } from "./ses_assembler_input_adapter.ts";
 
@@ -58,6 +65,14 @@ export interface SesReportTriggerDeps {
   /** The existing prepare path for ONE card, non-dry-run, with the docs-ready
    * notifier attached. Injected so the handler stays testable. */
   prepare: (request: SesPrepareRequest) => Promise<SesPrepareResponse & { docs_ready_sms?: unknown }>;
+  /**
+   * The ONE shared pack read (`inspect_ses_pack`), projected to what the
+   * admission gate reads. REQUIRED, not optional: an optional dependency that
+   * every test stubs away is invisible to the whole suite and only surfaces in
+   * production, which is how the SWMS renderer binding was lost. Returning
+   * `null` means "could not be read" and the gate fails closed on it.
+   */
+  readPackTruth: (jobId: string) => Promise<SesPackBuildPackTruth | null>;
   now?: () => Date;
 }
 
@@ -180,14 +195,70 @@ export async function runSesReportTrigger(
       run = await transition(client, run, { attendance_cycle_id: currentCycle.id, cycle_number: currentCycle.cycle_number });
     }
 
-    // 3. Conflict: a different source identity already built this job+cycle.
-    const sibling = await client.from("ses_report_trigger_runs").select("id, dedupe_key, state, docket_revision_id")
-      .eq("job_id", run.job_id).eq("attendance_cycle_id", currentCycle.id).eq("state", "done").neq("id", run.id).limit(1).maybeSingle();
-    if (sibling.error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `sibling read failed: ${sibling.error.message || sibling.error}`, 503);
-    if (sibling.data) {
+    // 3. Admission. The old check here asked only "is there a sibling RUN in
+    //    state done", which cannot see a pack another door already built.
+    //    Measured in production 2026-09-13, AJBR-72221 carried a never-claimed
+    //    pending run AND a complete pack with a live Xero DRAFT bound to it,
+    //    built through the direct prepare door — so that question returned "no
+    //    conflict" about a card that was already finished. Admission now reads
+    //    PACK truth through the one shared read and the sibling runs together.
+    const siblings = await client.from("ses_report_trigger_runs")
+      .select("id, dedupe_key, state, attendance_cycle_id, docket_revision_id, lease_expires_at")
+      .eq("job_id", run.job_id).neq("id", run.id).limit(50);
+    if (siblings.error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `sibling read failed: ${siblings.error.message || siblings.error}`, 503);
+
+    // A pack read fault is NOT "there is no pack": it is handed to the gate as
+    // null, which fails closed rather than admitting a rebuild over bound money.
+    let packTruth: SesPackBuildPackTruth | null = null;
+    try {
+      packTruth = await deps.readPackTruth(run.job_id);
+    } catch (error) {
+      packTruth = null;
+      console.error("ses_report_trigger: pack truth read failed", { job_id: run.job_id, error: String((error as Error)?.message || error) });
+    }
+
+    const admission = admitSesPackBuild({
+      requested: { job_id: run.job_id, attendance_cycle_id: currentCycle.id, source_identity: run.dedupe_key },
+      current_cycle: { id: currentCycle.id, cycle_number: currentCycle.cycle_number },
+      pack: packTruth,
+      sibling_runs: (siblings.data as SesPackBuildSiblingRun[]) || [],
+      now: now(),
+    });
+
+    if (admission.decision === "reuse") {
+      // The documents already exist and are bound. Adopt them: no rebuild, no
+      // second docket revision, and nothing is handed to prepare, so no second
+      // invoice can be minted. This is the reuse the contract requires.
       run = await transition(client, run, {
-        state: "refused_conflict", last_error: `cycle already built from ${sibling.data.dedupe_key} (docket ${sibling.data.docket_revision_id})`,
-        recovery_action: "reconcile: INSURANCE decides whether this later submission supersedes the built docket; if so prepare a revision manually", completed_at: now().toISOString(),
+        state: "done",
+        docket_revision_id: admission.adopt_docket_revision_id,
+        output_content_hash: admission.adopt_output_content_hash,
+        last_error: null, recovery_action: null, completed_at: now().toISOString(),
+        result: { admission: sesPackBuildAdmissionReceipt(admission), adopted_existing_pack: true },
+      });
+      return receipt(run, "done");
+    }
+    if (admission.decision === "join") {
+      // Another attempt holds this job and cycle under a live lease. Joining is
+      // NOT a refusal and must not burn this row: release the claim back to
+      // pending so it re-runs once the holder settles, and give back the
+      // attempt the claim spent, because waiting for somebody else is not an
+      // attempt at building. The CAS on the claim token makes that safe.
+      run = await transition(client, run, {
+        state: "pending", attempts: Math.max(0, run.attempts - 1),
+        claimed_by: null, claim_token: null, lease_expires_at: null,
+        next_attempt_at: new Date(now().getTime() + 60_000).toISOString(),
+        last_error: admission.reason.slice(0, 500), recovery_action: admission.recovery_action,
+        result: { admission: sesPackBuildAdmissionReceipt(admission) },
+      });
+      return receipt(run, "joined");
+    }
+    if (admission.decision !== "admit") {
+      const state = sesPackBuildAdmissionRunState(admission.decision) ?? "refused_gate";
+      run = await transition(client, run, {
+        state, last_error: admission.reason.slice(0, 500), recovery_action: admission.recovery_action,
+        completed_at: now().toISOString(),
+        result: { admission: sesPackBuildAdmissionReceipt(admission) },
       });
       return receipt(run, "refused");
     }
@@ -233,7 +304,7 @@ export async function runSesReportTrigger(
       run = await transition(client, run, {
         state: "done", docket_revision_id: result.docket_revision_id, output_content_hash: result.output_content_hash,
         docs_ready_sms: response.docs_ready_sms ?? null, last_error: null, recovery_action: null, completed_at: now().toISOString(),
-        result: { state: result.state, artifacts: (result.artifacts || []).map((a: any) => ({ role: a.role, content_hash: a.content_hash, size_bytes: a.size_bytes })) },
+        result: { state: result.state, admission: sesPackBuildAdmissionReceipt(admission), artifacts: (result.artifacts || []).map((a: any) => ({ role: a.role, content_hash: a.content_hash, size_bytes: a.size_bytes })) },
       });
       return receipt(run, "done");
     }

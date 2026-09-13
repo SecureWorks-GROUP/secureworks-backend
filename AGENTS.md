@@ -130,6 +130,35 @@ Apply `20260730000001_makesafe_report_cycle_uniqueness.sql` before deploying the
 matching `ops-api`; its unique nullable-cycle index is the database guard that
 makes concurrent report retries converge on one report per attendance cycle.
 
+## A Pack Can Exist That No Run Explains, And `drain_enabled` Is Not The Cron Job
+
+A submitted trade report files ONE attempt on `ses_report_trigger_runs` via the
+`job_events` trigger `trg_enqueue_ses_report_trigger_run`
+(`20260911060000_ses_report_trigger_runs.sql`). The ledger's claim, lease,
+per-claim CAS token and `job:cycle:identity` dedupe key are sound. Two traps
+around it are not obvious.
+
+**A run ledger is not pack truth.** `prepare_ses_docket_revision` is reachable
+DIRECTLY by the make-safe reporting routine, the agent seat and any admin/owner
+session, so a card can carry a complete pack with a bound live Xero DRAFT while
+its run still reads `pending` (measured 2026-09-13: AJBR-72221, pack built by
+`makesafe-reporting-routine` a day after its run was filed). Asking only "is
+there a sibling RUN in state done" answers "no conflict" about finished work,
+and re-preparing cuts a second docket revision over bound money. `admitSesPackBuild`
+(`ses_pack_build_admission.ts`) is the ONE gate that reads pack truth (through
+`inspect_ses_pack`, never re-derived) and the siblings together; it reuses a
+complete pack instead of rebuilding, fails closed on an unreadable read, and
+can never mint or send. Every build surface reaches it. Contract:
+`docs/ses-pack-build-workflow-v1.md`.
+
+**`drain_enabled` is a flag; `cron.job.active` is the job.** They disagree in
+production today (flag true, job 98 `active = false` since 2026-09-11), so a
+flag-only reader calls a dead queue healthy. Read both through
+`ses_pack_build_state` or `list_ses_report_trigger_runs`, and read
+`SES_REPORT_DRAIN_VISIBILITY_NOTE` before calling an empty `cron_job` "not
+scheduled" — pg_cron row security can hide a job owned by another role. A cron
+run marked `succeeded` means the drain posted, never that ops-api processed it.
+
 ## Deterministic Make-Safe Replay Measures Identity, Not Job Readiness
 
 The canonical diagnosis and sanitized production projection are in
