@@ -178,6 +178,29 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
         }
         return { data: { ok: true, token: args.p_token, lease_id: args.p_lease_id, generation: gen }, error: null };
       }
+      if (fn === "sales_booking_cas_draft") {
+        const row = rows("sales_booking_drafts").find((d) => d.case_id === args.p_case_id && d.org_id === args.p_org_id);
+        const cur = row ? Number(row.revision || 0) : 0;
+        if (args.p_expected_revision != null && Number(args.p_expected_revision) !== cur) {
+          return { data: { ok: false, code: "cas_conflict", revision: cur }, error: null };
+        }
+        const nxt = cur + 1;
+        if (row) {
+          row.text = args.p_text;
+          row.human_edited = args.p_human_edited;
+          row.sender = args.p_sender;
+          row.actor_id = args.p_actor_id;
+          row.revision = nxt;
+          row.updated_at = nowIso();
+        } else {
+          rows("sales_booking_drafts").push({
+            case_id: args.p_case_id, org_id: args.p_org_id, text: args.p_text,
+            human_edited: args.p_human_edited, sender: args.p_sender, actor_id: args.p_actor_id,
+            revision: nxt, updated_at: nowIso(),
+          });
+        }
+        return { data: { ok: true, revision: nxt, text: args.p_text, case_id: args.p_case_id, human_edited: args.p_human_edited, sender: args.p_sender }, error: null };
+      }
       if (fn === "sales_booking_cas_case") {
         const row = rows("sales_booking_cases").find((c) => c.id === args.p_id && c.org_id === args.p_org_id);
         if (!row || row.source_version !== args.p_expected_version) return { data: { ok: false, code: "cas_conflict" }, error: null };
@@ -369,16 +392,20 @@ export async function readWorkspace(
 export async function persistDraft(db: BookingDb, body: { case_id: string; text?: string; human_edited?: boolean; sender?: string | null; expected_revision?: number }, actor: BookingActor) {
   const a = assertBookingActor(actor);
   if (!body.case_id) throw new SalesBookingError("case_id required");
-  const prev = (await db.selectMatch("sales_booking_drafts", { case_id: body.case_id, org_id: a.org_id })).data[0] || { revision: 0 };
-  if (body.expected_revision != null && Number(prev.revision || 0) !== Number(body.expected_revision)) {
-    throw new SalesBookingError("Draft revision conflict", 409, "cas_conflict");
+  const actorUuid = /^[0-9a-f-]{36}$/i.test(a.user_id) ? a.user_id : null;
+  const { data, error } = await db.rpc("sales_booking_cas_draft", {
+    p_org_id: a.org_id,
+    p_case_id: body.case_id,
+    p_text: body.text ?? "",
+    p_human_edited: !!body.human_edited,
+    p_sender: body.sender ?? null,
+    p_actor_id: actorUuid,
+    p_expected_revision: body.expected_revision ?? 0,
+  });
+  if (error) throw new SalesBookingError(error.message, 500, "rpc");
+  if (!data || data.ok === false) {
+    throw new SalesBookingError("Draft revision conflict", 409, String(data && data.code || "cas_conflict"));
   }
-  const next = {
-    case_id: body.case_id, org_id: a.org_id, actor_id: a.user_id,
-    text: body.text ?? prev.text, human_edited: body.human_edited ?? prev.human_edited ?? false,
-    sender: body.sender ?? prev.sender ?? null, revision: Number(prev.revision || 0) + 1, updated_at: nowIso(),
-  };
-  requireUpsert(await db.upsert("sales_booking_drafts", next));
   const readback = (await db.selectMatch("sales_booking_drafts", { case_id: body.case_id, org_id: a.org_id })).data[0];
   if (!readback) throw new SalesBookingError("Draft readback missing", 500, "upsert_failed");
   return readback;

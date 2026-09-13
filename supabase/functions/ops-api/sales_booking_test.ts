@@ -94,8 +94,8 @@ Deno.test("unavailable adapter is not a completed workload and remains refreshab
 Deno.test("failed draft write does not report saved revision", async () => {
   const db = createMemoryBookingDb();
   await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin" });
-  const orig = db.upsert.bind(db);
-  db.upsert = async (table, row) => table === "sales_booking_drafts" ? { error: { message: "database refused" } } : orig(table, row);
+  const orig = db.rpc.bind(db);
+  db.rpc = async (fn, args) => fn === "sales_booking_cas_draft" ? { data: null, error: { message: "database refused" } } : orig(fn, args);
   await assertRejects(() => persistDraft(db, { case_id: "opp-a", text: "x" }, ACTOR));
 });
 
