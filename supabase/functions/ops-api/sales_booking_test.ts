@@ -684,6 +684,27 @@ Deno.test("fake execute recovers calendar after sms and refuses revoked or stale
   assertEquals(revoked.reason, "approval_revoked");
 });
 
+Deno.test("new inbound or email reply marks the prior proposed slot stale without dropping the draft", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "slot-1", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", status: "needs_decision", contact_id: "c1" });
+  await persistDraft(db, { case_id: "slot-1", text: "Hi, Thursday 1pm. Nithin, SecureWorks Patios", human_edited: true }, ACTOR);
+  await persistAssessment(db, {
+    case_id: "slot-1", version: "sales-booking-assess-v2.4",
+    payload: { classification: "needs_decision", status: "needs_decision", source_version: "s1", proposal: { start_iso: "2026-09-17T13:00:00+08:00", kind: "tentative" } },
+    observed_source_version: "s1",
+  }, ACTOR);
+  const ev = await onEvent(db, fakeAdapters(), { event_key: "email-1", type: "email_inbound", case_id: "slot-1", message_id: "mail-99" }, ACTOR);
+  assertEquals(ev.ok, true);
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true }),
+  }), db, "GET", ACTOR) as { cases: { id: string; proposal_stale?: boolean; assessment_stale?: boolean; source_version?: string; draft?: { text?: string } }[] };
+  const row = out.cases.find((c) => c.id === "slot-1");
+  assertEquals(row?.proposal_stale, true);
+  assertEquals(row?.assessment_stale, true);
+  assertEquals(String(row?.source_version || "").includes("mail-99"), true);
+  assertEquals(row?.draft?.text, "Hi, Thursday 1pm. Nithin, SecureWorks Patios");
+});
+
 Deno.test("needs-scoper items dedupe, skip quiet hours, and never auto-send the client", async () => {
   const db = createMemoryBookingDb();
   await db.upsert("sales_booking_cases", { id: "ns-1", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1" });

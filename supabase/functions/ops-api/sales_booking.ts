@@ -1000,7 +1000,7 @@ export async function restoreCase(db: BookingDb, caseId: string, actor: BookingA
   return { ok: true, crm_deleted: false, contact_id: rec.contact_id };
 }
 
-export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_key: string; type: string; case_id?: string }, actor: BookingActor) {
+export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_key: string; type: string; case_id?: string; message_id?: string; input?: { messages?: unknown[] } }, actor: BookingActor) {
   const a = assertBookingActor(actor);
   if (!body.event_key) throw new SalesBookingError("event_key required");
   const ingest = await db.rpc("sales_booking_ingest_event", { p_org_id: a.org_id, p_event_key: body.event_key });
@@ -1021,14 +1021,25 @@ export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_k
     await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: leaseId, p_token: invocation });
     return { ok: true, duplicate: false, assessed: false, reason: "unknown_case" };
   }
+  if ((body.type === "inbound" || body.type === "email_inbound") && body.message_id) {
+    const nextVersion = `ghl:${c.id}:msg:${body.message_id}`;
+    if (String(c.source_version || "") !== nextVersion) {
+      requireUpsert(await db.upsert("sales_booking_cases", { ...c, source_version: nextVersion, updated_at: nowIso() }));
+      c.source_version = nextVersion;
+    }
+  }
   if (c.archived) { /* archives joined separately */ }
   const arch = (await db.selectMatch("sales_booking_archives", { case_id: body.case_id, org_id: a.org_id })).data[0];
   if (arch && !arch.restored) {
     requireUpsert(await db.upsert("sales_booking_archives", { ...arch, restored: true, reason: "inbound_reopen" }));
   }
   try {
+    const eventHasMessages = Array.isArray(body.input?.messages);
+    if ((body.type === "inbound" || body.type === "email_inbound") && !eventHasMessages) {
+      await db.rpc("sales_booking_mark_event_processed", { p_org_id: a.org_id, p_event_key: body.event_key });
+      return { ok: true, duplicate: false, assessed: false, reason: "source_bumped_stale_proposal", source_version: c.source_version };
+    }
     const payload = await assessFn({ case: c, event: body, org_id: a.org_id });
-    const eventHasMessages = Array.isArray((body as { input?: { messages?: unknown[] } }).input?.messages);
     if (payload.classification === "unassessed_conversation" && !eventHasMessages) {
       await db.rpc("sales_booking_mark_event_processed", { p_org_id: a.org_id, p_event_key: body.event_key });
       return { ok: true, duplicate: false, assessed: false, reason: "unassessed_conversation" };
