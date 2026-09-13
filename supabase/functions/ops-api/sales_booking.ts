@@ -2,6 +2,7 @@
 // booking_test/psql is a test transport only. No Deno.Command/psql in this module.
 
 import { authorisedLocalReason, runAssessment } from "./sales_booking_engine.ts";
+import { validate, conservativeExtract } from "./sales_booking_assess.ts";
 
 export const SALES_BOOKING_VERSION = "sales-booking-api/v1";
 
@@ -590,6 +591,120 @@ export async function persistAssessment(db: BookingDb, body: { case_id: string; 
   return rec;
 }
 
+function draftTextAllowed(text: string) {
+  if (!text || !text.trim()) return { ok: false, code: "draft_required" };
+  if (text.indexOf("\u2014") >= 0 || text.indexOf("—") >= 0) return { ok: false, code: "em_dash_forbidden" };
+  if (/\$\s*\d/.test(text) || /quote for/i.test(text)) return { ok: false, code: "price_forbidden" };
+  return { ok: true };
+}
+
+export async function submitInterpretation(
+  db: BookingDb,
+  body: {
+    case_id: string;
+    observed_source_version?: string;
+    resource_id?: string;
+    input?: Record<string, unknown>;
+    interpretation: {
+      interpreter: { identity: string; version?: string };
+      cited_message_ids?: string[];
+      customer_windows?: Record<string, unknown>[];
+      candidate_slots?: { start_iso: string; end_iso: string }[];
+      proposed_text?: string;
+      customer_intent?: string;
+      holds?: string[];
+    };
+  },
+  actor: BookingActor,
+) {
+  const a = assertBookingActor(actor);
+  if (!body.case_id || !body.interpretation) throw new SalesBookingError("interpretation required");
+  const c = (await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id })).data[0];
+  if (!c) throw new SalesBookingError("unknown case", 404, "unknown_case");
+  if (body.observed_source_version && c.source_version !== body.observed_source_version) {
+    throw new SalesBookingError("stale source version", 409, "stale_source");
+  }
+  if (body.resource_id && body.resource_id !== c.resource_id) {
+    throw new SalesBookingError("wrong staff resource", 409, "wrong_staff");
+  }
+  const interp = body.interpretation;
+  if (!interp.interpreter || !interp.interpreter.identity) throw new SalesBookingError("interpreter identity required", 400, "interpreter_required");
+  const messages = Array.isArray((body.input as { messages?: unknown[] } | undefined)?.messages)
+    ? ((body.input as { messages: Record<string, unknown>[] }).messages)
+    : [];
+  if (!messages.length) throw new SalesBookingError("conversation messages required", 400, "messages_required");
+  for (const id of interp.cited_message_ids || []) {
+    if (!messages.some((m) => String(m.id) === String(id))) throw new SalesBookingError("cited message missing", 400, "cited_missing");
+  }
+  if (interp.proposed_text) {
+    const allowed = draftTextAllowed(interp.proposed_text);
+    if (!allowed.ok) throw new SalesBookingError("proposed text refused", 400, allowed.code);
+  }
+  const resource = RESOURCES[String(c.resource_id)] || RESOURCES.nithin;
+  const input = {
+    ...(body.input || {}),
+    messages,
+    week_start: String((body.input as { week_start?: string } | undefined)?.week_start || "2026-09-14"),
+    now: String((body.input as { now?: string } | undefined)?.now || new Date().toISOString()),
+    resource,
+    suburb: c.suburb || (body.input as { suburb?: string } | undefined)?.suburb,
+    coverage: (body.input as { coverage?: Record<string, unknown> } | undefined)?.coverage || { leave_roster_complete: false, leave_state: "incomplete", travel_state: "unavailable" },
+  };
+  const ground = conservativeExtract(input);
+  const model = {
+    customer_windows: interp.customer_windows || [],
+    candidate_slots: interp.candidate_slots || [],
+    proposed_text: interp.proposed_text,
+    interpreter: `${interp.interpreter.identity}/${interp.interpreter.version || "unversioned"}`,
+  };
+  const payload = validate(ground, model, input) as Record<string, unknown>;
+  payload.interpreter = interp.interpreter;
+  payload.customer_intent = interp.customer_intent || null;
+  payload.submitted_holds = interp.holds || [];
+  payload.intelligent_automation = interp.interpreter.identity !== "authorised_local_reason";
+  payload.paid_model = false;
+  if (c.contact_id) {
+    const suburbKey = String(c.suburb || (body.input as { suburb?: string } | undefined)?.suburb || "").trim().toLowerCase();
+    const siblings = (await db.selectMatch("sales_booking_cases", { org_id: a.org_id, contact_id: c.contact_id })).data.filter((row) => row.id !== c.id);
+    const archives = await db.selectMatch("sales_booking_archives", { org_id: a.org_id });
+    for (const sib of siblings) {
+      const archived = archives.data.some((ar) => ar.case_id === sib.id && !ar.restored);
+      if (archived || sib.status === "completed") continue;
+      const sibSuburb = String(sib.suburb || "").trim().toLowerCase();
+      const sameScope = suburbKey !== "" && sibSuburb === suburbKey;
+      if (!sameScope) continue;
+      const ass = (await db.selectMatch("sales_booking_assessments", { case_id: sib.id, org_id: a.org_id })).data[0];
+      const prop = (ass?.payload as { proposal?: { start_iso?: string } } | undefined)?.proposal;
+      if (prop && prop.start_iso) {
+        payload.ambiguous_duplicate_scope = true;
+        payload.review_reasons = [
+          ...((payload.review_reasons as string[]) || []),
+          "Another open opportunity for this contact at the same suburb may be the same scope. Keep both visible until staff confirm they are distinct jobs.",
+        ];
+        break;
+      }
+    }
+  }
+  const rec = await persistAssessment(db, {
+    case_id: body.case_id,
+    version: String(payload.version || SALES_BOOKING_VERSION),
+    payload,
+    observed_source_version: String(c.source_version || ""),
+  }, a);
+  if (payload.draft) {
+    const existingDraft = (await db.selectMatch("sales_booking_drafts", { case_id: body.case_id, org_id: a.org_id })).data[0];
+    if (!existingDraft || !existingDraft.human_edited) {
+      await persistDraft(db, {
+        case_id: body.case_id,
+        text: String(payload.draft),
+        human_edited: false,
+        expected_revision: existingDraft ? Number(existingDraft.revision) : 0,
+      }, a);
+    }
+  }
+  return rec;
+}
+
 export async function archiveCase(db: BookingDb, body: { case_id: string; reason?: string; note?: string }, actor: BookingActor) {
   const a = assertBookingActor(actor);
   const c = (await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id })).data[0];
@@ -727,7 +842,8 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
       }, a);
       requireUpsert(await db.upsert("sales_booking_cases", { ...c, last_runner_at: nowIso() }));
       assessed += 1;
-    } catch {
+    } catch (err) {
+      if (err instanceof SalesBookingError && err.code === "stale_source") throw err;
       requireUpsert(await db.upsert("sales_booking_cases", { ...c, last_runner_at: nowIso() }));
     } finally {
       await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: leaseId, p_token: invocation });
@@ -739,7 +855,7 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
 export async function approveAction(
   db: BookingDb,
   adapters: Adapters,
-  body: { case_id: string; kind: string; text?: string; start_iso?: string; end_iso?: string; exact_acceptance?: boolean; execute?: boolean; fake?: boolean },
+  body: { case_id: string; kind: string; text?: string; start_iso?: string; end_iso?: string; exact_acceptance?: boolean; execute?: boolean; fake?: boolean; action_id?: string; expected_draft_revision?: number; resource_id?: string; revoke?: boolean; expired?: boolean },
   actor: BookingActor,
   hold = true,
 ) {
@@ -775,7 +891,7 @@ export async function approveAction(
   const idempotencyKey = `hold:${a.org_id}:${body.case_id}:${body.kind}:${c.source_version || ""}:${body.start_iso || ""}:${body.end_iso || ""}`;
   const priorActions = await db.selectMatch("sales_booking_actions", { org_id: a.org_id, case_id: body.case_id });
   const prior = priorActions.data.find((row) => row.idempotency_key === idempotencyKey);
-  if (prior) {
+  if (prior && !(body.fake && body.execute)) {
     return {
       ok: false,
       held: prior.status === "held",
@@ -787,7 +903,7 @@ export async function approveAction(
       idempotent: true,
     };
   }
-  const actionId = `act_${crypto.randomUUID()}`;
+  const actionId = body.action_id || (prior && body.fake && body.execute ? String(prior.action_id) : `act_${crypto.randomUUID()}`);
   const serverHold = hold || POLICY.send === "held";
   requireUpsert(await db.upsert("sales_booking_actions", {
     action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: serverHold && !body.fake ? "held" : "proposed",
@@ -805,30 +921,101 @@ export async function approveAction(
     return { ok: false, held: true, sent: false, booked: false, waiting: false, reason: "send_hold", action_id: actionId, stage: "held" };
   }
   if (!body.fake) throw new SalesBookingError("Live provider writes are refused", 403, "live_write_refused");
-  await journalActionStage(db, a, actionId, "executing", { fake: true, live: false });
-  const sms = await adapters.sendSms?.({ contact_id: c.contact_id, text: body.text, sender: resource?.sender }, { execute: true, fake: true });
-  const uncertain = !sms || sms.held === true || (sms.sent !== true && !sms.message_id);
-  requireUpsert(await db.upsert("sales_booking_actions", {
-    action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind,
-    status: uncertain ? "uncertain" : "complete", stage: uncertain ? "uncertain" : "complete",
-    source_version: c.source_version, send_evidence: sms?.sent ? "sent" : "uncertain",
-    idempotency_key: idempotencyKey, provider_uncertain: uncertain, created_at: nowIso(),
-  }));
-  await journalActionStage(db, a, actionId, uncertain ? "uncertain" : "complete", { fake: true, message_id: sms?.message_id || null, sent: !!sms?.sent });
-  requireUpsert(await db.upsert("sales_booking_offers", {
-    offer_id: `off_${actionId}`, org_id: a.org_id, case_id: body.case_id, slot_revision: 1, start_iso: body.start_iso, end_iso: body.end_iso,
-    send_evidence: sms?.sent ? "sent" : "failed", sent_at: sms?.sent ? nowIso() : null,
-  }));
-  let booked = false;
-  if (body.kind === "confirm_booking") {
-    const cal = await adapters.writeCalendar?.({ scoper_user_id: resource?.scoper_user_id, start_iso: body.start_iso, end_iso: body.end_iso, case_id: body.case_id }, { execute: true, fake: true });
-    booked = !!cal?.written;
-    if (cal?.event_id) requireUpsert(await db.upsert("sales_booking_cases", { ...c, event_id: cal.event_id, status: "booked" }));
-    if (!cal?.written || !cal?.event_id) {
-      await journalActionStage(db, a, actionId, "uncertain", { calendar: true, written: !!cal?.written, event_id: cal?.event_id || null });
+  return executeFakeSequence(db, adapters, {
+    actionId, caseRow: c, body, actor: a, resource, idempotencyKey,
+  });
+}
+
+async function executeFakeSequence(
+  db: BookingDb,
+  adapters: Adapters,
+  args: {
+    actionId: string;
+    caseRow: Record<string, unknown>;
+    body: { case_id: string; kind: string; text?: string; start_iso?: string; end_iso?: string; expected_draft_revision?: number; resource_id?: string; revoke?: boolean; expired?: boolean };
+    actor: BookingActor;
+    resource: { id: string; sender?: string | null; scoper_user_id: string } | undefined;
+    idempotencyKey: string;
+  },
+) {
+  const { actionId, caseRow: c, body, actor: a, resource, idempotencyKey } = args;
+  const live = (await db.selectMatch("sales_booking_actions", { org_id: a.org_id, action_id: actionId })).data[0];
+  if (live?.revoked || body.revoke) {
+    await journalActionStage(db, a, actionId, "revoked", { reason: "approval_revoked" });
+    return { ok: false, held: true, reason: "approval_revoked", action_id: actionId };
+  }
+  if (live?.expires_at && Date.parse(String(live.expires_at)) < Date.now() || body.expired) {
+    await journalActionStage(db, a, actionId, "expired", { reason: "approval_expired" });
+    return { ok: false, held: true, reason: "approval_expired", action_id: actionId };
+  }
+  if (body.resource_id && resource && body.resource_id !== resource.id) {
+    return { ok: false, held: true, reason: "wrong_staff", action_id: actionId };
+  }
+  if (body.expected_draft_revision != null) {
+    const draft = (await db.selectMatch("sales_booking_drafts", { org_id: a.org_id, case_id: body.case_id })).data[0];
+    if (!draft || Number(draft.revision) !== Number(body.expected_draft_revision)) {
+      return { ok: false, held: true, reason: "draft_revision_mismatch", action_id: actionId };
     }
   }
-  return { ok: true, held: false, sent: !!sms?.sent, booked, fake: true, action_id: actionId, stage: uncertain ? "uncertain" : "complete", provider_uncertain: uncertain };
+  const observedSource = String(c.source_version || "");
+  const recordedSource = String(live?.source_version || observedSource);
+  if (observedSource && recordedSource && observedSource !== recordedSource) {
+    return { ok: false, held: true, reason: "source_changed", action_id: actionId };
+  }
+  const invocation = crypto.randomUUID();
+  const lease = await db.rpc("sales_booking_acquire_lease", {
+    p_org_id: a.org_id, p_lease_id: `exec:${actionId}:${invocation}`, p_case_id: body.case_id,
+    p_action_kind: "execute", p_token: invocation, p_owner: a.user_id, p_ttl_seconds: 60,
+  });
+  if (lease.data?.ok === false) return { ok: false, held: true, reason: "lease_held", action_id: actionId };
+  try {
+    await journalActionStage(db, a, actionId, "executing", { fake: true, live: false });
+    const journal = (await db.selectMatch("sales_booking_action_journal", { org_id: a.org_id, action_id: actionId })).data;
+    const smsAlready = journal.some((row) => row.stage === "sms_sent");
+    let sms: { held?: boolean; sent?: boolean; message_id?: string } | undefined;
+    if (!smsAlready) {
+      sms = await adapters.sendSms?.({ contact_id: c.contact_id, text: body.text, sender: resource?.sender }, { execute: true, fake: true });
+      if (!sms || sms.held || !sms.sent || !sms.message_id) {
+        await journalActionStage(db, a, actionId, "sms_failed", { sent: !!sms?.sent, message_id: sms?.message_id || null });
+        requireUpsert(await db.upsert("sales_booking_actions", {
+          action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: "uncertain",
+          stage: "uncertain", source_version: c.source_version, send_evidence: "uncertain",
+          idempotency_key: idempotencyKey, provider_uncertain: true, created_at: nowIso(),
+        }));
+        return { ok: false, held: false, sent: false, booked: false, fake: true, reason: "sms_uncertain", action_id: actionId, provider_uncertain: true };
+      }
+      await journalActionStage(db, a, actionId, "sms_sent", { message_id: sms.message_id });
+      requireUpsert(await db.upsert("sales_booking_offers", {
+        offer_id: `off_${actionId}`, org_id: a.org_id, case_id: body.case_id, slot_revision: 1,
+        start_iso: body.start_iso, end_iso: body.end_iso, send_evidence: "sent", sent_at: nowIso(),
+      }));
+    }
+    let booked = false;
+    if (body.kind === "confirm_booking") {
+      const cal = await adapters.writeCalendar?.({ scoper_user_id: resource?.scoper_user_id, start_iso: body.start_iso, end_iso: body.end_iso, case_id: body.case_id }, { execute: true, fake: true });
+      if (!cal?.written || !cal?.event_id) {
+        await journalActionStage(db, a, actionId, "calendar_failed", { written: !!cal?.written, event_id: cal?.event_id || null });
+        requireUpsert(await db.upsert("sales_booking_actions", {
+          action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: "uncertain",
+          stage: "uncertain", source_version: c.source_version, send_evidence: "sent",
+          idempotency_key: idempotencyKey, provider_uncertain: true, created_at: nowIso(),
+        }));
+        return { ok: false, sent: true, booked: false, fake: true, reason: "calendar_uncertain", action_id: actionId, provider_uncertain: true };
+      }
+      booked = true;
+      await journalActionStage(db, a, actionId, "calendar_written", { event_id: cal.event_id });
+      requireUpsert(await db.upsert("sales_booking_cases", { ...c, event_id: cal.event_id, status: "booked" }));
+    }
+    requireUpsert(await db.upsert("sales_booking_actions", {
+      action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: "complete",
+      stage: "complete", source_version: c.source_version, send_evidence: "sent",
+      idempotency_key: idempotencyKey, provider_uncertain: false, created_at: nowIso(),
+    }));
+    await journalActionStage(db, a, actionId, "complete", { fake: true, booked });
+    return { ok: true, held: false, sent: true, booked, fake: true, action_id: actionId, stage: "complete", provider_uncertain: false };
+  } finally {
+    await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: `exec:${actionId}:${invocation}`, p_token: invocation });
+  }
 }
 
 export async function dispatch(
@@ -855,9 +1042,12 @@ export async function dispatch(
       refresh: params.refresh === "1" || body.refresh === true,
     }, a);
   }
-  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot"];
+  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot"];
   if (writes.includes(action) && method !== "POST") throw new SalesBookingError(`${action} requires POST`, 405, "method_not_allowed");
   if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; human_edited?: boolean; sender?: string | null; expected_revision?: number }, a);
+  if (action === "sales_booking_interpret") {
+    return submitInterpretation(db, body as Parameters<typeof submitInterpretation>[1], a);
+  }
   if (action === "sales_booking_assess") {
     const cases = await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id });
     if (!cases.data[0]) throw new SalesBookingError("unknown case", 404, "unknown_case");

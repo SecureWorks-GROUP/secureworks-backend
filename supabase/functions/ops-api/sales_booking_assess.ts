@@ -663,7 +663,7 @@ function proposeCandidate(input, facts) {
         customer_date_specified: !!facts.date_specified,
         window_label: facts.date_specified ? 'customer date' : 'AI-proposed date, customer date unspecified'
       };
-      if (!clash && slotFeasible(candidate, input)) {
+      if (!clash && slotTentative(candidate, input)) {
         found = candidate;
         return;
       }
@@ -721,7 +721,7 @@ function proposeFromWindows(windows, input) {
           ? (w.source_message_id ? 'inbound ' + w.source_message_id : 'inbound window')
           : 'AI-proposed date, customer date unspecified'
       };
-      if (!clash && slotFeasible(cand, input)) {
+      if (!clash && slotTentative(cand, input)) {
         found = cand;
         return;
       }
@@ -808,13 +808,66 @@ function travelClash(startMs, endMs, input) {
   return false;
 }
 
-function slotFeasible(slot, input) {
+function slotDeskOk(slot, input) {
   if (!slot || slot.start_instant == null || slot.end_instant == null) return false;
   var nowMs = toInstant(input.now || input.as_of);
   if (nowMs != null && slot.start_instant < nowMs) return false;
+  var rules = (input.resource && input.resource.desk_rules) || {};
+  var local = perthParts(slot.start_instant);
+  if (!legalStart(local.hour, rules, local.date, mondayIso(input.week_start || '2026-09-14'))) return false;
+  return true;
+}
+
+function travelKnown(input) {
+  return input.travel_minutes != null || (Array.isArray(input.route_legs) && input.route_legs.length > 0);
+}
+
+function slotTentative(slot, input) {
+  if (!slotDeskOk(slot, input)) return false;
+  if (Array.isArray(input.leave_intervals) && input.leave_retrieved_at && leaveClash(slot.start_instant, slot.end_instant, input)) return false;
+  if (travelKnown(input) && travelClash(slot.start_instant, slot.end_instant, input)) return false;
+  return true;
+}
+
+function slotFeasible(slot, input) {
+  if (!slotDeskOk(slot, input)) return false;
   if (leaveClash(slot.start_instant, slot.end_instant, input)) return false;
   if (travelClash(slot.start_instant, slot.end_instant, input)) return false;
   return true;
+}
+
+function staffNextSteps(gaps) {
+  var steps = [];
+  (gaps || []).forEach(function (g) {
+    if (g === 'leave_unobserved' || g === 'leave_unavailable' || g === 'leave_roster_incomplete' || g === 'stale_leave_observation') {
+      steps.push('Confirm this scoper leave day in staff availability or Graph leave before treating the diary as free.');
+    }
+    if (g === 'travel_unobserved' || g === 'travel_unavailable' || g === 'stale_travel_observation') {
+      steps.push('Confirm drive time from the previous visit or Heathridge to this suburb.');
+    }
+    if (g === 'calendar_unobserved' || g === 'stale_calendar_observation') {
+      steps.push('Refresh this scoper Outlook week before sending an offer.');
+    }
+  });
+  var seen = {};
+  return steps.filter(function (s) { if (seen[s]) return false; seen[s] = true; return true; });
+}
+
+function composeDraft(proposal, input) {
+  if (!proposal || !proposal.start_iso) return '';
+  var hm = String(proposal.start_iso).slice(11, 16);
+  var hour = Number(hm.slice(0, 2));
+  var min = hm.slice(3);
+  var ampm = hour >= 12 ? 'pm' : 'am';
+  var h12 = hour % 12 || 12;
+  var who = (input.resource && input.resource.name) || 'SecureWorks';
+  var lane = input.resource && input.resource.lane === 'fencing' ? 'SecureWorks Fencing' : 'SecureWorks Patios';
+  var when = String(proposal.start_iso).slice(0, 10) + ' at ' + h12 + ':' + min + ampm;
+  var suburb = input.suburb || 'the site';
+  if (proposal.date_source === 'ai_proposed') {
+    return 'Hi, I can visit ' + when + ' in ' + suburb + '. Does that suit? ' + who + ', ' + lane;
+  }
+  return 'Hi, ' + when + ' in ' + suburb + ' works for me. Can someone be there then? ' + who + ', ' + lane;
 }
 
 export function validate(ground, model, input) {
@@ -881,6 +934,24 @@ export function validate(ground, model, input) {
       facts.date_specified = true;
       usedModelWindows = true;
     }
+  }
+  if (model && Array.isArray(model.candidate_slots)) {
+    model.candidate_slots.forEach(function (w) {
+      var startI = toInstant(w.start_iso);
+      var endI = toInstant(w.end_iso);
+      if (startI == null || endI == null || endI <= startI) {
+        reasons.push('Interpreter candidate slot times are not valid instants.');
+        return;
+      }
+      windows.push({
+        start_iso: w.start_iso,
+        end_iso: w.end_iso,
+        start_instant: startI,
+        end_instant: endI,
+        date_source: 'ai_proposed',
+        customer_date_specified: false
+      });
+    });
   }
 
   if (model && model.exact_acceptance) {
@@ -952,20 +1023,31 @@ export function validate(ground, model, input) {
       slot = proposeCandidate(input, facts);
     }
     var capGaps = occupancyGaps(input);
-    if (capGaps.length) {
-      reasons.push('Calendar, leave or travel coverage is missing. Not execution-ready. ' + capGaps.join(','));
-      status = 'needs_decision';
-      proposal = null;
-    } else if (!slot) {
+    var executable = slot && slotFeasible(slot, input) && !capGaps.length;
+    if (!slot) {
       reasons.push('No feasible slot under current rules and occupancy.');
       status = 'needs_decision';
       proposal = null;
     } else if (wrongLane) {
       status = 'needs_decision';
       proposal = null;
+    } else if (!executable) {
+      reasons.push('Tentative candidate only. Leave/travel/calendar coverage is not complete, so this is not Ready and not actionable. ' + capGaps.join(','));
+      status = 'needs_decision';
+      if (capGaps.indexOf('as_of_missing') >= 0) {
+        proposal = null;
+      } else {
+        proposal = Object.assign({}, slot, {
+          kind: 'tentative',
+          actionable: false,
+          holds: capGaps,
+          staff_next: staffNextSteps(capGaps)
+        });
+      }
+      if (slot.date_source === 'ai_proposed') reasons.push('AI-proposed date, customer date unspecified.');
     } else {
       status = 'ready';
-      proposal = slot;
+      proposal = Object.assign({}, slot, { kind: 'proposal', actionable: false, holds: [] });
       if (slot.date_source === 'ai_proposed') {
         reasons.push('AI-proposed date, customer date unspecified.');
       }
@@ -978,27 +1060,17 @@ export function validate(ground, model, input) {
   }
 
   var draft = '';
-  if (proposal && status === 'ready') {
-    var hm = String(proposal.start_iso).slice(11, 16);
-    var hour = Number(hm.slice(0, 2));
-    var min = hm.slice(3);
-    var ampm = hour >= 12 ? 'pm' : 'am';
-    var h12 = hour % 12 || 12;
-    var who = (input.resource && input.resource.name) || 'SecureWorks';
-    var lane = input.resource && input.resource.lane === 'fencing' ? 'SecureWorks Fencing' : 'SecureWorks Patios';
-    var when = String(proposal.start_iso).slice(0, 10) + ' at ' + h12 + ':' + min + ampm;
-    if (proposal.date_source === 'ai_proposed') {
-      draft = 'Hi, I can visit ' + when + ' in ' + (input.suburb || 'the site') + '. Does that suit? ' + who + ', ' + lane;
-    } else {
-      draft = 'Hi, ' + when + ' in ' + (input.suburb || 'the site') + ' works for me. Can someone be there then? ' + who + ', ' + lane;
-    }
+  if (proposal && (status === 'ready' || proposal.kind === 'tentative')) {
+    draft = (model && typeof model.proposed_text === 'string' && model.proposed_text.trim())
+      ? model.proposed_text.trim()
+      : composeDraft(proposal, input);
     proposal.draft = draft;
-    proposal.kind = 'proposal';
+    if (!proposal.kind) proposal.kind = status === 'ready' ? 'proposal' : 'tentative';
   }
 
   return {
     version: VERSION,
-    interpreter: usedModelWindows ? 'ops-ai-structured-validated' : (ground.interpreter || INTERPRETER_FALLBACK),
+    interpreter: (model && model.interpreter) || (usedModelWindows ? 'ops-ai-structured-validated' : (ground.interpreter || INTERPRETER_FALLBACK)),
     intelligent_automation: !!usedModelWindows,
     week_start: mondayIso(input.week_start || '2026-09-14'),
     reply_kind: replyKind,
