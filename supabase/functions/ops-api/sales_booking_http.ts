@@ -13,9 +13,51 @@ const ACTOR: BookingActor = {
   role: "ops_manager",
 };
 
+const MCP = Deno.env.get("SW_MCP") || `${Deno.env.get("HOME")}/.local/bin/sw-mcp`;
+
+async function mcpCall(tool: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const dir = await Deno.makeTempDir({ prefix: "booking-mcp-" });
+  const argsFile = `${dir}/args.json`;
+  const outFile = `${dir}/out.json`;
+  await Deno.writeTextFile(argsFile, JSON.stringify(args));
+  const cmd = new Deno.Command(MCP, {
+    args: ["call", tool, "--args-file", argsFile, "--out", outFile],
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const out = await cmd.output();
+  if (out.code !== 0) {
+    throw new Error(new TextDecoder().decode(out.stderr) || `mcp ${tool} exit ${out.code}`);
+  }
+  const parsed = JSON.parse(await Deno.readTextFile(outFile));
+  if (parsed.result?.content?.[0]?.text) return JSON.parse(parsed.result.content[0].text);
+  return parsed.result || parsed;
+}
+
 const adapters: Adapters = {
   listOpportunities: async () => ({ items: [], next: null, complete: false }),
-  calendarEvents: async () => ({ ok: true, events: [], retrieved_at: new Date().toISOString() }),
+  calendarEvents: async (scoperUserId, since, until) => {
+    const raw = await mcpCall("sw_scoper_calendar_events", {
+      scoper_user_id: scoperUserId,
+      since,
+      until,
+      timezone: "Australia/Perth",
+    });
+    return {
+      ok: raw.ok !== false,
+      mailbox: raw.mailbox,
+      retrieved_at: raw.retrieved_at || new Date().toISOString(),
+      coverage: raw.coverage || { operational_leave: "not_read" },
+      events: Array.isArray(raw.events) ? raw.events : [],
+    };
+  },
+  coverageForResource: async () => ({
+    leave_intervals: null,
+    travel_minutes: null,
+    calendar_retrieved_at: new Date().toISOString(),
+    leave_retrieved_at: null,
+    travel_retrieved_at: null,
+  }),
 };
 
 function actorFrom(req: Request): BookingActor | null {
