@@ -41,6 +41,7 @@ function refreshClient(
   claimed: any,
   options: {
     recordError?: any;
+    finishError?: any;
     skipCommitPersistence?: boolean;
     fabricateCommandRequestId?: boolean;
     mutateSourceAfterPlanRead?: { pg: any; jobId: string };
@@ -107,14 +108,30 @@ function refreshClient(
         return { data: structuredClone(claimed), error: null };
       }
       if (name === "record_workflow_refresh_receipt") {
+        assertEquals(Object.keys(args).sort(), [
+          "p_run_id", "p_owner", "p_lease", "p_generation",
+          "p_driver_version", "p_scope", "p_output", "p_observed_revision",
+        ].sort(), "receipt RPC must use the provisional named-argument contract");
         if (options.recordError) {
           return { data: null, error: options.recordError };
         }
-        recordedReceipt = args.p_receipt;
-        return { data: { ok: true, id: args.p_id }, error: null };
+        recordedReceipt = {
+          driver_version: args.p_driver_version,
+          scope: args.p_scope,
+          observed_source_revision: args.p_observed_revision,
+          output: args.p_output,
+        };
+        return { data: { ok: true, id: args.p_run_id }, error: null };
       }
       if (name === "finish_workflow_refresh") {
-        finishedOutput = args.p_output;
+        assertEquals(Object.keys(args).sort(), [
+          "p_id", "p_status", "p_result", "p_cutoff",
+          "p_lease", "p_owner", "p_generation", "p_observed_revision",
+        ].sort(), "finish RPC must use the provisional named-argument contract");
+        if (options.finishError) {
+          return { data: null, error: options.finishError };
+        }
+        finishedOutput = args.p_result;
         return {
           data: { id: args.p_id, outcome: "completed", status: "completed" },
           error: null,
@@ -137,6 +154,8 @@ Deno.test("Dispatch Refresh worker persists assessment output before recording r
     const client = refreshClient(pg.client, expectedClaim);
     const result = await runDispatchRefreshWorker(client, org);
     const receipt = client.recordedReceipt;
+    assertEquals(result.outcome, "unavailable");
+    assertEquals(result.capability, "pending");
     assertEquals(result.reason, "dispatch_verified_output_unavailable");
     assertEquals(receipt.driver_version, "dispatch_refresh/v1");
     assertEquals(receipt.scope, { org_id: org, job_id: jobId });
@@ -201,20 +220,26 @@ Deno.test("Dispatch Refresh worker persists assessment output before recording r
     assert(commitCall > claimCall);
     assert(recordCall);
     assert(finishCall);
-    assertEquals(recordCall.args.p_id, expectedClaim.id);
-    assertEquals(recordCall.args.p_lease_token, expectedClaim.lease_token);
-    assertEquals(recordCall.args.p_generation, expectedClaim.generation);
-    assertEquals(
-      recordCall.args.p_receipt.observed_source_revision,
-      persisted.data.plan.source_version,
-    );
-    assertEquals(finishCall.args.p_id, expectedClaim.id);
-    assertEquals(finishCall.args.p_lease_token, expectedClaim.lease_token);
-    assertEquals(finishCall.args.p_generation, expectedClaim.generation);
-    assertEquals(
-      finishCall.args.p_observed_source_revision,
-      persisted.data.plan.source_version,
-    );
+    assertEquals(recordCall.args, {
+      p_run_id: expectedClaim.id,
+      p_owner: expectedClaim.owner,
+      p_lease: expectedClaim.lease_token,
+      p_generation: expectedClaim.generation,
+      p_driver_version: "dispatch_refresh/v1",
+      p_scope: expectedClaim.scope,
+      p_output: receipt.output,
+      p_observed_revision: persisted.data.plan.source_version,
+    });
+    assertEquals(finishCall.args, {
+      p_id: expectedClaim.id,
+      p_status: "completed",
+      p_result: receipt.output,
+      p_cutoff: receipt.output.work.source_cutoff,
+      p_lease: expectedClaim.lease_token,
+      p_owner: expectedClaim.owner,
+      p_generation: expectedClaim.generation,
+      p_observed_revision: persisted.data.plan.source_version,
+    });
   } finally {
     await pg.close();
   }
@@ -233,6 +258,8 @@ Deno.test("Dispatch Refresh worker leaves run pending when receipt RPC is missin
       },
     });
     const result = await runDispatchRefreshWorker(client, org);
+    assertEquals(result.outcome, "unavailable");
+    assertEquals(result.capability, "pending");
     assertEquals(result.reason, "dispatch_refresh_receipt_rpc_missing");
     assertEquals(
       client.calls.some((call: any) => call.name === "finish_workflow_refresh"),
@@ -250,6 +277,29 @@ Deno.test("Dispatch Refresh worker leaves run pending when receipt RPC is missin
     );
     if (persisted.error) throw new Error(persisted.error.message);
     assertEquals(persisted.data, { commands: 1, plans: 1 });
+  } finally {
+    await pg.close();
+  }
+});
+
+Deno.test("Dispatch Refresh worker leaves run pending when finish RPC is missing", async () => {
+  const pg = await openDispatchPg();
+  try {
+    const jobId = id(7);
+    await insertAcceptedJob(pg, jobId);
+    const client = refreshClient(pg.client, claim(jobId, 7), {
+      finishError: {
+        code: "PGRST202",
+        message:
+          "Could not find public.finish_workflow_refresh in the schema cache",
+      },
+    });
+    const result = await runDispatchRefreshWorker(client, org);
+    assertEquals(result.outcome, "unavailable");
+    assertEquals(result.capability, "pending");
+    assertEquals(result.reason, "dispatch_refresh_finish_rpc_missing");
+    assert(client.recordedReceipt);
+    assertEquals(client.finishedOutput, null);
   } finally {
     await pg.close();
   }

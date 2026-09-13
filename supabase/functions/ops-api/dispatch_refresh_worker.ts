@@ -138,15 +138,17 @@ export async function runClaimedDispatchRefresh(
     },
   };
   const coordinates = {
-    p_id: claim.id,
-    p_org_id: org,
     p_owner: claim.owner,
-    p_lease_token: claim.lease_token,
+    p_lease: claim.lease_token,
     p_generation: claim.generation,
   };
   const recorded = await client.rpc("record_workflow_refresh_receipt", {
     ...coordinates,
-    p_receipt: receipt,
+    p_run_id: claim.id,
+    p_driver_version: receipt.driver_version,
+    p_scope: receipt.scope,
+    p_output: receipt.output,
+    p_observed_revision: plan.source_version,
   });
   if (recorded.error) {
     if (missingRpc(recorded.error)) {
@@ -170,8 +172,11 @@ export async function runClaimedDispatchRefresh(
   }
   const finished = await client.rpc("finish_workflow_refresh", {
     ...coordinates,
-    p_observed_source_revision: plan.source_version,
-    p_output: receipt.output,
+    p_id: claim.id,
+    p_status: "completed",
+    p_result: receipt.output,
+    p_cutoff: sourceCutoff,
+    p_observed_revision: plan.source_version,
   });
   if (finished.error) {
     if (missingRpc(finished.error)) {

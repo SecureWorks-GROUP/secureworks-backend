@@ -18,6 +18,10 @@ export const literal = (value: any): string =>
       ) + "'" + (typeof value === "object" ? "::jsonb" : "");
 
 export async function openDispatchPg() {
+  const port = Deno.env.get("DISPATCH_TEST_PGPORT") || "55581";
+  if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > 65535) {
+    throw Error("DISPATCH_TEST_PGPORT must be a local unprivileged port");
+  }
   const child = new Deno.Command(psql, {
     args: [
       "-X",
@@ -25,7 +29,7 @@ export async function openDispatchPg() {
       "-h",
       "127.0.0.1",
       "-p",
-      "55581",
+      port,
       "-d",
       "dispatch_test5",
       "-v",
