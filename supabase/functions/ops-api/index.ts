@@ -357,7 +357,20 @@ import {
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { organisationContext, OrganisationContextError } from './organisation_context.ts'
-import { startWorkflowRefresh, finishWorkflowRefresh, WorkflowRefreshError } from './workflow_refresh.ts'
+import {
+  consumeWorkflowRefresh,
+  finishWorkflowRefresh,
+  refreshActorFromAuth,
+  startAndConsumeDispatchRefresh,
+  startWorkflowRefresh,
+  WorkflowRefreshError,
+} from './workflow_refresh.ts'
+import {
+  ContextMailError,
+  correctMessageWorkLink,
+  readMessageWorkLinks,
+  recordContextMailOccurrence,
+} from './context_mail.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -6945,11 +6958,51 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'workflow_refresh': {
         if (req.method !== 'POST') return json({ error: 'workflow_refresh requires POST' }, 405)
         try {
+          const actor = refreshActorFromAuth(authMode, authUser, body?.actor, DEFAULT_ORG_ID)
           const op = String(body?.op || 'start')
-          if (op === 'finish') return json(await finishWorkflowRefresh(client, body || {}))
-          return json(await startWorkflowRefresh(client, { workflow: body?.workflow, scope: body?.scope, actor: body?.actor || 'ops-api' }))
+          if (op === 'finish') {
+            return json(await finishWorkflowRefresh(client, { ...body, owner: body?.owner || body?.workflow }))
+          }
+          if (op === 'consume') return json(await consumeWorkflowRefresh(client, body || {}))
+          if (op === 'readback') {
+            const { data, error } = await client.rpc('workflow_refresh_readback', { p_id: body?.id })
+            if (error) throw new WorkflowRefreshError(500, error.message)
+            return json(data)
+          }
+          const startBody = { workflow: body?.workflow, scope: body?.scope, actor }
+          if (String(body?.workflow || '') === 'dispatch') {
+            return json(await startAndConsumeDispatchRefresh(client, startBody))
+          }
+          return json(await startWorkflowRefresh(client, startBody))
         } catch (error) {
           if (error instanceof WorkflowRefreshError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'context_mail_occurrence': {
+        if (req.method !== 'POST') return json({ error: 'context_mail_occurrence requires POST' }, 405)
+        try {
+          return json(await recordContextMailOccurrence(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'message_work_links': {
+        if (req.method !== 'GET') return json({ error: 'message_work_links requires GET' }, 405)
+        try {
+          return json(await readMessageWorkLinks(client, { event_id: url.searchParams.get('event_id') || undefined }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'correct_message_work_link': {
+        if (req.method !== 'POST') return json({ error: 'correct_message_work_link requires POST' }, 405)
+        try {
+          return json(await correctMessageWorkLink(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
           throw error
         }
       }

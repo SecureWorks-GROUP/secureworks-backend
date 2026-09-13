@@ -1,8 +1,11 @@
-// Provider-open ACCREC book vs xero_invoices cache.
-// Incremental If-Modified-Since never re-asks invoices that have not changed,
-// so AUTHORISED rows that were never cached stay missing. This pass compares
-// a full provider page set to the door filter and upserts only missing opens.
-// Author tests must call write=false against production.
+// Provider-open ACCREC vs cache rows of any status.
+// Production SELECT 2026-09-13 02:36:28 UTC: the 13 door-absent invoices
+// already exist (same Xero IDs). 12 cached DELETED/0, INV-1442 cached DRAFT.
+// Incremental If-Modified-Since plus a watermark advanced by local DELETED
+// writes never re-asks those IDs; stale reconcile only selects AUTHORISED
+// amount_due>0 or a tiny DRAFT sweep. Repair UPDATES existing money/status
+// from provider authority and must not wipe debt_* notes/classifications.
+// Author tests must not write production.
 
 export type ProviderOpenInvoice = {
   InvoiceID: string;
@@ -10,105 +13,129 @@ export type ProviderOpenInvoice = {
   Type?: string;
   Status: string;
   AmountDue: number;
+  AmountPaid?: number;
+  UpdatedDateUTC?: string;
 };
 
-export type CacheOpenInvoice = {
+export type CacheInvoice = {
   xero_invoice_id: string;
   invoice_number?: string | null;
   invoice_type?: string | null;
   status?: string | null;
   amount_due?: number | null;
+  debt_classification?: string | null;
+  debt_brief?: string | null;
 };
 
-export function isOpenAccrec(row: {
-  Type?: string | null;
-  invoice_type?: string | null;
-  Status?: string | null;
-  status?: string | null;
-  AmountDue?: number | null;
-  amount_due?: number | null;
-}): boolean {
-  const type = row.Type ?? row.invoice_type;
-  const status = row.Status ?? row.status;
-  const due = Number(row.AmountDue ?? row.amount_due ?? 0);
-  return type === "ACCREC" && status === "AUTHORISED" && due > 0;
+export function isProviderOpenAccrec(row: ProviderOpenInvoice): boolean {
+  return (row.Type ?? "ACCREC") === "ACCREC" &&
+    row.Status === "AUTHORISED" &&
+    Number(row.AmountDue) > 0;
 }
 
-export function diffOpenReceivables(
-  provider: ProviderOpenInvoice[],
-  cache: CacheOpenInvoice[],
-) {
-  const p = provider.filter((r) =>
-    isOpenAccrec({
-      Type: r.Type ?? "ACCREC",
-      Status: r.Status,
-      AmountDue: r.AmountDue,
-    })
-  );
-  const c = cache.filter((r) =>
-    isOpenAccrec({
-      invoice_type: r.invoice_type ?? "ACCREC",
-      status: r.status,
-      amount_due: r.amount_due,
-    })
-  );
-  const pIds = new Map(p.map((r) => [r.InvoiceID, r]));
-  const cIds = new Map(c.map((r) => [r.xero_invoice_id, r]));
-  const missing = p.filter((r) => !cIds.has(r.InvoiceID));
-  const extras = c.filter((r) => !pIds.has(r.xero_invoice_id));
-  const amount_diffs: Array<{ id: string; provider: number; cache: number }> = [];
-  for (const [id, prow] of pIds) {
-    const crow = cIds.get(id);
-    if (!crow) continue;
-    const pd = Number(prow.AmountDue);
-    const cd = Number(crow.amount_due);
-    if (Math.round(pd * 100) !== Math.round(cd * 100)) {
-      amount_diffs.push({ id, provider: pd, cache: cd });
-    }
-  }
-  return {
-    provider_count: p.length,
-    provider_due: round2(p.reduce((s, r) => s + Number(r.AmountDue), 0)),
-    cache_count: c.length,
-    cache_due: round2(c.reduce((s, r) => s + Number(r.amount_due || 0), 0)),
-    missing,
-    extras,
-    amount_diffs,
-  };
+export function isDoorOpen(row: CacheInvoice): boolean {
+  return (row.invoice_type ?? "ACCREC") === "ACCREC" &&
+    row.status === "AUTHORISED" &&
+    Number(row.amount_due) > 0;
 }
 
 function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
+export function classifyProviderVsCache(
+  provider: ProviderOpenInvoice[],
+  cache: CacheInvoice[],
+) {
+  const p = provider.filter(isProviderOpenAccrec);
+  const byId = new Map(cache.map((r) => [r.xero_invoice_id, r]));
+  const stale_status: Array<{ provider: ProviderOpenInvoice; cache: CacheInvoice }> = [];
+  const absent: ProviderOpenInvoice[] = [];
+  const matched: ProviderOpenInvoice[] = [];
+  for (const inv of p) {
+    const row = byId.get(inv.InvoiceID);
+    if (!row) {
+      absent.push(inv);
+      continue;
+    }
+    if (!isDoorOpen(row) || round2(Number(row.amount_due)) !== round2(Number(inv.AmountDue))) {
+      stale_status.push({ provider: inv, cache: row });
+    } else {
+      matched.push(inv);
+    }
+  }
+  const door = cache.filter(isDoorOpen);
+  const cutoffTimes = p
+    .map((r) => Date.parse(String(r.UpdatedDateUTC || "")))
+    .filter((n) => Number.isFinite(n));
+  return {
+    provider_count: p.length,
+    provider_due: round2(p.reduce((s, r) => s + Number(r.AmountDue), 0)),
+    door_count: door.length,
+    door_due: round2(door.reduce((s, r) => s + Number(r.amount_due || 0), 0)),
+    provider_cutoff: cutoffTimes.length
+      ? new Date(Math.max(...cutoffTimes)).toISOString()
+      : null,
+    stale_status,
+    absent,
+    matched_count: matched.length,
+  };
+}
+
+const MONEY_FIELDS = [
+  "status",
+  "amount_due",
+  "amount_paid",
+  "synced_at",
+] as const;
+
+export function providerMoneyPatch(inv: ProviderOpenInvoice, now = new Date()) {
+  return {
+    status: inv.Status,
+    amount_due: inv.AmountDue,
+    amount_paid: inv.AmountPaid ?? 0,
+    synced_at: now.toISOString(),
+  };
+}
+
 export async function applyOpenReceivableReconcile(
   client: { from: (t: string) => any },
   orgId: string,
   provider: ProviderOpenInvoice[],
-  opts: { write: boolean },
+  opts: { write: boolean; now?: Date },
 ) {
+  const ids = provider.filter(isProviderOpenAccrec).map((p) => p.InvoiceID);
   const { data, error } = await client.from("xero_invoices")
-    .select("xero_invoice_id, invoice_number, invoice_type, status, amount_due")
+    .select(
+      "xero_invoice_id, invoice_number, invoice_type, status, amount_due, debt_classification, debt_brief",
+    )
     .eq("org_id", orgId)
-    .eq("invoice_type", "ACCREC")
-    .eq("status", "AUTHORISED")
-    .gt("amount_due", 0);
+    .in("xero_invoice_id", ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]);
   if (error) throw error;
-  const diff = diffOpenReceivables(provider, data || []);
-  if (!opts.write) return { ...diff, written: 0 };
-  let written = 0;
-  for (const inv of diff.missing) {
-    const { error: upErr } = await client.from("xero_invoices").upsert({
+  const diff = classifyProviderVsCache(provider, data || []);
+  if (!opts.write) {
+    return { ...diff, updated: 0, inserted: 0 };
+  }
+  const now = opts.now ?? new Date();
+  let updated = 0;
+  let inserted = 0;
+  for (const { provider: inv } of diff.stale_status) {
+    const patch = providerMoneyPatch(inv, now);
+    const { error: upErr } = await client.from("xero_invoices").update(patch)
+      .eq("org_id", orgId).eq("xero_invoice_id", inv.InvoiceID);
+    if (upErr) throw upErr;
+    updated += 1;
+  }
+  for (const inv of diff.absent) {
+    const { error: inErr } = await client.from("xero_invoices").insert({
       org_id: orgId,
       xero_invoice_id: inv.InvoiceID,
       invoice_number: inv.InvoiceNumber,
       invoice_type: inv.Type ?? "ACCREC",
-      status: inv.Status,
-      amount_due: inv.AmountDue,
-      synced_at: new Date().toISOString(),
-    }, { onConflict: "org_id,xero_invoice_id" });
-    if (upErr) throw upErr;
-    written += 1;
+      ...providerMoneyPatch(inv, now),
+    });
+    if (inErr) throw inErr;
+    inserted += 1;
   }
-  return { ...diff, written };
+  return { ...diff, updated, inserted, money_fields: MONEY_FIELDS };
 }

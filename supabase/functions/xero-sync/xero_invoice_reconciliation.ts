@@ -150,6 +150,12 @@ export async function listStaleXeroInvoices(
       !row || typeof row.xero_invoice_id !== "string" || !row.xero_invoice_id
     );
   // Open receivables: verified hourly while money is owed.
+  // DELETED/zero tombstones are intentionally not selected here. A local
+  // DELETED write stamps updated_at=now() via update_xero_invoices_updated_at,
+  // which advances the incremental If-Modified-Since watermark past Xero's
+  // older UpdatedDateUTC, so those IDs never return in the incremental list
+  // either. Revival is the outstanding AUTHORISED ACCREC page (no
+  // If-Modified-Since) that UPDATES existing same-ID rows.
   const open = await client.from("xero_invoices")
     .select("xero_invoice_id")
     .eq("org_id", orgId).eq("invoice_type", "ACCREC")

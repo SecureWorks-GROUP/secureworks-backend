@@ -908,10 +908,12 @@ async function syncInvoices(sb: any) {
     }
   }
 
-  // Incremental If-Modified-Since never re-asks invoices that have not changed
-  // since the cursor (INV-0034 last provider update 2025-11-04). Stale
-  // reconcile only UPDATES rows already in xero_invoices. Page the current
-  // AUTHORISED ACCREC book without If-Modified-Since and upsert misses.
+  // Production 2026-09-13 02:36:28 UTC: 13 door-absent invoices already exist
+  // (12 DELETED/0, INV-1442 DRAFT). Incremental If-Modified-Since plus a
+  // watermark advanced by those DELETED writes never re-asks them. Stale
+  // reconcile only selects AUTHORISED amount_due>0 or a 5-row DRAFT sweep.
+  // Page current AUTHORISED ACCREC without If-Modified-Since and UPDATE
+  // existing money/status, preserving debt_* classifications.
   {
     const outstanding: Array<Record<string, unknown>> = []
     let opage = 1
@@ -934,9 +936,13 @@ async function syncInvoices(sb: any) {
     )
     console.log('[xero-sync] outstanding ACCREC reconcile', {
       provider_count: rec.provider_count,
-      cache_count: rec.cache_count,
-      missing: rec.missing.length,
-      written: rec.written,
+      provider_due: rec.provider_due,
+      door_count: rec.door_count,
+      provider_cutoff: rec.provider_cutoff,
+      stale_status: rec.stale_status.length,
+      absent: rec.absent.length,
+      updated: rec.updated,
+      inserted: rec.inserted,
     })
   }
 
