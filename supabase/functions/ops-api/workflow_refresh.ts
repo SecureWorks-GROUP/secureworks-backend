@@ -9,8 +9,23 @@ export const WORKFLOW_REFRESH_OWNERS = [
   "performance",
 ] as const;
 
-export const WORKFLOW_REFRESH_SCOPE_KEYS = ["job_id", "org_id", "week_start"] as const;
-export const WORKFLOW_REFRESH_WORKER_OPS = ["claim", "finish", "consume"] as const;
+export const WORKFLOW_REFRESH_SCOPE_KEYS = [
+  "job_id",
+  "org_id",
+  "week_start",
+] as const;
+export const WORKFLOW_REFRESH_WORKER_OPS = [
+  "claim",
+  "finish",
+  "consume",
+] as const;
+
+export type WorkflowRefreshReceipt = {
+  driver_version: string;
+  scope: Record<string, unknown>;
+  output: Record<string, unknown>;
+  observed_source_revision: string;
+};
 
 export class WorkflowRefreshError extends Error {
   constructor(readonly status: number, message: string) {
@@ -24,12 +39,20 @@ export function assertWorkflowRefreshBoundary(body: {
   owner?: string;
 }) {
   const workflow = String(body.workflow || body.owner || "").trim();
-  if (!WORKFLOW_REFRESH_OWNERS.includes(workflow as typeof WORKFLOW_REFRESH_OWNERS[number])) {
+  if (
+    !WORKFLOW_REFRESH_OWNERS.includes(
+      workflow as typeof WORKFLOW_REFRESH_OWNERS[number],
+    )
+  ) {
     throw new WorkflowRefreshError(400, "workflow is not allowlisted");
   }
   const scope = body.scope && typeof body.scope === "object" ? body.scope : {};
   for (const key of Object.keys(scope)) {
-    if (!WORKFLOW_REFRESH_SCOPE_KEYS.includes(key as typeof WORKFLOW_REFRESH_SCOPE_KEYS[number])) {
+    if (
+      !WORKFLOW_REFRESH_SCOPE_KEYS.includes(
+        key as typeof WORKFLOW_REFRESH_SCOPE_KEYS[number],
+      )
+    ) {
       throw new WorkflowRefreshError(400, "refresh scope is not allowlisted");
     }
   }
@@ -53,7 +76,9 @@ export function refreshActorFromAuth(
   expectedOrgId: string,
 ) {
   if (authMode === "jwt") {
-    if (!authUser?.id) throw new WorkflowRefreshError(401, "named operator required");
+    if (!authUser?.id) {
+      throw new WorkflowRefreshError(401, "named operator required");
+    }
     if (authUser.orgId && authUser.orgId !== expectedOrgId) {
       throw new WorkflowRefreshError(403, "operator organisation mismatch");
     }
@@ -66,16 +91,26 @@ export function refreshActorFromAuth(
 
 export function assertRefreshWorkerOp(authMode: string, op: string) {
   if (
-    WORKFLOW_REFRESH_WORKER_OPS.includes(op as typeof WORKFLOW_REFRESH_WORKER_OPS[number]) &&
+    WORKFLOW_REFRESH_WORKER_OPS.includes(
+      op as typeof WORKFLOW_REFRESH_WORKER_OPS[number],
+    ) &&
     authMode === "jwt"
   ) {
-    throw new WorkflowRefreshError(403, "operators may request or read a run, not claim or finish it");
+    throw new WorkflowRefreshError(
+      403,
+      "operators may request or read a run, not claim or finish it",
+    );
   }
 }
 
 export async function startWorkflowRefresh(
   client: { rpc: Function },
-  body: { workflow?: string; scope?: Record<string, unknown>; actor?: string; org_id: string },
+  body: {
+    workflow?: string;
+    scope?: Record<string, unknown>;
+    actor?: string;
+    org_id: string;
+  },
 ) {
   const { workflow, scope } = assertWorkflowRefreshBoundary(body);
   const actor = String(body.actor || "").trim();
@@ -93,7 +128,12 @@ export async function startWorkflowRefresh(
 
 export async function claimWorkflowRefresh(
   client: { rpc: Function },
-  body: { id: string; owner?: string; lease_token?: string | null; lease_generation?: number | null },
+  body: {
+    id: string;
+    owner?: string;
+    lease_token?: string | null;
+    lease_generation?: number | null;
+  },
 ) {
   const owner = String(body.owner || "dispatch").trim();
   assertWorkflowRefreshBoundary({ workflow: owner });
@@ -112,7 +152,9 @@ export async function consumeWorkflowRefresh(
   body: { owner?: string },
 ) {
   const owner = String(body.owner || "").trim();
-  if (!owner) throw new WorkflowRefreshError(400, "workflow is not allowlisted");
+  if (!owner) {
+    throw new WorkflowRefreshError(400, "workflow is not allowlisted");
+  }
   assertWorkflowRefreshBoundary({ workflow: owner });
   const { data, error } = await client.rpc("consume_workflow_refresh", {
     p_owner: owner,
@@ -132,16 +174,44 @@ export async function finishWorkflowRefresh(
     owner?: string;
     lease_generation?: number;
     observed_source_revision?: string | null;
+    receipt?: WorkflowRefreshReceipt;
   },
 ) {
   if (!body.lease_token || !body.owner || body.lease_generation == null) {
-    throw new WorkflowRefreshError(400, "lease token, owner and generation are required");
+    throw new WorkflowRefreshError(
+      400,
+      "lease token, owner and generation are required",
+    );
   }
   assertWorkflowRefreshBoundary({ workflow: body.owner });
+  if (body.status === "completed" && !body.receipt) {
+    throw new WorkflowRefreshError(
+      400,
+      "completed Refresh requires a persisted driver receipt",
+    );
+  }
+  let result = body.result ?? {};
+  if (body.receipt) {
+    const receipt = await recordWorkflowRefreshReceipt(client, {
+      id: body.id,
+      owner: body.owner,
+      lease_token: body.lease_token,
+      lease_generation: body.lease_generation,
+      receipt: body.receipt,
+    });
+    if (result && typeof result === "object" && !Array.isArray(result)) {
+      result = {
+        ...(result as Record<string, unknown>),
+        receipt_id: receipt.receipt_id,
+      };
+    } else {
+      result = { receipt_id: receipt.receipt_id };
+    }
+  }
   const { data, error } = await client.rpc("finish_workflow_refresh", {
     p_id: body.id,
     p_status: body.status,
-    p_result: body.result ?? {},
+    p_result: result,
     p_cutoff: body.source_cutoff ?? null,
     p_lease: body.lease_token,
     p_owner: body.owner,
@@ -150,6 +220,43 @@ export async function finishWorkflowRefresh(
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
   return data;
+}
+
+export async function recordWorkflowRefreshReceipt(
+  client: { rpc: Function },
+  body: {
+    id: string;
+    owner: string;
+    lease_token: string;
+    lease_generation: number;
+    receipt: WorkflowRefreshReceipt;
+  },
+) {
+  const { data, error } = await client.rpc("record_workflow_refresh_receipt", {
+    p_run_id: body.id,
+    p_owner: body.owner,
+    p_lease: body.lease_token,
+    p_generation: body.lease_generation,
+    p_driver_version: body.receipt.driver_version,
+    p_scope: body.receipt.scope,
+    p_output: body.receipt.output,
+    p_observed_revision: body.receipt.observed_source_revision,
+  });
+  if (error) throw new WorkflowRefreshError(500, error.message);
+  if (
+    !data || typeof data !== "object" ||
+    typeof (data as { receipt_id?: unknown }).receipt_id !== "string"
+  ) {
+    throw new WorkflowRefreshError(
+      500,
+      "receipt persistence returned no receipt id",
+    );
+  }
+  return data as {
+    receipt_id: string;
+    outcome?: string;
+    observed_source_revision?: string;
+  };
 }
 
 export async function readWorkflowRefresh(
