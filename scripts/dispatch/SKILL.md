@@ -33,7 +33,9 @@ bash scripts/dispatch/run-dispatch-worker.sh --once
 
 The checked-in `worker.disabled.json` prints `dispatch worker disabled` and makes no network call. That is the current runtime, not a failure of the command.
 
-Page refresh: Dispatch **Refresh evidence** re-reads the selected job and calendar through the same authenticated `ops-api` actions. It does not enable the worker.
+Page **Refresh evidence** re-reads the selected job and calendar through the same authenticated `ops-api` actions. It does not enable the worker.
+
+**Workflow Refresh** is a separate control. It POSTs `workflow_refresh` `op=start` then reads back. Operators cannot claim or finish. Until the Dispatch driver is registered and the worker can finish `dispatch_refresh/v1`, start is **unavailable**. A source-hash reread is not completed Refresh. CIO overlay `3b19d5dc` consume-hash is not this driver.
 
 To run one bounded assessment cycle after a reviewed enablement (not current default):
 
@@ -52,4 +54,4 @@ Runtime truth is `GET ops-api?action=dispatch_workflow`. If `worker.mismatch` is
 
 ## Proof
 
-Isolated PostgreSQL on `127.0.0.1:55581` with rollback fixtures. No live send, purchase, calendar write or production migration. Combined Ops host still waits on the Booking pin. CIO projection of `event_at` remains a separate pin.
+Isolated PostgreSQL on `127.0.0.1:55581` with rollback fixtures. No live send, purchase, calendar write or production migration. Combined Ops host copies Patio Booking pin `f048ca5` and uses authenticated `sales_booking_*` / `opsFetch`. 4174/4175 JSON preview is not connected. Performance remains unpublished until `public.sales_performance_weeks` exists. CIO projection of `event_at` remains a separate pin.

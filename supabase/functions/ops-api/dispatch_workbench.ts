@@ -5,6 +5,13 @@ import {
   formatPoDeliveryNotes,
   parsePoDeliveryAddress,
 } from "../_shared/po_reference.ts";
+import {
+  DISPATCH_REFRESH_OUTPUT,
+  dispatchRefreshResult,
+  pendingRefreshDoor,
+  salesPerformanceUnpublished,
+  stripLeaseToken,
+} from "./dispatch_refresh_driver.ts";
 const sourceLimit = 998;
 const orderedStatuses = [
   "submitted",
@@ -1575,6 +1582,8 @@ export function handleDispatch(
       "dispatch_trigger",
       "dispatch_run",
       "dispatch_retry_task",
+      "workflow_refresh",
+      "dispatch_refresh",
     ]
       .includes(action)
   ) {
@@ -1585,6 +1594,9 @@ export function handleDispatch(
     if (action === "dispatch_run") return dispatchRun(client, org, actor);
     if (action === "dispatch_retry_task") {
       return dispatchRetryTask(client, org, actor, body);
+    }
+    if (action === "workflow_refresh" || action === "dispatch_refresh") {
+      return handleDispatchRefresh(client, org, actor, body);
     }
     return dispatchCommand(
       client,
@@ -1611,7 +1623,116 @@ export function handleDispatch(
   if (action === "dispatch_workflow") {
     return dispatchWorkflow(client, org);
   }
+  if (action === "sales_performance_read") {
+    return salesPerformanceUnpublished();
+  }
+  if (action === "message_work_links") {
+    return {
+      ok: false,
+      capability: "pending",
+      reason:
+        "Canonical mail reader is on the CIO overlay. Captured PO mail is not that store.",
+      records: [],
+      coverage: { complete: false },
+    };
+  }
+  if (action === "sales_booking_read") {
+    throw new DispatchError(
+      "Booking uses Patio's authenticated sales_booking_* handler. 4174/4175 JSON preview is not connected on this host.",
+      404,
+    );
+  }
   throw new DispatchError("Unknown Dispatch action", 404);
+}
+
+async function runDispatchRefreshWork(
+  client: any,
+  org: string,
+  scope: { job_id?: string } = {},
+) {
+  const sourceCutoff = new Date().toISOString();
+  if (scope.job_id) {
+    const job = await readDispatchJob(client, org, uuid(scope.job_id));
+    const from = sourceCutoff.slice(0, 10);
+    const toDate = new Date(`${from}T12:00:00Z`);
+    toDate.setUTCDate(toDate.getUTCDate() + 6);
+    await dispatchCalendar(
+      client,
+      org,
+      new URLSearchParams({
+        from,
+        to: toDate.toISOString().slice(0, 10),
+      }),
+    );
+    return dispatchRefreshResult(1, sourceCutoff, {
+      calendar_read: true,
+      observed_source_revision: job?.source_version || null,
+    });
+  }
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const pageParams = new URLSearchParams({ limit: "100" });
+    if (cursor) pageParams.set("cursor", cursor);
+    const page = await dispatchList(client, org, pageParams);
+    for (const job of page.jobs || []) seen.add(job.id);
+    cursor = page.next_cursor || undefined;
+  } while (cursor);
+  if (seen.size < 1) {
+    throw new DispatchError("Dispatch Refresh did not read accepted work", 400);
+  }
+  return dispatchRefreshResult(seen.size, sourceCutoff, {
+    calendar_read: false,
+  });
+}
+
+async function handleDispatchRefresh(
+  client: any,
+  org: string,
+  actor: string,
+  body: any,
+) {
+  const op = String(body?.op || "start");
+  if (["claim", "consume", "finish"].includes(op)) {
+    throw new DispatchError(
+      "operators may request or read a run, not claim or finish it",
+      403,
+    );
+  }
+  if (op === "run_once") {
+    if (Deno.env.get("DISPATCH_REFRESH_WORKER") !== "1") {
+      return pendingRefreshDoor("dispatch_refresh_worker_disabled");
+    }
+    const work = await runDispatchRefreshWork(client, org, body?.scope || {});
+    return { outcome: "completed", capability: "registered", work };
+  }
+  if (op === "readback") {
+    if (!body?.id) throw new DispatchError("Refresh run id is required", 400);
+    if (typeof client.rpc !== "function") return pendingRefreshDoor();
+    const { data, error } = await client.rpc("workflow_refresh_readback", {
+      p_id: body.id,
+      p_org_id: org,
+    });
+    if (error) {
+      if (/does not exist/i.test(error.message || "")) return pendingRefreshDoor();
+      throw new DispatchError(error.message, 500);
+    }
+    return stripLeaseToken(data);
+  }
+  if (op !== "start") throw new DispatchError("Unknown Refresh operation", 400);
+  if (typeof client.rpc !== "function") return pendingRefreshDoor();
+  const { data, error } = await client.rpc("start_workflow_refresh", {
+    p_workflow: "dispatch",
+    p_scope: { ...(body?.scope || {}), org_id: org },
+    p_actor: actor,
+    p_org_id: org,
+  });
+  if (error) {
+    if (/does not exist/i.test(error.message || "")) return pendingRefreshDoor();
+    throw new DispatchError(error.message, 500);
+  }
+  if (data?.outcome === "unavailable") return data;
+  return stripLeaseToken(data);
 }
 
 export async function dispatchWorkflow(client: any, org: string) {
@@ -1640,6 +1761,12 @@ export async function dispatchWorkflow(client: any, org: string) {
       mismatch: intendedEnabled !== observedEnabled,
     },
     communications_enabled: controls[0]?.communications_enabled === true,
+    refresh: {
+      declared_output: DISPATCH_REFRESH_OUTPUT,
+      driver_capability: "unavailable",
+      worker: "disabled",
+      note: "A source-hash reread is not completed Refresh. Register the Dispatch driver after the worker can finish declared output.",
+    },
     latest_task: (tasks.items || [])[0] || null,
     latest_source_failure: (tasks.source_failures || [])[0] || null,
     coverage: {
