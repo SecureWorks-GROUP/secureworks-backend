@@ -7002,6 +7002,7 @@ if (import.meta.main) serve(async (req: Request) => {
           throw error
         }
       }
+      case 'message_work_link_correct':
       case 'correct_message_work_link': {
         if (req.method !== 'POST') return json({ error: 'correct_message_work_link requires POST' }, 405)
         try {
@@ -7011,6 +7012,7 @@ if (import.meta.main) serve(async (req: Request) => {
           throw error
         }
       }
+      case 'message_attachment':
       case 'open_message_attachment': {
         if (req.method !== 'GET') return json({ error: 'open_message_attachment requires GET' }, 405)
         try {
