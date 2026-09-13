@@ -13,6 +13,8 @@ import {
   answerNeedsScoper,
   staffLeaveFromCrewAvailability,
   mergeCioCalendarCoverage,
+  classifyJobContextLuna,
+  BOOKING_HOW_IT_WORKS,
   submitInterpretation,
   captureConversation,
   extractGhlPage,
@@ -202,6 +204,32 @@ Deno.test("same-suburb duplicate contact suppresses a second proposal on read", 
   const b = out.cases.find((c) => c.id === "dup-b");
   assertEquals(b?.duplicate_scope_review, true);
   assertEquals(b?.suppress_new_proposal, true);
+});
+
+Deno.test("Luna canary is context-luna-subscription:v1 or honest missing", () => {
+  const luna = classifyJobContextLuna({
+    job: { job_number: "SWP-261376", id: "job-1" },
+    generatedAt: "2026-09-13T09:08:21.120Z",
+    facts: [{
+      id: "fact-luna",
+      kind: "proposal",
+      created_at: "2026-09-10T11:06:30Z",
+      provenance: { extractor: "context-luna-subscription:v1", model: "gpt-5.6-luna", auth_mode: "chatgpt_subscription" },
+    }],
+  });
+  assertEquals(luna.status, "luna_fact");
+  assertEquals(luna.extractor, "context-luna-subscription:v1");
+  assertEquals(luna.base_accepted, false);
+  const missing = classifyJobContextLuna({ job: { job_number: "SWP-000000" }, facts: [] });
+  assertEquals(missing.status, "missing");
+  const haiku = classifyJobContextLuna({
+    job: { job_number: "SWP-000001" },
+    facts: [{ id: "old", kind: "note", provenance: { extractor: "haiku", model: "claude-3-haiku" } }],
+  });
+  assertEquals(haiku.status, "not_luna");
+  assertEquals(haiku.extractor === "context-luna-subscription:v1", false);
+  assertEquals(BOOKING_HOW_IT_WORKS.luna_canary.status, "luna_fact");
+  assertEquals(BOOKING_HOW_IT_WORKS.luna_canary.job_number, "SWP-261376");
 });
 
 Deno.test("CIO unread/not_read calendar is never treat_as_free", () => {

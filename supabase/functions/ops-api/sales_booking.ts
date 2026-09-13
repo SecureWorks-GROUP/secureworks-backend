@@ -28,6 +28,92 @@ export const POLICY = {
   },
 };
 
+export const LUNA_EXTRACTOR = "context-luna-subscription:v1";
+
+export function classifyJobContextLuna(dossier: {
+  job?: { job_number?: string; id?: string };
+  generatedAt?: string;
+  facts?: Array<{
+    id?: string;
+    kind?: string;
+    created_at?: string;
+    provenance?: { extractor?: string; model?: string; auth_mode?: string };
+  }>;
+} | null) {
+  const job_number = dossier?.job?.job_number || null;
+  const job_id = dossier?.job?.id || null;
+  const facts = Array.isArray(dossier?.facts) ? dossier!.facts! : [];
+  const luna = facts.filter((f) => String(f.provenance?.extractor || "") === LUNA_EXTRACTOR);
+  const other = facts.find((f) => String(f.provenance?.extractor || "") && String(f.provenance?.extractor) !== LUNA_EXTRACTOR) || facts[0];
+  if (!facts.length) {
+    return {
+      status: "missing" as const,
+      job_number,
+      job_id,
+      fact_id: null,
+      kind: null,
+      extractor: null,
+      model: null,
+      auth_mode: null,
+      note: "No job_context fact for this job. Missing Luna is unfinished, not inferred success.",
+      base_accepted: false,
+      staff_jwt_ops_dash: "not_proved",
+    };
+  }
+  if (!luna.length) {
+    return {
+      status: "not_luna" as const,
+      job_number,
+      job_id,
+      fact_id: other?.id || null,
+      kind: other?.kind || null,
+      extractor: other?.provenance?.extractor || "unknown",
+      model: other?.provenance?.model || null,
+      auth_mode: other?.provenance?.auth_mode || null,
+      note: "A stored fact exists but it is not context-luna-subscription:v1. Do not label it current Luna.",
+      base_accepted: false,
+      staff_jwt_ops_dash: "not_proved",
+    };
+  }
+  const f = luna[0];
+  return {
+    status: "luna_fact" as const,
+    job_number,
+    job_id,
+    fact_id: f.id || null,
+    kind: f.kind || null,
+    extractor: LUNA_EXTRACTOR,
+    model: f.provenance?.model || null,
+    auth_mode: f.provenance?.auth_mode || null,
+    created_at: f.created_at || null,
+    retrieved_at: dossier?.generatedAt || null,
+    tool: "sw_job_context_v2",
+    worker: "aecf106838ec78c0b8e1a4e4fda0dc0faf22b34c",
+    note: "Canary Luna fact. BASE not accepted. Staff JWT Ops Dash not proved.",
+    base_accepted: false,
+    staff_jwt_ops_dash: "not_proved",
+  };
+}
+
+/** Patio canary observed via MCP 13 Sep 09:08Z. No client personal data. */
+export const BOOKING_HOW_IT_WORKS = {
+  workflow: "booking",
+  host_slot: "data-how-it-works=booking",
+  owner: "PATIOS",
+  combined_ui_host_owner: "operations",
+  cloud_schedule: POLICY.cloud_schedule,
+  luna_canary: classifyJobContextLuna({
+    job: { job_number: "SWP-261376", id: "21b2b0a6-d8a4-4486-8eba-b40321018b85" },
+    generatedAt: "2026-09-13T09:08:21.120Z",
+    facts: [{
+      id: "e6fcc02b-7c5e-5da1-abef-62df42cf27ee",
+      kind: "proposal",
+      created_at: "2026-09-10T11:06:30.918306+00:00",
+      provenance: { extractor: LUNA_EXTRACTOR, model: "gpt-5.6-luna", auth_mode: "chatgpt_subscription" },
+    }],
+  }),
+};
+
 export const PIPELINES: Record<string, string> = {
   nithin: "OGZLpPPVWVarN94HL6af",
   marnin: "I9t8njpuR0Dm7B2NDcvI",
@@ -644,7 +730,7 @@ export async function readWorkspace(
     return completeness === "complete" || completeness === "partial" || completeness === "unknown";
   });
   return {
-    ok: true, fixture: false, send_hold: true, version: SALES_BOOKING_VERSION, policy: POLICY,
+    ok: true, fixture: false, send_hold: true, version: SALES_BOOKING_VERSION, policy: POLICY, how_it_works: BOOKING_HOW_IT_WORKS,
     resource: { ...resource, calendar: { ok: cal.ok, mailbox: cal.mailbox || null } },
     week_start: params.week_start,
     coverage: {
@@ -1496,7 +1582,8 @@ export async function dispatch(
   actor?: BookingActor | null,
 ): Promise<Record<string, unknown>> {
   const a = assertBookingActor(actor);
-  if (action === "sales_booking_policy") return { ok: true, policy: POLICY, version: SALES_BOOKING_VERSION };
+  if (action === "sales_booking_policy") return { ok: true, policy: POLICY, how_it_works: BOOKING_HOW_IT_WORKS, version: SALES_BOOKING_VERSION };
+  if (action === "sales_booking_how_it_works") return { ok: true, how_it_works: BOOKING_HOW_IT_WORKS, send: "held", base_accepted: false };
   if (action === "sales_booking_reason") {
     const prompt = (body.prompt || body) as Record<string, unknown>;
     const out = await authorisedLocalReason(prompt);

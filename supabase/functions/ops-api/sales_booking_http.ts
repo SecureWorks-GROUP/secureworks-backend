@@ -2,7 +2,7 @@
  * Isolated registered ops-api for Booking review.
  * Authenticated staff actor + org_id. SQL on booking_test. No live send/calendar.
  */
-import { dispatch, extractGhlPage, extractGhlPageMeta, SalesBookingError, staffLeaveFromCrewAvailability, mergeCioCalendarCoverage, RESOURCES, type Adapters, type BookingActor } from "./sales_booking.ts";
+import { dispatch, extractGhlPage, extractGhlPageMeta, SalesBookingError, staffLeaveFromCrewAvailability, mergeCioCalendarCoverage, RESOURCES, BOOKING_HOW_IT_WORKS, type Adapters, type BookingActor } from "./sales_booking.ts";
 import { createPsqlBookingDb, psql, q } from "./sales_booking_pg.ts";
 
 const PORT = Number(Deno.env.get("BOOKING_API_PORT") || 4176);
@@ -218,7 +218,7 @@ Deno.serve({ hostname: "127.0.0.1", port: PORT }, async (req) => {
     return Response.json({
       ok: true,
       entry: "ops-api",
-      actions: ["sales_booking_assess", "sales_booking_draft", "sales_booking_read", "sales_booking_runner", "sales_booking_reason", "sales_booking_interpret", "sales_booking_capture_conversation"],
+      actions: ["sales_booking_assess", "sales_booking_draft", "sales_booking_read", "sales_booking_runner", "sales_booking_reason", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_how_it_works"],
       org_id: ACTOR.org_id,
       sql: "booking_test",
       send: "held",
@@ -227,6 +227,8 @@ Deno.serve({ hostname: "127.0.0.1", port: PORT }, async (req) => {
       paid_model: false,
       cloud_schedule: { configured: false, observed: "not_configured" },
       cadence_intended: { debounce_seconds: 60, catch_up_minutes: 15, daily_reconcile: "after CIO 06:00 Perth pass finishes" },
+      how_it_works: BOOKING_HOW_IT_WORKS,
+      base_accepted: false,
     }, { headers: cors });
   }
   const action = url.searchParams.get("action") || "";
