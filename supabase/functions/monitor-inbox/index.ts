@@ -462,8 +462,9 @@ async function processMailbox(
               continue
             }
 
-            const { data: urlData } = sb.storage.from('job-photos').getPublicUrl(storagePath)
-            const publicUrl = urlData?.publicUrl || ''
+            // Do not publish a public object URL. Open goes through
+            // open_message_attachment after a scoped link.
+            const privateRef = `job-photos:${storagePath}`
 
             if (isPdf) {
               // Decide doc type + visibility from classification + subject keywords.
@@ -489,8 +490,8 @@ async function processMailbox(
               const baseRow = {
                 job_id: jobId,
                 file_name: att.name || 'Supplier Document',
-                storage_url: publicUrl,
-                pdf_url: publicUrl,
+                storage_url: privateRef,
+                pdf_url: privateRef,
                 visible_to_trades: visibleToTrades,
                 version: 1,
               }
@@ -526,15 +527,27 @@ async function processMailbox(
               }
             } else {
               // Store as job_media — surface errors, don't swallow
-              const { error: mediaErr } = await sb.from('job_media').insert({
+              const { data: mediaRow, error: mediaErr } = await sb.from('job_media').insert({
                 job_id: jobId,
                 phase: 'receipt',
                 type: 'photo',
-                storage_url: publicUrl,
+                storage_url: privateRef,
                 label: att.name || 'Supplier attachment',
-              })
+              }).select('id').single()
               if (mediaErr) {
                 console.error(`[monitor-inbox] job_media insert failed for ${att.name} (job=${jobId}): ${mediaErr.message}`)
+              } else if (canonicalEventId && mediaRow?.id) {
+                const { error: linkErr } = await sb.rpc('link_context_mail_attachment', {
+                  p_org_id: DEFAULT_ORG_ID,
+                  p_event_id: canonicalEventId,
+                  p_store: 'job_media',
+                  p_object_id: mediaRow.id,
+                  p_job_id: jobId,
+                  p_file_name: att.name || 'Supplier attachment',
+                })
+                if (linkErr) {
+                  console.error(`[monitor-inbox] job_media link failed for ${att.name}: ${linkErr.message}`)
+                }
               }
             }
           }
