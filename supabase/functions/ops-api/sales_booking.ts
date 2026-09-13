@@ -614,6 +614,36 @@ function draftTextAllowed(text: string) {
   return { ok: true };
 }
 
+/** Unwrap GHL pager envelopes. data.messages may be { messages, nextPage, lastMessageId }. */
+export function extractGhlPage(raw: Record<string, unknown>, keys: string[]) {
+  const bags: Record<string, unknown>[] = [raw];
+  if (raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)) bags.push(raw.data as Record<string, unknown>);
+  for (const bag of bags) {
+    for (const k of keys) {
+      const v = bag[k];
+      if (Array.isArray(v)) return v as Record<string, unknown>[];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const inner = v as Record<string, unknown>;
+        if (Array.isArray(inner.messages)) return inner.messages as Record<string, unknown>[];
+        if (Array.isArray(inner.conversations)) return inner.conversations as Record<string, unknown>[];
+      }
+    }
+  }
+  if (Array.isArray(raw.data)) return raw.data as Record<string, unknown>[];
+  return [] as Record<string, unknown>[];
+}
+
+export function extractGhlPageMeta(raw: Record<string, unknown>) {
+  const pag = (raw.pagination && typeof raw.pagination === "object") ? raw.pagination as Record<string, unknown> : {};
+  const data = (raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)) ? raw.data as Record<string, unknown> : {};
+  const bag = (data.messages && typeof data.messages === "object" && !Array.isArray(data.messages)) ? data.messages as Record<string, unknown> : {};
+  const has_more = raw.has_more === true || pag.has_more === true || bag.nextPage === true;
+  const complete = raw.complete === true || pag.complete === true;
+  const next = raw.next_cursor || pag.next_cursor || pag.next || bag.lastMessageId;
+  const returned = Number(pag.returned ?? raw.returned ?? 0);
+  return { has_more, complete, next, returned };
+}
+
 function canonicalCapturedMessage(m: Record<string, unknown>) {
   return {
     id: String(m.id || ""),

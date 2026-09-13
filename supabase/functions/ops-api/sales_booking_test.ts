@@ -11,6 +11,8 @@ import {
   staffLeaveFromCrewAvailability,
   submitInterpretation,
   captureConversation,
+  extractGhlPage,
+  extractGhlPageMeta,
   type Adapters,
   type BookingActor,
 } from "./sales_booking.ts";
@@ -405,6 +407,20 @@ Deno.test("caller-only and altered captured citations are refused", async () => 
     input: { messages: [{ id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Altered body" }] },
     interpretation: { interpreter: { identity: "grok-desk" }, cited_message_ids: ["in-1"], proposed_text: "Hi, Tuesday. Nithin, SecureWorks Patios" },
   }, ACTOR));
+});
+
+Deno.test("GHL message pager unwraps nested messages and nextPage", () => {
+  const raw = {
+    data: { messages: { lastMessageId: "m-old", nextPage: true, messages: [{ id: "m1", body: "hi", direction: "inbound" }] } },
+    pagination: { returned: 1, has_more: true, complete: false, next_cursor: { last_message_id: "m-old" } },
+  };
+  const items = extractGhlPage(raw, ["messages", "items"]);
+  const meta = extractGhlPageMeta(raw);
+  assertEquals(items.length, 1);
+  assertEquals(items[0].id, "m1");
+  assertEquals(meta.has_more, true);
+  assertEquals(meta.complete, false);
+  assertEquals((meta.next as { last_message_id?: string }).last_message_id, "m-old");
 });
 
 Deno.test("absent or partial conversation coverage cannot be treated as complete", async () => {

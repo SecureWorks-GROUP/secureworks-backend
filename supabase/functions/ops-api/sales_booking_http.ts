@@ -2,7 +2,7 @@
  * Isolated registered ops-api for Booking review.
  * Authenticated staff actor + org_id. SQL on booking_test. No live send/calendar.
  */
-import { dispatch, SalesBookingError, staffLeaveFromCrewAvailability, type Adapters, type BookingActor } from "./sales_booking.ts";
+import { dispatch, extractGhlPage, extractGhlPageMeta, SalesBookingError, staffLeaveFromCrewAvailability, type Adapters, type BookingActor } from "./sales_booking.ts";
 import { createPsqlBookingDb } from "./sales_booking_pg.ts";
 
 const PORT = Number(Deno.env.get("BOOKING_API_PORT") || 4176);
@@ -80,28 +80,11 @@ const adapters: Adapters = {
 };
 
 function pageItems(raw: Record<string, unknown>, keys: string[]) {
-  for (const k of keys) {
-    const v = raw[k];
-    if (Array.isArray(v)) return v as Record<string, unknown>[];
-  }
-  const nested = raw.data;
-  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-    for (const k of keys) {
-      const v = (nested as Record<string, unknown>)[k];
-      if (Array.isArray(v)) return v as Record<string, unknown>[];
-    }
-  }
-  if (Array.isArray(raw.data)) return raw.data as Record<string, unknown>[];
-  return [];
+  return extractGhlPage(raw, keys);
 }
 
 function pageMeta(raw: Record<string, unknown>) {
-  const pag = (raw.pagination && typeof raw.pagination === "object") ? raw.pagination as Record<string, unknown> : {};
-  const cov = (raw.coverage && typeof raw.coverage === "object") ? raw.coverage as Record<string, unknown> : {};
-  const has_more = raw.has_more === true || pag.has_more === true || cov.has_more === true;
-  const complete = raw.complete === true || pag.complete === true || cov.complete === true;
-  const next = raw.next_cursor || pag.next_cursor || pag.next || cov.next_cursor;
-  return { has_more, complete, next };
+  return extractGhlPageMeta(raw);
 }
 
 async function readContactViaPagers(contactId: string) {
@@ -153,6 +136,12 @@ async function readContactViaPagers(contactId: string) {
       const raw = await mcpCall("sw_list_ghl_messages", args);
       message_pages += 1;
       const items = pageItems(raw, ["messages", "items"]);
+      const meta = pageMeta(raw);
+      if (meta.returned > 0 && items.length === 0) {
+        messages_complete = false;
+        msgHasMore = true;
+        break;
+      }
       for (const m of items) {
         messages.push({
           id: m.id,
@@ -162,7 +151,6 @@ async function readContactViaPagers(contactId: string) {
           conversation_id,
         });
       }
-      const meta = pageMeta(raw);
       if (meta.complete && !meta.has_more) {
         thisComplete = true;
         break;
