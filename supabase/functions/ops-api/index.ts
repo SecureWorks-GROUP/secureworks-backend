@@ -376,6 +376,7 @@ import {
   recordContextMailOccurrence,
 } from './context_mail.ts'
 import { readDispatchJobWorkshop } from './dispatch_workshop.ts'
+import { answerNeedsScoper, notifyNeedsScoper, openNeedsScoperItem } from './needs_scoper.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -7043,6 +7044,44 @@ if (import.meta.main) serve(async (req: Request) => {
             job_id: url.searchParams.get('job_id') || undefined,
             po_id: url.searchParams.get('po_id') || undefined,
           }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'calendar_coverage': {
+        try {
+          if (req.method === 'GET') {
+            const { data, error } = await client.rpc('read_calendar_coverage', {
+              p_org_id: DEFAULT_ORG_ID,
+              p_owner_key: url.searchParams.get('owner_key') || 'nithin',
+            })
+            if (error) throw new ContextMailError(500, error.message)
+            return json(data)
+          }
+          if (req.method !== 'POST') return json({ error: 'calendar_coverage requires GET or POST' }, 405)
+          const { data, error } = await client.rpc('record_calendar_coverage', {
+            p_org_id: DEFAULT_ORG_ID,
+            p_owner_key: body?.owner_key,
+            p_calendar_id: body?.calendar_id,
+            p_last_check_at: body?.last_check_at,
+            p_status: body?.coverage_status,
+            p_error: body?.error ?? null,
+          })
+          if (error) throw new ContextMailError(500, error.message)
+          return json(data)
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'needs_scoper': {
+        if (req.method !== 'POST') return json({ error: 'needs_scoper requires POST' }, 405)
+        try {
+          const op = String(body?.op || 'open')
+          if (op === 'notify') return json(await notifyNeedsScoper(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+          if (op === 'answer') return json(await answerNeedsScoper(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+          return json(await openNeedsScoperItem(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
         } catch (error) {
           if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
           throw error
