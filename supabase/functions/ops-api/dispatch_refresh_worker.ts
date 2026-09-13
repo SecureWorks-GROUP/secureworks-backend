@@ -115,7 +115,9 @@ export async function runClaimedDispatchRefresh(
       work: {
         jobs_read: 1,
         source_cutoff: sourceCutoff,
-        missing_materials: assessment.obligations.filter((item: any) =>
+        missing_materials: assessment.obligations.filter((
+          item: { code: string },
+        ) =>
           [
             "complete_set_unreviewed",
             "requirement_review",
@@ -125,7 +127,9 @@ export async function runClaimedDispatchRefresh(
             "allocation_suitability",
           ].includes(item.code)
         ),
-        missing_order_evidence: assessment.obligations.filter((item: any) =>
+        missing_order_evidence: assessment.obligations.filter((
+          item: { code: string },
+        ) =>
           ["complete_set_unreviewed", "requirement_review", "supply_gap"]
             .includes(item.code)
         ),

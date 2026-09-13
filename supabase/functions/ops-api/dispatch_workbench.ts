@@ -1233,7 +1233,9 @@ export async function dispatchList(
   const limit = Math.min(100, Math.max(1, Number(params.get("limit") || 50)));
   if (!Number.isInteger(limit)) throw new DispatchError("Invalid limit");
   const queue = params.get("queue") || "current_material";
-  if (!["current_material", "acceptance_review", "historical"].includes(queue)) {
+  if (
+    !["current_material", "acceptance_review", "historical"].includes(queue)
+  ) {
     throw new DispatchError("Invalid queue");
   }
   let q = client.from("dispatch_eligible_jobs").select(

@@ -5063,7 +5063,7 @@ export async function handleOpsApiRequest(req: Request): Promise<Response> {
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
 
-    if (action?.startsWith('dispatch_') || ['workflow_refresh','sales_performance_read','message_work_links'].includes(action || '')) {
+    if (action && (action.startsWith('dispatch_') || ['workflow_refresh','sales_performance_read','message_work_links'].includes(action))) {
       if (!_opsApiCallerIsStaffOperator(authMode, authUser)) return json({error:'Office operator access required'},403)
       const dispatchOrg = authMode === 'jwt' ? authUser!.orgId : DEFAULT_ORG_ID
       if (!dispatchOrg) return json({error:'Office organisation required'},403)

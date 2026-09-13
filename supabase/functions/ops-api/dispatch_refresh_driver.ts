@@ -1,4 +1,4 @@
-// Dispatch business driver for the shared Refresh contract.
+// Shared Refresh response contract; claimed work lives in dispatch_refresh_worker.ts.
 // CIO owns start/claim/finish/readback security. Operations owns this work.
 // A source-hash reread is not completed Refresh.
 export const DISPATCH_REFRESH_OUTPUT = "dispatch_refresh/v1";
