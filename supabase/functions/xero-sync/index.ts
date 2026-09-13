@@ -30,6 +30,7 @@ import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from 
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
+import { applyOpenReceivableReconcile } from './open_receivables_reconcile.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -905,6 +906,47 @@ async function syncInvoices(sb: any) {
       hasMore = invoices.length === 100
       page++
     }
+  }
+
+  // Production 2026-09-13 02:36:28 UTC: 13 door-absent invoices already exist
+  // (12 DELETED/0, INV-1442 DRAFT). Incremental If-Modified-Since plus a
+  // watermark advanced by those DELETED writes never re-asks them. Stale
+  // reconcile only selects AUTHORISED amount_due>0 or a 5-row DRAFT sweep.
+  // Page current AUTHORISED ACCREC without If-Modified-Since and UPDATE
+  // existing money/status, preserving debt_* classifications.
+  {
+    const outstanding: Array<Record<string, unknown>> = []
+    let opage = 1
+    for (;;) {
+      const odata = await xeroGet('/Invoices', accessToken, tenantId, {
+        page: String(opage),
+        where: 'Type=="ACCREC"',
+        Statuses: 'AUTHORISED',
+      })
+      const oinv = odata.Invoices || []
+      outstanding.push(...oinv)
+      if (oinv.length < 100) break
+      opage++
+    }
+    const rec = await applyOpenReceivableReconcile(
+      sb,
+      DEFAULT_ORG_ID,
+      outstanding as any,
+      { write: true, provider_pages: opage },
+    )
+    console.log('[xero-sync] outstanding ACCREC reconcile', {
+      provider_count: rec.provider_count,
+      provider_due: rec.provider_due,
+      door_count: rec.door_count,
+      provider_cutoff: rec.provider_cutoff,
+      stale_status: rec.stale_status.length,
+      absent: rec.absent.length,
+      updated: rec.updated,
+      inserted: rec.inserted,
+      receipt_id: rec.receipt_id,
+      attempted: rec.attempted,
+      failed: rec.failed,
+    })
   }
 
   // Every type and page above completed without throwing: advance the cursor.

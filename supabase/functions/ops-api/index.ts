@@ -357,6 +357,23 @@ import {
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { organisationContext, OrganisationContextError } from './organisation_context.ts'
+import {
+  assertRefreshWorkerOp,
+  claimWorkflowRefresh,
+  consumeWorkflowRefresh,
+  finishWorkflowRefresh,
+  readWorkflowRefresh,
+  refreshActorFromAuth,
+  startWorkflowRefresh,
+  WorkflowRefreshError,
+} from './workflow_refresh.ts'
+import {
+  ContextMailError,
+  correctMessageWorkLink,
+  openMessageAttachment,
+  readMessageWorkLinks,
+  recordContextMailOccurrence,
+} from './context_mail.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -6938,6 +6955,69 @@ if (import.meta.main) serve(async (req: Request) => {
           return json(await contextAccuracyVerdict(client, body, authMode === 'jwt' && authUser ? { id: authUser.id, orgId: authUser.orgId } : null, DEFAULT_ORG_ID))
         } catch (error) {
           if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
+      case 'workflow_refresh': {
+        if (req.method !== 'POST') return json({ error: 'workflow_refresh requires POST' }, 405)
+        try {
+          const actor = refreshActorFromAuth(authMode, authUser, body?.actor, DEFAULT_ORG_ID)
+          const op = String(body?.op || 'start')
+          assertRefreshWorkerOp(authMode, op)
+          if (op === 'finish') {
+            return json(await finishWorkflowRefresh(client, { ...body, owner: body?.owner || body?.workflow }))
+          }
+          if (op === 'claim') return json(await claimWorkflowRefresh(client, body || {}))
+          if (op === 'consume') return json(await consumeWorkflowRefresh(client, body || {}))
+          if (op === 'readback') return json(await readWorkflowRefresh(client, body?.id, DEFAULT_ORG_ID))
+          return json(await startWorkflowRefresh(client, {
+            workflow: body?.workflow,
+            scope: body?.scope,
+            actor,
+            org_id: DEFAULT_ORG_ID,
+          }))
+        } catch (error) {
+          if (error instanceof WorkflowRefreshError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'context_mail_occurrence': {
+        if (req.method !== 'POST') return json({ error: 'context_mail_occurrence requires POST' }, 405)
+        try {
+          return json(await recordContextMailOccurrence(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'message_work_links': {
+        if (req.method !== 'GET') return json({ error: 'message_work_links requires GET' }, 405)
+        try {
+          return json(await readMessageWorkLinks(client, { event_id: url.searchParams.get('event_id') || undefined }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'correct_message_work_link': {
+        if (req.method !== 'POST') return json({ error: 'correct_message_work_link requires POST' }, 405)
+        try {
+          return json(await correctMessageWorkLink(client, body || {}, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'open_message_attachment': {
+        if (req.method !== 'GET') return json({ error: 'open_message_attachment requires GET' }, 405)
+        try {
+          return json(await openMessageAttachment(client, {
+            event_id: url.searchParams.get('event_id') || undefined,
+            store: url.searchParams.get('store') || undefined,
+            object_id: url.searchParams.get('object_id') || undefined,
+          }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
           throw error
         }
       }
