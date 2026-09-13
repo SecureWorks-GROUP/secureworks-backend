@@ -60,6 +60,23 @@ Deno.test("allowlist refuses unknown workflow and scope keys", () => {
   }
 });
 
+Deno.test("debt invoice and population scopes are allowlisted", () => {
+  assertEquals(
+    assertWorkflowRefreshBoundary({
+      workflow: "debt",
+      scope: { xero_invoice_id: "aaaaaaaa-0000-4000-8000-000000000002" },
+    }).workflow,
+    "debt",
+  );
+  assertEquals(
+    assertWorkflowRefreshBoundary({
+      workflow: "debt",
+      scope: { population: "open" },
+    }).workflow,
+    "debt",
+  );
+});
+
 Deno.test("JWT actor is the signed-in operator, not the body", () => {
   const actor = refreshActorFromAuth(
     "jwt",

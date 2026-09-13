@@ -13,6 +13,8 @@ export const WORKFLOW_REFRESH_SCOPE_KEYS = [
   "job_id",
   "org_id",
   "week_start",
+  "xero_invoice_id",
+  "population",
 ] as const;
 export const WORKFLOW_REFRESH_WORKER_OPS = [
   "claim",
