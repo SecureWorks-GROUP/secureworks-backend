@@ -1714,7 +1714,9 @@ async function handleDispatchRefresh(
       p_org_id: org,
     });
     if (error) {
-      if (/does not exist/i.test(error.message || "")) return pendingRefreshDoor();
+      if (["PGRST202", "42883"].includes(error.code)) {
+        return pendingRefreshDoor();
+      }
       throw new DispatchError(error.message, 500);
     }
     return stripLeaseToken(data);
@@ -1728,7 +1730,7 @@ async function handleDispatchRefresh(
     p_org_id: org,
   });
   if (error) {
-    if (/does not exist/i.test(error.message || "")) return pendingRefreshDoor();
+    if (["PGRST202", "42883"].includes(error.code)) return pendingRefreshDoor();
     throw new DispatchError(error.message, 500);
   }
   if (data?.outcome === "unavailable") return data;
@@ -1737,7 +1739,7 @@ async function handleDispatchRefresh(
 
 export async function dispatchWorkflow(client: any, org: string) {
   const intendedEnabled = false;
-  const observedEnabled = Deno.env.get("DISPATCH_WORKER_ENABLED") === "true";
+  const configuredEnabled = Deno.env.get("DISPATCH_WORKER_ENABLED");
   const controls = checked(
     await client.from("dispatch_release_controls").select(
       "communications_enabled",
@@ -1754,18 +1756,23 @@ export async function dispatchWorkflow(client: any, org: string) {
     live_actions_enabled: false,
     worker: {
       intended_enabled: intendedEnabled,
-      observed_enabled: observedEnabled,
+      configured_enabled: configuredEnabled == null
+        ? null
+        : configuredEnabled === "true",
+      configuration_source: "DISPATCH_WORKER_ENABLED",
+      observed_enabled: null,
       schedule_installed: false,
       config_path: "scripts/dispatch/worker.disabled.json",
       manual_command: "bash scripts/dispatch/run-dispatch-worker.sh --once",
-      mismatch: intendedEnabled !== observedEnabled,
+      mismatch: null,
     },
     communications_enabled: controls[0]?.communications_enabled === true,
     refresh: {
       declared_output: DISPATCH_REFRESH_OUTPUT,
       driver_capability: "unavailable",
       worker: "disabled",
-      note: "A source-hash reread is not completed Refresh. Register the Dispatch driver after the worker can finish declared output.",
+      note:
+        "A source-hash reread is not completed Refresh. Register the Dispatch driver after the worker can finish declared output.",
     },
     latest_task: (tasks.items || [])[0] || null,
     latest_source_failure: (tasks.source_failures || [])[0] || null,
