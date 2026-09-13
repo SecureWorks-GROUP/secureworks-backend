@@ -375,6 +375,7 @@ import {
   readMessageWorkLinks,
   recordContextMailOccurrence,
 } from './context_mail.ts'
+import { readDispatchJobWorkshop } from './dispatch_workshop.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -7029,6 +7030,18 @@ if (import.meta.main) serve(async (req: Request) => {
             job_id: url.searchParams.get('job_id') || undefined,
             po_id: url.searchParams.get('po_id') || undefined,
             invoice_id: url.searchParams.get('invoice_id') || undefined,
+          }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'dispatch_job_workshop': {
+        if (req.method !== 'GET') return json({ error: 'dispatch_job_workshop requires GET' }, 405)
+        try {
+          return json(await readDispatchJobWorkshop(client, {
+            job_id: url.searchParams.get('job_id') || undefined,
+            po_id: url.searchParams.get('po_id') || undefined,
           }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
         } catch (error) {
           if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
