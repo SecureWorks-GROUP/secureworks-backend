@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   correctMessageWorkLink,
+  openMessageAttachment,
   recordContextMailOccurrence,
   readMessageWorkLinks,
 } from "./context_mail.ts";
@@ -73,6 +74,24 @@ Deno.test("reader calls read_message_work_links", async () => {
     ORG,
   );
   assertEquals(out.links.length, 1);
+});
+
+Deno.test("attachment open is a permissioned RPC, not a borrowed object id", async () => {
+  const client = {
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      assertEquals(name, "open_message_attachment");
+      assertEquals(args.p_org_id, ORG);
+      return { data: null, error: { message: "message_attachment_scope_mismatch" } };
+    },
+  };
+  await assertRejects(() =>
+    openMessageAttachment(
+      client,
+      { event_id: "e1", store: "job_documents", object_id: "other-job-doc" },
+      { mode: "jwt", user: { id: "user-1", orgId: ORG } },
+      ORG,
+    )
+  );
 });
 
 Deno.test("JWT org mismatch is refused", async () => {

@@ -61,6 +61,26 @@ export async function readMessageWorkLinks(
   return data;
 }
 
+export async function openMessageAttachment(
+  client: { rpc: Function },
+  params: { event_id?: string; store?: string; object_id?: string },
+  auth: { mode: string; user: { id?: string; orgId?: string } | null },
+  expectedOrgId: string,
+) {
+  requireActor(auth.mode, auth.user, expectedOrgId, "ops-api");
+  if (!params.event_id || !params.store || !params.object_id) {
+    throw new ContextMailError(400, "event_id, store and object_id are required");
+  }
+  const { data, error } = await client.rpc("open_message_attachment", {
+    p_org_id: expectedOrgId,
+    p_event_id: params.event_id,
+    p_store: params.store,
+    p_object_id: params.object_id,
+  });
+  if (error) throw new ContextMailError(403, error.message);
+  return data;
+}
+
 export async function correctMessageWorkLink(
   client: { rpc: Function },
   body: Record<string, unknown>,

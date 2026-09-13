@@ -1,7 +1,5 @@
-// Executable scoped refresh: same RPC for UI, terminal and cloud.
-// Start coalesces. Dispatch clicks are consumed by consume_dispatch_refresh
-// with lease, source readback and terminal status. Finish requires the
-// stored lease token and owner.
+// Shared Refresh contract. UI may start/read. Workers claim/finish.
+// A source-hash read is not completed Refresh. Unregistered drivers are unavailable.
 
 export const WORKFLOW_REFRESH_OWNERS = [
   "dispatch",
@@ -12,6 +10,7 @@ export const WORKFLOW_REFRESH_OWNERS = [
 ] as const;
 
 export const WORKFLOW_REFRESH_SCOPE_KEYS = ["job_id", "org_id", "week_start"] as const;
+export const WORKFLOW_REFRESH_WORKER_OPS = ["claim", "finish", "consume"] as const;
 
 export class WorkflowRefreshError extends Error {
   constructor(readonly status: number, message: string) {
@@ -37,6 +36,16 @@ export function assertWorkflowRefreshBoundary(body: {
   return { workflow, scope };
 }
 
+export function bindRefreshOrg(
+  scope: Record<string, unknown>,
+  operatorOrgId: string,
+) {
+  if (scope.org_id && String(scope.org_id) !== operatorOrgId) {
+    throw new WorkflowRefreshError(403, "operator organisation mismatch");
+  }
+  return { ...scope, org_id: operatorOrgId };
+}
+
 export function refreshActorFromAuth(
   authMode: string,
   authUser: { id?: string; orgId?: string } | null,
@@ -55,27 +64,45 @@ export function refreshActorFromAuth(
   return actor;
 }
 
+export function assertRefreshWorkerOp(authMode: string, op: string) {
+  if (
+    WORKFLOW_REFRESH_WORKER_OPS.includes(op as typeof WORKFLOW_REFRESH_WORKER_OPS[number]) &&
+    authMode === "jwt"
+  ) {
+    throw new WorkflowRefreshError(403, "operators may request or read a run, not claim or finish it");
+  }
+}
+
 export async function startWorkflowRefresh(
   client: { rpc: Function },
-  body: { workflow?: string; scope?: Record<string, unknown>; actor?: string },
+  body: { workflow?: string; scope?: Record<string, unknown>; actor?: string; org_id: string },
 ) {
   const { workflow, scope } = assertWorkflowRefreshBoundary(body);
   const actor = String(body.actor || "").trim();
   if (!actor) throw new WorkflowRefreshError(400, "actor is required");
+  const bound = bindRefreshOrg(scope, body.org_id);
   const { data, error } = await client.rpc("start_workflow_refresh", {
     p_workflow: workflow,
-    p_scope: scope,
+    p_scope: bound,
     p_actor: actor,
+    p_org_id: body.org_id,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
   return data;
 }
 
-export async function consumeDispatchRefresh(
+export async function claimWorkflowRefresh(
   client: { rpc: Function },
-  body: { id: string },
+  body: { id: string; owner?: string; lease_token?: string | null; lease_generation?: number | null },
 ) {
-  const { data, error } = await client.rpc("consume_dispatch_refresh", { p_id: body.id });
+  const owner = String(body.owner || "dispatch").trim();
+  assertWorkflowRefreshBoundary({ workflow: owner });
+  const { data, error } = await client.rpc("claim_workflow_refresh", {
+    p_id: body.id,
+    p_owner: owner,
+    p_lease: body.lease_token ?? null,
+    p_generation: body.lease_generation ?? null,
+  });
   if (error) throw new WorkflowRefreshError(500, error.message);
   return data;
 }
@@ -84,8 +111,9 @@ export async function consumeWorkflowRefresh(
   client: { rpc: Function },
   body: { owner?: string },
 ) {
-  const owner = String(body.owner || "dispatch").trim();
-  if (owner !== "dispatch") throw new WorkflowRefreshError(400, "workflow is not allowlisted");
+  const owner = String(body.owner || "").trim();
+  if (!owner) throw new WorkflowRefreshError(400, "workflow is not allowlisted");
+  assertWorkflowRefreshBoundary({ workflow: owner });
   const { data, error } = await client.rpc("consume_workflow_refresh", {
     p_owner: owner,
   });
@@ -102,10 +130,12 @@ export async function finishWorkflowRefresh(
     source_cutoff?: string;
     lease_token?: string;
     owner?: string;
+    lease_generation?: number;
+    observed_source_revision?: string | null;
   },
 ) {
-  if (!body.lease_token || !body.owner) {
-    throw new WorkflowRefreshError(400, "lease token and owner are required");
+  if (!body.lease_token || !body.owner || body.lease_generation == null) {
+    throw new WorkflowRefreshError(400, "lease token, owner and generation are required");
   }
   assertWorkflowRefreshBoundary({ workflow: body.owner });
   const { data, error } = await client.rpc("finish_workflow_refresh", {
@@ -115,6 +145,8 @@ export async function finishWorkflowRefresh(
     p_cutoff: body.source_cutoff ?? null,
     p_lease: body.lease_token,
     p_owner: body.owner,
+    p_generation: body.lease_generation,
+    p_observed_revision: body.observed_source_revision ?? null,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
   return data;
@@ -123,22 +155,15 @@ export async function finishWorkflowRefresh(
 export async function readWorkflowRefresh(
   client: { rpc: Function },
   id: string,
+  orgId: string,
 ) {
-  const { data, error } = await client.rpc("workflow_refresh_readback", { p_id: id });
+  const { data, error } = await client.rpc("workflow_refresh_readback", {
+    p_id: id,
+    p_org_id: orgId,
+  });
   if (error) throw new WorkflowRefreshError(500, error.message);
-  return data;
-}
-
-export async function startAndConsumeDispatchRefresh(
-  client: { rpc: Function },
-  body: { workflow?: string; scope?: Record<string, unknown>; actor?: string },
-) {
-  const started = await startWorkflowRefresh(client, body);
-  if (String(body.workflow || "") !== "dispatch") return { start: started };
-  if (started?.status === "queued" || started?.outcome === "started") {
-    const consumed = await consumeDispatchRefresh(client, { id: started.id });
-    const readback = await readWorkflowRefresh(client, started.id);
-    return { start: started, consume: consumed, readback };
+  if (data && typeof data === "object" && "lease_token" in (data as object)) {
+    throw new WorkflowRefreshError(500, "lease token must not be read back");
   }
-  return { start: started, readback: await readWorkflowRefresh(client, started.id) };
+  return data;
 }

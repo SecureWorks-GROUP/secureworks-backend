@@ -932,7 +932,7 @@ async function syncInvoices(sb: any) {
       sb,
       DEFAULT_ORG_ID,
       outstanding as any,
-      { write: true },
+      { write: true, provider_pages: opage },
     )
     console.log('[xero-sync] outstanding ACCREC reconcile', {
       provider_count: rec.provider_count,
@@ -943,6 +943,9 @@ async function syncInvoices(sb: any) {
       absent: rec.absent.length,
       updated: rec.updated,
       inserted: rec.inserted,
+      receipt_id: rec.receipt_id,
+      attempted: rec.attempted,
+      failed: rec.failed,
     })
   }
 

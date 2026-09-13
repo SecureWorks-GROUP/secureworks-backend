@@ -43,6 +43,12 @@ function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
+function rejectIfError(result: { error?: { message?: string } | null } | null | undefined, what: string) {
+  const err = result?.error;
+  if (!err) return;
+  throw err instanceof Error ? err : new Error(err.message || what);
+}
+
 export function classifyProviderVsCache(
   provider: ProviderOpenInvoice[],
   cache: CacheInvoice[],
@@ -102,7 +108,7 @@ export async function applyOpenReceivableReconcile(
   client: { from: (t: string) => any },
   orgId: string,
   provider: ProviderOpenInvoice[],
-  opts: { write: boolean; now?: Date },
+  opts: { write: boolean; now?: Date; provider_pages?: number },
 ) {
   const ids = provider.filter(isProviderOpenAccrec).map((p) => p.InvoiceID);
   const { data, error } = await client.from("xero_invoices")
@@ -114,28 +120,83 @@ export async function applyOpenReceivableReconcile(
   if (error) throw error;
   const diff = classifyProviderVsCache(provider, data || []);
   if (!opts.write) {
-    return { ...diff, updated: 0, inserted: 0 };
+    return { ...diff, updated: 0, inserted: 0, attempted: 0, failed: 0, receipt_id: null };
   }
   const now = opts.now ?? new Date();
+  const runIns = await client.from("xero_open_receivable_reconcile_runs").insert({
+    org_id: orgId,
+    status: "running",
+    provider_pages: opts.provider_pages ?? 0,
+    provider_count: diff.provider_count,
+    provider_cutoff: diff.provider_cutoff,
+    attempted: diff.stale_status.length + diff.absent.length,
+  }).select("id").single();
+  rejectIfError(runIns, "reconcile receipt create failed");
+  if (!runIns.data?.id) throw new Error("reconcile receipt create failed");
+  const receiptId = runIns.data.id;
   let updated = 0;
   let inserted = 0;
-  for (const { provider: inv } of diff.stale_status) {
-    const patch = providerMoneyPatch(inv, now);
-    const { error: upErr } = await client.from("xero_invoices").update(patch)
-      .eq("org_id", orgId).eq("xero_invoice_id", inv.InvoiceID);
-    if (upErr) throw upErr;
-    updated += 1;
-  }
-  for (const inv of diff.absent) {
-    const { error: inErr } = await client.from("xero_invoices").insert({
-      org_id: orgId,
-      xero_invoice_id: inv.InvoiceID,
-      invoice_number: inv.InvoiceNumber,
-      invoice_type: inv.Type ?? "ACCREC",
-      ...providerMoneyPatch(inv, now),
+  let failed = 0;
+  let lastError: { invoice?: string; message: string } | null = null;
+  const mark = async (invoiceId: string, action: "update" | "insert", ok: boolean, message?: string) => {
+    const itemIns = await client.from("xero_open_receivable_reconcile_items").insert({
+      run_id: receiptId,
+      xero_invoice_id: invoiceId,
+      action,
+      ok,
+      error: message ?? null,
     });
-    if (inErr) throw inErr;
-    inserted += 1;
+    rejectIfError(itemIns, "reconcile receipt item write failed");
+  };
+  const finishReceipt = async (status: "completed" | "partial" | "failed") => {
+    const recUp = await client.from("xero_open_receivable_reconcile_runs").update({
+      status,
+      finished_at: new Date().toISOString(),
+      updated,
+      inserted,
+      failed,
+      attempted: diff.stale_status.length + diff.absent.length,
+      traversal_complete: status === "completed",
+      last_error: lastError,
+    }).eq("id", receiptId);
+    rejectIfError(recUp, "reconcile receipt progress write failed");
+  };
+  try {
+    for (const { provider: inv } of diff.stale_status) {
+      const patch = providerMoneyPatch(inv, now);
+      const { error: upErr } = await client.from("xero_invoices").update(patch)
+        .eq("org_id", orgId).eq("xero_invoice_id", inv.InvoiceID);
+      if (upErr) {
+        failed += 1;
+        lastError = { invoice: inv.InvoiceID, message: upErr.message };
+        await mark(inv.InvoiceID, "update", false, upErr.message);
+        throw upErr;
+      }
+      updated += 1;
+      await mark(inv.InvoiceID, "update", true);
+    }
+    for (const inv of diff.absent) {
+      const { error: inErr } = await client.from("xero_invoices").insert({
+        org_id: orgId,
+        xero_invoice_id: inv.InvoiceID,
+        invoice_number: inv.InvoiceNumber,
+        invoice_type: inv.Type ?? "ACCREC",
+        ...providerMoneyPatch(inv, now),
+      });
+      if (inErr) {
+        failed += 1;
+        lastError = { invoice: inv.InvoiceID, message: inErr.message };
+        await mark(inv.InvoiceID, "insert", false, inErr.message);
+        throw inErr;
+      }
+      inserted += 1;
+      await mark(inv.InvoiceID, "insert", true);
+    }
+  } catch (err) {
+    lastError = lastError || { message: err instanceof Error ? err.message : String(err) };
+    await finishReceipt(updated + inserted > 0 ? "partial" : "failed");
+    throw err;
   }
-  return { ...diff, updated, inserted, money_fields: MONEY_FIELDS };
+  await finishReceipt("completed");
+  return { ...diff, updated, inserted, attempted: diff.stale_status.length + diff.absent.length, failed: 0, receipt_id: receiptId, money_fields: MONEY_FIELDS };
 }

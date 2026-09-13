@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   applyOpenReceivableReconcile,
   classifyProviderVsCache,
@@ -102,37 +102,92 @@ Deno.test("write=false does not mutate", async () => {
   assertEquals(inserts.length, 0);
 });
 
+function journalAndInvoiceClient(opts: {
+  store: Array<Record<string, unknown>>;
+  updates: Array<Record<string, unknown>>;
+  inserts: unknown[];
+  failInvoice?: string;
+  failItemAfter?: number;
+  failReceiptComplete?: boolean;
+}) {
+  const items: unknown[] = [];
+  const receipts: Array<Record<string, unknown>> = [];
+  let itemOk = 0;
+  let receiptSeq = 0;
+  return {
+    items,
+    receipts,
+    client: {
+      from(table: string) {
+        if (table === "xero_open_receivable_reconcile_runs") {
+          return {
+            insert: () => ({
+              select: () => ({
+                single: async () => {
+                  receiptSeq += 1;
+                  return { data: { id: `receipt-${receiptSeq}` }, error: null };
+                },
+              }),
+            }),
+            update: (row: Record<string, unknown>) => ({
+              eq: async () => {
+                if (opts.failReceiptComplete && row.status === "completed") {
+                  return { error: { message: "receipt complete write failed" } };
+                }
+                receipts.push(row);
+                return { error: null };
+              },
+            }),
+          };
+        }
+        if (table === "xero_open_receivable_reconcile_items") {
+          return {
+            insert: async (row: { ok?: boolean }) => {
+              if (row.ok && opts.failItemAfter != null && itemOk >= opts.failItemAfter) {
+                return { error: { message: "receipt item write failed" } };
+              }
+              if (row.ok) itemOk += 1;
+              items.push(row);
+              return { error: null };
+            },
+          };
+        }
+        return {
+          select: () => ({
+            eq: () => ({
+              in: async () => ({ data: opts.store, error: null }),
+            }),
+          }),
+          update: (row: Record<string, unknown>) => {
+            opts.updates.push(row);
+            return {
+              eq: () => ({
+                eq: (_col: string, id: string) => {
+                  if (opts.failInvoice && id === opts.failInvoice) {
+                    return Promise.resolve({ error: { message: "forced" } });
+                  }
+                  const hit = opts.store.find((r) => r.xero_invoice_id === id);
+                  if (hit) Object.assign(hit, row);
+                  return Promise.resolve({ error: null });
+                },
+              }),
+            };
+          },
+          insert: async (row: unknown) => {
+            opts.inserts.push(row);
+            return { error: null };
+          },
+        };
+      },
+    },
+  };
+}
+
 Deno.test("write=true UPDATES existing tombstones and does not insert or touch classifications", async () => {
   const store = cacheRows().stale.map((r) => ({ ...r }));
   const updates: Array<Record<string, unknown>> = [];
   const inserts: unknown[] = [];
-  const client = {
-    from() {
-      return {
-        select: () => ({
-          eq: () => ({
-            in: async () => ({ data: store, error: null }),
-          }),
-        }),
-        update: (row: Record<string, unknown>) => {
-          updates.push(row);
-          return {
-            eq: () => ({
-              eq: (_col: string, id: string) => {
-                const hit = store.find((r) => r.xero_invoice_id === id);
-                if (hit) Object.assign(hit, row);
-                return Promise.resolve({ error: null });
-              },
-            }),
-          };
-        },
-        insert: async (row: unknown) => {
-          inserts.push(row);
-          return { error: null };
-        },
-      };
-    },
-  };
+  const { client } = journalAndInvoiceClient({ store, updates, inserts });
   const out = await applyOpenReceivableReconcile(
     client,
     "00000000-0000-0000-0000-000000000001",
@@ -155,6 +210,7 @@ Deno.test("write=true UPDATES existing tombstones and does not insert or touch c
   }
   assertEquals(store.find((r) => r.invoice_number === "INV-1442")?.amount_due, 3718);
   assertEquals(store.find((r) => r.invoice_number === "INV-0034")?.amount_due, 734.48);
+  assertEquals(out.receipt_id, "receipt-1");
 });
 
 Deno.test("money patch is status and balances only", () => {
@@ -170,22 +226,7 @@ Deno.test("money patch is status and balances only", () => {
 
 Deno.test("a genuinely absent provider ID still inserts; the 13 are not that case", async () => {
   const inserts: Array<Record<string, unknown>> = [];
-  const client = {
-    from() {
-      return {
-        select: () => ({
-          eq: () => ({
-            in: async () => ({ data: [], error: null }),
-          }),
-        }),
-        update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),
-        insert: async (row: Record<string, unknown>) => {
-          inserts.push(row);
-          return { error: null };
-        },
-      };
-    },
-  };
+  const { client } = journalAndInvoiceClient({ store: [], updates: [], inserts });
   const out = await applyOpenReceivableReconcile(
     client,
     "00000000-0000-0000-0000-000000000001",
@@ -203,4 +244,91 @@ Deno.test("a genuinely absent provider ID still inserts; the 13 are not that cas
   assertEquals(out.inserted, 1);
   assertEquals(out.updated, 0);
   assertEquals(inserts.length, 1);
+});
+
+Deno.test("a later item failure journals and throws without claiming complete", async () => {
+  const store = cacheRows().stale.map((r) => ({ ...r }));
+  const updates: Array<Record<string, unknown>> = [];
+  const { client, items } = journalAndInvoiceClient({
+    store,
+    updates,
+    inserts: [],
+    failInvoice: "0b74ba18-0cec-4f82-a568-97bbb537b6a6",
+  });
+  await assertRejects(() =>
+    applyOpenReceivableReconcile(
+      client,
+      "00000000-0000-0000-0000-000000000001",
+      providerOpen(),
+      { write: true },
+    )
+  );
+  assertEquals(items.some((row) => (row as { ok: boolean }).ok === false), true);
+});
+
+Deno.test("receipt item write failure after cache updates is not completed and retry is idempotent", async () => {
+  const store = cacheRows().stale.map((r) => ({ ...r }));
+  const updates: Array<Record<string, unknown>> = [];
+  const first = journalAndInvoiceClient({
+    store,
+    updates,
+    inserts: [],
+    failItemAfter: 2,
+  });
+  let cursorAdvanced = false;
+  try {
+    await applyOpenReceivableReconcile(
+      first.client,
+      "00000000-0000-0000-0000-000000000001",
+      providerOpen(),
+      { write: true },
+    );
+    cursorAdvanced = true;
+  } catch {
+    cursorAdvanced = false;
+  }
+  assertEquals(cursorAdvanced, false);
+  assertEquals(first.receipts.some((row) => row.status === "completed"), false);
+  assertEquals(first.receipts.some((row) => row.status === "partial"), true);
+  assertEquals(store.filter((r) => r.status === "AUTHORISED").length, 3);
+
+  const retryUpdates: Array<Record<string, unknown>> = [];
+  const retry = journalAndInvoiceClient({ store, updates: retryUpdates, inserts: [] });
+  const out = await applyOpenReceivableReconcile(
+    retry.client,
+    "00000000-0000-0000-0000-000000000001",
+    providerOpen(),
+    { write: true },
+  );
+  assertEquals(out.updated, 10);
+  assertEquals(out.inserted, 0);
+  assertEquals(retryUpdates.length, 10);
+  assertEquals(out.receipt_id, "receipt-1");
+  assertEquals(store.every((r) => r.status === "AUTHORISED"), true);
+});
+
+Deno.test("completed receipt write error after cache updates does not claim complete", async () => {
+  const store = cacheRows().stale.map((r) => ({ ...r }));
+  const updates: Array<Record<string, unknown>> = [];
+  const { client, receipts } = journalAndInvoiceClient({
+    store,
+    updates,
+    inserts: [],
+    failReceiptComplete: true,
+  });
+  let cursorAdvanced = false;
+  try {
+    await applyOpenReceivableReconcile(
+      client,
+      "00000000-0000-0000-0000-000000000001",
+      providerOpen(),
+      { write: true },
+    );
+    cursorAdvanced = true;
+  } catch {
+    cursorAdvanced = false;
+  }
+  assertEquals(cursorAdvanced, false);
+  assertEquals(receipts.some((row) => row.status === "completed"), false);
+  assertEquals(store.every((r) => r.status === "AUTHORISED"), true);
 });
