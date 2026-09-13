@@ -144,6 +144,8 @@ function fakeClient(fx: Fixture) {
       q.select = chain(() => {});
       q.eq = chain((a) => q._filters.push(["eq", a[0], a[1]]));
       q.neq = chain((a) => q._filters.push(["neq", a[0], a[1]]));
+      q.in = chain((a) => q._filters.push(["in", a[0], a[1]]));
+      q.not = chain((a) => q._filters.push(["not", a[0], a[1], a[2]]));
       q.order = chain((a) => { q._order = a; });
       q.limit = chain((a) => { q._limit = a[0]; });
       q.update = chain((a) => { q._op = "update"; q._patch = a[0]; });
@@ -179,7 +181,8 @@ function fakeClient(fx: Fixture) {
           const key = q._filters.find((f: any) => f[1] === "dedupe_key")?.[2];
           if (key) { const hit = Object.values(fx.runs).find((r: any) => r.dedupe_key === key); return { data: hit ? { id: hit.id, state: hit.state } : null, error: null }; }
           const stateEq = q._filters.find((f: any) => f[0] === "eq" && f[1] === "state")?.[2];
-          if (stateEq === "done") { const s = (fx.siblings || [])[0]; return { data: s ?? null, error: null }; }
+          const docketPresent = q._filters.some((f: any) => f[0] === "not" && f[1] === "docket_revision_id");
+          if (stateEq === "done" || docketPresent) { const s = (fx.siblings || [])[0]; return { data: s ?? null, error: null }; }
           const id = q._filters.find((f: any) => f[1] === "id")?.[2];
           if (id) return { data: fx.runs[id] ? { ...fx.runs[id] } : null, error: null };
           const stateNe = q._filters.find((f: any) => f[0] === "neq" && f[1] === "state")?.[2];
@@ -401,6 +404,21 @@ Deno.test("3. another identity already built this cycle: refused_conflict for re
   assertEquals(fx.runs[RUN].state, "refused_conflict");
   assertEquals(prepared, 0);
   assertStringIncludes(fx.runs[RUN].last_error, "roof:d:h");
+});
+
+Deno.test("3b. awaiting_pack sibling with a docket is already built; second identity does not prepare", async () => {
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun() },
+    cycles: [{ id: CYCLE1, cycle_number: 1 }],
+    siblings: [{ id: "y", dedupe_key: `${JOB}:${CYCLE1}:report:other`, state: "awaiting_pack", docket_revision_id: "d-awaiting" }],
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  assertEquals(out.outcome, "refused");
+  assertEquals(fx.runs[RUN].state, "refused_conflict");
+  assertEquals(prepared, 0);
+  assertStringIncludes(fx.runs[RUN].last_error, "report:other");
 });
 
 Deno.test("4. the pack path's own refusal or a blocked result is refused_gate, terminal for this identity", async () => {

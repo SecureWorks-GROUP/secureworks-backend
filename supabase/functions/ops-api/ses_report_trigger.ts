@@ -198,9 +198,12 @@ export async function runSesReportTrigger(
       run = await transition(client, run, { attendance_cycle_id: currentCycle.id, cycle_number: currentCycle.cycle_number });
     }
 
-    // 3. Conflict: a different source identity already built this job+cycle.
+    // 3. Conflict: a different source identity already persisted a docket for
+    //    this job+cycle. awaiting_pack still owns that docket; checking only
+    //    `done` would let a second identity prepare again.
     const sibling = await client.from("ses_report_trigger_runs").select("id, dedupe_key, state, docket_revision_id")
-      .eq("job_id", run.job_id).eq("attendance_cycle_id", currentCycle.id).eq("state", "done").neq("id", run.id).limit(1).maybeSingle();
+      .eq("job_id", run.job_id).eq("attendance_cycle_id", currentCycle.id)
+      .not("docket_revision_id", "is", null).neq("id", run.id).limit(1).maybeSingle();
     if (sibling.error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `sibling read failed: ${sibling.error.message || sibling.error}`, 503);
     if (sibling.data) {
       run = await transition(client, run, {
