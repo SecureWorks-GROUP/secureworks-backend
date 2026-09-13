@@ -222,7 +222,11 @@ Deno.test("receipt helper sends the driver-owned output to the durable RPC", asy
     rpc: async (name: string, args: unknown) => {
       calls.push({ name, args });
       return {
-        data: { receipt_id: "receipt-1", outcome: "persisted" },
+        data: {
+          receipt_id: "receipt-1",
+          outcome: "persisted",
+          observed_source_revision: SOURCE,
+        },
         error: null,
       };
     },
@@ -260,46 +264,94 @@ Deno.test("receipt helper sends the driver-owned output to the durable RPC", asy
   );
 });
 
-Deno.test("finish persists a receipt before invoking the finish RPC", async () => {
-  const calls: string[] = [];
-  const out = await finishWorkflowRefresh({
-    rpc: async (name: string) => {
-      calls.push(name);
-      if (name === "record_workflow_refresh_receipt") {
-        return {
-          data: { receipt_id: "receipt-1", outcome: "persisted" },
-          error: null,
-        };
-      }
-      return { data: { status: "completed" }, error: null };
-    },
-  }, {
-    id: "run-1",
-    status: "completed",
-    owner: "dispatch",
-    lease_token: "00000000-0000-4000-8000-000000000001",
-    lease_generation: 1,
-    observed_source_revision: SOURCE,
-    receipt: {
-      driver_version: "dispatch_refresh/v1",
-      scope: { job_id: JOB, org_id: ORG },
-      output: {
-        ok: true,
-        declared_output: "dispatch_refresh/v1",
-        observed_source_revision: SOURCE,
-        work: { jobs_read: 1, source_cutoff: "2026-09-13T00:00:00Z" },
-        output_ref: {
-          table: "dispatch_commands",
-          command: "assess",
-          request_id: "00000000-0000-4000-8000-000000000101",
-        },
+for (const callerRevision of [undefined, null, "stale-caller-revision"]) {
+  Deno.test(`finish uses the persisted revision when caller revision is ${callerRevision}`, async () => {
+    const calls: string[] = [];
+    const out = await finishWorkflowRefresh({
+      rpc: async (
+        name: string,
+        args: { p_observed_revision: unknown; p_result?: unknown },
+      ) => {
+        calls.push(name);
+        assertEquals(args.p_observed_revision, SOURCE);
+        if (name === "record_workflow_refresh_receipt") {
+          return {
+            data: {
+              receipt_id: "receipt-1",
+              outcome: "persisted",
+              observed_source_revision: SOURCE,
+            },
+            error: null,
+          };
+        }
+        assertEquals(args.p_result, { receipt_id: "receipt-1" });
+        return { data: { status: "completed" }, error: null };
       },
-      observed_source_revision: SOURCE,
-    },
+    }, {
+      id: "run-1",
+      status: "completed",
+      owner: "dispatch",
+      lease_token: "00000000-0000-4000-8000-000000000001",
+      lease_generation: 1,
+      observed_source_revision: callerRevision,
+      receipt: {
+        driver_version: "dispatch_refresh/v1",
+        scope: { job_id: JOB, org_id: ORG },
+        output: {
+          ok: true,
+          declared_output: "dispatch_refresh/v1",
+          observed_source_revision: SOURCE,
+          work: { jobs_read: 1, source_cutoff: "2026-09-13T00:00:00Z" },
+          output_ref: {
+            table: "dispatch_commands",
+            command: "assess",
+            request_id: "00000000-0000-4000-8000-000000000101",
+          },
+        },
+        observed_source_revision: SOURCE,
+      },
+    });
+    assertEquals(out.status, "completed");
+    assertEquals(calls, [
+      "record_workflow_refresh_receipt",
+      "finish_workflow_refresh",
+    ]);
   });
-  assertEquals(out.status, "completed");
-  assertEquals(calls, [
-    "record_workflow_refresh_receipt",
-    "finish_workflow_refresh",
-  ]);
+}
+
+Deno.test("finish stops when persistence returns no usable source revision", async () => {
+  for (const revision of [undefined, null, "", " "]) {
+    const calls: string[] = [];
+    await assertRejects(
+      () =>
+        finishWorkflowRefresh({
+          rpc: async (name: string) => {
+            calls.push(name);
+            return {
+              data: {
+                receipt_id: "receipt-1",
+                observed_source_revision: revision,
+              },
+              error: null,
+            };
+          },
+        }, {
+          id: "run-1",
+          status: "completed",
+          owner: "dispatch",
+          lease_token: "00000000-0000-4000-8000-000000000001",
+          lease_generation: 1,
+          observed_source_revision: SOURCE,
+          receipt: {
+            driver_version: "dispatch_refresh/v1",
+            scope: { job_id: JOB, org_id: ORG },
+            output: {},
+            observed_source_revision: SOURCE,
+          },
+        }),
+      WorkflowRefreshError,
+      "receipt persistence returned no receipt id or source revision",
+    );
+    assertEquals(calls, ["record_workflow_refresh_receipt"]);
+  }
 });

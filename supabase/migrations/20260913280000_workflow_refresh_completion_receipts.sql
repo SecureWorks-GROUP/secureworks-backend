@@ -140,8 +140,6 @@ BEGIN
   );
 END $$;
 
--- The old start body is retained with one additional gate: a registered
--- capability without a known validator cannot queue work.
 CREATE OR REPLACE FUNCTION public.start_workflow_refresh(
   p_workflow text, p_scope jsonb, p_actor text, p_org_id uuid)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
@@ -171,6 +169,8 @@ BEGIN
       'owner_role',driver.owner_role,'declared_output',driver.declared_output,
       'reason','driver_or_validator_not_registered');
   END IF;
+  IF NOT (scoped ? 'job_id')
+  THEN RAISE EXCEPTION 'workflow_refresh_scope_missing'; END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended(p_workflow || ':' || scoped::text, 0));
   BEGIN
     SELECT * INTO existing FROM public.workflow_refresh_runs
@@ -489,7 +489,10 @@ BEGIN
     SELECT 1 FROM public.workflow_refresh_drivers d
      WHERE d.workflow=p_owner AND d.capability='registered'
        AND d.validator_key='dispatch_source_v1'
-  ) THEN
+  ) OR to_regprocedure('public.dispatch_source_version(uuid,uuid)') IS NULL
+    OR to_regclass('public.dispatch_commands') IS NULL
+    OR to_regclass('public.dispatch_plans') IS NULL
+  THEN
     RETURN jsonb_build_object('outcome','unavailable','owner',p_owner,
       'reason','driver_or_validator_not_registered');
   END IF;
@@ -497,7 +500,16 @@ BEGIN
    WHERE workflow=p_owner AND status='queued'
    ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1;
   IF NOT FOUND THEN RETURN jsonb_build_object('outcome','idle','owner',p_owner); END IF;
-  RETURN public.claim_workflow_refresh(run.id, p_owner, NULL, NULL);
+  BEGIN
+    RETURN public.claim_workflow_refresh(run.id, p_owner, NULL, NULL);
+  EXCEPTION WHEN OTHERS THEN
+    UPDATE public.workflow_refresh_runs
+       SET status='failed', updated_at=now(),
+           result=jsonb_build_object('owner',p_owner,'step','claim_failed','error',SQLERRM)
+     WHERE id=run.id;
+    RETURN jsonb_build_object('ok',false,'id',run.id,'status','failed',
+      'owner',p_owner,'reason','claim_failed');
+  END;
 END $$;
 
 REVOKE ALL ON FUNCTION public.workflow_refresh_source_revision(text,uuid,jsonb,text),

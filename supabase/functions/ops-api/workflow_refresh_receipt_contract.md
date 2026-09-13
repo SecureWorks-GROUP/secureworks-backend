@@ -13,7 +13,9 @@ The shared Refresh API separates three states:
    finish is returned as `partial`.
 
 For Dispatch, the current registered adapter is `dispatch_refresh/v1`. The
-owner calls `finishWorkflowRefresh` with the lease returned by claim and this
+scope must include an existing `job_id` in the bound organisation; empty and
+week-only scopes are rejected before enqueueing. The owner calls
+`finishWorkflowRefresh` with the lease returned by claim and this
 receipt shape:
 
 ```ts
@@ -52,9 +54,14 @@ and checks its persisted plan version, state, and source revision. It also
 rechecks the source at finish. An exact receipt replay is idempotent; a
 different receipt for the same run is a conflict.
 
+Finish uses the persisted receipt's source revision; callers do not need to
+repeat it at the top level.
+
 Partial or failed outcomes may include a driver error result without a
-receipt. Missing or failed source validation leaves the run unavailable or
-running and cannot become a declaration-only completed run. Receipt rows are
+receipt. If a consumer cannot claim a queued run, it records that run as failed
+with the claim error so later consume calls can progress. Failed source
+validation at finish leaves the run running and cannot become a
+declaration-only completed run. Receipt rows are
 private; readback exposes the verified output and receipt id without exposing
 the lease token.
 

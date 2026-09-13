@@ -191,6 +191,7 @@ export async function finishWorkflowRefresh(
     );
   }
   let result = body.result ?? {};
+  let observedRevision = body.observed_source_revision ?? null;
   if (body.receipt) {
     const receipt = await recordWorkflowRefreshReceipt(client, {
       id: body.id,
@@ -199,6 +200,7 @@ export async function finishWorkflowRefresh(
       lease_generation: body.lease_generation,
       receipt: body.receipt,
     });
+    observedRevision = receipt.observed_source_revision;
     if (result && typeof result === "object" && !Array.isArray(result)) {
       result = {
         ...(result as Record<string, unknown>),
@@ -216,7 +218,7 @@ export async function finishWorkflowRefresh(
     p_lease: body.lease_token,
     p_owner: body.owner,
     p_generation: body.lease_generation,
-    p_observed_revision: body.observed_source_revision ?? null,
+    p_observed_revision: observedRevision,
   });
   if (error) throw new WorkflowRefreshError(500, error.message);
   return data;
@@ -245,17 +247,21 @@ export async function recordWorkflowRefreshReceipt(
   if (error) throw new WorkflowRefreshError(500, error.message);
   if (
     !data || typeof data !== "object" ||
-    typeof (data as { receipt_id?: unknown }).receipt_id !== "string"
+    typeof (data as { receipt_id?: unknown }).receipt_id !== "string" ||
+    typeof (data as { observed_source_revision?: unknown })
+        .observed_source_revision !== "string" ||
+    !(data as { observed_source_revision: string }).observed_source_revision
+      .trim()
   ) {
     throw new WorkflowRefreshError(
       500,
-      "receipt persistence returned no receipt id",
+      "receipt persistence returned no receipt id or source revision",
     );
   }
   return data as {
     receipt_id: string;
     outcome?: string;
-    observed_source_revision?: string;
+    observed_source_revision: string;
   };
 }
 
