@@ -6872,6 +6872,28 @@ if (import.meta.main) serve(async (req: Request) => {
           const outcome = await runSesReportTrigger(body || {}, {
             client,
             actor: triggerActor,
+            // Production inspect is read-only. Do not inject applyIsolatedContinuation:
+            // that fixture copies retained pointer ids in tests only. Live bind/mint/send stay held.
+            inspectPack: async (jobId) => {
+              const inspection = await inspectSesPackAction(client, jobId)
+              return {
+                job_id: inspection.job_id,
+                job_number: inspection.job_number,
+                required_documents: {
+                  report: inspection.required_documents?.report !== false,
+                  invoice: inspection.required_documents?.invoice !== false,
+                  swms: inspection.required_documents?.swms === true,
+                },
+                pack: {
+                  report_doc_id: inspection.pack.report_doc_id,
+                  invoice_doc_id: inspection.pack.invoice_doc_id,
+                  swms_doc_id: inspection.pack.swms_doc_id,
+                  sent_at: inspection.pack.sent_at,
+                },
+                xero_binding: inspection.xero_binding,
+                invoice: inspection.invoice,
+              }
+            },
             prepare: async (request) => {
               const response = await prepareSesDocketRevisionAtHttpBoundary(
                 request,
