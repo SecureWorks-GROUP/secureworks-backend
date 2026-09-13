@@ -879,6 +879,78 @@ Deno.test("native Outlook new mail validates final provider revision before acce
   assertEquals(error.receipt.draft_id, "new1");
 });
 
+Deno.test("native Outlook send refuses a changed revision after beforeSend and does not send", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  let sendCalls = 0;
+  let inspections = 0;
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: (path, options) => {
+      if (path.endsWith("/send")) {
+        sendCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 202 }));
+      }
+      if (!options?.method || options.method === "GET") {
+        inspections += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            id: "draft-1",
+            isDraft: true,
+            changeKey: inspections === 1 ? "k1" : "k2",
+            toRecipients: inspections === 1
+              ? [{ emailAddress: { address: "supplier@example.test" } }]
+              : [{ emailAddress: { address: "changed@example.test" } }],
+          })),
+        );
+      }
+      return Promise.resolve(new Response("{}"));
+    },
+  });
+  await assertRejects(
+    () =>
+      provider.send({
+        mailbox: "ops@example.test",
+        draft_id: "draft-1",
+        change_key: "k1",
+      }, async () => {}),
+    Error,
+    "Provider draft changed or already sent; readback required",
+  );
+  assertEquals(sendCalls, 0);
+  assertEquals(inspections, 2);
+});
+
+Deno.test("native Outlook send sends once when the revision is unchanged through beforeSend", async () => {
+  const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
+  let sendCalls = 0;
+  const provider = outlookDispatchProvider({}, ["ops@example.test"], {
+    guard: () => Promise.resolve(),
+    verify: () => Promise.resolve(),
+    attachment: () => Promise.reject(Error("none expected")),
+    request: (path, options) => {
+      if (path.endsWith("/send")) {
+        sendCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 202 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({
+          id: "draft-1",
+          isDraft: true,
+          changeKey: "k1",
+        })),
+      );
+    },
+  });
+  await provider.send({
+    mailbox: "ops@example.test",
+    draft_id: "draft-1",
+    change_key: "k1",
+  }, async () => {});
+  assertEquals(sendCalls, 1);
+});
+
 Deno.test("native Outlook reply guard blocks foreign source before provider mutation", async () => {
   const { outlookDispatchProvider } = await import("./dispatch_execution.ts");
   let providerMutations = 0;

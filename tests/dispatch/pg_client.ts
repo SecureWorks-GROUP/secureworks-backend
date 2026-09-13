@@ -129,12 +129,27 @@ class Query {
     return this;
   }
   eq(key: string, value: any) {
+    return this.filter(key, "=", value);
+  }
+  gt(key: string, value: any) {
+    return this.filter(key, ">", value);
+  }
+  gte(key: string, value: any) {
+    return this.filter(key, ">=", value);
+  }
+  lte(key: string, value: any) {
+    return this.filter(key, "<=", value);
+  }
+  neq(key: string, value: any) {
+    return this.filter(key, "<>", value);
+  }
+  filter(key: string, op: string, value: any) {
     this.filters.push(
       key === "jobs.org_id"
         ? `exists(select 1 from jobs j where j.id=t.job_id and j.org_id=${
           literal(value)
         })`
-        : `t.${name(key)}=${literal(value)}`,
+        : `t.${name(key)} ${op} ${literal(value)}`,
     );
     return this;
   }

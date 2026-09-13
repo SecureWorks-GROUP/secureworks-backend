@@ -4,7 +4,7 @@ do $$ begin
     raise exception 'required Supabase roles missing';
   end if;
 end $$;
-create table jobs(id uuid primary key,org_id uuid,status text,accepted_at timestamptz,scope_json jsonb,pricing_json jsonb,site_address text,scheduled_at timestamptz);
+create table jobs(id uuid primary key,org_id uuid,status text,accepted_at timestamptz,scope_json jsonb,pricing_json jsonb,site_address text,scheduled_at timestamptz,job_number text,client_name text,type text);
 create table job_documents(id uuid primary key,job_id uuid references jobs,type text,accepted_at timestamptz,superseded_at timestamptz);
 create table purchase_orders(id uuid primary key,org_id uuid,job_id uuid references jobs,line_items jsonb,status text,po_number text,supplier_name text,xero_contact_id text,subtotal numeric,tax numeric,total numeric,delivery_date date,reference text,notes text,xero_po_id text,updated_at timestamptz);
 create table job_context(id uuid primary key,job_id uuid references jobs,kind text,value jsonb,provenance jsonb,correlation_id uuid,created_at timestamptz not null default now(),updated_at timestamptz not null default now());

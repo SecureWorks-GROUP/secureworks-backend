@@ -20,6 +20,7 @@ import {
   sealedSesMoneyRefusal,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
+import { authorizeReportingJobContext } from './job_context_gate.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -180,15 +181,23 @@ serve(async (req: Request) => {
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
   let isAuthed = false
+  let authMode: 'api_key' | 'jwt' = 'api_key'
+  let jwtUserId: string | null = null
   if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey || (agentServerKey && xApiKey === agentServerKey))) {
     isAuthed = true
+    authMode = 'api_key'
   } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey || (agentServerKey && bearerToken === agentServerKey))) {
     isAuthed = true
+    authMode = 'api_key'
   } else if (bearerToken) {
     try {
       const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const { data: { user }, error } = await authClient.auth.getUser(bearerToken)
-      if (!error && user) isAuthed = true
+      if (!error && user) {
+        isAuthed = true
+        authMode = 'jwt'
+        jwtUserId = user.id
+      }
     } catch (_) { /* invalid token */ }
   }
   if (!isAuthed) {
@@ -302,8 +311,16 @@ serve(async (req: Request) => {
         return json(await cashLeakDetection(sb))
       case 'performance_benchmarks':
         return json(await performanceBenchmarks(sb))
-      case 'job_context':
-        return json(await jobContext(sb, url.searchParams.get('job_id') || ''))
+      case 'job_context': {
+        const gate = await authorizeReportingJobContext({
+          sb,
+          jobId: url.searchParams.get('job_id') || '',
+          authMode,
+          userId: jwtUserId,
+        })
+        if ('error' in gate) return json({ error: gate.error }, gate.status)
+        return json(await jobContext(sb, gate.jobId))
+      }
       case 'portfolio_summary':
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':

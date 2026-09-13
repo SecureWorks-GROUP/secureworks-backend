@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
-alter table jobs add column job_number text,add column client_name text,add column type text;
+alter table jobs add column if not exists job_number text, add column if not exists client_name text, add column if not exists type text;
 update jobs set job_number='FIXTURE-DISPATCH-1',client_name='Local fixture customer',type='patio',site_address='Fixture site address' where id='10000000-0000-4000-8000-000000000001';
 update jobs set job_number='FIXTURE-DISPATCH-2',client_name='Unresolved acceptance fixture',type='fencing' where id='10000000-0000-4000-8000-000000000002';
 alter table job_documents add column pdf_url text;

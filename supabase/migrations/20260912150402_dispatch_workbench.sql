@@ -1,4 +1,5 @@
 -- Dispatch is a review workbench. These records confer no send/purchase authority.
+alter table public.business_events add column if not exists event_at timestamptz;
 create table public.dispatch_plans (
   org_id uuid not null,
   job_id uuid not null references public.jobs(id),
@@ -359,11 +360,12 @@ begin
   insert into dispatch_commands(org_id,request_id,job_id,request_hash,actor,command,result)
     values(p_org,p_request,p_job,p_hash,p_actor,p_command,result);
   if p_command<>'assess' then
-  insert into business_events(event_type,source,entity_type,entity_id,correlation_id,job_id,match_status,match_method,payload,metadata)
+  insert into business_events(event_type,source,entity_type,entity_id,correlation_id,job_id,match_status,match_method,payload,metadata,event_at)
     values('dispatch.plan.changed','ops-api','dispatch_plan',p_job::text,p_request,p_job::text,
       'matched','direct_job_id',
       jsonb_build_object('contract_version','dispatch-context/v1','org_id',p_org,'job_id',p_job,'plan_version',plan.version,'source_version',p_source,'command',p_command,'state',p_state),
-      jsonb_build_object('source_ref',jsonb_build_object('table','dispatch_plans','org_id',p_org,'job_id',p_job,'version',plan.version),'evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',p_request,'plan_version',plan.version)));
+      jsonb_build_object('source_ref',jsonb_build_object('table','dispatch_plans','org_id',p_org,'job_id',p_job,'version',plan.version),'evidence_role','human_working_state','provider_action',false,'derivation',jsonb_build_object('owner','dispatch','event_id',p_request,'plan_version',plan.version)),
+      plan.updated_at);
   end if;
   return result;
 end $$;

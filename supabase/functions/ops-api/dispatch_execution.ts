@@ -631,19 +631,23 @@ export function outlookDispatchProvider(
     },
     async send(receipt: any, beforeSend?: () => Promise<void>) {
       allowed(receipt.mailbox);
-      const check = await deps.request(path(receipt), { headers }, {
-        mutating: false,
-      });
-      const current = await check.json();
-      if (
-        current.id !== receipt.draft_id || current.isDraft !== true ||
-        current.changeKey !== receipt.change_key
-      ) {
-        throw new Error(
-          "Provider draft changed or already sent; readback required",
-        );
-      }
+      const inspect = async () =>
+        (await deps.request(path(receipt), { headers }, {
+          mutating: false,
+        })).json();
+      const refuseChanged = (current: any) => {
+        if (
+          current.id !== receipt.draft_id || current.isDraft !== true ||
+          current.changeKey !== receipt.change_key
+        ) {
+          throw new Error(
+            "Provider draft changed or already sent; readback required",
+          );
+        }
+      };
+      refuseChanged(await inspect());
       if (beforeSend) await beforeSend();
+      refuseChanged(await inspect());
       await deps.request(path(receipt) + "/send", { method: "POST", headers }, {
         mutating: true,
       });
