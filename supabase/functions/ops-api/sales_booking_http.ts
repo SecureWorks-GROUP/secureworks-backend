@@ -2,8 +2,8 @@
  * Isolated registered ops-api for Booking review.
  * Authenticated staff actor + org_id. SQL on booking_test. No live send/calendar.
  */
-import { dispatch, extractGhlPage, extractGhlPageMeta, SalesBookingError, staffLeaveFromCrewAvailability, type Adapters, type BookingActor } from "./sales_booking.ts";
-import { createPsqlBookingDb } from "./sales_booking_pg.ts";
+import { dispatch, extractGhlPage, extractGhlPageMeta, SalesBookingError, staffLeaveFromCrewAvailability, mergeCioCalendarCoverage, RESOURCES, type Adapters, type BookingActor } from "./sales_booking.ts";
+import { createPsqlBookingDb, psql, q } from "./sales_booking_pg.ts";
 
 const PORT = Number(Deno.env.get("BOOKING_API_PORT") || 4176);
 const TOKEN = Deno.env.get("BOOKING_REVIEW_BEARER") || "booking-isolated-review";
@@ -56,25 +56,35 @@ const adapters: Adapters = {
     const end = new Date(`${start}T00:00:00+08:00`);
     end.setUTCDate(end.getUTCDate() + 7);
     const endDate = end.toISOString().slice(0, 10);
+    let crew = {
+      leave_intervals: null as { start_iso: string; end_iso: string; status?: string }[] | null,
+      travel_minutes: null as number | null,
+      calendar_retrieved_at: new Date().toISOString() as string | null,
+      leave_retrieved_at: null as string | null,
+      travel_retrieved_at: null as string | null,
+      leave_roster_complete: false,
+      leave_state: "unavailable" as string,
+      travel_state: "unavailable" as string,
+      travel_source: "drive_time_cache",
+      source_row_count: 0,
+      matched_rows: 0,
+    };
     try {
       const raw = await mcpCall("sw_get_crew_availability", { start_date: start, end_date: endDate });
       const rows = (raw.availability || raw.rows || raw.data || []) as Array<{ user_id?: string; date?: string; status?: string }>;
-      return staffLeaveFromCrewAvailability(rows, scoperUserId, new Date().toISOString());
+      crew = staffLeaveFromCrewAvailability(rows, scoperUserId, new Date().toISOString());
     } catch {
-      return {
-        leave_intervals: null,
-        travel_minutes: null,
-        calendar_retrieved_at: new Date().toISOString(),
-        leave_retrieved_at: null,
-        travel_retrieved_at: null,
-        leave_roster_complete: false,
-        leave_state: "unavailable",
-        travel_state: "unavailable",
-        travel_source: "drive_time_cache",
-        source_row_count: 0,
-        matched_rows: 0,
-      };
+      /* crew stays unread/unavailable; CIO coverage still joins below */
     }
+    const ownerKey = Object.values(RESOURCES).find((r) => r.scoper_user_id === scoperUserId)?.id || "nithin";
+    let cio = null;
+    try {
+      const raw = psql(`select public.read_calendar_coverage(${q(ACTOR.org_id)}::uuid, ${q(ownerKey)})::text`);
+      cio = raw ? JSON.parse(raw) : null;
+    } catch {
+      cio = null;
+    }
+    return mergeCioCalendarCoverage(crew, cio);
   },
   getConversation: async (contactId) => readContactViaPagers(contactId),
 };

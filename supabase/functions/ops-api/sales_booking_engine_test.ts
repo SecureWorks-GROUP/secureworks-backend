@@ -39,6 +39,32 @@ Deno.test("unchanged source hash skips a second model call", async () => {
   assertEquals(first.customer_facts && (first.customer_facts as { date_specified: boolean }).date_specified, false);
 });
 
+Deno.test("unread/not_read calendar is not Ready even if roster looks complete", async () => {
+  const r = await runAssessment({
+    input: {
+      week_start: "2026-09-14",
+      now: "2026-09-13T08:00:00Z",
+      messages: [{ id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Afternoons work" }],
+      calendar_retrieved_at: "2026-09-13T08:00:00Z",
+      leave_retrieved_at: "2026-09-13T08:00:00Z",
+      leave_intervals: [],
+      travel_retrieved_at: "2026-09-13T08:00:00Z",
+      travel_minutes: 12,
+      events: [],
+      coverage: {
+        leave_roster_complete: true,
+        leave_state: "not_read",
+        travel_state: "observed",
+        any_unread_or_not_read: true,
+        treat_as_free: true,
+      },
+      resource: { name: "Nithin", lane: "patio", desk_rules: { monday_from: 12, no_wednesday: true, last_start: 15.5 } },
+    },
+  });
+  assertEquals(r.status === "ready", false);
+  assertEquals((r.proposal as { kind?: string } | null)?.kind === "proposal", false);
+});
+
 Deno.test("authorised local reason is configured and is not a paid model", async () => {
   const r = await runAssessment({
     input: {

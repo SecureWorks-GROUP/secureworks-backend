@@ -89,9 +89,12 @@ export type Adapters = {
     leave_roster_complete?: boolean;
     source_row_count?: number;
     matched_rows?: number;
-    leave_state?: "observed" | "incomplete" | "unavailable" | "unread" | "absent";
+    leave_state?: "observed" | "incomplete" | "unavailable" | "unread" | "not_read" | "absent";
     travel_state?: "observed" | "absent" | "unavailable" | "unread";
     travel_source?: string;
+    treat_as_free?: boolean;
+    any_unread_or_not_read?: boolean;
+    calendar_source_coverage?: Record<string, unknown> | null;
   }>;
   getConversation?: (contactId: string) => Promise<{
     messages: Record<string, unknown>[];
@@ -189,6 +192,48 @@ export function staffLeaveFromCrewAvailability(
         : `Staff availability was read (${source_row_count} row(s)). None matched this scoper user id. That is incomplete roster coverage, not proof of no leave (absent).`,
       "Travel source drive_time_cache is unavailable in this isolated database. Unavailable is not unread.",
     ],
+  };
+}
+
+export type CioCalendarCoverage = {
+  owner_key?: string;
+  any_unread_or_not_read?: boolean;
+  calendars?: Array<{
+    calendar_id?: string;
+    coverage_status?: string;
+    treat_as_free?: boolean;
+    last_check_at?: string | null;
+  }>;
+};
+
+export function mergeCioCalendarCoverage<T extends {
+  leave_roster_complete?: boolean;
+  leave_state?: string;
+}>(crew: T, cio: CioCalendarCoverage | null | undefined): T & {
+  leave_roster_complete: boolean;
+  leave_state: string;
+  treat_as_free: false;
+  any_unread_or_not_read: boolean;
+  calendar_source_coverage: CioCalendarCoverage | null;
+} {
+  const calendars = Array.isArray(cio?.calendars) ? cio!.calendars! : [];
+  const anyUnread = cio?.any_unread_or_not_read === true || calendars.some((c) => {
+    const status = String(c.coverage_status || "");
+    return status === "unread" || status === "not_read" || status === "error";
+  });
+  const leaveCal = calendars.find((c) => c.calendar_id === "leave");
+  const leaveStatus = String(leaveCal?.coverage_status || "");
+  let leave_state = String(crew.leave_state || "incomplete");
+  if (anyUnread) {
+    leave_state = leaveStatus === "unread" ? "unread" : "not_read";
+  }
+  return {
+    ...crew,
+    leave_roster_complete: anyUnread ? false : crew.leave_roster_complete === true,
+    leave_state,
+    treat_as_free: false,
+    any_unread_or_not_read: anyUnread,
+    calendar_source_coverage: cio || null,
   };
 }
 
@@ -502,9 +547,17 @@ export async function readWorkspace(
   const cal = await adapters.calendarEvents(resource.scoper_user_id, since, untilDate.toISOString());
   const occupancy = scoperOccupancy(((cal.events || []) as unknown) as Record<string, unknown>[]);
   cal.events = occupancy.events;
-  const cov = adapters.coverageForResource
+  const crewCov = adapters.coverageForResource
     ? await adapters.coverageForResource(resource.scoper_user_id, params.week_start)
     : { leave_intervals: null, travel_minutes: null, calendar_retrieved_at: cal.retrieved_at || null, leave_retrieved_at: null, travel_retrieved_at: null, leave_roster_complete: false };
+  let cioCoverage: CioCalendarCoverage | null = null;
+  try {
+    const cioRpc = await db.rpc("read_calendar_coverage", { p_org_id: a.org_id, p_owner_key: params.resource });
+    if (!cioRpc.error && cioRpc.data && typeof cioRpc.data === "object") cioCoverage = cioRpc.data as CioCalendarCoverage;
+  } catch {
+    cioCoverage = null;
+  }
+  const cov = mergeCioCalendarCoverage(crewCov, cioCoverage);
   for (const ev of cal.events || []) {
     const existing = (await db.selectMatch("sales_booking_cases", { id: ev.event_id, org_id: a.org_id })).data[0];
     if (existing?.resource_id && existing.resource_id !== params.resource) continue;
@@ -598,6 +651,9 @@ export async function readWorkspace(
       leave_intervals: cov.leave_intervals,
       leave_roster_complete: cov.leave_roster_complete === true,
       leave_state: cov.leave_state || (cov.leave_retrieved_at ? "incomplete" : "unread"),
+      treat_as_free: false,
+      any_unread_or_not_read: cov.any_unread_or_not_read === true,
+      calendar_source_coverage: cov.calendar_source_coverage || cioCoverage,
       travel_retrieved_at: cov.travel_retrieved_at,
       travel_minutes: cov.travel_minutes,
       travel_state: cov.travel_state || (cov.travel_retrieved_at ? "observed" : "unavailable"),
@@ -621,7 +677,8 @@ export async function readWorkspace(
         cursor.complete === true ? "Provider reported terminal consumption for this resource/week." : "Provider page is not terminal. Empty or missing-next is not a completed workload.",
         occupancy.dropped_job_rows ? (occupancy.dropped_job_rows + " job-assignment rows were not used as Outlook occupancy.") : "Occupancy is scoper Outlook event_id rows.",
         cov.leave_state === "unavailable" ? "Leave source was unavailable (read failed). Unavailable is not absent." :
-        cov.leave_state === "unread" ? "Leave was not read." :
+        cov.leave_state === "unread" || cov.leave_state === "not_read" ? "Leave/calendar coverage is unread or not_read. Unread is not free capacity." :
+        cov.any_unread_or_not_read === true ? "A calendar source is unread or not_read. Unread is not free capacity." :
         cov.leave_roster_complete === true
           ? (cov.matched_rows ? "Leave intervals observed against a complete staff roster." : "Leave source was read against a complete roster and no leave rows exist for this scoper (absent).")
           : (cov.matched_rows
@@ -1117,9 +1174,17 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
         }
       }
       const resMeta = RESOURCES[String(c.resource_id)];
-      const cov = adapters.coverageForResource && resMeta
+      const crewCov = adapters.coverageForResource && resMeta
         ? await adapters.coverageForResource(resMeta.scoper_user_id, String((c as { week_start?: string }).week_start || "2026-09-14"))
         : { leave_intervals: null, travel_minutes: null, calendar_retrieved_at: null, leave_retrieved_at: null, travel_retrieved_at: null, leave_state: "unread" as const, travel_state: "unavailable" as const, leave_roster_complete: false };
+      let cioCoverage: CioCalendarCoverage | null = null;
+      try {
+        const cioRpc = await db.rpc("read_calendar_coverage", { p_org_id: a.org_id, p_owner_key: String(c.resource_id || "nithin") });
+        if (!cioRpc.error && cioRpc.data && typeof cioRpc.data === "object") cioCoverage = cioRpc.data as CioCalendarCoverage;
+      } catch {
+        cioCoverage = null;
+      }
+      const cov = mergeCioCalendarCoverage(crewCov, cioCoverage);
       const result = await assessFn({
         case: c,
         source: "runner",
@@ -1135,6 +1200,8 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
             leave_state: cov.leave_state,
             travel_state: cov.travel_state,
             leave_roster_complete: cov.leave_roster_complete === true,
+            any_unread_or_not_read: cov.any_unread_or_not_read === true,
+            treat_as_free: false,
           },
           leave_retrieved_at: cov.leave_retrieved_at,
           travel_retrieved_at: cov.travel_retrieved_at,

@@ -12,6 +12,7 @@ import {
   openNeedsScoper,
   answerNeedsScoper,
   staffLeaveFromCrewAvailability,
+  mergeCioCalendarCoverage,
   submitInterpretation,
   captureConversation,
   extractGhlPage,
@@ -200,6 +201,68 @@ Deno.test("same-suburb duplicate contact suppresses a second proposal on read", 
   const b = out.cases.find((c) => c.id === "dup-b");
   assertEquals(b?.duplicate_scope_review, true);
   assertEquals(b?.suppress_new_proposal, true);
+});
+
+Deno.test("CIO unread/not_read calendar is never treat_as_free", () => {
+  const merged = mergeCioCalendarCoverage({
+    leave_intervals: [],
+    travel_minutes: 12,
+    calendar_retrieved_at: "2026-09-13T07:57:01Z",
+    leave_retrieved_at: "2026-09-13T07:57:01Z",
+    travel_retrieved_at: "2026-09-13T07:57:01Z",
+    leave_roster_complete: true,
+    leave_state: "absent",
+    travel_state: "observed",
+  }, {
+    owner_key: "nithin",
+    any_unread_or_not_read: true,
+    calendars: [
+      { calendar_id: "primary", coverage_status: "captured", treat_as_free: false, last_check_at: "2026-09-13T07:57:01Z" },
+      { calendar_id: "leave", coverage_status: "not_read", treat_as_free: false, last_check_at: null },
+      { calendar_id: "non_primary", coverage_status: "not_read", treat_as_free: false, last_check_at: null },
+    ],
+  });
+  assertEquals(merged.treat_as_free, false);
+  assertEquals(merged.any_unread_or_not_read, true);
+  assertEquals(merged.leave_roster_complete, false);
+  assertEquals(merged.leave_state, "not_read");
+});
+
+Deno.test("sales_booking_read surfaces CIO unread coverage as not free", async () => {
+  const db = createMemoryBookingDb();
+  const orig = db.rpc.bind(db);
+  db.rpc = async (fn, args = {}) => {
+    if (fn === "read_calendar_coverage") {
+      return {
+        data: {
+          owner_key: "nithin",
+          any_unread_or_not_read: true,
+          calendars: [
+            { calendar_id: "primary", coverage_status: "captured", treat_as_free: false, last_check_at: "2026-09-13T07:57:01Z" },
+            { calendar_id: "leave", coverage_status: "not_read", treat_as_free: false, last_check_at: null },
+          ],
+        },
+        error: null,
+      };
+    }
+    return orig(fn, args);
+  };
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    coverageForResource: async () => ({
+      leave_intervals: [],
+      travel_minutes: 0,
+      calendar_retrieved_at: "2026-09-13T07:57:01Z",
+      leave_retrieved_at: "2026-09-13T07:57:01Z",
+      travel_retrieved_at: "2026-09-13T07:57:01Z",
+      leave_roster_complete: true,
+      leave_state: "absent",
+      travel_state: "observed",
+    }),
+  }), db, "GET", ACTOR) as { coverage: { treat_as_free?: boolean; any_unread_or_not_read?: boolean; leave_state?: string; leave_roster_complete?: boolean } };
+  assertEquals(out.coverage.treat_as_free, false);
+  assertEquals(out.coverage.any_unread_or_not_read, true);
+  assertEquals(out.coverage.leave_state, "not_read");
+  assertEquals(out.coverage.leave_roster_complete, false);
 });
 
 Deno.test("runner with incomplete leave does not produce Ready", async () => {

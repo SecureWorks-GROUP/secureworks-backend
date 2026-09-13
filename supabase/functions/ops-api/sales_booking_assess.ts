@@ -364,6 +364,19 @@ function occupancyGaps(input) {
     if (input.coverage.leave_state === 'unavailable') gaps.push('leave_unavailable');
     if (input.coverage.travel_state === 'unavailable') gaps.push('travel_unavailable');
     if (input.coverage.leave_roster_complete === false) gaps.push('leave_roster_incomplete');
+    if (input.coverage.leave_state === 'unread' || input.coverage.leave_state === 'not_read') {
+      gaps.push('leave_not_read_not_free');
+    }
+    if (input.coverage.any_unread_or_not_read === true) gaps.push('calendar_unread_not_free');
+    if (input.coverage.treat_as_free === true && (
+      input.coverage.any_unread_or_not_read === true ||
+      input.coverage.leave_state === 'unread' ||
+      input.coverage.leave_state === 'not_read' ||
+      input.coverage.leave === 'not_read' ||
+      input.coverage.leave === 'unread'
+    )) {
+      gaps.push('unread_calendar_must_not_be_free');
+    }
     if (input.coverage.leave === 'not_read' || input.coverage.leave === false || input.coverage.calendar === false || input.coverage.travel === false || input.coverage.route === false) {
       gaps.push('coverage_flag_not_ready');
     }
