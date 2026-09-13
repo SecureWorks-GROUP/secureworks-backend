@@ -25,6 +25,22 @@ Deno.test('pending proposal saves exact text, resets approval and repeats withou
 Deno.test('email subject and complete body persist as one reviewable proposal',async()=>{
  const f=fake();await debtProposalSave(f.client,{...request,kind:'email',subject:'Invoice question',to:'accounts@example.test'},'org','staff'); assert(f.row.debt_proposal_text==='Subject: Invoice question\n\n'+request.text)
 })
+Deno.test('conflicting proposal_at returns 409 and does not mark pending', async()=>{
+  const f=fake({debt_proposal_at:'2026-09-11T00:00:00Z'})
+  const orig=f.client.from.bind(f.client)
+  f.client.from=function(table:string){
+    const q=orig(table)
+    const innerUpdate=q.update.bind(q), innerMaybe=q.maybeSingle.bind(q)
+    q.update=function(value:any){ (q as any)._isUpdate=true; return innerUpdate(value) }
+    q.maybeSingle=async function(){ if(table==='xero_invoices' && (q as any)._isUpdate) return {data:null,error:null}; return innerMaybe() }
+    return q
+  }
+  let code=0
+  try { await debtProposalSave(f.client,{...request,text:'A different proposal.'},'org','staff') } catch(e:any){ code=e.status||0 }
+  assert(code===409, 'expected 409 conflict')
+  assert(f.row.debt_proposal_status==='approved')
+  assert(!f.logs.length)
+})
 Deno.test('cannot approve, mark sent, spoof organisation or save a closed invoice',async()=>{
  for(const field of ['status','approved_by','sent_ref','org_id']) {const f=fake();await rejects(()=>debtProposalSave(f.client,{...request,[field]:'approved'},'org','staff'));assert(!f.writes.length)}
  for(const status of ['approved','sent','pending']) {const f=fake(); await rejects(()=>debtProposalMark(f.client,{xero_invoice_id:xid,status,operator_email:'marnin@example.test'}));assert(!f.writes.length)}
