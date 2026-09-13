@@ -76,12 +76,127 @@ const adapters: Adapters = {
       };
     }
   },
-  getConversation: async (contactId) => {
-    const raw = await mcpCall("sw_get_conversation", { contact_id: contactId });
-    const messages = Array.isArray(raw.messages) ? raw.messages : [];
-    return { messages: messages.map((m: Record<string, unknown>) => ({ id: m.id, direction: m.direction, timestamp: m.timestamp, body: m.body || m.text || "" })) };
-  },
+  getConversation: async (contactId) => readContactViaPagers(contactId),
 };
+
+function pageItems(raw: Record<string, unknown>, keys: string[]) {
+  for (const k of keys) {
+    const v = raw[k];
+    if (Array.isArray(v)) return v as Record<string, unknown>[];
+  }
+  const nested = raw.data;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    for (const k of keys) {
+      const v = (nested as Record<string, unknown>)[k];
+      if (Array.isArray(v)) return v as Record<string, unknown>[];
+    }
+  }
+  if (Array.isArray(raw.data)) return raw.data as Record<string, unknown>[];
+  return [];
+}
+
+function pageMeta(raw: Record<string, unknown>) {
+  const pag = (raw.pagination && typeof raw.pagination === "object") ? raw.pagination as Record<string, unknown> : {};
+  const cov = (raw.coverage && typeof raw.coverage === "object") ? raw.coverage as Record<string, unknown> : {};
+  const has_more = raw.has_more === true || pag.has_more === true || cov.has_more === true;
+  const complete = raw.complete === true || pag.complete === true || cov.complete === true;
+  const next = raw.next_cursor || pag.next_cursor || pag.next || cov.next_cursor;
+  return { has_more, complete, next };
+}
+
+async function readContactViaPagers(contactId: string) {
+  const retrieved_at = new Date().toISOString();
+  const conversations: Record<string, unknown>[] = [];
+  let convCursor: string | undefined;
+  let conversation_pages = 0;
+  let conversations_complete = false;
+  let convHasMore = false;
+  const MAX_CONV_PAGES = 5;
+  while (conversation_pages < MAX_CONV_PAGES) {
+    const args: Record<string, unknown> = { contact_id: contactId, limit: 50 };
+    if (convCursor) args.start_after_date = convCursor;
+    const raw = await mcpCall("sw_list_ghl_conversations", args);
+    conversation_pages += 1;
+    const items = pageItems(raw, ["conversations", "items"]);
+    conversations.push(...items);
+    const meta = pageMeta(raw);
+    if (meta.complete && !meta.has_more) {
+      conversations_complete = true;
+      convHasMore = false;
+      break;
+    }
+    if (meta.has_more || meta.next) {
+      convHasMore = true;
+      const next = meta.next;
+      convCursor = typeof next === "string" ? next : (next && typeof next === "object" ? String((next as { start_after_date?: string }).start_after_date || "") : "");
+      if (!convCursor) break;
+      continue;
+    }
+    break;
+  }
+  const messages: Record<string, unknown>[] = [];
+  let message_pages = 0;
+  let messages_complete = conversations.length === 0 ? conversations_complete : true;
+  let msgHasMore = false;
+  const MAX_MSG_PAGES = 8;
+  for (const conv of conversations) {
+    const conversation_id = String(conv.id || conv.conversation_id || "");
+    if (!conversation_id) {
+      messages_complete = false;
+      continue;
+    }
+    let last: string | undefined;
+    let thisComplete = false;
+    for (let i = 0; i < MAX_MSG_PAGES; i++) {
+      const args: Record<string, unknown> = { contact_id: contactId, conversation_id, limit: 50 };
+      if (last) args.last_message_id = last;
+      const raw = await mcpCall("sw_list_ghl_messages", args);
+      message_pages += 1;
+      const items = pageItems(raw, ["messages", "items"]);
+      for (const m of items) {
+        messages.push({
+          id: m.id,
+          direction: m.direction,
+          timestamp: m.timestamp || m.dateAdded || m.created_at,
+          body: m.body || m.text || "",
+          conversation_id,
+        });
+      }
+      const meta = pageMeta(raw);
+      if (meta.complete && !meta.has_more) {
+        thisComplete = true;
+        break;
+      }
+      if (meta.has_more || meta.next) {
+        msgHasMore = true;
+        const next = meta.next;
+        last = typeof next === "string" ? next : (next && typeof next === "object" ? String((next as { last_message_id?: string }).last_message_id || "") : "");
+        if (!last && items.length) last = String(items[items.length - 1].id || "");
+        if (!last) break;
+        continue;
+      }
+      break;
+    }
+    if (!thisComplete) messages_complete = false;
+  }
+  const complete = conversations_complete && (messages_complete || conversations.length === 0) && !convHasMore && !msgHasMore;
+  return {
+    messages,
+    retrieved_at,
+    coverage: {
+      source: "ghl_pagers",
+      has_more: !complete,
+      complete,
+      conversation_count: conversations.length,
+      conversation_pages,
+      message_pages,
+      conversations_complete,
+      messages_complete: conversations.length === 0 ? conversations_complete : messages_complete,
+      horizon: retrieved_at,
+      next_cursor: convHasMore || msgHasMore ? true : null,
+    },
+  };
+}
 
 function actorFrom(req: Request): BookingActor | null {
   const auth = req.headers.get("authorization") || "";

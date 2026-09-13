@@ -338,7 +338,17 @@ Deno.test("changed source plus failed conversation cannot keep the s1 Ready", as
 
 async function capturedAdapters(messages: Record<string, unknown>[]) {
   return fakeAdapters({
-    getConversation: async () => ({ messages, coverage: { has_more: false }, retrieved_at: "2026-09-13T04:00:00Z" }),
+    getConversation: async () => ({
+      messages,
+      coverage: {
+        has_more: false,
+        complete: true,
+        source: "ghl_pagers",
+        conversations_complete: true,
+        messages_complete: true,
+      },
+      retrieved_at: "2026-09-13T04:00:00Z",
+    }),
   });
 }
 
@@ -394,6 +404,56 @@ Deno.test("caller-only and altered captured citations are refused", async () => 
     case_id: "opp-a", observed_source_version: "s1",
     input: { messages: [{ id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Altered body" }] },
     interpretation: { interpreter: { identity: "grok-desk" }, cited_message_ids: ["in-1"], proposed_text: "Hi, Tuesday. Nithin, SecureWorks Patios" },
+  }, ACTOR));
+});
+
+Deno.test("absent or partial conversation coverage cannot be treated as complete", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", contact_id: "c-a" });
+  const msgs = [{ id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Afternoons work for me" }];
+  const unknown = await captureConversation(db, fakeAdapters({
+    getConversation: async () => ({ messages: msgs }),
+  }), { case_id: "opp-a" }, ACTOR) as { completeness?: string; incomplete?: boolean };
+  assertEquals(unknown.completeness, "unknown");
+  assertEquals(unknown.incomplete, true);
+  await assertRejects(() => submitInterpretation(db, {
+    case_id: "opp-a", observed_source_version: "s1",
+    interpretation: { interpreter: { identity: "grok-desk" }, cited_message_ids: ["in-1"], proposed_text: "Hi, Thursday. Nithin, SecureWorks Patios" },
+  }, ACTOR));
+  const partial = await captureConversation(db, fakeAdapters({
+    getConversation: async () => ({
+      messages: msgs,
+      coverage: { has_more: true, complete: false, source: "ghl_pagers" },
+      retrieved_at: "2026-09-13T04:00:00Z",
+    }),
+  }), { case_id: "opp-a" }, ACTOR) as { completeness?: string };
+  assertEquals(partial.completeness, "partial");
+});
+
+Deno.test("capture hash binds to retained bodies and other org or case cannot use it", async () => {
+  const db = createMemoryBookingDb();
+  const msgs = [{ id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Afternoons work for me" }];
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", contact_id: "c-a", suburb: "Carlisle" });
+  await db.upsert("sales_booking_cases", { id: "opp-b", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", contact_id: "c-b" });
+  const cap = await captureConversation(db, await capturedAdapters(msgs), { case_id: "opp-a" }, ACTOR) as { content_hash: string; capture_id: string };
+  const stored = (await db.selectMatch("sales_booking_conversation_captures", { org_id: ACTOR.org_id, case_id: "opp-a" })).data[0];
+  const again = JSON.stringify((stored.messages as Record<string, unknown>[]).map((m) => ({ id: String(m.id), direction: String(m.direction), timestamp: String(m.timestamp), body: String(m.body || "") })));
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(again));
+  const hash = [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(cap.content_hash, hash);
+  const interpreted = await submitInterpretation(db, {
+    case_id: "opp-a", observed_source_version: "s1",
+    input: { week_start: "2026-09-14", now: "2026-09-12T13:00:00Z", calendar_retrieved_at: "2026-09-12T13:00:00Z", coverage: { leave_state: "incomplete", travel_state: "unavailable", leave_roster_complete: false } },
+    interpretation: { interpreter: { identity: "grok-desk", version: "grok-4.6" }, cited_message_ids: ["in-1"], proposed_text: "Hi, I can visit 2026-09-17 at 1:00pm in Carlisle. Does that suit? Nithin, SecureWorks Patios" },
+  }, ACTOR) as { payload: { capture_hash?: string } };
+  assertEquals(interpreted.payload.capture_hash, cap.content_hash);
+  await assertRejects(() => submitInterpretation(db, {
+    case_id: "opp-a", observed_source_version: "s1",
+    interpretation: { interpreter: { identity: "grok-desk" }, cited_message_ids: ["in-1"], proposed_text: "Hi, Thursday. Nithin, SecureWorks Patios" },
+  }, OTHER));
+  await assertRejects(() => submitInterpretation(db, {
+    case_id: "opp-b", observed_source_version: "s1",
+    interpretation: { interpreter: { identity: "grok-desk" }, cited_message_ids: ["in-1"], proposed_text: "Hi, Thursday. Nithin, SecureWorks Patios" },
   }, ACTOR));
 });
 

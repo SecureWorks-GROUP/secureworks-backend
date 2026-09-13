@@ -93,7 +93,22 @@ export type Adapters = {
     travel_state?: "observed" | "absent" | "unavailable" | "unread";
     travel_source?: string;
   }>;
-  getConversation?: (contactId: string) => Promise<{ messages: Record<string, unknown>[] }>;
+  getConversation?: (contactId: string) => Promise<{
+    messages: Record<string, unknown>[];
+    coverage?: {
+      has_more?: boolean;
+      complete?: boolean;
+      source?: string;
+      conversation_count?: number;
+      conversation_pages?: number;
+      message_pages?: number;
+      conversations_complete?: boolean;
+      messages_complete?: boolean;
+      next_cursor?: unknown;
+      horizon?: string;
+    };
+    retrieved_at?: string;
+  }>;
   assessCase?: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
   sendSms?: (payload: Record<string, unknown>, opts: { execute: boolean; fake: boolean }) => Promise<{ held: boolean; sent: boolean; message_id?: string }>;
   writeCalendar?: (payload: Record<string, unknown>, opts: { execute: boolean; fake: boolean }) => Promise<{ held: boolean; written: boolean; event_id?: string }>;
@@ -625,14 +640,34 @@ export async function captureConversation(
   if (!c) throw new SalesBookingError("unknown case", 404, "unknown_case");
   if (!c.contact_id) throw new SalesBookingError("case has no contact", 400, "no_contact");
   if (!adapters.getConversation) throw new SalesBookingError("conversation capture is unavailable", 409, "capture_unavailable");
-  let convo: { messages?: Record<string, unknown>[]; coverage?: { has_more?: boolean }; retrieved_at?: string };
+  let convo: {
+    messages?: Record<string, unknown>[];
+    coverage?: {
+      has_more?: boolean;
+      complete?: boolean;
+      source?: string;
+      conversation_count?: number;
+      conversation_pages?: number;
+      message_pages?: number;
+      conversations_complete?: boolean;
+      messages_complete?: boolean;
+      next_cursor?: unknown;
+      horizon?: string;
+    };
+    retrieved_at?: string;
+  };
   try {
     convo = await adapters.getConversation(String(c.contact_id));
   } catch (err) {
     throw new SalesBookingError((err as Error).message || "capture failed", 409, "capture_unavailable");
   }
   const messages = (Array.isArray(convo.messages) ? convo.messages : []).map(canonicalCapturedMessage);
-  const has_more = !!(convo.coverage && convo.coverage.has_more);
+  const cov = convo.coverage || {};
+  const retrieved_at = convo.retrieved_at || null;
+  let completeness: "complete" | "partial" | "unknown" = "unknown";
+  if (cov.complete === true && cov.has_more === false && retrieved_at) completeness = "complete";
+  else if (cov.has_more === true || cov.complete === false) completeness = "partial";
+  else completeness = "unknown";
   const content_hash = await hashCapturedMessages(messages);
   const rec = {
     capture_id: `cap_${crypto.randomUUID()}`,
@@ -644,8 +679,10 @@ export async function captureConversation(
     cutoff_at: messages.reduce((acc, m) => (m.timestamp > acc ? m.timestamp : acc), ""),
     content_hash,
     messages,
-    has_more,
-    retrieved_at: convo.retrieved_at || nowIso(),
+    has_more: completeness !== "complete",
+    completeness,
+    coverage: cov,
+    retrieved_at: retrieved_at || nowIso(),
   };
   requireUpsert(await db.upsert("sales_booking_conversation_captures", rec));
   return {
@@ -656,9 +693,11 @@ export async function captureConversation(
     source_version: rec.source_version,
     content_hash,
     message_count: messages.length,
-    has_more,
-    incomplete: has_more,
+    has_more: rec.has_more,
+    completeness,
+    incomplete: completeness !== "complete",
     retrieved_at: rec.retrieved_at,
+    coverage: cov,
   };
 }
 
@@ -708,7 +747,9 @@ export async function submitInterpretation(
   if (String(capture.source_version || "") !== String(c.source_version || "")) {
     throw new SalesBookingError("capture is not for the current source revision", 409, "stale_capture");
   }
-  if (capture.has_more) throw new SalesBookingError("conversation capture is incomplete", 409, "capture_incomplete");
+  if (String(capture.completeness || "") !== "complete" || capture.has_more) {
+    throw new SalesBookingError("conversation capture is incomplete", 409, "capture_incomplete");
+  }
   const messages = (Array.isArray(capture.messages) ? capture.messages : []).map((m) => canonicalCapturedMessage(m as Record<string, unknown>));
   const callerMessages = Array.isArray((body.input as { messages?: unknown[] } | undefined)?.messages)
     ? ((body.input as { messages: Record<string, unknown>[] }).messages).map(canonicalCapturedMessage)
@@ -749,6 +790,7 @@ export async function submitInterpretation(
   payload.capture_id = capture.capture_id;
   payload.capture_hash = capture.content_hash;
   payload.cited_message_ids = interp.cited_message_ids || [];
+  payload.capture_completeness = capture.completeness;
   payload.intelligent_automation = interp.interpreter.identity !== "authorised_local_reason";
   payload.paid_model = false;
   if (c.contact_id) {
