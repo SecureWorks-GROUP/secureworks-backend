@@ -192,6 +192,60 @@ export function staffLeaveFromCrewAvailability(
   };
 }
 
+export function isCustomerFacingMessage(m: Record<string, unknown>) {
+  const dir = String(m.direction || "").toLowerCase();
+  if (dir !== "inbound" && dir !== "outbound") return false;
+  const body = String(m.body || m.text || "").trim();
+  if (!body) return false;
+  if (/^opportunity created$/i.test(body)) return false;
+  return true;
+}
+
+/** Local queue hygiene from captured evidence. Does not write GHL. Age/text is not a completed scope. */
+export function reconcileLeadState(input: {
+  status?: string;
+  archived?: boolean;
+  event_id?: string | null;
+  capture_completeness?: string | null;
+  messages?: Record<string, unknown>[];
+  sender_resolved?: boolean;
+  resource_id?: string;
+}) {
+  if (input.archived) {
+    return { queue_state: "archived", status: "archived", evidence: "manual_archive", scoped: false };
+  }
+  if (input.status === "completed") {
+    return { queue_state: "scoped", status: "completed", evidence: "completed_status", scoped: true };
+  }
+  if (input.status === "booked" || input.event_id) {
+    return { queue_state: "booked_until_scoped", status: "booked", evidence: "booked_visit", scoped: false };
+  }
+  if (input.sender_resolved === false || input.resource_id === "unassigned-fencing") {
+    return { queue_state: "unresolved_ownership", status: "needs_decision", evidence: "ownership", scoped: false };
+  }
+  const completeness = input.capture_completeness || null;
+  if (!completeness || completeness === "unknown" || completeness === "partial") {
+    return {
+      queue_state: "needs_decision",
+      status: "needs_decision",
+      evidence: completeness ? "capture_" + completeness : "capture_missing",
+      stale_evidence: completeness !== "complete",
+      scoped: false,
+    };
+  }
+  const facing = (input.messages || []).filter(isCustomerFacingMessage)
+    .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+  const last = facing[facing.length - 1];
+  const hadOutbound = facing.some((m) => String(m.direction).toLowerCase() === "outbound");
+  if (!last || !hadOutbound) {
+    return { queue_state: "uncontacted", status: "ready", evidence: "no_outbound", scoped: false };
+  }
+  if (String(last.direction).toLowerCase() === "outbound") {
+    return { queue_state: "waiting_reply", status: "waiting", evidence: "last_outbound", scoped: false };
+  }
+  return { queue_state: "follow_up", status: "follow_up", evidence: "last_inbound_after_contact", scoped: false };
+}
+
 function rangesOverlap(a0: string, a1: string, b0: string, b1: string) {
   const A0 = Date.parse(a0), A1 = Date.parse(a1), B0 = Date.parse(b0), B1 = Date.parse(b1);
   if ([A0, A1, B0, B1].some((n) => Number.isNaN(n))) return true;
@@ -463,9 +517,10 @@ export async function readWorkspace(
   const drafts = await db.selectMatch("sales_booking_drafts", { org_id: a.org_id });
   const assessments = await db.selectMatch("sales_booking_assessments", { org_id: a.org_id });
   const archives = await db.selectMatch("sales_booking_archives", { org_id: a.org_id });
+  const captures = await db.selectMatch("sales_booking_conversation_captures", { org_id: a.org_id });
   const cases = listed.data.map((c) => {
     const assessment = assessments.data.find((d) => d.case_id === c.id) || null;
-    const payload = (assessment?.payload || {}) as { source_version?: string; stale?: boolean; actionable?: boolean; classification?: string; status?: string };
+    const payload = (assessment?.payload || {}) as { source_version?: string; stale?: boolean; actionable?: boolean; classification?: string; status?: string; proposal?: { start_iso?: string } };
     const assessmentStale = !!(
       assessment && (
         payload.stale === true ||
@@ -474,14 +529,56 @@ export async function readWorkspace(
         (payload.source_version && payload.source_version !== c.source_version)
       )
     );
+    const archive = archives.data.find((d) => d.case_id === c.id && !d.restored) || null;
+    const capture = latestCapture(captures.data, String(c.id), String(c.source_version || ""))
+      || captures.data.filter((row) => row.case_id === c.id).sort((a, b) => String(b.captured_at || "").localeCompare(String(a.captured_at || "")))[0];
+    const resourceMeta = RESOURCES[String(c.resource_id)] || null;
+    const lead = reconcileLeadState({
+      status: String(c.status || ""),
+      archived: !!archive,
+      event_id: (c.event_id as string | null) || null,
+      capture_completeness: capture ? String(capture.completeness || "") : null,
+      messages: capture && Array.isArray(capture.messages) ? capture.messages as Record<string, unknown>[] : [],
+      sender_resolved: resourceMeta ? resourceMeta.sender_resolved : true,
+      resource_id: String(c.resource_id || ""),
+    });
+    const suburbKey = String(c.suburb || "").trim().toLowerCase();
+    const siblings = listed.data.filter((row) =>
+      row.id !== c.id
+      && row.contact_id
+      && row.contact_id === c.contact_id
+      && String(row.suburb || "").trim().toLowerCase() === suburbKey
+      && suburbKey !== ""
+      && row.status !== "completed"
+      && !archives.data.some((ar) => ar.case_id === row.id && !ar.restored)
+    );
+    const siblingHasProposal = siblings.some((row) => {
+      const ass = assessments.data.find((d) => d.case_id === row.id);
+      const prop = (ass?.payload as { proposal?: { start_iso?: string } } | undefined)?.proposal;
+      return !!(prop && prop.start_iso);
+    });
+    const duplicate_scope_review = siblings.length > 0;
+    const suppress_new_proposal = duplicate_scope_review && siblingHasProposal;
+    const viewStatus = assessmentStale && (lead.status === "ready" || c.status === "ready" || c.status === "proposal")
+      ? "needs_decision"
+      : (lead.status || c.status);
     return {
       ...c,
-      status: assessmentStale && (c.status === "ready" || c.status === "proposal") ? "needs_decision" : c.status,
+      opportunity_id: c.opportunity_id,
+      status: viewStatus,
+      queue_state: lead.queue_state,
+      queue_evidence: lead.evidence,
+      stale_evidence: !!lead.stale_evidence || assessmentStale,
       assessment_stale: assessmentStale,
       proposal_stale: assessmentStale || c.proposal_stale,
+      duplicate_scope_review,
+      suppress_new_proposal,
+      sibling_case_ids: siblings.map((row) => row.id),
+      lane: resourceMeta?.lane || null,
       draft: drafts.data.find((d) => d.case_id === c.id) || null,
       assessment,
-      archived: archives.data.find((d) => d.case_id === c.id && !d.restored) || null,
+      archived: archive,
+      capture_completeness: capture ? capture.completeness : null,
     };
   });
   const enumerated = cases.filter((c) => (c as { opportunity_id?: string }).opportunity_id).length;
@@ -510,7 +607,13 @@ export async function readWorkspace(
         eligible_unscoped_cases: listed.data.filter((c) => c.opportunity_id && c.status !== "completed" && !archives.data.some((ar) => ar.case_id === c.id && !ar.restored)).length,
         booked_until_visit: listed.data.filter((c) => c.status === "booked" && c.opportunity_id).length,
         archived_cases: archives.data.filter((ar) => !ar.restored).length,
-        note: "Opportunity count is not unique customers and not scoping visits. Booked stays on the unscoped queue until a scope happens.",
+        uncontacted: cases.filter((c) => c.opportunity_id && c.queue_state === "uncontacted").length,
+        waiting_reply: cases.filter((c) => c.opportunity_id && c.queue_state === "waiting_reply").length,
+        follow_up: cases.filter((c) => c.opportunity_id && c.queue_state === "follow_up").length,
+        booked_until_scoped: cases.filter((c) => c.opportunity_id && c.queue_state === "booked_until_scoped").length,
+        scoped: cases.filter((c) => c.opportunity_id && c.queue_state === "scoped").length,
+        duplicate_scope_review: cases.filter((c) => c.opportunity_id && c.duplicate_scope_review).length,
+        note: "Opportunity count is not unique customers and not scoping visits. Booked stays on the unscoped queue until a scope happens. Queue states are local evidence overlays, not GHL writes.",
       },
       boolean_flags_are_not_capacity: true,
       gaps: [
@@ -987,7 +1090,12 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
     try {
       let messages: Record<string, unknown>[] = [];
       let conversation_state: "observed" | "empty" | "unavailable" | "unread" = "unread";
-      if (adapters.getConversation && c.contact_id) {
+      const captureRows = (await db.selectMatch("sales_booking_conversation_captures", { org_id: a.org_id, case_id: String(c.id) })).data;
+      const capture = latestCapture(captureRows, String(c.id), observed);
+      if (capture && String(capture.completeness) === "complete" && Array.isArray(capture.messages)) {
+        messages = capture.messages as Record<string, unknown>[];
+        conversation_state = messages.length ? "observed" : "empty";
+      } else if (adapters.getConversation && c.contact_id) {
         try {
           const convo = await adapters.getConversation(String(c.contact_id));
           messages = Array.isArray(convo.messages) ? convo.messages : [];
@@ -996,13 +1104,32 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
           conversation_state = "unavailable";
         }
       }
+      const resMeta = RESOURCES[String(c.resource_id)];
+      const cov = adapters.coverageForResource && resMeta
+        ? await adapters.coverageForResource(resMeta.scoper_user_id, String((c as { week_start?: string }).week_start || "2026-09-14"))
+        : { leave_intervals: null, travel_minutes: null, calendar_retrieved_at: null, leave_retrieved_at: null, travel_retrieved_at: null, leave_state: "unread" as const, travel_state: "unavailable" as const, leave_roster_complete: false };
       const result = await assessFn({
         case: c,
         source: "runner",
         org_id: a.org_id,
         cached_hash: existing?.source_hash,
         cached_payload: existing?.payload as Record<string, unknown> | undefined,
-        input: { messages, week_start: String((c as { week_start?: string }).week_start || "2026-09-14"), conversation_state },
+        input: {
+          messages,
+          week_start: String((c as { week_start?: string }).week_start || "2026-09-14"),
+          resource: resMeta,
+          conversation_state,
+          coverage: {
+            leave_state: cov.leave_state,
+            travel_state: cov.travel_state,
+            leave_roster_complete: cov.leave_roster_complete === true,
+          },
+          leave_retrieved_at: cov.leave_retrieved_at,
+          travel_retrieved_at: cov.travel_retrieved_at,
+          leave_intervals: cov.leave_intervals,
+          travel_minutes: cov.travel_minutes,
+          calendar_retrieved_at: cov.calendar_retrieved_at,
+        },
       });
       await persistAssessment(db, {
         case_id: String(c.id), version: String(result.version || SALES_BOOKING_VERSION), payload: result,

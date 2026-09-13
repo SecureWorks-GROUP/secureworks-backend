@@ -8,6 +8,7 @@ import {
   persistAssessment,
   persistDraft,
   runnerTick,
+  reconcileLeadState,
   staffLeaveFromCrewAvailability,
   submitInterpretation,
   captureConversation,
@@ -120,6 +121,114 @@ Deno.test("refresh does not persist a partial cursor over a terminal consume key
   assertEquals((cur.payload as { complete?: boolean; total?: number; pages?: number }).complete, true);
   assertEquals((cur.payload as { total?: number }).total, 495);
   assertEquals((cur.payload as { pages?: number }).pages, 26);
+});
+
+Deno.test("lead queue state follows captured evidence, not age, and booked stays unscoped", () => {
+  const uncontacted = reconcileLeadState({
+    status: "needs_decision",
+    capture_completeness: "complete",
+    messages: [{ direction: "inbound", timestamp: "2026-01-01T00:00:00Z", body: "Need a patio" }],
+  });
+  assertEquals(uncontacted.queue_state, "uncontacted");
+  const waiting = reconcileLeadState({
+    status: "needs_decision",
+    capture_completeness: "complete",
+    messages: [
+      { direction: "inbound", timestamp: "2026-01-01T00:00:00Z", body: "Need a patio" },
+      { direction: "outbound", timestamp: "2026-05-01T00:00:00Z", body: "Can I visit Thursday?" },
+    ],
+  });
+  assertEquals(waiting.queue_state, "waiting_reply");
+  const follow = reconcileLeadState({
+    status: "needs_decision",
+    capture_completeness: "complete",
+    messages: [
+      { direction: "outbound", timestamp: "2026-01-01T00:00:00Z", body: "Thursday 1pm?" },
+      { direction: "inbound", timestamp: "2026-01-02T00:00:00Z", body: "Can we do Friday?" },
+    ],
+  });
+  assertEquals(follow.queue_state, "follow_up");
+  const booked = reconcileLeadState({ status: "booked", event_id: "evt-1", capture_completeness: "complete", messages: [] });
+  assertEquals(booked.queue_state, "booked_until_scoped");
+  assertEquals(booked.scoped, false);
+  const aged = reconcileLeadState({
+    status: "needs_decision",
+    capture_completeness: "complete",
+    messages: [{ direction: "outbound", timestamp: "2025-01-01T00:00:00Z", body: "Old chase" }],
+  });
+  assertEquals(aged.queue_state, "waiting_reply");
+  assertEquals(aged.scoped, false);
+  const missing = reconcileLeadState({ status: "needs_decision" });
+  assertEquals(missing.stale_evidence, true);
+});
+
+Deno.test("read overlays waiting_reply from capture and keeps booked on the unscoped list", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "lead-wait", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "lead-wait", contact_id: "c-wait", source_version: "s1", status: "needs_decision", suburb: "Pearsall" });
+  await db.upsert("sales_booking_cases", { id: "lead-booked", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "lead-booked", contact_id: "c-book", source_version: "s1", status: "booked", event_id: "evt-book" });
+  await db.upsert("sales_booking_conversation_captures", {
+    capture_id: "cap-wait", org_id: ACTOR.org_id, case_id: "lead-wait", contact_id: "c-wait", source_version: "s1",
+    completeness: "complete", has_more: false, captured_at: "2026-09-13T07:00:00Z",
+    content_hash: "abc", messages: [
+      { id: "in-1", direction: "inbound", timestamp: "2026-01-14T00:00:00Z", body: "Need a patio" },
+      { id: "out-1", direction: "outbound", timestamp: "2026-05-01T00:00:00Z", body: "Still keen for a quote?" },
+    ],
+  });
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true, total: 0 }),
+  }), db, "GET", ACTOR) as { cases: { id: string; queue_state?: string; status: string }[]; coverage: { population?: { waiting_reply?: number; booked_until_scoped?: number } } };
+  const wait = out.cases.find((c) => c.id === "lead-wait");
+  const booked = out.cases.find((c) => c.id === "lead-booked");
+  assertEquals(wait?.queue_state, "waiting_reply");
+  assertEquals(wait?.status, "waiting");
+  assertEquals(booked?.queue_state, "booked_until_scoped");
+  assertEquals(booked?.status, "booked");
+  assertEquals(out.coverage.population?.waiting_reply, 1);
+  assertEquals(out.coverage.population?.booked_until_scoped, 1);
+});
+
+Deno.test("same-suburb duplicate contact suppresses a second proposal on read", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "dup-a", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "dup-a", contact_id: "same", suburb: "Carlisle", source_version: "s1", status: "needs_decision" });
+  await db.upsert("sales_booking_cases", { id: "dup-b", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "dup-b", contact_id: "same", suburb: "Carlisle", source_version: "s1", status: "needs_decision" });
+  await db.upsert("sales_booking_assessments", { case_id: "dup-a", org_id: ACTOR.org_id, version: "t", payload: { proposal: { start_iso: "2026-09-17T13:00:00+08:00" } } });
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true }),
+  }), db, "GET", ACTOR) as { cases: { id: string; suppress_new_proposal?: boolean; duplicate_scope_review?: boolean }[] };
+  const b = out.cases.find((c) => c.id === "dup-b");
+  assertEquals(b?.duplicate_scope_review, true);
+  assertEquals(b?.suppress_new_proposal, true);
+});
+
+Deno.test("runner with incomplete leave does not produce Ready", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "run-1", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", status: "needs_decision", contact_id: "c-run" });
+  const adapters = fakeAdapters({
+    assessCase: undefined,
+    getConversation: async () => ({
+      messages: [
+        { id: "in-1", direction: "inbound", timestamp: "2026-09-12T13:00:00Z", body: "Afternoons work for me" },
+      ],
+      coverage: { complete: true, has_more: false },
+      retrieved_at: "2026-09-12T13:00:00Z",
+    }),
+    coverageForResource: async () => ({
+      leave_intervals: [], travel_minutes: null,
+      calendar_retrieved_at: "2026-09-12T13:00:00Z",
+      leave_retrieved_at: "2026-09-12T13:00:00Z",
+      travel_retrieved_at: null,
+      leave_state: "incomplete",
+      travel_state: "unavailable",
+      leave_roster_complete: false,
+    }),
+  });
+  delete (adapters as { assessCase?: unknown }).assessCase;
+  const tick = await runnerTick(db, adapters, { runner_enabled: true }, ACTOR);
+  assertEquals(tick.assessed, 1);
+  const ass = (await db.selectMatch("sales_booking_assessments", { case_id: "run-1", org_id: ACTOR.org_id })).data[0];
+  const payload = ass.payload as { status?: string; proposal?: { kind?: string; actionable?: boolean } };
+  assertEquals(payload.status === "ready", false);
+  assertEquals(payload.proposal?.actionable === true, false);
 });
 
 Deno.test("read population keeps booked opportunities on the unscoped queue", async () => {
