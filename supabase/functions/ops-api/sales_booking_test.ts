@@ -5,8 +5,10 @@ import {
   createMemoryBookingDb,
   dispatch,
   onEvent,
+  persistAssessment,
   persistDraft,
   runnerTick,
+  staffLeaveFromCrewAvailability,
   type Adapters,
   type BookingActor,
 } from "./sales_booking.ts";
@@ -78,6 +80,22 @@ Deno.test("draft save then reload returns the acknowledged revision and text", a
   assertEquals(next.text, "Keep my wording");
 });
 
+Deno.test("refresh does not persist a partial cursor over a terminal consume key", async () => {
+  const db = createMemoryBookingDb();
+  await db.rpc("sales_booking_put_consumption_cursor", {
+    p_org_id: ACTOR.org_id,
+    p_key: "consume:nithin:2026-09-14",
+    p_payload: { next: null, complete: true, pages: 26, total: 495 },
+  });
+  await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, { refresh: true }, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: false }),
+  }), db, "GET", ACTOR);
+  const cur = (await db.selectMatch("sales_booking_cursors", { key: "consume:nithin:2026-09-14", org_id: ACTOR.org_id })).data[0];
+  assertEquals((cur.payload as { complete?: boolean; total?: number; pages?: number }).complete, true);
+  assertEquals((cur.payload as { total?: number }).total, 495);
+  assertEquals((cur.payload as { pages?: number }).pages, 26);
+});
+
 Deno.test("unavailable adapter is not a completed workload and remains refreshable", async () => {
   let calls = 0;
   const adapters = fakeAdapters({
@@ -120,6 +138,70 @@ Deno.test("held approval retry is idempotent on the same claim", async () => {
   const b = await approveAction(db, fakeAdapters(), { case_id: "opp-a", kind: "approve_offer", start_iso: "2026-09-17T13:00:00+08:00", end_iso: "2026-09-17T14:00:00+08:00" }, ACTOR);
   assertEquals(a.reason, "send_hold");
   assertEquals(b.reason, "send_hold");
+  assertEquals(a.action_id, b.action_id);
+  assertEquals(b.idempotent, true);
+});
+
+Deno.test("crew availability join is staff-id scoped and not a complete roster", () => {
+  const nithin = "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73";
+  const trade = "c9a84f70-6d43-43f2-8a5b-3ec6ba9ade8b";
+  const none = staffLeaveFromCrewAvailability([
+    { user_id: trade, date: "2026-09-17", status: "leave" },
+    { user_id: "f9a9e835-98a9-4dc4-a927-5edbb1a81a63", date: "2026-09-16", status: "unavailable" },
+  ], nithin, "2026-09-13T02:19:54Z");
+  assertEquals(none.matched_rows, 0);
+  assertEquals(none.leave_roster_complete, false);
+  assertEquals(none.leave_retrieved_at, "2026-09-13T02:19:54Z");
+  const hit = staffLeaveFromCrewAvailability([
+    { user_id: nithin, date: "2026-09-17", status: "leave" },
+    { user_id: trade, date: "2026-09-17", status: "leave" },
+  ], nithin, "2026-09-13T02:19:54Z");
+  assertEquals(hit.matched_rows, 1);
+  assertEquals(hit.leave_intervals[0].start_iso, "2026-09-17T00:00:00+08:00");
+  assertEquals(hit.leave_intervals[0].end_iso, "2026-09-18T00:00:00+08:00");
+});
+
+Deno.test("a second worker cannot share a live assessment lease", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", status: "needs_decision" });
+  let release!: (v: Record<string, unknown>) => void;
+  const gate = new Promise<Record<string, unknown>>((r) => { release = r; });
+  let started = 0;
+  const adapters = fakeAdapters({
+    assessCase: async () => {
+      started += 1;
+      return await gate;
+    },
+  });
+  const first = onEvent(db, adapters, { event_key: "e-live-1", type: "inbound", case_id: "opp-a" }, ACTOR);
+  while (started < 1) await new Promise((r) => setTimeout(r, 5));
+  const second = await onEvent(db, adapters, { event_key: "e-live-2", type: "inbound", case_id: "opp-a" }, ACTOR);
+  release({ version: "ok", status: "needs_decision" });
+  const firstOut = await first;
+  assertEquals(firstOut.assessed, true);
+  assertEquals(second.reason, "lease_held");
+  assertEquals(started, 1);
+});
+
+Deno.test("runner selects due work before the twenty-case bound", async () => {
+  const db = createMemoryBookingDb();
+  for (let i = 1; i <= 21; i++) {
+    const id = `due-${i}`;
+    await db.upsert("sales_booking_cases", { id, org_id: ACTOR.org_id, resource_id: "nithin", status: "needs_decision", source_version: "s1", last_runner_at: `2026-09-12T00:00:${String(i).padStart(2, "0")}Z` });
+    if (i <= 20) {
+      await db.upsert("sales_booking_assessments", { case_id: id, org_id: ACTOR.org_id, version: "test-assess", source_hash: "x", payload: { source_version: "s1" } });
+    }
+  }
+  const ran = new Set<string>();
+  const adapters = fakeAdapters({
+    assessCase: async (input) => {
+      ran.add(String((input.case as { id?: string })?.id));
+      return { version: "test-assess", status: "needs_decision" };
+    },
+  });
+  const out = await runnerTick(db, adapters, { runner_enabled: true }, ACTOR);
+  assertEquals(out.assessed, 1);
+  assertEquals([...ran][0], "due-21");
 });
 
 Deno.test("archive endpoint exists and is tenant scoped", async () => {
@@ -176,6 +258,59 @@ Deno.test("unaccepted case cannot confirm by asserting exact_acceptance", async 
   await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin" });
   const r = await approveAction(db, fakeAdapters(), { case_id: "opp-a", kind: "confirm_booking", exact_acceptance: true, fake: true, execute: true }, ACTOR);
   assertEquals(r.reason, "no_exact_acceptance");
+});
+
+Deno.test("failed conversation cannot leave an old Ready proposal actionable", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", status: "ready" });
+  await persistAssessment(db, {
+    case_id: "opp-a", version: "sales-booking-assess-v2.4",
+    payload: { classification: "ready", status: "ready", source_hash: "ready-hash", proposal: { start_iso: "2026-09-17T13:00:00+08:00" } },
+    observed_source_version: "s1",
+  }, ACTOR);
+  const failed = await persistAssessment(db, {
+    case_id: "opp-a", version: "sales-booking-assess-v2.4",
+    payload: { classification: "unassessed_conversation", source_hash: "empty" },
+    observed_source_version: "s1",
+  }, ACTOR) as { payload: { classification?: string; actionable?: boolean; stale?: boolean; status?: string; proposal?: unknown } };
+  assertEquals(failed.payload.classification, "unassessed_conversation");
+  assertEquals(failed.payload.actionable, false);
+  assertEquals(failed.payload.stale, true);
+  assertEquals(failed.payload.proposal, null);
+  const c = (await db.selectMatch("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id })).data[0];
+  assertEquals(c.status, "needs_decision");
+  const held = await approveAction(db, fakeAdapters(), { case_id: "opp-a", kind: "approve_offer" }, ACTOR);
+  assertEquals(held.reason, "assessment_stale");
+});
+
+Deno.test("changed source plus failed conversation cannot keep the s1 Ready", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1", status: "ready" });
+  await persistAssessment(db, {
+    case_id: "opp-a", version: "sales-booking-assess-v2.4",
+    payload: { classification: "ready", status: "ready", source_hash: "ready-hash" },
+    observed_source_version: "s1",
+  }, ACTOR);
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s2", status: "ready" });
+  await assertRejects(() => persistAssessment(db, {
+    case_id: "opp-a", version: "sales-booking-assess-v2.4",
+    payload: { classification: "unassessed_conversation" },
+    observed_source_version: "s1",
+  }, ACTOR));
+  const current = await persistAssessment(db, {
+    case_id: "opp-a", version: "sales-booking-assess-v2.4",
+    payload: { classification: "unassessed_conversation", source_hash: "s2-empty" },
+    observed_source_version: "s2",
+  }, ACTOR) as { payload: { source_version?: string; actionable?: boolean; classification?: string } };
+  assertEquals(current.payload.source_version, "s2");
+  assertEquals(current.payload.actionable, false);
+  assertEquals(current.payload.classification, "unassessed_conversation");
+  const read = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true, total: 0 }),
+  }), db, "GET", ACTOR) as { cases: { id: string; status: string; assessment_stale?: boolean }[] };
+  const row = read.cases.find((x) => x.id === "opp-a");
+  assertEquals(row?.status, "needs_decision");
+  assertEquals(row?.assessment_stale, true);
 });
 
 Deno.test("staff operator is required", async () => {

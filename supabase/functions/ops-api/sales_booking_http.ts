@@ -2,7 +2,7 @@
  * Isolated registered ops-api for Booking review.
  * Authenticated staff actor + org_id. SQL on booking_test. No live send/calendar.
  */
-import { dispatch, SalesBookingError, type Adapters, type BookingActor } from "./sales_booking.ts";
+import { dispatch, SalesBookingError, staffLeaveFromCrewAvailability, type Adapters, type BookingActor } from "./sales_booking.ts";
 import { createPsqlBookingDb } from "./sales_booking_pg.ts";
 
 const PORT = Number(Deno.env.get("BOOKING_API_PORT") || 4176);
@@ -51,13 +51,28 @@ const adapters: Adapters = {
       events: Array.isArray(raw.events) ? raw.events : [],
     };
   },
-  coverageForResource: async () => ({
-    leave_intervals: null,
-    travel_minutes: null,
-    calendar_retrieved_at: new Date().toISOString(),
-    leave_retrieved_at: null,
-    travel_retrieved_at: null,
-  }),
+  coverageForResource: async (scoperUserId, weekStart) => {
+    const start = weekStart || "2026-09-14";
+    const end = new Date(`${start}T00:00:00+08:00`);
+    end.setUTCDate(end.getUTCDate() + 7);
+    const endDate = end.toISOString().slice(0, 10);
+    try {
+      const raw = await mcpCall("sw_get_crew_availability", { start_date: start, end_date: endDate });
+      const rows = (raw.availability || raw.rows || raw.data || []) as Array<{ user_id?: string; date?: string; status?: string }>;
+      return staffLeaveFromCrewAvailability(rows, scoperUserId, new Date().toISOString());
+    } catch {
+      return {
+        leave_intervals: null,
+        travel_minutes: null,
+        calendar_retrieved_at: new Date().toISOString(),
+        leave_retrieved_at: null,
+        travel_retrieved_at: null,
+        leave_roster_complete: false,
+        source_row_count: 0,
+        matched_rows: 0,
+      };
+    }
+  },
 };
 
 function actorFrom(req: Request): BookingActor | null {

@@ -361,6 +361,7 @@ function occupancyGaps(input) {
     }
   });
   if (input.coverage) {
+    if (input.coverage.leave_roster_complete === false) gaps.push('leave_roster_incomplete');
     if (input.coverage.leave === 'not_read' || input.coverage.leave === false || input.coverage.calendar === false || input.coverage.travel === false || input.coverage.route === false) {
       gaps.push('coverage_flag_not_ready');
     }

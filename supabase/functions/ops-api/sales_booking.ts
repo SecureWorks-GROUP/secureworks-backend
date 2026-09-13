@@ -69,12 +69,15 @@ export type Adapters = {
   calendarEvents: (scoperUserId: string, since: string, until: string) => Promise<{
     ok: boolean; events: CalendarEvent[]; coverage: Record<string, unknown>; mailbox?: string; retrieved_at?: string;
   }>;
-  coverageForResource?: (scoperUserId: string) => Promise<{
-    leave_intervals: { start_iso: string; end_iso: string }[];
+  coverageForResource?: (scoperUserId: string, weekStart?: string) => Promise<{
+    leave_intervals: { start_iso: string; end_iso: string; status?: string }[] | null;
     travel_minutes: number | null;
     calendar_retrieved_at: string | null;
     leave_retrieved_at: string | null;
     travel_retrieved_at: string | null;
+    leave_roster_complete?: boolean;
+    source_row_count?: number;
+    matched_rows?: number;
   }>;
   getConversation?: (contactId: string) => Promise<{ messages: Record<string, unknown>[] }>;
   assessCase?: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -119,6 +122,44 @@ export function scoperOccupancy(raw: Record<string, unknown>[] | CalendarEvent[]
   return { events, dropped_job_rows: dropped };
 }
 
+function nextIsoDate(date: string) {
+  const [y, m, d] = String(date).slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+}
+
+/** Join crew_availability.user_id to the scoper staff id. Missing rows are not a complete roster. */
+export function staffLeaveFromCrewAvailability(
+  rows: Array<{ user_id?: string; date?: string; status?: string }>,
+  scoperUserId: string,
+  retrievedAt: string,
+) {
+  const source_row_count = Array.isArray(rows) ? rows.length : 0;
+  const leave_intervals = (rows || [])
+    .filter((r) => r && r.user_id === scoperUserId && (r.status === "leave" || r.status === "unavailable") && r.date)
+    .map((r) => ({
+      start_iso: `${String(r.date).slice(0, 10)}T00:00:00+08:00`,
+      end_iso: `${nextIsoDate(String(r.date).slice(0, 10))}T00:00:00+08:00`,
+      status: String(r.status),
+      source: "crew_availability",
+    }));
+  return {
+    leave_intervals,
+    leave_retrieved_at: retrievedAt,
+    travel_minutes: null,
+    travel_retrieved_at: null,
+    calendar_retrieved_at: retrievedAt,
+    leave_roster_complete: false,
+    source_row_count,
+    matched_rows: leave_intervals.length,
+    gaps: [
+      leave_intervals.length
+        ? `Staff availability leave/unavailable days for this scoper were applied from crew_availability (${leave_intervals.length} day(s)).`
+        : `Staff availability was read (${source_row_count} row(s)). None matched this scoper user id. This reader does not declare roster completeness, so missing rows are not proof of no leave.`,
+      "Travel minutes were not read from crew_availability.",
+    ],
+  };
+}
+
 function rangesOverlap(a0: string, a1: string, b0: string, b1: string) {
   const A0 = Date.parse(a0), A1 = Date.parse(a1), B0 = Date.parse(b0), B1 = Date.parse(b1);
   if ([A0, A1, B0, B1].some((n) => Number.isNaN(n))) return true;
@@ -161,25 +202,26 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
         return { data: { ok: true, claim_id: args.p_claim_id }, error: null };
       }
       if (fn === "sales_booking_acquire_lease") {
+        const now = Date.now();
+        for (const l of rows("sales_booking_leases")) {
+          if (!l.released && new Date(String(l.expires_at)).getTime() <= now) l.released = true;
+        }
         const live = rows("sales_booking_leases").find((l) =>
           l.org_id === args.p_org_id && l.case_id === args.p_case_id && l.action_kind === args.p_action_kind && !l.released &&
-          new Date(String(l.expires_at)).getTime() > Date.now());
-        if (live && live.token !== args.p_token) return { data: { ok: false, code: "lease_held", token: live.token }, error: null };
-        const existing = rows("sales_booking_leases").find((l) => l.lease_id === args.p_lease_id);
-        const gen = `g-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        if (existing) {
-          existing.expires_at = new Date(Date.now() + Number(args.p_ttl_seconds || 60) * 1000).toISOString();
-          existing.released = false;
-          existing.token = args.p_token;
-          existing.generation = gen;
-        } else {
-          rows("sales_booking_leases").push({
-            lease_id: args.p_lease_id, org_id: args.p_org_id, case_id: args.p_case_id, action_kind: args.p_action_kind,
-            token: args.p_token, owner: args.p_owner, released: false, generation: gen,
-            expires_at: new Date(Date.now() + Number(args.p_ttl_seconds || 60) * 1000).toISOString(),
-          });
-        }
+          new Date(String(l.expires_at)).getTime() > now);
+        if (live) return { data: { ok: false, code: "lease_held", token: live.token, lease_id: live.lease_id }, error: null };
+        const gen = `g-${now}-${Math.random().toString(16).slice(2)}`;
+        rows("sales_booking_leases").push({
+          lease_id: args.p_lease_id, org_id: args.p_org_id, case_id: args.p_case_id, action_kind: args.p_action_kind,
+          token: args.p_token, owner: args.p_owner, released: false, generation: gen,
+          expires_at: new Date(now + Number(args.p_ttl_seconds || 60) * 1000).toISOString(),
+        });
         return { data: { ok: true, token: args.p_token, lease_id: args.p_lease_id, generation: gen }, error: null };
+      }
+      if (fn === "sales_booking_release_lease") {
+        const hit = rows("sales_booking_leases").find((l) => l.org_id === args.p_org_id && l.lease_id === args.p_lease_id);
+        if (hit) hit.released = true;
+        return { data: { ok: true, lease_id: args.p_lease_id }, error: null };
       }
       if (fn === "sales_booking_cas_draft") {
         const row = rows("sales_booking_drafts").find((d) => d.case_id === args.p_case_id && d.org_id === args.p_org_id);
@@ -304,12 +346,16 @@ export async function readWorkspace(
   const pipeline = PIPELINES[params.resource];
   const consumeKey = `consume:${params.resource}:${params.week_start}`;
   const curRows = await db.selectMatch("sales_booking_cursors", { key: consumeKey, org_id: a.org_id });
-  let cursor = (curRows.data[0]?.payload as { next?: Record<string, unknown> | null; complete?: boolean; total?: number; pages?: number }) || { next: null, complete: false, pages: 0 };
-  if (cursor.complete && params.refresh) cursor = { ...cursor, complete: false };
+  let cursor = (curRows.data[0]?.payload as { next?: Record<string, unknown> | null; complete?: boolean; total?: number; pages?: number; retrieved_at?: string }) || { next: null, complete: false, pages: 0 };
+  const terminalCursor = cursor.complete === true ? { ...cursor } : null;
+  if (params.drain && params.refresh && cursor.complete) {
+    cursor = { next: null, complete: false, pages: 0, total: cursor.total };
+  }
   const maxPages = params.drain ? 50 : (params.max_pages ?? 8);
   let pages = 0;
   let providerCalls = 0;
-  while (!cursor.complete && pages < maxPages) {
+  const consume = cursor.complete !== true || params.drain === true;
+  while (consume && !cursor.complete && pages < maxPages) {
     const page = await adapters.listOpportunities(pipeline, cursor.next || null);
     providerCalls += 1;
     for (const item of page.items) {
@@ -325,12 +371,18 @@ export async function readWorkspace(
         updated_at: nowIso(),
       }));
     }
-    cursor = {
+    const nextCursor = {
       next: page.next || null,
       complete: page.complete === true,
-      total: page.total,
+      total: page.total ?? cursor.total,
       pages: (cursor.pages || 0) + 1,
+      retrieved_at: nowIso(),
     };
+    if (terminalCursor && nextCursor.complete !== true) {
+      cursor = terminalCursor;
+      break;
+    }
+    cursor = nextCursor;
     const put = await db.rpc("sales_booking_put_consumption_cursor", { p_org_id: a.org_id, p_key: consumeKey, p_payload: cursor });
     if (put.data && put.data.ok === false) throw new SalesBookingError("consumption cursor refused", 400, String(put.data.code));
     pages += 1;
@@ -344,8 +396,8 @@ export async function readWorkspace(
   const occupancy = scoperOccupancy(((cal.events || []) as unknown) as Record<string, unknown>[]);
   cal.events = occupancy.events;
   const cov = adapters.coverageForResource
-    ? await adapters.coverageForResource(resource.scoper_user_id)
-    : { leave_intervals: null, travel_minutes: null, calendar_retrieved_at: cal.retrieved_at || null, leave_retrieved_at: null, travel_retrieved_at: null };
+    ? await adapters.coverageForResource(resource.scoper_user_id, params.week_start)
+    : { leave_intervals: null, travel_minutes: null, calendar_retrieved_at: cal.retrieved_at || null, leave_retrieved_at: null, travel_retrieved_at: null, leave_roster_complete: false };
   for (const ev of cal.events || []) {
     const existing = (await db.selectMatch("sales_booking_cases", { id: ev.event_id, org_id: a.org_id })).data[0];
     if (existing?.resource_id && existing.resource_id !== params.resource) continue;
@@ -359,12 +411,27 @@ export async function readWorkspace(
   const drafts = await db.selectMatch("sales_booking_drafts", { org_id: a.org_id });
   const assessments = await db.selectMatch("sales_booking_assessments", { org_id: a.org_id });
   const archives = await db.selectMatch("sales_booking_archives", { org_id: a.org_id });
-  const cases = listed.data.map((c) => ({
-    ...c,
-    draft: drafts.data.find((d) => d.case_id === c.id) || null,
-    assessment: assessments.data.find((d) => d.case_id === c.id) || null,
-    archived: archives.data.find((d) => d.case_id === c.id && !d.restored) || null,
-  }));
+  const cases = listed.data.map((c) => {
+    const assessment = assessments.data.find((d) => d.case_id === c.id) || null;
+    const payload = (assessment?.payload || {}) as { source_version?: string; stale?: boolean; actionable?: boolean; classification?: string; status?: string };
+    const assessmentStale = !!(
+      assessment && (
+        payload.stale === true ||
+        payload.actionable === false ||
+        payload.classification === "unassessed_conversation" ||
+        (payload.source_version && payload.source_version !== c.source_version)
+      )
+    );
+    return {
+      ...c,
+      status: assessmentStale && (c.status === "ready" || c.status === "proposal") ? "needs_decision" : c.status,
+      assessment_stale: assessmentStale,
+      proposal_stale: assessmentStale || c.proposal_stale,
+      draft: drafts.data.find((d) => d.case_id === c.id) || null,
+      assessment,
+      archived: archives.data.find((d) => d.case_id === c.id && !d.restored) || null,
+    };
+  });
   const enumerated = cases.filter((c) => (c as { opportunity_id?: string }).opportunity_id).length;
   return {
     ok: true, fixture: false, send_hold: true, version: SALES_BOOKING_VERSION, policy: POLICY,
@@ -375,16 +442,23 @@ export async function readWorkspace(
       enumerated,
       total: cursor.total ?? null,
       provider_calls: providerCalls,
-      calendar_retrieved_at: cov.calendar_retrieved_at,
+      calendar_retrieved_at: cov.calendar_retrieved_at || cal.retrieved_at || null,
       leave_retrieved_at: cov.leave_retrieved_at,
       leave_intervals: cov.leave_intervals,
+      leave_roster_complete: cov.leave_roster_complete === true,
       travel_retrieved_at: cov.travel_retrieved_at,
       travel_minutes: cov.travel_minutes,
       boolean_flags_are_not_capacity: true,
       gaps: [
         cursor.complete === true ? "Provider reported terminal consumption for this resource/week." : "Provider page is not terminal. Empty or missing-next is not a completed workload.",
         occupancy.dropped_job_rows ? (occupancy.dropped_job_rows + " job-assignment rows were not used as Outlook occupancy.") : "Occupancy is scoper Outlook event_id rows.",
-        Array.isArray(cov.leave_intervals) && cov.leave_retrieved_at ? "Leave intervals observed." : "Leave intervals unobserved.",
+        Array.isArray(cov.leave_intervals) && cov.leave_retrieved_at
+          ? (cov.leave_roster_complete === true
+            ? "Leave intervals observed against a complete staff roster."
+            : (cov.matched_rows
+              ? "Staff availability leave days for this scoper were applied. Roster completeness is not declared."
+              : "Staff availability was read; no row matched this scoper. Missing rows are not proof of no leave."))
+          : "Leave intervals unobserved.",
         cov.travel_minutes != null && cov.travel_retrieved_at ? "Travel minutes observed." : "Travel unobserved.",
       ],
     },
@@ -428,12 +502,47 @@ export async function persistAssessment(db: BookingDb, body: { case_id: string; 
     const live = leases.data.find((l) => !l.released);
     if (live && live.generation !== body.lease_generation) throw new SalesBookingError("stale lease generation", 409, "stale_lease");
   }
+  const prior = (await db.selectMatch("sales_booking_assessments", { case_id: body.case_id, org_id: a.org_id })).data[0];
+  const priorPayload = (prior?.payload || {}) as { status?: string; classification?: string; source_hash?: string };
+  const incomingHash = (body.payload.source_hash as string | undefined) || null;
+  const incomplete = body.payload.classification === "unassessed_conversation" ||
+    body.payload.stale === true ||
+    body.payload.ok === false;
+  let payload: Record<string, unknown>;
+  if (incomplete) {
+    payload = {
+      ...body.payload,
+      source_version: c.source_version,
+      source_hash: incomingHash,
+      lease_generation: body.lease_generation || null,
+      classification: body.payload.classification || "unassessed_conversation",
+      status: "needs_decision",
+      proposal: null,
+      stale: true,
+      held: true,
+      actionable: false,
+      invalidated: true,
+      prior_invalidated: priorPayload.status === "ready" || priorPayload.classification === "ready" || priorPayload.classification === "assessed",
+      reason: body.payload.reason || "Current conversation or source read is incomplete. A previous Ready proposal is not current.",
+    };
+    if (c.status === "ready" || c.status === "proposal") {
+      requireUpsert(await db.upsert("sales_booking_cases", { ...c, status: "needs_decision", updated_at: nowIso() }));
+    }
+  } else {
+    payload = {
+      ...body.payload,
+      source_version: c.source_version,
+      lease_generation: body.lease_generation || null,
+      stale: false,
+      actionable: body.payload.actionable !== false,
+    };
+  }
   const rec = {
     case_id: body.case_id,
     org_id: a.org_id,
     version: body.version,
-    source_hash: body.payload.source_hash || null,
-    payload: { ...body.payload, source_version: c.source_version, lease_generation: body.lease_generation || null },
+    source_hash: incomingHash,
+    payload,
     at: nowIso(),
   };
   requireUpsert(await db.upsert("sales_booking_assessments", rec));
@@ -472,14 +581,18 @@ export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_k
   if (!body.case_id) {
     return { ok: true, duplicate: false, assessed: false, reason: "no_case" };
   }
-  const token = `assess:${a.org_id}:${body.case_id}`;
+  const invocation = crypto.randomUUID();
+  const leaseId = `assess:${a.org_id}:${body.case_id}:${invocation}`;
   const lease = await db.rpc("sales_booking_acquire_lease", {
-    p_org_id: a.org_id, p_lease_id: token, p_case_id: body.case_id, p_action_kind: "assess",
-    p_token: token, p_owner: a.user_id, p_ttl_seconds: 120,
+    p_org_id: a.org_id, p_lease_id: leaseId, p_case_id: body.case_id, p_action_kind: "assess",
+    p_token: invocation, p_owner: a.user_id, p_ttl_seconds: 120,
   });
   if (lease.data?.ok === false) return { ok: true, duplicate: false, assessed: false, reason: "lease_held" };
   const c = (await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id })).data[0];
-  if (!c) return { ok: true, duplicate: false, assessed: false, reason: "unknown_case" };
+  if (!c) {
+    await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: leaseId, p_token: invocation });
+    return { ok: true, duplicate: false, assessed: false, reason: "unknown_case" };
+  }
   if (c.archived) { /* archives joined separately */ }
   const arch = (await db.selectMatch("sales_booking_archives", { case_id: body.case_id, org_id: a.org_id })).data[0];
   if (arch && !arch.restored) {
@@ -487,6 +600,11 @@ export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_k
   }
   try {
     const payload = await assessFn({ case: c, event: body, org_id: a.org_id });
+    const eventHasMessages = Array.isArray((body as { input?: { messages?: unknown[] } }).input?.messages);
+    if (payload.classification === "unassessed_conversation" && !eventHasMessages) {
+      await db.rpc("sales_booking_mark_event_processed", { p_org_id: a.org_id, p_event_key: body.event_key });
+      return { ok: true, duplicate: false, assessed: false, reason: "unassessed_conversation" };
+    }
     await persistAssessment(db, {
       case_id: body.case_id, version: String(payload.version || SALES_BOOKING_VERSION), payload,
       lease_generation: String(lease.data?.generation || ""), observed_source_version: String(c.source_version || ""),
@@ -495,6 +613,8 @@ export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_k
     return { ok: true, duplicate: false, assessed: true, type: body.type };
   } catch (err) {
     return { ok: false, duplicate: false, assessed: false, reason: "assess_failed", error: (err as Error).message };
+  } finally {
+    await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: leaseId, p_token: invocation });
   }
 }
 
@@ -521,27 +641,36 @@ export async function runnerTick(db: BookingDb, adapters: Adapters, opts: { runn
   }));
   if (!enabled) return { ok: true, ran: false, reason: "runner_held", policy: POLICY, sent: 0, journaled: true };
   const assessFn = adapters.assessCase || ((input: Record<string, unknown>) => runAssessment(input));
-  const due = await db.selectMatch("sales_booking_cases", { org_id: a.org_id, status: "needs_decision" });
-  const ordered = due.data.sort((x, y) => String(x.last_runner_at || "").localeCompare(String(y.last_runner_at || "")));
-  let assessed = 0;
-  for (const c of ordered.slice(0, 20)) {
+  const dueRows = await db.selectMatch("sales_booking_cases", { org_id: a.org_id, status: "needs_decision" });
+  const due: Record<string, unknown>[] = [];
+  for (const c of dueRows.data.sort((x, y) => String(x.last_runner_at || "").localeCompare(String(y.last_runner_at || "")))) {
     const existing = (await db.selectMatch("sales_booking_assessments", { case_id: c.id, org_id: a.org_id })).data[0];
     const payload = existing?.payload as { invalidated?: boolean; source_version?: string } | undefined;
     if (existing && !payload?.invalidated && payload?.source_version === c.source_version) continue;
-    const token = `assess:${a.org_id}:${c.id}`;
+    due.push(c);
+  }
+  let assessed = 0;
+  for (const c of due.slice(0, 20)) {
+    const existing = (await db.selectMatch("sales_booking_assessments", { case_id: c.id, org_id: a.org_id })).data[0];
+    const invocation = crypto.randomUUID();
+    const leaseId = `assess:${a.org_id}:${c.id}:${invocation}`;
     const lease = await db.rpc("sales_booking_acquire_lease", {
-      p_org_id: a.org_id, p_lease_id: token, p_case_id: c.id, p_action_kind: "assess",
-      p_token: token, p_owner: a.user_id, p_ttl_seconds: 60,
+      p_org_id: a.org_id, p_lease_id: leaseId, p_case_id: String(c.id), p_action_kind: "assess",
+      p_token: invocation, p_owner: a.user_id, p_ttl_seconds: 60,
     });
     if (lease.data?.ok === false) continue;
     const observed = String(c.source_version || "");
-    const result = await assessFn({ case: c, source: "runner", org_id: a.org_id, cached_hash: existing?.source_hash, cached_payload: existing?.payload as Record<string, unknown> | undefined });
-    await persistAssessment(db, {
-      case_id: String(c.id), version: String(result.version || SALES_BOOKING_VERSION), payload: result,
-      lease_generation: String(lease.data?.generation || ""), observed_source_version: observed,
-    }, a);
-    requireUpsert(await db.upsert("sales_booking_cases", { ...c, last_runner_at: nowIso() }));
-    assessed += 1;
+    try {
+      const result = await assessFn({ case: c, source: "runner", org_id: a.org_id, cached_hash: existing?.source_hash, cached_payload: existing?.payload as Record<string, unknown> | undefined });
+      await persistAssessment(db, {
+        case_id: String(c.id), version: String(result.version || SALES_BOOKING_VERSION), payload: result,
+        lease_generation: String(lease.data?.generation || ""), observed_source_version: observed,
+      }, a);
+      requireUpsert(await db.upsert("sales_booking_cases", { ...c, last_runner_at: nowIso() }));
+      assessed += 1;
+    } finally {
+      await db.rpc("sales_booking_release_lease", { p_org_id: a.org_id, p_lease_id: leaseId, p_token: invocation });
+    }
   }
   return { ok: true, ran: true, assessed, sent: 0, send: "held", calendar_write: "held" };
 }
@@ -558,6 +687,16 @@ export async function approveAction(
   if (!c) throw new SalesBookingError("unknown case", 404, "unknown_case");
   const resource = RESOURCES[String(c.resource_id)];
   if (resource && resource.sender_resolved === false) return { ok: false, held: true, sent: false, reason: "sender_unresolved" };
+  const assessment = (await db.selectMatch("sales_booking_assessments", { case_id: body.case_id, org_id: a.org_id })).data[0];
+  const assessPayload = (assessment?.payload || {}) as { stale?: boolean; actionable?: boolean; classification?: string; source_version?: string; status?: string };
+  if (
+    assessPayload.stale === true ||
+    assessPayload.actionable === false ||
+    assessPayload.classification === "unassessed_conversation" ||
+    (assessPayload.source_version && assessPayload.source_version !== c.source_version)
+  ) {
+    return { ok: false, held: true, sent: false, booked: false, reason: "assessment_stale" };
+  }
   if (body.kind === "confirm_booking") {
     if (!c.exact_acceptance || !c.accepted_start_iso || !c.accepted_end_iso) {
       return { ok: false, held: true, sent: false, booked: false, reason: "no_exact_acceptance" };
@@ -572,10 +711,28 @@ export async function approveAction(
     });
     if (claim.ok === false) return { ok: false, held: true, sent: false, reason: "slot_overlap" };
   }
-  const actionId = `act_${Date.now()}`;
+  const idempotencyKey = `hold:${a.org_id}:${body.case_id}:${body.kind}:${c.source_version || ""}:${body.start_iso || ""}:${body.end_iso || ""}`;
+  const priorActions = await db.selectMatch("sales_booking_actions", { org_id: a.org_id, case_id: body.case_id });
+  const prior = priorActions.data.find((row) => row.idempotency_key === idempotencyKey);
+  if (prior) {
+    return {
+      ok: false,
+      held: prior.status === "held",
+      sent: false,
+      booked: false,
+      waiting: false,
+      reason: prior.status === "held" ? "send_hold" : String(prior.reason || prior.status),
+      action_id: prior.action_id,
+      idempotent: true,
+    };
+  }
+  const actionId = `act_${crypto.randomUUID()}`;
   const serverHold = hold || POLICY.send === "held";
   if (serverHold && !body.fake) {
-    requireUpsert(await db.upsert("sales_booking_actions", { action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: "held", send_evidence: "held", created_at: nowIso() }));
+    requireUpsert(await db.upsert("sales_booking_actions", {
+      action_id: actionId, org_id: a.org_id, case_id: body.case_id, kind: body.kind, status: "held",
+      send_evidence: "held", idempotency_key: idempotencyKey, created_at: nowIso(),
+    }));
     return { ok: false, held: true, sent: false, booked: false, waiting: false, reason: "send_hold", action_id: actionId };
   }
   if (!body.fake) throw new SalesBookingError("Live provider writes are refused", 403, "live_write_refused");
@@ -614,7 +771,7 @@ export async function dispatch(
   }
   const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot"];
   if (writes.includes(action) && method !== "POST") throw new SalesBookingError(`${action} requires POST`, 405, "method_not_allowed");
-  if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; expected_revision?: number }, a);
+  if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; human_edited?: boolean; sender?: string | null; expected_revision?: number }, a);
   if (action === "sales_booking_assess") {
     const cases = await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id });
     if (!cases.data[0]) throw new SalesBookingError("unknown case", 404, "unknown_case");
