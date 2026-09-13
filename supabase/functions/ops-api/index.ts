@@ -348,9 +348,25 @@ import {
 } from './ses_docs_ready_sms.ts'
 import {
   listSesReportTriggerRuns,
+  readSesReportDrainState,
   runSesReportTrigger,
   SesReportTriggerError,
 } from './ses_report_trigger.ts'
+import {
+  admitSesPackBuild,
+  sesPackBuildAdmissionReceipt,
+  sesPackBuildAttemptKey,
+  sesPackTruthFromInspection,
+  SES_PACK_BUILD_ADMISSION_VERSION,
+  type SesPackBuildPackTruth,
+  type SesPackBuildSiblingRun,
+} from './ses_pack_build_admission.ts'
+import {
+  readSesPackBuildState,
+  recordDirectPrepareAttempt,
+  requestSesPackBuild,
+  SesPackBuildDoorError,
+} from './ses_pack_build_doors.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -6839,9 +6855,31 @@ if (import.meta.main) serve(async (req: Request) => {
               actor,
             },
           )
+          // One ledger for every door. This path is RECORD-only (the routine
+          // and the operator are the authority here); the trigger path is
+          // where admission enforces. Fail-open and audible: a receipt write
+          // never turns a completed build into an error response.
+          const directReceipts = request.dry_run ? [] : await Promise.all(
+            (response.results || []).map((result) =>
+              recordDirectPrepareAttempt({
+                client,
+                jobId: String((result as { job_id?: string })?.job_id || ''),
+                attendanceCycleId: (result as {
+                  envelope?: { spine?: { current_attendance_cycle_id?: string } }
+                })?.envelope?.spine?.current_attendance_cycle_id ?? null,
+                idempotencyKey: request.idempotency_key,
+                actor,
+                docketRevisionId: result.docket_revision_id ?? null,
+                outputContentHash: result.output_content_hash ?? null,
+                state: String(result.state || ''),
+                persisted: result.persisted === true,
+              })
+            ),
+          )
           return json({
             ...summarizeSesPrepareResponseForHttp(response),
             docs_ready_sms: docsReadySms,
+            pack_build_attempt_recorded: directReceipts,
           })
         } catch (error) {
           if (error instanceof SesAssemblerAdapterError) {
@@ -6872,6 +6910,14 @@ if (import.meta.main) serve(async (req: Request) => {
           const outcome = await runSesReportTrigger(body || {}, {
             client,
             actor: triggerActor,
+            // The ONE shared pack read. A throw here is caught by the handler
+            // and handed to the admission gate as "unreadable", which fails
+            // closed rather than admitting a rebuild over a bound invoice.
+            readPackTruth: async (jobId) =>
+              sesPackTruthFromInspection(
+                await inspectSesPackAction(client, jobId),
+                DEFAULT_ORG_ID,
+              ),
             prepare: async (request) => {
               const response = await prepareSesDocketRevisionAtHttpBoundary(
                 request,
@@ -6925,6 +6971,57 @@ if (import.meta.main) serve(async (req: Request) => {
           if (error instanceof InvoiceContextError) {
             return json({ error: error.message, code: error.code }, error.status)
           }
+          throw error
+        }
+      }
+      // ── SES pack-build doors (CIO, ses-workflow-completion-20260913) ──
+      // The runtime reader and the Refresh door. Neither builds, mints or
+      // sends: Refresh files or joins ONE attempt and the privileged
+      // run_ses_report_trigger handler remains the only thing that builds.
+      // Contract: docs/ses-pack-build-workflow-v1.md
+      case 'ses_pack_build_state':
+      case 'request_ses_pack_build': {
+        const packBuildIsOperator = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role))
+        if (!packBuildIsOperator) {
+          return json({
+            error: `forbidden: ${action} requires the privileged ops key, the make-safe reporting routine, or an operator session`,
+            code: 'operator_access_required',
+          }, 403)
+        }
+        const packBuildDeps = {
+          client,
+          orgId: DEFAULT_ORG_ID,
+          readPackTruth: async (jobId: string) =>
+            sesPackTruthFromInspection(
+              await inspectSesPackAction(client, jobId),
+              DEFAULT_ORG_ID,
+            ),
+          readDrainState: readSesReportDrainState,
+        }
+        try {
+          if (action === 'ses_pack_build_state') {
+            if (req.method !== 'GET') {
+              return json({ error: 'ses_pack_build_state requires GET' }, 405)
+            }
+            return json(await readSesPackBuildState(url.searchParams, packBuildDeps))
+          }
+          if (req.method !== 'POST') {
+            return json({ error: 'request_ses_pack_build requires POST' }, 405)
+          }
+          // The driving person is named on the run, from the verified session
+          // and never from the request body.
+          const requestedBy = authMode === 'jwt'
+            ? (authUser?.email || `user:${authUser?.id || 'unknown'}`)
+            : `ops-api:${authMode}`
+          return json(await requestSesPackBuild(body || {}, { ...packBuildDeps, requestedBy }))
+        } catch (error) {
+          if (error instanceof SesPackBuildDoorError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          const sesError = sesActionErrorResponse(error)
+          if (sesError) return json(sesError.body, sesError.status)
           throw error
         }
       }
