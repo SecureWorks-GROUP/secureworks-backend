@@ -269,6 +269,7 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
     sales_booking_runner_journal: [],
     sales_booking_action_journal: [],
     sales_booking_conversation_captures: [],
+    sales_booking_needs_scoper: [],
   };
   function rows(t: string) { return mem[t] || (mem[t] = []); }
   return {
@@ -368,9 +369,9 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
     async upsert(table, row) {
       if (row._fail) return { error: { message: "forced upsert failure" } };
       const list = rows(table);
-      const key = String(row.capture_id || row.id || row.case_id || row.offer_id || row.action_id || row.claim_id || row.key || row.event_key);
+      const key = String(row.item_id || row.capture_id || row.id || row.case_id || row.offer_id || row.action_id || row.claim_id || row.key || row.event_key);
       const idx = list.findIndex((r) =>
-        r.org_id === row.org_id && String(r.capture_id || r.id || r.case_id || r.offer_id || r.action_id || r.claim_id || r.key || r.event_key) === key);
+        r.org_id === row.org_id && String(r.item_id || r.capture_id || r.id || r.case_id || r.offer_id || r.action_id || r.claim_id || r.key || r.event_key) === key);
       if (idx >= 0) list[idx] = { ...list[idx], ...row };
       else list.push({ ...row });
       return { error: null };
@@ -1313,6 +1314,81 @@ async function executeFakeSequence(
   }
 }
 
+function questionFingerprint(caseId: string, question: string) {
+  return `${caseId}:${question.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 180)}`;
+}
+
+function inQuietHours(nowIsoStr: string) {
+  const d = new Date(nowIsoStr);
+  const perthHour = (d.getUTCHours() + 8) % 24;
+  return perthHour >= 21 || perthHour < 7;
+}
+
+export async function openNeedsScoper(
+  db: BookingDb,
+  adapters: Adapters,
+  body: { case_id: string; question: string; context?: string; notify?: boolean; fake?: boolean; now?: string },
+  actor: BookingActor,
+) {
+  const a = assertBookingActor(actor);
+  const c = (await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id })).data[0];
+  if (!c) throw new SalesBookingError("unknown case", 404, "unknown_case");
+  const q = String(body.question || "").trim();
+  if (!q) throw new SalesBookingError("question required", 400, "question_required");
+  const fp = questionFingerprint(String(c.id), q);
+  const existing = (await db.selectMatch("sales_booking_needs_scoper", { org_id: a.org_id, case_id: body.case_id })).data.find((row) => row.fingerprint === fp && row.status !== "closed");
+  if (existing) {
+    return { ok: true, deduped: true, item_id: existing.item_id, status: existing.status, notify: existing.notify_state };
+  }
+  const resource = RESOURCES[String(c.resource_id)] || RESOURCES.nithin;
+  const itemId = `ns_${crypto.randomUUID()}`;
+  const now = body.now || nowIso();
+  let notify_state = "held";
+  if (body.notify && body.fake) {
+    notify_state = inQuietHours(now) ? "quiet_hours" : "fake_pending";
+    const sms = await adapters.sendSms?.({
+      contact_id: "staff-nithin",
+      text: `Needs scoper: ${q.slice(0, 140)}`,
+      sender: resource.sender,
+      internal: true,
+    }, { execute: true, fake: true });
+    if (notify_state !== "quiet_hours") notify_state = sms?.sent ? "fake_delivered" : "fake_error";
+  }
+  const rec = {
+    item_id: itemId, org_id: a.org_id, case_id: body.case_id, resource_id: c.resource_id,
+    question: q, context: body.context || null, fingerprint: fp, status: "open",
+    notify_state, scoper_user_id: resource.scoper_user_id, actor_id: a.user_id,
+    client_send: "held", created_at: now,
+  };
+  requireUpsert(await db.upsert("sales_booking_needs_scoper", rec));
+  return { ok: true, deduped: false, item_id: itemId, status: "open", notify: notify_state, client_send: "held" };
+}
+
+export async function answerNeedsScoper(
+  db: BookingDb,
+  body: { item_id: string; answer: string; apply_to_client_draft?: boolean },
+  actor: BookingActor,
+) {
+  const a = assertBookingActor(actor);
+  const items = (await db.selectMatch("sales_booking_needs_scoper", { org_id: a.org_id })).data;
+  const item = items.find((row) => row.item_id === body.item_id);
+  if (!item) throw new SalesBookingError("unknown item", 404, "unknown_item");
+  const answer = String(body.answer || "").trim();
+  if (!answer) throw new SalesBookingError("answer required", 400, "answer_required");
+  requireUpsert(await db.upsert("sales_booking_needs_scoper", {
+    ...item, status: "closed", answer, answered_at: nowIso(), client_send: "held",
+  }));
+  let draft = null;
+  if (body.apply_to_client_draft) {
+    draft = await persistDraft(db, {
+      case_id: String(item.case_id),
+      text: `Hi, ${answer} Nithin, SecureWorks Patios`,
+      human_edited: false,
+    }, a);
+  }
+  return { ok: true, item_id: body.item_id, status: "closed", client_send: "held", forwarded_to_client: false, draft_revision: draft && (draft as { revision?: number }).revision };
+}
+
 export async function dispatch(
   action: string,
   params: Record<string, string>,
@@ -1337,11 +1413,17 @@ export async function dispatch(
       refresh: params.refresh === "1" || body.refresh === true,
     }, a);
   }
-  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot"];
+  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot", "sales_booking_needs_scoper", "sales_booking_needs_scoper_answer"];
   if (writes.includes(action) && method !== "POST") throw new SalesBookingError(`${action} requires POST`, 405, "method_not_allowed");
   if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; human_edited?: boolean; sender?: string | null; expected_revision?: number }, a);
   if (action === "sales_booking_capture_conversation") {
     return captureConversation(db, adapters, body as { case_id: string }, a);
+  }
+  if (action === "sales_booking_needs_scoper") {
+    return openNeedsScoper(db, adapters, body as { case_id: string; question: string; context?: string; notify?: boolean; fake?: boolean; now?: string }, a);
+  }
+  if (action === "sales_booking_needs_scoper_answer") {
+    return answerNeedsScoper(db, body as { item_id: string; answer: string; apply_to_client_draft?: boolean }, a);
   }
   if (action === "sales_booking_interpret") {
     return submitInterpretation(db, body as Parameters<typeof submitInterpretation>[1], a);

@@ -9,6 +9,8 @@ import {
   persistDraft,
   runnerTick,
   reconcileLeadState,
+  openNeedsScoper,
+  answerNeedsScoper,
   staffLeaveFromCrewAvailability,
   submitInterpretation,
   captureConversation,
@@ -680,6 +682,24 @@ Deno.test("fake execute recovers calendar after sms and refuses revoked or stale
     start_iso: "2026-09-17T13:00:00+08:00", end_iso: "2026-09-17T14:00:00+08:00",
   }, ACTOR) as { reason?: string };
   assertEquals(revoked.reason, "approval_revoked");
+});
+
+Deno.test("needs-scoper items dedupe, skip quiet hours, and never auto-send the client", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "ns-1", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1" });
+  const q = "Can we replace battens then reinstate shadecloth?";
+  const a = await openNeedsScoper(db, fakeAdapters(), { case_id: "ns-1", question: q, notify: true, fake: true, now: "2026-09-13T04:00:00Z" }, ACTOR);
+  const b = await openNeedsScoper(db, fakeAdapters(), { case_id: "ns-1", question: q, notify: true, fake: true, now: "2026-09-13T04:05:00Z" }, ACTOR);
+  assertEquals(a.deduped, false);
+  assertEquals(b.deduped, true);
+  assertEquals(a.item_id, b.item_id);
+  assertEquals(a.client_send, "held");
+  const quiet = await openNeedsScoper(db, fakeAdapters(), { case_id: "ns-1", question: "Different question about council?", notify: true, fake: true, now: "2026-09-13T14:00:00Z" }, ACTOR);
+  assertEquals(quiet.notify, "quiet_hours");
+  const closed = await answerNeedsScoper(db, { item_id: String(a.item_id), answer: "Yes if the posts are sound.", apply_to_client_draft: true }, ACTOR);
+  assertEquals(closed.status, "closed");
+  assertEquals(closed.forwarded_to_client, false);
+  assertEquals(closed.client_send, "held");
 });
 
 Deno.test("staff operator is required", async () => {
