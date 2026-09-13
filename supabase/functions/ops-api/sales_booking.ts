@@ -97,6 +97,26 @@ export type BookingDb = {
 function nowIso() { return new Date().toISOString(); }
 function phoneLike(name: string | undefined) { return !!name && /^(\+61|0)\d/.test(name.replace(/\s/g, "")); }
 
+/** Occupancy is scoper Outlook rows with event_id. Job-assignment diary rows are not a salesperson calendar. */
+export function scoperOccupancy(raw: Record<string, unknown>[] | CalendarEvent[]): { events: CalendarEvent[]; dropped_job_rows: number } {
+  const events: CalendarEvent[] = [];
+  let dropped = 0;
+  for (const row of raw || []) {
+    const rec = row as Record<string, unknown>;
+    const eventId = rec.event_id || rec.id;
+    if (rec.assignment_id && !rec.event_id) { dropped += 1; continue; }
+    if (!eventId || !rec.start_iso || !rec.end_iso) { dropped += 1; continue; }
+    events.push({
+      event_id: String(eventId),
+      subject: rec.subject ? String(rec.subject) : undefined,
+      start_iso: String(rec.start_iso),
+      end_iso: String(rec.end_iso),
+      suburb: rec.suburb ? String(rec.suburb) : undefined,
+    });
+  }
+  return { events, dropped_job_rows: dropped };
+}
+
 function rangesOverlap(a0: string, a1: string, b0: string, b1: string) {
   const A0 = Date.parse(a0), A1 = Date.parse(a1), B0 = Date.parse(b0), B1 = Date.parse(b1);
   if ([A0, A1, B0, B1].some((n) => Number.isNaN(n))) return true;
@@ -294,6 +314,8 @@ export async function readWorkspace(
   const untilDate = new Date(`${params.week_start}T00:00:00+08:00`);
   untilDate.setUTCDate(untilDate.getUTCDate() + 5);
   const cal = await adapters.calendarEvents(resource.scoper_user_id, since, untilDate.toISOString());
+  const occupancy = scoperOccupancy(((cal.events || []) as unknown) as Record<string, unknown>[]);
+  cal.events = occupancy.events;
   const cov = adapters.coverageForResource
     ? await adapters.coverageForResource(resource.scoper_user_id)
     : { leave_intervals: null, travel_minutes: null, calendar_retrieved_at: cal.retrieved_at || null, leave_retrieved_at: null, travel_retrieved_at: null };
@@ -334,6 +356,7 @@ export async function readWorkspace(
       boolean_flags_are_not_capacity: true,
       gaps: [
         cursor.complete === true ? "Provider reported terminal consumption for this resource/week." : "Provider page is not terminal. Empty or missing-next is not a completed workload.",
+        occupancy.dropped_job_rows ? (occupancy.dropped_job_rows + " job-assignment rows were not used as Outlook occupancy.") : "Occupancy is scoper Outlook event_id rows.",
         Array.isArray(cov.leave_intervals) && cov.leave_retrieved_at ? "Leave intervals observed." : "Leave intervals unobserved.",
         cov.travel_minutes != null && cov.travel_retrieved_at ? "Travel minutes observed." : "Travel unobserved.",
       ],

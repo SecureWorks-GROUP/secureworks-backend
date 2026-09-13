@@ -36,6 +36,22 @@ function fakeAdapters(over: Partial<Adapters> = {}): Adapters {
   };
 }
 
+Deno.test("job-assignment diary rows are not salesperson Outlook occupancy", async () => {
+  const adapters = fakeAdapters({
+    calendarEvents: async () => ({
+      ok: true, mailbox: "nithin@secureworkswa.com.au", retrieved_at: "2026-09-12T13:00:00Z", coverage: { truncated: true },
+      events: [
+        { assignment_id: "asg-1", start_iso: "2026-09-15T09:00:00", end_iso: "2026-09-15T10:00:00" } as unknown as { event_id: string; start_iso: string; end_iso: string },
+        { event_id: "evt-outlook", subject: "Scope", start_iso: "2026-09-15T11:30:00+08:00", end_iso: "2026-09-15T12:30:00+08:00", suburb: "City Beach" },
+      ],
+    }),
+  });
+  const db = createMemoryBookingDb();
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, adapters, db, "GET", ACTOR) as { events: { event_id: string }[]; coverage: { gaps: string[] } };
+  assertEquals(out.events.map((e) => e.event_id), ["evt-outlook"]);
+  assert(out.coverage.gaps.some((g) => g.includes("job-assignment")));
+});
+
 Deno.test("fencing opportunities stay in a shared unassigned pool across calendar choice", async () => {
   const db = createMemoryBookingDb();
   const adapters = fakeAdapters();
