@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   correctMessageWorkLink,
+  listJobCommunications,
   openMessageAttachment,
   recordContextMailOccurrence,
   readMessageWorkLinks,
@@ -74,6 +75,25 @@ Deno.test("reader calls read_message_work_links", async () => {
     ORG,
   );
   assertEquals(out.links.length, 1);
+});
+
+Deno.test("job communications reader passes job and optional PO filter", async () => {
+  const client = {
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      assertEquals(name, "list_job_communications");
+      assertEquals(args.p_job_id, "job-1");
+      assertEquals(args.p_po_id, "po-a");
+      return { data: { messages: [{ complete: false }], inbox_only_boundary: true }, error: null };
+    },
+  };
+  const out = await listJobCommunications(
+    client,
+    { job_id: "job-1", po_id: "po-a" },
+    { mode: "api_key", user: null },
+    ORG,
+  );
+  assertEquals(out.inbox_only_boundary, true);
+  assertEquals(out.messages[0].complete, false);
 });
 
 Deno.test("attachment open is a permissioned RPC, not a borrowed object id", async () => {

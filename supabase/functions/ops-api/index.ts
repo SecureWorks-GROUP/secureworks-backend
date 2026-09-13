@@ -370,6 +370,7 @@ import {
 import {
   ContextMailError,
   correctMessageWorkLink,
+  listJobCommunications,
   openMessageAttachment,
   readMessageWorkLinks,
   recordContextMailOccurrence,
@@ -7015,6 +7016,19 @@ if (import.meta.main) serve(async (req: Request) => {
             event_id: url.searchParams.get('event_id') || undefined,
             store: url.searchParams.get('store') || undefined,
             object_id: url.searchParams.get('object_id') || undefined,
+          }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
+        } catch (error) {
+          if (error instanceof ContextMailError) return json({ error: error.message }, error.status)
+          throw error
+        }
+      }
+      case 'job_communications': {
+        if (req.method !== 'GET') return json({ error: 'job_communications requires GET' }, 405)
+        try {
+          return json(await listJobCommunications(client, {
+            job_id: url.searchParams.get('job_id') || undefined,
+            po_id: url.searchParams.get('po_id') || undefined,
+            invoice_id: url.searchParams.get('invoice_id') || undefined,
           }, { mode: authMode, user: authUser }, DEFAULT_ORG_ID))
         } catch (error) {
           if (error instanceof ContextMailError) return json({ error: error.message }, error.status)

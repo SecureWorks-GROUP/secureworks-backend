@@ -508,6 +508,14 @@ async function processMailbox(
                 })
                 if (linkErr) {
                   console.error(`[monitor-inbox] attachment link failed for ${att.name}: ${linkErr.message}`)
+                  if (canonicalEventId) {
+                    await sb.rpc('mark_mail_capture_status', {
+                      p_org_id: DEFAULT_ORG_ID,
+                      p_event_id: canonicalEventId,
+                      p_status: 'partial',
+                      p_error: linkErr.message,
+                    })
+                  }
                 }
               }
               if (insertDocErr) {
@@ -547,6 +555,14 @@ async function processMailbox(
                 })
                 if (linkErr) {
                   console.error(`[monitor-inbox] job_media link failed for ${att.name}: ${linkErr.message}`)
+                  if (canonicalEventId) {
+                    await sb.rpc('mark_mail_capture_status', {
+                      p_org_id: DEFAULT_ORG_ID,
+                      p_event_id: canonicalEventId,
+                      p_status: 'partial',
+                      p_error: linkErr.message,
+                    })
+                  }
                 }
               }
             }

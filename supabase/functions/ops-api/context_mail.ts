@@ -61,6 +61,24 @@ export async function readMessageWorkLinks(
   return data;
 }
 
+export async function listJobCommunications(
+  client: { rpc: Function },
+  params: { job_id?: string; po_id?: string; invoice_id?: string },
+  auth: { mode: string; user: { id?: string; orgId?: string } | null },
+  expectedOrgId: string,
+) {
+  requireActor(auth.mode, auth.user, expectedOrgId, "ops-api");
+  if (!params.job_id) throw new ContextMailError(400, "job_id is required");
+  const { data, error } = await client.rpc("list_job_communications", {
+    p_org_id: expectedOrgId,
+    p_job_id: params.job_id,
+    p_po_id: params.po_id || null,
+    p_invoice_id: params.invoice_id || null,
+  });
+  if (error) throw new ContextMailError(500, error.message);
+  return data;
+}
+
 export async function openMessageAttachment(
   client: { rpc: Function },
   params: { event_id?: string; store?: string; object_id?: string },
