@@ -179,6 +179,7 @@ Deno.test("read overlays waiting_reply from capture and keeps booked on the unsc
   });
   const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
     listOpportunities: async () => ({ items: [], next: null, complete: true, total: 0 }),
+    calendarEvents: async () => ({ ok: true, retrieved_at: "2026-09-13T07:00:00Z", coverage: {}, events: [] }),
   }), db, "GET", ACTOR) as { cases: { id: string; queue_state?: string; status: string }[]; coverage: { population?: { waiting_reply?: number; booked_until_scoped?: number } } };
   const wait = out.cases.find((c) => c.id === "lead-wait");
   const booked = out.cases.find((c) => c.id === "lead-booked");
@@ -303,10 +304,30 @@ Deno.test("read population keeps booked opportunities on the unscoped queue", as
   await db.upsert("sales_booking_cases", { id: "done-1", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "done-1", contact_id: "c3", status: "completed" });
   const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
     listOpportunities: async () => ({ items: [], next: null, complete: true, total: 3 }),
-  }), db, "GET", ACTOR) as { coverage: { population?: { opportunities?: number; eligible_unscoped_cases?: number; booked_until_visit?: number } } };
+    calendarEvents: async () => ({ ok: true, retrieved_at: "2026-09-13T07:00:00Z", coverage: {}, events: [] }),
+  }), db, "GET", ACTOR) as { coverage: { population?: { opportunities?: number; eligible_unscoped_cases?: number; booked_until_visit?: number; uncaptured_opportunities?: number; booked_until_scoped?: number } } };
   assertEquals(out.coverage.population?.opportunities, 3);
-  assertEquals(out.coverage.population?.eligible_unscoped_cases, 2);
+  assertEquals(out.coverage.population?.uncaptured_opportunities, 1);
+  assertEquals(out.coverage.population?.eligible_unscoped_cases, 1);
   assertEquals(out.coverage.population?.booked_until_visit, 1);
+  assertEquals(out.coverage.population?.booked_until_scoped, 1);
+});
+
+Deno.test("calendar booked visit without opportunity_id stays on the unscoped queue", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", {
+    id: "outlook-evt", org_id: ACTOR.org_id, resource_id: "nithin", status: "booked", event_id: "outlook-evt", display_name: "Scope: Marangaroo",
+  });
+  await db.upsert("sales_booking_cases", {
+    id: "marnin-evt", org_id: ACTOR.org_id, resource_id: "marnin", status: "booked", event_id: "marnin-evt", display_name: "Scope: Alkimos",
+  });
+  const nithin = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true }),
+    calendarEvents: async () => ({ ok: true, retrieved_at: "2026-09-13T08:00:00Z", coverage: {}, events: [] }),
+  }), db, "GET", ACTOR) as { coverage: { population?: { booked_until_scoped?: number; eligible_unscoped_cases?: number } }; events: { event_id: string }[] };
+  assertEquals(nithin.coverage.population?.booked_until_scoped, 1);
+  assertEquals(nithin.coverage.population?.eligible_unscoped_cases, 1);
+  assertEquals(nithin.events.some((e) => e.event_id === "marnin-evt"), false);
 });
 
 Deno.test("unavailable adapter is not a completed workload and remains refreshable", async () => {

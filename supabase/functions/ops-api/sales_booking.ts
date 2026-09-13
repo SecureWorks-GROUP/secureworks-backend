@@ -636,6 +636,13 @@ export async function readWorkspace(
     };
   });
   const enumerated = cases.filter((c) => (c as { opportunity_id?: string }).opportunity_id).length;
+  const censusCases = cases.filter((c) => !String(c.id).startsWith("review-") && !String(c.id).startsWith("sql-"));
+  const evidenceBackedUnscoped = censusCases.filter((c) => {
+    if (c.queue_state === "scoped" || c.queue_state === "archived") return false;
+    if (c.queue_state === "booked_until_scoped") return true;
+    const completeness = String(c.capture_completeness || "");
+    return completeness === "complete" || completeness === "partial" || completeness === "unknown";
+  });
   return {
     ok: true, fixture: false, send_hold: true, version: SALES_BOOKING_VERSION, policy: POLICY,
     resource: { ...resource, calendar: { ok: cal.ok, mailbox: cal.mailbox || null } },
@@ -659,18 +666,30 @@ export async function readWorkspace(
       travel_state: cov.travel_state || (cov.travel_retrieved_at ? "observed" : "unavailable"),
       travel_source: cov.travel_source || "drive_time_cache",
       population: {
-        opportunities: listed.data.filter((c) => c.opportunity_id && !String(c.id).startsWith("review-")).length,
+        lane: resource.lane,
+        resource: params.resource,
+        opportunities: listed.data.filter((c) => c.opportunity_id && !String(c.id).startsWith("review-") && !String(c.id).startsWith("sql-")).length,
         unique_customers: new Set(listed.data.filter((c) => c.contact_id && c.opportunity_id).map((c) => String(c.contact_id))).size,
-        eligible_unscoped_cases: listed.data.filter((c) => c.opportunity_id && c.status !== "completed" && !archives.data.some((ar) => ar.case_id === c.id && !ar.restored)).length,
-        booked_until_visit: listed.data.filter((c) => c.status === "booked" && c.opportunity_id).length,
-        archived_cases: archives.data.filter((ar) => !ar.restored).length,
-        uncontacted: cases.filter((c) => c.opportunity_id && c.queue_state === "uncontacted").length,
-        waiting_reply: cases.filter((c) => c.opportunity_id && c.queue_state === "waiting_reply").length,
-        follow_up: cases.filter((c) => c.opportunity_id && c.queue_state === "follow_up").length,
-        booked_until_scoped: cases.filter((c) => c.opportunity_id && c.queue_state === "booked_until_scoped").length,
-        scoped: cases.filter((c) => c.opportunity_id && c.queue_state === "scoped").length,
-        duplicate_scope_review: cases.filter((c) => c.opportunity_id && c.duplicate_scope_review).length,
-        note: "Opportunity count is not unique customers and not scoping visits. Booked stays on the unscoped queue until a scope happens. Queue states are local evidence overlays, not GHL writes.",
+        uncaptured_opportunities: censusCases.filter((c) =>
+          c.opportunity_id
+          && c.queue_state !== "booked_until_scoped"
+          && c.queue_state !== "scoped"
+          && c.queue_state !== "archived"
+          && !c.capture_completeness
+        ).length,
+        captured_complete: censusCases.filter((c) => c.capture_completeness === "complete").length,
+        captured_incomplete: censusCases.filter((c) => c.capture_completeness === "partial" || c.capture_completeness === "unknown").length,
+        eligible_unscoped_cases: evidenceBackedUnscoped.length,
+        booked_until_visit: censusCases.filter((c) => c.queue_state === "booked_until_scoped").length,
+        archived_cases: archives.data.filter((ar) => !ar.restored && censusCases.some((c) => c.id === ar.case_id)).length,
+        uncontacted: censusCases.filter((c) => c.queue_state === "uncontacted").length,
+        waiting_reply: censusCases.filter((c) => c.queue_state === "waiting_reply").length,
+        follow_up: censusCases.filter((c) => c.queue_state === "follow_up").length,
+        booked_until_scoped: censusCases.filter((c) => c.queue_state === "booked_until_scoped").length,
+        scoped: censusCases.filter((c) => c.queue_state === "scoped").length,
+        duplicate_scope_review: censusCases.filter((c) => c.opportunity_id && c.duplicate_scope_review).length,
+        other_lane_events_excluded: true,
+        note: "Enumerated opportunity IDs are not the unscoped visit workload. Eligible unscoped is booked-until-scoped (calendar visit still outstanding) plus captured conversations that are not scoped or archived. Uncaptured IDs are enumerated only. Queue states are local evidence overlays, not GHL writes. Age is not a completed scope.",
       },
       boolean_flags_are_not_capacity: true,
       gaps: [
