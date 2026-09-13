@@ -36,6 +36,32 @@ function fakeAdapters(over: Partial<Adapters> = {}): Adapters {
   };
 }
 
+Deno.test("fencing opportunities stay in a shared unassigned pool across calendar choice", async () => {
+  const db = createMemoryBookingDb();
+  const adapters = fakeAdapters();
+  const marnin = await dispatch("sales_booking_read", { resource: "marnin", week_start: "2026-09-14" }, {}, adapters, db, "GET", ACTOR) as { cases: { id: string; resource_id: string }[] };
+  const khairo = await dispatch("sales_booking_read", { resource: "khairo", week_start: "2026-09-14" }, {}, adapters, db, "GET", ACTOR) as { cases: { id: string; resource_id: string }[] };
+  const pool = marnin.cases.filter((c) => c.id.startsWith("opp-"));
+  assert(pool.length >= 1);
+  assert(pool.every((c) => c.resource_id === "unassigned-fencing"));
+  const khairoPool = khairo.cases.filter((c) => c.id.startsWith("opp-"));
+  assertEquals(khairoPool.map((c) => c.id).sort().join(","), pool.map((c) => c.id).sort().join(","));
+  assert(khairoPool.every((c) => c.resource_id === "unassigned-fencing"));
+});
+
+Deno.test("draft save then reload returns the acknowledged revision and text", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin" });
+  const saved = await persistDraft(db, { case_id: "opp-a", text: "Thursday 1pm works", human_edited: true, expected_revision: 0 }, ACTOR) as { revision: number; text: string };
+  assertEquals(saved.revision, 1);
+  assertEquals(saved.text, "Thursday 1pm works");
+  const again = await persistDraft(db, { case_id: "opp-a", text: "Thursday 1pm works", expected_revision: 0 }, ACTOR).catch((e) => e);
+  assertEquals((again as { code?: string }).code, "cas_conflict");
+  const next = await persistDraft(db, { case_id: "opp-a", text: "Keep my wording", human_edited: true, expected_revision: 1 }, ACTOR) as { revision: number; text: string };
+  assertEquals(next.revision, 2);
+  assertEquals(next.text, "Keep my wording");
+});
+
 Deno.test("unavailable adapter is not a completed workload and remains refreshable", async () => {
   let calls = 0;
   const adapters = fakeAdapters({

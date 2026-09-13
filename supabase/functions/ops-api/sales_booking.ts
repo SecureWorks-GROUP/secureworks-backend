@@ -20,6 +20,24 @@ export const PIPELINES: Record<string, string> = {
   marnin: "I9t8njpuR0Dm7B2NDcvI",
   khairo: "I9t8njpuR0Dm7B2NDcvI",
 };
+export const UNASSIGNED_FENCING = "unassigned-fencing";
+
+function admitResourceId(existingId: string | undefined, reading: string): string | null {
+  if (!existingId) {
+    if (reading === "nithin") return "nithin";
+    if (reading === "marnin" || reading === "khairo") return UNASSIGNED_FENCING;
+    return reading;
+  }
+  if (existingId === reading) return existingId;
+  if (existingId === UNASSIGNED_FENCING && (reading === "marnin" || reading === "khairo")) return existingId;
+  return null;
+}
+
+function caseVisibleFor(resourceId: string | undefined, reading: string): boolean {
+  if (reading === "nithin") return resourceId === "nithin";
+  if (reading === "marnin" || reading === "khairo") return resourceId === reading || resourceId === UNASSIGNED_FENCING;
+  return resourceId === reading;
+}
 
 export const RESOURCES: Record<string, {
   id: string; name: string; scoper_user_id: string; lane: string;
@@ -250,9 +268,10 @@ export async function readWorkspace(
     providerCalls += 1;
     for (const item of page.items) {
       const existing = (await db.selectMatch("sales_booking_cases", { id: item.id, org_id: a.org_id })).data[0];
-      if (existing?.resource_id && existing.resource_id !== params.resource) continue;
+      const admitted = admitResourceId(existing?.resource_id as string | undefined, params.resource);
+      if (!admitted) continue;
       requireUpsert(await db.upsert("sales_booking_cases", {
-        id: item.id, org_id: a.org_id, resource_id: params.resource, opportunity_id: item.id,
+        id: item.id, org_id: a.org_id, resource_id: admitted, opportunity_id: item.id,
         contact_id: item.contact_id, pipeline_id: pipeline, suburb: item.suburb || null,
         display_name: phoneLike(item.name) ? (item.suburb || "Enquiry") : (item.name || "Enquiry"),
         status: existing?.status || "needs_decision",
@@ -286,7 +305,8 @@ export async function readWorkspace(
       display_name: ev.subject || "Diary", status: "booked", updated_at: nowIso(),
     }));
   }
-  const listed = await db.selectMatch("sales_booking_cases", { resource_id: params.resource, org_id: a.org_id });
+  const listedAll = await db.selectMatch("sales_booking_cases", { org_id: a.org_id });
+  const listed = { data: listedAll.data.filter((c) => caseVisibleFor(c.resource_id as string | undefined, params.resource)) };
   const drafts = await db.selectMatch("sales_booking_drafts", { org_id: a.org_id });
   const assessments = await db.selectMatch("sales_booking_assessments", { org_id: a.org_id });
   const archives = await db.selectMatch("sales_booking_archives", { org_id: a.org_id });
