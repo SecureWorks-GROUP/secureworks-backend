@@ -357,6 +357,7 @@ import {
 } from './ses_report_trigger.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { organisationContext, OrganisationContextError } from './organisation_context.ts'
+import { startWorkflowRefresh, finishWorkflowRefresh, WorkflowRefreshError } from './workflow_refresh.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -6938,6 +6939,17 @@ if (import.meta.main) serve(async (req: Request) => {
           return json(await contextAccuracyVerdict(client, body, authMode === 'jwt' && authUser ? { id: authUser.id, orgId: authUser.orgId } : null, DEFAULT_ORG_ID))
         } catch (error) {
           if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
+      case 'workflow_refresh': {
+        if (req.method !== 'POST') return json({ error: 'workflow_refresh requires POST' }, 405)
+        try {
+          const op = String(body?.op || 'start')
+          if (op === 'finish') return json(await finishWorkflowRefresh(client, body || {}))
+          return json(await startWorkflowRefresh(client, { workflow: body?.workflow, scope: body?.scope, actor: body?.actor || 'ops-api' }))
+        } catch (error) {
+          if (error instanceof WorkflowRefreshError) return json({ error: error.message }, error.status)
           throw error
         }
       }

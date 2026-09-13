@@ -30,6 +30,7 @@ import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from 
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
+import { applyOpenReceivableReconcile } from './open_receivables_reconcile.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -905,6 +906,38 @@ async function syncInvoices(sb: any) {
       hasMore = invoices.length === 100
       page++
     }
+  }
+
+  // Incremental If-Modified-Since never re-asks invoices that have not changed
+  // since the cursor (INV-0034 last provider update 2025-11-04). Stale
+  // reconcile only UPDATES rows already in xero_invoices. Page the current
+  // AUTHORISED ACCREC book without If-Modified-Since and upsert misses.
+  {
+    const outstanding: Array<Record<string, unknown>> = []
+    let opage = 1
+    for (;;) {
+      const odata = await xeroGet('/Invoices', accessToken, tenantId, {
+        page: String(opage),
+        where: 'Type=="ACCREC"',
+        Statuses: 'AUTHORISED',
+      })
+      const oinv = odata.Invoices || []
+      outstanding.push(...oinv)
+      if (oinv.length < 100) break
+      opage++
+    }
+    const rec = await applyOpenReceivableReconcile(
+      sb,
+      DEFAULT_ORG_ID,
+      outstanding as any,
+      { write: true },
+    )
+    console.log('[xero-sync] outstanding ACCREC reconcile', {
+      provider_count: rec.provider_count,
+      cache_count: rec.cache_count,
+      missing: rec.missing.length,
+      written: rec.written,
+    })
   }
 
   // Every type and page above completed without throwing: advance the cursor.
