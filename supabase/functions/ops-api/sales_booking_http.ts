@@ -218,7 +218,7 @@ Deno.serve({ hostname: "127.0.0.1", port: PORT }, async (req) => {
     return Response.json({
       ok: true,
       entry: "ops-api",
-      actions: ["sales_booking_assess", "sales_booking_draft", "sales_booking_read", "sales_booking_runner", "sales_booking_reason", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_how_it_works"],
+      actions: ["sales_booking_assess", "sales_booking_draft", "sales_booking_read", "sales_booking_runner", "sales_booking_reason", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_how_it_works", "sales_booking_mail_communications"],
       org_id: ACTOR.org_id,
       sql: "booking_test",
       send: "held",

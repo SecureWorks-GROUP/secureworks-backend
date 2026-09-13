@@ -15,6 +15,7 @@ import {
   mergeCioCalendarCoverage,
   classifyJobContextLuna,
   BOOKING_HOW_IT_WORKS,
+  applyMailCommunications,
   submitInterpretation,
   captureConversation,
   extractGhlPage,
@@ -815,6 +816,50 @@ Deno.test("new inbound or email reply marks the prior proposed slot stale withou
   assertEquals(row?.assessment_stale, true);
   assertEquals(String(row?.source_version || "").includes("mail-99"), true);
   assertEquals(row?.draft?.text, "Hi, Thursday 1pm. Nithin, SecureWorks Patios");
+});
+
+Deno.test("mail viewer job-wide new mail marks earlier slot and keeps GHL draft", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "opp-mail", org_id: ACTOR.org_id, resource_id: "nithin", opportunity_id: "opp-mail", source_version: "s1", status: "needs_decision" });
+  await persistDraft(db, { case_id: "opp-mail", text: "Hi, Thursday 1pm. Nithin, SecureWorks Patios", human_edited: true }, ACTOR);
+  await persistAssessment(db, {
+    case_id: "opp-mail", version: "sales-booking-assess-v2.4",
+    payload: { status: "needs_decision", source_version: "s1", proposal: { start_iso: "2026-09-17T13:00:00+08:00", kind: "tentative", actionable: false } },
+    observed_source_version: "s1",
+  }, ACTOR);
+  const mail = await applyMailCommunications(db, {
+    job_id: "opp-mail",
+    proposal_requires_reassessment: true,
+    message_id: "graph-1",
+    coverage_complete: true,
+  }, ACTOR);
+  assertEquals(mail.job_wide, true);
+  assertEquals(mail.ghl_chat_unchanged, true);
+  assertEquals(mail.marked.includes("opp-mail"), true);
+  const out = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    listOpportunities: async () => ({ items: [], next: null, complete: true }),
+    calendarEvents: async () => ({ ok: true, retrieved_at: "2026-09-13T07:00:00Z", coverage: {}, events: [] }),
+  }), db, "GET", ACTOR) as { cases: { id: string; proposal_stale?: boolean; proposal_requires_reassessment?: boolean; ghl_chat?: string; draft?: { text?: string } }[] };
+  const row = out.cases.find((c) => c.id === "opp-mail");
+  assertEquals(row?.proposal_stale, true);
+  assertEquals(row?.proposal_requires_reassessment, true);
+  assertEquals(row?.ghl_chat, "unchanged");
+  assertEquals(row?.draft?.text, "Hi, Thursday 1pm. Nithin, SecureWorks Patios");
+});
+
+Deno.test("optional PO filter does not mark the other job-wide case", async () => {
+  const db = createMemoryBookingDb();
+  await db.upsert("sales_booking_cases", { id: "po-a", org_id: ACTOR.org_id, resource_id: "nithin", job_id: "job-1", po_id: "PO-A", source_version: "s1", status: "needs_decision" });
+  await db.upsert("sales_booking_cases", { id: "po-b", org_id: ACTOR.org_id, resource_id: "nithin", job_id: "job-1", po_id: "PO-B", source_version: "s1", status: "needs_decision" });
+  await persistAssessment(db, {
+    case_id: "po-a", version: "t", payload: { status: "needs_decision", source_version: "s1", proposal: { start_iso: "2026-09-17T10:00:00+08:00", kind: "tentative" } }, observed_source_version: "s1",
+  }, ACTOR);
+  await persistAssessment(db, {
+    case_id: "po-b", version: "t", payload: { status: "needs_decision", source_version: "s1", proposal: { start_iso: "2026-09-17T13:00:00+08:00", kind: "tentative" } }, observed_source_version: "s1",
+  }, ACTOR);
+  const mail = await applyMailCommunications(db, { job_id: "job-1", po_id: "PO-A", proposal_requires_reassessment: true, message_id: "mail-a" }, ACTOR);
+  assertEquals(mail.marked, ["po-a"]);
+  assertEquals(mail.job_wide, false);
 });
 
 Deno.test("needs-scoper items dedupe, skip quiet hours, and never auto-send the client", async () => {

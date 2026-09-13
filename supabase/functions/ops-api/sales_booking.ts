@@ -660,7 +660,7 @@ export async function readWorkspace(
   const captures = await db.selectMatch("sales_booking_conversation_captures", { org_id: a.org_id });
   const cases = listed.data.map((c) => {
     const assessment = assessments.data.find((d) => d.case_id === c.id) || null;
-    const payload = (assessment?.payload || {}) as { source_version?: string; stale?: boolean; actionable?: boolean; classification?: string; status?: string; proposal?: { start_iso?: string } };
+    const payload = (assessment?.payload || {}) as { source_version?: string; stale?: boolean; actionable?: boolean; classification?: string; status?: string; proposal?: { start_iso?: string }; proposal_requires_reassessment?: boolean; mail_job_wide?: boolean };
     const assessmentStale = !!(
       assessment && (
         payload.stale === true ||
@@ -711,6 +711,9 @@ export async function readWorkspace(
       stale_evidence: !!lead.stale_evidence || assessmentStale,
       assessment_stale: assessmentStale,
       proposal_stale: assessmentStale || c.proposal_stale,
+      proposal_requires_reassessment: payload.proposal_requires_reassessment === true || String(c.source_version || "").startsWith("mail:"),
+      mail_job_wide: payload.mail_job_wide === true,
+      ghl_chat: "unchanged",
       duplicate_scope_review,
       suppress_new_proposal,
       sibling_case_ids: siblings.map((row) => row.id),
@@ -1162,6 +1165,86 @@ export async function restoreCase(db: BookingDb, caseId: string, actor: BookingA
   return { ok: true, crm_deleted: false, contact_id: rec.contact_id };
 }
 
+/** Mail viewer is job-wide first; PO/invoice filters are optional. GHL chat is unchanged. */
+export async function applyMailCommunications(
+  db: BookingDb,
+  body: {
+    job_id: string;
+    po_id?: string | null;
+    invoice_id?: string | null;
+    case_id?: string | null;
+    proposal_requires_reassessment?: boolean;
+    last_capture_at?: string | null;
+    message_id?: string | null;
+    coverage_complete?: boolean;
+    inbox_only_boundary?: boolean;
+  },
+  actor: BookingActor,
+) {
+  const a = assertBookingActor(actor);
+  if (!body.job_id) throw new SalesBookingError("job_id required", 400, "job_required");
+  const listed = await db.selectMatch("sales_booking_cases", { org_id: a.org_id });
+  let matches = listed.data.filter((c) =>
+    String(c.id) === body.job_id
+    || String(c.opportunity_id || "") === body.job_id
+    || String(c.job_id || "") === body.job_id
+    || (body.case_id && String(c.id) === body.case_id)
+  );
+  if (body.po_id) {
+    const withPo = matches.filter((c) => String(c.po_id || "") === body.po_id);
+    if (withPo.length) matches = withPo;
+    else if (matches.some((c) => c.po_id)) matches = [];
+  }
+  const flagged = body.proposal_requires_reassessment === true;
+  const nextToken = `mail:${body.job_id}:${body.message_id || body.last_capture_at || "new"}`;
+  const marked: string[] = [];
+  if (flagged) {
+    for (const c of matches) {
+      requireUpsert(await db.upsert("sales_booking_cases", {
+        id: c.id,
+        org_id: c.org_id,
+        resource_id: c.resource_id,
+        opportunity_id: c.opportunity_id,
+        contact_id: c.contact_id,
+        pipeline_id: c.pipeline_id,
+        suburb: c.suburb,
+        display_name: c.display_name,
+        status: c.status,
+        source_version: nextToken,
+        event_id: c.event_id,
+        updated_at: nowIso(),
+      }));
+      const ass = (await db.selectMatch("sales_booking_assessments", { case_id: String(c.id), org_id: a.org_id })).data[0];
+      if (ass) {
+        requireUpsert(await db.upsert("sales_booking_assessments", {
+          ...ass,
+          payload: {
+            ...(ass.payload as object || {}),
+            stale: true,
+            proposal_requires_reassessment: true,
+            mail_job_id: body.job_id,
+            mail_po_id: body.po_id || null,
+            mail_job_wide: !body.po_id,
+          },
+        }));
+      }
+      marked.push(String(c.id));
+    }
+  }
+  return {
+    ok: true,
+    job_id: body.job_id,
+    po_id: body.po_id || null,
+    job_wide: !body.po_id,
+    proposal_requires_reassessment: flagged,
+    marked,
+    ghl_chat_unchanged: true,
+    send: "held" as const,
+    coverage_complete: body.coverage_complete !== true ? false : true,
+    inbox_only_boundary: body.inbox_only_boundary === true,
+  };
+}
+
 export async function onEvent(db: BookingDb, adapters: Adapters, body: { event_key: string; type: string; case_id?: string; message_id?: string; input?: { messages?: unknown[] } }, actor: BookingActor) {
   const a = assertBookingActor(actor);
   if (!body.event_key) throw new SalesBookingError("event_key required");
@@ -1597,7 +1680,7 @@ export async function dispatch(
       refresh: params.refresh === "1" || body.refresh === true,
     }, a);
   }
-  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot", "sales_booking_needs_scoper", "sales_booking_needs_scoper_answer"];
+  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot", "sales_booking_needs_scoper", "sales_booking_needs_scoper_answer", "sales_booking_mail_communications"];
   if (writes.includes(action) && method !== "POST") throw new SalesBookingError(`${action} requires POST`, 405, "method_not_allowed");
   if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; human_edited?: boolean; sender?: string | null; expected_revision?: number }, a);
   if (action === "sales_booking_capture_conversation") {
@@ -1633,7 +1716,10 @@ export async function dispatch(
   }
   if (action === "sales_booking_archive") return archiveCase(db, body as { case_id: string; reason?: string; note?: string }, a);
   if (action === "sales_booking_restore") return restoreCase(db, String(body.case_id), a);
-  if (action === "sales_booking_on_event") return onEvent(db, adapters, body as { event_key: string; type: string; case_id?: string }, a);
+  if (action === "sales_booking_on_event") return onEvent(db, adapters, body as { event_key: string; type: string; case_id?: string; message_id?: string; input?: { messages?: unknown[] } }, a);
+  if (action === "sales_booking_mail_communications") {
+    return applyMailCommunications(db, body as Parameters<typeof applyMailCommunications>[1], a);
+  }
   if (action === "sales_booking_reconcile") return reconcile(db, body as { case_id?: string; expected_version?: string; reason?: string }, a);
   if (action === "sales_booking_runner") return runnerTick(db, adapters, { runner_enabled: body.runner_enabled === true }, a);
   if (action === "sales_booking_claim_slot") return claimSlot(db, a, body as { claim_id: string; resource_id: string; start_iso: string; end_iso: string; case_id: string });
