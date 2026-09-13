@@ -11,13 +11,23 @@
 // Contract: lanes/handoffs/INSURANCE-to-CIO-SES-trigger-contract-2026-09-10.md.
 //
 // States on public.ses_report_trigger_runs:
-//   pending -> claimed -> done | refused_stale | refused_conflict | refused_gate | failed | unknown
-// `failed` carries next_attempt_at and is re-claimable; `unknown` is parked for
-// a human with a recovery_action and is never blindly replayed.
+//   pending -> claimed -> awaiting_pack | done | refused_stale | refused_conflict | refused_gate | failed | unknown
+// `awaiting_pack` means the docket is prepared but Docs Ready pointers are not
+// bound. Drain next() ignores it. An explicit run_id (Board Watch / terminal /
+// UI) may reclaim it without incrementing attempts. `failed` carries
+// next_attempt_at and is re-claimable; `unknown` is parked for a human with a
+// recovery_action and is never blindly replayed.
 
 import type { SesPrepareRequest } from "./ses_docket_envelope.ts";
 import type { SesPrepareResponse } from "./ses_prepare_docket_revision.ts";
 import { SesAssemblerAdapterError } from "./ses_assembler_input_adapter.ts";
+import {
+  planSesBuildPackContinuation,
+  pointerViewAfterIsolatedApply,
+  type IsolatedBindResult,
+  type SesPackPointerView,
+  type SesRetainedArtifacts,
+} from "./ses_build_pack_continuation.ts";
 
 export const SES_REPORT_TRIGGER_VERSION = "ses.report-trigger/v1";
 const MAX_ATTEMPTS = 6;
@@ -59,6 +69,14 @@ export interface SesReportTriggerDeps {
    * notifier attached. Injected so the handler stays testable. */
   prepare: (request: SesPrepareRequest) => Promise<SesPrepareResponse & { docs_ready_sms?: unknown }>;
   now?: () => Date;
+  /** Read-only pack inspect after prepare. Production must pass this. */
+  inspectPack?: (jobId: string) => Promise<SesPackPointerView>;
+  /** Isolated fixture bind only. Production omits this so live bind/mint/send cannot run. */
+  applyIsolatedContinuation?: (
+    view: SesPackPointerView,
+    retained: SesRetainedArtifacts,
+  ) => IsolatedBindResult;
+  retainedArtifacts?: SesRetainedArtifacts | null;
 }
 
 export class SesReportTriggerError extends Error {
@@ -180,9 +198,12 @@ export async function runSesReportTrigger(
       run = await transition(client, run, { attendance_cycle_id: currentCycle.id, cycle_number: currentCycle.cycle_number });
     }
 
-    // 3. Conflict: a different source identity already built this job+cycle.
+    // 3. Conflict: a different source identity already persisted a docket for
+    //    this job+cycle. awaiting_pack still owns that docket; checking only
+    //    `done` would let a second identity prepare again.
     const sibling = await client.from("ses_report_trigger_runs").select("id, dedupe_key, state, docket_revision_id")
-      .eq("job_id", run.job_id).eq("attendance_cycle_id", currentCycle.id).eq("state", "done").neq("id", run.id).limit(1).maybeSingle();
+      .eq("job_id", run.job_id).eq("attendance_cycle_id", currentCycle.id)
+      .not("docket_revision_id", "is", null).neq("id", run.id).limit(1).maybeSingle();
     if (sibling.error) throw new SesReportTriggerError("ses_trigger_ledger_unavailable", `sibling read failed: ${sibling.error.message || sibling.error}`, 503);
     if (sibling.data) {
       run = await transition(client, run, {
@@ -192,58 +213,64 @@ export async function runSesReportTrigger(
       return receipt(run, "refused");
     }
 
-    // 4. Hand the one card to the existing prepare path. Idempotency key is the
-    //    dedupe key so a retry of this exact run cannot mint a second docket.
-    const request: SesPrepareRequest = {
-      selection: { mode: "job_id", job_id: run.job_id },
-      dry_run: false,
-      idempotency_key: run.dedupe_key,
-      assembler_version: "ses-pack-assembler/v1",
-    } as SesPrepareRequest;
-    let response: Awaited<ReturnType<SesReportTriggerDeps["prepare"]>>;
-    try {
-      response = await deps.prepare(request);
-    } catch (error) {
-      if (error instanceof SesAssemblerAdapterError) {
+    // 4. Hand the one card to the existing prepare path unless this run already
+    //    persisted a docket (awaiting_pack join from Board Watch / terminal / UI).
+    let response: Awaited<ReturnType<SesReportTriggerDeps["prepare"]>> | null = null;
+    if (!run.docket_revision_id) {
+      const request: SesPrepareRequest = {
+        selection: { mode: "job_id", job_id: run.job_id },
+        dry_run: false,
+        idempotency_key: run.dedupe_key,
+        assembler_version: "ses-pack-assembler/v1",
+      } as SesPrepareRequest;
+      try {
+        response = await deps.prepare(request);
+      } catch (error) {
+        if (error instanceof SesAssemblerAdapterError) {
+          run = await transition(client, run, {
+            state: "refused_gate", last_error: `${error.code}: ${error.message}`.slice(0, 500),
+            recovery_action: "the pack path refused on its own gate; fix the named condition on the card, then re-file this identity", completed_at: now().toISOString(),
+            result: { refusal: { code: error.code, status: error.status } },
+          });
+          return receipt(run, "refused");
+        }
+        throw error;
+      }
+      const result = (response.results || [])[0];
+      if (!result) {
+        run = await transition(client, run, { state: "refused_gate", last_error: "prepare returned no result for this job", recovery_action: "check the job is on the make-safe board; re-file if so", completed_at: now().toISOString() });
+        return receipt(run, "refused");
+      }
+      const spineCycle = (result as any)?.envelope?.spine?.current_attendance_cycle_id as string | undefined;
+      if (spineCycle && spineCycle !== currentCycle.id) {
         run = await transition(client, run, {
-          state: "refused_gate", last_error: `${error.code}: ${error.message}`.slice(0, 500),
-          recovery_action: "the pack path refused on its own gate; fix the named condition on the card, then re-file this identity", completed_at: now().toISOString(),
-          result: { refusal: { code: error.code, status: error.status } },
+          state: "unknown", last_error: `assembler cycle ${spineCycle} differs from pre-read ${currentCycle.id}`,
+          recovery_action: "read back the docket by dedupe key; if it was persisted for the right cycle mark done, otherwise re-file",
+          docket_revision_id: result.docket_revision_id ?? null, output_content_hash: result.output_content_hash ?? null,
+        });
+        return receipt(run, "unknown");
+      }
+      if (!(result.state === "ready" && result.persisted)) {
+        run = await transition(client, run, {
+          state: "refused_gate", last_error: `prepare state ${result.state}, persisted ${result.persisted}`.slice(0, 500),
+          recovery_action: "clear the blockers on the card (see result.blockers), then re-file this identity",
+          result: { state: result.state, persisted: result.persisted, blockers: (result as any).blockers ?? null }, completed_at: now().toISOString(),
         });
         return receipt(run, "refused");
       }
-      throw error;
-    }
-    const result = (response.results || [])[0];
-    if (!result) {
-      run = await transition(client, run, { state: "refused_gate", last_error: "prepare returned no result for this job", recovery_action: "check the job is on the make-safe board; re-file if so", completed_at: now().toISOString() });
-      return receipt(run, "refused");
-    }
-    const spineCycle = (result as any)?.envelope?.spine?.current_attendance_cycle_id as string | undefined;
-    if (spineCycle && spineCycle !== currentCycle.id) {
-      // The assembler saw a different cycle than the pre-read: something moved between reads.
       run = await transition(client, run, {
-        state: "unknown", last_error: `assembler cycle ${spineCycle} differs from pre-read ${currentCycle.id}`,
-        recovery_action: "read back the docket by dedupe key; if it was persisted for the right cycle mark done, otherwise re-file",
-        docket_revision_id: result.docket_revision_id ?? null, output_content_hash: result.output_content_hash ?? null,
-      });
-      return receipt(run, "unknown");
-    }
-    if (result.state === "ready" && result.persisted) {
-      run = await transition(client, run, {
-        state: "done", docket_revision_id: result.docket_revision_id, output_content_hash: result.output_content_hash,
-        docs_ready_sms: response.docs_ready_sms ?? null, last_error: null, recovery_action: null, completed_at: now().toISOString(),
+        docket_revision_id: result.docket_revision_id,
+        output_content_hash: result.output_content_hash,
+        docs_ready_sms: response.docs_ready_sms ?? null,
         result: { state: result.state, artifacts: (result.artifacts || []).map((a: any) => ({ role: a.role, content_hash: a.content_hash, size_bytes: a.size_bytes })) },
       });
-      return receipt(run, "done");
     }
-    // Blocked or not persisted: the pack path's own gate said no. Terminal for this identity.
-    run = await transition(client, run, {
-      state: "refused_gate", last_error: `prepare state ${result.state}, persisted ${result.persisted}`.slice(0, 500),
-      recovery_action: "clear the blockers on the card (see result.blockers), then re-file this identity",
-      result: { state: result.state, persisted: result.persisted, blockers: (result as any).blockers ?? null }, completed_at: now().toISOString(),
-    });
-    return receipt(run, "refused");
+
+    // 5. Docs Ready is pointers, not a persisted docket. Inspect, plan the
+    //    existing Build Pack bind spine, never mint when an invoice exists,
+    //    never send. Production omits applyIsolatedContinuation.
+    return await finishWithPackPointers(client, deps, run, now);
+
   } catch (error) {
     if (error instanceof SesReportTriggerError && error.code === "ses_trigger_lease_lost") throw error;
     // Transport, timeout or unexpected failure after the claim. The effect may or
@@ -258,6 +285,92 @@ export async function runSesReportTrigger(
   }
 }
 
+async function finishWithPackPointers(
+  client: any,
+  deps: SesReportTriggerDeps,
+  run: SesReportTriggerRun,
+  now: () => Date,
+): Promise<Record<string, unknown>> {
+  if (!deps.inspectPack) {
+    run = await transition(client, run, {
+      state: "awaiting_pack",
+      last_error: null,
+      recovery_action:
+        "docket prepared; inspect pack pointers then run Build Pack bind spine. Reuse existing invoice. Do not mint a duplicate. Do not send. Drain will not auto-bind.",
+      completed_at: null,
+    });
+    return receipt(run, "awaiting_pack");
+  }
+  let view: SesPackPointerView;
+  try {
+    view = await deps.inspectPack(run.job_id);
+  } catch (error) {
+    const detail = (error as Error)?.message || String(error);
+    run = await transition(client, run, {
+      state: "awaiting_pack",
+      last_error: detail.slice(0, 500),
+      recovery_action:
+        "inspect_ses_pack could not be read after prepare; retry Build Pack inspect then bind. Do not mint or send.",
+      completed_at: null,
+    });
+    return receipt(run, "awaiting_pack", detail);
+  }
+  let plan = planSesBuildPackContinuation(view, deps.retainedArtifacts ?? null);
+  const reusedInvoice = plan.reuse_invoice_number;
+  if (
+    deps.applyIsolatedContinuation &&
+    (plan.kind === "reuse_invoice_and_bind" || plan.kind === "bind_report") &&
+    deps.retainedArtifacts
+  ) {
+    const applied = deps.applyIsolatedContinuation(view, deps.retainedArtifacts);
+    view = pointerViewAfterIsolatedApply(view, applied);
+    plan = planSesBuildPackContinuation(view, deps.retainedArtifacts);
+  }
+  const pointers = {
+    report_doc_id: view.pack.report_doc_id,
+    invoice_doc_id: view.pack.invoice_doc_id,
+    swms_doc_id: view.pack.swms_doc_id,
+    sent_at: view.pack.sent_at,
+    continuation: plan.kind,
+    reuse_invoice_number: plan.reuse_invoice_number || reusedInvoice,
+  };
+  if (plan.kind === "docs_ready_unsent" || plan.kind === "already_sent") {
+    run = await transition(client, run, {
+      state: "done",
+      last_error: null,
+      recovery_action: plan.kind === "already_sent"
+        ? "pack already sent; continuation did not send again"
+        : null,
+      completed_at: now().toISOString(),
+      result: { ...(run.result || {}), pointers, docs_ready_unsent: plan.kind === "docs_ready_unsent" },
+    });
+    return receipt(run, "done");
+  }
+  if (
+    plan.kind === "hold_missing_photos" ||
+    plan.kind === "hold_unsupported_family" ||
+    plan.kind === "refuse_cross_job" ||
+    plan.kind === "refuse_tenant"
+  ) {
+    run = await transition(client, run, {
+      state: "refused_gate",
+      last_error: plan.reason.slice(0, 500),
+      recovery_action: plan.reason,
+      completed_at: now().toISOString(),
+      result: { ...(run.result || {}), pointers, continuation: plan.kind },
+    });
+    return receipt(run, "refused");
+  }
+  run = await transition(client, run, {
+    state: "awaiting_pack",
+    last_error: null,
+    recovery_action: plan.reason,
+    completed_at: null,
+    result: { ...(run.result || {}), pointers, continuation: plan.kind },
+  });
+  return receipt(run, "awaiting_pack");
+}
+
 function receipt(run: SesReportTriggerRun, outcome: string, detail?: string): Record<string, unknown> {
   return {
     version: SES_REPORT_TRIGGER_VERSION, ok: outcome === "done", outcome, state: run.state,
@@ -268,7 +381,7 @@ function receipt(run: SesReportTriggerRun, outcome: string, detail?: string): Re
       last_error: run.last_error, recovery_action: run.recovery_action, next_attempt_at: run.next_attempt_at, completed_at: run.completed_at,
     },
     ...(detail ? { detail } : {}),
-    note: "A done run means the docket revision was persisted through the existing prepare path and the docs-ready ping went through its own exact-once effect. No client send occurs here.",
+    note: "done with docs_ready_unsent means inspect showed bound report/invoice pointers and empty sent_at. awaiting_pack means the docket exists but Build Pack bind is still owed. No client send and no duplicate mint occur here.",
   };
 }
 

@@ -5,8 +5,8 @@
 // Pins:
 //   1. A pending run is claimed exclusively, the job and current cycle are re-read,
 //      one card goes to the existing prepare path with the dedupe key as
-//      idempotency key, and a ready+persisted result marks the run done with the
-//      docket id, output hash and the docs-ready SMS outcome.
+//      idempotency key. A ready+persisted docket without pack pointers parks
+//      awaiting_pack (not Docs Ready). Drain must not auto-bind.
 //   2. A run whose event cycle is no longer current is refused_stale, nothing prepared.
 //   3. A second done run for the same job+cycle from another identity is refused_conflict.
 //   4. The prepare path's own refusal (adapter error) or a blocked result is refused_gate.
@@ -30,6 +30,12 @@
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { listSesReportTriggerRuns, runSesReportTrigger, SesReportTriggerError } from "./ses_report_trigger.ts";
 import { SesAssemblerAdapterError } from "./ses_assembler_input_adapter.ts";
+import {
+  applyIsolatedSesPackContinuation,
+  planSesBuildPackContinuation,
+  type SesPackPointerView,
+  type SesRetainedArtifacts,
+} from "./ses_build_pack_continuation.ts";
 
 const JOB = "70000000-0000-4000-8000-000000000001";
 const CYCLE1 = "72000000-0000-4000-8000-000000000001";
@@ -118,10 +124,16 @@ function fakeClient(fx: Fixture) {
       }
       assertEquals(name, "claim_ses_report_trigger_run");
       const run = fx.runs[args.p_run_id];
-      const claimable = fx.claimable ?? (run && (run.state === "pending" || (run.state === "failed" && (!run.next_attempt_at || Date.parse(run.next_attempt_at) <= NOW.getTime()))));
+      const claimable = fx.claimable ?? (run && (
+        run.state === "pending" ||
+        run.state === "awaiting_pack" ||
+        (run.state === "failed" && (!run.next_attempt_at || Date.parse(run.next_attempt_at) <= NOW.getTime()))
+      ));
       if (!run || !claimable) return Promise.resolve({ data: [], error: null });
-      Object.assign(run, { state: "claimed", attempts: run.attempts + 1, claimed_by: args.p_owner, claimed_at: NOW.toISOString(),
-        claim_token: `token-${run.attempts + 1}`, lease_expires_at: new Date(NOW.getTime() + 600_000).toISOString() });
+      const increment = run.state === "awaiting_pack" ? 0 : 1;
+      const nextAttempts = run.attempts + increment;
+      Object.assign(run, { state: "claimed", attempts: nextAttempts, claimed_by: args.p_owner, claimed_at: NOW.toISOString(),
+        claim_token: `token-${nextAttempts || 1}`, lease_expires_at: new Date(NOW.getTime() + 600_000).toISOString() });
       const snapshot = { ...run };
       if (fx.stealClaimAfterClaim) Object.assign(run, { claim_token: "token-stolen", claimed_by: args.p_owner });
       return Promise.resolve({ data: [snapshot], error: null });
@@ -132,6 +144,8 @@ function fakeClient(fx: Fixture) {
       q.select = chain(() => {});
       q.eq = chain((a) => q._filters.push(["eq", a[0], a[1]]));
       q.neq = chain((a) => q._filters.push(["neq", a[0], a[1]]));
+      q.in = chain((a) => q._filters.push(["in", a[0], a[1]]));
+      q.not = chain((a) => q._filters.push(["not", a[0], a[1], a[2]]));
       q.order = chain((a) => { q._order = a; });
       q.limit = chain((a) => { q._limit = a[0]; });
       q.update = chain((a) => { q._op = "update"; q._patch = a[0]; });
@@ -167,7 +181,8 @@ function fakeClient(fx: Fixture) {
           const key = q._filters.find((f: any) => f[1] === "dedupe_key")?.[2];
           if (key) { const hit = Object.values(fx.runs).find((r: any) => r.dedupe_key === key); return { data: hit ? { id: hit.id, state: hit.state } : null, error: null }; }
           const stateEq = q._filters.find((f: any) => f[0] === "eq" && f[1] === "state")?.[2];
-          if (stateEq === "done") { const s = (fx.siblings || [])[0]; return { data: s ?? null, error: null }; }
+          const docketPresent = q._filters.some((f: any) => f[0] === "not" && f[1] === "docket_revision_id");
+          if (stateEq === "done" || docketPresent) { const s = (fx.siblings || [])[0]; return { data: s ?? null, error: null }; }
           const id = q._filters.find((f: any) => f[1] === "id")?.[2];
           if (id) return { data: fx.runs[id] ? { ...fx.runs[id] } : null, error: null };
           const stateNe = q._filters.find((f: any) => f[0] === "neq" && f[1] === "state")?.[2];
@@ -184,6 +199,47 @@ function fakeClient(fx: Fixture) {
   return { client, writes };
 }
 
+const MARANGAROO_RETAINED: SesRetainedArtifacts = {
+  job_id: JOB,
+  report_doc_id: "9e3a5dc5-7c24-48c5-a29a-3b93ab366919",
+  invoice_number: "INV-1515",
+  invoice_doc_id: "4221d6e0-5aa7-4056-9a5b-7a3b99cda029",
+  photo_count: 13,
+  tenant_ok: true,
+};
+
+function emptyInspect(jobId: string): SesPackPointerView {
+  return {
+    job_id: jobId,
+    required_documents: { report: true, invoice: true, swms: false },
+    pack: { report_doc_id: null, invoice_doc_id: null, swms_doc_id: null, sent_at: null },
+  };
+}
+
+function readyInspect(jobId: string): SesPackPointerView {
+  return {
+    job_id: jobId,
+    required_documents: { report: true, invoice: true, swms: false },
+    pack: {
+      report_doc_id: MARANGAROO_RETAINED.report_doc_id!,
+      invoice_doc_id: MARANGAROO_RETAINED.invoice_doc_id!,
+      swms_doc_id: null,
+      sent_at: null,
+    },
+    invoice: { number: "INV-1515", status: "DRAFT", doc_id: MARANGAROO_RETAINED.invoice_doc_id },
+  };
+}
+
+function unboundInspect(jobId: string): SesPackPointerView {
+  return {
+    job_id: jobId,
+    required_documents: { report: true, invoice: true, swms: false },
+    pack: { report_doc_id: null, invoice_doc_id: null, swms_doc_id: null, sent_at: null },
+    invoice: { number: "INV-1515", status: "DRAFT", doc_id: null },
+    xero_binding: { invoice_number: "INV-1515", status: "DRAFT" },
+  };
+}
+
 function readyResponse(cycle = CYCLE1): any {
   return {
     action: "prepare_ses_docket_revision", assembler_version: "ses-pack-assembler/v1", dry_run: false,
@@ -194,13 +250,17 @@ function readyResponse(cycle = CYCLE1): any {
   };
 }
 
-Deno.test("1. pending run: claim, re-read, prepare one card with the dedupe key, mark done", async () => {
+Deno.test("1. pending run: claim, re-read, prepare one card; missing pointers park awaiting_pack, not Docs Ready", async () => {
   const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const { client, writes } = fakeClient(fx);
   const prepared: any[] = [];
-  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "test-drain", now: () => NOW, prepare: async (req) => { prepared.push(req); return readyResponse(); } });
-  assertEquals(out.ok, true);
-  assertEquals(out.outcome, "done");
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "test-drain", now: () => NOW,
+    prepare: async (req) => { prepared.push(req); return readyResponse(); },
+    inspectPack: async (jobId) => emptyInspect(jobId),
+  });
+  assertEquals(out.ok, false);
+  assertEquals(out.outcome, "awaiting_pack");
   assertEquals(prepared.length, 1);
   assertEquals(prepared[0].selection, { mode: "job_id", job_id: JOB });
   assertEquals(prepared[0].dry_run, false);
@@ -209,9 +269,119 @@ Deno.test("1. pending run: claim, re-read, prepare one card with the dedupe key,
   assertEquals(run.docket_revision_id, "b308e68a-4435-5789-b843-59de3837cdc1");
   assertEquals(run.output_content_hash, "sha256:out");
   assertEquals(run.docs_ready_sms, [{ job_id: JOB, outcome: "sent" }]);
-  assertEquals(fx.runs[RUN].state, "done");
+  assertEquals(fx.runs[RUN].state, "awaiting_pack");
   assertEquals(fx.runs[RUN].attempts, 1);
+  assertStringIncludes(fx.runs[RUN].recovery_action, "must not auto-bind or mint");
   assert(writes.every((w) => !w.patch || fx.runs[RUN].claimed_by === "test-drain"));
+});
+
+Deno.test("1b. inspect with bound report and INV-1515 marks done docs_ready_unsent, no send", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client } = fakeClient(fx);
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", now: () => NOW,
+    prepare: async () => readyResponse(),
+    inspectPack: async (jobId) => readyInspect(jobId),
+  });
+  assertEquals(out.ok, true);
+  assertEquals(out.outcome, "done");
+  assertEquals(fx.runs[RUN].state, "done");
+  assertEquals(fx.runs[RUN].result.docs_ready_unsent, true);
+  assertEquals(fx.runs[RUN].result.pointers.report_doc_id, MARANGAROO_RETAINED.report_doc_id);
+  assertEquals(fx.runs[RUN].result.pointers.invoice_doc_id, MARANGAROO_RETAINED.invoice_doc_id);
+  assertEquals(fx.runs[RUN].result.pointers.sent_at, null);
+});
+
+Deno.test("1c. isolated apply reuses INV-1515 and reaches unsent Docs Ready without live bind", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client } = fakeClient(fx);
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", now: () => NOW,
+    prepare: async () => readyResponse(),
+    inspectPack: async (jobId) => unboundInspect(jobId),
+    retainedArtifacts: MARANGAROO_RETAINED,
+    applyIsolatedContinuation: (view, retained) => {
+      const plan = planSesBuildPackContinuation(view, retained);
+      return applyIsolatedSesPackContinuation(view, plan, retained);
+    },
+  });
+  assertEquals(out.outcome, "done");
+  assertEquals(fx.runs[RUN].result.docs_ready_unsent, true);
+  assertEquals(fx.runs[RUN].result.pointers.continuation, "docs_ready_unsent");
+  assertEquals(fx.runs[RUN].result.pointers.reuse_invoice_number, "INV-1515");
+  assertEquals(fx.runs[RUN].result.pointers.invoice_doc_id, MARANGAROO_RETAINED.invoice_doc_id);
+  assertEquals(fx.runs[RUN].result.pointers.sent_at, null);
+});
+
+Deno.test("1d. awaiting_pack join skips a second prepare and uses the same run", async () => {
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun({ state: "awaiting_pack", docket_revision_id: "b308e68a-4435-5789-b843-59de3837cdc1", output_content_hash: "sha256:out", attempts: 1 }) },
+    cycles: [{ id: CYCLE1, cycle_number: 1 }],
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "board-watch", now: () => NOW,
+    prepare: async () => { prepared++; return readyResponse(); },
+    inspectPack: async (jobId) => readyInspect(jobId),
+  });
+  assertEquals(prepared, 0);
+  assertEquals(out.outcome, "done");
+  assertEquals((out as any).run.id, RUN);
+  assertEquals(fx.runs[RUN].attempts, 1, "reclaiming awaiting_pack must not increment attempts");
+});
+
+Deno.test("1g. production shape (no isolated apply) reuses INV-1515 in the plan but parks awaiting_pack; no mint, no bind", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client } = fakeClient(fx);
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", now: () => NOW,
+    prepare: async () => readyResponse(),
+    inspectPack: async (jobId) => unboundInspect(jobId),
+    retainedArtifacts: MARANGAROO_RETAINED,
+  });
+  assertEquals(out.outcome, "awaiting_pack");
+  assertEquals(fx.runs[RUN].state, "awaiting_pack");
+  assertEquals(fx.runs[RUN].result.pointers.reuse_invoice_number, "INV-1515");
+  assertEquals(fx.runs[RUN].result.pointers.invoice_doc_id, null);
+  assertStringIncludes(fx.runs[RUN].recovery_action, "never mint");
+});
+
+Deno.test("1h. inspect throw after prepare parks awaiting_pack, does not mark done", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client } = fakeClient(fx);
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", now: () => NOW,
+    prepare: async () => readyResponse(),
+    inspectPack: async () => { throw new Error("No current SES docket revision"); },
+  });
+  assertEquals(out.outcome, "awaiting_pack");
+  assertEquals(fx.runs[RUN].state, "awaiting_pack");
+  assertEquals(fx.runs[RUN].docket_revision_id, "b308e68a-4435-5789-b843-59de3837cdc1");
+  assertStringIncludes(fx.runs[RUN].last_error, "No current SES docket revision");
+});
+
+Deno.test("1f. missing photos hold refused_gate and does not mint", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun() }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client } = fakeClient(fx);
+  const out = await runSesReportTrigger({ run_id: RUN }, {
+    client, actor: "t", now: () => NOW,
+    prepare: async () => readyResponse(),
+    inspectPack: async (jobId) => emptyInspect(jobId),
+    retainedArtifacts: { ...MARANGAROO_RETAINED, missing_photos: true },
+  });
+  assertEquals(out.outcome, "refused");
+  assertEquals(fx.runs[RUN].state, "refused_gate");
+  assertStringIncludes(fx.runs[RUN].last_error, "photos");
+});
+
+Deno.test("1e. overlapping second claim of a done identity is not_claimable", async () => {
+  const fx: Fixture = { runs: { [RUN]: baseRun({ state: "done", docket_revision_id: "d" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  assertEquals(out.code, "ses_trigger_run_not_claimable");
+  assertEquals(prepared, 0);
 });
 
 Deno.test("2. event cycle no longer current: refused_stale, nothing prepared", async () => {
@@ -234,6 +404,21 @@ Deno.test("3. another identity already built this cycle: refused_conflict for re
   assertEquals(fx.runs[RUN].state, "refused_conflict");
   assertEquals(prepared, 0);
   assertStringIncludes(fx.runs[RUN].last_error, "roof:d:h");
+});
+
+Deno.test("3b. awaiting_pack sibling with a docket is already built; second identity does not prepare", async () => {
+  const fx: Fixture = {
+    runs: { [RUN]: baseRun() },
+    cycles: [{ id: CYCLE1, cycle_number: 1 }],
+    siblings: [{ id: "y", dedupe_key: `${JOB}:${CYCLE1}:report:other`, state: "awaiting_pack", docket_revision_id: "d-awaiting" }],
+  };
+  const { client } = fakeClient(fx);
+  let prepared = 0;
+  const out = await runSesReportTrigger({ run_id: RUN }, { client, actor: "t", now: () => NOW, prepare: async () => { prepared++; return readyResponse(); } });
+  assertEquals(out.outcome, "refused");
+  assertEquals(fx.runs[RUN].state, "refused_conflict");
+  assertEquals(prepared, 0);
+  assertStringIncludes(fx.runs[RUN].last_error, "report:other");
 });
 
 Deno.test("4. the pack path's own refusal or a blocked result is refused_gate, terminal for this identity", async () => {
@@ -297,10 +482,10 @@ Deno.test("7. manual entry needs exact job, cycle and identity; reuses an existi
     try { await runSesReportTrigger(body, { client, actor: "t", now: () => NOW, prepare: async () => readyResponse() }); } catch (e) { threw = e; }
     assert(threw instanceof SesReportTriggerError, "manual entry without exact identity must refuse");
   }
-  const reused = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+  const reused = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse(), inspectPack: async (jobId) => readyInspect(jobId) });
   assertEquals((reused as any).run.id, RUN);
   assert(!writes.some((w) => w.insert), "an existing identity must not be re-inserted");
-  const fresh = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r2" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+  const fresh = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r2" }, { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse(), inspectPack: async (jobId) => readyInspect(jobId) });
   assert(writes.some((w) => w.insert?.dedupe_key === `${JOB}:${CYCLE1}:report:r2`));
   assertEquals((fresh as any).run.event_type, "manual");
 });
@@ -330,7 +515,7 @@ Deno.test("11. refile moves a refused or parked run back to pending with the act
   const fx: Fixture = { runs: { [RUN]: baseRun({ state: "refused_gate", last_error: "SWMS missing", recovery_action: "fix then refile", completed_at: "2026-09-11T02:30:00.000Z" }) }, cycles: [{ id: CYCLE1, cycle_number: 1 }] };
   const { client, writes } = fakeClient(fx);
   const out = await runSesReportTrigger({ job_id: JOB, attendance_cycle_id: CYCLE1, source_identity: "report:r1", refile: true, actor: "insurance-desk" },
-    { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse() });
+    { client, actor: "manual", now: () => NOW, prepare: async () => readyResponse(), inspectPack: async (jobId) => readyInspect(jobId) });
   assertEquals(out.outcome, "done", JSON.stringify(out));
   const refile = writes.find((w) => w.patch?.state === "pending");
   assert(refile, "refile must move the row to pending before the claim");
