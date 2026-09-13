@@ -1,3 +1,4 @@
+import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // ════════════════════════════════════════════════════════════
 // MONITOR-INBOX — Microsoft Graph inbox polling for JARVIS
 // ════════════════════════════════════════════════════════════
@@ -670,6 +671,9 @@ Deno.serve(async (req) => {
 
   try {
     const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    if (!(await automationLaneEnabled(sb, 'capture'))) {
+      return new Response(JSON.stringify({ skipped: true, reason: 'automation_lane_disabled', lane: 'capture' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
     const token = await getGraphToken()
     let totalProcessed = 0
 
