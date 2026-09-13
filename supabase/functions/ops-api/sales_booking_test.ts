@@ -58,6 +58,28 @@ Deno.test("job-assignment diary rows are not salesperson Outlook occupancy", asy
   assert(out.coverage.gaps.some((g) => g.includes("job-assignment")));
 });
 
+Deno.test("Khairo Outlook occupancy does not attach to Nithin Booking", async () => {
+  const db = createMemoryBookingDb();
+  const nithin = await dispatch("sales_booking_read", { resource: "nithin", week_start: "2026-09-14" }, {}, fakeAdapters({
+    calendarEvents: async (scoper) => ({
+      ok: true, mailbox: scoper, retrieved_at: "2026-09-12T13:00:00Z", coverage: {},
+      events: scoper.includes("5862cf1d")
+        ? [{ event_id: "nithin-evt", subject: "Nithin scope", start_iso: "2026-09-15T11:30:00+08:00", end_iso: "2026-09-15T12:30:00+08:00" }]
+        : [{ event_id: "khairo-evt", subject: "Khairo fence", start_iso: "2026-09-15T09:00:00+08:00", end_iso: "2026-09-15T10:00:00+08:00" }],
+    }),
+  }), db, "GET", ACTOR) as { events: { event_id: string }[]; resource: { scoper_user_id: string } };
+  const khairo = await dispatch("sales_booking_read", { resource: "khairo", week_start: "2026-09-14" }, {}, fakeAdapters({
+    calendarEvents: async (scoper) => ({
+      ok: true, mailbox: scoper, retrieved_at: "2026-09-12T13:00:00Z", coverage: {},
+      events: scoper.includes("be6c2188")
+        ? [{ event_id: "khairo-evt", subject: "Khairo fence", start_iso: "2026-09-15T09:00:00+08:00", end_iso: "2026-09-15T10:00:00+08:00" }]
+        : [{ event_id: "nithin-evt", subject: "Nithin scope", start_iso: "2026-09-15T11:30:00+08:00", end_iso: "2026-09-15T12:30:00+08:00" }],
+    }),
+  }), db, "GET", ACTOR) as { events: { event_id: string }[] };
+  assertEquals(nithin.events.map((e) => e.event_id), ["nithin-evt"]);
+  assertEquals(khairo.events.map((e) => e.event_id), ["khairo-evt"]);
+});
+
 Deno.test("fencing opportunities stay in a shared unassigned pool across calendar choice", async () => {
   const db = createMemoryBookingDb();
   const adapters = fakeAdapters();
