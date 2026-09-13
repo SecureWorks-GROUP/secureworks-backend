@@ -51,6 +51,8 @@ export function createPsqlBookingDb(): BookingDb {
         ? "case_id"
         : table === "sales_booking_cursors"
         ? "key"
+        : table === "sales_booking_conversation_captures"
+        ? "capture_id"
         : table === "sales_booking_runner_journal" || table === "sales_booking_actions"
         ? "id"
         : table === "sales_booking_actions"

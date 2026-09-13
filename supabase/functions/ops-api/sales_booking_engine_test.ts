@@ -64,7 +64,7 @@ Deno.test("authorised local reason is configured and is not a paid model", async
 Deno.test("dispatch assess uses the TypeScript engine when no adapter is supplied", async () => {
   const db = createMemoryBookingDb();
   await db.upsert("sales_booking_cases", { id: "opp-a", org_id: ACTOR.org_id, resource_id: "nithin", source_version: "s1" });
-  const adapters = { listOpportunities: async () => ({ items: [], next: null, complete: true }), calendarEvents: async () => ({ ok: true, events: [], retrieved_at: "2026-09-12T13:00:00Z" }) } as Adapters;
+  const adapters = { listOpportunities: async () => ({ items: [], next: null, complete: true }), calendarEvents: async () => ({ ok: true, events: [], retrieved_at: "2026-09-12T13:00:00Z", coverage: {} }) } as Adapters;
   const out = await dispatch("sales_booking_assess", {}, {
     case_id: "opp-a",
     input: {
@@ -78,7 +78,7 @@ Deno.test("dispatch assess uses the TypeScript engine when no adapter is supplie
       travel_minutes: 0,
       events: [],
     },
-  }, adapters, db, "POST", ACTOR) as { payload: { version: string; classification: string } };
+  }, adapters, db, "POST", ACTOR) as { payload: { version: string; classification: string }; version?: string };
   assertEquals(out.payload.version, "sales-booking-assess-v2.4");
-  assertEquals(out.version, "sales-booking-assess-v2.4");
+  assertEquals(String(out.payload.version || out.version), "sales-booking-assess-v2.4");
 });

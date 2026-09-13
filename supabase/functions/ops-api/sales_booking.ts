@@ -199,6 +199,7 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
     sales_booking_source_revisions: [],
     sales_booking_runner_journal: [],
     sales_booking_action_journal: [],
+    sales_booking_conversation_captures: [],
   };
   function rows(t: string) { return mem[t] || (mem[t] = []); }
   return {
@@ -298,9 +299,9 @@ export function createMemoryBookingDb(): BookingDb & { _mem: Record<string, Reco
     async upsert(table, row) {
       if (row._fail) return { error: { message: "forced upsert failure" } };
       const list = rows(table);
-      const key = String(row.id || row.case_id || row.offer_id || row.action_id || row.claim_id || row.key || row.event_key);
+      const key = String(row.capture_id || row.id || row.case_id || row.offer_id || row.action_id || row.claim_id || row.key || row.event_key);
       const idx = list.findIndex((r) =>
-        r.org_id === row.org_id && String(r.id || r.case_id || r.offer_id || r.action_id || r.claim_id || r.key || r.event_key) === key);
+        r.org_id === row.org_id && String(r.capture_id || r.id || r.case_id || r.offer_id || r.action_id || r.claim_id || r.key || r.event_key) === key);
       if (idx >= 0) list[idx] = { ...list[idx], ...row };
       else list.push({ ...row });
       return { error: null };
@@ -598,6 +599,75 @@ function draftTextAllowed(text: string) {
   return { ok: true };
 }
 
+function canonicalCapturedMessage(m: Record<string, unknown>) {
+  return {
+    id: String(m.id || ""),
+    direction: String(m.direction || ""),
+    timestamp: String(m.timestamp || ""),
+    body: String(m.body || m.text || ""),
+  };
+}
+
+async function hashCapturedMessages(messages: Record<string, unknown>[]) {
+  const payload = JSON.stringify(messages.map(canonicalCapturedMessage));
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function captureConversation(
+  db: BookingDb,
+  adapters: Adapters,
+  body: { case_id: string },
+  actor: BookingActor,
+) {
+  const a = assertBookingActor(actor);
+  const c = (await db.selectMatch("sales_booking_cases", { id: body.case_id, org_id: a.org_id })).data[0];
+  if (!c) throw new SalesBookingError("unknown case", 404, "unknown_case");
+  if (!c.contact_id) throw new SalesBookingError("case has no contact", 400, "no_contact");
+  if (!adapters.getConversation) throw new SalesBookingError("conversation capture is unavailable", 409, "capture_unavailable");
+  let convo: { messages?: Record<string, unknown>[]; coverage?: { has_more?: boolean }; retrieved_at?: string };
+  try {
+    convo = await adapters.getConversation(String(c.contact_id));
+  } catch (err) {
+    throw new SalesBookingError((err as Error).message || "capture failed", 409, "capture_unavailable");
+  }
+  const messages = (Array.isArray(convo.messages) ? convo.messages : []).map(canonicalCapturedMessage);
+  const has_more = !!(convo.coverage && convo.coverage.has_more);
+  const content_hash = await hashCapturedMessages(messages);
+  const rec = {
+    capture_id: `cap_${crypto.randomUUID()}`,
+    org_id: a.org_id,
+    case_id: String(c.id),
+    contact_id: String(c.contact_id),
+    source_version: String(c.source_version || ""),
+    captured_at: nowIso(),
+    cutoff_at: messages.reduce((acc, m) => (m.timestamp > acc ? m.timestamp : acc), ""),
+    content_hash,
+    messages,
+    has_more,
+    retrieved_at: convo.retrieved_at || nowIso(),
+  };
+  requireUpsert(await db.upsert("sales_booking_conversation_captures", rec));
+  return {
+    ok: true,
+    capture_id: rec.capture_id,
+    case_id: rec.case_id,
+    contact_id: rec.contact_id,
+    source_version: rec.source_version,
+    content_hash,
+    message_count: messages.length,
+    has_more,
+    incomplete: has_more,
+    retrieved_at: rec.retrieved_at,
+  };
+}
+
+function latestCapture(rows: Record<string, unknown>[], caseId: string, sourceVersion: string) {
+  return rows
+    .filter((r) => r.case_id === caseId && String(r.source_version || "") === sourceVersion)
+    .sort((a, b) => String(b.captured_at || "").localeCompare(String(a.captured_at || "")))[0];
+}
+
 export async function submitInterpretation(
   db: BookingDb,
   body: {
@@ -629,12 +699,27 @@ export async function submitInterpretation(
   }
   const interp = body.interpretation;
   if (!interp.interpreter || !interp.interpreter.identity) throw new SalesBookingError("interpreter identity required", 400, "interpreter_required");
-  const messages = Array.isArray((body.input as { messages?: unknown[] } | undefined)?.messages)
-    ? ((body.input as { messages: Record<string, unknown>[] }).messages)
+  const captures = await db.selectMatch("sales_booking_conversation_captures", { org_id: a.org_id, case_id: body.case_id });
+  const capture = latestCapture(captures.data, body.case_id, String(c.source_version || ""));
+  if (!capture) throw new SalesBookingError("authoritative conversation capture required", 409, "capture_required");
+  if (String(capture.contact_id || "") !== String(c.contact_id || "")) {
+    throw new SalesBookingError("capture contact does not match the case", 409, "wrong_contact");
+  }
+  if (String(capture.source_version || "") !== String(c.source_version || "")) {
+    throw new SalesBookingError("capture is not for the current source revision", 409, "stale_capture");
+  }
+  if (capture.has_more) throw new SalesBookingError("conversation capture is incomplete", 409, "capture_incomplete");
+  const messages = (Array.isArray(capture.messages) ? capture.messages : []).map((m) => canonicalCapturedMessage(m as Record<string, unknown>));
+  const callerMessages = Array.isArray((body.input as { messages?: unknown[] } | undefined)?.messages)
+    ? ((body.input as { messages: Record<string, unknown>[] }).messages).map(canonicalCapturedMessage)
     : [];
-  if (!messages.length) throw new SalesBookingError("conversation messages required", 400, "messages_required");
   for (const id of interp.cited_message_ids || []) {
-    if (!messages.some((m) => String(m.id) === String(id))) throw new SalesBookingError("cited message missing", 400, "cited_missing");
+    const captured = messages.find((m) => m.id === String(id));
+    if (!captured) throw new SalesBookingError("caller-only citation is not captured evidence", 400, "caller_only_citation");
+    const caller = callerMessages.find((m) => m.id === String(id));
+    if (caller && caller.body !== captured.body) {
+      throw new SalesBookingError("cited message body does not match capture", 400, "altered_body");
+    }
   }
   if (interp.proposed_text) {
     const allowed = draftTextAllowed(interp.proposed_text);
@@ -661,6 +746,9 @@ export async function submitInterpretation(
   payload.interpreter = interp.interpreter;
   payload.customer_intent = interp.customer_intent || null;
   payload.submitted_holds = interp.holds || [];
+  payload.capture_id = capture.capture_id;
+  payload.capture_hash = capture.content_hash;
+  payload.cited_message_ids = interp.cited_message_ids || [];
   payload.intelligent_automation = interp.interpreter.identity !== "authorised_local_reason";
   payload.paid_model = false;
   if (c.contact_id) {
@@ -1042,9 +1130,12 @@ export async function dispatch(
       refresh: params.refresh === "1" || body.refresh === true,
     }, a);
   }
-  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot"];
+  const writes = ["sales_booking_draft", "sales_booking_assess", "sales_booking_interpret", "sales_booking_capture_conversation", "sales_booking_archive", "sales_booking_restore", "sales_booking_approve", "sales_booking_confirm", "sales_booking_on_event", "sales_booking_reconcile", "sales_booking_runner", "sales_booking_claim_slot"];
   if (writes.includes(action) && method !== "POST") throw new SalesBookingError(`${action} requires POST`, 405, "method_not_allowed");
   if (action === "sales_booking_draft") return persistDraft(db, body as { case_id: string; text?: string; human_edited?: boolean; sender?: string | null; expected_revision?: number }, a);
+  if (action === "sales_booking_capture_conversation") {
+    return captureConversation(db, adapters, body as { case_id: string }, a);
+  }
   if (action === "sales_booking_interpret") {
     return submitInterpretation(db, body as Parameters<typeof submitInterpretation>[1], a);
   }
