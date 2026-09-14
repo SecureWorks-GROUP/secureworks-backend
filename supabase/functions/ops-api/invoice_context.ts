@@ -3,7 +3,8 @@
 // Invoice context door (CIO, 2026-09-11, debt dashboard directive).
 //
 // One read: invoice in, everything the system already holds out. Job link,
-// job facts (Luna), stored conversation (five-source merge), Xero cache state,
+// Luna subscription facts only (extractor context-luna-subscription:v1 — Haiku
+// does not count), stored conversation (five-source merge), Xero cache state,
 // chase log, and an explicit owned blocker for every missing piece. SELECT-only.
 // Never calls Xero or GHL, never writes, never classifies.
 //
@@ -57,7 +58,15 @@ export interface InvoiceContextDeps {
   getJobConversation: (client: any, body: { job_id: string; limit: number }) => Promise<{ messages: any[] }>;
   /** context_visibility.isCurrentContextFact */
   isCurrentContextFact: (row: Record<string, unknown>, now?: number) => boolean;
+  /** Optional override; defaults to current + Luna subscription extractor. */
+  isCurrentLunaFact?: (row: Record<string, unknown>, now?: number) => boolean;
   now?: () => Date;
+}
+
+function isDoorLunaFact(deps: InvoiceContextDeps, row: Record<string, unknown>, nowMs: number): boolean {
+  if (deps.isCurrentLunaFact) return deps.isCurrentLunaFact(row, nowMs);
+  const p = row.provenance as Record<string, unknown> | null;
+  return deps.isCurrentContextFact(row, nowMs) && p?.extractor === "context-luna-subscription:v1";
 }
 
 export interface Blocker { code: string; owner: string; detail: string }
@@ -300,7 +309,7 @@ async function factsCountByJob(deps: InvoiceContextDeps, jobIds: string[], warni
     return rows;
   });
   for (const row of read.data || []) {
-    if (!deps.isCurrentContextFact(row, now)) continue;
+    if (!isDoorLunaFact(deps, row, now)) continue;
     counts.set(row.job_id, (counts.get(row.job_id) ?? 0) + 1);
   }
   return { counts, status: read.status };
@@ -528,7 +537,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
       sources.extraction_queue = queueRead.status;
       sources.conversation_presence = presenceRead.status;
       sources.other_open_invoices = openRead.status;
-      facts = (factsRead.data || []).filter((row: any) => deps.isCurrentContextFact(row, now.getTime())).slice(0, factsLimit);
+      facts = (factsRead.data || []).filter((row: any) => isDoorLunaFact(deps, row, now.getTime())).slice(0, factsLimit);
       if (facts.length < (factsRead.data || []).length && (factsRead.data || []).length >= factsLimit * 2) warnings.push(`facts: read cap ${factsLimit * 2} reached; older facts not shown`);
       conversation = [...(convRead.data || [])].reverse();
       queue = queueRead.queues.get(jobRow.id);

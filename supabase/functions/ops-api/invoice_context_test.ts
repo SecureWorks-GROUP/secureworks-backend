@@ -78,9 +78,9 @@ function baseTables(): Tables {
     work_orders: [{ job_id: JOB1, wo_number: "WO-1", trade_name: "Sonny", status: "completed", scheduled_date: "2026-08-19", completed_at: "2026-08-20", created_at: "2026-08-18" }],
     council_submissions: [],
     current_job_context_facts: [
-      { id: "f1", job_id: JOB1, kind: "payment_promise", value: "Will pay Friday", provenance: { source_table: "business_events" }, updated_at: "2026-09-10T00:00:00.000Z", _context_store: "job_context" },
-      { id: "f2", job_id: JOB1, kind: "note", value: "superseded", provenance: { superseded_by: "f1" }, updated_at: "2026-09-09T00:00:00.000Z", _context_store: "job_context" },
-      { id: "f3", job_id: JOB1, kind: "current_state", value: "expired", provenance: {}, updated_at: "2026-09-01T00:00:00.000Z", expires_at: "2026-09-02T00:00:00.000Z", _context_store: "job_temporary_context" },
+      { id: "f1", job_id: JOB1, kind: "payment_promise", value: "Will pay Friday", provenance: { source_table: "business_events", extractor: "context-luna-subscription:v1" }, updated_at: "2026-09-10T00:00:00.000Z", _context_store: "job_context" },
+      { id: "f2", job_id: JOB1, kind: "note", value: "superseded", provenance: { superseded_by: "f1", extractor: "context-luna-subscription:v1" }, updated_at: "2026-09-09T00:00:00.000Z", _context_store: "job_context" },
+      { id: "f3", job_id: JOB1, kind: "current_state", value: "expired", provenance: { extractor: "context-luna-subscription:v1" }, updated_at: "2026-09-01T00:00:00.000Z", expires_at: "2026-09-02T00:00:00.000Z", _context_store: "job_temporary_context" },
     ],
     extraction_jobs: [
       { job_id: JOB2, status: "skipped", skip_reason: "source_attribution_unproven", error: null },
@@ -319,6 +319,30 @@ Deno.test("helpers: Xero dates, reference job numbers, queue detail", () => {
   assertEquals(queueDetail(undefined), "never_enqueued");
 });
 
+Deno.test("7b. Haiku / instruction facts do not count as Luna coverage", async () => {
+  const t = baseTables();
+  t.current_job_context_facts = [
+    {
+      id: "haiku-1",
+      job_id: JOB1,
+      kind: "note",
+      value: "old haiku row",
+      provenance: { extractor: "context-fact-extractor:v1.5", model: "claude-haiku-4-5-20251001" },
+      updated_at: "2026-09-10T00:00:00.000Z",
+      _context_store: "job_context",
+    },
+  ];
+  const door = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t));
+  assertEquals(door.facts, []);
+  assertEquals(door.coverage.facts_present, false);
+  assertEquals(door.blockers.some((b) => b.code === "facts_missing"), true);
+  const cov = await debtContextCoverage(new URLSearchParams({}), deps(t));
+  const row = cov.rows.find((r: any) => r.invoice_number === "INV-1419")!;
+  assertEquals(row.facts_count, 0);
+  assertEquals(row.blockers.includes("facts_missing"), true);
+  assertEquals(cov.totals.facts_present, 0);
+});
+
 Deno.test("7. multi-row reads page past the PostgREST 1000-row cap", async () => {
   const t = baseTables();
   // The fake client enforces the real 1000-row response cap, so an unpaged
@@ -329,7 +353,15 @@ Deno.test("7. multi-row reads page past the PostgREST 1000-row cap", async () =>
   }
   t.current_job_context_facts = [];
   for (let i = 0; i < 1500; i += 1) {
-    t.current_job_context_facts.push({ id: `f-${String(i).padStart(5, "0")}`, job_id: JOB1, kind: "note", value: `n${i}`, provenance: {}, updated_at: "2026-09-10T00:00:00.000Z", _context_store: "job_context" });
+    t.current_job_context_facts.push({
+      id: `f-${String(i).padStart(5, "0")}`,
+      job_id: JOB1,
+      kind: "note",
+      value: `n${i}`,
+      provenance: { extractor: "context-luna-subscription:v1" },
+      updated_at: "2026-09-10T00:00:00.000Z",
+      _context_store: "job_context",
+    });
   }
 
   const out = await debtContextCoverage(new URLSearchParams({}), deps(t));

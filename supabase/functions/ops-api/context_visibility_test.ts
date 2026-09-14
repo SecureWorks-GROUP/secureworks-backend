@@ -3,7 +3,11 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { isCurrentContextFact } from "./context_visibility.ts";
+import {
+  isCurrentContextFact,
+  isCurrentLunaSubscriptionFact,
+  isLunaSubscriptionFact,
+} from "./context_visibility.ts";
 import {
   _assembleJobDossierForTest,
   _getJobContextFactsForTest,
@@ -121,6 +125,39 @@ Deno.test("lifecycle invalidation outranks an old true trust flag", () => {
     true,
   );
 });
+
+Deno.test("Luna subscription extractor is required for door coverage stamps", () => {
+  assertEquals(isLunaSubscriptionFact(active), false);
+  assertEquals(
+    isLunaSubscriptionFact({
+      ...active,
+      provenance: { extractor: "context-luna-subscription:v1" },
+    }),
+    true,
+  );
+  assertEquals(
+    isLunaSubscriptionFact({
+      ...active,
+      provenance: { extractor: "context-fact-extractor:v1.5" },
+    }),
+    false,
+  );
+  assertEquals(
+    isCurrentLunaSubscriptionFact({
+      ...active,
+      provenance: { extractor: "context-luna-subscription:v1", safety: { memory_trusted: true } },
+    }),
+    true,
+  );
+  assertEquals(
+    isCurrentLunaSubscriptionFact({
+      ...active,
+      provenance: { extractor: "context-luna-subscription:v1", lifecycle: "superseded" },
+    }),
+    false,
+  );
+});
+
 Deno.test("actual facts endpoint excludes historical rows and discloses bounded exclusion", async () => {
   const result = await _getJobContextFactsForTest(client(), {
     job_uuids: ["job"],
