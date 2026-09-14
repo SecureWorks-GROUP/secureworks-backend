@@ -23,7 +23,7 @@ import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_KEY')!
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
-const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')!
+const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Monitored mailboxes
@@ -35,9 +35,12 @@ const MONITORED_MAILBOXES = [
   'nithin@secureworkswa.com.au',    // Sales (patios) — confirmed working
   'shaun@secureworkswa.com.au',     // Ops manager — returns Apr 13, mailbox active
   'admin@secureworkswa.com.au',     // Shared admin inbox
-  'patios@secureworkswa.com.au',    // Group mailbox — patio enquiries
-  'fencing@secureworkswa.com.au',   // Group mailbox — fencing enquiries
-  // 'khairo@secureworkswa.com.au', // NOT provisioned in MS365 — needs admin to create/verify
+]
+
+/** M365 Groups (receive-only). Never call /users/{mail} — that returns ErrorInvalidUser. */
+const GROUP_MAILBOXES = [
+  'patios@secureworkswa.com.au',
+  'fencing@secureworkswa.com.au',
 ]
 
 // Graph token cache
@@ -81,11 +84,59 @@ async function getGraphToken(): Promise<string> {
 }
 
 // ── Classify email with Haiku ──
+function extractJobRef(subject: string, bodyPreview: string): string | null {
+  const haystack = `${subject}\n${bodyPreview}`
+  const legacy = haystack.match(/\bSW\d{4,}\b/i)
+  if (legacy) return legacy[0]
+  const prefixed = haystack.match(/\bSW[PFD]-\d+\b/i)
+  if (prefixed) return prefixed[0]
+  const po = haystack.match(/\bPO-?\d{6}\b/i)
+  if (po) return po[0].toUpperCase().startsWith('PO-') ? po[0].toUpperCase() : `PO-${po[0].replace(/PO/i, '')}`
+  return null
+}
+
+/** Rules triage — Context must not depend on a paid classifier being funded. */
+function classifyEmailRules(
+  from: string,
+  subject: string,
+  bodyPreview: string,
+): { classification: string; priority: string; action_needed: string | null; job_ref: string | null } {
+  const fromLower = (from || '').toLowerCase()
+  const hay = `${subject}\n${bodyPreview}`.toLowerCase()
+  const job_ref = extractJobRef(subject, bodyPreview)
+
+  if (
+    /noreply|no-reply|mailer-daemon|notifications?@|newsletter|unsubscribe/.test(fromLower) ||
+    /\bunsubscribe\b|\bview in browser\b|\bemail preferences\b/.test(hay)
+  ) {
+    return { classification: 'newsletter', priority: 'low', action_needed: null, job_ref }
+  }
+  if (/\burgent\b|\basap\b|\bcomplaint\b|\bunhappy\b|\bangry\b/.test(hay)) {
+    return { classification: 'complaint', priority: 'high', action_needed: 'review', job_ref }
+  }
+  if (/\binvoice\b|\binv-\d+/i.test(hay)) {
+    return { classification: 'invoice', priority: 'normal', action_needed: null, job_ref }
+  }
+  if (/\bquote\b|\bquotation\b|\bestimate\b/.test(hay)) {
+    return { classification: 'supplier_quote', priority: 'normal', action_needed: null, job_ref }
+  }
+  if (/\bcouncil\b|\bpermit\b|\bba\b|\bbuilding approval\b/.test(hay)) {
+    return { classification: 'council', priority: 'high', action_needed: 'review', job_ref }
+  }
+  // Default: treat as client reply so Context gets the words. Attribution
+  // ladder + Luna decide the job; empty/automated rows stay out of extraction.
+  return { classification: 'client_reply', priority: 'normal', action_needed: null, job_ref }
+}
+
 async function classifyEmail(
   from: string,
   subject: string,
   bodyPreview: string,
 ): Promise<{ classification: string; priority: string; action_needed: string | null; job_ref: string | null }> {
+  // R1: rules are enough to store; Haiku is optional enrichment only.
+  // Never block capture on unpaid/slow Haiku.
+  const rules = classifyEmailRules(from, subject, bodyPreview)
+  if (!ANTHROPIC_API_KEY) return rules
   try {
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
     const resp = await anthropic.messages.create({
@@ -111,16 +162,27 @@ Return the raw matched string preserving case/format. Leave null only if none pr
     })
 
     const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
-    // Extract JSON from response
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (jsonMatch) {
-      try { return JSON.parse(jsonMatch[0]) } catch { /* fall through to default */ }
+      try {
+        const parsed = JSON.parse(jsonMatch[0])
+        // Never let a vague "other" drop Context capture when rules found a
+        // concrete class. Prefer model job_ref when present.
+        if (parsed?.classification && parsed.classification !== 'other') {
+          return {
+            classification: String(parsed.classification),
+            priority: String(parsed.priority || rules.priority),
+            action_needed: parsed.action_needed ?? null,
+            job_ref: parsed.job_ref || rules.job_ref,
+          }
+        }
+      } catch { /* fall through to rules */ }
     }
   } catch (e) {
-    console.log('[monitor-inbox] Classification failed:', (e as Error).message)
+    console.log('[monitor-inbox] Classification failed; using rules:', (e as Error).message)
   }
 
-  return { classification: 'other', priority: 'normal', action_needed: null, job_ref: null }
+  return rules
 }
 
 // ── Comprehensive job resolution — tries every ref pattern + supplier/client fallbacks.
@@ -500,8 +562,11 @@ async function processMailbox(
 
     // ── Job Memory Loop: create business_event for supplier/client emails ──
     const isSupplier = ['supplier_quote', 'supplier_response'].includes(classification.classification)
-    const isClient = ['client_reply', 'complaint', 'urgent'].includes(classification.classification)
-    if (isSupplier || isClient) {
+    const isClient = ['client_reply', 'complaint', 'urgent', 'council', 'invoice'].includes(classification.classification)
+    const isNoise = ['newsletter', 'spam'].includes(classification.classification)
+    // Context target: store the words even when triage is uncertain. Only
+    // skip pure noise. "other" used to drop rows when Haiku was unpaid.
+    if (isSupplier || isClient || (!isNoise && classification.classification === 'other')) {
       // For supplier emails without a job match, try PO number from subject
       let finalJobId = jobId
       if (!finalJobId && isSupplier) {
@@ -542,24 +607,42 @@ async function processMailbox(
       // Legacy spine row shape — emitted either by the T7 fallback path
       // OR when t7Enabled is false. Defined once so both branches stay
       // in lockstep on shape.
+      // R5: hard-bind only on certain job/PO refs. Contact/heuristic matches
+      // stay as hints for the ladder (job_id null on write).
+      const via = matchedVia || ''
+      const certainRef = /(?:^|:)(ai_po|ai_job_ref|job_ref|legacy_sw|po|ai_quote):/i.test(`:${via}`) ||
+        /\b(po|ref|legacy_sw|job_ref|ai_po|ai_job)\b/i.test(via)
+      const custodyJobId = (finalJobId && matchConfidence === 'high' && certainRef) ? finalJobId : null
+      const matchMethod: MatchMethod = custodyJobId ? 'direct_reference' : 'none'
+      const matchConfidenceNum: number | undefined = custodyJobId ? 0.92 : undefined
+      const payload: Record<string, unknown> = {
+        from: fromEmail,
+        subject: subject.slice(0, 200),
+        body_preview: bodyPreview,
+        body: bodyPreview,
+        inbox_events_id: inboxEventId,
+        classification: classification.classification,
+        priority: classification.priority,
+        has_attachments: msg.hasAttachments || false,
+        matched: !!custodyJobId,
+        mailbox,
+        job_ref: classification.job_ref || null,
+        automated: isNoise ? true : undefined,
+      }
+      if (finalJobId && !custodyJobId) {
+        payload.attribution_hint = {
+          job_id: finalJobId,
+          match_method: matchConfidence === 'high' ? 'contact_id' : 'single_recent_active_job',
+          match_confidence: matchConfidence === 'high' ? 0.85 : 0.55,
+        }
+      }
       const legacySpineRow = {
         event_type: isSupplier ? 'supplier.email_in' : 'client.email_in',
         source: 'monitor_inbox',
-        entity_type: finalJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
-        entity_id: finalJobId || 'unmatched',
-        job_id: finalJobId || null,
-        payload: {
-          from: fromEmail,
-          subject: subject.slice(0, 200),
-          body_preview: bodyPreview,
-          inbox_events_id: inboxEventId,
-          classification: classification.classification,
-          priority: classification.priority,
-          has_attachments: msg.hasAttachments || false,
-          matched: !!finalJobId,
-          mailbox,
-          job_ref: classification.job_ref || null,
-        },
+        entity_type: custodyJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
+        entity_id: custodyJobId || 'unmatched',
+        job_id: custodyJobId,
+        payload,
         occurred_at: receivedAt || new Date().toISOString(),
       }
 
@@ -575,23 +658,6 @@ async function processMailbox(
           ? 'restricted_pii' as const
           : 'staff_only' as const
 
-        // Match method/confidence translation from monitor-inbox's existing
-        // signals. matchedVia comes from the upstream classifier (e.g.
-        // 'ai_job_ref', 'po', 'legacy_sw'); matchConfidence is 'high'/'low'/'none'.
-        let matchMethod: MatchMethod = 'none'
-        let matchConfidenceNum: number | undefined = undefined
-        if (finalJobId) {
-          if (matchConfidence === 'high') {
-            matchMethod = matchedVia?.includes('ref') ? 'direct_reference'
-                        : matchedVia?.includes('po')  ? 'direct_reference'
-                        : 'contact_id'
-            matchConfidenceNum = 0.92
-          } else {
-            matchMethod = 'single_recent_active_job'
-            matchConfidenceNum = 0.55  // below floor; recordEvidence will quarantine
-          }
-        }
-
         try {
           await recordEvidence(sb, {
             event_type: isSupplier ? 'supplier.email_in' : 'client.email_in',
@@ -599,26 +665,21 @@ async function processMailbox(
             channel: 'email' as Channel,
             direction: 'inbound' as Direction,
             occurred_at: legacySpineRow.occurred_at,
+            event_at: legacySpineRow.occurred_at,
+            provider_message_id: msg.id ? `graph:${msg.id}` : null,
             source_table: 'inbox_events',
             source_id: inboxEventId,
-            job_id: finalJobId || null,
+            job_id: custodyJobId,
             contact_id: ghlContactId,
-            entity_type: finalJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
-            entity_id: finalJobId || inboxEventId,
+            entity_type: custodyJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
+            entity_id: custodyJobId || inboxEventId,
             match_method: matchMethod,
             match_confidence: matchConfidenceNum,
             body_preview: bodyPreview,
-            // Loop 3: full body persistence is intentionally NOT enabled
-            // here yet — Microsoft Graph's /messages endpoint returns
-            // bodyPreview only (500c) unless we explicitly request body.
-            // Full body fetch is a separate change inside the existing
-            // Graph fetcher that requires its own performance review.
-            // For now we record the preview only; body_pointer stays NULL.
-            // body_full: undefined,
             thread_key: msg.conversationId || null,
             privacy_classification: privacy,
             retention_class: '7y_audit',
-            payload: legacySpineRow.payload,
+            payload,
           }, {
             org_id: DEFAULT_ORG_ID,
             storage_client: sb.storage,
@@ -644,6 +705,138 @@ async function processMailbox(
 
   }
 
+  return { processed }
+}
+
+/** Resolve M365 Group id by mail. Never use /users/ for these addresses. */
+async function resolveGroupIdByMail(token: string, mail: string): Promise<string | null> {
+  const url = `https://graph.microsoft.com/v1.0/groups?$filter=` +
+    encodeURIComponent(`mail eq '${mail}'`) +
+    `&$select=id,mail,displayName`
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+  if (!resp.ok) {
+    console.log(`[monitor-inbox] Group resolve failed for ${mail}: ${resp.status} ${await resp.text()}`)
+    return null
+  }
+  const groups = ((await resp.json()).value || []) as Array<{ id?: string }>
+  if (groups.length !== 1 || !groups[0]?.id) {
+    console.log(`[monitor-inbox] Group resolve expected 1 row for ${mail}, got ${groups.length}`)
+    return null
+  }
+  return groups[0].id as string
+}
+
+/**
+ * R7: patios@ / fencing@ are Groups. Poll conversations → threads → posts
+ * (same Graph shape as monitor-ses), write Context evidence with rules triage.
+ * Attachments stay pointers later; v1 stores post text/preview only.
+ */
+async function processGroupMailbox(
+  sb: any,
+  token: string,
+  mailbox: string,
+): Promise<{ processed: number }> {
+  let processed = 0
+  const groupId = await resolveGroupIdByMail(token, mailbox)
+  if (!groupId) return { processed: 0 }
+
+  const sinceIso = new Date(Date.now() - 15 * 60000).toISOString()
+  const convUrl =
+    `https://graph.microsoft.com/v1.0/groups/${groupId}/conversations` +
+    `?$select=id,lastDeliveredDateTime&$orderby=lastDeliveredDateTime desc&$top=10`
+  const convResp = await fetch(convUrl, { headers: { Authorization: `Bearer ${token}` } })
+  if (!convResp.ok) {
+    console.log(`[monitor-inbox] Group conversations failed for ${mailbox}: ${convResp.status} ${await convResp.text()}`)
+    return { processed: 0 }
+  }
+  const conversations = ((await convResp.json()).value || []) as Array<{ id: string; lastDeliveredDateTime?: string }>
+
+  for (const conv of conversations) {
+    if (conv.lastDeliveredDateTime && conv.lastDeliveredDateTime < sinceIso) continue
+    const threadUrl =
+      `https://graph.microsoft.com/v1.0/groups/${groupId}/conversations/${conv.id}/threads` +
+      `?$select=id,topic,lastDeliveredDateTime&$top=5`
+    const threadResp = await fetch(threadUrl, { headers: { Authorization: `Bearer ${token}` } })
+    if (!threadResp.ok) continue
+    const threads = ((await threadResp.json()).value || []) as Array<{ id: string; topic?: string }>
+    for (const thread of threads) {
+      const postUrl =
+        `https://graph.microsoft.com/v1.0/groups/${groupId}/threads/${thread.id}/posts` +
+        `?$select=id,from,receivedDateTime,body,hasAttachments&$top=10`
+      const postResp = await fetch(postUrl, { headers: { Authorization: `Bearer ${token}` } })
+      if (!postResp.ok) continue
+      const posts = ((await postResp.json()).value || []) as Array<{
+        id: string
+        from?: { emailAddress?: { address?: string } }
+        receivedDateTime?: string
+        body?: { content?: string }
+        hasAttachments?: boolean
+      }>
+      for (const post of posts) {
+        if (post.receivedDateTime && post.receivedDateTime < sinceIso) continue
+        const providerId = `graph-group:${post.id}`
+        const { data: existing } = await sb.from('business_events')
+          .select('id').eq('provider_message_id', providerId).limit(1)
+        if (existing?.length) continue
+
+        const fromEmail = post.from?.emailAddress?.address || ''
+        const subject = thread.topic || '(no subject)'
+        const rawBody = (post.body?.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        const bodyPreview = rawBody.slice(0, 500)
+        if (!bodyPreview) continue
+
+        const classification = await classifyEmail(fromEmail, subject, bodyPreview)
+        const isNoise = ['newsletter', 'spam'].includes(classification.classification)
+        if (isNoise) continue
+        const isSupplier = ['supplier_quote', 'supplier_response'].includes(classification.classification)
+        const resolved = await resolveJobId(sb, fromEmail, subject, bodyPreview, classification.job_ref)
+        const via = resolved.matchedVia || ''
+        const certainRef = /\b(po|ref|legacy_sw|job_ref|ai_po|ai_job)\b/i.test(via)
+        const custodyJobId = (resolved.jobId && resolved.confidence === 'high' && certainRef) ? resolved.jobId : null
+
+        try {
+          await recordEvidence(sb, {
+            event_type: isSupplier ? 'supplier.email_in' : 'client.email_in',
+            source: 'monitor-inbox-group',
+            channel: 'email' as Channel,
+            direction: 'inbound' as Direction,
+            occurred_at: post.receivedDateTime || new Date().toISOString(),
+            event_at: post.receivedDateTime || null,
+            provider_message_id: providerId,
+            source_table: 'graph_group_post',
+            source_id: post.id,
+            job_id: custodyJobId,
+            contact_id: null,
+            entity_type: custodyJobId ? 'job' : (isSupplier ? 'unmatched_supplier' : 'unmatched_contact'),
+            entity_id: custodyJobId || post.id,
+            match_method: custodyJobId ? 'direct_reference' : 'none',
+            match_confidence: custodyJobId ? 0.92 : undefined,
+            body_preview: bodyPreview,
+            thread_key: thread.id,
+            privacy_classification: 'staff_only',
+            retention_class: '7y_audit',
+            payload: {
+              from: fromEmail,
+              subject: subject.slice(0, 200),
+              body: bodyPreview,
+              body_preview: bodyPreview,
+              mailbox,
+              group_id: groupId,
+              classification: classification.classification,
+              has_attachments: !!post.hasAttachments,
+              job_ref: classification.job_ref,
+              attribution_hint: resolved.jobId && !custodyJobId
+                ? { job_id: resolved.jobId, match_method: 'contact_id', match_confidence: 0.85 }
+                : undefined,
+            },
+          }, { org_id: DEFAULT_ORG_ID, storage_client: sb.storage })
+          processed++
+        } catch (e) {
+          console.error(`[monitor-inbox] group evidence write failed ${mailbox}:`, (e as Error).message)
+        }
+      }
+    }
+  }
   return { processed }
 }
 
@@ -714,6 +907,12 @@ Deno.serve(async (req) => {
             .eq('id', cfg.id)
         } catch { /* non-fatal */ }
       }
+    }
+
+    // R7: Group inboxes (patios@, fencing@) — Graph /groups path, not /users.
+    for (const groupMail of GROUP_MAILBOXES) {
+      const { processed } = await processGroupMailbox(sb, token, groupMail)
+      totalProcessed += processed
     }
 
     const result = {
