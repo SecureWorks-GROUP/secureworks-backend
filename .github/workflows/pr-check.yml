@@ -2,8 +2,11 @@ name: PR Check — Edge Functions
 
 on:
   pull_request:
-    branches:
-      - main
+    # Do not restrict to main. That filter matches the PR base, so stacked
+    # packet PRs targeting cio/context-b*-recovery never ran deno-check,
+    # migration-contracts or ses-proof-harness. 834 and 835 pass because
+    # they target main. Run the same three jobs on every PR that touches
+    # these paths.
     paths:
       - 'supabase/functions/**'
       # Migrations-only and scripts-only PRs must still trigger the required

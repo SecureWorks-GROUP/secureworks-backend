@@ -1,3 +1,4 @@
+import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 
 // Deposit stamp (ACCREC) — projects "the deposit invoice is PAID in Xero" onto
@@ -199,12 +200,17 @@ export async function applyDepositStamp(
     }
     if (Array.isArray(logged) && logged.length > 0) return null;
 
-    await client.from("business_events").insert({
+    await insertCapturedEvidence(client, {
       event_type: "job.deposit_stamp_contradicted",
       source: "xero-sync",
       entity_type: "invoice",
       entity_id: inv.InvoiceID,
       job_id: job.id,
+      match_method: "direct_job_id",
+      channel: "invoice", direction: "internal",
+      occurred_at: now.toISOString(),
+      event_at: xeroDateToIsoTimestamp(inv.UpdatedDateUTC),
+      body_preview: `Deposit invoice ${inv.InvoiceNumber || inv.InvoiceID} is ${decision.invoice_status}; prior deposit stamp retained.`,
       payload: {
         invoice_number: inv.InvoiceNumber || null,
         invoice_status: decision.invoice_status,
@@ -236,12 +242,17 @@ export async function applyDepositStamp(
   if (!Array.isArray(stampedRows) || stampedRows.length === 0) return null;
 
   if (await automationLaneEnabled(client, "capture")) {
-    await client.from("business_events").insert({
+    await insertCapturedEvidence(client, {
       event_type: "job.deposit_stamped",
       source: "xero-sync",
       entity_type: "invoice",
       entity_id: inv.InvoiceID,
       job_id: job.id,
+      match_method: "direct_job_id",
+      channel: "invoice", direction: "internal",
+      occurred_at: now.toISOString(),
+      event_at: xeroDateToIsoTimestamp(inv.FullyPaidOnDate),
+      body_preview: `Xero marks deposit invoice ${inv.InvoiceNumber || inv.InvoiceID} PAID.`,
       payload: {
         invoice_number: inv.InvoiceNumber || null,
         deposit_at: decision.deposit_at,
