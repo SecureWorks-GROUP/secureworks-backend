@@ -1,4 +1,13 @@
 // Current memory visibility. Historical rows remain in their source tables for audit.
+
+/** Live Luna subscription extractor stamp. Haiku / instruction extractors must not count as Luna. */
+export const LUNA_SUBSCRIPTION_EXTRACTOR = "context-luna-subscription:v1";
+
+export function isLunaSubscriptionFact(row: Record<string, unknown>): boolean {
+  const p = row.provenance as Record<string, unknown> | null;
+  return p?.extractor === LUNA_SUBSCRIPTION_EXTRACTOR;
+}
+
 export function isCurrentContextFact(
   row: Record<string, unknown>,
   now = Date.now(),
@@ -22,4 +31,12 @@ export function isCurrentContextFact(
     ? Date.parse(row.expires_at)
     : NaN;
   return Number.isFinite(expiry) && expiry > now;
+}
+
+/** Current + Luna-stamped. Used by the invoice door so Haiku rows never read as Luna coverage. */
+export function isCurrentLunaSubscriptionFact(
+  row: Record<string, unknown>,
+  now = Date.now(),
+): boolean {
+  return isCurrentContextFact(row, now) && isLunaSubscriptionFact(row);
 }
