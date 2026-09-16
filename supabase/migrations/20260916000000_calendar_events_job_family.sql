@@ -18,7 +18,8 @@
 -- data/repair-pipeline-type-audit-scout/report.md (outside this repo)
 -- for the full diagnosis.
 --
--- Contract for consumers (see AGENTS.md "Calendar feed job_family"):
+-- Contract for consumers (owner: AGENTS.md, the `calendar_events.job_family`
+-- bullet under "Never Select `scope_json` In A List/Feed Query"):
 -- job_family is present on every calendar event row; value 'repair'
 -- means "treat as Repair division regardless of job_type"; null or
 -- anything else means fall back to job_type.

@@ -320,9 +320,11 @@ Rules:
   migration on `column ja.label does not exist` and still 400s on
   `include_financials=true`. That gap remains OPEN; closing it means landing
   the three `ALTER TABLE job_assignments` statements as a repo migration
-  sequenced before this view migration. Against production the view carried
-  44 columns before this migration and 45 after it; `CAL_FINANCIAL_COLUMNS`
-  matches the post-migration shape. Two rules for the next edit: the view has
+  sequenced before this view migration. Measured read-only against production
+  on 2026-09-16, the view carried 44 columns before this migration; it carries
+  45 once applied (by construction of the view text, pinned by the contract
+  case below, not yet re-measured live), and `CAL_FINANCIAL_COLUMNS` matches
+  that post-migration shape. Two rules for the next edit: the view has
   no `DROP VIEW`, so `CREATE OR REPLACE VIEW` must APPEND any new column
   LAST — Postgres refuses a mid-list insert as a rename of the column it
   displaces — and the executable proof of both the append and the projected
