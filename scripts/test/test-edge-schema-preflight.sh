@@ -250,7 +250,8 @@ write_response() {
   CONTEXT_ACCURACY_MIGRATION="$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" \
   CONTEXT_MAIL_MIGRATION="$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" \
   CONTEXT_CAPTURE_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911171000_context_capture_attribution.sql" | awk '{print $1}')" \
-  CONTEXT_FACTS_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911172000_context_job_fact_custody.sql" | awk '{print $1}')" \
+  CONTEXT_FACTS_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260916120000_context_job_fact_custody.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260916120000_context_job_fact_custody.sql" | awk '{print $1}')" \
+  CONTEXT_BUDGET_SCOPE_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260916120100_context_extraction_budget_scope.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260916120100_context_extraction_budget_scope.sql" | awk '{print $1}')" \
   CONTEXT_ACCURACY_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911173000_context_accuracy_and_status.sql" | awk '{print $1}')" \
   CONTEXT_MAIL_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" | awk '{print $1}')" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
@@ -658,7 +659,8 @@ for version, name, key in [
     ("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"),
     ("20260911170001", "context_run_ledger", "CONTEXT_LEDGER_EXPECTED_SHA"),
     ("20260911171000", "context_capture_attribution", "CONTEXT_CAPTURE_EXPECTED_SHA"),
-    ("20260911172000", "context_job_fact_custody", "CONTEXT_FACTS_EXPECTED_SHA"),
+    ("20260916120000", "context_job_fact_custody", "CONTEXT_FACTS_EXPECTED_SHA"),
+    ("20260916120100", "context_extraction_budget_scope", "CONTEXT_BUDGET_SCOPE_EXPECTED_SHA"),
     ("20260911173000", "context_accuracy_and_status", "CONTEXT_ACCURACY_EXPECTED_SHA"),
     ("20260911174000", "context_mail_capture", "CONTEXT_MAIL_EXPECTED_SHA"),
 ]:
