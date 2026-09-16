@@ -352,8 +352,6 @@ export interface SalesBookingCase {
   stage_name: string | null
   /** Additive: newest GHL activity timestamp, used to order the thread budget. */
   last_activity_at: string | null
-  /** Which fact produced `status`. `unread` means nothing was proved. */
-  status_source: 'thread_facts' | 'unread'
 }
 
 /** A contact whose "name" is really a phone number is an unnamed enquiry. */
@@ -399,7 +397,6 @@ export function projectSalesBookingCase(
     tags: Array.isArray(contact.tags) ? contact.tags.map((t) => String(t)) : [],
     stage_name: (stageId && stages[stageId]) || null,
     last_activity_at: typeof updatedAt === 'string' ? updatedAt : null,
-    status_source: 'unread',
   }
 }
 
@@ -911,24 +908,15 @@ async function readOpportunitiesLive(pipelineId: string): Promise<SalesBookingOp
   return { opportunities, stages, exhausted, pages_scanned: pages, total, reason }
 }
 
-/**
- * One contact's conversation messages, same two-step and same shape tolerance
- * as ghl-proxy `get_conversation`: conversation search, then messages. A read
- * failure REJECTS so the caller records `read_ok:false` rather than an empty
- * (and therefore falsely quiet) thread.
- */
-async function readThreadLive(contactId: string): Promise<SalesBookingMessage[]> {
-  const locationId = Deno.env.get('GHL_LOCATION_ID') || ''
-  const search = await ghlRead(
-    `/conversations/search?contactId=${encodeURIComponent(contactId)}&locationId=${encodeURIComponent(locationId)}`,
-  )
-  const conversations = Array.isArray(search.conversations) ? search.conversations as Record<string, unknown>[] : []
-  if (conversations.length === 0) return []
-  const conversationId = String(conversations[0].id || '')
-  if (!conversationId) return []
-  const result = await ghlRead(
-    `/conversations/${encodeURIComponent(conversationId)}/messages?limit=30&type=TYPE_SMS,TYPE_EMAIL,TYPE_CALL&sort=desc&sortBy=dateAdded`,
-  )
+function conversationsFromGhlBody(body: Record<string, unknown> | unknown[]): Record<string, unknown>[] {
+  if (Array.isArray(body)) return body as Record<string, unknown>[]
+  if (body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>).conversations)) {
+    return (body as Record<string, unknown>).conversations as Record<string, unknown>[]
+  }
+  return []
+}
+
+function messagesFromGhlBody(result: Record<string, unknown>): SalesBookingMessage[] {
   const nested = result.messages && typeof result.messages === 'object'
     ? (result.messages as Record<string, unknown>).messages
     : null
@@ -947,6 +935,41 @@ async function readThreadLive(contactId: string): Promise<SalesBookingMessage[]>
     timestamp: String(m.dateAdded || m.createdAt || m.timestamp || ''),
     userId: typeof m.userId === 'string' ? m.userId : undefined,
   }))
+}
+
+/**
+ * One contact's conversation messages, same two-step and same shape tolerance
+ * as ghl-proxy `get_conversation`: conversation search, then the contact list
+ * when search returns 200 with no rows, then messages. Empty search is not
+ * proof of no thread (offer-out SMS conversations are omitted there). A
+ * genuine miss on both lookups is an empty thread. A read failure REJECTS so
+ * the caller records `read_ok:false` rather than an empty (and therefore
+ * falsely quiet) thread.
+ */
+export async function readSalesBookingThreadMessages(
+  ghlGet: (path: string) => Promise<Record<string, unknown>>,
+  contactId: string,
+  locationId: string,
+): Promise<SalesBookingMessage[]> {
+  const contactQuery = `contactId=${encodeURIComponent(contactId)}&locationId=${encodeURIComponent(locationId)}`
+  const search = await ghlGet(`/conversations/search?${contactQuery}`)
+  let conversations = conversationsFromGhlBody(search)
+  if (conversations.length === 0) {
+    const direct = await ghlGet(`/conversations?${contactQuery}`)
+    conversations = conversationsFromGhlBody(direct)
+  }
+  if (conversations.length === 0) return []
+  const conversationId = String(conversations[0].id || '')
+  if (!conversationId) return []
+  const result = await ghlGet(
+    `/conversations/${encodeURIComponent(conversationId)}/messages?limit=30&type=TYPE_SMS,TYPE_EMAIL,TYPE_CALL&sort=desc&sortBy=dateAdded`,
+  )
+  return messagesFromGhlBody(result)
+}
+
+async function readThreadLive(contactId: string): Promise<SalesBookingMessage[]> {
+  const locationId = Deno.env.get('GHL_LOCATION_ID') || ''
+  return await readSalesBookingThreadMessages(ghlRead, contactId, locationId)
 }
 
 /**

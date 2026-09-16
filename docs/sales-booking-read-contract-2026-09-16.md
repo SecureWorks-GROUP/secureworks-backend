@@ -11,8 +11,8 @@ Regressions: `supabase/functions/ops-api/sales_booking_read_test.ts`.
 ## It is read-only, and send stays held
 
 No write of any kind: no Supabase mutation, no GHL write, no calendar create,
-no send. Every dependency is a reader and a test parses the module for write
-verbs. `send_hold: true` and `policy.{activation,send,calendar_write}: 'held'`
+no send. Every dependency is a reader. `send_hold: true` and
+`policy.{activation,send,calendar_write}: 'held'`
 are constants the view renders; they are not the enforcement, because this
 action has no send or calendar-write capability to gate.
 
@@ -44,13 +44,11 @@ Additions:
   `week_start`. Each entry: `event_id`, `start`, `end` (ISO with `+08:00`),
   `title`, `kind` (`busy` | `leave` | `personal`), `source` (`outlook_primary`),
   plus `show_as`, `blocks_capacity`, `is_all_day`, `location`, `title_withheld`.
-  `events` is the SAME array under the key the shipped view already reads.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
   `template_outbound_count`.
-- **`diary_read`** — `{read_ok, reason, source, calendar_email}`. Also mirrored
-  at `resource.calendar` (with `leave: 'not_read'`) for the shipped view.
+- **`diary_read`** — `{read_ok, reason, source, calendar_email}`.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
   `scoper_user_id`, `sender_line`, `sender_line_source`.
 - **`defaults`** — the Captain defaults this response was produced under, so
@@ -66,7 +64,7 @@ Additions:
   clear week. Unread coverage is never free capacity.
 - **`thread_facts[id].read_ok:false`** means nothing was proved about that
   thread. The case still appears, and its `status` stays the default
-  `needs_decision` with `status_source:'unread'`.
+  `needs_decision`. Classification lives only in `thread_facts`.
 - **Cases with no entry in `thread_facts`** were never attempted (a bound was
   hit). `coverage.gaps` names how many and why. Do not paint them as clear.
 - **`kind` comes from provider fields only.** `showAs:oof` is leave; a private

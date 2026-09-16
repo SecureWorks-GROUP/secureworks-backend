@@ -34,6 +34,7 @@ import {
   perthWeekWindow,
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
+  readSalesBookingThreadMessages,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
   SALES_BOOKING_RESOURCES,
@@ -284,9 +285,9 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
     suburb: "Canning Vale",
     display_name: "Jane Smith",
     status: "needs_decision",
-    status_source: "unread",
     stage_name: "New Lead",
   });
+  assertEquals("status_source" in named, false);
   assertEquals(named.tags, ["stratco"]);
 
   const anonymous = projectSalesBookingCase(
@@ -315,7 +316,7 @@ Deno.test("case status stays at the reference default; classification lives only
     { resource: "marnin", week_start: WEEK },
   );
   assertEquals(payload.cases[0].status, "needs_decision");
-  assertEquals(payload.cases[0].status_source, "unread");
+  assertEquals("status_source" in payload.cases[0], false);
   assertEquals(payload.thread_facts["opp-1"].classification, "waiting_reply");
   assertEquals(payload.thread_facts["opp-1"].read_ok, true);
 });
@@ -455,7 +456,7 @@ Deno.test("a failed thread read degrades only that case and is named in coverage
   assertStringIncludes(facts.reason!, "GHL 502");
   assertEquals(facts.classification, "unread");
   assertEquals(payload.cases[0].status, "needs_decision");
-  assertEquals(payload.cases[0].status_source, "unread");
+  assertEquals("status_source" in payload.cases[0], false);
   assert(payload.coverage.gaps.some((g) => g.includes("thread read(s) failed")));
 });
 
@@ -554,6 +555,87 @@ Deno.test("scoper_user_id overrides the resource default for the calendar read o
   assertEquals(seen, "11111111-2222-3333-4444-555555555555");
   // The roster still comes from the resource's own pipeline.
   assertEquals(payload.resource.pipeline_id, "I9t8njpuR0Dm7B2NDcvI");
+});
+
+Deno.test("empty conversation search falls through to the contact list before deriving facts", async () => {
+  const paths: string[] = [];
+  const ghlGet = (path: string) => {
+    paths.push(path);
+    if (path.startsWith("/conversations/search")) {
+      return Promise.resolve({ conversations: [] });
+    }
+    if (path.startsWith("/conversations?") && path.includes("contactId=contact-1")) {
+      return Promise.resolve({ conversations: [{ id: "conv-sms-1" }] });
+    }
+    if (path.includes("/conversations/conv-sms-1/messages")) {
+      return Promise.resolve({
+        messages: [
+          {
+            id: "m1",
+            messageType: "TYPE_SMS",
+            direction: "outbound",
+            body: "Here is the quote for Tuesday",
+            dateAdded: "2026-09-15T22:00:00.000Z",
+          },
+        ],
+      });
+    }
+    return Promise.reject(new Error(`unexpected path ${path}`));
+  };
+
+  const messages = await readSalesBookingThreadMessages(ghlGet, "contact-1", "loc-1");
+  assertEquals(messages.length, 1);
+  assertEquals(messages[0].body, "Here is the quote for Tuesday");
+  assert(paths.some((p) => p.startsWith("/conversations/search")));
+  assert(paths.some((p) => p.startsWith("/conversations?") && p.includes("contactId=contact-1")));
+  assert(paths.some((p) => p.includes("/conversations/conv-sms-1/messages")));
+
+  const payload = await salesBookingRead(
+    deps({
+      readThread: ({ contactId }) => readSalesBookingThreadMessages(ghlGet, contactId, "loc-1"),
+    }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(payload.cases[0].status, "needs_decision");
+  assertEquals(payload.thread_facts["opp-1"].read_ok, true);
+  assertEquals(payload.thread_facts["opp-1"].classification, "waiting_reply");
+});
+
+Deno.test("empty search and empty contact list is a new enquiry, not a failed read", async () => {
+  const messages = await readSalesBookingThreadMessages(
+    (path) => {
+      if (path.startsWith("/conversations/search")) return Promise.resolve({ conversations: [] });
+      if (path.startsWith("/conversations?")) return Promise.resolve({ conversations: [] });
+      return Promise.reject(new Error(`messages must not be fetched without a conversation: ${path}`));
+    },
+    "contact-new",
+    "loc-1",
+  );
+  assertEquals(messages, []);
+
+  const payload = await salesBookingRead(
+    deps({ readThread: () => Promise.resolve(messages) }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(payload.thread_facts["opp-1"].read_ok, true);
+  assertEquals(payload.thread_facts["opp-1"].classification, "ready_to_contact");
+});
+
+Deno.test("a conversation search hit does not call the contact list fallback", async () => {
+  const paths: string[] = [];
+  await readSalesBookingThreadMessages(
+    (path) => {
+      paths.push(path);
+      if (path.startsWith("/conversations/search")) {
+        return Promise.resolve({ conversations: [{ id: "conv-1" }] });
+      }
+      if (path.includes("/conversations/conv-1/messages")) return Promise.resolve({ messages: [] });
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    },
+    "contact-1",
+    "loc-1",
+  );
+  assertEquals(paths.some((p) => p.startsWith("/conversations?") && !p.startsWith("/conversations/search")), false);
 });
 
 Deno.test("week_start defaults to the current Perth week when omitted", async () => {
