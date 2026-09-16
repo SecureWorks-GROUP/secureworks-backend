@@ -89,6 +89,17 @@ if [[ "$action" == "makesafe_deterministic_intake_replay" ]]; then
   exit 0
 fi
 
+# Stands in for resolveSalesBookingResource: an unknown resource is refused in
+# the request validator, before any GHL pipeline scan or Graph calendar read.
+if [[ "$action" == "sales_booking_read" ]]; then
+  if printf '%s' "$url" | grep -q 'resource=__deploy_probe__'; then
+    printf '%s\n' '{"error":"Unknown resource \"__deploy_probe__\". Use: nithin, marnin"}'
+  else
+    printf '%s\n' '{"ok":true,"version":"sales-booking-api/v1"}'
+  fi
+  exit 0
+fi
+
 case "$action" in
   trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
     printf '%s\n' '{"error":"Login required"}'

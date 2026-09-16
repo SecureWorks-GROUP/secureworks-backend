@@ -802,6 +802,13 @@ import {
   remintSesCaptainLockDraftAction,
 } from './ses_captain_lock_draft_remint.ts'
 import { buildOpsApiVersion } from './ops_api_version.ts'
+// Sales Booking view read (calendar + queue + thread facts). Read-only: the
+// module holds no write verb and no send/calendar-write capability, and its
+// send_hold / policy flags are constants the view renders, not the enforcement.
+import {
+  salesBookingReadAction,
+  SalesBookingRequestError,
+} from './sales_booking_read.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
@@ -5090,6 +5097,38 @@ if (import.meta.main) serve(async (req: Request) => {
 
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
+      case 'sales_booking_read': {
+        // GET-shaped read: ops.html's opsFetch puts every param on the query
+        // string. POST body keys are accepted only as a convenience for the
+        // terminal; there is no write path either way.
+        const sbParam = (name: string) => url.searchParams.get(name) ?? body[name] ?? null
+        const sbInt = (name: string) => {
+          const raw = sbParam(name)
+          return raw === null || raw === '' ? undefined : Number(raw)
+        }
+        const sbThreadFacts = sbParam('include_thread_facts')
+        const sbCaseIds = sbParam('case_ids')
+        try {
+          return json(await salesBookingReadAction(client, {
+            resource: sbParam('resource'),
+            week_start: sbParam('week_start'),
+            scoper_user_id: sbParam('scoper_user_id'),
+            include_thread_facts: sbThreadFacts === null
+              ? undefined
+              : String(sbThreadFacts) !== 'false',
+            thread_limit: sbInt('thread_limit'),
+            thread_budget_ms: sbInt('thread_budget_ms'),
+            case_ids: Array.isArray(sbCaseIds)
+              ? sbCaseIds.map((id: unknown) => String(id))
+              : typeof sbCaseIds === 'string' && sbCaseIds
+              ? sbCaseIds.split(',').map((id: string) => id.trim()).filter(Boolean)
+              : null,
+          }))
+        } catch (e) {
+          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
       case 'ses_synthetic_livefire_capabilities': {
         return json({
           success: true,
