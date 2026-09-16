@@ -3,6 +3,9 @@
 -- draft on PR #838 so the three context migrations already ledgered in production
 -- (20260911170000, 20260911170001, 20260911171000) stay byte-identical to main.
 -- Every statement is re-runnable: a second apply on production is a no-op.
+-- Every column reference inside a join or subquery is table-qualified: production
+-- business_events carries source_table/source_id, so a bare alias named like a
+-- column is ambiguous there (SQLSTATE 42702 on the first apply, 2026-09-16).
 -- Preserve the five-argument legacy RPC; the new nine-argument overload is v2-only.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
@@ -178,9 +181,9 @@ BEGIN
  request_hash:=encode(sha256(convert_to(jsonb_build_object('job',p_job_id,'events',p_events,'new',p_new,
    'supersedes',p_supersedes,'retracts',p_retracts,'version',p_extractor_version)::text,'UTF8')),'hex');
  -- Serialize the whole revision and its receipt before examining source rows.
- SELECT * INTO r FROM public.context_extraction_runs WHERE id=p_run_id FOR UPDATE;
+ SELECT run.* INTO r FROM public.context_extraction_runs run WHERE run.id=p_run_id FOR UPDATE;
  IF NOT FOUND OR r.job_id IS DISTINCT FROM p_job_id OR r.phase<>'extraction' THEN RAISE EXCEPTION 'luna_run_identity_invalid'; END IF;
- SELECT * INTO receipt FROM public.luna_context_job_revisions WHERE run_id=p_run_id;
+ SELECT rev.* INTO receipt FROM public.luna_context_job_revisions rev WHERE rev.run_id=p_run_id;
  IF FOUND THEN
   IF receipt.request_sha256=request_hash THEN RETURN receipt.result||jsonb_build_object('outcome','idempotent'); END IF;
   RETURN jsonb_build_object('outcome','held','reason','run_already_committed');
@@ -276,7 +279,7 @@ BEGIN
   review_time:=CASE WHEN kind='client_preference' THEN ((event_time AT TIME ZONE 'Australia/Perth')+interval '1 year') AT TIME ZONE 'Australia/Perth' ELSE NULL END;
   target:=CASE WHEN kind IN ('current_state','pending_action','quote_issue') THEN 'job_temporary_context' ELSE 'job_context' END;
   fact_id:=md5(p_run_id::text||':luna_v2:'||n::text)::uuid;
-  SELECT jsonb_agg(jsonb_build_object('table','business_events','id',id::text) ORDER BY id) INTO source_refs FROM unnest(refs) id;
+  SELECT jsonb_agg(jsonb_build_object('table','business_events','id',cited.source_event_id::text) ORDER BY cited.source_event_id) INTO source_refs FROM unnest(refs) AS cited(source_event_id);
   EXECUTE format('INSERT INTO public.%I(id,job_id,kind,value,provenance,correlation_id,lifecycle,event_date,expires_at,review_at,source_event_ids,attribution_confidence,extractor_version,trust)
    VALUES($1,$2,$3,$4,$5,$6,''current'',$7,$8,$9,$10,$11,''luna_v2'',''luna'') RETURNING to_jsonb(%I)',target,target)
   INTO actual USING fact_id,p_job_id,kind,
@@ -327,8 +330,8 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
  AND (kind NOT IN ('current_state','pending_action','quote_issue','proposal') OR expires_at IS NOT NULL OR trust IS DISTINCT FROM 'legacy')
  AND (extractor_version IS DISTINCT FROM 'luna_v2' OR (
   cardinality(source_event_ids)>0 AND NOT EXISTS (
-   SELECT 1 FROM unnest(visible.source_event_ids) source_id
-   LEFT JOIN public.business_events b ON b.id=source_id
+   SELECT 1 FROM unnest(visible.source_event_ids) AS cited(source_event_id)
+   LEFT JOIN public.business_events b ON b.id=cited.source_event_id
    WHERE b.id IS NULL OR b.job_id IS DISTINCT FROM visible.job_id
     OR b.attribution_status IS NULL OR b.attribution_status NOT IN ('direct','thread','single_open','single_line','luna')
     OR b.event_at IS NULL OR b.attribution_confidence IS NULL OR b.attribution_confidence NOT BETWEEN 0 AND 1
