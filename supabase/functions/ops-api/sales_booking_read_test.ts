@@ -38,11 +38,11 @@ import {
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
   SALES_BOOKING_RESOURCES,
-  salesBookingRead,
-  SalesBookingRequestError,
   type SalesBookingDiaryScan,
   type SalesBookingMessage,
+  salesBookingRead,
   type SalesBookingReadDependencies,
+  SalesBookingRequestError,
 } from "./sales_booking_read.ts";
 
 const NOW = new Date("2026-09-16T02:00:00.000Z"); // Wed 10:00 Perth
@@ -50,24 +50,39 @@ const WEEK = "2026-09-14"; // Monday
 
 // ── Fixtures ────────────────────────────────────────────────
 
-function opportunity(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function opportunity(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     id: "opp-1",
     name: "Jane Smith",
     pipelineStageId: "stage-a",
     status: "open",
     updatedAt: "2026-09-15T01:00:00.000Z",
-    contact: { id: "contact-1", name: "Jane Smith", city: "Canning Vale", tags: ["stratco"] },
+    contact: {
+      id: "contact-1",
+      name: "Jane Smith",
+      city: "Canning Vale",
+      tags: ["stratco"],
+    },
     ...overrides,
   };
 }
 
-function graphEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function graphEvent(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     id: "evt-1",
     subject: "Scope visit - Beckenham",
-    start: { dateTime: "2026-09-15T10:00:00.0000000", timeZone: "Australia/Perth" },
-    end: { dateTime: "2026-09-15T11:30:00.0000000", timeZone: "Australia/Perth" },
+    start: {
+      dateTime: "2026-09-15T10:00:00.0000000",
+      timeZone: "Australia/Perth",
+    },
+    end: {
+      dateTime: "2026-09-15T11:30:00.0000000",
+      timeZone: "Australia/Perth",
+    },
     location: { displayName: "12 Example St" },
     isAllDay: false,
     showAs: "busy",
@@ -77,7 +92,9 @@ function graphEvent(overrides: Record<string, unknown> = {}): Record<string, unk
 }
 
 /** A dependency set whose every member is a reader; no write seam exists. */
-function deps(overrides: Partial<SalesBookingReadDependencies> = {}): SalesBookingReadDependencies {
+function deps(
+  overrides: Partial<SalesBookingReadDependencies> = {},
+): SalesBookingReadDependencies {
   return {
     readOpportunities: () =>
       Promise.resolve({
@@ -150,8 +167,14 @@ Deno.test("perthWeekWindow refuses a non-Monday and an impossible date", () => {
 Deno.test("defaultPerthWeekStart reads the Perth wall clock, not UTC", () => {
   // 2026-09-13T17:30Z is Sunday in UTC but Monday 01:30 in Perth: the Perth
   // week has already rolled over.
-  assertEquals(defaultPerthWeekStart(new Date("2026-09-13T17:30:00Z")), "2026-09-14");
-  assertEquals(defaultPerthWeekStart(new Date("2026-09-13T15:00:00Z")), "2026-09-07");
+  assertEquals(
+    defaultPerthWeekStart(new Date("2026-09-13T17:30:00Z")),
+    "2026-09-14",
+  );
+  assertEquals(
+    defaultPerthWeekStart(new Date("2026-09-13T15:00:00Z")),
+    "2026-09-07",
+  );
   assertEquals(defaultPerthWeekStart(NOW), "2026-09-14");
 });
 
@@ -159,8 +182,16 @@ Deno.test("defaultPerthWeekStart reads the Perth wall clock, not UTC", () => {
 
 Deno.test("template markers match case-insensitively across line wrapping", () => {
   assert(isSalesBookingTemplateBody("Thanks for reaching out to SecureWorks!"));
-  assert(isSalesBookingTemplateBody("Sorry we missed your\n  call, we will ring back."));
-  assert(!isSalesBookingTemplateBody("Hi Jane, can I come Tuesday between 10 and 11:30?"));
+  assert(
+    isSalesBookingTemplateBody(
+      "Sorry we missed your\n  call, we will ring back.",
+    ),
+  );
+  assert(
+    !isSalesBookingTemplateBody(
+      "Hi Jane, can I come Tuesday between 10 and 11:30?",
+    ),
+  );
   assert(!isSalesBookingTemplateBody(""));
   assert(!isSalesBookingTemplateBody(null));
 });
@@ -209,7 +240,12 @@ Deno.test("FIXTURE: a template-only thread is not an answered thread", () => {
 
 Deno.test("a real human outbound inside 20h is waiting_reply; outside it is follow_up_due", () => {
   const human = (timestamp: string): SalesBookingMessage[] => [
-    { type: "TYPE_SMS", direction: "inbound", body: "keen", timestamp: "2026-09-14T01:00:00.000Z" },
+    {
+      type: "TYPE_SMS",
+      direction: "inbound",
+      body: "keen",
+      timestamp: "2026-09-14T01:00:00.000Z",
+    },
     {
       type: "TYPE_SMS",
       direction: "outbound",
@@ -238,7 +274,12 @@ Deno.test("a real human outbound inside 20h is waiting_reply; outside it is foll
 
 Deno.test("an empty thread is ready_to_contact, and activity rows are not contact", () => {
   assertEquals(
-    deriveSalesBookingThreadFacts({ caseId: "c", contactId: "x", messages: [], nowMs: NOW.getTime() })
+    deriveSalesBookingThreadFacts({
+      caseId: "c",
+      contactId: "x",
+      messages: [],
+      nowMs: NOW.getTime(),
+    })
       .classification,
     "ready_to_contact",
   );
@@ -246,7 +287,12 @@ Deno.test("an empty thread is ready_to_contact, and activity rows are not contac
     caseId: "c",
     contactId: "x",
     messages: [
-      { type: "TYPE_ACTIVITY_OPPORTUNITY", direction: "outbound", body: "stage moved", timestamp: "2026-09-16T01:00:00.000Z" },
+      {
+        type: "TYPE_ACTIVITY_OPPORTUNITY",
+        direction: "outbound",
+        body: "stage moved",
+        timestamp: "2026-09-16T01:00:00.000Z",
+      },
       { type: "TYPE_SMS", direction: "outbound", body: "hi", timestamp: "" },
     ],
     nowMs: NOW.getTime(),
@@ -260,8 +306,17 @@ Deno.test("direction falls back to userId exactly as ghl-proxy does", () => {
     caseId: "c",
     contactId: "x",
     messages: [
-      { type: "TYPE_SMS", body: "ours", timestamp: "2026-09-16T00:00:00.000Z", userId: "user-9" },
-      { type: "TYPE_SMS", body: "theirs", timestamp: "2026-09-15T00:00:00.000Z" },
+      {
+        type: "TYPE_SMS",
+        body: "ours",
+        timestamp: "2026-09-16T00:00:00.000Z",
+        userId: "user-9",
+      },
+      {
+        type: "TYPE_SMS",
+        body: "theirs",
+        timestamp: "2026-09-15T00:00:00.000Z",
+      },
     ],
     nowMs: NOW.getTime(),
   });
@@ -276,7 +331,9 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
   assert(isPhoneLikeName("0400111222"));
   assert(!isPhoneLikeName("Jane Smith"));
 
-  const named = projectSalesBookingCase(opportunity(), "marnin", { "stage-a": "New Lead" })!;
+  const named = projectSalesBookingCase(opportunity(), "marnin", {
+    "stage-a": "New Lead",
+  })!;
   assertObjectMatch(named as unknown as Record<string, unknown>, {
     id: "opp-1",
     resource_id: "marnin",
@@ -324,8 +381,14 @@ Deno.test("case status stays at the reference default; classification lives only
 // ── Diary ───────────────────────────────────────────────────
 
 Deno.test("perthGraphInstant stamps the Perth offset on an offset-less Graph value", () => {
-  assertEquals(perthGraphInstant("2026-09-15T10:00:00.0000000"), "2026-09-15T10:00:00+08:00");
-  assertEquals(perthGraphInstant("2026-09-15T02:00:00Z"), "2026-09-15T02:00:00Z");
+  assertEquals(
+    perthGraphInstant("2026-09-15T10:00:00.0000000"),
+    "2026-09-15T10:00:00+08:00",
+  );
+  assertEquals(
+    perthGraphInstant("2026-09-15T02:00:00Z"),
+    "2026-09-15T02:00:00Z",
+  );
   assertEquals(perthGraphInstant("not a date"), null);
   assertEquals(perthGraphInstant(undefined), null);
 });
@@ -343,15 +406,26 @@ Deno.test("diary kind comes from provider fields, never from subject text", () =
     title_withheld: false,
   });
 
-  assertEquals(projectSalesBookingDiaryEntry(graphEvent({ showAs: "oof" }))!.kind, "leave");
-  assertEquals(projectSalesBookingDiaryEntry(graphEvent({ showAs: "free" }))!.blocks_capacity, false);
+  assertEquals(
+    projectSalesBookingDiaryEntry(graphEvent({ showAs: "oof" }))!.kind,
+    "leave",
+  );
+  assertEquals(
+    projectSalesBookingDiaryEntry(graphEvent({ showAs: "free" }))!
+      .blocks_capacity,
+    false,
+  );
 
   // A subject that merely SAYS leave is not a leave fact.
-  const worded = projectSalesBookingDiaryEntry(graphEvent({ subject: "Annual leave chat" }))!;
+  const worded = projectSalesBookingDiaryEntry(
+    graphEvent({ subject: "Annual leave chat" }),
+  )!;
   assertEquals(worded.kind, "busy");
 
   // A private entry is a block on the diary, without its subject or location.
-  const priv = projectSalesBookingDiaryEntry(graphEvent({ sensitivity: "private" }))!;
+  const priv = projectSalesBookingDiaryEntry(
+    graphEvent({ sensitivity: "private" }),
+  )!;
   assertEquals(priv.kind, "personal");
   assertEquals(priv.title, null);
   assertEquals(priv.location, null);
@@ -364,7 +438,10 @@ Deno.test("diary kind comes from provider fields, never from subject text", () =
 // ── Assembly / coverage honesty ─────────────────────────────
 
 Deno.test("response keeps the reference shape the Sales Booking view consumes", async () => {
-  const payload = await salesBookingRead(deps(), { resource: "marnin", week_start: WEEK });
+  const payload = await salesBookingRead(deps(), {
+    resource: "marnin",
+    week_start: WEEK,
+  });
   assertEquals(payload.ok, true);
   assertEquals(payload.fixture, false);
   assertEquals(payload.send_hold, true);
@@ -387,7 +464,10 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
 });
 
 Deno.test("diary is the only calendar output; unread is diary_read plus coverage.gaps", async () => {
-  const payload = await salesBookingRead(deps(), { resource: "marnin", week_start: WEEK });
+  const payload = await salesBookingRead(deps(), {
+    resource: "marnin",
+    week_start: WEEK,
+  });
   assertEquals("events" in payload, false);
   assertEquals("calendar" in payload.resource, false);
   assertEquals(payload.diary.length, 1);
@@ -437,7 +517,14 @@ Deno.test("an unfinished roster scan is never reported as a complete book", () =
       reason: "page cap 20 reached",
     },
     diary: UNREAD_DIARY,
-    threads: { facts: {}, attempted: 0, read_ok_count: 0, not_attempted: 0, budget_exhausted: false, enabled: true },
+    threads: {
+      facts: {},
+      attempted: 0,
+      read_ok_count: 0,
+      not_attempted: 0,
+      budget_exhausted: false,
+      enabled: true,
+    },
   });
   assertEquals(payload.coverage.full_population, false);
   assertEquals(payload.coverage.enumerated, 0);
@@ -447,7 +534,9 @@ Deno.test("an unfinished roster scan is never reported as a complete book", () =
 
 Deno.test("a failed thread read degrades only that case and is named in coverage", async () => {
   const payload = await salesBookingRead(
-    deps({ readThread: () => Promise.reject(new Error("GHL 502: bad gateway")) }),
+    deps({
+      readThread: () => Promise.reject(new Error("GHL 502: bad gateway")),
+    }),
     { resource: "marnin", week_start: WEEK },
   );
   assertEquals(payload.ok, true);
@@ -457,7 +546,9 @@ Deno.test("a failed thread read degrades only that case and is named in coverage
   assertEquals(facts.classification, "unread");
   assertEquals(payload.cases[0].status, "needs_decision");
   assertEquals("status_source" in payload.cases[0], false);
-  assert(payload.coverage.gaps.some((g) => g.includes("thread read(s) failed")));
+  assert(
+    payload.coverage.gaps.some((g) => g.includes("thread read(s) failed")),
+  );
 });
 
 Deno.test("an opportunity with no GHL contact is still a row, marked unread", async () => {
@@ -479,24 +570,44 @@ Deno.test("an opportunity with no GHL contact is still a row, marked unread", as
     { resource: "marnin", week_start: WEEK },
   );
   assertEquals(payload.cases.length, 1);
-  assertEquals(payload.thread_facts["opp-1"].reason, "no_ghl_contact_on_opportunity");
+  assertEquals(
+    payload.thread_facts["opp-1"].reason,
+    "no_ghl_contact_on_opportunity",
+  );
   assertEquals(payload.thread_facts["opp-1"].read_ok, false);
 });
 
 Deno.test("thread_limit leaves the remainder unproved rather than unreported", async () => {
-  const many = Array.from({ length: 5 }, (_, i) =>
-    opportunity({ id: `opp-${i}`, contact: { id: `contact-${i}`, name: `Lead ${i}` } }));
+  const many = Array.from(
+    { length: 5 },
+    (_, i) =>
+      opportunity({
+        id: `opp-${i}`,
+        contact: { id: `contact-${i}`, name: `Lead ${i}` },
+      }),
+  );
   const payload = await salesBookingRead(
     deps({
       readOpportunities: () =>
-        Promise.resolve({ opportunities: many, stages: {}, exhausted: true, pages_scanned: 1, total: 5, reason: null }),
+        Promise.resolve({
+          opportunities: many,
+          stages: {},
+          exhausted: true,
+          pages_scanned: 1,
+          total: 5,
+          reason: null,
+        }),
     }),
     { resource: "marnin", week_start: WEEK, thread_limit: 2 },
   );
   assertEquals(payload.cases.length, 5);
   assertEquals(Object.keys(payload.thread_facts).length, 2);
   assertEquals(payload.coverage.threads_read, 2);
-  assert(payload.coverage.gaps.some((g) => g.includes("3 case(s) had no thread read")));
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("3 case(s) had no thread read")
+    ),
+  );
   const unproved = payload.cases.filter((c) => !payload.thread_facts[c.id]);
   assertEquals(unproved.length, 3);
   for (const row of payload.cases) {
@@ -508,24 +619,36 @@ Deno.test("include_thread_facts:false skips every thread read and says so", asyn
   const payload = await salesBookingRead(
     deps({
       readThread: () => {
-        throw new Error("readThread must not be called when thread facts are off");
+        throw new Error(
+          "readThread must not be called when thread facts are off",
+        );
       },
     }),
     { resource: "marnin", week_start: WEEK, include_thread_facts: false },
   );
   assertEquals(payload.thread_facts, {});
-  assert(payload.coverage.gaps.some((g) => g.includes("Thread facts were not requested")));
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("Thread facts were not requested")
+    ),
+  );
 });
 
 // ── Request validation ──────────────────────────────────────
 
 Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses", async () => {
-  const nithin = await salesBookingRead(deps(), { resource: "nithin", week_start: WEEK });
+  const nithin = await salesBookingRead(deps(), {
+    resource: "nithin",
+    week_start: WEEK,
+  });
   assertEquals(nithin.resource.pipeline_id, "OGZLpPPVWVarN94HL6af");
   assertEquals(nithin.resource.lane, "patio");
   assertEquals(nithin.resource.sender_line, "774");
 
-  const marnin = await salesBookingRead(deps(), { resource: "marnin", week_start: WEEK });
+  const marnin = await salesBookingRead(deps(), {
+    resource: "marnin",
+    week_start: WEEK,
+  });
   assertEquals(marnin.resource.pipeline_id, "I9t8njpuR0Dm7B2NDcvI");
   assertEquals(marnin.resource.lane, "fencing");
   // Fencing and patio pipelines are never mixed.
@@ -536,7 +659,11 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
     SalesBookingRequestError,
   );
   await assertRejects(
-    () => salesBookingRead(deps(), { resource: "marnin", week_start: "2026-09-15" }),
+    () =>
+      salesBookingRead(deps(), {
+        resource: "marnin",
+        week_start: "2026-09-15",
+      }),
     SalesBookingRequestError,
   );
 });
@@ -550,7 +677,11 @@ Deno.test("scoper_user_id overrides the resource default for the calendar read o
         return Promise.resolve(UNREAD_DIARY);
       },
     }),
-    { resource: "marnin", week_start: WEEK, scoper_user_id: "11111111-2222-3333-4444-555555555555" },
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      scoper_user_id: "11111111-2222-3333-4444-555555555555",
+    },
   );
   assertEquals(seen, "11111111-2222-3333-4444-555555555555");
   // The roster still comes from the resource's own pipeline.
@@ -564,7 +695,9 @@ Deno.test("empty conversation search falls through to the contact list before de
     if (path.startsWith("/conversations/search")) {
       return Promise.resolve({ conversations: [] });
     }
-    if (path.startsWith("/conversations?") && path.includes("contactId=contact-1")) {
+    if (
+      path.startsWith("/conversations?") && path.includes("contactId=contact-1")
+    ) {
       return Promise.resolve({ conversations: [{ id: "conv-sms-1" }] });
     }
     if (path.includes("/conversations/conv-sms-1/messages")) {
@@ -583,16 +716,25 @@ Deno.test("empty conversation search falls through to the contact list before de
     return Promise.reject(new Error(`unexpected path ${path}`));
   };
 
-  const messages = await readSalesBookingThreadMessages(ghlGet, "contact-1", "loc-1");
+  const messages = await readSalesBookingThreadMessages(
+    ghlGet,
+    "contact-1",
+    "loc-1",
+  );
   assertEquals(messages.length, 1);
   assertEquals(messages[0].body, "Here is the quote for Tuesday");
   assert(paths.some((p) => p.startsWith("/conversations/search")));
-  assert(paths.some((p) => p.startsWith("/conversations?") && p.includes("contactId=contact-1")));
+  assert(
+    paths.some((p) =>
+      p.startsWith("/conversations?") && p.includes("contactId=contact-1")
+    ),
+  );
   assert(paths.some((p) => p.includes("/conversations/conv-sms-1/messages")));
 
   const payload = await salesBookingRead(
     deps({
-      readThread: ({ contactId }) => readSalesBookingThreadMessages(ghlGet, contactId, "loc-1"),
+      readThread: ({ contactId }) =>
+        readSalesBookingThreadMessages(ghlGet, contactId, "loc-1"),
     }),
     { resource: "marnin", week_start: WEEK },
   );
@@ -604,9 +746,17 @@ Deno.test("empty conversation search falls through to the contact list before de
 Deno.test("empty search and empty contact list is a new enquiry, not a failed read", async () => {
   const messages = await readSalesBookingThreadMessages(
     (path) => {
-      if (path.startsWith("/conversations/search")) return Promise.resolve({ conversations: [] });
-      if (path.startsWith("/conversations?")) return Promise.resolve({ conversations: [] });
-      return Promise.reject(new Error(`messages must not be fetched without a conversation: ${path}`));
+      if (path.startsWith("/conversations/search")) {
+        return Promise.resolve({ conversations: [] });
+      }
+      if (path.startsWith("/conversations?")) {
+        return Promise.resolve({ conversations: [] });
+      }
+      return Promise.reject(
+        new Error(
+          `messages must not be fetched without a conversation: ${path}`,
+        ),
+      );
     },
     "contact-new",
     "loc-1",
@@ -618,7 +768,10 @@ Deno.test("empty search and empty contact list is a new enquiry, not a failed re
     { resource: "marnin", week_start: WEEK },
   );
   assertEquals(payload.thread_facts["opp-1"].read_ok, true);
-  assertEquals(payload.thread_facts["opp-1"].classification, "ready_to_contact");
+  assertEquals(
+    payload.thread_facts["opp-1"].classification,
+    "ready_to_contact",
+  );
 });
 
 Deno.test("a conversation search hit does not call the contact list fallback", async () => {
@@ -629,13 +782,20 @@ Deno.test("a conversation search hit does not call the contact list fallback", a
       if (path.startsWith("/conversations/search")) {
         return Promise.resolve({ conversations: [{ id: "conv-1" }] });
       }
-      if (path.includes("/conversations/conv-1/messages")) return Promise.resolve({ messages: [] });
+      if (path.includes("/conversations/conv-1/messages")) {
+        return Promise.resolve({ messages: [] });
+      }
       return Promise.reject(new Error(`unexpected path ${path}`));
     },
     "contact-1",
     "loc-1",
   );
-  assertEquals(paths.some((p) => p.startsWith("/conversations?") && !p.startsWith("/conversations/search")), false);
+  assertEquals(
+    paths.some((p) =>
+      p.startsWith("/conversations?") && !p.startsWith("/conversations/search")
+    ),
+    false,
+  );
 });
 
 Deno.test("week_start defaults to the current Perth week when omitted", async () => {
