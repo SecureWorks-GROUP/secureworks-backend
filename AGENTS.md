@@ -527,6 +527,19 @@ trigger fix landing on `main` does not retroactively register a check on an
 already-open PR — that PR needs a `synchronize` event
 (`gh-axi pr update-branch <n>`) before the check appears.
 
+## Context Migrations: Six Ledger Rows Have No Repository File
+
+Production's migration ledger carries six hand-applied context rows from 14 Sep 2026
+with no file here (`20260914010227`, `20260914010726`, `20260914011949`,
+`20260914012038`, `20260914012058`, `20260914022554`). The apply lane iterates
+repository files, so they need no alias or exclusion, but the versions are
+RESERVED: a repo file at one of them is silently treated as applied (same name)
+or fails the deploy as a collision (different name). The B3 custody packet was
+re-dated to `20260916120000` / `20260916120100` for the same reason; the three
+ledgered B1/B2 files must stay byte-identical to main. Context migration lanes:
+`scripts/test-context-b1.sh`, `scripts/test-context-b3.sh` (disposable localhost
+Postgres, applies the new migrations twice). Record: `docs/context/b3-fact-custody.md`.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before

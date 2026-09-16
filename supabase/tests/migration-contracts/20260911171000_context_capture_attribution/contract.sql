@@ -57,13 +57,19 @@ BEGIN
  INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25);
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
  IF n<>7 THEN RAISE EXCEPTION 'receipt backlog lost, got %',n; END IF;
- -- An outbound tail is readable with a retained inbound anchor, never by itself.
+ -- D4 (20260916120100): our own outbound tail never runs alone; it rides along once
+ -- the job has unreceipted inbound or internal evidence, with the inbound anchor.
  INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25) ON CONFLICT DO NOTHING;
  INSERT INTO public.business_events(payload,job_id,direction,match_method) VALUES('{"body":"Our answer"}',j3,'outbound','direct_job_id');
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
- IF n<>2 THEN RAISE EXCEPTION 'outbound tail lost or sent alone, got %',n; END IF;
+ IF n<>0 THEN RAISE EXCEPTION 'outbound tail sent alone, got %',n; END IF;
  SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
- IF n<>1 THEN RAISE EXCEPTION 'outbound tail missing candidate'; END IF;
+ IF n<>0 THEN RAISE EXCEPTION 'outbound-only job took a candidate slot'; END IF;
+ INSERT INTO public.business_events(payload,job_id,direction,match_method) VALUES('{"body":"Client follow-up"}',j3,'inbound','direct_job_id');
+ SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
+ IF n<>2 THEN RAISE EXCEPTION 'outbound tail lost beside new inbound, got %',n; END IF;
+ SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
+ IF n<>1 THEN RAISE EXCEPTION 'new inbound missing candidate'; END IF;
  UPDATE public.automation_switches SET attribution=false WHERE id=1;
  INSERT INTO public.business_events(payload,job_id,match_method)
  VALUES('{"body":"Explicit source while paused"}',j1,'direct_job_id') RETURNING * INTO e;
