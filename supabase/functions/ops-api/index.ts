@@ -12703,7 +12703,7 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
 export const OPS_SUMMARY_SCHEDULE_COLUMNS = [
   'assignment_id', 'job_id', 'client_name', 'site_suburb', 'site_address', 'job_type',
   'assignment_type', 'crew_name', 'assigned_to', 'start_time', 'end_time',
-  'assignment_status', 'job_status',
+  'assignment_status', 'job_status', 'job_family',
 ].join(', ')
 
 export const OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS = [
@@ -12727,6 +12727,7 @@ export function toOpsSummaryScheduleEvent(ev: any) {
     end_time: ev.end_time,
     assignment_status: ev.assignment_status,
     job_status: ev.job_status,
+    job_family: ev.job_family,
   }
 }
 
@@ -13195,7 +13196,7 @@ const CAL_FINANCIAL_COLUMNS = [
   'break_minutes', 'hours_worked', 'job_type', 'job_number', 'client_name', 'client_phone',
   'site_address', 'site_suburb', 'job_status', 'org_id', 'ghl_contact_id', 'pricing_json',
   'legacy', 'assigned_to', 'assigned_phone', 'xero_project_name', 'xero_invoiced', 'xero_expenses',
-  'label', 'visible_to_trades', 'recurrence_group_id',
+  'label', 'visible_to_trades', 'recurrence_group_id', 'job_family',
 ]
 
 const CAL_LIGHT_COLUMNS = [
@@ -13204,6 +13205,10 @@ const CAL_LIGHT_COLUMNS = [
   'scheduled_date', 'scheduled_end', 'duration_days', 'start_time', 'end_time', 'crew_name', 'assigned_to',
   'assignment_type', 'assignment_status', 'confirmation_status', 'job_type', 'job_status',
   'ghl_contact_id', 'org_id',
+  // job_family: SES/make-safe family tag (e.g. 'repair'), independent of job_type.
+  // Lets the calendar Divisions filter recognise family-tagged repairs the same
+  // way the Repairs board and make-safe board already do. See AGENTS.md.
+  'job_family',
 ]
 
 export const TRADE_CALENDAR_SCHEMA = 'trade-calendar.v1'

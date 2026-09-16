@@ -291,7 +291,7 @@ Rules:
 - If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
   `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it.
 - `ops_summary`'s `today_schedule` reads `calendar_events` through
-  `OPS_SUMMARY_SCHEDULE_COLUMNS` (13 columns) rather than `select('*')`, so the
+  `OPS_SUMMARY_SCHEDULE_COLUMNS` (14 columns) rather than `select('*')`, so the
   view's `scope_json` and `pricing_json` never enter the worker. That list is
   exactly the keys `toOpsSummaryScheduleEvent` emits — change the two together.
   It deliberately does NOT reuse `CAL_LIGHT_COLUMNS` (a superset maintained for
@@ -306,24 +306,33 @@ Rules:
 - `calendar_events` `include_financials=true` enumerates columns
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
   in sync with the LIVE `calendar_events` view — check
-  `information_schema.columns`, NOT the migrations. The view has drifted ahead of
-  this repo: the newest migration defining it
-  (`20260330000001_calendar_clock_fields.sql`) declares 41 columns, while live has
-  44 — `label`, `visible_to_trades` and `recurrence_group_id` exist in production
-  but in no migration here. `CAL_FINANCIAL_COLUMNS` is correct against live and
-  includes all three. A maintainer who reconciles it against the migration instead
-  would silently drop them from the `include_financials` response. Note the
-  tradeoff cuts BOTH ways, and the reverse is the sharper one: `select('*')` was
-  drift-proof in both directions, enumeration only in one. Because those three
-  columns exist live but in no migration here, any database provisioned from these
-  migrations — a fresh `supabase start`, a Supabase preview branch, a CI
-  integration env — gets a PostgREST 400 (`column calendar_events.label does not
-  exist`) on `include_financials=true` rather than a response. Production is
-  unaffected (the columns exist there) and no in-repo code calls
-  `include_financials`, which is why this is a documented follow-up and not a
-  blocker. The real fix is closing the migration/view drift — a migration that
-  recreates `calendar_events` with all 44 columns so the migrations match prod —
-  and that is a separate task.
+  `information_schema.columns`, NOT the migrations. The newest migration defining
+  the view is `20260916000000_calendar_events_job_family.sql`, which was written
+  from a live `pg_get_viewdef` read (2026-09-16) and so is the first migration to
+  declare `label`, `visible_to_trades` and `recurrence_group_id` — the three
+  columns that previously existed in production but in no migration here. Live
+  now carries 45 columns; `CAL_FINANCIAL_COLUMNS` matches. A maintainer who edits
+  the view without re-checking `information_schema.columns` on live risks
+  reopening this exact drift — the previous migration
+  (`20260330000001_calendar_clock_fields.sql`, 41 columns) is why a database
+  provisioned from migrations alone (fresh `supabase start`, a Supabase preview
+  branch, a CI integration env) used to 400 on `include_financials=true`; that gap
+  is now closed for a fresh migration replay too.
+- **`calendar_events.job_family`** (added by
+  `20260916000000_calendar_events_job_family.sql`):
+  `COALESCE(j.metadata->>'ses_family', j.metadata->>'makesafe_job_family')`, so
+  the OpsDash calendar's Divisions filter can recognise family-tagged repairs
+  the same way the Repairs board (`loadInsuranceRepairJobIds`,
+  `insurance_repairs_board.ts`) and make-safe board (`excludeInsuranceRepairs`)
+  already do — `update_makesafe_job_family` deliberately never retypes
+  `jobs.type`, so a card can be family-tagged `repair` while `jobs.type` stays
+  `makesafe` (or historically `fencing`) permanently by design. **Contract for
+  consumers:** `job_family` is present on every calendar event row; `'repair'`
+  means treat as the Repair division regardless of `job_type`; null or anything
+  else means fall back to `job_type`. Threaded through `CAL_LIGHT_COLUMNS`,
+  `CAL_FINANCIAL_COLUMNS` and `OPS_SUMMARY_SCHEDULE_COLUMNS` — never
+  `TRADE_CALENDAR_COLUMNS`, which is a separate query path for the Trade app
+  calendar and has no Divisions filter to serve.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
