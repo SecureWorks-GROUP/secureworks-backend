@@ -3,7 +3,7 @@
 -- exercised after a double apply of both forward migrations.
 BEGIN;
 DO $$
-DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; j uuid:=gen_random_uuid(); holding uuid:=gen_random_uuid();
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; j uuid:=gen_random_uuid(); holding uuid:=gen_random_uuid(); archived uuid:=gen_random_uuid();
  e uuid; ev jsonb; e2 uuid; ev2 jsonb; claimed jsonb; run uuid; tok uuid; result jsonb; facts jsonb; snap jsonb; tr jsonb;
  state_id uuid; d date:=(now() AT TIME ZONE 'Australia/Perth')::date; source_time timestamptz:=now()-interval '2 hours';
 BEGIN
@@ -14,11 +14,14 @@ BEGIN
  THEN RAISE EXCEPTION 'B3 re-apply duplicated guards'; END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,org,'accepted','patio','B3-'||j);
  INSERT INTO public.jobs(id,org_id,status,type,job_number,metadata) VALUES(holding,org,'archived','fencing','B3-HOLD-'||holding,'{"do_not_schedule":true,"purpose":"pdf_unlock_bucket"}');
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,metadata) VALUES(archived,org,'archived','patio','B3-ARCH-'||archived,'{}');
  INSERT INTO public.business_events(job_id,match_method,direction,payload,event_at) VALUES(j,'direct_job_id','inbound','{"body":"Crew are on site today, gate is on the left."}',source_time) RETURNING id,to_jsonb(business_events) INTO e,ev;
  INSERT INTO public.business_events(job_id,match_method,direction,payload,event_at) VALUES(holding,'direct_job_id','inbound','{"body":"Supplier bill attached"}',source_time);
+ INSERT INTO public.business_events(job_id,match_method,direction,payload,event_at) VALUES(archived,'direct_job_id','inbound','{"body":"Old job question"}',source_time);
  IF (ev->>'context_captured_at') IS NULL THEN RAISE EXCEPTION 'B3 capture stamp missing (20260914110000 not applied)'; END IF;
  IF NOT EXISTS(SELECT 1 FROM public.context_extraction_candidates(400) c WHERE c.job_id=j) THEN RAISE EXCEPTION 'B3 real job not a candidate'; END IF;
  IF EXISTS(SELECT 1 FROM public.context_extraction_candidates(400) c WHERE c.job_id=holding) THEN RAISE EXCEPTION 'B3 holding job admitted'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.context_extraction_candidates(400) c WHERE c.job_id=archived) THEN RAISE EXCEPTION 'B3 archived non-holding with inbound not extractable'; END IF;
  claimed:=public.claim_context_extraction_run(j,d,'extraction'); run:=(claimed->'run'->>'id')::uuid; tok:=(claimed->'run'->>'lease_token')::uuid;
  facts:=jsonb_build_array(
   jsonb_build_object('kind','current_state','text','Crew are on site.','confidence',0.9,'source_event_ids',jsonb_build_array(e),'evidence_excerpt','Crew are on site today'),

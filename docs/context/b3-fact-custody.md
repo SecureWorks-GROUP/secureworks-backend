@@ -5,7 +5,7 @@ The approved context target's sections 3 and 5 govern this packet. One model res
 Landed on main as two forward migrations dated 2026-09-16, not the 20260911172000 draft that PR #838 first carried:
 
 - `20260916120000_context_job_fact_custody.sql`: lifecycle, trust, event-date expiry, the per-job custody RPC, the current-facts view.
-- `20260916120100_context_extraction_budget_scope.sql`: the D4 budget scope (outbound-only sources and archived or holding jobs never take a model call).
+- `20260916120100_context_extraction_budget_scope.sql`: the D4 budget scope (outbound-only sources and archived holding jobs never take a model call).
 
 ## Why the migration was re-dated (ledger reconciliation)
 
@@ -42,11 +42,11 @@ The function calls B1's finish RPC inside the same transaction and raises if fen
 
 The nine-kind closed list is a CHECK on `job_context` for Luna-trust rows (`job_context_kind_check`); `job_temporary_context` keeps its three-kind time-bound check. The four legacy operator-override kinds live in production (`payment_agreement`, `do_not_chase`, `internal_instruction`, `context_fact`) are deliberately left untouched under `trust='legacy'`: the stage-gate engine reads `payment_agreement` as a deposit override and the jarvis internal-instruction extractor still writes `internal_instruction`. Retracting or renaming them here (as the draft did) would silently break that reader. J3 retires the writer and owns tightening the constraint to every row.
 
-The migration backfills existing rows from provenance they already carry: `extractor_version` from `provenance.extractor`; `lifecycle` from the legacy provenance lifecycle marker; and, for Luna v1 rows only, `event_date`, `source_event_ids` and the event-date expiry from `provenance.source_occurred_at`. That moves the v1 time-bound rows off the 24 hour write TTL the audit measured (25 of 45 dead on arrival) onto the event-date rules. A write clock or `extracted_at` never anchors an expiry, so undated legacy proposals leave current reads instead of receiving an invented date.
+The migration backfills existing rows from provenance they already carry: `extractor_version` from `provenance.extractor`; `lifecycle` from the legacy provenance lifecycle marker; and, for Luna v1 rows only, `event_date`, `source_event_ids` and the event-date expiry from `provenance.source_occurred_at`. That moves the v1 time-bound rows off the 24 hour write TTL the audit measured (25 of 45 dead on arrival) onto the event-date rules. A write clock or `extracted_at` never anchors an expiry, so undated legacy proposals leave current reads instead of receiving an invented date. `current_job_context_facts` hides a time-bound row with NULL `expires_at` only when `trust='legacy'`; live five-argument `persist_luna_context_revision` writes (no `expires_at`) stay readable.
 
 ## D4: budget scope
 
-`context_job_extractable(jobs)` is false for `status = 'archived'` and for holding jobs, marked by `metadata.do_not_schedule = true` (the SWF-PDF-BUCKET row also carries `metadata.purpose = 'pdf_unlock_bucket'`, no contact and an internal site; the marker, not the number, is the rule). `context_extraction_candidates` admits a job only on unreceipted non-outbound evidence; `context_extraction_events` includes outbound rows only when the same batch has unreceipted inbound or internal evidence, so our own messages are read beside the client's and never extracted alone. Names, signatures, the per-day one-run guard, the 400 cap and the reservation functions are unchanged.
+`context_job_extractable(jobs)` is false only for holding jobs, marked by `metadata.do_not_schedule = true` (the SWF-PDF-BUCKET row also carries `metadata.purpose = 'pdf_unlock_bucket'`, no contact and an internal site; the marker, not the number or `jobs.status`, is the rule). Quiet, closed or archived jobs are not rechecked unless something new lands; that is the fresh-inbound rule on candidates and events, not an archived-status exclusion. `context_extraction_candidates` admits a job only on unreceipted non-outbound evidence; `context_extraction_events` includes outbound rows only when the same batch has unreceipted inbound or internal evidence, so our own messages are read beside the client's and never extracted alone. Names, signatures, the per-day one-run guard, the 400 cap and the reservation functions are unchanged.
 
 ## Verification and rollback
 

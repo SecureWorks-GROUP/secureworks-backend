@@ -2,21 +2,21 @@
 -- Measured live: the archived holding job SWF-PDF-BUCKET took 50 of 124 extraction
 -- calls on 15 and 16 Sep for 2 facts, and 17 of 55 current Luna facts came from our
 -- own outbound messages. Target 1b: sent items are read only alongside the client's
--- messages, never extracted alone. Target 3: archived jobs are not rechecked.
+-- messages, never extracted alone. Target 3b: quiet, closed or archived jobs are
+-- not rechecked unless something new lands; the fresh-inbound rule owns that.
 --
 -- Same names and signatures as 20260911171000 (CREATE OR REPLACE, re-runnable).
 -- The daily cap and reservation functions are untouched.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
--- A job takes model budget only when it is a real, non-archived job. Holding jobs are
--- the rows an agent minted to park unallocated documents: they carry
+-- A job takes model budget unless it is a holding job. Holding jobs are the rows
+-- an agent minted to park unallocated documents: they carry
 -- metadata.do_not_schedule = true (SWF-PDF-BUCKET, purpose pdf_unlock_bucket), no
--- contact and an internal site. That marker, not the job number, is the rule.
+-- contact and an internal site. That marker, not the job number or status, is the rule.
 CREATE OR REPLACE FUNCTION public.context_job_extractable(j public.jobs) RETURNS boolean
 LANGUAGE sql STABLE SET search_path=public,pg_temp AS $$
  SELECT j.id IS NOT NULL
-  AND j.status::text IS DISTINCT FROM 'archived'
   AND coalesce(to_jsonb(j)->'metadata'->>'do_not_schedule','') NOT IN ('true','1')
 $$;
 REVOKE ALL ON FUNCTION public.context_job_extractable(public.jobs) FROM PUBLIC,anon,authenticated;

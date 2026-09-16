@@ -2,7 +2,7 @@ BEGIN;
 DO $$
 DECLARE j uuid:=gen_random_uuid(); other_job uuid:=gen_random_uuid(); ev jsonb; ev2 jsonb; stale jsonb;
  e uuid; e2 uuid; run uuid; tok uuid; claimed jsonb; result jsonb; facts jsonb; snap jsonb; tr jsonb;
- old uuid; temp uuid; legacy uuid:=gen_random_uuid(); due date:=(now() AT TIME ZONE 'Australia/Perth')::date+2;
+ old uuid; temp uuid; legacy uuid:=gen_random_uuid(); v1 uuid:=gen_random_uuid(); due date:=(now() AT TIME ZONE 'Australia/Perth')::date+2;
  source_time timestamptz:=now()-interval '1 hour'; d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
 BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE id='b3000000-0000-0000-0000-000000000002') OR EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id='b3000000-0000-0000-0000-000000000002') THEN RAISE EXCEPTION 'B3 legacy undated proposal must be held, not deleted or current'; END IF;
@@ -32,6 +32,20 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE id='b3000000-0000-0000-0000-000000000006' AND trust='luna' AND extractor_version='context-luna-subscription:v1') THEN RAISE EXCEPTION 'B3 trust stamp trigger'; END IF;
  INSERT INTO public.job_context(id,job_id,kind,value,provenance) VALUES('b3000000-0000-0000-0000-000000000007','b3000000-0000-0000-0000-000000000001','note','{"text":"haiku note"}','{"extractor":"context-fact-extractor:v1.5"}');
  IF NOT EXISTS(SELECT 1 FROM public.job_context WHERE id='b3000000-0000-0000-0000-000000000007' AND trust='legacy') THEN RAISE EXCEPTION 'B3 legacy writer promoted'; END IF;
+ INSERT INTO public.business_events(job_id,match_method,payload,event_at)
+  VALUES('b3000000-0000-0000-0000-000000000001','direct_job_id','{"body":"Can we book Tuesday instead"}',now())
+  RETURNING id,to_jsonb(business_events) INTO e,ev;
+ result:=public.persist_luna_context_revision('business_events',e::text,ev,'job_context',
+  jsonb_build_object('id',v1,'job_id',ev->>'job_id','kind','proposal',
+   'value',jsonb_build_object('text','Can we book Tuesday instead','source_refs',jsonb_build_array(jsonb_build_object('table','business_events','id',e::text))),
+   'provenance',jsonb_build_object('extractor','context-luna-subscription:v1','writer_role','classifier','untrusted',false,
+    'source_event_ids',jsonb_build_array(e::text),'extracted_at','2026-09-16T00:00:00Z',
+    'safety',jsonb_build_object('memory_trusted',true,'action_safe',false,'state_change_safe',false,'outbound_safe',false))));
+ IF result->>'outcome'<>'inserted'
+  OR NOT EXISTS(SELECT 1 FROM public.job_context WHERE id=v1 AND trust='luna' AND extractor_version='context-luna-subscription:v1' AND expires_at IS NULL)
+  OR NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=v1 AND kind='proposal' AND expires_at IS NULL)
+  OR EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id='b3000000-0000-0000-0000-000000000002')
+ THEN RAISE EXCEPTION 'B3 v1 NULL-expiry proposal must be current and legacy Haiku must not'; END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES
  (j,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-'||j),
  (other_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B3-'||other_job);
