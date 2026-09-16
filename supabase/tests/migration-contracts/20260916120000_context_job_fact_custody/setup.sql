@@ -1,6 +1,16 @@
 -- Real B1 tables and B2 attribution migration precede this packet in the registry.
 -- No substitute helpers. These optional reader columns mirror production types.
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS quoted_at timestamptz;
+-- Mirror the production business_events envelope (read 2026-09-16). source_id and
+-- source_table exist live, so any bare alias with those names inside the view or
+-- the custody RPC is ambiguous there; the registry must reproduce that.
+ALTER TABLE public.business_events
+ ADD COLUMN IF NOT EXISTS sequence_number bigint, ADD COLUMN IF NOT EXISTS event_type text, ADD COLUMN IF NOT EXISTS source text,
+ ADD COLUMN IF NOT EXISTS recorded_at timestamptz, ADD COLUMN IF NOT EXISTS entity_type text, ADD COLUMN IF NOT EXISTS entity_id text,
+ ADD COLUMN IF NOT EXISTS correlation_id uuid, ADD COLUMN IF NOT EXISTS causation_id uuid, ADD COLUMN IF NOT EXISTS schema_version text,
+ ADD COLUMN IF NOT EXISTS source_table text, ADD COLUMN IF NOT EXISTS source_id text, ADD COLUMN IF NOT EXISTS channel text,
+ ADD COLUMN IF NOT EXISTS safe_summary text, ADD COLUMN IF NOT EXISTS body_pointer text, ADD COLUMN IF NOT EXISTS body_hash text,
+ ADD COLUMN IF NOT EXISTS conversation_key text, ADD COLUMN IF NOT EXISTS privacy_classification text, ADD COLUMN IF NOT EXISTS retention_class text;
 
 -- Pre-migration rows that mirror the three live populations (read 2026-09-16):
 -- a legacy Haiku proposal with no source date (retain audit, never invent expiry),
