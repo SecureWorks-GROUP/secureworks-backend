@@ -34,6 +34,7 @@ Deno.test("ops_summary schedule projection matches its unchanged response shape"
     assignment_status: "scheduled",
     job_status: "processing",
     job_number: "SWP-9999",
+    job_family: "repair",
     scope_json: { job: { sitePlanImage: "unused-large-media" } },
     pricing_json: { totalIncGST: 1234.5 },
   };
@@ -42,6 +43,7 @@ Deno.test("ops_summary schedule projection matches its unchanged response shape"
   const projectedColumns = OPS_SUMMARY_SCHEDULE_COLUMNS.split(", ");
 
   assertEquals(Object.keys(result), projectedColumns);
+  assertEquals(result.job_family, "repair");
   assertFalse("job_number" in result);
   assertFalse(projectedColumns.includes("scope_json"));
   assertFalse(projectedColumns.includes("pricing_json"));

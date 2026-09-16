@@ -291,7 +291,7 @@ Rules:
 - If the fencing/patio scoping tools add a new FREE-TEXT key, add it to
   `CAL_SCOPE_PROJECTION` or the asbestos badge will silently miss it.
 - `ops_summary`'s `today_schedule` reads `calendar_events` through
-  `OPS_SUMMARY_SCHEDULE_COLUMNS` (13 columns) rather than `select('*')`, so the
+  `OPS_SUMMARY_SCHEDULE_COLUMNS` (14 columns) rather than `select('*')`, so the
   view's `scope_json` and `pricing_json` never enter the worker. That list is
   exactly the keys `toOpsSummaryScheduleEvent` emits — change the two together.
   It deliberately does NOT reuse `CAL_LIGHT_COLUMNS` (a superset maintained for
@@ -306,24 +306,56 @@ Rules:
 - `calendar_events` `include_financials=true` enumerates columns
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
   in sync with the LIVE `calendar_events` view — check
-  `information_schema.columns`, NOT the migrations. The view has drifted ahead of
-  this repo: the newest migration defining it
-  (`20260330000001_calendar_clock_fields.sql`) declares 41 columns, while live has
-  44 — `label`, `visible_to_trades` and `recurrence_group_id` exist in production
-  but in no migration here. `CAL_FINANCIAL_COLUMNS` is correct against live and
-  includes all three. A maintainer who reconciles it against the migration instead
-  would silently drop them from the `include_financials` response. Note the
-  tradeoff cuts BOTH ways, and the reverse is the sharper one: `select('*')` was
-  drift-proof in both directions, enumeration only in one. Because those three
-  columns exist live but in no migration here, any database provisioned from these
-  migrations — a fresh `supabase start`, a Supabase preview branch, a CI
-  integration env — gets a PostgREST 400 (`column calendar_events.label does not
-  exist`) on `include_financials=true` rather than a response. Production is
-  unaffected (the columns exist there) and no in-repo code calls
-  `include_financials`, which is why this is a documented follow-up and not a
-  blocker. The real fix is closing the migration/view drift — a migration that
-  recreates `calendar_events` with all 44 columns so the migrations match prod —
-  and that is a separate task.
+  `information_schema.columns`, NOT the migrations. The newest migration defining
+  the view is `20260916000000_calendar_events_job_family.sql`, written from a
+  live `pg_get_viewdef` read (2026-09-16): it is the first migration to NAME
+  `label`, `visible_to_trades` and `recurrence_group_id` on the view and to
+  filter on `is_ghost`, but it does NOT close the drift. Those FOUR
+  `job_assignments` columns (`label`, `visible_to_trades`,
+  `recurrence_group_id`, `is_ghost`) are still added by no migration in this
+  repo — the live ledger carries three of them as live-lane entries with no
+  repo file (`20260525073156 add_visible_to_trades_to_job_assignments`,
+  `20260531154401 add_recurrence_fields`; `label` likewise has no repo
+  producer) and `is_ghost` is the live drift the trade-feed section below
+  already records — so a database provisioned from migrations alone (fresh
+  `supabase start`, a Supabase preview branch, a CI integration env) fails this
+  migration on `column ja.label does not exist` and still 400s on
+  `include_financials=true`. That gap remains OPEN; closing it means landing
+  all four `ALTER TABLE job_assignments` statements as a repo migration
+  sequenced before this view migration. Measured read-only against production
+  on 2026-09-16, the view carried 44 columns before this migration; it carries
+  45 once applied (by construction of the view text, pinned by the contract
+  case below, not yet re-measured live), and `CAL_FINANCIAL_COLUMNS`
+  enumerates every one of those 45 except `scope_json`, which the same select
+  projects through `CAL_SCOPE_PROJECTION` instead. Two rules for the next
+  edit: the view has
+  no `DROP VIEW`, so `CREATE OR REPLACE VIEW` must APPEND any new column
+  LAST — Postgres refuses a mid-list insert as a rename of the column it
+  displaces — and the executable proof of both the append and the projected
+  value is the registered case
+  `supabase/tests/migration-contracts/20260916000000_calendar_events_job_family`,
+  whose `setup.sql` creates the live 44-column view first so the migration is
+  replayed against the real pre-existing column order.
+- **`calendar_events.job_family`** (added by
+  `20260916000000_calendar_events_job_family.sql`):
+  `COALESCE(j.metadata->>'ses_family', j.metadata->>'makesafe_job_family')`, so
+  the OpsDash calendar's Divisions filter can recognise family-tagged repairs
+  the same way the Repairs board (`loadInsuranceRepairJobIds`,
+  `insurance_repairs_board.ts`) and make-safe board (`excludeInsuranceRepairs`)
+  already do — `update_makesafe_job_family` deliberately never retypes
+  `jobs.type`, so a card can be family-tagged `repair` while `jobs.type` stays
+  `makesafe` (or historically `fencing`) permanently by design. **Contract for
+  consumers:** `job_family` is present on every calendar event row; `'repair'`
+  means treat as the Repair division regardless of `job_type`; null or anything
+  else means fall back to `job_type`. Known follow-up: report_type-only
+  repairs (`makesafe_job_details.report_type = 'repair'` with neither
+  `ses_family` nor `makesafe_job_family` metadata, which both boards admit)
+  are not projected by `job_family`, and a read-only production check on
+  2026-09-16 found none, so the per-row join was deliberately not added.
+  Threaded through `CAL_LIGHT_COLUMNS`,
+  `CAL_FINANCIAL_COLUMNS` and `OPS_SUMMARY_SCHEDULE_COLUMNS` — never
+  `TRADE_CALENDAR_COLUMNS`, which is a separate query path for the Trade app
+  calendar and has no Divisions filter to serve.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
