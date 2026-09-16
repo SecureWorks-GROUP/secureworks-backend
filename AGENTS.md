@@ -307,17 +307,29 @@ Rules:
   (`CAL_FINANCIAL_COLUMNS`) rather than `select('*')` for the same reason. Keep it
   in sync with the LIVE `calendar_events` view — check
   `information_schema.columns`, NOT the migrations. The newest migration defining
-  the view is `20260916000000_calendar_events_job_family.sql`, which was written
-  from a live `pg_get_viewdef` read (2026-09-16) and so is the first migration to
-  declare `label`, `visible_to_trades` and `recurrence_group_id` — the three
-  columns that previously existed in production but in no migration here. Live
-  now carries 45 columns; `CAL_FINANCIAL_COLUMNS` matches. A maintainer who edits
-  the view without re-checking `information_schema.columns` on live risks
-  reopening this exact drift — the previous migration
-  (`20260330000001_calendar_clock_fields.sql`, 41 columns) is why a database
-  provisioned from migrations alone (fresh `supabase start`, a Supabase preview
-  branch, a CI integration env) used to 400 on `include_financials=true`; that gap
-  is now closed for a fresh migration replay too.
+  the view is `20260916000000_calendar_events_job_family.sql`, written from a
+  live `pg_get_viewdef` read (2026-09-16): it is the first migration to NAME
+  `label`, `visible_to_trades` and `recurrence_group_id` on the view, but it
+  does NOT close the drift. Those three `job_assignments` columns are still
+  added by no migration in this repo — the live ledger carries them as
+  live-lane entries with no repo file (`20260525073156
+  add_visible_to_trades_to_job_assignments`, `20260531154401
+  add_recurrence_fields`; `label` likewise has no repo producer) — so a
+  database provisioned from migrations alone (fresh
+  `supabase start`, a Supabase preview branch, a CI integration env) fails this
+  migration on `column ja.label does not exist` and still 400s on
+  `include_financials=true`. That gap remains OPEN; closing it means landing
+  the three `ALTER TABLE job_assignments` statements as a repo migration
+  sequenced before this view migration. Against production the view carried
+  44 columns before this migration and 45 after it; `CAL_FINANCIAL_COLUMNS`
+  matches the post-migration shape. Two rules for the next edit: the view has
+  no `DROP VIEW`, so `CREATE OR REPLACE VIEW` must APPEND any new column
+  LAST — Postgres refuses a mid-list insert as a rename of the column it
+  displaces — and the executable proof of both the append and the projected
+  value is the registered case
+  `supabase/tests/migration-contracts/20260916000000_calendar_events_job_family`,
+  whose `setup.sql` creates the live 44-column view first so the migration is
+  replayed against the real pre-existing column order.
 - **`calendar_events.job_family`** (added by
   `20260916000000_calendar_events_job_family.sql`):
   `COALESCE(j.metadata->>'ses_family', j.metadata->>'makesafe_job_family')`, so

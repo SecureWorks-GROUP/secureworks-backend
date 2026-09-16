@@ -24,7 +24,9 @@
 -- anything else means fall back to job_type.
 --
 -- This migration is additive and idempotent (CREATE OR REPLACE VIEW)
--- and safe to auto-deploy: it changes no data and adds one column.
+-- and safe to auto-deploy: it changes no data and adds one column, in
+-- the only position CREATE OR REPLACE permits (last). Executable proof:
+-- supabase/tests/migration-contracts/20260916000000_calendar_events_job_family.
 --
 -- Based on the LIVE view definition (confirmed via pg_get_viewdef on
 -- 2026-09-16), which has drifted ahead of the last migration that
@@ -76,10 +78,6 @@ SELECT
   j.pricing_json,
   j.scope_json,
   j.legacy,
-  -- Family (new): SES/make-safe family tag, independent of jobs.type.
-  -- 'repair' here means "this is repair-shaped work" even when jobs.type
-  -- was never retyped. Narrow projected keys only, never the metadata blob.
-  COALESCE(j.metadata->>'ses_family', j.metadata->>'makesafe_job_family') AS job_family,
   -- User fields
   u.name AS assigned_to,
   u.phone AS assigned_phone,
@@ -89,7 +87,13 @@ SELECT
   xp.total_expenses AS xero_expenses,
   ja.label,
   ja.visible_to_trades,
-  ja.recurrence_group_id
+  ja.recurrence_group_id,
+  -- Family (new): SES/make-safe family tag, independent of jobs.type.
+  -- 'repair' here means "this is repair-shaped work" even when jobs.type
+  -- was never retyped. Narrow projected keys only, never the metadata blob.
+  -- Appended as the LAST column: CREATE OR REPLACE VIEW only accepts new
+  -- columns at the end of the select list, never mid-list.
+  COALESCE(j.metadata->>'ses_family', j.metadata->>'makesafe_job_family') AS job_family
 FROM job_assignments ja
 LEFT JOIN jobs j ON j.id = ja.job_id
 LEFT JOIN users u ON u.id = ja.user_id
