@@ -309,17 +309,19 @@ Rules:
   `information_schema.columns`, NOT the migrations. The newest migration defining
   the view is `20260916000000_calendar_events_job_family.sql`, written from a
   live `pg_get_viewdef` read (2026-09-16): it is the first migration to NAME
-  `label`, `visible_to_trades` and `recurrence_group_id` on the view, but it
-  does NOT close the drift. Those three `job_assignments` columns are still
-  added by no migration in this repo — the live ledger carries them as
-  live-lane entries with no repo file (`20260525073156
-  add_visible_to_trades_to_job_assignments`, `20260531154401
-  add_recurrence_fields`; `label` likewise has no repo producer) — so a
-  database provisioned from migrations alone (fresh
+  `label`, `visible_to_trades` and `recurrence_group_id` on the view and to
+  filter on `is_ghost`, but it does NOT close the drift. Those FOUR
+  `job_assignments` columns (`label`, `visible_to_trades`,
+  `recurrence_group_id`, `is_ghost`) are still added by no migration in this
+  repo — the live ledger carries three of them as live-lane entries with no
+  repo file (`20260525073156 add_visible_to_trades_to_job_assignments`,
+  `20260531154401 add_recurrence_fields`; `label` likewise has no repo
+  producer) and `is_ghost` is the live drift the trade-feed section below
+  already records — so a database provisioned from migrations alone (fresh
   `supabase start`, a Supabase preview branch, a CI integration env) fails this
   migration on `column ja.label does not exist` and still 400s on
   `include_financials=true`. That gap remains OPEN; closing it means landing
-  the three `ALTER TABLE job_assignments` statements as a repo migration
+  all four `ALTER TABLE job_assignments` statements as a repo migration
   sequenced before this view migration. Measured read-only against production
   on 2026-09-16, the view carried 44 columns before this migration; it carries
   45 once applied (by construction of the view text, pinned by the contract
@@ -345,7 +347,12 @@ Rules:
   `makesafe` (or historically `fencing`) permanently by design. **Contract for
   consumers:** `job_family` is present on every calendar event row; `'repair'`
   means treat as the Repair division regardless of `job_type`; null or anything
-  else means fall back to `job_type`. Threaded through `CAL_LIGHT_COLUMNS`,
+  else means fall back to `job_type`. Known follow-up: report_type-only
+  repairs (`makesafe_job_details.report_type = 'repair'` with neither
+  `ses_family` nor `makesafe_job_family` metadata, which both boards admit)
+  are not projected by `job_family`, and a read-only production check on
+  2026-09-16 found none, so the per-row join was deliberately not added.
+  Threaded through `CAL_LIGHT_COLUMNS`,
   `CAL_FINANCIAL_COLUMNS` and `OPS_SUMMARY_SCHEDULE_COLUMNS` — never
   `TRADE_CALENDAR_COLUMNS`, which is a separate query path for the Trade app
   calendar and has no Divisions filter to serve.
