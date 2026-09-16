@@ -39,7 +39,7 @@
 - **webhook_log** — audit trail for all sync operations
 
 ## Key Views
-- **calendar_events** — joins assignments + jobs + users for calendar rendering. Carries `jobs.scope_json` through, so never `select('*')` or select `scope_json` from it across a date range — that OOM-kills the edge worker (see `gotchas.md`). The live view has also drifted ahead of the migrations here (live has 44 columns, the newest migration declares 41); check `information_schema.columns`, not the migrations, before enumerating its columns. Both consumers enumerate: `CAL_FINANCIAL_COLUMNS` / `CAL_LIGHT_COLUMNS` for the calendar, `OPS_SUMMARY_SCHEDULE_COLUMNS` for `ops_summary`'s `today_schedule`.
+- **calendar_events** — joins assignments + jobs + users for calendar rendering. Carries `jobs.scope_json` through, so never `select('*')` or select `scope_json` from it across a date range — that OOM-kills the edge worker (see `gotchas.md`). The live view has also drifted ahead of the migrations here; check `information_schema.columns`, not the migrations, before enumerating its columns. `AGENTS.md`'s `calendar_events` section owns the current drift accounting, the append-last rule for `CREATE OR REPLACE VIEW`, and the `job_family` consumer contract. Both consumers enumerate: `CAL_FINANCIAL_COLUMNS` / `CAL_LIGHT_COLUMNS` for the calendar, `OPS_SUMMARY_SCHEDULE_COLUMNS` for `ops_summary`'s `today_schedule`.
 - **jobs_needing_scheduling** — accepted/quoted jobs with no future assignments. `ops_summary` reads only `id, client_name, site_suburb, type, days_waiting` (`OPS_SUMMARY_NEEDS_SCHEDULING_COLUMNS`), so the view can grow without widening that read.
 
 ## Key Functions

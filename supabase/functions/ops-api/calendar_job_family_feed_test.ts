@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 // Calendar feed job_family contract.
 // ---------------------------------------------------------------------------
 // The OpsDash calendar's Divisions filter classes an event by job_type, which
@@ -97,8 +98,14 @@ Deno.test("calendar light feed requests job_family from the view and serves it p
   const res: any = await calendarEvents(client, params());
   const sel = captured.selects["calendar_events"];
   assert(sel, "calendar_events was queried");
-  assert(selectsColumn(sel, "job_family"), `light select must name job_family: ${sel}`);
-  assert(selectsColumn(sel, "job_type"), "job_type is still served beside job_family");
+  assert(
+    selectsColumn(sel, "job_family"),
+    `light select must name job_family: ${sel}`,
+  );
+  assert(
+    selectsColumn(sel, "job_type"),
+    "job_type is still served beside job_family",
+  );
 
   const byAssignment = Object.fromEntries(
     res.events.map((e: any) => [e.assignment_id, e]),
@@ -117,16 +124,29 @@ Deno.test("calendar light feed requests job_family from the view and serves it p
 
 Deno.test("calendar include_financials feed also requests and serves job_family", async () => {
   const { client, captured } = calClient(ROWS);
-  const res: any = await calendarEvents(client, params({ include_financials: "true" }));
+  const res: any = await calendarEvents(
+    client,
+    params({ include_financials: "true" }),
+  );
   const sel = captured.selects["calendar_events"];
-  assert(selectsColumn(sel, "job_family"), `financial select must name job_family: ${sel}`);
-  const repair = res.events.find((e: any) => e.assignment_id === "asg-fencing-repair");
+  assert(
+    selectsColumn(sel, "job_family"),
+    `financial select must name job_family: ${sel}`,
+  );
+  const repair = res.events.find((e: any) =>
+    e.assignment_id === "asg-fencing-repair"
+  );
   assertEquals(repair.job_family, "repair");
   assertEquals(repair.job_type, "fencing");
 });
 
 Deno.test("calendar feed never widens to the metadata blob to carry the family", async () => {
-  for (const extra of [{}, { include_financials: "true" }] as Record<string, string>[]) {
+  for (
+    const extra of [{}, { include_financials: "true" }] as Record<
+      string,
+      string
+    >[]
+  ) {
     const { client, captured } = calClient([]);
     await calendarEvents(client, params(extra));
     const sel = captured.selects["calendar_events"];
@@ -149,7 +169,10 @@ Deno.test("ops_summary today_schedule carries job_family through its mapper", ()
   });
   assertEquals(mapped.job_family, "repair");
   assertEquals(mapped.job_type, "makesafe");
-  const plain = toOpsSummaryScheduleEvent({ job_type: "makesafe", job_family: null });
+  const plain = toOpsSummaryScheduleEvent({
+    job_type: "makesafe",
+    job_family: null,
+  });
   assert("job_family" in plain);
   assertEquals(plain.job_family, null);
 });

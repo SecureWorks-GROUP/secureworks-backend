@@ -323,8 +323,10 @@ Rules:
   sequenced before this view migration. Measured read-only against production
   on 2026-09-16, the view carried 44 columns before this migration; it carries
   45 once applied (by construction of the view text, pinned by the contract
-  case below, not yet re-measured live), and `CAL_FINANCIAL_COLUMNS` matches
-  that post-migration shape. Two rules for the next edit: the view has
+  case below, not yet re-measured live), and `CAL_FINANCIAL_COLUMNS`
+  enumerates every one of those 45 except `scope_json`, which the same select
+  projects through `CAL_SCOPE_PROJECTION` instead. Two rules for the next
+  edit: the view has
   no `DROP VIEW`, so `CREATE OR REPLACE VIEW` must APPEND any new column
   LAST — Postgres refuses a mid-list insert as a rename of the column it
   displaces — and the executable proof of both the append and the projected
