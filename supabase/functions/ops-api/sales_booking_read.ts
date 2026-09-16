@@ -403,20 +403,6 @@ export function projectSalesBookingCase(
   }
 }
 
-/**
- * Fold thread facts back onto the case `status` the queue filters on.
- * A case with no read thread keeps the reference default `needs_decision` and
- * says so through `status_source`, so an unread row is never mistaken for a
- * proved disposition. `booked` is deliberately never derived here.
- */
-export function applyThreadFactsToCase(
-  row: SalesBookingCase,
-  facts: SalesBookingThreadFacts | undefined,
-): SalesBookingCase {
-  if (!facts || !facts.read_ok) return row
-  return { ...row, status: facts.classification, status_source: 'thread_facts' }
-}
-
 // ════════════════════════════════════════════════════════════
 // Diary (pure)
 // ════════════════════════════════════════════════════════════
@@ -536,21 +522,6 @@ export interface SalesBookingThreadScan {
   enabled: boolean
 }
 
-/**
- * The resource as PUBLISHED: the static profile plus the calendar provenance
- * the existing view reads at `resource.calendar`. `leave` stays `not_read`
- * because only the primary Outlook calendar is consulted.
- */
-export interface SalesBookingPublishedResource extends SalesBookingResource {
-  calendar: {
-    read_ok: boolean
-    reason: string | null
-    email: string | null
-    source: string
-    leave: 'not_read'
-  }
-}
-
 export interface SalesBookingReadResponse {
   ok: true
   fixture: false
@@ -558,7 +529,7 @@ export interface SalesBookingReadResponse {
   version: string
   week_start: string
   week: SalesBookingWeekWindow
-  resource: SalesBookingPublishedResource
+  resource: SalesBookingResource
   coverage: {
     full_population: boolean
     enumerated: number
@@ -572,12 +543,6 @@ export interface SalesBookingReadResponse {
   }
   cases: SalesBookingCase[]
   diary: SalesBookingDiaryEntry[]
-  /**
-   * The same array as `diary`, under the key the shipped Sales Booking view
-   * already reads. Kept so the existing view and the reskin can consume one
-   * response; `diary` is the contract name.
-   */
-  events: SalesBookingDiaryEntry[]
   diary_read: { read_ok: boolean; reason: string | null; source: string; calendar_email: string | null }
   thread_facts: Record<string, SalesBookingThreadFacts>
   drafts: Record<string, never>
@@ -592,15 +557,14 @@ export interface SalesBookingReadResponse {
 export function assembleSalesBookingRead(input: {
   resource: SalesBookingResource
   week: SalesBookingWeekWindow
-  /** Already de-duplicated and projected; the thread facts are folded on here. */
+  /** Already de-duplicated and projected. */
   projectedCases: SalesBookingCase[]
   opportunities: SalesBookingOpportunityScan
   diary: SalesBookingDiaryScan
   threads: SalesBookingThreadScan
 }): SalesBookingReadResponse {
   const { resource, week, opportunities, diary, threads } = input
-
-  const cases = input.projectedCases.map((row) => applyThreadFactsToCase(row, threads.facts[row.id]))
+  const cases = input.projectedCases
 
   const gaps: string[] = []
   gaps.push(
@@ -640,16 +604,7 @@ export function assembleSalesBookingRead(input: {
     version: SALES_BOOKING_API_VERSION,
     week_start: week.week_start,
     week,
-    resource: {
-      ...resource,
-      calendar: {
-        read_ok: diary.read_ok,
-        reason: diary.reason,
-        email: diary.calendar_email,
-        source: DIARY_SOURCE,
-        leave: 'not_read',
-      },
-    },
+    resource: { ...resource },
     coverage: {
       // Full population means the roster was terminal. Thread and calendar gaps
       // are named separately: they narrow what is KNOWN about a case, not
@@ -666,7 +621,6 @@ export function assembleSalesBookingRead(input: {
     },
     cases,
     diary: diary.entries,
-    events: diary.entries,
     diary_read: {
       read_ok: diary.read_ok,
       reason: diary.reason,

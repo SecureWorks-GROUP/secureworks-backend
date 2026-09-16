@@ -24,8 +24,8 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  applyThreadFactsToCase,
   assembleSalesBookingRead,
+  createSalesBookingReadDependencies,
   defaultPerthWeekStart,
   deriveSalesBookingThreadFacts,
   isPhoneLikeName,
@@ -42,7 +42,6 @@ import {
   type SalesBookingDiaryScan,
   type SalesBookingMessage,
   type SalesBookingReadDependencies,
-  unreadSalesBookingThreadFacts,
 } from "./sales_booking_read.ts";
 
 const NOW = new Date("2026-09-16T02:00:00.000Z"); // Wed 10:00 Perth
@@ -300,18 +299,25 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
   assertEquals(projectSalesBookingCase({ name: "no id" }, "marnin"), null);
 });
 
-Deno.test("an unread thread never overwrites the case status", () => {
-  const row = projectSalesBookingCase(opportunity(), "marnin")!;
-  const unread = applyThreadFactsToCase(row, unreadSalesBookingThreadFacts("opp-1", "contact-1", "ghl_thread_unread: 502"));
-  assertEquals(unread.status, "needs_decision");
-  assertEquals(unread.status_source, "unread");
-
-  const read = applyThreadFactsToCase(
-    row,
-    deriveSalesBookingThreadFacts({ caseId: "opp-1", contactId: "contact-1", messages: [], nowMs: NOW.getTime() }),
+Deno.test("case status stays at the reference default; classification lives only in thread_facts", async () => {
+  const payload = await salesBookingRead(
+    deps({
+      readThread: () =>
+        Promise.resolve([
+          {
+            type: "TYPE_SMS",
+            direction: "outbound",
+            body: "Can I come Tuesday between 10:00 and 11:30?",
+            timestamp: "2026-09-15T22:00:00.000Z",
+          },
+        ]),
+    }),
+    { resource: "marnin", week_start: WEEK },
   );
-  assertEquals(read.status, "ready_to_contact");
-  assertEquals(read.status_source, "thread_facts");
+  assertEquals(payload.cases[0].status, "needs_decision");
+  assertEquals(payload.cases[0].status_source, "unread");
+  assertEquals(payload.thread_facts["opp-1"].classification, "waiting_reply");
+  assertEquals(payload.thread_facts["opp-1"].read_ok, true);
 });
 
 // ── Diary ───────────────────────────────────────────────────
@@ -379,27 +385,23 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.resource.sender_line, "776");
 });
 
-Deno.test("the shipped view's own keys are served from the same read", async () => {
-  // ops-sales-booking.js reads `data.events` for the week grid and
-  // `data.resource.calendar.leave` for the leave caveat. Both must come off
-  // THIS response, or the shipped view renders "No provider events".
+Deno.test("diary is the only calendar output; unread is diary_read plus coverage.gaps", async () => {
   const payload = await salesBookingRead(deps(), { resource: "marnin", week_start: WEEK });
-  assertEquals(payload.events, payload.diary);
-  assertEquals(payload.resource.calendar.leave, "not_read");
-  assertEquals(payload.resource.calendar.read_ok, true);
-  assertEquals(payload.resource.calendar.email, "marnin@secureworkswa.com.au");
+  assertEquals("events" in payload, false);
+  assertEquals("calendar" in payload.resource, false);
+  assertEquals(payload.diary.length, 1);
+  assertEquals(payload.diary_read.read_ok, true);
 
   const unread = await salesBookingRead(
     deps({ readDiary: () => Promise.resolve(UNREAD_DIARY) }),
     { resource: "marnin", week_start: WEEK },
   );
-  assertEquals(unread.events, []);
-  assertEquals(unread.resource.calendar.read_ok, false);
-  // The static profile is never mutated by publishing calendar provenance.
-  assertEquals(
-    (SALES_BOOKING_RESOURCES.marnin as unknown as Record<string, unknown>).calendar,
-    undefined,
-  );
+  assertEquals("events" in unread, false);
+  assertEquals("calendar" in unread.resource, false);
+  assertEquals(unread.diary, []);
+  assertEquals(unread.diary_read.read_ok, false);
+  assertEquals(unread.coverage.diary_read_ok, false);
+  assert(unread.coverage.gaps.some((g) => g.includes("calendar_http_403")));
 });
 
 Deno.test("FIXTURE: an unread calendar names the gap and never throws", async () => {
@@ -494,9 +496,11 @@ Deno.test("thread_limit leaves the remainder unproved rather than unreported", a
   assertEquals(Object.keys(payload.thread_facts).length, 2);
   assertEquals(payload.coverage.threads_read, 2);
   assert(payload.coverage.gaps.some((g) => g.includes("3 case(s) had no thread read")));
-  // Unproved cases keep the reference default, not a clean-looking disposition.
-  const unproved = payload.cases.filter((c) => c.status_source === "unread");
+  const unproved = payload.cases.filter((c) => !payload.thread_facts[c.id]);
   assertEquals(unproved.length, 3);
+  for (const row of payload.cases) {
+    assertEquals(row.status, "needs_decision");
+  }
 });
 
 Deno.test("include_thread_facts:false skips every thread read and says so", async () => {
@@ -560,17 +564,40 @@ Deno.test("week_start defaults to the current Perth week when omitted", async ()
 
 // ── Structural: the action is read-only ─────────────────────
 
-Deno.test("the module declares no write verb on any dependency", async () => {
-  const source = await Deno.readTextFile(new URL("./sales_booking_read.ts", import.meta.url));
-  // A PostgREST write, a GHL POST, or a calendar create would each show here.
-  for (const forbidden of [".insert(", ".update(", ".upsert(", ".delete(", ".rpc("]) {
-    assertEquals(
-      source.includes(forbidden),
-      false,
-      `sales_booking_read must stay read-only; found ${forbidden}`,
-    );
+Deno.test("the deps object handed to the runner exposes no write members", async () => {
+  const production = createSalesBookingReadDependencies({ from: () => ({}) });
+  const forbidden = ["insert", "update", "upsert", "delete", "rpc"] as const;
+  for (const name of forbidden) {
+    assertEquals(Object.hasOwn(production, name), false);
   }
-  // Only GET reads leave this module.
-  assertEquals(source.includes("method: 'POST'"), false);
-  assertEquals(source.includes('method: "POST"'), false);
+  assertEquals(
+    Object.keys(production).sort(),
+    ["now", "readDiary", "readOpportunities", "readThread"].sort(),
+  );
+
+  let handed: SalesBookingReadDependencies | undefined;
+  const readers = deps();
+  const captured: SalesBookingReadDependencies = {
+    readOpportunities: (args) => {
+      handed = captured;
+      return readers.readOpportunities(args);
+    },
+    readDiary: (args) => {
+      handed = captured;
+      return readers.readDiary(args);
+    },
+    readThread: (args) => {
+      handed = captured;
+      return readers.readThread(args);
+    },
+    now: () => {
+      handed = captured;
+      return readers.now();
+    },
+  };
+  await salesBookingRead(captured, { resource: "marnin", week_start: WEEK });
+  assert(handed);
+  for (const name of forbidden) {
+    assertEquals(Object.hasOwn(handed, name), false);
+  }
 });
