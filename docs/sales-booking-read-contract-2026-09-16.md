@@ -28,7 +28,7 @@ action has no send or calendar-write capability to gate.
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
 | `scoper_user_id` | the resource's own | Overrides the CALENDAR read only, and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
-| `thread_limit` | 80 (max 250) | Newest-activity-first cap on thread reads. |
+| `thread_limit` | 200 (max 250) | Newest-activity-first cap on thread reads, spent on scoped rows only. |
 | `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep. |
 | `case_ids` | all | Comma-separated: read threads for these cases only. |
 
@@ -56,7 +56,8 @@ Additions:
   `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
   the confirmed GHL user id or null when unread.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
-  `scoper_user_id`, `sender_line`, `sender_line_source`, plus `calendar`
+  `scoper_user_id`, `sender_line`, `sender_line_source`,
+  `scope_stage_ids`, plus `calendar`
   `{ok, error, mailbox}` copied from `diary_read` (not a second calendar
   read). The Booking door paints "Calendar not connected" when
   `resource.calendar.ok` is false.
@@ -65,10 +66,21 @@ Additions:
 
 ## Reading it honestly
 
+- **`coverage.enumerated`** and **`cases[]`** are the scoped book: open
+  opportunities whose GHL stage still needs a visit, a reply or a quote
+  (`resource.scope_stage_ids`, the visit/reply/quote prefix of wiki
+  `harness/ops/skills/secureworks-scope-booking/profiles/patio-nithin.json`
+  and `fencing-stratco-marnin.json` `pipeline_stages`). Quote-sent, won,
+  hold, lost, archive, and blank or unknown stage ids are left out.
+  **`coverage.excluded_by_stage`** is how many unique open rows were dropped
+  for that reason. **`coverage.total`** stays the GHL open-pipeline search
+  total (unscoped). CRM row count is not visit demand.
 - **`coverage.full_population`** is TRUE only when the GHL roster scan reached
   the real end of the result set with no degradation. FALSE means the book is
   incomplete, never that it is small. Every gap is a sentence in
-  `coverage.gaps`.
+  `coverage.gaps`. The live search is `pipelineId` + `status=open`; GHL v3
+  search takes only one `pipelineStageId`, so stage scope is applied after
+  enumeration and before the thread pass.
 - **`diary` empty with `diary_read.read_ok:false`** is an UNREAD calendar, not a
   clear week. Unread coverage is never free capacity. Named unread reasons
   include `ghl_user_unmapped` (no confirmed GHL user for that scoper) and
