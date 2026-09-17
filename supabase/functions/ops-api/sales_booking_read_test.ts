@@ -1360,6 +1360,36 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
     salesBookingSuburbFromContact({ city: "115 Berkley Rd" }),
     SALES_BOOKING_NOT_GIVEN,
   );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "8 ison court" }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "12 Delonix Circle" }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "Banksia Grove" }),
+    "Banksia Grove",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "St James" }),
+    "St James",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({
+      city: "53 pensacola Ave Caversham 6055",
+    }),
+    "Caversham",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "5 Skye Ct, Greenwood 6024" }),
+    "Greenwood",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "East Victoria Park, 6101" }),
+    "East Victoria Park",
+  );
   assertEquals(salesBookingSuburbFromContact({}), SALES_BOOKING_NOT_GIVEN);
   assertEquals(
     salesBookingJobTypeFromOpportunity({}, { tags: ["northside patios"] }),

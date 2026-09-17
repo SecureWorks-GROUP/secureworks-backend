@@ -728,7 +728,10 @@ export function salesBookingSuburbFromContact(
     const parsedCity = salesBookingSuburbFromAddressLine(city) ||
       salesBookingSuburbFromStreetLine(city);
     if (parsedCity) return parsedCity;
-    if (!salesBookingLooksLikeStreet(city)) return city;
+    const strippedCity = stripAddressPlaceTail(city);
+    if (strippedCity && !salesBookingLooksLikeStreet(strippedCity)) {
+      return strippedCity;
+    }
   }
   const fields = collectCustomFieldValues(contact, opportunity);
   for (const field of fields) {
@@ -767,8 +770,20 @@ export function salesBookingSuburbFromContact(
 const STREET_TYPE_RE =
   /\b(?:st|street|rd|road|ave|avenue|dr|drive|ct|court|pl|place|way|cres|crescent|crest|pde|parade|cl|close|tce|terrace|hwy|highway|blvd|circuit|cct|loop|rise|grove|lane|ln)\b/i;
 
+/** Optional AU postcode after the suburb, with or without WA. */
+const AU_POSTCODE_TAIL_RE = /(?:,\s*|\s+)\d{4}\s*$/;
+
+function stripAddressPlaceTail(text: string): string {
+  return text.replace(WA_PLACE_TAIL_RE, "").replace(AU_POSTCODE_TAIL_RE, "")
+    .trim();
+}
+
+/**
+ * A street line starts with a house or unit number. Suburb names may contain
+ * Grove / St / Place and must still count as given.
+ */
 function salesBookingLooksLikeStreet(value: string): boolean {
-  return /^\d/.test(value.trim()) || STREET_TYPE_RE.test(value);
+  return /^(?:\d+[A-Za-z]?\/)?\d/.test(value.trim());
 }
 
 /**
@@ -780,7 +795,8 @@ export function salesBookingSuburbFromStreetLine(
 ): string | null {
   const text = nonemptyText(value);
   if (!text) return null;
-  const trimmed = text.replace(WA_PLACE_TAIL_RE, "").trim();
+  const trimmed = stripAddressPlaceTail(text);
+  if (!trimmed || !salesBookingLooksLikeStreet(trimmed)) return null;
   const comma = trimmed.match(/,\s*([A-Za-z][A-Za-z .'-]{1,40})\s*$/);
   const afterComma = nonemptyText(comma?.[1]);
   if (
