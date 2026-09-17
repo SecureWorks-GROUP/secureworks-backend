@@ -4205,7 +4205,9 @@ export function _scopeCalendarPayloadToVerticals(payload: any, managedVerticals:
   if (!payload || typeof payload !== 'object') return payload
   const events = Array.isArray(payload.events) ? payload.events : []
   const kept = events.filter((e: any) =>
-    verticals.includes(_jobVertical({ type: e?.job_type, job_number: e?.job_number })),
+    verticals.includes(
+      _jobVertical({ type: e?.job_type, job_number: e?.job_number, job_family: e?.job_family }),
+    ),
   )
   const keptJobIds = new Set(kept.map((e: any) => String(e?.job_id || '')).filter(Boolean))
   const out: any = { ...payload, events: kept }
@@ -9974,7 +9976,7 @@ if (import.meta.main) serve(async (req: Request) => {
             // orders, but tenant and canonical job vertical remain hard server
             // boundaries at submission time too.
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb)')
+              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
               .eq('id', work_order_id)
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
@@ -13324,12 +13326,26 @@ const TRADE_CALENDAR_COLUMNS = [
   'scheduled_date', 'scheduled_end', 'start_time', 'end_time', 'crew_name', 'assigned_to',
   'assignment_type', 'assignment_status', 'confirmation_status', 'job_type', 'job_status',
   'org_id',
+  // job_family: SES/make-safe family tag (e.g. 'repair'), independent of
+  // job_type — lets the Trade calendar's vertical filter (and the JS-side
+  // precedence check below) recognise a family-tagged repair the same way
+  // the OpsDash calendar/Repairs board already do. See AGENTS.md.
+  'job_family',
 ]
 
+// A SUPERSET filter: matches every row a requested vertical could possibly
+// mean. Deliberately flat (no PostgREST and()/or() nesting) so it stays a
+// trivial string to test and reason about; the exact "repair wins" precedence
+// (a make-safe/fencing job whose family says repair is never counted as its
+// birth vertical — see _jobIsRepairFamily) is enforced ONCE, afterward, by the
+// JS-side filter in tradeCalendarEvents. Over-fetching here is harmless; the
+// JS filter is what makes the answer exact.
 function tradeCalendarVerticalFilter(verticals: string[]): string {
   return verticals.flatMap((vertical) =>
     vertical === 'makesafe'
       ? ['job_type.eq.makesafe', 'job_number.ilike.SWMS-%']
+      : vertical === 'repair'
+      ? ['job_type.eq.repair', 'job_family.eq.repair']
       : [`job_type.eq.${vertical}`]
   ).join(',')
 }
@@ -13443,16 +13459,33 @@ export async function tradeCalendarEvents(
   // manager past their own rows). Mine is already bounded by user_id, so
   // applying it there would hide a manager's OWN out-of-vertical work — making
   // their personal calendar smaller than an ordinary installer's.
-  if (requestedType) {
-    query = query.or(tradeCalendarVerticalFilter([requestedType]))
-  } else if (mode === 'all' && !isDispatcher && managedVerticals.length > 0) {
-    query = query.or(tradeCalendarVerticalFilter(managedVerticals))
+  const scopingVerticals = requestedType
+    ? [requestedType]
+    : mode === 'all' && !isDispatcher && managedVerticals.length > 0
+    ? managedVerticals
+    : []
+  if (scopingVerticals.length > 0) {
+    query = query.or(tradeCalendarVerticalFilter(scopingVerticals))
   }
 
   const { data, error } = await query
   if (error) throw error
 
-  const rows = data || []
+  let rows = data || []
+  // tradeCalendarVerticalFilter's SQL clause is a SUPERSET (e.g. a manager
+  // scoped to 'makesafe' also matches every SWMS-numbered row); the exact
+  // "repair wins" precedence is enforced here, the ONE place, using the same
+  // classifier every other vertical decision uses. A family-tagged make-safe
+  // row is dropped from a 'makesafe'-scoped view and would only survive a
+  // 'repair'-scoped one (SWMS-261319 class).
+  if (scopingVerticals.length > 0) {
+    const scopingSet = new Set(scopingVerticals)
+    rows = rows.filter((row: any) =>
+      scopingSet.has(
+        _jobVertical({ type: row?.job_type, job_number: row?.job_number, job_family: row?.job_family }),
+      )
+    )
+  }
   const hasMore = rows.length > pageSize
   const events = rows.slice(0, pageSize).map((event: any) => {
     const { org_id, ...safeEvent } = event
@@ -14149,9 +14182,16 @@ export async function tradeWorkOrders(
     : mode === 'all' && !isDispatcher
     ? managedVerticals
     : []
+  // A SUPERSET filter (see tradeCalendarVerticalFilter): repair additionally
+  // matches by family metadata, since a family-tagged make-safe/fencing job is
+  // never retyped. The exact "repair wins" precedence is enforced once, below,
+  // after the fetch, via the same _jobVertical classifier every other
+  // vertical decision uses.
   const workOrderVerticalFilter = verticals.flatMap((vertical) =>
     vertical === 'makesafe'
       ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%']
+      : vertical === 'repair'
+      ? ['type.eq.repair', 'metadata->>ses_family.eq.repair', 'metadata->>makesafe_job_family.eq.repair']
       : [`type.eq.${vertical}`]
   ).join(',')
 
@@ -14160,7 +14200,7 @@ export async function tradeWorkOrders(
   while (true) {
     let query = client
       .from('work_orders')
-      .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb)')
+      .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
       .eq('org_id', viewer.orgId)
       .eq('jobs.org_id', viewer.orgId)
       .not('status', 'in', '("cancelled","deleted")')
@@ -14190,6 +14230,14 @@ export async function tradeWorkOrders(
   // Defensive de-duplication protects external offset paging if a database view
   // or retry ever repeats a row at a page boundary.
   let authorizedRows = [...new Map(allRows.map((row: any) => [String(row.id), row])).values()]
+  // workOrderVerticalFilter is a superset (a caller scoped to 'makesafe' also
+  // matches every SWMS-numbered row); narrow to the exact requested/managed
+  // vertical set, the ONE way precedence is decided (_jobVertical), so a
+  // family-tagged job never rides its birth vertical's work-order list.
+  if (verticals.length > 0) {
+    const verticalSet = new Set(verticals)
+    authorizedRows = authorizedRows.filter((row: any) => verticalSet.has(_jobVertical(row.jobs)))
+  }
   if (status === 'complete') {
     authorizedRows = authorizedRows.filter((row: any) => workOrderIsInvoiceReady(row))
   }
@@ -14277,6 +14325,11 @@ export async function tradeWorkOrders(
       job_number: workOrder.jobs?.job_number || '',
       client_name: workOrder.jobs?.client_name || '',
       job_type: _jobVertical(workOrder.jobs),
+      // Additive: the narrow family tag (e.g. 'repair') and the same derived
+      // vertical as job_type, spelled under the shared contract name so a
+      // consumer keyed on either can bucket a family-tagged job correctly.
+      job_family: _jobFamilyOf(workOrder.jobs),
+      vertical: _jobVertical(workOrder.jobs),
       job_status: workOrder.jobs?.status || '',
       assigned_user_id: workOrder.assigned_user_id || null,
       assigned_user_name: workOrder.assigned_user?.name || workOrder.trade_name || '',
@@ -31801,7 +31854,7 @@ export async function assertAssignmentMutationAuthz(
   }
   let jobVertical: string | null = null
   if (jobId) {
-    const { data: job } = await client.from('jobs').select('id, type, job_number').eq('id', jobId).maybeSingle()
+    const { data: job } = await client.from('jobs').select('id, type, job_number, metadata').eq('id', jobId).maybeSingle()
     if (job) jobVertical = _jobVertical(job)
   }
   const decision = _resolveAllocationAuthz({
@@ -31885,7 +31938,7 @@ export async function allocateJob(client: any, args: {
   if (!jobId) throw new ApiError('jobId (new allocation) or assignmentId (reassignment) required', 400)
 
   const { data: job } = await client.from('jobs')
-    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+    .select('id, type, job_number, status, metadata').eq('id', jobId).maybeSingle()
   if (!job) throw new ApiError('job not found', 404)
 
   // Refuse archived / cancelled / otherwise-terminal jobs (same terminal set the
@@ -37489,7 +37542,9 @@ export const _closeOpenAssignmentsForJobForTest = closeOpenAssignmentsForJob
 async function getTradeJobForAccess(client: any, jobId: string): Promise<any> {
   const { data, error } = await client
     .from('jobs')
-    .select('id, org_id, type, job_number, status')
+    // metadata is selected so _jobVertical can classify a family-tagged
+    // repair job (jobs.type unchanged) into the division_manager check below.
+    .select('id, org_id, type, job_number, status, metadata')
     .eq('id', jobId)
     .maybeSingle()
   if (error) throw error
@@ -38167,7 +38222,11 @@ export function _canSeeFullMakesafePool(isDispatcher: boolean, isMakesafeManager
 // (b) allocation rights over that vertical. Values align to jobs.type. This
 // generalises the make-safe-only flag (users.makesafe_manager, now backfilled
 // into managed_verticals) to fencing / patio / decking with one mechanism.
-export const _MANAGED_VERTICALS = ['makesafe', 'fencing', 'patio', 'decking'] as const
+// 2026-09-17: 'repair' joins the set (Captain: "there's fencing, there's
+// patio, and now there's repair. It's the same theory"). A repair division
+// manager gets the repair open pool + allocation rights exactly like every
+// other vertical; see _jobVertical for how a job is classified into it.
+export const _MANAGED_VERTICALS = ['makesafe', 'fencing', 'patio', 'decking', 'repair'] as const
 
 // Normalise a raw managed_verticals value (DB array, possibly null / mixed-case
 // / unknown entries) into a clean, de-duplicated list of valid verticals.
@@ -38235,10 +38294,44 @@ export function _managerBoardVerticals(
   return _normalizeManagedVerticals(input.managedVerticals)
 }
 
-// The vertical a job belongs to, for allocation-authz + pool purposes. Make-safe
-// wins on either jobs.type='makesafe' OR an SWMS- job_number (mirrors
+// The narrow family tag itself (e.g. 'repair'), for surfacing on trade-facing
+// reads as `job_family` — mirrors calendar_events.job_family's own
+// COALESCE(ses_family, makesafe_job_family) shape. Null when nothing is
+// tagged; this is display metadata, never a placement/authority input (that's
+// _jobVertical / _jobIsRepairFamily below).
+export function _jobFamilyOf(job: any): string | null {
+  if (!job) return null
+  const light = String(job.job_family || '').trim().toLowerCase()
+  if (light) return light
+  const metadata = job.metadata && typeof job.metadata === 'object' ? job.metadata : {}
+  const family = String(metadata.ses_family || metadata.makesafe_job_family || '').trim().toLowerCase()
+  return family || null
+}
+
+// Repair takes precedence over every other vertical, per the SES boards' own
+// rule (isInsuranceRepairFamily, insurance_repairs_board.ts): jobs.type='repair'
+// OR family metadata says so (metadata.ses_family / metadata.makesafe_job_family),
+// independent of the row's own jobs.type. A make-safe (or, once, fencing) job
+// reclassified in place via update_makesafe_job_family stays type='makesafe'/
+// 'fencing' forever by design (the SWR- mint is a one-way supervised door,
+// Captain ruling 2026-08-28) — so a repair-family job must never be read as its
+// birth vertical. Delegates to the canonical predicate for a full `jobs` row
+// (type/metadata/ses_family/family/makesafe_details.report_type), and also
+// accepts a light calendar-row shape carrying the projected `job_family`
+// column (calendar_events, AGENTS.md's "Never Select scope_json…" section).
+export function _jobIsRepairFamily(job: any): boolean {
+  if (!job) return false
+  if (String(job.job_family || '').trim().toLowerCase() === 'repair') return true
+  return isInsuranceRepairFamily(job)
+}
+
+// The vertical a job belongs to, for allocation-authz + pool purposes. Repair
+// is checked FIRST (see _jobIsRepairFamily) so a family-tagged make-safe/fencing
+// job is never read as make-safe/fencing here. Otherwise make-safe wins on
+// either jobs.type='makesafe' OR an SWMS- job_number (mirrors
 // isMakesafeAccessJob); otherwise the plain jobs.type (lower-cased).
 export function _jobVertical(job: any): string {
+  if (_jobIsRepairFamily(job)) return 'repair'
   if (isMakesafeAccessJob(job)) return 'makesafe'
   return String(job?.type || '').trim().toLowerCase()
 }
@@ -38562,13 +38655,17 @@ export async function myJobs(
   const poolLens: 'everyone' | 'mine' = showAll || managerScope.length > 0 ? 'everyone' : 'mine'
   const poolRecoveryUserId = poolLens === 'mine' ? userId : ''
 
+  // `metadata` is selected here (in addition to the makesafe-pool selects that
+  // already carried it) so _jobVertical / job_family can classify a
+  // family-tagged repair job (jobs.type unchanged, per the SES boards' rule)
+  // on every myJobs lane, not only the make-safe pool.
   const ASSIGNMENT_SELECT_ADMIN = `
         id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name ),
         jobs:job_id (
           id, type, status, archived, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number
+          site_address, site_suburb, notes, job_number, metadata
         )
       `
   const ASSIGNMENT_SELECT_USER = `
@@ -38576,7 +38673,7 @@ export async function myJobs(
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id (
           id, type, status, archived, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number
+          site_address, site_suburb, notes, job_number, metadata
         )
       `
   // Same columns as the admin select but with an INNER join on jobs so a
@@ -38658,8 +38755,17 @@ export async function myJobs(
     // Because the open pools below de-dupe
     // against this same (now vertical-wide) `assignments` set, jobs already
     // assigned to OTHER crew can no longer show as false "available" cards.
+    // A SUPERSET filter, same shape as tradeCalendarVerticalFilter: repair
+    // additionally matches by family metadata (jobs has no job_family column,
+    // so both keys are read directly), since a family-tagged make-safe/fencing
+    // job never gets retyped. The exact "repair wins" precedence is enforced
+    // afterward, ONCE, via the _jobVertical filter below.
     const verticalFilter = (verticals: string[]) => verticals.flatMap((v) =>
-      v === 'makesafe' ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%'] : [`type.eq.${v}`]
+      v === 'makesafe'
+        ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%']
+        : v === 'repair'
+        ? ['type.eq.repair', 'metadata->>ses_family.eq.repair', 'metadata->>makesafe_job_family.eq.repair']
+        : [`type.eq.${v}`]
     ).join(',')
     const rollingVerticals = managerScope.filter((vertical) => vertical !== 'fencing')
     assignments = []
@@ -38707,6 +38813,13 @@ export async function myJobs(
     // Mixed scopes can overlap only through malformed data, but de-duplicating
     // by the canonical assignment id also makes retries/page boundaries safe.
     assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
+    // verticalFilter() above is a superset (a manager scoped to 'makesafe'
+    // also matches every SWMS-numbered row); narrow to the exact vertical set
+    // this manager actually manages, the ONE way precedence is decided
+    // (_jobVertical), so a family-tagged job never rides its birth vertical's
+    // board.
+    const managerScopeSet = new Set(managerScope)
+    assignments = assignments.filter((row: any) => managerScopeSet.has(_jobVertical(row?.jobs)))
   } else {
     // ── Normal mode: only this user's assignments ──
     // Ghost rows carry the requesting ops manager's own user_id, so this is the
@@ -38752,7 +38865,7 @@ export async function myJobs(
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id!inner (
           id, type, status, archived, client_name, client_phone, client_email,
-          site_address, site_suburb, notes, job_number
+          site_address, site_suburb, notes, job_number, metadata
         )
       `
   // U2b + ship-review FIX 1: the personal path runs this backstop per-user; the
@@ -39133,19 +39246,34 @@ export async function myJobs(
         // "available" cards — the 72/76 counts Marnin called out. The make-safe
         // pool above keeps its exclude filter untouched (its "New" = intake-
         // complete jobs, already honest). Assigned-job dedupe below unchanged.
-        const openJobs = await readPagedRows(
-          (offset, limit) =>
-            client
+        // Repair additionally matches by family metadata (jobs has no
+        // job_family column, so both keys are read directly) — a
+        // family-tagged make-safe/fencing job is never retyped, per the SES
+        // boards' rule. This is a SUPERSET for repair; the exact "repair wins"
+        // precedence over every OTHER vertical (a fencing job tagged
+        // family=repair must not enter the fencing pool) is enforced by the
+        // _jobIsRepairFamily filter just below — the same classifier used
+        // everywhere else, applied once.
+        const openJobsRaw = await readPagedRows(
+          (offset, limit) => {
+            let q = client
               .from('jobs')
-              .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+              .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at, metadata')
               .eq('org_id', orgId)
-              .eq('type', vertical)
+            q = vertical === 'repair'
+              ? q.or('type.eq.repair,metadata->>ses_family.eq.repair,metadata->>makesafe_job_family.eq.repair')
+              : q.eq('type', vertical)
+            return q
               .in('status', _CREW_READY_STATUSES as unknown as string[])
               .order('created_at', { ascending: false })
               .order('id', { ascending: true })
-              .range(offset, offset + limit - 1),
+              .range(offset, offset + limit - 1)
+          },
           `${vertical} pool`,
         )
+        const openJobs = vertical === 'repair'
+          ? openJobsRaw
+          : (openJobsRaw || []).filter((job: any) => !_jobIsRepairFamily(job))
         // The manager assignment feed intentionally remains 30-day windowed, so
         // ask job_assignments directly whether these already tenant+vertical-
         // authorized pool ids are occupied at any date.
@@ -39252,6 +39380,12 @@ export async function myJobs(
       const pj = a.jobs.pricing_json
       a.jobs.scope_summary = pj?.job_description || ''
       delete a.jobs.pricing_json // don't send pricing data to trades
+      // Additive: job_family/vertical so the trade app can bucket a job
+      // whose family metadata says repair as Repair, without this card ever
+      // having its own jobs.type mutated (the SWR- mint stays a one-way
+      // supervised door). `type` is left exactly as it was.
+      a.jobs.job_family = _jobFamilyOf(a.jobs)
+      a.jobs.vertical = _jobVertical(a.jobs)
     }
   }
 
@@ -40763,6 +40897,24 @@ async function tradeJobDetail(
       family: _tradeJobMetadata?.makesafe_job_family,
       authority: 'typed_job_metadata',
     }),
+    // Additive: the narrow family tag and the derived vertical (repair takes
+    // precedence over jobs.type — see _jobVertical), so a repair-family job
+    // reaches the trade app through this SAME normal detail path (documents,
+    // notes, assignments, POs below are already unconditional on job type)
+    // rather than only via the make-safe board.
+    job_family: _jobFamilyOf(jobRes.data),
+    vertical: _jobVertical(jobRes.data),
+    // Additive: repair identifiers, present whenever the job is repair-family
+    // even when jobs.type is still 'makesafe'/'fencing' (update_makesafe_job_family
+    // never retypes the row; the SWR- mint is a one-way supervised door).
+    // Mirrors the Repairs board's own identifiers (insurance_repairs_board.ts
+    // projectInsuranceRepairPipelineRow).
+    repair: isInsuranceRepairFamily(jobRes.data) ? {
+      builder_work_order_number: String(_tradeJobMetadata?.builder_work_order_number || '').trim() || null,
+      builder_po_number: String(_tradeJobMetadata?.builder_po_number || '').trim() || null,
+      builder_claim_ref: String(_tradeJobMetadata?.builder_claim_ref || '').trim() || null,
+      repair_stage: insuranceRepairStage(jobRes.data),
+    } : null,
     documents: visibleDocuments,
     media: allocatedMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
@@ -48580,7 +48732,7 @@ async function reopenMakesafe(client: any, body: any, authz?: {
 
   // Load the job to check eligibility.
   const { data: job, error: jobErr } = await client.from('jobs')
-    .select('id, status, type').eq('id', jobId).maybeSingle()
+    .select('id, status, type, metadata').eq('id', jobId).maybeSingle()
   if (jobErr) throw new ApiError('reopenMakesafe: job read failed: ' + jobErr.message, 500)
   if (!job) throw new ApiError('reopenMakesafe: job not found: ' + jobId, 404)
   if (job.type !== 'makesafe') throw new ApiError('reopenMakesafe: job is not a make-safe job', 400)
@@ -48780,7 +48932,7 @@ export async function cancelMakesafe(client: any, args: {
   if (!note) throw new ApiError('note required (a typed reason is always required)', 400)
 
   const { data: job, error: jobErr } = await client.from('jobs')
-    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+    .select('id, type, job_number, status, metadata').eq('id', jobId).maybeSingle()
   if (jobErr) throw new ApiError('cancelMakesafe: job read failed: ' + jobErr.message, 500)
   if (!job) throw new ApiError('job not found', 404)
   if (job.type !== 'makesafe') throw new ApiError('cancelMakesafe: job is not a make-safe job', 400)
@@ -48935,7 +49087,7 @@ export async function reattendMakesafe(client: any, args: {
   if (!reason) throw new ApiError('reason required (e.g. "temp fence blew down again")', 400)
 
   const { data: job, error: jobErr } = await client.from('jobs')
-    .select('id, type, job_number, status').eq('id', jobId).maybeSingle()
+    .select('id, type, job_number, status, metadata').eq('id', jobId).maybeSingle()
   if (jobErr) throw new ApiError('reattendMakesafe: job read failed: ' + jobErr.message, 500)
   if (!job) throw new ApiError('job not found', 404)
   if (job.type !== 'makesafe') throw new ApiError('reattendMakesafe: job is not a make-safe job', 400)
