@@ -196,6 +196,35 @@ Deno.test("wired calendar_events handler is GET only, returns the window, and is
   ]);
 });
 
+Deno.test("window GET reads only body.events", async () => {
+  const aliases = getter([{
+    appointments: [event("via-appointments")],
+    data: { events: [event("via-nested")] },
+  }]);
+  const ignored = await fetchGhlCalendarEvents({
+    ghlGet: aliases.ghlGet,
+    locationId: LOCATION,
+    userId: USER,
+    startMs: START,
+    endMs: END,
+  });
+  assertEquals(ignored.events, []);
+  assertEquals(ignored.count, 0);
+  assertEquals(ignored.failure, null);
+
+  const documented = getter([{ events: [event("via-events")] }]);
+  const kept = await fetchGhlCalendarEvents({
+    ghlGet: documented.ghlGet,
+    locationId: LOCATION,
+    userId: USER,
+    startMs: START,
+    endMs: END,
+  });
+  assertEquals(kept.count, 1);
+  assertEquals((kept.events[0] as { id: string }).id, "via-events");
+  assertEquals(kept.failure, null);
+});
+
 Deno.test("one unpaged window GET keeps a full GHL page", async () => {
   const many = Array.from({ length: 100 }, (_, i) => event(`e-${i}`));
   const { calls, ghlGet } = getter([{ events: many }]);

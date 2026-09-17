@@ -510,26 +510,12 @@ export function perthDiaryInstant(value: unknown): string | null {
 /** @deprecated Use perthDiaryInstant. Outlook Graph is no longer the diary source. */
 export const perthGraphInstant = perthDiaryInstant;
 
-function ghlEventInstant(event: Record<string, unknown>, key: string): string | null {
-  const direct = event[key];
-  if (direct !== undefined && direct !== null && typeof direct !== "object") {
-    return perthDiaryInstant(direct);
-  }
-  const nested = event[key] && typeof event[key] === "object"
-    ? event[key] as Record<string, unknown>
-    : null;
-  if (nested) {
-    return perthDiaryInstant(nested.dateTime ?? nested.date ?? nested.startDate);
-  }
-  return null;
-}
-
 function ghlIsAllDay(
   event: Record<string, unknown>,
   start: string,
   end: string,
 ): boolean {
-  if (event.isAllDay === true || event.allDay === true) return true;
+  if (event.isAllDay === true) return true;
   const startMs = Date.parse(start);
   const endMs = Date.parse(end);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
@@ -555,30 +541,23 @@ export function projectSalesBookingDiaryEntry(
   event: Record<string, unknown>,
 ): SalesBookingDiaryEntry | null {
   const id = typeof event.id === "string" ? event.id : "";
-  const start = ghlEventInstant(event, "startTime") ??
-    ghlEventInstant(event, "start");
-  const end = ghlEventInstant(event, "endTime") ?? ghlEventInstant(event, "end");
+  const start = perthDiaryInstant(event.startTime);
+  const end = perthDiaryInstant(event.endTime);
   if (!id || !start || !end) return null;
 
   const deleted = event.deleted === true;
   const rawStatus = typeof event.appointmentStatus === "string"
     ? event.appointmentStatus
-    : typeof event.status === "string"
-    ? event.status
     : null;
   const status = (rawStatus || "").toLowerCase();
   const cancelled = deleted || status === "cancelled";
-  const showAs = cancelled ? "cancelled" : (rawStatus || status || "busy");
+  const showAs = cancelled ? "cancelled" : (rawStatus || "busy");
   // Conservative: only cancelled/deleted is non-occupancy. Unknown statuses still block.
   const title = typeof event.title === "string" && event.title
     ? event.title
-    : typeof event.appointmentTitle === "string" && event.appointmentTitle
-    ? event.appointmentTitle
     : null;
   const location = typeof event.address === "string" && event.address
     ? event.address
-    : typeof event.location === "string" && event.location
-    ? event.location
     : null;
   return {
     event_id: id,

@@ -441,6 +441,34 @@ Deno.test("diary kind and blocks_capacity come from GHL status, never from title
   assertEquals(projectSalesBookingDiaryEntry(ghlEvent({ id: "" })), null);
 });
 
+Deno.test("diary projection reads only documented GHL event fields", () => {
+  assertEquals(
+    projectSalesBookingDiaryEntry({
+      id: "alias-times",
+      start: "2026-09-15T10:00:00+08:00",
+      end: "2026-09-15T11:00:00+08:00",
+      title: "Visit",
+    }),
+    null,
+  );
+
+  const aliases = projectSalesBookingDiaryEntry(ghlEvent({
+    title: "",
+    appointmentTitle: "Hidden title",
+    address: "",
+    location: "Hidden place",
+    appointmentStatus: "",
+    status: "cancelled",
+    isAllDay: false,
+    allDay: true,
+  }))!;
+  assertEquals(aliases.title, null);
+  assertEquals(aliases.location, null);
+  assertEquals(aliases.blocks_capacity, true);
+  assertEquals(aliases.show_as, "busy");
+  assertEquals(aliases.is_all_day, false);
+});
+
 // ── Assembly / coverage honesty ─────────────────────────────
 
 Deno.test("response keeps the reference shape the Sales Booking view consumes", async () => {

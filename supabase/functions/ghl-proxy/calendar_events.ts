@@ -61,19 +61,9 @@ export function ghlCalendarInstantMs(value: unknown): number | null {
 }
 
 function eventsFromBody(body: Record<string, unknown>): Record<string, unknown>[] {
-  if (Array.isArray(body.events)) {
-    return body.events as Record<string, unknown>[];
-  }
-  if (Array.isArray(body.appointments)) {
-    return body.appointments as Record<string, unknown>[];
-  }
-  const nested = body.data && typeof body.data === "object"
-    ? body.data as Record<string, unknown>
-    : null;
-  if (nested && Array.isArray(nested.events)) {
-    return nested.events as Record<string, unknown>[];
-  }
-  return [];
+  return Array.isArray(body.events)
+    ? body.events as Record<string, unknown>[]
+    : [];
 }
 
 /**
