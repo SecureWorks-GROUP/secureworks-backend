@@ -133,19 +133,21 @@ Additions:
   `proposals` is an object keyed by the lead's `opportunity_id`, or by the
   lead `id` when there is none. Every pack lead is included, independent of
   the GHL roster, the scope-stage filter, and the thread budget; the door
-  filters. Each entry: `disposition`, `window` (as stored), `day` (the
-  stored `window.day`), `draft`,
+  filters. Each entry: `disposition`, `window` (as stored: `{day, start,
+  end}`), `day` (the stored `window.day`), `draft`,
   `offer` (true when disposition is `offer`), `name`, `suburb`,
   `opportunity_id`, `contact_id`, `stage`, `status`, `calendar_event_id`.
+  Projected from the stored publish `proposals` (engine array or `{leads}`;
+  see `sales_booking_pack_publish`).
 - **`stamp`** — `{present, as_of, approved, rejected, decisions, stage_moves}`
   from the latest `kind=stamp` row. The captain Send stamp; nothing is sent.
 - Per case **`proposal`** — `{disposition, day, window_start, window_end,
-  draft, why[]}` merged from that pack by opportunity id. Pack row ids are
+  draft, why[]}` merged onto a roster case from that same stored pack by
+  opportunity id. Pack row ids are
   `opp:<ghlOpportunityId>`; merge strips the `opp:` prefix only (`opp-…`
   is a live GHL id and is left intact). No match → `null`.
-  `proposals` is the engine's `proposals.json`: a top-level array, or
-  `{leads: [...]}`. Window fields are `day`, `start`, `end`. `why[]` is
-  collected from the row's `why` and `failures` only.
+  `why[]` is collected from the row's `why` and `failures` only. KEEP/CUT
+  stamps read `pack.proposals` above, not this per-case merge.
 - Per case **`stamp_state`** — `'none' | 'approved' | 'rejected'`. Stamp
   `approved` and `rejected` lists carry the door's bare GHL opportunity ids
   (the case ids); pack-style `opp:<id>` is also accepted. Matching a case

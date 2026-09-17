@@ -5,7 +5,9 @@
  *  - Publish stores kind=pack; the latest as_of is the one sales_booking_read
  *    merges. An older as_of still in the table is ignored.
  *  - Merge puts proposal + draft on the matching case (`opp:<id>` → opportunity
- *    id), fills top-level drafts, and sets stamp_state from the latest stamp.
+ *    id), fills top-level drafts, publishes `pack.proposals` from every pack
+ *    lead (opportunity id, or lead id when there is none), and sets
+ *    stamp_state from the latest stamp.
  *  - Stamp write then stamp read round-trips. Unauthenticated publish is
  *    refused. Only an allow-listed captain JWT may write a stamp; the API
  *    key and any other JWT are 403 stamp_write_requires_captain.

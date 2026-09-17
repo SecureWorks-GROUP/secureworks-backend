@@ -14,8 +14,8 @@
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
 // so the next read can serve cached conversation state and the opportunity
 // enumeration. Those are the only writes. No GHL mutation, no calendar
-// create, no send. Drafts and proposed windows come from the latest
-// kind=pack row, merged in after this read.
+// create, no send. Drafts, per-case `proposal`, and `pack.proposals` come
+// from the latest kind=pack row in the pack overlay after this read.
 //
 // ── HONESTY CONTRACT (wiki skill `secureworks-scope-booking`) ──
 //  1. Full population, or an explicit `coverage.full_population:false` naming
