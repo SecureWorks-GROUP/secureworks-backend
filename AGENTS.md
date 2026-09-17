@@ -536,7 +536,11 @@ repository files, so they need no alias or exclusion, but the versions are
 RESERVED: a repo file at one of them is silently treated as applied (same name)
 or fails the deploy as a collision (different name). The B3 custody packet was
 re-dated to `20260916120000` / `20260916120100` for the same reason; the three
-ledgered B1/B2 files must stay byte-identical to main. Context migration lanes:
+ledgered B1/B2 files must stay byte-identical to main. The nine-argument
+`persist_luna_context_revision` and `current_job_context_facts` read source
+time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
+an `event_at`-only gate — production almost never populates `event_at`.
+Context migration lanes:
 `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh` (disposable localhost
 Postgres, applies the new migrations twice). Record: `docs/context/b3-fact-custody.md`.
 

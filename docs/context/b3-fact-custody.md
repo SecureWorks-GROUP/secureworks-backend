@@ -24,8 +24,8 @@ Consequences for this packet:
 
 Unchanged from the PR #838 draft; the jarvis per-job extractor (jarvis #157) codes against it as is.
 
-- `p_events`: 1 to 25 exact complete business_events rows supplied by B2. The function locks each row and compares every byte of its JSON representation. Missing source time, revoked attribution, a different job or previously acknowledged evidence prevents persistence.
-- New facts: `{kind,text,confidence,source_event_ids,evidence_excerpt?,due_date?}`. Nine kinds only. The server creates stable IDs from run/index, attribution confidence from the minimum source confidence, and event date from the latest cited event's real event_at. Unknown extra fact fields are rejected. Nothing here writes money, job status, booking or outbound-message columns.
+- `p_events`: 1 to 25 exact complete business_events rows supplied by B2. The function locks each row and compares every byte of its JSON representation. Missing source time (`coalesce(event_at, occurred_at)` null), revoked attribution, a different job or previously acknowledged evidence prevents persistence. `20260917120000` is the coalesce; production `event_at` is almost never set, and candidates already ordered by the same expression.
+- New facts: `{kind,text,confidence,source_event_ids,evidence_excerpt?,due_date?}`. Nine kinds only. The server creates stable IDs from run/index, attribution confidence from the minimum source confidence, and event date from the latest cited event's `coalesce(event_at, occurred_at)`. Unknown extra fact fields are rejected. Nothing here writes money, job status, booking or outbound-message columns.
 - Transitions: `{fact_id,fact_store,reason,source_event_ids,new_fact_index?,expected_fact}`. J2 injects `expected_fact` from the exact current-view row shown to the model, not from model output. Index is zero-based and is only valid for supersedes. Every fact must still belong to the job and match the snapshot under a row lock.
 - V2 facts additionally match an independent full-row custody hash, detecting human edits even when their extractor tag remains. Legacy classifier facts (Haiku `context-fact-extractor:*` and per-event `context-luna-subscription:v1`) can be retired when their extractor identity is recognised and the read snapshot remains unchanged. Unknown or human writers are held.
 - Result: `{outcome:'inserted'|'idempotent'|'held',facts_new,facts_superseded,facts_retracted,fact_ids}` for success, or held with reason. The exact committed request retries idempotently. Changing a committed run's request is held. Held paths perform no writes; validation errors roll back the entire function.
@@ -55,7 +55,8 @@ PR #838 merged and the deploy lane's auto-apply of `20260916120000` failed with 
 ## Verification and rollback
 
 - `supabase/tests/migration-contracts/20260916120000_*` and `20260916120100_*`: registered contracts, rollbacks, and deliberate breaks (expiry function nulled; extractable predicate forced true).
-- `scripts/test-context-b3.sh` with `CONTEXT_B3_TEST_DATABASE_URL`: disposable database, production-shaped view first, both migrations applied twice, then `context_b1_contract.sql` and `context_b3_contract.sql`.
+- `supabase/tests/migration-contracts/20260917120000_luna_context_event_at_coalesce`: nine-argument persist and `current_job_context_facts` read `coalesce(event_at, occurred_at)` for attribution, event_date, expiry, due-date support and live-source re-validation; both-null still rejects.
+- `scripts/test-context-b3.sh` with `CONTEXT_B3_TEST_DATABASE_URL`: disposable database, production-shaped view first, B3 plus the coalesce follow-up applied twice, then `context_b1_contract.sql` and `context_b3_contract.sql`.
 - The B2 contract's outbound-tail case now asserts the D4 rule.
 - Rollbacks stop extraction, revoke the v2 overload, drop the trust triggers, and restore the 20260911171000 extraction functions. Columns and backfilled values stay as audit truth.
 
