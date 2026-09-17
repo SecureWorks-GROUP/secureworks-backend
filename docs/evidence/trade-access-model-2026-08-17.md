@@ -9,7 +9,7 @@ Rendered as three tiers:
 | Tier | Who | Gets |
 |---|---|---|
 | 1 Office | `users.role` in `admin / owner / ops_manager` (`OPS_API_STAFF_OPERATOR_ROLES`), or a privileged server key | everything, everywhere |
-| 2 Division manager | `users.managed_verticals` contains the job's vertical (`_jobVertical(job)`; whitelist `makesafe / fencing / patio / decking`) | everything on that trade's jobs, quote included; allocates crew, sets the lead |
+| 2 Division manager | `users.managed_verticals` contains the job's vertical (`_jobVertical(job)`; whitelist `makesafe / fencing / patio / decking`, plus `repair` since 2026-09-17 — a family-tagged repair classifies as `repair` regardless of `jobs.type`, see the 2026-09-17 addendum in `docs/trade-all-means-all-v1.md`) | everything on that trade's jobs, quote included; allocates crew, sets the lead |
 | 3 Allocated trade | a non-cancelled `job_assignments` row for the caller on the job — `is_lead` TRUE **or** FALSE, no difference | everything about the job **except the quote** |
 
 Nobody else sees anything on a job (the pre-existing MakeSafe field-report exception is kept and named — see ambiguities).

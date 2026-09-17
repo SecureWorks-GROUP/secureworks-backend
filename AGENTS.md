@@ -2475,6 +2475,30 @@ tenant scoping, and client follow-up, lives in
 `_managerBoardVerticals`, and `_resolveTradeJobFeedLens` in `ops-api/index.ts`
 aligned with that document and their regression tests.
 
+**Repair is a first-class trade vertical** (Captain 2026-09-17; contract owned
+by the 2026-09-17 addendum of `docs/trade-all-means-all-v1.md`).
+`_MANAGED_VERTICALS` includes it. A job is repair whenever `jobs.type='repair'`
+OR its family metadata says so (`metadata.ses_family` /
+`.makesafe_job_family`), mirroring `isInsuranceRepairFamily`
+(`insurance_repairs_board.ts`), because `update_makesafe_job_family` never
+retypes a card (the SWR- mint is a one-way supervised door, ruling
+2026-08-28). `_jobVertical` (`index.ts`) is the ONE classifier and checks
+repair FIRST via `_jobIsRepairFamily`; every vertical decision
+(`_resolveManagerVisibility`, `_resolveAllocationAuthz`,
+`resolveTradeJobAccessTier`, `tradeViewerQuoteVisibleForJob`) routes through
+it, so any `jobs` select feeding one of them must select `metadata`. Per-vertical
+SQL filters are deliberate flat SUPERSETS (no PostgREST `and()/or()` nesting),
+and "repair wins" is enforced once per surface afterward by re-classifying
+rows through `_jobVertical`. Trade reads carry additive `job_family` /
+`vertical` (and `trade_job_detail` a `repair` block) without ever mutating
+`jobs.type`; the make-safe board's `excludeInsuranceRepairs` projections are
+untouched. Two exceptions are load-bearing: the fencing completion-evidence
+gate keys on raw `jobs.type` through `completionEvidenceVertical`
+(`trade_completion_evidence.ts`), never `_jobVertical`, so a fencing job whose
+family says repair is not relaxed; and the repair open pool's
+`_REPAIR_POOL_READY_STATUSES` is PROVISIONAL until the repair lifecycle is
+ruled. Tests: `repair_trade_vertical_test.ts`.
+
 The 2026-08-03 trade crew/detail payload, named-lead contract, visibility
 narrowing, diagnosis, and deployment caveats are owned by
 `docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before

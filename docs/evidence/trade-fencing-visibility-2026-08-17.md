@@ -97,7 +97,7 @@ from the start.
 - Read-only check for whoever has a session:
   `select id, email, role, managed_verticals from users where name ilike '%henry%'`.
   If `fencing` is absent, the fix is a one-row update through the ops UI's user
-  editor (server whitelists `makesafe/fencing/patio/decking`), **not code** — and
+  editor (server whitelists `makesafe/fencing/patio/decking`, plus `repair` since 2026-09-17), **not code** — and
   it is a permission grant, so it is the Captain's to make.
 
 ### Backend change for Ask 1

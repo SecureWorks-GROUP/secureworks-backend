@@ -46,6 +46,11 @@ my_hours assignments, trade_job_detail) and set
 (`submit_work_order_invoice`, weekly `_resolveWeeklyWorkOrderInvoice`,
 per-metre `submit_trade_invoice`) refuse with `completionEvidenceMessage`.
 Hourly invoices are not gated. A failed evidence read fails closed.
+The vertical every caller passes in is `completionEvidenceVertical(job)`,
+the job's raw `jobs.type` only — never the trade classifier `_jobVertical`,
+which reads `repair` off family metadata (2026-09-17 addendum in
+`docs/trade-all-means-all-v1.md`). A fencing job whose family says repair
+is therefore still gated.
 
 `complete_my_job` is the trade-scoped door to `completeJob` (assignment /
 vertical-manager access, then the same evidence gate for fencing).
