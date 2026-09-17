@@ -1249,8 +1249,8 @@ function unreadDiary(
  *
  * GHL user ids are not in this backend. Resolve the resource's mapped email
  * against GET /users/?locationId=; unconfirmed is `ghl_user_unmapped`, never
- * an invented id and never an empty free week. A failed events page is
- * `ghl_calendar_page_failed` with zero entries. Never throws.
+ * an invented id and never an empty free week. A failed unpaged events GET
+ * is `ghl_calendar_page_failed` with zero entries. Never throws.
  */
 export async function readSalesBookingGhlDiary(args: {
   ghlGet: GhlCalendarGet;
@@ -1292,7 +1292,9 @@ export async function readSalesBookingGhlDiary(args: {
 
   const startMs = Date.parse(args.since);
   const untilMs = Date.parse(args.untilExclusive);
-  if (!Number.isFinite(startMs) || !Number.isFinite(untilMs) || untilMs <= startMs) {
+  if (
+    !Number.isFinite(startMs) || !Number.isFinite(untilMs) || untilMs <= startMs
+  ) {
     return unreadDiary(args.scoperUserId, "ghl_calendar_window_invalid", {
       calendar_email: mapping.email,
       ghl_user_id: confirmed.id,

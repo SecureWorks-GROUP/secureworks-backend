@@ -60,7 +60,9 @@ export function ghlCalendarInstantMs(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function eventsFromBody(body: Record<string, unknown>): Record<string, unknown>[] {
+function eventsFromBody(
+  body: Record<string, unknown>,
+): Record<string, unknown>[] {
   return Array.isArray(body.events)
     ? body.events as Record<string, unknown>[]
     : [];
@@ -180,7 +182,9 @@ export function confirmGhlUserId(args: {
   if (matches.length !== 1) return { id: null, reason: "ghl_user_unmapped" };
   const id = matches[0].id;
   const claimed = ghlId(args.claimedId);
-  if (claimed && claimed !== id) return { id: null, reason: "ghl_user_unmapped" };
+  if (claimed && claimed !== id) {
+    return { id: null, reason: "ghl_user_unmapped" };
+  }
   return { id, reason: null };
 }
 
@@ -229,7 +233,8 @@ export async function ghlCalendarEventsAction(args: {
       status: 400,
       body: {
         ok: false,
-        error: "start and end must be ISO (Perth) or Unix milliseconds, with end after start",
+        error:
+          "start and end must be ISO (Perth) or Unix milliseconds, with end after start",
         code: "invalid_window",
       },
     };

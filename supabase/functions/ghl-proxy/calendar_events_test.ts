@@ -185,7 +185,10 @@ Deno.test("wired calendar_events handler is GET only, returns the window, and is
   assertEquals(query.get("locationId"), LOCATION);
   assertEquals(query.get("userId"), USER);
   assertEquals(query.get("startTime"), String(START));
-  assertEquals(query.get("endTime"), String(Date.parse("2026-09-21T00:00:00+08:00")));
+  assertEquals(
+    query.get("endTime"),
+    String(Date.parse("2026-09-21T00:00:00+08:00")),
+  );
   assertEquals(query.get("skip"), null);
   assertEquals(query.get("limit"), null);
   assertEquals([...query.keys()].sort(), [

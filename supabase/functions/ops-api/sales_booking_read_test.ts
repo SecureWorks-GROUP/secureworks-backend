@@ -523,7 +523,10 @@ Deno.test("unread mirrors diary_read onto resource.calendar so the Booking door 
   assertEquals(payload.diary_read.read_ok, true);
   assertEquals(payload.resource.calendar.ok, true);
   assertEquals(payload.resource.calendar.error, null);
-  assertEquals(payload.resource.calendar.mailbox, "marnin@secureworkswa.com.au");
+  assertEquals(
+    payload.resource.calendar.mailbox,
+    "marnin@secureworkswa.com.au",
+  );
 
   const unread = await salesBookingRead(
     deps({ readDiary: () => Promise.resolve(UNREAD_DIARY) }),
@@ -533,11 +536,16 @@ Deno.test("unread mirrors diary_read onto resource.calendar so the Booking door 
   assertEquals(unread.diary, []);
   assertEquals(unread.diary_read.read_ok, false);
   assertEquals(unread.coverage.diary_read_ok, false);
-  assert(unread.coverage.gaps.some((g) => g.includes("ghl_calendar_page_failed")));
+  assert(
+    unread.coverage.gaps.some((g) => g.includes("ghl_calendar_page_failed")),
+  );
   // Live Booking door (ops-sales-booking.js renderCalendar) paints
   // "Calendar not connected" only when resource.calendar.ok === false.
   assertEquals(unread.resource.calendar.ok, false);
-  assertEquals(unread.resource.calendar.error, "ghl_calendar_page_failed: GHL 502");
+  assertEquals(
+    unread.resource.calendar.error,
+    "ghl_calendar_page_failed: GHL 502",
+  );
   assertEquals(unread.resource.calendar.mailbox, "marnin@secureworkswa.com.au");
 });
 
@@ -684,7 +692,11 @@ Deno.test("an unmapped scoper is diary_read.read_ok false with ghl_user_unmapped
 
   const payload = await salesBookingRead(
     deps({ readDiary: () => Promise.resolve(scan) }),
-    { resource: "nithin", week_start: WEEK, scoper_user_id: "00000000-0000-0000-0000-000000000000" },
+    {
+      resource: "nithin",
+      week_start: WEEK,
+      scoper_user_id: "00000000-0000-0000-0000-000000000000",
+    },
   );
   assertEquals(payload.diary_read.read_ok, false);
   assertEquals(payload.diary_read.reason, "ghl_user_unmapped");

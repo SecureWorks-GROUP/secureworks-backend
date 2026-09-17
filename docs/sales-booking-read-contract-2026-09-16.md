@@ -7,8 +7,10 @@ Booking view. It replaces the branch-local preview server
 
 Implementation and the full rationale: `supabase/functions/ops-api/sales_booking_read.ts`.
 Regressions: `supabase/functions/ops-api/sales_booking_read_test.ts`.
-The GHL calendar page itself is `GET ghl-proxy?action=calendar_events`
-(`supabase/functions/ghl-proxy/calendar_events.ts`).
+The GHL calendar window is one unpaged `/calendars/events` GET in
+`supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
+reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
+action (`userId` or `calendarId`, plus `start` and `end`).
 
 ## It is read-only, and send stays held
 
@@ -54,7 +56,10 @@ Additions:
   `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
   the confirmed GHL user id or null when unread.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
-  `scoper_user_id`, `sender_line`, `sender_line_source`.
+  `scoper_user_id`, `sender_line`, `sender_line_source`, plus `calendar`
+  `{ok, error, mailbox}` copied from `diary_read` (not a second calendar
+  read). The Booking door paints "Calendar not connected" when
+  `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
 
@@ -67,7 +72,7 @@ Additions:
 - **`diary` empty with `diary_read.read_ok:false`** is an UNREAD calendar, not a
   clear week. Unread coverage is never free capacity. Named unread reasons
   include `ghl_user_unmapped` (no confirmed GHL user for that scoper) and
-  `ghl_calendar_page_failed` (a GHL events page did not complete).
+  `ghl_calendar_page_failed` (the unpaged GHL events GET did not complete).
 - **`thread_facts[id].read_ok:false`** means nothing was proved about that
   thread. The case still appears, and its `status` stays the default
   `needs_decision`. Classification lives only in `thread_facts`.
@@ -77,6 +82,9 @@ Additions:
   Confirmed/booked (and any non-cancelled status) block; cancelled or deleted
   does not block but is still returned with `show_as:'cancelled'`. GHL has no
   leave/personal sensitivity, so those kinds are never invented from a title.
+  **`is_all_day` is `event.isAllDay === true` only** — no midnight or duration
+  inference. **`title_withheld` is always false** (GHL has no
+  private-sensitivity flag).
 - **`classification` never emits `booked`.** A booking is a calendar /
   commitment fact this read cannot attribute to a case, and guessing one would
   invent it.
