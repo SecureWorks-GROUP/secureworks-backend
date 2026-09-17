@@ -802,9 +802,8 @@ import {
   remintSesCaptainLockDraftAction,
 } from './ses_captain_lock_draft_remint.ts'
 import { buildOpsApiVersion } from './ops_api_version.ts'
-// Sales Booking view read (calendar + queue + thread facts). Read-only: the
-// module holds no write verb and no send/calendar-write capability, and its
-// send_hold / policy flags are constants the view renders, not the enforcement.
+// Sales Booking view read (calendar + queue + thread facts). Page load may
+// persist kind=thread_facts. No GHL write, no send, no calendar write.
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
@@ -815,6 +814,7 @@ import {
   salesBookingPackPublishAction,
   salesBookingStampReadAction,
   salesBookingStampWriteAction,
+  salesBookingThreadsRefreshAction,
   SalesBookingPackError,
 } from './sales_booking_pack.ts'
 import {
@@ -5106,9 +5106,6 @@ if (import.meta.main) serve(async (req: Request) => {
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
       case 'sales_booking_read': {
-        // GET-shaped read: ops.html's opsFetch puts every param on the query
-        // string. POST body keys are accepted only as a convenience for the
-        // terminal; there is no write path either way.
         const sbParam = (name: string) => url.searchParams.get(name) ?? body[name] ?? null
         const sbInt = (name: string) => {
           const raw = sbParam(name)
@@ -5191,6 +5188,24 @@ if (import.meta.main) serve(async (req: Request) => {
             resource: stampParam('resource'),
             week_start: stampParam('week_start'),
           }))
+        } catch (e) {
+          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
+      case 'sales_booking_threads_refresh': {
+        // Background GHL thread refresh into kind=thread_facts. API key only.
+        // No send, no calendar write, no GHL write.
+        if (req.method !== 'POST') {
+          throw new ApiError('sales_booking_threads_refresh requires POST', 405)
+        }
+        try {
+          return json(await salesBookingThreadsRefreshAction(client, {
+            mode: authMode,
+            role: authUser?.role ?? null,
+            userId: authUser?.id ?? null,
+          }, body && typeof body === 'object' ? body : {}))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)

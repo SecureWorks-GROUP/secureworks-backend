@@ -21,6 +21,7 @@ import {
   assertSalesBookingPackPublishAuth,
   assertSalesBookingStampReadAuth,
   assertSalesBookingStampWriteAuth,
+  assertSalesBookingThreadsRefreshAuth,
   loadSalesBookingPackOverlay,
   normaliseSalesBookingDrafts,
   SalesBookingPackError,
@@ -29,6 +30,7 @@ import {
   salesBookingStampReadAction,
   salesBookingStampStateForCase,
   salesBookingStampWriteAction,
+  salesBookingThreadsRefreshAction,
 } from "./sales_booking_pack.ts";
 import { _authorizeOpsApiAction } from "./index.ts";
 import {
@@ -541,6 +543,7 @@ Deno.test("front door refuses unauthenticated pack publish with 401", () => {
       "sales_booking_pack_publish",
       "sales_booking_stamp_write",
       "sales_booking_stamp_read",
+      "sales_booking_threads_refresh",
     ]
   ) {
     const decision = _authorizeOpsApiAction({
@@ -553,4 +556,22 @@ Deno.test("front door refuses unauthenticated pack publish with 401", () => {
       assertEquals(decision.code, "user_jwt_required");
     }
   }
+});
+
+Deno.test("threads refresh is api-key only and refuses an unknown resource", async () => {
+  assertSalesBookingThreadsRefreshAuth({ mode: "api_key" });
+  await assertRejects(
+    () =>
+      salesBookingThreadsRefreshAction(memoryPacks(), { mode: "none" }, {
+        resource: "marnin",
+      }),
+    SalesBookingPackError,
+  );
+  await assertRejects(
+    () =>
+      salesBookingThreadsRefreshAction(memoryPacks(), API_KEY_AUTH, {
+        resource: "__deploy_probe__",
+      }),
+    SalesBookingRequestError,
+  );
 });

@@ -1,11 +1,12 @@
 // ════════════════════════════════════════════════════════════
-// SALES BOOKING PACK STORE — engine pack + captain stamp
+// SALES BOOKING PACK STORE — engine pack + captain stamp + thread facts
 // ════════════════════════════════════════════════════════════
 //
-// One table, two kinds. `sales_booking_pack_publish` stores the engine's
+// One table, three kinds. `sales_booking_pack_publish` stores the engine's
 // proposals.json / coverage.json / drafts map (kind=pack).
 // `sales_booking_stamp_write` stores the captain KEEP/CUT stamp (kind=stamp)
 // with as_of = now. `sales_booking_stamp_read` returns the latest stamp.
+// `sales_booking_threads_refresh` re-reads GHL threads into kind=thread_facts.
 // `sales_booking_read` merges the latest pack onto cases by opportunity id
 // (`opp:<id>` → case opportunity id) and fills drafts + stamp_state.
 //
@@ -14,6 +15,8 @@
 import {
   perthWeekWindow,
   resolveSalesBookingResource,
+  salesBookingReadAction,
+  SALES_BOOKING_MAX_THREAD_LIMIT,
   type SalesBookingCase,
   type SalesBookingCaseProposal,
   type SalesBookingReadResponse,
@@ -23,6 +26,7 @@ import {
 
 export const SALES_BOOKING_PACK_KIND = "pack" as const;
 export const SALES_BOOKING_STAMP_KIND = "stamp" as const;
+export const SALES_BOOKING_THREAD_FACTS_KIND = "thread_facts" as const;
 
 export type SalesBookingStampDecision = "hold" | "replace";
 export type { SalesBookingCaseProposal, SalesBookingStampState };
@@ -302,6 +306,22 @@ export function applySalesBookingPackOverlay(
   };
 }
 
+export function assertSalesBookingThreadsRefreshAuth(
+  auth: SalesBookingPackAuth,
+): void {
+  if (auth.mode === "api_key") return;
+  if (auth.mode === "none") {
+    throw new SalesBookingPackError(
+      "sales_booking_threads_refresh requires the ops API key",
+      401,
+    );
+  }
+  throw new SalesBookingPackError(
+    "sales_booking_threads_refresh requires the ops API key",
+    403,
+  );
+}
+
 export function assertSalesBookingPackPublishAuth(
   auth: SalesBookingPackAuth,
 ): void {
@@ -424,7 +444,11 @@ async function insertPackRow(
 
 export async function readLatestSalesBookingPackRow(
   client: PackClient,
-  args: { resource: string; week_start: string; kind: "pack" | "stamp" },
+  args: {
+    resource: string;
+    week_start: string;
+    kind: "pack" | "stamp" | "thread_facts";
+  },
 ): Promise<{ row: SalesBookingPackRow | null; error: string | null }> {
   const { data, error } = await client
     .from("sales_booking_packs")
@@ -551,4 +575,21 @@ export async function salesBookingStampReadAction(
     stamp: parseSalesBookingStampPayload(latest.row.payload),
     as_of: latest.row.as_of,
   };
+}
+
+export async function salesBookingThreadsRefreshAction(
+  client: PackClient,
+  auth: SalesBookingPackAuth,
+  body: Record<string, unknown>,
+): Promise<SalesBookingReadResponse> {
+  assertSalesBookingThreadsRefreshAuth(auth);
+  const resource = resolveSalesBookingResource(body.resource);
+  return await salesBookingReadAction(client, {
+    resource: resource.resource_id,
+    week_start: typeof body.week_start === "string" ? body.week_start : null,
+    include_thread_facts: true,
+    force_refresh: true,
+    thread_limit: SALES_BOOKING_MAX_THREAD_LIMIT,
+    thread_budget_ms: 60_000,
+  });
 }

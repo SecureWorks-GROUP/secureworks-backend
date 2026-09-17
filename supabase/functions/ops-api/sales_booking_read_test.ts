@@ -9,8 +9,7 @@
  *    the quiet window, and never makes a case look answered.
  *  - An unread calendar and an unread thread degrade THEIR OWN item, name the
  *    gap, and never throw or empty the rest of the response.
- *  - The action writes nothing: every dependency is a reader and the fakes
- *    below would fail loudly if a write were attempted.
+ *  - Thread-facts cache persist is the only write; GHL stays read-only.
  *
  * What these do NOT prove: that GHL accepts the live request shapes, or that
  * production credentials exist. Those need a live read.
@@ -40,19 +39,30 @@ import {
   resolveSalesBookingGhlMapping,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
+  SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS,
   SALES_BOOKING_GHL_USERS,
+  SALES_BOOKING_NOT_GIVEN,
   SALES_BOOKING_RESOURCES,
+  salesBookingGhl429DelayMs,
+  salesBookingJobTypeFromOpportunity,
+  salesBookingSuburbFromContact,
+  salesBookingThreadFactIsFresh,
+  type SalesBookingCachedThreadFact,
   type SalesBookingDiaryScan,
   type SalesBookingMessage,
   salesBookingRead,
   type SalesBookingReadDependencies,
   SalesBookingRequestError,
+  confirmSalesBookingGhlUser,
+  withSalesBookingGhl429Retry,
 } from "./sales_booking_read.ts";
 
 const NOW = new Date("2026-09-16T02:00:00.000Z"); // Wed 10:00 Perth
 const WEEK = "2026-09-14"; // Monday
 const MARNIN_SCOPE_STAGE = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[0];
 const NITHIN_SCOPE_STAGE = SALES_BOOKING_RESOURCES.nithin.scope_stage_ids[0];
+/** Wiki fencing "Lead Closed (scope booked)" — still visit/reply/quote. */
+const MARNIN_LEAD_CLOSED_STAGE = "09eeb872-fa46-41fc-a96b-8a8d2bc12215";
 /** Wiki fencing "Following up Quote Sent (Site visit)" — past quote-to-send. */
 const MARNIN_QUOTE_SENT_STAGE = "02476ea1-6ef4-4b73-80fa-7d685c016bf7";
 /** Wiki fencing "On Hold". */
@@ -100,7 +110,7 @@ function ghlEvent(
   };
 }
 
-/** A dependency set whose every member is a reader; no write seam exists. */
+/** Default fakes. Cache persist is optional; GHL members stay readers. */
 function deps(
   overrides: Partial<SalesBookingReadDependencies> = {},
 ): SalesBookingReadDependencies {
@@ -356,6 +366,8 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
     display_name: "Jane Smith",
     status: "needs_decision",
     stage_name: "New Lead",
+    job_type: SALES_BOOKING_NOT_GIVEN,
+    pipeline_stage_id: MARNIN_SCOPE_STAGE,
   });
   assertEquals("status_source" in named, false);
   assertEquals(named.tags, ["stratco"]);
@@ -365,7 +377,8 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
     "marnin",
   )!;
   assertEquals(anonymous.display_name, "Enquiry");
-  assertEquals(anonymous.suburb, null); // absent city stays null, never guessed
+  assertEquals(anonymous.suburb, SALES_BOOKING_NOT_GIVEN);
+  assertEquals(anonymous.job_type, SALES_BOOKING_NOT_GIVEN);
   assertEquals(anonymous.stage_name, null);
   assertEquals(projectSalesBookingCase({ name: "no id" }, "marnin"), null);
 });
@@ -832,6 +845,10 @@ Deno.test("an unfinished roster scan is never reported as a complete book", () =
       not_attempted: 0,
       budget_exhausted: false,
       enabled: true,
+      cached_count: 0,
+      fresh_count: 0,
+      unread_count: 0,
+      remaining_429_count: 0,
     },
   });
   assertEquals(payload.coverage.full_population, false);
@@ -856,7 +873,7 @@ Deno.test("a failed thread read degrades only that case and is named in coverage
   assertEquals(payload.cases[0].status, "needs_decision");
   assertEquals("status_source" in payload.cases[0], false);
   assert(
-    payload.coverage.gaps.some((g) => g.includes("thread read(s) failed")),
+    payload.coverage.gaps.some((g) => g.includes("thread(s) unread")),
   );
 });
 
@@ -947,7 +964,7 @@ Deno.test("FIXTURE: mixed pipeline stages exclude quote-sent/hold and spend the 
   });
   const olderInScope = opportunity({
     id: "opp-old",
-    pipelineStageId: SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[7], // Lead Closed (scope booked)
+    pipelineStageId: MARNIN_LEAD_CLOSED_STAGE, // Lead Closed (scope booked)
     updatedAt: "2026-09-14T01:00:00.000Z",
     contact: { id: "contact-old", name: "Older Booked" },
   });
@@ -977,7 +994,7 @@ Deno.test("FIXTURE: mixed pipeline stages exclude quote-sent/hold and spend the 
           ],
           stages: {
             [MARNIN_SCOPE_STAGE]: "New Lead (Call + Qualify)",
-            [SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[7]]:
+            [MARNIN_LEAD_CLOSED_STAGE]:
               "Lead Closed (scope booked)",
             [MARNIN_QUOTE_SENT_STAGE]: "Following up Quote Sent (Site visit)",
             [MARNIN_ON_HOLD_STAGE]: "On Hold",
@@ -1251,7 +1268,14 @@ Deno.test("the deps object handed to the runner exposes no write members", async
   }
   assertEquals(
     Object.keys(production).sort(),
-    ["now", "readDiary", "readOpportunities", "readThread"].sort(),
+    [
+      "loadThreadFactsCache",
+      "now",
+      "persistThreadFactsCache",
+      "readDiary",
+      "readOpportunities",
+      "readThread",
+    ].sort(),
   );
 
   let handed: SalesBookingReadDependencies | undefined;
@@ -1280,3 +1304,276 @@ Deno.test("the deps object handed to the runner exposes no write members", async
     assertEquals(Object.hasOwn(handed, name), false);
   }
 });
+
+function cachedFact(
+  overrides: Partial<SalesBookingCachedThreadFact> = {},
+): SalesBookingCachedThreadFact {
+  return {
+    case_id: "opp-1",
+    contact_id: "contact-1",
+    read_ok: true,
+    reason: null,
+    last_inbound_at: null,
+    last_human_outbound_at: "2026-09-15T00:00:00.000Z",
+    last_outbound_at: "2026-09-15T00:00:00.000Z",
+    quiet_window: false,
+    quiet_hours: 20,
+    classification: "follow_up_due",
+    message_count: 1,
+    template_outbound_count: 0,
+    read_at: "2026-09-16T01:00:00.000Z",
+    ...overrides,
+  };
+}
+
+Deno.test("suburb comes from city or a WA address line; job_type from custom fields then tags", () => {
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "Mosman Park" }),
+    "Mosman Park",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({
+      address1: "12 Example St, Canning Vale WA 6155",
+    }),
+    "Canning Vale",
+  );
+  assertEquals(salesBookingSuburbFromContact({}), SALES_BOOKING_NOT_GIVEN);
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({}, { tags: ["northside patios"] }),
+    "patio",
+  );
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({}, { tags: ["sw fencing"] }),
+    "fencing",
+  );
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({
+      customFields: [{ key: "job_type", field_value: "Patio" }],
+    }, { tags: ["sw fencing"] }),
+    "patio",
+  );
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({}, { tags: ["stratco"] }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
+  const fromAddress = projectSalesBookingCase(
+    opportunity({
+      createdAt: "2026-09-10T02:00:00.000Z",
+      contact: {
+        id: "c-addr",
+        name: "Pat",
+        address1: "9 Reef Rd, Hillarys WA 6025",
+        tags: ["northside patios"],
+      },
+    }),
+    "nithin",
+  )!;
+  assertEquals(fromAddress.suburb, "Hillarys");
+  assertEquals(fromAddress.job_type, "patio");
+  assertEquals(fromAddress.enquiry_at, "2026-09-10T02:00:00.000Z");
+  assertEquals(fromAddress.pipeline_stage_id, MARNIN_SCOPE_STAGE);
+});
+
+Deno.test("dropped first-touch stages are out of the visit/reply/quote set", () => {
+  for (const [resource, dropped] of Object.entries(SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS)) {
+    const scope = SALES_BOOKING_RESOURCES[resource].scope_stage_ids;
+    for (const row of dropped) {
+      assertEquals(scope.includes(row.id), false);
+      assertEquals(isSalesBookingScopeStage(row.id, scope), false);
+    }
+  }
+  const payload = assembleSalesBookingRead({
+    resource: SALES_BOOKING_RESOURCES.nithin,
+    week: perthWeekWindow(WEEK),
+    projectedCases: [],
+    opportunities: {
+      opportunities: [],
+      stages: {},
+      exhausted: true,
+      pages_scanned: 1,
+      total: 0,
+      reason: null,
+    },
+    diary: UNREAD_DIARY,
+    threads: {
+      facts: {},
+      attempted: 0,
+      read_ok_count: 0,
+      not_attempted: 0,
+      budget_exhausted: false,
+      enabled: false,
+      cached_count: 0,
+      fresh_count: 0,
+      unread_count: 0,
+      remaining_429_count: 0,
+    },
+  });
+  assertEquals(
+    payload.resource.scope_stage_ids.includes(
+      SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS.nithin[0].id,
+    ),
+    false,
+  );
+});
+
+Deno.test("cached thread facts are served; stale activity is refreshed newest first", async () => {
+  const persisted: Record<string, SalesBookingCachedThreadFact>[] = [];
+  let liveReads = 0;
+  const payload = await salesBookingRead(
+    deps({
+      loadThreadFactsCache: () =>
+        Promise.resolve({ "opp-1": cachedFact() }),
+      persistThreadFactsCache: (_resource, facts) => {
+        persisted.push(facts);
+        return Promise.resolve();
+      },
+      readThread: () => {
+        liveReads++;
+        return Promise.resolve([] as SalesBookingMessage[]);
+      },
+    }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(liveReads, 0);
+  assertEquals(payload.coverage.threads_cached, 1);
+  assertEquals(payload.coverage.threads_fresh, 0);
+  assertEquals(payload.thread_facts["opp-1"].classification, "follow_up_due");
+  assertEquals(persisted.length, 0);
+
+  liveReads = 0;
+  persisted.length = 0;
+  const stale = await salesBookingRead(
+    deps({
+      loadThreadFactsCache: () =>
+        Promise.resolve({
+          "opp-1": cachedFact({ read_at: "2026-09-14T00:00:00.000Z" }),
+        }),
+      persistThreadFactsCache: (_resource, facts) => {
+        persisted.push(facts);
+        return Promise.resolve();
+      },
+      readThread: () => {
+        liveReads++;
+        return Promise.resolve([] as SalesBookingMessage[]);
+      },
+    }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(liveReads, 1);
+  assertEquals(stale.coverage.threads_fresh, 1);
+  assertEquals(stale.coverage.threads_cached, 0);
+  assertEquals(persisted.length, 1);
+  assertEquals(
+    salesBookingThreadFactIsFresh({
+      cachedReadAt: "2026-09-16T01:00:00.000Z",
+      lastActivityAt: "2026-09-15T01:00:00.000Z",
+      nowMs: NOW.getTime(),
+    }),
+    true,
+  );
+  assertEquals(
+    salesBookingThreadFactIsFresh({
+      cachedReadAt: "2026-09-15T00:00:00.000Z",
+      lastActivityAt: "2026-09-16T03:00:00.000Z",
+      nowMs: NOW.getTime(),
+    }),
+    false,
+  );
+});
+
+Deno.test("GHL 429 retries three times with backoff then counts remaining failures", async () => {
+  assertEquals(salesBookingGhl429DelayMs(1, () => 0), 200);
+  assertEquals(salesBookingGhl429DelayMs(2, () => 0), 400);
+  assertEquals(salesBookingGhl429DelayMs(3, () => 0), 800);
+  const sleeps: number[] = [];
+  let attempts = 0;
+  const value = await withSalesBookingGhl429Retry(async () => {
+    attempts++;
+    if (attempts < 3) {
+      const error = new Error("GHL 429: Too Many Requests");
+      (error as { status?: number }).status = 429;
+      throw error;
+    }
+    return "ok";
+  }, {
+    sleep: (ms) => {
+      sleeps.push(ms);
+      return Promise.resolve();
+    },
+    random: () => 0,
+  });
+  assertEquals(value, "ok");
+  assertEquals(attempts, 3);
+  assertEquals(sleeps, [200, 400]);
+
+  const payload = await salesBookingRead(
+    deps({
+      loadThreadFactsCache: () =>
+        Promise.resolve({ "opp-1": cachedFact() }),
+      readThread: () => {
+        const error = new Error("GHL 429: Too Many Requests");
+        (error as { status?: number }).status = 429;
+        return Promise.reject(error);
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, force_refresh: true },
+  );
+  assertEquals(payload.coverage.remaining_429_count, 1);
+  assertEquals(payload.thread_facts["opp-1"].classification, "follow_up_due");
+  assertEquals(payload.coverage.threads_cached, 1);
+});
+
+Deno.test("Nithin maps by unique GHL name when the recorded email is absent", async () => {
+  const users = [
+    {
+      id: "ghl_nithin_live",
+      email: "nithin.p@secureworkswa.com.au",
+      name: "Nithin Patel",
+      firstName: "Nithin",
+    },
+    {
+      id: "ghl_user_marnin",
+      email: SALES_BOOKING_GHL_USERS.marnin.email,
+      name: "Marnin",
+      firstName: "Marnin",
+    },
+  ];
+  assertEquals(
+    confirmSalesBookingGhlUser({
+      users,
+      email: SALES_BOOKING_GHL_USERS.nithin.email,
+      nameMatch: "nithin",
+    }),
+    {
+      id: "ghl_nithin_live",
+      reason: null,
+      match: "name",
+      ghl_email: "nithin.p@secureworkswa.com.au",
+    },
+  );
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: {
+        users: [
+          {
+            id: "ghl_nithin_live",
+            email: "nithin.p@secureworkswa.com.au",
+            firstName: "Nithin",
+            name: "Nithin Patel",
+          },
+        ],
+      },
+      events: { events: [] },
+    }),
+    locationId: "loc",
+    resourceId: "nithin",
+    scoperUserId: SALES_BOOKING_RESOURCES.nithin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, true);
+  assertEquals(scan.ghl_user_id, "ghl_nithin_live");
+  assertEquals(scan.calendar_email, "nithin.p@secureworkswa.com.au");
+  assertStringIncludes(scan.reason || "", "ghl_user_mapped_by_name");
+});
+
