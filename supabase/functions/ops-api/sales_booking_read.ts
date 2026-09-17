@@ -2026,7 +2026,7 @@ async function persistThreadFactsCacheLive(
     .eq("resource", resourceId)
     .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
     .eq("kind", SALES_BOOKING_THREAD_FACTS_KIND)
-    .neq("as_of", asOf);
+    .lt("as_of", asOf);
   if (pruneError) {
     throw new Error(pruneError.message || "thread_facts prune failed");
   }

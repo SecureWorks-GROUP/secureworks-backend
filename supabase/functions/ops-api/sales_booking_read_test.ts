@@ -1640,6 +1640,18 @@ function threadFactsPackClient(
     as_of: string;
     payload: Record<string, unknown>;
   }>,
+  hooks?: {
+    beforeDelete?: (
+      store: Array<{
+        id: string;
+        resource: string;
+        week_start: string;
+        kind: string;
+        as_of: string;
+        payload: Record<string, unknown>;
+      }>,
+    ) => void;
+  },
 ) {
   const store = seed.map((row) => ({
     id: crypto.randomUUID(),
@@ -1667,6 +1679,7 @@ function threadFactsPackClient(
         }
         if (write === "delete") {
           writes.push("delete");
+          hooks?.beforeDelete?.(store);
           const keep = store.filter((row) => !filters.every((fn) => fn(row)));
           store.splice(0, store.length, ...keep);
           return { data: null, error: null };
@@ -1714,6 +1727,12 @@ function threadFactsPackClient(
         neq(col: string, value: unknown) {
           filters.push((row) =>
             (row as Record<string, unknown>)[col] !== value
+          );
+          return self;
+        },
+        lt(col: string, value: unknown) {
+          filters.push((row) =>
+            String((row as Record<string, unknown>)[col]) < String(value)
           );
           return self;
         },
@@ -1800,5 +1819,64 @@ Deno.test("thread facts persist keeps one latest row per resource and week", asy
   assertEquals(client.store[0].kind, SALES_BOOKING_THREAD_FACTS_KIND);
   assertEquals(client.store[0].resource, "marnin");
   assertEquals(client.store[0].week_start, SALES_BOOKING_THREAD_FACTS_WEEK_START);
+});
+
+Deno.test("thread facts persist prune keeps a newer concurrent as_of and drops older rows", async () => {
+  const previous = { "opp-1": cachedFact() };
+  const next = {
+    "opp-1": cachedFact({
+      classification: "waiting_reply",
+      last_inbound_at: "2026-09-16T01:30:00.000Z",
+      read_at: "2026-09-16T02:00:00.000Z",
+    }),
+  };
+  const concurrentFacts = {
+    "opp-1": cachedFact({
+      classification: "waiting_reply",
+      last_inbound_at: "2026-09-16T03:00:00.000Z",
+      read_at: "2026-09-16T03:30:00.000Z",
+    }),
+  };
+  let concurrentAsOf = "";
+  const client = threadFactsPackClient(
+    [
+      {
+        resource: "marnin",
+        week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+        kind: SALES_BOOKING_THREAD_FACTS_KIND,
+        as_of: "2026-09-16T00:00:00.000Z",
+        payload: { facts: previous },
+      },
+    ],
+    {
+      beforeDelete(store) {
+        const latest = store.reduce((a, b) => a.as_of > b.as_of ? a : b);
+        concurrentAsOf = new Date(Date.parse(latest.as_of) + 1000)
+          .toISOString();
+        store.push({
+          id: crypto.randomUUID(),
+          resource: "marnin",
+          week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+          kind: SALES_BOOKING_THREAD_FACTS_KIND,
+          as_of: concurrentAsOf,
+          payload: { facts: concurrentFacts },
+        });
+      },
+    },
+  );
+  await createSalesBookingReadDependencies(client).persistThreadFactsCache!(
+    "marnin",
+    next,
+  );
+  assertEquals(client.writes, ["upsert", "delete"]);
+  assertEquals(
+    client.store.some((row) => row.as_of === "2026-09-16T00:00:00.000Z"),
+    false,
+  );
+  assertEquals(
+    client.store.some((row) => row.as_of === concurrentAsOf),
+    true,
+  );
+  assertEquals(client.store.length, 2);
 });
 
