@@ -3,9 +3,14 @@
 /** Live Luna subscription extractor stamp. Haiku / instruction extractors must not count as Luna. */
 export const LUNA_SUBSCRIPTION_EXTRACTOR = "context-luna-subscription:v1";
 
+/** Per-job writer stamp. Accepted in addition to LUNA_SUBSCRIPTION_EXTRACTOR, never instead of it. */
+const LUNA_V2_EXTRACTOR = "luna_v2";
+
 export function isLunaSubscriptionFact(row: Record<string, unknown>): boolean {
   const p = row.provenance as Record<string, unknown> | null;
-  return p?.extractor === LUNA_SUBSCRIPTION_EXTRACTOR;
+  if (p?.extractor === LUNA_SUBSCRIPTION_EXTRACTOR) return true;
+  if (p?.extractor === LUNA_V2_EXTRACTOR) return true;
+  return row.extractor_version === LUNA_V2_EXTRACTOR && row.trust === "luna";
 }
 
 export function isCurrentContextFact(

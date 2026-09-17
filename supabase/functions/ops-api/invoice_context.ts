@@ -3,8 +3,8 @@
 // Invoice context door (CIO, 2026-09-11, debt dashboard directive).
 //
 // One read: invoice in, everything the system already holds out. Job link,
-// Luna subscription facts only (extractor context-luna-subscription:v1 — Haiku
-// does not count), stored conversation (five-source merge), Xero cache state,
+// Luna facts only (v1 stamp or per-job luna_v2 — Haiku / instruction extractors
+// do not count), stored conversation (five-source merge), Xero cache state,
 // chase log, and an explicit owned blocker for every missing piece. SELECT-only.
 // Never calls Xero or GHL, never writes, never classifies.
 //
@@ -13,6 +13,8 @@
 // A second read, debt_context_coverage, returns the coverage flags for every
 // open receivable in one call so the screen and the coverage table do not need
 // one door call per invoice.
+
+import { isLunaSubscriptionFact } from "./context_visibility.ts";
 
 export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
@@ -63,10 +65,9 @@ export interface InvoiceContextDeps {
   now?: () => Date;
 }
 
-function isDoorLunaFact(deps: InvoiceContextDeps, row: Record<string, unknown>, nowMs: number): boolean {
+export function isDoorLunaFact(deps: InvoiceContextDeps, row: Record<string, unknown>, nowMs: number): boolean {
   if (deps.isCurrentLunaFact) return deps.isCurrentLunaFact(row, nowMs);
-  const p = row.provenance as Record<string, unknown> | null;
-  return deps.isCurrentContextFact(row, nowMs) && p?.extractor === "context-luna-subscription:v1";
+  return deps.isCurrentContextFact(row, nowMs) && isLunaSubscriptionFact(row);
 }
 
 export interface Blocker { code: string; owner: string; detail: string }

@@ -23,8 +23,8 @@
 //      coverage flag and every blocker code.
 
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { debtContextCoverage, escapeLikeLiteral, invoiceContext, InvoiceContextError, jobNumberFromReference, parseXeroDate, queueDetail } from "./invoice_context.ts";
-import { isCurrentContextFact } from "./context_visibility.ts";
+import { debtContextCoverage, escapeLikeLiteral, invoiceContext, InvoiceContextError, isDoorLunaFact, jobNumberFromReference, parseXeroDate, queueDetail } from "./invoice_context.ts";
+import { isCurrentContextFact, isLunaSubscriptionFact } from "./context_visibility.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const NOW = new Date("2026-09-11T05:00:00.000Z");
@@ -317,6 +317,116 @@ Deno.test("helpers: Xero dates, reference job numbers, queue detail", () => {
   assertEquals(jobNumberFromReference("Deposit swp-261180 patio"), "SWP-261180");
   assertEquals(jobNumberFromReference("MLB-24911", "INV-1419"), null);
   assertEquals(queueDetail(undefined), "never_enqueued");
+});
+
+Deno.test("luna_v2 stamps count as Luna; Haiku and instruction do not", async () => {
+  const nowMs = NOW.getTime();
+  const doorDeps = {
+    client: {},
+    orgId: ORG,
+    getJobConversation: async () => ({ messages: [] }),
+    isCurrentContextFact,
+    now: () => NOW,
+  };
+  const cases: Array<{ name: string; luna: boolean; row: Record<string, unknown> }> = [
+    {
+      name: "v1",
+      luna: true,
+      row: {
+        id: "v1",
+        job_id: JOB1,
+        kind: "note",
+        value: "v1 fact",
+        provenance: { extractor: "context-luna-subscription:v1" },
+        _context_store: "job_context",
+      },
+    },
+    {
+      name: "luna_v2 trust",
+      luna: true,
+      row: {
+        id: "v2-trust",
+        job_id: JOB1,
+        kind: "note",
+        value: "v2 columns",
+        extractor_version: "luna_v2",
+        trust: "luna",
+        provenance: {},
+        _context_store: "job_context",
+      },
+    },
+    {
+      name: "luna_v2 provenance",
+      luna: true,
+      row: {
+        id: "v2-prov",
+        job_id: JOB1,
+        kind: "note",
+        value: "v2 provenance",
+        provenance: { extractor: "luna_v2" },
+        _context_store: "job_context",
+      },
+    },
+    {
+      name: "haiku",
+      luna: false,
+      row: {
+        id: "haiku",
+        job_id: JOB1,
+        kind: "note",
+        value: "haiku",
+        provenance: { extractor: "context-fact-extractor:v1.5" },
+        _context_store: "job_context",
+      },
+    },
+    {
+      name: "instruction",
+      luna: false,
+      row: {
+        id: "instr",
+        job_id: JOB1,
+        kind: "internal_instruction",
+        value: "do not chase",
+        provenance: { extractor: "internal-instruction" },
+        _context_store: "job_context",
+      },
+    },
+  ];
+  for (const c of cases) {
+    assertEquals(isLunaSubscriptionFact(c.row), c.luna, c.name);
+    assertEquals(isDoorLunaFact(doorDeps, c.row, nowMs), c.luna, c.name);
+  }
+
+  const supersededV2 = {
+    id: "v2-old",
+    job_id: JOB1,
+    kind: "note",
+    value: "retired",
+    extractor_version: "luna_v2",
+    trust: "luna",
+    provenance: { extractor: "luna_v2", lifecycle: "superseded" },
+    _context_store: "job_context",
+  };
+  assertEquals(isLunaSubscriptionFact(supersededV2), true);
+  assertEquals(isDoorLunaFact(doorDeps, supersededV2, nowMs), false);
+
+  const t = baseTables();
+  t.current_job_context_facts = [{
+    id: "v2-live",
+    job_id: JOB1,
+    kind: "note",
+    value: "per-job writer",
+    provenance: { extractor: "luna_v2" },
+    updated_at: "2026-09-10T00:00:00.000Z",
+    _context_store: "job_context",
+  }];
+  const door = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(t));
+  assertEquals(door.facts.map((f: any) => f.id), ["v2-live"]);
+  assertEquals(door.coverage.facts_present, true);
+  const cov = await debtContextCoverage(new URLSearchParams({}), deps(t));
+  const row = cov.rows.find((r: any) => r.invoice_number === "INV-1419")!;
+  assertEquals(row.facts_count, 1);
+  assertEquals(row.blockers.includes("facts_missing"), false);
 });
 
 Deno.test("7b. Haiku / instruction facts do not count as Luna coverage", async () => {
