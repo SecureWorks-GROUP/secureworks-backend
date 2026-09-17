@@ -29,6 +29,7 @@ import {
   defaultPerthWeekStart,
   deriveSalesBookingThreadFacts,
   isPhoneLikeName,
+  isSalesBookingScopeStage,
   isSalesBookingTemplateBody,
   perthGraphInstant,
   perthWeekWindow,
@@ -39,6 +40,7 @@ import {
   resolveSalesBookingGhlMapping,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
+  SALES_BOOKING_DEFAULT_THREAD_LIMIT,
   SALES_BOOKING_GHL_USERS,
   SALES_BOOKING_RESOURCES,
   type SalesBookingDiaryScan,
@@ -50,6 +52,12 @@ import {
 
 const NOW = new Date("2026-09-16T02:00:00.000Z"); // Wed 10:00 Perth
 const WEEK = "2026-09-14"; // Monday
+const MARNIN_SCOPE_STAGE = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[0];
+const NITHIN_SCOPE_STAGE = SALES_BOOKING_RESOURCES.nithin.scope_stage_ids[0];
+/** Wiki fencing "Following up Quote Sent (Site visit)" — past quote-to-send. */
+const MARNIN_QUOTE_SENT_STAGE = "02476ea1-6ef4-4b73-80fa-7d685c016bf7";
+/** Wiki fencing "On Hold". */
+const MARNIN_ON_HOLD_STAGE = "9cae7ae3-142a-4864-9a2e-bb04a3fb94fb";
 
 // ── Fixtures ────────────────────────────────────────────────
 
@@ -59,7 +67,7 @@ function opportunity(
   return {
     id: "opp-1",
     name: "Jane Smith",
-    pipelineStageId: "stage-a",
+    pipelineStageId: MARNIN_SCOPE_STAGE,
     status: "open",
     updatedAt: "2026-09-15T01:00:00.000Z",
     contact: {
@@ -70,6 +78,13 @@ function opportunity(
     },
     ...overrides,
   };
+}
+
+function scopeStageForPipeline(pipelineId: string): string {
+  if (pipelineId === SALES_BOOKING_RESOURCES.nithin.pipeline_id) {
+    return NITHIN_SCOPE_STAGE;
+  }
+  return MARNIN_SCOPE_STAGE;
 }
 
 function ghlEvent(
@@ -91,15 +106,17 @@ function deps(
   overrides: Partial<SalesBookingReadDependencies> = {},
 ): SalesBookingReadDependencies {
   return {
-    readOpportunities: () =>
-      Promise.resolve({
-        opportunities: [opportunity()],
-        stages: { "stage-a": "New Lead" },
+    readOpportunities: ({ pipelineId }) => {
+      const stageId = scopeStageForPipeline(pipelineId);
+      return Promise.resolve({
+        opportunities: [opportunity({ pipelineStageId: stageId })],
+        stages: { [stageId]: "New Lead" },
         exhausted: true,
         pages_scanned: 1,
         total: 1,
         reason: null,
-      }),
+      });
+    },
     readDiary: () =>
       Promise.resolve({
         read_ok: true,
@@ -329,7 +346,7 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
   assert(!isPhoneLikeName("Jane Smith"));
 
   const named = projectSalesBookingCase(opportunity(), "marnin", {
-    "stage-a": "New Lead",
+    [MARNIN_SCOPE_STAGE]: "New Lead",
   })!;
   assertObjectMatch(named as unknown as Record<string, unknown>, {
     id: "opp-1",
@@ -503,6 +520,7 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.coverage.full_population, true);
   assertEquals(payload.coverage.enumerated, 1);
   assertEquals(payload.coverage.total, 1);
+  assertEquals(payload.coverage.excluded_by_stage, 0);
   assertEquals(payload.coverage.operational_leave, "not_read");
   assert(payload.coverage.gaps.length >= 2);
   // The two additions the reskinned view needs.
@@ -815,6 +833,7 @@ Deno.test("an unfinished roster scan is never reported as a complete book", () =
   });
   assertEquals(payload.coverage.full_population, false);
   assertEquals(payload.coverage.enumerated, 0);
+  assertEquals(payload.coverage.excluded_by_stage, 0);
   assertStringIncludes(payload.coverage.gaps[0], "not a completed empty book");
   assert(payload.coverage.gaps.some((g) => g.includes("page cap 20 reached")));
 });
@@ -902,6 +921,166 @@ Deno.test("thread_limit leaves the remainder unproved rather than unreported", a
   }
 });
 
+Deno.test("scope_stage_ids are the wiki stages through booked / quote-to-send", () => {
+  assertEquals(SALES_BOOKING_DEFAULT_THREAD_LIMIT, 200);
+  assertEquals(SALES_BOOKING_RESOURCES.nithin.scope_stage_ids, [
+    "09759a42-f80a-4947-bca4-71df5dd770da",
+    "4d3bcf9a-185d-4a90-98e0-e0805fdf4a02",
+    "637c165f-93a3-496b-8e86-970eb8935044",
+    "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5",
+    "9b9e5313-8e0e-4ed6-8654-d50413b99885",
+  ]);
+  assertEquals(SALES_BOOKING_RESOURCES.marnin.scope_stage_ids, [
+    "cc401467-4743-4dbd-a7d7-e8f2ff023dd2",
+    "7f863a14-1d9f-4a18-b73c-0e1780390bd7",
+    "8c43212e-5e58-4f0d-b7f7-96c6ee644d6e",
+    "341d6a77-6a35-4338-b2b0-09236c7c80f9",
+    "52c70bff-5cf3-447b-b891-03c30486aed8",
+    "6b101809-a4f9-440d-ac4c-0be669b8173e",
+    "bfdba902-0a92-4a90-95a5-af27d7502a90",
+    "09eeb872-fa46-41fc-a96b-8a8d2bc12215",
+    "4dc3da8f-d713-4bd4-851c-8e89b6682a4e",
+    "418534d4-6356-4c20-a274-51fbb892c2fa",
+  ]);
+  assertEquals(
+    isSalesBookingScopeStage(
+      MARNIN_QUOTE_SENT_STAGE,
+      SALES_BOOKING_RESOURCES.marnin.scope_stage_ids,
+    ),
+    false,
+  );
+  assertEquals(
+    isSalesBookingScopeStage(
+      MARNIN_SCOPE_STAGE,
+      SALES_BOOKING_RESOURCES.marnin.scope_stage_ids,
+    ),
+    true,
+  );
+  assertEquals(
+    isSalesBookingScopeStage(
+      "",
+      SALES_BOOKING_RESOURCES.marnin.scope_stage_ids,
+    ),
+    false,
+  );
+});
+
+Deno.test("FIXTURE: mixed pipeline stages exclude quote-sent/hold and spend the thread budget on newest in-scope first", async () => {
+  const newestOutOfScope = opportunity({
+    id: "opp-quote-sent",
+    pipelineStageId: MARNIN_QUOTE_SENT_STAGE,
+    updatedAt: "2026-09-16T04:00:00.000Z",
+    contact: { id: "contact-quote-sent", name: "Quote Sent" },
+  });
+  const newestInScope = opportunity({
+    id: "opp-new",
+    pipelineStageId: MARNIN_SCOPE_STAGE,
+    updatedAt: "2026-09-16T03:00:00.000Z",
+    contact: { id: "contact-new", name: "New Lead" },
+  });
+  const olderInScope = opportunity({
+    id: "opp-old",
+    pipelineStageId: SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[7], // Lead Closed (scope booked)
+    updatedAt: "2026-09-14T01:00:00.000Z",
+    contact: { id: "contact-old", name: "Older Booked" },
+  });
+  const onHold = opportunity({
+    id: "opp-hold",
+    pipelineStageId: MARNIN_ON_HOLD_STAGE,
+    updatedAt: "2026-09-16T05:00:00.000Z",
+    contact: { id: "contact-hold", name: "On Hold" },
+  });
+  const blankStage = opportunity({
+    id: "opp-blank",
+    pipelineStageId: "",
+    updatedAt: "2026-09-16T06:00:00.000Z",
+    contact: { id: "contact-blank", name: "Blank Stage" },
+  });
+  const attempted: string[] = [];
+  const payload = await salesBookingRead(
+    deps({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [
+            newestOutOfScope,
+            olderInScope,
+            newestInScope,
+            onHold,
+            blankStage,
+          ],
+          stages: {
+            [MARNIN_SCOPE_STAGE]: "New Lead (Call + Qualify)",
+            [SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[7]]:
+              "Lead Closed (scope booked)",
+            [MARNIN_QUOTE_SENT_STAGE]: "Following up Quote Sent (Site visit)",
+            [MARNIN_ON_HOLD_STAGE]: "On Hold",
+          },
+          exhausted: true,
+          pages_scanned: 1,
+          total: 5,
+          reason: null,
+        }),
+      readThread: ({ contactId }) => {
+        attempted.push(contactId);
+        return Promise.resolve([] as SalesBookingMessage[]);
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, thread_limit: 1 },
+  );
+
+  assertEquals(payload.cases.map((row) => row.id), ["opp-old", "opp-new"]);
+  assertEquals(payload.coverage.enumerated, 2);
+  assertEquals(payload.coverage.excluded_by_stage, 3);
+  assertEquals(payload.coverage.total, 5);
+  assertEquals(Object.keys(payload.thread_facts), ["opp-new"]);
+  assertEquals(attempted, ["contact-new"]);
+  assertEquals(payload.coverage.threads_attempted, 1);
+  assertEquals(payload.coverage.threads_read, 1);
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("1 case(s) had no thread read (row budget reached)")
+    ),
+  );
+  assertEquals("opp-quote-sent" in payload.thread_facts, false);
+  assertEquals("opp-hold" in payload.thread_facts, false);
+});
+
+Deno.test("FIXTURE: patio quote-sent stages are excluded from nithin's scoped book", async () => {
+  const patioQuoteSent = "d2fb3af7-91e5-4317-b778-2be117341f07";
+  const payload = await salesBookingRead(
+    deps({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [
+            opportunity({
+              id: "opp-need-scope",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "contact-need", name: "Need Scope" },
+            }),
+            opportunity({
+              id: "opp-quote-sent",
+              pipelineStageId: patioQuoteSent,
+              contact: { id: "contact-sent", name: "Quote Sent" },
+            }),
+          ],
+          stages: {
+            [NITHIN_SCOPE_STAGE]: "Client Needs To Be Contacted",
+            [patioQuoteSent]: "Quote Sent / Follow up",
+          },
+          exhausted: true,
+          pages_scanned: 1,
+          total: 2,
+          reason: null,
+        }),
+    }),
+    { resource: "nithin", week_start: WEEK },
+  );
+  assertEquals(payload.cases.map((row) => row.id), ["opp-need-scope"]);
+  assertEquals(payload.coverage.enumerated, 1);
+  assertEquals(payload.coverage.excluded_by_stage, 1);
+  assertEquals(Object.keys(payload.thread_facts), ["opp-need-scope"]);
+});
+
 Deno.test("include_thread_facts:false skips every thread read and says so", async () => {
   const payload = await salesBookingRead(
     deps({
@@ -931,6 +1110,10 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
   assertEquals(nithin.resource.pipeline_id, "OGZLpPPVWVarN94HL6af");
   assertEquals(nithin.resource.lane, "patio");
   assertEquals(nithin.resource.sender_line, "774");
+  assertEquals(
+    nithin.resource.scope_stage_ids,
+    SALES_BOOKING_RESOURCES.nithin.scope_stage_ids,
+  );
 
   const marnin = await salesBookingRead(deps(), {
     resource: "marnin",

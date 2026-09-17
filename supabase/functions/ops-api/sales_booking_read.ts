@@ -26,6 +26,10 @@
 //  4. Unread leave is not free capacity: `coverage.operational_leave` stays
 //     `not_read` because GHL appointments do not carry an Outlook-style leave
 //     calendar. Missing coverage is never a free week.
+//  5. Only people who need a visit, a reply or a quote. `scope_stage_ids`
+//     drops quote-sent / won / hold / lost / archive. `coverage.enumerated`
+//     is that scoped count; `excluded_by_stage` is how many open rows were
+//     left out. CRM row count is not visit demand.
 //
 // A failure in any sub-read degrades that item, never the whole response. The
 // action throws only on an invalid request (unknown resource / malformed week).
@@ -86,6 +90,14 @@ export interface SalesBookingResource {
   /** Outbound SMS line for this resource. Captain default; see PR "Captain can flip tomorrow". */
   sender_line: string;
   sender_line_source: string;
+  /**
+   * GHL stages that still need a visit, a reply or a quote. Copied from wiki
+   * https://github.com/SecureWorks-GROUP/secureworks-wiki/pull/438
+   * (`pipeline_stages` on patio-nithin.json / fencing-stratco-marnin.json):
+   * every stage before and including Scope Booked / visited-quote-to-send.
+   * Quote-sent, won, hold, lost and archive stages stay off this door.
+   */
+  scope_stage_ids: readonly string[];
 }
 
 /**
@@ -120,6 +132,14 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
     sender_line: "774",
     sender_line_source: "patio_profile_source_backed",
+    // Wiki PR 438 patio-nithin.json pipeline_stages[0..4].
+    scope_stage_ids: [
+      "09759a42-f80a-4947-bca4-71df5dd770da", // Client Needs To Be Contacted
+      "4d3bcf9a-185d-4a90-98e0-e0805fdf4a02", // Contacted Waiting on Response
+      "637c165f-93a3-496b-8e86-970eb8935044", // Needs Scope / Quote
+      "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5", // Scope Booked
+      "9b9e5313-8e0e-4ed6-8654-d50413b99885", // Scope Complete / Quote to be Sent
+    ],
   },
   marnin: {
     resource_id: "marnin",
@@ -128,6 +148,19 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     sender_line: "776",
     sender_line_source: "captain_default_2026-09-16",
+    // Wiki PR 438 fencing-stratco-marnin.json pipeline_stages[0..9].
+    scope_stage_ids: [
+      "cc401467-4743-4dbd-a7d7-e8f2ff023dd2", // New Lead (Call + Qualify)
+      "7f863a14-1d9f-4a18-b73c-0e1780390bd7", // New Lead (Replied/ Contacted)
+      "8c43212e-5e58-4f0d-b7f7-96c6ee644d6e", // Stale Lead
+      "341d6a77-6a35-4338-b2b0-09236c7c80f9", // Called, No Answer
+      "52c70bff-5cf3-447b-b891-03c30486aed8", // Call Answered (presentation not made)
+      "6b101809-a4f9-440d-ac4c-0be669b8173e", // Presentation Made (scope not booked)
+      "bfdba902-0a92-4a90-95a5-af27d7502a90", // Needs On Site Scope Urgently
+      "09eeb872-fa46-41fc-a96b-8a8d2bc12215", // Lead Closed (scope booked)
+      "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
+      "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
+    ],
   },
 };
 
@@ -160,7 +193,8 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
 // swallowed: an unfinished scan must not read as a finished small board.
 export const SALES_BOOKING_MAX_OPPORTUNITY_PAGES = 20;
 export const SALES_BOOKING_OPPORTUNITY_PAGE_SIZE = 100;
-export const SALES_BOOKING_DEFAULT_THREAD_LIMIT = 80;
+/** Raised so a typical scope-needing set (tens of rows) is fully read. */
+export const SALES_BOOKING_DEFAULT_THREAD_LIMIT = 200;
 export const SALES_BOOKING_MAX_THREAD_LIMIT = 250;
 export const SALES_BOOKING_THREAD_CONCURRENCY = 6;
 export const SALES_BOOKING_DEFAULT_THREAD_BUDGET_MS = 18_000;
@@ -465,6 +499,18 @@ export function projectSalesBookingCase(
   };
 }
 
+/**
+ * True when the opportunity is still in a stage that needs a visit, a reply
+ * or a quote. Unknown or blank stage ids are out of scope (never the whole CRM).
+ */
+export function isSalesBookingScopeStage(
+  stageId: string | null | undefined,
+  scopeStageIds: readonly string[],
+): boolean {
+  return typeof stageId === "string" && stageId.length > 0 &&
+    scopeStageIds.includes(stageId);
+}
+
 // ════════════════════════════════════════════════════════════
 // Diary (pure)
 // ════════════════════════════════════════════════════════════
@@ -647,6 +693,8 @@ export interface SalesBookingReadResponse {
     full_population: boolean;
     enumerated: number;
     total: number | null;
+    /** Open roster rows left out because their GHL stage is past scope-needed. */
+    excluded_by_stage: number;
     operational_leave: "not_read";
     gaps: string[];
     pages_scanned: number;
@@ -676,11 +724,13 @@ export interface SalesBookingReadResponse {
 export function assembleSalesBookingRead(input: {
   resource: SalesBookingResource;
   week: SalesBookingWeekWindow;
-  /** Already de-duplicated and projected. */
+  /** Already de-duplicated, stage-scoped and projected. */
   projectedCases: SalesBookingCase[];
   opportunities: SalesBookingOpportunityScan;
   diary: SalesBookingDiaryScan;
   threads: SalesBookingThreadScan;
+  /** Unique open rows dropped because their stage is past scope-needed. */
+  excludedByStage?: number;
 }): SalesBookingReadResponse {
   const { resource, week, opportunities, diary, threads } = input;
   const cases = input.projectedCases;
@@ -746,10 +796,12 @@ export function assembleSalesBookingRead(input: {
     coverage: {
       // Full population means the roster was terminal. Thread and calendar gaps
       // are named separately: they narrow what is KNOWN about a case, not
-      // whether the book is complete.
+      // whether the book is complete. `enumerated` is the scoped count, not
+      // the whole CRM.
       full_population: opportunities.exhausted && !opportunities.reason,
       enumerated: cases.length,
       total: opportunities.total,
+      excluded_by_stage: input.excludedByStage ?? 0,
       operational_leave: "not_read",
       gaps,
       pages_scanned: opportunities.pages_scanned,
@@ -985,6 +1037,7 @@ export async function salesBookingRead(
 
   const projected: SalesBookingCase[] = [];
   const seen = new Set<string>();
+  let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
     const row = projectSalesBookingCase(
       raw,
@@ -993,6 +1046,13 @@ export async function salesBookingRead(
     );
     if (!row || seen.has(row.id)) continue;
     seen.add(row.id);
+    const stageId = typeof raw.pipelineStageId === "string"
+      ? raw.pipelineStageId
+      : "";
+    if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) {
+      excludedByStage++;
+      continue;
+    }
     projected.push(row);
   }
 
@@ -1004,6 +1064,7 @@ export async function salesBookingRead(
     opportunities,
     diary,
     threads,
+    excludedByStage,
   });
 }
 
@@ -1036,6 +1097,10 @@ async function ghlRead(
  * ghl-proxy's `fetchOpportunityPages` does: a SHORT page or an empty page is
  * the only positive proof the result set ended, and a stalled cursor stops the
  * scan with `exhausted:false` so a caller fails closed on an absence.
+ *
+ * GHL v3 search accepts a single `pipelineStageId`. This door needs several
+ * (patio 5, fencing 10), so the live call stays `pipelineId` + `status=open`
+ * and `salesBookingRead` filters to `scope_stage_ids` before the thread pass.
  */
 async function readOpportunitiesLive(
   pipelineId: string,
