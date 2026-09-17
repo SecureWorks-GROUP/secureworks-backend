@@ -23,7 +23,9 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  applySalesBookingContactFact,
   assembleSalesBookingRead,
+  confirmSalesBookingGhlUser,
   createSalesBookingReadDependencies,
   defaultPerthWeekStart,
   deriveSalesBookingThreadFacts,
@@ -32,7 +34,6 @@ import {
   isSalesBookingTemplateBody,
   perthGraphInstant,
   perthWeekWindow,
-  applySalesBookingContactFact,
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
   readSalesBookingGhlDiary,
@@ -45,17 +46,16 @@ import {
   SALES_BOOKING_RESOURCES,
   SALES_BOOKING_THREAD_FACTS_KIND,
   SALES_BOOKING_THREAD_FACTS_WEEK_START,
-  salesBookingGhl429DelayMs,
-  salesBookingJobTypeFromOpportunity,
-  salesBookingSuburbFromContact,
-  salesBookingThreadFactIsFresh,
   type SalesBookingCachedThreadFact,
   type SalesBookingDiaryScan,
+  salesBookingGhl429DelayMs,
+  salesBookingJobTypeFromOpportunity,
   type SalesBookingMessage,
   salesBookingRead,
   type SalesBookingReadDependencies,
   SalesBookingRequestError,
-  confirmSalesBookingGhlUser,
+  salesBookingSuburbFromContact,
+  salesBookingThreadFactIsFresh,
   withSalesBookingGhl429Retry,
 } from "./sales_booking_read.ts";
 
@@ -1001,8 +1001,7 @@ Deno.test("FIXTURE: mixed pipeline stages exclude quote-sent/hold and spend the 
           ],
           stages: {
             [MARNIN_SCOPE_STAGE]: "New Lead (Call + Qualify)",
-            [MARNIN_LEAD_CLOSED_STAGE]:
-              "Lead Closed (scope booked)",
+            [MARNIN_LEAD_CLOSED_STAGE]: "Lead Closed (scope booked)",
             [MARNIN_QUOTE_SENT_STAGE]: "Following up Quote Sent (Site visit)",
             [MARNIN_ON_HOLD_STAGE]: "On Hold",
           },
@@ -1547,8 +1546,14 @@ Deno.test("job site fills suburb only when GHL city and address are empty", asyn
     { resource: "nithin", week_start: WEEK, include_thread_facts: false },
   );
   assertEquals(asked.opportunityIds.sort(), ["opp-city", "opp-empty"]);
-  assertEquals(payload.cases.find((row) => row.id === "opp-empty")?.suburb, "Balcatta");
-  assertEquals(payload.cases.find((row) => row.id === "opp-city")?.suburb, "Fremantle");
+  assertEquals(
+    payload.cases.find((row) => row.id === "opp-empty")?.suburb,
+    "Balcatta",
+  );
+  assertEquals(
+    payload.cases.find((row) => row.id === "opp-city")?.suburb,
+    "Fremantle",
+  );
 });
 
 Deno.test("live week paints given suburbs and job types from evidence, else not given", async () => {
@@ -1740,8 +1745,7 @@ Deno.test("cached thread facts are served; stale activity is refreshed newest fi
   let liveReads = 0;
   const payload = await salesBookingRead(
     deps({
-      loadThreadFactsCache: () =>
-        Promise.resolve({ "opp-1": cachedFact() }),
+      loadThreadFactsCache: () => Promise.resolve({ "opp-1": cachedFact() }),
       persistThreadFactsCache: (_resource, facts) => {
         persisted.push(facts);
         return Promise.resolve();
@@ -1806,14 +1810,14 @@ Deno.test("GHL 429 retries three times with backoff then counts remaining failur
   assertEquals(salesBookingGhl429DelayMs(3, () => 0), 800);
   const sleeps: number[] = [];
   let attempts = 0;
-  const value = await withSalesBookingGhl429Retry(async () => {
+  const value = await withSalesBookingGhl429Retry(() => {
     attempts++;
     if (attempts < 3) {
       const error = new Error("GHL 429: Too Many Requests");
       (error as { status?: number }).status = 429;
-      throw error;
+      return Promise.reject(error);
     }
-    return "ok";
+    return Promise.resolve("ok");
   }, {
     sleep: (ms) => {
       sleeps.push(ms);
@@ -1827,8 +1831,7 @@ Deno.test("GHL 429 retries three times with backoff then counts remaining failur
 
   const payload = await salesBookingRead(
     deps({
-      loadThreadFactsCache: () =>
-        Promise.resolve({ "opp-1": cachedFact() }),
+      loadThreadFactsCache: () => Promise.resolve({ "opp-1": cachedFact() }),
       readThread: () => {
         const error = new Error("GHL 429: Too Many Requests");
         (error as { status?: number }).status = 429;
@@ -1937,7 +1940,10 @@ Deno.test("Nithin maps by unique GHL name when the recorded email is absent", as
   assertEquals(payload.diary_read.reason, "ghl_user_mapped_by_name");
   assertEquals(payload.diary_read.mapped_by, "name");
   assertEquals(payload.diary_read.ghl_user_id, "ghl_nithin_live");
-  assertEquals(payload.diary_read.calendar_email, "nithin.p@secureworkswa.com.au");
+  assertEquals(
+    payload.diary_read.calendar_email,
+    "nithin.p@secureworkswa.com.au",
+  );
 });
 
 Deno.test("zero or several Nithin name matches stay ghl_user_unmapped", async () => {
@@ -2076,9 +2082,10 @@ function threadFactsPackClient(
             week_start: String(row.week_start),
             kind: String(row.kind),
             as_of: String(row.as_of),
-            payload: (row.payload && typeof row.payload === "object"
-              ? row.payload
-              : {}) as Record<string, unknown>,
+            payload:
+              (row.payload && typeof row.payload === "object"
+                ? row.payload
+                : {}) as Record<string, unknown>,
           };
           return self;
         },
@@ -2181,13 +2188,18 @@ Deno.test("thread facts persist keeps one latest row per resource and week", asy
   assertEquals(client.writes, ["upsert", "delete"]);
   assertEquals(client.store.length, 1);
   assertEquals(
-    (client.store[0].payload as { facts?: { "opp-1"?: { classification?: string } } })
+    (client.store[0].payload as {
+      facts?: { "opp-1"?: { classification?: string } };
+    })
       .facts?.["opp-1"]?.classification,
     "waiting_reply",
   );
   assertEquals(client.store[0].kind, SALES_BOOKING_THREAD_FACTS_KIND);
   assertEquals(client.store[0].resource, "marnin");
-  assertEquals(client.store[0].week_start, SALES_BOOKING_THREAD_FACTS_WEEK_START);
+  assertEquals(
+    client.store[0].week_start,
+    SALES_BOOKING_THREAD_FACTS_WEEK_START,
+  );
 });
 
 Deno.test("thread facts persist prune keeps a newer concurrent as_of and drops older rows", async () => {
@@ -2299,7 +2311,9 @@ Deno.test("thread facts persist writes a genuine empty store", async () => {
   assertEquals(client.writes, ["upsert", "delete"]);
   assertEquals(client.store.length, 1);
   assertEquals(
-    (client.store[0].payload as { facts?: { "opp-1"?: { classification?: string } } })
+    (client.store[0].payload as {
+      facts?: { "opp-1"?: { classification?: string } };
+    })
       .facts?.["opp-1"]?.classification,
     "follow_up_due",
   );
@@ -2346,4 +2360,3 @@ Deno.test("thread facts persist merges a limited refresh into the loaded map and
   assertEquals(facts?.["opp-1"]?.classification, "waiting_reply");
   assertEquals(facts?.["opp-2"]?.case_id, "opp-2");
 });
-

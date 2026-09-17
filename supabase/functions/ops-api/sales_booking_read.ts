@@ -166,15 +166,10 @@ export const SALES_BOOKING_RESOURCES: Readonly<
 };
 
 /**
- * GHL user ids are not stored anywhere in this backend: `users`,
- * `scoper_preferences` (google_calendar_id / work_calendar_email only), and
- * ghl-proxy config all lack a ghl_user_id. Do not embed a guessed id.
- *
- * Keyed by resource. Email source: `public.users.email` for the scoper_user_id
- * already on SALES_BOOKING_RESOURCES (Nithin patio, Marnin fencing Stratco;
- * confirmed by `20260322000005_fix_user_roles.sql` and the scoper_preferences
- * seed). The live GHL id is confirmed at read time against GET /users/?locationId=.
- * Khairo is intentionally absent.
+ * GHL user ids are not stored on `users`, `scoper_preferences`, or ghl-proxy
+ * config. Do not embed a guessed id. Nithin's pin stays null until the live
+ * roster email is known. Confirmation (email, then unique name):
+ * `docs/sales-booking-read-contract-2026-09-16.md`.
  */
 export const SALES_BOOKING_GHL_USERS: Readonly<
   Record<string, {
@@ -511,7 +506,9 @@ export function parseSalesBookingThreadFactsCache(
         ? row.quiet_hours
         : SALES_BOOKING_QUIET_HOURS,
       classification,
-      message_count: typeof row.message_count === "number" ? row.message_count : 0,
+      message_count: typeof row.message_count === "number"
+        ? row.message_count
+        : 0,
       template_outbound_count: typeof row.template_outbound_count === "number"
         ? row.template_outbound_count
         : 0,
@@ -526,7 +523,8 @@ export function isSalesBookingGhl429(error: unknown): boolean {
   const status = (error as { status?: unknown }).status;
   if (status === 429) return true;
   const message = String((error as Error).message || "");
-  return /\bGHL 429\b/.test(message) || /\b429 Too Many Requests\b/i.test(message);
+  return /\bGHL 429\b/.test(message) ||
+    /\b429 Too Many Requests\b/i.test(message);
 }
 
 /** attempt 1 → 200ms + jitter, then 400, 800; cap 2000ms. */
@@ -867,10 +865,15 @@ function collectCustomFieldValues(
       for (const row of fields) {
         if (!row || typeof row !== "object") continue;
         const rec = row as Record<string, unknown>;
-        push(rec.key ?? rec.fieldKey ?? rec.id ?? rec.name, customFieldValue(rec));
+        push(
+          rec.key ?? rec.fieldKey ?? rec.id ?? rec.name,
+          customFieldValue(rec),
+        );
       }
     } else if (fields && typeof fields === "object") {
-      for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
+      for (
+        const [key, value] of Object.entries(fields as Record<string, unknown>)
+      ) {
         if (value && typeof value === "object" && !Array.isArray(value)) {
           const rec = value as Record<string, unknown>;
           push(key, customFieldValue(rec));
@@ -1713,9 +1716,8 @@ async function scanThreads(
   );
   const unreadCount = Object.values(facts).filter((f) => !f.read_ok).length +
     notAttempted;
-  const cachedCount = Object.keys(facts).filter((id) =>
-    cachedHits.includes(id)
-  ).length;
+  const cachedCount =
+    Object.keys(facts).filter((id) => cachedHits.includes(id)).length;
   const freshCount = selected.filter((row) => {
     const fact = facts[row.id];
     return fact?.read_ok === true && !cachedHits.includes(row.id);
@@ -1929,7 +1931,9 @@ async function readContactsLive(
       if (index >= unique.length) return;
       const contactId = unique[index];
       try {
-        const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
+        const body = await ghlRead(
+          `/contacts/${encodeURIComponent(contactId)}`,
+        );
         facts[contactId] = salesBookingContactFactFromGhl(body);
       } catch {
         // One unread contact stays `"not given"`; do not empty the book.
@@ -1948,10 +1952,15 @@ async function readContactsLive(
 
 const JOB_SITE_ID_CHUNK = 25;
 
-function chunkSalesBookingIds(ids: string[], size = JOB_SITE_ID_CHUNK): string[][] {
+function chunkSalesBookingIds(
+  ids: string[],
+  size = JOB_SITE_ID_CHUNK,
+): string[][] {
   const unique = [...new Set(ids.filter((id) => id.length > 0))];
   const out: string[][] = [];
-  for (let i = 0; i < unique.length; i += size) out.push(unique.slice(i, i + size));
+  for (let i = 0; i < unique.length; i += size) {
+    out.push(unique.slice(i, i + size));
+  }
   return out;
 }
 
@@ -2220,12 +2229,9 @@ function unreadDiary(
 }
 
 /**
- * The scoper's GHL calendar for the window.
- *
- * GHL user ids are not in this backend. Resolve the resource's mapped email
- * against GET /users/?locationId=; unconfirmed is `ghl_user_unmapped`, never
- * an invented id and never an empty free week. A failed unpaged events GET
- * is `ghl_calendar_page_failed` with zero entries. Never throws.
+ * The scoper's GHL calendar for the window. Mapping and unread reasons:
+ * `docs/sales-booking-read-contract-2026-09-16.md`. Never invents an id
+ * and never treats an unread week as free. Never throws.
  */
 export async function readSalesBookingGhlDiary(args: {
   ghlGet: GhlCalendarGet;
@@ -2375,6 +2381,7 @@ function salesBookingThreadFactsMapsEqual(
   );
 }
 
+/** One latest thread_facts row: abort on load error, merge, skip when equal, prune only older as_of. */
 async function persistThreadFactsCacheLive(
   client: SalesBookingReadClient,
   resourceId: string,

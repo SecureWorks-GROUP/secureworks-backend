@@ -15,10 +15,10 @@
 import {
   perthWeekWindow,
   resolveSalesBookingResource,
-  salesBookingReadAction,
   SALES_BOOKING_MAX_THREAD_LIMIT,
   type SalesBookingCase,
   type SalesBookingCaseProposal,
+  salesBookingReadAction,
   type SalesBookingReadResponse,
   SalesBookingRequestError,
   type SalesBookingStampState,
