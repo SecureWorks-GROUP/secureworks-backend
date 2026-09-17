@@ -12,10 +12,20 @@
 // AGENTS.md and pinned by myjobs_ghost_rows_test.ts — this module NEVER
 // touches a read path, only the write side that used to be entirely manual.
 //
+// `job_assignments_job_user_date_key` is UNIQUE(job_id, user_id,
+// scheduled_date) with no is_ghost / status predicate, so the ops manager
+// can hold at most ONE row per job/date — ghost or real, live or cancelled.
+// Every writer here therefore reads that one row first and reuses it
+// (revives a cancelled ghost, yields to a real assignment) rather than
+// inserting blind, and `releaseGhostObserverMirrorForRealAssignee` clears
+// the ghost out of the way before a real ops-manager row lands on the key.
+//
 // `job_assignments.role` is intentionally re-checked here rather than
 // imported from index.ts's OBSERVER_ROLES: index.ts imports FROM this module
 // (matching every other ops-api helper file), so importing back would be
 // circular. Keep the two sets in sync by hand if either changes.
+import { fetchAllRows } from './makesafe_compact_reads.ts'
+
 const GHOST_MIRROR_OBSERVER_ROLES = new Set(['observer', 'ghost'])
 // Planning entries (calendar meetings/reminders) are not field work and must
 // never mint a ghost — mirrors the SMS notify skip in createAssignment.
@@ -35,6 +45,12 @@ export type GhostMirrorSpan = {
   crewName?: string | null
 }
 
+type OpsManagerSpanRow = {
+  id: string
+  is_ghost: boolean
+  status: string
+}
+
 /**
  * A row counts as real, dated crew work — never an existing ghost/observer
  * placeholder, and never a planning-only meeting/reminder entry. Does NOT
@@ -49,6 +65,13 @@ export function isGenuineCrewAssignmentRow(row: any): boolean {
   if (GHOST_MIRROR_OBSERVER_ROLES.has(role) || GHOST_MIRROR_OBSERVER_ROLES.has(type)) return false
   if (GHOST_MIRROR_PLANNING_TYPES.has(type)) return false
   return true
+}
+
+export function isAssignmentUserDateUniqueViolation(error: any): boolean {
+  if (String(error?.code || '') !== '23505') return false
+  const detail = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`
+  return detail.includes('job_assignments_job_user_date_key') ||
+    detail.includes('(job_id, user_id, scheduled_date)')
 }
 
 /**
@@ -72,35 +95,100 @@ export async function resolveOpsManagerUserId(client: any): Promise<string | nul
   return row?.id ? String(row.id) : null
 }
 
+/**
+ * The ops manager's ONE row on (job, date) — ghost or real, any status — or
+ * null. `unreadable` is distinct from "no row" so a read fault never lets a
+ * caller insert onto a key it could not see.
+ */
+async function readOpsManagerRowForSpan(
+  client: any,
+  opsManagerId: string,
+  jobId: string,
+  scheduledDate: string,
+): Promise<{ row: OpsManagerSpanRow | null; unreadable: boolean }> {
+  const { data, error } = await client
+    .from('job_assignments')
+    .select('id, is_ghost, status')
+    .eq('job_id', jobId)
+    .eq('user_id', opsManagerId)
+    .eq('scheduled_date', scheduledDate)
+    .limit(1)
+  if (error) {
+    console.log('[ops-api] ghost observer mirror: span-row read failed:', error)
+    return { row: null, unreadable: true }
+  }
+  const raw = Array.isArray(data) ? data[0] : null
+  if (!raw?.id) return { row: null, unreadable: false }
+  return {
+    row: {
+      id: String(raw.id),
+      is_ghost: raw.is_ghost === true,
+      status: String(raw.status || '').toLowerCase(),
+    },
+    unreadable: false,
+  }
+}
+
+function isLiveGhost(row: OpsManagerSpanRow | null): row is OpsManagerSpanRow {
+  return !!row && row.is_ghost && row.status !== 'cancelled'
+}
+
 async function findGhostRowForSpan(
   client: any,
   opsManagerId: string,
   jobId: string,
   scheduledDate: string,
 ): Promise<{ id: string } | null> {
-  const { data, error } = await client
-    .from('job_assignments')
-    .select('id')
-    .eq('job_id', jobId)
-    .eq('user_id', opsManagerId)
-    .eq('is_ghost', true)
-    .eq('scheduled_date', scheduledDate)
-    .neq('status', 'cancelled')
-    .limit(1)
+  const { row } = await readOpsManagerRowForSpan(client, opsManagerId, jobId, scheduledDate)
+  return isLiveGhost(row) ? { id: row.id } : null
+}
+
+function ghostMirrorNotes(crewName?: string | null): string {
+  return `Auto ghost observer for ${crewName || 'crew'} schedule`
+}
+
+async function writeGhostMirrorEvent(client: any, jobId: string, ghostId: string | undefined, scheduledDate: string, revived: boolean) {
+  const { error } = await client.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'assignment_created',
+    detail_json: {
+      assignment_id: ghostId,
+      date: scheduledDate,
+      source: GHOST_OBSERVER_MIRROR_SOURCE,
+      ...(revived ? { revived: true } : {}),
+    },
+  })
+  if (error) console.log('[ops-api] ghost observer mirror: event write failed:', error)
+}
+
+async function reviveCancelledGhost(
+  client: any,
+  ghostId: string,
+  span: GhostMirrorSpan,
+): Promise<boolean> {
+  const { error } = await client.from('job_assignments').update({
+    status: 'scheduled',
+    confirmation_status: 'tentative',
+    scheduled_end: span.scheduledEnd || null,
+    start_time: span.startTime || null,
+    end_time: span.endTime || null,
+    notes: ghostMirrorNotes(span.crewName),
+  }).eq('id', ghostId)
   if (error) {
-    console.log('[ops-api] ghost observer mirror: ghost-row read failed:', error)
-    return null
+    console.log('[ops-api] ghost observer mirror: ghost revive failed:', error)
+    return false
   }
-  const row = Array.isArray(data) ? data[0] : null
-  return row?.id ? { id: String(row.id) } : null
+  return true
 }
 
 /**
  * Idempotent create: ensures exactly one non-cancelled ghost observer row for
  * the ops manager covers `span.scheduledDate` on `span.jobId`. No-ops when
  * the ops manager cannot be resolved, when a covering ghost already exists,
- * or when `assigneeUserId` IS the ops manager (he is already the real
- * assignee — no watcher row needed).
+ * when the ops manager already holds a REAL row on that key (he is the
+ * assignee — no watcher row needed), or when `assigneeUserId` IS the ops
+ * manager. A cancelled ghost on the key is revived in place rather than
+ * inserted over, because the unique key does not exempt cancelled rows.
  */
 export async function ensureGhostObserverMirror(
   client: any,
@@ -115,8 +203,26 @@ export async function ensureGhostObserverMirror(
     return { created: false, opsManagerId }
   }
 
-  const existing = await findGhostRowForSpan(client, opsManagerId, span.jobId, span.scheduledDate)
-  if (existing) return { created: false, ghostId: existing.id, opsManagerId }
+  const reuse = async (): Promise<{ created: boolean; ghostId?: string; opsManagerId?: string | null } | null> => {
+    const { row, unreadable } = await readOpsManagerRowForSpan(client, opsManagerId, span.jobId, span.scheduledDate)
+    if (unreadable) return { created: false, opsManagerId }
+    if (!row) return null
+    if (!row.is_ghost) {
+      if (row.status !== 'cancelled') return { created: false, opsManagerId }
+      console.log(
+        `[ops-api] ghost observer mirror: ops manager holds a cancelled real assignment on job ${span.jobId} / ${span.scheduledDate}; not mirrored`,
+      )
+      return { created: false, opsManagerId }
+    }
+    if (row.status !== 'cancelled') return { created: false, ghostId: row.id, opsManagerId }
+    const revived = await reviveCancelledGhost(client, row.id, span)
+    if (!revived) return { created: false, opsManagerId }
+    await writeGhostMirrorEvent(client, span.jobId, row.id, span.scheduledDate, true)
+    return { created: true, ghostId: row.id, opsManagerId }
+  }
+
+  const reused = await reuse()
+  if (reused) return reused
 
   const insertRow = {
     job_id: span.jobId,
@@ -131,25 +237,52 @@ export async function ensureGhostObserverMirror(
     status: 'scheduled',
     confirmation_status: 'tentative',
     crew_name: null,
-    notes: `Auto ghost observer for ${span.crewName || 'crew'} schedule`,
+    notes: ghostMirrorNotes(span.crewName),
   }
   const { data, error } = await client.from('job_assignments').insert(insertRow).select().single()
   if (error) {
+    if (isAssignmentUserDateUniqueViolation(error)) {
+      const raced = await reuse()
+      if (raced) return raced
+    }
     console.log('[ops-api] ghost observer mirror: insert failed:', error)
     return { created: false, opsManagerId }
   }
 
-  await client.from('job_events').insert({
-    job_id: span.jobId,
-    event_type: 'assignment_created',
-    detail_json: {
-      assignment_id: data?.id,
-      date: span.scheduledDate,
-      source: GHOST_OBSERVER_MIRROR_SOURCE,
-    },
-  })
+  await writeGhostMirrorEvent(client, span.jobId, data?.id, span.scheduledDate, false)
 
   return { created: true, ghostId: data?.id ? String(data.id) : undefined, opsManagerId }
+}
+
+/**
+ * A REAL crew row for `userId` is about to be written onto (job, date). When
+ * that user is the ops manager, any ghost row already on that exact key is
+ * deleted first (cancelled included) so the unique key never fires and the
+ * real assignment wins. Every writer of a real ops-manager row — insert or
+ * date/assignee move — must call this before its write. No-op for anyone
+ * else and for an unresolved ops manager.
+ */
+export async function releaseGhostObserverMirrorForRealAssignee(
+  client: any,
+  params: { jobId: string; scheduledDate: string; userId?: string | null },
+): Promise<{ removed: number }> {
+  if (!params?.jobId || !params?.scheduledDate || !params?.userId) return { removed: 0 }
+  const opsManagerId = await resolveOpsManagerUserId(client)
+  if (!opsManagerId || String(params.userId) !== String(opsManagerId)) return { removed: 0 }
+
+  const { data, error } = await client
+    .from('job_assignments')
+    .delete()
+    .eq('job_id', params.jobId)
+    .eq('user_id', opsManagerId)
+    .eq('scheduled_date', params.scheduledDate)
+    .eq('is_ghost', true)
+    .select('id')
+  if (error) {
+    console.log('[ops-api] ghost observer mirror: release-for-real-assignee delete failed:', error)
+    return { removed: 0 }
+  }
+  return { removed: (data || []).length }
 }
 
 /**
@@ -181,13 +314,23 @@ async function anotherCrewRowStillCoversSpan(
   )
 }
 
+async function deleteGhostRow(client: any, ghostId: string, label: string): Promise<boolean> {
+  const { error } = await client.from('job_assignments').delete().eq('id', ghostId)
+  if (error) {
+    console.log(`[ops-api] ghost observer mirror: ${label} delete failed:`, error)
+    return false
+  }
+  return true
+}
+
 /**
  * Reschedule: when a genuine crew assignment's date moves and no other crew
  * row still covers the OLD date, the ops manager's ghost for the old date
- * moves with it (or is dropped if a ghost already covers the new date, or
- * created fresh if none existed). When another crew row still holds the old
- * date, the old ghost is left alone and the new date simply gets its own
- * mirror via the same idempotent `ensureGhostObserverMirror`.
+ * moves with it (or is dropped if the new date is already held by any
+ * ops-manager row, or created fresh if none existed). When another crew row
+ * still holds the old date, the old ghost is left alone and the new date
+ * simply gets its own mirror via the same idempotent
+ * `ensureGhostObserverMirror`.
  */
 export async function reconcileGhostObserverMirrorOnReschedule(
   client: any,
@@ -217,20 +360,44 @@ export async function reconcileGhostObserverMirrorOnReschedule(
     if (oldGhost) {
       const assigneeIsOpsManager = params.assigneeUserId &&
         String(params.assigneeUserId) === String(opsManagerId)
-      const newGhost = assigneeIsOpsManager
-        ? null
-        : await findGhostRowForSpan(client, opsManagerId, params.jobId, params.newDate)
-      if (assigneeIsOpsManager || newGhost) {
-        // The ops manager is now the real assignee, or the new date is
-        // already mirrored — the stale old-date ghost is redundant.
-        await client.from('job_assignments').delete().eq('id', oldGhost.id)
-      } else {
-        await client.from('job_assignments').update({
-          scheduled_date: params.newDate,
-          scheduled_end: params.newScheduledEnd ?? null,
-          start_time: params.newStartTime ?? null,
-          end_time: params.newEndTime ?? null,
-        }).eq('id', oldGhost.id)
+      const newSpan = assigneeIsOpsManager
+        ? { row: null, unreadable: false }
+        : await readOpsManagerRowForSpan(client, opsManagerId, params.jobId, params.newDate)
+      if (assigneeIsOpsManager || newSpan.row) {
+        // The ops manager is now the real assignee, or already holds a row
+        // on the new date — the stale old-date ghost is redundant. A
+        // cancelled ghost on the new date is revived by the ensure below.
+        await deleteGhostRow(client, oldGhost.id, 'stale old-date ghost')
+        if (newSpan.row && newSpan.row.is_ghost && newSpan.row.status === 'cancelled') {
+          await ensureGhostObserverMirror(client, {
+            jobId: params.jobId,
+            scheduledDate: params.newDate,
+            scheduledEnd: params.newScheduledEnd ?? null,
+            startTime: params.newStartTime ?? null,
+            endTime: params.newEndTime ?? null,
+            crewName: params.crewName ?? null,
+          }, params.assigneeUserId ?? null)
+        }
+        return
+      }
+      if (newSpan.unreadable) {
+        console.log('[ops-api] ghost observer mirror: new-date span unreadable; old-date ghost left in place')
+        return
+      }
+      const { error: moveErr } = await client.from('job_assignments').update({
+        scheduled_date: params.newDate,
+        scheduled_end: params.newScheduledEnd ?? null,
+        start_time: params.newStartTime ?? null,
+        end_time: params.newEndTime ?? null,
+        notes: ghostMirrorNotes(params.crewName),
+      }).eq('id', oldGhost.id)
+      if (moveErr) {
+        console.log('[ops-api] ghost observer mirror: ghost date move failed:', moveErr)
+        if (isAssignmentUserDateUniqueViolation(moveErr)) {
+          // Something already holds the new key — the old-date ghost is the
+          // only thing left to remove.
+          await deleteGhostRow(client, oldGhost.id, 'old-date ghost after move conflict')
+        }
       }
       return
     }
@@ -280,8 +447,7 @@ export async function cleanupGhostObserverMirrorForSpan(
 
   let removed = 0
   for (const row of data || []) {
-    const { error: delErr } = await client.from('job_assignments').delete().eq('id', row.id)
-    if (!delErr) removed++
+    if (await deleteGhostRow(client, String(row.id), 'cleanup')) removed++
   }
   return { removed }
 }
@@ -300,10 +466,11 @@ export type GhostBackfillCandidate = {
 
 /**
  * Every non-cancelled, non-ghost, genuine crew assignment dated `today` or
- * later on a job/date span the ops manager does not already have a ghost
- * covering. Read-only — never writes. Job-type categorisation is left to the
- * caller (index.ts owns `_jobVertical`, and importing it here would be
- * circular), so each candidate carries its raw `job` row.
+ * later on a job/date span the ops manager does not already hold a live row
+ * on (ghost or real). Read-only — never writes; both reads page past the
+ * PostgREST 1000-row ceiling. Job-type categorisation is left to the caller
+ * (index.ts owns `_jobVertical`, and importing it here would be circular),
+ * so each candidate carries its raw `job` row.
  */
 export async function findGhostObserverBackfillCandidates(
   client: any,
@@ -312,33 +479,40 @@ export async function findGhostObserverBackfillCandidates(
   const opsManagerId = await resolveOpsManagerUserId(client)
   if (!opsManagerId) return []
 
-  const { data: rows, error } = await client
-    .from('job_assignments')
-    .select(
-      'id, job_id, user_id, role, assignment_type, is_ghost, status, scheduled_date, ' +
-      'scheduled_end, start_time, end_time, crew_name, jobs:job_id(type, metadata, job_number)',
-    )
-    .eq('is_ghost', false)
-    .neq('status', 'cancelled')
-    .gte('scheduled_date', opts.today)
-  if (error) throw error
+  const rows = await fetchAllRows<any>(
+    () =>
+      client
+        .from('job_assignments')
+        .select(
+          'id, job_id, user_id, role, assignment_type, is_ghost, status, scheduled_date, ' +
+          'scheduled_end, start_time, end_time, crew_name, jobs:job_id(type, metadata, job_number)',
+        )
+        .eq('is_ghost', false)
+        .neq('status', 'cancelled')
+        .gte('scheduled_date', opts.today),
+    'ghost observer backfill: crew rows',
+    'id',
+  )
 
-  const { data: ghostRows, error: ghostErr } = await client
-    .from('job_assignments')
-    .select('job_id, scheduled_date')
-    .eq('is_ghost', true)
-    .eq('user_id', opsManagerId)
-    .neq('status', 'cancelled')
-    .gte('scheduled_date', opts.today)
-  if (ghostErr) throw ghostErr
+  const opsManagerRows = await fetchAllRows<any>(
+    () =>
+      client
+        .from('job_assignments')
+        .select('id, job_id, scheduled_date, status')
+        .eq('user_id', opsManagerId)
+        .neq('status', 'cancelled')
+        .gte('scheduled_date', opts.today),
+    'ghost observer backfill: ops manager rows',
+    'id',
+  )
 
   const covered = new Set(
-    (ghostRows || []).map((g: any) => `${g.job_id}::${g.scheduled_date}`),
+    opsManagerRows.map((g: any) => `${g.job_id}::${g.scheduled_date}`),
   )
 
   const seenSpans = new Set<string>()
   const candidates: GhostBackfillCandidate[] = []
-  for (const row of rows || []) {
+  for (const row of rows) {
     if (!isGenuineCrewAssignmentRow(row)) continue
     if (!row.job_id || !row.scheduled_date) continue
     if (row.user_id && String(row.user_id) === String(opsManagerId)) continue
@@ -362,8 +536,9 @@ export async function findGhostObserverBackfillCandidates(
 export async function applyGhostObserverBackfill(
   client: any,
   candidates: GhostBackfillCandidate[],
-): Promise<{ created: number }> {
+): Promise<{ created: number; failed: number }> {
   let created = 0
+  let failed = 0
   for (const c of candidates) {
     const res = await ensureGhostObserverMirror(client, {
       jobId: c.jobId,
@@ -374,6 +549,7 @@ export async function applyGhostObserverBackfill(
       crewName: c.crewName,
     })
     if (res.created) created++
+    else failed++
   }
-  return { created }
+  return { created, failed }
 }

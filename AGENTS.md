@@ -2585,13 +2585,30 @@ manager is himself the real assignee), `reconcileGhostObserverMirrorOnReschedule
 (moves the mirror, or leaves it when a sibling crew row still covers the old
 date) and `cleanupGhostObserverMirrorForSpan` (removes it once no genuine crew
 row covers that job/date) are wired into `createAssignment`, `updateAssignment`,
-`deleteAssignment` and the legacy `approve_assignment_request` direct-insert
-writer — every place a real crew `job_assignments` row is written. The ops
+`deleteAssignment`, the make-safe submitter override
+(`overrideMakesafeAllocationToSubmitter`) and the legacy
+`approve_assignment_request` direct-insert writer — every place a real crew
+`job_assignments` row is written or cancelled. The ops
 manager is resolved by `users.role = 'ops_manager'` at runtime, never a
 hard-coded id. `backfill_ghost_observers` (api_key-only, dry-run unless
-`apply:true`) mirrors the pre-existing population dated today or later. This
+`apply:true`) mirrors the pre-existing population dated today or later, paging
+both reads past the 1000-row ceiling. This
 is a write-side invariant only; every read-side ghost exclusion above is
 unchanged. Tests: `ghost_observer_auto_mirror_test.ts`.
+
+`job_assignments_job_user_date_key` is UNIQUE(job_id, user_id, scheduled_date)
+with NO `is_ghost` or `status` exemption, so the ops manager holds at most one
+row per job/date — ghost or real, live or cancelled. Two rules follow. The
+mirror never inserts blind: it reads that one row and revives a cancelled
+ghost in place, yields to a live real row, and treats a 23505 as a re-read.
+And a REAL ops-manager row landing on a key (createAssignment insert, or an
+updateAssignment user/date move) calls
+`releaseGhostObserverMirrorForRealAssignee` first so the ghost is deleted
+before the write; `allocateJob`'s dedupe reads ignore ghost rows for the same
+reason, otherwise allocating the ops manager returns his own ghost as an
+"idempotent" success and never allocates him. The in-memory fake in the test
+suite enforces that key on insert and update, so a new writer that collides
+fails there rather than only in production.
 
 ## Every SES Measurement Names Its Denominator And Its Generation
 
