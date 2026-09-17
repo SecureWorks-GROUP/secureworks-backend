@@ -6,7 +6,7 @@
 // view (`opsFetch('sales_booking_read', {resource, week_start, scoper_user_id})`).
 // It replaces the branch-local preview server `scripts/sales-booking-local-api.mjs`
 // with the same response shape, plus the two facts the browser must not derive
-// itself: the scoper's Outlook `diary[]` for the week, and per-case
+// itself: the scoper's GHL `diary[]` for the week, and per-case
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
 //
@@ -24,7 +24,8 @@
 //  3. Auto-ack and missed-call templates are NOT human replies
 //     (`SALES_BOOKING_TEMPLATE_MARKERS`).
 //  4. Unread leave is not free capacity: `coverage.operational_leave` stays
-//     `not_read` because only the scoper's PRIMARY Outlook calendar is read.
+//     `not_read` because GHL appointments do not carry an Outlook-style leave
+//     calendar. Missing coverage is never a free week.
 //
 // A failure in any sub-read degrades that item, never the whole response. The
 // action throws only on an invalid request (unknown resource / malformed week).
@@ -34,7 +35,12 @@
 // constants here. This action has no capability to send or to write a calendar;
 // the flags exist so the view can render the hold, not as the enforcement.
 
-import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
+import {
+  confirmGhlUserId,
+  fetchGhlCalendarEvents,
+  fetchGhlLocationUsers,
+  type GhlCalendarGet,
+} from "../ghl-proxy/calendar_events.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
 
@@ -110,6 +116,30 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     sender_line: "776",
     sender_line_source: "captain_default_2026-09-16",
+  },
+};
+
+/**
+ * GHL user ids are not stored anywhere in this backend: `users`,
+ * `scoper_preferences` (google_calendar_id / work_calendar_email only), and
+ * ghl-proxy config all lack a ghl_user_id. Do not embed a guessed id.
+ *
+ * Keyed by resource. Email source: `public.users.email` for the scoper_user_id
+ * already on SALES_BOOKING_RESOURCES (Nithin patio, Marnin fencing Stratco;
+ * confirmed by `20260322000005_fix_user_roles.sql` and the scoper_preferences
+ * seed). The live GHL id is confirmed at read time against GET /users/?locationId=.
+ * Khairo is intentionally absent.
+ */
+export const SALES_BOOKING_GHL_USERS: Readonly<
+  Record<string, { email: string; ghl_user_id: string | null }>
+> = {
+  nithin: {
+    email: "nithin@secureworkswa.com.au",
+    ghl_user_id: null,
+  },
+  marnin: {
+    email: "marnin@secureworkswa.com.au",
+    ghl_user_id: null,
   },
 };
 
@@ -436,26 +466,39 @@ export interface SalesBookingDiaryEntry {
   title: string | null;
   kind: SalesBookingDiaryKind;
   source: string;
-  /** Raw Graph `showAs`, so a consumer can re-derive `kind` without trusting it. */
+  /** Raw GHL `appointmentStatus` (or `cancelled` when deleted). */
   show_as: string | null;
-  /** False for a `free` block: on the diary, but not occupancy. */
+  /** False for cancelled: on the diary, but not occupancy. */
   blocks_capacity: boolean;
   is_all_day: boolean;
   location: string | null;
-  /** True when the subject was withheld because the event is marked private. */
+  /** Always false on the GHL path: GHL appointments have no private-sensitivity flag. */
   title_withheld: boolean;
 }
 
-const DIARY_SOURCE = "outlook_primary";
+const DIARY_SOURCE = "ghl_calendar";
 
 /**
- * Graph renders `start.dateTime` in the timezone asked for via the `Prefer`
- * header and returns it WITHOUT an offset. Perth has no daylight saving, so
- * appending +08:00 to a Perth-rendered value is exact rather than approximate.
+ * Stamp a Perth offset on an offset-less local datetime. GHL usually already
+ * sends an offset; Unix milliseconds and date-only all-day values are accepted
+ * too. Named `perthGraphInstant` in the 16 Sep Outlook reader; kept as a
+ * compatibility export so older tests that only care about ISO stamping still
+ * compile against this module.
  */
-export function perthGraphInstant(value: unknown): string | null {
+export function perthDiaryInstant(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
   if (typeof value !== "string" || !value) return null;
   const trimmed = value.replace(/\.\d+$/, "");
+  if (/^\d{10,13}$/.test(trimmed)) {
+    const ms = Number(trimmed);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const withOffset = `${trimmed}T00:00:00${PERTH_UTC_OFFSET}`;
+    return Number.isFinite(Date.parse(withOffset)) ? withOffset : null;
+  }
   if (/(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed)) {
     return Number.isFinite(Date.parse(trimmed)) ? trimmed : null;
   }
@@ -464,57 +507,125 @@ export function perthGraphInstant(value: unknown): string | null {
   return Number.isFinite(Date.parse(withOffset)) ? withOffset : null;
 }
 
+/** @deprecated Use perthDiaryInstant. Outlook Graph is no longer the diary source. */
+export const perthGraphInstant = perthDiaryInstant;
+
+function ghlEventInstant(event: Record<string, unknown>, key: string): string | null {
+  const direct = event[key];
+  if (direct !== undefined && direct !== null && typeof direct !== "object") {
+    return perthDiaryInstant(direct);
+  }
+  const nested = event[key] && typeof event[key] === "object"
+    ? event[key] as Record<string, unknown>
+    : null;
+  if (nested) {
+    return perthDiaryInstant(nested.dateTime ?? nested.date ?? nested.startDate);
+  }
+  return null;
+}
+
+function ghlIsAllDay(
+  event: Record<string, unknown>,
+  start: string,
+  end: string,
+): boolean {
+  if (event.isAllDay === true || event.allDay === true) return true;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return false;
+  }
+  const perth = new Date(startMs + 8 * 3_600_000);
+  const midnight = perth.getUTCHours() === 0 && perth.getUTCMinutes() === 0 &&
+    perth.getUTCSeconds() === 0;
+  const duration = endMs - startMs;
+  return midnight && duration >= 86_400_000 && duration % 86_400_000 === 0;
+}
+
 /**
- * Project one Graph calendarView event onto a diary entry.
+ * Project one GHL calendar event onto a diary entry.
  *
- * `kind` is read off provider fields only, never off subject text: `showAs:oof`
- * is leave, a private/confidential/personal sensitivity is personal, everything
- * else is busy. Keyword-sniffing a subject for "leave" would invent a fact the
- * calendar did not state. Returns null for a malformed event; the caller counts
- * the drop rather than hiding it.
+ * `kind` and `blocks_capacity` come from provider status only, never from
+ * title text. Confirmed/booked (and the conservative occupied statuses) block;
+ * cancelled/deleted do not block but still appear with `show_as:'cancelled'`.
+ * GHL has no leave/personal sensitivity, so those kinds are not invented.
+ * Returns null for a malformed event; the caller counts the drop.
  */
 export function projectSalesBookingDiaryEntry(
   event: Record<string, unknown>,
 ): SalesBookingDiaryEntry | null {
   const id = typeof event.id === "string" ? event.id : "";
-  const start = perthGraphInstant(
-    (event.start as Record<string, unknown> | undefined)?.dateTime,
-  );
-  const end = perthGraphInstant(
-    (event.end as Record<string, unknown> | undefined)?.dateTime,
-  );
+  const start = ghlEventInstant(event, "startTime") ??
+    ghlEventInstant(event, "start");
+  const end = ghlEventInstant(event, "endTime") ?? ghlEventInstant(event, "end");
   if (!id || !start || !end) return null;
 
-  const showAs = typeof event.showAs === "string" ? event.showAs : null;
-  const sensitivity = String(event.sensitivity || "").toLowerCase();
-  const isPrivate = sensitivity === "private" || sensitivity === "personal" ||
-    sensitivity === "confidential";
-  const kind: SalesBookingDiaryKind = showAs === "oof"
-    ? "leave"
-    : isPrivate
-    ? "personal"
-    : "busy";
-  const subject = typeof event.subject === "string" && event.subject
-    ? event.subject
+  const deleted = event.deleted === true;
+  const rawStatus = typeof event.appointmentStatus === "string"
+    ? event.appointmentStatus
+    : typeof event.status === "string"
+    ? event.status
     : null;
-  const location = (event.location as Record<string, unknown> | undefined)
-    ?.displayName;
+  const status = (rawStatus || "").toLowerCase();
+  const cancelled = deleted || status === "cancelled";
+  const showAs = cancelled ? "cancelled" : (rawStatus || status || "busy");
+  // Conservative: only cancelled/deleted is non-occupancy. Unknown statuses still block.
+  const title = typeof event.title === "string" && event.title
+    ? event.title
+    : typeof event.appointmentTitle === "string" && event.appointmentTitle
+    ? event.appointmentTitle
+    : null;
+  const location = typeof event.address === "string" && event.address
+    ? event.address
+    : typeof event.location === "string" && event.location
+    ? event.location
+    : null;
   return {
     event_id: id,
     start,
     end,
-    // A private calendar entry's subject is not ops information. The block is.
-    title: isPrivate ? null : subject,
-    kind,
+    title,
+    kind: "busy",
     source: DIARY_SOURCE,
     show_as: showAs,
-    blocks_capacity: showAs !== "free",
-    is_all_day: event.isAllDay === true,
-    location: isPrivate || typeof location !== "string" || !location
-      ? null
-      : location,
-    title_withheld: isPrivate && subject !== null,
+    blocks_capacity: !cancelled,
+    is_all_day: ghlIsAllDay(event, start, end),
+    location,
+    title_withheld: false,
   };
+}
+
+/**
+ * Pick the GHL mapping for this calendar read. `scoper_user_id` may override
+ * the resource the same way it used to override the Outlook mailbox: only a
+ * known v1 scoper (Nithin / Marnin) maps. Anyone else is unmapped — never a
+ * guess, never Khairo.
+ */
+export function resolveSalesBookingGhlMapping(
+  resourceId: string,
+  scoperUserId: string,
+): { resource_id: string; email: string; ghl_user_id: string | null } | null {
+  const byScoper = Object.values(SALES_BOOKING_RESOURCES).find((row) =>
+    row.scoper_user_id === scoperUserId
+  );
+  const key = byScoper?.resource_id || resourceId;
+  const mapping = SALES_BOOKING_GHL_USERS[key];
+  if (!mapping) return null;
+  if (byScoper) {
+    return {
+      resource_id: byScoper.resource_id,
+      email: mapping.email,
+      ghl_user_id: mapping.ghl_user_id,
+    };
+  }
+  if (SALES_BOOKING_RESOURCES[resourceId]?.scoper_user_id === scoperUserId) {
+    return {
+      resource_id: resourceId,
+      email: mapping.email,
+      ghl_user_id: mapping.ghl_user_id,
+    };
+  }
+  return null;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -538,6 +649,7 @@ export interface SalesBookingDiaryScan {
   entries: SalesBookingDiaryEntry[];
   malformed_dropped: number;
   calendar_email: string | null;
+  ghl_user_id: string | null;
   scoper_user_id: string | null;
 }
 
@@ -577,6 +689,7 @@ export interface SalesBookingReadResponse {
     reason: string | null;
     source: string;
     calendar_email: string | null;
+    ghl_user_id: string | null;
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
   drafts: Record<string, never>;
@@ -611,7 +724,7 @@ export function assembleSalesBookingRead(input: {
   }
   gaps.push(
     diary.read_ok
-      ? "Primary Outlook calendar read for this week. Operational leave, travel and non-primary calendars remain unread. Missing coverage is not free capacity."
+      ? "GHL calendar read for this week. Operational leave, travel and non-GHL calendars remain unread. Missing coverage is not free capacity."
       : `Scoper calendar unread (${
         diary.reason || "unknown"
       }). Missing coverage is not free capacity.`,
@@ -672,6 +785,7 @@ export function assembleSalesBookingRead(input: {
       reason: diary.reason,
       source: DIARY_SOURCE,
       calendar_email: diary.calendar_email,
+      ghl_user_id: diary.ghl_user_id,
     },
     thread_facts: threads.facts,
     // No draft store exists server-side (a new table is out of scope for v1).
@@ -700,8 +814,9 @@ export interface SalesBookingReadDependencies {
   readOpportunities(
     args: { pipelineId: string },
   ): Promise<SalesBookingOpportunityScan>;
-  /** One scoper's primary Outlook events for the week. Never throws. */
+  /** One scoper's GHL calendar events for the week. Never throws. */
   readDiary(args: {
+    resourceId: string;
     scoperUserId: string;
     since: string;
     untilExclusive: string;
@@ -882,6 +997,7 @@ export async function salesBookingRead(
   const [opportunities, diary] = await Promise.all([
     deps.readOpportunities({ pipelineId: resource.pipeline_id }),
     deps.readDiary({
+      resourceId: resource.resource_id,
       scoperUserId,
       since: week.since,
       untilExclusive: week.until_exclusive,
@@ -1126,128 +1242,106 @@ async function readThreadLive(
   return await readSalesBookingThreadMessages(ghlRead, contactId, locationId);
 }
 
-/**
- * The scoper's PRIMARY Outlook calendar for the window.
- *
- * `scoper_preferences.work_calendar_email` is LIVE DRIFT: the column is
- * populated in production and read by the jarvis `sw_scoper_calendar_events`
- * tool, but the only repo file defining it sits under
- * `supabase/migrations/_drafts/`. PostgREST answers a missing column with a 400
- * and `data:null`, which would read as "this scoper has no calendar", so the
- * error is checked and surfaced as `read_ok:false` with its reason. Never
- * throws: an unread calendar degrades the diary, not the response.
- */
 // Supabase query builders are thenables; this SELECT-only surface avoids
-// coupling a read to service-role mutation capabilities.
+// coupling a read to service-role mutation capabilities. The GHL diary no
+// longer reads scoper_preferences; the client stays on the factory so the
+// dispatch signature is unchanged.
 // deno-lint-ignore no-explicit-any
 type SalesBookingReadClient = { from: (table: string) => any };
 
-async function readDiaryLive(
-  client: SalesBookingReadClient,
+function unreadDiary(
   scoperUserId: string,
-  since: string,
-  untilExclusive: string,
-): Promise<SalesBookingDiaryScan> {
-  const fail = (
-    reason: string,
-    email: string | null = null,
-  ): SalesBookingDiaryScan => ({
+  reason: string,
+  extra: { calendar_email?: string | null; ghl_user_id?: string | null } = {},
+): SalesBookingDiaryScan {
+  return {
     read_ok: false,
     reason,
     entries: [],
     malformed_dropped: 0,
-    calendar_email: email,
+    calendar_email: extra.calendar_email ?? null,
+    ghl_user_id: extra.ghl_user_id ?? null,
     scoper_user_id: scoperUserId,
-  });
+  };
+}
 
-  let email: string | null = null;
-  try {
-    const { data, error } = await client
-      .from("scoper_preferences")
-      .select("user_id,work_calendar_email")
-      .eq("user_id", scoperUserId)
-      .maybeSingle();
-    if (error) {
-      return fail(
-        `scoper_preferences_unreadable: ${
-          error.message || error.code || "unknown"
-        }`,
-      );
-    }
-    email = (data && typeof data.work_calendar_email === "string" &&
-      data.work_calendar_email) || null;
-    if (!email) return fail("scoper_has_no_work_calendar_email");
-  } catch (error) {
-    return fail(
-      `scoper_preferences_unreadable: ${
-        (error as Error)?.message || "unknown"
-      }`,
+/**
+ * The scoper's GHL calendar for the window.
+ *
+ * GHL user ids are not in this backend. Resolve the resource's mapped email
+ * against GET /users/?locationId=; unconfirmed is `ghl_user_unmapped`, never
+ * an invented id and never an empty free week. A failed events page is
+ * `ghl_calendar_page_failed` with zero entries. Never throws.
+ */
+export async function readSalesBookingGhlDiary(args: {
+  ghlGet: GhlCalendarGet;
+  locationId: string;
+  resourceId: string;
+  scoperUserId: string;
+  since: string;
+  untilExclusive: string;
+}): Promise<SalesBookingDiaryScan> {
+  const mapping = resolveSalesBookingGhlMapping(
+    args.resourceId,
+    args.scoperUserId,
+  );
+  if (!mapping) {
+    return unreadDiary(args.scoperUserId, "ghl_user_unmapped");
+  }
+
+  const users = await fetchGhlLocationUsers({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+  });
+  if (users.failure) {
+    return unreadDiary(args.scoperUserId, users.failure, {
+      calendar_email: mapping.email,
+    });
+  }
+  const confirmed = confirmGhlUserId({
+    users: users.users,
+    email: mapping.email,
+    claimedId: mapping.ghl_user_id,
+  });
+  if (!confirmed.id) {
+    return unreadDiary(
+      args.scoperUserId,
+      confirmed.reason || "ghl_user_unmapped",
+      { calendar_email: mapping.email },
+    );
+  }
+
+  const startMs = Date.parse(args.since);
+  const untilMs = Date.parse(args.untilExclusive);
+  if (!Number.isFinite(startMs) || !Number.isFinite(untilMs) || untilMs <= startMs) {
+    return unreadDiary(args.scoperUserId, "ghl_calendar_window_invalid", {
+      calendar_email: mapping.email,
+      ghl_user_id: confirmed.id,
+    });
+  }
+
+  const scan = await fetchGhlCalendarEvents({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+    userId: confirmed.id,
+    startMs,
+    endMs: untilMs - 1,
+  });
+  if (scan.failure || !scan.exhausted) {
+    return unreadDiary(
+      args.scoperUserId,
+      scan.failure || "ghl_calendar_page_failed",
+      { calendar_email: mapping.email, ghl_user_id: confirmed.id },
     );
   }
 
   const entries: SalesBookingDiaryEntry[] = [];
   let dropped = 0;
-  try {
-    let token = await getGraphToken();
-    const url = new URL(
-      `https://graph.microsoft.com/v1.0/users/${
-        encodeURIComponent(email)
-      }/calendarView`,
-    );
-    url.searchParams.set("startDateTime", since);
-    url.searchParams.set("endDateTime", untilExclusive);
-    url.searchParams.set(
-      "$select",
-      "id,subject,start,end,location,isAllDay,showAs,sensitivity",
-    );
-    url.searchParams.set("$top", "100");
-
-    let next: string | null = url.toString();
-    const seenPages = new Set<string>();
-    for (let page = 0; page < 10 && next; page++) {
-      if (seenPages.has(next)) {
-        return fail("calendar_pagination_stalled", email);
-      }
-      seenPages.add(next);
-      const res: Response = await graphFetch(next, token, {
-        init: {
-          method: "GET",
-          redirect: "error",
-          signal: AbortSignal.timeout(20_000),
-          headers: { Prefer: `outlook.timezone="${PERTH_TIMEZONE}"` },
-        },
-        refresh: async () => {
-          token = await getGraphToken({ forceRefresh: true });
-          return token;
-        },
-      });
-      if (!res.ok) {
-        return fail(`calendar_http_${res.status}`, email);
-      }
-      const data = await res.json().catch(() => null);
-      if (!data || !Array.isArray(data.value)) {
-        return fail("calendar_page_malformed", email);
-      }
-      for (const item of data.value) {
-        const entry = item && typeof item === "object"
-          ? projectSalesBookingDiaryEntry(item as Record<string, unknown>)
-          : null;
-        if (entry) entries.push(entry);
-        else dropped++;
-      }
-      const link = data["@odata.nextLink"];
-      next = typeof link === "string" &&
-          link.startsWith("https://graph.microsoft.com/")
-        ? link
-        : null;
-    }
-  } catch (error) {
-    return fail(
-      `calendar_read_failed: ${(error as Error)?.message || "unknown"}`,
-      email,
-    );
+  for (const item of scan.events) {
+    const entry = projectSalesBookingDiaryEntry(item);
+    if (entry) entries.push(entry);
+    else dropped++;
   }
-
   entries.sort((a, b) =>
     Date.parse(a.start) - Date.parse(b.start) ||
     a.event_id.localeCompare(b.event_id)
@@ -1257,19 +1351,37 @@ async function readDiaryLive(
     reason: null,
     entries,
     malformed_dropped: dropped,
-    calendar_email: email,
-    scoper_user_id: scoperUserId,
+    calendar_email: mapping.email,
+    ghl_user_id: confirmed.id,
+    scoper_user_id: args.scoperUserId,
   };
+}
+
+async function readDiaryLive(
+  resourceId: string,
+  scoperUserId: string,
+  since: string,
+  untilExclusive: string,
+): Promise<SalesBookingDiaryScan> {
+  const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+  return await readSalesBookingGhlDiary({
+    ghlGet: ghlRead,
+    locationId,
+    resourceId,
+    scoperUserId,
+    since,
+    untilExclusive,
+  });
 }
 
 /** Real readers for the dispatch. Every one is read-only. */
 export function createSalesBookingReadDependencies(
-  client: SalesBookingReadClient,
+  _client: SalesBookingReadClient,
 ): SalesBookingReadDependencies {
   return {
     readOpportunities: ({ pipelineId }) => readOpportunitiesLive(pipelineId),
-    readDiary: ({ scoperUserId, since, untilExclusive }) =>
-      readDiaryLive(client, scoperUserId, since, untilExclusive),
+    readDiary: ({ resourceId, scoperUserId, since, untilExclusive }) =>
+      readDiaryLive(resourceId, scoperUserId, since, untilExclusive),
     readThread: ({ contactId }) => readThreadLive(contactId),
     now: () => new Date(),
   };

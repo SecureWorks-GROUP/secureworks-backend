@@ -8,6 +8,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 //
 // Endpoints (via query param ?action=):
 //   GET  ?action=opportunities&pipeline=fencing|patio
+//   GET  ?action=calendar_events&userId=...&start=ISO&end=ISO  — read-only GHL calendar window
 //   GET  ?action=search&q=smith&pipeline=patio  — search GHL leads (pipeline+Supabase cross-ref)
 //   GET  ?action=contact&contactId=xxx  — full contact details
 //   POST ?action=link  { opportunityId, jobId, toolType, contact }
@@ -101,6 +102,7 @@ import {
   isGhlProviderReadAction,
   readGhlProvider,
 } from './provider_reads.ts'
+import { ghlCalendarEventsAction } from './calendar_events.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -729,6 +731,20 @@ serve(async (req: Request) => {
     if (action === 'pipelines') {
       const data = await ghl(`/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`)
       return json(data)
+    }
+
+    // ── Read-only GHL calendar window. GET only; no appointment create. ──
+    if (action === 'calendar_events') {
+      if (req.method !== 'GET') {
+        return json({ error: 'calendar_events is GET only', code: 'method_not_allowed' }, 405)
+      }
+      const result = await ghlCalendarEventsAction({
+        method: req.method,
+        params: url.searchParams,
+        locationId: GHL_LOCATION_ID,
+        ghlGet: (path) => ghl(path),
+      })
+      return json(result.body, result.status)
     }
 
     // ── GHL location/business profile summary (sw_get_profile) ──

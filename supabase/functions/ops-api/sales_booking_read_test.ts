@@ -12,8 +12,8 @@
  *  - The action writes nothing: every dependency is a reader and the fakes
  *    below would fail loudly if a write were attempted.
  *
- * What these do NOT prove: that GHL or Microsoft Graph accept the live request
- * shapes, or that production credentials exist. Those need a live read.
+ * What these do NOT prove: that GHL accepts the live request shapes, or that
+ * production credentials exist. Those need a live read.
  */
 // deno-lint-ignore-file no-import-prefix
 import {
@@ -34,9 +34,12 @@ import {
   perthWeekWindow,
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
+  readSalesBookingGhlDiary,
   readSalesBookingThreadMessages,
+  resolveSalesBookingGhlMapping,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
+  SALES_BOOKING_GHL_USERS,
   SALES_BOOKING_RESOURCES,
   type SalesBookingDiaryScan,
   type SalesBookingMessage,
@@ -69,24 +72,17 @@ function opportunity(
   };
 }
 
-function graphEvent(
+function ghlEvent(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
     id: "evt-1",
-    subject: "Scope visit - Beckenham",
-    start: {
-      dateTime: "2026-09-15T10:00:00.0000000",
-      timeZone: "Australia/Perth",
-    },
-    end: {
-      dateTime: "2026-09-15T11:30:00.0000000",
-      timeZone: "Australia/Perth",
-    },
-    location: { displayName: "12 Example St" },
-    isAllDay: false,
-    showAs: "busy",
-    sensitivity: "normal",
+    title: "Scope visit - Beckenham",
+    startTime: "2026-09-15T10:00:00+08:00",
+    endTime: "2026-09-15T11:30:00+08:00",
+    address: "12 Example St",
+    appointmentStatus: "confirmed",
+    deleted: false,
     ...overrides,
   };
 }
@@ -109,9 +105,10 @@ function deps(
       Promise.resolve({
         read_ok: true,
         reason: null,
-        entries: [projectSalesBookingDiaryEntry(graphEvent())!],
+        entries: [projectSalesBookingDiaryEntry(ghlEvent())!],
         malformed_dropped: 0,
         calendar_email: "marnin@secureworkswa.com.au",
+        ghl_user_id: "ghl_user_marnin",
         scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
       }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
@@ -122,10 +119,11 @@ function deps(
 
 const UNREAD_DIARY: SalesBookingDiaryScan = {
   read_ok: false,
-  reason: "calendar_http_403",
+  reason: "ghl_calendar_page_failed: GHL 502",
   entries: [],
   malformed_dropped: 0,
   calendar_email: "marnin@secureworkswa.com.au",
+  ghl_user_id: "ghl_user_marnin",
   scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
 };
 
@@ -380,7 +378,7 @@ Deno.test("case status stays at the reference default; classification lives only
 
 // ── Diary ───────────────────────────────────────────────────
 
-Deno.test("perthGraphInstant stamps the Perth offset on an offset-less Graph value", () => {
+Deno.test("perthGraphInstant stamps the Perth offset on an offset-less local datetime", () => {
   assertEquals(
     perthGraphInstant("2026-09-15T10:00:00.0000000"),
     "2026-09-15T10:00:00+08:00",
@@ -393,46 +391,54 @@ Deno.test("perthGraphInstant stamps the Perth offset on an offset-less Graph val
   assertEquals(perthGraphInstant(undefined), null);
 });
 
-Deno.test("diary kind comes from provider fields, never from subject text", () => {
-  const busy = projectSalesBookingDiaryEntry(graphEvent())!;
+Deno.test("diary kind and blocks_capacity come from GHL status, never from title text", () => {
+  const busy = projectSalesBookingDiaryEntry(ghlEvent())!;
   assertObjectMatch(busy as unknown as Record<string, unknown>, {
     event_id: "evt-1",
     start: "2026-09-15T10:00:00+08:00",
     end: "2026-09-15T11:30:00+08:00",
     title: "Scope visit - Beckenham",
     kind: "busy",
-    source: "outlook_primary",
+    source: "ghl_calendar",
+    show_as: "confirmed",
     blocks_capacity: true,
     title_withheld: false,
   });
 
-  assertEquals(
-    projectSalesBookingDiaryEntry(graphEvent({ showAs: "oof" }))!.kind,
-    "leave",
-  );
-  assertEquals(
-    projectSalesBookingDiaryEntry(graphEvent({ showAs: "free" }))!
-      .blocks_capacity,
-    false,
-  );
+  const cancelled = projectSalesBookingDiaryEntry(
+    ghlEvent({ appointmentStatus: "cancelled" }),
+  )!;
+  assertEquals(cancelled.show_as, "cancelled");
+  assertEquals(cancelled.blocks_capacity, false);
+  assertEquals(cancelled.kind, "busy");
 
-  // A subject that merely SAYS leave is not a leave fact.
+  const booked = projectSalesBookingDiaryEntry(
+    ghlEvent({ appointmentStatus: "booked" }),
+  )!;
+  assertEquals(booked.blocks_capacity, true);
+
+  // A title that merely SAYS leave is not a leave fact.
   const worded = projectSalesBookingDiaryEntry(
-    graphEvent({ subject: "Annual leave chat" }),
+    ghlEvent({ title: "Annual leave chat" }),
   )!;
   assertEquals(worded.kind, "busy");
+  assertEquals(worded.blocks_capacity, true);
 
-  // A private entry is a block on the diary, without its subject or location.
-  const priv = projectSalesBookingDiaryEntry(
-    graphEvent({ sensitivity: "private" }),
+  const allDay = projectSalesBookingDiaryEntry(
+    ghlEvent({
+      id: "evt-all-day",
+      title: "Public holiday",
+      startTime: "2026-09-16T00:00:00+08:00",
+      endTime: "2026-09-17T00:00:00+08:00",
+      isAllDay: true,
+      appointmentStatus: "confirmed",
+    }),
   )!;
-  assertEquals(priv.kind, "personal");
-  assertEquals(priv.title, null);
-  assertEquals(priv.location, null);
-  assertEquals(priv.title_withheld, true);
+  assertEquals(allDay.is_all_day, true);
+  assertEquals(allDay.blocks_capacity, true);
 
   assertEquals(projectSalesBookingDiaryEntry({ id: "x" }), null);
-  assertEquals(projectSalesBookingDiaryEntry(graphEvent({ id: "" })), null);
+  assertEquals(projectSalesBookingDiaryEntry(ghlEvent({ id: "" })), null);
 });
 
 // ── Assembly / coverage honesty ─────────────────────────────
@@ -482,7 +488,7 @@ Deno.test("diary is the only calendar output; unread is diary_read plus coverage
   assertEquals(unread.diary, []);
   assertEquals(unread.diary_read.read_ok, false);
   assertEquals(unread.coverage.diary_read_ok, false);
-  assert(unread.coverage.gaps.some((g) => g.includes("calendar_http_403")));
+  assert(unread.coverage.gaps.some((g) => g.includes("ghl_calendar_page_failed")));
 });
 
 Deno.test("FIXTURE: an unread calendar names the gap and never throws", async () => {
@@ -493,14 +499,210 @@ Deno.test("FIXTURE: an unread calendar names the gap and never throws", async ()
   assertEquals(payload.ok, true);
   assertEquals(payload.diary, []);
   assertEquals(payload.diary_read.read_ok, false);
-  assertEquals(payload.diary_read.reason, "calendar_http_403");
+  assertEquals(payload.diary_read.reason, "ghl_calendar_page_failed: GHL 502");
   assertEquals(payload.coverage.diary_read_ok, false);
   // The cases side is untouched: a calendar fault is not a roster fault.
   assertEquals(payload.cases.length, 1);
   const gap = payload.coverage.gaps.find((g) => g.includes("calendar"))!;
-  assertStringIncludes(gap, "calendar_http_403");
+  assertStringIncludes(gap, "ghl_calendar_page_failed");
   // Unread coverage is never spare capacity.
   assertStringIncludes(gap, "not free capacity");
+});
+
+const GHL_USERS_BODY = {
+  users: [
+    {
+      id: "ghl_user_nithin",
+      email: SALES_BOOKING_GHL_USERS.nithin.email,
+      name: "Nithin",
+    },
+    {
+      id: "ghl_user_marnin",
+      email: SALES_BOOKING_GHL_USERS.marnin.email,
+      name: "Marnin",
+    },
+  ],
+};
+
+function ghlDiaryGet(
+  replies: Record<string, Record<string, unknown> | { throw: string }>,
+) {
+  return (path: string) => {
+    const key = path.startsWith("/users/")
+      ? "users"
+      : path.startsWith("/calendars/events")
+      ? "events"
+      : path;
+    const reply = replies[key];
+    if (!reply) return Promise.reject(new Error(`unexpected GHL GET ${path}`));
+    if ("throw" in reply && typeof reply.throw === "string") {
+      return Promise.reject(new Error(reply.throw));
+    }
+    return Promise.resolve(reply);
+  };
+}
+
+Deno.test("a GHL week with confirmed, cancelled and all-day entries keeps UI diary keys", async () => {
+  const confirmed = projectSalesBookingDiaryEntry(ghlEvent())!;
+  const cancelled = projectSalesBookingDiaryEntry(
+    ghlEvent({
+      id: "evt-cancelled",
+      title: "Cancelled visit",
+      appointmentStatus: "cancelled",
+      startTime: "2026-09-15T13:00:00+08:00",
+      endTime: "2026-09-15T14:00:00+08:00",
+    }),
+  )!;
+  const allDay = projectSalesBookingDiaryEntry(
+    ghlEvent({
+      id: "evt-all-day",
+      title: "Rostered day off",
+      startTime: "2026-09-16T00:00:00+08:00",
+      endTime: "2026-09-17T00:00:00+08:00",
+      isAllDay: true,
+      appointmentStatus: "confirmed",
+    }),
+  )!;
+  const payload = await salesBookingRead(
+    deps({
+      readDiary: () =>
+        Promise.resolve({
+          read_ok: true,
+          reason: null,
+          entries: [confirmed, cancelled, allDay],
+          malformed_dropped: 0,
+          calendar_email: SALES_BOOKING_GHL_USERS.marnin.email,
+          ghl_user_id: "ghl_user_marnin",
+          scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
+        }),
+    }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(payload.diary_read.read_ok, true);
+  assertEquals(payload.diary_read.source, "ghl_calendar");
+  assertEquals(payload.diary_read.ghl_user_id, "ghl_user_marnin");
+  assertEquals(payload.diary.map((row) => row.event_id), [
+    "evt-1",
+    "evt-cancelled",
+    "evt-all-day",
+  ]);
+  assertEquals(payload.diary[0].blocks_capacity, true);
+  assertEquals(payload.diary[0].show_as, "confirmed");
+  assertEquals(payload.diary[1].blocks_capacity, false);
+  assertEquals(payload.diary[1].show_as, "cancelled");
+  assertEquals(payload.diary[2].is_all_day, true);
+  for (const row of payload.diary) {
+    assertEquals(row.source, "ghl_calendar");
+    assert(
+      [
+        "event_id",
+        "start",
+        "end",
+        "title",
+        "kind",
+        "source",
+        "show_as",
+        "blocks_capacity",
+        "is_all_day",
+        "location",
+        "title_withheld",
+      ].every((key) => key in row),
+    );
+  }
+});
+
+Deno.test("an unmapped scoper is diary_read.read_ok false with ghl_user_unmapped", async () => {
+  assertEquals(
+    resolveSalesBookingGhlMapping(
+      "nithin",
+      "00000000-0000-0000-0000-000000000000",
+    ),
+    null,
+  );
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({ users: GHL_USERS_BODY }),
+    locationId: "loc",
+    resourceId: "nithin",
+    scoperUserId: "00000000-0000-0000-0000-000000000000",
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, false);
+  assertEquals(scan.reason, "ghl_user_unmapped");
+  assertEquals(scan.entries, []);
+  assertEquals(scan.ghl_user_id, null);
+
+  const payload = await salesBookingRead(
+    deps({ readDiary: () => Promise.resolve(scan) }),
+    { resource: "nithin", week_start: WEEK, scoper_user_id: "00000000-0000-0000-0000-000000000000" },
+  );
+  assertEquals(payload.diary_read.read_ok, false);
+  assertEquals(payload.diary_read.reason, "ghl_user_unmapped");
+  assertEquals(payload.diary_read.source, "ghl_calendar");
+  assertEquals(payload.diary, []);
+  assertEquals(payload.cases.length, 1);
+});
+
+Deno.test("a failed GHL events page is unread, never a free week", async () => {
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: GHL_USERS_BODY,
+      events: { throw: "GHL 502: upstream" },
+    }),
+    locationId: "loc",
+    resourceId: "marnin",
+    scoperUserId: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, false);
+  assertStringIncludes(scan.reason || "", "ghl_calendar_page_failed");
+  assertEquals(scan.entries, []);
+  assertEquals(scan.ghl_user_id, "ghl_user_marnin");
+
+  const payload = await salesBookingRead(
+    deps({ readDiary: () => Promise.resolve(scan) }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(payload.diary_read.read_ok, false);
+  assertEquals(payload.diary, []);
+  assert(payload.coverage.gaps.some((g) => g.includes("not free capacity")));
+});
+
+Deno.test("a live GHL users+events fixture confirms the mapped email and projects the week", async () => {
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: GHL_USERS_BODY,
+      events: {
+        events: [
+          ghlEvent(),
+          ghlEvent({
+            id: "evt-cancelled",
+            appointmentStatus: "cancelled",
+            startTime: "2026-09-15T13:00:00+08:00",
+            endTime: "2026-09-15T14:00:00+08:00",
+          }),
+          ghlEvent({
+            id: "evt-all-day",
+            isAllDay: true,
+            startTime: "2026-09-16T00:00:00+08:00",
+            endTime: "2026-09-17T00:00:00+08:00",
+          }),
+        ],
+      },
+    }),
+    locationId: "loc",
+    resourceId: "marnin",
+    scoperUserId: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, true);
+  assertEquals(scan.ghl_user_id, "ghl_user_marnin");
+  assertEquals(scan.entries.length, 3);
+  assertEquals(scan.entries[1].show_as, "cancelled");
+  assertEquals(scan.entries[1].blocks_capacity, false);
+  assertEquals(scan.entries[2].is_all_day, true);
 });
 
 Deno.test("an unfinished roster scan is never reported as a complete book", () => {
