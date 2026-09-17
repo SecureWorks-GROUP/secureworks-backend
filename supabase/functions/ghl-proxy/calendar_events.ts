@@ -28,6 +28,7 @@ export interface GhlLocationUser {
   id: string;
   email: string | null;
   name: string | null;
+  firstName: string | null;
 }
 
 export interface GhlLocationUsersScan {
@@ -144,6 +145,7 @@ export function usersFromGhlBody(
       id,
       email: nonempty(row.email)?.toLowerCase() ?? null,
       name: nonempty(row.name),
+      firstName: nonempty(row.firstName),
     });
   }
   return users;

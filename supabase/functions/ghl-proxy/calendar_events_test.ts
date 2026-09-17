@@ -283,7 +283,9 @@ Deno.test("usersFromGhlBody reads only body.users", () => {
   });
   assertEquals(users.map((user) => user.id), ["n1", "n2"]);
   assertEquals(users[0].name, "Nithin");
+  assertEquals(users[0].firstName, null);
   assertEquals(users[1].name, null);
+  assertEquals(users[1].firstName, "Other");
 });
 
 Deno.test("confirmGhlUserId refuses a missing, duplicate, or disagreed email match", () => {

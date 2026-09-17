@@ -21,6 +21,7 @@ import {
   assertSalesBookingPackPublishAuth,
   assertSalesBookingStampReadAuth,
   assertSalesBookingStampWriteAuth,
+  assertSalesBookingThreadsRefreshAuth,
   loadSalesBookingPackOverlay,
   normaliseSalesBookingDrafts,
   SalesBookingPackError,
@@ -29,14 +30,15 @@ import {
   salesBookingStampReadAction,
   salesBookingStampStateForCase,
   salesBookingStampWriteAction,
+  salesBookingThreadsRefreshAction,
 } from "./sales_booking_pack.ts";
 import { _authorizeOpsApiAction } from "./index.ts";
 import {
   SALES_BOOKING_RESOURCES,
-  SalesBookingRequestError,
   salesBookingRead,
   type SalesBookingReadDependencies,
   type SalesBookingReadResponse,
+  SalesBookingRequestError,
 } from "./sales_booking_read.ts";
 
 const WEEK = "2026-09-14";
@@ -258,6 +260,7 @@ function readDeps(): SalesBookingReadDependencies {
         malformed_dropped: 0,
         calendar_email: "marnin@secureworkswa.com.au",
         ghl_user_id: "ghl_user_marnin",
+        mapped_by: "email",
         scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
       }),
     readThread: () => Promise.resolve([]),
@@ -541,6 +544,7 @@ Deno.test("front door refuses unauthenticated pack publish with 401", () => {
       "sales_booking_pack_publish",
       "sales_booking_stamp_write",
       "sales_booking_stamp_read",
+      "sales_booking_threads_refresh",
     ]
   ) {
     const decision = _authorizeOpsApiAction({
@@ -553,4 +557,22 @@ Deno.test("front door refuses unauthenticated pack publish with 401", () => {
       assertEquals(decision.code, "user_jwt_required");
     }
   }
+});
+
+Deno.test("threads refresh is api-key only and refuses an unknown resource", async () => {
+  assertSalesBookingThreadsRefreshAuth({ mode: "api_key" });
+  await assertRejects(
+    () =>
+      salesBookingThreadsRefreshAction(memoryPacks(), { mode: "none" }, {
+        resource: "marnin",
+      }),
+    SalesBookingPackError,
+  );
+  await assertRejects(
+    () =>
+      salesBookingThreadsRefreshAction(memoryPacks(), API_KEY_AUTH, {
+        resource: "__deploy_probe__",
+      }),
+    SalesBookingRequestError,
+  );
 });

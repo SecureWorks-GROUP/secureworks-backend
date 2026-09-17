@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; thread cache 2026-09-17)
 
 `GET ops-api?action=sales_booking_read` is the single read behind the Sales
 Booking view. It replaces the branch-local preview server
@@ -6,7 +6,7 @@ Booking view. It replaces the branch-local preview server
 `patio/sales-booking-20260912`) and keeps that script's response shape.
 
 Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
-Pack publish, captain stamp, and the read overlay:
+Pack publish, captain stamp, thread-facts cache, and the read overlay:
 `supabase/functions/ops-api/sales_booking_pack.ts`.
 Regressions: `sales_booking_read_test.ts` and `sales_booking_pack_test.ts`
 beside those files.
@@ -15,17 +15,32 @@ The GHL calendar window is one unpaged `/calendars/events` GET in
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
 action (`userId` or `calendarId`, plus `start` and `end`).
 
-## The read writes nothing; send stays held
+## Page load may persist thread facts; send stays held
 
-`sales_booking_read` is still a reader: no Supabase mutation, no GHL write,
-no calendar create, no send. `send_hold: true` and
-`policy.{activation,send,calendar_write}: 'held'`
-are constants the view renders; they are not the enforcement, because this
-action has no send or calendar-write capability to gate.
+Live GHL thread reads stay the source of truth. Page load serves cached
+`kind=thread_facts` facts that are still fresh (GHL last activity not newer
+than `read_at`, and cache younger than 6 hours) and live-refreshes only the
+rest, newest first, under the time budget. A 429 after retries still
+serves a stale cached thread when one exists. That persist is the only
+write on the read path. No GHL mutation, no calendar create, no send.
+`send_hold: true` and `policy.{activation,send,calendar_write}: 'held'`
+are constants the view renders; they are not the enforcement.
 
-The first writes are `sales_booking_pack_publish` and
-`sales_booking_stamp_write` below. They persist pack/stamp rows only.
-Nothing is sent.
+The stored thread-facts map is the latest row merged with this sweep: a
+short refresh cannot drop keys the stored row already held. Skip persist
+and prune when the latest-row read errors (a failed read is not an empty
+store). Skip the write when the merged map equals the row just read.
+After insert, delete only older `as_of` for the same resource, week_start,
+and kind — a concurrent newer row stays.
+
+`sales_booking_pack_publish` and `sales_booking_stamp_write` persist
+pack/stamp rows only. `sales_booking_threads_refresh` (api key, POST) does
+a full background refresh for one resource into the same thread-facts
+store. Nothing is sent.
+
+GHL 429 Too Many Requests on roster pages and thread reads retries three
+times with exponential backoff and jitter. Remaining 429s are
+`coverage.remaining_429_count`.
 
 ## Request
 
@@ -58,10 +73,23 @@ Additions:
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
-  `template_outbound_count`.
-- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id}`.
+  `template_outbound_count`, `read_at`.
+- Per case **`suburb`**, **`job_type`**, **`enquiry_at`**, **`pipeline_stage_id`**
+  beside `stage_name`. Suburb is contact city, a WA suburb parsed from the
+  street line, or `jobs.site_suburb` when GHL has no parseable city/address.
+  Job type is enquiry tags then the resource book lane (Nithin patio, Marnin
+  fencing). Either field is `"not given"` when none of those exist — never
+  invented. A live-week missing-rate bar is not acceptance: 14 Sep 2026
+  measured Nithin 39 of 107 and Marnin 192 of 448 suburb not given after
+  contact hydrate and job-site fill (job type 0 of 107 / 0 of 448). That is
+  a CIO data gap, not a code defect. `enquiry_at` is opportunity created.
+- **`coverage.threads_cached` / `threads_fresh` / `threads_unread` /
+  `remaining_429_count`** — honest cache vs live vs unread vs leftover 429s.
+- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by}`.
   `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
-  the confirmed GHL user id or null when unread.
+  the confirmed GHL user id or null when unread. `mapped_by` is `email` or
+  `name` when that id was confirmed, else null. Name is the weaker match:
+  `reason` is then `ghl_user_mapped_by_name`.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
   `scoper_user_id`, `sender_line`, `sender_line_source`,
   `scope_stage_ids`, plus `calendar`
@@ -103,10 +131,18 @@ Publish / stamp actions (same table, no send):
 - `GET sales_booking_stamp_read` (api key only): `{resource, week_start}`
   returns the latest stamp payload and `as_of`, or
   `{ok:true, stamp:null, as_of:null}`.
+- `POST sales_booking_threads_refresh` (api key only): body `{resource,
+  week_start?}`. Force-refreshes in-scope threads for that resource, persists
+  `kind=thread_facts` (`week_start` 1970-01-05), returns the same read payload.
+  No send.
 
-Table: `sales_booking_packs`. Latest = greatest `as_of` per
-`(resource, week_start, kind)`. An older pack is ignored. RLS on, no client
-access. Migration `20260917130000_sales_booking_packs.sql`.
+Table: `sales_booking_packs`. Pack and stamp keep history; latest = greatest
+`as_of` per `(resource, week_start, kind)` and older rows are ignored.
+Thread facts keep one latest row per resource at `week_start` 1970-01-05:
+writers insert then delete older `as_of` only. RLS on, no client
+access. Migrations `20260917130000_sales_booking_packs.sql` and
+`20260917180000_sales_booking_thread_facts.sql` (kind check includes
+`thread_facts`).
 
 ## Reading it honestly
 
@@ -114,8 +150,13 @@ access. Migration `20260917130000_sales_booking_packs.sql`.
   opportunities whose GHL stage still needs a visit, a reply or a quote
   (`resource.scope_stage_ids`, the visit/reply/quote prefix of wiki
   `harness/ops/skills/secureworks-scope-booking/profiles/patio-nithin.json`
-  and `fencing-stratco-marnin.json` `pipeline_stages`). Quote-sent, won,
-  hold, lost, archive, and blank or unknown stage ids are left out.
+  and `fencing-stratco-marnin.json` `pipeline_stages`). Dropped as first-touch
+  inflation, not visit/reply/quote: patio **Client Needs To Be Contacted**
+  (`09759a42-…`, 193 of 300 live Nithin rows on 17 Sep); fencing **New Lead
+  (Call + Qualify)** (`cc401467-…`, 22 live Marnin rows), **Stale Lead**
+  (`8c43212e-…`, ghl-proxy maps to cancelled), **Called, No Answer**
+  (`341d6a77-…`). Quote-sent, won, hold, lost, archive, and blank or unknown
+  stage ids are also left out.
   **`coverage.excluded_by_stage`** is how many unique open rows were dropped
   for that reason. **`coverage.total`** stays the GHL open-pipeline search
   total (unscoped). CRM row count is not visit demand.
@@ -154,9 +195,14 @@ look answered.
 
 There is no `ghl_user_id` on `users`, `scoper_preferences`, or ghl-proxy
 config. `SALES_BOOKING_GHL_USERS` is keyed by resource (`nithin`, `marnin`)
-and holds the `public.users.email` for that scoper (`nithin@` / `marnin@`).
-The live GHL id is confirmed at read time against `GET /users/?locationId=`.
-If the email is missing from that roster, or `scoper_user_id` is not a v1
-scoper, the diary is unread with `ghl_user_unmapped`. Khairo is not mapped.
-GHL user ids were not confirmed against a live location in this change; a
-live read after CI is owed to the CIO's key holder.
+and holds the `public.users.email` for that scoper (`nithin@` /
+`marnin@secureworkswa.com.au`, source
+`20260322000005_fix_user_roles.sql` plus the wiki profile `calendar_email`).
+The live GHL id is confirmed at read time against `GET /users/?locationId=`:
+unique email first, then unique first/display name (`name_match: nithin` /
+`marnin`). Live 17 Sep: Nithin's recorded email was absent from that roster
+(`ghl_user_unmapped`); a unique name match maps him and `diary_read` stays
+`read_ok` with `mapped_by: name`, `reason: ghl_user_mapped_by_name`, and
+`calendar_email` set to the live GHL email. Zero or several name matches stay
+unread with `ghl_user_unmapped` — never first-match-wins. Khairo is not
+mapped.

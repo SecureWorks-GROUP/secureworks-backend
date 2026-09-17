@@ -10,11 +10,11 @@
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
 //
-// ── READ ONLY ──
-// This module performs NO writes of any kind: no Supabase mutation, no GHL
-// write, no calendar create, no send. Every dependency it takes is a reader.
-// Drafts and proposed windows come from the latest `sales_booking_packs`
-// row (kind=pack), merged in after this read. Without a pack they stay empty.
+// ── NO SEND, NO GHL WRITE ──
+// Page load may persist `sales_booking_packs` kind=thread_facts so the next
+// read can serve cached conversation state. That is the only write. No GHL
+// mutation, no calendar create, no send. Drafts and proposed windows come
+// from the latest kind=pack row, merged in after this read.
 //
 // ── HONESTY CONTRACT (wiki skill `secureworks-scope-booking`) ──
 //  1. Full population, or an explicit `coverage.full_population:false` naming
@@ -44,6 +44,7 @@ import {
   fetchGhlCalendarEvents,
   fetchGhlLocationUsers,
   type GhlCalendarGet,
+  type GhlLocationUser,
 } from "../ghl-proxy/calendar_events.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
@@ -130,9 +131,10 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
     sender_line: "774",
     sender_line_source: "patio_profile_source_backed",
-    // patio-nithin.json pipeline_stages[0..4] (through Quote to be Sent).
+    // patio-nithin.json visit/reply/quote: waiting on a reply, needs a visit,
+    // scope booked, quote to send. Dropped Client Needs To Be Contacted
+    // (09759a42-…) — 193 of 300 live Nithin rows on 17 Sep, first-touch sales.
     scope_stage_ids: [
-      "09759a42-f80a-4947-bca4-71df5dd770da", // Client Needs To Be Contacted
       "4d3bcf9a-185d-4a90-98e0-e0805fdf4a02", // Contacted Waiting on Response
       "637c165f-93a3-496b-8e86-970eb8935044", // Needs Scope / Quote
       "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5", // Scope Booked
@@ -146,12 +148,13 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     sender_line: "776",
     sender_line_source: "captain_default_2026-09-16",
-    // fencing-stratco-marnin.json pipeline_stages[0..9] (through Scope Complete).
+    // fencing-stratco-marnin.json visit/reply/quote: replied, presentation,
+    // urgent visit, booked, scheduled, quote to send. Dropped:
+    // New Lead Call+Qualify (cc401467-…, first-touch), Stale Lead
+    // (8c43212e-…, ghl-proxy maps to cancelled), Called No Answer
+    // (341d6a77-…, call-qualify holding pen).
     scope_stage_ids: [
-      "cc401467-4743-4dbd-a7d7-e8f2ff023dd2", // New Lead (Call + Qualify)
       "7f863a14-1d9f-4a18-b73c-0e1780390bd7", // New Lead (Replied/ Contacted)
-      "8c43212e-5e58-4f0d-b7f7-96c6ee644d6e", // Stale Lead
-      "341d6a77-6a35-4338-b2b0-09236c7c80f9", // Called, No Answer
       "52c70bff-5cf3-447b-b891-03c30486aed8", // Call Answered (presentation not made)
       "6b101809-a4f9-440d-ac4c-0be669b8173e", // Presentation Made (scope not booked)
       "bfdba902-0a92-4a90-95a5-af27d7502a90", // Needs On Site Scope Urgently
@@ -163,25 +166,32 @@ export const SALES_BOOKING_RESOURCES: Readonly<
 };
 
 /**
- * GHL user ids are not stored anywhere in this backend: `users`,
- * `scoper_preferences` (google_calendar_id / work_calendar_email only), and
- * ghl-proxy config all lack a ghl_user_id. Do not embed a guessed id.
- *
- * Keyed by resource. Email source: `public.users.email` for the scoper_user_id
- * already on SALES_BOOKING_RESOURCES (Nithin patio, Marnin fencing Stratco;
- * confirmed by `20260322000005_fix_user_roles.sql` and the scoper_preferences
- * seed). The live GHL id is confirmed at read time against GET /users/?locationId=.
- * Khairo is intentionally absent.
+ * GHL user ids are not stored on `users`, `scoper_preferences`, or ghl-proxy
+ * config. Do not embed a guessed id. Nithin's pin stays null until the live
+ * roster email is known. Confirmation (email, then unique name):
+ * `docs/sales-booking-read-contract-2026-09-16.md`.
  */
 export const SALES_BOOKING_GHL_USERS: Readonly<
-  Record<string, { email: string; ghl_user_id: string | null }>
+  Record<string, {
+    email: string;
+    email_source: string;
+    name_match: string | null;
+    ghl_user_id: string | null;
+  }>
 > = {
   nithin: {
     email: "nithin@secureworkswa.com.au",
+    email_source:
+      "public.users.email (20260322000005_fix_user_roles.sql) and wiki patio-nithin.json calendar_email",
+    name_match: "nithin",
+    // Pin is a follow-up once the live roster email is known.
     ghl_user_id: null,
   },
   marnin: {
     email: "marnin@secureworkswa.com.au",
+    email_source:
+      "public.users.email (20260322000005_fix_user_roles.sql) and wiki fencing-stratco-marnin.json calendar_email",
+    name_match: "marnin",
     ghl_user_id: null,
   },
 };
@@ -196,6 +206,13 @@ export const SALES_BOOKING_DEFAULT_THREAD_LIMIT = 200;
 export const SALES_BOOKING_MAX_THREAD_LIMIT = 250;
 export const SALES_BOOKING_THREAD_CONCURRENCY = 6;
 export const SALES_BOOKING_DEFAULT_THREAD_BUDGET_MS = 18_000;
+export const SALES_BOOKING_THREAD_CACHE_MAX_AGE_MS = 6 * 3_600_000;
+export const SALES_BOOKING_GHL_429_TRIES = 3;
+export const SALES_BOOKING_GHL_429_BASE_MS = 200;
+export const SALES_BOOKING_NOT_GIVEN = "not given";
+export const SALES_BOOKING_THREAD_FACTS_KIND = "thread_facts";
+/** Sentinel Monday so thread_facts reuse the packs table without a week grid. */
+export const SALES_BOOKING_THREAD_FACTS_WEEK_START = "1970-01-05";
 
 // ════════════════════════════════════════════════════════════
 // Week window (pure)
@@ -296,6 +313,8 @@ export interface SalesBookingThreadFacts {
   classification: SalesBookingClassification;
   message_count: number;
   template_outbound_count: number;
+  /** When these facts were last derived from a live GHL thread read. */
+  read_at: string | null;
 }
 
 function normaliseBody(body: unknown): string {
@@ -401,6 +420,7 @@ export function deriveSalesBookingThreadFacts(args: {
     classification,
     message_count: counted,
     template_outbound_count: templateOutbound,
+    read_at: new Date(args.nowMs).toISOString(),
   };
 }
 
@@ -423,6 +443,194 @@ export function unreadSalesBookingThreadFacts(
     classification: "unread",
     message_count: 0,
     template_outbound_count: 0,
+    read_at: null,
+  };
+}
+
+export type SalesBookingCachedThreadFact = SalesBookingThreadFacts & {
+  read_at: string;
+};
+
+/** Cached facts are usable when last GHL activity is not newer than read_at and the cache is under 6 hours old. */
+export function salesBookingThreadFactIsFresh(args: {
+  cachedReadAt: string | null | undefined;
+  lastActivityAt: string | null | undefined;
+  nowMs: number;
+  maxAgeMs?: number;
+}): boolean {
+  const readAtMs = Date.parse(String(args.cachedReadAt || ""));
+  if (!Number.isFinite(readAtMs)) return false;
+  const maxAge = args.maxAgeMs ?? SALES_BOOKING_THREAD_CACHE_MAX_AGE_MS;
+  if (args.nowMs - readAtMs >= maxAge) return false;
+  if (!args.lastActivityAt) return true;
+  const activityMs = Date.parse(args.lastActivityAt);
+  if (!Number.isFinite(activityMs)) return true;
+  return activityMs <= readAtMs;
+}
+
+export function parseSalesBookingThreadFactsCache(
+  payload: unknown,
+): Record<string, SalesBookingCachedThreadFact> {
+  const body = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {};
+  const factsRaw = body.facts && typeof body.facts === "object" &&
+      !Array.isArray(body.facts)
+    ? body.facts as Record<string, unknown>
+    : {};
+  const out: Record<string, SalesBookingCachedThreadFact> = {};
+  for (const [id, value] of Object.entries(factsRaw)) {
+    if (!id || !value || typeof value !== "object" || Array.isArray(value)) {
+      continue;
+    }
+    const row = value as Record<string, unknown>;
+    const readAt = nonemptyText(row.read_at);
+    if (!readAt || !Number.isFinite(Date.parse(readAt))) continue;
+    const classification = row.classification === "ready_to_contact" ||
+        row.classification === "waiting_reply" ||
+        row.classification === "follow_up_due" ||
+        row.classification === "needs_decision" ||
+        row.classification === "unread"
+      ? row.classification
+      : "unread";
+    out[id] = {
+      case_id: nonemptyText(row.case_id) || id,
+      contact_id: nonemptyText(row.contact_id),
+      read_ok: row.read_ok === true,
+      reason: nonemptyText(row.reason),
+      last_inbound_at: nonemptyText(row.last_inbound_at),
+      last_human_outbound_at: nonemptyText(row.last_human_outbound_at),
+      last_outbound_at: nonemptyText(row.last_outbound_at),
+      quiet_window: row.quiet_window === true,
+      quiet_hours: typeof row.quiet_hours === "number"
+        ? row.quiet_hours
+        : SALES_BOOKING_QUIET_HOURS,
+      classification,
+      message_count: typeof row.message_count === "number"
+        ? row.message_count
+        : 0,
+      template_outbound_count: typeof row.template_outbound_count === "number"
+        ? row.template_outbound_count
+        : 0,
+      read_at: new Date(Date.parse(readAt)).toISOString(),
+    };
+  }
+  return out;
+}
+
+export function isSalesBookingGhl429(error: unknown): boolean {
+  if (!error) return false;
+  const status = (error as { status?: unknown }).status;
+  if (status === 429) return true;
+  const message = String((error as Error).message || "");
+  return /\bGHL 429\b/.test(message) ||
+    /\b429 Too Many Requests\b/i.test(message);
+}
+
+/** attempt 1 → 200ms + jitter, then 400, 800; cap 2000ms. */
+export function salesBookingGhl429DelayMs(
+  attempt: number,
+  random: () => number = Math.random,
+): number {
+  const exp = Math.max(0, Math.trunc(attempt) - 1);
+  const base = Math.min(
+    SALES_BOOKING_GHL_429_BASE_MS * (2 ** exp),
+    2_000,
+  );
+  const sample = random();
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1) : 0;
+  const jitter = Math.floor(unit * (base / 2));
+  return base + jitter;
+}
+
+export async function withSalesBookingGhl429Retry<T>(
+  run: () => Promise<T>,
+  opts: {
+    sleep?: (ms: number) => Promise<void>;
+    random?: () => number;
+    tries?: number;
+  } = {},
+): Promise<T> {
+  const tries = opts.tries ?? SALES_BOOKING_GHL_429_TRIES;
+  const sleep = opts.sleep ??
+    ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const random = opts.random ?? Math.random;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (!isSalesBookingGhl429(error) || attempt >= tries) throw error;
+      await sleep(salesBookingGhl429DelayMs(attempt, random));
+    }
+  }
+  throw lastError;
+}
+
+export function confirmSalesBookingGhlUser(args: {
+  users: GhlLocationUser[];
+  email: string;
+  nameMatch?: string | null;
+  claimedId?: string | null;
+}): {
+  id: string | null;
+  reason: string | null;
+  match: "email" | "name" | null;
+  ghl_email: string | null;
+} {
+  const email = confirmGhlUserId({
+    users: args.users,
+    email: args.email,
+    claimedId: args.claimedId,
+  });
+  if (email.id) {
+    const matched = args.users.find((user) => user.id === email.id);
+    return {
+      id: email.id,
+      reason: null,
+      match: "email",
+      ghl_email: matched?.email ?? args.email.trim().toLowerCase(),
+    };
+  }
+  const needle = nonemptyText(args.nameMatch)?.toLowerCase();
+  if (!needle) {
+    return {
+      id: null,
+      reason: email.reason || "ghl_user_unmapped",
+      match: null,
+      ghl_email: null,
+    };
+  }
+  const nameHits = args.users.filter((user) => {
+    const first = (user.firstName || "").trim().toLowerCase();
+    const display = (user.name || "").trim().toLowerCase();
+    const firstToken = display.split(/\s+/)[0] || "";
+    return first === needle || display === needle || firstToken === needle;
+  });
+  if (nameHits.length !== 1) {
+    return {
+      id: null,
+      reason: "ghl_user_unmapped",
+      match: null,
+      ghl_email: null,
+    };
+  }
+  const hit = nameHits[0];
+  const claimed = nonemptyText(args.claimedId);
+  if (claimed && claimed !== hit.id) {
+    return {
+      id: null,
+      reason: "ghl_user_unmapped",
+      match: null,
+      ghl_email: hit.email,
+    };
+  }
+  return {
+    id: hit.id,
+    reason: null,
+    match: "name",
+    ghl_email: hit.email,
   };
 }
 
@@ -446,12 +654,22 @@ export interface SalesBookingCase {
   resource_id: string;
   opportunity_id: string;
   contact_id: string | null;
-  suburb: string | null;
+  /**
+   * Contact city / suburb, parsed WA address, or the linked job's site suburb.
+   * `"not given"` when none of those exist. Never invented.
+   */
+  suburb: string;
+  /** `patio` / `fencing` from custom fields or enquiry tags. `"not given"` when absent. */
+  job_type: string;
+  /** Opportunity created timestamp, or null when GHL did not send one. */
+  enquiry_at: string | null;
   display_name: string;
   status: string;
   tags: string[];
   /** Additive: GHL stage name when the pipeline stage map resolved it. */
   stage_name: string | null;
+  /** GHL `pipelineStageId` as stored, beside `stage_name`. */
+  pipeline_stage_id: string | null;
   /** Additive: newest GHL activity timestamp, used to order the thread budget. */
   last_activity_at: string | null;
   /** Latest engine pack row for this opportunity, or null when no pack matched. */
@@ -465,10 +683,372 @@ export function isPhoneLikeName(name: unknown): boolean {
   return /^(\+61|0)\d/.test(text);
 }
 
+function nonemptyText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+const SUBURB_FIELD_KEYS = new Set([
+  "suburb",
+  "city",
+  "site_suburb",
+  "site suburb",
+  "location",
+  "area",
+]);
+
+/** WA / W.A / W.A. / Western Australia, optional postcode. */
+const WA_PLACE_TAIL_RE =
+  /(?:,\s*|\s+)(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i;
+
 /**
- * Project one raw GHL opportunity onto a case row. Never invents a suburb: an
- * absent contact city stays null so nothing downstream places a window on a
- * guessed locality.
+ * Contact city / suburb, nested address city, or a WA suburb parsed from a
+ * street line or a GHL custom-field address. Never guesses: no city and no
+ * parseable suburb is `"not given"`.
+ */
+export function salesBookingSuburbFromContact(
+  contact: Record<string, unknown>,
+  opportunity: Record<string, unknown> = {},
+): string {
+  const nestedAddress =
+    (contact.address && typeof contact.address === "object"
+      ? contact.address
+      : opportunity.address && typeof opportunity.address === "object"
+      ? opportunity.address
+      : null) as Record<string, unknown> | null;
+  const city = nonemptyText(contact.city) ||
+    nonemptyText(contact.suburb) ||
+    nonemptyText(contact.contactCity) ||
+    nonemptyText(nestedAddress?.city) ||
+    nonemptyText(opportunity.city) ||
+    nonemptyText(opportunity.suburb) ||
+    nonemptyText(opportunity.contactCity);
+  if (city) {
+    const parsedCity = salesBookingSuburbFromAddressLine(city) ||
+      salesBookingSuburbFromStreetLine(city);
+    if (parsedCity) return parsedCity;
+    const strippedCity = stripAddressPlaceTail(city);
+    if (strippedCity && !salesBookingLooksLikeStreet(strippedCity)) {
+      return strippedCity;
+    }
+  }
+  const fields = collectCustomFieldValues(contact, opportunity);
+  for (const field of fields) {
+    if (!SUBURB_FIELD_KEYS.has(field.key)) continue;
+    const parsed = salesBookingSuburbFromAddressLine(field.value) ||
+      salesBookingSuburbFromStreetLine(field.value);
+    if (parsed) return parsed;
+    if (!salesBookingLooksLikeStreet(field.value)) return field.value;
+  }
+  for (const field of fields) {
+    const parsed = salesBookingSuburbFromAddressLine(field.value) ||
+      salesBookingSuburbFromStreetLine(field.value);
+    if (parsed) return parsed;
+  }
+  const lines = [
+    contact.address1,
+    contact.contactAddress,
+    contact.postalAddress,
+    typeof contact.address === "string" ? contact.address : null,
+    nestedAddress?.address1,
+    nestedAddress?.line1,
+    opportunity.address1,
+    opportunity.contactAddress,
+    typeof opportunity.address === "string" ? opportunity.address : null,
+    opportunity.name,
+    contact.name,
+  ];
+  for (const line of lines) {
+    const parsed = salesBookingSuburbFromAddressLine(line) ||
+      salesBookingSuburbFromStreetLine(line);
+    if (parsed) return parsed;
+  }
+  return SALES_BOOKING_NOT_GIVEN;
+}
+
+const STREET_TYPE_RE =
+  /\b(?:st|street|rd|road|ave|avenue|dr|drive|ct|court|pl|place|way|cres|crescent|crest|pde|parade|cl|close|tce|terrace|hwy|highway|blvd|circuit|cct|loop|rise|grove|lane|ln)\b/i;
+
+/** Optional AU postcode after the suburb, with or without WA. */
+const AU_POSTCODE_TAIL_RE = /(?:,\s*|\s+)\d{4}\s*$/;
+
+function stripAddressPlaceTail(text: string): string {
+  return text.replace(WA_PLACE_TAIL_RE, "").replace(AU_POSTCODE_TAIL_RE, "")
+    .trim();
+}
+
+/**
+ * A street line starts with a house or unit number. Suburb names may contain
+ * Grove / St / Place and must still count as given.
+ */
+function salesBookingLooksLikeStreet(value: string): boolean {
+  return /^(?:\d+[A-Za-z]?\/)?\d/.test(value.trim());
+}
+
+/**
+ * "52 warrington road byford" / "2 Wedge Way, Merriwa" → suburb after the
+ * street token. Street-only lines stay null.
+ */
+export function salesBookingSuburbFromStreetLine(
+  value: unknown,
+): string | null {
+  const text = nonemptyText(value);
+  if (!text) return null;
+  const trimmed = stripAddressPlaceTail(text);
+  if (!trimmed || !salesBookingLooksLikeStreet(trimmed)) return null;
+  const comma = trimmed.match(/,\s*([A-Za-z][A-Za-z .'-]{1,40})\s*$/);
+  const afterComma = nonemptyText(comma?.[1]);
+  if (
+    afterComma && !salesBookingLooksLikeStreet(afterComma) &&
+    !/^\d/.test(afterComma)
+  ) {
+    return afterComma;
+  }
+  const afterStreet = trimmed.match(
+    new RegExp(
+      `${STREET_TYPE_RE.source}\\s+([A-Za-z][A-Za-z .'-]{1,40}?)\\s*$`,
+      "i",
+    ),
+  );
+  const suburb = nonemptyText(afterStreet?.[1]);
+  return suburb && !/^\d/.test(suburb) && !STREET_TYPE_RE.test(suburb)
+    ? suburb
+    : null;
+}
+
+/** WA street line → suburb. Misses stay null rather than taking the street. */
+export function salesBookingSuburbFromAddressLine(
+  value: unknown,
+): string | null {
+  const text = nonemptyText(value);
+  if (!text) return null;
+  const afterComma = text.match(
+    /,\s*([A-Za-z][A-Za-z .'-]{1,40}?)\s*(?:,\s*|\s+)(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
+  );
+  const commaSuburb = nonemptyText(afterComma?.[1]);
+  if (
+    commaSuburb && !/^\d/.test(commaSuburb) && !STREET_TYPE_RE.test(commaSuburb)
+  ) {
+    return commaSuburb;
+  }
+  const whole = text.match(
+    /^([A-Za-z][A-Za-z .'-]{1,40}?)\s+(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?\s*$/i,
+  );
+  const wholeSuburb = nonemptyText(whole?.[1]);
+  if (
+    wholeSuburb && !STREET_TYPE_RE.test(wholeSuburb)
+  ) {
+    return wholeSuburb;
+  }
+  const tail = text.match(
+    /\s([A-Za-z][A-Za-z'-]{1,40})\s+(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
+  );
+  const suburb = nonemptyText(tail?.[1]);
+  return suburb && !STREET_TYPE_RE.test(suburb) ? suburb : null;
+}
+
+function customFieldValue(rec: Record<string, unknown>): unknown {
+  return rec.fieldValue ?? rec.field_value ?? rec.value ?? rec.name;
+}
+
+function collectCustomFieldValues(
+  ...sources: Record<string, unknown>[]
+): Array<{ key: string; value: string }> {
+  const out: Array<{ key: string; value: string }> = [];
+  const push = (key: unknown, value: unknown) => {
+    const k = nonemptyText(key)?.toLowerCase() || "";
+    const v = nonemptyText(value);
+    if (k && v) out.push({ key: k, value: v });
+  };
+  for (const source of sources) {
+    const fields = source.customFields ?? source.customData;
+    if (Array.isArray(fields)) {
+      for (const row of fields) {
+        if (!row || typeof row !== "object") continue;
+        const rec = row as Record<string, unknown>;
+        push(
+          rec.key ?? rec.fieldKey ?? rec.id ?? rec.name,
+          customFieldValue(rec),
+        );
+      }
+    } else if (fields && typeof fields === "object") {
+      for (
+        const [key, value] of Object.entries(fields as Record<string, unknown>)
+      ) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          const rec = value as Record<string, unknown>;
+          push(key, customFieldValue(rec));
+        } else {
+          push(key, value);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function mapSalesBookingJobWords(
+  text: string,
+): "patio" | "fencing" | null {
+  const patio = /\bpatios?\b/i.test(text);
+  const fencing = /\bfenc(?:e|ing|es)\b/i.test(text);
+  if (patio && fencing) return null;
+  if (patio) return "patio";
+  if (fencing) return "fencing";
+  return null;
+}
+
+const JOB_TYPE_FIELD_KEYS = new Set([
+  "job_type",
+  "jobtype",
+  "job type",
+  "type",
+  "enquiry_type",
+  "enquiry type",
+  "product",
+  "service",
+  "division",
+]);
+
+/**
+ * Custom-field job type first, then enquiry tags mapped to patio / fencing.
+ * The resource pipeline family is last: Nithin is the patio book, Marnin
+ * the fencing book. `"not given"` only when none of those name a family.
+ */
+export function salesBookingJobTypeFromOpportunity(
+  opportunity: Record<string, unknown>,
+  contact: Record<string, unknown> = {},
+  lane?: "patio" | "fencing" | string | null,
+): string {
+  const fields = collectCustomFieldValues(opportunity, contact);
+  for (const field of fields) {
+    if (!JOB_TYPE_FIELD_KEYS.has(field.key)) continue;
+    const mapped = mapSalesBookingJobWords(field.value);
+    if (mapped) return mapped;
+  }
+  for (const field of fields) {
+    const mapped = mapSalesBookingJobWords(`${field.key} ${field.value}`);
+    if (mapped) return mapped;
+  }
+  const tags = [
+    ...(Array.isArray(contact.tags) ? contact.tags : []),
+    ...(Array.isArray(opportunity.tags) ? opportunity.tags : []),
+  ].map((tag) => String(tag));
+  const mappedTags = new Set<"patio" | "fencing">();
+  for (const tag of tags) {
+    const mapped = mapSalesBookingJobWords(tag);
+    if (mapped) mappedTags.add(mapped);
+  }
+  if (mappedTags.size === 1) return [...mappedTags][0];
+  return lane === "patio" || lane === "fencing"
+    ? lane
+    : SALES_BOOKING_NOT_GIVEN;
+}
+
+function salesBookingEnquiryAt(
+  opportunity: Record<string, unknown>,
+): string | null {
+  const raw = [opportunity.createdAt, opportunity.dateAdded].find((value) =>
+    typeof value === "string" && value
+  );
+  if (typeof raw !== "string") return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : raw;
+}
+
+function salesBookingTags(
+  contact: Record<string, unknown>,
+  opportunity: Record<string, unknown>,
+): string[] {
+  const raw = Array.isArray(contact.tags)
+    ? contact.tags
+    : Array.isArray(opportunity.tags)
+    ? opportunity.tags
+    : [];
+  return raw.map((tag) => String(tag));
+}
+
+export interface SalesBookingContactFact {
+  city?: unknown;
+  suburb?: unknown;
+  address1?: unknown;
+  address?: unknown;
+  postalAddress?: unknown;
+  tags?: unknown;
+  customFields?: unknown;
+  customData?: unknown;
+}
+
+/** Linked job site when GHL city/address is empty. Never invented. */
+export interface SalesBookingJobSiteFact {
+  suburb?: unknown;
+  address?: unknown;
+}
+
+/** Overlay a GHL contact read onto a search row that omitted city/tags. */
+export function applySalesBookingContactFact(
+  opportunity: Record<string, unknown>,
+  fact: SalesBookingContactFact | null | undefined,
+): Record<string, unknown> {
+  if (!fact) return opportunity;
+  const contact = {
+    ...((opportunity.contact && typeof opportunity.contact === "object"
+      ? opportunity.contact
+      : {}) as Record<string, unknown>),
+  };
+  const fill = (key: string, value: unknown) => {
+    if (value == null || value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    const current = contact[key];
+    if (current == null || current === "") {
+      contact[key] = value;
+      return;
+    }
+    if (Array.isArray(current) && current.length === 0) contact[key] = value;
+  };
+  fill("city", fact.city);
+  fill("city", fact.suburb);
+  fill("address1", fact.address1);
+  fill("address", fact.address);
+  fill("postalAddress", fact.postalAddress);
+  fill("tags", fact.tags);
+  fill("customFields", fact.customFields);
+  fill("customData", fact.customData);
+  return { ...opportunity, contact };
+}
+
+export function salesBookingContactId(
+  opportunity: Record<string, unknown>,
+): string | null {
+  const contact =
+    (opportunity.contact && typeof opportunity.contact === "object"
+      ? opportunity.contact
+      : {}) as Record<string, unknown>;
+  return nonemptyText(contact.id) || nonemptyText(opportunity.contactId);
+}
+
+export function salesBookingContactFactFromGhl(
+  body: Record<string, unknown>,
+): SalesBookingContactFact {
+  const contact =
+    (body.contact && typeof body.contact === "object"
+      ? body.contact
+      : body) as Record<string, unknown>;
+  return {
+    city: contact.city,
+    suburb: contact.suburb,
+    address1: contact.address1,
+    address: contact.address,
+    postalAddress: contact.postalAddress,
+    tags: contact.tags,
+    customFields: contact.customFields,
+    customData: contact.customData,
+  };
+}
+
+/**
+ * Project one raw GHL opportunity onto a case row. Never invents a suburb:
+ * absent city/address/job site stays `"not given"`. Job type prefers custom
+ * fields and enquiry tags, then the resource pipeline family.
  */
 export function projectSalesBookingCase(
   opportunity: Record<string, unknown>,
@@ -483,30 +1063,27 @@ export function projectSalesBookingCase(
       : {}) as Record<string, unknown>;
   const rawName = (typeof contact.name === "string" && contact.name) ||
     (typeof opportunity.name === "string" && opportunity.name) || "";
-  const suburb = typeof contact.city === "string" && contact.city.trim()
-    ? contact.city.trim()
-    : null;
-  const stageId = typeof opportunity.pipelineStageId === "string"
-    ? opportunity.pipelineStageId
-    : "";
+  const stageId = nonemptyText(opportunity.pipelineStageId);
   const updatedAt = [
     opportunity.updatedAt,
     opportunity.dateUpdated,
     opportunity.lastStatusChangeAt,
     opportunity.createdAt,
   ].find((value) => typeof value === "string" && value);
+  const lane = SALES_BOOKING_RESOURCES[resourceId]?.lane;
   return {
     id,
     resource_id: resourceId,
     opportunity_id: id,
-    contact_id: (typeof contact.id === "string" && contact.id) ||
-      (typeof opportunity.contactId === "string" && opportunity.contactId) ||
-      null,
-    suburb,
+    contact_id: salesBookingContactId(opportunity),
+    suburb: salesBookingSuburbFromContact(contact, opportunity),
+    job_type: salesBookingJobTypeFromOpportunity(opportunity, contact, lane),
+    enquiry_at: salesBookingEnquiryAt(opportunity),
     display_name: isPhoneLikeName(rawName) ? "Enquiry" : (rawName || "Enquiry"),
     status: "needs_decision",
-    tags: Array.isArray(contact.tags) ? contact.tags.map((t) => String(t)) : [],
+    tags: salesBookingTags(contact, opportunity),
     stage_name: (stageId && stages[stageId]) || null,
+    pipeline_stage_id: stageId,
     last_activity_at: typeof updatedAt === "string" ? updatedAt : null,
     proposal: null,
     stamp_state: "none",
@@ -682,6 +1259,8 @@ export interface SalesBookingDiaryScan {
   malformed_dropped: number;
   calendar_email: string | null;
   ghl_user_id: string | null;
+  /** Which roster field confirmed `ghl_user_id`. Name is weaker than email. */
+  mapped_by: "email" | "name" | null;
   scoper_user_id: string | null;
 }
 
@@ -693,6 +1272,10 @@ export interface SalesBookingThreadScan {
   not_attempted: number;
   budget_exhausted: boolean;
   enabled: boolean;
+  cached_count: number;
+  fresh_count: number;
+  unread_count: number;
+  remaining_429_count: number;
 }
 
 export interface SalesBookingReadResponse {
@@ -714,6 +1297,10 @@ export interface SalesBookingReadResponse {
     pages_scanned: number;
     threads_read: number;
     threads_attempted: number;
+    threads_cached: number;
+    threads_fresh: number;
+    threads_unread: number;
+    remaining_429_count: number;
     diary_read_ok: boolean;
   };
   cases: SalesBookingCase[];
@@ -724,6 +1311,7 @@ export interface SalesBookingReadResponse {
     source: string;
     calendar_email: string | null;
     ghl_user_id: string | null;
+    mapped_by: "email" | "name" | null;
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
   drafts: Record<string, string>;
@@ -784,7 +1372,17 @@ export function assembleSalesBookingRead(input: {
       "Thread facts were not requested; no case carries a proved conversation state.",
     );
   } else {
-    const unread = threads.attempted - threads.read_ok_count;
+    const unread = threads.unread_count;
+    if (threads.cached_count > 0) {
+      gaps.push(
+        `${threads.cached_count} thread(s) served from cache without a live GHL read.`,
+      );
+    }
+    if (threads.fresh_count > 0) {
+      gaps.push(
+        `${threads.fresh_count} thread(s) refreshed live from GHL this read.`,
+      );
+    }
     if (threads.not_attempted > 0) {
       gaps.push(
         `${threads.not_attempted} case(s) had no thread read${
@@ -796,7 +1394,12 @@ export function assembleSalesBookingRead(input: {
     }
     if (unread > 0) {
       gaps.push(
-        `${unread} thread read(s) failed; those cases stay on the board as unread.`,
+        `${unread} thread(s) unread; those cases stay on the board as unread.`,
+      );
+    }
+    if (threads.remaining_429_count > 0) {
+      gaps.push(
+        `${threads.remaining_429_count} GHL 429 Too Many Requests remaining after retries.`,
       );
     }
   }
@@ -830,6 +1433,10 @@ export function assembleSalesBookingRead(input: {
       pages_scanned: opportunities.pages_scanned,
       threads_read: threads.read_ok_count,
       threads_attempted: threads.attempted,
+      threads_cached: threads.cached_count,
+      threads_fresh: threads.fresh_count,
+      threads_unread: threads.unread_count,
+      remaining_429_count: threads.remaining_429_count,
       diary_read_ok: diary.read_ok,
     },
     cases,
@@ -840,6 +1447,7 @@ export function assembleSalesBookingRead(input: {
       source: DIARY_SOURCE,
       calendar_email: diary.calendar_email,
       ghl_user_id: diary.ghl_user_id,
+      mapped_by: diary.mapped_by,
     },
     thread_facts: threads.facts,
     // Pack overlay (proposals, drafts, stamp) is applied after this assemble
@@ -871,6 +1479,8 @@ export interface SalesBookingReadParams {
   thread_limit?: number;
   thread_budget_ms?: number;
   case_ids?: string[] | null;
+  /** Ignore cache freshness and re-read every selected thread. */
+  force_refresh?: boolean;
 }
 
 export interface SalesBookingReadDependencies {
@@ -887,7 +1497,48 @@ export interface SalesBookingReadDependencies {
   }): Promise<SalesBookingDiaryScan>;
   /** One contact's GHL conversation messages. Rejects on a failed read. */
   readThread(args: { contactId: string }): Promise<SalesBookingMessage[]>;
+  /**
+   * City/tags/custom fields for scoped contact ids. Search rows omit these.
+   * Optional: tests that only exercise roster shape can skip it.
+   */
+  readContacts?(
+    contactIds: string[],
+  ): Promise<Record<string, SalesBookingContactFact>>;
+  /**
+   * Recorded job site for scoped opportunity / contact ids. Used only when
+   * the GHL contact has no parseable suburb. Optional.
+   */
+  readJobSites?(
+    ids: { opportunityIds: string[]; contactIds: string[] },
+  ): Promise<Record<string, SalesBookingJobSiteFact>>;
   now(): Date;
+  loadThreadFactsCache?(
+    resourceId: string,
+  ): Promise<Record<string, SalesBookingCachedThreadFact>>;
+  persistThreadFactsCache?(
+    resourceId: string,
+    facts: Record<string, SalesBookingCachedThreadFact>,
+  ): Promise<void>;
+  sleep?(ms: number): Promise<void>;
+  random?(): number;
+}
+
+function emptyThreadScan(
+  enabled: boolean,
+  notAttempted: number,
+): SalesBookingThreadScan {
+  return {
+    facts: {},
+    attempted: 0,
+    read_ok_count: 0,
+    not_attempted: notAttempted,
+    budget_exhausted: false,
+    enabled,
+    cached_count: 0,
+    fresh_count: 0,
+    unread_count: enabled ? notAttempted : 0,
+    remaining_429_count: 0,
+  };
 }
 
 export class SalesBookingRequestError extends Error {
@@ -923,28 +1574,27 @@ function clampInt(
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
+function asCachedThreadFact(
+  facts: SalesBookingThreadFacts,
+  readAt: string,
+): SalesBookingCachedThreadFact {
+  return { ...facts, read_at: readAt };
+}
+
 /**
- * Read threads for the selected cases under BOTH a row cap and a wall-clock
- * budget, at bounded concurrency. Cases beyond either bound are reported as
- * not attempted rather than silently omitted, so the view can tell "no reply
- * needed" from "nobody looked".
+ * Serve cached thread facts; live-refresh only stale or missing rows, newest
+ * first, under the time budget. Page load persists the merged map.
  */
 async function scanThreads(
   deps: SalesBookingReadDependencies,
+  resourceId: string,
   cases: SalesBookingCase[],
   params: SalesBookingReadParams,
 ): Promise<SalesBookingThreadScan> {
   const enabled = params.include_thread_facts !== false;
   const facts: Record<string, SalesBookingThreadFacts> = {};
   if (!enabled || cases.length === 0) {
-    return {
-      facts,
-      attempted: 0,
-      read_ok_count: 0,
-      not_attempted: enabled ? cases.length : 0,
-      budget_exhausted: false,
-      enabled,
-    };
+    return emptyThreadScan(enabled, enabled ? cases.length : 0);
   }
 
   const limit = clampInt(
@@ -959,11 +1609,12 @@ async function scanThreads(
     1_000,
     60_000,
   );
+  const forceRefresh = params.force_refresh === true;
   const wanted = params.case_ids && params.case_ids.length
     ? new Set(params.case_ids.map((id) => String(id)))
     : null;
+  const nowMs = deps.now().getTime();
 
-  // Newest activity first: the budget should be spent on the live end of the board.
   const ordered = cases
     .filter((row) => (wanted ? wanted.has(row.id) : true))
     .slice()
@@ -971,10 +1622,40 @@ async function scanThreads(
       Date.parse(b.last_activity_at || "") -
         Date.parse(a.last_activity_at || "") || a.id.localeCompare(b.id)
     );
-  const selected = ordered.slice(0, limit);
 
+  let cachedStore: Record<string, SalesBookingCachedThreadFact> = {};
+  let cacheLoadFailed = false;
+  try {
+    cachedStore = deps.loadThreadFactsCache
+      ? await deps.loadThreadFactsCache(resourceId)
+      : {};
+  } catch {
+    cacheLoadFailed = true;
+    cachedStore = {};
+  }
+
+  const cachedHits: string[] = [];
+  const stale: SalesBookingCase[] = [];
+  for (const row of ordered) {
+    const cached = cachedStore[row.id] || cachedStore[row.opportunity_id];
+    const fresh = !forceRefresh && !!cached &&
+      salesBookingThreadFactIsFresh({
+        cachedReadAt: cached.read_at,
+        lastActivityAt: row.last_activity_at,
+        nowMs,
+      });
+    if (fresh && cached) {
+      facts[row.id] = { ...cached, case_id: row.id };
+      cachedHits.push(row.id);
+    } else {
+      stale.push(row);
+    }
+  }
+
+  const selected = stale.slice(0, limit);
   const startedAt = deps.now().getTime();
   let budgetExhausted = false;
+  let remaining429 = 0;
   let cursor = 0;
   const worker = async () => {
     for (;;) {
@@ -1002,6 +1683,14 @@ async function scanThreads(
           nowMs: deps.now().getTime(),
         });
       } catch (error) {
+        const staleCache = cachedStore[row.id] ||
+          cachedStore[row.opportunity_id];
+        if (isSalesBookingGhl429(error)) remaining429++;
+        if (staleCache) {
+          facts[row.id] = { ...staleCache, case_id: row.id };
+          cachedHits.push(row.id);
+          continue;
+        }
         facts[row.id] = unreadSalesBookingThreadFacts(
           row.id,
           row.contact_id,
@@ -1011,24 +1700,56 @@ async function scanThreads(
     }
   };
 
-  await Promise.all(
-    Array.from({
-      length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, selected.length),
-    }, () => worker()),
-  );
+  if (selected.length > 0) {
+    await Promise.all(
+      Array.from({
+        length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, selected.length),
+      }, () => worker()),
+    );
+  }
 
   const attempted = Object.keys(facts).length;
   const readOk = Object.values(facts).filter((f) => f.read_ok).length;
+  const notAttempted = Math.max(
+    0,
+    (wanted ? ordered.length : cases.length) - attempted,
+  );
+  const unreadCount = Object.values(facts).filter((f) => !f.read_ok).length +
+    notAttempted;
+  const cachedCount =
+    Object.keys(facts).filter((id) => cachedHits.includes(id)).length;
+  const freshCount = selected.filter((row) => {
+    const fact = facts[row.id];
+    return fact?.read_ok === true && !cachedHits.includes(row.id);
+  }).length;
+
+  const merged: Record<string, SalesBookingCachedThreadFact> = {
+    ...cachedStore,
+  };
+  for (const [id, fact] of Object.entries(facts)) {
+    if (fact.read_at) merged[id] = asCachedThreadFact(fact, fact.read_at);
+  }
+  if (
+    deps.persistThreadFactsCache && selected.length > 0 && !cacheLoadFailed
+  ) {
+    try {
+      await deps.persistThreadFactsCache(resourceId, merged);
+    } catch {
+      // Cache write must not empty the board.
+    }
+  }
+
   return {
     facts,
     attempted,
     read_ok_count: readOk,
-    not_attempted: Math.max(
-      0,
-      (wanted ? ordered.length : cases.length) - attempted,
-    ),
+    not_attempted: notAttempted,
     budget_exhausted: budgetExhausted,
     enabled,
+    cached_count: cachedCount,
+    fresh_count: freshCount,
+    unread_count: unreadCount,
+    remaining_429_count: remaining429,
   };
 }
 
@@ -1068,12 +1789,50 @@ export async function salesBookingRead(
     }),
   ]);
 
+  const scopedContactIds: string[] = [];
+  const scopedOpportunityIds: string[] = [];
+  for (const raw of opportunities.opportunities) {
+    const stageId = typeof raw.pipelineStageId === "string"
+      ? raw.pipelineStageId
+      : "";
+    if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
+    const contactId = salesBookingContactId(raw);
+    if (contactId) scopedContactIds.push(contactId);
+    if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
+  }
+  let contactFacts: Record<string, SalesBookingContactFact> = {};
+  if (deps.readContacts && scopedContactIds.length > 0) {
+    try {
+      contactFacts = await deps.readContacts(scopedContactIds);
+    } catch {
+      contactFacts = {};
+    }
+  }
+  let jobSites: Record<string, SalesBookingJobSiteFact> = {};
+  if (
+    deps.readJobSites &&
+    (scopedOpportunityIds.length > 0 || scopedContactIds.length > 0)
+  ) {
+    try {
+      jobSites = await deps.readJobSites({
+        opportunityIds: scopedOpportunityIds,
+        contactIds: scopedContactIds,
+      });
+    } catch {
+      jobSites = {};
+    }
+  }
+
   const projected: SalesBookingCase[] = [];
   const seen = new Set<string>();
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
+    const contactId = salesBookingContactId(raw);
     const row = projectSalesBookingCase(
-      raw,
+      applySalesBookingContactFact(
+        raw,
+        contactId ? contactFacts[contactId] : null,
+      ),
       resource.resource_id,
       opportunities.stages,
     );
@@ -1086,10 +1845,26 @@ export async function salesBookingRead(
       excludedByStage++;
       continue;
     }
+    if (row.suburb === SALES_BOOKING_NOT_GIVEN) {
+      const job = jobSites[row.id] ||
+        (contactId ? jobSites[contactId] : undefined);
+      if (job) {
+        const fromJob = salesBookingSuburbFromContact({
+          city: job.suburb,
+          address1: job.address,
+        });
+        if (fromJob !== SALES_BOOKING_NOT_GIVEN) row.suburb = fromJob;
+      }
+    }
     projected.push(row);
   }
 
-  const threads = await scanThreads(deps, projected, params);
+  const threads = await scanThreads(
+    deps,
+    resource.resource_id,
+    projected,
+    params,
+  );
   return assembleSalesBookingRead({
     resource,
     week,
@@ -1105,24 +1880,130 @@ export async function salesBookingRead(
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 
+type GhlRetryHooks = {
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
+};
+
 async function ghlRead(
   path: string,
   init: RequestInit = {},
+  retry: GhlRetryHooks = {},
 ): Promise<Record<string, unknown>> {
   const token = Deno.env.get("GHL_API_TOKEN") || "";
   if (!token) throw new Error("GHL API token not configured");
-  const res = await fetch(`${GHL_BASE}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Version: "2021-07-28",
-      "Content-Type": "application/json",
-      ...(init.headers || {}),
-    },
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`GHL ${res.status}: ${text.slice(0, 300)}`);
-  return JSON.parse(text);
+  return await withSalesBookingGhl429Retry(async () => {
+    const res = await fetch(`${GHL_BASE}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Version: "2021-07-28",
+        "Content-Type": "application/json",
+        ...(init.headers || {}),
+      },
+    });
+    const text = await res.text();
+    if (res.status === 429) {
+      const error = new Error(`GHL 429: ${text.slice(0, 300)}`);
+      (error as { status?: number }).status = 429;
+      throw error;
+    }
+    if (!res.ok) throw new Error(`GHL ${res.status}: ${text.slice(0, 300)}`);
+    return JSON.parse(text);
+  }, retry);
+}
+
+/**
+ * City, address, tags, and custom fields for scoped contacts. Opportunity
+ * search omits them; GET /contacts/{id} is the GHL store the CIO already
+ * observed ("northside patios", "sw fencing"). Scoped ids only, same 429
+ * retry and concurrency as the thread sweep — not one call per open CRM row.
+ */
+async function readContactsLive(
+  contactIds: string[],
+): Promise<Record<string, SalesBookingContactFact>> {
+  const unique = [...new Set(contactIds.filter((id) => id.length > 0))];
+  const facts: Record<string, SalesBookingContactFact> = {};
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= unique.length) return;
+      const contactId = unique[index];
+      try {
+        const body = await ghlRead(
+          `/contacts/${encodeURIComponent(contactId)}`,
+        );
+        facts[contactId] = salesBookingContactFactFromGhl(body);
+      } catch {
+        // One unread contact stays `"not given"`; do not empty the book.
+      }
+    }
+  };
+  if (unique.length > 0) {
+    await Promise.all(
+      Array.from({
+        length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, unique.length),
+      }, () => worker()),
+    );
+  }
+  return facts;
+}
+
+const JOB_SITE_ID_CHUNK = 25;
+
+function chunkSalesBookingIds(
+  ids: string[],
+  size = JOB_SITE_ID_CHUNK,
+): string[][] {
+  const unique = [...new Set(ids.filter((id) => id.length > 0))];
+  const out: string[][] = [];
+  for (let i = 0; i < unique.length; i += size) {
+    out.push(unique.slice(i, i + size));
+  }
+  return out;
+}
+
+/**
+ * Recorded `jobs.site_suburb` / `site_address` for scoped GHL ids. One
+ * bounded read per id chunk. A failed chunk leaves those keys absent so
+ * the GHL contact answer still stands.
+ */
+async function readJobSitesLive(
+  client: SalesBookingReadClient,
+  opportunityIds: string[],
+  contactIds: string[],
+): Promise<Record<string, SalesBookingJobSiteFact>> {
+  const facts: Record<string, SalesBookingJobSiteFact> = {};
+  const take = (rows: Array<Record<string, unknown>> | null) => {
+    for (const row of rows || []) {
+      const fact: SalesBookingJobSiteFact = {
+        suburb: row.site_suburb,
+        address: row.site_address,
+      };
+      const opportunityId = nonemptyText(row.ghl_opportunity_id);
+      const contactId = nonemptyText(row.ghl_contact_id);
+      if (opportunityId) facts[opportunityId] = fact;
+      if (contactId) facts[contactId] = fact;
+    }
+  };
+  for (const chunk of chunkSalesBookingIds(opportunityIds)) {
+    const { data, error } = await client
+      .from("jobs")
+      .select("ghl_opportunity_id, ghl_contact_id, site_suburb, site_address")
+      .in("ghl_opportunity_id", chunk);
+    if (error) continue;
+    take(data as Array<Record<string, unknown>> | null);
+  }
+  for (const chunk of chunkSalesBookingIds(contactIds)) {
+    const { data, error } = await client
+      .from("jobs")
+      .select("ghl_opportunity_id, ghl_contact_id, site_suburb, site_address")
+      .in("ghl_contact_id", chunk);
+    if (error) continue;
+    take(data as Array<Record<string, unknown>> | null);
+  }
+  return facts;
 }
 
 /**
@@ -1329,7 +2210,11 @@ type SalesBookingReadClient = { from: (table: string) => any };
 function unreadDiary(
   scoperUserId: string,
   reason: string,
-  extra: { calendar_email?: string | null; ghl_user_id?: string | null } = {},
+  extra: {
+    calendar_email?: string | null;
+    ghl_user_id?: string | null;
+    mapped_by?: "email" | "name" | null;
+  } = {},
 ): SalesBookingDiaryScan {
   return {
     read_ok: false,
@@ -1338,17 +2223,15 @@ function unreadDiary(
     malformed_dropped: 0,
     calendar_email: extra.calendar_email ?? null,
     ghl_user_id: extra.ghl_user_id ?? null,
+    mapped_by: extra.mapped_by ?? null,
     scoper_user_id: scoperUserId,
   };
 }
 
 /**
- * The scoper's GHL calendar for the window.
- *
- * GHL user ids are not in this backend. Resolve the resource's mapped email
- * against GET /users/?locationId=; unconfirmed is `ghl_user_unmapped`, never
- * an invented id and never an empty free week. A failed unpaged events GET
- * is `ghl_calendar_page_failed` with zero entries. Never throws.
+ * The scoper's GHL calendar for the window. Mapping and unread reasons:
+ * `docs/sales-booking-read-contract-2026-09-16.md`. Never invents an id
+ * and never treats an unread week as free. Never throws.
  */
 export async function readSalesBookingGhlDiary(args: {
   ghlGet: GhlCalendarGet;
@@ -1375,9 +2258,10 @@ export async function readSalesBookingGhlDiary(args: {
       calendar_email: mapping.email,
     });
   }
-  const confirmed = confirmGhlUserId({
+  const confirmed = confirmSalesBookingGhlUser({
     users: users.users,
     email: mapping.email,
+    nameMatch: SALES_BOOKING_GHL_USERS[mapping.resource_id]?.name_match ?? null,
     claimedId: mapping.ghl_user_id,
   });
   if (!confirmed.id) {
@@ -1387,6 +2271,7 @@ export async function readSalesBookingGhlDiary(args: {
       { calendar_email: mapping.email },
     );
   }
+  const calendarEmail = confirmed.ghl_email || mapping.email;
 
   const startMs = Date.parse(args.since);
   const untilMs = Date.parse(args.untilExclusive);
@@ -1394,8 +2279,9 @@ export async function readSalesBookingGhlDiary(args: {
     !Number.isFinite(startMs) || !Number.isFinite(untilMs) || untilMs <= startMs
   ) {
     return unreadDiary(args.scoperUserId, "ghl_calendar_window_invalid", {
-      calendar_email: mapping.email,
+      calendar_email: calendarEmail,
       ghl_user_id: confirmed.id,
+      mapped_by: confirmed.match,
     });
   }
 
@@ -1410,7 +2296,11 @@ export async function readSalesBookingGhlDiary(args: {
     return unreadDiary(
       args.scoperUserId,
       scan.failure,
-      { calendar_email: mapping.email, ghl_user_id: confirmed.id },
+      {
+        calendar_email: calendarEmail,
+        ghl_user_id: confirmed.id,
+        mapped_by: confirmed.match,
+      },
     );
   }
 
@@ -1427,11 +2317,12 @@ export async function readSalesBookingGhlDiary(args: {
   );
   return {
     read_ok: true,
-    reason: null,
+    reason: confirmed.match === "name" ? "ghl_user_mapped_by_name" : null,
     entries,
     malformed_dropped: dropped,
-    calendar_email: mapping.email,
+    calendar_email: calendarEmail,
     ghl_user_id: confirmed.id,
+    mapped_by: confirmed.match,
     scoper_user_id: args.scoperUserId,
   };
 }
@@ -1453,16 +2344,98 @@ async function readDiaryLive(
   });
 }
 
-/** Real readers for the dispatch. Every one is read-only. */
+async function loadThreadFactsCacheLive(
+  client: SalesBookingReadClient,
+  resourceId: string,
+): Promise<Record<string, SalesBookingCachedThreadFact>> {
+  const { data, error } = await client
+    .from("sales_booking_packs")
+    .select("payload")
+    .eq("resource", resourceId)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
+    .eq("kind", SALES_BOOKING_THREAD_FACTS_KIND)
+    .order("as_of", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(error.message || "thread_facts load failed");
+  }
+  if (!data) return {};
+  return parseSalesBookingThreadFactsCache(
+    (data as { payload?: unknown }).payload,
+  );
+}
+
+function salesBookingThreadFactsMapsEqual(
+  left: Record<string, SalesBookingCachedThreadFact>,
+  right: Record<string, SalesBookingCachedThreadFact>,
+): boolean {
+  const a = parseSalesBookingThreadFactsCache({ facts: left });
+  const b = parseSalesBookingThreadFactsCache({ facts: right });
+  const keysA = Object.keys(a).sort();
+  const keysB = Object.keys(b).sort();
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((key, index) =>
+    key === keysB[index] &&
+    JSON.stringify(a[key]) === JSON.stringify(b[key])
+  );
+}
+
+/** One latest thread_facts row: abort on load error, merge, skip when equal, prune only older as_of. */
+async function persistThreadFactsCacheLive(
+  client: SalesBookingReadClient,
+  resourceId: string,
+  facts: Record<string, SalesBookingCachedThreadFact>,
+): Promise<void> {
+  let existing: Record<string, SalesBookingCachedThreadFact>;
+  try {
+    existing = await loadThreadFactsCacheLive(client, resourceId);
+  } catch {
+    return;
+  }
+  const merged = { ...existing, ...facts };
+  if (salesBookingThreadFactsMapsEqual(existing, merged)) return;
+  const asOf = new Date().toISOString();
+  const { error } = await client.from("sales_booking_packs").upsert({
+    resource: resourceId,
+    week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+    kind: SALES_BOOKING_THREAD_FACTS_KIND,
+    as_of: asOf,
+    payload: { facts: merged },
+    published_by: "ops-api:thread_facts",
+  }, { onConflict: "resource,week_start,kind,as_of" });
+  if (error) {
+    throw new Error(error.message || "thread_facts persist failed");
+  }
+  const { error: pruneError } = await client
+    .from("sales_booking_packs")
+    .delete()
+    .eq("resource", resourceId)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
+    .eq("kind", SALES_BOOKING_THREAD_FACTS_KIND)
+    .lt("as_of", asOf);
+  if (pruneError) {
+    throw new Error(pruneError.message || "thread_facts prune failed");
+  }
+}
+
+/** Real readers for the dispatch. Cache persist is the only write. */
 export function createSalesBookingReadDependencies(
-  _client: SalesBookingReadClient,
+  client: SalesBookingReadClient,
 ): SalesBookingReadDependencies {
   return {
     readOpportunities: ({ pipelineId }) => readOpportunitiesLive(pipelineId),
     readDiary: ({ resourceId, scoperUserId, since, untilExclusive }) =>
       readDiaryLive(resourceId, scoperUserId, since, untilExclusive),
     readThread: ({ contactId }) => readThreadLive(contactId),
+    readContacts: (contactIds) => readContactsLive(contactIds),
+    readJobSites: ({ opportunityIds, contactIds }) =>
+      readJobSitesLive(client, opportunityIds, contactIds),
     now: () => new Date(),
+    loadThreadFactsCache: (resourceId) =>
+      loadThreadFactsCacheLive(client, resourceId),
+    persistThreadFactsCache: (resourceId, facts) =>
+      persistThreadFactsCacheLive(client, resourceId, facts),
   };
 }
 
