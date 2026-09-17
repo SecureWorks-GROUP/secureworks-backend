@@ -68,9 +68,13 @@ Additions:
 - **`stamp`** — `{present, as_of, approved, rejected, decisions, stage_moves}`
   from the latest `kind=stamp` row. The captain Send stamp; nothing is sent.
 - Per case **`proposal`** — `{disposition, day, window_start, window_end,
-  draft, why[]}` merged from that pack by opportunity id (`opp:<id>` maps to
-  the case opportunity id), or `null` when no pack row matched.
-- Per case **`stamp_state`** — `'none' | 'approved' | 'rejected'`.
+  draft, why[]}` merged from that pack by opportunity id. Pack row ids are
+  `opp:<ghlOpportunityId>`; merge strips the `opp:` prefix only (`opp-…`
+  is a live GHL id and is left intact). No match → `null`.
+- Per case **`stamp_state`** — `'none' | 'approved' | 'rejected'`. Stamp
+  `approved` and `rejected` lists carry the door's bare GHL opportunity ids
+  (the case ids); pack-style `opp:<id>` is also accepted. Matching a case
+  uses both forms.
 - **`drafts`** — filled from the pack's drafts map (opportunity id → text).
   Empty `{}` when no pack is present.
 

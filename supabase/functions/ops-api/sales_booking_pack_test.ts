@@ -27,6 +27,7 @@ import {
   salesBookingPackPublishAction,
   SalesBookingPackError,
   salesBookingStampReadAction,
+  salesBookingStampStateForCase,
   salesBookingStampWriteAction,
 } from "./sales_booking_pack.ts";
 import {
@@ -283,6 +284,19 @@ Deno.test("pack row id opp:<id> maps onto the case opportunity id", () => {
     "opp:opp-1": "Hi Jane",
     "other": 1,
   }), { "opp-1": "Hi Jane" });
+});
+
+Deno.test("stamp_state matches bare GHL opportunity ids and opp:<id>", () => {
+  const stamp = {
+    captain: "marnin",
+    approved: ["opp-1"],
+    rejected: ["opp:opp-2"],
+    decisions: {},
+    stage_moves: [],
+  };
+  assertEquals(salesBookingStampStateForCase("opp-1", stamp), "approved");
+  assertEquals(salesBookingStampStateForCase("opp-2", stamp), "rejected");
+  assertEquals(salesBookingStampStateForCase("opp-3", stamp), "none");
 });
 
 Deno.test("publish then read merge puts proposal and draft on the matching case", async () => {
