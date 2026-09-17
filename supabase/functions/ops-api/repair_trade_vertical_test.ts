@@ -21,10 +21,9 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
+  _canSubmitWorkOrderInvoice,
   _CREW_READY_STATUSES,
   _jobFamilyOf,
   _jobIsRepairFamily,
@@ -35,7 +34,6 @@ import {
   _REPAIR_POOL_READY_STATUSES,
   _resolveManagerVisibility,
   _resolveWeeklyWorkOrderInvoice,
-  _canSubmitWorkOrderInvoice,
   _scopeCalendarPayloadToVerticals,
   _tradeCompleteMyJobForTest,
   _tradeJobDetailForTest,
@@ -446,7 +444,10 @@ Deno.test("completion evidence: a fencing job tagged family=repair still require
   assertEquals(_jobVertical(SWF_261343), "repair");
   assertEquals(completionEvidenceVertical(SWF_261343), "fencing");
   assertEquals(completionEvidenceVertical({ type: " Fencing " }), "fencing");
-  assertEquals(completionEvidenceApplies(completionEvidenceVertical(SWF_261343)), true);
+  assertEquals(
+    completionEvidenceApplies(completionEvidenceVertical(SWF_261343)),
+    true,
+  );
 
   const tables: string[] = [];
   const client = {
@@ -472,14 +473,23 @@ Deno.test("completion evidence: a fencing job tagged family=repair still require
   assertEquals(ev.applies, true);
   assertEquals(ev.satisfied, false);
   assertEquals(ev.missing, ["completion_photos", "neighbour_signoff"]);
-  assert(tables.includes("job_media"), "evidence was actually read for the fencing job");
+  assert(
+    tables.includes("job_media"),
+    "evidence was actually read for the fencing job",
+  );
 });
 
 Deno.test("complete_my_job: a fencing job tagged family=repair is refused end to end until evidence is on file", async () => {
   const tables: Tables = {
     jobs: [{ ...SWF_261343 }],
     job_assignments: [
-      { id: "a-lead", job_id: SWF_261343.id, user_id: "u-lead", status: "scheduled", is_ghost: false },
+      {
+        id: "a-lead",
+        job_id: SWF_261343.id,
+        user_id: "u-lead",
+        status: "scheduled",
+        is_ghost: false,
+      },
     ],
     job_media: [],
     job_events: [],
@@ -493,11 +503,21 @@ Deno.test("complete_my_job: a fencing job tagged family=repair is refused end to
   } as any;
   const access = { orgId: ORG_A, managedVerticals: [] as string[] };
   await assertRejects(
-    () => _tradeCompleteMyJobForTest(makeClient(tables), { jobId: SWF_261343.id }, lead, access),
+    () =>
+      _tradeCompleteMyJobForTest(
+        makeClient(tables),
+        { jobId: SWF_261343.id },
+        lead,
+        access,
+      ),
     Error,
     "cannot be marked complete yet",
   );
-  assertEquals(tables.jobs[0].status, "processing", "job status untouched by the refused completion");
+  assertEquals(
+    tables.jobs[0].status,
+    "processing",
+    "job status untouched by the refused completion",
+  );
 });
 
 // ── my_jobs open pools: repair pool statuses + make-safe pool exclusion ──────
@@ -505,10 +525,32 @@ Deno.test("complete_my_job: a fencing job tagged family=repair is refused end to
 // JSON-path column inside or() (`metadata->>ses_family.eq.repair`) resolves
 // against the row's metadata object, and every query is recorded.
 
-type PoolJob = { id: string; type: string; status: string; job_number?: string; metadata?: any };
-type PoolAssignment = { id: string; user_id: string; status: string; scheduled_date: string; job_id: string };
-type PoolDetail = { job_id: string; substatus?: string | null; report_received_at?: string | null; report_sent_at?: string | null; invoice_ready_at?: string | null };
-type PoolFixtures = { assignments: PoolAssignment[]; jobs: PoolJob[]; details?: PoolDetail[] };
+type PoolJob = {
+  id: string;
+  type: string;
+  status: string;
+  job_number?: string;
+  metadata?: any;
+};
+type PoolAssignment = {
+  id: string;
+  user_id: string;
+  status: string;
+  scheduled_date: string;
+  job_id: string;
+};
+type PoolDetail = {
+  job_id: string;
+  substatus?: string | null;
+  report_received_at?: string | null;
+  report_sent_at?: string | null;
+  invoice_ready_at?: string | null;
+};
+type PoolFixtures = {
+  assignments: PoolAssignment[];
+  jobs: PoolJob[];
+  details?: PoolDetail[];
+};
 type PoolQuery = {
   table: string;
   eq: Record<string, unknown>;
@@ -536,7 +578,9 @@ function poolMatchOr(row: Record<string, any>, orStr: string): boolean {
     const val = rest.join(".");
     const cell = poolCell(row, col);
     if (op === "eq") return cell === val;
-    if (op === "ilike") return cell.toLowerCase().startsWith(val.replace(/%$/, "").toLowerCase());
+    if (op === "ilike") {
+      return cell.toLowerCase().startsWith(val.replace(/%$/, "").toLowerCase());
+    }
     return false;
   });
 }
@@ -547,11 +591,18 @@ function poolNotInSet(filterStr: string): Set<string> {
   return out;
 }
 
-function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; error: null } {
+function resolvePoolQuery(
+  fx: PoolFixtures,
+  st: PoolQuery,
+): { data: unknown[]; error: null } {
   if (st.table === "job_assignments") {
     let rows = fx.assignments.slice();
-    if (st.eq.user_id != null) rows = rows.filter((a) => a.user_id === st.eq.user_id);
-    if (st.neq.status != null) rows = rows.filter((a) => a.status !== st.neq.status);
+    if (st.eq.user_id != null) {
+      rows = rows.filter((a) => a.user_id === st.eq.user_id);
+    }
+    if (st.neq.status != null) {
+      rows = rows.filter((a) => a.status !== st.neq.status);
+    }
     if (st.notIn) {
       const closed = poolNotInSet(st.notIn);
       rows = rows.filter((a) => !closed.has(a.status));
@@ -569,17 +620,27 @@ function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; e
         data: joined
           .filter((x) => st.inVals!.includes(x.a.job_id))
           .map(({ a }) => ({
-            id: a.id, job_id: a.job_id, scheduled_date: a.scheduled_date,
-            status: a.status, role: "lead", assignment_type: "install",
-            crew_name: null, user: { id: a.user_id, name: a.user_id },
+            id: a.id,
+            job_id: a.job_id,
+            scheduled_date: a.scheduled_date,
+            status: a.status,
+            role: "lead",
+            assignment_type: "install",
+            crew_name: null,
+            user: { id: a.user_id, name: a.user_id },
           })),
         error: null,
       };
     }
     return {
       data: joined.map(({ a, job }) => ({
-        id: a.id, scheduled_date: a.scheduled_date, status: a.status,
-        role: "lead", assignment_type: "install", crew_name: null, notes: null,
+        id: a.id,
+        scheduled_date: a.scheduled_date,
+        status: a.status,
+        role: "lead",
+        assignment_type: "install",
+        crew_name: null,
+        notes: null,
         jobs: { ...job },
       })),
       error: null,
@@ -588,10 +649,16 @@ function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; e
   if (st.table === "jobs") {
     let rows = fx.jobs.slice();
     if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
-    if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
+    if (st.eq.status != null) {
+      rows = rows.filter((j) => j.status === st.eq.status);
+    }
     if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
-    if (st.inCol === "status" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.status));
-    if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.id));
+    if (st.inCol === "status" && st.inVals) {
+      rows = rows.filter((j) => st.inVals!.includes(j.status));
+    }
+    if (st.inCol === "id" && st.inVals) {
+      rows = rows.filter((j) => st.inVals!.includes(j.id));
+    }
     if (st.refOr && st.refOr.referencedTable == null) {
       rows = rows.filter((j) => poolMatchOr(j, st.refOr!.str));
     }
@@ -603,7 +670,9 @@ function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; e
   }
   if (st.table === "makesafe_job_details") {
     let rows = (fx.details || []).slice();
-    if (st.inCol === "job_id" && st.inVals) rows = rows.filter((d) => st.inVals!.includes(d.job_id));
+    if (st.inCol === "job_id" && st.inVals) {
+      rows = rows.filter((d) => st.inVals!.includes(d.job_id));
+    }
     return { data: rows.map((d) => ({ ...d })), error: null };
   }
   return { data: [], error: null };
@@ -612,17 +681,43 @@ function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; e
 function makePoolClient(fx: PoolFixtures, recorded: PoolQuery[]) {
   function from(table: string) {
     const st: PoolQuery = {
-      table, eq: {}, neq: {}, gte: null, lt: null, refOr: null,
-      notIn: null, inCol: null, inVals: null,
+      table,
+      eq: {},
+      neq: {},
+      gte: null,
+      lt: null,
+      refOr: null,
+      notIn: null,
+      inCol: null,
+      inVals: null,
     };
     const b: any = {
       select: () => b,
-      eq: (k: string, v: unknown) => { st.eq[k] = v; return b; },
-      neq: (k: string, v: unknown) => { st.neq[k] = v; return b; },
-      gte: (k: string, v: string) => { if (k === "scheduled_date") st.gte = v; return b; },
-      lt: (k: string, v: string) => { if (k === "scheduled_date") st.lt = v; return b; },
-      in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
-      not: (k: string, op: string, v: string) => { if (k === "status" && op === "in") st.notIn = v; return b; },
+      eq: (k: string, v: unknown) => {
+        st.eq[k] = v;
+        return b;
+      },
+      neq: (k: string, v: unknown) => {
+        st.neq[k] = v;
+        return b;
+      },
+      gte: (k: string, v: string) => {
+        if (k === "scheduled_date") st.gte = v;
+        return b;
+      },
+      lt: (k: string, v: string) => {
+        if (k === "scheduled_date") st.lt = v;
+        return b;
+      },
+      in: (k: string, arr: unknown[]) => {
+        st.inCol = k;
+        st.inVals = arr;
+        return b;
+      },
+      not: (k: string, op: string, v: string) => {
+        if (k === "status" && op === "in") st.notIn = v;
+        return b;
+      },
       or: (s: string, opts?: { referencedTable?: string }) => {
         st.refOr = { str: s, referencedTable: opts?.referencedTable ?? null };
         return b;
@@ -632,7 +727,10 @@ function makePoolClient(fx: PoolFixtures, recorded: PoolQuery[]) {
       limit: () => b,
       range: () => b,
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
-      then: (resolve: any) => { recorded.push(st); resolve(resolvePoolQuery(fx, st)); },
+      then: (resolve: any) => {
+        recorded.push(st);
+        resolve(resolvePoolQuery(fx, st));
+      },
     };
     return b;
   }
@@ -648,27 +746,77 @@ function repairPoolFixtures(): PoolFixtures {
     assignments: [],
     jobs: [
       // SWMS-261319 shape: repair-family make-safe, never retyped, at 'processing'.
-      { id: "job-ms-repair", type: "makesafe", status: "processing", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
+      {
+        id: "job-ms-repair",
+        type: "makesafe",
+        status: "processing",
+        job_number: "SWMS-261319",
+        metadata: { ses_family: "repair" },
+      },
       // SWR- typed repair sits at 'accepted' after createMakesafeJob.
-      { id: "job-swr", type: "repair", status: "accepted", job_number: "SWR-1", metadata: {} },
+      {
+        id: "job-swr",
+        type: "repair",
+        status: "accepted",
+        job_number: "SWR-1",
+        metadata: {},
+      },
       // Ordinary make-safe, no family tag.
-      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
+      {
+        id: "job-ms-plain",
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-2",
+        metadata: {},
+      },
       // Fencing at a non-ready status: must stay out of the fencing pool.
-      { id: "job-f-processing", type: "fencing", status: "processing", job_number: "SWF-1", metadata: {} },
+      {
+        id: "job-f-processing",
+        type: "fencing",
+        status: "processing",
+        job_number: "SWF-1",
+        metadata: {},
+      },
       // Fencing at a ready status: pools for the fencing manager as before.
-      { id: "job-f-ready", type: "fencing", status: "order_confirmed", job_number: "SWF-2", metadata: {} },
+      {
+        id: "job-f-ready",
+        type: "fencing",
+        status: "order_confirmed",
+        job_number: "SWF-2",
+        metadata: {},
+      },
       // Patio at a non-ready status: unaffected.
-      { id: "job-p-accepted", type: "patio", status: "accepted", job_number: "SWP-1", metadata: {} },
+      {
+        id: "job-p-accepted",
+        type: "patio",
+        status: "accepted",
+        job_number: "SWP-1",
+        metadata: {},
+      },
     ],
   };
 }
 
-async function poolFor(managed: string[], fx: PoolFixtures, recorded: PoolQuery[] = [], role = "lead_installer") {
+async function poolFor(
+  managed: string[],
+  fx: PoolFixtures,
+  recorded: PoolQuery[] = [],
+  role = "lead_installer",
+) {
   const vis = _resolveManagerVisibility({ role, managedVerticals: managed });
-  const scope = _managerBoardVerticals({ isDispatcher: vis.isDispatcher, mode: "all", managedVerticals: managed });
+  const scope = _managerBoardVerticals({
+    isDispatcher: vis.isDispatcher,
+    mode: "all",
+    managedVerticals: managed,
+  });
   const g = await myJobs(
-    makePoolClient(fx, recorded), "u-viewer",
-    vis.isDispatcher, vis.isDispatcher, vis.isMakesafeManager, vis.poolVerticals, scope,
+    makePoolClient(fx, recorded),
+    "u-viewer",
+    vis.isDispatcher,
+    vis.isDispatcher,
+    vis.isMakesafeManager,
+    vis.poolVerticals,
+    scope,
   );
   return poolIds(g);
 }
@@ -676,30 +824,60 @@ async function poolFor(managed: string[], fx: PoolFixtures, recorded: PoolQuery[
 Deno.test("repair pool: an unallocated repair-family make-safe at 'processing' surfaces for a repair division manager (SWMS-261319)", async () => {
   const recorded: PoolQuery[] = [];
   const pool = await poolFor(["repair"], repairPoolFixtures(), recorded);
-  assert(pool.includes("job-ms-repair"), "repair-family make-safe at processing pools");
+  assert(
+    pool.includes("job-ms-repair"),
+    "repair-family make-safe at processing pools",
+  );
   assert(pool.includes("job-swr"), "SWR- typed repair at accepted pools");
-  assertEquals(pool.includes("job-ms-plain"), false, "a plain make-safe is not repair work");
+  assertEquals(
+    pool.includes("job-ms-plain"),
+    false,
+    "a plain make-safe is not repair work",
+  );
   assertEquals(pool.includes("job-f-processing"), false);
   assertEquals(pool.includes("job-p-accepted"), false);
 
-  const repairQuery = recorded.find((q) => q.table === "jobs" && q.refOr?.str.includes("type.eq.repair"));
+  const repairQuery = recorded.find((q) =>
+    q.table === "jobs" && q.refOr?.str.includes("type.eq.repair")
+  );
   assert(repairQuery, "repair pool query issued");
   assertEquals(repairQuery!.inCol, "status");
   assertEquals(repairQuery!.inVals, [..._REPAIR_POOL_READY_STATUSES]);
-  for (const s of _CREW_READY_STATUSES) assert(_REPAIR_POOL_READY_STATUSES.includes(s));
-  for (const s of ["accepted", "processing", "scheduled"]) assert(_REPAIR_POOL_READY_STATUSES.includes(s));
+  for (const s of _CREW_READY_STATUSES) {
+    assert(_REPAIR_POOL_READY_STATUSES.includes(s));
+  }
+  for (const s of ["accepted", "processing", "scheduled"]) {
+    assert(_REPAIR_POOL_READY_STATUSES.includes(s));
+  }
 });
 
 Deno.test("repair pool: the fencing / patio pools keep exactly _CREW_READY_STATUSES (non-ready statuses still excluded)", async () => {
   const recorded: PoolQuery[] = [];
-  const pool = await poolFor(["fencing", "patio"], repairPoolFixtures(), recorded);
-  assert(pool.includes("job-f-ready"), "order_confirmed fencing pools as before");
-  assertEquals(pool.includes("job-f-processing"), false, "processing fencing does NOT pool");
-  assertEquals(pool.includes("job-p-accepted"), false, "accepted patio does NOT pool");
+  const pool = await poolFor(
+    ["fencing", "patio"],
+    repairPoolFixtures(),
+    recorded,
+  );
+  assert(
+    pool.includes("job-f-ready"),
+    "order_confirmed fencing pools as before",
+  );
+  assertEquals(
+    pool.includes("job-f-processing"),
+    false,
+    "processing fencing does NOT pool",
+  );
+  assertEquals(
+    pool.includes("job-p-accepted"),
+    false,
+    "accepted patio does NOT pool",
+  );
   assertEquals(pool.includes("job-ms-repair"), false);
   assertEquals(pool.includes("job-swr"), false);
   for (const vertical of ["fencing", "patio"]) {
-    const q = recorded.find((r) => r.table === "jobs" && r.eq.type === vertical);
+    const q = recorded.find((r) =>
+      r.table === "jobs" && r.eq.type === vertical
+    );
     assert(q, `${vertical} pool query issued`);
     assertEquals(q!.inVals, [..._CREW_READY_STATUSES]);
   }
@@ -709,23 +887,61 @@ Deno.test("make-safe pool: a repair-family make-safe no longer appears in a make
   const fx: PoolFixtures = {
     assignments: [],
     jobs: [
-      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
-      { id: "job-ms-repair", type: "makesafe", status: "accepted", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
-      { id: "job-ms-repair-legacy-family", type: "makesafe", status: "processing", job_number: "SWMS-3", metadata: { makesafe_job_family: "repair" } },
+      {
+        id: "job-ms-plain",
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-2",
+        metadata: {},
+      },
+      {
+        id: "job-ms-repair",
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-261319",
+        metadata: { ses_family: "repair" },
+      },
+      {
+        id: "job-ms-repair-legacy-family",
+        type: "makesafe",
+        status: "processing",
+        job_number: "SWMS-3",
+        metadata: { makesafe_job_family: "repair" },
+      },
     ],
   };
   const pool = await poolFor(["makesafe"], fx);
   assert(pool.includes("job-ms-plain"), "ordinary make-safe still pools");
-  assertEquals(pool.includes("job-ms-repair"), false, "ses_family=repair is not in the make-safe pool");
-  assertEquals(pool.includes("job-ms-repair-legacy-family"), false, "makesafe_job_family=repair is not in the make-safe pool");
+  assertEquals(
+    pool.includes("job-ms-repair"),
+    false,
+    "ses_family=repair is not in the make-safe pool",
+  );
+  assertEquals(
+    pool.includes("job-ms-repair-legacy-family"),
+    false,
+    "makesafe_job_family=repair is not in the make-safe pool",
+  );
 });
 
 Deno.test("make-safe pool: a manager of BOTH make-safe and repair sees the repair-family card once, via the repair pool", async () => {
   const fx: PoolFixtures = {
     assignments: [],
     jobs: [
-      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
-      { id: "job-ms-repair", type: "makesafe", status: "processing", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
+      {
+        id: "job-ms-plain",
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-2",
+        metadata: {},
+      },
+      {
+        id: "job-ms-repair",
+        type: "makesafe",
+        status: "processing",
+        job_number: "SWMS-261319",
+        metadata: { ses_family: "repair" },
+      },
     ],
   };
   const pool = await poolFor(["makesafe", "repair"], fx);
@@ -738,7 +954,9 @@ Deno.test("make-safe pool: a manager of BOTH make-safe and repair sees the repai
 
 function calendarPagingClient(rows: any[]) {
   function from(table: string) {
-    if (table !== "calendar_events") throw new Error(`unexpected table ${table}`);
+    if (table !== "calendar_events") {
+      throw new Error(`unexpected table ${table}`);
+    }
     const eq: Record<string, unknown> = {};
     const neq: Record<string, unknown> = {};
     const ors: string[] = [];
@@ -746,20 +964,41 @@ function calendarPagingClient(rows: any[]) {
     let range: [number, number] | null = null;
     const b: any = {
       select: () => b,
-      eq: (c: string, v: unknown) => { eq[c] = v; return b; },
-      neq: (c: string, v: unknown) => { neq[c] = v; return b; },
-      lte: (_c: string, v: string) => { lte = v; return b; },
-      or: (v: string) => { ors.push(v); return b; },
+      eq: (c: string, v: unknown) => {
+        eq[c] = v;
+        return b;
+      },
+      neq: (c: string, v: unknown) => {
+        neq[c] = v;
+        return b;
+      },
+      lte: (_c: string, v: string) => {
+        lte = v;
+        return b;
+      },
+      or: (v: string) => {
+        ors.push(v);
+        return b;
+      },
       order: () => b,
-      range: (a: number, z: number) => { range = [a, z]; return b; },
+      range: (a: number, z: number) => {
+        range = [a, z];
+        return b;
+      },
       then: (resolve: (v: unknown) => void) => {
         let result = rows.slice();
-        for (const [c, v] of Object.entries(eq)) result = result.filter((r) => r[c] === v);
-        for (const [c, v] of Object.entries(neq)) result = result.filter((r) => r[c] !== v);
+        for (const [c, v] of Object.entries(eq)) {
+          result = result.filter((r) => r[c] === v);
+        }
+        for (const [c, v] of Object.entries(neq)) {
+          result = result.filter((r) => r[c] !== v);
+        }
         if (lte) result = result.filter((r) => r.scheduled_date <= lte!);
         for (const clause of ors) {
           if (clause.startsWith("scheduled_end.gte.")) {
-            const from = clause.match(/scheduled_end\.gte\.(\d{4}-\d{2}-\d{2})/)?.[1] || "";
+            const from =
+              clause.match(/scheduled_end\.gte\.(\d{4}-\d{2}-\d{2})/)?.[1] ||
+              "";
             result = result.filter((r) =>
               (r.scheduled_end != null && r.scheduled_end >= from) ||
               (r.scheduled_end == null && r.scheduled_date >= from)
@@ -789,7 +1028,11 @@ const CAL_HUGO: TradeAuthContext = {
   managedVerticals: ["makesafe"],
 };
 
-function calRow(assignmentId: string, jobNumber: string, jobFamily: string | null) {
+function calRow(
+  assignmentId: string,
+  jobNumber: string,
+  jobFamily: string | null,
+) {
   return {
     assignment_id: assignmentId,
     job_id: `job-${assignmentId}`,
@@ -815,17 +1058,33 @@ Deno.test("trade calendar: a classifier-dropped boundary row does not break trun
   const client = calendarPagingClient(rows);
   const page1 = await tradeCalendarEvents(
     client,
-    new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2", offset: "0" }),
+    new URLSearchParams({
+      from: "2026-07-13",
+      to: "2026-07-21",
+      mode: "all",
+      page_size: "2",
+      offset: "0",
+    }),
     CAL_HUGO,
     false,
   );
-  assertEquals(page1.events.map((e: any) => e.assignment_id), ["a1"], "the dropped boundary row shortens the page; a3 must NOT leak onto page 1");
+  assertEquals(
+    page1.events.map((e: any) => e.assignment_id),
+    ["a1"],
+    "the dropped boundary row shortens the page; a3 must NOT leak onto page 1",
+  );
   assertEquals(page1.truncated, true, "the raw lookahead saw a third row");
   assertEquals(page1.next_offset, 2);
 
   const page2 = await tradeCalendarEvents(
     client,
-    new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2", offset: String(page1.next_offset) }),
+    new URLSearchParams({
+      from: "2026-07-13",
+      to: "2026-07-21",
+      mode: "all",
+      page_size: "2",
+      offset: String(page1.next_offset),
+    }),
     CAL_HUGO,
     false,
   );
@@ -833,9 +1092,19 @@ Deno.test("trade calendar: a classifier-dropped boundary row does not break trun
   assertEquals(page2.truncated, false);
   assertEquals(page2.next_offset, null);
 
-  const seen = [...page1.events, ...page2.events].map((e: any) => e.assignment_id);
-  assertEquals(new Set(seen).size, seen.length, "no row emitted twice across pages");
-  assertEquals(seen.includes("a2"), false, "the repair-family row never reaches a makesafe-only view");
+  const seen = [...page1.events, ...page2.events].map((e: any) =>
+    e.assignment_id
+  );
+  assertEquals(
+    new Set(seen).size,
+    seen.length,
+    "no row emitted twice across pages",
+  );
+  assertEquals(
+    seen.includes("a2"),
+    false,
+    "the repair-family row never reaches a makesafe-only view",
+  );
 });
 
 Deno.test("trade calendar: the same rows are all returned, once, for a repair+makesafe manager", async () => {
@@ -844,10 +1113,34 @@ Deno.test("trade calendar: the same rows are all returned, once, for a repair+ma
     calRow("a2", "SWMS-261319", "repair"),
     calRow("a3", "SWMS-3", null),
   ];
-  const viewer: TradeAuthContext = { ...CAL_HUGO, managedVerticals: ["makesafe", "repair"] };
+  const viewer: TradeAuthContext = {
+    ...CAL_HUGO,
+    managedVerticals: ["makesafe", "repair"],
+  };
   const client = calendarPagingClient(rows);
-  const p1 = await tradeCalendarEvents(client, new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2" }), viewer, false);
-  const p2 = await tradeCalendarEvents(client, new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2", offset: String(p1.next_offset) }), viewer, false);
+  const p1 = await tradeCalendarEvents(
+    client,
+    new URLSearchParams({
+      from: "2026-07-13",
+      to: "2026-07-21",
+      mode: "all",
+      page_size: "2",
+    }),
+    viewer,
+    false,
+  );
+  const p2 = await tradeCalendarEvents(
+    client,
+    new URLSearchParams({
+      from: "2026-07-13",
+      to: "2026-07-21",
+      mode: "all",
+      page_size: "2",
+      offset: String(p1.next_offset),
+    }),
+    viewer,
+    false,
+  );
   assertEquals(p1.events.map((e: any) => e.assignment_id), ["a1", "a2"]);
   assertEquals(p2.events.map((e: any) => e.assignment_id), ["a3"]);
   assertEquals(p2.truncated, false);
@@ -857,23 +1150,49 @@ Deno.test("make-safe pool: a dispatcher still sees an unallocated repair-family 
   const fx = (): PoolFixtures => ({
     assignments: [],
     jobs: [
-      { id: "job-ms-repair", type: "makesafe", status: "processing", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
-      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
+      {
+        id: "job-ms-repair",
+        type: "makesafe",
+        status: "processing",
+        job_number: "SWMS-261319",
+        metadata: { ses_family: "repair" },
+      },
+      {
+        id: "job-ms-plain",
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-2",
+        metadata: {},
+      },
     ],
     details: [
       { job_id: "job-ms-repair", substatus: "pending_allocation" },
       { job_id: "job-ms-plain", substatus: "pending_allocation" },
     ],
   });
-  const dispatcherVis = _resolveManagerVisibility({ role: "ops_manager", managedVerticals: [] });
+  const dispatcherVis = _resolveManagerVisibility({
+    role: "ops_manager",
+    managedVerticals: [],
+  });
   assertEquals(dispatcherVis.isDispatcher, true);
-  assertEquals(dispatcherVis.poolVerticals.includes("repair"), false, "a pure dispatcher gains no repair pool");
+  assertEquals(
+    dispatcherVis.poolVerticals.includes("repair"),
+    false,
+    "a pure dispatcher gains no repair pool",
+  );
   const dispatcherPool = await poolFor([], fx(), [], "ops_manager");
-  assert(dispatcherPool.includes("job-ms-repair"), "Hugo-class dispatcher keeps SWMS-261319 in the make-safe pool");
+  assert(
+    dispatcherPool.includes("job-ms-repair"),
+    "Hugo-class dispatcher keeps SWMS-261319 in the make-safe pool",
+  );
   assert(dispatcherPool.includes("job-ms-plain"));
 
   const managerPool = await poolFor(["makesafe"], fx());
-  assertEquals(managerPool.includes("job-ms-repair"), false, "a make-safe-only manager cannot action it, so it is not offered");
+  assertEquals(
+    managerPool.includes("job-ms-repair"),
+    false,
+    "a make-safe-only manager cannot action it, so it is not offered",
+  );
   assert(managerPool.includes("job-ms-plain"));
 });
 
@@ -881,33 +1200,89 @@ Deno.test("repair pool: a freshly minted repair job still at company_contact_req
   const fx: PoolFixtures = {
     assignments: [],
     jobs: [
-      { id: "job-swr-new", type: "repair", status: "accepted", job_number: "SWR-9", metadata: {} },
-      { id: "job-ms-repair-new", type: "makesafe", status: "accepted", job_number: "SWMS-9", metadata: { ses_family: "repair" } },
-      { id: "job-ms-repair-reported", type: "makesafe", status: "processing", job_number: "SWMS-10", metadata: { ses_family: "repair" } },
-      { id: "job-repair-legacy", type: "repair", status: "accepted", job_number: "SWR-1", metadata: {} },
+      {
+        id: "job-swr-new",
+        type: "repair",
+        status: "accepted",
+        job_number: "SWR-9",
+        metadata: {},
+      },
+      {
+        id: "job-ms-repair-new",
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-9",
+        metadata: { ses_family: "repair" },
+      },
+      {
+        id: "job-ms-repair-reported",
+        type: "makesafe",
+        status: "processing",
+        job_number: "SWMS-10",
+        metadata: { ses_family: "repair" },
+      },
+      {
+        id: "job-repair-legacy",
+        type: "repair",
+        status: "accepted",
+        job_number: "SWR-1",
+        metadata: {},
+      },
     ],
     details: [
       { job_id: "job-swr-new", substatus: "company_contact_required" },
       { job_id: "job-ms-repair-new", substatus: "company_contact_required" },
-      { job_id: "job-ms-repair-reported", substatus: "processing", report_received_at: "2026-09-10T00:00:00Z" },
+      {
+        job_id: "job-ms-repair-reported",
+        substatus: "processing",
+        report_received_at: "2026-09-10T00:00:00Z",
+      },
     ],
   };
   const recorded: PoolQuery[] = [];
   const pool = await poolFor(["repair"], fx, recorded);
-  assertEquals(pool.includes("job-swr-new"), false, "ops's admin queue is not open work");
+  assertEquals(
+    pool.includes("job-swr-new"),
+    false,
+    "ops's admin queue is not open work",
+  );
   assertEquals(pool.includes("job-ms-repair-new"), false);
-  assertEquals(pool.includes("job-ms-repair-reported"), false, "report already in is not open work");
-  assert(pool.includes("job-repair-legacy"), "no detail row -> allocatable on status alone");
-  const detailRead = recorded.find((q) => q.table === "makesafe_job_details" && q.inCol === "job_id");
-  assert(detailRead, "repair candidates are screened through makesafe_job_details");
+  assertEquals(
+    pool.includes("job-ms-repair-reported"),
+    false,
+    "report already in is not open work",
+  );
+  assert(
+    pool.includes("job-repair-legacy"),
+    "no detail row -> allocatable on status alone",
+  );
+  const detailRead = recorded.find((q) =>
+    q.table === "makesafe_job_details" && q.inCol === "job_id"
+  );
+  assert(
+    detailRead,
+    "repair candidates are screened through makesafe_job_details",
+  );
 });
 
 Deno.test("repair pool: the same job is offered once its substatus clears company_contact_required", async () => {
   const fx: PoolFixtures = {
     assignments: [],
     jobs: [
-      { id: "job-swr-new", type: "repair", status: "accepted", job_number: "SWR-9", metadata: {} },
-      { id: "job-ms-repair-new", type: "makesafe", status: "processing", job_number: "SWMS-9", metadata: { ses_family: "repair" } },
+      {
+        id: "job-swr-new",
+        type: "repair",
+        status: "accepted",
+        job_number: "SWR-9",
+        metadata: {},
+      },
+      {
+        id: "job-ms-repair-new",
+        type: "makesafe",
+        status: "processing",
+        job_number: "SWMS-9",
+        metadata: { ses_family: "repair" },
+      },
     ],
     details: [
       { job_id: "job-swr-new", substatus: "pending_allocation" },
@@ -935,7 +1310,12 @@ function repairFamilyWorkOrder() {
     scheduled_date: "2026-08-26",
     assigned_user_id: null,
     site_address: "1 Duncraig Rd",
-    scope_items: [{ description: "Fence panel repair", quantity: 2, unit: "ea", unit_price: 120 }],
+    scope_items: [{
+      description: "Fence panel repair",
+      quantity: 2,
+      unit: "ea",
+      unit_price: 120,
+    }],
     jobs: {
       id: WO_JOB_ID,
       org_id: ORG_A,
@@ -964,7 +1344,10 @@ function weeklyLaneClient(workOrders: any[]): any {
     from(table: string) {
       let selected = "";
       const b: any = {
-        select(columns: string) { selected = columns; return b; },
+        select(columns: string) {
+          selected = columns;
+          return b;
+        },
         eq: () => b,
         in: () => b,
         lte: () => b,
@@ -982,8 +1365,20 @@ function weeklyLaneClient(workOrders: any[]): any {
   };
 }
 
-const RITA_CTX: TradeAuthContext = { id: RITA, email: "rita@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: ["repair"] };
-const HUGO_CTX: TradeAuthContext = { id: HUGO, email: "hugo@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: ["makesafe"] };
+const RITA_CTX: TradeAuthContext = {
+  id: RITA,
+  email: "rita@example.test",
+  orgId: ORG_A,
+  role: "lead_installer",
+  managedVerticals: ["repair"],
+};
+const HUGO_CTX: TradeAuthContext = {
+  id: HUGO,
+  email: "hugo@example.test",
+  orgId: ORG_A,
+  role: "lead_installer",
+  managedVerticals: ["makesafe"],
+};
 
 Deno.test("work-order invoice authz: the weekly lane and the single door agree on a repair-family job", async () => {
   const wo = repairFamilyWorkOrder();
@@ -995,15 +1390,30 @@ Deno.test("work-order invoice authz: the weekly lane and the single door agree o
 
   // Weekly lane, driven end to end through its own select projection.
   const forRita = await _resolveWeeklyWorkOrderInvoice(
-    weeklyLaneClient([repairFamilyWorkOrder()]), RITA_CTX, false, "2026-08-24", "2026-08-30", body,
+    weeklyLaneClient([repairFamilyWorkOrder()]),
+    RITA_CTX,
+    false,
+    "2026-08-24",
+    "2026-08-30",
+    body,
   );
-  assertEquals(forRita.job_blocks.length, 1, "repair division manager is authorised on the weekly lane too");
+  assertEquals(
+    forRita.job_blocks.length,
+    1,
+    "repair division manager is authorised on the weekly lane too",
+  );
   assertEquals(forRita.job_blocks[0].source_work_order_id, WO_ID);
 
   await assertRejects(
-    () => _resolveWeeklyWorkOrderInvoice(
-      weeklyLaneClient([repairFamilyWorkOrder()]), HUGO_CTX, false, "2026-08-24", "2026-08-30", body,
-    ),
+    () =>
+      _resolveWeeklyWorkOrderInvoice(
+        weeklyLaneClient([repairFamilyWorkOrder()]),
+        HUGO_CTX,
+        false,
+        "2026-08-24",
+        "2026-08-30",
+        body,
+      ),
     Error,
     "outside your assigned or managed work",
   );

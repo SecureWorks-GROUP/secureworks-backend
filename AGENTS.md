@@ -2475,54 +2475,29 @@ tenant scoping, and client follow-up, lives in
 `_managerBoardVerticals`, and `_resolveTradeJobFeedLens` in `ops-api/index.ts`
 aligned with that document and their regression tests.
 
-**Repair is a first-class trade vertical** (2026-09-17, Captain: "there's
-fencing, there's patio, and now there's repair. It's the same theory"),
+**Repair is a first-class trade vertical** (Captain 2026-09-17; contract owned
+by the 2026-09-17 addendum of `docs/trade-all-means-all-v1.md`).
 `_MANAGED_VERTICALS` includes it. A job is repair whenever `jobs.type='repair'`
-OR its family metadata says so (`metadata.ses_family` / `.makesafe_job_family`)
-— mirroring `isInsuranceRepairFamily` (`insurance_repairs_board.ts`), the
-Repairs/make-safe boards' own rule — because `update_makesafe_job_family` never
+OR its family metadata says so (`metadata.ses_family` /
+`.makesafe_job_family`), mirroring `isInsuranceRepairFamily`
+(`insurance_repairs_board.ts`), because `update_makesafe_job_family` never
 retypes a card (the SWR- mint is a one-way supervised door, ruling
-2026-08-28), so a family-tagged make-safe/fencing job stays that `jobs.type`
-forever by design. `_jobVertical` (`index.ts`) is the ONE classifier and checks
-repair FIRST, before the make-safe test, via `_jobIsRepairFamily`; it accepts
-either a full `jobs` row (`.metadata`) or a light calendar-row shape carrying
-the projected `job_family` column. Every vertical decision routes through it —
-`_resolveManagerVisibility`, `_resolveAllocationAuthz`, `resolveTradeJobAccessTier`,
-`tradeViewerQuoteVisibleForJob` — so a repair division manager gets the repair
-pool + allocation rights exactly like any other vertical, and a make-safe (or
-fencing) manager LOSES automatic access to a job the moment its family says
-repair. Trade-facing reads (`trade_calendar`, the office `calendar` action for
-a division-manager JWT, `my_jobs`, `my_work_orders`, `trade_job_detail`) all
-carry `job_family` (nullable) and a derived `vertical` field without ever
-mutating `jobs.type`; `trade_job_detail` additionally surfaces a `repair` block
-(`builder_work_order_number` / `builder_po_number` / `builder_claim_ref` /
-`repair_stage`) for a repair-family job — through the SAME normal detail path
-every job takes (documents/notes/assignments/POs there are already
-unconditional on job type; there is no separate make-safe detail branch to
-route around). Each SQL vertical filter (`tradeCalendarVerticalFilter`, the
-myJobs generic/manager-board pool queries, `tradeWorkOrders`' filter) is a
-deliberate SUPERSET — flat clauses only, no PostgREST `and()/or()` nesting, so
-the existing flat-parsing test fixtures keep working — and the exact "repair
-wins" precedence is enforced exactly once per surface, afterward, by
-re-classifying each row through `_jobVertical`. The make-safe board's own
-`excludeInsuranceRepairs` projections are untouched; a repair-family job is no
-longer served ONLY through that board. Two rulings bound the vertical
-(2026-09-17): the fencing completion-evidence gate (photos + neighbour
-sign-off before invoice / completion) keys on raw `jobs.type` through
-`completionEvidenceVertical` (`trade_completion_evidence.ts`), never on
-`_jobVertical`, so a fencing job whose family says repair is not relaxed;
-and the repair open pool admits `_REPAIR_POOL_READY_STATUSES` (crew-ready
-plus `accepted` / `processing`), PROVISIONAL until the repair lifecycle is
-ruled, while the fencing / patio / decking pools keep `_CREW_READY_STATUSES`
-screened through the same `isAllocatableMakesafePoolDetail` read the
-make-safe pool uses (no detail row still admits), and the my_jobs make-safe
-pool drops repair-family rows for non-dispatchers only (a dispatcher's
-allocation is never vertical-refused, so their pool keeps them). `tradeCalendarEvents`
-decides truncation and `next_offset` on the raw lookahead and narrows only the
-returned page. Both work-order invoice doors (`submit_work_order_invoice` and
-the weekly `_resolveWeeklyWorkOrderInvoice`) select `metadata` on the `jobs`
-embed so `_canSubmitWorkOrderInvoice` answers identically for a repair-family
-job. Tests: `repair_trade_vertical_test.ts`.
+2026-08-28). `_jobVertical` (`index.ts`) is the ONE classifier and checks
+repair FIRST via `_jobIsRepairFamily`; every vertical decision
+(`_resolveManagerVisibility`, `_resolveAllocationAuthz`,
+`resolveTradeJobAccessTier`, `tradeViewerQuoteVisibleForJob`) routes through
+it, so any `jobs` select feeding one of them must select `metadata`. Per-vertical
+SQL filters are deliberate flat SUPERSETS (no PostgREST `and()/or()` nesting),
+and "repair wins" is enforced once per surface afterward by re-classifying
+rows through `_jobVertical`. Trade reads carry additive `job_family` /
+`vertical` (and `trade_job_detail` a `repair` block) without ever mutating
+`jobs.type`; the make-safe board's `excludeInsuranceRepairs` projections are
+untouched. Two exceptions are load-bearing: the fencing completion-evidence
+gate keys on raw `jobs.type` through `completionEvidenceVertical`
+(`trade_completion_evidence.ts`), never `_jobVertical`, so a fencing job whose
+family says repair is not relaxed; and the repair open pool's
+`_REPAIR_POOL_READY_STATUSES` is PROVISIONAL until the repair lifecycle is
+ruled. Tests: `repair_trade_vertical_test.ts`.
 
 The 2026-08-03 trade crew/detail payload, named-lead contract, visibility
 narrowing, diagnosis, and deployment caveats are owned by
