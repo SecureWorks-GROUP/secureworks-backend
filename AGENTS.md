@@ -2576,6 +2576,23 @@ migration; `boolean NOT NULL DEFAULT false` in production). Structural guard:
 `myjobs_ghost_rows_test.ts`; evidence:
 `docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
 
+**Every genuine, dated crew assignment auto-mirrors a ghost for the ops
+manager** (Captain 2026-09-17: "repair works that are scheduled need to be
+seen by Shaun as a ghost assignment too, just as any other job would"), across
+every job type — no vertical filtering. `ghost_observer_mirror.ts` is the one
+module: `ensureGhostObserverMirror` (idempotent create, skipped when the ops
+manager is himself the real assignee), `reconcileGhostObserverMirrorOnReschedule`
+(moves the mirror, or leaves it when a sibling crew row still covers the old
+date) and `cleanupGhostObserverMirrorForSpan` (removes it once no genuine crew
+row covers that job/date) are wired into `createAssignment`, `updateAssignment`,
+`deleteAssignment` and the legacy `approve_assignment_request` direct-insert
+writer — every place a real crew `job_assignments` row is written. The ops
+manager is resolved by `users.role = 'ops_manager'` at runtime, never a
+hard-coded id. `backfill_ghost_observers` (api_key-only, dry-run unless
+`apply:true`) mirrors the pre-existing population dated today or later. This
+is a write-side invariant only; every read-side ghost exclusion above is
+unchanged. Tests: `ghost_observer_auto_mirror_test.ts`.
+
 ## Every SES Measurement Names Its Denominator And Its Generation
 
 Two small modules carry plan v2's write-safety rule D.0/3, and every SES harness
