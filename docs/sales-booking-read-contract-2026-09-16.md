@@ -1,24 +1,31 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17)
 
 `GET ops-api?action=sales_booking_read` is the single read behind the Sales
 Booking view. It replaces the branch-local preview server
 (`scripts/sales-booking-local-api.mjs` on secureworks-ux
 `patio/sales-booking-20260912`) and keeps that script's response shape.
 
-Implementation and the full rationale: `supabase/functions/ops-api/sales_booking_read.ts`.
-Regressions: `supabase/functions/ops-api/sales_booking_read_test.ts`.
+Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
+Pack publish, captain stamp, and the read overlay:
+`supabase/functions/ops-api/sales_booking_pack.ts`.
+Regressions: `sales_booking_read_test.ts` and `sales_booking_pack_test.ts`
+beside those files.
 The GHL calendar window is one unpaged `/calendars/events` GET in
 `supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
 action (`userId` or `calendarId`, plus `start` and `end`).
 
-## It is read-only, and send stays held
+## The read writes nothing; send stays held
 
-No write of any kind: no Supabase mutation, no GHL write, no calendar create,
-no send. Every dependency is a reader. `send_hold: true` and
+`sales_booking_read` is still a reader: no Supabase mutation, no GHL write,
+no calendar create, no send. `send_hold: true` and
 `policy.{activation,send,calendar_write}: 'held'`
 are constants the view renders; they are not the enforcement, because this
 action has no send or calendar-write capability to gate.
+
+The first writes are `sales_booking_pack_publish` and
+`sales_booking_stamp_write` below. They persist pack/stamp rows only.
+Nothing is sent.
 
 ## Request
 
@@ -71,23 +78,31 @@ Additions:
   draft, why[]}` merged from that pack by opportunity id. Pack row ids are
   `opp:<ghlOpportunityId>`; merge strips the `opp:` prefix only (`opp-…`
   is a live GHL id and is left intact). No match → `null`.
+  `proposals` is the engine's `proposals.json`: a top-level array, or
+  `{leads: [...]}`. Window fields are `day`, `start`, `end`. `why[]` is
+  collected from the row's `why` and `failures` only.
 - Per case **`stamp_state`** — `'none' | 'approved' | 'rejected'`. Stamp
   `approved` and `rejected` lists carry the door's bare GHL opportunity ids
   (the case ids); pack-style `opp:<id>` is also accepted. Matching a case
   uses both forms.
-- **`drafts`** — filled from the pack's drafts map (opportunity id → text).
-  Empty `{}` when no pack is present.
+- **`drafts`** — filled from the pack's drafts map (opportunity id → text),
+  with a row `draft` filling a missing map entry. Empty `{}` when no pack
+  is present.
 
 Publish / stamp actions (same table, no send):
 
 - `POST sales_booking_pack_publish` (api key only): body
-  `{resource, week_start, as_of, proposals, coverage, drafts}` stores
-  `kind=pack`. Returns `{ok, id, as_of}`.
+  `{resource, week_start, as_of, proposals, coverage, drafts}` where
+  `proposals` is the engine's `proposals.json` (array or `{leads}`),
+  `coverage` its `coverage.json`, and `drafts` a map of opportunity id to
+  draft text. Stores `kind=pack`. Returns `{ok, id, as_of}`.
 - `POST sales_booking_stamp_write` (api key or signed-in
-  admin / owner / ops_manager): body `{resource, week_start, stamp}` stores
-  `kind=stamp` with `as_of` now. No other side effect.
+  admin / owner / ops_manager): body `{resource, week_start, stamp}` where
+  `stamp` is `{captain, approved, rejected, decisions, stage_moves}`.
+  Stores `kind=stamp` with `as_of` now. No other side effect.
 - `GET sales_booking_stamp_read` (api key only): `{resource, week_start}`
-  returns the latest stamp payload and `as_of`, or `{ok:true, stamp:null}`.
+  returns the latest stamp payload and `as_of`, or
+  `{ok:true, stamp:null, as_of:null}`.
 
 Table: `sales_booking_packs`. Latest = greatest `as_of` per
 `(resource, week_start, kind)`. An older pack is ignored. RLS on, no client

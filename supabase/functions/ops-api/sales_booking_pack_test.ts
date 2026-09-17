@@ -23,21 +23,19 @@ import {
   assertSalesBookingStampWriteAuth,
   loadSalesBookingPackOverlay,
   normaliseSalesBookingDrafts,
+  SalesBookingPackError,
   salesBookingPackOpportunityId,
   salesBookingPackPublishAction,
-  SalesBookingPackError,
   salesBookingStampReadAction,
   salesBookingStampStateForCase,
   salesBookingStampWriteAction,
 } from "./sales_booking_pack.ts";
-import {
-  _authorizeOpsApiAction,
-} from "./index.ts";
+import { _authorizeOpsApiAction } from "./index.ts";
 import {
   SALES_BOOKING_RESOURCES,
-  type SalesBookingReadResponse,
   salesBookingRead,
   type SalesBookingReadDependencies,
+  type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 
 const WEEK = "2026-09-14";
@@ -64,7 +62,7 @@ type PackRow = {
 function memoryPacks(initial: PackRow[] = []) {
   const store: PackRow[] = initial.map((row) => ({ ...row }));
   const builder = () => {
-    let filters: Array<(row: PackRow) => boolean> = [];
+    const filters: Array<(row: PackRow) => boolean> = [];
     let orderCol: keyof PackRow | null = null;
     let orderAsc = true;
     let limitN: number | null = null;
@@ -111,9 +109,10 @@ function memoryPacks(initial: PackRow[] = []) {
           week_start: String(row.week_start),
           kind: String(row.kind),
           as_of: String(row.as_of),
-          payload: (row.payload && typeof row.payload === "object"
-            ? row.payload
-            : {}) as Record<string, unknown>,
+          payload:
+            (row.payload && typeof row.payload === "object"
+              ? row.payload
+              : {}) as Record<string, unknown>,
           published_by: typeof row.published_by === "string"
             ? row.published_by
             : null,
@@ -131,9 +130,10 @@ function memoryPacks(initial: PackRow[] = []) {
           week_start: String(row.week_start),
           kind: String(row.kind),
           as_of: String(row.as_of),
-          payload: (row.payload && typeof row.payload === "object"
-            ? row.payload
-            : {}) as Record<string, unknown>,
+          payload:
+            (row.payload && typeof row.payload === "object"
+              ? row.payload
+              : {}) as Record<string, unknown>,
           published_by: typeof row.published_by === "string"
             ? row.published_by
             : null,
@@ -174,7 +174,10 @@ function memoryPacks(initial: PackRow[] = []) {
         const row = Array.isArray(data) ? data[0] ?? null : data;
         return Promise.resolve({ data: row, error: null });
       },
-      then(resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) {
+      then(
+        resolve: (value: unknown) => unknown,
+        reject?: (reason: unknown) => unknown,
+      ) {
         return Promise.resolve(run()).then(resolve, reject);
       },
     };
@@ -234,7 +237,11 @@ function readDeps(): SalesBookingReadDependencies {
           name: "Jane Smith",
           pipelineStageId: marninScopeStage,
           updatedAt: "2026-09-15T01:00:00.000Z",
-          contact: { id: "contact-1", name: "Jane Smith", city: "Canning Vale" },
+          contact: {
+            id: "contact-1",
+            name: "Jane Smith",
+            city: "Canning Vale",
+          },
         }],
         stages: { [marninScopeStage]: "New Lead (Call + Qualify)" },
         exhausted: true,
@@ -275,10 +282,13 @@ Deno.test("pack row id opp:<id> maps onto the case opportunity id", () => {
     "TelAKHzhxnCjKrExxQxE",
   );
   assertEquals(salesBookingPackOpportunityId("opp-1"), "opp-1");
-  assertEquals(normaliseSalesBookingDrafts({
-    "opp:opp-1": "Hi Jane",
-    "other": 1,
-  }), { "opp-1": "Hi Jane" });
+  assertEquals(
+    normaliseSalesBookingDrafts({
+      "opp:opp-1": "Hi Jane",
+      "other": 1,
+    }),
+    { "opp-1": "Hi Jane" },
+  );
 });
 
 Deno.test("stamp_state matches bare GHL opportunity ids and opp:<id>", () => {
@@ -324,7 +334,10 @@ Deno.test("publish then read merge puts proposal and draft on the matching case"
   });
 
   const fromMapOnly = applySalesBookingPackOverlay(
-    await salesBookingRead(readDeps(), { resource: "marnin", week_start: WEEK }),
+    await salesBookingRead(readDeps(), {
+      resource: "marnin",
+      week_start: WEEK,
+    }),
     {
       pack: {
         id: "pack-map-only",
@@ -340,7 +353,10 @@ Deno.test("publish then read merge puts proposal and draft on the matching case"
       stamp_error: null,
     },
   );
-  assertEquals(fromMapOnly.cases[0].proposal?.draft, "Hi Jane from drafts map.");
+  assertEquals(
+    fromMapOnly.cases[0].proposal?.draft,
+    "Hi Jane from drafts map.",
+  );
 });
 
 Deno.test("stale pack with an older as_of is ignored in favour of the latest", async () => {
@@ -470,11 +486,16 @@ Deno.test("unauthenticated publish is refused; jwt ops_manager stamp is accepted
   }
 
   const client = memoryPacks();
-  const published = await salesBookingStampWriteAction(client, OPS_MANAGER_AUTH, {
-    resource: "nithin",
-    week_start: WEEK,
-    stamp: { captain: "nithin", approved: [], rejected: [] },
-  }, new Date("2026-09-17T02:00:00.000Z"));
+  const published = await salesBookingStampWriteAction(
+    client,
+    OPS_MANAGER_AUTH,
+    {
+      resource: "nithin",
+      week_start: WEEK,
+      stamp: { captain: "nithin", approved: [], rejected: [] },
+    },
+    new Date("2026-09-17T02:00:00.000Z"),
+  );
   assertEquals(published.ok, true);
 
   await assertRejects(

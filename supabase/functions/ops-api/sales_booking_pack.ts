@@ -14,10 +14,10 @@
 import {
   perthWeekWindow,
   resolveSalesBookingResource,
-  SalesBookingRequestError,
   type SalesBookingCase,
   type SalesBookingCaseProposal,
   type SalesBookingReadResponse,
+  SalesBookingRequestError,
   type SalesBookingStampState,
 } from "./sales_booking_read.ts";
 
@@ -89,6 +89,7 @@ export function salesBookingPackOpportunityId(rowId: unknown): string | null {
   return raw;
 }
 
+/** Engine proposals.json is a top-level array or `{leads}`. */
 export function salesBookingPackProposalRows(
   proposals: unknown,
 ): Record<string, unknown>[] {
@@ -115,6 +116,7 @@ export function normaliseSalesBookingDrafts(
   return out;
 }
 
+/** why[] is `why` plus `failures`. Pack rows have no `checks` key. */
 function collectWhy(row: Record<string, unknown>): string[] {
   const buckets = [row.why, row.failures];
   const out: string[] = [];
@@ -134,6 +136,7 @@ export function projectSalesBookingProposal(
   const opportunityId = salesBookingPackOpportunityId(row.id);
   if (!opportunityId) return null;
   const window = isObject(row.window) ? row.window : null;
+  // Pack window is `{day, start, end}` only.
   const draftFromRow = typeof row.draft === "string" && row.draft
     ? row.draft
     : null;
@@ -216,7 +219,9 @@ export function emptySalesBookingPackOverlay(): SalesBookingPackOverlay {
   return { pack: null, stamp: null, pack_error: null, stamp_error: null };
 }
 
-export function emptySalesBookingStampView(): SalesBookingReadResponse["stamp"] {
+export function emptySalesBookingStampView(): SalesBookingReadResponse[
+  "stamp"
+] {
   return {
     present: false,
     as_of: null,
@@ -334,7 +339,8 @@ export function assertSalesBookingStampWriteAuth(
 ): void {
   if (auth.mode === "api_key") return;
   if (
-    auth.mode === "jwt" && STAFF_ROLES.has(String(auth.role || "").toLowerCase())
+    auth.mode === "jwt" &&
+    STAFF_ROLES.has(String(auth.role || "").toLowerCase())
   ) {
     return;
   }
@@ -405,7 +411,8 @@ async function insertPackRow(
     );
   }
   const id = data && typeof data.id === "string" ? data.id : "";
-  const asOf = data && (typeof data.as_of === "string" ? data.as_of : row.as_of);
+  const asOf = data &&
+    (typeof data.as_of === "string" ? data.as_of : row.as_of);
   if (!id) {
     throw new SalesBookingPackError(
       "sales_booking_packs write returned no id",
@@ -521,7 +528,9 @@ export async function salesBookingStampReadAction(
   client: PackClient,
   auth: SalesBookingPackAuth,
   params: { resource?: unknown; week_start?: unknown },
-): Promise<{ ok: true; stamp: SalesBookingStampPayload | null; as_of: string | null }> {
+): Promise<
+  { ok: true; stamp: SalesBookingStampPayload | null; as_of: string | null }
+> {
   assertSalesBookingStampReadAuth(auth);
   const resource = resolveSalesBookingResource(params.resource);
   const weekStart = resolveWeekStart(params.week_start);
