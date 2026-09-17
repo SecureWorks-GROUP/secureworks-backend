@@ -5,7 +5,9 @@
  *  - Publish stores kind=pack; the latest as_of is the one sales_booking_read
  *    merges. An older as_of still in the table is ignored.
  *  - Merge puts proposal + draft on the matching case (`opp:<id>` → opportunity
- *    id), fills top-level drafts, and sets stamp_state from the latest stamp.
+ *    id), fills top-level drafts, publishes `pack.proposals` from every pack
+ *    lead (opportunity id, or lead id when there is none), and sets
+ *    stamp_state from the latest stamp.
  *  - Stamp write then stamp read round-trips. Unauthenticated publish is
  *    refused. Only an allow-listed captain JWT may write a stamp; the API
  *    key and any other JWT are 403 stamp_write_requires_captain.
@@ -29,6 +31,7 @@ import {
   parseSalesBookingCaptainEmails,
   SalesBookingPackError,
   salesBookingPackOpportunityId,
+  salesBookingPackProposalsMap,
   salesBookingPackPublishAction,
   salesBookingStampReadAction,
   salesBookingStampStateForCase,
@@ -340,7 +343,11 @@ Deno.test("publish then read merge puts proposal and draft on the matching case"
   assertEquals(published.as_of, NEW_AS_OF);
 
   const payload = await publishedRead(client);
-  assertEquals(payload.pack, { present: true, as_of: NEW_AS_OF });
+  assertEquals(payload.pack.present, true);
+  assertEquals(payload.pack.as_of, NEW_AS_OF);
+  assertEquals(Object.keys(payload.pack.proposals), ["opp-1"]);
+  assertEquals(payload.pack.proposals["opp-1"].offer, true);
+  assertEquals(payload.pack.proposals["opp-1"].day, "Fri");
   assertEquals(payload.drafts["opp-1"], "Hi Jane from drafts map.");
   assertEquals(payload.cases.length, 1);
   assertEquals(payload.cases[0].stamp_state, "none");
@@ -410,6 +417,161 @@ Deno.test("stale pack with an older as_of is ignored in favour of the latest", a
   assertEquals(payload.cases[0].proposal?.disposition, "offer");
   assertEquals(payload.cases[0].proposal?.draft, "new draft");
   assertEquals(payload.drafts["opp-1"], "new draft");
+});
+
+const PACK_WINDOW = {
+  day: "Wed",
+  start: "2026-09-18T08:00:00+08:00",
+  end: "2026-09-18T09:30:00+08:00",
+};
+
+function fortyFivePackLeads(): Record<string, unknown>[] {
+  const leads: Record<string, unknown>[] = [];
+  for (let i = 1; i <= 45; i++) {
+    const noOpp = i === 45;
+    leads.push({
+      id: noOpp ? "lead-no-opp" : `opp:opp-${i}`,
+      opportunity_id: noOpp ? undefined : `opp-${i}`,
+      contact_id: `contact-${i}`,
+      name: `Lead ${i}`,
+      suburb: "Canning Vale",
+      stage: "Needs On Site Scope Urgently",
+      status: "open",
+      disposition: i <= 11 ? "offer" : "capacity",
+      window: PACK_WINDOW,
+      draft: i <= 11 ? `Draft ${i}` : null,
+      calendar_event_id: i === 1 ? "cal-1" : null,
+    });
+  }
+  return leads;
+}
+
+function twoOppReadDeps(): SalesBookingReadDependencies {
+  const stage = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[0];
+  const opp = (id: string, name: string) => ({
+    id,
+    name,
+    pipelineStageId: stage,
+    updatedAt: "2026-09-15T01:00:00.000Z",
+    contact: { id: `contact-${id}`, name, city: "Canning Vale" },
+  });
+  return {
+    ...readDeps(),
+    readOpportunities: () =>
+      Promise.resolve({
+        opportunities: [
+          opp("opp-1", "Lead 1"),
+          opp("opp-12", "Lead 12"),
+        ],
+        stages: { [stage]: "New Lead (Replied/ Contacted)" },
+        exhausted: true,
+        pages_scanned: 1,
+        total: 45,
+        reason: null,
+      }),
+  };
+}
+
+Deno.test("pack.proposals carries every lead even when the roster enumerates two", async () => {
+  const assembled = await salesBookingRead(twoOppReadDeps(), {
+    resource: "marnin",
+    week_start: WEEK,
+  });
+  assertEquals(assembled.cases.length, 2);
+  assertEquals(assembled.pack, { present: false, as_of: null, proposals: {} });
+
+  const payload = applySalesBookingPackOverlay(assembled, {
+    pack: {
+      id: "pack-45",
+      as_of: NEW_AS_OF,
+      payload: {
+        proposals: { leads: fortyFivePackLeads() },
+        coverage: { lead_count: 45 },
+        drafts: {},
+      },
+    },
+    stamp: null,
+    pack_error: null,
+    stamp_error: null,
+  });
+
+  assertEquals(payload.pack.present, true);
+  assertEquals(payload.pack.as_of, NEW_AS_OF);
+  assertEquals(Object.keys(payload.pack.proposals).length, 45);
+  assertEquals(
+    Object.values(payload.pack.proposals).filter((row) => row.offer).length,
+    11,
+  );
+  assertEquals(payload.cases.length, 2);
+  assertEquals(payload.pack.proposals["opp-1"].offer, true);
+  assertEquals(payload.pack.proposals["opp-1"].day, "Wed");
+  assertEquals(payload.pack.proposals["opp-1"].window, PACK_WINDOW);
+  assertEquals(payload.pack.proposals["opp-1"].draft, "Draft 1");
+  assertEquals(payload.pack.proposals["opp-1"].name, "Lead 1");
+  assertEquals(payload.pack.proposals["opp-1"].suburb, "Canning Vale");
+  assertEquals(payload.pack.proposals["opp-1"].opportunity_id, "opp-1");
+  assertEquals(payload.pack.proposals["opp-1"].contact_id, "contact-1");
+  assertEquals(
+    payload.pack.proposals["opp-1"].stage,
+    "Needs On Site Scope Urgently",
+  );
+  assertEquals(payload.pack.proposals["opp-1"].status, "open");
+  assertEquals(payload.pack.proposals["opp-1"].calendar_event_id, "cal-1");
+  assertEquals(payload.pack.proposals["opp-12"].offer, false);
+  assertEquals(payload.pack.proposals["opp-12"].disposition, "capacity");
+  assertEquals(payload.cases[0].proposal?.disposition, "offer");
+  assertEquals(payload.cases[1].proposal?.disposition, "capacity");
+
+  const degraded = applySalesBookingPackOverlay(
+    { ...assembled, cases: [] },
+    {
+      pack: {
+        id: "pack-45",
+        as_of: NEW_AS_OF,
+        payload: {
+          proposals: { leads: fortyFivePackLeads() },
+          coverage: { lead_count: 45 },
+          drafts: {},
+        },
+      },
+      stamp: null,
+      pack_error: null,
+      stamp_error: null,
+    },
+  );
+  assertEquals(degraded.cases.length, 0);
+  assertEquals(Object.keys(degraded.pack.proposals).length, 45);
+  assertEquals(
+    Object.values(degraded.pack.proposals).filter((row) => row.offer).length,
+    11,
+  );
+});
+
+Deno.test("pack.proposals keys a lead with no opportunity id by its lead id", () => {
+  const map = salesBookingPackProposalsMap({
+    leads: [{
+      id: "lead-no-opp",
+      name: "No Opp",
+      suburb: "Morley",
+      disposition: "offer",
+      window: PACK_WINDOW,
+      draft: "Hi",
+    }],
+  });
+  assertEquals(Object.keys(map), ["lead-no-opp"]);
+  assertEquals(map["lead-no-opp"].opportunity_id, null);
+  assertEquals(map["lead-no-opp"].offer, true);
+  assertEquals(map["lead-no-opp"].day, "Wed");
+});
+
+Deno.test("absent pack overlay keeps present false and an empty proposals map", async () => {
+  const assembled = await salesBookingRead(readDeps(), {
+    resource: "marnin",
+    week_start: WEEK,
+  });
+  const payload = applySalesBookingPackOverlay(assembled);
+  assertEquals(payload.pack, { present: false, as_of: null, proposals: {} });
+  assertEquals(payload.cases[0].proposal, null);
 });
 
 Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", async () => {

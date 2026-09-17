@@ -14,8 +14,8 @@
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
 // so the next read can serve cached conversation state and the opportunity
 // enumeration. Those are the only writes. No GHL mutation, no calendar
-// create, no send. Drafts and proposed windows come from the latest
-// kind=pack row, merged in after this read.
+// create, no send. Drafts, per-case `proposal`, and `pack.proposals` come
+// from the latest kind=pack row in the pack overlay after this read.
 //
 // ── HONESTY CONTRACT (wiki skill `secureworks-scope-booking`) ──
 //  1. Full population, or an explicit `coverage.full_population:false` naming
@@ -673,6 +673,37 @@ export interface SalesBookingCaseProposal {
   window_end: string | null;
   draft: string | null;
   why: string[];
+}
+
+/**
+ * One engine pack lead, keyed on `pack.proposals` by opportunity id (or the
+ * lead id when there is none). Independent of the roster and stage filter.
+ */
+export interface SalesBookingPackProposal {
+  disposition: string | null;
+  /** Window object as stored on the pack lead. */
+  window: unknown;
+  /** Stored pack `window.day`. */
+  day: string | null;
+  draft: string | null;
+  offer: boolean;
+  name: string | null;
+  suburb: string | null;
+  opportunity_id: string | null;
+  contact_id: string | null;
+  stage: string | null;
+  status: string | null;
+  calendar_event_id: string | null;
+}
+
+export interface SalesBookingPackView {
+  present: boolean;
+  as_of: string | null;
+  proposals: Record<string, SalesBookingPackProposal>;
+}
+
+export function emptySalesBookingPackView(): SalesBookingPackView {
+  return { present: false, as_of: null, proposals: {} };
 }
 
 export interface SalesBookingCase {
@@ -1577,7 +1608,7 @@ export interface SalesBookingReadResponse {
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
   drafts: Record<string, string>;
-  pack: { present: boolean; as_of: string | null };
+  pack: SalesBookingPackView;
   stamp: {
     present: boolean;
     as_of: string | null;
@@ -1734,7 +1765,7 @@ export function assembleSalesBookingRead(input: {
     // Pack overlay (proposals, drafts, stamp) is applied after this assemble
     // by sales_booking_pack.ts. Absent here means the engine has not published.
     drafts: {},
-    pack: { present: false, as_of: null },
+    pack: emptySalesBookingPackView(),
     stamp: {
       present: false,
       as_of: null,
