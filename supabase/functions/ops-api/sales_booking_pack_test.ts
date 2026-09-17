@@ -275,10 +275,6 @@ Deno.test("pack row id opp:<id> maps onto the case opportunity id", () => {
     "TelAKHzhxnCjKrExxQxE",
   );
   assertEquals(salesBookingPackOpportunityId("opp-1"), "opp-1");
-  assertEquals(
-    salesBookingPackOpportunityId("opp:x", "TelAKHzhxnCjKrExxQxE"),
-    "TelAKHzhxnCjKrExxQxE",
-  );
   assertEquals(normaliseSalesBookingDrafts({
     "opp:opp-1": "Hi Jane",
     "other": 1,

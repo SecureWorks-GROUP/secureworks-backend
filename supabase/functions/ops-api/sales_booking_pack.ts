@@ -78,16 +78,9 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item) => typeof item === "string").map((item) => item);
 }
 
-/** Strip `opp:` / `opp-` so a pack row id maps onto the case opportunity id. */
-export function salesBookingPackOpportunityId(
-  rowId: unknown,
-  opportunityId?: unknown,
-): string | null {
-  const raw = typeof opportunityId === "string" && opportunityId.trim()
-    ? opportunityId.trim()
-    : typeof rowId === "string"
-    ? rowId.trim()
-    : "";
+/** Strip `opp:` so a pack row id maps onto the case opportunity id. */
+export function salesBookingPackOpportunityId(rowId: unknown): string | null {
+  const raw = typeof rowId === "string" ? rowId.trim() : "";
   if (!raw) return null;
   // Pack row ids are `opp:<ghlOpportunityId>`. Do not strip `opp-`: that prefix
   // is a live GHL opportunity id in the booking-read fixtures (and can be one
@@ -123,7 +116,7 @@ export function normaliseSalesBookingDrafts(
 }
 
 function collectWhy(row: Record<string, unknown>): string[] {
-  const buckets = [row.why, row.checks, row.failures];
+  const buckets = [row.why, row.failures];
   const out: string[] = [];
   for (const bucket of buckets) {
     if (!Array.isArray(bucket)) continue;
@@ -138,10 +131,7 @@ export function projectSalesBookingProposal(
   row: Record<string, unknown>,
   drafts: Record<string, string>,
 ): { opportunity_id: string; proposal: SalesBookingCaseProposal } | null {
-  const opportunityId = salesBookingPackOpportunityId(
-    row.id,
-    row.opportunity_id,
-  );
+  const opportunityId = salesBookingPackOpportunityId(row.id);
   if (!opportunityId) return null;
   const window = isObject(row.window) ? row.window : null;
   const draftFromRow = typeof row.draft === "string" && row.draft
