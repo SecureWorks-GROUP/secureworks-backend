@@ -225,17 +225,18 @@ function coverageFixture() {
 }
 
 function readDeps(): SalesBookingReadDependencies {
+  const marninScopeStage = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[0];
   return {
     readOpportunities: () =>
       Promise.resolve({
         opportunities: [{
           id: "opp-1",
           name: "Jane Smith",
-          pipelineStageId: "stage-a",
+          pipelineStageId: marninScopeStage,
           updatedAt: "2026-09-15T01:00:00.000Z",
           contact: { id: "contact-1", name: "Jane Smith", city: "Canning Vale" },
         }],
-        stages: { "stage-a": "New Lead" },
+        stages: { [marninScopeStage]: "New Lead (Call + Qualify)" },
         exhausted: true,
         pages_scanned: 1,
         total: 1,
