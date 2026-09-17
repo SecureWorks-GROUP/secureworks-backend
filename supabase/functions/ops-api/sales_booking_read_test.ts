@@ -2967,6 +2967,94 @@ Deno.test("an incomplete live roster is persisted and the next read resumes from
   assertEquals(coldPersisted[0].start_after_id, "c-99");
 });
 
+Deno.test("force_refresh on an incomplete roster resumes from its cursor and merges", async () => {
+  const cached400 = Array.from({ length: 400 }, (_, i) =>
+    opportunity({ id: `opp-cache-${i}` }));
+  const live200 = Array.from({ length: 200 }, (_, i) =>
+    opportunity({ id: `opp-live-${i}` }));
+  const incomplete = cachedRoster({
+    opportunities: cached400,
+    exhausted: false,
+    reason: "time budget exhausted",
+    pages_scanned: 4,
+    total: 1012,
+    start_after: 4,
+    start_after_id: "c-399",
+    read_at: NOW.toISOString(),
+  });
+  const resumes: Array<{
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  }> = [];
+  const resolved = await resolveSalesBookingRoster({
+    cached: incomplete,
+    nowMs: NOW.getTime(),
+    forceRefresh: true,
+    live: (resume) => {
+      resumes.push(resume ?? {});
+      return Promise.resolve({
+        opportunities: live200,
+        stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+        exhausted: false,
+        pages_scanned: 2,
+        total: 1012,
+        reason: "time budget exhausted",
+        start_after: 6,
+        start_after_id: "c-599",
+      });
+    },
+  });
+  assertEquals(resumes, [{ startAfter: 4, startAfterId: "c-399" }]);
+  assertEquals(resolved.shouldPersist, true);
+  assertEquals(resolved.scan.opportunities.length, 600);
+  assertEquals(resolved.scan.opportunities[0]?.id, "opp-cache-0");
+  assertEquals(resolved.scan.opportunities[399]?.id, "opp-cache-399");
+  assertEquals(resolved.scan.opportunities[400]?.id, "opp-live-0");
+  assertEquals(resolved.scan.opportunities[599]?.id, "opp-live-199");
+  assertEquals(resolved.scan.start_after, 6);
+  assertEquals(resolved.scan.start_after_id, "c-599");
+  assertEquals(resolved.scan.exhausted, false);
+  assertEquals(salesBookingRosterIsComplete(resolved.scan), false);
+
+  const persisted: SalesBookingCachedRoster[] = [];
+  const payload = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(incomplete),
+      persistRosterCache: (_resourceId, roster) => {
+        persisted.push(roster);
+        return Promise.resolve();
+      },
+      readOpportunities: (args) => {
+        assertEquals(args.startAfter, 4);
+        assertEquals(args.startAfterId, "c-399");
+        return Promise.resolve({
+          opportunities: live200,
+          stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+          exhausted: false,
+          pages_scanned: 2,
+          total: 1012,
+          reason: "time budget exhausted",
+          start_after: 6,
+          start_after_id: "c-599",
+        });
+      },
+    }),
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      include_thread_facts: false,
+      force_refresh: true,
+    },
+  );
+  assertEquals(payload.coverage.full_population, false);
+  assertEquals(payload.cases.length, 600);
+  assertEquals(persisted.length, 1);
+  assertEquals(persisted[0].opportunities.length, 600);
+  assertEquals(persisted[0].start_after, 6);
+  assertEquals(persisted[0].start_after_id, "c-599");
+  assertEquals(persisted[0].exhausted, false);
+});
+
 Deno.test("opportunity paging resumes from the stored cursor inside the deadline", async () => {
   const paths: string[] = [];
   let nowMs = NOW.getTime();

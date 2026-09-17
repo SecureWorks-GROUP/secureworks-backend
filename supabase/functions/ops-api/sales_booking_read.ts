@@ -1482,7 +1482,7 @@ export async function resolveSalesBookingRoster(args: {
       shouldPersist: false,
     };
   }
-  const resume = args.forceRefresh ? null : rosterResumeCursor(cached);
+  const resume = rosterResumeCursor(cached);
   const live = await args.live(resume ?? undefined);
   const liveScan: SalesBookingOpportunityScan = {
     ...live,
