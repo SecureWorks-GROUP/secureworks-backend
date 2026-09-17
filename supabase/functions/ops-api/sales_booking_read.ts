@@ -217,7 +217,7 @@ export const SALES_BOOKING_GHL_429_BASE_MS = 200;
 export const SALES_BOOKING_NOT_GIVEN = "not given";
 export const SALES_BOOKING_THREAD_FACTS_KIND = "thread_facts";
 export const SALES_BOOKING_ROSTER_KIND = "roster";
-/** Sentinel Monday so thread_facts reuse the packs table without a week grid. */
+/** Sentinel Monday so thread_facts and roster reuse the packs table without a week grid. */
 export const SALES_BOOKING_THREAD_FACTS_WEEK_START = "1970-01-05";
 
 // ════════════════════════════════════════════════════════════
@@ -1281,6 +1281,9 @@ export interface SalesBookingOpportunityScan {
   /** Age of the cached roster in ms; 0 when live; null when unknown. */
   age_ms?: number | null;
   remaining_429_count?: number;
+  /** Next GHL search page. Set on an incomplete scan so the next read can resume. */
+  start_after?: string | number | null;
+  start_after_id?: string | null;
 }
 
 export interface SalesBookingCachedRoster {
@@ -1291,6 +1294,8 @@ export interface SalesBookingCachedRoster {
   total: number | null;
   reason: string | null;
   read_at: string;
+  start_after?: string | number | null;
+  start_after_id?: string | null;
 }
 
 /** Cached roster is usable when younger than 10 minutes. */
@@ -1336,6 +1341,68 @@ export function parseSalesBookingRosterCache(
     total: typeof body.total === "number" ? body.total : null,
     reason: nonemptyText(body.reason),
     read_at: new Date(Date.parse(readAt)).toISOString(),
+    start_after: rosterCursorValue(body.start_after),
+    start_after_id: nonemptyText(body.start_after_id),
+  };
+}
+
+function rosterCursorValue(value: unknown): string | number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return nonemptyText(value);
+}
+
+export function salesBookingRosterIsComplete(
+  roster:
+    | Pick<
+      SalesBookingCachedRoster,
+      "exhausted" | "reason"
+    >
+    | Pick<SalesBookingOpportunityScan, "exhausted" | "reason">
+    | null
+    | undefined,
+): boolean {
+  return !!roster && roster.exhausted === true && !roster.reason;
+}
+
+function rosterResumeCursor(
+  cached: SalesBookingCachedRoster | null,
+): { startAfter: string | number; startAfterId: string } | null {
+  if (!cached || salesBookingRosterIsComplete(cached)) return null;
+  const startAfter = rosterCursorValue(cached.start_after);
+  const startAfterId = nonemptyText(cached.start_after_id);
+  if (startAfter == null || !startAfterId) return null;
+  return { startAfter, startAfterId };
+}
+
+function mergeResumedRosterScan(
+  cached: SalesBookingCachedRoster,
+  live: SalesBookingOpportunityScan,
+): SalesBookingOpportunityScan {
+  const seen = new Set<string>();
+  const opportunities: Record<string, unknown>[] = [];
+  for (const row of [...cached.opportunities, ...live.opportunities]) {
+    const id = typeof row.id === "string" ? row.id : "";
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    opportunities.push(row);
+  }
+  const exhausted = live.exhausted === true;
+  return {
+    opportunities,
+    stages: { ...cached.stages, ...live.stages },
+    exhausted,
+    pages_scanned: (cached.pages_scanned || 0) + (live.pages_scanned || 0),
+    total: live.total ?? cached.total,
+    reason: live.reason,
+    source: "live",
+    age_ms: 0,
+    remaining_429_count: live.remaining_429_count ?? 0,
+    start_after: exhausted
+      ? null
+      : live.start_after ?? cached.start_after ?? null,
+    start_after_id: exhausted
+      ? null
+      : live.start_after_id ?? cached.start_after_id ?? null,
   };
 }
 
@@ -1358,6 +1425,8 @@ export function scanFromCachedRoster(
     source: "cache",
     age_ms: Number.isFinite(readAtMs) ? Math.max(0, nowMs - readAtMs) : null,
     remaining_429_count: extra.remaining_429_count ?? 0,
+    start_after: cached.start_after ?? null,
+    start_after_id: cached.start_after_id ?? null,
   };
 }
 
@@ -1373,6 +1442,8 @@ export function cachedRosterFromScan(
     total: scan.total,
     reason: scan.reason,
     read_at: readAt,
+    start_after: scan.exhausted ? null : scan.start_after ?? null,
+    start_after_id: scan.exhausted ? null : scan.start_after_id ?? null,
   };
 }
 
@@ -1382,20 +1453,25 @@ function rosterScanLooksLike429(scan: SalesBookingOpportunityScan): boolean {
 }
 
 /**
- * Serve a fresh cached roster; otherwise live-refresh. A 429 on live falls
- * back to the cached roster when one exists.
+ * Serve a fresh complete cached roster; otherwise live-refresh. A complete
+ * cache always beats an incomplete live result. An incomplete cache is
+ * resumed from its page cursor and persisted until the book is complete.
  */
 export async function resolveSalesBookingRoster(args: {
   cached: SalesBookingCachedRoster | null;
   nowMs: number;
   forceRefresh?: boolean;
-  live: () => Promise<SalesBookingOpportunityScan>;
+  live: (resume?: {
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  }) => Promise<SalesBookingOpportunityScan>;
 }): Promise<{
   scan: SalesBookingOpportunityScan;
   shouldPersist: boolean;
 }> {
   const cached = args.cached;
-  const fresh = !!cached && !args.forceRefresh &&
+  const cachedComplete = salesBookingRosterIsComplete(cached);
+  const fresh = cachedComplete && !!cached && !args.forceRefresh &&
     salesBookingRosterIsFresh({
       cachedReadAt: cached.read_at,
       nowMs: args.nowMs,
@@ -1406,25 +1482,32 @@ export async function resolveSalesBookingRoster(args: {
       shouldPersist: false,
     };
   }
-  const live = await args.live();
+  const resume = args.forceRefresh ? null : rosterResumeCursor(cached);
+  const live = await args.live(resume ?? undefined);
   const liveScan: SalesBookingOpportunityScan = {
     ...live,
     source: "live",
     age_ms: 0,
     remaining_429_count: live.remaining_429_count ?? 0,
   };
-  if (rosterScanLooksLike429(liveScan) && cached) {
+  const merged = resume && cached
+    ? mergeResumedRosterScan(cached, liveScan)
+    : liveScan;
+  if (cachedComplete && cached && !salesBookingRosterIsComplete(merged)) {
+    const like429 = rosterScanLooksLike429(merged);
     return {
       scan: scanFromCachedRoster(cached, args.nowMs, {
-        reason: liveScan.reason || "GHL 429",
-        remaining_429_count: Math.max(1, liveScan.remaining_429_count ?? 1),
+        reason: merged.reason || (like429 ? "GHL 429" : "incomplete live refresh"),
+        remaining_429_count: like429
+          ? Math.max(1, merged.remaining_429_count ?? 1)
+          : merged.remaining_429_count ?? 0,
       }),
       shouldPersist: false,
     };
   }
   return {
-    scan: liveScan,
-    shouldPersist: liveScan.exhausted === true && !liveScan.reason,
+    scan: merged,
+    shouldPersist: true,
   };
 }
 
@@ -1616,7 +1699,8 @@ export function assembleSalesBookingRead(input: {
       // are named separately: they narrow what is KNOWN about a case, not
       // whether the book is complete. `enumerated` is the scoped count, not
       // the whole CRM.
-      full_population: opportunities.exhausted && !opportunities.reason,
+      full_population: opportunities.exhausted === true &&
+        (opportunities.source === "cache" || !opportunities.reason),
       enumerated: cases.length,
       total: opportunities.total,
       excluded_by_stage: input.excludedByStage ?? 0,
@@ -1684,7 +1768,12 @@ export interface SalesBookingReadParams {
 export interface SalesBookingReadDependencies {
   /** Bounded, terminal-or-honest GHL opportunity roster for one pipeline. */
   readOpportunities(
-    args: { pipelineId: string; deadlineMs?: number },
+    args: {
+      pipelineId: string;
+      deadlineMs?: number;
+      startAfter?: string | number | null;
+      startAfterId?: string | null;
+    },
   ): Promise<SalesBookingOpportunityScan>;
   /** One scoper's GHL calendar events for the week. Never throws. */
   readDiary(args: {
@@ -1724,11 +1813,9 @@ export interface SalesBookingReadDependencies {
   ): Promise<void>;
   loadRosterCache?(
     resourceId: string,
-    weekStart: string,
   ): Promise<SalesBookingCachedRoster | null>;
   persistRosterCache?(
     resourceId: string,
-    weekStart: string,
     roster: SalesBookingCachedRoster,
   ): Promise<void>;
   sleep?(ms: number): Promise<void>;
@@ -2015,18 +2102,27 @@ export async function salesBookingRead(
   let cachedRoster: SalesBookingCachedRoster | null = null;
   try {
     cachedRoster = deps.loadRosterCache
-      ? await deps.loadRosterCache(resource.resource_id, week.week_start)
+      ? await deps.loadRosterCache(resource.resource_id)
       : null;
   } catch {
     cachedRoster = null;
   }
 
-  const liveRoster = () =>
+  const liveRoster = (
+    resume?: {
+      startAfter?: string | number | null;
+      startAfterId?: string | null;
+    },
+  ) =>
     deps.readOpportunities({
       pipelineId: resource.pipeline_id,
       deadlineMs,
+      startAfter: resume?.startAfter,
+      startAfterId: resume?.startAfterId,
     });
-  const rosterFresh = !!cachedRoster && !forceRefresh &&
+  const rosterFresh = !!cachedRoster &&
+    salesBookingRosterIsComplete(cachedRoster) &&
+    !forceRefresh &&
     salesBookingRosterIsFresh({
       cachedReadAt: cachedRoster.read_at,
       nowMs: deps.now().getTime(),
@@ -2093,7 +2189,6 @@ export async function salesBookingRead(
     try {
       await deps.persistRosterCache(
         resource.resource_id,
-        week.week_start,
         cachedRosterFromScan(
           opportunities,
           deps.now().toISOString(),
@@ -2335,13 +2430,15 @@ export async function readSalesBookingOpportunities(args: {
   locationId: string;
   now?: () => Date;
   deadlineMs?: number;
+  startAfter?: string | number | null;
+  startAfterId?: string | null;
 }): Promise<SalesBookingOpportunityScan> {
   const now = args.now ?? (() => new Date());
   const limit = SALES_BOOKING_OPPORTUNITY_PAGE_SIZE;
   const opportunities: Record<string, unknown>[] = [];
   const seen = new Set<string>();
-  let startAfter: string | number | null = null;
-  let startAfterId: string | null = null;
+  let startAfter: string | number | null = rosterCursorValue(args.startAfter);
+  let startAfterId: string | null = nonemptyText(args.startAfterId);
   let pages = 0;
   let total: number | null = null;
   let exhausted = false;
@@ -2450,12 +2547,18 @@ export async function readSalesBookingOpportunities(args: {
     source: "live",
     age_ms: 0,
     remaining_429_count: remaining429,
+    start_after: exhausted ? null : startAfter,
+    start_after_id: exhausted ? null : startAfterId,
   };
 }
 
 async function readOpportunitiesLive(
   pipelineId: string,
   retry: GhlRetryHooks = {},
+  resume?: {
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  },
 ): Promise<SalesBookingOpportunityScan> {
   const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
   return await readSalesBookingOpportunities({
@@ -2464,6 +2567,8 @@ async function readOpportunitiesLive(
     locationId,
     now: retry.now,
     deadlineMs: retry.deadlineMs,
+    startAfter: resume?.startAfter,
+    startAfterId: resume?.startAfterId,
   });
 }
 
@@ -2775,13 +2880,12 @@ async function persistThreadFactsCacheLive(
 async function loadRosterCacheLive(
   client: SalesBookingReadClient,
   resourceId: string,
-  weekStart: string,
 ): Promise<SalesBookingCachedRoster | null> {
   const { data, error } = await client
     .from("sales_booking_packs")
     .select("payload")
     .eq("resource", resourceId)
-    .eq("week_start", weekStart)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
     .eq("kind", SALES_BOOKING_ROSTER_KIND)
     .order("as_of", { ascending: false })
     .limit(1)
@@ -2806,16 +2910,15 @@ function salesBookingRostersEqual(
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** One latest roster row per resource and week: abort on load error, skip when equal, prune only older as_of. */
+/** One latest roster row per resource at the weekless sentinel: abort on load error, skip when equal, prune only older as_of. */
 async function persistRosterCacheLive(
   client: SalesBookingReadClient,
   resourceId: string,
-  weekStart: string,
   roster: SalesBookingCachedRoster,
 ): Promise<void> {
   let existing: SalesBookingCachedRoster | null;
   try {
-    existing = await loadRosterCacheLive(client, resourceId, weekStart);
+    existing = await loadRosterCacheLive(client, resourceId);
   } catch {
     return;
   }
@@ -2823,7 +2926,7 @@ async function persistRosterCacheLive(
   const asOf = new Date().toISOString();
   const { error } = await client.from("sales_booking_packs").upsert({
     resource: resourceId,
-    week_start: weekStart,
+    week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
     kind: SALES_BOOKING_ROSTER_KIND,
     as_of: asOf,
     payload: roster,
@@ -2836,7 +2939,7 @@ async function persistRosterCacheLive(
     .from("sales_booking_packs")
     .delete()
     .eq("resource", resourceId)
-    .eq("week_start", weekStart)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
     .eq("kind", SALES_BOOKING_ROSTER_KIND)
     .lt("as_of", asOf);
   if (pruneError) {
@@ -2852,9 +2955,12 @@ export function createSalesBookingReadDependencies(
     now: () => new Date(),
   };
   return {
-    readOpportunities: ({ pipelineId, deadlineMs }) => {
+    readOpportunities: ({ pipelineId, deadlineMs, startAfter, startAfterId }) => {
       retry.deadlineMs = deadlineMs;
-      return readOpportunitiesLive(pipelineId, retry);
+      return readOpportunitiesLive(pipelineId, retry, {
+        startAfter,
+        startAfterId,
+      });
     },
     readDiary: (
       { resourceId, scoperUserId, since, untilExclusive, deadlineMs },
@@ -2883,10 +2989,9 @@ export function createSalesBookingReadDependencies(
       loadThreadFactsCacheLive(client, resourceId),
     persistThreadFactsCache: (resourceId, facts) =>
       persistThreadFactsCacheLive(client, resourceId, facts),
-    loadRosterCache: (resourceId, weekStart) =>
-      loadRosterCacheLive(client, resourceId, weekStart),
-    persistRosterCache: (resourceId, weekStart, roster) =>
-      persistRosterCacheLive(client, resourceId, weekStart, roster),
+    loadRosterCache: (resourceId) => loadRosterCacheLive(client, resourceId),
+    persistRosterCache: (resourceId, roster) =>
+      persistRosterCacheLive(client, resourceId, roster),
   };
 }
 
