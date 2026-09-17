@@ -2514,7 +2514,10 @@ sign-off before invoice / completion) keys on raw `jobs.type` through
 and the repair open pool admits `_REPAIR_POOL_READY_STATUSES` (crew-ready
 plus `accepted` / `processing`), PROVISIONAL until the repair lifecycle is
 ruled, while the fencing / patio / decking pools keep `_CREW_READY_STATUSES`
-and the my_jobs make-safe pool drops repair-family rows. `tradeCalendarEvents`
+screened through the same `isAllocatableMakesafePoolDetail` read the
+make-safe pool uses (no detail row still admits), and the my_jobs make-safe
+pool drops repair-family rows for non-dispatchers only (a dispatcher's
+allocation is never vertical-refused, so their pool keeps them). `tradeCalendarEvents`
 decides truncation and `next_offset` on the raw lookahead and narrows only the
 returned page. Tests: `repair_trade_vertical_test.ts`.
 

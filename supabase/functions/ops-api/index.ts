@@ -37387,6 +37387,28 @@ export function _isAllocatableMakesafePoolDetailForTest(detail: any): boolean {
   return isAllocatableMakesafePoolDetail(detail)
 }
 
+async function loadAllocatableMakesafePoolDetails(
+  client: any,
+  jobIds: string[],
+): Promise<Record<string, any>> {
+  const ids = Array.from(new Set((jobIds || []).filter(Boolean)))
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += OCCUPANCY_PROBE_CHUNK) {
+    chunks.push(ids.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+  }
+  const pages = await Promise.all(chunks.map(async (chunk) => {
+    const { data, error } = await client
+      .from('makesafe_job_details')
+      .select('job_id, substatus, report_received_at, report_sent_at, invoice_ready_at')
+      .in('job_id', chunk)
+    if (error) throw error
+    return data || []
+  }))
+  const byJobId: Record<string, any> = {}
+  for (const row of pages.flat()) if (row?.job_id) byJobId[String(row.job_id)] = row
+  return byJobId
+}
+
 // ── M3d U2a/U2b — auto-close stale crew assignments on terminal transitions ──
 // The trade Board classifies a card purely from its ASSIGNMENT status, so a job
 // (or make-safe) that reaches a terminal state must close its still-open crew
@@ -38955,7 +38977,7 @@ export async function myJobs(
 
     const openMakesafeById: Record<string, any> = {}
     for (const job of (openMakesafesByShape || [])) {
-      if (job?.id && !_jobIsRepairFamily(job)) openMakesafeById[job.id] = job
+      if (job?.id && (isDispatcher || !_jobIsRepairFamily(job))) openMakesafeById[job.id] = job
     }
 
     // Backstop for legacy imports: if a job has a makesafe_job_details row but
@@ -39012,7 +39034,7 @@ export async function myJobs(
       ))
       const detailJobs = detailPages.flat()
       for (const job of (detailJobs || [])) {
-        if (job?.id && !_jobIsRepairFamily(job)) openMakesafeById[job.id] = job
+        if (job?.id && (isDispatcher || !_jobIsRepairFamily(job))) openMakesafeById[job.id] = job
       }
     }
 
@@ -39293,9 +39315,18 @@ export async function myJobs(
           },
           `${vertical} pool`,
         )
-        const openJobs = vertical === 'repair'
+        let openJobs = vertical === 'repair'
           ? (openJobsRaw || []).filter((job: any) => _jobIsRepairFamily(job))
           : (openJobsRaw || []).filter((job: any) => !_jobIsRepairFamily(job))
+        if (vertical === 'repair' && openJobs.length > 0) {
+          const repairDetailByJobId = await loadAllocatableMakesafePoolDetails(
+            client,
+            openJobs.map((job: any) => String(job?.id || '')).filter(Boolean),
+          )
+          openJobs = openJobs.filter((job: any) =>
+            isAllocatableMakesafePoolDetail(repairDetailByJobId[String(job?.id || '')])
+          )
+        }
         // The manager assignment feed intentionally remains 30-day windowed, so
         // ask job_assignments directly whether these already tenant+vertical-
         // authorized pool ids are occupied at any date.

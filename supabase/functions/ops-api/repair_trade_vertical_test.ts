@@ -505,7 +505,8 @@ Deno.test("complete_my_job: a fencing job tagged family=repair is refused end to
 
 type PoolJob = { id: string; type: string; status: string; job_number?: string; metadata?: any };
 type PoolAssignment = { id: string; user_id: string; status: string; scheduled_date: string; job_id: string };
-type PoolFixtures = { assignments: PoolAssignment[]; jobs: PoolJob[] };
+type PoolDetail = { job_id: string; substatus?: string | null; report_received_at?: string | null; report_sent_at?: string | null; invoice_ready_at?: string | null };
+type PoolFixtures = { assignments: PoolAssignment[]; jobs: PoolJob[]; details?: PoolDetail[] };
 type PoolQuery = {
   table: string;
   eq: Record<string, unknown>;
@@ -598,6 +599,11 @@ function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; e
     }
     return { data: rows.map((j) => ({ ...j })), error: null };
   }
+  if (st.table === "makesafe_job_details") {
+    let rows = (fx.details || []).slice();
+    if (st.inCol === "job_id" && st.inVals) rows = rows.filter((d) => st.inVals!.includes(d.job_id));
+    return { data: rows.map((d) => ({ ...d })), error: null };
+  }
   return { data: [], error: null };
 }
 
@@ -655,12 +661,12 @@ function repairPoolFixtures(): PoolFixtures {
   };
 }
 
-async function poolFor(managed: string[], fx: PoolFixtures, recorded: PoolQuery[] = []) {
-  const vis = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: managed });
+async function poolFor(managed: string[], fx: PoolFixtures, recorded: PoolQuery[] = [], role = "lead_installer") {
+  const vis = _resolveManagerVisibility({ role, managedVerticals: managed });
   const scope = _managerBoardVerticals({ isDispatcher: vis.isDispatcher, mode: "all", managedVerticals: managed });
   const g = await myJobs(
     makePoolClient(fx, recorded), "u-viewer",
-    false, vis.isDispatcher, vis.isMakesafeManager, vis.poolVerticals, scope,
+    vis.isDispatcher, vis.isDispatcher, vis.isMakesafeManager, vis.poolVerticals, scope,
   );
   return poolIds(g);
 }
@@ -843,4 +849,70 @@ Deno.test("trade calendar: the same rows are all returned, once, for a repair+ma
   assertEquals(p1.events.map((e: any) => e.assignment_id), ["a1", "a2"]);
   assertEquals(p2.events.map((e: any) => e.assignment_id), ["a3"]);
   assertEquals(p2.truncated, false);
+});
+
+Deno.test("make-safe pool: a dispatcher still sees an unallocated repair-family make-safe; a make-safe-only manager does not", async () => {
+  const fx = (): PoolFixtures => ({
+    assignments: [],
+    jobs: [
+      { id: "job-ms-repair", type: "makesafe", status: "processing", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
+      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
+    ],
+    details: [
+      { job_id: "job-ms-repair", substatus: "pending_allocation" },
+      { job_id: "job-ms-plain", substatus: "pending_allocation" },
+    ],
+  });
+  const dispatcherVis = _resolveManagerVisibility({ role: "ops_manager", managedVerticals: [] });
+  assertEquals(dispatcherVis.isDispatcher, true);
+  assertEquals(dispatcherVis.poolVerticals.includes("repair"), false, "a pure dispatcher gains no repair pool");
+  const dispatcherPool = await poolFor([], fx(), [], "ops_manager");
+  assert(dispatcherPool.includes("job-ms-repair"), "Hugo-class dispatcher keeps SWMS-261319 in the make-safe pool");
+  assert(dispatcherPool.includes("job-ms-plain"));
+
+  const managerPool = await poolFor(["makesafe"], fx());
+  assertEquals(managerPool.includes("job-ms-repair"), false, "a make-safe-only manager cannot action it, so it is not offered");
+  assert(managerPool.includes("job-ms-plain"));
+});
+
+Deno.test("repair pool: a freshly minted repair job still at company_contact_required is not offered", async () => {
+  const fx: PoolFixtures = {
+    assignments: [],
+    jobs: [
+      { id: "job-swr-new", type: "repair", status: "accepted", job_number: "SWR-9", metadata: {} },
+      { id: "job-ms-repair-new", type: "makesafe", status: "accepted", job_number: "SWMS-9", metadata: { ses_family: "repair" } },
+      { id: "job-ms-repair-reported", type: "makesafe", status: "processing", job_number: "SWMS-10", metadata: { ses_family: "repair" } },
+      { id: "job-repair-legacy", type: "repair", status: "accepted", job_number: "SWR-1", metadata: {} },
+    ],
+    details: [
+      { job_id: "job-swr-new", substatus: "company_contact_required" },
+      { job_id: "job-ms-repair-new", substatus: "company_contact_required" },
+      { job_id: "job-ms-repair-reported", substatus: "processing", report_received_at: "2026-09-10T00:00:00Z" },
+    ],
+  };
+  const recorded: PoolQuery[] = [];
+  const pool = await poolFor(["repair"], fx, recorded);
+  assertEquals(pool.includes("job-swr-new"), false, "ops's admin queue is not open work");
+  assertEquals(pool.includes("job-ms-repair-new"), false);
+  assertEquals(pool.includes("job-ms-repair-reported"), false, "report already in is not open work");
+  assert(pool.includes("job-repair-legacy"), "no detail row -> allocatable on status alone");
+  const detailRead = recorded.find((q) => q.table === "makesafe_job_details" && q.inCol === "job_id");
+  assert(detailRead, "repair candidates are screened through makesafe_job_details");
+});
+
+Deno.test("repair pool: the same job is offered once its substatus clears company_contact_required", async () => {
+  const fx: PoolFixtures = {
+    assignments: [],
+    jobs: [
+      { id: "job-swr-new", type: "repair", status: "accepted", job_number: "SWR-9", metadata: {} },
+      { id: "job-ms-repair-new", type: "makesafe", status: "processing", job_number: "SWMS-9", metadata: { ses_family: "repair" } },
+    ],
+    details: [
+      { job_id: "job-swr-new", substatus: "pending_allocation" },
+      { job_id: "job-ms-repair-new", substatus: "processing" },
+    ],
+  };
+  const pool = await poolFor(["repair"], fx);
+  assert(pool.includes("job-swr-new"));
+  assert(pool.includes("job-ms-repair-new"));
 });
