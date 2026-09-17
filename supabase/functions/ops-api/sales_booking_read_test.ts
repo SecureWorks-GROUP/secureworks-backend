@@ -32,6 +32,7 @@ import {
   isSalesBookingTemplateBody,
   perthGraphInstant,
   perthWeekWindow,
+  applySalesBookingContactFact,
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
   readSalesBookingGhlDiary,
@@ -369,7 +370,7 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
     display_name: "Jane Smith",
     status: "needs_decision",
     stage_name: "New Lead",
-    job_type: SALES_BOOKING_NOT_GIVEN,
+    job_type: "fencing",
     pipeline_stage_id: MARNIN_SCOPE_STAGE,
   });
   assertEquals("status_source" in named, false);
@@ -381,7 +382,7 @@ Deno.test("projectSalesBookingCase never invents a suburb and hides a phone-like
   )!;
   assertEquals(anonymous.display_name, "Enquiry");
   assertEquals(anonymous.suburb, SALES_BOOKING_NOT_GIVEN);
-  assertEquals(anonymous.job_type, SALES_BOOKING_NOT_GIVEN);
+  assertEquals(anonymous.job_type, "fencing");
   assertEquals(anonymous.stage_name, null);
   assertEquals(projectSalesBookingCase({ name: "no id" }, "marnin"), null);
 });
@@ -1278,6 +1279,7 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "loadThreadFactsCache",
       "now",
       "persistThreadFactsCache",
+      "readContacts",
       "readDiary",
       "readOpportunities",
       "readThread",
@@ -1343,6 +1345,20 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
     }),
     "Canning Vale",
   );
+  assertEquals(
+    salesBookingSuburbFromContact({
+      city: "18 heysen crest woodvale WA 6026",
+    }),
+    "woodvale",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "2 Wedge Way, Merriwa" }),
+    "Merriwa",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "115 Berkley Rd" }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
   assertEquals(salesBookingSuburbFromContact({}), SALES_BOOKING_NOT_GIVEN);
   assertEquals(
     salesBookingJobTypeFromOpportunity({}, { tags: ["northside patios"] }),
@@ -1359,8 +1375,18 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
     "patio",
   );
   assertEquals(
+    salesBookingJobTypeFromOpportunity({
+      customFields: [{ id: "cf-job", fieldValue: "Patio" }],
+    }),
+    "patio",
+  );
+  assertEquals(
     salesBookingJobTypeFromOpportunity({}, { tags: ["stratco"] }),
     SALES_BOOKING_NOT_GIVEN,
+  );
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({}, { tags: ["stratco"] }, "patio"),
+    "patio",
   );
   const fromAddress = projectSalesBookingCase(
     opportunity({
@@ -1378,6 +1404,49 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
   assertEquals(fromAddress.job_type, "patio");
   assertEquals(fromAddress.enquiry_at, "2026-09-10T02:00:00.000Z");
   assertEquals(fromAddress.pipeline_stage_id, MARNIN_SCOPE_STAGE);
+});
+
+Deno.test("search rows pick up city and tags from a later contact read", async () => {
+  let requested: string[] = [];
+  const payload = await salesBookingRead(
+    deps({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [
+            opportunity({
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "contact-1", name: "Pat" },
+            }),
+          ],
+          stages: { [NITHIN_SCOPE_STAGE]: "Needs Scope / Quote" },
+          exhausted: true,
+          pages_scanned: 1,
+          total: 1,
+          reason: null,
+        }),
+      readContacts: (ids) => {
+        requested = ids;
+        return Promise.resolve({
+          "contact-1": {
+            city: "Queens Park",
+            tags: ["northside patios"],
+          },
+        });
+      },
+    }),
+    { resource: "nithin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(requested, ["contact-1"]);
+  assertEquals(payload.cases[0].suburb, "Queens Park");
+  assertEquals(payload.cases[0].job_type, "patio");
+  assertEquals(payload.cases[0].tags, ["northside patios"]);
+  assertEquals(
+    applySalesBookingContactFact(
+      { id: "opp-1", contact: { id: "c1" } },
+      { city: "Fremantle", tags: ["sw fencing"] },
+    ).contact,
+    { id: "c1", city: "Fremantle", tags: ["sw fencing"] },
+  );
 });
 
 Deno.test("cached thread facts are served; stale activity is refreshed newest first", async () => {

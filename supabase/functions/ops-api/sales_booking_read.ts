@@ -686,6 +686,15 @@ function nonemptyText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+const SUBURB_FIELD_KEYS = new Set([
+  "suburb",
+  "city",
+  "site_suburb",
+  "site suburb",
+  "location",
+  "area",
+]);
+
 /**
  * Contact city, nested address city, or a WA suburb parsed from a street
  * line. Never guesses: no city and no parseable suburb is `"not given"`.
@@ -701,23 +710,82 @@ export function salesBookingSuburbFromContact(
       ? opportunity.address
       : null) as Record<string, unknown> | null;
   const city = nonemptyText(contact.city) ||
+    nonemptyText(contact.contactCity) ||
     nonemptyText(nestedAddress?.city) ||
-    nonemptyText(opportunity.city);
-  if (city) return city;
+    nonemptyText(opportunity.city) ||
+    nonemptyText(opportunity.contactCity);
+  if (city) {
+    const parsedCity = salesBookingSuburbFromAddressLine(city) ||
+      salesBookingSuburbFromStreetLine(city);
+    if (parsedCity) return parsedCity;
+    if (!salesBookingLooksLikeStreet(city)) return city;
+  }
+  for (const field of collectCustomFieldValues(contact, opportunity)) {
+    if (!SUBURB_FIELD_KEYS.has(field.key)) continue;
+    const parsed = salesBookingSuburbFromAddressLine(field.value) ||
+      salesBookingSuburbFromStreetLine(field.value);
+    if (parsed) return parsed;
+    if (!salesBookingLooksLikeStreet(field.value)) return field.value;
+  }
   const lines = [
     contact.address1,
+    contact.contactAddress,
     contact.postalAddress,
     typeof contact.address === "string" ? contact.address : null,
     nestedAddress?.address1,
     nestedAddress?.line1,
     opportunity.address1,
+    opportunity.contactAddress,
     typeof opportunity.address === "string" ? opportunity.address : null,
   ];
   for (const line of lines) {
-    const parsed = salesBookingSuburbFromAddressLine(line);
+    const parsed = salesBookingSuburbFromAddressLine(line) ||
+      salesBookingSuburbFromStreetLine(line);
     if (parsed) return parsed;
   }
   return SALES_BOOKING_NOT_GIVEN;
+}
+
+const STREET_TYPE_RE =
+  /\b(?:st|street|rd|road|ave|avenue|dr|drive|ct|court|pl|place|way|cres|crescent|crest|pde|parade|cl|close|tce|terrace|hwy|highway|blvd|circuit|cct|loop|rise|grove|lane|ln)\b/i;
+
+function salesBookingLooksLikeStreet(value: string): boolean {
+  return /^\d/.test(value.trim()) || STREET_TYPE_RE.test(value);
+}
+
+/**
+ * "52 warrington road byford" / "2 Wedge Way, Merriwa" → suburb after the
+ * street token. Street-only lines stay null.
+ */
+export function salesBookingSuburbFromStreetLine(
+  value: unknown,
+): string | null {
+  const text = nonemptyText(value);
+  if (!text) return null;
+  const trimmed = text
+    .replace(
+      /(?:,\s*|\s+)(?:WA|W\.A\.|Western Australia|Australia)(?:\s+\d{4})?\s*$/i,
+      "",
+    )
+    .trim();
+  const comma = trimmed.match(/,\s*([A-Za-z][A-Za-z .'-]{1,40})\s*$/);
+  const afterComma = nonemptyText(comma?.[1]);
+  if (
+    afterComma && !salesBookingLooksLikeStreet(afterComma) &&
+    !/^\d/.test(afterComma)
+  ) {
+    return afterComma;
+  }
+  const afterStreet = text.match(
+    new RegExp(
+      `${STREET_TYPE_RE.source}\\s+([A-Za-z][A-Za-z .'-]{1,40}?)\\s*$`,
+      "i",
+    ),
+  );
+  const suburb = nonemptyText(afterStreet?.[1]);
+  return suburb && !/^\d/.test(suburb) && !STREET_TYPE_RE.test(suburb)
+    ? suburb
+    : null;
 }
 
 /** WA street line → suburb. Misses stay null rather than taking the street. */
@@ -726,15 +794,37 @@ export function salesBookingSuburbFromAddressLine(
 ): string | null {
   const text = nonemptyText(value);
   if (!text) return null;
-  const match = text.match(
-    /(?:^|,)\s*([A-Za-z][A-Za-z .'-]{1,60}?)\s*,?\s*(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?\s*$/i,
+  const afterComma = text.match(
+    /,\s*([A-Za-z][A-Za-z .'-]{1,40}?)\s*(?:,\s*|\s+)(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
   );
-  const suburb = nonemptyText(match?.[1]);
-  return suburb && !/^\d/.test(suburb) ? suburb : null;
+  const commaSuburb = nonemptyText(afterComma?.[1]);
+  if (
+    commaSuburb && !/^\d/.test(commaSuburb) && !STREET_TYPE_RE.test(commaSuburb)
+  ) {
+    return commaSuburb;
+  }
+  const whole = text.match(
+    /^([A-Za-z][A-Za-z .'-]{1,40}?)\s+(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?\s*$/i,
+  );
+  const wholeSuburb = nonemptyText(whole?.[1]);
+  if (
+    wholeSuburb && !STREET_TYPE_RE.test(wholeSuburb)
+  ) {
+    return wholeSuburb;
+  }
+  const tail = text.match(
+    /\s([A-Za-z][A-Za-z'-]{1,40})\s+(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
+  );
+  const suburb = nonemptyText(tail?.[1]);
+  return suburb && !STREET_TYPE_RE.test(suburb) ? suburb : null;
+}
+
+function customFieldValue(rec: Record<string, unknown>): unknown {
+  return rec.fieldValue ?? rec.field_value ?? rec.value ?? rec.name;
 }
 
 function collectCustomFieldValues(
-  opportunity: Record<string, unknown>,
+  ...sources: Record<string, unknown>[]
 ): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
   const push = (key: unknown, value: unknown) => {
@@ -742,20 +832,22 @@ function collectCustomFieldValues(
     const v = nonemptyText(value);
     if (k && v) out.push({ key: k, value: v });
   };
-  const fields = opportunity.customFields ?? opportunity.customData;
-  if (Array.isArray(fields)) {
-    for (const row of fields) {
-      if (!row || typeof row !== "object") continue;
-      const rec = row as Record<string, unknown>;
-      push(rec.key ?? rec.fieldKey ?? rec.id ?? rec.name, rec.field_value ?? rec.value);
-    }
-  } else if (fields && typeof fields === "object") {
-    for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        const rec = value as Record<string, unknown>;
-        push(key, rec.field_value ?? rec.value ?? rec.name);
-      } else {
-        push(key, value);
+  for (const source of sources) {
+    const fields = source.customFields ?? source.customData;
+    if (Array.isArray(fields)) {
+      for (const row of fields) {
+        if (!row || typeof row !== "object") continue;
+        const rec = row as Record<string, unknown>;
+        push(rec.key ?? rec.fieldKey ?? rec.id ?? rec.name, customFieldValue(rec));
+      }
+    } else if (fields && typeof fields === "object") {
+      for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          const rec = value as Record<string, unknown>;
+          push(key, customFieldValue(rec));
+        } else {
+          push(key, value);
+        }
       }
     }
   }
@@ -787,13 +879,15 @@ const JOB_TYPE_FIELD_KEYS = new Set([
 
 /**
  * Custom-field job type first, then enquiry tags mapped to patio / fencing.
- * `"not given"` when neither source names a single family.
+ * The resource pipeline family is last: Nithin is the patio book, Marnin
+ * the fencing book. `"not given"` only when none of those name a family.
  */
 export function salesBookingJobTypeFromOpportunity(
   opportunity: Record<string, unknown>,
   contact: Record<string, unknown> = {},
+  lane?: "patio" | "fencing" | string | null,
 ): string {
-  const fields = collectCustomFieldValues(opportunity);
+  const fields = collectCustomFieldValues(opportunity, contact);
   for (const field of fields) {
     if (!JOB_TYPE_FIELD_KEYS.has(field.key)) continue;
     const mapped = mapSalesBookingJobWords(field.value);
@@ -813,7 +907,9 @@ export function salesBookingJobTypeFromOpportunity(
     if (mapped) mappedTags.add(mapped);
   }
   if (mappedTags.size === 1) return [...mappedTags][0];
-  return SALES_BOOKING_NOT_GIVEN;
+  return lane === "patio" || lane === "fencing"
+    ? lane
+    : SALES_BOOKING_NOT_GIVEN;
 }
 
 function salesBookingEnquiryAt(
@@ -839,9 +935,79 @@ function salesBookingTags(
   return raw.map((tag) => String(tag));
 }
 
+export interface SalesBookingContactFact {
+  city?: unknown;
+  address1?: unknown;
+  address?: unknown;
+  postalAddress?: unknown;
+  tags?: unknown;
+  customFields?: unknown;
+  customData?: unknown;
+}
+
+/** Overlay a GHL contact read onto a search row that omitted city/tags. */
+export function applySalesBookingContactFact(
+  opportunity: Record<string, unknown>,
+  fact: SalesBookingContactFact | null | undefined,
+): Record<string, unknown> {
+  if (!fact) return opportunity;
+  const contact = {
+    ...((opportunity.contact && typeof opportunity.contact === "object"
+      ? opportunity.contact
+      : {}) as Record<string, unknown>),
+  };
+  const fill = (key: string, value: unknown) => {
+    if (value == null || value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    const current = contact[key];
+    if (current == null || current === "") {
+      contact[key] = value;
+      return;
+    }
+    if (Array.isArray(current) && current.length === 0) contact[key] = value;
+  };
+  fill("city", fact.city);
+  fill("address1", fact.address1);
+  fill("address", fact.address);
+  fill("postalAddress", fact.postalAddress);
+  fill("tags", fact.tags);
+  fill("customFields", fact.customFields);
+  fill("customData", fact.customData);
+  return { ...opportunity, contact };
+}
+
+export function salesBookingContactId(
+  opportunity: Record<string, unknown>,
+): string | null {
+  const contact =
+    (opportunity.contact && typeof opportunity.contact === "object"
+      ? opportunity.contact
+      : {}) as Record<string, unknown>;
+  return nonemptyText(contact.id) || nonemptyText(opportunity.contactId);
+}
+
+export function salesBookingContactFactFromGhl(
+  body: Record<string, unknown>,
+): SalesBookingContactFact {
+  const contact =
+    (body.contact && typeof body.contact === "object"
+      ? body.contact
+      : body) as Record<string, unknown>;
+  return {
+    city: contact.city,
+    address1: contact.address1,
+    address: contact.address,
+    postalAddress: contact.postalAddress,
+    tags: contact.tags,
+    customFields: contact.customFields,
+    customData: contact.customData,
+  };
+}
+
 /**
- * Project one raw GHL opportunity onto a case row. Never invents a suburb or
- * job type: absent city/tags/custom fields become `"not given"`.
+ * Project one raw GHL opportunity onto a case row. Never invents a suburb:
+ * absent city/address stays `"not given"`. Job type prefers custom fields
+ * and enquiry tags, then the resource pipeline family.
  */
 export function projectSalesBookingCase(
   opportunity: Record<string, unknown>,
@@ -863,15 +1029,14 @@ export function projectSalesBookingCase(
     opportunity.lastStatusChangeAt,
     opportunity.createdAt,
   ].find((value) => typeof value === "string" && value);
+  const lane = SALES_BOOKING_RESOURCES[resourceId]?.lane;
   return {
     id,
     resource_id: resourceId,
     opportunity_id: id,
-    contact_id: (typeof contact.id === "string" && contact.id) ||
-      (typeof opportunity.contactId === "string" && opportunity.contactId) ||
-      null,
+    contact_id: salesBookingContactId(opportunity),
     suburb: salesBookingSuburbFromContact(contact, opportunity),
-    job_type: salesBookingJobTypeFromOpportunity(opportunity, contact),
+    job_type: salesBookingJobTypeFromOpportunity(opportunity, contact, lane),
     enquiry_at: salesBookingEnquiryAt(opportunity),
     display_name: isPhoneLikeName(rawName) ? "Enquiry" : (rawName || "Enquiry"),
     status: "needs_decision",
@@ -1291,6 +1456,13 @@ export interface SalesBookingReadDependencies {
   }): Promise<SalesBookingDiaryScan>;
   /** One contact's GHL conversation messages. Rejects on a failed read. */
   readThread(args: { contactId: string }): Promise<SalesBookingMessage[]>;
+  /**
+   * City/tags/custom fields for scoped contact ids. Search rows omit these.
+   * Optional: tests that only exercise roster shape can skip it.
+   */
+  readContacts?(
+    contactIds: string[],
+  ): Promise<Record<string, SalesBookingContactFact>>;
   now(): Date;
   loadThreadFactsCache?(
     resourceId: string,
@@ -1570,12 +1742,34 @@ export async function salesBookingRead(
     }),
   ]);
 
+  const scopedContactIds: string[] = [];
+  for (const raw of opportunities.opportunities) {
+    const stageId = typeof raw.pipelineStageId === "string"
+      ? raw.pipelineStageId
+      : "";
+    if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
+    const contactId = salesBookingContactId(raw);
+    if (contactId) scopedContactIds.push(contactId);
+  }
+  let contactFacts: Record<string, SalesBookingContactFact> = {};
+  if (deps.readContacts && scopedContactIds.length > 0) {
+    try {
+      contactFacts = await deps.readContacts(scopedContactIds);
+    } catch {
+      contactFacts = {};
+    }
+  }
+
   const projected: SalesBookingCase[] = [];
   const seen = new Set<string>();
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
+    const contactId = salesBookingContactId(raw);
     const row = projectSalesBookingCase(
-      raw,
+      applySalesBookingContactFact(
+        raw,
+        contactId ? contactFacts[contactId] : null,
+      ),
       resource.resource_id,
       opportunities.stages,
     );
@@ -1643,6 +1837,41 @@ async function ghlRead(
     if (!res.ok) throw new Error(`GHL ${res.status}: ${text.slice(0, 300)}`);
     return JSON.parse(text);
   }, retry);
+}
+
+/**
+ * City, address, tags, and custom fields for scoped contacts. Opportunity
+ * search omits them; GET /contacts/{id} is the GHL store the CIO already
+ * observed ("northside patios", "sw fencing"). Scoped ids only, same 429
+ * retry and concurrency as the thread sweep — not one call per open CRM row.
+ */
+async function readContactsLive(
+  contactIds: string[],
+): Promise<Record<string, SalesBookingContactFact>> {
+  const unique = [...new Set(contactIds.filter((id) => id.length > 0))];
+  const facts: Record<string, SalesBookingContactFact> = {};
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= unique.length) return;
+      const contactId = unique[index];
+      try {
+        const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
+        facts[contactId] = salesBookingContactFactFromGhl(body);
+      } catch {
+        // One unread contact stays `"not given"`; do not empty the book.
+      }
+    }
+  };
+  if (unique.length > 0) {
+    await Promise.all(
+      Array.from({
+        length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, unique.length),
+      }, () => worker()),
+    );
+  }
+  return facts;
 }
 
 /**
@@ -2069,6 +2298,7 @@ export function createSalesBookingReadDependencies(
     readDiary: ({ resourceId, scoperUserId, since, untilExclusive }) =>
       readDiaryLive(resourceId, scoperUserId, since, untilExclusive),
     readThread: ({ contactId }) => readThreadLive(contactId),
+    readContacts: (contactIds) => readContactsLive(contactIds),
     now: () => new Date(),
     loadThreadFactsCache: (resourceId) =>
       loadThreadFactsCacheLive(client, resourceId),
