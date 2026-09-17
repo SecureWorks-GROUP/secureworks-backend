@@ -18,7 +18,7 @@ done
 psql "$url" -X -v ON_ERROR_STOP=1 -1 -f "$root/supabase/migrations/20260910112833_luna_context_source_revisions.sql"
 psql "$url" -X -v ON_ERROR_STOP=1 -1 -f "$root/supabase/migrations/20260911171000_context_capture_attribution.sql"
 psql "$url" -X -v ON_ERROR_STOP=1 -1 -f "$root/supabase/migrations/20260914110000_context_capture_stamp_and_rerun.sql"
-# The two B3 migrations are applied twice: production may be re-applied by the deploy lane.
+# B3 plus the coalesce follow-up are applied twice: production may be re-applied by the deploy lane.
 for _pass in 1 2; do
  for migration in 20260916120000_context_job_fact_custody 20260916120100_context_extraction_budget_scope 20260917120000_luna_context_event_at_coalesce; do
   psql "$url" -X -v ON_ERROR_STOP=1 -1 -f "$root/supabase/migrations/$migration.sql"

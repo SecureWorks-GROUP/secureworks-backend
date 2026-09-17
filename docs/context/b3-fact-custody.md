@@ -22,7 +22,7 @@ Consequences for this packet:
 
 `persist_luna_context_revision(p_run_id uuid, p_lease_token uuid, p_job_id uuid, p_events jsonb, p_new jsonb, p_supersedes jsonb, p_retracts jsonb, p_extractor_version text = 'luna_v2', p_tokens_in integer = 0) -> jsonb`
 
-Unchanged from the PR #838 draft; the jarvis per-job extractor (jarvis #157) codes against it as is.
+Signature unchanged from the PR #838 draft; the jarvis per-job extractor (jarvis #157) codes against it as is.
 
 - `p_events`: 1 to 25 exact complete business_events rows supplied by B2. The function locks each row and compares every byte of its JSON representation. Missing source time (`coalesce(event_at, occurred_at)` null), revoked attribution, a different job or previously acknowledged evidence prevents persistence. `20260917120000` is the coalesce; production `event_at` is almost never set, and candidates already ordered by the same expression.
 - New facts: `{kind,text,confidence,source_event_ids,evidence_excerpt?,due_date?}`. Nine kinds only. The server creates stable IDs from run/index, attribution confidence from the minimum source confidence, and event date from the latest cited event's `coalesce(event_at, occurred_at)`. Unknown extra fact fields are rejected. Nothing here writes money, job status, booking or outbound-message columns.
