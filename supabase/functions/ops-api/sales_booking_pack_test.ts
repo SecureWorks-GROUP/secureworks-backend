@@ -260,6 +260,7 @@ function readDeps(): SalesBookingReadDependencies {
         malformed_dropped: 0,
         calendar_email: "marnin@secureworkswa.com.au",
         ghl_user_id: "ghl_user_marnin",
+        mapped_by: "email",
         scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
       }),
     readThread: () => Promise.resolve([]),

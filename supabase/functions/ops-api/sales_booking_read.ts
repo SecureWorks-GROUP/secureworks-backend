@@ -1053,6 +1053,8 @@ export interface SalesBookingDiaryScan {
   malformed_dropped: number;
   calendar_email: string | null;
   ghl_user_id: string | null;
+  /** Which roster field confirmed `ghl_user_id`. Name is weaker than email. */
+  mapped_by: "email" | "name" | null;
   scoper_user_id: string | null;
 }
 
@@ -1103,6 +1105,7 @@ export interface SalesBookingReadResponse {
     source: string;
     calendar_email: string | null;
     ghl_user_id: string | null;
+    mapped_by: "email" | "name" | null;
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
   drafts: Record<string, string>;
@@ -1238,6 +1241,7 @@ export function assembleSalesBookingRead(input: {
       source: DIARY_SOURCE,
       calendar_email: diary.calendar_email,
       ghl_user_id: diary.ghl_user_id,
+      mapped_by: diary.mapped_by,
     },
     thread_facts: threads.facts,
     // Pack overlay (proposals, drafts, stamp) is applied after this assemble
@@ -1841,7 +1845,11 @@ type SalesBookingReadClient = { from: (table: string) => any };
 function unreadDiary(
   scoperUserId: string,
   reason: string,
-  extra: { calendar_email?: string | null; ghl_user_id?: string | null } = {},
+  extra: {
+    calendar_email?: string | null;
+    ghl_user_id?: string | null;
+    mapped_by?: "email" | "name" | null;
+  } = {},
 ): SalesBookingDiaryScan {
   return {
     read_ok: false,
@@ -1850,6 +1858,7 @@ function unreadDiary(
     malformed_dropped: 0,
     calendar_email: extra.calendar_email ?? null,
     ghl_user_id: extra.ghl_user_id ?? null,
+    mapped_by: extra.mapped_by ?? null,
     scoper_user_id: scoperUserId,
   };
 }
@@ -1910,6 +1919,7 @@ export async function readSalesBookingGhlDiary(args: {
     return unreadDiary(args.scoperUserId, "ghl_calendar_window_invalid", {
       calendar_email: calendarEmail,
       ghl_user_id: confirmed.id,
+      mapped_by: confirmed.match,
     });
   }
 
@@ -1924,7 +1934,11 @@ export async function readSalesBookingGhlDiary(args: {
     return unreadDiary(
       args.scoperUserId,
       scan.failure,
-      { calendar_email: calendarEmail, ghl_user_id: confirmed.id },
+      {
+        calendar_email: calendarEmail,
+        ghl_user_id: confirmed.id,
+        mapped_by: confirmed.match,
+      },
     );
   }
 
@@ -1946,6 +1960,7 @@ export async function readSalesBookingGhlDiary(args: {
     malformed_dropped: dropped,
     calendar_email: calendarEmail,
     ghl_user_id: confirmed.id,
+    mapped_by: confirmed.match,
     scoper_user_id: args.scoperUserId,
   };
 }

@@ -74,9 +74,11 @@ Additions:
   when absent — never invented. `enquiry_at` is opportunity created.
 - **`coverage.threads_cached` / `threads_fresh` / `threads_unread` /
   `remaining_429_count`** — honest cache vs live vs unread vs leftover 429s.
-- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id}`.
+- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by}`.
   `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
-  the confirmed GHL user id or null when unread.
+  the confirmed GHL user id or null when unread. `mapped_by` is `email` or
+  `name` when that id was confirmed, else null. Name is the weaker match:
+  `reason` is then `ghl_user_mapped_by_name`.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
   `scoper_user_id`, `sender_line`, `sender_line_source`,
   `scope_stage_ids`, plus `calendar`
@@ -187,6 +189,7 @@ The live GHL id is confirmed at read time against `GET /users/?locationId=`:
 unique email first, then unique first/display name (`name_match: nithin` /
 `marnin`). Live 17 Sep: Nithin's recorded email was absent from that roster
 (`ghl_user_unmapped`); a unique name match maps him and `diary_read` stays
-`read_ok` with `calendar_email` set to the live GHL email. If the name is
-not unique, the diary stays unread with `ghl_user_unmapped`. Khairo is not
+`read_ok` with `mapped_by: name`, `reason: ghl_user_mapped_by_name`, and
+`calendar_email` set to the live GHL email. Zero or several name matches stay
+unread with `ghl_user_unmapped` — never first-match-wins. Khairo is not
 mapped.

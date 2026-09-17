@@ -135,6 +135,7 @@ function deps(
         malformed_dropped: 0,
         calendar_email: "marnin@secureworkswa.com.au",
         ghl_user_id: "ghl_user_marnin",
+        mapped_by: "email",
         scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
       }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
@@ -150,6 +151,7 @@ const UNREAD_DIARY: SalesBookingDiaryScan = {
   malformed_dropped: 0,
   calendar_email: "marnin@secureworkswa.com.au",
   ghl_user_id: "ghl_user_marnin",
+  mapped_by: "email",
   scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
 };
 
@@ -668,6 +670,7 @@ Deno.test("a GHL week with confirmed, cancelled and all-day entries keeps UI dia
           malformed_dropped: 0,
           calendar_email: SALES_BOOKING_GHL_USERS.marnin.email,
           ghl_user_id: "ghl_user_marnin",
+          mapped_by: "email",
           scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
         }),
     }),
@@ -1512,6 +1515,7 @@ Deno.test("Nithin maps by recorded email when that address is on the roster", as
   });
   assertEquals(scan.read_ok, true);
   assertEquals(scan.reason, null);
+  assertEquals(scan.mapped_by, "email");
   assertEquals(scan.ghl_user_id, "ghl_user_nithin");
   assertEquals(scan.calendar_email, SALES_BOOKING_GHL_USERS.nithin.email);
   const payload = await salesBookingRead(
@@ -1519,6 +1523,7 @@ Deno.test("Nithin maps by recorded email when that address is on the roster", as
     { resource: "nithin", week_start: WEEK },
   );
   assertEquals(payload.diary_read.reason, null);
+  assertEquals(payload.diary_read.mapped_by, "email");
   assertEquals(payload.diary_read.ghl_user_id, "ghl_user_nithin");
   assertEquals(
     payload.diary_read.calendar_email,
@@ -1567,6 +1572,7 @@ Deno.test("Nithin maps by unique GHL name when the recorded email is absent", as
   });
   assertEquals(scan.read_ok, true);
   assertEquals(scan.reason, "ghl_user_mapped_by_name");
+  assertEquals(scan.mapped_by, "name");
   assertEquals(scan.ghl_user_id, "ghl_nithin_live");
   assertEquals(scan.calendar_email, "nithin.p@secureworkswa.com.au");
   const payload = await salesBookingRead(
@@ -1574,6 +1580,7 @@ Deno.test("Nithin maps by unique GHL name when the recorded email is absent", as
     { resource: "nithin", week_start: WEEK },
   );
   assertEquals(payload.diary_read.reason, "ghl_user_mapped_by_name");
+  assertEquals(payload.diary_read.mapped_by, "name");
   assertEquals(payload.diary_read.ghl_user_id, "ghl_nithin_live");
   assertEquals(payload.diary_read.calendar_email, "nithin.p@secureworkswa.com.au");
 });
@@ -1598,6 +1605,7 @@ Deno.test("zero or several Nithin name matches stay ghl_user_unmapped", async ()
   });
   assertEquals(none.read_ok, false);
   assertEquals(none.reason, "ghl_user_unmapped");
+  assertEquals(none.mapped_by, null);
   assertEquals(none.ghl_user_id, null);
   assertEquals(none.calendar_email, SALES_BOOKING_GHL_USERS.nithin.email);
 
@@ -1628,6 +1636,7 @@ Deno.test("zero or several Nithin name matches stay ghl_user_unmapped", async ()
   });
   assertEquals(several.read_ok, false);
   assertEquals(several.reason, "ghl_user_unmapped");
+  assertEquals(several.mapped_by, null);
   assertEquals(several.ghl_user_id, null);
   assertEquals(several.calendar_email, SALES_BOOKING_GHL_USERS.nithin.email);
 });
