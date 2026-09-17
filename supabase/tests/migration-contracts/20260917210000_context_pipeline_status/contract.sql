@@ -4,6 +4,7 @@ DECLARE empty_job uuid:=gen_random_uuid(); pending_job uuid:=gen_random_uuid(); 
  event_id uuid; j uuid; before_counts jsonb; after_counts jsonb; section text;
  snap jsonb; perth date:=(now() AT TIME ZONE 'Australia/Perth')::date;
  missing_before integer; missing_after integer; both_null_job uuid:=gen_random_uuid();
+ pending_source timestamptz:='1999-01-02 03:04:05+00';
 BEGIN
  IF to_regprocedure('public.context_coverage()') IS NULL
   OR to_regprocedure('public.context_pipeline_status()') IS NULL
@@ -53,9 +54,11 @@ BEGIN
  missing_before:=(public.context_pipeline_status()->>'missing_event_time')::integer;
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(both_null_job,'00000000-0000-0000-0000-000000000001','accepted','patio','HB-TIME-'||both_null_job);
  INSERT INTO public.business_events(job_id,match_method,payload,occurred_at,attribution_status)
-  VALUES(both_null_job,'direct_job_id','{"body":"occurred_at only"}',now(),'direct');
+  VALUES(both_null_job,'direct_job_id','{"body":"occurred_at only"}',pending_source,'direct');
  IF (public.context_pipeline_status()->>'missing_event_time')::integer IS DISTINCT FROM missing_before
  THEN RAISE EXCEPTION 'heartbeat counted occurred_at-only as missing event time'; END IF;
+ IF (public.context_pipeline_status()->>'oldest_pending_event_at')::timestamptz IS DISTINCT FROM pending_source
+ THEN RAISE EXCEPTION 'heartbeat oldest_pending ignored occurred_at-only source time'; END IF;
  ALTER TABLE public.business_events ALTER COLUMN occurred_at DROP NOT NULL;
  INSERT INTO public.business_events(job_id,match_method,payload,event_at,occurred_at,attribution_status)
   VALUES(both_null_job,'direct_job_id','{"body":"both clocks null"}',NULL,NULL,'direct');

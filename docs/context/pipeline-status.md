@@ -20,7 +20,7 @@ Copied from the unmerged accuracy packet without `context_accuracy_*` tables or
 
 Two live-schema corrections against that draft:
 
-1. `missing_event_time` counts rows where **both** `event_at` and `occurred_at` are null. An `event_at IS NULL` count would report ~33k healthy rows after PR 854, whose writer and `current_job_context_facts` already read `coalesce(event_at, occurred_at)`.
+1. `missing_event_time` counts rows where **both** `event_at` and `occurred_at` are null. An `event_at IS NULL` count would report ~33k healthy rows after PR 854, whose writer and `current_job_context_facts` already read `coalesce(event_at, occurred_at)`. `oldest_pending_event_at` uses that same `min(coalesce(event_at, occurred_at))` source time.
 2. Coverage filters `xero_invoices.invoice_type`. Production has no `type` column on that table.
 
 ## Proof

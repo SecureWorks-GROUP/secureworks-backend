@@ -543,7 +543,8 @@ an `event_at`-only gate — production almost never populates `event_at`.
 The captain heartbeat is `GET ops-api?action=context_pipeline_status`
 (`context_pipeline.ts` → RPC `context_pipeline_status` /
 `context_coverage`, migration `20260917210000`). `missing_event_time` is
-both-null, not `event_at IS NULL`. Coverage filters
+both-null, not `event_at IS NULL`. `oldest_pending_event_at` is
+`min(coalesce(event_at, occurred_at))`, not `min(event_at)`. Coverage filters
 `xero_invoices.invoice_type`, not `type`. The weekly accuracy programme is
 not in this packet. Record: `docs/context/pipeline-status.md`.
 Context migration lanes:
