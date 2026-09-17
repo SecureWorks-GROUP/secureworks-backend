@@ -66,12 +66,15 @@ Additions:
 
 ## Reading it honestly
 
-- **`coverage.enumerated`** is the scoped book: open opportunities whose GHL
-  stage still needs a visit, a reply or a quote (`resource.scope_stage_ids`,
-  copied from wiki PR https://github.com/SecureWorks-GROUP/secureworks-wiki/pull/438).
-  Quote-sent, won, hold, lost and archive stages are left out.
+- **`coverage.enumerated`** and **`cases[]`** are the scoped book: open
+  opportunities whose GHL stage still needs a visit, a reply or a quote
+  (`resource.scope_stage_ids`, the visit/reply/quote prefix of wiki
+  `harness/ops/skills/secureworks-scope-booking/profiles/patio-nithin.json`
+  and `fencing-stratco-marnin.json` `pipeline_stages`). Quote-sent, won,
+  hold, lost, archive, and blank or unknown stage ids are left out.
   **`coverage.excluded_by_stage`** is how many unique open rows were dropped
-  for that reason. CRM row count is not visit demand.
+  for that reason. **`coverage.total`** stays the GHL open-pipeline search
+  total (unscoped). CRM row count is not visit demand.
 - **`coverage.full_population`** is TRUE only when the GHL roster scan reached
   the real end of the result set with no degradation. FALSE means the book is
   incomplete, never that it is small. Every gap is a sentence in

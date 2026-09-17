@@ -91,11 +91,9 @@ export interface SalesBookingResource {
   sender_line: string;
   sender_line_source: string;
   /**
-   * GHL stages that still need a visit, a reply or a quote. Copied from wiki
-   * https://github.com/SecureWorks-GROUP/secureworks-wiki/pull/438
-   * (`pipeline_stages` on patio-nithin.json / fencing-stratco-marnin.json):
-   * every stage before and including Scope Booked / visited-quote-to-send.
-   * Quote-sent, won, hold, lost and archive stages stay off this door.
+   * In-scope GHL stage ids for this door. Copied from wiki
+   * `secureworks-scope-booking` profiles (`pipeline_stages`). Rule:
+   * `docs/sales-booking-read-contract-2026-09-16.md`.
    */
   scope_stage_ids: readonly string[];
 }
@@ -132,7 +130,7 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
     sender_line: "774",
     sender_line_source: "patio_profile_source_backed",
-    // Wiki PR 438 patio-nithin.json pipeline_stages[0..4].
+    // patio-nithin.json pipeline_stages[0..4] (through Quote to be Sent).
     scope_stage_ids: [
       "09759a42-f80a-4947-bca4-71df5dd770da", // Client Needs To Be Contacted
       "4d3bcf9a-185d-4a90-98e0-e0805fdf4a02", // Contacted Waiting on Response
@@ -148,7 +146,7 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     sender_line: "776",
     sender_line_source: "captain_default_2026-09-16",
-    // Wiki PR 438 fencing-stratco-marnin.json pipeline_stages[0..9].
+    // fencing-stratco-marnin.json pipeline_stages[0..9] (through Scope Complete).
     scope_stage_ids: [
       "cc401467-4743-4dbd-a7d7-e8f2ff023dd2", // New Lead (Call + Qualify)
       "7f863a14-1d9f-4a18-b73c-0e1780390bd7", // New Lead (Replied/ Contacted)
