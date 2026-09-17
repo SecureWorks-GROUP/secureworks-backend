@@ -259,6 +259,30 @@ Deno.test("a failed GHL window is named and not treated as complete", async () =
   assertStringIncludes(scan.failure || "", "GHL 502");
 });
 
+Deno.test("usersFromGhlBody reads only body.users", () => {
+  assertEquals(
+    usersFromGhlBody({
+      data: [{ id: "via-data", email: "nithin@secureworkswa.com.au" }],
+    }),
+    [],
+  );
+  const users = usersFromGhlBody({
+    users: [
+      { id: "n1", email: "nithin@secureworkswa.com.au", name: "Nithin" },
+      {
+        id: "n2",
+        email: "other@secureworkswa.com.au",
+        firstName: "Other",
+        lastName: "Person",
+      },
+    ],
+    data: [{ id: "via-data", email: "marnin@secureworkswa.com.au" }],
+  });
+  assertEquals(users.map((user) => user.id), ["n1", "n2"]);
+  assertEquals(users[0].name, "Nithin");
+  assertEquals(users[1].name, null);
+});
+
 Deno.test("confirmGhlUserId refuses a missing, duplicate, or disagreed email match", () => {
   const users = usersFromGhlBody({
     users: [

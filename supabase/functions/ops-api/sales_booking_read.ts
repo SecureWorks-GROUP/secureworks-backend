@@ -466,7 +466,7 @@ export interface SalesBookingDiaryEntry {
   title: string | null;
   kind: SalesBookingDiaryKind;
   source: string;
-  /** Raw GHL `appointmentStatus` (or `cancelled` when deleted). */
+  /** Raw GHL `appointmentStatus`. */
   show_as: string | null;
   /** False for cancelled: on the diary, but not occupancy. */
   blocks_capacity: boolean;
@@ -510,30 +510,12 @@ export function perthDiaryInstant(value: unknown): string | null {
 /** @deprecated Use perthDiaryInstant. Outlook Graph is no longer the diary source. */
 export const perthGraphInstant = perthDiaryInstant;
 
-function ghlIsAllDay(
-  event: Record<string, unknown>,
-  start: string,
-  end: string,
-): boolean {
-  if (event.isAllDay === true) return true;
-  const startMs = Date.parse(start);
-  const endMs = Date.parse(end);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
-    return false;
-  }
-  const perth = new Date(startMs + 8 * 3_600_000);
-  const midnight = perth.getUTCHours() === 0 && perth.getUTCMinutes() === 0 &&
-    perth.getUTCSeconds() === 0;
-  const duration = endMs - startMs;
-  return midnight && duration >= 86_400_000 && duration % 86_400_000 === 0;
-}
-
 /**
  * Project one GHL calendar event onto a diary entry.
  *
  * `kind` and `blocks_capacity` come from provider status only, never from
  * title text. Confirmed/booked (and the conservative occupied statuses) block;
- * cancelled/deleted do not block but still appear with `show_as:'cancelled'`.
+ * cancelled does not block but still appears with `show_as:'cancelled'`.
  * GHL has no leave/personal sensitivity, so those kinds are not invented.
  * Returns null for a malformed event; the caller counts the drop.
  */
@@ -545,14 +527,13 @@ export function projectSalesBookingDiaryEntry(
   const end = perthDiaryInstant(event.endTime);
   if (!id || !start || !end) return null;
 
-  const deleted = event.deleted === true;
   const rawStatus = typeof event.appointmentStatus === "string"
     ? event.appointmentStatus
     : null;
   const status = (rawStatus || "").toLowerCase();
-  const cancelled = deleted || status === "cancelled";
+  const cancelled = status === "cancelled";
   const showAs = cancelled ? "cancelled" : (rawStatus || "busy");
-  // Conservative: only cancelled/deleted is non-occupancy. Unknown statuses still block.
+  // Conservative: only cancelled is non-occupancy. Unknown statuses still block.
   const title = typeof event.title === "string" && event.title
     ? event.title
     : null;
@@ -568,7 +549,7 @@ export function projectSalesBookingDiaryEntry(
     source: DIARY_SOURCE,
     show_as: showAs,
     blocks_capacity: !cancelled,
-    is_all_day: ghlIsAllDay(event, start, end),
+    is_all_day: event.isAllDay === true,
     location,
     title_withheld: false,
   };

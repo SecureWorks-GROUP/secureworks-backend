@@ -133,11 +133,7 @@ export async function fetchGhlCalendarEvents(args: {
 export function usersFromGhlBody(
   body: Record<string, unknown>,
 ): GhlLocationUser[] {
-  const raw = Array.isArray(body.users)
-    ? body.users
-    : Array.isArray(body.data)
-    ? body.data
-    : [];
+  const raw = Array.isArray(body.users) ? body.users : [];
   const users: GhlLocationUser[] = [];
   for (const row of raw as Record<string, unknown>[]) {
     const id = ghlId(row.id);
@@ -145,12 +141,7 @@ export function usersFromGhlBody(
     users.push({
       id,
       email: nonempty(row.email)?.toLowerCase() ?? null,
-      name: nonempty(row.name) ||
-        nonempty(
-          [row.firstName, row.lastName].filter((part) => nonempty(part)).join(
-            " ",
-          ),
-        ),
+      name: nonempty(row.name),
     });
   }
   return users;

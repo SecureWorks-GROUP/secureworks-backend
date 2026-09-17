@@ -82,7 +82,6 @@ function ghlEvent(
     endTime: "2026-09-15T11:30:00+08:00",
     address: "12 Example St",
     appointmentStatus: "confirmed",
-    deleted: false,
     ...overrides,
   };
 }
@@ -467,6 +466,23 @@ Deno.test("diary projection reads only documented GHL event fields", () => {
   assertEquals(aliases.blocks_capacity, true);
   assertEquals(aliases.show_as, "busy");
   assertEquals(aliases.is_all_day, false);
+
+  const midnightSpan = projectSalesBookingDiaryEntry(ghlEvent({
+    id: "midnight-block",
+    startTime: "2026-09-16T00:00:00+08:00",
+    endTime: "2026-09-17T00:00:00+08:00",
+    isAllDay: false,
+    appointmentStatus: "confirmed",
+  }))!;
+  assertEquals(midnightSpan.is_all_day, false);
+  assertEquals(midnightSpan.blocks_capacity, true);
+
+  const deletedFlag = projectSalesBookingDiaryEntry(ghlEvent({
+    deleted: true,
+    appointmentStatus: "confirmed",
+  }))!;
+  assertEquals(deletedFlag.show_as, "confirmed");
+  assertEquals(deletedFlag.blocks_capacity, true);
 });
 
 // ── Assembly / coverage honesty ─────────────────────────────
