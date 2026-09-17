@@ -2597,6 +2597,14 @@ both reads past the 1000-row ceiling. This
 is a write-side invariant only; every read-side ghost exclusion above is
 unchanged. Tests: `ghost_observer_auto_mirror_test.ts`.
 
+The ghost mirrors every span field of its crew row (`scheduled_date`,
+`scheduled_end`, `start_time`, `end_time`, `duration_days`): a same-date
+resize re-syncs the live ghost in place (last writer wins across crew rows on
+one date, no second event), and every live-crew read in the module keeps
+NULL-status rows via `status.is.null,status.neq.cancelled`, because
+`job_assignments.status` is nullable and a bare `.neq` would let a legacy
+row's span lose its ghost.
+
 `job_assignments_job_user_date_key` is UNIQUE(job_id, user_id, scheduled_date)
 with NO `is_ghost` or `status` exemption, so the ops manager holds at most one
 row per job/date — ghost or real, live or cancelled. Two rules follow. The

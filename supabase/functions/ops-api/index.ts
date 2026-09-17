@@ -32485,6 +32485,7 @@ export async function createAssignment(client: any, body: any) {
         scheduledEnd: data.scheduled_end ?? null,
         startTime: data.start_time ?? null,
         endTime: data.end_time ?? null,
+        durationDays: data.duration_days ?? null,
         crewName: data.crew_name || body.crewName || body.crew_name || null,
       }, data.user_id)
     }
@@ -32698,19 +32699,23 @@ export async function updateAssignment(client: any, body: any) {
           newScheduledEnd: data.scheduled_end ?? null,
           newStartTime: data.start_time ?? null,
           newEndTime: data.end_time ?? null,
+          newDurationDays: data.duration_days ?? null,
           crewName: data.crew_name ?? null,
           assigneeUserId: data.user_id ?? null,
         })
       } else if (data.scheduled_date) {
-        // Same date, still crew work: the row may have been un-cancelled, or
+        // Same date, still crew work: the row may have been un-cancelled,
         // reassigned off the ops manager (whose real row held the key in
-        // place of a ghost). Idempotent, so a no-change update costs one read.
+        // place of a ghost), or resized (end / times / duration) — the
+        // mirror follows every span field. Idempotent, so a no-change
+        // update costs one read.
         await ensureGhostObserverMirror(client, {
           jobId: String(data.job_id),
           scheduledDate: String(data.scheduled_date),
           scheduledEnd: data.scheduled_end ?? null,
           startTime: data.start_time ?? null,
           endTime: data.end_time ?? null,
+          durationDays: data.duration_days ?? null,
           crewName: data.crew_name ?? null,
         }, data.user_id ?? null)
       }

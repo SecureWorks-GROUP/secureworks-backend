@@ -27,6 +27,10 @@
 import { fetchAllRows } from './makesafe_compact_reads.ts'
 
 const GHOST_MIRROR_OBSERVER_ROLES = new Set(['observer', 'ghost'])
+// `job_assignments.status` is nullable, and a plain `.neq('status', ...)`
+// drops NULL-status rows under SQL three-valued logic. Every live-row read
+// here keeps NULL and excludes only an explicit cancel.
+const LIVE_STATUS_PREDICATE = 'status.is.null,status.neq.cancelled'
 // Planning entries (calendar meetings/reminders) are not field work and must
 // never mint a ghost — mirrors the SMS notify skip in createAssignment.
 const GHOST_MIRROR_PLANNING_TYPES = new Set(['meeting', 'reminder'])
@@ -42,13 +46,37 @@ export type GhostMirrorSpan = {
   scheduledEnd?: string | null
   startTime?: string | null
   endTime?: string | null
+  durationDays?: number | null
   crewName?: string | null
+}
+
+function positiveDurationDays(value: unknown): number | null {
+  const n = Math.round(Number(value))
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/** The mutable span fields a ghost mirrors from its crew row. */
+function ghostSpanFields(span: GhostMirrorSpan): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    scheduled_end: span.scheduledEnd || null,
+    start_time: span.startTime || null,
+    end_time: span.endTime || null,
+  }
+  const duration = positiveDurationDays(span.durationDays)
+  if (duration !== null) fields.duration_days = duration
+  return fields
+}
+
+function ghostSpanDiffers(row: OpsManagerSpanRow, span: GhostMirrorSpan): boolean {
+  const want = ghostSpanFields(span)
+  return Object.keys(want).some((key) => (row.fields[key] ?? null) !== (want[key] ?? null))
 }
 
 type OpsManagerSpanRow = {
   id: string
   is_ghost: boolean
   status: string
+  fields: Record<string, unknown>
 }
 
 /**
@@ -108,7 +136,7 @@ async function readOpsManagerRowForSpan(
 ): Promise<{ row: OpsManagerSpanRow | null; unreadable: boolean }> {
   const { data, error } = await client
     .from('job_assignments')
-    .select('id, is_ghost, status')
+    .select('id, is_ghost, status, scheduled_end, start_time, end_time, duration_days')
     .eq('job_id', jobId)
     .eq('user_id', opsManagerId)
     .eq('scheduled_date', scheduledDate)
@@ -124,6 +152,12 @@ async function readOpsManagerRowForSpan(
       id: String(raw.id),
       is_ghost: raw.is_ghost === true,
       status: String(raw.status || '').toLowerCase(),
+      fields: {
+        scheduled_end: raw.scheduled_end ?? null,
+        start_time: raw.start_time ?? null,
+        end_time: raw.end_time ?? null,
+        duration_days: raw.duration_days ?? null,
+      },
     },
     unreadable: false,
   }
@@ -169,9 +203,7 @@ async function reviveCancelledGhost(
   const { error } = await client.from('job_assignments').update({
     status: 'scheduled',
     confirmation_status: 'tentative',
-    scheduled_end: span.scheduledEnd || null,
-    start_time: span.startTime || null,
-    end_time: span.endTime || null,
+    ...ghostSpanFields(span),
     notes: ghostMirrorNotes(span.crewName),
   }).eq('id', ghostId)
   if (error) {
@@ -181,14 +213,27 @@ async function reviveCancelledGhost(
   return true
 }
 
+async function syncLiveGhostSpan(
+  client: any,
+  row: OpsManagerSpanRow,
+  span: GhostMirrorSpan,
+): Promise<void> {
+  if (!ghostSpanDiffers(row, span)) return
+  const { error } = await client.from('job_assignments').update(ghostSpanFields(span)).eq('id', row.id)
+  if (error) console.log('[ops-api] ghost observer mirror: ghost span sync failed:', error)
+}
+
 /**
  * Idempotent create: ensures exactly one non-cancelled ghost observer row for
- * the ops manager covers `span.scheduledDate` on `span.jobId`. No-ops when
- * the ops manager cannot be resolved, when a covering ghost already exists,
- * when the ops manager already holds a REAL row on that key (he is the
- * assignee — no watcher row needed), or when `assigneeUserId` IS the ops
- * manager. A cancelled ghost on the key is revived in place rather than
- * inserted over, because the unique key does not exempt cancelled rows.
+ * the ops manager covers `span.scheduledDate` on `span.jobId`, carrying the
+ * crew row's scheduled_end / start_time / end_time / duration_days. A ghost
+ * already on the key is never duplicated: its span fields are brought into
+ * line with this call (last writer wins) and no second event is written.
+ * No-ops when the ops manager cannot be resolved, when he already holds a
+ * REAL row on that key (he is the assignee — no watcher row needed), or
+ * when `assigneeUserId` IS the ops manager. A cancelled ghost on the key is
+ * revived in place rather than inserted over, because the unique key does
+ * not exempt cancelled rows.
  */
 export async function ensureGhostObserverMirror(
   client: any,
@@ -214,7 +259,10 @@ export async function ensureGhostObserverMirror(
       )
       return { created: false, opsManagerId }
     }
-    if (row.status !== 'cancelled') return { created: false, ghostId: row.id, opsManagerId }
+    if (row.status !== 'cancelled') {
+      await syncLiveGhostSpan(client, row, span)
+      return { created: false, ghostId: row.id, opsManagerId }
+    }
     const revived = await reviveCancelledGhost(client, row.id, span)
     if (!revived) return { created: false, opsManagerId }
     await writeGhostMirrorEvent(client, span.jobId, row.id, span.scheduledDate, true)
@@ -228,9 +276,7 @@ export async function ensureGhostObserverMirror(
     job_id: span.jobId,
     user_id: opsManagerId,
     scheduled_date: span.scheduledDate,
-    scheduled_end: span.scheduledEnd || null,
-    start_time: span.startTime || null,
-    end_time: span.endTime || null,
+    ...ghostSpanFields(span),
     role: GHOST_OBSERVER_ROLE,
     assignment_type: 'install',
     is_ghost: true,
@@ -306,10 +352,10 @@ async function spanCrewCoverage(
 ): Promise<SpanCoverage> {
   const { data, error } = await client
     .from('job_assignments')
-    .select('id, user_id, role, assignment_type, is_ghost, status, scheduled_end, start_time, end_time, crew_name')
+    .select('id, user_id, role, assignment_type, is_ghost, status, scheduled_end, start_time, end_time, duration_days, crew_name')
     .eq('job_id', jobId)
     .eq('scheduled_date', scheduledDate)
-    .neq('status', 'cancelled')
+    .or(LIVE_STATUS_PREDICATE)
   if (error) {
     console.log('[ops-api] ghost observer mirror: sibling-coverage read failed:', error)
     return { covered: true, unreadable: true, coveringRow: null }
@@ -358,6 +404,7 @@ export async function reconcileGhostObserverMirrorOnReschedule(
     newScheduledEnd?: string | null
     newStartTime?: string | null
     newEndTime?: string | null
+    newDurationDays?: number | null
     crewName?: string | null
     assigneeUserId?: string | null
   },
@@ -382,6 +429,7 @@ export async function reconcileGhostObserverMirrorOnReschedule(
       scheduledEnd: cover.scheduled_end ?? null,
       startTime: cover.start_time ?? null,
       endTime: cover.end_time ?? null,
+      durationDays: cover.duration_days ?? null,
       crewName: cover.crew_name ?? null,
     })
   }
@@ -406,6 +454,7 @@ export async function reconcileGhostObserverMirrorOnReschedule(
             scheduledEnd: params.newScheduledEnd ?? null,
             startTime: params.newStartTime ?? null,
             endTime: params.newEndTime ?? null,
+            durationDays: params.newDurationDays ?? null,
             crewName: params.crewName ?? null,
           }, params.assigneeUserId ?? null)
         }
@@ -417,9 +466,14 @@ export async function reconcileGhostObserverMirrorOnReschedule(
       }
       const { error: moveErr } = await client.from('job_assignments').update({
         scheduled_date: params.newDate,
-        scheduled_end: params.newScheduledEnd ?? null,
-        start_time: params.newStartTime ?? null,
-        end_time: params.newEndTime ?? null,
+        ...ghostSpanFields({
+          jobId: params.jobId,
+          scheduledDate: params.newDate,
+          scheduledEnd: params.newScheduledEnd ?? null,
+          startTime: params.newStartTime ?? null,
+          endTime: params.newEndTime ?? null,
+          durationDays: params.newDurationDays ?? null,
+        }),
         notes: ghostMirrorNotes(params.crewName),
       }).eq('id', oldGhost.id)
       if (moveErr) {
@@ -440,6 +494,7 @@ export async function reconcileGhostObserverMirrorOnReschedule(
     scheduledEnd: params.newScheduledEnd ?? null,
     startTime: params.newStartTime ?? null,
     endTime: params.newEndTime ?? null,
+    durationDays: params.newDurationDays ?? null,
     crewName: params.crewName ?? null,
   }, params.assigneeUserId ?? null)
 }
@@ -474,6 +529,7 @@ export async function syncGhostObserverMirrorForSpan(
       scheduledEnd: cover.scheduled_end ?? null,
       startTime: cover.start_time ?? null,
       endTime: cover.end_time ?? null,
+      durationDays: cover.duration_days ?? null,
       crewName: cover.crew_name ?? null,
     })
     return { removed: 0, ensured: res.created }
@@ -486,7 +542,7 @@ export async function syncGhostObserverMirrorForSpan(
     .eq('user_id', opsManagerId)
     .eq('is_ghost', true)
     .eq('scheduled_date', params.scheduledDate)
-    .neq('status', 'cancelled')
+    .or(LIVE_STATUS_PREDICATE)
   if (error) {
     console.log('[ops-api] ghost observer mirror: cleanup read failed:', error)
     return { removed: 0, ensured: false }
@@ -507,6 +563,7 @@ export type GhostBackfillCandidate = {
   scheduledEnd: string | null
   startTime: string | null
   endTime: string | null
+  durationDays: number | null
   crewName: string | null
   job: any
 }
@@ -532,10 +589,10 @@ export async function findGhostObserverBackfillCandidates(
         .from('job_assignments')
         .select(
           'id, job_id, user_id, role, assignment_type, is_ghost, status, scheduled_date, ' +
-          'scheduled_end, start_time, end_time, crew_name, jobs:job_id(type, metadata, job_number)',
+          'scheduled_end, start_time, end_time, duration_days, crew_name, jobs:job_id(type, metadata, job_number)',
         )
         .eq('is_ghost', false)
-        .neq('status', 'cancelled')
+        .or(LIVE_STATUS_PREDICATE)
         .gte('scheduled_date', opts.today),
     'ghost observer backfill: crew rows',
     'id',
@@ -547,7 +604,7 @@ export async function findGhostObserverBackfillCandidates(
         .from('job_assignments')
         .select('id, job_id, scheduled_date, status')
         .eq('user_id', opsManagerId)
-        .neq('status', 'cancelled')
+        .or(LIVE_STATUS_PREDICATE)
         .gte('scheduled_date', opts.today),
     'ghost observer backfill: ops manager rows',
     'id',
@@ -572,6 +629,7 @@ export async function findGhostObserverBackfillCandidates(
       scheduledEnd: row.scheduled_end ?? null,
       startTime: row.start_time ?? null,
       endTime: row.end_time ?? null,
+      durationDays: row.duration_days ?? null,
       crewName: row.crew_name ?? null,
       job: row.jobs || null,
     })
@@ -593,6 +651,7 @@ export async function applyGhostObserverBackfill(
       scheduledEnd: c.scheduledEnd,
       startTime: c.startTime,
       endTime: c.endTime,
+      durationDays: c.durationDays,
       crewName: c.crewName,
     })
     if (res.created) created++
