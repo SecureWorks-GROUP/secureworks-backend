@@ -259,3 +259,9 @@ debt_proposal_mark
 # so the probe names an unknown resource: that refuses in the request validator
 # before any provider call, which is still positive proof the action is wired.
 sales_booking_read # probe=bounded-refusal probe-args=resource=__deploy_probe__
+# Sales Booking pack store (17 Sep 2026). Publish and stamp write mutate, so
+# the live probe is source-only. Stamp read refuses an unknown resource before
+# touching the table, same shape as sales_booking_read.
+sales_booking_pack_publish # probe=source-only
+sales_booking_stamp_write # probe=source-only
+sales_booking_stamp_read # probe=bounded-refusal probe-args=resource=__deploy_probe__

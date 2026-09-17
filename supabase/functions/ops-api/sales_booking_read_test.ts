@@ -515,7 +515,11 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.week_start, WEEK);
   assertEquals(payload.policy.activation, "held");
   assertEquals(payload.drafts, {});
+  assertEquals(payload.pack, { present: false, as_of: null });
+  assertEquals(payload.stamp.present, false);
   assertEquals(payload.cases.length, 1);
+  assertEquals(payload.cases[0].proposal, null);
+  assertEquals(payload.cases[0].stamp_state, "none");
   assertEquals(payload.coverage.full_population, true);
   assertEquals(payload.coverage.enumerated, 1);
   assertEquals(payload.coverage.total, 1);

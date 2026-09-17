@@ -90,8 +90,9 @@ if [[ "$action" == "makesafe_deterministic_intake_replay" ]]; then
 fi
 
 # Stands in for resolveSalesBookingResource: an unknown resource is refused in
-# the request validator, before any GHL pipeline scan or Graph calendar read.
-if [[ "$action" == "sales_booking_read" ]]; then
+# the request validator, before any GHL pipeline scan, Graph calendar read, or
+# sales_booking_packs table read. Stamp read shares that validator.
+if [[ "$action" == "sales_booking_read" || "$action" == "sales_booking_stamp_read" ]]; then
   if printf '%s' "$url" | grep -q 'resource=__deploy_probe__'; then
     printf '%s\n' '{"error":"Unknown resource \"__deploy_probe__\". Use: nithin, marnin"}'
   else

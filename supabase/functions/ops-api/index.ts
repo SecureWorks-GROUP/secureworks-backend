@@ -810,6 +810,14 @@ import {
   SalesBookingRequestError,
 } from './sales_booking_read.ts'
 import {
+  loadSalesBookingPackOverlay,
+  applySalesBookingPackOverlay,
+  salesBookingPackPublishAction,
+  salesBookingStampReadAction,
+  salesBookingStampWriteAction,
+  SalesBookingPackError,
+} from './sales_booking_pack.ts'
+import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
   senderMatchesWatchedFloor as _senderMatchesWatchedFloor,
@@ -5109,7 +5117,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const sbThreadFacts = sbParam('include_thread_facts')
         const sbCaseIds = sbParam('case_ids')
         try {
-          return json(await salesBookingReadAction(client, {
+          const assembled = await salesBookingReadAction(client, {
             resource: sbParam('resource'),
             week_start: sbParam('week_start'),
             scoper_user_id: sbParam('scoper_user_id'),
@@ -5123,9 +5131,69 @@ if (import.meta.main) serve(async (req: Request) => {
               : typeof sbCaseIds === 'string' && sbCaseIds
               ? sbCaseIds.split(',').map((id: string) => id.trim()).filter(Boolean)
               : null,
+          })
+          const overlay = await loadSalesBookingPackOverlay(
+            client,
+            assembled.resource.resource_id,
+            assembled.week_start,
+          )
+          return json(applySalesBookingPackOverlay(assembled, overlay))
+        } catch (e) {
+          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
+      case 'sales_booking_pack_publish': {
+        // Engine publish: ops API key only. Stores kind=pack. No send.
+        if (req.method !== 'POST') {
+          throw new ApiError('sales_booking_pack_publish requires POST', 405)
+        }
+        try {
+          return json(await salesBookingPackPublishAction(client, {
+            mode: authMode,
+            role: authUser?.role ?? null,
+            userId: authUser?.id ?? null,
+          }, body && typeof body === 'object' ? body : {}))
+        } catch (e) {
+          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
+      case 'sales_booking_stamp_write': {
+        // Captain KEEP/CUT. API key or signed-in admin/owner/ops_manager.
+        // Stores kind=stamp with as_of now. No send, no calendar, no GHL write.
+        if (req.method !== 'POST') {
+          throw new ApiError('sales_booking_stamp_write requires POST', 405)
+        }
+        try {
+          return json(await salesBookingStampWriteAction(client, {
+            mode: authMode,
+            role: authUser?.role ?? null,
+            userId: authUser?.id ?? null,
+          }, body && typeof body === 'object' ? body : {}))
+        } catch (e) {
+          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
+      case 'sales_booking_stamp_read': {
+        // Engine --apply-stamp reader. API key only.
+        const stampParam = (name: string) => url.searchParams.get(name) ?? body[name] ?? null
+        try {
+          return json(await salesBookingStampReadAction(client, {
+            mode: authMode,
+            role: authUser?.role ?? null,
+            userId: authUser?.id ?? null,
+          }, {
+            resource: stampParam('resource'),
+            week_start: stampParam('week_start'),
           }))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
           throw e
         }
       }
