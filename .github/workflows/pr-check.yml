@@ -250,7 +250,8 @@ jobs:
             supabase/functions/ops-api/ses_report_trigger_test.ts \
             supabase/functions/ops-api/xero_bank_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
-            supabase/functions/ops-api/sales_booking_read_test.ts
+            supabase/functions/ops-api/sales_booking_read_test.ts \
+            supabase/functions/ops-api/sales_booking_pack_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still

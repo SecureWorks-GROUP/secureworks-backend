@@ -63,6 +63,31 @@ Additions:
   `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
+- **`pack`** — `{present, as_of}` for the latest `sales_booking_packs` row
+  with `kind=pack`. Absent when the engine has not published this week.
+- **`stamp`** — `{present, as_of, approved, rejected, decisions, stage_moves}`
+  from the latest `kind=stamp` row. The captain Send stamp; nothing is sent.
+- Per case **`proposal`** — `{disposition, day, window_start, window_end,
+  draft, why[]}` merged from that pack by opportunity id (`opp:<id>` maps to
+  the case opportunity id), or `null` when no pack row matched.
+- Per case **`stamp_state`** — `'none' | 'approved' | 'rejected'`.
+- **`drafts`** — filled from the pack's drafts map (opportunity id → text).
+  Empty `{}` when no pack is present.
+
+Publish / stamp actions (same table, no send):
+
+- `POST sales_booking_pack_publish` (api key only): body
+  `{resource, week_start, as_of, proposals, coverage, drafts}` stores
+  `kind=pack`. Returns `{ok, id, as_of}`.
+- `POST sales_booking_stamp_write` (api key or signed-in
+  admin / owner / ops_manager): body `{resource, week_start, stamp}` stores
+  `kind=stamp` with `as_of` now. No other side effect.
+- `GET sales_booking_stamp_read` (api key only): `{resource, week_start}`
+  returns the latest stamp payload and `as_of`, or `{ok:true, stamp:null}`.
+
+Table: `sales_booking_packs`. Latest = greatest `as_of` per
+`(resource, week_start, kind)`. An older pack is ignored. RLS on, no client
+access. Migration `20260917120000_sales_booking_packs.sql`.
 
 ## Reading it honestly
 

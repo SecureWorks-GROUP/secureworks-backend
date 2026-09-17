@@ -13,8 +13,8 @@
 // ── READ ONLY ──
 // This module performs NO writes of any kind: no Supabase mutation, no GHL
 // write, no calendar create, no send. Every dependency it takes is a reader.
-// There is deliberately no draft store (the reference shape's `drafts` is
-// always `{}`) because that would be a new table, which is out of scope.
+// Drafts and proposed windows come from the latest `sales_booking_packs`
+// row (kind=pack), merged in after this read. Without a pack they stay empty.
 //
 // ── HONESTY CONTRACT (wiki skill `secureworks-scope-booking`) ──
 //  1. Full population, or an explicit `coverage.full_population:false` naming
@@ -430,6 +430,17 @@ export function unreadSalesBookingThreadFacts(
 // Cases (pure)
 // ════════════════════════════════════════════════════════════
 
+export type SalesBookingStampState = "none" | "approved" | "rejected";
+
+export interface SalesBookingCaseProposal {
+  disposition: string;
+  day: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  draft: string | null;
+  why: string[];
+}
+
 export interface SalesBookingCase {
   id: string;
   resource_id: string;
@@ -443,6 +454,9 @@ export interface SalesBookingCase {
   stage_name: string | null;
   /** Additive: newest GHL activity timestamp, used to order the thread budget. */
   last_activity_at: string | null;
+  /** Latest engine pack row for this opportunity, or null when no pack matched. */
+  proposal: SalesBookingCaseProposal | null;
+  stamp_state: SalesBookingStampState;
 }
 
 /** A contact whose "name" is really a phone number is an unnamed enquiry. */
@@ -494,6 +508,8 @@ export function projectSalesBookingCase(
     tags: Array.isArray(contact.tags) ? contact.tags.map((t) => String(t)) : [],
     stage_name: (stageId && stages[stageId]) || null,
     last_activity_at: typeof updatedAt === "string" ? updatedAt : null,
+    proposal: null,
+    stamp_state: "none",
   };
 }
 
@@ -710,7 +726,16 @@ export interface SalesBookingReadResponse {
     ghl_user_id: string | null;
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
-  drafts: Record<string, never>;
+  drafts: Record<string, string>;
+  pack: { present: boolean; as_of: string | null };
+  stamp: {
+    present: boolean;
+    as_of: string | null;
+    approved: string[];
+    rejected: string[];
+    decisions: Record<string, "hold" | "replace">;
+    stage_moves: Array<{ id: string; to_stage_id: string }>;
+  };
   defaults: typeof SALES_BOOKING_CAPTAIN_DEFAULTS;
   policy: { activation: "held"; send: "held"; calendar_write: "held" };
 }
@@ -817,8 +842,18 @@ export function assembleSalesBookingRead(input: {
       ghl_user_id: diary.ghl_user_id,
     },
     thread_facts: threads.facts,
-    // No draft store exists server-side (a new table is out of scope for v1).
+    // Pack overlay (proposals, drafts, stamp) is applied after this assemble
+    // by sales_booking_pack.ts. Absent here means the engine has not published.
     drafts: {},
+    pack: { present: false, as_of: null },
+    stamp: {
+      present: false,
+      as_of: null,
+      approved: [],
+      rejected: [],
+      decisions: {},
+      stage_moves: [],
+    },
     defaults: SALES_BOOKING_CAPTAIN_DEFAULTS,
     policy: { activation: "held", send: "held", calendar_write: "held" },
   };
