@@ -2506,7 +2506,17 @@ the existing flat-parsing test fixtures keep working — and the exact "repair
 wins" precedence is enforced exactly once per surface, afterward, by
 re-classifying each row through `_jobVertical`. The make-safe board's own
 `excludeInsuranceRepairs` projections are untouched; a repair-family job is no
-longer served ONLY through that board. Tests: `repair_trade_vertical_test.ts`.
+longer served ONLY through that board. Two rulings bound the vertical
+(2026-09-17): the fencing completion-evidence gate (photos + neighbour
+sign-off before invoice / completion) keys on raw `jobs.type` through
+`completionEvidenceVertical` (`trade_completion_evidence.ts`), never on
+`_jobVertical`, so a fencing job whose family says repair is not relaxed;
+and the repair open pool admits `_REPAIR_POOL_READY_STATUSES` (crew-ready
+plus `accepted` / `processing`), PROVISIONAL until the repair lifecycle is
+ruled, while the fencing / patio / decking pools keep `_CREW_READY_STATUSES`
+and the my_jobs make-safe pool drops repair-family rows. `tradeCalendarEvents`
+decides truncation and `next_offset` on the raw lookahead and narrows only the
+returned page. Tests: `repair_trade_vertical_test.ts`.
 
 The 2026-08-03 trade crew/detail payload, named-lead contract, visibility
 narrowing, diagnosis, and deployment caveats are owned by

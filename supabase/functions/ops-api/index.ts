@@ -163,6 +163,7 @@ import {
   COMPLETION_EVIDENCE_BLOCK_REASON,
   NEIGHBOUR_SIGNOFF_WAIVED_EVENT,
   completionEvidenceMessage,
+  completionEvidenceVertical,
   loadCompletionEvidenceByJob,
   type CompletionEvidence,
 } from './trade_completion_evidence.ts'
@@ -2527,6 +2528,20 @@ export const _sendSmsViaGhlWithReceiptForTest = sendSmsViaGhlWithReceipt
 // 72-available counts) and the ready-transition manager text (U2b — fires only
 // on ENTERING this set). G1: crewless 'scheduled' is deliberately included.
 export const _CREW_READY_STATUSES = ['order_confirmed', 'schedule_install', 'scheduled'] as const
+
+// PROVISIONAL (2026-09-17) until the repair lifecycle is settled by a future
+// ruling: the repair open pool admits the crew-ready set PLUS the make-safe
+// lifecycle statuses an SWR- mint ('accepted') and a repair-family make-safe
+// ('accepted' / 'processing') actually carry, because both are born through
+// createMakesafeJob and never reach order_confirmed / schedule_install. Used
+// ONLY by the repair branch of the generic pool loop; the fencing / patio /
+// decking pools keep _CREW_READY_STATUSES exactly.
+export const _REPAIR_POOL_READY_STATUSES = Array.from(new Set([
+  ..._CREW_READY_STATUSES,
+  'accepted',
+  'processing',
+  'scheduled',
+])) as readonly string[]
 
 // ── M3b U2 (D4): vertical-manager SMS fan-out ───────────────────────────────
 // Reverse lookup (scout: no such helper existed): the managers of a vertical =
@@ -9995,7 +10010,7 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             await assertFencingCompletionEvidence(client, [{
               id: String(woJob?.id || wo.job_id || ''),
-              vertical: _jobVertical(woJob),
+              vertical: completionEvidenceVertical(woJob),
               label: woJob?.job_number || null,
             }])
 
@@ -13471,7 +13486,9 @@ export async function tradeCalendarEvents(
   const { data, error } = await query
   if (error) throw error
 
-  let rows = data || []
+  const rows = data || []
+  const hasMore = rows.length > pageSize
+  let pageRows = rows.slice(0, pageSize)
   // tradeCalendarVerticalFilter's SQL clause is a SUPERSET (e.g. a manager
   // scoped to 'makesafe' also matches every SWMS-numbered row); the exact
   // "repair wins" precedence is enforced here, the ONE place, using the same
@@ -13480,14 +13497,13 @@ export async function tradeCalendarEvents(
   // 'repair'-scoped one (SWMS-261319 class).
   if (scopingVerticals.length > 0) {
     const scopingSet = new Set(scopingVerticals)
-    rows = rows.filter((row: any) =>
+    pageRows = pageRows.filter((row: any) =>
       scopingSet.has(
         _jobVertical({ type: row?.job_type, job_number: row?.job_number, job_family: row?.job_family }),
       )
     )
   }
-  const hasMore = rows.length > pageSize
-  const events = rows.slice(0, pageSize).map((event: any) => {
+  const events = pageRows.map((event: any) => {
     const { org_id, ...safeEvent } = event
     return safeEvent
   })
@@ -13886,7 +13902,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
     client,
     (workOrders || []).map((workOrder: any) => {
       const job = Array.isArray(workOrder.jobs) ? workOrder.jobs[0] : workOrder.jobs
-      return { id: String(job?.id || workOrder.job_id || ''), vertical: _jobVertical(job), label: job?.job_number || null }
+      return { id: String(job?.id || workOrder.job_id || ''), vertical: completionEvidenceVertical(job), label: job?.job_number || null }
     }).filter((j: any) => j.id),
   )
 
@@ -14364,7 +14380,7 @@ export async function tradeWorkOrders(
   // card never offers an invoice action that 422s.
   const evidenceByJob = await loadCompletionEvidenceByJob(
     client,
-    pageRows.map((row: any) => ({ id: String(row.job_id || ''), vertical: _jobVertical(row.jobs) })).filter((j: any) => j.id),
+    pageRows.map((row: any) => ({ id: String(row.job_id || ''), vertical: completionEvidenceVertical(row.jobs) })).filter((j: any) => j.id),
   )
   for (let i = 0; i < mapped.length; i++) {
     const ev = evidenceByJob.get(String(pageRows[i]?.job_id || ''))
@@ -38938,7 +38954,9 @@ export async function myJobs(
     )
 
     const openMakesafeById: Record<string, any> = {}
-    for (const job of (openMakesafesByShape || [])) if (job?.id) openMakesafeById[job.id] = job
+    for (const job of (openMakesafesByShape || [])) {
+      if (job?.id && !_jobIsRepairFamily(job)) openMakesafeById[job.id] = job
+    }
 
     // Backstop for legacy imports: if a job has a makesafe_job_details row but
     // its jobs.type/job_number has not been normalised, still expose it to the
@@ -38993,7 +39011,9 @@ export async function myJobs(
         ),
       ))
       const detailJobs = detailPages.flat()
-      for (const job of (detailJobs || [])) if (job?.id) openMakesafeById[job.id] = job
+      for (const job of (detailJobs || [])) {
+        if (job?.id && !_jobIsRepairFamily(job)) openMakesafeById[job.id] = job
+      }
     }
 
     // Full detail rows for exactly the jobs that survived into the pool. Chunked
@@ -39264,7 +39284,9 @@ export async function myJobs(
               ? q.or('type.eq.repair,metadata->>ses_family.eq.repair,metadata->>makesafe_job_family.eq.repair')
               : q.eq('type', vertical)
             return q
-              .in('status', _CREW_READY_STATUSES as unknown as string[])
+              .in('status', vertical === 'repair'
+                ? _REPAIR_POOL_READY_STATUSES as unknown as string[]
+                : _CREW_READY_STATUSES as unknown as string[])
               .order('created_at', { ascending: false })
               .order('id', { ascending: true })
               .range(offset, offset + limit - 1)
@@ -39272,7 +39294,7 @@ export async function myJobs(
           `${vertical} pool`,
         )
         const openJobs = vertical === 'repair'
-          ? openJobsRaw
+          ? (openJobsRaw || []).filter((job: any) => _jobIsRepairFamily(job))
           : (openJobsRaw || []).filter((job: any) => !_jobIsRepairFamily(job))
         // The manager assignment feed intentionally remains 30-day windowed, so
         // ask job_assignments directly whether these already tenant+vertical-
@@ -40878,7 +40900,7 @@ async function tradeJobDetail(
 
   const completionEvidence = (await loadCompletionEvidenceByJob(client, [{
     id: jobId,
-    vertical: _jobVertical(jobRes.data),
+    vertical: completionEvidenceVertical(jobRes.data),
     scope_json: jobRes.data?.scope_json,
   }])).get(jobId) || null
 
@@ -49957,7 +49979,7 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     .eq('id', jobId).eq('org_id', tradeUser.orgId).maybeSingle()
   if (error) throw error
   if (!job) throw new ApiError('Job not found', 404)
-  const ev = (await loadCompletionEvidenceByJob(client, [{ id: job.id, vertical: _jobVertical(job), scope_json: job.scope_json }])).get(job.id) || null
+  const ev = (await loadCompletionEvidenceByJob(client, [{ id: job.id, vertical: completionEvidenceVertical(job), scope_json: job.scope_json }])).get(job.id) || null
   if (ev && ev.applies && !ev.satisfied) {
     throw new ApiError(completionEvidenceMessage(ev, null, 'marked complete'), 422)
   }
@@ -50053,7 +50075,7 @@ async function tradeWaiveNeighbourSignoff(client: any, body: any, tradeUser: Tra
     detail_json: { reason, waived_by: tradeUser.id, waived_by_email: tradeUser.email || null },
   }).select().single()
   if (insErr) throw insErr
-  const ev = (await loadCompletionEvidenceByJob(client, [{ id: job.id, vertical: _jobVertical(job), scope_json: job.scope_json }])).get(job.id) || null
+  const ev = (await loadCompletionEvidenceByJob(client, [{ id: job.id, vertical: completionEvidenceVertical(job), scope_json: job.scope_json }])).get(job.id) || null
   return { ok: true, event_id: event?.id || null, completion_evidence: ev }
 }
 
@@ -50508,7 +50530,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   if (isPerMetre) {
     const evidenceByJob = await loadCompletionEvidenceByJob(
       client,
-      enriched.map((a: any) => ({ id: String(a.jobs?.id || ''), vertical: _jobVertical(a.jobs) })).filter((j: any) => j.id),
+      enriched.map((a: any) => ({ id: String(a.jobs?.id || ''), vertical: completionEvidenceVertical(a.jobs) })).filter((j: any) => j.id),
     )
     for (const a of enriched) {
       const ev = evidenceByJob.get(String(a.jobs?.id || ''))
@@ -50722,7 +50744,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
         .filter((item: any) => (Number(item?.metres) || 0) > 0 && jobMap[item.job_id])
         .map((item: any) => ({
           id: String(item.job_id),
-          vertical: _jobVertical(jobMap[item.job_id]),
+          vertical: completionEvidenceVertical(jobMap[item.job_id]),
           label: jobMap[item.job_id]?.job_number || null,
         })),
     )

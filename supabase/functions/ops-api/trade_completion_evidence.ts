@@ -56,6 +56,15 @@ export function completionEvidenceApplies(vertical: unknown): boolean {
   return String(vertical || '').trim().toLowerCase() === 'fencing'
 }
 
+/** The vertical string every completion-evidence caller passes in. Keyed on the
+ *  job's raw `jobs.type` only: this is a money/safety gate (completion photos +
+ *  neighbour sign-off before a fencing job can be invoiced), so family metadata
+ *  saying `repair` must never relax it. Never derive this from the trade
+ *  vertical classifier. */
+export function completionEvidenceVertical(job: unknown): string {
+  return String(asObject(job).type || '').trim().toLowerCase()
+}
+
 /** Neighbours the scoper actually named. A blank row (the scoping tool
  *  always seeds one) does not count. */
 export function namedNeighbourCount(scopeJson: unknown): number {

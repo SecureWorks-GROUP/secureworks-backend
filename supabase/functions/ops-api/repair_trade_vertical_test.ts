@@ -22,16 +22,31 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  _CREW_READY_STATUSES,
   _jobFamilyOf,
   _jobIsRepairFamily,
   _jobVertical,
   _MANAGED_VERTICALS,
+  _managerBoardVerticals,
   _normalizeManagedVerticals,
+  _REPAIR_POOL_READY_STATUSES,
   _resolveManagerVisibility,
   _scopeCalendarPayloadToVerticals,
+  _tradeCompleteMyJobForTest,
   _tradeJobDetailForTest,
+  myJobs,
   resolveTradeJobAccessTier,
+  type TradeAuthContext,
+  tradeCalendarEvents,
 } from "./index.ts";
+import {
+  completionEvidenceApplies,
+  completionEvidenceVertical,
+  loadCompletionEvidenceByJob,
+} from "./trade_completion_evidence.ts";
 
 // ── _jobVertical / _jobIsRepairFamily / _jobFamilyOf ────────────────────────
 
@@ -407,4 +422,425 @@ Deno.test("trade_job_detail: an ordinary (non-repair-family) make-safe job carri
   assertEquals(result.job_family, null);
   assertEquals(result.vertical, "makesafe");
   assertEquals(result.repair, null);
+});
+
+// ── Fencing completion evidence keys on jobs.type, never the trade vertical ──
+// Captain ruling 2026-09-17: the completion-photos + neighbour-sign-off gate
+// is a money/safety gate and must not relax because a fencing job's family
+// metadata says repair (SWF-261343 class).
+
+const SWF_261343 = {
+  id: "job-swf-261343",
+  org_id: ORG_A,
+  type: "fencing",
+  status: "processing",
+  job_number: "SWF-261343",
+  scope_json: { job: { neighbours: [{ firstName: "" }] } },
+  metadata: { ses_family: "repair" },
+};
+
+Deno.test("completion evidence: a fencing job tagged family=repair still requires evidence (loadCompletionEvidenceByJob)", async () => {
+  // The trade vertical says repair; the evidence gate must not follow it.
+  assertEquals(_jobVertical(SWF_261343), "repair");
+  assertEquals(completionEvidenceVertical(SWF_261343), "fencing");
+  assertEquals(completionEvidenceVertical({ type: " Fencing " }), "fencing");
+  assertEquals(completionEvidenceApplies(completionEvidenceVertical(SWF_261343)), true);
+
+  const tables: string[] = [];
+  const client = {
+    from(table: string) {
+      const q: any = {
+        select: () => q,
+        in: () => q,
+        eq: () => q,
+        then: (res: any) => {
+          tables.push(table);
+          return Promise.resolve({ data: [], error: null }).then(res);
+        },
+      };
+      return q;
+    },
+  };
+  const map = await loadCompletionEvidenceByJob(client, [{
+    id: SWF_261343.id,
+    vertical: completionEvidenceVertical(SWF_261343),
+    scope_json: SWF_261343.scope_json,
+  }]);
+  const ev = map.get(SWF_261343.id)!;
+  assertEquals(ev.applies, true);
+  assertEquals(ev.satisfied, false);
+  assertEquals(ev.missing, ["completion_photos", "neighbour_signoff"]);
+  assert(tables.includes("job_media"), "evidence was actually read for the fencing job");
+});
+
+Deno.test("complete_my_job: a fencing job tagged family=repair is refused end to end until evidence is on file", async () => {
+  const tables: Tables = {
+    jobs: [{ ...SWF_261343 }],
+    job_assignments: [
+      { id: "a-lead", job_id: SWF_261343.id, user_id: "u-lead", status: "scheduled", is_ghost: false },
+    ],
+    job_media: [],
+    job_events: [],
+  };
+  const lead = {
+    id: "u-lead",
+    email: "lead@example.test",
+    orgId: ORG_A,
+    role: "lead_installer",
+    managedVerticals: [],
+  } as any;
+  const access = { orgId: ORG_A, managedVerticals: [] as string[] };
+  await assertRejects(
+    () => _tradeCompleteMyJobForTest(makeClient(tables), { jobId: SWF_261343.id }, lead, access),
+    Error,
+    "cannot be marked complete yet",
+  );
+  assertEquals(tables.jobs[0].status, "processing", "job status untouched by the refused completion");
+});
+
+// ── my_jobs open pools: repair pool statuses + make-safe pool exclusion ──────
+// Mock adapted from m3b_ready_gate_pool_test.ts, extended so a PostgREST
+// JSON-path column inside or() (`metadata->>ses_family.eq.repair`) resolves
+// against the row's metadata object, and every query is recorded.
+
+type PoolJob = { id: string; type: string; status: string; job_number?: string; metadata?: any };
+type PoolAssignment = { id: string; user_id: string; status: string; scheduled_date: string; job_id: string };
+type PoolFixtures = { assignments: PoolAssignment[]; jobs: PoolJob[] };
+type PoolQuery = {
+  table: string;
+  eq: Record<string, unknown>;
+  neq: Record<string, unknown>;
+  gte: string | null;
+  lt: string | null;
+  refOr: { str: string; referencedTable: string | null } | null;
+  notIn: string | null;
+  inCol: string | null;
+  inVals: unknown[] | null;
+};
+
+function poolCell(row: Record<string, any>, col: string): string {
+  const m = col.match(/^(\w+)->>(\w+)$/);
+  if (m) {
+    const obj = row?.[m[1]];
+    return String((obj && typeof obj === "object" ? obj[m[2]] : "") ?? "");
+  }
+  return String(row?.[col] ?? "");
+}
+
+function poolMatchOr(row: Record<string, any>, orStr: string): boolean {
+  return orStr.split(",").some((cond) => {
+    const [col, op, ...rest] = cond.split(".");
+    const val = rest.join(".");
+    const cell = poolCell(row, col);
+    if (op === "eq") return cell === val;
+    if (op === "ilike") return cell.toLowerCase().startsWith(val.replace(/%$/, "").toLowerCase());
+    return false;
+  });
+}
+
+function poolNotInSet(filterStr: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of filterStr.matchAll(/"([^"]+)"/g)) out.add(m[1]);
+  return out;
+}
+
+function resolvePoolQuery(fx: PoolFixtures, st: PoolQuery): { data: unknown[]; error: null } {
+  if (st.table === "job_assignments") {
+    let rows = fx.assignments.slice();
+    if (st.eq.user_id != null) rows = rows.filter((a) => a.user_id === st.eq.user_id);
+    if (st.neq.status != null) rows = rows.filter((a) => a.status !== st.neq.status);
+    if (st.notIn) {
+      const closed = poolNotInSet(st.notIn);
+      rows = rows.filter((a) => !closed.has(a.status));
+    }
+    if (st.gte != null) rows = rows.filter((a) => a.scheduled_date >= st.gte!);
+    if (st.lt != null) rows = rows.filter((a) => a.scheduled_date < st.lt!);
+    let joined = rows
+      .map((a) => ({ a, job: fx.jobs.find((j) => j.id === a.job_id) }))
+      .filter((x) => x.job) as { a: PoolAssignment; job: PoolJob }[];
+    if (st.refOr && st.refOr.referencedTable === "jobs") {
+      joined = joined.filter((x) => poolMatchOr(x.job, st.refOr!.str));
+    }
+    if (st.inCol === "job_id" && st.inVals) {
+      return {
+        data: joined
+          .filter((x) => st.inVals!.includes(x.a.job_id))
+          .map(({ a }) => ({
+            id: a.id, job_id: a.job_id, scheduled_date: a.scheduled_date,
+            status: a.status, role: "lead", assignment_type: "install",
+            crew_name: null, user: { id: a.user_id, name: a.user_id },
+          })),
+        error: null,
+      };
+    }
+    return {
+      data: joined.map(({ a, job }) => ({
+        id: a.id, scheduled_date: a.scheduled_date, status: a.status,
+        role: "lead", assignment_type: "install", crew_name: null, notes: null,
+        jobs: { ...job },
+      })),
+      error: null,
+    };
+  }
+  if (st.table === "jobs") {
+    let rows = fx.jobs.slice();
+    if (st.eq.type != null) rows = rows.filter((j) => j.type === st.eq.type);
+    if (st.eq.status != null) rows = rows.filter((j) => j.status === st.eq.status);
+    if (st.eq.id != null) rows = rows.filter((j) => j.id === st.eq.id);
+    if (st.inCol === "status" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.status));
+    if (st.inCol === "id" && st.inVals) rows = rows.filter((j) => st.inVals!.includes(j.id));
+    if (st.refOr && st.refOr.referencedTable == null) {
+      rows = rows.filter((j) => poolMatchOr(j, st.refOr!.str));
+    }
+    if (st.notIn) {
+      const ex = poolNotInSet(st.notIn);
+      rows = rows.filter((j) => !ex.has(j.status));
+    }
+    return { data: rows.map((j) => ({ ...j })), error: null };
+  }
+  return { data: [], error: null };
+}
+
+function makePoolClient(fx: PoolFixtures, recorded: PoolQuery[]) {
+  function from(table: string) {
+    const st: PoolQuery = {
+      table, eq: {}, neq: {}, gte: null, lt: null, refOr: null,
+      notIn: null, inCol: null, inVals: null,
+    };
+    const b: any = {
+      select: () => b,
+      eq: (k: string, v: unknown) => { st.eq[k] = v; return b; },
+      neq: (k: string, v: unknown) => { st.neq[k] = v; return b; },
+      gte: (k: string, v: string) => { if (k === "scheduled_date") st.gte = v; return b; },
+      lt: (k: string, v: string) => { if (k === "scheduled_date") st.lt = v; return b; },
+      in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
+      not: (k: string, op: string, v: string) => { if (k === "status" && op === "in") st.notIn = v; return b; },
+      or: (s: string, opts?: { referencedTable?: string }) => {
+        st.refOr = { str: s, referencedTable: opts?.referencedTable ?? null };
+        return b;
+      },
+      ilike: () => b,
+      order: () => b,
+      limit: () => b,
+      range: () => b,
+      maybeSingle: () => Promise.resolve({ data: null, error: null }),
+      then: (resolve: any) => { recorded.push(st); resolve(resolvePoolQuery(fx, st)); },
+    };
+    return b;
+  }
+  return { from };
+}
+
+function poolIds(g: any): string[] {
+  return (g.makesafePool as any[]).map((a) => a.jobs?.id);
+}
+
+function repairPoolFixtures(): PoolFixtures {
+  return {
+    assignments: [],
+    jobs: [
+      // SWMS-261319 shape: repair-family make-safe, never retyped, at 'processing'.
+      { id: "job-ms-repair", type: "makesafe", status: "processing", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
+      // SWR- typed repair sits at 'accepted' after createMakesafeJob.
+      { id: "job-swr", type: "repair", status: "accepted", job_number: "SWR-1", metadata: {} },
+      // Ordinary make-safe, no family tag.
+      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
+      // Fencing at a non-ready status: must stay out of the fencing pool.
+      { id: "job-f-processing", type: "fencing", status: "processing", job_number: "SWF-1", metadata: {} },
+      // Fencing at a ready status: pools for the fencing manager as before.
+      { id: "job-f-ready", type: "fencing", status: "order_confirmed", job_number: "SWF-2", metadata: {} },
+      // Patio at a non-ready status: unaffected.
+      { id: "job-p-accepted", type: "patio", status: "accepted", job_number: "SWP-1", metadata: {} },
+    ],
+  };
+}
+
+async function poolFor(managed: string[], fx: PoolFixtures, recorded: PoolQuery[] = []) {
+  const vis = _resolveManagerVisibility({ role: "lead_installer", managedVerticals: managed });
+  const scope = _managerBoardVerticals({ isDispatcher: vis.isDispatcher, mode: "all", managedVerticals: managed });
+  const g = await myJobs(
+    makePoolClient(fx, recorded), "u-viewer",
+    false, vis.isDispatcher, vis.isMakesafeManager, vis.poolVerticals, scope,
+  );
+  return poolIds(g);
+}
+
+Deno.test("repair pool: an unallocated repair-family make-safe at 'processing' surfaces for a repair division manager (SWMS-261319)", async () => {
+  const recorded: PoolQuery[] = [];
+  const pool = await poolFor(["repair"], repairPoolFixtures(), recorded);
+  assert(pool.includes("job-ms-repair"), "repair-family make-safe at processing pools");
+  assert(pool.includes("job-swr"), "SWR- typed repair at accepted pools");
+  assertEquals(pool.includes("job-ms-plain"), false, "a plain make-safe is not repair work");
+  assertEquals(pool.includes("job-f-processing"), false);
+  assertEquals(pool.includes("job-p-accepted"), false);
+
+  const repairQuery = recorded.find((q) => q.table === "jobs" && q.refOr?.str.includes("type.eq.repair"));
+  assert(repairQuery, "repair pool query issued");
+  assertEquals(repairQuery!.inCol, "status");
+  assertEquals(repairQuery!.inVals, [..._REPAIR_POOL_READY_STATUSES]);
+  for (const s of _CREW_READY_STATUSES) assert(_REPAIR_POOL_READY_STATUSES.includes(s));
+  for (const s of ["accepted", "processing", "scheduled"]) assert(_REPAIR_POOL_READY_STATUSES.includes(s));
+});
+
+Deno.test("repair pool: the fencing / patio pools keep exactly _CREW_READY_STATUSES (non-ready statuses still excluded)", async () => {
+  const recorded: PoolQuery[] = [];
+  const pool = await poolFor(["fencing", "patio"], repairPoolFixtures(), recorded);
+  assert(pool.includes("job-f-ready"), "order_confirmed fencing pools as before");
+  assertEquals(pool.includes("job-f-processing"), false, "processing fencing does NOT pool");
+  assertEquals(pool.includes("job-p-accepted"), false, "accepted patio does NOT pool");
+  assertEquals(pool.includes("job-ms-repair"), false);
+  assertEquals(pool.includes("job-swr"), false);
+  for (const vertical of ["fencing", "patio"]) {
+    const q = recorded.find((r) => r.table === "jobs" && r.eq.type === vertical);
+    assert(q, `${vertical} pool query issued`);
+    assertEquals(q!.inVals, [..._CREW_READY_STATUSES]);
+  }
+});
+
+Deno.test("make-safe pool: a repair-family make-safe no longer appears in a make-safe-only manager's open pool", async () => {
+  const fx: PoolFixtures = {
+    assignments: [],
+    jobs: [
+      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
+      { id: "job-ms-repair", type: "makesafe", status: "accepted", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
+      { id: "job-ms-repair-legacy-family", type: "makesafe", status: "processing", job_number: "SWMS-3", metadata: { makesafe_job_family: "repair" } },
+    ],
+  };
+  const pool = await poolFor(["makesafe"], fx);
+  assert(pool.includes("job-ms-plain"), "ordinary make-safe still pools");
+  assertEquals(pool.includes("job-ms-repair"), false, "ses_family=repair is not in the make-safe pool");
+  assertEquals(pool.includes("job-ms-repair-legacy-family"), false, "makesafe_job_family=repair is not in the make-safe pool");
+});
+
+Deno.test("make-safe pool: a manager of BOTH make-safe and repair sees the repair-family card once, via the repair pool", async () => {
+  const fx: PoolFixtures = {
+    assignments: [],
+    jobs: [
+      { id: "job-ms-plain", type: "makesafe", status: "accepted", job_number: "SWMS-2", metadata: {} },
+      { id: "job-ms-repair", type: "makesafe", status: "processing", job_number: "SWMS-261319", metadata: { ses_family: "repair" } },
+    ],
+  };
+  const pool = await poolFor(["makesafe", "repair"], fx);
+  assertEquals(pool.filter((id) => id === "job-ms-repair").length, 1);
+  assert(pool.includes("job-ms-plain"));
+});
+
+// ── trade_calendar pagination: page math on the raw lookahead, precedence
+// narrowing on the page only ───────────────────────────────────────────────
+
+function calendarPagingClient(rows: any[]) {
+  function from(table: string) {
+    if (table !== "calendar_events") throw new Error(`unexpected table ${table}`);
+    const eq: Record<string, unknown> = {};
+    const neq: Record<string, unknown> = {};
+    const ors: string[] = [];
+    let lte: string | null = null;
+    let range: [number, number] | null = null;
+    const b: any = {
+      select: () => b,
+      eq: (c: string, v: unknown) => { eq[c] = v; return b; },
+      neq: (c: string, v: unknown) => { neq[c] = v; return b; },
+      lte: (_c: string, v: string) => { lte = v; return b; },
+      or: (v: string) => { ors.push(v); return b; },
+      order: () => b,
+      range: (a: number, z: number) => { range = [a, z]; return b; },
+      then: (resolve: (v: unknown) => void) => {
+        let result = rows.slice();
+        for (const [c, v] of Object.entries(eq)) result = result.filter((r) => r[c] === v);
+        for (const [c, v] of Object.entries(neq)) result = result.filter((r) => r[c] !== v);
+        if (lte) result = result.filter((r) => r.scheduled_date <= lte!);
+        for (const clause of ors) {
+          if (clause.startsWith("scheduled_end.gte.")) {
+            const from = clause.match(/scheduled_end\.gte\.(\d{4}-\d{2}-\d{2})/)?.[1] || "";
+            result = result.filter((r) =>
+              (r.scheduled_end != null && r.scheduled_end >= from) ||
+              (r.scheduled_end == null && r.scheduled_date >= from)
+            );
+            continue;
+          }
+          result = result.filter((r) => poolMatchOr(r, clause));
+        }
+        result.sort((a, b) =>
+          String(a.scheduled_date).localeCompare(String(b.scheduled_date)) ||
+          String(a.assignment_id).localeCompare(String(b.assignment_id))
+        );
+        if (range) result = result.slice(range[0], range[1] + 1);
+        resolve({ data: result, error: null });
+      },
+    };
+    return b;
+  }
+  return { from };
+}
+
+const CAL_HUGO: TradeAuthContext = {
+  id: "hugo",
+  email: "hugo@example.test",
+  orgId: ORG_A,
+  role: "lead_installer",
+  managedVerticals: ["makesafe"],
+};
+
+function calRow(assignmentId: string, jobNumber: string, jobFamily: string | null) {
+  return {
+    assignment_id: assignmentId,
+    job_id: `job-${assignmentId}`,
+    user_id: "someone",
+    job_number: jobNumber,
+    job_type: "makesafe",
+    job_family: jobFamily,
+    org_id: ORG_A,
+    assignment_status: "scheduled",
+    scheduled_date: "2026-07-15",
+    scheduled_end: null,
+  };
+}
+
+Deno.test("trade calendar: a classifier-dropped boundary row does not break truncation / next_offset, and no row is duplicated across pages", async () => {
+  // Three raw rows for a makesafe-scoped manager; the SECOND is the page
+  // boundary row of a 2-row page and is repair-family, so precedence drops it.
+  const rows = [
+    calRow("a1", "SWMS-1", null),
+    calRow("a2", "SWMS-261319", "repair"),
+    calRow("a3", "SWMS-3", null),
+  ];
+  const client = calendarPagingClient(rows);
+  const page1 = await tradeCalendarEvents(
+    client,
+    new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2", offset: "0" }),
+    CAL_HUGO,
+    false,
+  );
+  assertEquals(page1.events.map((e: any) => e.assignment_id), ["a1"], "the dropped boundary row shortens the page; a3 must NOT leak onto page 1");
+  assertEquals(page1.truncated, true, "the raw lookahead saw a third row");
+  assertEquals(page1.next_offset, 2);
+
+  const page2 = await tradeCalendarEvents(
+    client,
+    new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2", offset: String(page1.next_offset) }),
+    CAL_HUGO,
+    false,
+  );
+  assertEquals(page2.events.map((e: any) => e.assignment_id), ["a3"]);
+  assertEquals(page2.truncated, false);
+  assertEquals(page2.next_offset, null);
+
+  const seen = [...page1.events, ...page2.events].map((e: any) => e.assignment_id);
+  assertEquals(new Set(seen).size, seen.length, "no row emitted twice across pages");
+  assertEquals(seen.includes("a2"), false, "the repair-family row never reaches a makesafe-only view");
+});
+
+Deno.test("trade calendar: the same rows are all returned, once, for a repair+makesafe manager", async () => {
+  const rows = [
+    calRow("a1", "SWMS-1", null),
+    calRow("a2", "SWMS-261319", "repair"),
+    calRow("a3", "SWMS-3", null),
+  ];
+  const viewer: TradeAuthContext = { ...CAL_HUGO, managedVerticals: ["makesafe", "repair"] };
+  const client = calendarPagingClient(rows);
+  const p1 = await tradeCalendarEvents(client, new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2" }), viewer, false);
+  const p2 = await tradeCalendarEvents(client, new URLSearchParams({ from: "2026-07-13", to: "2026-07-21", mode: "all", page_size: "2", offset: String(p1.next_offset) }), viewer, false);
+  assertEquals(p1.events.map((e: any) => e.assignment_id), ["a1", "a2"]);
+  assertEquals(p2.events.map((e: any) => e.assignment_id), ["a3"]);
+  assertEquals(p2.truncated, false);
 });
