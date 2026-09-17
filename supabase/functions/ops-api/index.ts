@@ -371,6 +371,7 @@ import {
   requestSesPackBuild,
   SesPackBuildDoorError,
 } from './ses_pack_build_doors.ts'
+import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -7112,6 +7113,16 @@ if (import.meta.main) serve(async (req: Request) => {
           if (error instanceof SesReportTriggerError) {
             return json({ error: error.message, code: error.code, ...(error.detail || {}) }, error.status)
           }
+          throw error
+        }
+      }
+      case 'context_pipeline_status': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(await contextPipelineStatus(client))
+        } catch (error) {
+          if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }
