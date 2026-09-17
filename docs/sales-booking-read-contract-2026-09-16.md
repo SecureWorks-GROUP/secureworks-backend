@@ -124,10 +124,14 @@ Publish / stamp actions (same table, no send):
   `proposals` is the engine's `proposals.json` (array or `{leads}`),
   `coverage` its `coverage.json`, and `drafts` a map of opportunity id to
   draft text. Stores `kind=pack`. Returns `{ok, id, as_of}`.
-- `POST sales_booking_stamp_write` (api key or signed-in
-  admin / owner / ops_manager): body `{resource, week_start, stamp}` where
-  `stamp` is `{captain, approved, rejected, decisions, stage_moves}`.
-  Stores `kind=stamp` with `as_of` now. No other side effect.
+- `POST sales_booking_stamp_write` (allow-listed captain JWT only;
+  env `SALES_BOOKING_CAPTAIN_EMAILS`, comma-separated, case-insensitive;
+  unset or blank defaults to `marnin@secureworkswa.com.au`; the ops API
+  key and every other JWT are 403 `stamp_write_requires_captain`): body
+  `{resource, week_start, stamp}` where `stamp` is `{captain, approved,
+  rejected, decisions, stage_moves}`. The body `captain` field is
+  ignored. Stores `kind=stamp` with `as_of` now and `published_by` = the
+  JWT email. Returns `{ok, id, as_of, published_by}`. No other side effect.
 - `GET sales_booking_stamp_read` (api key only): `{resource, week_start}`
   returns the latest stamp payload and `as_of`, or
   `{ok:true, stamp:null, as_of:null}`.

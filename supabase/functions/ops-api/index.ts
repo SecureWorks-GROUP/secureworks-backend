@@ -1182,6 +1182,10 @@ const XERO_CLIENT_SECRET = Deno.env.get('XERO_CLIENT_SECRET') || ''
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
+// SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails allowed to
+// write sales_booking_stamp_write. Case-insensitive. Read at call time in
+// sales_booking_pack.ts (not here). Unset or blank defaults to
+// marnin@secureworkswa.com.au. API key callers are refused.
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env.get('RAILWAY_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app').replace(/\/+$/, '')
@@ -5159,8 +5163,12 @@ if (import.meta.main) serve(async (req: Request) => {
         }
       }
       case 'sales_booking_stamp_write': {
-        // Captain KEEP/CUT. API key or signed-in admin/owner/ops_manager.
-        // Stores kind=stamp with as_of now. No send, no calendar, no GHL write.
+        // Captain KEEP/CUT. Allow-listed captain JWT only
+        // (SALES_BOOKING_CAPTAIN_EMAILS; unset defaults to
+        // marnin@secureworkswa.com.au). API key and every other JWT are 403
+        // stamp_write_requires_captain. published_by is the JWT email; the
+        // body captain field is ignored. Stores kind=stamp with as_of now.
+        // No send, no calendar, no GHL write.
         if (req.method !== 'POST') {
           throw new ApiError('sales_booking_stamp_write requires POST', 405)
         }
@@ -5169,6 +5177,7 @@ if (import.meta.main) serve(async (req: Request) => {
             mode: authMode,
             role: authUser?.role ?? null,
             userId: authUser?.id ?? null,
+            email: authUser?.email ?? null,
           }, body && typeof body === 'object' ? body : {}))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)

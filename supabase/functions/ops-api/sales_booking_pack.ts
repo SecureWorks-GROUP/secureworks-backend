@@ -5,10 +5,19 @@
 // One table, three kinds. `sales_booking_pack_publish` stores the engine's
 // proposals.json / coverage.json / drafts map (kind=pack).
 // `sales_booking_stamp_write` stores the captain KEEP/CUT stamp (kind=stamp)
-// with as_of = now. `sales_booking_stamp_read` returns the latest stamp.
+// with as_of = now. Only a verified Supabase JWT whose email is on
+// SALES_BOOKING_CAPTAIN_EMAILS may write; the ops API key and every other
+// JWT are 403 `stamp_write_requires_captain`. `published_by` is the JWT
+// email; the body `captain` field is ignored. `sales_booking_stamp_read`
+// returns the latest stamp.
 // `sales_booking_threads_refresh` re-reads GHL threads into kind=thread_facts.
 // `sales_booking_read` merges the latest pack onto cases by opportunity id
 // (`opp:<id>` → case opportunity id) and fills drafts + stamp_state.
+//
+// Env (read at call time, not module load):
+//   SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails allowed to
+//     write a stamp. Case-insensitive. Unset or blank defaults to
+//     marnin@secureworkswa.com.au.
 //
 // No send, no calendar write, no GHL write. A stamp write is a row, nothing else.
 
@@ -62,7 +71,17 @@ export interface SalesBookingPackAuth {
   mode: "api_key" | "jwt" | "routine" | "agent_read" | "none";
   role?: string | null;
   userId?: string | null;
+  email?: string | null;
 }
+
+export type SalesBookingEnvGet = (name: string) => string | undefined;
+
+export const SALES_BOOKING_CAPTAIN_EMAILS_ENV = "SALES_BOOKING_CAPTAIN_EMAILS";
+export const DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL =
+  "marnin@secureworkswa.com.au";
+export const STAMP_WRITE_REQUIRES_CAPTAIN = "stamp_write_requires_captain";
+
+const defaultEnvGet: SalesBookingEnvGet = (name) => Deno.env.get(name);
 
 export class SalesBookingPackError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -70,8 +89,6 @@ export class SalesBookingPackError extends Error {
     this.name = "SalesBookingPackError";
   }
 }
-
-const STAFF_ROLES = new Set(["admin", "owner", "ops_manager"]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -354,26 +371,62 @@ export function assertSalesBookingStampReadAuth(
   );
 }
 
+/** Comma-separated, case-insensitive. Unset or blank → default captain email. */
+export function parseSalesBookingCaptainEmails(
+  raw: string | undefined | null,
+): string[] {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return [DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL];
+  const emails = [
+    ...new Set(
+      text.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
+    ),
+  ];
+  return emails.length > 0 ? emails : [DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL];
+}
+
+export function salesBookingCaptainEmailsFromEnv(
+  envGet: SalesBookingEnvGet = defaultEnvGet,
+): string[] {
+  return parseSalesBookingCaptainEmails(
+    envGet(SALES_BOOKING_CAPTAIN_EMAILS_ENV),
+  );
+}
+
+function stampWriteCallerId(auth: SalesBookingPackAuth): string {
+  if (auth.mode === "jwt") {
+    const email = String(auth.email || "").trim();
+    if (email) return email;
+    if (auth.userId) return auth.userId;
+    return "jwt";
+  }
+  if (auth.mode === "api_key") return auth.userId || "api_key";
+  return auth.mode;
+}
+
+function refuseStampWrite(auth: SalesBookingPackAuth): never {
+  console.warn(
+    `sales_booking_stamp_write refused ${STAMP_WRITE_REQUIRES_CAPTAIN} caller=${
+      stampWriteCallerId(auth)
+    }`,
+  );
+  throw new SalesBookingPackError(STAMP_WRITE_REQUIRES_CAPTAIN, 403);
+}
+
+/**
+ * Captain KEEP/CUT write: allow-listed JWT email only.
+ * Returns the verified JWT email used as `published_by`.
+ */
 export function assertSalesBookingStampWriteAuth(
   auth: SalesBookingPackAuth,
-): void {
-  if (auth.mode === "api_key") return;
-  if (
-    auth.mode === "jwt" &&
-    STAFF_ROLES.has(String(auth.role || "").toLowerCase())
-  ) {
-    return;
-  }
-  if (auth.mode === "none" || (auth.mode === "jwt" && !auth.role)) {
-    throw new SalesBookingPackError(
-      "sales_booking_stamp_write requires an ops API key or a signed-in operator session",
-      401,
-    );
-  }
-  throw new SalesBookingPackError(
-    "sales_booking_stamp_write requires an ops API key or a signed-in operator session",
-    403,
-  );
+  envGet: SalesBookingEnvGet = defaultEnvGet,
+): string {
+  if (auth.mode !== "jwt") refuseStampWrite(auth);
+  const email = String(auth.email || "").trim();
+  if (!email) refuseStampWrite(auth);
+  const allowed = salesBookingCaptainEmailsFromEnv(envGet);
+  if (!allowed.includes(email.toLowerCase())) refuseStampWrite(auth);
+  return email;
 }
 
 function publishedBy(auth: SalesBookingPackAuth): string {
@@ -531,11 +584,15 @@ export async function salesBookingStampWriteAction(
   auth: SalesBookingPackAuth,
   body: Record<string, unknown>,
   now: Date = new Date(),
-): Promise<{ ok: true; id: string; as_of: string }> {
-  assertSalesBookingStampWriteAuth(auth);
+  envGet: SalesBookingEnvGet = defaultEnvGet,
+): Promise<{ ok: true; id: string; as_of: string; published_by: string }> {
+  const publishedByEmail = assertSalesBookingStampWriteAuth(auth, envGet);
   const resource = resolveSalesBookingResource(body.resource);
   const weekStart = resolveWeekStart(body.week_start);
-  const stamp = parseSalesBookingStampPayload(body.stamp);
+  const stamp = {
+    ...parseSalesBookingStampPayload(body.stamp),
+    captain: publishedByEmail,
+  };
   const asOf = now.toISOString();
   const written = await insertPackRow(client, {
     resource: resource.resource_id,
@@ -543,9 +600,14 @@ export async function salesBookingStampWriteAction(
     kind: SALES_BOOKING_STAMP_KIND,
     as_of: asOf,
     payload: stamp as unknown as Record<string, unknown>,
-    published_by: publishedBy(auth),
+    published_by: publishedByEmail,
   });
-  return { ok: true, id: written.id, as_of: written.as_of };
+  return {
+    ok: true,
+    id: written.id,
+    as_of: written.as_of,
+    published_by: publishedByEmail,
+  };
 }
 
 export async function salesBookingStampReadAction(
