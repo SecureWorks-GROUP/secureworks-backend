@@ -2583,8 +2583,9 @@ every job type — no vertical filtering. `ghost_observer_mirror.ts` is the one
 module: `ensureGhostObserverMirror` (idempotent create, skipped when the ops
 manager is himself the real assignee), `reconcileGhostObserverMirrorOnReschedule`
 (moves the mirror, or leaves it when a sibling crew row still covers the old
-date) and `cleanupGhostObserverMirrorForSpan` (removes it once no genuine crew
-row covers that job/date) are wired into `createAssignment`, `updateAssignment`,
+date) and `syncGhostObserverMirrorForSpan` (removes it once no genuine crew
+row covers that job/date, and re-ensures it from the remaining crew when the
+departing row was the ops manager's own real assignment) are wired into `createAssignment`, `updateAssignment`,
 `deleteAssignment`, the make-safe submitter override
 (`overrideMakesafeAllocationToSubmitter`) and the legacy
 `approve_assignment_request` direct-insert writer — every place a real crew

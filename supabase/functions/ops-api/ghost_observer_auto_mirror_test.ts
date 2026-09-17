@@ -46,6 +46,11 @@ import {
 // UNIQUE(job_id, user_id, scheduled_date) on insert and update, returning the
 // PostgREST-shaped 23505 error rather than throwing, because that key has no
 // is_ghost/status exemption and is exactly what the ghost mirror collides with.
+// It also honours PostgREST's default 1000-row response ceiling on any select
+// without an explicit `.range()` / `.limit()`, so an un-paged read over a
+// larger population truncates here exactly as it does in production.
+
+const POSTGREST_DEFAULT_MAX_ROWS = 1000;
 
 type Row = Record<string, any>;
 type Store = Record<string, Row[]>;
@@ -130,7 +135,8 @@ function makeFakeClient(store: Store) {
         });
       }
       if (rangeFrom != null && rangeTo != null) rows = rows.slice(rangeFrom, rangeTo + 1);
-      if (limitN != null) rows = rows.slice(0, limitN);
+      else if (limitN != null) rows = rows.slice(0, limitN);
+      else rows = rows.slice(0, POSTGREST_DEFAULT_MAX_ROWS);
       let out = rows.map((r) => ({ ...r }));
       if (selectStr.includes("jobs:job_id(")) {
         out = out.map((r) => ({
@@ -757,4 +763,130 @@ Deno.test("findGhostObserverBackfillCandidates: reads beyond 1000 crew rows and 
   const expected = Math.floor(total / 2);
   assertEquals(candidates.length, expected, `expected ${expected} uncovered (odd) spans, saw ${candidates.length}`);
   assert(candidates.every((c) => Number(c.jobId.slice("job-pg-".length)) % 2 === 1), "every candidate is an uncovered odd job");
+});
+
+// ── The ops manager leaving a span re-mirrors the crew he leaves behind ────
+
+Deno.test("updateAssignment: reassigning the ops manager's real row to another installer on a date other crew still works re-mints the ghost for that span", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!.push({ id: "job-leave", type: "fencing", job_number: "SWF-LEAVE", status: "scheduled", metadata: {} });
+
+    await createAssignment(makeFakeClient(store), { jobId: "job-leave", userId: "inst-1", scheduledDate: "2026-11-20" });
+    await flush();
+    const om = await createAssignment(makeFakeClient(store), { jobId: "job-leave", userId: OPS_MANAGER_ID, scheduledDate: "2026-11-20" });
+    await flush();
+    assertEquals(ghostRowsFor(store, "job-leave").length, 0, "his real row holds the key; no ghost");
+
+    await updateAssignment(makeFakeClient(store), { assignmentId: om.assignment.id, userId: "inst-2" });
+    await flush();
+
+    const ghosts = ghostRowsFor(store, "job-leave");
+    assertEquals(ghosts.length, 1, "inst-1 and inst-2 now work the date, so the span is mirrored again");
+    assertEquals(ghosts[0].scheduled_date, "2026-11-20");
+    const realRows = store.job_assignments!.filter((r) => r.job_id === "job-leave" && !r.is_ghost);
+    assertEquals(realRows.map((r) => r.user_id).sort(), ["inst-1", "inst-2"]);
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("deleteAssignment: deleting the ops manager's real row while another installer still works the date re-mints the ghost", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!.push({ id: "job-omdel", type: "repair", job_number: "SWR-OMDEL", status: "scheduled", metadata: {} });
+
+    await createAssignment(makeFakeClient(store), { jobId: "job-omdel", userId: "inst-1", scheduledDate: "2026-11-21" });
+    await flush();
+    const om = await createAssignment(makeFakeClient(store), { jobId: "job-omdel", userId: OPS_MANAGER_ID, scheduledDate: "2026-11-21" });
+    await flush();
+    assertEquals(ghostRowsFor(store, "job-omdel").length, 0);
+
+    await deleteAssignment(makeFakeClient(store), { assignmentId: om.assignment.id });
+    await flush();
+
+    const ghosts = ghostRowsFor(store, "job-omdel");
+    assertEquals(ghosts.length, 1, "inst-1 still works the date, so it is mirrored again");
+    assertEquals(ghosts[0].scheduled_date, "2026-11-21");
+    const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-omdel" && r.user_id === OPS_MANAGER_ID);
+    assertEquals(opsRows.length, 1, "exactly one ops-manager row on the key: the ghost");
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("updateAssignment: rescheduling the ops manager's real row off a date another installer still works re-mints the old date's ghost", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!.push({ id: "job-omrs", type: "patio", job_number: "SWP-OMRS", status: "scheduled", metadata: {} });
+
+    await createAssignment(makeFakeClient(store), { jobId: "job-omrs", userId: "inst-1", scheduledDate: "2026-11-22" });
+    await flush();
+    const om = await createAssignment(makeFakeClient(store), { jobId: "job-omrs", userId: OPS_MANAGER_ID, scheduledDate: "2026-11-22" });
+    await flush();
+    assertEquals(ghostRowsFor(store, "job-omrs").length, 0);
+
+    await updateAssignment(makeFakeClient(store), { assignmentId: om.assignment.id, scheduledDate: "2026-11-23" });
+    await flush();
+
+    const dates = ghostRowsFor(store, "job-omrs").map((g) => g.scheduled_date);
+    assertEquals(dates, ["2026-11-22"], "the old date (inst-1) gets its ghost back; the new date is his own real row, no ghost");
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("updateAssignment: cancelling and then un-cancelling the sole crew row restores its ghost", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!.push({ id: "job-uncancel", type: "fencing", job_number: "SWF-UNC", status: "scheduled", metadata: {} });
+
+    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-uncancel", userId: "inst-1", scheduledDate: "2026-11-24" });
+    await flush();
+    assertEquals(ghostRowsFor(store, "job-uncancel").length, 1);
+
+    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, status: "cancelled" });
+    await flush();
+    assertEquals(ghostRowsFor(store, "job-uncancel").length, 0, "the last crew row was cancelled, so the ghost went");
+
+    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, status: "scheduled" });
+    await flush();
+
+    const ghosts = ghostRowsFor(store, "job-uncancel");
+    assertEquals(ghosts.length, 1, "un-cancelling brings the mirror back");
+    assertEquals(ghosts[0].scheduled_date, "2026-11-24");
+    assertEquals(ghosts[0].status, "scheduled");
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("updateAssignment: a no-change update on an already-mirrored row does not mint a second ghost", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!.push({ id: "job-noop", type: "fencing", job_number: "SWF-NOOP", status: "scheduled", metadata: {} });
+
+    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-noop", userId: "inst-1", scheduledDate: "2026-11-25" });
+    await flush();
+    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, notes: "bring ladder" });
+    await flush();
+
+    assertEquals(ghostRowsFor(store, "job-noop").length, 1);
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("fake client: an un-paged select truncates at PostgREST's 1000-row default, so the pagination test above is discriminating", async () => {
+  const store = baseStore();
+  store.job_assignments = Array.from({ length: 1205 }, (_, i) => ({
+    id: `row-${String(i).padStart(5, "0")}`, job_id: "job-cap", user_id: `u-${i}`, scheduled_date: "2026-12-01",
+  }));
+  const { data } = await makeFakeClient(store).from("job_assignments").select("id").eq("job_id", "job-cap");
+  assertEquals(data.length, 1000);
 });

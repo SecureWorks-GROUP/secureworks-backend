@@ -285,33 +285,49 @@ export async function releaseGhostObserverMirrorForRealAssignee(
   return { removed: (data || []).length }
 }
 
+type SpanCoverage = {
+  covered: boolean
+  unreadable: boolean
+  coveringRow: any | null
+}
+
 /**
  * Does any OTHER non-cancelled, genuine crew row still cover `scheduledDate`
- * on `jobId`? Shared by reschedule-reconcile and delete/cancel-cleanup so
- * both agree on "the last crew row for that date is gone".
+ * on `jobId`? Shared by reschedule-reconcile and delete/cancel-sync so both
+ * agree on "the last crew row for that date is gone". Returns one covering
+ * row so a caller can re-mirror the span from real crew facts. A read fault
+ * reports `covered` so the mirror is never destructive on a fault.
  */
+async function spanCrewCoverage(
+  client: any,
+  jobId: string,
+  scheduledDate: string,
+  excludeAssignmentId?: string | null,
+): Promise<SpanCoverage> {
+  const { data, error } = await client
+    .from('job_assignments')
+    .select('id, user_id, role, assignment_type, is_ghost, status, scheduled_end, start_time, end_time, crew_name')
+    .eq('job_id', jobId)
+    .eq('scheduled_date', scheduledDate)
+    .neq('status', 'cancelled')
+  if (error) {
+    console.log('[ops-api] ghost observer mirror: sibling-coverage read failed:', error)
+    return { covered: true, unreadable: true, coveringRow: null }
+  }
+  const coveringRow = (data || []).find((row: any) =>
+    (!excludeAssignmentId || String(row.id) !== String(excludeAssignmentId)) &&
+    isGenuineCrewAssignmentRow(row),
+  ) || null
+  return { covered: !!coveringRow, unreadable: false, coveringRow }
+}
+
 async function anotherCrewRowStillCoversSpan(
   client: any,
   jobId: string,
   scheduledDate: string,
   excludeAssignmentId?: string | null,
 ): Promise<boolean> {
-  const { data, error } = await client
-    .from('job_assignments')
-    .select('id, role, assignment_type, is_ghost, status')
-    .eq('job_id', jobId)
-    .eq('scheduled_date', scheduledDate)
-    .neq('status', 'cancelled')
-  if (error) {
-    console.log('[ops-api] ghost observer mirror: sibling-coverage read failed:', error)
-    // A read fault must never make the mirror destructive — assume coverage
-    // still exists so a ghost is never wrongly removed.
-    return true
-  }
-  return (data || []).some((row: any) =>
-    (!excludeAssignmentId || String(row.id) !== String(excludeAssignmentId)) &&
-    isGenuineCrewAssignmentRow(row),
-  )
+  return (await spanCrewCoverage(client, jobId, scheduledDate, excludeAssignmentId)).covered
 }
 
 async function deleteGhostRow(client: any, ghostId: string, label: string): Promise<boolean> {
@@ -351,9 +367,24 @@ export async function reconcileGhostObserverMirrorOnReschedule(
   const opsManagerId = await resolveOpsManagerUserId(client)
   if (!opsManagerId) return
 
-  const stillCovered = await anotherCrewRowStillCoversSpan(
+  const oldCoverage = await spanCrewCoverage(
     client, params.jobId, params.oldDate, params.assignmentId,
   )
+  const stillCovered = oldCoverage.covered
+
+  if (stillCovered && oldCoverage.coveringRow) {
+    // The moved row may have been the ops manager's own real row, which held
+    // the old key in place of a ghost; the crew left behind still needs one.
+    const cover = oldCoverage.coveringRow
+    await ensureGhostObserverMirror(client, {
+      jobId: params.jobId,
+      scheduledDate: params.oldDate,
+      scheduledEnd: cover.scheduled_end ?? null,
+      startTime: cover.start_time ?? null,
+      endTime: cover.end_time ?? null,
+      crewName: cover.crew_name ?? null,
+    })
+  }
 
   if (!stillCovered) {
     const oldGhost = await findGhostRowForSpan(client, opsManagerId, params.jobId, params.oldDate)
@@ -414,23 +445,39 @@ export async function reconcileGhostObserverMirrorOnReschedule(
 }
 
 /**
- * Deletion / cancellation of a crew row: when no other genuine crew row still
- * covers that job/date, the ops manager's mirrored ghost for that span is
- * removed too — never left pointing at a date nobody is working.
+ * Deletion / cancellation of a crew row, or a row leaving a span: brings the
+ * span back to the invariant. When no other genuine crew row still covers
+ * that job/date, the ops manager's mirrored ghost for that span is removed —
+ * never left pointing at a date nobody is working. When other crew DOES
+ * still cover it, the ghost is (re-)ensured from that crew's facts, because
+ * the departing row may have been the ops manager's own real assignment,
+ * which held the unique key in place of a ghost.
  */
-export async function cleanupGhostObserverMirrorForSpan(
+export async function syncGhostObserverMirrorForSpan(
   client: any,
   params: { jobId: string; scheduledDate: string; excludeAssignmentId?: string | null },
-): Promise<{ removed: number }> {
-  if (!params?.jobId || !params?.scheduledDate) return { removed: 0 }
+): Promise<{ removed: number; ensured: boolean }> {
+  if (!params?.jobId || !params?.scheduledDate) return { removed: 0, ensured: false }
 
   const opsManagerId = await resolveOpsManagerUserId(client)
-  if (!opsManagerId) return { removed: 0 }
+  if (!opsManagerId) return { removed: 0, ensured: false }
 
-  const stillCovered = await anotherCrewRowStillCoversSpan(
+  const coverage = await spanCrewCoverage(
     client, params.jobId, params.scheduledDate, params.excludeAssignmentId,
   )
-  if (stillCovered) return { removed: 0 }
+  if (coverage.covered) {
+    if (!coverage.coveringRow) return { removed: 0, ensured: false }
+    const cover = coverage.coveringRow
+    const res = await ensureGhostObserverMirror(client, {
+      jobId: params.jobId,
+      scheduledDate: params.scheduledDate,
+      scheduledEnd: cover.scheduled_end ?? null,
+      startTime: cover.start_time ?? null,
+      endTime: cover.end_time ?? null,
+      crewName: cover.crew_name ?? null,
+    })
+    return { removed: 0, ensured: res.created }
+  }
 
   const { data, error } = await client
     .from('job_assignments')
@@ -442,14 +489,14 @@ export async function cleanupGhostObserverMirrorForSpan(
     .neq('status', 'cancelled')
   if (error) {
     console.log('[ops-api] ghost observer mirror: cleanup read failed:', error)
-    return { removed: 0 }
+    return { removed: 0, ensured: false }
   }
 
   let removed = 0
   for (const row of data || []) {
     if (await deleteGhostRow(client, String(row.id), 'cleanup')) removed++
   }
-  return { removed }
+  return { removed, ensured: false }
 }
 
 // ── Backfill (backfill_ghost_observers action) ──────────────────────────────
