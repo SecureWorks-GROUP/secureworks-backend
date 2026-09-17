@@ -18,7 +18,7 @@ Historical rows are deterministically classified in 250-row batches without assi
 
 Rollback removes triggers and callable code while preserving captured rows and thread custody. It does not reverse historic attribution or delete evidence. Restore prior endpoint code with the rollback; the retained additive columns keep those writes compatible.
 
-Undated provider evidence retains a null `event_at`; attribution never substitutes ingestion time. The fact writer must hold such sources until a true occurrence date exists. Internal event producers likewise supply their occurrence date explicitly.
+Undated provider evidence retains a null `event_at`; attribution never substitutes ingestion time. Internal event producers likewise supply their occurrence date explicitly. Persist source time is owned by `docs/context/b3-fact-custody.md`.
 
 ## Checks and evidence boundary
 

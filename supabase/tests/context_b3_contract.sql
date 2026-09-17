@@ -56,3 +56,57 @@ BEGIN
  THEN RAISE EXCEPTION 'B3 retracted row still current'; END IF;
 END $$;
 ROLLBACK;
+
+BEGIN;
+DO $$
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001';
+ j uuid:=gen_random_uuid(); missing uuid:=gen_random_uuid(); prefer uuid:=gen_random_uuid();
+ e uuid; ev jsonb; run uuid; tok uuid; claimed jsonb; result jsonb; facts jsonb; fact uuid;
+ occurred_time timestamptz:='2026-09-12 15:00:00+08'; event_time timestamptz:='2026-09-10 12:00:00+08';
+ later_occurred timestamptz:='2026-09-15 12:00:00+08'; d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES
+  (j,org,'accepted','patio','B3-EVT-'||j),
+  (missing,org,'accepted','patio','B3-EVT-NULL-'||missing),
+  (prefer,org,'accepted','patio','B3-EVT-PREFER-'||prefer);
+ INSERT INTO public.business_events(job_id,match_method,direction,payload,occurred_at)
+  VALUES(j,'direct_job_id','inbound','{"body":"Gate is on the left."}',occurred_time)
+  RETURNING id,to_jsonb(business_events) INTO e,ev;
+ IF ev->>'event_at' IS NOT NULL THEN RAISE EXCEPTION 'B3 occurred_at fixture leaked event_at'; END IF;
+ claimed:=public.claim_context_extraction_run(j,d,'extraction'); run:=(claimed->'run'->>'id')::uuid; tok:=(claimed->'run'->>'lease_token')::uuid;
+ facts:=jsonb_build_array(jsonb_build_object('kind','access_note','text','Gate is on the left.','confidence',0.9,'source_event_ids',jsonb_build_array(e)));
+ result:=public.persist_luna_context_revision(run,tok,j,jsonb_build_array(ev),facts,'[]','[]');
+ IF result->>'outcome'<>'inserted' THEN RAISE EXCEPTION 'B3 occurred_at fallback rejected %',result; END IF;
+ fact:=(result->'fact_ids'->>0)::uuid;
+ IF (SELECT event_date FROM public.job_context WHERE id=fact) IS DISTINCT FROM (occurred_time AT TIME ZONE 'Australia/Perth')::date
+  OR (SELECT (provenance->>'event_at')::timestamptz FROM public.job_context WHERE id=fact) IS DISTINCT FROM occurred_time
+  OR NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact)
+ THEN RAISE EXCEPTION 'B3 occurred_at fallback dated from the wrong clock'; END IF;
+ ALTER TABLE public.business_events ALTER COLUMN occurred_at DROP NOT NULL;
+ INSERT INTO public.business_events(job_id,match_method,direction,payload,event_at,occurred_at)
+  VALUES(missing,'direct_job_id','inbound','{"body":"No clock on this row"}',NULL,NULL)
+  RETURNING id,to_jsonb(business_events) INTO e,ev;
+ claimed:=public.claim_context_extraction_run(missing,d,'extraction'); run:=(claimed->'run'->>'id')::uuid; tok:=(claimed->'run'->>'lease_token')::uuid;
+ facts:=jsonb_build_array(jsonb_build_object('kind','note','text','No clock.','confidence',0.9,'source_event_ids',jsonb_build_array(e)));
+ BEGIN
+  PERFORM public.persist_luna_context_revision(run,tok,missing,jsonb_build_array(ev),facts,'[]','[]');
+  RAISE EXCEPTION 'B3 both-null source time accepted' USING ERRCODE='ZX001';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_source_attribution_rejected' THEN RAISE; END IF; END;
+ fact:=gen_random_uuid();
+ INSERT INTO public.job_context(id,job_id,kind,value,provenance,lifecycle,source_event_ids,extractor_version,trust)
+  VALUES(fact,missing,'note','{"text":"No clock."}','{"extractor":"luna_v2","writer_role":"classifier"}','current',ARRAY[e],'luna_v2','luna');
+ IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact)
+ THEN RAISE EXCEPTION 'B3 both-null luna_v2 fact leaked into current view'; END IF;
+ INSERT INTO public.business_events(job_id,match_method,direction,payload,event_at,occurred_at)
+  VALUES(prefer,'direct_job_id','inbound','{"body":"Prefers the earlier stamp"}',event_time,later_occurred)
+  RETURNING id,to_jsonb(business_events) INTO e,ev;
+ claimed:=public.claim_context_extraction_run(prefer,d,'extraction'); run:=(claimed->'run'->>'id')::uuid; tok:=(claimed->'run'->>'lease_token')::uuid;
+ facts:=jsonb_build_array(jsonb_build_object('kind','current_state','text','Prefers the earlier stamp.','confidence',0.9,'source_event_ids',jsonb_build_array(e)));
+ result:=public.persist_luna_context_revision(run,tok,prefer,jsonb_build_array(ev),facts,'[]','[]');
+ IF result->>'outcome'<>'inserted' THEN RAISE EXCEPTION 'B3 event_at preferred source rejected %',result; END IF;
+ fact:=(result->'fact_ids'->>0)::uuid;
+ IF (SELECT event_date FROM public.job_temporary_context WHERE id=fact) IS DISTINCT FROM '2026-09-10'::date
+  OR (SELECT expires_at FROM public.job_temporary_context WHERE id=fact) IS DISTINCT FROM '2026-09-11 00:00+08'::timestamptz
+ THEN RAISE EXCEPTION 'B3 event_at did not outrank occurred_at'; END IF;
+END $$;
+ROLLBACK;

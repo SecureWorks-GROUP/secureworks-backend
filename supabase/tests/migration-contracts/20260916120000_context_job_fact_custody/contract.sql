@@ -99,12 +99,14 @@ BEGIN
    jsonb_build_array(jsonb_build_object('kind','pending_action','text','Due tomorrow','confidence',0.9,'source_event_ids',jsonb_build_array(e2),'due_date','2099-01-01')),'[]','[]');
   RAISE EXCEPTION 'B3 unsupported due accepted' USING ERRCODE='ZX001';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_due_date_unsupported' THEN RAISE; END IF; END;
- UPDATE public.business_events SET event_at=NULL WHERE id=e2 RETURNING to_jsonb(business_events) INTO stale;
+ -- Source time is coalesce(event_at, occurred_at); only both-null is missing time.
+ ALTER TABLE public.business_events ALTER COLUMN occurred_at DROP NOT NULL;
+ UPDATE public.business_events SET event_at=NULL, occurred_at=NULL WHERE id=e2 RETURNING to_jsonb(business_events) INTO stale;
  BEGIN
   PERFORM public.persist_luna_context_revision(run,tok,j,jsonb_build_array(stale),facts,'[]','[]');
   RAISE EXCEPTION 'B3 missing event time accepted' USING ERRCODE='ZX001';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'luna_source_attribution_rejected' THEN RAISE; END IF; END;
- UPDATE public.business_events SET event_at=(ev2->>'event_at')::timestamptz WHERE id=e2 RETURNING to_jsonb(business_events) INTO ev2;
+ UPDATE public.business_events SET event_at=(ev2->>'event_at')::timestamptz, occurred_at=coalesce((ev2->>'occurred_at')::timestamptz,(ev2->>'event_at')::timestamptz) WHERE id=e2 RETURNING to_jsonb(business_events) INTO ev2;
  UPDATE public.automation_switches SET extraction=false;
  result:=public.persist_luna_context_revision(run,tok,j,jsonb_build_array(ev2),facts,'[]','[]');
  IF result->>'outcome'<>'held' OR EXISTS(SELECT 1 FROM public.context_extraction_event_receipts WHERE event_id=e2) THEN RAISE EXCEPTION 'B3 paused lane wrote'; END IF;
