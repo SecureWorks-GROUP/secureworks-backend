@@ -705,6 +705,29 @@ Deno.test("a live GHL users+events fixture confirms the mapped email and project
   assertEquals(scan.entries[2].is_all_day, true);
 });
 
+Deno.test("readSalesBookingGhlDiary keeps a 100-event GHL window", async () => {
+  const events = Array.from({ length: 100 }, (_, i) =>
+    ghlEvent({
+      id: `evt-${i}`,
+      startTime: "2026-09-15T10:00:00+08:00",
+      endTime: "2026-09-15T11:00:00+08:00",
+    }));
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: GHL_USERS_BODY,
+      events: { events },
+    }),
+    locationId: "loc",
+    resourceId: "marnin",
+    scoperUserId: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, true);
+  assertEquals(scan.reason, null);
+  assertEquals(scan.entries.length, 100);
+});
+
 Deno.test("an unfinished roster scan is never reported as a complete book", () => {
   const payload = assembleSalesBookingRead({
     resource: SALES_BOOKING_RESOURCES.marnin,

@@ -2,15 +2,13 @@
 // GHL calendar events — read-only
 // ════════════════════════════════════════════════════════════
 //
-// GET ghl-proxy?action=calendar_events is the one calendar read. It pages
-// `/calendars/events` for a location window filtered by userId or calendarId
-// and returns the raw GHL events plus provenance. No writes of any kind.
+// GET ghl-proxy?action=calendar_events is the one calendar read. It issues
+// one documented Get Calendar Events call (`/calendars/events` with
+// locationId, userId or calendarId, startTime, endTime) and returns the raw
+// GHL events plus provenance. No writes of any kind.
 //
 // Times on the action are ISO (Perth). GHL itself wants Unix milliseconds;
 // conversion happens here so callers never have to know that.
-
-export const GHL_CALENDAR_EVENTS_PAGE_SIZE = 100;
-export const GHL_CALENDAR_EVENTS_MAX_PAGES = 10;
 
 export interface GhlCalendarGet {
   (path: string): Promise<Record<string, unknown>>;
@@ -18,9 +16,7 @@ export interface GhlCalendarGet {
 
 export interface GhlCalendarEventsScan {
   events: Record<string, unknown>[];
-  pages_read: number;
   count: number;
-  exhausted: boolean;
   failure: string | null;
   user_id: string | null;
   calendar_id: string | null;
@@ -80,33 +76,10 @@ function eventsFromBody(body: Record<string, unknown>): Record<string, unknown>[
   return [];
 }
 
-function nextSkip(
-  body: Record<string, unknown>,
-  skip: number,
-  rows: Record<string, unknown>[],
-  limit: number,
-): number | null {
-  const meta =
-    (body.meta && typeof body.meta === "object"
-      ? body.meta
-      : {}) as Record<string, unknown>;
-  const declared = meta.nextSkip ?? meta.skip ?? body.nextSkip;
-  if (typeof declared === "number" && Number.isFinite(declared)) {
-    const next = Math.trunc(declared);
-    return next > skip ? next : null;
-  }
-  if (typeof declared === "string" && /^\d+$/.test(declared)) {
-    const next = Number(declared);
-    return next > skip ? next : null;
-  }
-  if (rows.length < limit) return null;
-  return skip + rows.length;
-}
-
 /**
- * Page `/calendars/events` to completion (or a named failure). Never throws:
- * a failed page is `failure` plus the events already collected, so a caller
- * can refuse to treat a partial week as a free week.
+ * One documented `/calendars/events` window GET. Never throws: a failed GET
+ * is `failure` plus zero events, so a caller cannot treat an unread week as
+ * a free week.
  */
 export async function fetchGhlCalendarEvents(args: {
   ghlGet: GhlCalendarGet;
@@ -118,20 +91,11 @@ export async function fetchGhlCalendarEvents(args: {
 }): Promise<GhlCalendarEventsScan> {
   const userId = ghlId(args.userId);
   const calendarId = ghlId(args.calendarId);
-  const events: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  let pages = 0;
-  let skip = 0;
-  let exhausted = false;
-  let failure: string | null = null;
-  const limit = GHL_CALENDAR_EVENTS_PAGE_SIZE;
 
   if (!userId && !calendarId) {
     return {
       events: [],
-      pages_read: 0,
       count: 0,
-      exhausted: false,
       failure: "user_or_calendar_required",
       user_id: null,
       calendar_id: null,
@@ -141,89 +105,39 @@ export async function fetchGhlCalendarEvents(args: {
   }
 
   try {
-    let paged = true;
-    for (let page = 0; page < GHL_CALENDAR_EVENTS_MAX_PAGES; page++) {
-      const query = new URLSearchParams({
-        locationId: args.locationId,
-        startTime: String(args.startMs),
-        endTime: String(args.endMs),
-      });
-      if (userId) query.set("userId", userId);
-      if (calendarId) query.set("calendarId", calendarId);
-      if (paged) {
-        query.set("limit", String(limit));
-        query.set("skip", String(skip));
-      }
-      let body: Record<string, unknown>;
-      try {
-        body = await args.ghlGet(`/calendars/events?${query.toString()}`);
-      } catch (error) {
-        // Documented Get Calendar Events has no skip/limit. One window retry
-        // on the first page only; a later page failure stays a failure.
-        if (page === 0 && paged) {
-          paged = false;
-          const unpaged = new URLSearchParams({
-            locationId: args.locationId,
-            startTime: String(args.startMs),
-            endTime: String(args.endMs),
-          });
-          if (userId) unpaged.set("userId", userId);
-          if (calendarId) unpaged.set("calendarId", calendarId);
-          body = await args.ghlGet(`/calendars/events?${unpaged.toString()}`);
-        } else {
-          throw error;
-        }
-      }
-      pages++;
-      const rows = eventsFromBody(body);
-      let fresh = 0;
-      for (const row of rows) {
-        const id = typeof row.id === "string" ? row.id : "";
-        if (id && seen.has(id)) continue;
-        if (id) seen.add(id);
-        events.push(row);
-        fresh++;
-      }
-      if (!paged) {
-        exhausted = true;
-        break;
-      }
-      if (rows.length === 0) {
-        exhausted = true;
-        break;
-      }
-      const next = nextSkip(body, skip, rows, limit);
-      if (next === null) {
-        exhausted = true;
-        break;
-      }
-      if (fresh === 0) {
-        failure = "calendar_pagination_stalled";
-        break;
-      }
-      skip = next;
-    }
-    if (!exhausted && !failure && pages >= GHL_CALENDAR_EVENTS_MAX_PAGES) {
-      failure = `page cap ${GHL_CALENDAR_EVENTS_MAX_PAGES} reached`;
-    }
+    const query = new URLSearchParams({
+      locationId: args.locationId,
+      startTime: String(args.startMs),
+      endTime: String(args.endMs),
+    });
+    if (userId) query.set("userId", userId);
+    if (calendarId) query.set("calendarId", calendarId);
+    const body = await args.ghlGet(`/calendars/events?${query.toString()}`);
+    const events = eventsFromBody(body);
+    return {
+      events,
+      count: events.length,
+      failure: null,
+      user_id: userId,
+      calendar_id: calendarId,
+      start_ms: args.startMs,
+      end_ms: args.endMs,
+    };
   } catch (error) {
-    failure = (error as Error)?.message || "ghl_calendar_page_failed";
+    let failure = (error as Error)?.message || "ghl_calendar_page_failed";
     if (!failure.startsWith("ghl_calendar_")) {
       failure = `ghl_calendar_page_failed: ${failure}`;
     }
+    return {
+      events: [],
+      count: 0,
+      failure,
+      user_id: userId,
+      calendar_id: calendarId,
+      start_ms: args.startMs,
+      end_ms: args.endMs,
+    };
   }
-
-  return {
-    events,
-    pages_read: pages,
-    count: events.length,
-    exhausted,
-    failure,
-    user_id: userId,
-    calendar_id: calendarId,
-    start_ms: args.startMs,
-    end_ms: args.endMs,
-  };
 }
 
 export function usersFromGhlBody(
@@ -297,7 +211,7 @@ export interface GhlCalendarEventsActionResult {
 /**
  * Read-only ghl-proxy action. GET only. Never writes. A provider failure is
  * 200 with provenance.failure set rather than an empty 200 that looks like a
- * free week to a careless caller — `ok` is false when the scan did not finish.
+ * free week to a careless caller — `ok` is false when the GET failed.
  */
 export async function ghlCalendarEventsAction(args: {
   method: string;
@@ -315,10 +229,8 @@ export async function ghlCalendarEventsAction(args: {
       },
     };
   }
-  const userId = nonempty(args.params.get("userId") ?? args.params.get("user_id"));
-  const calendarId = nonempty(
-    args.params.get("calendarId") ?? args.params.get("calendar_id"),
-  );
+  const userId = nonempty(args.params.get("userId"));
+  const calendarId = nonempty(args.params.get("calendarId"));
   if (!ghlId(userId) && !ghlId(calendarId)) {
     return {
       status: 400,
@@ -329,12 +241,8 @@ export async function ghlCalendarEventsAction(args: {
       },
     };
   }
-  const startMs = ghlCalendarInstantMs(
-    args.params.get("start") ?? args.params.get("startTime"),
-  );
-  const endMs = ghlCalendarInstantMs(
-    args.params.get("end") ?? args.params.get("endTime"),
-  );
+  const startMs = ghlCalendarInstantMs(args.params.get("start"));
+  const endMs = ghlCalendarInstantMs(args.params.get("end"));
   if (startMs === null || endMs === null || endMs <= startMs) {
     return {
       status: 400,
@@ -354,16 +262,13 @@ export async function ghlCalendarEventsAction(args: {
     startMs,
     endMs,
   });
-  const ok = scan.failure === null && scan.exhausted;
   return {
     status: 200,
     body: {
-      ok,
+      ok: scan.failure === null,
       events: scan.events,
       provenance: {
-        pages_read: scan.pages_read,
         count: scan.count,
-        exhausted: scan.exhausted,
         failure: scan.failure,
         user_id: scan.user_id,
         calendar_id: scan.calendar_id,

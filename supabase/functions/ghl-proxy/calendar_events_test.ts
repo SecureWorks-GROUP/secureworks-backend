@@ -1,9 +1,9 @@
 /**
- * ghl-proxy calendar_events — read-only paging and provenance.
+ * ghl-proxy calendar_events — read-only window GET and provenance.
  *
- * What these prove: GET-only, user-or-calendar required, ISO window, paging to
- * a short page, a failed GHL page named in provenance, users-list confirmation
- * that refuses a guess. No writes, no live GHL.
+ * What these prove: GET-only, user-or-calendar required, ISO window, one
+ * unpaged calendars/events GET, a failed GHL GET named in provenance,
+ * users-list confirmation that refuses a guess. No writes, no live GHL.
  */
 // deno-lint-ignore-file no-import-prefix
 import {
@@ -14,7 +14,6 @@ import {
   confirmGhlUserId,
   fetchGhlCalendarEvents,
   fetchGhlLocationUsers,
-  GHL_CALENDAR_EVENTS_PAGE_SIZE,
   ghlCalendarEventsAction,
   ghlCalendarInstantMs,
   usersFromGhlBody,
@@ -54,6 +53,10 @@ function getter(
     return Promise.resolve(reply);
   };
   return { calls, ghlGet };
+}
+
+function windowQuery(path: string): URLSearchParams {
+  return new URL(path, "https://ghl.example").searchParams;
 }
 
 Deno.test("ghlCalendarInstantMs accepts Perth ISO and Unix milliseconds", () => {
@@ -106,17 +109,65 @@ Deno.test("calendar_events action is GET only and requires a user or calendar pl
   assertEquals((badWindow.body as { code: string }).code, "invalid_window");
 });
 
-Deno.test("a short GHL page is completion; raw events and provenance ride the body", async () => {
-  const { calls, ghlGet } = getter([{
-    events: [event("a"), event("b", { appointmentStatus: "cancelled" })],
-  }]);
-  const result = await ghlCalendarEventsAction({
+Deno.test("calendar_events accepts only userId or calendarId plus start and end", async () => {
+  const { calls, ghlGet } = getter([]);
+  const snake = await ghlCalendarEventsAction({
     method: "GET",
     params: new URLSearchParams({
-      userId: USER,
+      user_id: USER,
       start: "2026-09-14T00:00:00+08:00",
       end: "2026-09-21T00:00:00+08:00",
     }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(snake.status, 400);
+  assertEquals(
+    (snake.body as { code: string }).code,
+    "user_or_calendar_required",
+  );
+
+  const ghlNames = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      userId: USER,
+      startTime: "2026-09-14T00:00:00+08:00",
+      endTime: "2026-09-21T00:00:00+08:00",
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(ghlNames.status, 400);
+  assertEquals((ghlNames.body as { code: string }).code, "invalid_window");
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("wired calendar_events handler is GET only, returns the window, and issues no write", async () => {
+  const { calls, ghlGet } = getter([{
+    events: [event("a"), event("b", { appointmentStatus: "cancelled" })],
+  }]);
+  const window = new URLSearchParams({
+    userId: USER,
+    start: "2026-09-14T00:00:00+08:00",
+    end: "2026-09-21T00:00:00+08:00",
+  });
+
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    const refused = await ghlCalendarEventsAction({
+      method,
+      params: window,
+      locationId: LOCATION,
+      ghlGet,
+    });
+    assertEquals(refused.status, 405);
+    assertEquals(refused.body.ok, false);
+    assertEquals((refused.body as { code: string }).code, "method_not_allowed");
+  }
+  assertEquals(calls.length, 0);
+
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: window,
     locationId: LOCATION,
     ghlGet,
   });
@@ -124,25 +175,30 @@ Deno.test("a short GHL page is completion; raw events and provenance ride the bo
   assertEquals(result.body.ok, true);
   assertEquals((result.body.events as unknown[]).length, 2);
   const provenance = result.body.provenance as Record<string, unknown>;
-  assertEquals(provenance.pages_read, 1);
   assertEquals(provenance.count, 2);
-  assertEquals(provenance.exhausted, true);
   assertEquals(provenance.failure, null);
   assertEquals(provenance.user_id, USER);
+  assertEquals(provenance.calendar_id, null);
+  assertEquals(calls.length, 1);
   assertStringIncludes(calls[0], "/calendars/events?");
-  assertStringIncludes(calls[0], `userId=${USER}`);
-  assertStringIncludes(calls[0], `locationId=${LOCATION}`);
+  const query = windowQuery(calls[0]);
+  assertEquals(query.get("locationId"), LOCATION);
+  assertEquals(query.get("userId"), USER);
+  assertEquals(query.get("startTime"), String(START));
+  assertEquals(query.get("endTime"), String(Date.parse("2026-09-21T00:00:00+08:00")));
+  assertEquals(query.get("skip"), null);
+  assertEquals(query.get("limit"), null);
+  assertEquals([...query.keys()].sort(), [
+    "endTime",
+    "locationId",
+    "startTime",
+    "userId",
+  ]);
 });
 
-Deno.test("a full page is followed; a failed later page is named and not treated as complete", async () => {
-  const full = Array.from(
-    { length: GHL_CALENDAR_EVENTS_PAGE_SIZE },
-    (_, i) => event(`p1-${i}`),
-  );
-  const { ghlGet } = getter([
-    { events: full },
-    { throw: "GHL 502: upstream" },
-  ]);
+Deno.test("one unpaged window GET keeps a full GHL page", async () => {
+  const many = Array.from({ length: 100 }, (_, i) => event(`e-${i}`));
+  const { calls, ghlGet } = getter([{ events: many }]);
   const scan = await fetchGhlCalendarEvents({
     ghlGet,
     locationId: LOCATION,
@@ -150,9 +206,26 @@ Deno.test("a full page is followed; a failed later page is named and not treated
     startMs: START,
     endMs: END,
   });
-  assertEquals(scan.pages_read, 1);
-  assertEquals(scan.count, GHL_CALENDAR_EVENTS_PAGE_SIZE);
-  assertEquals(scan.exhausted, false);
+  assertEquals(scan.count, 100);
+  assertEquals(scan.failure, null);
+  assertEquals(scan.events.length, 100);
+  assertEquals(calls.length, 1);
+  const query = windowQuery(calls[0]);
+  assertEquals(query.get("skip"), null);
+  assertEquals(query.get("limit"), null);
+});
+
+Deno.test("a failed GHL window is named and not treated as complete", async () => {
+  const { ghlGet } = getter([{ throw: "GHL 502: upstream" }]);
+  const scan = await fetchGhlCalendarEvents({
+    ghlGet,
+    locationId: LOCATION,
+    userId: USER,
+    startMs: START,
+    endMs: END,
+  });
+  assertEquals(scan.count, 0);
+  assertEquals(scan.events, []);
   assertStringIncludes(scan.failure || "", "ghl_calendar_page_failed");
   assertStringIncludes(scan.failure || "", "GHL 502");
 });
@@ -190,19 +263,4 @@ Deno.test("a failed users list is unread, never an invented roster", async () =>
   });
   assertEquals(scan.users, []);
   assertStringIncludes(scan.failure || "", "ghl_users_unread");
-});
-
-Deno.test("ghl-proxy index wires calendar_events as a GET action", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const action = source.indexOf("action === 'calendar_events'");
-  assertEquals(action >= 0, true);
-  const methodGuard = source.indexOf("req.method !== 'GET'", action);
-  assertEquals(methodGuard > action, true);
-  assertEquals(source.includes("ghlCalendarEventsAction"), true);
-  assertEquals(
-    /calendars\/events['"`].*(POST|PUT|PATCH|DELETE)/i.test(
-      source.slice(action, action + 800),
-    ),
-    false,
-  );
 });

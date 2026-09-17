@@ -1327,10 +1327,10 @@ export async function readSalesBookingGhlDiary(args: {
     startMs,
     endMs: untilMs - 1,
   });
-  if (scan.failure || !scan.exhausted) {
+  if (scan.failure) {
     return unreadDiary(
       args.scoperUserId,
-      scan.failure || "ghl_calendar_page_failed",
+      scan.failure,
       { calendar_email: mapping.email, ghl_user_id: confirmed.id },
     );
   }
