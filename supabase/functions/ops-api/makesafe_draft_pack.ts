@@ -65,12 +65,32 @@ export interface DraftPackContext {
   source_docs?: Array<Record<string, unknown>>;
 }
 
+/**
+ * A named pricing decision the verifier ACCEPTED instead of blocking, carried
+ * up so a Captain reviews it on the cockpit rather than the desk needing a
+ * lock plus a remint. An assumption never fails verification.
+ */
+export interface DraftPackReviewAssumption {
+  reason_code: string;
+  reason: string;
+}
+
 export interface DraftPackVerificationResult {
   ok: boolean;
   blockers: string[];
   warnings: string[];
   applied_rule_ids: string[];
+  /** Present only when the verifier accepted something under a named caveat. */
+  review_assumptions?: DraftPackReviewAssumption[];
 }
+
+/**
+ * Reason code for a labour-only MLB temporary-fence pack: the trade report
+ * records client-supplied fencing, so SecureWorks withheld hire, retrieval and
+ * consumables rather than billing a hire card nobody supplied.
+ */
+export const MLB_CLIENT_SUPPLIED_TEMP_FENCE_REASON_CODE =
+  "temporary_fence_hire_withheld_client_supplied";
 
 export interface DraftPackDueDetail {
   job_id?: string | null;
@@ -773,6 +793,7 @@ export function verifyDraftPackOutput(
 ): DraftPackVerificationResult {
   const blockers: string[] = [];
   const warnings: string[] = [];
+  const reviewAssumptions: DraftPackReviewAssumption[] = [];
   const applied = new Set<string>();
   const bodies = humanFeedbackBodies(ctx);
   const feedbackText = bodies.join("\n");
@@ -876,13 +897,26 @@ export function verifyDraftPackOutput(
           "MLB solo temporary-fence make-safe labour must be at least 4 hours unless Ops explicitly discounts it",
         );
       }
-      verifyMlbTempFenceInvoiceLines(
-        output,
-        nonFeedbackSearchText,
-        humanOverride,
-        blockers,
-        applied,
-      );
+      // A labour-only pack whose trade report records client-supplied fencing
+      // is not an under-billed hire card: there was no SecureWorks hire to
+      // bill. Accept it under a named review assumption so the desk mints the
+      // DRAFT and the Captain reviews the withheld hire on the cockpit.
+      if (mlbTempFenceLabourOnlyClientSupplied(output, ctx)) {
+        applied.add("MLB_TEMP_FENCE_CLIENT_SUPPLIED_LABOUR_ONLY");
+        reviewAssumptions.push({
+          reason_code: MLB_CLIENT_SUPPLIED_TEMP_FENCE_REASON_CODE,
+          reason:
+            "Temporary-fence hire, the retrieval allowance and the $25 consumables line were withheld from this MLB draft because the selected current-cycle trade report records no SecureWorks materials and states client-supplied fencing. The pack bills attendance labour only; the Captain should confirm the builder is not to be charged hire for this card.",
+        });
+      } else {
+        verifyMlbTempFenceInvoiceLines(
+          output,
+          nonFeedbackSearchText,
+          humanOverride,
+          blockers,
+          applied,
+        );
+      }
     }
   }
 
@@ -908,6 +942,9 @@ export function verifyDraftPackOutput(
     blockers,
     warnings,
     applied_rule_ids: Array.from(applied),
+    ...(reviewAssumptions.length > 0
+      ? { review_assumptions: reviewAssumptions }
+      : {}),
   };
 }
 
@@ -1195,6 +1232,168 @@ function verifyMlbTempFenceInvoiceLines(
       );
     }
   }
+}
+
+/**
+ * Wording a trade uses when the CLIENT (or builder) put the fencing up, so the
+ * SecureWorks attendance is labour only. Matched case-insensitively against
+ * trade-recorded text only — never against model-generated draft wording,
+ * which could invent the phrase and launder away the hire card.
+ *
+ * Every phrase must NAME the supplier, and that name must be the client, the
+ * customer, the insured or the owner. Two shapes are banned outright:
+ *
+ * - a bare "own supplies", because "used our own supplies" is the trade saying
+ *   SecureWorks supplied the fencing, and matching it would invert the gate and
+ *   withhold a hire the builder owes;
+ * - an unattributed possessive such as "their own supplies", "his own supplies"
+ *   or a bare "client's own", because the pronoun can just as easily point at
+ *   our own crew, and the bare possessive never says what was supplied.
+ */
+const CLIENT_SUPPLIED_FENCE_PHRASES = [
+  "client used own supplies",
+  "client used their own supplies",
+  "client supplied",
+  "client's own supplies",
+  "clients own supplies",
+  "customer supplied",
+  "customer's own supplies",
+  "customers own supplies",
+  "insured supplied",
+  "owner supplied",
+  "owner's own supplies",
+  "owners own supplies",
+  "no fencing installed",
+  "no temporary fencing installed",
+];
+
+/**
+ * Phrases that say the supplies were OURS. Any one of these locks the
+ * labour-only path shut even when a client phrase also matches somewhere in the
+ * same text: a report that says both is ambiguous, and ambiguity must fall back
+ * to billing the hire card rather than withholding it.
+ */
+const SECUREWORKS_SUPPLIED_FENCE_PHRASES = [
+  "our own",
+  "we supplied",
+  "secureworks supplied",
+  "our supplies",
+  "our panels",
+];
+
+/**
+ * Lowercase, straighten smart quotes and flatten hyphens to spaces, so the
+ * natural written form "client-supplied" matches the spaced phrase list.
+ */
+function normaliseFenceWordingText(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u2010-\u2015\-]+/g, " ");
+}
+
+function hasSecureworksSuppliedFenceWording(text: string): boolean {
+  const lower = normaliseFenceWordingText(text);
+  return SECUREWORKS_SUPPLIED_FENCE_PHRASES.some((phrase) =>
+    lower.includes(phrase)
+  );
+}
+
+function hasClientSuppliedFenceWording(text: string): boolean {
+  // A SecureWorks-supplied mention wins outright, so "used our own supplies"
+  // can never unlock the labour-only path.
+  if (hasSecureworksSuppliedFenceWording(text)) return false;
+  const lower = normaliseFenceWordingText(text);
+  return CLIENT_SUPPLIED_FENCE_PHRASES.some((phrase) =>
+    lower.includes(normaliseFenceWordingText(phrase))
+  );
+}
+
+/**
+ * A checklist row that carries no material: one of the placeholder skeletons
+ * the trade app leaves behind when nothing was entered.
+ *
+ * The 11 Sep real-report check over 22 live service reports found four shapes
+ * in the field - ". x .", ". x 1", "1 x 1" and blanks - so this is a shape
+ * rule rather than a list of known strings. Drop the separator "x", and an item
+ * with no letters left has no material NAME, only quantity punctuation. Any
+ * item that still carries a letter is a real material, which keeps
+ * "Screws x 20" and units baked into the quantity such as
+ * "Flashing tape x 1.5m" and "Pollyweave x 45m2" on the SecureWorks side.
+ */
+function isPlaceholderMaterialItem(item: unknown): boolean {
+  const value = String(item ?? "").trim();
+  if (!value) return true;
+  return !/\p{L}/u.test(value.replace(/\bx\b/gi, " "));
+}
+
+/**
+ * True only when the trade report positively shows no SecureWorks materials.
+ *
+ * A `materials_used` that is present but is not a list is UNKNOWN, not empty.
+ * The trade app could have drifted to an object or a string that records real
+ * quantities we cannot read here, so that case keeps the hire card rather than
+ * reading as "nothing was supplied". Absent entirely still reads as nothing
+ * recorded, which is the placeholder case this path exists for.
+ */
+function serviceReportRecordsNoSecureworksMaterials(
+  ctx: DraftPackContext,
+): boolean {
+  const report = asRecord(ctx.service_report);
+  const checklist = asRecord(report.checklist_json);
+  for (const candidate of [checklist.materials_used, report.materials_used]) {
+    if (candidate === undefined || candidate === null) continue;
+    if (!Array.isArray(candidate)) return false;
+    return candidate.every((item) => isPlaceholderMaterialItem(item));
+  }
+  return true;
+}
+
+function clientSuppliedFenceEvidenceText(ctx: DraftPackContext): string {
+  const report = asRecord(ctx.service_report);
+  const checklist = asRecord(report.checklist_json);
+  return [
+    checklist.work_done,
+    checklist.works_completed,
+    checklist.notes,
+    report.work_done,
+    report.notes,
+  ].map((value) => typeof value === "string" ? value : "").join("\n");
+}
+
+function isHireOrRetrievalLine(line: DraftPackLineItem): boolean {
+  return /\bhire\b|\brental\b|retrieval|retriev|collection|collect|pick\s*up|pickup|dismantle/
+    .test(lineDescription(line));
+}
+
+/**
+ * True when the invoice bills attendance labour and nothing else: one or more
+ * labour lines, and no hire, retrieval, panel, base, picket or consumables
+ * line anywhere in the set.
+ */
+function isLabourOnlyLineSet(lines: DraftPackLineItem[]): boolean {
+  if (!lines.some((line) => isLabourLine(line))) return false;
+  return lines.every((line) => {
+    if (isLabourLine(line) && !isHireOrRetrievalLine(line)) return true;
+    return !isHireOrRetrievalLine(line) && !isPanelLine(line) &&
+      !isBaseLine(line) && !isPicketLine(line) && !isConsumableLine(line);
+  });
+}
+
+/**
+ * The narrow case the canonical verifier now accepts instead of demanding the
+ * MLB hire card: the selected current-cycle trade report shows no SecureWorks
+ * materials AND records client-supplied fencing, and the draft bills labour
+ * only. Everything outside this exact shape keeps the existing hire/retrieval/
+ * consumables demands.
+ */
+function mlbTempFenceLabourOnlyClientSupplied(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+): boolean {
+  return serviceReportRecordsNoSecureworksMaterials(ctx) &&
+    hasClientSuppliedFenceWording(clientSuppliedFenceEvidenceText(ctx)) &&
+    isLabourOnlyLineSet(output.invoice.line_items || []);
 }
 
 function isMlbDraft(ctx: DraftPackContext, output: DraftPackOutput): boolean {

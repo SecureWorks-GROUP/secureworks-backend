@@ -3185,3 +3185,428 @@ Deno.test("curated bind photo accounting keeps sub-millisecond created_at order"
     globalThis.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Curated bind: byte-identical duplicate photo exclusion.
+//
+// A trade who uploads the same batch twice used to force repeat pages into the
+// builder report, because applicable_ids/selected_ids had to equal EVERY
+// current-cycle job_media photo row. `duplicate_bytes` is the ONE exclusion
+// reason allowed to name a photo, and the server proves it from bytes it
+// fetched itself. source_count still accounts for the whole media set.
+// ---------------------------------------------------------------------------
+
+const DUPLICATE_PHOTO_CYCLE = "cycle-two";
+
+function duplicatePhotoServiceReport() {
+  return {
+    id: SERVICE_REPORT_ID,
+    status: "submitted",
+    checklist_json: { materials_used: [] },
+    attendance_cycle_id: DUPLICATE_PHOTO_CYCLE,
+    cycle_attribution: "bound",
+    cycle_number: 2,
+  };
+}
+
+function duplicatePhotoMedia(
+  extra: Array<Record<string, unknown>> = [],
+): Array<Record<string, unknown>> {
+  return [
+    {
+      id: "photo-one",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-09-01T08:00:00.000Z",
+      storage_url: "https://storage.example.test/one.jpg",
+      attendance_cycle_id: DUPLICATE_PHOTO_CYCLE,
+      cycle_attribution: "bound",
+    },
+    {
+      id: "photo-two",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-09-01T09:00:00.000Z",
+      storage_url: "https://storage.example.test/two.jpg",
+      attendance_cycle_id: DUPLICATE_PHOTO_CYCLE,
+      cycle_attribution: "bound",
+    },
+    ...extra,
+    {
+      id: "site-document",
+      type: "document",
+      phase: "intake",
+      created_at: "2026-09-01T11:00:00.000Z",
+      storage_url: "https://storage.example.test/site-document.bin",
+      attendance_cycle_id: DUPLICATE_PHOTO_CYCLE,
+      cycle_attribution: "bound",
+    },
+  ];
+}
+
+function duplicatePhotoReportJob(options: {
+  contentHash: string;
+  sourceCount?: number;
+  applicableIds?: string[];
+  excluded?: Array<Record<string, unknown>>;
+}) {
+  const applicableIds = options.applicableIds || ["photo-one"];
+  return currentReportJob({
+    photos: applicableIds.map((id) => ({
+      evidence_id: id,
+      caption: "Site photo " + id,
+      content_sha256: options.contentHash,
+    })),
+    photo_evidence: {
+      source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+      completeness_verified: true,
+      source_count: options.sourceCount ?? 3,
+      applicable_count: applicableIds.length,
+      selected_count: applicableIds.length,
+      applicable_ids: applicableIds,
+      selected_ids: applicableIds,
+      excluded: options.excluded || [],
+      rejected: [],
+    },
+  });
+}
+
+async function withDuplicatePhotoFetch<T>(
+  pdfBytes: Uint8Array,
+  bytesByUrl: Map<string, Uint8Array>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: any) => {
+    const url = String(input);
+    const found = bytesByUrl.get(url);
+    if (found) return Promise.resolve(new Response(found, { status: 200 }));
+    if (url.endsWith(".pdf")) {
+      return Promise.resolve(new Response(pdfBytes, { status: 200 }));
+    }
+    return Promise.resolve(new Response(new Uint8Array(), { status: 404 }));
+  }) as any;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+Deno.test("curated bind excludes a byte-identical duplicate photo and seals the proof", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nduplicate bytes fixture");
+  const photoBytes = new TextEncoder().encode("repeat upload photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const bytesByUrl = new Map<string, Uint8Array>([
+    ["https://storage.example.test/one.jpg", photoBytes],
+    ["https://storage.example.test/two.jpg", photoBytes],
+  ]);
+  const base = await bindBody(bytes);
+  const excluded = [
+    { evidence_id: "photo-two", reason: "duplicate_bytes" },
+    { evidence_id: "site-document", reason: "not_photo_evidence" },
+  ];
+  await withDuplicatePhotoFetch(bytes, bytesByUrl, async () => {
+    const { client, document } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media: duplicatePhotoMedia(),
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      {
+        ...base,
+        report_job: duplicatePhotoReportJob({ contentHash, excluded }),
+      },
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+    assertEquals(document.data_snapshot_json.photo_source_accounting, {
+      excluded_duplicates: [{
+        evidence_id: "photo-two",
+        duplicate_of: "photo-one",
+        sha256: contentHash,
+      }],
+    });
+    // Current-cycle scope stays byte-stable: no sealed id list, no scope key.
+    assertEquals(document.data_snapshot_json.photo_source_scope, undefined);
+
+    // An explicitly named original is accepted on the same server-side proof.
+    const { client: named, document: namedDocument } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media: duplicatePhotoMedia(),
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const namedResult = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      named,
+      {
+        ...base,
+        report_job: duplicatePhotoReportJob({
+          contentHash,
+          excluded: [
+            {
+              evidence_id: "photo-two",
+              reason: "duplicate_bytes",
+              duplicate_of: "photo-one",
+            },
+            { evidence_id: "site-document", reason: "not_photo_evidence" },
+          ],
+        }),
+      },
+      FIXTURE_ACTOR,
+    );
+    assertEquals(namedResult.success, true);
+    assertEquals(
+      (namedDocument.data_snapshot_json.photo_source_accounting as any)
+        ?.excluded_duplicates?.[0]?.duplicate_of,
+      "photo-one",
+    );
+  });
+});
+
+Deno.test("curated bind refuses a duplicate_bytes exclusion whose bytes are not a repeat", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nwrong hash fixture");
+  const photoBytes = new TextEncoder().encode("first upload photo bytes");
+  const otherBytes = new TextEncoder().encode("genuinely different photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const bytesByUrl = new Map<string, Uint8Array>([
+    ["https://storage.example.test/one.jpg", photoBytes],
+    ["https://storage.example.test/two.jpg", otherBytes],
+  ]);
+  const base = await bindBody(bytes);
+  await withDuplicatePhotoFetch(bytes, bytesByUrl, async () => {
+    const { client, mutations } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media: duplicatePhotoMedia(),
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          {
+            ...base,
+            report_job: duplicatePhotoReportJob({
+              contentHash,
+              excluded: [
+                { evidence_id: "photo-two", reason: "duplicate_bytes" },
+                { evidence_id: "site-document", reason: "not_photo_evidence" },
+              ],
+            }),
+          },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertEquals(
+      ((error as ApiError).body as any)?.code,
+      "curated_bind_photo_source_mismatch",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "has no earlier applicable current-cycle photo with the same SHA-256",
+    );
+    assertEquals(mutations, []);
+
+    const { client: named, mutations: namedMutations } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media: duplicatePhotoMedia(),
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const namedError = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          named,
+          {
+            ...base,
+            report_job: duplicatePhotoReportJob({
+              contentHash,
+              excluded: [
+                {
+                  evidence_id: "photo-two",
+                  reason: "duplicate_bytes",
+                  duplicate_of: "photo-one",
+                },
+                { evidence_id: "site-document", reason: "not_photo_evidence" },
+              ],
+            }),
+          },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertEquals(
+      ((namedError as ApiError).body as any)?.code,
+      "curated_bind_photo_source_mismatch",
+    );
+    assertStringIncludes(
+      String((namedError as ApiError).message),
+      "does not have the same SHA-256 as applicable current-cycle photo photo-one",
+    );
+    assertEquals(namedMutations, []);
+  });
+});
+
+Deno.test("curated bind refuses a duplicate_of that is not an applicable photo", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nbad original fixture");
+  const photoBytes = new TextEncoder().encode("repeat upload photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const bytesByUrl = new Map<string, Uint8Array>([
+    ["https://storage.example.test/one.jpg", photoBytes],
+    ["https://storage.example.test/two.jpg", photoBytes],
+  ]);
+  const base = await bindBody(bytes);
+  await withDuplicatePhotoFetch(bytes, bytesByUrl, async () => {
+    const { client, mutations } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media: duplicatePhotoMedia(),
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          {
+            ...base,
+            report_job: duplicatePhotoReportJob({
+              contentHash,
+              excluded: [
+                {
+                  evidence_id: "photo-two",
+                  reason: "duplicate_bytes",
+                  duplicate_of: "site-document",
+                },
+                { evidence_id: "site-document", reason: "not_photo_evidence" },
+              ],
+            }),
+          },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertEquals(
+      ((error as ApiError).body as any)?.code,
+      "curated_bind_photo_source_mismatch",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "names duplicate_of site-document, which is not an earlier applicable current-cycle photo",
+    );
+    assertEquals(mutations, []);
+  });
+});
+
+Deno.test("curated bind still refuses any other exclusion reason for a photo row", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nother reason fixture");
+  const photoBytes = new TextEncoder().encode("repeat upload photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const bytesByUrl = new Map<string, Uint8Array>([
+    ["https://storage.example.test/one.jpg", photoBytes],
+    ["https://storage.example.test/two.jpg", photoBytes],
+  ]);
+  const base = await bindBody(bytes);
+  await withDuplicatePhotoFetch(bytes, bytesByUrl, async () => {
+    const { client, mutations } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media: duplicatePhotoMedia(),
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          {
+            ...base,
+            report_job: duplicatePhotoReportJob({
+              contentHash,
+              excluded: [
+                { evidence_id: "photo-two", reason: "blurry" },
+                { evidence_id: "site-document", reason: "not_photo_evidence" },
+              ],
+            }),
+          },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertEquals(
+      ((error as ApiError).body as any)?.code,
+      "curated_bind_photo_source_mismatch",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "applicable_ids does not match the current-cycle set",
+    );
+    assertEquals(mutations, []);
+  });
+});
+
+Deno.test("curated bind duplicate exclusion still requires source_count to cover every media row", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nsource count fixture");
+  const photoBytes = new TextEncoder().encode("repeat upload photo bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const bytesByUrl = new Map<string, Uint8Array>([
+    ["https://storage.example.test/one.jpg", photoBytes],
+    ["https://storage.example.test/two.jpg", photoBytes],
+    ["https://storage.example.test/three.jpg", photoBytes],
+  ]);
+  const media = duplicatePhotoMedia([{
+    id: "photo-three",
+    type: "photo",
+    phase: "completion",
+    created_at: "2026-09-01T10:00:00.000Z",
+    storage_url: "https://storage.example.test/three.jpg",
+    attendance_cycle_id: DUPLICATE_PHOTO_CYCLE,
+    cycle_attribution: "bound",
+  }]);
+  const base = await bindBody(bytes);
+  await withDuplicatePhotoFetch(bytes, bytesByUrl, async () => {
+    const { client, mutations } = bindClient(bytes, {
+      cycleId: DUPLICATE_PHOTO_CYCLE,
+      documentCycleId: DUPLICATE_PHOTO_CYCLE,
+      reattendCount: 1,
+      media,
+      serviceReport: duplicatePhotoServiceReport(),
+    });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          {
+            ...base,
+            report_job: duplicatePhotoReportJob({
+              contentHash,
+              sourceCount: 3,
+              excluded: [
+                { evidence_id: "photo-two", reason: "duplicate_bytes" },
+                { evidence_id: "site-document", reason: "not_photo_evidence" },
+              ],
+            }),
+          },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertEquals(
+      ((error as ApiError).body as any)?.code,
+      "curated_bind_photo_source_mismatch",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "source_count 3 does not equal the current-cycle job_media count 4",
+    );
+    assertEquals(mutations, []);
+  });
+});

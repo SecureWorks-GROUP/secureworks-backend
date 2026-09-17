@@ -2765,7 +2765,17 @@ function suppliedDraftPackOutput(
   request: SesPrepareRequest,
   input: SesAssemblerInputV1,
   row?: SesFamilyMatrixRow,
-): { output: DraftPackOutput | null; blocker: SesBlocker | null } {
+): {
+  output: DraftPackOutput | null;
+  blocker: SesBlocker | null;
+  /**
+   * Named pricing decisions the canonical verifier ACCEPTED (e.g. a labour-only
+   * MLB temporary-fence pack where the trade report records client-supplied
+   * fencing). They ride as review assumptions so the Captain reviews them on
+   * the cockpit; they never hold the mint.
+   */
+  assumptions?: SesBlocker[];
+} {
   if (request.draft_pack_output === undefined) {
     return {
       output: null,
@@ -2833,7 +2843,21 @@ function suppliedDraftPackOutput(
         ),
       };
     }
-    return { output, blocker: null };
+    return {
+      output,
+      blocker: null,
+      assumptions: (verification.review_assumptions || []).map((assumption) =>
+        blocked(
+          assumption.reason_code,
+          assumption.reason,
+          "Confirm the withheld charge on this card before release, or resubmit a draft pack that bills it.",
+          ["maverick-draft-pack", "selected-trade-report-current-cycle"],
+          [],
+          { verifier_applied_rule_ids: verification.applied_rule_ids },
+          "review_assumption",
+        )
+      ),
+    };
   } catch (error) {
     return {
       output: null,
@@ -2933,6 +2957,9 @@ async function prepareOne(
   );
   if (suppliedDraftPack.blocker) {
     addBlocker(blockers, suppliedDraftPack.blocker);
+  }
+  for (const assumption of suppliedDraftPack.assumptions || []) {
+    addBlocker(blockers, assumption);
   }
   // The card carries a standing materials-charge decision — UNSET, SET or
   // NONE — and it changes what the invoice says, so the decided states belong
