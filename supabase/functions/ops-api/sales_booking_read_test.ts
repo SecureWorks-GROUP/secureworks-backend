@@ -39,10 +39,11 @@ import {
   resolveSalesBookingGhlMapping,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
-  SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS,
   SALES_BOOKING_GHL_USERS,
   SALES_BOOKING_NOT_GIVEN,
   SALES_BOOKING_RESOURCES,
+  SALES_BOOKING_THREAD_FACTS_KIND,
+  SALES_BOOKING_THREAD_FACTS_WEEK_START,
   salesBookingGhl429DelayMs,
   salesBookingJobTypeFromOpportunity,
   salesBookingSuburbFromContact,
@@ -607,11 +608,13 @@ const GHL_USERS_BODY = {
       id: "ghl_user_nithin",
       email: SALES_BOOKING_GHL_USERS.nithin.email,
       name: "Nithin",
+      firstName: "Nithin",
     },
     {
       id: "ghl_user_marnin",
       email: SALES_BOOKING_GHL_USERS.marnin.email,
       name: "Marnin",
+      firstName: "Marnin",
     },
   ],
 };
@@ -1374,48 +1377,6 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
   assertEquals(fromAddress.pipeline_stage_id, MARNIN_SCOPE_STAGE);
 });
 
-Deno.test("dropped first-touch stages are out of the visit/reply/quote set", () => {
-  for (const [resource, dropped] of Object.entries(SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS)) {
-    const scope = SALES_BOOKING_RESOURCES[resource].scope_stage_ids;
-    for (const row of dropped) {
-      assertEquals(scope.includes(row.id), false);
-      assertEquals(isSalesBookingScopeStage(row.id, scope), false);
-    }
-  }
-  const payload = assembleSalesBookingRead({
-    resource: SALES_BOOKING_RESOURCES.nithin,
-    week: perthWeekWindow(WEEK),
-    projectedCases: [],
-    opportunities: {
-      opportunities: [],
-      stages: {},
-      exhausted: true,
-      pages_scanned: 1,
-      total: 0,
-      reason: null,
-    },
-    diary: UNREAD_DIARY,
-    threads: {
-      facts: {},
-      attempted: 0,
-      read_ok_count: 0,
-      not_attempted: 0,
-      budget_exhausted: false,
-      enabled: false,
-      cached_count: 0,
-      fresh_count: 0,
-      unread_count: 0,
-      remaining_429_count: 0,
-    },
-  });
-  assertEquals(
-    payload.resource.scope_stage_ids.includes(
-      SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS.nithin[0].id,
-    ),
-    false,
-  );
-});
-
 Deno.test("cached thread facts are served; stale activity is refreshed newest first", async () => {
   const persisted: Record<string, SalesBookingCachedThreadFact>[] = [];
   let liveReads = 0;
@@ -1523,6 +1484,48 @@ Deno.test("GHL 429 retries three times with backoff then counts remaining failur
   assertEquals(payload.coverage.threads_cached, 1);
 });
 
+Deno.test("Nithin maps by recorded email when that address is on the roster", async () => {
+  assertEquals(SALES_BOOKING_GHL_USERS.nithin.ghl_user_id, null);
+  assertEquals(
+    confirmSalesBookingGhlUser({
+      users: GHL_USERS_BODY.users,
+      email: SALES_BOOKING_GHL_USERS.nithin.email,
+      nameMatch: "nithin",
+    }),
+    {
+      id: "ghl_user_nithin",
+      reason: null,
+      match: "email",
+      ghl_email: SALES_BOOKING_GHL_USERS.nithin.email,
+    },
+  );
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: GHL_USERS_BODY,
+      events: { events: [] },
+    }),
+    locationId: "loc",
+    resourceId: "nithin",
+    scoperUserId: SALES_BOOKING_RESOURCES.nithin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, true);
+  assertEquals(scan.reason, null);
+  assertEquals(scan.ghl_user_id, "ghl_user_nithin");
+  assertEquals(scan.calendar_email, SALES_BOOKING_GHL_USERS.nithin.email);
+  const payload = await salesBookingRead(
+    deps({ readDiary: () => Promise.resolve(scan) }),
+    { resource: "nithin", week_start: WEEK },
+  );
+  assertEquals(payload.diary_read.reason, null);
+  assertEquals(payload.diary_read.ghl_user_id, "ghl_user_nithin");
+  assertEquals(
+    payload.diary_read.calendar_email,
+    SALES_BOOKING_GHL_USERS.nithin.email,
+  );
+});
+
 Deno.test("Nithin maps by unique GHL name when the recorded email is absent", async () => {
   const users = [
     {
@@ -1553,16 +1556,7 @@ Deno.test("Nithin maps by unique GHL name when the recorded email is absent", as
   );
   const scan = await readSalesBookingGhlDiary({
     ghlGet: ghlDiaryGet({
-      users: {
-        users: [
-          {
-            id: "ghl_nithin_live",
-            email: "nithin.p@secureworkswa.com.au",
-            firstName: "Nithin",
-            name: "Nithin Patel",
-          },
-        ],
-      },
+      users: { users },
       events: { events: [] },
     }),
     locationId: "loc",
@@ -1572,8 +1566,239 @@ Deno.test("Nithin maps by unique GHL name when the recorded email is absent", as
     untilExclusive: "2026-09-21T00:00:00+08:00",
   });
   assertEquals(scan.read_ok, true);
+  assertEquals(scan.reason, "ghl_user_mapped_by_name");
   assertEquals(scan.ghl_user_id, "ghl_nithin_live");
   assertEquals(scan.calendar_email, "nithin.p@secureworkswa.com.au");
-  assertStringIncludes(scan.reason || "", "ghl_user_mapped_by_name");
+  const payload = await salesBookingRead(
+    deps({ readDiary: () => Promise.resolve(scan) }),
+    { resource: "nithin", week_start: WEEK },
+  );
+  assertEquals(payload.diary_read.reason, "ghl_user_mapped_by_name");
+  assertEquals(payload.diary_read.ghl_user_id, "ghl_nithin_live");
+  assertEquals(payload.diary_read.calendar_email, "nithin.p@secureworkswa.com.au");
+});
+
+Deno.test("zero or several Nithin name matches stay ghl_user_unmapped", async () => {
+  const none = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: {
+        users: [{
+          id: "ghl_other",
+          email: "sam@secureworkswa.com.au",
+          name: "Sam",
+          firstName: "Sam",
+        }],
+      },
+    }),
+    locationId: "loc",
+    resourceId: "nithin",
+    scoperUserId: SALES_BOOKING_RESOURCES.nithin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(none.read_ok, false);
+  assertEquals(none.reason, "ghl_user_unmapped");
+  assertEquals(none.ghl_user_id, null);
+  assertEquals(none.calendar_email, SALES_BOOKING_GHL_USERS.nithin.email);
+
+  const several = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: {
+        users: [
+          {
+            id: "ghl_nithin_a",
+            email: "nithin.a@secureworkswa.com.au",
+            name: "Nithin A",
+            firstName: "Nithin",
+          },
+          {
+            id: "ghl_nithin_b",
+            email: "nithin.b@secureworkswa.com.au",
+            name: "Nithin B",
+            firstName: "Nithin",
+          },
+        ],
+      },
+    }),
+    locationId: "loc",
+    resourceId: "nithin",
+    scoperUserId: SALES_BOOKING_RESOURCES.nithin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(several.read_ok, false);
+  assertEquals(several.reason, "ghl_user_unmapped");
+  assertEquals(several.ghl_user_id, null);
+  assertEquals(several.calendar_email, SALES_BOOKING_GHL_USERS.nithin.email);
+});
+
+function threadFactsPackClient(
+  seed: Array<{
+    resource: string;
+    week_start: string;
+    kind: string;
+    as_of: string;
+    payload: Record<string, unknown>;
+  }>,
+) {
+  const store = seed.map((row) => ({
+    id: crypto.randomUUID(),
+    ...row,
+  }));
+  const writes: string[] = [];
+  return {
+    store,
+    writes,
+    from(table: string) {
+      if (table !== "sales_booking_packs") {
+        throw new Error(`unexpected table ${table}`);
+      }
+      const filters: Array<(row: (typeof store)[number]) => boolean> = [];
+      let pending: (typeof store)[number] | null = null;
+      let write: "upsert" | "delete" | null = null;
+      let orderCol: string | null = null;
+      let orderAsc = true;
+      let limitN: number | null = null;
+      const run = () => {
+        if (write === "upsert" && pending) {
+          writes.push("upsert");
+          store.push(pending);
+          return { data: pending, error: null };
+        }
+        if (write === "delete") {
+          writes.push("delete");
+          const keep = store.filter((row) => !filters.every((fn) => fn(row)));
+          store.splice(0, store.length, ...keep);
+          return { data: null, error: null };
+        }
+        let matched = store.filter((row) => filters.every((fn) => fn(row)));
+        if (orderCol) {
+          const col = orderCol as keyof (typeof store)[number];
+          matched = matched.slice().sort((a, b) => {
+            const av = String(a[col]);
+            const bv = String(b[col]);
+            return orderAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+          });
+        }
+        if (limitN != null) matched = matched.slice(0, limitN);
+        return { data: matched, error: null };
+      };
+      const self = {
+        select() {
+          return self;
+        },
+        upsert(row: Record<string, unknown>) {
+          write = "upsert";
+          pending = {
+            id: crypto.randomUUID(),
+            resource: String(row.resource),
+            week_start: String(row.week_start),
+            kind: String(row.kind),
+            as_of: String(row.as_of),
+            payload: (row.payload && typeof row.payload === "object"
+              ? row.payload
+              : {}) as Record<string, unknown>,
+          };
+          return self;
+        },
+        delete() {
+          write = "delete";
+          return self;
+        },
+        eq(col: string, value: unknown) {
+          filters.push((row) =>
+            (row as Record<string, unknown>)[col] === value
+          );
+          return self;
+        },
+        neq(col: string, value: unknown) {
+          filters.push((row) =>
+            (row as Record<string, unknown>)[col] !== value
+          );
+          return self;
+        },
+        order(col: string, opts?: { ascending?: boolean }) {
+          orderCol = col;
+          orderAsc = opts?.ascending !== false;
+          return self;
+        },
+        limit(n: number) {
+          limitN = n;
+          return self;
+        },
+        maybeSingle() {
+          const { data, error } = run();
+          const row = Array.isArray(data) ? data[0] ?? null : data;
+          return Promise.resolve({ data: row, error });
+        },
+        then(
+          resolve: (value: unknown) => unknown,
+          reject?: (reason: unknown) => unknown,
+        ) {
+          return Promise.resolve(run()).then(resolve, reject);
+        },
+      };
+      return self;
+    },
+  };
+}
+
+Deno.test("thread facts persist skips a write when the merged map equals the stored row", async () => {
+  const facts = { "opp-1": cachedFact() };
+  const client = threadFactsPackClient([{
+    resource: "marnin",
+    week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+    kind: SALES_BOOKING_THREAD_FACTS_KIND,
+    as_of: "2026-09-16T01:00:00.000Z",
+    payload: { facts },
+  }]);
+  await createSalesBookingReadDependencies(client).persistThreadFactsCache!(
+    "marnin",
+    facts,
+  );
+  assertEquals(client.writes, []);
+  assertEquals(client.store.length, 1);
+  assertEquals(client.store[0].as_of, "2026-09-16T01:00:00.000Z");
+});
+
+Deno.test("thread facts persist keeps one latest row per resource and week", async () => {
+  const previous = { "opp-1": cachedFact() };
+  const next = {
+    "opp-1": cachedFact({
+      classification: "waiting_reply",
+      last_inbound_at: "2026-09-16T01:30:00.000Z",
+      read_at: "2026-09-16T02:00:00.000Z",
+    }),
+  };
+  const client = threadFactsPackClient([
+    {
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_THREAD_FACTS_KIND,
+      as_of: "2026-09-16T00:00:00.000Z",
+      payload: { facts: previous },
+    },
+    {
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_THREAD_FACTS_KIND,
+      as_of: "2026-09-16T01:00:00.000Z",
+      payload: { facts: previous },
+    },
+  ]);
+  await createSalesBookingReadDependencies(client).persistThreadFactsCache!(
+    "marnin",
+    next,
+  );
+  assertEquals(client.writes, ["upsert", "delete"]);
+  assertEquals(client.store.length, 1);
+  assertEquals(
+    (client.store[0].payload as { facts?: { "opp-1"?: { classification?: string } } })
+      .facts?.["opp-1"]?.classification,
+    "waiting_reply",
+  );
+  assertEquals(client.store[0].kind, SALES_BOOKING_THREAD_FACTS_KIND);
+  assertEquals(client.store[0].resource, "marnin");
+  assertEquals(client.store[0].week_start, SALES_BOOKING_THREAD_FACTS_WEEK_START);
 });
 

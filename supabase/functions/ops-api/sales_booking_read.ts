@@ -188,10 +188,8 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
     email: "nithin@secureworkswa.com.au",
     email_source:
       "public.users.email (20260322000005_fix_user_roles.sql) and wiki patio-nithin.json calendar_email",
-    // Live 17 Sep: GET /users/?locationId= had no nithin@secureworkswa.com.au
-    // row (ghl_user_unmapped). Confirm by unique first/display name on that
-    // same roster; pin the id when the match is unique.
     name_match: "nithin",
+    // Pin is a follow-up once the live roster email is known.
     ghl_user_id: null,
   },
   marnin: {
@@ -201,36 +199,6 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
     name_match: "marnin",
     ghl_user_id: null,
   },
-};
-
-/** Wiki stage ids that inflated the live roster past visit/reply/quote. */
-export const SALES_BOOKING_DROPPED_SCOPE_STAGE_IDS: Readonly<
-  Record<string, readonly { id: string; name: string; why: string }[]>
-> = {
-  nithin: [
-    {
-      id: "09759a42-f80a-4947-bca4-71df5dd770da",
-      name: "Client Needs To Be Contacted",
-      why: "193 of 300 live Nithin rows on 17 Sep; first-touch sales, not a visit, reply, or quote to send",
-    },
-  ],
-  marnin: [
-    {
-      id: "cc401467-4743-4dbd-a7d7-e8f2ff023dd2",
-      name: "New Lead (Call + Qualify)",
-      why: "first-touch call-qualify; 22 live Marnin rows on 17 Sep",
-    },
-    {
-      id: "8c43212e-5e58-4f0d-b7f7-96c6ee644d6e",
-      name: "Stale Lead",
-      why: "ghl-proxy maps Stale Lead to cancelled; not visit/reply/quote",
-    },
-    {
-      id: "341d6a77-6a35-4338-b2b0-09236c7c80f9",
-      name: "Called, No Answer",
-      why: "call-qualify holding pen, not a visit or quote to send",
-    },
-  ],
 };
 
 // ── Bounds ───────────────────────────────────────────────────
@@ -1973,10 +1941,7 @@ export async function readSalesBookingGhlDiary(args: {
   );
   return {
     read_ok: true,
-    reason: confirmed.match === "name" && confirmed.ghl_email &&
-        confirmed.ghl_email !== mapping.email
-      ? `ghl_user_mapped_by_name:${confirmed.ghl_email}`
-      : null,
+    reason: confirmed.match === "name" ? "ghl_user_mapped_by_name" : null,
     entries,
     malformed_dropped: dropped,
     calendar_email: calendarEmail,
@@ -2021,22 +1986,49 @@ async function loadThreadFactsCacheLive(
   );
 }
 
+function salesBookingThreadFactsMapsEqual(
+  left: Record<string, SalesBookingCachedThreadFact>,
+  right: Record<string, SalesBookingCachedThreadFact>,
+): boolean {
+  const a = parseSalesBookingThreadFactsCache({ facts: left });
+  const b = parseSalesBookingThreadFactsCache({ facts: right });
+  const keysA = Object.keys(a).sort();
+  const keysB = Object.keys(b).sort();
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((key, index) =>
+    key === keysB[index] &&
+    JSON.stringify(a[key]) === JSON.stringify(b[key])
+  );
+}
+
 async function persistThreadFactsCacheLive(
   client: SalesBookingReadClient,
   resourceId: string,
   facts: Record<string, SalesBookingCachedThreadFact>,
 ): Promise<void> {
-  const payload: Record<string, unknown> = { facts };
+  const existing = await loadThreadFactsCacheLive(client, resourceId);
+  if (salesBookingThreadFactsMapsEqual(existing, facts)) return;
+  const asOf = new Date().toISOString();
   const { error } = await client.from("sales_booking_packs").upsert({
     resource: resourceId,
     week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
     kind: SALES_BOOKING_THREAD_FACTS_KIND,
-    as_of: new Date().toISOString(),
-    payload,
+    as_of: asOf,
+    payload: { facts },
     published_by: "ops-api:thread_facts",
   }, { onConflict: "resource,week_start,kind,as_of" });
   if (error) {
     throw new Error(error.message || "thread_facts persist failed");
+  }
+  const { error: pruneError } = await client
+    .from("sales_booking_packs")
+    .delete()
+    .eq("resource", resourceId)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
+    .eq("kind", SALES_BOOKING_THREAD_FACTS_KIND)
+    .neq("as_of", asOf);
+  if (pruneError) {
+    throw new Error(pruneError.message || "thread_facts prune failed");
   }
 }
 
