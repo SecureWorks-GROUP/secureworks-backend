@@ -145,14 +145,20 @@ Deno.test("Luna subscription extractor is required for door coverage stamps", ()
   assertEquals(
     isCurrentLunaSubscriptionFact({
       ...active,
-      provenance: { extractor: "context-luna-subscription:v1", safety: { memory_trusted: true } },
+      provenance: {
+        extractor: "context-luna-subscription:v1",
+        safety: { memory_trusted: true },
+      },
     }),
     true,
   );
   assertEquals(
     isCurrentLunaSubscriptionFact({
       ...active,
-      provenance: { extractor: "context-luna-subscription:v1", lifecycle: "superseded" },
+      provenance: {
+        extractor: "context-luna-subscription:v1",
+        lifecycle: "superseded",
+      },
     }),
     false,
   );

@@ -6,6 +6,7 @@ export const LUNA_SUBSCRIPTION_EXTRACTOR = "context-luna-subscription:v1";
 /** Per-job writer stamp. Accepted in addition to LUNA_SUBSCRIPTION_EXTRACTOR, never instead of it. */
 const LUNA_V2_EXTRACTOR = "luna_v2";
 
+/** v1 stamp, or per-job luna_v2 (provenance.extractor or extractor_version+trust). Haiku / instruction do not count. */
 export function isLunaSubscriptionFact(row: Record<string, unknown>): boolean {
   const p = row.provenance as Record<string, unknown> | null;
   if (p?.extractor === LUNA_SUBSCRIPTION_EXTRACTOR) return true;
