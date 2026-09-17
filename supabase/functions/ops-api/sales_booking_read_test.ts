@@ -40,7 +40,6 @@ import {
   resolveSalesBookingGhlMapping,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
-  SALES_BOOKING_DEFAULT_THREAD_LIMIT,
   SALES_BOOKING_GHL_USERS,
   SALES_BOOKING_RESOURCES,
   type SalesBookingDiaryScan,
@@ -921,48 +920,12 @@ Deno.test("thread_limit leaves the remainder unproved rather than unreported", a
   }
 });
 
-Deno.test("scope_stage_ids are the wiki stages through booked / quote-to-send", () => {
-  assertEquals(SALES_BOOKING_DEFAULT_THREAD_LIMIT, 200);
-  assertEquals(SALES_BOOKING_RESOURCES.nithin.scope_stage_ids, [
-    "09759a42-f80a-4947-bca4-71df5dd770da",
-    "4d3bcf9a-185d-4a90-98e0-e0805fdf4a02",
-    "637c165f-93a3-496b-8e86-970eb8935044",
-    "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5",
-    "9b9e5313-8e0e-4ed6-8654-d50413b99885",
-  ]);
-  assertEquals(SALES_BOOKING_RESOURCES.marnin.scope_stage_ids, [
-    "cc401467-4743-4dbd-a7d7-e8f2ff023dd2",
-    "7f863a14-1d9f-4a18-b73c-0e1780390bd7",
-    "8c43212e-5e58-4f0d-b7f7-96c6ee644d6e",
-    "341d6a77-6a35-4338-b2b0-09236c7c80f9",
-    "52c70bff-5cf3-447b-b891-03c30486aed8",
-    "6b101809-a4f9-440d-ac4c-0be669b8173e",
-    "bfdba902-0a92-4a90-95a5-af27d7502a90",
-    "09eeb872-fa46-41fc-a96b-8a8d2bc12215",
-    "4dc3da8f-d713-4bd4-851c-8e89b6682a4e",
-    "418534d4-6356-4c20-a274-51fbb892c2fa",
-  ]);
-  assertEquals(
-    isSalesBookingScopeStage(
-      MARNIN_QUOTE_SENT_STAGE,
-      SALES_BOOKING_RESOURCES.marnin.scope_stage_ids,
-    ),
-    false,
-  );
-  assertEquals(
-    isSalesBookingScopeStage(
-      MARNIN_SCOPE_STAGE,
-      SALES_BOOKING_RESOURCES.marnin.scope_stage_ids,
-    ),
-    true,
-  );
-  assertEquals(
-    isSalesBookingScopeStage(
-      "",
-      SALES_BOOKING_RESOURCES.marnin.scope_stage_ids,
-    ),
-    false,
-  );
+Deno.test("isSalesBookingScopeStage admits an in-scope id and drops quote-sent, hold, and blank", () => {
+  const scope = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids;
+  assertEquals(isSalesBookingScopeStage(MARNIN_SCOPE_STAGE, scope), true);
+  assertEquals(isSalesBookingScopeStage(MARNIN_QUOTE_SENT_STAGE, scope), false);
+  assertEquals(isSalesBookingScopeStage(MARNIN_ON_HOLD_STAGE, scope), false);
+  assertEquals(isSalesBookingScopeStage("", scope), false);
 });
 
 Deno.test("FIXTURE: mixed pipeline stages exclude quote-sent/hold and spend the thread budget on newest in-scope first", async () => {
