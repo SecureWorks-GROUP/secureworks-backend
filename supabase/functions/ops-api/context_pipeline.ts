@@ -5,7 +5,7 @@ export class ContextPipelineError extends Error {
 }
 
 export async function contextPipelineStatus(
-  client: { rpc: (fn: string) => Promise<{ data: unknown; error: unknown }> },
+  client: { rpc: (fn: string) => PromiseLike<{ data: unknown; error: unknown }> },
 ) {
   const { data, error } = await client.rpc("context_pipeline_status");
   if (error || !data) {
