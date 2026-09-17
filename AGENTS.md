@@ -540,6 +540,8 @@ ledgered B1/B2 files must stay byte-identical to main. The nine-argument
 `persist_luna_context_revision` and `current_job_context_facts` read source
 time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
 an `event_at`-only gate — production almost never populates `event_at`.
+The captain heartbeat is `GET ops-api?action=context_pipeline_status`
+(migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
 Context migration lanes:
 `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh` (disposable localhost
 Postgres, applies the new migrations twice). Record: `docs/context/b3-fact-custody.md`.
