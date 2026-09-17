@@ -28,7 +28,6 @@
 
 import {
   emptySalesBookingPackView,
-  perthWeekdayShort,
   perthWeekWindow,
   resolveSalesBookingResource,
   SALES_BOOKING_MAX_THREAD_LIMIT,
@@ -140,9 +139,9 @@ function optionalPackString(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
-function windowStartIso(window: unknown): string | null {
+function packWindowDay(window: unknown): string | null {
   if (!isObject(window)) return null;
-  return optionalPackString(window.start);
+  return typeof window.day === "string" ? window.day : null;
 }
 
 /**
@@ -168,7 +167,7 @@ export function salesBookingPackProposalsMap(
     out[key] = {
       disposition,
       window: "window" in row ? row.window : null,
-      day: perthWeekdayShort(windowStartIso(row.window)),
+      day: packWindowDay(row.window),
       draft: draftFromRow ?? draftFromMap,
       offer: disposition === "offer",
       name: optionalPackString(row.name),
@@ -226,7 +225,7 @@ export function projectSalesBookingProposal(
       disposition: typeof row.disposition === "string" && row.disposition
         ? row.disposition
         : "needs_info",
-      day: window && typeof window.day === "string" ? window.day : null,
+      day: packWindowDay(window),
       window_start: window && typeof window.start === "string"
         ? window.start
         : null,

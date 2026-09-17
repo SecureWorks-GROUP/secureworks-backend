@@ -133,8 +133,8 @@ Additions:
   `proposals` is an object keyed by the lead's `opportunity_id`, or by the
   lead `id` when there is none. Every pack lead is included, independent of
   the GHL roster, the scope-stage filter, and the thread budget; the door
-  filters. Each entry: `disposition`, `window` (as stored), `day` (short
-  Perth weekday derived from `window.start`, not the stored `day`), `draft`,
+  filters. Each entry: `disposition`, `window` (as stored), `day` (the
+  stored `window.day`), `draft`,
   `offer` (true when disposition is `offer`), `name`, `suburb`,
   `opportunity_id`, `contact_id`, `stage`, `status`, `calendar_event_id`.
 - **`stamp`** — `{present, as_of, approved, rejected, decisions, stage_moves}`

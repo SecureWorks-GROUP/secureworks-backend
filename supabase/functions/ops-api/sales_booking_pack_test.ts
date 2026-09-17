@@ -502,7 +502,7 @@ Deno.test("pack.proposals carries every lead even when the roster enumerates two
   );
   assertEquals(payload.cases.length, 2);
   assertEquals(payload.pack.proposals["opp-1"].offer, true);
-  assertEquals(payload.pack.proposals["opp-1"].day, "Fri");
+  assertEquals(payload.pack.proposals["opp-1"].day, "Wed");
   assertEquals(payload.pack.proposals["opp-1"].window, PACK_WINDOW);
   assertEquals(payload.pack.proposals["opp-1"].draft, "Draft 1");
   assertEquals(payload.pack.proposals["opp-1"].name, "Lead 1");
@@ -559,7 +559,7 @@ Deno.test("pack.proposals keys a lead with no opportunity id by its lead id", ()
   assertEquals(Object.keys(map), ["lead-no-opp"]);
   assertEquals(map["lead-no-opp"].opportunity_id, null);
   assertEquals(map["lead-no-opp"].offer, true);
-  assertEquals(map["lead-no-opp"].day, "Fri");
+  assertEquals(map["lead-no-opp"].day, "Wed");
 });
 
 Deno.test("absent pack overlay keeps present false and an empty proposals map", async () => {

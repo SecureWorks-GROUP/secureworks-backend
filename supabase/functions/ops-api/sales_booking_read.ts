@@ -285,30 +285,6 @@ export function perthWeekWindow(weekStart: string): SalesBookingWeekWindow {
   };
 }
 
-const PERTH_WEEKDAY_SHORT = [
-  "Sun",
-  "Mon",
-  "Tue",
-  "Wed",
-  "Thu",
-  "Fri",
-  "Sat",
-] as const;
-
-/**
- * Short English weekday on the Perth wall clock (`Fri`). Used for pack
- * proposal `day`, which is derived from `window.start`, never guessed.
- */
-export function perthWeekdayShort(
-  iso: string | null | undefined,
-): string | null {
-  if (typeof iso !== "string" || !iso.trim()) return null;
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return null;
-  const perth = new Date(ms + 8 * 3_600_000);
-  return PERTH_WEEKDAY_SHORT[perth.getUTCDay()] ?? null;
-}
-
 // ════════════════════════════════════════════════════════════
 // Thread facts (pure)
 // ════════════════════════════════════════════════════════════
@@ -707,7 +683,7 @@ export interface SalesBookingPackProposal {
   disposition: string | null;
   /** Window object as stored on the pack lead. */
   window: unknown;
-  /** Short Perth weekday (`Fri`) from `window.start`, not the stored `day`. */
+  /** Stored pack `window.day`. */
   day: string | null;
   draft: string | null;
   offer: boolean;
