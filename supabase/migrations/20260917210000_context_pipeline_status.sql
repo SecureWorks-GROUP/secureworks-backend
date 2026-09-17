@@ -1,10 +1,13 @@
 -- Heartbeat: coverage of current facts, and one pipeline-status read.
 -- Copied from cio/context-b4-recovery's context_accuracy_and_status packet
--- without the weekly accuracy tables or review functions. Two corrections
--- against that draft, both live-schema:
+-- without the weekly accuracy tables or review functions. Corrections against
+-- that draft:
 --   * missing_event_time counts rows where BOTH event_at and occurred_at are
 --     null. event_at-only would flag ~33k healthy rows (PR 854; production
 --     source time is coalesce(event_at, occurred_at)).
+--   * oldest_pending_event_at is min(coalesce(event_at, occurred_at)).
+--   * evidence_by_attribution_status excludes empty/automated (never extractable).
+--   * today's extraction runs are split by status and failed runs by error code.
 --   * coverage filters xero_invoices.invoice_type, the live column. The draft
 --     read i.type, which production does not have.
 SET LOCAL lock_timeout = '5s';
@@ -34,7 +37,8 @@ DECLARE d date:=(now() AT TIME ZONE 'Australia/Perth')::date; switches jsonb; qu
 BEGIN
  SELECT to_jsonb(s) INTO switches FROM public.automation_switches s WHERE id=1;
  SELECT jsonb_object_agg(status,n) INTO queue FROM (SELECT coalesce(e.attribution_status,'unknown') status,count(*) n
- FROM public.business_events e WHERE NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=e.job_id AND r.extractor_version='luna_v2')
+ FROM public.business_events e WHERE e.attribution_status NOT IN ('empty','automated')
+ AND NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=e.job_id AND r.extractor_version='luna_v2')
  GROUP BY e.attribution_status) q;
  BEGIN
   EXECUTE 'SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=$1' INTO calls USING d;
@@ -43,6 +47,8 @@ BEGIN
  RETURN jsonb_build_object('as_of',now(),'run_date',d,'switches',switches,
   'lanes',jsonb_build_object('capture',public.automation_lane_enabled('capture'),'attribution',public.automation_lane_enabled('attribution'),'extraction',public.automation_lane_enabled('extraction')),
   'runs_used',(SELECT count(*) FROM public.context_extraction_runs WHERE run_date=d AND phase='extraction'),'run_cap',400,
+  'runs_by_status',(SELECT coalesce(jsonb_object_agg(status,n),'{}'::jsonb) FROM (SELECT status,count(*) n FROM public.context_extraction_runs WHERE run_date=d AND phase='extraction' GROUP BY status) s),
+  'failed_by_error',(SELECT coalesce(jsonb_object_agg(coalesce(nullif(error,''),'(none)'),n),'{}'::jsonb) FROM (SELECT error,count(*) n FROM public.context_extraction_runs WHERE run_date=d AND phase='extraction' AND status='failed' GROUP BY error) s),
   'model_calls_used',calls,'model_call_cap',400,'model_call_budget_state',call_state,
   'evidence_by_attribution_status',coalesce(queue,'{}'::jsonb),'ready_jobs',ready,'ready_jobs_is_lower_bound',ready=400,
   'admin_bucket_size',(SELECT count(*) FROM public.business_events WHERE attribution_status='admin_bucket'),

@@ -1,9 +1,10 @@
 # Context pipeline heartbeat
 
 `GET ops-api?action=context_pipeline_status` is the captain's one-line-a-day
-read: Perth `run_date`, switch/lanes, today's extraction runs and model-call
-reservations, unreceipted evidence by attribution status, ready-job count
-(capped at 400), and `coverage` of open jobs and authorised receivables.
+read: Perth `run_date`, switch/lanes, today's extraction runs (total, by
+status, and failed-by-error-code), model-call reservations, unreceipted
+extractable evidence by attribution status, ready-job count (capped at 400),
+and `coverage` of open jobs and authorised receivables.
 
 The jarvis tool proxies this action. It is SELECT-only. Deploy `ops-api` with
 `--no-verify-jwt`.
@@ -18,10 +19,12 @@ The jarvis tool proxies this action. It is SELECT-only. Deploy `ops-api` with
 Copied from the unmerged accuracy packet without `context_accuracy_*` tables or
 `latest_accuracy_week` / `accuracy_alerts`.
 
-Two live-schema corrections against that draft:
+Corrections against that draft:
 
-1. `missing_event_time` counts rows where **both** `event_at` and `occurred_at` are null. An `event_at IS NULL` count would report ~33k healthy rows after PR 854, whose writer and `current_job_context_facts` already read `coalesce(event_at, occurred_at)`. `oldest_pending_event_at` uses that same `min(coalesce(event_at, occurred_at))` source time.
+1. `missing_event_time` counts rows where **both** `event_at` and `occurred_at` are null. An `event_at IS NULL` count would report ~33k healthy rows after PR 854. `oldest_pending_event_at` is `min(coalesce(event_at, occurred_at))`.
 2. Coverage filters `xero_invoices.invoice_type`. Production has no `type` column on that table.
+3. `evidence_by_attribution_status` excludes `empty` and `automated` (candidates never admit them).
+4. Today's extraction runs are published as `runs_by_status` and `failed_by_error` so a failure-code morning is visible without SQL.
 
 ## Proof
 

@@ -5,6 +5,8 @@ DECLARE empty_job uuid:=gen_random_uuid(); pending_job uuid:=gen_random_uuid(); 
  snap jsonb; perth date:=(now() AT TIME ZONE 'Australia/Perth')::date;
  missing_before integer; missing_after integer; both_null_job uuid:=gen_random_uuid();
  pending_source timestamptz:='1999-01-02 03:04:05+00';
+ empty_n integer; auto_n integer; queue jsonb;
+ done_job uuid:=gen_random_uuid(); fail_job uuid:=gen_random_uuid(); run_job uuid:=gen_random_uuid();
 BEGIN
  IF to_regprocedure('public.context_coverage()') IS NULL
   OR to_regprocedure('public.context_pipeline_status()') IS NULL
@@ -64,5 +66,33 @@ BEGIN
   VALUES(both_null_job,'direct_job_id','{"body":"both clocks null"}',NULL,NULL,'direct');
  missing_after:=(public.context_pipeline_status()->>'missing_event_time')::integer;
  IF missing_after IS DISTINCT FROM missing_before+1 THEN RAISE EXCEPTION 'heartbeat both-null missing_event_time % -> %',missing_before,missing_after; END IF;
+
+ -- empty/automated unreceipted rows are never extractable and must not inflate the queue.
+ queue:=public.context_pipeline_status()->'evidence_by_attribution_status';
+ empty_n:=coalesce((queue->>'empty')::integer,0); auto_n:=coalesce((queue->>'automated')::integer,0);
+ INSERT INTO public.business_events(job_id,match_method,payload,occurred_at,attribution_status)
+  VALUES(both_null_job,'direct_job_id','{"body":"blank"}',now(),'empty'),
+        (both_null_job,'direct_job_id','{"body":"system"}',now(),'automated');
+ queue:=public.context_pipeline_status()->'evidence_by_attribution_status';
+ IF coalesce((queue->>'empty')::integer,0) IS DISTINCT FROM empty_n
+  OR coalesce((queue->>'automated')::integer,0) IS DISTINCT FROM auto_n
+ THEN RAISE EXCEPTION 'heartbeat queued never-extractable empty/automated %',queue; END IF;
+
+ -- Today's extraction runs split by status; failed runs split by error code.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES
+  (done_job,'00000000-0000-0000-0000-000000000001','accepted','patio','HB-RUN-DONE-'||done_job),
+  (fail_job,'00000000-0000-0000-0000-000000000001','accepted','patio','HB-RUN-FAIL-'||fail_job),
+  (run_job,'00000000-0000-0000-0000-000000000001','accepted','patio','HB-RUN-RUN-'||run_job);
+ INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,error) VALUES
+  (done_job,perth,'extraction','done',NULL),
+  (fail_job,perth,'extraction','failed','process_failed'),
+  (run_job,perth,'extraction','running',NULL);
+ snap:=public.context_pipeline_status();
+ IF coalesce((snap#>>'{runs_by_status,done}')::integer,0)<1
+  OR coalesce((snap#>>'{runs_by_status,failed}')::integer,0)<1
+  OR coalesce((snap#>>'{runs_by_status,running}')::integer,0)<1
+ THEN RAISE EXCEPTION 'heartbeat runs_by_status missing today %',snap->'runs_by_status'; END IF;
+ IF coalesce((snap#>>'{failed_by_error,process_failed}')::integer,0)<1
+ THEN RAISE EXCEPTION 'heartbeat failed_by_error missing process_failed %',snap->'failed_by_error'; END IF;
 END $$;
 ROLLBACK;
