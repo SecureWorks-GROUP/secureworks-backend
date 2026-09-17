@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17)
 
 `GET ops-api?action=sales_booking_read` is the single read behind the Sales
 Booking view. It replaces the branch-local preview server
@@ -127,8 +127,16 @@ Additions:
   `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
-- **`pack`** — `{present, as_of}` for the latest `sales_booking_packs` row
-  with `kind=pack`. Absent when the engine has not published this week.
+- **`pack`** — `{present, as_of, proposals}` for the latest
+  `sales_booking_packs` row with `kind=pack`. Absent when the engine has not
+  published this week (`present:false`, `as_of:null`, `proposals:{}`).
+  `proposals` is an object keyed by the lead's `opportunity_id`, or by the
+  lead `id` when there is none. Every pack lead is included, independent of
+  the GHL roster, the scope-stage filter, and the thread budget; the door
+  filters. Each entry: `disposition`, `window` (as stored), `day` (short
+  Perth weekday derived from `window.start`, not the stored `day`), `draft`,
+  `offer` (true when disposition is `offer`), `name`, `suburb`,
+  `opportunity_id`, `contact_id`, `stage`, `status`, `calendar_event_id`.
 - **`stamp`** — `{present, as_of, approved, rejected, decisions, stage_moves}`
   from the latest `kind=stamp` row. The captain Send stamp; nothing is sent.
 - Per case **`proposal`** — `{disposition, day, window_start, window_end,

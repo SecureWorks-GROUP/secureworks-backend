@@ -285,6 +285,30 @@ export function perthWeekWindow(weekStart: string): SalesBookingWeekWindow {
   };
 }
 
+const PERTH_WEEKDAY_SHORT = [
+  "Sun",
+  "Mon",
+  "Tue",
+  "Wed",
+  "Thu",
+  "Fri",
+  "Sat",
+] as const;
+
+/**
+ * Short English weekday on the Perth wall clock (`Fri`). Used for pack
+ * proposal `day`, which is derived from `window.start`, never guessed.
+ */
+export function perthWeekdayShort(
+  iso: string | null | undefined,
+): string | null {
+  if (typeof iso !== "string" || !iso.trim()) return null;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  const perth = new Date(ms + 8 * 3_600_000);
+  return PERTH_WEEKDAY_SHORT[perth.getUTCDay()] ?? null;
+}
+
 // ════════════════════════════════════════════════════════════
 // Thread facts (pure)
 // ════════════════════════════════════════════════════════════
@@ -673,6 +697,37 @@ export interface SalesBookingCaseProposal {
   window_end: string | null;
   draft: string | null;
   why: string[];
+}
+
+/**
+ * One engine pack lead, keyed on `pack.proposals` by opportunity id (or the
+ * lead id when there is none). Independent of the roster and stage filter.
+ */
+export interface SalesBookingPackProposal {
+  disposition: string | null;
+  /** Window object as stored on the pack lead. */
+  window: unknown;
+  /** Short Perth weekday (`Fri`) from `window.start`, not the stored `day`. */
+  day: string | null;
+  draft: string | null;
+  offer: boolean;
+  name: string | null;
+  suburb: string | null;
+  opportunity_id: string | null;
+  contact_id: string | null;
+  stage: string | null;
+  status: string | null;
+  calendar_event_id: string | null;
+}
+
+export interface SalesBookingPackView {
+  present: boolean;
+  as_of: string | null;
+  proposals: Record<string, SalesBookingPackProposal>;
+}
+
+export function emptySalesBookingPackView(): SalesBookingPackView {
+  return { present: false, as_of: null, proposals: {} };
 }
 
 export interface SalesBookingCase {
@@ -1577,7 +1632,7 @@ export interface SalesBookingReadResponse {
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
   drafts: Record<string, string>;
-  pack: { present: boolean; as_of: string | null };
+  pack: SalesBookingPackView;
   stamp: {
     present: boolean;
     as_of: string | null;
@@ -1734,7 +1789,7 @@ export function assembleSalesBookingRead(input: {
     // Pack overlay (proposals, drafts, stamp) is applied after this assemble
     // by sales_booking_pack.ts. Absent here means the engine has not published.
     drafts: {},
-    pack: { present: false, as_of: null },
+    pack: emptySalesBookingPackView(),
     stamp: {
       present: false,
       as_of: null,

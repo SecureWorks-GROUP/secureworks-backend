@@ -34,6 +34,7 @@ import {
   isSalesBookingScopeStage,
   isSalesBookingTemplateBody,
   perthGraphInstant,
+  perthWeekdayShort,
   perthWeekWindow,
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
@@ -171,6 +172,15 @@ Deno.test("perthWeekWindow spans Monday to the following Monday in Perth", () =>
   assertEquals(week.since, "2026-09-14T00:00:00+08:00");
   assertEquals(week.until_exclusive, "2026-09-21T00:00:00+08:00");
   assertEquals(week.timezone, "Australia/Perth");
+});
+
+Deno.test("perthWeekdayShort uses the Perth wall clock, not UTC", () => {
+  assertEquals(perthWeekdayShort("2026-09-18T08:00:00+08:00"), "Fri");
+  // Thursday 16:00 UTC is Friday 00:00 Perth.
+  assertEquals(perthWeekdayShort("2026-09-17T16:00:00.000Z"), "Fri");
+  assertEquals(perthWeekdayShort("2026-09-17T15:59:00.000Z"), "Thu");
+  assertEquals(perthWeekdayShort(""), null);
+  assertEquals(perthWeekdayShort("not-a-date"), null);
 });
 
 Deno.test("perthWeekWindow refuses a non-Monday and an impossible date", () => {
@@ -540,7 +550,7 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.week_start, WEEK);
   assertEquals(payload.policy.activation, "held");
   assertEquals(payload.drafts, {});
-  assertEquals(payload.pack, { present: false, as_of: null });
+  assertEquals(payload.pack, { present: false, as_of: null, proposals: {} });
   assertEquals(payload.stamp.present, false);
   assertEquals(payload.cases.length, 1);
   assertEquals(payload.cases[0].proposal, null);

@@ -14,7 +14,10 @@
 // `sales_booking_read` also persists kind=roster (opportunity enumeration
 // cache) on that same table; this module does not read or write it.
 // `sales_booking_read` merges the latest pack onto cases by opportunity id
-// (`opp:<id>` → case opportunity id) and fills drafts + stamp_state.
+// (`opp:<id>` → case opportunity id) and fills drafts + stamp_state. It also
+// publishes `pack.proposals` from every pack lead, keyed by opportunity id
+// (or the lead id when there is none), independent of the roster and stage
+// filter.
 //
 // Env (read at call time, not module load):
 //   SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails allowed to
@@ -24,11 +27,14 @@
 // No send, no calendar write, no GHL write. A stamp write is a row, nothing else.
 
 import {
+  emptySalesBookingPackView,
+  perthWeekdayShort,
   perthWeekWindow,
   resolveSalesBookingResource,
   SALES_BOOKING_MAX_THREAD_LIMIT,
   type SalesBookingCase,
   type SalesBookingCaseProposal,
+  type SalesBookingPackProposal,
   salesBookingReadAction,
   type SalesBookingReadResponse,
   SalesBookingRequestError,
@@ -40,7 +46,11 @@ export const SALES_BOOKING_STAMP_KIND = "stamp" as const;
 export const SALES_BOOKING_THREAD_FACTS_KIND = "thread_facts" as const;
 
 export type SalesBookingStampDecision = "hold" | "replace";
-export type { SalesBookingCaseProposal, SalesBookingStampState };
+export type {
+  SalesBookingCaseProposal,
+  SalesBookingPackProposal,
+  SalesBookingStampState,
+};
 
 export interface SalesBookingStampPayload {
   captain: string | null;
@@ -124,6 +134,53 @@ export function salesBookingPackProposalRows(
     return proposals.leads.filter(isObject);
   }
   return [];
+}
+
+function optionalPackString(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
+}
+
+function windowStartIso(window: unknown): string | null {
+  if (!isObject(window)) return null;
+  return optionalPackString(window.start);
+}
+
+/**
+ * Full pack-lead map for the Booking door. Keyed by `opportunity_id`, or by
+ * the lead `id` when there is none. Every lead is included; the door filters.
+ * Independent of the roster, stage filter, and thread budget.
+ */
+export function salesBookingPackProposalsMap(
+  proposals: unknown,
+  drafts: Record<string, string> = {},
+): Record<string, SalesBookingPackProposal> {
+  const out: Record<string, SalesBookingPackProposal> = {};
+  for (const row of salesBookingPackProposalRows(proposals)) {
+    const opportunityId = optionalPackString(row.opportunity_id);
+    const leadId = optionalPackString(row.id);
+    const key = opportunityId || leadId;
+    if (!key) continue;
+    const disposition = optionalPackString(row.disposition);
+    const draftFromRow = optionalPackString(row.draft);
+    const draftFromMap = (opportunityId && drafts[opportunityId]) ||
+      (leadId && drafts[salesBookingPackOpportunityId(leadId) ?? leadId]) ||
+      null;
+    out[key] = {
+      disposition,
+      window: "window" in row ? row.window : null,
+      day: perthWeekdayShort(windowStartIso(row.window)),
+      draft: draftFromRow ?? draftFromMap,
+      offer: disposition === "offer",
+      name: optionalPackString(row.name),
+      suburb: optionalPackString(row.suburb),
+      opportunity_id: opportunityId,
+      contact_id: optionalPackString(row.contact_id),
+      stage: optionalPackString(row.stage),
+      status: optionalPackString(row.status),
+      calendar_event_id: optionalPackString(row.calendar_event_id),
+    };
+  }
+  return out;
 }
 
 export function normaliseSalesBookingDrafts(
@@ -258,6 +315,7 @@ export function emptySalesBookingStampView(): SalesBookingReadResponse[
 /**
  * Merge the latest pack + stamp onto an already-assembled booking read.
  * Missing overlay is an honest empty pack, not a guessed proposal.
+ * `pack.proposals` is built from the pack row itself, not from `cases[]`.
  */
 export function applySalesBookingPackOverlay(
   response: SalesBookingReadResponse,
@@ -310,8 +368,15 @@ export function applySalesBookingPackOverlay(
     cases,
     drafts,
     pack: overlay.pack
-      ? { present: true, as_of: overlay.pack.as_of }
-      : { present: false, as_of: null },
+      ? {
+        present: true,
+        as_of: overlay.pack.as_of,
+        proposals: salesBookingPackProposalsMap(
+          packPayload?.proposals,
+          drafts,
+        ),
+      }
+      : emptySalesBookingPackView(),
     stamp: stamp && overlay.stamp
       ? {
         present: true,
