@@ -89,6 +89,18 @@ export interface SalesBookingResource {
 }
 
 /**
+ * Compatibility overlay for the live Booking door
+ * (`secureworks-ux` `modules/ops-sales-booking.js`). That door paints
+ * "Calendar not connected" only when `resource.calendar.ok === false`.
+ * Values are copied from `diary_read`; this is not a second calendar read.
+ */
+export interface SalesBookingCalendarOverlay {
+  ok: boolean;
+  error: string | null;
+  mailbox: string | null;
+}
+
+/**
  * v1 roster. `nithin` is the patio pipeline on line 774; `marnin` is the
  * fencing (Stratco) profile on line 776.
  *
@@ -630,7 +642,7 @@ export interface SalesBookingReadResponse {
   version: string;
   week_start: string;
   week: SalesBookingWeekWindow;
-  resource: SalesBookingResource;
+  resource: SalesBookingResource & { calendar: SalesBookingCalendarOverlay };
   coverage: {
     full_population: boolean;
     enumerated: number;
@@ -723,7 +735,14 @@ export function assembleSalesBookingRead(input: {
     version: SALES_BOOKING_API_VERSION,
     week_start: week.week_start,
     week,
-    resource: { ...resource },
+    resource: {
+      ...resource,
+      calendar: {
+        ok: diary.read_ok,
+        error: diary.read_ok ? null : diary.reason,
+        mailbox: diary.calendar_email,
+      },
+    },
     coverage: {
       // Full population means the roster was terminal. Thread and calendar gaps
       // are named separately: they narrow what is KNOWN about a case, not

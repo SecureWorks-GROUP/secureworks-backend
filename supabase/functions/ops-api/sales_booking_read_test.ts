@@ -513,26 +513,32 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.resource.sender_line, "776");
 });
 
-Deno.test("diary is the only calendar output; unread is diary_read plus coverage.gaps", async () => {
+Deno.test("unread mirrors diary_read onto resource.calendar so the Booking door paints the banner", async () => {
   const payload = await salesBookingRead(deps(), {
     resource: "marnin",
     week_start: WEEK,
   });
   assertEquals("events" in payload, false);
-  assertEquals("calendar" in payload.resource, false);
   assertEquals(payload.diary.length, 1);
   assertEquals(payload.diary_read.read_ok, true);
+  assertEquals(payload.resource.calendar.ok, true);
+  assertEquals(payload.resource.calendar.error, null);
+  assertEquals(payload.resource.calendar.mailbox, "marnin@secureworkswa.com.au");
 
   const unread = await salesBookingRead(
     deps({ readDiary: () => Promise.resolve(UNREAD_DIARY) }),
     { resource: "marnin", week_start: WEEK },
   );
   assertEquals("events" in unread, false);
-  assertEquals("calendar" in unread.resource, false);
   assertEquals(unread.diary, []);
   assertEquals(unread.diary_read.read_ok, false);
   assertEquals(unread.coverage.diary_read_ok, false);
   assert(unread.coverage.gaps.some((g) => g.includes("ghl_calendar_page_failed")));
+  // Live Booking door (ops-sales-booking.js renderCalendar) paints
+  // "Calendar not connected" only when resource.calendar.ok === false.
+  assertEquals(unread.resource.calendar.ok, false);
+  assertEquals(unread.resource.calendar.error, "ghl_calendar_page_failed: GHL 502");
+  assertEquals(unread.resource.calendar.mailbox, "marnin@secureworkswa.com.au");
 });
 
 Deno.test("FIXTURE: an unread calendar names the gap and never throws", async () => {
