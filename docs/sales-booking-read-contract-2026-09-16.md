@@ -28,13 +28,24 @@ than `read_at`, and cache younger than 6 hours) and live-refreshes only the
 rest, newest first, under the remaining budget. A 429 after retries still
 serves a stale cached thread when one exists.
 
-The opportunity roster is cached the same way: one latest `kind=roster` row
-per resource and week. A row younger than 10 minutes is served from cache
+The opportunity roster is week-agnostic: one latest `kind=roster` row per
+resource, keyed at the same sentinel Monday `1970-01-05` as thread facts.
+A complete row younger than 10 minutes is served from cache
 (`coverage.roster_source: cache` plus `roster_age_ms`). Absent or older than
-10 minutes is live-refreshed. A 429 on that refresh falls back to the cached
-roster when one exists and says so in `coverage.gaps`. Incomplete live
-enumerations are not persisted. Thread-facts and roster persist are the
-only writes on the read path. No GHL mutation, no calendar create, no send.
+10 minutes is live-refreshed. `force_refresh` only bypasses that 10-minute
+window on a complete row; an incomplete row always resumes from its stored
+page cursor, including when `force_refresh` is set. A complete cached book
+always beats an incomplete live result, whatever the reason (429, time
+budget, page error): the response keeps the cached `as_of`, sets
+`coverage.roster_source: cache`, and names why the live refresh was
+incomplete in `coverage.gaps`. Only a complete live scan replaces a
+complete cache. An incomplete live scan is persisted as an incomplete row
+carrying the page cursor reached; the next read resumes from that cursor
+inside the remaining 25 s budget, merges the pages, and marks the row
+complete when the result set ends. Until then the merged partial is served
+with `full_population: false` and an honest gap. No background job, no new
+table. Thread-facts and roster persist are the only writes on the read
+path. No GHL mutation, no calendar create, no send.
 `send_hold: true` and `policy.{activation,send,calendar_write}: 'held'`
 are constants the view renders; they are not the enforcement.
 
@@ -66,6 +77,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 | `thread_limit` | 200 (max 250) | Newest-activity-first cap on thread reads, spent on scoped rows only. |
 | `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep, also clipped to the remaining whole-read budget. |
 | `read_budget_ms` | 25000 (max 25000) | Whole-read wall clock covering roster, diary, contacts, and threads. |
+| `force_refresh` | `false` | Bypasses the 10-minute freshness window on a complete roster row and thread-facts freshness. An incomplete roster always resumes from its cursor. |
 | `case_ids` | all | Comma-separated: read threads for these cases only. |
 
 Auth is the ops-api default: an ops API key, or a signed-in
@@ -154,14 +166,15 @@ Publish / stamp actions (same table, no send):
   `{ok:true, stamp:null, as_of:null}`.
 - `POST sales_booking_threads_refresh` (api key only): body `{resource,
   week_start?}`. Force-refreshes in-scope threads for that resource, persists
-  `kind=thread_facts` (`week_start` 1970-01-05), returns the same read payload.
-  No send.
+  `kind=thread_facts` (`week_start` 1970-01-05), and calls the read with
+  `force_refresh` so a complete roster bypasses its 10-minute window (an
+  incomplete roster still resumes). Returns the same read payload. No send.
 
 Table: `sales_booking_packs`. Pack and stamp keep history; latest = greatest
 `as_of` per `(resource, week_start, kind)` and older rows are ignored.
 Thread facts keep one latest row per resource at `week_start` 1970-01-05:
 writers insert then delete older `as_of` only. Roster keeps one latest row
-per resource and week the same way. RLS on, no client access. Migrations
+per resource at that same sentinel. RLS on, no client access. Migrations
 `20260917130000_sales_booking_packs.sql`,
 `20260917180000_sales_booking_thread_facts.sql` (kind check includes
 `thread_facts`), and `20260917200000_sales_booking_roster.sql` (kind check

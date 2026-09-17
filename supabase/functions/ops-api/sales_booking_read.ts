@@ -1497,7 +1497,8 @@ export async function resolveSalesBookingRoster(args: {
     const like429 = rosterScanLooksLike429(merged);
     return {
       scan: scanFromCachedRoster(cached, args.nowMs, {
-        reason: merged.reason || (like429 ? "GHL 429" : "incomplete live refresh"),
+        reason: merged.reason ||
+          (like429 ? "GHL 429" : "incomplete live refresh"),
         remaining_429_count: like429
           ? Math.max(1, merged.remaining_429_count ?? 1)
           : merged.remaining_429_count ?? 0,
@@ -1761,7 +1762,7 @@ export interface SalesBookingReadParams {
   /** Whole-read wall clock. Capped at 25s. */
   read_budget_ms?: number;
   case_ids?: string[] | null;
-  /** Ignore cache freshness and re-read every selected thread and the roster. */
+  /** Bypass thread-facts freshness and the 10-minute window on a complete roster. An incomplete roster always resumes from its cursor. */
   force_refresh?: boolean;
 }
 
@@ -2220,12 +2221,10 @@ export async function salesBookingRead(
   for (const raw of opportunities.opportunities) {
     const contactId = salesBookingContactId(raw);
     const row = projectSalesBookingCase(
-      hydrateLive
-        ? raw
-        : applySalesBookingContactFact(
-          raw,
-          contactId ? contactFacts[contactId] : null,
-        ),
+      hydrateLive ? raw : applySalesBookingContactFact(
+        raw,
+        contactId ? contactFacts[contactId] : null,
+      ),
       resource.resource_id,
       opportunities.stages,
     );
@@ -2955,7 +2954,9 @@ export function createSalesBookingReadDependencies(
     now: () => new Date(),
   };
   return {
-    readOpportunities: ({ pipelineId, deadlineMs, startAfter, startAfterId }) => {
+    readOpportunities: (
+      { pipelineId, deadlineMs, startAfter, startAfterId },
+    ) => {
       retry.deadlineMs = deadlineMs;
       return readOpportunitiesLive(pipelineId, retry, {
         startAfter,

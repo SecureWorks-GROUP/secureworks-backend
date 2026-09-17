@@ -1,11 +1,11 @@
 -- Sales Booking roster cache (17 Sep 2026).
 --
--- Live opportunity paging on sales_booking_read hits GHL 429 and spends the
--- whole door budget before threads run. kind=roster stores the last completed
--- open-pipeline enumeration per resource and week as one packs-style row.
+-- Widens sales_booking_packs.kind to include roster. Persist grain, resume,
+-- and complete-vs-incomplete rules live in
+-- docs/sales-booking-read-contract-2026-09-16.md.
 --
--- Latest = greatest as_of per (resource, week_start, kind), same as
--- pack/stamp/thread_facts. Writers insert then delete older as_of only.
+-- Latest = greatest as_of per (resource, week_start, kind). Writers insert
+-- then delete older as_of only.
 --
 -- No send, no calendar write, no GHL write. Service-role only, same as pack.
 
@@ -17,4 +17,4 @@ ALTER TABLE public.sales_booking_packs
   CHECK (kind IN ('pack', 'stamp', 'thread_facts', 'roster'));
 
 COMMENT ON TABLE public.sales_booking_packs IS
-  'Engine pack (kind=pack), captain stamp (kind=stamp), cached GHL thread facts (kind=thread_facts), and cached GHL opportunity roster (kind=roster) for the Sales Booking door. Latest = greatest as_of per (resource, week_start, kind). Thread facts use week_start 1970-01-05. Service-role only.';
+  'Engine pack (kind=pack), captain stamp (kind=stamp), cached GHL thread facts (kind=thread_facts), and cached GHL opportunity roster (kind=roster) for the Sales Booking door. Latest = greatest as_of per (resource, week_start, kind). Thread facts and roster use week_start 1970-01-05. Service-role only.';

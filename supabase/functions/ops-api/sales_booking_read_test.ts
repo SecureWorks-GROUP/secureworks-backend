@@ -25,6 +25,7 @@ import {
 import {
   applySalesBookingContactFact,
   assembleSalesBookingRead,
+  cachedRosterFromScan,
   confirmSalesBookingGhlUser,
   createSalesBookingReadDependencies,
   defaultPerthWeekStart,
@@ -37,8 +38,10 @@ import {
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
   readSalesBookingGhlDiary,
+  readSalesBookingOpportunities,
   readSalesBookingThreadMessages,
   resolveSalesBookingGhlMapping,
+  resolveSalesBookingRoster,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
   SALES_BOOKING_GHL_USERS,
@@ -57,11 +60,8 @@ import {
   salesBookingRead,
   type SalesBookingReadDependencies,
   SalesBookingRequestError,
-  cachedRosterFromScan,
   salesBookingRosterIsComplete,
   salesBookingRosterIsFresh,
-  readSalesBookingOpportunities,
-  resolveSalesBookingRoster,
   salesBookingSuburbFromContact,
   salesBookingThreadFactIsFresh,
   withSalesBookingGhl429Retry,
@@ -1871,7 +1871,7 @@ Deno.test("GHL 429 retries at most twice per call then counts remaining failures
   );
   assertEquals(stormed, 3);
 
-  let nowMs = 0;
+  const nowMs = 0;
   let lateAttempts = 0;
   await assertRejects(() =>
     withSalesBookingGhl429Retry(() => {
@@ -2455,9 +2455,7 @@ Deno.test("whole-read budget exhaustion returns a well-formed response with gaps
     payload.coverage.gaps.some((g) => g.includes("time budget exhausted")),
   );
   assert(
-    payload.coverage.gaps.some((g) =>
-      g.includes("not a completed empty book")
-    ),
+    payload.coverage.gaps.some((g) => g.includes("not a completed empty book")),
   );
 });
 
@@ -2673,8 +2671,10 @@ Deno.test("roster persist skips a write when the stored roster equals the incomi
 
 Deno.test("a complete cached roster beats an incomplete live refresh for any reason", async () => {
   const complete = cachedRoster({
-    opportunities: Array.from({ length: 3 }, (_, i) =>
-      opportunity({ id: `opp-cache-${i}` })),
+    opportunities: Array.from(
+      { length: 3 },
+      (_, i) => opportunity({ id: `opp-cache-${i}` }),
+    ),
     pages_scanned: 11,
     total: 1012,
     exhausted: true,
@@ -2824,10 +2824,14 @@ Deno.test("roster cache is one latest row per resource and ignores the door week
 });
 
 Deno.test("an incomplete live roster is persisted and the next read resumes from its cursor", async () => {
-  const pageOne = Array.from({ length: 2 }, (_, i) =>
-    opportunity({ id: `opp-p1-${i}` }));
-  const pageTwo = Array.from({ length: 2 }, (_, i) =>
-    opportunity({ id: `opp-p2-${i}` }));
+  const pageOne = Array.from(
+    { length: 2 },
+    (_, i) => opportunity({ id: `opp-p1-${i}` }),
+  );
+  const pageTwo = Array.from(
+    { length: 2 },
+    (_, i) => opportunity({ id: `opp-p2-${i}` }),
+  );
   const first = await resolveSalesBookingRoster({
     cached: null,
     nowMs: NOW.getTime(),
@@ -2968,10 +2972,14 @@ Deno.test("an incomplete live roster is persisted and the next read resumes from
 });
 
 Deno.test("force_refresh on an incomplete roster resumes from its cursor and merges", async () => {
-  const cached400 = Array.from({ length: 400 }, (_, i) =>
-    opportunity({ id: `opp-cache-${i}` }));
-  const live200 = Array.from({ length: 200 }, (_, i) =>
-    opportunity({ id: `opp-live-${i}` }));
+  const cached400 = Array.from(
+    { length: 400 },
+    (_, i) => opportunity({ id: `opp-cache-${i}` }),
+  );
+  const live200 = Array.from(
+    { length: 200 },
+    (_, i) => opportunity({ id: `opp-live-${i}` }),
+  );
   const incomplete = cachedRoster({
     opportunities: cached400,
     exhausted: false,
