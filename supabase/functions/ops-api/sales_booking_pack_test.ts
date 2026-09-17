@@ -33,6 +33,7 @@ import {
 import { _authorizeOpsApiAction } from "./index.ts";
 import {
   SALES_BOOKING_RESOURCES,
+  SalesBookingRequestError,
   salesBookingRead,
   type SalesBookingReadDependencies,
   type SalesBookingReadResponse,
@@ -444,6 +445,28 @@ Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", asy
   assertEquals(payload.stamp.present, true);
   assertEquals(payload.stamp.approved, ["opp:opp-1"]);
   assertEquals(payload.cases[0].stamp_state, "approved");
+});
+
+Deno.test("stamp read refuses an unknown resource before touching the table", async () => {
+  let touched = false;
+  const client = {
+    from() {
+      touched = true;
+      throw new Error(
+        "sales_booking_packs must not be read for an unknown resource",
+      );
+    },
+  };
+  await assertRejects(
+    () =>
+      salesBookingStampReadAction(client, API_KEY_AUTH, {
+        resource: "__deploy_probe__",
+        week_start: WEEK,
+      }),
+    SalesBookingRequestError,
+    'Unknown resource "__deploy_probe__"',
+  );
+  assertEquals(touched, false);
 });
 
 Deno.test("unauthenticated publish is refused; jwt ops_manager stamp is accepted", async () => {
