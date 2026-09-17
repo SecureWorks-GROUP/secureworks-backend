@@ -204,7 +204,6 @@ function proposalsFixture(overrides: Record<string, unknown> = {}) {
         disposition: "offer",
         window: {
           day: "Fri",
-          date: "2026-09-18",
           start: "2026-09-18T08:00:00+08:00",
           end: "2026-09-18T09:30:00+08:00",
         },

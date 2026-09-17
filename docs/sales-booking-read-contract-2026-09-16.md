@@ -91,7 +91,7 @@ Publish / stamp actions (same table, no send):
 
 Table: `sales_booking_packs`. Latest = greatest `as_of` per
 `(resource, week_start, kind)`. An older pack is ignored. RLS on, no client
-access. Migration `20260917120000_sales_booking_packs.sql`.
+access. Migration `20260917130000_sales_booking_packs.sql`.
 
 ## Reading it honestly
 

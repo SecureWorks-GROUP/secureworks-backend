@@ -359,11 +359,11 @@ monitor-ses-makesafes|supabase/migrations/20260911170000_automation_switches.sql
 ops-api|supabase/migrations/20260916000000_calendar_events_job_family.sql|column|calendar_events.job_family
 
 # Sales Booking pack + stamp store (engine publish and captain KEEP/CUT)
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|table|sales_booking_packs
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|column|sales_booking_packs.resource
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|column|sales_booking_packs.week_start
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|column|sales_booking_packs.kind
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|column|sales_booking_packs.as_of
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|column|sales_booking_packs.payload
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|column|sales_booking_packs.published_by
-ops-api|supabase/migrations/20260917120000_sales_booking_packs.sql|index|idx_sales_booking_packs_latest
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|table|sales_booking_packs
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.resource
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.week_start
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.kind
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.as_of
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.payload
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.published_by
+ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|index|idx_sales_booking_packs_latest

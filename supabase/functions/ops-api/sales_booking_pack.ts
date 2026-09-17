@@ -106,9 +106,6 @@ export function salesBookingPackProposalRows(
   if (Array.isArray(proposals.leads)) {
     return proposals.leads.filter(isObject);
   }
-  if (Array.isArray(proposals.proposals)) {
-    return proposals.proposals.filter(isObject);
-  }
   return [];
 }
 
@@ -156,11 +153,7 @@ export function projectSalesBookingProposal(
       disposition: typeof row.disposition === "string" && row.disposition
         ? row.disposition
         : "needs_info",
-      day: window && typeof window.day === "string"
-        ? window.day
-        : window && typeof window.date === "string"
-        ? window.date
-        : null,
+      day: window && typeof window.day === "string" ? window.day : null,
       window_start: window && typeof window.start === "string"
         ? window.start
         : null,
