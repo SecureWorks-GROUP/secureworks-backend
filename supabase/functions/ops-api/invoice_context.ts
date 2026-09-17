@@ -305,7 +305,7 @@ async function factsCountByJob(deps: InvoiceContextDeps, jobIds: string[], warni
     const rows: any[] = [];
     for (const ids of chunk(jobIds)) {
       rows.push(...await pageThrough("current_job_context_facts", () => deps.client.from("current_job_context_facts")
-        .select("id, job_id, kind, provenance, expires_at, _context_store").in("job_id", ids), warnings));
+        .select("id, job_id, kind, provenance, expires_at, _context_store, extractor_version, trust").in("job_id", ids), warnings));
     }
     return rows;
   });
@@ -525,7 +525,7 @@ export async function invoiceContext(params: URLSearchParams, deps: InvoiceConte
         safeRead("work_orders", async () => unwrap(await client.from("work_orders").select("wo_number, trade_name, status, scheduled_date, completed_at").eq("job_id", jobRow.id).order("created_at", { ascending: false }).limit(50))),
         safeRead("council_submissions", async () => unwrap(await client.from("council_submissions").select("template_type, overall_status").eq("job_id", jobRow.id).order("updated_at", { ascending: false }).limit(1))),
         safeRead("current_job_context_facts", async () => unwrap(await client.from("current_job_context_facts")
-          .select("id, job_id, kind, value, provenance, expires_at, _context_store, updated_at").eq("job_id", jobRow.id).order("updated_at", { ascending: false }).limit(factsLimit * 2))),
+          .select("id, job_id, kind, value, provenance, expires_at, _context_store, updated_at, extractor_version, trust").eq("job_id", jobRow.id).order("updated_at", { ascending: false }).limit(factsLimit * 2))),
         safeRead("conversation", async () => (await deps.getJobConversation(client, { job_id: jobRow.id, limit: conversationLimit })).messages || []),
         queueByJob(client, [jobRow.id], warnings),
         conversationCountsByJob(client, [{ id: jobRow.id, ghl_contact_id: jobRow.ghl_contact_id ?? null }], warnings),

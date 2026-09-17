@@ -123,9 +123,22 @@ function fakeClient(tables: Tables, failing: Set<string> = new Set(), failFrom: 
       let order: { col: string; asc: boolean } | null = null;
       let limit: number | null = null;
       let range: { from: number; to: number } | null = null;
+      let selected: Array<{ out: string; src: string }> | null = null;
       const q: any = {};
       const chain = (fn: () => void) => (...args: any[]) => { (fn as any)(...args); return q; };
-      q.select = chain(() => {});
+      q.select = chain((cols?: string) => {
+        if (typeof cols !== "string") return;
+        const trimmed = cols.trim();
+        if (!trimmed || trimmed === "*") return;
+        selected = trimmed.split(",").map((part) => {
+          const piece = part.trim();
+          const colon = piece.indexOf(":");
+          if (colon > 0) {
+            return { out: piece.slice(0, colon).trim(), src: piece.slice(colon + 1).trim() };
+          }
+          return { out: piece, src: piece };
+        }).filter((c) => c.out && c.src);
+      });
       q.eq = chain((c: string, v: any) => filters.push((r) => r[c] === v));
       q.neq = chain((c: string, v: any) => filters.push((r) => r[c] !== v));
       q.gt = chain((c: string, v: any) => filters.push((r) => r[c] !== null && r[c] !== undefined && r[c] > v));
@@ -143,6 +156,13 @@ function fakeClient(tables: Tables, failing: Set<string> = new Set(), failFrom: 
         if (order) rows = [...rows].sort((a, b) => (a[order!.col] < b[order!.col] ? -1 : a[order!.col] > b[order!.col] ? 1 : 0) * (order!.asc ? 1 : -1));
         if (limit !== null) rows = rows.slice(0, limit);
         if (range) rows = rows.slice(range.from, range.to + 1);
+        if (selected) {
+          rows = rows.map((r) => {
+            const out: any = {};
+            for (const col of selected!) out[col.out] = r[col.src];
+            return out;
+          });
+        }
         // PostgREST never returns more than 1000 rows in one response.
         return { data: rows.slice(0, PG_ROW_CAP), error: null };
       };
@@ -427,6 +447,26 @@ Deno.test("luna_v2 stamps count as Luna; Haiku and instruction do not", async ()
   const row = cov.rows.find((r: any) => r.invoice_number === "INV-1419")!;
   assertEquals(row.facts_count, 1);
   assertEquals(row.blockers.includes("facts_missing"), false);
+
+  const tCols = baseTables();
+  tCols.current_job_context_facts = [{
+    id: "v2-cols",
+    job_id: JOB1,
+    kind: "note",
+    value: "column only",
+    extractor_version: "luna_v2",
+    trust: "luna",
+    provenance: {},
+    updated_at: "2026-09-10T00:00:00.000Z",
+    _context_store: "job_context",
+  }];
+  const doorCols = await invoiceContext(new URLSearchParams({ invoice: "INV-1419" }), deps(tCols));
+  assertEquals(doorCols.facts.map((f: any) => f.id), ["v2-cols"]);
+  assertEquals(doorCols.coverage.facts_present, true);
+  const covCols = await debtContextCoverage(new URLSearchParams({}), deps(tCols));
+  const rowCols = covCols.rows.find((r: any) => r.invoice_number === "INV-1419")!;
+  assertEquals(rowCols.facts_count, 1);
+  assertEquals(rowCols.blockers.includes("facts_missing"), false);
 });
 
 Deno.test("7b. Haiku / instruction facts do not count as Luna coverage", async () => {
