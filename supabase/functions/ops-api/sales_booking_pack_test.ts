@@ -7,7 +7,8 @@
  *  - Merge puts proposal + draft on the matching case (`opp:<id>` → opportunity
  *    id), fills top-level drafts, and sets stamp_state from the latest stamp.
  *  - Stamp write then stamp read round-trips. Unauthenticated publish is
- *    refused. A signed-in ops_manager may write a stamp.
+ *    refused. Only an allow-listed captain JWT may write a stamp; the API
+ *    key and any other JWT are 403 stamp_write_requires_captain.
  *  - Nothing is sent.
  */
 // deno-lint-ignore-file no-import-prefix no-explicit-any
@@ -22,8 +23,10 @@ import {
   assertSalesBookingStampReadAuth,
   assertSalesBookingStampWriteAuth,
   assertSalesBookingThreadsRefreshAuth,
+  DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
   loadSalesBookingPackOverlay,
   normaliseSalesBookingDrafts,
+  parseSalesBookingCaptainEmails,
   SalesBookingPackError,
   salesBookingPackOpportunityId,
   salesBookingPackPublishAction,
@@ -31,6 +34,7 @@ import {
   salesBookingStampStateForCase,
   salesBookingStampWriteAction,
   salesBookingThreadsRefreshAction,
+  STAMP_WRITE_REQUIRES_CAPTAIN,
 } from "./sales_booking_pack.ts";
 import { _authorizeOpsApiAction } from "./index.ts";
 import {
@@ -45,10 +49,23 @@ const WEEK = "2026-09-14";
 const NEW_AS_OF = "2026-09-16T08:00:00.000Z";
 const OLD_AS_OF = "2026-09-16T07:00:00.000Z";
 const API_KEY_AUTH = { mode: "api_key" as const };
+const CAPTAIN_AUTH = {
+  mode: "jwt" as const,
+  role: "admin",
+  userId: "user-captain",
+  email: DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+};
+const STAFF_NOT_CAPTAIN_AUTH = {
+  mode: "jwt" as const,
+  role: "admin",
+  userId: "user-ops-manager",
+  email: "ops@secureworkswa.com.au",
+};
 const OPS_MANAGER_AUTH = {
   mode: "jwt" as const,
   role: "ops_manager",
   userId: "user-ops-manager",
+  email: "ops@secureworkswa.com.au",
 };
 
 type PackRow = {
@@ -407,12 +424,12 @@ Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", asy
   });
   const written = await salesBookingStampWriteAction(
     client,
-    OPS_MANAGER_AUTH,
+    CAPTAIN_AUTH,
     {
       resource: "marnin",
       week_start: WEEK,
       stamp: {
-        captain: "marnin",
+        captain: "nithin",
         approved: ["opp:opp-1"],
         rejected: [],
         decisions: { "opp:opp-1": "hold" },
@@ -423,6 +440,7 @@ Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", asy
   );
   assertEquals(written.ok, true);
   assertEquals(written.as_of, "2026-09-17T01:00:00.000Z");
+  assertEquals(written.published_by, DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL);
 
   const read = await salesBookingStampReadAction(client, API_KEY_AUTH, {
     resource: "marnin",
@@ -430,7 +448,7 @@ Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", asy
   });
   assertEquals(read.ok, true);
   assertEquals(read.as_of, "2026-09-17T01:00:00.000Z");
-  assertEquals(read.stamp?.captain, "marnin");
+  assertEquals(read.stamp?.captain, DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL);
   assertEquals(read.stamp?.approved, ["opp:opp-1"]);
   assertEquals(read.stamp?.decisions, { "opp:opp-1": "hold" });
   assertEquals(read.stamp?.stage_moves, [{
@@ -472,7 +490,7 @@ Deno.test("stamp read refuses an unknown resource before touching the table", as
   assertEquals(touched, false);
 });
 
-Deno.test("unauthenticated publish is refused; jwt ops_manager stamp is accepted", async () => {
+Deno.test("unauthenticated publish is refused; stamp read stays api-key only", async () => {
   try {
     assertSalesBookingPackPublishAuth({ mode: "none" });
     throw new Error("expected throw");
@@ -501,29 +519,7 @@ Deno.test("unauthenticated publish is refused; jwt ops_manager stamp is accepted
     assertEquals(error.status, 403);
   }
 
-  assertSalesBookingStampWriteAuth(API_KEY_AUTH);
-  assertSalesBookingStampWriteAuth(OPS_MANAGER_AUTH);
-  try {
-    assertSalesBookingStampWriteAuth({ mode: "jwt", role: "installer" });
-    throw new Error("expected throw");
-  } catch (error) {
-    assert(error instanceof SalesBookingPackError);
-    assertEquals(error.status, 403);
-  }
-
   const client = memoryPacks();
-  const published = await salesBookingStampWriteAction(
-    client,
-    OPS_MANAGER_AUTH,
-    {
-      resource: "nithin",
-      week_start: WEEK,
-      stamp: { captain: "nithin", approved: [], rejected: [] },
-    },
-    new Date("2026-09-17T02:00:00.000Z"),
-  );
-  assertEquals(published.ok, true);
-
   await assertRejects(
     () =>
       salesBookingPackPublishAction(client, { mode: "none" }, {
@@ -536,6 +532,180 @@ Deno.test("unauthenticated publish is refused; jwt ops_manager stamp is accepted
       }),
     SalesBookingPackError,
   );
+});
+
+function captureWarns(fn: () => void): string[] {
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    fn();
+  } finally {
+    console.warn = orig;
+  }
+  return warnings;
+}
+
+function assertStampWriteAuthRefused(
+  auth: {
+    mode: "api_key" | "jwt" | "none";
+    role?: string;
+    userId?: string;
+    email?: string;
+  },
+  callerNeedle: string,
+): void {
+  const warnings = captureWarns(() => {
+    try {
+      assertSalesBookingStampWriteAuth(auth);
+      throw new Error("expected throw");
+    } catch (error) {
+      assert(error instanceof SalesBookingPackError);
+      assertEquals(error.status, 403);
+      assertEquals(error.message, STAMP_WRITE_REQUIRES_CAPTAIN);
+    }
+  });
+  assertEquals(warnings.length, 1);
+  assert(warnings[0].includes(STAMP_WRITE_REQUIRES_CAPTAIN));
+  assert(warnings[0].includes(`caller=${callerNeedle}`));
+  assert(!warnings[0].includes("spoofed"));
+}
+
+Deno.test("stamp write accepts only an allow-listed captain JWT email", async () => {
+  assertEquals(parseSalesBookingCaptainEmails(undefined), [
+    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+  ]);
+  assertEquals(parseSalesBookingCaptainEmails("  "), [
+    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+  ]);
+  assertEquals(
+    parseSalesBookingCaptainEmails(
+      " shaun@secureworkswa.com.au , MARNIN@secureworkswa.com.au ",
+    ),
+    ["shaun@secureworkswa.com.au", "marnin@secureworkswa.com.au"],
+  );
+
+  assertEquals(
+    assertSalesBookingStampWriteAuth(CAPTAIN_AUTH),
+    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+  );
+  assertEquals(
+    assertSalesBookingStampWriteAuth({
+      ...CAPTAIN_AUTH,
+      email: "Marnin@SecureWorksWA.com.au",
+    }),
+    "Marnin@SecureWorksWA.com.au",
+  );
+
+  assertStampWriteAuthRefused(API_KEY_AUTH, "api_key");
+  assertStampWriteAuthRefused(
+    STAFF_NOT_CAPTAIN_AUTH,
+    STAFF_NOT_CAPTAIN_AUTH.email,
+  );
+  assertStampWriteAuthRefused(OPS_MANAGER_AUTH, OPS_MANAGER_AUTH.email);
+  assertStampWriteAuthRefused({ mode: "jwt", role: "installer" }, "jwt");
+  assertStampWriteAuthRefused({ mode: "none" }, "none");
+
+  const onlyShaun = (name: string) =>
+    name === "SALES_BOOKING_CAPTAIN_EMAILS"
+      ? "shaun@secureworkswa.com.au"
+      : undefined;
+  const warnings = captureWarns(() => {
+    try {
+      assertSalesBookingStampWriteAuth(CAPTAIN_AUTH, onlyShaun);
+      throw new Error("expected throw");
+    } catch (error) {
+      assert(error instanceof SalesBookingPackError);
+      assertEquals(error.message, STAMP_WRITE_REQUIRES_CAPTAIN);
+    }
+  });
+  assert(warnings[0].includes(DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL));
+
+  const client = memoryPacks();
+  const written = await salesBookingStampWriteAction(
+    client,
+    CAPTAIN_AUTH,
+    {
+      resource: "nithin",
+      week_start: WEEK,
+      stamp: {
+        captain: "nithin",
+        approved: ["opp-1"],
+        rejected: [],
+      },
+    },
+    new Date("2026-09-17T02:00:00.000Z"),
+  );
+  assertEquals(written.ok, true);
+  assertEquals(written.published_by, DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL);
+  assertEquals(
+    client.store[0].published_by,
+    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+  );
+  assertEquals(
+    (client.store[0].payload as { captain: string }).captain,
+    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+  );
+
+  const origWarn = console.warn;
+  const writeRefusals: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    writeRefusals.push(args.map(String).join(" "));
+  };
+  try {
+    await assertRejects(
+      () =>
+        salesBookingStampWriteAction(client, API_KEY_AUTH, {
+          resource: "nithin",
+          week_start: WEEK,
+          stamp: { captain: "api-key-spoof", approved: ["opp-1"] },
+        }),
+      SalesBookingPackError,
+      STAMP_WRITE_REQUIRES_CAPTAIN,
+    );
+    await assertRejects(
+      () =>
+        salesBookingStampWriteAction(client, STAFF_NOT_CAPTAIN_AUTH, {
+          resource: "nithin",
+          week_start: WEEK,
+          stamp: { captain: "staff-spoof", approved: ["opp-1"] },
+        }),
+      SalesBookingPackError,
+      STAMP_WRITE_REQUIRES_CAPTAIN,
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(writeRefusals.length, 2);
+  assert(writeRefusals[0].includes("caller=api_key"));
+  assert(writeRefusals[1].includes(`caller=${STAFF_NOT_CAPTAIN_AUTH.email}`));
+  assert(!writeRefusals.join("\n").includes("spoof"));
+  assertEquals(client.store.length, 1);
+});
+
+Deno.test("stamp write refuses an unknown resource before touching the table", async () => {
+  let touched = false;
+  const client = {
+    from() {
+      touched = true;
+      throw new Error(
+        "sales_booking_packs must not be written for an unknown resource",
+      );
+    },
+  };
+  await assertRejects(
+    () =>
+      salesBookingStampWriteAction(client, CAPTAIN_AUTH, {
+        resource: "__deploy_probe__",
+        week_start: WEEK,
+        stamp: { captain: "nithin", approved: [], rejected: [] },
+      }),
+    SalesBookingRequestError,
+    'Unknown resource "__deploy_probe__"',
+  );
+  assertEquals(touched, false);
 });
 
 Deno.test("front door refuses unauthenticated pack publish with 401", () => {
