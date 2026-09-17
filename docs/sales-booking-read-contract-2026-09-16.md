@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17)
 
 `GET ops-api?action=sales_booking_read` is the single read behind the Sales
 Booking view. It replaces the branch-local preview server
@@ -7,6 +7,10 @@ Booking view. It replaces the branch-local preview server
 
 Implementation and the full rationale: `supabase/functions/ops-api/sales_booking_read.ts`.
 Regressions: `supabase/functions/ops-api/sales_booking_read_test.ts`.
+The GHL calendar window is one unpaged `/calendars/events` GET in
+`supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
+reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
+action (`userId` or `calendarId`, plus `start` and `end`).
 
 ## It is read-only, and send stays held
 
@@ -22,7 +26,7 @@ action has no send or calendar-write capability to gate.
 |---|---|---|
 | `resource` | `nithin` | `nithin` (patio) or `marnin` (fencing/Stratco). Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
-| `scoper_user_id` | the resource's own | Overrides the CALENDAR read only. The roster still comes from the resource's pipeline. |
+| `scoper_user_id` | the resource's own | Overrides the CALENDAR read only, and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
 | `thread_limit` | 80 (max 250) | Newest-activity-first cap on thread reads. |
 | `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep. |
@@ -40,17 +44,22 @@ Reference keys, unchanged: `ok`, `fixture:false`, `send_hold:true`,
 
 Additions:
 
-- **`diary[]`** — the scoper's PRIMARY Outlook events for Mon..Sun of
+- **`diary[]`** — the scoper's GHL calendar events for Mon..Sun of
   `week_start`. Each entry: `event_id`, `start`, `end` (ISO with `+08:00`),
-  `title`, `kind` (`busy` | `leave` | `personal`), `source` (`outlook_primary`),
+  `title`, `kind` (`busy` | `leave` | `personal`), `source` (`ghl_calendar`),
   plus `show_as`, `blocks_capacity`, `is_all_day`, `location`, `title_withheld`.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
   `template_outbound_count`.
-- **`diary_read`** — `{read_ok, reason, source, calendar_email}`.
+- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id}`.
+  `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
+  the confirmed GHL user id or null when unread.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
-  `scoper_user_id`, `sender_line`, `sender_line_source`.
+  `scoper_user_id`, `sender_line`, `sender_line_source`, plus `calendar`
+  `{ok, error, mailbox}` copied from `diary_read` (not a second calendar
+  read). The Booking door paints "Calendar not connected" when
+  `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
 
@@ -61,15 +70,21 @@ Additions:
   incomplete, never that it is small. Every gap is a sentence in
   `coverage.gaps`.
 - **`diary` empty with `diary_read.read_ok:false`** is an UNREAD calendar, not a
-  clear week. Unread coverage is never free capacity.
+  clear week. Unread coverage is never free capacity. Named unread reasons
+  include `ghl_user_unmapped` (no confirmed GHL user for that scoper) and
+  `ghl_calendar_page_failed` (the unpaged GHL events GET did not complete).
 - **`thread_facts[id].read_ok:false`** means nothing was proved about that
   thread. The case still appears, and its `status` stays the default
   `needs_decision`. Classification lives only in `thread_facts`.
 - **Cases with no entry in `thread_facts`** were never attempted (a bound was
   hit). `coverage.gaps` names how many and why. Do not paint them as clear.
-- **`kind` comes from provider fields only.** `showAs:oof` is leave; a private
-  sensitivity is `personal` (its subject and location are withheld); everything
-  else is `busy`. A subject that merely says "leave" is not a leave fact.
+- **`kind` and `blocks_capacity` come from GHL `appointmentStatus` only.**
+  Confirmed/booked (and any non-cancelled status) block; cancelled or deleted
+  does not block but is still returned with `show_as:'cancelled'`. GHL has no
+  leave/personal sensitivity, so those kinds are never invented from a title.
+  **`is_all_day` is `event.isAllDay === true` only** — no midnight or duration
+  inference. **`title_withheld` is always false** (GHL has no
+  private-sensitivity flag).
 - **`classification` never emits `booked`.** A booking is a calendar /
   commitment fact this read cannot attribute to a case, and guessing one would
   invent it.
@@ -79,19 +94,13 @@ or `sorry we missed your call` is automation. It never becomes
 `last_human_outbound_at`, never starts the quiet window, and never makes a case
 look answered.
 
-## Known caveat
+## GHL user mapping
 
-`scoper_preferences.work_calendar_email` is LIVE DRIFT: production carries it
-and the jarvis `sw_scoper_calendar_events` tool reads it, but the only repo file
-defining it is `supabase/migrations/_drafts/20260505060000_scoper_preferences_work_calendar_email.sql`.
-It is deliberately NOT declared in `scripts/edge-function-schema-requirements.txt`
-(that manifest needs a ledgered migration version, and this column has none).
-The read checks the PostgREST error instead, so an absent column surfaces as
-`diary_read.read_ok:false` with `scoper_preferences_unreadable: ...` rather than
-as a silently empty week. Confirm it read-only with:
-
-```sql
-select user_id, work_calendar_email from public.scoper_preferences
- where user_id in ('5862cf1d-0a3b-4836-8fd1-d69f95aa2f73',
-                   '706c5258-70dd-483a-b36c-af6864b24498');
-```
+There is no `ghl_user_id` on `users`, `scoper_preferences`, or ghl-proxy
+config. `SALES_BOOKING_GHL_USERS` is keyed by resource (`nithin`, `marnin`)
+and holds the `public.users.email` for that scoper (`nithin@` / `marnin@`).
+The live GHL id is confirmed at read time against `GET /users/?locationId=`.
+If the email is missing from that roster, or `scoper_user_id` is not a v1
+scoper, the diary is unread with `ghl_user_unmapped`. Khairo is not mapped.
+GHL user ids were not confirmed against a live location in this change; a
+live read after CI is owed to the CIO's key holder.

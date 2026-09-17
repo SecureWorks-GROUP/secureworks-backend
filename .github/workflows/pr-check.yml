@@ -236,6 +236,7 @@ jobs:
             supabase/functions/ghl-proxy/provider_reads_test.ts \
             supabase/functions/ghl-proxy/lead_search_test.ts \
             supabase/functions/ghl-proxy/sms_sender_default_test.ts \
+            supabase/functions/ghl-proxy/calendar_events_test.ts \
             supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
