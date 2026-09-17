@@ -68,10 +68,14 @@ Additions:
   `classification`, `read_ok`, `reason`, `message_count`,
   `template_outbound_count`, `read_at`.
 - Per case **`suburb`**, **`job_type`**, **`enquiry_at`**, **`pipeline_stage_id`**
-  beside `stage_name`. Suburb is contact city, nested address city, or a WA
-  suburb parsed from the street line. Job type is opportunity custom fields
-  then enquiry tags mapped to patio / fencing. Either field is `"not given"`
-  when absent — never invented. `enquiry_at` is opportunity created.
+  beside `stage_name`. Suburb is contact city, a WA suburb parsed from the
+  street line, or `jobs.site_suburb` when GHL has no parseable city/address.
+  Job type is enquiry tags then the resource book lane (Nithin patio, Marnin
+  fencing). Either field is `"not given"` when none of those exist — never
+  invented. A live-week missing-rate bar is not acceptance: 14 Sep 2026
+  measured Nithin 39 of 107 and Marnin 192 of 448 suburb not given after
+  contact hydrate and job-site fill (job type 0 of 107 / 0 of 448). That is
+  a CIO data gap, not a code defect. `enquiry_at` is opportunity created.
 - **`coverage.threads_cached` / `threads_fresh` / `threads_unread` /
   `remaining_429_count`** — honest cache vs live vs unread vs leftover 429s.
 - **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by}`.

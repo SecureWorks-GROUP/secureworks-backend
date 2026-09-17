@@ -1551,6 +1551,149 @@ Deno.test("job site fills suburb only when GHL city and address are empty", asyn
   assertEquals(payload.cases.find((row) => row.id === "opp-city")?.suburb, "Fremantle");
 });
 
+Deno.test("live week paints given suburbs and job types from evidence, else not given", async () => {
+  const patio = await salesBookingRead(
+    deps({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [
+            opportunity({
+              id: "opp-city",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: {
+                id: "c-city",
+                name: "Pat",
+                city: "Mosman Park",
+                tags: ["northside patios"],
+              },
+            }),
+            opportunity({
+              id: "opp-address",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: {
+                id: "c-address",
+                name: "Sam",
+                address1: "9 Reef Rd, Hillarys WA 6025",
+                tags: ["northside patios"],
+              },
+            }),
+            opportunity({
+              id: "opp-job-site",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "c-job", name: "Kim" },
+            }),
+            opportunity({
+              id: "opp-street",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "c-street", name: "Lee", city: "8 ison court" },
+            }),
+            opportunity({
+              id: "opp-empty",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "c-empty", name: "Jo" },
+            }),
+            opportunity({
+              id: "opp-lane",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: {
+                id: "c-lane",
+                name: "Alex",
+                city: "Fremantle",
+                tags: ["stratco"],
+              },
+            }),
+          ],
+          stages: { [NITHIN_SCOPE_STAGE]: "Needs Scope / Quote" },
+          exhausted: true,
+          pages_scanned: 1,
+          total: 6,
+          reason: null,
+        }),
+      readJobSites: () =>
+        Promise.resolve({
+          "opp-job-site": { suburb: "Balcatta" },
+        }),
+    }),
+    { resource: "nithin", week_start: WEEK, include_thread_facts: false },
+  );
+  const patioById = Object.fromEntries(
+    patio.cases.map((row) => [row.id, row]),
+  );
+  assertEquals(patioById["opp-city"]?.suburb, "Mosman Park");
+  assertEquals(patioById["opp-city"]?.job_type, "patio");
+  assertEquals(patioById["opp-address"]?.suburb, "Hillarys");
+  assertEquals(patioById["opp-address"]?.job_type, "patio");
+  assertEquals(patioById["opp-job-site"]?.suburb, "Balcatta");
+  assertEquals(patioById["opp-job-site"]?.job_type, "patio");
+  assertEquals(patioById["opp-street"]?.suburb, SALES_BOOKING_NOT_GIVEN);
+  assertEquals(patioById["opp-empty"]?.suburb, SALES_BOOKING_NOT_GIVEN);
+  assertEquals(patioById["opp-lane"]?.suburb, "Fremantle");
+  assertEquals(patioById["opp-lane"]?.job_type, "patio");
+  assertEquals(patio.send_hold, true);
+  assertEquals(
+    patio.cases.some((row) =>
+      row.suburb === "Suburb unknown" || row.job_type === "No job data yet"
+    ),
+    false,
+  );
+
+  const fencing = await salesBookingRead(
+    deps({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [
+            opportunity({
+              id: "opp-fence-tag",
+              pipelineStageId: MARNIN_SCOPE_STAGE,
+              contact: {
+                id: "c-ft",
+                name: "Pat",
+                city: "Midland",
+                tags: ["sw fencing"],
+              },
+            }),
+            opportunity({
+              id: "opp-fence-empty",
+              pipelineStageId: MARNIN_SCOPE_STAGE,
+              contact: { id: "c-fe", name: "Sam", tags: ["stratco"] },
+            }),
+          ],
+          stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+          exhausted: true,
+          pages_scanned: 1,
+          total: 2,
+          reason: null,
+        }),
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(
+    fencing.cases.find((row) => row.id === "opp-fence-tag")?.suburb,
+    "Midland",
+  );
+  assertEquals(
+    fencing.cases.find((row) => row.id === "opp-fence-tag")?.job_type,
+    "fencing",
+  );
+  assertEquals(
+    fencing.cases.find((row) => row.id === "opp-fence-empty")?.suburb,
+    SALES_BOOKING_NOT_GIVEN,
+  );
+  assertEquals(
+    fencing.cases.find((row) => row.id === "opp-fence-empty")?.job_type,
+    "fencing",
+  );
+
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({}, { tags: ["northside patios"] }),
+    "patio",
+  );
+  assertEquals(
+    salesBookingJobTypeFromOpportunity({}, { tags: ["stratco"] }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
+});
+
 Deno.test("live job-site read maps jobs rows by opportunity and contact id", async () => {
   const filters: Array<{ column: string; values: string[] }> = [];
   const client = {
