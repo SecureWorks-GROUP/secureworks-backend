@@ -13874,7 +13874,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb)')
+    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)

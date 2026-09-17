@@ -34,6 +34,8 @@ import {
   _normalizeManagedVerticals,
   _REPAIR_POOL_READY_STATUSES,
   _resolveManagerVisibility,
+  _resolveWeeklyWorkOrderInvoice,
+  _canSubmitWorkOrderInvoice,
   _scopeCalendarPayloadToVerticals,
   _tradeCompleteMyJobForTest,
   _tradeJobDetailForTest,
@@ -915,4 +917,94 @@ Deno.test("repair pool: the same job is offered once its substatus clears compan
   const pool = await poolFor(["repair"], fx);
   assert(pool.includes("job-swr-new"));
   assert(pool.includes("job-ms-repair-new"));
+});
+
+// ── Work-order invoice authorization: weekly lane agrees with the single door ──
+
+const WO_JOB_ID = "00000000-0000-0000-0000-000000000260";
+const WO_ID = "00000000-0000-0000-0000-000000000160";
+
+function repairFamilyWorkOrder() {
+  return {
+    id: WO_ID,
+    org_id: ORG_A,
+    job_id: WO_JOB_ID,
+    wo_number: "WO-160",
+    status: "complete",
+    completed_at: "2026-08-26T09:30:00Z",
+    scheduled_date: "2026-08-26",
+    assigned_user_id: null,
+    site_address: "1 Duncraig Rd",
+    scope_items: [{ description: "Fence panel repair", quantity: 2, unit: "ea", unit_price: 120 }],
+    jobs: {
+      id: WO_JOB_ID,
+      org_id: ORG_A,
+      job_number: "SWMS-261319",
+      client_name: "Simon Davey",
+      type: "makesafe",
+      status: "complete",
+      site_address: "1 Duncraig Rd",
+      site_suburb: "Duncraig",
+      metadata: { ses_family: "repair" },
+    },
+  };
+}
+
+function projectEmbeddedJobs(row: any, select: string) {
+  const m = select.match(/jobs!inner\(([^)]*)\)/);
+  if (!m) return row;
+  const cols = m[1].split(",").map((c) => c.trim()).filter(Boolean);
+  const jobs: any = {};
+  for (const c of cols) if (c in (row.jobs || {})) jobs[c] = row.jobs[c];
+  return { ...row, jobs };
+}
+
+function weeklyLaneClient(workOrders: any[]): any {
+  return {
+    from(table: string) {
+      let selected = "";
+      const b: any = {
+        select(columns: string) { selected = columns; return b; },
+        eq: () => b,
+        in: () => b,
+        lte: () => b,
+        or: () => b,
+        order: () => b,
+        then(resolve: (v: unknown) => void) {
+          const data = table === "work_orders"
+            ? workOrders.map((wo) => projectEmbeddedJobs(wo, selected))
+            : [];
+          resolve({ data, error: null });
+        },
+      };
+      return b;
+    },
+  };
+}
+
+const RITA_CTX: TradeAuthContext = { id: RITA, email: "rita@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: ["repair"] };
+const HUGO_CTX: TradeAuthContext = { id: HUGO, email: "hugo@example.test", orgId: ORG_A, role: "lead_installer", managedVerticals: ["makesafe"] };
+
+Deno.test("work-order invoice authz: the weekly lane and the single door agree on a repair-family job", async () => {
+  const wo = repairFamilyWorkOrder();
+  const body = { work_order_blocks: [{ work_order_id: WO_ID }] };
+
+  // Single door (submit_work_order_invoice selects metadata on the embed).
+  assertEquals(_canSubmitWorkOrderInvoice(RITA_CTX, wo, false), true);
+  assertEquals(_canSubmitWorkOrderInvoice(HUGO_CTX, wo, false), false);
+
+  // Weekly lane, driven end to end through its own select projection.
+  const forRita = await _resolveWeeklyWorkOrderInvoice(
+    weeklyLaneClient([repairFamilyWorkOrder()]), RITA_CTX, false, "2026-08-24", "2026-08-30", body,
+  );
+  assertEquals(forRita.job_blocks.length, 1, "repair division manager is authorised on the weekly lane too");
+  assertEquals(forRita.job_blocks[0].source_work_order_id, WO_ID);
+
+  await assertRejects(
+    () => _resolveWeeklyWorkOrderInvoice(
+      weeklyLaneClient([repairFamilyWorkOrder()]), HUGO_CTX, false, "2026-08-24", "2026-08-30", body,
+    ),
+    Error,
+    "outside your assigned or managed work",
+  );
 });

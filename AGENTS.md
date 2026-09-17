@@ -2519,7 +2519,10 @@ make-safe pool uses (no detail row still admits), and the my_jobs make-safe
 pool drops repair-family rows for non-dispatchers only (a dispatcher's
 allocation is never vertical-refused, so their pool keeps them). `tradeCalendarEvents`
 decides truncation and `next_offset` on the raw lookahead and narrows only the
-returned page. Tests: `repair_trade_vertical_test.ts`.
+returned page. Both work-order invoice doors (`submit_work_order_invoice` and
+the weekly `_resolveWeeklyWorkOrderInvoice`) select `metadata` on the `jobs`
+embed so `_canSubmitWorkOrderInvoice` answers identically for a repair-family
+job. Tests: `repair_trade_vertical_test.ts`.
 
 The 2026-08-03 trade crew/detail payload, named-lead contract, visibility
 narrowing, diagnosis, and deployment caveats are owned by
