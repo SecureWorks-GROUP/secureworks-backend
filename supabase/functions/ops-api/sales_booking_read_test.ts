@@ -1281,6 +1281,7 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "persistThreadFactsCache",
       "readContacts",
       "readDiary",
+      "readJobSites",
       "readOpportunities",
       "readThread",
     ].sort(),
@@ -1404,6 +1405,35 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
   assertEquals(fromAddress.job_type, "patio");
   assertEquals(fromAddress.enquiry_at, "2026-09-10T02:00:00.000Z");
   assertEquals(fromAddress.pipeline_stage_id, MARNIN_SCOPE_STAGE);
+  assertEquals(
+    salesBookingSuburbFromContact({ suburb: "Mosman Park" }),
+    "Mosman Park",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({ city: "5A Burdmam Way Balga W.A" }),
+    "Balga",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({}, {
+      customFields: [{
+        id: "cf-uuid",
+        fieldValue: "9 Reef Rd, Hillarys WA 6025",
+      }],
+    }),
+    "Hillarys",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({}, {
+      name: "Pat Smith, Canning Vale WA 6155",
+    }),
+    "Canning Vale",
+  );
+  assertEquals(
+    salesBookingSuburbFromContact({}, {
+      customFields: [{ id: "cf-uuid", fieldValue: "Patio" }],
+    }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
 });
 
 Deno.test("search rows pick up city and tags from a later contact read", async () => {
@@ -1447,6 +1477,89 @@ Deno.test("search rows pick up city and tags from a later contact read", async (
     ).contact,
     { id: "c1", city: "Fremantle", tags: ["sw fencing"] },
   );
+});
+
+Deno.test("job site fills suburb only when GHL city and address are empty", async () => {
+  let asked = {
+    opportunityIds: [] as string[],
+    contactIds: [] as string[],
+  };
+  const payload = await salesBookingRead(
+    deps({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [
+            opportunity({
+              id: "opp-empty",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "c-empty", name: "Pat" },
+            }),
+            opportunity({
+              id: "opp-city",
+              pipelineStageId: NITHIN_SCOPE_STAGE,
+              contact: { id: "c-city", name: "Sam", city: "Fremantle" },
+            }),
+          ],
+          stages: { [NITHIN_SCOPE_STAGE]: "Needs Scope / Quote" },
+          exhausted: true,
+          pages_scanned: 1,
+          total: 2,
+          reason: null,
+        }),
+      readJobSites: (ids) => {
+        asked = ids;
+        return Promise.resolve({
+          "opp-empty": { suburb: "Balcatta" },
+          "opp-city": { suburb: "Kinross" },
+        });
+      },
+    }),
+    { resource: "nithin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(asked.opportunityIds.sort(), ["opp-city", "opp-empty"]);
+  assertEquals(payload.cases.find((row) => row.id === "opp-empty")?.suburb, "Balcatta");
+  assertEquals(payload.cases.find((row) => row.id === "opp-city")?.suburb, "Fremantle");
+});
+
+Deno.test("live job-site read maps jobs rows by opportunity and contact id", async () => {
+  const filters: Array<{ column: string; values: string[] }> = [];
+  const client = {
+    from(table: string) {
+      assertEquals(table, "jobs");
+      const self = {
+        select(columns: string) {
+          assertEquals(
+            columns,
+            "ghl_opportunity_id, ghl_contact_id, site_suburb, site_address",
+          );
+          return self;
+        },
+        in(column: string, values: string[]) {
+          filters.push({ column, values: [...values] });
+          const rows = column === "ghl_opportunity_id"
+            ? [{
+              ghl_opportunity_id: "opp-1",
+              ghl_contact_id: "c-1",
+              site_suburb: "Balcatta",
+              site_address: "6 Moorby Pl",
+            }]
+            : [];
+          return Promise.resolve({ data: rows, error: null });
+        },
+      };
+      return self;
+    },
+  };
+  const facts = await createSalesBookingReadDependencies(client).readJobSites!({
+    opportunityIds: ["opp-1"],
+    contactIds: ["c-1"],
+  });
+  assertEquals(filters.map((row) => row.column).sort(), [
+    "ghl_contact_id",
+    "ghl_opportunity_id",
+  ]);
+  assertEquals(facts["opp-1"]?.suburb, "Balcatta");
+  assertEquals(facts["c-1"]?.suburb, "Balcatta");
 });
 
 Deno.test("cached thread facts are served; stale activity is refreshed newest first", async () => {

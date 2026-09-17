@@ -656,7 +656,10 @@ export interface SalesBookingCase {
   resource_id: string;
   opportunity_id: string;
   contact_id: string | null;
-  /** Contact city, address city, or parsed WA suburb. `"not given"` when absent. */
+  /**
+   * Contact city / suburb, parsed WA address, or the linked job's site suburb.
+   * `"not given"` when none of those exist. Never invented.
+   */
   suburb: string;
   /** `patio` / `fencing` from custom fields or enquiry tags. `"not given"` when absent. */
   job_type: string;
@@ -695,9 +698,14 @@ const SUBURB_FIELD_KEYS = new Set([
   "area",
 ]);
 
+/** WA / W.A / W.A. / Western Australia, optional postcode. */
+const WA_PLACE_TAIL_RE =
+  /(?:,\s*|\s+)(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i;
+
 /**
- * Contact city, nested address city, or a WA suburb parsed from a street
- * line. Never guesses: no city and no parseable suburb is `"not given"`.
+ * Contact city / suburb, nested address city, or a WA suburb parsed from a
+ * street line or a GHL custom-field address. Never guesses: no city and no
+ * parseable suburb is `"not given"`.
  */
 export function salesBookingSuburbFromContact(
   contact: Record<string, unknown>,
@@ -710,9 +718,11 @@ export function salesBookingSuburbFromContact(
       ? opportunity.address
       : null) as Record<string, unknown> | null;
   const city = nonemptyText(contact.city) ||
+    nonemptyText(contact.suburb) ||
     nonemptyText(contact.contactCity) ||
     nonemptyText(nestedAddress?.city) ||
     nonemptyText(opportunity.city) ||
+    nonemptyText(opportunity.suburb) ||
     nonemptyText(opportunity.contactCity);
   if (city) {
     const parsedCity = salesBookingSuburbFromAddressLine(city) ||
@@ -720,12 +730,18 @@ export function salesBookingSuburbFromContact(
     if (parsedCity) return parsedCity;
     if (!salesBookingLooksLikeStreet(city)) return city;
   }
-  for (const field of collectCustomFieldValues(contact, opportunity)) {
+  const fields = collectCustomFieldValues(contact, opportunity);
+  for (const field of fields) {
     if (!SUBURB_FIELD_KEYS.has(field.key)) continue;
     const parsed = salesBookingSuburbFromAddressLine(field.value) ||
       salesBookingSuburbFromStreetLine(field.value);
     if (parsed) return parsed;
     if (!salesBookingLooksLikeStreet(field.value)) return field.value;
+  }
+  for (const field of fields) {
+    const parsed = salesBookingSuburbFromAddressLine(field.value) ||
+      salesBookingSuburbFromStreetLine(field.value);
+    if (parsed) return parsed;
   }
   const lines = [
     contact.address1,
@@ -737,6 +753,8 @@ export function salesBookingSuburbFromContact(
     opportunity.address1,
     opportunity.contactAddress,
     typeof opportunity.address === "string" ? opportunity.address : null,
+    opportunity.name,
+    contact.name,
   ];
   for (const line of lines) {
     const parsed = salesBookingSuburbFromAddressLine(line) ||
@@ -762,12 +780,7 @@ export function salesBookingSuburbFromStreetLine(
 ): string | null {
   const text = nonemptyText(value);
   if (!text) return null;
-  const trimmed = text
-    .replace(
-      /(?:,\s*|\s+)(?:WA|W\.A\.|Western Australia|Australia)(?:\s+\d{4})?\s*$/i,
-      "",
-    )
-    .trim();
+  const trimmed = text.replace(WA_PLACE_TAIL_RE, "").trim();
   const comma = trimmed.match(/,\s*([A-Za-z][A-Za-z .'-]{1,40})\s*$/);
   const afterComma = nonemptyText(comma?.[1]);
   if (
@@ -776,7 +789,7 @@ export function salesBookingSuburbFromStreetLine(
   ) {
     return afterComma;
   }
-  const afterStreet = text.match(
+  const afterStreet = trimmed.match(
     new RegExp(
       `${STREET_TYPE_RE.source}\\s+([A-Za-z][A-Za-z .'-]{1,40}?)\\s*$`,
       "i",
@@ -795,7 +808,7 @@ export function salesBookingSuburbFromAddressLine(
   const text = nonemptyText(value);
   if (!text) return null;
   const afterComma = text.match(
-    /,\s*([A-Za-z][A-Za-z .'-]{1,40}?)\s*(?:,\s*|\s+)(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
+    /,\s*([A-Za-z][A-Za-z .'-]{1,40}?)\s*(?:,\s*|\s+)(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
   );
   const commaSuburb = nonemptyText(afterComma?.[1]);
   if (
@@ -804,7 +817,7 @@ export function salesBookingSuburbFromAddressLine(
     return commaSuburb;
   }
   const whole = text.match(
-    /^([A-Za-z][A-Za-z .'-]{1,40}?)\s+(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?\s*$/i,
+    /^([A-Za-z][A-Za-z .'-]{1,40}?)\s+(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?\s*$/i,
   );
   const wholeSuburb = nonemptyText(whole?.[1]);
   if (
@@ -813,7 +826,7 @@ export function salesBookingSuburbFromAddressLine(
     return wholeSuburb;
   }
   const tail = text.match(
-    /\s([A-Za-z][A-Za-z'-]{1,40})\s+(?:WA|W\.A\.|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
+    /\s([A-Za-z][A-Za-z'-]{1,40})\s+(?:WA|W\.A\.?|Western Australia)(?:\s+\d{4})?(?:,\s*Australia)?\s*$/i,
   );
   const suburb = nonemptyText(tail?.[1]);
   return suburb && !STREET_TYPE_RE.test(suburb) ? suburb : null;
@@ -937,12 +950,19 @@ function salesBookingTags(
 
 export interface SalesBookingContactFact {
   city?: unknown;
+  suburb?: unknown;
   address1?: unknown;
   address?: unknown;
   postalAddress?: unknown;
   tags?: unknown;
   customFields?: unknown;
   customData?: unknown;
+}
+
+/** Linked job site when GHL city/address is empty. Never invented. */
+export interface SalesBookingJobSiteFact {
+  suburb?: unknown;
+  address?: unknown;
 }
 
 /** Overlay a GHL contact read onto a search row that omitted city/tags. */
@@ -967,6 +987,7 @@ export function applySalesBookingContactFact(
     if (Array.isArray(current) && current.length === 0) contact[key] = value;
   };
   fill("city", fact.city);
+  fill("city", fact.suburb);
   fill("address1", fact.address1);
   fill("address", fact.address);
   fill("postalAddress", fact.postalAddress);
@@ -995,6 +1016,7 @@ export function salesBookingContactFactFromGhl(
       : body) as Record<string, unknown>;
   return {
     city: contact.city,
+    suburb: contact.suburb,
     address1: contact.address1,
     address: contact.address,
     postalAddress: contact.postalAddress,
@@ -1006,8 +1028,8 @@ export function salesBookingContactFactFromGhl(
 
 /**
  * Project one raw GHL opportunity onto a case row. Never invents a suburb:
- * absent city/address stays `"not given"`. Job type prefers custom fields
- * and enquiry tags, then the resource pipeline family.
+ * absent city/address/job site stays `"not given"`. Job type prefers custom
+ * fields and enquiry tags, then the resource pipeline family.
  */
 export function projectSalesBookingCase(
   opportunity: Record<string, unknown>,
@@ -1463,6 +1485,13 @@ export interface SalesBookingReadDependencies {
   readContacts?(
     contactIds: string[],
   ): Promise<Record<string, SalesBookingContactFact>>;
+  /**
+   * Recorded job site for scoped opportunity / contact ids. Used only when
+   * the GHL contact has no parseable suburb. Optional.
+   */
+  readJobSites?(
+    ids: { opportunityIds: string[]; contactIds: string[] },
+  ): Promise<Record<string, SalesBookingJobSiteFact>>;
   now(): Date;
   loadThreadFactsCache?(
     resourceId: string,
@@ -1743,6 +1772,7 @@ export async function salesBookingRead(
   ]);
 
   const scopedContactIds: string[] = [];
+  const scopedOpportunityIds: string[] = [];
   for (const raw of opportunities.opportunities) {
     const stageId = typeof raw.pipelineStageId === "string"
       ? raw.pipelineStageId
@@ -1750,6 +1780,7 @@ export async function salesBookingRead(
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
     const contactId = salesBookingContactId(raw);
     if (contactId) scopedContactIds.push(contactId);
+    if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
   }
   let contactFacts: Record<string, SalesBookingContactFact> = {};
   if (deps.readContacts && scopedContactIds.length > 0) {
@@ -1757,6 +1788,20 @@ export async function salesBookingRead(
       contactFacts = await deps.readContacts(scopedContactIds);
     } catch {
       contactFacts = {};
+    }
+  }
+  let jobSites: Record<string, SalesBookingJobSiteFact> = {};
+  if (
+    deps.readJobSites &&
+    (scopedOpportunityIds.length > 0 || scopedContactIds.length > 0)
+  ) {
+    try {
+      jobSites = await deps.readJobSites({
+        opportunityIds: scopedOpportunityIds,
+        contactIds: scopedContactIds,
+      });
+    } catch {
+      jobSites = {};
     }
   }
 
@@ -1781,6 +1826,17 @@ export async function salesBookingRead(
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) {
       excludedByStage++;
       continue;
+    }
+    if (row.suburb === SALES_BOOKING_NOT_GIVEN) {
+      const job = jobSites[row.id] ||
+        (contactId ? jobSites[contactId] : undefined);
+      if (job) {
+        const fromJob = salesBookingSuburbFromContact({
+          city: job.suburb,
+          address1: job.address,
+        });
+        if (fromJob !== SALES_BOOKING_NOT_GIVEN) row.suburb = fromJob;
+      }
     }
     projected.push(row);
   }
@@ -1870,6 +1926,57 @@ async function readContactsLive(
         length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, unique.length),
       }, () => worker()),
     );
+  }
+  return facts;
+}
+
+const JOB_SITE_ID_CHUNK = 25;
+
+function chunkSalesBookingIds(ids: string[], size = JOB_SITE_ID_CHUNK): string[][] {
+  const unique = [...new Set(ids.filter((id) => id.length > 0))];
+  const out: string[][] = [];
+  for (let i = 0; i < unique.length; i += size) out.push(unique.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Recorded `jobs.site_suburb` / `site_address` for scoped GHL ids. One
+ * bounded read per id chunk. A failed chunk leaves those keys absent so
+ * the GHL contact answer still stands.
+ */
+async function readJobSitesLive(
+  client: SalesBookingReadClient,
+  opportunityIds: string[],
+  contactIds: string[],
+): Promise<Record<string, SalesBookingJobSiteFact>> {
+  const facts: Record<string, SalesBookingJobSiteFact> = {};
+  const take = (rows: Array<Record<string, unknown>> | null) => {
+    for (const row of rows || []) {
+      const fact: SalesBookingJobSiteFact = {
+        suburb: row.site_suburb,
+        address: row.site_address,
+      };
+      const opportunityId = nonemptyText(row.ghl_opportunity_id);
+      const contactId = nonemptyText(row.ghl_contact_id);
+      if (opportunityId) facts[opportunityId] = fact;
+      if (contactId) facts[contactId] = fact;
+    }
+  };
+  for (const chunk of chunkSalesBookingIds(opportunityIds)) {
+    const { data, error } = await client
+      .from("jobs")
+      .select("ghl_opportunity_id, ghl_contact_id, site_suburb, site_address")
+      .in("ghl_opportunity_id", chunk);
+    if (error) continue;
+    take(data as Array<Record<string, unknown>> | null);
+  }
+  for (const chunk of chunkSalesBookingIds(contactIds)) {
+    const { data, error } = await client
+      .from("jobs")
+      .select("ghl_opportunity_id, ghl_contact_id, site_suburb, site_address")
+      .in("ghl_contact_id", chunk);
+    if (error) continue;
+    take(data as Array<Record<string, unknown>> | null);
   }
   return facts;
 }
@@ -2299,6 +2406,8 @@ export function createSalesBookingReadDependencies(
       readDiaryLive(resourceId, scoperUserId, since, untilExclusive),
     readThread: ({ contactId }) => readThreadLive(contactId),
     readContacts: (contactIds) => readContactsLive(contactIds),
+    readJobSites: ({ opportunityIds, contactIds }) =>
+      readJobSitesLive(client, opportunityIds, contactIds),
     now: () => new Date(),
     loadThreadFactsCache: (resourceId) =>
       loadThreadFactsCacheLive(client, resourceId),
