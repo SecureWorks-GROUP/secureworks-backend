@@ -11,10 +11,11 @@
 // reading every GHL thread client-side.
 //
 // ── NO SEND, NO GHL WRITE ──
-// Page load may persist `sales_booking_packs` kind=thread_facts so the next
-// read can serve cached conversation state. That is the only write. No GHL
-// mutation, no calendar create, no send. Drafts and proposed windows come
-// from the latest kind=pack row, merged in after this read.
+// Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
+// so the next read can serve cached conversation state and the opportunity
+// enumeration. Those are the only writes. No GHL mutation, no calendar
+// create, no send. Drafts and proposed windows come from the latest
+// kind=pack row, merged in after this read.
 //
 // ── HONESTY CONTRACT (wiki skill `secureworks-scope-booking`) ──
 //  1. Full population, or an explicit `coverage.full_population:false` naming
@@ -206,11 +207,16 @@ export const SALES_BOOKING_DEFAULT_THREAD_LIMIT = 200;
 export const SALES_BOOKING_MAX_THREAD_LIMIT = 250;
 export const SALES_BOOKING_THREAD_CONCURRENCY = 6;
 export const SALES_BOOKING_DEFAULT_THREAD_BUDGET_MS = 18_000;
+/** Whole-read wall clock covering roster paging, diary, contacts, and threads. */
+export const SALES_BOOKING_READ_BUDGET_MS = 25_000;
 export const SALES_BOOKING_THREAD_CACHE_MAX_AGE_MS = 6 * 3_600_000;
+export const SALES_BOOKING_ROSTER_CACHE_MAX_AGE_MS = 10 * 60_000;
+/** 1 attempt + 2 retries. Never more, even if a caller asks. */
 export const SALES_BOOKING_GHL_429_TRIES = 3;
 export const SALES_BOOKING_GHL_429_BASE_MS = 200;
 export const SALES_BOOKING_NOT_GIVEN = "not given";
 export const SALES_BOOKING_THREAD_FACTS_KIND = "thread_facts";
+export const SALES_BOOKING_ROSTER_KIND = "roster";
 /** Sentinel Monday so thread_facts reuse the packs table without a week grid. */
 export const SALES_BOOKING_THREAD_FACTS_WEEK_START = "1970-01-05";
 
@@ -549,20 +555,40 @@ export async function withSalesBookingGhl429Retry<T>(
     sleep?: (ms: number) => Promise<void>;
     random?: () => number;
     tries?: number;
+    now?: () => Date;
+    deadlineMs?: number;
   } = {},
 ): Promise<T> {
-  const tries = opts.tries ?? SALES_BOOKING_GHL_429_TRIES;
+  const tries = Math.min(
+    Math.max(1, opts.tries ?? SALES_BOOKING_GHL_429_TRIES),
+    SALES_BOOKING_GHL_429_TRIES,
+  );
   const sleep = opts.sleep ??
     ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const random = opts.random ?? Math.random;
+  const now = opts.now ?? (() => new Date());
   let lastError: unknown;
   for (let attempt = 1; attempt <= tries; attempt++) {
+    if (
+      opts.deadlineMs != null && Number.isFinite(opts.deadlineMs) &&
+      now().getTime() >= opts.deadlineMs
+    ) {
+      if (lastError) throw lastError;
+      throw new Error("time budget exhausted");
+    }
     try {
       return await run();
     } catch (error) {
       lastError = error;
       if (!isSalesBookingGhl429(error) || attempt >= tries) throw error;
-      await sleep(salesBookingGhl429DelayMs(attempt, random));
+      const delay = salesBookingGhl429DelayMs(attempt, random);
+      if (
+        opts.deadlineMs != null && Number.isFinite(opts.deadlineMs) &&
+        now().getTime() + delay >= opts.deadlineMs
+      ) {
+        throw error;
+      }
+      await sleep(delay);
     }
   }
   throw lastError;
@@ -1250,6 +1276,156 @@ export interface SalesBookingOpportunityScan {
   total: number | null;
   /** Non-null when the roster read failed or stopped short. */
   reason: string | null;
+  /** How this scan was obtained. Default live for callers that omit it. */
+  source?: "cache" | "live";
+  /** Age of the cached roster in ms; 0 when live; null when unknown. */
+  age_ms?: number | null;
+  remaining_429_count?: number;
+}
+
+export interface SalesBookingCachedRoster {
+  opportunities: Record<string, unknown>[];
+  stages: Record<string, string>;
+  exhausted: boolean;
+  pages_scanned: number;
+  total: number | null;
+  reason: string | null;
+  read_at: string;
+}
+
+/** Cached roster is usable when younger than 10 minutes. */
+export function salesBookingRosterIsFresh(args: {
+  cachedReadAt: string | null | undefined;
+  nowMs: number;
+  maxAgeMs?: number;
+}): boolean {
+  const readAtMs = Date.parse(String(args.cachedReadAt || ""));
+  if (!Number.isFinite(readAtMs)) return false;
+  const maxAge = args.maxAgeMs ?? SALES_BOOKING_ROSTER_CACHE_MAX_AGE_MS;
+  return args.nowMs - readAtMs < maxAge;
+}
+
+export function parseSalesBookingRosterCache(
+  payload: unknown,
+): SalesBookingCachedRoster | null {
+  const body = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {};
+  const readAt = nonemptyText(body.read_at);
+  if (!readAt || !Number.isFinite(Date.parse(readAt))) return null;
+  const opportunities = Array.isArray(body.opportunities)
+    ? body.opportunities.filter((row) =>
+      !!row && typeof row === "object" && !Array.isArray(row)
+    ) as Record<string, unknown>[]
+    : [];
+  const stagesRaw = body.stages && typeof body.stages === "object" &&
+      !Array.isArray(body.stages)
+    ? body.stages as Record<string, unknown>
+    : {};
+  const stages: Record<string, string> = {};
+  for (const [id, name] of Object.entries(stagesRaw)) {
+    if (id) stages[id] = String(name ?? "");
+  }
+  return {
+    opportunities,
+    stages,
+    exhausted: body.exhausted === true,
+    pages_scanned: typeof body.pages_scanned === "number"
+      ? body.pages_scanned
+      : 0,
+    total: typeof body.total === "number" ? body.total : null,
+    reason: nonemptyText(body.reason),
+    read_at: new Date(Date.parse(readAt)).toISOString(),
+  };
+}
+
+export function scanFromCachedRoster(
+  cached: SalesBookingCachedRoster,
+  nowMs: number,
+  extra: {
+    reason?: string | null;
+    remaining_429_count?: number;
+  } = {},
+): SalesBookingOpportunityScan {
+  const readAtMs = Date.parse(cached.read_at);
+  return {
+    opportunities: cached.opportunities,
+    stages: cached.stages,
+    exhausted: cached.exhausted,
+    pages_scanned: cached.pages_scanned,
+    total: cached.total,
+    reason: extra.reason !== undefined ? extra.reason : cached.reason,
+    source: "cache",
+    age_ms: Number.isFinite(readAtMs) ? Math.max(0, nowMs - readAtMs) : null,
+    remaining_429_count: extra.remaining_429_count ?? 0,
+  };
+}
+
+export function cachedRosterFromScan(
+  scan: SalesBookingOpportunityScan,
+  readAt: string,
+): SalesBookingCachedRoster {
+  return {
+    opportunities: scan.opportunities,
+    stages: scan.stages,
+    exhausted: scan.exhausted,
+    pages_scanned: scan.pages_scanned,
+    total: scan.total,
+    reason: scan.reason,
+    read_at: readAt,
+  };
+}
+
+function rosterScanLooksLike429(scan: SalesBookingOpportunityScan): boolean {
+  if ((scan.remaining_429_count ?? 0) > 0) return true;
+  return isSalesBookingGhl429({ message: scan.reason || "" });
+}
+
+/**
+ * Serve a fresh cached roster; otherwise live-refresh. A 429 on live falls
+ * back to the cached roster when one exists.
+ */
+export async function resolveSalesBookingRoster(args: {
+  cached: SalesBookingCachedRoster | null;
+  nowMs: number;
+  forceRefresh?: boolean;
+  live: () => Promise<SalesBookingOpportunityScan>;
+}): Promise<{
+  scan: SalesBookingOpportunityScan;
+  shouldPersist: boolean;
+}> {
+  const cached = args.cached;
+  const fresh = !!cached && !args.forceRefresh &&
+    salesBookingRosterIsFresh({
+      cachedReadAt: cached.read_at,
+      nowMs: args.nowMs,
+    });
+  if (fresh && cached) {
+    return {
+      scan: scanFromCachedRoster(cached, args.nowMs),
+      shouldPersist: false,
+    };
+  }
+  const live = await args.live();
+  const liveScan: SalesBookingOpportunityScan = {
+    ...live,
+    source: "live",
+    age_ms: 0,
+    remaining_429_count: live.remaining_429_count ?? 0,
+  };
+  if (rosterScanLooksLike429(liveScan) && cached) {
+    return {
+      scan: scanFromCachedRoster(cached, args.nowMs, {
+        reason: liveScan.reason || "GHL 429",
+        remaining_429_count: Math.max(1, liveScan.remaining_429_count ?? 1),
+      }),
+      shouldPersist: false,
+    };
+  }
+  return {
+    scan: liveScan,
+    shouldPersist: liveScan.exhausted === true && !liveScan.reason,
+  };
 }
 
 export interface SalesBookingDiaryScan {
@@ -1302,6 +1478,8 @@ export interface SalesBookingReadResponse {
     threads_unread: number;
     remaining_429_count: number;
     diary_read_ok: boolean;
+    roster_source: "cache" | "live";
+    roster_age_ms: number | null;
   };
   cases: SalesBookingCase[];
   diary: SalesBookingDiaryEntry[];
@@ -1355,6 +1533,17 @@ export function assembleSalesBookingRead(input: {
   if (opportunities.reason) {
     gaps.push(`Opportunity roster read degraded: ${opportunities.reason}`);
   }
+  if (opportunities.source === "cache") {
+    const age = opportunities.age_ms;
+    const ageLabel = age == null
+      ? "unknown age"
+      : `${Math.round(age / 1000)}s old`;
+    gaps.push(
+      rosterScanLooksLike429(opportunities)
+        ? `Opportunity roster served from cache after GHL 429 (${ageLabel}).`
+        : `Opportunity roster served from cache (${ageLabel}).`,
+    );
+  }
   gaps.push(
     diary.read_ok
       ? "GHL calendar read for this week. Operational leave, travel and non-GHL calendars remain unread. Missing coverage is not free capacity."
@@ -1397,11 +1586,14 @@ export function assembleSalesBookingRead(input: {
         `${unread} thread(s) unread; those cases stay on the board as unread.`,
       );
     }
-    if (threads.remaining_429_count > 0) {
-      gaps.push(
-        `${threads.remaining_429_count} GHL 429 Too Many Requests remaining after retries.`,
-      );
-    }
+  }
+
+  const remaining429 = (threads.remaining_429_count || 0) +
+    (opportunities.remaining_429_count || 0);
+  if (remaining429 > 0) {
+    gaps.push(
+      `${remaining429} GHL 429 Too Many Requests remaining after retries.`,
+    );
   }
 
   return {
@@ -1436,8 +1628,12 @@ export function assembleSalesBookingRead(input: {
       threads_cached: threads.cached_count,
       threads_fresh: threads.fresh_count,
       threads_unread: threads.unread_count,
-      remaining_429_count: threads.remaining_429_count,
+      remaining_429_count: (threads.remaining_429_count || 0) +
+        (opportunities.remaining_429_count || 0),
       diary_read_ok: diary.read_ok,
+      roster_source: opportunities.source === "cache" ? "cache" : "live",
+      roster_age_ms: opportunities.age_ms ??
+        (opportunities.source === "cache" ? null : 0),
     },
     cases,
     diary: diary.entries,
@@ -1478,15 +1674,17 @@ export interface SalesBookingReadParams {
   include_thread_facts?: boolean;
   thread_limit?: number;
   thread_budget_ms?: number;
+  /** Whole-read wall clock. Capped at 25s. */
+  read_budget_ms?: number;
   case_ids?: string[] | null;
-  /** Ignore cache freshness and re-read every selected thread. */
+  /** Ignore cache freshness and re-read every selected thread and the roster. */
   force_refresh?: boolean;
 }
 
 export interface SalesBookingReadDependencies {
   /** Bounded, terminal-or-honest GHL opportunity roster for one pipeline. */
   readOpportunities(
-    args: { pipelineId: string },
+    args: { pipelineId: string; deadlineMs?: number },
   ): Promise<SalesBookingOpportunityScan>;
   /** One scoper's GHL calendar events for the week. Never throws. */
   readDiary(args: {
@@ -1494,15 +1692,20 @@ export interface SalesBookingReadDependencies {
     scoperUserId: string;
     since: string;
     untilExclusive: string;
+    deadlineMs?: number;
   }): Promise<SalesBookingDiaryScan>;
   /** One contact's GHL conversation messages. Rejects on a failed read. */
-  readThread(args: { contactId: string }): Promise<SalesBookingMessage[]>;
+  readThread(args: {
+    contactId: string;
+    deadlineMs?: number;
+  }): Promise<SalesBookingMessage[]>;
   /**
    * City/tags/custom fields for scoped contact ids. Search rows omit these.
    * Optional: tests that only exercise roster shape can skip it.
    */
   readContacts?(
     contactIds: string[],
+    opts?: { deadlineMs?: number },
   ): Promise<Record<string, SalesBookingContactFact>>;
   /**
    * Recorded job site for scoped opportunity / contact ids. Used only when
@@ -1518,6 +1721,15 @@ export interface SalesBookingReadDependencies {
   persistThreadFactsCache?(
     resourceId: string,
     facts: Record<string, SalesBookingCachedThreadFact>,
+  ): Promise<void>;
+  loadRosterCache?(
+    resourceId: string,
+    weekStart: string,
+  ): Promise<SalesBookingCachedRoster | null>;
+  persistRosterCache?(
+    resourceId: string,
+    weekStart: string,
+    roster: SalesBookingCachedRoster,
   ): Promise<void>;
   sleep?(ms: number): Promise<void>;
   random?(): number;
@@ -1590,6 +1802,7 @@ async function scanThreads(
   resourceId: string,
   cases: SalesBookingCase[],
   params: SalesBookingReadParams,
+  deadlineMs?: number,
 ): Promise<SalesBookingThreadScan> {
   const enabled = params.include_thread_facts !== false;
   const facts: Record<string, SalesBookingThreadFacts> = {};
@@ -1597,17 +1810,21 @@ async function scanThreads(
     return emptyThreadScan(enabled, enabled ? cases.length : 0);
   }
 
+  const requestedBudget = clampInt(
+    params.thread_budget_ms,
+    SALES_BOOKING_DEFAULT_THREAD_BUDGET_MS,
+    0,
+    60_000,
+  );
+  const remaining = deadlineMs != null
+    ? Math.max(0, deadlineMs - deps.now().getTime())
+    : requestedBudget;
+  const budgetMs = Math.min(requestedBudget, remaining);
   const limit = clampInt(
     params.thread_limit,
     SALES_BOOKING_DEFAULT_THREAD_LIMIT,
     0,
     SALES_BOOKING_MAX_THREAD_LIMIT,
-  );
-  const budgetMs = clampInt(
-    params.thread_budget_ms,
-    SALES_BOOKING_DEFAULT_THREAD_BUDGET_MS,
-    1_000,
-    60_000,
   );
   const forceRefresh = params.force_refresh === true;
   const wanted = params.case_ids && params.case_ids.length
@@ -1661,7 +1878,10 @@ async function scanThreads(
     for (;;) {
       const index = cursor++;
       if (index >= selected.length) return;
-      if (deps.now().getTime() - startedAt >= budgetMs) {
+      if (
+        deps.now().getTime() - startedAt >= budgetMs ||
+        (deadlineMs != null && deps.now().getTime() >= deadlineMs)
+      ) {
         budgetExhausted = true;
         return;
       }
@@ -1675,7 +1895,10 @@ async function scanThreads(
         continue;
       }
       try {
-        const messages = await deps.readThread({ contactId: row.contact_id });
+        const messages = await deps.readThread({
+          contactId: row.contact_id,
+          deadlineMs,
+        });
         facts[row.id] = deriveSalesBookingThreadFacts({
           caseId: row.id,
           contactId: row.contact_id,
@@ -1779,16 +2002,58 @@ export async function salesBookingRead(
       ? String(params.scoper_user_id).trim()
       : resource.scoper_user_id;
 
-  const [opportunities, diary] = await Promise.all([
-    deps.readOpportunities({ pipelineId: resource.pipeline_id }),
+  const startedAt = deps.now().getTime();
+  const budgetMs = clampInt(
+    params.read_budget_ms,
+    SALES_BOOKING_READ_BUDGET_MS,
+    1,
+    SALES_BOOKING_READ_BUDGET_MS,
+  );
+  const deadlineMs = startedAt + budgetMs;
+  const forceRefresh = params.force_refresh === true;
+
+  let cachedRoster: SalesBookingCachedRoster | null = null;
+  try {
+    cachedRoster = deps.loadRosterCache
+      ? await deps.loadRosterCache(resource.resource_id, week.week_start)
+      : null;
+  } catch {
+    cachedRoster = null;
+  }
+
+  const liveRoster = () =>
+    deps.readOpportunities({
+      pipelineId: resource.pipeline_id,
+      deadlineMs,
+    });
+  const rosterFresh = !!cachedRoster && !forceRefresh &&
+    salesBookingRosterIsFresh({
+      cachedReadAt: cachedRoster.read_at,
+      nowMs: deps.now().getTime(),
+    });
+
+  const [resolved, diary] = await Promise.all([
+    rosterFresh && cachedRoster
+      ? Promise.resolve({
+        scan: scanFromCachedRoster(cachedRoster, deps.now().getTime()),
+        shouldPersist: false,
+      })
+      : resolveSalesBookingRoster({
+        cached: cachedRoster,
+        nowMs: deps.now().getTime(),
+        forceRefresh,
+        live: liveRoster,
+      }),
     deps.readDiary({
       resourceId: resource.resource_id,
       scoperUserId,
       since: week.since,
       untilExclusive: week.until_exclusive,
+      deadlineMs,
     }),
   ]);
 
+  let opportunities = resolved.scan;
   const scopedContactIds: string[] = [];
   const scopedOpportunityIds: string[] = [];
   for (const raw of opportunities.opportunities) {
@@ -1801,17 +2066,48 @@ export async function salesBookingRead(
     if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
   }
   let contactFacts: Record<string, SalesBookingContactFact> = {};
-  if (deps.readContacts && scopedContactIds.length > 0) {
+  const hydrateLive = opportunities.source !== "cache" &&
+    deps.readContacts &&
+    scopedContactIds.length > 0 &&
+    deps.now().getTime() < deadlineMs;
+  if (hydrateLive) {
     try {
-      contactFacts = await deps.readContacts(scopedContactIds);
+      contactFacts = await deps.readContacts!(scopedContactIds, { deadlineMs });
     } catch {
       contactFacts = {};
+    }
+    opportunities = {
+      ...opportunities,
+      opportunities: opportunities.opportunities.map((raw) => {
+        const contactId = salesBookingContactId(raw);
+        return applySalesBookingContactFact(
+          raw,
+          contactId ? contactFacts[contactId] : null,
+        );
+      }),
+    };
+  }
+  if (
+    resolved.shouldPersist && deps.persistRosterCache
+  ) {
+    try {
+      await deps.persistRosterCache(
+        resource.resource_id,
+        week.week_start,
+        cachedRosterFromScan(
+          opportunities,
+          deps.now().toISOString(),
+        ),
+      );
+    } catch {
+      // Cache write must not empty the board.
     }
   }
   let jobSites: Record<string, SalesBookingJobSiteFact> = {};
   if (
     deps.readJobSites &&
-    (scopedOpportunityIds.length > 0 || scopedContactIds.length > 0)
+    (scopedOpportunityIds.length > 0 || scopedContactIds.length > 0) &&
+    deps.now().getTime() < deadlineMs
   ) {
     try {
       jobSites = await deps.readJobSites({
@@ -1829,10 +2125,12 @@ export async function salesBookingRead(
   for (const raw of opportunities.opportunities) {
     const contactId = salesBookingContactId(raw);
     const row = projectSalesBookingCase(
-      applySalesBookingContactFact(
-        raw,
-        contactId ? contactFacts[contactId] : null,
-      ),
+      hydrateLive
+        ? raw
+        : applySalesBookingContactFact(
+          raw,
+          contactId ? contactFacts[contactId] : null,
+        ),
       resource.resource_id,
       opportunities.stages,
     );
@@ -1864,6 +2162,7 @@ export async function salesBookingRead(
     resource.resource_id,
     projected,
     params,
+    deadlineMs,
   );
   return assembleSalesBookingRead({
     resource,
@@ -1883,6 +2182,8 @@ const GHL_BASE = "https://services.leadconnectorhq.com";
 type GhlRetryHooks = {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  now?: () => Date;
+  deadlineMs?: number;
 };
 
 async function ghlRead(
@@ -1921,18 +2222,27 @@ async function ghlRead(
  */
 async function readContactsLive(
   contactIds: string[],
+  retry: GhlRetryHooks = {},
 ): Promise<Record<string, SalesBookingContactFact>> {
   const unique = [...new Set(contactIds.filter((id) => id.length > 0))];
   const facts: Record<string, SalesBookingContactFact> = {};
   let cursor = 0;
+  const now = retry.now ?? (() => new Date());
   const worker = async () => {
     for (;;) {
+      if (
+        retry.deadlineMs != null && now().getTime() >= retry.deadlineMs
+      ) {
+        return;
+      }
       const index = cursor++;
       if (index >= unique.length) return;
       const contactId = unique[index];
       try {
         const body = await ghlRead(
           `/contacts/${encodeURIComponent(contactId)}`,
+          {},
+          retry,
         );
         facts[contactId] = salesBookingContactFactFromGhl(body);
       } catch {
@@ -2016,10 +2326,17 @@ async function readJobSitesLive(
  * (patio 5, fencing 10), so the live call stays `pipelineId` + `status=open`
  * and `salesBookingRead` filters to `scope_stage_ids` before the thread pass.
  */
-async function readOpportunitiesLive(
-  pipelineId: string,
-): Promise<SalesBookingOpportunityScan> {
-  const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+export async function readSalesBookingOpportunities(args: {
+  ghlGet: (
+    path: string,
+    init?: RequestInit,
+  ) => Promise<Record<string, unknown>>;
+  pipelineId: string;
+  locationId: string;
+  now?: () => Date;
+  deadlineMs?: number;
+}): Promise<SalesBookingOpportunityScan> {
+  const now = args.now ?? (() => new Date());
   const limit = SALES_BOOKING_OPPORTUNITY_PAGE_SIZE;
   const opportunities: Record<string, unknown>[] = [];
   const seen = new Set<string>();
@@ -2029,20 +2346,28 @@ async function readOpportunitiesLive(
   let total: number | null = null;
   let exhausted = false;
   let reason: string | null = null;
+  let remaining429 = 0;
 
   try {
     for (let page = 1; page <= SALES_BOOKING_MAX_OPPORTUNITY_PAGES; page++) {
+      if (
+        args.deadlineMs != null && now().getTime() >= args.deadlineMs
+      ) {
+        reason = "time budget exhausted";
+        break;
+      }
       const query = new URLSearchParams({
-        locationId,
+        locationId: args.locationId,
         limit: String(limit),
-        pipelineId,
+        pipelineId: args.pipelineId,
         status: "open",
       });
       if (startAfter != null) query.set("startAfter", String(startAfter));
       if (startAfterId) query.set("startAfterId", startAfterId);
-      const data = await ghlRead(`/opportunities/search?${query.toString()}`, {
-        headers: { Version: "v3" },
-      });
+      const data = await args.ghlGet(
+        `/opportunities/search?${query.toString()}`,
+        { headers: { Version: "v3" } },
+      );
       const rows = Array.isArray(data.opportunities)
         ? data.opportunities as Record<string, unknown>[]
         : [];
@@ -2078,36 +2403,41 @@ async function readOpportunitiesLive(
       startAfter = nextAfter as string | number;
       startAfterId = String(nextAfterId);
     }
-    if (!exhausted && pages >= SALES_BOOKING_MAX_OPPORTUNITY_PAGES) {
+    if (!exhausted && !reason && pages >= SALES_BOOKING_MAX_OPPORTUNITY_PAGES) {
       reason = `page cap ${SALES_BOOKING_MAX_OPPORTUNITY_PAGES} reached`;
     }
   } catch (error) {
     reason = (error as Error)?.message || "opportunity search failed";
+    if (isSalesBookingGhl429(error)) remaining429 = 1;
   }
 
   let stages: Record<string, string> = {};
-  try {
-    const data = await ghlRead(
-      `/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`,
-    );
-    const pipelines = Array.isArray(data.pipelines)
-      ? data.pipelines as Record<string, unknown>[]
-      : [];
-    for (const pipeline of pipelines) {
-      if (pipeline.id !== pipelineId) continue;
-      const list = Array.isArray(pipeline.stages)
-        ? pipeline.stages as Record<string, unknown>[]
-        : [];
-      stages = Object.fromEntries(
-        list.filter((s) => typeof s.id === "string").map((
-          s,
-        ) => [String(s.id), String(s.name ?? "")]),
+  if (
+    args.deadlineMs == null || now().getTime() < args.deadlineMs
+  ) {
+    try {
+      const data = await args.ghlGet(
+        `/opportunities/pipelines?locationId=${
+          encodeURIComponent(args.locationId)
+        }`,
       );
+      const pipelines = Array.isArray(data.pipelines)
+        ? data.pipelines as Record<string, unknown>[]
+        : [];
+      for (const pipeline of pipelines) {
+        if (pipeline.id !== args.pipelineId) continue;
+        const list = Array.isArray(pipeline.stages)
+          ? pipeline.stages as Record<string, unknown>[]
+          : [];
+        stages = Object.fromEntries(
+          list.filter((s) => typeof s.id === "string").map((
+            s,
+          ) => [String(s.id), String(s.name ?? "")]),
+        );
+      }
+    } catch {
+      stages = {};
     }
-  } catch {
-    // Stage names are presentation only; an unread stage map leaves stage_name
-    // null rather than degrading the roster.
-    stages = {};
   }
 
   return {
@@ -2117,7 +2447,24 @@ async function readOpportunitiesLive(
     pages_scanned: pages,
     total,
     reason,
+    source: "live",
+    age_ms: 0,
+    remaining_429_count: remaining429,
   };
+}
+
+async function readOpportunitiesLive(
+  pipelineId: string,
+  retry: GhlRetryHooks = {},
+): Promise<SalesBookingOpportunityScan> {
+  const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+  return await readSalesBookingOpportunities({
+    ghlGet: (path, init) => ghlRead(path, init, retry),
+    pipelineId,
+    locationId,
+    now: retry.now,
+    deadlineMs: retry.deadlineMs,
+  });
 }
 
 function conversationsFromGhlBody(
@@ -2195,9 +2542,14 @@ export async function readSalesBookingThreadMessages(
 
 async function readThreadLive(
   contactId: string,
+  retry: GhlRetryHooks = {},
 ): Promise<SalesBookingMessage[]> {
   const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
-  return await readSalesBookingThreadMessages(ghlRead, contactId, locationId);
+  return await readSalesBookingThreadMessages(
+    (path) => ghlRead(path, {}, retry),
+    contactId,
+    locationId,
+  );
 }
 
 // Supabase query builders are thenables; this SELECT-only surface avoids
@@ -2332,10 +2684,11 @@ async function readDiaryLive(
   scoperUserId: string,
   since: string,
   untilExclusive: string,
+  retry: GhlRetryHooks = {},
 ): Promise<SalesBookingDiaryScan> {
   const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
   return await readSalesBookingGhlDiary({
-    ghlGet: ghlRead,
+    ghlGet: (path) => ghlRead(path, {}, retry),
     locationId,
     resourceId,
     scoperUserId,
@@ -2419,16 +2772,110 @@ async function persistThreadFactsCacheLive(
   }
 }
 
+async function loadRosterCacheLive(
+  client: SalesBookingReadClient,
+  resourceId: string,
+  weekStart: string,
+): Promise<SalesBookingCachedRoster | null> {
+  const { data, error } = await client
+    .from("sales_booking_packs")
+    .select("payload")
+    .eq("resource", resourceId)
+    .eq("week_start", weekStart)
+    .eq("kind", SALES_BOOKING_ROSTER_KIND)
+    .order("as_of", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(error.message || "roster load failed");
+  }
+  if (!data) return null;
+  return parseSalesBookingRosterCache(
+    (data as { payload?: unknown }).payload,
+  );
+}
+
+function salesBookingRostersEqual(
+  left: SalesBookingCachedRoster | null,
+  right: SalesBookingCachedRoster,
+): boolean {
+  if (!left) return false;
+  const a = parseSalesBookingRosterCache(left);
+  const b = parseSalesBookingRosterCache(right);
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** One latest roster row per resource and week: abort on load error, skip when equal, prune only older as_of. */
+async function persistRosterCacheLive(
+  client: SalesBookingReadClient,
+  resourceId: string,
+  weekStart: string,
+  roster: SalesBookingCachedRoster,
+): Promise<void> {
+  let existing: SalesBookingCachedRoster | null;
+  try {
+    existing = await loadRosterCacheLive(client, resourceId, weekStart);
+  } catch {
+    return;
+  }
+  if (salesBookingRostersEqual(existing, roster)) return;
+  const asOf = new Date().toISOString();
+  const { error } = await client.from("sales_booking_packs").upsert({
+    resource: resourceId,
+    week_start: weekStart,
+    kind: SALES_BOOKING_ROSTER_KIND,
+    as_of: asOf,
+    payload: roster,
+    published_by: "ops-api:roster",
+  }, { onConflict: "resource,week_start,kind,as_of" });
+  if (error) {
+    throw new Error(error.message || "roster persist failed");
+  }
+  const { error: pruneError } = await client
+    .from("sales_booking_packs")
+    .delete()
+    .eq("resource", resourceId)
+    .eq("week_start", weekStart)
+    .eq("kind", SALES_BOOKING_ROSTER_KIND)
+    .lt("as_of", asOf);
+  if (pruneError) {
+    throw new Error(pruneError.message || "roster prune failed");
+  }
+}
+
 /** Real readers for the dispatch. Cache persist is the only write. */
 export function createSalesBookingReadDependencies(
   client: SalesBookingReadClient,
 ): SalesBookingReadDependencies {
+  const retry: GhlRetryHooks = {
+    now: () => new Date(),
+  };
   return {
-    readOpportunities: ({ pipelineId }) => readOpportunitiesLive(pipelineId),
-    readDiary: ({ resourceId, scoperUserId, since, untilExclusive }) =>
-      readDiaryLive(resourceId, scoperUserId, since, untilExclusive),
-    readThread: ({ contactId }) => readThreadLive(contactId),
-    readContacts: (contactIds) => readContactsLive(contactIds),
+    readOpportunities: ({ pipelineId, deadlineMs }) => {
+      retry.deadlineMs = deadlineMs;
+      return readOpportunitiesLive(pipelineId, retry);
+    },
+    readDiary: (
+      { resourceId, scoperUserId, since, untilExclusive, deadlineMs },
+    ) => {
+      retry.deadlineMs = deadlineMs;
+      return readDiaryLive(
+        resourceId,
+        scoperUserId,
+        since,
+        untilExclusive,
+        retry,
+      );
+    },
+    readThread: ({ contactId, deadlineMs }) => {
+      if (deadlineMs != null) retry.deadlineMs = deadlineMs;
+      return readThreadLive(contactId, retry);
+    },
+    readContacts: (contactIds, opts) => {
+      if (opts?.deadlineMs != null) retry.deadlineMs = opts.deadlineMs;
+      return readContactsLive(contactIds, retry);
+    },
     readJobSites: ({ opportunityIds, contactIds }) =>
       readJobSitesLive(client, opportunityIds, contactIds),
     now: () => new Date(),
@@ -2436,6 +2883,10 @@ export function createSalesBookingReadDependencies(
       loadThreadFactsCacheLive(client, resourceId),
     persistThreadFactsCache: (resourceId, facts) =>
       persistThreadFactsCacheLive(client, resourceId, facts),
+    loadRosterCache: (resourceId, weekStart) =>
+      loadRosterCacheLive(client, resourceId, weekStart),
+    persistRosterCache: (resourceId, weekStart, roster) =>
+      persistRosterCacheLive(client, resourceId, weekStart, roster),
   };
 }
 

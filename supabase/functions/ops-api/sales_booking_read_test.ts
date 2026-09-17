@@ -9,7 +9,7 @@
  *    the quiet window, and never makes a case look answered.
  *  - An unread calendar and an unread thread degrade THEIR OWN item, name the
  *    gap, and never throw or empty the rest of the response.
- *  - Thread-facts cache persist is the only write; GHL stays read-only.
+ *  - Thread-facts and roster cache persist are the only writes; GHL stays read-only.
  *
  * What these do NOT prove: that GHL accepts the live request shapes, or that
  * production credentials exist. Those need a live read.
@@ -43,9 +43,12 @@ import {
   SALES_BOOKING_CAPTAIN_DEFAULTS,
   SALES_BOOKING_GHL_USERS,
   SALES_BOOKING_NOT_GIVEN,
+  SALES_BOOKING_READ_BUDGET_MS,
   SALES_BOOKING_RESOURCES,
+  SALES_BOOKING_ROSTER_KIND,
   SALES_BOOKING_THREAD_FACTS_KIND,
   SALES_BOOKING_THREAD_FACTS_WEEK_START,
+  type SalesBookingCachedRoster,
   type SalesBookingCachedThreadFact,
   type SalesBookingDiaryScan,
   salesBookingGhl429DelayMs,
@@ -54,6 +57,9 @@ import {
   salesBookingRead,
   type SalesBookingReadDependencies,
   SalesBookingRequestError,
+  salesBookingRosterIsFresh,
+  readSalesBookingOpportunities,
+  resolveSalesBookingRoster,
   salesBookingSuburbFromContact,
   salesBookingThreadFactIsFresh,
   withSalesBookingGhl429Retry,
@@ -542,6 +548,8 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.coverage.total, 1);
   assertEquals(payload.coverage.excluded_by_stage, 0);
   assertEquals(payload.coverage.operational_leave, "not_read");
+  assertEquals(payload.coverage.roster_source, "live");
+  assertEquals(payload.coverage.roster_age_ms, 0);
   assert(payload.coverage.gaps.length >= 2);
   // The two additions the reskinned view needs.
   assertEquals(payload.diary.length, 1);
@@ -1275,8 +1283,10 @@ Deno.test("the deps object handed to the runner exposes no write members", async
   assertEquals(
     Object.keys(production).sort(),
     [
+      "loadRosterCache",
       "loadThreadFactsCache",
       "now",
+      "persistRosterCache",
       "persistThreadFactsCache",
       "readContacts",
       "readDiary",
@@ -1330,6 +1340,21 @@ function cachedFact(
     message_count: 1,
     template_outbound_count: 0,
     read_at: "2026-09-16T01:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function cachedRoster(
+  overrides: Partial<SalesBookingCachedRoster> = {},
+): SalesBookingCachedRoster {
+  return {
+    opportunities: [opportunity()],
+    stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+    exhausted: true,
+    pages_scanned: 3,
+    total: 1,
+    reason: null,
+    read_at: "2026-09-16T01:55:00.000Z",
     ...overrides,
   };
 }
@@ -1804,7 +1829,7 @@ Deno.test("cached thread facts are served; stale activity is refreshed newest fi
   );
 });
 
-Deno.test("GHL 429 retries three times with backoff then counts remaining failures", async () => {
+Deno.test("GHL 429 retries at most twice per call then counts remaining failures", async () => {
   assertEquals(salesBookingGhl429DelayMs(1, () => 0), 200);
   assertEquals(salesBookingGhl429DelayMs(2, () => 0), 400);
   assertEquals(salesBookingGhl429DelayMs(3, () => 0), 800);
@@ -1828,6 +1853,38 @@ Deno.test("GHL 429 retries three times with backoff then counts remaining failur
   assertEquals(value, "ok");
   assertEquals(attempts, 3);
   assertEquals(sleeps, [200, 400]);
+
+  let stormed = 0;
+  await assertRejects(() =>
+    withSalesBookingGhl429Retry(() => {
+      stormed++;
+      const error = new Error("GHL 429: Too Many Requests");
+      (error as { status?: number }).status = 429;
+      return Promise.reject(error);
+    }, {
+      tries: 99,
+      sleep: () => Promise.resolve(),
+      random: () => 0,
+    })
+  );
+  assertEquals(stormed, 3);
+
+  let nowMs = 0;
+  let lateAttempts = 0;
+  await assertRejects(() =>
+    withSalesBookingGhl429Retry(() => {
+      lateAttempts++;
+      const error = new Error("GHL 429: Too Many Requests");
+      (error as { status?: number }).status = 429;
+      return Promise.reject(error);
+    }, {
+      now: () => new Date(nowMs),
+      deadlineMs: 100,
+      sleep: () => Promise.resolve(),
+      random: () => 0,
+    })
+  );
+  assertEquals(lateAttempts, 1);
 
   const payload = await salesBookingRead(
     deps({
@@ -2359,4 +2416,254 @@ Deno.test("thread facts persist merges a limited refresh into the loaded map and
   }).facts;
   assertEquals(facts?.["opp-1"]?.classification, "waiting_reply");
   assertEquals(facts?.["opp-2"]?.case_id, "opp-2");
+});
+
+Deno.test("whole-read budget exhaustion returns a well-formed response with gaps", async () => {
+  let nowMs = NOW.getTime();
+  let liveThreads = 0;
+  const payload = await salesBookingRead(
+    deps({
+      now: () => new Date(nowMs),
+      readOpportunities: () => {
+        nowMs += SALES_BOOKING_READ_BUDGET_MS + 1;
+        return Promise.resolve({
+          opportunities: [opportunity()],
+          stages: {},
+          exhausted: false,
+          pages_scanned: 2,
+          total: 1012,
+          reason: "time budget exhausted",
+        });
+      },
+      readThread: () => {
+        liveThreads++;
+        return Promise.resolve([] as SalesBookingMessage[]);
+      },
+    }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(payload.ok, true);
+  assertEquals(payload.fixture, false);
+  assertEquals(payload.send_hold, true);
+  assertEquals(payload.cases.length, 1);
+  assertEquals(payload.cases[0].id, "opp-1");
+  assertEquals(liveThreads, 0);
+  assertEquals(payload.coverage.full_population, false);
+  assert(
+    payload.coverage.gaps.some((g) => g.includes("time budget exhausted")),
+  );
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("not a completed empty book")
+    ),
+  );
+});
+
+Deno.test("fresh roster is served from cache; stale roster is refreshed live", async () => {
+  let liveReads = 0;
+  const fresh = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(cachedRoster()),
+      readOpportunities: () => {
+        liveReads++;
+        return Promise.resolve({
+          opportunities: [opportunity({ id: "opp-live" })],
+          stages: {},
+          exhausted: true,
+          pages_scanned: 1,
+          total: 1,
+          reason: null,
+        });
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(liveReads, 0);
+  assertEquals(fresh.coverage.roster_source, "cache");
+  assertEquals(fresh.coverage.roster_age_ms, 5 * 60_000);
+  assertEquals(fresh.cases[0].id, "opp-1");
+  assert(
+    fresh.coverage.gaps.some((g) => g.includes("served from cache")),
+  );
+
+  liveReads = 0;
+  const stale = await salesBookingRead(
+    deps({
+      loadRosterCache: () =>
+        Promise.resolve(cachedRoster({
+          read_at: "2026-09-16T01:40:00.000Z",
+        })),
+      persistRosterCache: () => Promise.resolve(),
+      readOpportunities: () => {
+        liveReads++;
+        return Promise.resolve({
+          opportunities: [opportunity({ id: "opp-live" })],
+          stages: {},
+          exhausted: true,
+          pages_scanned: 4,
+          total: 1,
+          reason: null,
+        });
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(liveReads, 1);
+  assertEquals(stale.coverage.roster_source, "live");
+  assertEquals(stale.coverage.roster_age_ms, 0);
+  assertEquals(stale.cases[0].id, "opp-live");
+  assertEquals(
+    salesBookingRosterIsFresh({
+      cachedReadAt: "2026-09-16T01:55:00.000Z",
+      nowMs: NOW.getTime(),
+    }),
+    true,
+  );
+  assertEquals(
+    salesBookingRosterIsFresh({
+      cachedReadAt: "2026-09-16T01:40:00.000Z",
+      nowMs: NOW.getTime(),
+    }),
+    false,
+  );
+});
+
+Deno.test("a 429 during live roster refresh falls back to the cached roster", async () => {
+  const resolved = await resolveSalesBookingRoster({
+    cached: cachedRoster(),
+    nowMs: NOW.getTime(),
+    forceRefresh: true,
+    live: () =>
+      Promise.resolve({
+        opportunities: [],
+        stages: {},
+        exhausted: false,
+        pages_scanned: 1,
+        total: 1012,
+        reason: "GHL 429: Too Many Requests",
+        remaining_429_count: 1,
+      }),
+  });
+  assertEquals(resolved.shouldPersist, false);
+  assertEquals(resolved.scan.source, "cache");
+  assertEquals(resolved.scan.opportunities[0]?.id, "opp-1");
+  assertEquals(resolved.scan.remaining_429_count, 1);
+
+  const payload = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(cachedRoster()),
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [],
+          stages: {},
+          exhausted: false,
+          pages_scanned: 1,
+          total: 1012,
+          reason: "GHL 429: Too Many Requests",
+          remaining_429_count: 1,
+        }),
+    }),
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      include_thread_facts: false,
+      force_refresh: true,
+    },
+  );
+  assertEquals(payload.ok, true);
+  assertEquals(payload.coverage.roster_source, "cache");
+  assertEquals(payload.cases.length, 1);
+  assertEquals(payload.cases[0].id, "opp-1");
+  assertEquals(payload.coverage.remaining_429_count >= 1, true);
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("served from cache after GHL 429")
+    ),
+  );
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("GHL 429 Too Many Requests remaining after retries")
+    ),
+  );
+});
+
+Deno.test("opportunity paging stops when the whole-read deadline is reached", async () => {
+  let nowMs = NOW.getTime();
+  let pages = 0;
+  const scan = await readSalesBookingOpportunities({
+    pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+    locationId: "loc",
+    now: () => new Date(nowMs),
+    deadlineMs: NOW.getTime() + 1,
+    ghlGet: () => {
+      pages++;
+      nowMs += 10_000;
+      return Promise.resolve({
+        opportunities: Array.from({ length: 100 }, (_, i) => ({
+          id: `opp-page-${pages}-${i}`,
+          sort: [pages, `c-${i}`],
+        })),
+        meta: { total: 900, startAfter: pages, startAfterId: `c-99` },
+      });
+    },
+  });
+  assertEquals(pages, 1);
+  assertEquals(scan.exhausted, false);
+  assertEquals(scan.reason, "time budget exhausted");
+  assertEquals(scan.opportunities.length, 100);
+});
+
+Deno.test("roster persist keeps one latest row per resource and week", async () => {
+  const next = cachedRoster({
+    pages_scanned: 8,
+    read_at: "2026-09-16T02:00:00.000Z",
+  });
+  const client = threadFactsPackClient([
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      kind: SALES_BOOKING_ROSTER_KIND,
+      as_of: "2026-09-16T00:00:00.000Z",
+      payload: { ...cachedRoster({ pages_scanned: 1 }) },
+    },
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      kind: SALES_BOOKING_ROSTER_KIND,
+      as_of: "2026-09-16T01:00:00.000Z",
+      payload: { ...cachedRoster({ pages_scanned: 1 }) },
+    },
+  ]);
+  await createSalesBookingReadDependencies(client).persistRosterCache!(
+    "marnin",
+    WEEK,
+    next,
+  );
+  assertEquals(client.writes, ["upsert", "delete"]);
+  assertEquals(client.store.length, 1);
+  assertEquals(client.store[0].kind, SALES_BOOKING_ROSTER_KIND);
+  assertEquals(client.store[0].resource, "marnin");
+  assertEquals(client.store[0].week_start, WEEK);
+  assertEquals(
+    (client.store[0].payload as { pages_scanned?: number }).pages_scanned,
+    8,
+  );
+});
+
+Deno.test("roster persist skips a write when the stored roster equals the incoming scan", async () => {
+  const roster = cachedRoster();
+  const client = threadFactsPackClient([{
+    resource: "marnin",
+    week_start: WEEK,
+    kind: SALES_BOOKING_ROSTER_KIND,
+    as_of: "2026-09-16T01:00:00.000Z",
+    payload: { ...roster },
+  }]);
+  await createSalesBookingReadDependencies(client).persistRosterCache!(
+    "marnin",
+    WEEK,
+    roster,
+  );
+  assertEquals(client.writes, []);
+  assertEquals(client.store.length, 1);
 });

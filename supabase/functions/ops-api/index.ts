@@ -803,7 +803,8 @@ import {
 } from './ses_captain_lock_draft_remint.ts'
 import { buildOpsApiVersion } from './ops_api_version.ts'
 // Sales Booking view read (calendar + queue + thread facts). Page load may
-// persist kind=thread_facts. No GHL write, no send, no calendar write.
+// persist kind=thread_facts and kind=roster. No GHL write, no send, no
+// calendar write.
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
