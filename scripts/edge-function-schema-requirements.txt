@@ -370,3 +370,6 @@ ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|index|idx_sal
 
 # Sales Booking thread-facts cache (kind check widened; week_start sentinel 1970-01-05)
 ops-api|supabase/migrations/20260917180000_sales_booking_thread_facts.sql|constraint|sales_booking_packs_kind_check
+
+# Sales Booking roster cache (kind check widened to roster)
+ops-api|supabase/migrations/20260917200000_sales_booking_roster.sql|constraint|sales_booking_packs_kind_check

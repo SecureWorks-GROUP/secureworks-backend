@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; thread cache 2026-09-17)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17)
 
 `GET ops-api?action=sales_booking_read` is the single read behind the Sales
 Booking view. It replaces the branch-local preview server
@@ -15,14 +15,37 @@ The GHL calendar window is one unpaged `/calendars/events` GET in
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
 action (`userId` or `calendarId`, plus `start` and `end`).
 
-## Page load may persist thread facts; send stays held
+## Page load may persist thread facts and the roster; send stays held
+
+The whole read is capped at 25 seconds wall clock (`SALES_BOOKING_READ_BUDGET_MS`),
+covering roster paging, diary, contacts, and threads. Hitting that budget
+returns a well-formed payload with `coverage.gaps` naming what was not read;
+it does not keep paging GHL.
 
 Live GHL thread reads stay the source of truth. Page load serves cached
 `kind=thread_facts` facts that are still fresh (GHL last activity not newer
 than `read_at`, and cache younger than 6 hours) and live-refreshes only the
-rest, newest first, under the time budget. A 429 after retries still
-serves a stale cached thread when one exists. That persist is the only
-write on the read path. No GHL mutation, no calendar create, no send.
+rest, newest first, under the remaining budget. A 429 after retries still
+serves a stale cached thread when one exists.
+
+The opportunity roster is week-agnostic: one latest `kind=roster` row per
+resource, keyed at the same sentinel Monday `1970-01-05` as thread facts.
+A complete row younger than 10 minutes is served from cache
+(`coverage.roster_source: cache` plus `roster_age_ms`). Absent or older than
+10 minutes is live-refreshed. `force_refresh` only bypasses that 10-minute
+window on a complete row; an incomplete row always resumes from its stored
+page cursor, including when `force_refresh` is set. A complete cached book
+always beats an incomplete live result, whatever the reason (429, time
+budget, page error): the response keeps the cached `as_of`, sets
+`coverage.roster_source: cache`, and names why the live refresh was
+incomplete in `coverage.gaps`. Only a complete live scan replaces a
+complete cache. An incomplete live scan is persisted as an incomplete row
+carrying the page cursor reached; the next read resumes from that cursor
+inside the remaining 25 s budget, merges the pages, and marks the row
+complete when the result set ends. Until then the merged partial is served
+with `full_population: false` and an honest gap. No background job, no new
+table. Thread-facts and roster persist are the only writes on the read
+path. No GHL mutation, no calendar create, no send.
 `send_hold: true` and `policy.{activation,send,calendar_write}: 'held'`
 are constants the view renders; they are not the enforcement.
 
@@ -38,9 +61,10 @@ pack/stamp rows only. `sales_booking_threads_refresh` (api key, POST) does
 a full background refresh for one resource into the same thread-facts
 store. Nothing is sent.
 
-GHL 429 Too Many Requests on roster pages and thread reads retries three
-times with exponential backoff and jitter. Remaining 429s are
-`coverage.remaining_429_count`.
+GHL 429 Too Many Requests on roster pages and thread reads retries at most
+twice per call (three attempts including the first) with exponential
+backoff and jitter, and never sleeps past the whole-read deadline.
+Remaining 429s are `coverage.remaining_429_count`.
 
 ## Request
 
@@ -51,7 +75,9 @@ times with exponential backoff and jitter. Remaining 429s are
 | `scoper_user_id` | the resource's own | Overrides the CALENDAR read only, and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
 | `thread_limit` | 200 (max 250) | Newest-activity-first cap on thread reads, spent on scoped rows only. |
-| `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep. |
+| `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep, also clipped to the remaining whole-read budget. |
+| `read_budget_ms` | 25000 (max 25000) | Whole-read wall clock covering roster, diary, contacts, and threads. |
+| `force_refresh` | `false` | Bypasses the 10-minute freshness window on a complete roster row and thread-facts freshness. An incomplete roster always resumes from its cursor. |
 | `case_ids` | all | Comma-separated: read threads for these cases only. |
 
 Auth is the ops-api default: an ops API key, or a signed-in
@@ -85,6 +111,9 @@ Additions:
   a CIO data gap, not a code defect. `enquiry_at` is opportunity created.
 - **`coverage.threads_cached` / `threads_fresh` / `threads_unread` /
   `remaining_429_count`** — honest cache vs live vs unread vs leftover 429s.
+- **`coverage.roster_source` / `roster_age_ms`** — `cache` or `live`, and the
+  cached roster's age in milliseconds (`0` when live). Additive; the door's
+  existing keys are unchanged.
 - **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by}`.
   `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
   the confirmed GHL user id or null when unread. `mapped_by` is `email` or
@@ -137,16 +166,19 @@ Publish / stamp actions (same table, no send):
   `{ok:true, stamp:null, as_of:null}`.
 - `POST sales_booking_threads_refresh` (api key only): body `{resource,
   week_start?}`. Force-refreshes in-scope threads for that resource, persists
-  `kind=thread_facts` (`week_start` 1970-01-05), returns the same read payload.
-  No send.
+  `kind=thread_facts` (`week_start` 1970-01-05), and calls the read with
+  `force_refresh` so a complete roster bypasses its 10-minute window (an
+  incomplete roster still resumes). Returns the same read payload. No send.
 
 Table: `sales_booking_packs`. Pack and stamp keep history; latest = greatest
 `as_of` per `(resource, week_start, kind)` and older rows are ignored.
 Thread facts keep one latest row per resource at `week_start` 1970-01-05:
-writers insert then delete older `as_of` only. RLS on, no client
-access. Migrations `20260917130000_sales_booking_packs.sql` and
+writers insert then delete older `as_of` only. Roster keeps one latest row
+per resource at that same sentinel. RLS on, no client access. Migrations
+`20260917130000_sales_booking_packs.sql`,
 `20260917180000_sales_booking_thread_facts.sql` (kind check includes
-`thread_facts`).
+`thread_facts`), and `20260917200000_sales_booking_roster.sql` (kind check
+includes `roster`).
 
 ## Reading it honestly
 

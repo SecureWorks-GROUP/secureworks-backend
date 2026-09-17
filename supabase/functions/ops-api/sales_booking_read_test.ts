@@ -9,7 +9,7 @@
  *    the quiet window, and never makes a case look answered.
  *  - An unread calendar and an unread thread degrade THEIR OWN item, name the
  *    gap, and never throw or empty the rest of the response.
- *  - Thread-facts cache persist is the only write; GHL stays read-only.
+ *  - Thread-facts and roster cache persist are the only writes; GHL stays read-only.
  *
  * What these do NOT prove: that GHL accepts the live request shapes, or that
  * production credentials exist. Those need a live read.
@@ -25,6 +25,7 @@ import {
 import {
   applySalesBookingContactFact,
   assembleSalesBookingRead,
+  cachedRosterFromScan,
   confirmSalesBookingGhlUser,
   createSalesBookingReadDependencies,
   defaultPerthWeekStart,
@@ -37,15 +38,20 @@ import {
   projectSalesBookingCase,
   projectSalesBookingDiaryEntry,
   readSalesBookingGhlDiary,
+  readSalesBookingOpportunities,
   readSalesBookingThreadMessages,
   resolveSalesBookingGhlMapping,
+  resolveSalesBookingRoster,
   SALES_BOOKING_API_VERSION,
   SALES_BOOKING_CAPTAIN_DEFAULTS,
   SALES_BOOKING_GHL_USERS,
   SALES_BOOKING_NOT_GIVEN,
+  SALES_BOOKING_READ_BUDGET_MS,
   SALES_BOOKING_RESOURCES,
+  SALES_BOOKING_ROSTER_KIND,
   SALES_BOOKING_THREAD_FACTS_KIND,
   SALES_BOOKING_THREAD_FACTS_WEEK_START,
+  type SalesBookingCachedRoster,
   type SalesBookingCachedThreadFact,
   type SalesBookingDiaryScan,
   salesBookingGhl429DelayMs,
@@ -54,6 +60,8 @@ import {
   salesBookingRead,
   type SalesBookingReadDependencies,
   SalesBookingRequestError,
+  salesBookingRosterIsComplete,
+  salesBookingRosterIsFresh,
   salesBookingSuburbFromContact,
   salesBookingThreadFactIsFresh,
   withSalesBookingGhl429Retry,
@@ -542,6 +550,8 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.coverage.total, 1);
   assertEquals(payload.coverage.excluded_by_stage, 0);
   assertEquals(payload.coverage.operational_leave, "not_read");
+  assertEquals(payload.coverage.roster_source, "live");
+  assertEquals(payload.coverage.roster_age_ms, 0);
   assert(payload.coverage.gaps.length >= 2);
   // The two additions the reskinned view needs.
   assertEquals(payload.diary.length, 1);
@@ -1275,8 +1285,10 @@ Deno.test("the deps object handed to the runner exposes no write members", async
   assertEquals(
     Object.keys(production).sort(),
     [
+      "loadRosterCache",
       "loadThreadFactsCache",
       "now",
+      "persistRosterCache",
       "persistThreadFactsCache",
       "readContacts",
       "readDiary",
@@ -1330,6 +1342,21 @@ function cachedFact(
     message_count: 1,
     template_outbound_count: 0,
     read_at: "2026-09-16T01:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function cachedRoster(
+  overrides: Partial<SalesBookingCachedRoster> = {},
+): SalesBookingCachedRoster {
+  return {
+    opportunities: [opportunity()],
+    stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+    exhausted: true,
+    pages_scanned: 3,
+    total: 1,
+    reason: null,
+    read_at: "2026-09-16T01:55:00.000Z",
     ...overrides,
   };
 }
@@ -1804,7 +1831,7 @@ Deno.test("cached thread facts are served; stale activity is refreshed newest fi
   );
 });
 
-Deno.test("GHL 429 retries three times with backoff then counts remaining failures", async () => {
+Deno.test("GHL 429 retries at most twice per call then counts remaining failures", async () => {
   assertEquals(salesBookingGhl429DelayMs(1, () => 0), 200);
   assertEquals(salesBookingGhl429DelayMs(2, () => 0), 400);
   assertEquals(salesBookingGhl429DelayMs(3, () => 0), 800);
@@ -1828,6 +1855,38 @@ Deno.test("GHL 429 retries three times with backoff then counts remaining failur
   assertEquals(value, "ok");
   assertEquals(attempts, 3);
   assertEquals(sleeps, [200, 400]);
+
+  let stormed = 0;
+  await assertRejects(() =>
+    withSalesBookingGhl429Retry(() => {
+      stormed++;
+      const error = new Error("GHL 429: Too Many Requests");
+      (error as { status?: number }).status = 429;
+      return Promise.reject(error);
+    }, {
+      tries: 99,
+      sleep: () => Promise.resolve(),
+      random: () => 0,
+    })
+  );
+  assertEquals(stormed, 3);
+
+  const nowMs = 0;
+  let lateAttempts = 0;
+  await assertRejects(() =>
+    withSalesBookingGhl429Retry(() => {
+      lateAttempts++;
+      const error = new Error("GHL 429: Too Many Requests");
+      (error as { status?: number }).status = 429;
+      return Promise.reject(error);
+    }, {
+      now: () => new Date(nowMs),
+      deadlineMs: 100,
+      sleep: () => Promise.resolve(),
+      random: () => 0,
+    })
+  );
+  assertEquals(lateAttempts, 1);
 
   const payload = await salesBookingRead(
     deps({
@@ -2359,4 +2418,680 @@ Deno.test("thread facts persist merges a limited refresh into the loaded map and
   }).facts;
   assertEquals(facts?.["opp-1"]?.classification, "waiting_reply");
   assertEquals(facts?.["opp-2"]?.case_id, "opp-2");
+});
+
+Deno.test("whole-read budget exhaustion returns a well-formed response with gaps", async () => {
+  let nowMs = NOW.getTime();
+  let liveThreads = 0;
+  const payload = await salesBookingRead(
+    deps({
+      now: () => new Date(nowMs),
+      readOpportunities: () => {
+        nowMs += SALES_BOOKING_READ_BUDGET_MS + 1;
+        return Promise.resolve({
+          opportunities: [opportunity()],
+          stages: {},
+          exhausted: false,
+          pages_scanned: 2,
+          total: 1012,
+          reason: "time budget exhausted",
+        });
+      },
+      readThread: () => {
+        liveThreads++;
+        return Promise.resolve([] as SalesBookingMessage[]);
+      },
+    }),
+    { resource: "marnin", week_start: WEEK },
+  );
+  assertEquals(payload.ok, true);
+  assertEquals(payload.fixture, false);
+  assertEquals(payload.send_hold, true);
+  assertEquals(payload.cases.length, 1);
+  assertEquals(payload.cases[0].id, "opp-1");
+  assertEquals(liveThreads, 0);
+  assertEquals(payload.coverage.full_population, false);
+  assert(
+    payload.coverage.gaps.some((g) => g.includes("time budget exhausted")),
+  );
+  assert(
+    payload.coverage.gaps.some((g) => g.includes("not a completed empty book")),
+  );
+});
+
+Deno.test("fresh roster is served from cache; stale roster is refreshed live", async () => {
+  let liveReads = 0;
+  const fresh = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(cachedRoster()),
+      readOpportunities: () => {
+        liveReads++;
+        return Promise.resolve({
+          opportunities: [opportunity({ id: "opp-live" })],
+          stages: {},
+          exhausted: true,
+          pages_scanned: 1,
+          total: 1,
+          reason: null,
+        });
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(liveReads, 0);
+  assertEquals(fresh.coverage.roster_source, "cache");
+  assertEquals(fresh.coverage.roster_age_ms, 5 * 60_000);
+  assertEquals(fresh.cases[0].id, "opp-1");
+  assert(
+    fresh.coverage.gaps.some((g) => g.includes("served from cache")),
+  );
+
+  liveReads = 0;
+  const stale = await salesBookingRead(
+    deps({
+      loadRosterCache: () =>
+        Promise.resolve(cachedRoster({
+          read_at: "2026-09-16T01:40:00.000Z",
+        })),
+      persistRosterCache: () => Promise.resolve(),
+      readOpportunities: () => {
+        liveReads++;
+        return Promise.resolve({
+          opportunities: [opportunity({ id: "opp-live" })],
+          stages: {},
+          exhausted: true,
+          pages_scanned: 4,
+          total: 1,
+          reason: null,
+        });
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(liveReads, 1);
+  assertEquals(stale.coverage.roster_source, "live");
+  assertEquals(stale.coverage.roster_age_ms, 0);
+  assertEquals(stale.cases[0].id, "opp-live");
+  assertEquals(
+    salesBookingRosterIsFresh({
+      cachedReadAt: "2026-09-16T01:55:00.000Z",
+      nowMs: NOW.getTime(),
+    }),
+    true,
+  );
+  assertEquals(
+    salesBookingRosterIsFresh({
+      cachedReadAt: "2026-09-16T01:40:00.000Z",
+      nowMs: NOW.getTime(),
+    }),
+    false,
+  );
+});
+
+Deno.test("a 429 during live roster refresh falls back to the cached roster", async () => {
+  const resolved = await resolveSalesBookingRoster({
+    cached: cachedRoster(),
+    nowMs: NOW.getTime(),
+    forceRefresh: true,
+    live: () =>
+      Promise.resolve({
+        opportunities: [],
+        stages: {},
+        exhausted: false,
+        pages_scanned: 1,
+        total: 1012,
+        reason: "GHL 429: Too Many Requests",
+        remaining_429_count: 1,
+      }),
+  });
+  assertEquals(resolved.shouldPersist, false);
+  assertEquals(resolved.scan.source, "cache");
+  assertEquals(resolved.scan.opportunities[0]?.id, "opp-1");
+  assertEquals(resolved.scan.remaining_429_count, 1);
+
+  const payload = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(cachedRoster()),
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [],
+          stages: {},
+          exhausted: false,
+          pages_scanned: 1,
+          total: 1012,
+          reason: "GHL 429: Too Many Requests",
+          remaining_429_count: 1,
+        }),
+    }),
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      include_thread_facts: false,
+      force_refresh: true,
+    },
+  );
+  assertEquals(payload.ok, true);
+  assertEquals(payload.coverage.roster_source, "cache");
+  assertEquals(payload.cases.length, 1);
+  assertEquals(payload.cases[0].id, "opp-1");
+  assertEquals(payload.coverage.remaining_429_count >= 1, true);
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("served from cache after GHL 429")
+    ),
+  );
+  assert(
+    payload.coverage.gaps.some((g) =>
+      g.includes("GHL 429 Too Many Requests remaining after retries")
+    ),
+  );
+});
+
+Deno.test("opportunity paging stops when the whole-read deadline is reached", async () => {
+  let nowMs = NOW.getTime();
+  let pages = 0;
+  const scan = await readSalesBookingOpportunities({
+    pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+    locationId: "loc",
+    now: () => new Date(nowMs),
+    deadlineMs: NOW.getTime() + 1,
+    ghlGet: () => {
+      pages++;
+      nowMs += 10_000;
+      return Promise.resolve({
+        opportunities: Array.from({ length: 100 }, (_, i) => ({
+          id: `opp-page-${pages}-${i}`,
+          sort: [pages, `c-${i}`],
+        })),
+        meta: { total: 900, startAfter: pages, startAfterId: `c-99` },
+      });
+    },
+  });
+  assertEquals(pages, 1);
+  assertEquals(scan.exhausted, false);
+  assertEquals(scan.reason, "time budget exhausted");
+  assertEquals(scan.opportunities.length, 100);
+});
+
+Deno.test("roster persist keeps one latest row per resource at the weekless sentinel", async () => {
+  const next = cachedRoster({
+    pages_scanned: 8,
+    read_at: "2026-09-16T02:00:00.000Z",
+  });
+  const client = threadFactsPackClient([
+    {
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_ROSTER_KIND,
+      as_of: "2026-09-16T00:00:00.000Z",
+      payload: { ...cachedRoster({ pages_scanned: 1 }) },
+    },
+    {
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_ROSTER_KIND,
+      as_of: "2026-09-16T01:00:00.000Z",
+      payload: { ...cachedRoster({ pages_scanned: 1 }) },
+    },
+  ]);
+  await createSalesBookingReadDependencies(client).persistRosterCache!(
+    "marnin",
+    next,
+  );
+  assertEquals(client.writes, ["upsert", "delete"]);
+  assertEquals(client.store.length, 1);
+  assertEquals(client.store[0].kind, SALES_BOOKING_ROSTER_KIND);
+  assertEquals(client.store[0].resource, "marnin");
+  assertEquals(
+    client.store[0].week_start,
+    SALES_BOOKING_THREAD_FACTS_WEEK_START,
+  );
+  assertEquals(
+    (client.store[0].payload as { pages_scanned?: number }).pages_scanned,
+    8,
+  );
+});
+
+Deno.test("roster persist skips a write when the stored roster equals the incoming scan", async () => {
+  const roster = cachedRoster();
+  const client = threadFactsPackClient([{
+    resource: "marnin",
+    week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+    kind: SALES_BOOKING_ROSTER_KIND,
+    as_of: "2026-09-16T01:00:00.000Z",
+    payload: { ...roster },
+  }]);
+  await createSalesBookingReadDependencies(client).persistRosterCache!(
+    "marnin",
+    roster,
+  );
+  assertEquals(client.writes, []);
+  assertEquals(client.store.length, 1);
+});
+
+Deno.test("a complete cached roster beats an incomplete live refresh for any reason", async () => {
+  const complete = cachedRoster({
+    opportunities: Array.from(
+      { length: 3 },
+      (_, i) => opportunity({ id: `opp-cache-${i}` }),
+    ),
+    pages_scanned: 11,
+    total: 1012,
+    exhausted: true,
+    reason: null,
+  });
+  const incompleteLive = {
+    opportunities: [opportunity({ id: "opp-live-200" })],
+    stages: {},
+    exhausted: false,
+    pages_scanned: 2,
+    total: 1012,
+    reason: "time budget exhausted",
+    remaining_429_count: 0,
+  };
+  const resolved = await resolveSalesBookingRoster({
+    cached: complete,
+    nowMs: NOW.getTime(),
+    forceRefresh: true,
+    live: () => Promise.resolve(incompleteLive),
+  });
+  assertEquals(resolved.shouldPersist, false);
+  assertEquals(resolved.scan.source, "cache");
+  assertEquals(resolved.scan.opportunities.length, 3);
+  assertEquals(resolved.scan.opportunities[0]?.id, "opp-cache-0");
+  assertEquals(resolved.scan.reason, "time budget exhausted");
+  assertEquals(salesBookingRosterIsComplete(complete), true);
+  assertEquals(salesBookingRosterIsComplete(resolved.scan), false);
+
+  const payload = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(complete),
+      persistRosterCache: () => {
+        throw new Error("complete cache must not be replaced");
+      },
+      readOpportunities: () => Promise.resolve(incompleteLive),
+    }),
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      include_thread_facts: false,
+      force_refresh: true,
+    },
+  );
+  assertEquals(payload.coverage.roster_source, "cache");
+  assertEquals(payload.coverage.full_population, true);
+  assertEquals(payload.cases.length, 3);
+  assertEquals(payload.cases[0].id, "opp-cache-0");
+  assert(
+    payload.coverage.gaps.some((g) => g.includes("time budget exhausted")),
+  );
+  assert(
+    payload.coverage.gaps.some((g) => g.includes("served from cache")),
+  );
+
+  const pageError = await resolveSalesBookingRoster({
+    cached: complete,
+    nowMs: NOW.getTime(),
+    forceRefresh: true,
+    live: () =>
+      Promise.resolve({
+        ...incompleteLive,
+        reason: "opportunity search failed",
+        pages_scanned: 1,
+      }),
+  });
+  assertEquals(pageError.shouldPersist, false);
+  assertEquals(pageError.scan.source, "cache");
+  assertEquals(pageError.scan.opportunities.length, 3);
+  assertEquals(pageError.scan.reason, "opportunity search failed");
+});
+
+Deno.test("roster cache is one latest row per resource and ignores the door week", async () => {
+  const persisted: Array<{ resource: string; week_start?: string }> = [];
+  const loaded: string[] = [];
+  const cache = cachedRoster();
+  const thisWeek = await salesBookingRead(
+    deps({
+      loadRosterCache: (resourceId) => {
+        loaded.push(resourceId);
+        return Promise.resolve(cache);
+      },
+      persistRosterCache: (resourceId) => {
+        persisted.push({ resource: resourceId });
+        return Promise.resolve();
+      },
+      readOpportunities: () => {
+        throw new Error("fresh complete roster must not live-refresh");
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  const lastWeek = await salesBookingRead(
+    deps({
+      loadRosterCache: (resourceId) => {
+        loaded.push(resourceId);
+        return Promise.resolve(cache);
+      },
+      persistRosterCache: (resourceId) => {
+        persisted.push({ resource: resourceId });
+        return Promise.resolve();
+      },
+      readOpportunities: () => {
+        throw new Error("fresh complete roster must not live-refresh");
+      },
+    }),
+    {
+      resource: "marnin",
+      week_start: "2026-09-07",
+      include_thread_facts: false,
+    },
+  );
+  assertEquals(loaded, ["marnin", "marnin"]);
+  assertEquals(persisted, []);
+  assertEquals(thisWeek.coverage.roster_source, "cache");
+  assertEquals(lastWeek.coverage.roster_source, "cache");
+  assertEquals(thisWeek.week_start, WEEK);
+  assertEquals(lastWeek.week_start, "2026-09-07");
+
+  const client = threadFactsPackClient([{
+    resource: "marnin",
+    week_start: WEEK,
+    kind: SALES_BOOKING_ROSTER_KIND,
+    as_of: "2026-09-16T01:00:00.000Z",
+    payload: { ...cachedRoster({ pages_scanned: 1 }) },
+  }]);
+  await createSalesBookingReadDependencies(client).persistRosterCache!(
+    "marnin",
+    cachedRoster({ pages_scanned: 11 }),
+  );
+  const loadedLive = await createSalesBookingReadDependencies(client)
+    .loadRosterCache!("marnin");
+  assertEquals(loadedLive?.pages_scanned, 11);
+  assertEquals(
+    client.store.some((row) =>
+      row.kind === SALES_BOOKING_ROSTER_KIND &&
+      row.week_start === SALES_BOOKING_THREAD_FACTS_WEEK_START
+    ),
+    true,
+  );
+  assertEquals(
+    client.store.filter((row) =>
+      row.kind === SALES_BOOKING_ROSTER_KIND &&
+      row.week_start === SALES_BOOKING_THREAD_FACTS_WEEK_START
+    ).length,
+    1,
+  );
+});
+
+Deno.test("an incomplete live roster is persisted and the next read resumes from its cursor", async () => {
+  const pageOne = Array.from(
+    { length: 2 },
+    (_, i) => opportunity({ id: `opp-p1-${i}` }),
+  );
+  const pageTwo = Array.from(
+    { length: 2 },
+    (_, i) => opportunity({ id: `opp-p2-${i}` }),
+  );
+  const first = await resolveSalesBookingRoster({
+    cached: null,
+    nowMs: NOW.getTime(),
+    live: () =>
+      Promise.resolve({
+        opportunities: pageOne,
+        stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+        exhausted: false,
+        pages_scanned: 2,
+        total: 4,
+        reason: "time budget exhausted",
+        start_after: 2,
+        start_after_id: "c-99",
+      }),
+  });
+  assertEquals(first.shouldPersist, true);
+  assertEquals(first.scan.exhausted, false);
+  assertEquals(first.scan.opportunities.map((row) => row.id), [
+    "opp-p1-0",
+    "opp-p1-1",
+  ]);
+  assertEquals(first.scan.start_after, 2);
+  assertEquals(first.scan.start_after_id, "c-99");
+  assertEquals(salesBookingRosterIsComplete(first.scan), false);
+
+  const stored = cachedRosterFromScan(first.scan, NOW.toISOString());
+  const resumes: Array<{
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  }> = [];
+  const second = await resolveSalesBookingRoster({
+    cached: stored,
+    nowMs: NOW.getTime(),
+    live: (resume) => {
+      resumes.push(resume ?? {});
+      return Promise.resolve({
+        opportunities: pageTwo,
+        stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+        exhausted: true,
+        pages_scanned: 2,
+        total: 4,
+        reason: null,
+        start_after: 4,
+        start_after_id: "c-199",
+      });
+    },
+  });
+  assertEquals(resumes, [{ startAfter: 2, startAfterId: "c-99" }]);
+  assertEquals(second.shouldPersist, true);
+  assertEquals(second.scan.exhausted, true);
+  assertEquals(second.scan.reason, null);
+  assertEquals(second.scan.opportunities.map((row) => row.id), [
+    "opp-p1-0",
+    "opp-p1-1",
+    "opp-p2-0",
+    "opp-p2-1",
+  ]);
+  assertEquals(second.scan.pages_scanned, 4);
+  assertEquals(second.scan.start_after, null);
+  assertEquals(salesBookingRosterIsComplete(second.scan), true);
+
+  const persisted: SalesBookingCachedRoster[] = [];
+  const incompleteCache = cachedRoster({
+    opportunities: pageOne,
+    exhausted: false,
+    reason: "time budget exhausted",
+    pages_scanned: 2,
+    total: 4,
+    start_after: 2,
+    start_after_id: "c-99",
+    read_at: NOW.toISOString(),
+  });
+  const payload = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(incompleteCache),
+      persistRosterCache: (_resourceId, roster) => {
+        persisted.push(roster);
+        return Promise.resolve();
+      },
+      readOpportunities: (args) => {
+        assertEquals(args.startAfter, 2);
+        assertEquals(args.startAfterId, "c-99");
+        return Promise.resolve({
+          opportunities: pageTwo,
+          stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+          exhausted: true,
+          pages_scanned: 2,
+          total: 4,
+          reason: null,
+        });
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(payload.coverage.roster_source, "live");
+  assertEquals(payload.coverage.full_population, true);
+  assertEquals(payload.cases.map((row) => row.id), [
+    "opp-p1-0",
+    "opp-p1-1",
+    "opp-p2-0",
+    "opp-p2-1",
+  ]);
+  assertEquals(persisted.length, 1);
+  assertEquals(persisted[0].exhausted, true);
+  assertEquals(persisted[0].reason, null);
+  assertEquals(persisted[0].start_after, null);
+
+  const coldPersisted: SalesBookingCachedRoster[] = [];
+  const cold = await salesBookingRead(
+    deps({
+      persistRosterCache: (_resourceId, roster) => {
+        coldPersisted.push(roster);
+        return Promise.resolve();
+      },
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: pageOne,
+          stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+          exhausted: false,
+          pages_scanned: 2,
+          total: 4,
+          reason: "time budget exhausted",
+          start_after: 2,
+          start_after_id: "c-99",
+        }),
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(cold.coverage.full_population, false);
+  assertEquals(cold.cases.map((row) => row.id), ["opp-p1-0", "opp-p1-1"]);
+  assert(
+    cold.coverage.gaps.some((g) => g.includes("not a completed empty book")),
+  );
+  assertEquals(coldPersisted.length, 1);
+  assertEquals(coldPersisted[0].exhausted, false);
+  assertEquals(coldPersisted[0].start_after, 2);
+  assertEquals(coldPersisted[0].start_after_id, "c-99");
+});
+
+Deno.test("force_refresh on an incomplete roster resumes from its cursor and merges", async () => {
+  const cached400 = Array.from(
+    { length: 400 },
+    (_, i) => opportunity({ id: `opp-cache-${i}` }),
+  );
+  const live200 = Array.from(
+    { length: 200 },
+    (_, i) => opportunity({ id: `opp-live-${i}` }),
+  );
+  const incomplete = cachedRoster({
+    opportunities: cached400,
+    exhausted: false,
+    reason: "time budget exhausted",
+    pages_scanned: 4,
+    total: 1012,
+    start_after: 4,
+    start_after_id: "c-399",
+    read_at: NOW.toISOString(),
+  });
+  const resumes: Array<{
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  }> = [];
+  const resolved = await resolveSalesBookingRoster({
+    cached: incomplete,
+    nowMs: NOW.getTime(),
+    forceRefresh: true,
+    live: (resume) => {
+      resumes.push(resume ?? {});
+      return Promise.resolve({
+        opportunities: live200,
+        stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+        exhausted: false,
+        pages_scanned: 2,
+        total: 1012,
+        reason: "time budget exhausted",
+        start_after: 6,
+        start_after_id: "c-599",
+      });
+    },
+  });
+  assertEquals(resumes, [{ startAfter: 4, startAfterId: "c-399" }]);
+  assertEquals(resolved.shouldPersist, true);
+  assertEquals(resolved.scan.opportunities.length, 600);
+  assertEquals(resolved.scan.opportunities[0]?.id, "opp-cache-0");
+  assertEquals(resolved.scan.opportunities[399]?.id, "opp-cache-399");
+  assertEquals(resolved.scan.opportunities[400]?.id, "opp-live-0");
+  assertEquals(resolved.scan.opportunities[599]?.id, "opp-live-199");
+  assertEquals(resolved.scan.start_after, 6);
+  assertEquals(resolved.scan.start_after_id, "c-599");
+  assertEquals(resolved.scan.exhausted, false);
+  assertEquals(salesBookingRosterIsComplete(resolved.scan), false);
+
+  const persisted: SalesBookingCachedRoster[] = [];
+  const payload = await salesBookingRead(
+    deps({
+      loadRosterCache: () => Promise.resolve(incomplete),
+      persistRosterCache: (_resourceId, roster) => {
+        persisted.push(roster);
+        return Promise.resolve();
+      },
+      readOpportunities: (args) => {
+        assertEquals(args.startAfter, 4);
+        assertEquals(args.startAfterId, "c-399");
+        return Promise.resolve({
+          opportunities: live200,
+          stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+          exhausted: false,
+          pages_scanned: 2,
+          total: 1012,
+          reason: "time budget exhausted",
+          start_after: 6,
+          start_after_id: "c-599",
+        });
+      },
+    }),
+    {
+      resource: "marnin",
+      week_start: WEEK,
+      include_thread_facts: false,
+      force_refresh: true,
+    },
+  );
+  assertEquals(payload.coverage.full_population, false);
+  assertEquals(payload.cases.length, 600);
+  assertEquals(persisted.length, 1);
+  assertEquals(persisted[0].opportunities.length, 600);
+  assertEquals(persisted[0].start_after, 6);
+  assertEquals(persisted[0].start_after_id, "c-599");
+  assertEquals(persisted[0].exhausted, false);
+});
+
+Deno.test("opportunity paging resumes from the stored cursor inside the deadline", async () => {
+  const paths: string[] = [];
+  let nowMs = NOW.getTime();
+  const scan = await readSalesBookingOpportunities({
+    pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+    locationId: "loc",
+    now: () => new Date(nowMs),
+    deadlineMs: NOW.getTime() + 15_000,
+    startAfter: 2,
+    startAfterId: "c-99",
+    ghlGet: (path) => {
+      paths.push(path);
+      nowMs += 20_000;
+      return Promise.resolve({
+        opportunities: Array.from({ length: 100 }, (_, i) => ({
+          id: `opp-resume-${i}`,
+          sort: [3, `c-${i}`],
+        })),
+        meta: { total: 900, startAfter: 3, startAfterId: "c-199" },
+      });
+    },
+  });
+  assertEquals(paths.length, 1);
+  assert(
+    paths[0].includes("startAfter=2") && paths[0].includes("startAfterId=c-99"),
+  );
+  assertEquals(scan.exhausted, false);
+  assertEquals(scan.reason, "time budget exhausted");
+  assertEquals(scan.opportunities[0]?.id, "opp-resume-0");
+  assertEquals(scan.start_after, 3);
+  assertEquals(scan.start_after_id, "c-199");
 });

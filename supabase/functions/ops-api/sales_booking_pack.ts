@@ -2,7 +2,7 @@
 // SALES BOOKING PACK STORE — engine pack + captain stamp + thread facts
 // ════════════════════════════════════════════════════════════
 //
-// One table, three kinds. `sales_booking_pack_publish` stores the engine's
+// One table, four kinds. `sales_booking_pack_publish` stores the engine's
 // proposals.json / coverage.json / drafts map (kind=pack).
 // `sales_booking_stamp_write` stores the captain KEEP/CUT stamp (kind=stamp)
 // with as_of = now. Only a verified Supabase JWT whose email is on
@@ -11,6 +11,8 @@
 // email; the body `captain` field is ignored. `sales_booking_stamp_read`
 // returns the latest stamp.
 // `sales_booking_threads_refresh` re-reads GHL threads into kind=thread_facts.
+// `sales_booking_read` also persists kind=roster (opportunity enumeration
+// cache) on that same table; this module does not read or write it.
 // `sales_booking_read` merges the latest pack onto cases by opportunity id
 // (`opp:<id>` → case opportunity id) and fills drafts + stamp_state.
 //
