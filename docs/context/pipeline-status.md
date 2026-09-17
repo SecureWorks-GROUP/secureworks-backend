@@ -6,8 +6,8 @@ status, and failed-by-error-code), model-call reservations, unreceipted
 extractable evidence by attribution status, ready-job count (capped at 400),
 and `coverage` of open jobs and authorised receivables.
 
-The jarvis tool proxies this action. It is SELECT-only. Deploy `ops-api` with
-`--no-verify-jwt`.
+The jarvis tool proxies this action through `context_pipeline.ts`. The
+handler is GET-only and SELECT-only.
 
 ## SQL
 

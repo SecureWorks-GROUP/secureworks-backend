@@ -541,14 +541,7 @@ ledgered B1/B2 files must stay byte-identical to main. The nine-argument
 time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
 an `event_at`-only gate — production almost never populates `event_at`.
 The captain heartbeat is `GET ops-api?action=context_pipeline_status`
-(`context_pipeline.ts` → RPC `context_pipeline_status` /
-`context_coverage`, migration `20260917210000`). `missing_event_time` is
-both-null, not `event_at IS NULL`. `oldest_pending_event_at` is
-`min(coalesce(event_at, occurred_at))`, not `min(event_at)`. Coverage filters
-`xero_invoices.invoice_type`, not `type`. Queue counts exclude `empty` /
-`automated`. Today's extraction runs are `runs_by_status` and
-`failed_by_error`. The weekly accuracy programme is not in this packet.
-Record: `docs/context/pipeline-status.md`.
+(migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
 Context migration lanes:
 `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh` (disposable localhost
 Postgres, applies the new migrations twice). Record: `docs/context/b3-fact-custody.md`.

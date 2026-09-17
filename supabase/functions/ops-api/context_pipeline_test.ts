@@ -14,7 +14,7 @@ Deno.test("contextPipelineStatus returns the RPC payload", async () => {
     model_calls_used: 396,
   };
   const data = await contextPipelineStatus({
-    rpc: async () => ({ data: payload, error: null }),
+    rpc: () => Promise.resolve({ data: payload, error: null }),
   });
   assertEquals(data, payload);
 });
@@ -23,7 +23,8 @@ Deno.test("contextPipelineStatus refuses an unreadable status as 503", async () 
   const error = await assertRejects(
     () =>
       contextPipelineStatus({
-        rpc: async () => ({ data: null, error: { message: "rpc failed" } }),
+        rpc: () =>
+          Promise.resolve({ data: null, error: { message: "rpc failed" } }),
       }),
     ContextPipelineError,
     "Context pipeline status could not be read.",
@@ -36,7 +37,7 @@ Deno.test("contextPipelineStatus refuses an empty payload as 503", async () => {
   const error = await assertRejects(
     () =>
       contextPipelineStatus({
-        rpc: async () => ({ data: null, error: null }),
+        rpc: () => Promise.resolve({ data: null, error: null }),
       }),
     ContextPipelineError,
   );
