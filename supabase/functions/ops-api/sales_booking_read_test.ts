@@ -1660,6 +1660,7 @@ function threadFactsPackClient(
         payload: Record<string, unknown>;
       }>,
     ) => void;
+    selectError?: { message: string };
   },
 ) {
   const store = seed.map((row) => ({
@@ -1692,6 +1693,9 @@ function threadFactsPackClient(
           const keep = store.filter((row) => !filters.every((fn) => fn(row)));
           store.splice(0, store.length, ...keep);
           return { data: null, error: null };
+        }
+        if (hooks?.selectError) {
+          return { data: null, error: hooks.selectError };
         }
         let matched = store.filter((row) => filters.every((fn) => fn(row)));
         if (orderCol) {
@@ -1756,8 +1760,9 @@ function threadFactsPackClient(
         },
         maybeSingle() {
           const { data, error } = run();
+          if (error) return Promise.resolve({ data: null, error });
           const row = Array.isArray(data) ? data[0] ?? null : data;
-          return Promise.resolve({ data: row, error });
+          return Promise.resolve({ data: row, error: null });
         },
         then(
           resolve: (value: unknown) => unknown,
@@ -1887,5 +1892,103 @@ Deno.test("thread facts persist prune keeps a newer concurrent as_of and drops o
     true,
   );
   assertEquals(client.store.length, 2);
+});
+
+Deno.test("thread facts persist skips write and prune after a failed cache read", async () => {
+  const stored = {
+    "opp-1": cachedFact(),
+    "opp-2": cachedFact({ case_id: "opp-2", contact_id: "contact-2" }),
+  };
+  const client = threadFactsPackClient(
+    [{
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_THREAD_FACTS_KIND,
+      as_of: "2026-09-16T01:00:00.000Z",
+      payload: { facts: stored },
+    }],
+    { selectError: { message: "could not load thread_facts" } },
+  );
+  await createSalesBookingReadDependencies(client).persistThreadFactsCache!(
+    "marnin",
+    { "opp-1": cachedFact({ classification: "waiting_reply" }) },
+  );
+  assertEquals(client.writes, []);
+  assertEquals(client.store.length, 1);
+  assertEquals(
+    (client.store[0].payload as { facts?: Record<string, unknown> }).facts,
+    stored,
+  );
+
+  const persisted: Record<string, SalesBookingCachedThreadFact>[] = [];
+  await salesBookingRead(
+    deps({
+      loadThreadFactsCache: () => Promise.reject(new Error("cache unread")),
+      persistThreadFactsCache: (_resource, facts) => {
+        persisted.push(facts);
+        return Promise.resolve();
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, force_refresh: true },
+  );
+  assertEquals(persisted.length, 0);
+});
+
+Deno.test("thread facts persist writes a genuine empty store", async () => {
+  const next = { "opp-1": cachedFact() };
+  const client = threadFactsPackClient([]);
+  await createSalesBookingReadDependencies(client).persistThreadFactsCache!(
+    "marnin",
+    next,
+  );
+  assertEquals(client.writes, ["upsert", "delete"]);
+  assertEquals(client.store.length, 1);
+  assertEquals(
+    (client.store[0].payload as { facts?: { "opp-1"?: { classification?: string } } })
+      .facts?.["opp-1"]?.classification,
+    "follow_up_due",
+  );
+});
+
+Deno.test("thread facts persist merges a limited refresh into the loaded map and prunes older rows", async () => {
+  const existing = {
+    "opp-1": cachedFact(),
+    "opp-2": cachedFact({ case_id: "opp-2", contact_id: "contact-2" }),
+  };
+  const incoming = {
+    "opp-1": cachedFact({
+      classification: "waiting_reply",
+      last_inbound_at: "2026-09-16T01:30:00.000Z",
+      read_at: "2026-09-16T02:00:00.000Z",
+    }),
+  };
+  const client = threadFactsPackClient([
+    {
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_THREAD_FACTS_KIND,
+      as_of: "2026-09-16T00:00:00.000Z",
+      payload: { facts: existing },
+    },
+    {
+      resource: "marnin",
+      week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+      kind: SALES_BOOKING_THREAD_FACTS_KIND,
+      as_of: "2026-09-16T01:00:00.000Z",
+      payload: { facts: existing },
+    },
+  ]);
+  await createSalesBookingReadDependencies(client).persistThreadFactsCache!(
+    "marnin",
+    incoming,
+  );
+  assertEquals(client.writes, ["upsert", "delete"]);
+  assertEquals(client.store.length, 1);
+  assertEquals(client.store[0].as_of > "2026-09-16T01:00:00.000Z", true);
+  const facts = (client.store[0].payload as {
+    facts?: Record<string, { classification?: string; case_id?: string }>;
+  }).facts;
+  assertEquals(facts?.["opp-1"]?.classification, "waiting_reply");
+  assertEquals(facts?.["opp-2"]?.case_id, "opp-2");
 });
 

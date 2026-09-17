@@ -1404,11 +1404,13 @@ async function scanThreads(
     );
 
   let cachedStore: Record<string, SalesBookingCachedThreadFact> = {};
+  let cacheLoadFailed = false;
   try {
     cachedStore = deps.loadThreadFactsCache
       ? await deps.loadThreadFactsCache(resourceId)
       : {};
   } catch {
+    cacheLoadFailed = true;
     cachedStore = {};
   }
 
@@ -1508,7 +1510,9 @@ async function scanThreads(
   for (const [id, fact] of Object.entries(facts)) {
     if (fact.read_at) merged[id] = asCachedThreadFact(fact, fact.read_at);
   }
-  if (deps.persistThreadFactsCache && selected.length > 0) {
+  if (
+    deps.persistThreadFactsCache && selected.length > 0 && !cacheLoadFailed
+  ) {
     try {
       await deps.persistThreadFactsCache(resourceId, merged);
     } catch {
@@ -1995,7 +1999,10 @@ async function loadThreadFactsCacheLive(
     .order("as_of", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error || !data) return {};
+  if (error) {
+    throw new Error(error.message || "thread_facts load failed");
+  }
+  if (!data) return {};
   return parseSalesBookingThreadFactsCache(
     (data as { payload?: unknown }).payload,
   );
@@ -2021,15 +2028,21 @@ async function persistThreadFactsCacheLive(
   resourceId: string,
   facts: Record<string, SalesBookingCachedThreadFact>,
 ): Promise<void> {
-  const existing = await loadThreadFactsCacheLive(client, resourceId);
-  if (salesBookingThreadFactsMapsEqual(existing, facts)) return;
+  let existing: Record<string, SalesBookingCachedThreadFact>;
+  try {
+    existing = await loadThreadFactsCacheLive(client, resourceId);
+  } catch {
+    return;
+  }
+  const merged = { ...existing, ...facts };
+  if (salesBookingThreadFactsMapsEqual(existing, merged)) return;
   const asOf = new Date().toISOString();
   const { error } = await client.from("sales_booking_packs").upsert({
     resource: resourceId,
     week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
     kind: SALES_BOOKING_THREAD_FACTS_KIND,
     as_of: asOf,
-    payload: { facts },
+    payload: { facts: merged },
     published_by: "ops-api:thread_facts",
   }, { onConflict: "resource,week_start,kind,as_of" });
   if (error) {
