@@ -20,6 +20,7 @@ import {
   sealedSesMoneyRefusal,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
+import { authenticateReportingRequest, authorizeReportingJobContext } from './job_context_gate.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -166,32 +167,15 @@ class ReportingApiRefusalError extends Error {
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
-  // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
-  const validKey = Deno.env.get('SW_API_KEY')
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  const agentServerKeyEnv = Deno.env.get('OPS_AGENT_SERVER_KEY')
-  const agentServerKey = agentServerKeyEnv &&
-      agentServerKeyEnv !== validKey &&
-      agentServerKeyEnv !== serviceKey
-    ? agentServerKeyEnv
-    : null
-  const xApiKey = req.headers.get('x-api-key')
-  const authHeader = req.headers.get('authorization')
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-
-  let isAuthed = false
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey || (agentServerKey && xApiKey === agentServerKey))) {
-    isAuthed = true
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey || (agentServerKey && bearerToken === agentServerKey))) {
-    isAuthed = true
-  } else if (bearerToken) {
-    try {
-      const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const { data: { user }, error } = await authClient.auth.getUser(bearerToken)
-      if (!error && user) isAuthed = true
-    } catch (_) { /* invalid token */ }
-  }
-  if (!isAuthed) {
+  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const auth = await authenticateReportingRequest({
+    sb,
+    headers: req.headers,
+    sharedKey: Deno.env.get('SW_API_KEY'),
+    serviceKey: SUPABASE_SERVICE_KEY,
+    agentServerKey: Deno.env.get('OPS_AGENT_SERVER_KEY'),
+  })
+  if (!auth) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
     })
@@ -199,10 +183,6 @@ serve(async (req: Request) => {
 
   const url = new URL(req.url)
   const action = url.searchParams.get('action') || ''
-
-  // Use service role client for data queries (RLS views need it)
-  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
 
   try {
     switch (action) {
@@ -302,8 +282,16 @@ serve(async (req: Request) => {
         return json(await cashLeakDetection(sb))
       case 'performance_benchmarks':
         return json(await performanceBenchmarks(sb))
-      case 'job_context':
-        return json(await jobContext(sb, url.searchParams.get('job_id') || ''))
+      case 'job_context': {
+        const gate = await authorizeReportingJobContext({
+          sb,
+          jobId: url.searchParams.get('job_id') || '',
+          authMode: auth.authMode,
+          userId: auth.userId,
+        })
+        if ('error' in gate) return json({ error: gate.error }, gate.status)
+        return json(await jobContext(sb, gate.jobId))
+      }
       case 'portfolio_summary':
         return json(await getPortfolioSummary(sb))
       case 'job_intelligence':

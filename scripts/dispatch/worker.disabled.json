@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "endpoint_url": null,
+  "token_env": "DISPATCH_WORKER_TOKEN",
+  "interval_seconds": null,
+  "timeout_seconds": 30,
+  "trigger_body": {},
+  "run_body": {},
+  "network_effects": "disabled_until_enabled_with_token"
+}
