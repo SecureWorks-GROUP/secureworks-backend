@@ -98,9 +98,12 @@ import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
 import {
   assertGhlProviderReadCaller,
   GhlProviderReadError,
+  ghlRateLimitResponseFields,
   isDedicatedGhlReadServerKey,
   isGhlProviderReadAction,
+  isGhlRateLimitError,
   readGhlProvider,
+  throwIfGhlResponseNotOk,
 } from './provider_reads.ts'
 import { ghlCalendarEventsAction } from './calendar_events.ts'
 
@@ -185,11 +188,15 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 }
 
-function json(data: unknown, status = 200) {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS },
+    headers: { 'Content-Type': 'application/json', ...CORS, ...extraHeaders },
   })
+}
+
+function rethrowIfGhlRateLimited(error: unknown): void {
+  if (isGhlRateLimitError(error)) throw error
 }
 
 async function ghl(path: string, init: RequestInit = {}) {
@@ -206,7 +213,7 @@ async function ghl(path: string, init: RequestInit = {}) {
   })
   const text = await res.text()
   console.log(`[ghl-proxy] Response: ${res.status} (${text.length} bytes)`)
-  if (!res.ok) throw new Error(`GHL ${res.status}: ${text}`)
+  throwIfGhlResponseNotOk(res, text)
   return JSON.parse(text)
 }
 
@@ -704,9 +711,11 @@ serve(async (req: Request) => {
         }))
       } catch (error) {
         if (error instanceof GhlProviderReadError) {
+          const extra: Record<string, string> = {}
+          if (error.retryAfter) extra['Retry-After'] = error.retryAfter
           return json({ success: false, source: 'ghl_provider', code: error.code,
             error: error.message, provider_status: error.providerStatus,
-            retry_after: error.retryAfter, complete: false }, error.status)
+            retry_after: error.retryAfter, complete: false }, error.status, extra)
         }
         return json({ success: false, source: 'ghl_provider', code: 'provider_read_failed',
           error: 'GHL provider read failed', complete: false }, 502)
@@ -773,6 +782,7 @@ serve(async (req: Request) => {
           }
         })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] get_profile failed:', e)
         return json({ error: (e as Error).message }, 500)
       }
@@ -889,6 +899,7 @@ serve(async (req: Request) => {
           }).map(mapContact)
         }
       } catch (ghlErr) {
+        rethrowIfGhlRateLimited(ghlErr)
         console.error('[ghl-proxy] GHL contact search failed, falling through to Supabase:', (ghlErr as Error).message)
         // contacts stays empty, Supabase fallback below will handle it
       }
@@ -1080,6 +1091,7 @@ serve(async (req: Request) => {
           const result = await ghl(searchUrl, { signal: AbortSignal.timeout(10000) })
           contactsRaw = result.contacts || []
         } catch (e) {
+          rethrowIfGhlRateLimited(e)
           if (isTimeoutError(e)) {
             console.log('[ghl-proxy] lead_search contacts search timed out')
             return json({ error: 'ghl_timeout', code: 'ghl_timeout' }, 504)
@@ -1140,6 +1152,7 @@ serve(async (req: Request) => {
             })
             lookups[c.id] = { opps, failed: false }
           } catch (e) {
+            rethrowIfGhlRateLimited(e)
             console.log('[ghl-proxy] lead_search per-contact lookup failed for', c.id, isTimeoutError(e) ? '(timeout)' : (e as Error).message)
             lookups[c.id] = { opps: [], failed: true }
           }
@@ -1201,6 +1214,7 @@ serve(async (req: Request) => {
       try {
         paged = await fetchOpportunityPages({ locationId: GHL_LOCATION_ID, pipelineId, limit: 100, maxPages: 2, perPageTimeoutMs: 10000 })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         if (isTimeoutError(e)) {
           console.log('[ghl-proxy] lead_search browse fetch timed out')
           return json({ error: 'ghl_timeout', code: 'ghl_timeout' }, 504)
@@ -1699,6 +1713,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] move_stage: ${opportunityId} → ${status || stageId} (${targetStageId})`)
         return json({ success: true, stageId: targetStageId })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] move_stage failed:', e)
         return json({ success: false, error: (e as Error).message })
       }
@@ -1772,6 +1787,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] Custom fields updated for ${opportunityId}:`, Object.keys(fields))
         return json({ success: true })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] Custom field update failed:', e)
         return json({ success: false, error: (e as Error).message })
       }
@@ -1798,6 +1814,7 @@ serve(async (req: Request) => {
         }
         return json({ success: true, tags: existing })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] add_contact_tag failed:', e)
         return json({ error: (e as Error).message }, 500)
       }
@@ -1820,6 +1837,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] Tag removed from ${contactId}: ${tag}`)
         return json({ success: true, tags: filtered })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] remove_contact_tag failed:', e)
         return json({ error: (e as Error).message }, 500)
       }
@@ -1843,6 +1861,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] Contact custom fields updated for ${contactId}:`, Object.keys(customFields))
         return json({ success: true })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] update_contact_custom_fields failed:', e)
         return json({ error: (e as Error).message }, 500)
       }
@@ -2509,6 +2528,7 @@ serve(async (req: Request) => {
           contactId = createRes.contact?.id || null
           console.log('[ghl-proxy] Created new GHL contact:', contactId)
         } catch (e) {
+          rethrowIfGhlRateLimited(e)
           const errMsg = (e as Error).message || ''
           console.log('[ghl-proxy] Failed to create GHL contact:', errMsg)
 
@@ -2552,6 +2572,7 @@ serve(async (req: Request) => {
           opportunityId = oppRes.opportunity?.id || null
           console.log('[ghl-proxy] Created GHL opportunity:', opportunityId)
         } catch (e) {
+          rethrowIfGhlRateLimited(e)
           console.log('[ghl-proxy] Failed to create GHL opportunity:', e)
           return json({ contactId, opportunityId: null, contactExisted, error: 'Opportunity creation failed: ' + (e as Error).message }, 500)
         }
@@ -3956,6 +3977,7 @@ serve(async (req: Request) => {
             })
             contactId = createRes.contact?.id || null
           } catch (e) {
+            rethrowIfGhlRateLimited(e)
             const errMsg = (e as Error).message || ''
             const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
             if (dupMatch && dupMatch[1]) contactId = dupMatch[1]
@@ -4149,6 +4171,7 @@ serve(async (req: Request) => {
 
         return json({ success: true, messageId: result.messageId || result.id })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] send_sms failed:', e)
         return json({ success: false, error: (e as Error).message })
       }
@@ -4187,6 +4210,7 @@ serve(async (req: Request) => {
 
         return json({ success: true, messageId: result.messageId || result.id })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] send_email failed:', e)
         return json({ success: false, error: (e as Error).message })
       }
@@ -4217,6 +4241,7 @@ serve(async (req: Request) => {
 
         return json({ success: true, noteId: result.id || null })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] add_note failed:', e)
         return json({ success: false, error: (e as Error).message })
       }
@@ -4243,6 +4268,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] Call initiated to ${toNumber} for contact ${contactId}`)
         return json({ success: true, callId: result.messageId || result.id || null })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] initiate_call failed:', e)
         // TODO: Try alternative endpoint POST /phone/calls if conversations/messages doesn't support Call type
         // TODO: For true bridge calling, may need GHL's Twilio integration endpoint
@@ -4259,6 +4285,7 @@ serve(async (req: Request) => {
         const locData = await ghl(`/locations/${GHL_LOCATION_ID}`)
         return json({ customValues: data, location: locData })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         return json({ error: (e as Error).message })
       }
     }
@@ -4277,6 +4304,7 @@ serve(async (req: Request) => {
           conversations = searchResult.conversations || []
           console.log(`[ghl-proxy] conversation search returned ${conversations.length} conversations`)
         } catch (e) {
+          rethrowIfGhlRateLimited(e)
           console.log(`[ghl-proxy] conversation search failed: ${(e as Error).message}`)
         }
 
@@ -4287,6 +4315,7 @@ serve(async (req: Request) => {
             conversations = directResult.conversations || (Array.isArray(directResult) ? directResult : [])
             console.log(`[ghl-proxy] direct conversations endpoint returned ${conversations.length}`)
           } catch (e) {
+            rethrowIfGhlRateLimited(e)
             console.log(`[ghl-proxy] direct conversations also failed: ${(e as Error).message}`)
           }
         }
@@ -4345,6 +4374,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] Loaded ${messages.length} messages for contact ${contactId}`)
         return json({ messages, contactId, conversationId })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] get_conversation failed:', e)
         return json({ error: (e as Error).message, messages: [] }, 500)
       }
@@ -4382,6 +4412,7 @@ serve(async (req: Request) => {
           _raw_keys: recording_url ? undefined : Object.keys(data || {}),
         })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         return json({ error: (e as Error).message, messageId }, 500)
       }
     }
@@ -4401,13 +4432,16 @@ serve(async (req: Request) => {
           const searchResult = await ghl(`/conversations/search?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
           conversations = searchResult.conversations || []
         } catch (e) {
+          rethrowIfGhlRateLimited(e)
           console.log(`[ghl-proxy] sync: conversation search failed: ${(e as Error).message}`)
         }
         if (conversations.length === 0) {
           try {
             const directResult = await ghl(`/conversations?contactId=${contactId}&locationId=${GHL_LOCATION_ID}`)
             conversations = directResult.conversations || (Array.isArray(directResult) ? directResult : [])
-          } catch (e) { /* ignore */ }
+          } catch (e) {
+            rethrowIfGhlRateLimited(e)
+          }
         }
         if (conversations.length === 0) {
           return json({ synced: false, contactId, message_count: 0, _note: 'No conversations found' })
@@ -4469,6 +4503,7 @@ serve(async (req: Request) => {
 
         return json({ synced: true, contactId, job_id: jobId, message_count: messages.length, call_count: callCount, _transcript_note: callCount > 0 ? 'GHL does not expose call transcripts via API. Call entries contain metadata only (duration, status, direction). For actual transcript ingestion, a separate recording/transcription service would be needed.' : undefined })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] sync_conversation failed:', e)
         return json({ error: (e as Error).message, synced: false }, 500)
       }
@@ -4506,6 +4541,7 @@ serve(async (req: Request) => {
         console.log(`[ghl-proxy] Loaded ${messages.length} outbound messages for contact ${contactId}`)
         return json({ messages, contactId, conversationId })
       } catch (e) {
+        rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] get_my_messages failed:', e)
         return json({ error: (e as Error).message, messages: [] }, 500)
       }
@@ -4634,6 +4670,10 @@ serve(async (req: Request) => {
 
   } catch (err) {
     console.error('[ghl-proxy] ERROR:', err)
+    if (isGhlRateLimitError(err)) {
+      const parts = ghlRateLimitResponseFields(err)
+      return json(parts.body, parts.status, parts.headers)
+    }
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
 })
