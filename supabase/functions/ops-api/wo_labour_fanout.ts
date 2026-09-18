@@ -34,7 +34,7 @@ export type WoLabourProblem = {
 // Client/sales (ACCREC) invoice routing is deliberately untouched.
 export const TRADE_INVOICE_XERO_ACCOUNT_CODE = "306";
 
-// Where the withheld 12% super line lands. 2026-09-10 (Alyx audit): it was a
+// Where the worker-withhold minus line lands. 2026-09-10 (Alyx audit): it was a
 // negative line on 306, so Xero showed labour net of super and nothing showed
 // what is owed to the funds. Point this at the Superannuation Payable liability
 // account once the bookkeeper names it (env TRADE_SUPER_XERO_ACCOUNT_CODE);

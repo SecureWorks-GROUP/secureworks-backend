@@ -11,6 +11,12 @@
 export const TRADE_INVOICE_GST_RATE = 0.10;
 export const TRADE_INVOICE_SUPER_RATE = 0.12;
 export const TRADE_INVOICE_SUPER_EFFECTIVE_FROM = "2025-07-01";
+// Captain 2026-09-18: payable split only. Worker cash withholds half the SG
+// rate; the company contributes the other half. The two rates must sum to
+// TRADE_INVOICE_SUPER_RATE. Bookkeeper / fund remittance stays the full SG
+// figure on super_amount.
+export const TRADE_INVOICE_WORKER_WITHHOLD_RATE = 0.06;
+export const TRADE_INVOICE_COMPANY_CONTRIBUTION_RATE = 0.06;
 
 export type TradeInvoiceMoneyErrorCode =
   | "GST_CHOICE_INVALID"
@@ -38,10 +44,13 @@ export type TradeInvoiceMoney = {
   super_rate: number;
   gross_earned: number;
   super_amount: number;
+  worker_withhold: number;
+  company_contribution: number;
   net_pay: number;
   gst_amount: number;
   trade_payable: number;
   total_inc: number;
+  company_total_out: number;
 };
 
 export type TradeInvoiceXeroLine = Record<string, unknown> & {
@@ -69,6 +78,85 @@ const round2 = (value: number): number => Math.round(value * 100) / 100;
 const toCents = (value: number): number => Math.round(value * 100);
 const closeMoney = (left: number, right: number): boolean =>
   Math.abs(left - right) <= 0.01;
+
+function assertPayableSplitRates(): void {
+  const sum = TRADE_INVOICE_WORKER_WITHHOLD_RATE +
+    TRADE_INVOICE_COMPANY_CONTRIBUTION_RATE;
+  if (Math.abs(sum - TRADE_INVOICE_SUPER_RATE) > 1e-12) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Worker withhold and company contribution rates must sum to the Superannuation Guarantee rate",
+    );
+  }
+}
+
+/** Current payable split (Captain 2026-09-18): 6% withheld from cash, 6% company. */
+export function tradeInvoiceCurrentPayableSplit(
+  grossEarned: number,
+  superRate: number,
+): {
+  super_amount: number;
+  worker_withhold: number;
+  company_contribution: number;
+  net_pay: number;
+  company_total_out: number;
+} {
+  assertPayableSplitRates();
+  const gross = round2(grossEarned);
+  const superAmount = round2(gross * superRate);
+  const workerWithhold = round2(gross * TRADE_INVOICE_WORKER_WITHHOLD_RATE);
+  const companyContribution = round2(superAmount - workerWithhold);
+  if (workerWithhold < 0 || companyContribution < 0) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Trade invoice super payable split does not reconcile",
+    );
+  }
+  const netPay = round2(gross - workerWithhold);
+  return {
+    super_amount: superAmount,
+    worker_withhold: workerWithhold,
+    company_contribution: companyContribution,
+    net_pay: netPay,
+    company_total_out: round2(netPay + superAmount),
+  };
+}
+
+function derivedPayableFromStored(
+  gross: number,
+  superAmount: number,
+  netPay: number,
+): {
+  worker_withhold: number;
+  company_contribution: number;
+  company_total_out: number;
+} {
+  const workerWithhold = round2(gross - netPay);
+  const companyContribution = round2(superAmount - workerWithhold);
+  if (workerWithhold < 0 || companyContribution < 0) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Trade invoice super/GST split does not reconcile and cannot be pushed to Xero",
+    );
+  }
+  return {
+    worker_withhold: workerWithhold,
+    company_contribution: companyContribution,
+    company_total_out: round2(netPay + superAmount),
+  };
+}
+
+function netPayMatchesKnownPayableSplit(
+  gross: number,
+  superAmount: number,
+  netPay: number,
+  superRate: number,
+): boolean {
+  const current = tradeInvoiceCurrentPayableSplit(gross, superRate);
+  const legacyFullCarveOut = round2(gross - superAmount);
+  return closeMoney(netPay, current.net_pay) ||
+    closeMoney(netPay, legacyFullCarveOut);
+}
 
 function validDateOnly(raw: unknown): string | null {
   const text = String(raw ?? "").slice(0, 10);
@@ -138,21 +226,24 @@ export function calculateTradeInvoiceMoney(input: {
   }
 
   const gross = round2(grossEarned);
-  const superAmount = round2(gross * superRate);
-  const netPay = round2(gross - superAmount);
+  const split = tradeInvoiceCurrentPayableSplit(gross, superRate);
   // GST remains 10% of the original contractor supply (gross earned). Super is
-  // a split of that amount, not an extra taxable amount.
+  // a split of that amount, not an extra taxable amount. total_inc stays the
+  // GST-inclusive supply face (gross + GST), not company total out.
   const gstAmount = input.gstOn ? round2(gross * TRADE_INVOICE_GST_RATE) : 0;
 
   return {
     gst_on: input.gstOn,
     super_rate: superRate,
     gross_earned: gross,
-    super_amount: superAmount,
-    net_pay: netPay,
+    super_amount: split.super_amount,
+    worker_withhold: split.worker_withhold,
+    company_contribution: split.company_contribution,
+    net_pay: split.net_pay,
     gst_amount: gstAmount,
-    trade_payable: round2(netPay + gstAmount),
+    trade_payable: round2(split.net_pay + gstAmount),
     total_inc: round2(gross + gstAmount),
+    company_total_out: split.company_total_out,
   };
 }
 
@@ -214,7 +305,7 @@ export function validatePersistedTradeInvoiceMoney(
     Math.abs(superRate - statutoryRate) > 0.000001 ||
     !closeMoney(gross, subtotalEx) ||
     !closeMoney(superAmount, round2(gross * superRate)) ||
-    !closeMoney(netPay, round2(gross - superAmount)) ||
+    !netPayMatchesKnownPayableSplit(gross, superAmount, netPay, superRate) ||
     !closeMoney(
       gstAmount,
       record.gst_on ? round2(gross * TRADE_INVOICE_GST_RATE) : 0,
@@ -227,15 +318,20 @@ export function validatePersistedTradeInvoiceMoney(
     );
   }
 
+  const derived = derivedPayableFromStored(gross, superAmount, netPay);
+
   return {
     gst_on: record.gst_on,
     super_rate: superRate,
     gross_earned: round2(gross),
     super_amount: round2(superAmount),
+    worker_withhold: derived.worker_withhold,
+    company_contribution: derived.company_contribution,
     net_pay: round2(netPay),
     gst_amount: round2(gstAmount),
     trade_payable: round2(netPay + gstAmount),
     total_inc: round2(totalInc),
+    company_total_out: derived.company_total_out,
   };
 }
 
@@ -386,11 +482,17 @@ export function formatTradeInvoiceSuperWithheldDescription(
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
   return [
-    `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
-    `Submitted total ${moneyLabel(money.gross_earned)}. Super ${
+    `Superannuation Guarantee ${
+      rateLabel(money.super_rate)
+    } of submitted total`,
+    `Submitted total ${moneyLabel(money.gross_earned)}. Super remittance ${
       moneyLabel(money.super_amount)
+    }. Worker withhold ${
+      moneyLabel(money.worker_withhold)
+    }. Company contribution ${
+      moneyLabel(money.company_contribution)
     }. Amount payable ${moneyLabel(money.net_pay)}.`,
-    `Paid to the super fund separately - not part of the amount payable to ${name}`,
+    `Paid to the super fund separately - this line withholds the worker share only; the company pays the other half. Not part of the amount payable to ${name}`,
   ].join("\n");
 }
 
@@ -456,29 +558,43 @@ export function buildTradeInvoiceAuditModel(
   if (!closeMoney(submittedTotal, money.gross_earned)) {
     throw new TradeInvoiceMoneyError(
       "XERO_GROSS_MISMATCH",
-      `Xero gross lines ${moneyLabel(submittedTotal)} do not match gross earned ${
-        moneyLabel(money.gross_earned)
-      }`,
+      `Xero gross lines ${
+        moneyLabel(submittedTotal)
+      } do not match gross earned ${moneyLabel(money.gross_earned)}`,
     );
   }
-  if (!closeMoney(money.super_amount, round2(money.gross_earned * money.super_rate))) {
+  if (
+    !closeMoney(
+      money.super_amount,
+      round2(money.gross_earned * money.super_rate),
+    )
+  ) {
     throw new TradeInvoiceMoneyError(
       "MONEY_SPLIT_INVALID",
       "Super must be 12% of the submitted total, calculated once",
     );
   }
-  if (!closeMoney(money.net_pay, round2(money.gross_earned - money.super_amount))) {
+  if (
+    !closeMoney(
+      money.net_pay,
+      round2(money.gross_earned - money.worker_withhold),
+    ) ||
+    !closeMoney(
+      round2(money.worker_withhold + money.company_contribution),
+      money.super_amount,
+    )
+  ) {
     throw new TradeInvoiceMoneyError(
       "MONEY_SPLIT_INVALID",
-      "Amount payable must equal submitted total minus super",
+      "Amount payable must equal submitted total minus the worker super withhold",
     );
   }
 
   const superLine: TradeInvoiceAuditLine = {
     description: formatTradeInvoiceSuperWithheldDescription(money, tradeName),
     quantity: 1,
-    unit_amount: -round2(money.super_amount),
-    line_total: -round2(money.super_amount),
+    unit_amount: -round2(money.worker_withhold),
+    line_total: -round2(money.worker_withhold),
     kind: "super",
   };
 
@@ -510,10 +626,12 @@ export function splitTradeInvoiceXeroLines(
     options.tradeName,
   );
   const taxType = money.gst_on ? "INPUT" : "NONE";
-  // Labour stays at the submitted amounts. Super is one 12%-of-total MINUS
-  // so the bill total is the cash payable to the trade (OSCO payout). Super
-  // is paid to the fund separately and is not a taxable supply, so it is
-  // always TaxType NONE. Never scale or rewrite unit rates per line.
+  // Labour stays at the submitted amounts. The minus line is the worker
+  // withhold only, so the bill total is cash payable to the trade. Super
+  // remittance (super_amount, still 12%) is paid to the fund separately and
+  // is not a taxable supply, so the withhold line is always TaxType NONE.
+  // Company contribution is company cost, not a Xero bill line. Never scale
+  // or rewrite unit rates per line.
   const labourLines = grossLines.map((line, index) => {
     const submitted = model.submitted_lines[index];
     const { LineAmount: _lineAmount, ...rest } = line;
@@ -566,13 +684,16 @@ export function assertReturnedTradeInvoiceXeroSplit(
 
   const lines = value as TradeInvoiceXeroLine[];
   const superLines = lines.filter((line) => isTradeInvoiceSuperXeroLine(line));
-  const labourLines = lines.filter((line) => !isTradeInvoiceSuperXeroLine(line));
+  const labourLines = lines.filter((line) =>
+    !isTradeInvoiceSuperXeroLine(line)
+  );
   const expectedLabourTaxType = money.gst_on ? "INPUT" : "NONE";
   // 2026-09-08: Xero (AU orgs) stores a TaxType of NONE as BASEXCLUDED and
   // returns it that way. Reading it back as a mismatch made EVERY push since the
   // 27 Aug super split fail after the bill was created (422, no PDF attached,
   // ops retry failed the same way). Compare tax types by meaning, not spelling.
-  const taxTypeOf = (line: TradeInvoiceXeroLine) => normaliseXeroTaxType(line.TaxType);
+  const taxTypeOf = (line: TradeInvoiceXeroLine) =>
+    normaliseXeroTaxType(line.TaxType);
   const totalCents = lines.reduce(
     (sum, line) => sum + lineGrossCents(line),
     0,
@@ -585,14 +706,14 @@ export function assertReturnedTradeInvoiceXeroSplit(
     (sum, line) => sum + lineGrossCents(line),
     0,
   );
-  const expectedSuperCents = -toCents(money.super_amount);
+  const expectedWithholdCents = -toCents(money.worker_withhold);
   const expectedNetCents = toCents(money.net_pay);
   const expectedGrossCents = toCents(money.gross_earned);
 
   if (
     superLines.length !== 1 ||
     Math.abs(labourCents - expectedGrossCents) > 1 ||
-    Math.abs(superCents - expectedSuperCents) > 1 ||
+    Math.abs(superCents - expectedWithholdCents) > 1 ||
     Math.abs(totalCents - expectedNetCents) > 1 ||
     superLines.some((line) => taxTypeOf(line) !== "NONE") ||
     labourLines.some((line) => taxTypeOf(line) !== expectedLabourTaxType)

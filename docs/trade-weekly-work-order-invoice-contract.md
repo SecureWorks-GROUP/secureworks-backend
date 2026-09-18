@@ -58,11 +58,9 @@ to_be_paid_ex = subtotal_ex
 ```
 
 The existing super/GST calculation still operates on `subtotal_ex`, and Xero
-keeps negative lines at their exact stored amount. Labour stays at those
-submitted amounts; super is one 12%-of-total minus line so the bill total
-equals cash payable to the trade (TO BE PAID less super). Super is paid to
-the fund separately. The audit PDF shows the same three numbers: submitted
-total, super 12%, amount payable.
+keeps negative lines at their exact stored amount. Payable split, Xero minus
+line, and audit PDF numbers are owned by
+`docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
 ## Trade app API contract
 
