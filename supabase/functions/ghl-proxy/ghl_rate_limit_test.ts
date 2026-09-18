@@ -7,8 +7,8 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ghlNonOkError,
-  ghlRateLimitResponseFields,
   GhlProviderReadError,
+  ghlRateLimitResponseFields,
   isGhlRateLimitError,
   rethrowIfGhlRateLimited,
   throwIfGhlResponseNotOk,
@@ -72,7 +72,11 @@ Deno.test("GHL 404 stays a bare Error with the same message ghl() always threw",
   const err = assertThrows(
     () =>
       throwIfGhlResponseNotOk(
-        { ok: false, status: 404, headers: headers({ "Retry-After": "ignored" }) },
+        {
+          ok: false,
+          status: 404,
+          headers: headers({ "Retry-After": "ignored" }),
+        },
         '{"message":"Contact not found"}',
       ),
     Error,

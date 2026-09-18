@@ -615,12 +615,13 @@ export function leadOppNameForContact(
 // The GHL client is injected so this is unit-testable without network:
 //   - GET /contacts/{id} 404 / not-found → { status:404, code:'contact_not_found' }
 //     and NO opportunity creation is attempted.
+//   - GHL 429 is rethrown (not flattened to 502/500) so the proxy can emit HTTP 429.
 //   - other fetch failure → { status:502, code:'contact_fetch_failed' }.
 //   - skipOpportunity → contact is still verified, but NO opportunity is created:
 //     { status:200, body:{ contactId, opportunityId:null, contactExisted:true } }.
 //   - success → { status:200, body:{ contactId, opportunityId, contactExisted:true } }
 //     with oppName built from the FETCHED contact identity.
-//   - opportunity creation failure → { status:500 } echoing the resolved contactId.
+//   - other opportunity creation failure → { status:500 } echoing the resolved contactId.
 export async function createOpportunityForExistingContact(args: {
   contactId: string
   toolType: unknown

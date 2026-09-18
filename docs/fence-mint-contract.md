@@ -88,7 +88,7 @@ The response also exposes a `Server-Timing` header, `Timing-Allow-Origin: *`, an
 
 ## Typed failures
 
-All failures return `{ "error": "...", "code": "...", "details": ... }` and no quote/communication side effect.
+Typed mint failures return `{ "error": "...", "code": "...", "details": ... }` and no quote/communication side effect. A GHL 429 is a proxy-wide rate-limit response, not a mint code: HTTP 429 with `Retry-After` when GHL sent one, and body `{ error, retry_after? }` (no `code`). The HTTP 429 shape is owned by the GHL 429 contract on `ghl-proxy` in `docs/project-knowledge/edge-functions.md`.
 
 | HTTP | Code | Entry behaviour |
 |---|---|---|
@@ -104,8 +104,9 @@ All failures return `{ "error": "...", "code": "...", "details": ... }` and no q
 | 409 | `stale_existing_job_evidence` | Refresh the client's job list and ask again before a deliberate repeat. |
 | 409 | `duplicate_stamped_opportunities` | Two GHL opportunities carry the same mint stamp. Operator reconciliation, never an automatic replacement create. |
 | 413 | `mint_payload_too_large` | The request exceeded the 32 KB cap. Shrink the body; the mint takes identity fields only. |
+| 429 | (not a mint code) | GHL rate-limited the request. Honour `Retry-After` and retry the same request ID. Do not treat this as `fence_mint_failed`. |
 | 500 | `mint_request_not_found`, `mint_owner_not_found`, `mint_owner_chain_corrupt`, `canonical_job_missing`, `bound_job_missing` | Ledger integrity failure, not a caller conflict. Escalate rather than loop. |
-| 500/503 | `fence_mint_failed` | Untyped command failure. Retain the local draft and retry the same request ID. |
+| 500/503 | `fence_mint_failed` | Untyped command failure (not a GHL 429). Retain the local draft and retry the same request ID. |
 | 502 | `ghl_contact_missing`, `ghl_opportunity_missing`, `ghl_request_failed` | GHL was unreachable or returned an unusable identity. Retain the local draft and retry the same request ID. |
 | 503 | `mint_reconciliation_unproven`, `mint_contact_scope_unsupported` | The contact-scoped stamp scan could not be completed, so a create was refused. Retry the same request ID. |
 | 503 | `mint_persistence_failed`, `mint_persistence_invalid`, `mint_completion_incomplete`, `canonical_mapping_incomplete` | Retain the local draft and retry the same request ID. No GHL create occurs before reservation. |
@@ -132,7 +133,7 @@ A completed mint keeps its `opportunityId` reserved in the ledger. A later `requ
 5. `complete_fence_job_mint` atomically inserts/reuses the job, assigns `SWF-` number, binds contact/opportunity, completes the ledger, and logs a non-communication job event.
 6. Existing `(org, type, opportunity)` mapping uniqueness and existing job-number uniqueness are database constraints.
 
-A caught failure releases the execution lease for immediate same-key retry. A hard process loss leaves a 90-second lease so a concurrent worker cannot double-create; a later same-key retry takes over and reconciles the GHL stamp.
+A recorded caught failure releases the execution lease for immediate same-key retry. A GHL 429 is rethrown unrecorded and does not release the lease; honour Retry-After and retry the same request ID. A hard process loss leaves a 90-second lease so a concurrent worker cannot double-create; a later same-key retry takes over and reconciles the GHL stamp.
 
 ## Local draft and entry-funnel integration
 
