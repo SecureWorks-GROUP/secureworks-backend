@@ -38,6 +38,10 @@ export function isGhlRateLimitError(
   return error instanceof GhlProviderReadError && error.status === 429;
 }
 
+export function rethrowIfGhlRateLimited(error: unknown): void {
+  if (isGhlRateLimitError(error)) throw error;
+}
+
 /** Same message shape `ghl()` has always thrown; only 429 becomes typed. */
 export function ghlNonOkError(
   status: number,

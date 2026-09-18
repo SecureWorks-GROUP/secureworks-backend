@@ -103,6 +103,7 @@ import {
   isGhlProviderReadAction,
   isGhlRateLimitError,
   readGhlProvider,
+  rethrowIfGhlRateLimited,
   throwIfGhlResponseNotOk,
 } from './provider_reads.ts'
 import { ghlCalendarEventsAction } from './calendar_events.ts'
@@ -193,10 +194,6 @@ function json(data: unknown, status = 200, extraHeaders: Record<string, string> 
     status,
     headers: { 'Content-Type': 'application/json', ...CORS, ...extraHeaders },
   })
-}
-
-function rethrowIfGhlRateLimited(error: unknown): void {
-  if (isGhlRateLimitError(error)) throw error
 }
 
 async function ghl(path: string, init: RequestInit = {}) {
@@ -2351,6 +2348,7 @@ serve(async (req: Request) => {
           },
         })
       } catch (error) {
+        rethrowIfGhlRateLimited(error)
         const typed = error instanceof FenceMintError
           ? error
           : new FenceMintError(500, 'fence_mint_failed', (error as Error)?.message || 'Fence mint failed')

@@ -1,3 +1,5 @@
+import { rethrowIfGhlRateLimited } from './provider_reads.ts'
+
 export type AuthMode = 'service_role' | 'shared_key' | 'user_jwt'
 
 export type AuthDecision =
@@ -634,6 +636,7 @@ export async function createOpportunityForExistingContact(args: {
     const data = await ghl(`/contacts/${contactId}`)
     fetchedContact = data?.contact || data
   } catch (e) {
+    rethrowIfGhlRateLimited(e)
     const msg = (e as Error)?.message || ''
     if (/^GHL 404/.test(msg) || (/^GHL 4\d\d/.test(msg) && /not found/i.test(msg))) {
       return { status: 404, body: { error: 'Contact not found', code: 'contact_not_found' } }
@@ -673,6 +676,7 @@ export async function createOpportunityForExistingContact(args: {
     const opportunityId = oppRes?.opportunity?.id || null
     return { status: 200, body: { contactId: fetchedContact.id, opportunityId, contactExisted: true } }
   } catch (e) {
+    rethrowIfGhlRateLimited(e)
     return {
       status: 500,
       body: {

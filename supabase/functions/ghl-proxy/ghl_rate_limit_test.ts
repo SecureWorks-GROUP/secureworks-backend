@@ -10,6 +10,7 @@ import {
   ghlRateLimitResponseFields,
   GhlProviderReadError,
   isGhlRateLimitError,
+  rethrowIfGhlRateLimited,
   throwIfGhlResponseNotOk,
 } from "./provider_reads.ts";
 
@@ -97,6 +98,26 @@ Deno.test("GHL 500 stays a bare Error with the same message ghl() always threw",
   assertEquals(err instanceof GhlProviderReadError, false);
   assertEquals(isGhlRateLimitError(err), false);
   assertEquals(err.message, "GHL 500: upstream boom");
+});
+
+Deno.test("rethrowIfGhlRateLimited rethrows only a typed GHL 429", () => {
+  const rateLimited = new GhlProviderReadError(
+    "ghl_rate_limited",
+    "GHL 429: slow down",
+    429,
+    429,
+    "30",
+  );
+  const thrown = assertThrows(
+    () => rethrowIfGhlRateLimited(rateLimited),
+    GhlProviderReadError,
+  );
+  assertEquals(thrown, rateLimited);
+
+  rethrowIfGhlRateLimited(new Error("GHL 500: upstream boom"));
+  rethrowIfGhlRateLimited(
+    new GhlProviderReadError("provider_read_failed", "other", 502),
+  );
 });
 
 Deno.test("an ok GHL response is not thrown", () => {

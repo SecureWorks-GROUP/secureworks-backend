@@ -4,7 +4,7 @@
 // index.ts feeds with mapped opps + Supabase cross-ref maps, plus the
 // contactId-branch opportunity naming for create_contact_and_opportunity.
 
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildLeadSearchRows,
   createOpportunityForExistingContact,
@@ -17,6 +17,7 @@ import {
   type LeadLookup,
   type LeadMappedOpp,
 } from "./hardening_helpers.ts";
+import { GhlProviderReadError } from "./provider_reads.ts";
 
 const FENCING = "I9t8njpuR0Dm7B2NDcvI";
 const PATIO = "OGZLpPPVWVarN94HL6af";
@@ -285,6 +286,64 @@ Deno.test("createOpportunityForExistingContact: contact fetch 404 → contact_no
   // only the contact fetch was attempted — no opportunity creation
   assertEquals(calls.length, 1);
   assertEquals(calls[0].path, "/contacts/missing");
+});
+
+Deno.test("createOpportunityForExistingContact: contact fetch 429 is rethrown, not flattened to 502", async () => {
+  const rateLimited = new GhlProviderReadError(
+    "ghl_rate_limited",
+    "GHL 429: slow down",
+    429,
+    429,
+    "12",
+  );
+  const { ghl, calls } = makeGhlMock({
+    contact: () => {
+      throw rateLimited;
+    },
+  });
+
+  const thrown = await assertRejects(
+    () =>
+      createOpportunityForExistingContact({
+        contactId: "ct-429",
+        toolType: "patio",
+        locationId: "loc-1",
+        pipelines: PIPELINES,
+        ghl,
+      }),
+    GhlProviderReadError,
+  );
+  assertEquals(thrown, rateLimited);
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("createOpportunityForExistingContact: opportunity create 429 is rethrown, not flattened to 500", async () => {
+  const rateLimited = new GhlProviderReadError(
+    "ghl_rate_limited",
+    "GHL 429: slow down",
+    429,
+    429,
+    "8",
+  );
+  const { ghl } = makeGhlMock({
+    contact: () => ({ contact: { id: "ct-429-opp", firstName: "Sam", lastName: "Lee" } }),
+    opp: () => {
+      throw rateLimited;
+    },
+  });
+
+  const thrown = await assertRejects(
+    () =>
+      createOpportunityForExistingContact({
+        contactId: "ct-429-opp",
+        toolType: "fencing",
+        locationId: "loc-1",
+        pipelines: PIPELINES,
+        ghl,
+      }),
+    GhlProviderReadError,
+  );
+  assertEquals(thrown, rateLimited);
 });
 
 Deno.test("createOpportunityForExistingContact: non-404 fetch failure → contact_fetch_failed 502, no opp attempted", async () => {

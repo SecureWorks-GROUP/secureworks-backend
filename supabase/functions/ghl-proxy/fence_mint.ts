@@ -4,6 +4,7 @@ import {
   normalizeIdentity,
   stableJsonStringify,
 } from "./hardening_helpers.ts";
+import { rethrowIfGhlRateLimited } from "./provider_reads.ts";
 
 export const FENCE_MINT_ROLES = new Set([
   "admin",
@@ -699,6 +700,7 @@ export async function executeFenceJobMint(args: {
       timingMs,
     });
   } catch (error) {
+    rethrowIfGhlRateLimited(error);
     const errorMessage = (error as Error)?.message || "Fence mint failed";
     const looksLikeGhlFailure =
       /^(GHL\s|fetch failed|network)|timeout|aborted|connection reset/i.test(
