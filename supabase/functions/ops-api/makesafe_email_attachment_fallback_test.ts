@@ -15,7 +15,10 @@
 //
 // Run: deno test --no-check --allow-env --allow-net=127.0.0.1 \
 //   supabase/functions/ops-api/makesafe_email_attachment_fallback_test.ts
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   senderMatchesWatchedFloor,
   WATCHED_SENDER_FLOOR,
@@ -27,15 +30,24 @@ import {
 } from "./index.ts";
 
 // ── Watched-sender floor (item 11b) ───────────────────────────────────────────
-Deno.test("watched-sender floor matches Prime's notification channel, not lookalikes", () => {
+Deno.test("watched-sender floor matches observed builder channels, not lookalikes", () => {
   assert(senderMatchesWatchedFloor("noreply@notifications.primeeco.tech"));
   assert(senderMatchesWatchedFloor("MLB.Mailer@Notifications.PrimeEco.Tech")); // case-insensitive
+  assert(senderMatchesWatchedFloor("human@mlbuilders.com.au"));
+  assert(senderMatchesWatchedFloor("workorders@ajs.build"));
+  assert(senderMatchesWatchedFloor("accounts@builderwest.com.au"));
+  assert(senderMatchesWatchedFloor("dispatch@westernbuild.com.au"));
   // Anchored domain match — a lookalike domain must NOT drift in.
-  assertEquals(senderMatchesWatchedFloor("noreply@notifications.primeeco.tech.evil.test"), false);
+  assertEquals(
+    senderMatchesWatchedFloor("noreply@notifications.primeeco.tech.evil.test"),
+    false,
+  );
+  assertEquals(senderMatchesWatchedFloor("spoof@evilmlbuilders.com.au"), false);
   assertEquals(senderMatchesWatchedFloor("someone@primeeco.tech"), false); // parent domain, not the channel
   assertEquals(senderMatchesWatchedFloor(""), false);
   assertEquals(senderMatchesWatchedFloor(null), false);
   assert(WATCHED_SENDER_FLOOR.includes("notifications.primeeco.tech"));
+  assert(WATCHED_SENDER_FLOOR.includes("mlbuilders.com.au"));
 });
 
 // ── pickGraphAttachment (pure) ────────────────────────────────────────────────
@@ -43,12 +55,33 @@ const att = (o: Record<string, unknown>) => o as any;
 
 Deno.test("pickGraphAttachment: explicit id wins, then name, then PDF, then first", () => {
   const list = [
-    att({ id: "a1", name: "cover.txt", contentType: "text/plain", contentBytes: "AA" }),
-    att({ id: "a2", name: "WorkOrder.pdf", contentType: "application/pdf", contentBytes: "BB" }),
-    att({ id: "a3", name: "photo.jpg", contentType: "image/jpeg", contentBytes: "CC" }),
+    att({
+      id: "a1",
+      name: "cover.txt",
+      contentType: "text/plain",
+      contentBytes: "AA",
+    }),
+    att({
+      id: "a2",
+      name: "WorkOrder.pdf",
+      contentType: "application/pdf",
+      contentBytes: "BB",
+    }),
+    att({
+      id: "a3",
+      name: "photo.jpg",
+      contentType: "image/jpeg",
+      contentBytes: "CC",
+    }),
   ];
-  assertEquals(_pickGraphAttachmentForTest(list, { attachmentId: "a3" })?.id, "a3");
-  assertEquals(_pickGraphAttachmentForTest(list, { fileName: "workorder.pdf" })?.id, "a2");
+  assertEquals(
+    _pickGraphAttachmentForTest(list, { attachmentId: "a3" })?.id,
+    "a3",
+  );
+  assertEquals(
+    _pickGraphAttachmentForTest(list, { fileName: "workorder.pdf" })?.id,
+    "a2",
+  );
   assertEquals(_pickGraphAttachmentForTest(list, {})?.id, "a2"); // first PDF
 });
 
@@ -118,13 +151,21 @@ Deno.test("fallback: OUTBOUND sent pack (not in table) → live Graph fetch trie
   try {
     await _attachEmailAttachmentToJobForTest(
       {},
-      { job_id: "job-1", message_id: "AAMkGraphMsgId", file_name: "Make Safe Report.pdf" },
+      {
+        job_id: "job-1",
+        message_id: "AAMkGraphMsgId",
+        file_name: "Make Safe Report.pdf",
+      },
       {
         adminClient: missAdminClient(),
         // Simulate the message existing in no mailbox we can read (all fail).
         fetchGraphAttachments: (mailbox: string) => {
           tried.push(mailbox);
-          return Promise.resolve({ ok: false as const, status: 404, error: "not found" });
+          return Promise.resolve({
+            ok: false as const,
+            status: 404,
+            error: "not found",
+          });
         },
       },
     );
@@ -133,7 +174,10 @@ Deno.test("fallback: OUTBOUND sent pack (not in table) → live Graph fetch trie
     msg = e?.message ?? "";
   }
   // It fell THROUGH to the Graph fallback (old code threw before ever trying).
-  assertEquals(tried, ["ses@secureworkswa.com.au", "admin@secureworkswa.com.au"]);
+  assertEquals(tried, [
+    "ses@secureworkswa.com.au",
+    "admin@secureworkswa.com.au",
+  ]);
   assertEquals(status, 404);
   assert(msg.includes("AAMkGraphMsgId"), `unexpected: ${msg}`);
 });
@@ -143,11 +187,18 @@ Deno.test("fallback: message resolves but carries no eligible attachment → 404
   try {
     await _attachEmailAttachmentToJobForTest(
       {},
-      { job_id: "job-1", email_id: "msg-77", mailbox: "admin@secureworkswa.com.au" },
+      {
+        job_id: "job-1",
+        email_id: "msg-77",
+        mailbox: "admin@secureworkswa.com.au",
+      },
       {
         adminClient: missAdminClient(),
         fetchGraphAttachments: () =>
-          Promise.resolve({ ok: true as const, attachments: [att({ id: "z", name: "note.txt" })] }), // no contentBytes
+          Promise.resolve({
+            ok: true as const,
+            attachments: [att({ id: "z", name: "note.txt" })],
+          }), // no contentBytes
       },
     );
   } catch (e: any) {

@@ -36,7 +36,7 @@ const NEGATED_RE =
 const POLICY_RE =
   /\b(?:cancellation|cancel|withdrawal|voiding)\s+(?:policy|policies|fee|fees|terms?|process|procedure|notice\s+period)\b/i;
 
-function currentMessageOnly(value: string | null | undefined): string {
+export function currentMessageOnly(value: string | null | undefined): string {
   const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
   const kept: string[] = [];
   for (const line of lines) {

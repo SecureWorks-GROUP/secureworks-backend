@@ -2,7 +2,10 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { summarizeIntakeReconcileInvariant } from "./makesafe_intake_reconciliation.ts";
+import {
+  reconcileFreshSourceCoverage,
+  summarizeIntakeReconcileInvariant,
+} from "./makesafe_intake_reconciliation.ts";
 
 // MLB sends from mlbuilders.com.au; the sender pattern is the bare domain.
 const SENDER_PATTERNS = ["mlbuilders.com.au"];
@@ -88,6 +91,53 @@ Deno.test("invariant: a real WO from a known sender with NO draft and NO job is 
   assertEquals(
     inv.unaccounted[0].reason,
     "make_safe_candidate_no_draft_no_job",
+  );
+});
+
+Deno.test("invariant: a canonical exception case is visible without requiring a draft or job", () => {
+  const inv = summarizeIntakeReconcileInvariant({
+    emails: [{
+      post_id: "candidate-source",
+      subject: "Our Ref: MLB-24881 - Client Ref: 13334107",
+      from_email: "mlb.mailer@primeeco.tech",
+    }],
+    drafts: [],
+    jobs: [],
+    caseSources: [{
+      post_id: "candidate-source",
+      case_id: "visible-exception-case",
+    }],
+    senderPatterns: SENDER_PATTERNS,
+  });
+  assertEquals(inv.counts.unaccounted, 0);
+  assertEquals(inv.items[0].classification, "matched");
+  assertEquals(
+    inv.items[0].reason,
+    "source_post_id_matches_canonical_case",
+  );
+  assertEquals(inv.items[0].evidence, {
+    kind: "case",
+    id: "visible-exception-case",
+  });
+  assert(inv.live_and_true);
+});
+
+Deno.test("fresh-source coverage fails closed over candidate rows omitted by the stored ledger", () => {
+  assertEquals(
+    reconcileFreshSourceCoverage({
+      storedUnfatedSourceCount: 0,
+      storedOldestUnfatedReceivedAt: null,
+      storedFreshSourceLagSeconds: 0,
+      candidateUnaccountedCount: 6,
+      candidateOldestReceivedAt: "2026-07-22T00:05:14.000Z",
+      nowIso: "2026-07-28T04:26:19.000Z",
+    }),
+    {
+      known: true,
+      unfatedSourceCount: 6,
+      oldestUnfatedReceivedAt: "2026-07-22T00:05:14.000Z",
+      freshSourceLagSeconds: 534065,
+    },
   );
 });
 
