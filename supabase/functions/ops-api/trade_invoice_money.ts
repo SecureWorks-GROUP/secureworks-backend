@@ -482,10 +482,14 @@ export function formatTradeInvoiceSuperWithheldDescription(
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
   return [
-    `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
+    `Superannuation Guarantee ${
+      rateLabel(money.super_rate)
+    } of submitted total`,
     `Submitted total ${moneyLabel(money.gross_earned)}. Super remittance ${
       moneyLabel(money.super_amount)
-    }. Worker withhold ${moneyLabel(money.worker_withhold)}. Company contribution ${
+    }. Worker withhold ${
+      moneyLabel(money.worker_withhold)
+    }. Company contribution ${
       moneyLabel(money.company_contribution)
     }. Amount payable ${moneyLabel(money.net_pay)}.`,
     `Paid to the super fund separately - this line withholds the worker share only; the company pays the other half. Not part of the amount payable to ${name}`,
@@ -554,12 +558,17 @@ export function buildTradeInvoiceAuditModel(
   if (!closeMoney(submittedTotal, money.gross_earned)) {
     throw new TradeInvoiceMoneyError(
       "XERO_GROSS_MISMATCH",
-      `Xero gross lines ${moneyLabel(submittedTotal)} do not match gross earned ${
-        moneyLabel(money.gross_earned)
-      }`,
+      `Xero gross lines ${
+        moneyLabel(submittedTotal)
+      } do not match gross earned ${moneyLabel(money.gross_earned)}`,
     );
   }
-  if (!closeMoney(money.super_amount, round2(money.gross_earned * money.super_rate))) {
+  if (
+    !closeMoney(
+      money.super_amount,
+      round2(money.gross_earned * money.super_rate),
+    )
+  ) {
     throw new TradeInvoiceMoneyError(
       "MONEY_SPLIT_INVALID",
       "Super must be 12% of the submitted total, calculated once",
@@ -675,13 +684,16 @@ export function assertReturnedTradeInvoiceXeroSplit(
 
   const lines = value as TradeInvoiceXeroLine[];
   const superLines = lines.filter((line) => isTradeInvoiceSuperXeroLine(line));
-  const labourLines = lines.filter((line) => !isTradeInvoiceSuperXeroLine(line));
+  const labourLines = lines.filter((line) =>
+    !isTradeInvoiceSuperXeroLine(line)
+  );
   const expectedLabourTaxType = money.gst_on ? "INPUT" : "NONE";
   // 2026-09-08: Xero (AU orgs) stores a TaxType of NONE as BASEXCLUDED and
   // returns it that way. Reading it back as a mismatch made EVERY push since the
   // 27 Aug super split fail after the bill was created (422, no PDF attached,
   // ops retry failed the same way). Compare tax types by meaning, not spelling.
-  const taxTypeOf = (line: TradeInvoiceXeroLine) => normaliseXeroTaxType(line.TaxType);
+  const taxTypeOf = (line: TradeInvoiceXeroLine) =>
+    normaliseXeroTaxType(line.TaxType);
   const totalCents = lines.reduce(
     (sum, line) => sum + lineGrossCents(line),
     0,

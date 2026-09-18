@@ -1,6 +1,9 @@
 // deno-lint-ignore-file no-import-prefix
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { calculateTradeInvoiceMoney } from "./trade_invoice_money.ts";
 import {
   buildTradeInvoiceAuditText,
@@ -43,7 +46,11 @@ Deno.test("audit PDF keeps submitted line amounts and shows one 12%-of-total sup
   assert(text.includes("Submitted total $2208.20"));
   assert(text.includes("Super 12.00% remittance of submitted total $264.98"));
   assert(text.includes("Amount payable $2075.71"));
-  assert(text.includes("TOTAL payable (submitted total minus worker withhold) $2075.71"));
+  assert(
+    text.includes(
+      "TOTAL payable (submitted total minus worker withhold) $2075.71",
+    ),
+  );
   assertEquals((text.match(/Superannuation Guarantee/g) || []).length, 1);
 
   const pdf = renderTradeInvoiceAuditPdf({
@@ -60,7 +67,10 @@ Deno.test("audit PDF keeps submitted line amounts and shows one 12%-of-total sup
     pdfText.includes("= $803.20") || pdfText.includes("$803.20"),
     "rendered PDF must show the full submitted line total, not a clipped $803.",
   );
-  assert(pdfText.includes("$1405.00"), "rendered PDF must show the full $1405.00 line total");
+  assert(
+    pdfText.includes("$1405.00"),
+    "rendered PDF must show the full $1405.00 line total",
+  );
   assert(
     pdfText.includes("$-132.49"),
     "rendered PDF bytes must contain the worker-withhold minus amount, not a clipped Amount payable $2075.71. P",
@@ -138,4 +148,3 @@ Deno.test("wrapPdfText keeps super minus and line totals instead of slicing at 1
   assert(rendered.includes("= $803.20") || rendered.includes("$803.20"));
   assertPdfXrefByteAccurate(bytes);
 });
-

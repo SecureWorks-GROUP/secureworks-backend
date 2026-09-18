@@ -4,10 +4,10 @@
 // This is the document Books sees on the Xero DRAFT — not a per-line shrink.
 
 import {
+  buildTradeInvoiceAuditModel,
   type TradeInvoiceAuditModel,
   type TradeInvoiceMoney,
   type TradeInvoiceXeroLine,
-  buildTradeInvoiceAuditModel,
 } from "./trade_invoice_money.ts";
 import { distinctXeroPdfFilenames } from "./xero_attachment.ts";
 
@@ -39,9 +39,9 @@ export function buildTradeInvoiceAuditText(
     );
   }
   lines.push(
-    `${
-      model.super_line.description.replace(/\s+/g, " ").trim()
-    }  ${moneyLabel(model.super_line.line_total)}`,
+    `${model.super_line.description.replace(/\s+/g, " ").trim()}  ${
+      moneyLabel(model.super_line.line_total)
+    }`,
   );
   lines.push(
     `TOTAL payable (submitted total minus worker withhold) ${
@@ -50,7 +50,9 @@ export function buildTradeInvoiceAuditText(
   );
   if (model.gst_amount > 0) {
     lines.push(
-      `GST ${moneyLabel(model.gst_amount)} on submitted total. Cash payable including GST ${
+      `GST ${
+        moneyLabel(model.gst_amount)
+      } on submitted total. Cash payable including GST ${
         moneyLabel(model.trade_payable)
       }`,
     );
@@ -59,7 +61,10 @@ export function buildTradeInvoiceAuditText(
 }
 
 function pdfEscape(text: string): string {
-  return text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  return text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(
+    /\)/g,
+    "\\)",
+  );
 }
 
 function toAsciiPdfText(text: string): string {
@@ -142,14 +147,18 @@ export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
   const byNumber: Uint8Array[] = [];
   byNumber[1] = utf8("<< /Type /Catalog /Pages 2 0 R >>");
   byNumber[2] = utf8(
-    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageCount} >>`,
+    `<< /Type /Pages /Kids [${
+      pageIds.map((id) => `${id} 0 R`).join(" ")
+    }] /Count ${pageCount} >>`,
   );
   byNumber[3] = utf8(
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   );
   for (let i = 0; i < pageCount; i++) {
     byNumber[pageIds[i]] = utf8(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentIds[i]} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${
+        contentIds[i]
+      } 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
     );
     byNumber[contentIds[i]] = concatPdfBytes([
       utf8(`<< /Length ${contentStreams[i].byteLength} >>\nstream\n`),
@@ -174,7 +183,9 @@ export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
   for (let i = 1; i <= objects.length; i++) {
     xref += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
   }
-  xref += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
+  xref += `trailer << /Size ${
+    objects.length + 1
+  } /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
   chunks.push(utf8(xref));
   return concatPdfBytes(chunks);
 }
