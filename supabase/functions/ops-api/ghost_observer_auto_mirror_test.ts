@@ -20,7 +20,10 @@
 // see myjobs_ghost_rows_test.ts — and is not re-asserted here; this module
 // never touches a read path.
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _overrideMakesafeAllocationToSubmitterForTest,
   allocateJob,
@@ -57,12 +60,20 @@ type Store = Record<string, Row[]>;
 
 const UNIQUE_KEY_ERROR = {
   code: "23505",
-  message: 'duplicate key value violates unique constraint "job_assignments_job_user_date_key"',
+  message:
+    'duplicate key value violates unique constraint "job_assignments_job_user_date_key"',
   details: "Key (job_id, user_id, scheduled_date) already exists.",
 };
 
-function violatesAssignmentKey(rows: Row[], candidate: Row, selfId?: string): boolean {
-  if (candidate.user_id == null || candidate.job_id == null || candidate.scheduled_date == null) return false;
+function violatesAssignmentKey(
+  rows: Row[],
+  candidate: Row,
+  selfId?: string,
+): boolean {
+  if (
+    candidate.user_id == null || candidate.job_id == null ||
+    candidate.scheduled_date == null
+  ) return false;
   return rows.some((r) =>
     r.id !== selfId &&
     r.job_id === candidate.job_id && r.user_id === candidate.user_id &&
@@ -88,7 +99,8 @@ function makeFakeClient(store: Store) {
     let rangeFrom: number | null = null;
     let rangeTo: number | null = null;
 
-    const applyPreds = (rows: Row[]) => rows.filter((r) => preds.every((p) => p(r)));
+    const applyPreds = (rows: Row[]) =>
+      rows.filter((r) => preds.every((p) => p(r)));
 
     function exec(): { data: any; error: any } {
       // Every branch returns FRESH clones, never the live stored object —
@@ -96,10 +108,15 @@ function makeFakeClient(store: Store) {
       // oldAssignment) would see a later mutation retroactively, exactly
       // unlike a real PostgREST response snapshot.
       if (mode === "insert") {
-        const created = insertRows!.map((r) => ({ id: r.id ?? crypto.randomUUID(), ...r }));
+        const created = insertRows!.map((r) => ({
+          id: r.id ?? crypto.randomUUID(),
+          ...r,
+        }));
         if (table === "job_assignments") {
           for (const r of created) {
-            if (violatesAssignmentKey(store[table], r)) return { data: null, error: UNIQUE_KEY_ERROR };
+            if (violatesAssignmentKey(store[table], r)) {
+              return { data: null, error: UNIQUE_KEY_ERROR };
+            }
           }
         }
         store[table].push(...created);
@@ -110,7 +127,9 @@ function makeFakeClient(store: Store) {
         const matched = applyPreds(store[table]);
         if (table === "job_assignments") {
           for (const r of matched) {
-            if (violatesAssignmentKey(store[table], { ...r, ...updateRow }, r.id)) {
+            if (
+              violatesAssignmentKey(store[table], { ...r, ...updateRow }, r.id)
+            ) {
               return { data: null, error: UNIQUE_KEY_ERROR };
             }
           }
@@ -134,8 +153,9 @@ function makeFakeClient(store: Store) {
           return 0;
         });
       }
-      if (rangeFrom != null && rangeTo != null) rows = rows.slice(rangeFrom, rangeTo + 1);
-      else if (limitN != null) rows = rows.slice(0, limitN);
+      if (rangeFrom != null && rangeTo != null) {
+        rows = rows.slice(rangeFrom, rangeTo + 1);
+      } else if (limitN != null) rows = rows.slice(0, limitN);
       else rows = rows.slice(0, POSTGREST_DEFAULT_MAX_ROWS);
       let out = rows.map((r) => ({ ...r }));
       if (selectStr.includes("jobs:job_id(")) {
@@ -191,7 +211,9 @@ function makeFakeClient(store: Store) {
         return b;
       },
       or: (expr: string) => {
-        const terms = String(expr).split(",").map((t) => t.trim()).filter(Boolean);
+        const terms = String(expr).split(",").map((t) => t.trim()).filter(
+          Boolean,
+        );
         preds.push((r) =>
           terms.some((term) => {
             const [col, op, ...rest] = term.split(".");
@@ -229,7 +251,8 @@ function makeFakeClient(store: Store) {
         const row = Array.isArray(data) ? data[0] ?? null : data;
         return Promise.resolve({ data: row, error });
       },
-      then: (resolve: any, reject?: any) => Promise.resolve(exec()).then(resolve, reject),
+      then: (resolve: any, reject?: any) =>
+        Promise.resolve(exec()).then(resolve, reject),
     };
     return b;
   }
@@ -239,7 +262,9 @@ function makeFakeClient(store: Store) {
 function stubFetch() {
   const original = globalThis.fetch;
   globalThis.fetch = (() =>
-    Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 200 }))) as typeof fetch;
+    Promise.resolve(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    )) as typeof fetch;
   return () => {
     globalThis.fetch = original;
   };
@@ -255,7 +280,13 @@ const OPS_MANAGER_ID = "9913309f-35ae-4a71-8e1f-f704ecc526ea";
 function baseStore(): Store {
   return {
     users: [
-      { id: OPS_MANAGER_ID, role: "ops_manager", name: "Shaun", phone: null, created_at: "2025-01-01" },
+      {
+        id: OPS_MANAGER_ID,
+        role: "ops_manager",
+        name: "Shaun",
+        phone: null,
+        created_at: "2025-01-01",
+      },
       { id: "inst-1", role: "installer", name: "Hugo", phone: null },
       { id: "inst-2", role: "installer", name: "Marco", phone: null },
     ],
@@ -268,25 +299,50 @@ function baseStore(): Store {
 
 function ghostRowsFor(store: Store, jobId: string) {
   return (store.job_assignments || []).filter(
-    (r) => r.job_id === jobId && r.is_ghost === true && r.user_id === OPS_MANAGER_ID,
+    (r) =>
+      r.job_id === jobId && r.is_ghost === true && r.user_id === OPS_MANAGER_ID,
   );
 }
 
 // ── isGenuineCrewAssignmentRow (pure) ───────────────────────────────────────
 
 Deno.test("isGenuineCrewAssignmentRow: install/lead_installer/assist rows are genuine crew work", () => {
-  assertEquals(isGenuineCrewAssignmentRow({ role: "lead_installer", assignment_type: "install" }), true);
-  assertEquals(isGenuineCrewAssignmentRow({ role: "crew", assignment_type: "assist" }), true);
-  assertEquals(isGenuineCrewAssignmentRow({ assignment_type: "install" }), true); // no role set
+  assertEquals(
+    isGenuineCrewAssignmentRow({
+      role: "lead_installer",
+      assignment_type: "install",
+    }),
+    true,
+  );
+  assertEquals(
+    isGenuineCrewAssignmentRow({ role: "crew", assignment_type: "assist" }),
+    true,
+  );
+  assertEquals(
+    isGenuineCrewAssignmentRow({ assignment_type: "install" }),
+    true,
+  ); // no role set
 });
 
 Deno.test("isGenuineCrewAssignmentRow: ghost/observer rows, meetings and reminders are never genuine crew work", () => {
-  assertEquals(isGenuineCrewAssignmentRow({ is_ghost: true, role: "observer" }), false);
+  assertEquals(
+    isGenuineCrewAssignmentRow({ is_ghost: true, role: "observer" }),
+    false,
+  );
   assertEquals(isGenuineCrewAssignmentRow({ role: "observer" }), false);
-  assertEquals(isGenuineCrewAssignmentRow({ assignment_type: "observer" }), false);
+  assertEquals(
+    isGenuineCrewAssignmentRow({ assignment_type: "observer" }),
+    false,
+  );
   assertEquals(isGenuineCrewAssignmentRow({ role: "ghost" }), false);
-  assertEquals(isGenuineCrewAssignmentRow({ assignment_type: "meeting" }), false);
-  assertEquals(isGenuineCrewAssignmentRow({ assignment_type: "reminder" }), false);
+  assertEquals(
+    isGenuineCrewAssignmentRow({ assignment_type: "meeting" }),
+    false,
+  );
+  assertEquals(
+    isGenuineCrewAssignmentRow({ assignment_type: "reminder" }),
+    false,
+  );
   assertEquals(isGenuineCrewAssignmentRow(null), false);
 });
 
@@ -294,12 +350,46 @@ Deno.test("isGenuineCrewAssignmentRow: ghost/observer rows, meetings and reminde
 
 const JOB_FIXTURES: Array<{ label: string; job: Row }> = [
   {
-    label: "repair-family make-safe (type=makesafe, metadata.ses_family=repair)",
-    job: { id: "job-msf-repair", type: "makesafe", job_number: "SWMS-90001", status: "scheduled", metadata: { ses_family: "repair" } },
+    label:
+      "repair-family make-safe (type=makesafe, metadata.ses_family=repair)",
+    job: {
+      id: "job-msf-repair",
+      type: "makesafe",
+      job_number: "SWMS-90001",
+      status: "scheduled",
+      metadata: { ses_family: "repair" },
+    },
   },
-  { label: "type=repair job", job: { id: "job-repair", type: "repair", job_number: "SWR-90002", status: "scheduled", metadata: {} } },
-  { label: "fencing job", job: { id: "job-fencing", type: "fencing", job_number: "SWF-90003", status: "scheduled", metadata: {} } },
-  { label: "patio job", job: { id: "job-patio", type: "patio", job_number: "SWP-90004", status: "scheduled", metadata: {} } },
+  {
+    label: "type=repair job",
+    job: {
+      id: "job-repair",
+      type: "repair",
+      job_number: "SWR-90002",
+      status: "scheduled",
+      metadata: {},
+    },
+  },
+  {
+    label: "fencing job",
+    job: {
+      id: "job-fencing",
+      type: "fencing",
+      job_number: "SWF-90003",
+      status: "scheduled",
+      metadata: {},
+    },
+  },
+  {
+    label: "patio job",
+    job: {
+      id: "job-patio",
+      type: "patio",
+      job_number: "SWP-90004",
+      status: "scheduled",
+      metadata: {},
+    },
+  },
 ];
 
 for (const { label, job } of JOB_FIXTURES) {
@@ -321,16 +411,24 @@ for (const { label, job } of JOB_FIXTURES) {
 
       assert(res.assignment?.id, "real assignment was created");
       const ghosts = ghostRowsFor(store, job.id);
-      assertEquals(ghosts.length, 1, `expected exactly one ghost row, saw ${ghosts.length}`);
+      assertEquals(
+        ghosts.length,
+        1,
+        `expected exactly one ghost row, saw ${ghosts.length}`,
+      );
       assertEquals(ghosts[0].scheduled_date, "2026-10-01");
       assertEquals(ghosts[0].role, GHOST_OBSERVER_ROLE);
       assertEquals(ghosts[0].is_ghost, true);
       assertEquals(ghosts[0].user_id, OPS_MANAGER_ID);
-      assert(String(ghosts[0].notes || "").includes("Hugo"), "notes name the mirrored crew");
+      assert(
+        String(ghosts[0].notes || "").includes("Hugo"),
+        "notes name the mirrored crew",
+      );
 
       // The ghost's own job_events row is auditable with the mirror source.
       const ghostEvent = (store.job_events || []).find(
-        (e) => e.job_id === job.id && e.detail_json?.source === "ghost_auto_mirror",
+        (e) =>
+          e.job_id === job.id && e.detail_json?.source === "ghost_auto_mirror",
       );
       assert(ghostEvent, "ghost mirror wrote its own auditable job_events row");
     } finally {
@@ -343,17 +441,36 @@ Deno.test("createAssignment: a second create on the same job/date does not dupli
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-1", type: "fencing", job_number: "SWF-1", status: "scheduled" });
+    store.jobs!.push({
+      id: "job-1",
+      type: "fencing",
+      job_number: "SWF-1",
+      status: "scheduled",
+    });
 
-    await createAssignment(makeFakeClient(store), { jobId: "job-1", userId: "inst-1", scheduledDate: "2026-10-05" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-1",
+      userId: "inst-1",
+      scheduledDate: "2026-10-05",
+    });
     await flush();
     // A second, different installer scheduled on the SAME job/date.
-    await createAssignment(makeFakeClient(store), { jobId: "job-1", userId: "inst-2", scheduledDate: "2026-10-05" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-1",
+      userId: "inst-2",
+      scheduledDate: "2026-10-05",
+    });
     await flush();
 
     const ghosts = ghostRowsFor(store, "job-1");
-    assertEquals(ghosts.length, 1, "the second create must not mint a second ghost for the same span");
-    const realRows = store.job_assignments!.filter((r) => r.job_id === "job-1" && !r.is_ghost);
+    assertEquals(
+      ghosts.length,
+      1,
+      "the second create must not mint a second ghost for the same span",
+    );
+    const realRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-1" && !r.is_ghost
+    );
     assertEquals(realRows.length, 2, "both real crew rows were still written");
   } finally {
     unstub();
@@ -364,7 +481,12 @@ Deno.test("createAssignment: the ops manager assigned to his own job produces no
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-self", type: "fencing", job_number: "SWF-2", status: "scheduled" });
+    store.jobs!.push({
+      id: "job-self",
+      type: "fencing",
+      job_number: "SWF-2",
+      status: "scheduled",
+    });
 
     const res = await createAssignment(makeFakeClient(store), {
       jobId: "job-self",
@@ -374,7 +496,11 @@ Deno.test("createAssignment: the ops manager assigned to his own job produces no
     await flush();
 
     assert(res.assignment?.id);
-    assertEquals(ghostRowsFor(store, "job-self").length, 0, "Shaun does not get a ghost of his own real row");
+    assertEquals(
+      ghostRowsFor(store, "job-self").length,
+      0,
+      "Shaun does not get a ghost of his own real row",
+    );
   } finally {
     unstub();
   }
@@ -386,7 +512,12 @@ Deno.test("updateAssignment: rescheduling the sole crew row moves its mirrored g
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-resched", type: "patio", job_number: "SWP-3", status: "scheduled" });
+    store.jobs!.push({
+      id: "job-resched",
+      type: "patio",
+      job_number: "SWP-3",
+      status: "scheduled",
+    });
 
     const created = await createAssignment(makeFakeClient(store), {
       jobId: "job-resched",
@@ -403,8 +534,16 @@ Deno.test("updateAssignment: rescheduling the sole crew row moves its mirrored g
     await flush();
 
     const ghosts = ghostRowsFor(store, "job-resched");
-    assertEquals(ghosts.length, 1, "the reschedule must not leave a second, stale ghost behind");
-    assertEquals(ghosts[0].scheduled_date, "2026-10-14", "the ghost followed the real row to its new date");
+    assertEquals(
+      ghosts.length,
+      1,
+      "the reschedule must not leave a second, stale ghost behind",
+    );
+    assertEquals(
+      ghosts[0].scheduled_date,
+      "2026-10-14",
+      "the ghost followed the real row to its new date",
+    );
   } finally {
     unstub();
   }
@@ -414,20 +553,41 @@ Deno.test("updateAssignment: reschedule leaves the old ghost alone when another 
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-multi", type: "fencing", job_number: "SWF-4", status: "scheduled" });
+    store.jobs!.push({
+      id: "job-multi",
+      type: "fencing",
+      job_number: "SWF-4",
+      status: "scheduled",
+    });
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-multi", userId: "inst-1", scheduledDate: "2026-10-20" });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-multi",
+      userId: "inst-1",
+      scheduledDate: "2026-10-20",
+    });
     await flush();
-    await createAssignment(makeFakeClient(store), { jobId: "job-multi", userId: "inst-2", scheduledDate: "2026-10-20" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-multi",
+      userId: "inst-2",
+      scheduledDate: "2026-10-20",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-multi").length, 1);
 
     // Move inst-1 alone to a new date — inst-2 still covers the old date.
-    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, scheduledDate: "2026-10-21" });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+      scheduledDate: "2026-10-21",
+    });
     await flush();
 
-    const dates = ghostRowsFor(store, "job-multi").map((g) => g.scheduled_date).sort();
-    assertEquals(dates, ["2026-10-20", "2026-10-21"], "the old date keeps its ghost (inst-2 still there) and the new date gets its own");
+    const dates = ghostRowsFor(store, "job-multi").map((g) => g.scheduled_date)
+      .sort();
+    assertEquals(
+      dates,
+      ["2026-10-20", "2026-10-21"],
+      "the old date keeps its ghost (inst-2 still there) and the new date gets its own",
+    );
   } finally {
     unstub();
   }
@@ -439,16 +599,31 @@ Deno.test("deleteAssignment: deleting the last crew row for a date removes the m
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-del", type: "repair", job_number: "SWR-5", status: "scheduled" });
+    store.jobs!.push({
+      id: "job-del",
+      type: "repair",
+      job_number: "SWR-5",
+      status: "scheduled",
+    });
 
-    const created = await createAssignment(makeFakeClient(store), { jobId: "job-del", userId: "inst-1", scheduledDate: "2026-10-25" });
+    const created = await createAssignment(makeFakeClient(store), {
+      jobId: "job-del",
+      userId: "inst-1",
+      scheduledDate: "2026-10-25",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-del").length, 1);
 
-    await deleteAssignment(makeFakeClient(store), { assignmentId: created.assignment.id });
+    await deleteAssignment(makeFakeClient(store), {
+      assignmentId: created.assignment.id,
+    });
     await flush();
 
-    assertEquals(ghostRowsFor(store, "job-del").length, 0, "no crew work remains, so the ghost is removed too");
+    assertEquals(
+      ghostRowsFor(store, "job-del").length,
+      0,
+      "no crew work remains, so the ghost is removed too",
+    );
   } finally {
     unstub();
   }
@@ -458,18 +633,37 @@ Deno.test("deleteAssignment: deleting one of two crew rows on the same date keep
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-del2", type: "fencing", job_number: "SWF-6", status: "scheduled" });
+    store.jobs!.push({
+      id: "job-del2",
+      type: "fencing",
+      job_number: "SWF-6",
+      status: "scheduled",
+    });
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-del2", userId: "inst-1", scheduledDate: "2026-10-26" });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-del2",
+      userId: "inst-1",
+      scheduledDate: "2026-10-26",
+    });
     await flush();
-    await createAssignment(makeFakeClient(store), { jobId: "job-del2", userId: "inst-2", scheduledDate: "2026-10-26" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-del2",
+      userId: "inst-2",
+      scheduledDate: "2026-10-26",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-del2").length, 1);
 
-    await deleteAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id });
+    await deleteAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+    });
     await flush();
 
-    assertEquals(ghostRowsFor(store, "job-del2").length, 1, "inst-2 still works that date, so the ghost stays");
+    assertEquals(
+      ghostRowsFor(store, "job-del2").length,
+      1,
+      "inst-2 still works that date, so the ghost stays",
+    );
   } finally {
     unstub();
   }
@@ -485,23 +679,90 @@ Deno.test("findGhostObserverBackfillCandidates: reports exactly the uncovered fu
   );
   store.job_assignments = [
     // Candidate: future, genuine, no ghost yet.
-    { id: "a-b1", job_id: "job-b1", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-01" },
+    {
+      id: "a-b1",
+      job_id: "job-b1",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-01",
+    },
     // Already covered by an existing ghost — not a candidate.
-    { id: "a-b2", job_id: "job-b2", user_id: "inst-2", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-02" },
-    { id: "g-b2", job_id: "job-b2", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "scheduled", scheduled_date: "2026-11-02" },
+    {
+      id: "a-b2",
+      job_id: "job-b2",
+      user_id: "inst-2",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-02",
+    },
+    {
+      id: "g-b2",
+      job_id: "job-b2",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-11-02",
+    },
     // Cancelled — not a candidate.
-    { id: "a-b3", job_id: "job-b1", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "cancelled", scheduled_date: "2026-11-03" },
+    {
+      id: "a-b3",
+      job_id: "job-b1",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "cancelled",
+      scheduled_date: "2026-11-03",
+    },
     // Past-dated — not a candidate.
-    { id: "a-b4", job_id: "job-b1", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-01-01" },
+    {
+      id: "a-b4",
+      job_id: "job-b1",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-01-01",
+    },
     // A meeting placeholder — not a candidate.
-    { id: "a-b5", job_id: "job-b1", user_id: null, role: null, assignment_type: "meeting", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-04" },
+    {
+      id: "a-b5",
+      job_id: "job-b1",
+      user_id: null,
+      role: null,
+      assignment_type: "meeting",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-04",
+    },
   ];
   const beforeCount = store.job_assignments.length;
 
-  const candidates = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
+  const candidates = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
 
-  assertEquals(store.job_assignments.length, beforeCount, "a dry-run read must write nothing");
-  assertEquals(candidates.length, 1, `expected exactly one candidate, saw ${candidates.map((c) => c.jobId + "/" + c.scheduledDate)}`);
+  assertEquals(
+    store.job_assignments.length,
+    beforeCount,
+    "a dry-run read must write nothing",
+  );
+  assertEquals(
+    candidates.length,
+    1,
+    `expected exactly one candidate, saw ${
+      candidates.map((c) => c.jobId + "/" + c.scheduledDate)
+    }`,
+  );
   assertEquals(candidates[0].jobId, "job-b1");
   assertEquals(candidates[0].scheduledDate, "2026-11-01");
   assertEquals(candidates[0].job?.type, "fencing");
@@ -509,21 +770,48 @@ Deno.test("findGhostObserverBackfillCandidates: reports exactly the uncovered fu
 
 Deno.test("applyGhostObserverBackfill: apply writes exactly one ghost per reported candidate", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-apply", type: "patio", job_number: "SWP-APPLY", metadata: {} });
+  store.jobs!.push({
+    id: "job-apply",
+    type: "patio",
+    job_number: "SWP-APPLY",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-apply", job_id: "job-apply", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-10" },
+    {
+      id: "a-apply",
+      job_id: "job-apply",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-10",
+    },
   ];
 
-  const candidates = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
+  const candidates = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
   assertEquals(candidates.length, 1);
 
-  const { created } = await applyGhostObserverBackfill(makeFakeClient(store), candidates);
+  const { created } = await applyGhostObserverBackfill(
+    makeFakeClient(store),
+    candidates,
+  );
   assertEquals(created, 1);
   assertEquals(ghostRowsFor(store, "job-apply").length, 1);
 
   // Re-running the backfill against the now-covered state finds nothing left to do.
-  const remaining = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
-  assertEquals(remaining.length, 0, "the backfill is idempotent — a second pass finds no candidates");
+  const remaining = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
+  assertEquals(
+    remaining.length,
+    0,
+    "the backfill is idempotent — a second pass finds no candidates",
+  );
 });
 
 // ── ensureGhostObserverMirror: direct unit coverage of the ops-manager gate ─
@@ -547,11 +835,25 @@ Deno.test("createAssignment: allocating the ops manager as real crew onto a job/
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-om", type: "repair", job_number: "SWR-OM", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-om",
+      type: "repair",
+      job_number: "SWR-OM",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    await createAssignment(makeFakeClient(store), { jobId: "job-om", userId: "inst-1", scheduledDate: "2026-10-01" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-om",
+      userId: "inst-1",
+      scheduledDate: "2026-10-01",
+    });
     await flush();
-    assertEquals(ghostRowsFor(store, "job-om").length, 1, "installer's assignment minted the ghost");
+    assertEquals(
+      ghostRowsFor(store, "job-om").length,
+      1,
+      "installer's assignment minted the ghost",
+    );
 
     const res = await createAssignment(makeFakeClient(store), {
       jobId: "job-om",
@@ -562,10 +864,24 @@ Deno.test("createAssignment: allocating the ops manager as real crew onto a job/
     await flush();
 
     assert(res.assignment?.id, "the ops manager's real assignment was created");
-    assertEquals(res.assignment.is_ghost ?? false, false, "the returned row is the real assignment, not the ghost");
-    const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-om" && r.user_id === OPS_MANAGER_ID);
-    assertEquals(opsRows.length, 1, "exactly one ops-manager row remains on the key");
-    assertEquals(opsRows[0].is_ghost ?? false, false, "and it is the real one — the ghost was released");
+    assertEquals(
+      res.assignment.is_ghost ?? false,
+      false,
+      "the returned row is the real assignment, not the ghost",
+    );
+    const opsRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-om" && r.user_id === OPS_MANAGER_ID
+    );
+    assertEquals(
+      opsRows.length,
+      1,
+      "exactly one ops-manager row remains on the key",
+    );
+    assertEquals(
+      opsRows[0].is_ghost ?? false,
+      false,
+      "and it is the real one — the ghost was released",
+    );
     assertEquals(opsRows[0].id, res.assignment.id);
   } finally {
     unstub();
@@ -576,22 +892,42 @@ Deno.test("allocateJob: allocating the ops manager onto a job/date carrying his 
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-alloc", type: "fencing", job_number: "SWF-ALLOC", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-alloc",
+      type: "fencing",
+      job_number: "SWF-ALLOC",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    await createAssignment(makeFakeClient(store), { jobId: "job-alloc", userId: "inst-1", scheduledDate: "2026-10-02" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-alloc",
+      userId: "inst-1",
+      scheduledDate: "2026-10-02",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-alloc").length, 1);
 
     const res = await allocateJob(makeFakeClient(store), {
-      body: { jobId: "job-alloc", userId: OPS_MANAGER_ID, scheduledDate: "2026-10-02" },
+      body: {
+        jobId: "job-alloc",
+        userId: OPS_MANAGER_ID,
+        scheduledDate: "2026-10-02",
+      },
       callerRole: "admin",
       actorUserId: null,
     });
     await flush();
 
-    assertEquals(res.mode, "create", "a ghost on the key must not satisfy the real-crew idempotency check");
+    assertEquals(
+      res.mode,
+      "create",
+      "a ghost on the key must not satisfy the real-crew idempotency check",
+    );
     assertEquals(res.assignment?.is_ghost ?? false, false);
-    const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-alloc" && r.user_id === OPS_MANAGER_ID);
+    const opsRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-alloc" && r.user_id === OPS_MANAGER_ID
+    );
     assertEquals(opsRows.length, 1);
     assertEquals(opsRows[0].is_ghost ?? false, false);
   } finally {
@@ -603,18 +939,41 @@ Deno.test("updateAssignment: reassigning a real crew row to the ops manager on a
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-reassign", type: "patio", job_number: "SWP-RA", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-reassign",
+      type: "patio",
+      job_number: "SWP-RA",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-reassign", userId: "inst-1", scheduledDate: "2026-10-03" });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-reassign",
+      userId: "inst-1",
+      scheduledDate: "2026-10-03",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-reassign").length, 1);
 
-    const res = await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, userId: OPS_MANAGER_ID });
+    const res = await updateAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+      userId: OPS_MANAGER_ID,
+    });
     await flush();
 
-    assertEquals(res.assignment?.user_id, OPS_MANAGER_ID, "the real row now belongs to the ops manager");
-    const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-reassign" && r.user_id === OPS_MANAGER_ID);
-    assertEquals(opsRows.length, 1, "the ghost was released so the key holds only the real row");
+    assertEquals(
+      res.assignment?.user_id,
+      OPS_MANAGER_ID,
+      "the real row now belongs to the ops manager",
+    );
+    const opsRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-reassign" && r.user_id === OPS_MANAGER_ID
+    );
+    assertEquals(
+      opsRows.length,
+      1,
+      "the ghost was released so the key holds only the real row",
+    );
     assertEquals(opsRows[0].is_ghost ?? false, false);
   } finally {
     unstub();
@@ -627,22 +986,58 @@ Deno.test("ensureGhostObserverMirror: a cancelled ghost on the key is revived in
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-revive", type: "fencing", job_number: "SWF-RV", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-revive",
+      type: "fencing",
+      job_number: "SWF-RV",
+      status: "scheduled",
+      metadata: {},
+    });
     store.job_assignments = [
-      { id: "g-old", job_id: "job-revive", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "cancelled", scheduled_date: "2026-10-08", notes: "Auto ghost observer for Hugo schedule" },
+      {
+        id: "g-old",
+        job_id: "job-revive",
+        user_id: OPS_MANAGER_ID,
+        role: "observer",
+        assignment_type: "install",
+        is_ghost: true,
+        status: "cancelled",
+        scheduled_date: "2026-10-08",
+        notes: "Auto ghost observer for Hugo schedule",
+      },
     ];
 
-    const created = await createAssignment(makeFakeClient(store), { jobId: "job-revive", userId: "inst-2", scheduledDate: "2026-10-08", crewName: "Marco" });
+    const created = await createAssignment(makeFakeClient(store), {
+      jobId: "job-revive",
+      userId: "inst-2",
+      scheduledDate: "2026-10-08",
+      crewName: "Marco",
+    });
     await flush();
 
     assert(created.assignment?.id);
-    const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-revive" && r.user_id === OPS_MANAGER_ID);
-    assertEquals(opsRows.length, 1, "no second ghost row was minted onto the unique key");
-    assertEquals(opsRows[0].id, "g-old", "the existing cancelled ghost row was reused");
+    const opsRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-revive" && r.user_id === OPS_MANAGER_ID
+    );
+    assertEquals(
+      opsRows.length,
+      1,
+      "no second ghost row was minted onto the unique key",
+    );
+    assertEquals(
+      opsRows[0].id,
+      "g-old",
+      "the existing cancelled ghost row was reused",
+    );
     assertEquals(opsRows[0].status, "scheduled", "and revived");
     assertEquals(opsRows[0].is_ghost, true);
-    assert(String(opsRows[0].notes).includes("Marco"), "revived notes name the crew now scheduled");
-    const revivedEvent = (store.job_events || []).find((e) => e.job_id === "job-revive" && e.detail_json?.source === "ghost_auto_mirror");
+    assert(
+      String(opsRows[0].notes).includes("Marco"),
+      "revived notes name the crew now scheduled",
+    );
+    const revivedEvent = (store.job_events || []).find((e) =>
+      e.job_id === "job-revive" && e.detail_json?.source === "ghost_auto_mirror"
+    );
     assert(revivedEvent, "the revive is audited like a create");
   } finally {
     unstub();
@@ -651,34 +1046,98 @@ Deno.test("ensureGhostObserverMirror: a cancelled ghost on the key is revived in
 
 Deno.test("findGhostObserverBackfillCandidates + apply: a span whose ghost was cancelled is a candidate and the apply revives it instead of failing", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-bf-rv", type: "repair", job_number: "SWR-BFRV", metadata: {} });
+  store.jobs!.push({
+    id: "job-bf-rv",
+    type: "repair",
+    job_number: "SWR-BFRV",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-bf", job_id: "job-bf-rv", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-12" },
-    { id: "g-bf", job_id: "job-bf-rv", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "cancelled", scheduled_date: "2026-11-12" },
+    {
+      id: "a-bf",
+      job_id: "job-bf-rv",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-12",
+    },
+    {
+      id: "g-bf",
+      job_id: "job-bf-rv",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "cancelled",
+      scheduled_date: "2026-11-12",
+    },
   ];
 
-  const candidates = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
-  assertEquals(candidates.length, 1, "a cancelled ghost does not count as coverage");
+  const candidates = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
+  assertEquals(
+    candidates.length,
+    1,
+    "a cancelled ghost does not count as coverage",
+  );
 
-  const res = await applyGhostObserverBackfill(makeFakeClient(store), candidates);
+  const res = await applyGhostObserverBackfill(
+    makeFakeClient(store),
+    candidates,
+  );
   assertEquals(res, { created: 1, failed: 0 });
-  const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-bf-rv" && r.user_id === OPS_MANAGER_ID);
+  const opsRows = store.job_assignments!.filter((r) =>
+    r.job_id === "job-bf-rv" && r.user_id === OPS_MANAGER_ID
+  );
   assertEquals(opsRows.length, 1);
   assertEquals(opsRows[0].id, "g-bf");
   assertEquals(opsRows[0].status, "scheduled");
 
-  const remaining = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
+  const remaining = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
   assertEquals(remaining.length, 0);
 });
 
 Deno.test("findGhostObserverBackfillCandidates: a span the ops manager already works as REAL crew is covered, never a candidate", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-bf-real", type: "fencing", job_number: "SWF-BFR", metadata: {} });
+  store.jobs!.push({
+    id: "job-bf-real",
+    type: "fencing",
+    job_number: "SWF-BFR",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-r1", job_id: "job-bf-real", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-13" },
-    { id: "a-r2", job_id: "job-bf-real", user_id: OPS_MANAGER_ID, role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-11-13" },
+    {
+      id: "a-r1",
+      job_id: "job-bf-real",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-13",
+    },
+    {
+      id: "a-r2",
+      job_id: "job-bf-real",
+      user_id: OPS_MANAGER_ID,
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-13",
+    },
   ];
-  const candidates = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
+  const candidates = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
   assertEquals(candidates.length, 0);
 });
 
@@ -686,11 +1145,43 @@ Deno.test("findGhostObserverBackfillCandidates: a span the ops manager already w
 
 Deno.test("reconcileGhostObserverMirrorOnReschedule: moving the ghost onto a date where a cancelled ghost already sits revives that one and drops the old, leaving exactly one live ghost", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-rs", type: "fencing", job_number: "SWF-RS", metadata: {} });
+  store.jobs!.push({
+    id: "job-rs",
+    type: "fencing",
+    job_number: "SWF-RS",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-rs", job_id: "job-rs", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-10-16" },
-    { id: "g-old", job_id: "job-rs", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "scheduled", scheduled_date: "2026-10-15" },
-    { id: "g-new-cancelled", job_id: "job-rs", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "cancelled", scheduled_date: "2026-10-16" },
+    {
+      id: "a-rs",
+      job_id: "job-rs",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-10-16",
+    },
+    {
+      id: "g-old",
+      job_id: "job-rs",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-10-15",
+    },
+    {
+      id: "g-new-cancelled",
+      job_id: "job-rs",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "cancelled",
+      scheduled_date: "2026-10-16",
+    },
   ];
 
   await reconcileGhostObserverMirrorOnReschedule(makeFakeClient(store), {
@@ -701,19 +1192,61 @@ Deno.test("reconcileGhostObserverMirrorOnReschedule: moving the ghost onto a dat
     assigneeUserId: "inst-1",
   });
 
-  const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-rs" && r.user_id === OPS_MANAGER_ID);
-  assertEquals(opsRows.map((r) => r.id).sort(), ["g-new-cancelled"], "old-date ghost removed; the new-date row reused");
-  assertEquals(opsRows[0].status, "scheduled", "the cancelled new-date ghost was revived");
+  const opsRows = store.job_assignments!.filter((r) =>
+    r.job_id === "job-rs" && r.user_id === OPS_MANAGER_ID
+  );
+  assertEquals(
+    opsRows.map((r) => r.id).sort(),
+    ["g-new-cancelled"],
+    "old-date ghost removed; the new-date row reused",
+  );
+  assertEquals(
+    opsRows[0].status,
+    "scheduled",
+    "the cancelled new-date ghost was revived",
+  );
   assertEquals(opsRows[0].scheduled_date, "2026-10-16");
 });
 
 Deno.test("reconcileGhostObserverMirrorOnReschedule: when the ops manager works the new date as real crew, the stale old-date ghost is removed and nothing collides", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-rs2", type: "patio", job_number: "SWP-RS2", metadata: {} });
+  store.jobs!.push({
+    id: "job-rs2",
+    type: "patio",
+    job_number: "SWP-RS2",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-rs2", job_id: "job-rs2", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-10-18" },
-    { id: "g-old2", job_id: "job-rs2", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "scheduled", scheduled_date: "2026-10-17" },
-    { id: "a-om-real", job_id: "job-rs2", user_id: OPS_MANAGER_ID, role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-10-18" },
+    {
+      id: "a-rs2",
+      job_id: "job-rs2",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-10-18",
+    },
+    {
+      id: "g-old2",
+      job_id: "job-rs2",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-10-17",
+    },
+    {
+      id: "a-om-real",
+      job_id: "job-rs2",
+      user_id: OPS_MANAGER_ID,
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-10-18",
+    },
   ];
 
   await reconcileGhostObserverMirrorOnReschedule(makeFakeClient(store), {
@@ -724,27 +1257,93 @@ Deno.test("reconcileGhostObserverMirrorOnReschedule: when the ops manager works 
     assigneeUserId: "inst-1",
   });
 
-  const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-rs2" && r.user_id === OPS_MANAGER_ID);
-  assertEquals(opsRows.map((r) => r.id), ["a-om-real"], "only the real ops-manager row remains; no stranded old-date ghost");
+  const opsRows = store.job_assignments!.filter((r) =>
+    r.job_id === "job-rs2" && r.user_id === OPS_MANAGER_ID
+  );
+  assertEquals(
+    opsRows.map((r) => r.id),
+    ["a-om-real"],
+    "only the real ops-manager row remains; no stranded old-date ghost",
+  );
 });
 
 // ── Submitter override cancel goes through the same span cleanup ───────────
 
 Deno.test("overrideMakesafeAllocationToSubmitter: cancelling another trade's last crew row for a date removes the ops manager's ghost for that date", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-ovr", type: "makesafe", job_number: "SWMS-OVR", status: "scheduled", metadata: {} });
+  store.jobs!.push({
+    id: "job-ovr",
+    type: "makesafe",
+    job_number: "SWMS-OVR",
+    status: "scheduled",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-other", job_id: "job-ovr", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-09-20", attendance_cycle_id: "cyc-1", cycle_attribution: "bound", invoiced_in: null, notes: null },
-    { id: "g-other", job_id: "job-ovr", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "scheduled", scheduled_date: "2026-09-20" },
-    { id: "a-submitter", job_id: "job-ovr", user_id: "inst-2", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "scheduled", scheduled_date: "2026-09-21", attendance_cycle_id: "cyc-1", cycle_attribution: "bound", invoiced_in: null, notes: null },
-    { id: "g-submitter", job_id: "job-ovr", user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install", is_ghost: true, status: "scheduled", scheduled_date: "2026-09-21" },
+    {
+      id: "a-other",
+      job_id: "job-ovr",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-09-20",
+      attendance_cycle_id: "cyc-1",
+      cycle_attribution: "bound",
+      invoiced_in: null,
+      notes: null,
+    },
+    {
+      id: "g-other",
+      job_id: "job-ovr",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-09-20",
+    },
+    {
+      id: "a-submitter",
+      job_id: "job-ovr",
+      user_id: "inst-2",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-09-21",
+      attendance_cycle_id: "cyc-1",
+      cycle_attribution: "bound",
+      invoiced_in: null,
+      notes: null,
+    },
+    {
+      id: "g-submitter",
+      job_id: "job-ovr",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-09-21",
+    },
   ];
 
-  const res = await _overrideMakesafeAllocationToSubmitterForTest(makeFakeClient(store), "job-ovr", "cyc-1", "inst-2", "2026-09-21T10:00:00Z");
+  const res = await _overrideMakesafeAllocationToSubmitterForTest(
+    makeFakeClient(store),
+    "job-ovr",
+    "cyc-1",
+    "inst-2",
+    "2026-09-21T10:00:00Z",
+  );
 
   assertEquals(res.cancelled.map((r: any) => r.id), ["a-other"]);
   const dates = ghostRowsFor(store, "job-ovr").map((g) => g.scheduled_date);
-  assertEquals(dates, ["2026-09-21"], "the 2026-09-20 ghost went with the last crew row for that date; the submitter's date keeps its ghost");
+  assertEquals(
+    dates,
+    ["2026-09-21"],
+    "the 2026-09-20 ghost went with the last crew row for that date; the submitter's date keeps its ghost",
+  );
 });
 
 // ── Backfill reads page past the PostgREST 1000-row ceiling ────────────────
@@ -755,27 +1354,52 @@ Deno.test("findGhostObserverBackfillCandidates: reads beyond 1000 crew rows and 
   store.job_assignments = [];
   for (let i = 0; i < total; i++) {
     const jobId = `job-pg-${i}`;
-    store.jobs!.push({ id: jobId, type: "fencing", job_number: `SWF-PG-${i}`, metadata: {} });
+    store.jobs!.push({
+      id: jobId,
+      type: "fencing",
+      job_number: `SWF-PG-${i}`,
+      metadata: {},
+    });
     store.job_assignments.push({
       id: `a-pg-${String(i).padStart(5, "0")}`,
-      job_id: jobId, user_id: "inst-1", role: "lead_installer", assignment_type: "install",
-      is_ghost: false, status: "scheduled", scheduled_date: "2026-12-01",
+      job_id: jobId,
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-12-01",
     });
     // Cover every EVEN job with an existing ghost so the covered-set read must
     // also page (603 ghost rows) and the candidate set is exactly the odd jobs.
     if (i % 2 === 0) {
       store.job_assignments.push({
         id: `g-pg-${String(i).padStart(5, "0")}`,
-        job_id: jobId, user_id: OPS_MANAGER_ID, role: "observer", assignment_type: "install",
-        is_ghost: true, status: "scheduled", scheduled_date: "2026-12-01",
+        job_id: jobId,
+        user_id: OPS_MANAGER_ID,
+        role: "observer",
+        assignment_type: "install",
+        is_ghost: true,
+        status: "scheduled",
+        scheduled_date: "2026-12-01",
       });
     }
   }
 
-  const candidates = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
+  const candidates = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
   const expected = Math.floor(total / 2);
-  assertEquals(candidates.length, expected, `expected ${expected} uncovered (odd) spans, saw ${candidates.length}`);
-  assert(candidates.every((c) => Number(c.jobId.slice("job-pg-".length)) % 2 === 1), "every candidate is an uncovered odd job");
+  assertEquals(
+    candidates.length,
+    expected,
+    `expected ${expected} uncovered (odd) spans, saw ${candidates.length}`,
+  );
+  assert(
+    candidates.every((c) => Number(c.jobId.slice("job-pg-".length)) % 2 === 1),
+    "every candidate is an uncovered odd job",
+  );
 });
 
 // ── The ops manager leaving a span re-mirrors the crew he leaves behind ────
@@ -784,21 +1408,48 @@ Deno.test("updateAssignment: reassigning the ops manager's real row to another i
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-leave", type: "fencing", job_number: "SWF-LEAVE", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-leave",
+      type: "fencing",
+      job_number: "SWF-LEAVE",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    await createAssignment(makeFakeClient(store), { jobId: "job-leave", userId: "inst-1", scheduledDate: "2026-11-20" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-leave",
+      userId: "inst-1",
+      scheduledDate: "2026-11-20",
+    });
     await flush();
-    const om = await createAssignment(makeFakeClient(store), { jobId: "job-leave", userId: OPS_MANAGER_ID, scheduledDate: "2026-11-20" });
+    const om = await createAssignment(makeFakeClient(store), {
+      jobId: "job-leave",
+      userId: OPS_MANAGER_ID,
+      scheduledDate: "2026-11-20",
+    });
     await flush();
-    assertEquals(ghostRowsFor(store, "job-leave").length, 0, "his real row holds the key; no ghost");
+    assertEquals(
+      ghostRowsFor(store, "job-leave").length,
+      0,
+      "his real row holds the key; no ghost",
+    );
 
-    await updateAssignment(makeFakeClient(store), { assignmentId: om.assignment.id, userId: "inst-2" });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: om.assignment.id,
+      userId: "inst-2",
+    });
     await flush();
 
     const ghosts = ghostRowsFor(store, "job-leave");
-    assertEquals(ghosts.length, 1, "inst-1 and inst-2 now work the date, so the span is mirrored again");
+    assertEquals(
+      ghosts.length,
+      1,
+      "inst-1 and inst-2 now work the date, so the span is mirrored again",
+    );
     assertEquals(ghosts[0].scheduled_date, "2026-11-20");
-    const realRows = store.job_assignments!.filter((r) => r.job_id === "job-leave" && !r.is_ghost);
+    const realRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-leave" && !r.is_ghost
+    );
     assertEquals(realRows.map((r) => r.user_id).sort(), ["inst-1", "inst-2"]);
   } finally {
     unstub();
@@ -809,22 +1460,48 @@ Deno.test("deleteAssignment: deleting the ops manager's real row while another i
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-omdel", type: "repair", job_number: "SWR-OMDEL", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-omdel",
+      type: "repair",
+      job_number: "SWR-OMDEL",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    await createAssignment(makeFakeClient(store), { jobId: "job-omdel", userId: "inst-1", scheduledDate: "2026-11-21" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-omdel",
+      userId: "inst-1",
+      scheduledDate: "2026-11-21",
+    });
     await flush();
-    const om = await createAssignment(makeFakeClient(store), { jobId: "job-omdel", userId: OPS_MANAGER_ID, scheduledDate: "2026-11-21" });
+    const om = await createAssignment(makeFakeClient(store), {
+      jobId: "job-omdel",
+      userId: OPS_MANAGER_ID,
+      scheduledDate: "2026-11-21",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-omdel").length, 0);
 
-    await deleteAssignment(makeFakeClient(store), { assignmentId: om.assignment.id });
+    await deleteAssignment(makeFakeClient(store), {
+      assignmentId: om.assignment.id,
+    });
     await flush();
 
     const ghosts = ghostRowsFor(store, "job-omdel");
-    assertEquals(ghosts.length, 1, "inst-1 still works the date, so it is mirrored again");
+    assertEquals(
+      ghosts.length,
+      1,
+      "inst-1 still works the date, so it is mirrored again",
+    );
     assertEquals(ghosts[0].scheduled_date, "2026-11-21");
-    const opsRows = store.job_assignments!.filter((r) => r.job_id === "job-omdel" && r.user_id === OPS_MANAGER_ID);
-    assertEquals(opsRows.length, 1, "exactly one ops-manager row on the key: the ghost");
+    const opsRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-omdel" && r.user_id === OPS_MANAGER_ID
+    );
+    assertEquals(
+      opsRows.length,
+      1,
+      "exactly one ops-manager row on the key: the ghost",
+    );
   } finally {
     unstub();
   }
@@ -834,19 +1511,40 @@ Deno.test("updateAssignment: rescheduling the ops manager's real row off a date 
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-omrs", type: "patio", job_number: "SWP-OMRS", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-omrs",
+      type: "patio",
+      job_number: "SWP-OMRS",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    await createAssignment(makeFakeClient(store), { jobId: "job-omrs", userId: "inst-1", scheduledDate: "2026-11-22" });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-omrs",
+      userId: "inst-1",
+      scheduledDate: "2026-11-22",
+    });
     await flush();
-    const om = await createAssignment(makeFakeClient(store), { jobId: "job-omrs", userId: OPS_MANAGER_ID, scheduledDate: "2026-11-22" });
+    const om = await createAssignment(makeFakeClient(store), {
+      jobId: "job-omrs",
+      userId: OPS_MANAGER_ID,
+      scheduledDate: "2026-11-22",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-omrs").length, 0);
 
-    await updateAssignment(makeFakeClient(store), { assignmentId: om.assignment.id, scheduledDate: "2026-11-23" });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: om.assignment.id,
+      scheduledDate: "2026-11-23",
+    });
     await flush();
 
     const dates = ghostRowsFor(store, "job-omrs").map((g) => g.scheduled_date);
-    assertEquals(dates, ["2026-11-22"], "the old date (inst-1) gets its ghost back; the new date is his own real row, no ghost");
+    assertEquals(
+      dates,
+      ["2026-11-22"],
+      "the old date (inst-1) gets its ghost back; the new date is his own real row, no ghost",
+    );
   } finally {
     unstub();
   }
@@ -856,17 +1554,37 @@ Deno.test("updateAssignment: cancelling and then un-cancelling the sole crew row
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-uncancel", type: "fencing", job_number: "SWF-UNC", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-uncancel",
+      type: "fencing",
+      job_number: "SWF-UNC",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-uncancel", userId: "inst-1", scheduledDate: "2026-11-24" });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-uncancel",
+      userId: "inst-1",
+      scheduledDate: "2026-11-24",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-uncancel").length, 1);
 
-    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, status: "cancelled" });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+      status: "cancelled",
+    });
     await flush();
-    assertEquals(ghostRowsFor(store, "job-uncancel").length, 0, "the last crew row was cancelled, so the ghost went");
+    assertEquals(
+      ghostRowsFor(store, "job-uncancel").length,
+      0,
+      "the last crew row was cancelled, so the ghost went",
+    );
 
-    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, status: "scheduled" });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+      status: "scheduled",
+    });
     await flush();
 
     const ghosts = ghostRowsFor(store, "job-uncancel");
@@ -882,11 +1600,24 @@ Deno.test("updateAssignment: a no-change update on an already-mirrored row does 
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-noop", type: "fencing", job_number: "SWF-NOOP", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-noop",
+      type: "fencing",
+      job_number: "SWF-NOOP",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-noop", userId: "inst-1", scheduledDate: "2026-11-25" });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-noop",
+      userId: "inst-1",
+      scheduledDate: "2026-11-25",
+    });
     await flush();
-    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, notes: "bring ladder" });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+      notes: "bring ladder",
+    });
     await flush();
 
     assertEquals(ghostRowsFor(store, "job-noop").length, 1);
@@ -898,9 +1629,14 @@ Deno.test("updateAssignment: a no-change update on an already-mirrored row does 
 Deno.test("fake client: an un-paged select truncates at PostgREST's 1000-row default, so the pagination test above is discriminating", async () => {
   const store = baseStore();
   store.job_assignments = Array.from({ length: 1205 }, (_, i) => ({
-    id: `row-${String(i).padStart(5, "0")}`, job_id: "job-cap", user_id: `u-${i}`, scheduled_date: "2026-12-01",
+    id: `row-${String(i).padStart(5, "0")}`,
+    job_id: "job-cap",
+    user_id: `u-${i}`,
+    scheduled_date: "2026-12-01",
   }));
-  const { data } = await makeFakeClient(store).from("job_assignments").select("id").eq("job_id", "job-cap");
+  const { data } = await makeFakeClient(store).from("job_assignments").select(
+    "id",
+  ).eq("job_id", "job-cap");
   assertEquals(data.length, 1000);
 });
 
@@ -910,21 +1646,40 @@ Deno.test("updateAssignment: a same-date resize (end/start/end-time/duration) mo
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-resize", type: "patio", job_number: "SWP-RESIZE", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-resize",
+      type: "patio",
+      job_number: "SWP-RESIZE",
+      status: "scheduled",
+      metadata: {},
+    });
 
     const a1 = await createAssignment(makeFakeClient(store), {
-      jobId: "job-resize", userId: "inst-1", scheduledDate: "2026-11-26", scheduledEnd: "2026-11-26",
-      startTime: "08:00", endTime: "12:00", durationDays: 1,
+      jobId: "job-resize",
+      userId: "inst-1",
+      scheduledDate: "2026-11-26",
+      scheduledEnd: "2026-11-26",
+      startTime: "08:00",
+      endTime: "12:00",
+      durationDays: 1,
     });
     await flush();
     let ghosts = ghostRowsFor(store, "job-resize");
     assertEquals(ghosts.length, 1);
     assertEquals(ghosts[0].scheduled_end, "2026-11-26");
     assertEquals(ghosts[0].start_time, "08:00");
-    assertEquals(ghosts[0].duration_days, 1, "the ghost mirrors the crew row's duration at mint");
+    assertEquals(
+      ghosts[0].duration_days,
+      1,
+      "the ghost mirrors the crew row's duration at mint",
+    );
 
     await updateAssignment(makeFakeClient(store), {
-      assignmentId: a1.assignment.id, scheduledEnd: "2026-11-27", startTime: "09:00", endTime: "15:00", durationDays: 2,
+      assignmentId: a1.assignment.id,
+      scheduledEnd: "2026-11-27",
+      startTime: "09:00",
+      endTime: "15:00",
+      durationDays: 2,
     });
     await flush();
 
@@ -935,8 +1690,14 @@ Deno.test("updateAssignment: a same-date resize (end/start/end-time/duration) mo
     assertEquals(ghosts[0].start_time, "09:00");
     assertEquals(ghosts[0].end_time, "15:00");
     assertEquals(ghosts[0].duration_days, 2);
-    const mirrorEvents = (store.job_events || []).filter((e) => e.job_id === "job-resize" && e.detail_json?.source === "ghost_auto_mirror");
-    assertEquals(mirrorEvents.length, 1, "a span sync is not a second create event");
+    const mirrorEvents = (store.job_events || []).filter((e) =>
+      e.job_id === "job-resize" && e.detail_json?.source === "ghost_auto_mirror"
+    );
+    assertEquals(
+      mirrorEvents.length,
+      1,
+      "a span sync is not a second create event",
+    );
   } finally {
     unstub();
   }
@@ -946,11 +1707,27 @@ Deno.test("updateAssignment: rescheduling a multi-day crew row carries its durat
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-rsdur", type: "fencing", job_number: "SWF-RSDUR", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-rsdur",
+      type: "fencing",
+      job_number: "SWF-RSDUR",
+      status: "scheduled",
+      metadata: {},
+    });
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-rsdur", userId: "inst-1", scheduledDate: "2026-12-01", durationDays: 2 });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-rsdur",
+      userId: "inst-1",
+      scheduledDate: "2026-12-01",
+      durationDays: 2,
+    });
     await flush();
-    await updateAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id, scheduledDate: "2026-12-03", scheduledEnd: "2026-12-05", durationDays: 3 });
+    await updateAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+      scheduledDate: "2026-12-03",
+      scheduledEnd: "2026-12-05",
+      durationDays: 3,
+    });
     await flush();
 
     const ghosts = ghostRowsFor(store, "job-rsdur");
@@ -969,19 +1746,44 @@ Deno.test("deleteAssignment: a legacy NULL-status crew row still counts as cover
   const unstub = stubFetch();
   try {
     const store = baseStore();
-    store.jobs!.push({ id: "job-null", type: "fencing", job_number: "SWF-NULL", status: "scheduled", metadata: {} });
+    store.jobs!.push({
+      id: "job-null",
+      type: "fencing",
+      job_number: "SWF-NULL",
+      status: "scheduled",
+      metadata: {},
+    });
     store.job_assignments = [
-      { id: "a-null", job_id: "job-null", user_id: "inst-2", role: "lead_installer", assignment_type: "install", is_ghost: false, status: null, scheduled_date: "2026-12-10" },
+      {
+        id: "a-null",
+        job_id: "job-null",
+        user_id: "inst-2",
+        role: "lead_installer",
+        assignment_type: "install",
+        is_ghost: false,
+        status: null,
+        scheduled_date: "2026-12-10",
+      },
     ];
 
-    const a1 = await createAssignment(makeFakeClient(store), { jobId: "job-null", userId: "inst-1", scheduledDate: "2026-12-10" });
+    const a1 = await createAssignment(makeFakeClient(store), {
+      jobId: "job-null",
+      userId: "inst-1",
+      scheduledDate: "2026-12-10",
+    });
     await flush();
     assertEquals(ghostRowsFor(store, "job-null").length, 1);
 
-    await deleteAssignment(makeFakeClient(store), { assignmentId: a1.assignment.id });
+    await deleteAssignment(makeFakeClient(store), {
+      assignmentId: a1.assignment.id,
+    });
     await flush();
 
-    assertEquals(ghostRowsFor(store, "job-null").length, 1, "inst-2's NULL-status row still works the date; the ghost must stay");
+    assertEquals(
+      ghostRowsFor(store, "job-null").length,
+      1,
+      "inst-2's NULL-status row still works the date; the ghost must stay",
+    );
   } finally {
     unstub();
   }
@@ -989,12 +1791,39 @@ Deno.test("deleteAssignment: a legacy NULL-status crew row still counts as cover
 
 Deno.test("findGhostObserverBackfillCandidates: a NULL-status genuine crew row is a candidate; a cancelled one is not", async () => {
   const store = baseStore();
-  store.jobs!.push({ id: "job-bf-null", type: "repair", job_number: "SWR-BFNULL", metadata: {} });
+  store.jobs!.push({
+    id: "job-bf-null",
+    type: "repair",
+    job_number: "SWR-BFNULL",
+    metadata: {},
+  });
   store.job_assignments = [
-    { id: "a-n1", job_id: "job-bf-null", user_id: "inst-1", role: "lead_installer", assignment_type: "install", is_ghost: false, status: null, scheduled_date: "2026-12-11", duration_days: 2 },
-    { id: "a-n2", job_id: "job-bf-null", user_id: "inst-2", role: "lead_installer", assignment_type: "install", is_ghost: false, status: "cancelled", scheduled_date: "2026-12-12" },
+    {
+      id: "a-n1",
+      job_id: "job-bf-null",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: null,
+      scheduled_date: "2026-12-11",
+      duration_days: 2,
+    },
+    {
+      id: "a-n2",
+      job_id: "job-bf-null",
+      user_id: "inst-2",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "cancelled",
+      scheduled_date: "2026-12-12",
+    },
   ];
-  const candidates = await findGhostObserverBackfillCandidates(makeFakeClient(store), { today: "2026-09-17" });
+  const candidates = await findGhostObserverBackfillCandidates(
+    makeFakeClient(store),
+    { today: "2026-09-17" },
+  );
   assertEquals(candidates.map((c) => c.scheduledDate), ["2026-12-11"]);
   assertEquals(candidates[0].durationDays, 2);
 });

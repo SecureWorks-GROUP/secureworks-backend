@@ -2569,9 +2569,9 @@ surfacing a raw uniqueness error. Diagnosis and the response contract live in
 
 The my_jobs feed excludes ghost watcher rows at source: every `job_assignments`
 read in `myJobs()` (occupancy probe included) carries `.eq('is_ghost', false)`,
-the `calendar_events` view's own predicate. A ghost `role:'observer'` row keeps
-a job's OLD scheduled date after a reschedule, so a raw read re-creates the
-2026-08-04 Trade App stale-date defect. `is_ghost` is live-drift (in no repo
+the `calendar_events` view's own predicate. A hand-placed ghost `role:'observer'`
+row keeps a job's OLD scheduled date after a reschedule, so a raw read re-creates
+the 2026-08-04 Trade App stale-date defect. `is_ghost` is live-drift (in no repo
 migration; `boolean NOT NULL DEFAULT false` in production). Structural guard:
 `myjobs_ghost_rows_test.ts`; evidence:
 `docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
