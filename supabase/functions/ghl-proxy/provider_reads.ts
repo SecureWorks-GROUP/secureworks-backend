@@ -32,6 +32,60 @@ export class GhlProviderReadError extends Error {
   }
 }
 
+export function isGhlRateLimitError(
+  error: unknown,
+): error is GhlProviderReadError {
+  return error instanceof GhlProviderReadError && error.status === 429;
+}
+
+export function rethrowIfGhlRateLimited(error: unknown): void {
+  if (isGhlRateLimitError(error)) throw error;
+}
+
+/** Same message shape `ghl()` has always thrown; only 429 becomes typed. */
+export function ghlNonOkError(
+  status: number,
+  bodyText: string,
+  retryAfter?: string | null,
+): Error {
+  if (status === 429) {
+    return new GhlProviderReadError(
+      "ghl_rate_limited",
+      `GHL ${status}: ${bodyText}`,
+      429,
+      status,
+      retryAfter || undefined,
+    );
+  }
+  return new Error(`GHL ${status}: ${bodyText}`);
+}
+
+export function throwIfGhlResponseNotOk(
+  res: {
+    ok: boolean;
+    status: number;
+    headers: { get(name: string): string | null };
+  },
+  text: string,
+): void {
+  if (res.ok) return;
+  throw ghlNonOkError(res.status, text, res.headers.get("Retry-After"));
+}
+
+export function ghlRateLimitResponseFields(error: GhlProviderReadError): {
+  status: 429;
+  headers: Record<string, string>;
+  body: { error: string; retry_after?: string };
+} {
+  const headers: Record<string, string> = {};
+  if (error.retryAfter) headers["Retry-After"] = error.retryAfter;
+  const body: { error: string; retry_after?: string } = {
+    error: error.message,
+  };
+  if (error.retryAfter) body.retry_after = error.retryAfter;
+  return { status: 429, headers, body };
+}
+
 export function isDedicatedGhlReadServerKey(input: {
   action: string | null;
   xApiKey?: string | null;

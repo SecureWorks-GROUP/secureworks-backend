@@ -15,6 +15,7 @@ import {
   fenceMintStamp,
   validateFenceMintInput,
 } from "./fence_mint.ts";
+import { GhlProviderReadError } from "./provider_reads.ts";
 
 const FENCE_PIPELINE_ID = "I9t8njpuR0Dm7B2NDcvI";
 const REQUEST_A = "11111111-1111-4111-8111-111111111111";
@@ -639,6 +640,35 @@ Deno.test("edge stamp recovery is contact scoped, fails closed and classes non-c
   assertStringIncludes(source, "mint_owner_not_found: 500");
   assertStringIncludes(source, "canonical_job_missing: 500");
   assertStringIncludes(source, "MINT_CONFLICT_STATUS[conflictCode] ?? 409");
+});
+
+Deno.test("executeFenceJobMint: GHL 429 is rethrown and not recorded as a mint failure", async () => {
+  const rateLimited = new GhlProviderReadError(
+    "ghl_rate_limited",
+    "GHL 429: slow down",
+    429,
+    429,
+    "15",
+  );
+  const stamped: string[] = [];
+  const thrown = await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A),
+        actorId: "user-1",
+        deps: deps({
+          getContact: () => {
+            throw rateLimited;
+          },
+          recordFailure: async ({ requestId }) => {
+            stamped.push(requestId);
+          },
+        }),
+      }),
+    GhlProviderReadError,
+  );
+  assertEquals(thrown, rateLimited);
+  assertEquals(stamped, []);
 });
 
 Deno.test("takeover executor records failure on the owner row it actually drove", async () => {
