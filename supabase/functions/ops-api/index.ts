@@ -17236,6 +17236,65 @@ export function _requestedMakesafeJobRoute(body: any): MakesafeCreatorJobRoute {
   )
 }
 
+function isMakesafeHugoAssignee(user: any): boolean {
+  const name = String(user?.name || '').trim().toLowerCase()
+  const email = String(user?.email || '').trim().toLowerCase()
+  if (name === 'hugo' || name.startsWith('hugo ')) return true
+  if (email.startsWith('hugo@') || email.startsWith('hugolgraetz@')) return true
+  return false
+}
+
+async function resolveMakesafeDefaultAssignee(
+  client: any,
+): Promise<{ id: string; name: string } | null> {
+  const { data, error } = await client.from('users').select('id, name, email, role')
+  if (error) {
+    console.error(
+      '[ops-api] default make-safe assignee lookup failed:',
+      error.message || error,
+    )
+    return null
+  }
+  const rows = Array.isArray(data) ? data : (data ? [data] : [])
+  const matches = rows.filter(isMakesafeHugoAssignee)
+  if (!matches.length) return null
+  const preferred = matches.find((u: any) =>
+    String(u?.name || '').trim().toLowerCase() === 'hugo'
+  ) || matches.find((u: any) =>
+    String(u?.email || '').toLowerCase().includes('hugolgraetz')
+  ) || matches[0]
+  const id = String(preferred?.id || '')
+  if (!id) return null
+  return { id, name: String(preferred?.name || 'Hugo') }
+}
+
+async function autoAllocateMakesafeIntakeToHugo(
+  client: any,
+  job: any,
+): Promise<void> {
+  if (!job?.id) return
+  const assignee = await resolveMakesafeDefaultAssignee(client)
+  if (!assignee) {
+    console.error('[ops-api] make-safe intake auto-allocate skipped: Hugo user not found')
+    return
+  }
+  await createAssignment(client, {
+    jobId: job.id,
+    userId: assignee.id,
+    crewName: assignee.name,
+    scheduledDate: getAWSTDate(),
+    startTime: '07:00',
+    endTime: '15:00',
+    assignmentType: 'install',
+    role: 'lead_installer',
+    notes: 'Auto-allocated at intake',
+    confirmation_status: 'confirmed',
+    suppress_notifications: true,
+  })
+}
+export const _isMakesafeHugoAssigneeForTest = isMakesafeHugoAssignee
+export const _resolveMakesafeDefaultAssigneeForTest = resolveMakesafeDefaultAssignee
+
 async function createMakesafeJob(
   client: any,
   body: any,
@@ -17669,6 +17728,28 @@ async function createMakesafeJob(
         : {}),
     },
   })
+
+  // SES make-safe / roof / assessment cards mint onto Hugo so they land in
+  // Allocated instead of sitting in New. Repair cards stay unassigned for
+  // manual allocation. Historical backfill and synthetic live-fire never get
+  // a live crew row. Failure here must not roll back the minted job.
+  if (
+    !isRepairRoute &&
+    reviewedJobFamily !== 'repair' &&
+    !internalOptions.historicalBackfill &&
+    !reviewedSyntheticLivefireMarker
+  ) {
+    try {
+      await autoAllocateMakesafeIntakeToHugo(client, job)
+    } catch (e: any) {
+      console.error(
+        '[ops-api] make-safe intake auto-allocate failed for',
+        jobNumber,
+        job?.id,
+        e?.message || e,
+      )
+    }
+  }
 
   // M3b U2a (D4a, gate G3): text the make-safe manager(s) that a new make-safe
   // exists. Shaun is no-texts by choice, and dispatcher
@@ -18788,11 +18869,14 @@ function currentCycleReportMap(
 }
 
 function makesafeCrew(assignments: any[] = []) {
-  const names = assignments.map((a: any) => a?.users?.name).filter(Boolean)
+  const live = assignments.filter((a: any) =>
+    isGenuineTradeAssignment(a) && a?.is_ghost !== true
+  )
+  const names = live.map((a: any) => a?.users?.name).filter(Boolean)
   const uniqueNames = Array.from(new Set(names))
-  const crewNames = assignments.map((a: any) => a?.crew_name).filter(Boolean)
+  const crewNames = live.map((a: any) => a?.crew_name).filter(Boolean)
   const uniqueCrews = Array.from(new Set(crewNames))
-  const firstDate = assignments.map((a: any) => a?.scheduled_date).filter(Boolean).sort()[0] || null
+  const firstDate = live.map((a: any) => a?.scheduled_date).filter(Boolean).sort()[0] || null
   const labelBase = uniqueCrews.length > 0 ? uniqueCrews.join(', ') : uniqueNames.length > 0 ? uniqueNames.join(', ') : 'Unassigned'
   return {
     crew_label: firstDate && labelBase !== 'Unassigned' ? `${labelBase} — ${firstDate}` : labelBase,
