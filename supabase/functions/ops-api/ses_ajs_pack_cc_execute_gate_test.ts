@@ -98,6 +98,8 @@ interface Harness {
   effects: Map<string, any>;
   confirmedTokens: Set<string>;
   graphCalls: any[];
+  /** SAMPLE walk: builder_reference SAMPLE-* so execute skips live AJS CC repair. */
+  sampleDocket?: boolean;
 }
 
 function memberRows(harness: Harness): any[] {
@@ -125,9 +127,18 @@ function docketRows(harness: Harness): any[] {
           family: "physical_makesafe",
         },
         routing: {},
+        identity: harness.sampleDocket
+          ? {
+            job_number: "SWMS-261237",
+            builder_reference: "SAMPLE-AJS-WALK-1",
+          }
+          : {},
       },
     },
     review_spec: {},
+    local_invoice_proposal: harness.sampleDocket
+      ? { builder_reference: "SAMPLE-AJS-WALK-1" }
+      : {},
   }));
 }
 
@@ -347,6 +358,51 @@ async function execute(state: Harness) {
     xeroReader as any,
   );
 }
+
+Deno.test("SEND IT skips AJS CC repair on a SAMPLE docket with blank cc", async () => {
+  const sampleRoutes = ajsRoutes([], []).map((route) => ({
+    ...route,
+    recipients: ["captain-personal@example.test"],
+    cc: [],
+  }));
+  const state = harness({ routes: sampleRoutes, sampleDocket: true });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls.length, 2);
+  assertEquals(state.graphCalls.every((call) => (call.cc || []).length === 0), true);
+});
+
+Deno.test("SEND IT still repairs AJBR CCs on a live docket even if routes look like SAMPLE", async () => {
+  const sampleShapedRoutes = ajsRoutes([], []).map((route) => ({
+    ...route,
+    recipients: ["captain-personal@example.test"],
+    cc: [],
+  }));
+  const state = harness({
+    routes: sampleShapedRoutes,
+    builderKeys: ["AJBR"],
+    sampleDocket: false,
+  });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls[0].cc, [SES_FINANCE_CC]);
+});
+
+Deno.test("SEND IT skips AJBR finance CC repair on a SAMPLE docket", async () => {
+  const sampleRoutes = ajsRoutes([], []).map((route) => ({
+    ...route,
+    recipients: ["captain-personal@example.test"],
+    cc: [],
+  }));
+  const state = harness({
+    routes: sampleRoutes,
+    builderKeys: ["AJBR"],
+    sampleDocket: true,
+  });
+  const result: any = await execute(state);
+  assertEquals(result.state, "released");
+  assertEquals(state.graphCalls.every((call) => (call.cc || []).length === 0), true);
+});
 
 Deno.test("SEND IT repairs a never-dispatched AJS release before Graph send", async () => {
   const state = harness({
