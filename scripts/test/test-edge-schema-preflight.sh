@@ -46,6 +46,7 @@ SALES_BOOKING_PACKS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917130000_sal
 SALES_BOOKING_THREAD_FACTS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917180000_sales_booking_thread_facts.sql"
 SALES_BOOKING_ROSTER_MIGRATION="$REPO_ROOT/supabase/migrations/20260917200000_sales_booking_roster.sql"
 CONTEXT_PIPELINE_STATUS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917210000_context_pipeline_status.sql"
+TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION="$REPO_ROOT/supabase/migrations/20260918120000_trade_invoice_super_payable_split.sql"
 
 
 PASS_COUNT=0
@@ -224,6 +225,10 @@ context_pipeline_status_migration_sha() {
   shasum -a 256 "$CONTEXT_PIPELINE_STATUS_MIGRATION" | awk '{print $1}'
 }
 
+trade_invoice_payable_split_migration_sha() {
+  shasum -a 256 "$TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -280,6 +285,7 @@ write_response() {
   SALES_BOOKING_THREAD_FACTS_EXPECTED_SHA="$(sales_booking_thread_facts_migration_sha)" \
   SALES_BOOKING_ROSTER_EXPECTED_SHA="$(sales_booking_roster_migration_sha)" \
   CONTEXT_PIPELINE_STATUS_EXPECTED_SHA="$(context_pipeline_status_migration_sha)" \
+  TRADE_INVOICE_PAYABLE_SPLIT_EXPECTED_SHA="$(trade_invoice_payable_split_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -722,6 +728,17 @@ context_pipeline_status_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+trade_invoice_payable_split_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260918120000",
+    "expected_migration_name": "trade_invoice_super_payable_split",
+    "expected_statement_sha256": os.environ["TRADE_INVOICE_PAYABLE_SPLIT_EXPECTED_SHA"],
+    "actual_migration_version": "20260918120000",
+    "actual_migration_name": "trade_invoice_super_payable_split",
+    "actual_statement_count": 4,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 context_rows = []
 for version, name, key in [
     ("20260911170000", "automation_switches", "CONTEXT_SWITCH_EXPECTED_SHA"),
@@ -786,6 +803,7 @@ with open(sys.argv[1], "w") as f:
             sales_booking_thread_facts_row,
             sales_booking_roster_row,
             context_pipeline_status_row,
+            trade_invoice_payable_split_row,
             *context_rows,
         ],
         f,
@@ -1024,7 +1042,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" || ! -f "$DEBT_PICTURE_MIGRATION" || ! -f "$CALENDAR_JOB_FAMILY_MIGRATION" || ! -f "$SALES_BOOKING_PACKS_MIGRATION" || ! -f "$SALES_BOOKING_THREAD_FACTS_MIGRATION" || ! -f "$SALES_BOOKING_ROSTER_MIGRATION" || ! -f "$CONTEXT_PIPELINE_STATUS_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" || ! -f "$DEBT_PICTURE_MIGRATION" || ! -f "$CALENDAR_JOB_FAMILY_MIGRATION" || ! -f "$SALES_BOOKING_PACKS_MIGRATION" || ! -f "$SALES_BOOKING_THREAD_FACTS_MIGRATION" || ! -f "$SALES_BOOKING_ROSTER_MIGRATION" || ! -f "$CONTEXT_PIPELINE_STATUS_MIGRATION" || ! -f "$TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
