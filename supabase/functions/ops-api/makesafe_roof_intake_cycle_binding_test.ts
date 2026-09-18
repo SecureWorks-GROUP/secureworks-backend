@@ -238,7 +238,7 @@ function attendanceFor(store: Store, jobId: string) {
   };
 }
 
-Deno.test("ordinary roof intake returns only after one current cycle is bound and remains unassigned", async () => {
+Deno.test("ordinary roof intake returns only after one current cycle is bound and stays unassigned without a Hugo user", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch =
     (() =>

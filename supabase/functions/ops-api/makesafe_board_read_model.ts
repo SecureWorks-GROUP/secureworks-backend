@@ -224,6 +224,7 @@ function slimAssignmentsForCard(assignments: any[]) {
     status: a?.status || null,
     scheduled_date: a?.scheduled_date || null,
     role: a?.role || null,
+    is_ghost: a?.is_ghost === true,
   }));
 }
 
@@ -1064,6 +1065,7 @@ function assignmentFacts(rows: any[]) {
     phone: a?.users?.phone || a?.user?.phone || null,
     crew_name: a?.crew_name || null,
     role: a?.role || null,
+    is_ghost: a?.is_ghost === true,
     status: a?.status || null,
     scheduled_date: a?.scheduled_date || null,
     start_time: a?.start_time || null,

@@ -204,3 +204,43 @@ Deno.test("F6 has_wo stays type-only: a 'work order' filename on a general file 
     false,
   );
 });
+
+Deno.test("crew chip keeps Hugo as lead even when his staff role is ops_manager, and drops the observer copy", () => {
+  const job = {
+    id: "j-hugo",
+    type: "makesafe",
+    status: "scheduled",
+    created_at: "2026-09-18T00:00:00Z",
+  };
+  const detail = { substatus: "waiting_on_trade_report", external_ref: "MLB-40059" };
+  const assignments = [
+    {
+      id: "a-hugo",
+      user_id: "user-hugo",
+      role: "lead_installer",
+      status: "scheduled",
+      is_ghost: false,
+      crew_name: "Hugo",
+      scheduled_date: "2026-09-18",
+      users: { id: "user-hugo", name: "Hugo" },
+    },
+    {
+      id: "a-nithin",
+      user_id: "user-nithin",
+      role: "observer",
+      status: "scheduled",
+      is_ghost: true,
+      crew_name: null,
+      scheduled_date: "2026-09-18",
+      users: { id: "user-nithin", name: "Nithin" },
+    },
+  ];
+  const enriched = enrich(job, detail, assignments, null, null, [], false, null);
+  assertEquals(enriched.crew_members, ["Hugo"]);
+  assert(
+    String(enriched.crew_label || "").startsWith("Hugo"),
+    `expected Hugo on crew_label, got ${enriched.crew_label}`,
+  );
+  assertEquals(/nithin/i.test(String(enriched.crew_label || "")), false);
+});
+
