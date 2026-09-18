@@ -15,16 +15,23 @@ import {
   resolvePersistedTradeInvoiceLineAmount,
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
+  TRADE_INVOICE_COMPANY_CONTRIBUTION_RATE,
+  TRADE_INVOICE_SUPER_RATE,
+  TRADE_INVOICE_WORKER_WITHHOLD_RATE,
   TradeInvoiceMoneyError,
   validatePersistedTradeInvoiceMoney,
   normaliseXeroTaxType,
 } from "./trade_invoice_money.ts";
 
-Deno.test("trade invoice money: GST off splits gross earned into net pay and 12% super", () => {
+Deno.test("captain 2026-09-18: $1000 gross keeps 12% super remittance and pays the boy $940", () => {
+  assertEquals(
+    TRADE_INVOICE_WORKER_WITHHOLD_RATE + TRADE_INVOICE_COMPANY_CONTRIBUTION_RATE,
+    TRADE_INVOICE_SUPER_RATE,
+  );
   const money = calculateTradeInvoiceMoney({
     grossEarned: 1_000,
     gstOn: false,
-    earningsDate: "2026-08-27",
+    earningsDate: "2026-09-18",
   });
 
   assertEquals(money, {
@@ -32,14 +39,17 @@ Deno.test("trade invoice money: GST off splits gross earned into net pay and 12%
     super_rate: 0.12,
     gross_earned: 1_000,
     super_amount: 120,
-    net_pay: 880,
+    worker_withhold: 60,
+    company_contribution: 60,
+    net_pay: 940,
     gst_amount: 0,
-    trade_payable: 880,
+    trade_payable: 940,
     total_inc: 1_000,
+    company_total_out: 1_060,
   });
 });
 
-Deno.test("trade invoice money: GST on stays 10% of gross and never double-counts super", () => {
+Deno.test("trade invoice money: GST on stays 10% of gross; company cost and invoice face diverge", () => {
   const money = calculateTradeInvoiceMoney({
     grossEarned: 1_000,
     gstOn: true,
@@ -47,11 +57,15 @@ Deno.test("trade invoice money: GST on stays 10% of gross and never double-count
   });
 
   assertEquals(money.super_amount, 120);
-  assertEquals(money.net_pay, 880);
-  assertEquals(money.net_pay + money.super_amount, money.gross_earned);
+  assertEquals(money.worker_withhold, 60);
+  assertEquals(money.company_contribution, 60);
+  assertEquals(money.net_pay, 940);
+  assertEquals(money.worker_withhold + money.company_contribution, money.super_amount);
+  assertEquals(money.net_pay + money.super_amount, money.company_total_out);
   assertEquals(money.gst_amount, 100);
-  assertEquals(money.trade_payable, 980);
+  assertEquals(money.trade_payable, 1_040);
   assertEquals(money.total_inc, 1_100);
+  assertEquals(money.company_total_out, 1_060);
 });
 
 Deno.test("trade invoice money: GST is 10% of gross earned, never of net pay after super", () => {
@@ -64,7 +78,8 @@ Deno.test("trade invoice money: GST is 10% of gross earned, never of net pay aft
   assertEquals(money.gst_amount, 220.82);
   assertEquals(money.gst_amount === Math.round(money.net_pay * 0.1 * 100) / 100, false);
   assertEquals(money.total_inc, 2_429.02);
-  assertEquals(money.trade_payable, 2_164.04);
+  assertEquals(money.net_pay, 2_075.71);
+  assertEquals(money.trade_payable, 2_296.53);
 });
 
 Deno.test("trade invoice money: statutory rate is resolved by date and fails closed outside the owned schedule", () => {
@@ -152,14 +167,22 @@ Deno.test("trade invoice Xero lines keep labour at work amounts and withhold sup
     true,
   );
   assertEquals(
-    String(lines[2].Description).includes("Amount payable $880.00"),
+    String(lines[2].Description).includes("Amount payable $940.00"),
+    true,
+  );
+  assertEquals(
+    String(lines[2].Description).includes("Super remittance $120.00"),
+    true,
+  );
+  assertEquals(
+    String(lines[2].Description).includes("Worker withhold $60.00"),
     true,
   );
   assertEquals(
     String(lines[2].Description).includes("Paid to the super fund separately"),
     true,
   );
-  assertEquals(lines[2].UnitAmount, -120);
+  assertEquals(lines[2].UnitAmount, -60);
   assertEquals(lines[2].TaxType, "NONE");
   assertEquals(lines.slice(0, 2).every((line) => line.TaxType === "INPUT"), true);
   assertEquals(
@@ -200,15 +223,18 @@ Deno.test("Xero split preserves a final deduction and withholds super so the bil
 
   assertEquals(lines[0].UnitAmount, 5_163.40);
   assertEquals(lines[1].UnitAmount, -350);
-  assertEquals(lines[2].UnitAmount, -577.61);
+  assertEquals(lines[2].UnitAmount, -288.80);
   assertEquals(
-    lines.reduce(
-      (sum, line) => sum + Number(line.Quantity) * Number(line.UnitAmount),
-      0,
-    ),
+    Math.round(
+      lines.reduce(
+        (sum, line) => sum + Number(line.Quantity) * Number(line.UnitAmount),
+        0,
+      ) * 100,
+    ) / 100,
     money.net_pay,
   );
-  assertEquals(money.net_pay, 4_235.79);
+  assertEquals(money.net_pay, 4_524.60);
+  assertEquals(money.super_amount, 577.61);
 });
 
 Deno.test("trade invoice Xero lines use NoTax when GST is off", () => {
@@ -232,7 +258,7 @@ Deno.test("trade invoice Xero lines use NoTax when GST is off", () => {
   assertEquals(lines.map((line) => line.TaxType), ["NONE", "NONE"]);
   assertEquals(lines[0].UnitAmount, 41.15);
   assertEquals(lines[0].Quantity, 3);
-  assertEquals(lines[1].UnitAmount, -14.81);
+  assertEquals(lines[1].UnitAmount, -7.41);
 });
 
 Deno.test("returned Xero bill must preserve the worked-out super split", () => {
@@ -416,11 +442,11 @@ Deno.test("invoice presenter publishes server cash payable and leaves legacy his
     super_rate: 0.12,
     super_amount: 120,
     gross_earned: 1_000,
-    net_pay: 880,
+    net_pay: 940,
     total_inc: 1_100,
   };
 
-  assertEquals(presentTradeInvoiceMoney(persisted).trade_payable, 980);
+  assertEquals(presentTradeInvoiceMoney(persisted).trade_payable, 1_040);
   assertEquals(
     presentTradeInvoiceMoney({
       week_end: "2025-06-30",
@@ -459,7 +485,7 @@ Deno.test("persisted money validation rejects an unresolved or non-statutory rat
     super_rate: 0.12,
     super_amount: 120,
     gross_earned: 1_000,
-    net_pay: 880,
+    net_pay: 940,
     total_inc: 1_100,
   };
 
@@ -510,10 +536,11 @@ Deno.test("Israel-style work-order nets keep labour at work amounts; super is mi
   );
 
   assertEquals(money.super_amount, 264.98);
-  assertEquals(money.net_pay, 1_943.22);
+  assertEquals(money.worker_withhold, 132.49);
+  assertEquals(money.net_pay, 2_075.71);
   assertEquals(lines[0].UnitAmount, 803.20);
   assertEquals(lines[1].UnitAmount, 1_405.00);
-  assertEquals(lines[2].UnitAmount, -264.98);
+  assertEquals(lines[2].UnitAmount, -132.49);
   assertEquals(
     Math.round(
       lines.reduce(
@@ -521,7 +548,7 @@ Deno.test("Israel-style work-order nets keep labour at work amounts; super is mi
         0,
       ) * 100,
     ) / 100,
-    1_943.22,
+    2_075.71,
   );
   assertEquals(String(lines[0].Description).startsWith("Israel\n"), true);
   assertEquals(
@@ -537,7 +564,7 @@ Deno.test("Israel-style work-order nets keep labour at work amounts; super is mi
     true,
   );
   assertEquals(
-    String(lines[2].Description).includes("Amount payable $1943.22"),
+    String(lines[2].Description).includes("Amount payable $2075.71"),
     true,
   );
 });
@@ -558,15 +585,15 @@ Deno.test("audit model does not shrink labour per line; super is 12% of submitte
   assertEquals(model.submitted_lines[0].unit_amount === 706.82, false);
   assertEquals(model.header.submitted_total, 2_208.20);
   assertEquals(model.header.super_amount, 264.98);
-  assertEquals(model.header.amount_payable, 1_943.22);
+  assertEquals(model.header.amount_payable, 2_075.71);
   assertEquals(
     Math.round(
-      (model.header.submitted_total - model.header.super_amount) * 100,
+      (model.header.submitted_total - money.worker_withhold) * 100,
     ) / 100,
     model.header.amount_payable,
   );
   assertEquals(model.super_line.kind, "super");
-  assertEquals(model.super_line.unit_amount, -264.98);
+  assertEquals(model.super_line.unit_amount, -132.49);
 });
 
 // 2026-09-08: the shape Xero actually returns for a pushed trade bill (Hugo,
@@ -576,20 +603,83 @@ Deno.test("returned split: Xero's BASEXCLUDED super line is accepted as NONE", (
   const returned = [
     { Description: "Hugo\nSWF-261281 | SW - FENCING\nLabour", Quantity: 1, UnitAmount: 710, TaxType: "INPUT" },
     { Description: "Hugo\nSWMS-261344 | SW - MAKESAFE\nMS and RR", Quantity: 44, UnitAmount: 40, TaxType: "INPUT" },
-    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -296.4, TaxType: "BASEXCLUDED" },
+    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -148.2, TaxType: "BASEXCLUDED" },
   ];
   assertReturnedTradeInvoiceXeroSplit(returned, money);
   // GST off: labour comes back BASEXCLUDED too.
   const moneyOff = calculateTradeInvoiceMoney({ grossEarned: 1000, gstOn: false, earningsDate: "2026-09-04" });
   assertReturnedTradeInvoiceXeroSplit([
     { Description: "Labour", Quantity: 1, UnitAmount: 1000, TaxType: "BASEXCLUDED" },
-    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -120, TaxType: "BASEXCLUDED" },
+    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -60, TaxType: "BASEXCLUDED" },
   ], moneyOff);
   // A taxed super line is still wrong.
   assertThrows(() => assertReturnedTradeInvoiceXeroSplit([
     { Description: "Labour", Quantity: 1, UnitAmount: 2470, TaxType: "INPUT" },
-    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -296.4, TaxType: "INPUT" },
+    { Description: "Superannuation Guarantee 12.00% of submitted total", Quantity: 1, UnitAmount: -148.2, TaxType: "INPUT" },
   ], money), TradeInvoiceMoneyError);
   assertEquals(normaliseXeroTaxType("basexcluded"), "NONE");
   assertEquals(normaliseXeroTaxType("INPUT"), "INPUT");
+});
+
+Deno.test("captain 2026-09-18: $1333.33 rounding still reconciles to the cent", () => {
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 1_333.33,
+    gstOn: false,
+    earningsDate: "2026-09-18",
+  });
+  assertEquals(money.super_amount, 160);
+  assertEquals(money.worker_withhold, 80);
+  assertEquals(money.company_contribution, 80);
+  assertEquals(money.net_pay, 1_253.33);
+  assertEquals(money.company_total_out, 1_413.33);
+  assertEquals(
+    money.worker_withhold + money.company_contribution,
+    money.super_amount,
+  );
+  assertEquals(money.net_pay + money.super_amount, money.company_total_out);
+  assertEquals(money.net_pay + money.worker_withhold, money.gross_earned);
+});
+
+Deno.test("validator accepts the new 6% withhold shape and the historical 12% carve-out, and rejects a tamper", () => {
+  const current = {
+    week_end: "2026-09-18",
+    subtotal_ex: 1_000,
+    gst: 0,
+    gst_on: false,
+    super_rate: 0.12,
+    super_amount: 120,
+    gross_earned: 1_000,
+    net_pay: 940,
+    total_inc: 1_000,
+  };
+  const accepted = validatePersistedTradeInvoiceMoney(current);
+  assertEquals(accepted.net_pay, 940);
+  assertEquals(accepted.worker_withhold, 60);
+  assertEquals(accepted.company_contribution, 60);
+  assertEquals(accepted.company_total_out, 1_060);
+
+  const legacy = validatePersistedTradeInvoiceMoney({
+    ...current,
+    net_pay: 880,
+  });
+  assertEquals(legacy.net_pay, 880);
+  assertEquals(legacy.worker_withhold, 120);
+  assertEquals(legacy.company_contribution, 0);
+  assertEquals(legacy.company_total_out, 1_000);
+
+  assertThrows(
+    () => validatePersistedTradeInvoiceMoney({ ...current, net_pay: 900 }),
+    TradeInvoiceMoneyError,
+    "does not reconcile",
+  );
+  assertThrows(
+    () => validatePersistedTradeInvoiceMoney({ ...current, net_pay: 1_000 }),
+    TradeInvoiceMoneyError,
+    "does not reconcile",
+  );
+  assertThrows(
+    () => validatePersistedTradeInvoiceMoney({ ...current, super_amount: 60, net_pay: 940 }),
+    TradeInvoiceMoneyError,
+    "does not reconcile",
+  );
 });

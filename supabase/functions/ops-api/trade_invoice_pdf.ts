@@ -1,6 +1,7 @@
 // Canonical trade-invoice audit PDF. Labour stays at submitted amounts.
-// Super is one 12%-of-submitted-total line. Header, lines, and TOTAL agree.
-// This is the document Books sees on the Xero DRAFT — not a per-line 88% shrink.
+// Super remittance is still 12% of submitted total. The minus line is the
+// worker withhold only (6% on new invoices) so TOTAL equals cash payable.
+// This is the document Books sees on the Xero DRAFT — not a per-line shrink.
 
 import {
   type TradeInvoiceAuditModel,
@@ -20,12 +21,12 @@ export function buildTradeInvoiceAuditText(
   const invoiceNumber = String(options.invoiceNumber || "").trim() ||
     "trade-invoice";
   const lines: string[] = [
-    "TAX INVOICE - labour at submitted amounts, super 12% of total once",
+    "TAX INVOICE - labour at submitted amounts, super 12% remittance, worker withhold on the minus line",
     `${tradeName}  ${invoiceNumber}`,
     `Submitted total ${moneyLabel(model.header.submitted_total)}`,
     `Super ${
       (model.super_rate * 100).toFixed(2)
-    }% of submitted total ${moneyLabel(model.header.super_amount)}`,
+    }% remittance of submitted total ${moneyLabel(model.header.super_amount)}`,
     `Amount payable ${moneyLabel(model.header.amount_payable)}`,
     "Lines (submitted amounts - not reduced per line for super)",
   ];
@@ -43,7 +44,7 @@ export function buildTradeInvoiceAuditText(
     }  ${moneyLabel(model.super_line.line_total)}`,
   );
   lines.push(
-    `TOTAL payable (submitted total minus super) ${
+    `TOTAL payable (submitted total minus worker withhold) ${
       moneyLabel(model.header.amount_payable)
     }`,
   );

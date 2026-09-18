@@ -1759,6 +1759,9 @@ function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
     total_inc: money.total_inc,
     submitted_total: money.gross_earned,
     amount_payable: money.net_pay,
+    worker_withhold: money.worker_withhold,
+    company_contribution: money.company_contribution,
+    company_total_out: money.company_total_out,
   }
 }
 
@@ -50811,9 +50814,10 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     .maybeSingle()
 
   const subtotal = Math.round(totalHours * rate * 100) / 100
-  // Preview money uses the SAME split as the invoice (super 12% of gross, GST
-  // 10% of gross when on) so the Pay tab and the bill never disagree. The GST
-  // choice is ?gst_on=true|false, else the profile flag, else off.  [audit 2026-09]
+  // Preview money uses the SAME split as the invoice (SG remittance 12% of
+  // gross, 6% worker withhold, GST 10% of gross when on) so the Pay tab and
+  // the bill never disagree. The GST choice is ?gst_on=true|false, else the
+  // profile flag, else off.  [audit 2026-09]
   const previewGstParam = params.get('gst_on')
   const previewGstOn = previewGstParam === 'true' || previewGstParam === 'false'
     ? previewGstParam === 'true'

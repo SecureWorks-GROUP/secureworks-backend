@@ -246,6 +246,10 @@ ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|col
 ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|constraint|trade_invoices_super_gst_split_check
 ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|trigger|trade_invoices.trg_trade_invoices_require_money_split
 ops-api|supabase/migrations/20260827112928_trade_invoice_super_gst_split.sql|function|replace_trade_invoice_draft_v1
+# Captain 2026-09-18 payable split: net_pay is gross minus 6% worker withhold.
+# Constraint name is unchanged; this ledger row must land before ops-api writes
+# the new shape. Historical 12% carve-out rows stay valid on the same CHECK.
+ops-api|supabase/migrations/20260918120000_trade_invoice_super_payable_split.sql|constraint|trade_invoices_super_gst_split_check
 # Weekly work-order invoice blocks select and insert these fields. The header
 # constraint owns Grand Total - final deductions = TO BE PAID, while typed line
 # constraints keep deductions negative and final deductions non-job-scoped.
