@@ -231,6 +231,15 @@ import {
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from './insurance_repairs_board.ts'
+import {
+  applyGhostObserverBackfill,
+  ensureGhostObserverMirror,
+  findGhostObserverBackfillCandidates,
+  isGenuineCrewAssignmentRow,
+  reconcileGhostObserverMirrorOnReschedule,
+  releaseGhostObserverMirrorForRealAssignee,
+  syncGhostObserverMirrorForSpan,
+} from './ghost_observer_mirror.ts'
 import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
 import {
   deriveFencingStageV1,
@@ -7654,6 +7663,41 @@ if (import.meta.main) serve(async (req: Request) => {
         })
         return json(await deleteAssignment(client, body))
       }
+      // Ghost observer auto-mirror backfill (Captain 2026-09-17): mirrors a
+      // Shaun ghost onto every non-cancelled, non-ghost, genuine crew
+      // assignment dated today or later that lacks one yet — the population
+      // that predates this mission's auto-mirror going live. API-key-only,
+      // dry-run by default; apply:true actually writes. Firstmate/ops runs
+      // this only on the Captain's explicit word, never automatically.
+      case 'backfill_ghost_observers': {
+        if (authMode !== 'api_key') {
+          return json({ error: 'backfill_ghost_observers requires ops privilege' }, 403)
+        }
+        const apply = body?.apply === true
+        const today = getAWSTDate()
+        const candidates = await findGhostObserverBackfillCandidates(client, { today })
+        const byJobType: Record<string, number> = {}
+        for (const c of candidates) {
+          const vertical = _jobVertical(c.job)
+          byJobType[vertical] = (byJobType[vertical] || 0) + 1
+        }
+        let created = 0
+        let failed = 0
+        if (apply) {
+          const res = await applyGhostObserverBackfill(client, candidates)
+          created = res.created
+          failed = res.failed
+        }
+        return json({
+          ok: true,
+          apply,
+          today,
+          candidates: candidates.length,
+          created,
+          failed,
+          by_job_type: byJobType,
+        })
+      }
       // Name (or clear) the lead installer on a job's crew.
       //
       // Authority is deliberately the SAME gate as creating the assignment —
@@ -9752,8 +9796,26 @@ if (import.meta.main) serve(async (req: Request) => {
             notes: 'Requested by ' + (aarReq.requester?.name || 'lead'),
           }))
 
-          await client.from('job_assignments').insert(aarAssignmentRows)
+          const { error: aarInsertErr } = await client.from('job_assignments').insert(aarAssignmentRows)
 
+          // Ghost observer auto-mirror: this is the one job_assignments
+          // writer that bypasses createAssignment (a legacy name-only
+          // "assist" row per requested date), so it must call the same
+          // mirror helper directly — "one helper, every writer". Never
+          // mirror rows that were not written.
+          if (aarInsertErr) {
+            console.log('[ops-api] approve_assignment_request: assignment insert failed; ghost mirror skipped:', aarInsertErr)
+          } else {
+            for (const row of aarAssignmentRows) {
+              try {
+                await ensureGhostObserverMirror(client, {
+                  jobId: aarReq.job_id,
+                  scheduledDate: row.scheduled_date,
+                  crewName: aarReq.trade?.name || null,
+                }, aarReq.requested_trade || null)
+              } catch (e) { console.log('[ops-api] ghost observer auto-mirror (assignment request) failed:', e) }
+            }
+          }
         }
 
         return json({ success: true, status: aarNewStatus })
@@ -23629,7 +23691,7 @@ async function overrideMakesafeAllocationToSubmitter(
   nowIso: string,
 ): Promise<{ cancelled: any[]; blocked: any[] }> {
   const { data: others, error } = await client.from('job_assignments')
-    .select('id, user_id, status, role, assignment_type, invoiced_in, notes, is_lead')
+    .select('id, user_id, status, role, assignment_type, invoiced_in, notes, is_lead, scheduled_date')
     .eq('job_id', jobId)
     .eq('attendance_cycle_id', attendanceCycleId)
     .eq('cycle_attribution', 'bound')
@@ -23648,6 +23710,19 @@ async function overrideMakesafeAllocationToSubmitter(
       .update({ status: 'cancelled', notes: note }).eq('id', row.id)
     if (updErr) { console.warn('[ops-api] allocation override cancel failed:', updErr.message || updErr); blocked.push(row); continue }
     cancelled.push(row)
+  }
+  // Ghost observer auto-mirror: this cancel bypasses updateAssignment, so it
+  // owns the same span cleanup — the last real crew row for a date going
+  // away must take the ops manager's mirrored ghost with it.
+  for (const row of cancelled) {
+    if (!row.scheduled_date) continue
+    try {
+      await syncGhostObserverMirrorForSpan(client, {
+        jobId,
+        scheduledDate: String(row.scheduled_date),
+        excludeAssignmentId: String(row.id),
+      })
+    } catch (e) { console.log('[ops-api] ghost observer auto-mirror (allocation override) failed:', e) }
   }
   if (cancelled.length || blocked.length) {
     try {
@@ -31942,11 +32017,15 @@ async function findActiveAssignmentForUserDate(
   scheduledDate: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('job_assignments')
-    .select('id, scheduled_date, user_id, status, assignment_type')
+    .select('id, scheduled_date, user_id, status, assignment_type, is_ghost')
     .eq('job_id', jobId).eq('user_id', userId).eq('scheduled_date', scheduledDate)
     .neq('status', 'cancelled').limit(1)
   if (error) throw error
-  return data?.[0] || null
+  // The unique key allows ONE row per job/user/date, so the row returned is
+  // the only one. An auto-mirrored ghost watcher on that key is not a crew
+  // allocation and must never satisfy a real-crew idempotency check.
+  const row = data?.[0] || null
+  return row && row.is_ghost !== true ? row : null
 }
 
 function assignmentUserDateConflict(
@@ -32086,10 +32165,11 @@ export async function allocateJob(client: any, args: {
 
   // Idempotency against double-taps: an existing non-cancelled assignment for the
   // same job + installer + date returns instead of inserting a duplicate.
-  const { data: dup } = await client.from('job_assignments')
-    .select('id, scheduled_date, user_id, status, assignment_type, attendance_cycle_id, cycle_attribution')
+  const { data: dupRows } = await client.from('job_assignments')
+    .select('id, scheduled_date, user_id, status, assignment_type, attendance_cycle_id, cycle_attribution, is_ghost')
     .eq('job_id', jobId).eq('user_id', targetUserId).eq('scheduled_date', sDate)
     .neq('status', 'cancelled').limit(1)
+  const dup = (dupRows || []).filter((row: any) => row?.is_ghost !== true)
   if (dup && dup.length > 0) {
     if (dup[0].attendance_cycle_id && dup[0].cycle_attribution === 'bound') {
       await reconcileMakesafeReportBindingWithAllocation(client, {
@@ -32225,6 +32305,16 @@ export async function createAssignment(client: any, body: any) {
       })
       return { assignment: exactDuplicate, deduped: true }
     }
+  }
+
+  // Ghost observer auto-mirror: the ops manager allocated as REAL crew must
+  // win the (job, user, date) unique key over his own auto-mirrored ghost.
+  if (isGenuineCrewAssignmentRow(insertRow) && insertRow.user_id) {
+    await releaseGhostObserverMirrorForRealAssignee(client, {
+      jobId: jId,
+      scheduledDate: sDate,
+      userId: String(insertRow.user_id),
+    })
   }
 
   const { data, error } = await client.from('job_assignments').insert(insertRow).select().single()
@@ -32380,6 +32470,27 @@ export async function createAssignment(client: any, body: any) {
     })
   }
 
+  // Ghost observer auto-mirror (Captain 2026-09-17): "repair works that are
+  // scheduled need to be seen by Shaun as a ghost assignment too, just as any
+  // other job would." Applies to every job type — no vertical filtering. Only
+  // a genuine, dated, real-assignee crew row mirrors; an observer/ghost
+  // placeholder or a planning entry (meeting/reminder) never does, and the
+  // ops manager assigning HIMSELF needs no watcher row. Non-blocking: a
+  // mirror failure must never fail or delay the real assignment write.
+  try {
+    if (isGenuineCrewAssignmentRow(data) && data?.user_id && data?.scheduled_date) {
+      await ensureGhostObserverMirror(client, {
+        jobId: jId,
+        scheduledDate: data.scheduled_date,
+        scheduledEnd: data.scheduled_end ?? null,
+        startTime: data.start_time ?? null,
+        endTime: data.end_time ?? null,
+        durationDays: data.duration_days ?? null,
+        crewName: data.crew_name || body.crewName || body.crew_name || null,
+      }, data.user_id)
+    }
+  } catch (e) { console.log('[ops-api] ghost observer auto-mirror (create) failed:', e) }
+
   return { assignment: data }
 }
 
@@ -32390,7 +32501,7 @@ export async function updateAssignment(client: any, body: any) {
   // Capture old state for dual-write
   const { data: oldAssignment } = await client
     .from('job_assignments')
-    .select('confirmation_status, scheduled_date, crew_name, job_id, user_id, status, role, assignment_type, attendance_cycle_id, cycle_attribution')
+    .select('confirmation_status, scheduled_date, crew_name, job_id, user_id, status, role, assignment_type, is_ghost, attendance_cycle_id, cycle_attribution')
     .eq('id', id)
     .single()
 
@@ -32435,6 +32546,23 @@ export async function updateAssignment(client: any, body: any) {
     const durationDays = Math.round(Number(update.duration_days))
     if (durationDays > 0) update.duration_days = durationDays
     else delete update.duration_days
+  }
+
+  // Ghost observer auto-mirror: a real crew row moving onto (job, ops
+  // manager, date) must first clear his auto-mirrored ghost off that key.
+  if (
+    oldAssignment?.job_id && isGenuineCrewAssignmentRow(oldAssignment) &&
+    (update.user_id !== undefined || update.scheduled_date !== undefined)
+  ) {
+    const targetUserId = update.user_id ?? oldAssignment.user_id
+    const targetDate = update.scheduled_date ?? oldAssignment.scheduled_date
+    if (targetUserId && targetDate) {
+      await releaseGhostObserverMirrorForRealAssignee(client, {
+        jobId: String(oldAssignment.job_id),
+        scheduledDate: String(targetDate),
+        userId: String(targetUserId),
+      })
+    }
   }
 
   const { data, error } = await client
@@ -32542,17 +32670,69 @@ export async function updateAssignment(client: any, body: any) {
     })
   }
 
+  // Ghost observer auto-mirror: keep Shaun's mirrored ghost in sync with the
+  // real crew row it shadows. Only re-triggered when the row being updated
+  // was ITSELF genuine crew work (never a ghost row, meeting, or reminder).
+  // A cancel, or a reclassification that stops counting as crew work, is
+  // treated exactly like removal; otherwise a bare reschedule moves the
+  // mirror. Non-blocking: a mirror failure must never fail the real update.
+  if (data?.job_id && oldAssignment && isGenuineCrewAssignmentRow(oldAssignment)) {
+    try {
+      const stillGenuineCrewWork = data.status !== 'cancelled' && isGenuineCrewAssignmentRow(data)
+      if (!stillGenuineCrewWork) {
+        if (oldAssignment.scheduled_date) {
+          await syncGhostObserverMirrorForSpan(client, {
+            jobId: String(data.job_id),
+            scheduledDate: String(oldAssignment.scheduled_date),
+            excludeAssignmentId: String(id),
+          })
+        }
+      } else if (
+        oldAssignment.scheduled_date && data.scheduled_date &&
+        oldAssignment.scheduled_date !== data.scheduled_date
+      ) {
+        await reconcileGhostObserverMirrorOnReschedule(client, {
+          jobId: String(data.job_id),
+          assignmentId: String(id),
+          oldDate: String(oldAssignment.scheduled_date),
+          newDate: String(data.scheduled_date),
+          newScheduledEnd: data.scheduled_end ?? null,
+          newStartTime: data.start_time ?? null,
+          newEndTime: data.end_time ?? null,
+          newDurationDays: data.duration_days ?? null,
+          crewName: data.crew_name ?? null,
+          assigneeUserId: data.user_id ?? null,
+        })
+      } else if (data.scheduled_date) {
+        // Same date, still crew work: the row may have been un-cancelled,
+        // reassigned off the ops manager (whose real row held the key in
+        // place of a ghost), or resized (end / times / duration) — the
+        // mirror follows every span field. Idempotent, so a no-change
+        // update costs one read.
+        await ensureGhostObserverMirror(client, {
+          jobId: String(data.job_id),
+          scheduledDate: String(data.scheduled_date),
+          scheduledEnd: data.scheduled_end ?? null,
+          startTime: data.start_time ?? null,
+          endTime: data.end_time ?? null,
+          durationDays: data.duration_days ?? null,
+          crewName: data.crew_name ?? null,
+        }, data.user_id ?? null)
+      }
+    } catch (e) { console.log('[ops-api] ghost observer auto-mirror (update) failed:', e) }
+  }
+
   return { assignment: data, all_complete: allComplete, suggest_status: suggestStatus, job_id: data?.job_id }
 }
 
-async function deleteAssignment(client: any, body: any) {
+export async function deleteAssignment(client: any, body: any) {
   const id = body.assignmentId || body.assignment_id || body.id
   if (!id) throw new Error('assignmentId required')
 
   // Get assignment for event log + dual-write
   const { data: existing } = await client
     .from('job_assignments')
-    .select('job_id, user_id, scheduled_date, confirmation_status, crew_name, invoiced_in')
+    .select('job_id, user_id, scheduled_date, confirmation_status, crew_name, invoiced_in, role, assignment_type, is_ghost')
     .eq('id', id)
     .single()
 
@@ -32596,6 +32776,21 @@ async function deleteAssignment(client: any, body: any) {
       },
       metadata: { operator: body.operator_email || body.user_email || null },
     })
+
+    // Ghost observer auto-mirror: deleting the last genuine crew row for a
+    // job/date must not leave Shaun's mirrored ghost pointing at a date
+    // nobody is working. Skipped when the deleted row was itself a ghost/
+    // observer/planning entry — that is a direct admin action, not a change
+    // in real crew work.
+    if (isGenuineCrewAssignmentRow(existing) && existing.scheduled_date) {
+      try {
+        await syncGhostObserverMirrorForSpan(client, {
+          jobId: String(existing.job_id),
+          scheduledDate: String(existing.scheduled_date),
+          excludeAssignmentId: String(id),
+        })
+      } catch (e) { console.log('[ops-api] ghost observer auto-mirror (delete) failed:', e) }
+    }
   }
 
   return { success: true }

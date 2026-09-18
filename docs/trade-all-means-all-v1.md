@@ -74,11 +74,14 @@ not a silent coercion.
 Every `job_assignments` read that can reach the my_jobs feed — the dispatcher
 full-range pages, the manager rolling/fencing queries, the personal own-rows
 query, the make-safe backstop, and the pool occupancy probe — carries
-`.eq('is_ghost', false)`, the `calendar_events` view's own predicate. A ghost
-`role:'observer'` row keeps a job's old `scheduled_date` after a reschedule, so
-a raw read let a consumer deduping to one row per job pick the stale date (the
-2026-08-04 Trade App defect). No lens above changes meaning: the excluded rows
-were never visible on any calendar surface. Structural guard:
+`.eq('is_ghost', false)`, the `calendar_events` view's own predicate. A
+hand-placed ghost `role:'observer'` row keeps a job's old `scheduled_date` after
+a reschedule, so a raw read let a consumer deduping to one row per job pick the
+stale date (the 2026-08-04 Trade App defect). Ghosts auto-mirrored since
+2026-09-17 (`ghost_observer_mirror.ts`, see AGENTS.md) follow their crew row,
+but the exclusion is unchanged: a ghost is never crew. No lens above changes
+meaning: the excluded rows were never visible on any calendar surface.
+Structural guard:
 `myjobs_ghost_rows_test.ts`; evidence:
 `docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
 

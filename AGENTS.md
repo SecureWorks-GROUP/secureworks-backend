@@ -2569,12 +2569,55 @@ surfacing a raw uniqueness error. Diagnosis and the response contract live in
 
 The my_jobs feed excludes ghost watcher rows at source: every `job_assignments`
 read in `myJobs()` (occupancy probe included) carries `.eq('is_ghost', false)`,
-the `calendar_events` view's own predicate. A ghost `role:'observer'` row keeps
-a job's OLD scheduled date after a reschedule, so a raw read re-creates the
-2026-08-04 Trade App stale-date defect. `is_ghost` is live-drift (in no repo
+the `calendar_events` view's own predicate. A hand-placed ghost `role:'observer'`
+row keeps a job's OLD scheduled date after a reschedule, so a raw read re-creates
+the 2026-08-04 Trade App stale-date defect. `is_ghost` is live-drift (in no repo
 migration; `boolean NOT NULL DEFAULT false` in production). Structural guard:
 `myjobs_ghost_rows_test.ts`; evidence:
 `docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
+
+**Every genuine, dated crew assignment auto-mirrors a ghost for the ops
+manager** (Captain 2026-09-17: "repair works that are scheduled need to be
+seen by Shaun as a ghost assignment too, just as any other job would"), across
+every job type — no vertical filtering. `ghost_observer_mirror.ts` is the one
+module: `ensureGhostObserverMirror` (idempotent create, skipped when the ops
+manager is himself the real assignee), `reconcileGhostObserverMirrorOnReschedule`
+(moves the mirror, or leaves it when a sibling crew row still covers the old
+date) and `syncGhostObserverMirrorForSpan` (removes it once no genuine crew
+row covers that job/date, and re-ensures it from the remaining crew when the
+departing row was the ops manager's own real assignment) are wired into `createAssignment`, `updateAssignment`,
+`deleteAssignment`, the make-safe submitter override
+(`overrideMakesafeAllocationToSubmitter`) and the legacy
+`approve_assignment_request` direct-insert writer — every place a real crew
+`job_assignments` row is written or cancelled. The ops
+manager is resolved by `users.role = 'ops_manager'` at runtime, never a
+hard-coded id. `backfill_ghost_observers` (api_key-only, dry-run unless
+`apply:true`) mirrors the pre-existing population dated today or later, paging
+both reads past the 1000-row ceiling. This
+is a write-side invariant only; every read-side ghost exclusion above is
+unchanged. Tests: `ghost_observer_auto_mirror_test.ts`.
+
+The ghost mirrors every span field of its crew row (`scheduled_date`,
+`scheduled_end`, `start_time`, `end_time`, `duration_days`): a same-date
+resize re-syncs the live ghost in place (last writer wins across crew rows on
+one date, no second event), and every live-crew read in the module keeps
+NULL-status rows via `status.is.null,status.neq.cancelled`, because
+`job_assignments.status` is nullable and a bare `.neq` would let a legacy
+row's span lose its ghost.
+
+`job_assignments_job_user_date_key` is UNIQUE(job_id, user_id, scheduled_date)
+with NO `is_ghost` or `status` exemption, so the ops manager holds at most one
+row per job/date — ghost or real, live or cancelled. Two rules follow. The
+mirror never inserts blind: it reads that one row and revives a cancelled
+ghost in place, yields to a live real row, and treats a 23505 as a re-read.
+And a REAL ops-manager row landing on a key (createAssignment insert, or an
+updateAssignment user/date move) calls
+`releaseGhostObserverMirrorForRealAssignee` first so the ghost is deleted
+before the write; `allocateJob`'s dedupe reads ignore ghost rows for the same
+reason, otherwise allocating the ops manager returns his own ghost as an
+"idempotent" success and never allocates him. The in-memory fake in the test
+suite enforces that key on insert and update, so a new writer that collides
+fails there rather than only in production.
 
 ## Every SES Measurement Names Its Denominator And Its Generation
 
