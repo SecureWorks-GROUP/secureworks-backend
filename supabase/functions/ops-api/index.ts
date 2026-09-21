@@ -830,6 +830,7 @@ import {
   salesBookingThreadsRefreshAction,
   SalesBookingPackError,
 } from './sales_booking_pack.ts'
+import { recordVisitOutcomeAction, listVisitOutcomesAction, VisitOutcomeError } from './visit_outcomes.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
@@ -5164,6 +5165,22 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(result.body, result.status)
       }
       case 'ops_api_version': return json(opsApiVersion())
+      case 'record_visit_outcome':
+      case 'list_visit_outcomes': {
+        const visitAuth = {
+          mode: authMode,
+          userId: authUser?.id ?? null,
+          isStaffOperator: _opsApiCallerIsStaffOperator(authMode, authUser),
+        }
+        try {
+          return json(action === 'record_visit_outcome'
+            ? await recordVisitOutcomeAction(client, visitAuth, body, req.method)
+            : await listVisitOutcomesAction(client, visitAuth, Object.fromEntries(url.searchParams), req.method))
+        } catch (e) {
+          if (e instanceof VisitOutcomeError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
       case 'sales_booking_read': {
         const sbParam = (name: string) => url.searchParams.get(name) ?? body[name] ?? null
         const sbInt = (name: string) => {
