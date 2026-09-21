@@ -56,7 +56,6 @@ function scopedDispatchStatus(
   return 200;
 }
 
-
 Deno.test("create_invoice_draft is privileged server or staff JWT only at the ops-api front door", () => {
   const action = "create_invoice_draft";
   assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true);
@@ -64,14 +63,26 @@ Deno.test("create_invoice_draft is privileged server or staff JWT only at the op
   assertEquals(authorizationStatus({ action, authMode: "none" }), 401);
   assertEquals(authorizationStatus({ action, authMode: "api_key" }), 401);
   assertEquals(
-    authorizationStatus({ action, authMode: "api_key", serverSecretPresented: true }),
+    authorizationStatus({
+      action,
+      authMode: "api_key",
+      serverSecretPresented: true,
+    }),
     200,
   );
   for (const role of ["admin", "owner", "ops_manager"]) {
-    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200, role);
+    assertEquals(
+      authorizationStatus({ action, authMode: "jwt", role }),
+      200,
+      role,
+    );
   }
   for (const role of ["crew", "installer", "lead_installer"]) {
-    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 403, role);
+    assertEquals(
+      authorizationStatus({ action, authMode: "jwt", role }),
+      403,
+      role,
+    );
   }
   assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
 });
@@ -608,7 +619,9 @@ Deno.test("outage fix: a lead_installer JWT WITH a managed vertical passes the f
 });
 
 Deno.test("three-tier: a lead_installer with NO managed vertical is an allocated trade and gets none of the office reads (403, not 401)", () => {
-  for (const action of [...LEAD_INSTALLER_READ_ACTIONS, "pipeline", "ops_summary"]) {
+  for (
+    const action of [...LEAD_INSTALLER_READ_ACTIONS, "pipeline", "ops_summary"]
+  ) {
     const decision = _authorizeOpsApiAction({
       url: actionUrl(action),
       authMode: "jwt",
@@ -859,7 +872,11 @@ for (const action of ["update_assignment", "delete_assignment"] as const) {
     assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true);
     assertEquals(_opsApiActionNeedsStaffRole(actionUrl(action)), false);
     assertEquals(
-      _authorizeOpsApiAction({ url: actionUrl(action), authMode: "jwt", authUser: { role: "lead_installer" } }),
+      _authorizeOpsApiAction({
+        url: actionUrl(action),
+        authMode: "jwt",
+        authUser: { role: "lead_installer" },
+      }),
       { ok: true },
     );
     await assertAssignmentMutationAuthz(

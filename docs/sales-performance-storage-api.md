@@ -1,13 +1,14 @@
 # Sales performance storage/API contract
 
 Approved plan: wiki `coding/work/campaigns/ceo-ops/audits/2026-09-11-sales-performance-PLAN.md`.
+These ops-api actions store weekly collector snapshots. They are not reporting-api `sales_performance`.
 Migration must be applied before deploying these actions. This change does not run collectors, migrate live data or deploy.
 
 ## Publish
 
 `POST ops-api?action=sales_performance_write` requires the actual service-role secret, not the shared browser, agent-server or routine key.
 
-Body: `org_id` UUID, `week_start` exact Monday `YYYY-MM-DD` (Perth reporting week), `lane` (`patio` or `fencing`), `metrics` object, `coverage` object, `queues` object, nonempty `run_id`, nonempty `definition_version`, and `computed_at` ISO timestamp with timezone, not in the future.
+Body: `org_id` UUID, `week_start` exact Monday `YYYY-MM-DD` (Perth reporting week), `lane` (`patio` or `fencing`; Stratco is a fencing source bucket, not a third lane), `metrics` object, `coverage` object, `queues` object, nonempty `run_id`, nonempty `definition_version`, and `computed_at` ISO timestamp with timezone, not in the future.
 
 `coverage.gaps` must be an array and `coverage.collection_complete` must be boolean `true`. This confirms the collection run completed; it does **not** assert all measures are available. Known unavailable measures remain absent/null with their gaps. Failed, interrupted or over-budget collectors must not set this flag or publish. The API preserves measure payloads; it does not recompute or zero-fill them.
 
@@ -39,21 +40,7 @@ Before release, verify effective production grants, applicable policies and trig
 
 ## Rebase delivery, 21 September 2026
 
-Replays the three commits from https://github.com/SecureWorks-GROUP/secureworks-backend/pull/835 onto main `aefe71af` on a new branch. Conflicts were additive imports, action/schema manifests and schema-preflight fixtures; main's booking, context and other routes remain intact. The store, migration and behavioral tests are unchanged from the original change. Migration version `20260911000001` has no collision on this main, so it was retained.
-
-### Tables and functions added
-
-- Table: `public.sales_performance_weeks`, one row per `(org_id, week_start, lane)`, with staff/org read RLS.
-- Database functions: `public.sales_performance_write_v1(uuid,date,text,jsonb,jsonb,jsonb,text,text,timestamptz)` and `public.sales_performance_note_v1(date,text,text)`.
-- Ops API actions: `sales_performance_write`, `sales_performance_read`, `sales_performance_note`. Their shared implementation is `salesPerformanceAction` plus `salesPerformanceStore` in `supabase/functions/ops-api/sales_performance.ts`; exported week helpers are `monday` and `latestClosedWeek`.
-
-### What each weekly run must write
-
-The publisher uploads the completed run's `metrics.json`, `coverage.json` and `queues.json` as objects, with the lane config's `org_id` and `lane` (`fencing` or `patio`), Perth Monday `week_start`, nonempty `run_id` and `definition_version`, and the original timezone-qualified `computed_at`. Coverage must include `gaps:[]` (or named gaps) and `collection_complete:true`; incomplete or over-budget runs must publish nothing. Unavailable measures stay absent/null with coverage explanations, and queues retain the evidence IDs needed for named drill-downs. Stratco belongs within fencing's source buckets, not a third lane. Collector uploads must omit operator notes. The service-role credential stays in the trusted publisher.
-
-### What the read returns
-
-The staff JWT's organisation determines scope. The response contains stored rows for both lanes over four consecutive calendar weeks, defaulting to the latest stored closed week, plus `week_start`, `week_starts`, `latest_closed_week`, `latest_stored_closed_week`, `missing_latest_closed_week`, `available_weeks`, `available_weeks_limit:104` and `fetched_at`. Rows carry their original metrics, coverage, queues, notes, provenance and `computed_at`. No missing lane, week or measure is synthesized. See Read above for the missing-lane distinction and bounded week discovery.
+Replays the three commits from https://github.com/SecureWorks-GROUP/secureworks-backend/pull/835 onto main `aefe71af` on a new branch. Conflicts were additive imports, action/schema manifests and schema-preflight fixtures; main's booking, context and other routes remain intact. The store, migration and behavioral tests are unchanged from the original change. Migration version `20260911000001` has no collision on this main, so it was retained. Table, RPC and action names, write envelope, and read window stay in Publish, Read and Notes above.
 
 ### Still not covered
 
