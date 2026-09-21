@@ -263,13 +263,27 @@ Deno.test("a failed GHL window is named and not treated as complete", async () =
 });
 
 Deno.test("usersFromGhlBody reads only body.users", () => {
+  assertEquals(usersFromGhlBody({ users: [] }), { users: [], failure: null });
   assertEquals(
     usersFromGhlBody({
       data: [{ id: "via-data", email: "nithin@secureworkswa.com.au" }],
     }),
-    [],
+    { users: [], failure: "ghl_users_malformed" },
   );
-  const users = usersFromGhlBody({
+  assertEquals(
+    usersFromGhlBody({ users: { id: "n1" } }),
+    { users: [], failure: "ghl_users_malformed" },
+  );
+  assertEquals(
+    usersFromGhlBody({
+      users: [
+        { id: "n1", email: "nithin@secureworkswa.com.au" },
+        { email: "no-id@secureworkswa.com.au" },
+      ],
+    }),
+    { users: [], failure: "ghl_users_malformed" },
+  );
+  const parsed = usersFromGhlBody({
     users: [
       { id: "n1", email: "nithin@secureworkswa.com.au", name: "Nithin" },
       {
@@ -281,6 +295,8 @@ Deno.test("usersFromGhlBody reads only body.users", () => {
     ],
     data: [{ id: "via-data", email: "marnin@secureworkswa.com.au" }],
   });
+  assertEquals(parsed.failure, null);
+  const users = parsed.users;
   assertEquals(users.map((user) => user.id), ["n1", "n2"]);
   assertEquals(users[0].name, "Nithin");
   assertEquals(users[0].firstName, null);
@@ -289,7 +305,7 @@ Deno.test("usersFromGhlBody reads only body.users", () => {
 });
 
 Deno.test("confirmGhlUserId refuses a missing, duplicate, or disagreed email match", () => {
-  const users = usersFromGhlBody({
+  const { users } = usersFromGhlBody({
     users: [
       { id: "n1", email: "nithin@secureworkswa.com.au", name: "Nithin" },
       { id: "m1", email: "marnin@secureworkswa.com.au", name: "Marnin" },

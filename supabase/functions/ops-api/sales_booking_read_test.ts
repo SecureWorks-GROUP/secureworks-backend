@@ -1134,7 +1134,7 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
     () => salesBookingRead(deps(), { resource: "khairo", week_start: WEEK }),
     SalesBookingRequestError,
   );
-  const khairoUsers = usersFromGhlBody({
+  const { users: khairoUsers } = usersFromGhlBody({
     users: [
       { id: "ghl_user_khairo", email: "khairo@secureworkswa.com.au" },
       { id: "ghl_user_marnin", email: "marnin@secureworkswa.com.au" },

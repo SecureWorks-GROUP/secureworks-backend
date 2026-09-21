@@ -122,6 +122,20 @@ function ghlId(value: unknown): string | null {
   return id;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function eventsAssignedToUser(
+  events: Record<string, unknown>[],
+  userId: string,
+): Record<string, unknown>[] {
+  return events.filter((event) => {
+    const assigned = ghlId(event.assignedUserId);
+    return !assigned || assigned === userId;
+  });
+}
+
 /** Perth ISO or Unix-ms into the millis GHL calendars/events requires. */
 export function ghlCalendarInstantMs(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -211,12 +225,19 @@ export async function fetchGhlCalendarEvents(args: {
 
 export function usersFromGhlBody(
   body: Record<string, unknown>,
-): GhlLocationUser[] {
-  const raw = Array.isArray(body.users) ? body.users : [];
+): GhlLocationUsersScan {
+  if (!Array.isArray(body.users)) {
+    return { users: [], failure: "ghl_users_malformed" };
+  }
   const users: GhlLocationUser[] = [];
-  for (const row of raw as Record<string, unknown>[]) {
+  for (const row of body.users as unknown[]) {
+    if (!isRecord(row)) {
+      return { users: [], failure: "ghl_users_malformed" };
+    }
     const id = ghlId(row.id);
-    if (!id) continue;
+    if (!id) {
+      return { users: [], failure: "ghl_users_malformed" };
+    }
     users.push({
       id,
       email: nonempty(row.email)?.toLowerCase() ?? null,
@@ -224,7 +245,7 @@ export function usersFromGhlBody(
       firstName: nonempty(row.firstName),
     });
   }
-  return users;
+  return { users, failure: null };
 }
 
 /** GET /users/?locationId= — no companyId, matches the ghl-proxy 2021-07-28 lane. */
@@ -236,7 +257,7 @@ export async function fetchGhlLocationUsers(args: {
     const body = await args.ghlGet(
       `/users/?locationId=${encodeURIComponent(args.locationId)}`,
     );
-    return { users: usersFromGhlBody(body), failure: null };
+    return usersFromGhlBody(body);
   } catch (error) {
     return {
       users: [],
@@ -451,20 +472,37 @@ export interface GhlCalendarsScan {
  */
 export function calendarsFromGhlBody(
   body: Record<string, unknown>,
-): GhlCalendarDirectoryRow[] {
-  const raw = Array.isArray(body.calendars) ? body.calendars : [];
+): { calendars: GhlCalendarDirectoryRow[]; failure: string | null } {
+  if (!Array.isArray(body.calendars)) {
+    return { calendars: [], failure: "ghl_calendars_malformed" };
+  }
   const calendars: GhlCalendarDirectoryRow[] = [];
-  for (const row of raw as Record<string, unknown>[]) {
+  for (const row of body.calendars as unknown[]) {
+    if (!isRecord(row)) {
+      return { calendars: [], failure: "ghl_calendars_malformed" };
+    }
     const id = ghlId(row.id);
-    if (!id) continue;
+    if (!id) {
+      return { calendars: [], failure: "ghl_calendars_malformed" };
+    }
     const teamMembers = row.teamMembers;
-    const assignmentsReturned = Array.isArray(teamMembers);
+    let assignmentsReturned = Array.isArray(teamMembers);
     const assigned: string[] = [];
     if (assignmentsReturned) {
       const seen = new Set<string>();
-      for (const member of teamMembers as Record<string, unknown>[]) {
-        const userId = ghlId(member?.userId);
-        if (!userId || seen.has(userId)) continue;
+      for (const member of teamMembers as unknown[]) {
+        if (!isRecord(member)) {
+          assignmentsReturned = false;
+          assigned.length = 0;
+          break;
+        }
+        const userId = ghlId(member.userId);
+        if (!userId) {
+          assignmentsReturned = false;
+          assigned.length = 0;
+          break;
+        }
+        if (seen.has(userId)) continue;
         seen.add(userId);
         assigned.push(userId);
       }
@@ -477,7 +515,7 @@ export function calendarsFromGhlBody(
       assignments_returned: assignmentsReturned,
     });
   }
-  return calendars;
+  return { calendars, failure: null };
 }
 
 export async function fetchGhlCalendars(args: {
@@ -488,10 +526,16 @@ export async function fetchGhlCalendars(args: {
     const body = await args.ghlGet(
       `/calendars/?locationId=${encodeURIComponent(args.locationId)}`,
     );
-    const calendars = calendarsFromGhlBody(body);
+    const parsed = calendarsFromGhlBody(body);
+    if (parsed.failure) {
+      return {
+        calendars: [],
+        receipt: { ok: false, count: 0, failure: parsed.failure },
+      };
+    }
     return {
-      calendars,
-      receipt: { ok: true, count: calendars.length, failure: null },
+      calendars: parsed.calendars,
+      receipt: { ok: true, count: parsed.calendars.length, failure: null },
     };
   } catch (error) {
     return {
@@ -723,17 +767,21 @@ export async function ghlCalendarPersonEventsAction(args: {
       startMs,
       endMs,
     });
+    const kept = eventsAssignedToUser(scan.events, resolvedUserId);
     calendarReads.push({
       calendar_id: calendar.id,
       name: calendar.name,
       ok: scan.failure === null,
-      count: scan.count,
+      count: scan.failure === null ? kept.length : scan.count,
       failure: scan.failure,
     });
-    calendarBatches.push(scan.events);
+    calendarBatches.push(kept);
   }
 
-  const merged = mergeEventsById([userScan.events, ...calendarBatches]);
+  const merged = mergeEventsById([
+    eventsAssignedToUser(userScan.events, resolvedUserId),
+    ...calendarBatches,
+  ]);
   const complete = userEventsReceipt.ok && calendars.receipt.ok &&
     assignmentsReturned &&
     calendarReads.every((row) => row.ok);

@@ -5,6 +5,13 @@
  * never an empty list, assignments come from teamMembers or are marked
  * absent, person events merge assigned calendars plus userId and de-dupe by
  * event id, a failed calendar among several marks complete false. No writes.
+ *
+ * Fixture coverage only. These three live GHL reads stay unproven until a
+ * post-deploy read: (a) a scoper email resolves a live GHL user id by unique
+ * roster email match and returns that person's diary, (b) calendar_directory
+ * lists existing GHL calendars plus the full roster as id, name, and email
+ * only, without writing, (c) calendar_person_events for one scoper does not
+ * include another person's appointments from a shared calendar.
  */
 // deno-lint-ignore-file no-import-prefix
 import {
@@ -98,12 +105,22 @@ const CALENDARS_WITH_ASSIGNMENTS = {
 
 Deno.test("calendarsFromGhlBody reads only body.calendars and drops extra fields", () => {
   assertEquals(
+    calendarsFromGhlBody({ calendars: [] }),
+    { calendars: [], failure: null },
+  );
+  assertEquals(
     calendarsFromGhlBody({
       data: [{ id: "via-data", name: "nope" }],
     }),
-    [],
+    { calendars: [], failure: "ghl_calendars_malformed" },
   );
-  const rows = calendarsFromGhlBody(CALENDARS_WITH_ASSIGNMENTS);
+  assertEquals(
+    calendarsFromGhlBody({ calendars: "nope" }),
+    { calendars: [], failure: "ghl_calendars_malformed" },
+  );
+  const parsed = calendarsFromGhlBody(CALENDARS_WITH_ASSIGNMENTS);
+  assertEquals(parsed.failure, null);
+  const rows = parsed.calendars;
   assertEquals(rows.map((row) => row.id), [CAL_A, CAL_B, "cal_marnin_only"]);
   assertEquals(rows[0], {
     id: CAL_A,
@@ -127,12 +144,33 @@ Deno.test("calendarsFromGhlBody reads only body.calendars and drops extra fields
 });
 
 Deno.test("calendarsFromGhlBody does not invent assignments when teamMembers is absent", () => {
-  const rows = calendarsFromGhlBody({
+  const parsed = calendarsFromGhlBody({
     calendars: [{ id: "cal_plain", name: "Plain", isActive: true }],
   });
+  assertEquals(parsed.failure, null);
+  const rows = parsed.calendars;
   assertEquals(rows[0].assignments_returned, false);
   assertEquals(rows[0].assigned_user_ids, []);
   assertEquals(rows[0].is_active, true);
+});
+
+Deno.test("calendar_directory keeps documented empty arrays as a valid empty listing", async () => {
+  const { ghlGet } = getter([{ calendars: [] }, { users: [] }]);
+  const result = await ghlCalendarDirectoryAction({
+    method: "GET",
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  assertEquals(result.body.calendars, []);
+  assertEquals(result.body.users, []);
+  const provenance = result.body.provenance as {
+    calendars: { ok: boolean; count: number; failure: null };
+    users: { ok: boolean; count: number; failure: null };
+  };
+  assertEquals(provenance.calendars, { ok: true, count: 0, failure: null });
+  assertEquals(provenance.users, { ok: true, count: 0, failure: null });
 });
 
 Deno.test("calendar_directory is GET only and returns two receipts", async () => {
@@ -484,4 +522,257 @@ Deno.test("calendar_person_events without teamMembers does not infer assignments
   );
   assertEquals(calls.length, 3);
   assertEquals(calls.some((path) => path.includes("calendarId=")), false);
+});
+
+Deno.test("a documented empty calendars array stays a complete empty assigned set", async () => {
+  const { ghlGet } = getter([
+    ROSTER,
+    { calendars: [] },
+    { events: [] },
+  ]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  assertEquals(result.body.complete, true);
+  assertEquals(result.body.events, []);
+  const provenance = result.body.provenance as {
+    assignments_returned: boolean;
+    calendars_list: { ok: boolean; count: number; failure: string | null };
+  };
+  assertEquals(provenance.assignments_returned, true);
+  assertEquals(provenance.calendars_list, { ok: true, count: 0, failure: null });
+});
+
+Deno.test("calendar_person_events treats a missing calendars field as unread, not an empty complete diary", async () => {
+  const { calls, ghlGet } = getter([
+    ROSTER,
+    { unexpected: "provider response omitted calendars" },
+    { events: [] },
+  ]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals(result.body.complete, false);
+  assertEquals(result.body.events, []);
+  const provenance = result.body.provenance as {
+    assignments_returned: boolean;
+    complete: boolean;
+    calendars_list: { ok: boolean; count: number; failure: string | null };
+  };
+  assertEquals(provenance.complete, false);
+  assertEquals(provenance.assignments_returned, false);
+  assertEquals(provenance.calendars_list.ok, false);
+  assertEquals(provenance.calendars_list.count, 0);
+  assertEquals(provenance.calendars_list.failure, "ghl_calendars_malformed");
+  assertEquals(calls.some((path) => path.includes("calendarId=")), false);
+});
+
+Deno.test("calendar_directory treats a missing calendars field as unread, not an empty list", async () => {
+  const { ghlGet } = getter([
+    { unexpected: "provider response omitted calendars" },
+    ROSTER,
+  ]);
+  const result = await ghlCalendarDirectoryAction({
+    method: "GET",
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals(result.body.calendars, []);
+  assertEquals((result.body.users as unknown[]).length, 3);
+  const provenance = result.body.provenance as {
+    calendars: { ok: boolean; count: number; failure: string | null };
+    users: { ok: boolean; count: number };
+  };
+  assertEquals(provenance.calendars.ok, false);
+  assertEquals(provenance.calendars.count, 0);
+  assertEquals(provenance.calendars.failure, "ghl_calendars_malformed");
+  assertEquals(provenance.users.ok, true);
+});
+
+Deno.test("calendar_directory treats a missing users field as unread, not an empty roster", async () => {
+  const { ghlGet } = getter([
+    CALENDARS_WITH_ASSIGNMENTS,
+    { unexpected: "provider response omitted users" },
+  ]);
+  const result = await ghlCalendarDirectoryAction({
+    method: "GET",
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals((result.body.calendars as unknown[]).length, 3);
+  assertEquals(result.body.users, []);
+  const provenance = result.body.provenance as {
+    calendars: { ok: boolean };
+    users: { ok: boolean; count: number; failure: string | null };
+  };
+  assertEquals(provenance.calendars.ok, true);
+  assertEquals(provenance.users.ok, false);
+  assertEquals(provenance.users.count, 0);
+  assertEquals(provenance.users.failure, "ghl_users_malformed");
+});
+
+Deno.test("calendar_person_events treats a missing users field as unread, not an unmapped scoper", async () => {
+  const { calls, ghlGet } = getter([
+    { unexpected: "provider response omitted users" },
+  ]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals(result.body.complete, false);
+  assertEquals(result.body.events, []);
+  assertEquals(
+    (result.body.provenance as { failure: string }).failure,
+    "ghl_users_malformed",
+  );
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0], "/users/");
+});
+
+Deno.test("calendar_person_events treats a malformed assignment row as incomplete", async () => {
+  const { calls, ghlGet } = getter([
+    ROSTER,
+    {
+      calendars: [
+        {
+          id: CAL_A,
+          name: "Nithin patios",
+          isActive: true,
+          teamMembers: [{ userId: USER }, { selected: true }, "bad"],
+        },
+      ],
+    },
+    { events: [event("user-only")] },
+  ]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals(result.body.complete, false);
+  assertEquals(
+    (result.body.provenance as { assignments_returned: boolean })
+      .assignments_returned,
+    false,
+  );
+  assertEquals(
+    (result.body.provenance as { calendar_reads: unknown[] }).calendar_reads
+      .length,
+    0,
+  );
+  assertEquals(
+    (result.body.events as Array<{ id: string }>).map((row) => row.id),
+    ["user-only"],
+  );
+  assertEquals(calls.some((path) => path.includes("calendarId=")), false);
+});
+
+Deno.test("calendar_person_events treats an invalid calendar id row as unread, not complete", async () => {
+  const { calls, ghlGet } = getter([
+    ROSTER,
+    {
+      calendars: [
+        {
+          id: CAL_A,
+          name: "Nithin patios",
+          teamMembers: [{ userId: USER }],
+        },
+        {
+          name: "no-id",
+          teamMembers: [{ userId: USER }],
+        },
+      ],
+    },
+    { events: [event("user-only")] },
+  ]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals(result.body.complete, false);
+  const provenance = result.body.provenance as {
+    assignments_returned: boolean;
+    calendars_list: { ok: boolean; failure: string | null };
+  };
+  assertEquals(provenance.assignments_returned, false);
+  assertEquals(provenance.calendars_list.ok, false);
+  assertEquals(provenance.calendars_list.failure, "ghl_calendars_malformed");
+  assertEquals(
+    (result.body.events as Array<{ id: string }>).map((row) => row.id),
+    ["user-only"],
+  );
+  assertEquals(calls.some((path) => path.includes("calendarId=")), false);
+});
+
+Deno.test("a shared calendar appointment for another rep is not this rep's busy time", async () => {
+  const marninStratco = event("marnin-stratco", {
+    assignedUserId: "ghl_user_marnin",
+  });
+  const nithinShared = event("nithin-shared");
+  const { calls, ghlGet } = getter([
+    ROSTER,
+    CALENDARS_WITH_ASSIGNMENTS,
+    { events: [event("user-only")] },
+    { events: [event("cal-a")] },
+    { events: [nithinShared, marninStratco] },
+  ]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  const ids = (result.body.events as Array<{ id: string }>).map((row) =>
+    row.id
+  );
+  assertEquals(ids.includes("marnin-stratco"), false);
+  assertEquals(ids.includes("nithin-shared"), true);
+  assertEquals(ids.includes("user-only"), true);
+  const sharedCall = calls.find((path) => path.includes(`calendarId=${CAL_B}`));
+  assertStringIncludes(sharedCall || "", `userId=${USER}`);
 });
