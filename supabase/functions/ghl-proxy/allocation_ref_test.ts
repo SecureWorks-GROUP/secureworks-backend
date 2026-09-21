@@ -1,5 +1,8 @@
 // Allocation-ref lookup and create-with-field. Mocked GHL only — no live provider.
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ALLOCATION_FIELD_ENV,
   allocationOpportunityCustomFields,
@@ -102,7 +105,10 @@ async function createWithOptionalRef(args: {
       locationId: "loc-1",
       pipelines: PIPELINES,
       skipOpportunity: args.skipOpportunity,
-      customFields: allocationOpportunityCustomFields(prepared.fieldId, prepared.ref),
+      customFields: allocationOpportunityCustomFields(
+        prepared.fieldId,
+        prepared.ref,
+      ),
       ghl: args.ghl,
     });
   }
@@ -127,53 +133,98 @@ Deno.test("parseAllocationReference strips the retry-key prefix and ignores blan
 
 Deno.test("create and lookup readers keep allocationRef and contactId only", () => {
   assertEquals(readCreateAllocationRef({ allocationRef: REF }), REF);
-  assertEquals(readCreateAllocationRef({ allocationRef: `stratco-allocation:${REF}` }), REF);
+  assertEquals(
+    readCreateAllocationRef({ allocationRef: `stratco-allocation:${REF}` }),
+    REF,
+  );
   assertEquals(readCreateAllocationRef({ allocation_ref: REF }), null);
   assertEquals(readCreateAllocationRef({ stratcoAllocationRef: REF }), null);
-  const params = new URLSearchParams({ allocationRef: REF, contactId: CONTACT });
-  assertEquals(readLookupAllocationQuery(params), { ref: REF, contactId: CONTACT });
+  const params = new URLSearchParams({
+    allocationRef: REF,
+    contactId: CONTACT,
+  });
+  assertEquals(readLookupAllocationQuery(params), {
+    ref: REF,
+    contactId: CONTACT,
+  });
   const aliased = new URLSearchParams({ ref: REF, contact_id: CONTACT });
-  assertEquals(readLookupAllocationQuery(aliased), { ref: null, contactId: null });
+  assertEquals(readLookupAllocationQuery(aliased), {
+    ref: null,
+    contactId: null,
+  });
 });
 
 Deno.test("readAllocationFieldId uses the one env name and treats blank as unconfigured", () => {
   assertEquals(readAllocationFieldId(() => undefined), null);
   assertEquals(readAllocationFieldId(() => "  "), null);
-  assertEquals(readAllocationFieldId((name) => name === ALLOCATION_FIELD_ENV ? FIELD_ID : undefined), FIELD_ID);
+  assertEquals(
+    readAllocationFieldId((name) =>
+      name === ALLOCATION_FIELD_ENV ? FIELD_ID : undefined
+    ),
+    FIELD_ID,
+  );
 });
 
 Deno.test("opportunityCarriesAllocationRef matches id plus fieldValue/field_value/value", () => {
   assertEquals(
-    opportunityCarriesAllocationRef({ customFields: [{ id: FIELD_ID, fieldValue: REF }] }, FIELD_ID, REF),
+    opportunityCarriesAllocationRef(
+      { customFields: [{ id: FIELD_ID, fieldValue: REF }] },
+      FIELD_ID,
+      REF,
+    ),
     true,
   );
   assertEquals(
-    opportunityCarriesAllocationRef({ customFields: [{ id: FIELD_ID, field_value: REF }] }, FIELD_ID, REF),
+    opportunityCarriesAllocationRef(
+      { customFields: [{ id: FIELD_ID, field_value: REF }] },
+      FIELD_ID,
+      REF,
+    ),
     true,
   );
   assertEquals(
-    opportunityCarriesAllocationRef({ customFields: [{ id: FIELD_ID, value: REF }] }, FIELD_ID, REF),
+    opportunityCarriesAllocationRef(
+      { customFields: [{ id: FIELD_ID, value: REF }] },
+      FIELD_ID,
+      REF,
+    ),
     true,
   );
   assertEquals(
-    opportunityCarriesAllocationRef({ customFields: [{ id: "other", fieldValue: REF }] }, FIELD_ID, REF),
+    opportunityCarriesAllocationRef(
+      { customFields: [{ id: "other", fieldValue: REF }] },
+      FIELD_ID,
+      REF,
+    ),
     false,
   );
-  assertEquals(opportunityCarriesAllocationRef({ customFields: [] }, FIELD_ID, REF), false);
+  assertEquals(
+    opportunityCarriesAllocationRef({ customFields: [] }, FIELD_ID, REF),
+    false,
+  );
   assertEquals(opportunityCarriesAllocationRef({}, FIELD_ID, REF), false);
 });
 
 Deno.test("parseOpportunitySearchResponse refuses missing or non-array opportunities", () => {
-  assertEquals(parseOpportunitySearchResponse({ opportunities: [] }), { ok: true, opportunities: [] });
+  assertEquals(parseOpportunitySearchResponse({ opportunities: [] }), {
+    ok: true,
+    opportunities: [],
+  });
   assertEquals(parseOpportunitySearchResponse({}), { ok: false });
-  assertEquals(parseOpportunitySearchResponse({ opportunities: null }), { ok: false });
-  assertEquals(parseOpportunitySearchResponse({ opportunities: {} }), { ok: false });
+  assertEquals(parseOpportunitySearchResponse({ opportunities: null }), {
+    ok: false,
+  });
+  assertEquals(parseOpportunitySearchResponse({ opportunities: {} }), {
+    ok: false,
+  });
   assertEquals(parseOpportunitySearchResponse(null), { ok: false });
 });
 
 Deno.test("no allocationRef leaves createOpportunityForExistingContact unchanged: no search, no customFields", async () => {
   const { ghl, calls } = makeGhlMock({
-    contact: () => ({ contact: { id: CONTACT, firstName: "Priya", lastName: "Nadar" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Priya", lastName: "Nadar" },
+    }),
     opp: () => ({ opportunity: { id: "opp-new" } }),
   });
 
@@ -184,7 +235,11 @@ Deno.test("no allocationRef leaves createOpportunityForExistingContact unchanged
   });
 
   assertEquals(result.status, 200);
-  assertEquals(result.body, { contactId: CONTACT, opportunityId: "opp-new", contactExisted: true });
+  assertEquals(result.body, {
+    contactId: CONTACT,
+    opportunityId: "opp-new",
+    contactExisted: true,
+  });
   assertEquals(calls.map((c) => c.path), ["/contacts/ct-1", "/opportunities/"]);
   const oppBody = JSON.parse(String(calls[1].init?.body));
   assertEquals(oppBody.customFields, undefined);
@@ -217,7 +272,9 @@ Deno.test("reference plus existing opportunity returns it and creates nothing", 
 Deno.test("hydrated non-matching customFields on a short page is none found and creates once", async () => {
   const { ghl, calls } = makeGhlMock({
     search: () => ({ opportunities: [otherHydratedOpp("opp-other")] }),
-    contact: () => ({ contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" },
+    }),
     opp: () => ({ opportunity: { id: "opp-new" } }),
   });
 
@@ -229,20 +286,35 @@ Deno.test("hydrated non-matching customFields on a short page is none found and 
 
   assertEquals(result.status, 200);
   assertEquals(result.body.opportunityId, "opp-new");
-  assertEquals(calls.filter((c) => c.path.startsWith("/opportunities/search")).length, 1);
-  assertEquals(calls.filter((c) => c.path.startsWith("/opportunities/") && c.path !== "/opportunities/" && !c.path.startsWith("/opportunities/search")).length, 0);
+  assertEquals(
+    calls.filter((c) => c.path.startsWith("/opportunities/search")).length,
+    1,
+  );
+  assertEquals(
+    calls.filter((c) =>
+      c.path.startsWith("/opportunities/") && c.path !== "/opportunities/" &&
+      !c.path.startsWith("/opportunities/search")
+    ).length,
+    0,
+  );
   assertEquals(calls.filter((c) => c.path === "/opportunities/").length, 1);
 });
 
 Deno.test("reference and none found creates once with the allocation custom field", async () => {
   const { ghl, calls } = makeGhlMock({
     search: () => ({ opportunities: [] }),
-    contact: () => ({ contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" },
+    }),
     opp: () => ({ opportunity: { id: "opp-new" } }),
   });
 
   const result = await createWithOptionalRef({
-    body: { contactId: CONTACT, toolType: "fencing", allocationRef: `stratco-allocation:${REF}` },
+    body: {
+      contactId: CONTACT,
+      toolType: "fencing",
+      allocationRef: `stratco-allocation:${REF}`,
+    },
     fieldId: FIELD_ID,
     ghl,
   });
@@ -266,13 +338,18 @@ Deno.test("retry after a successful create returns the existing opportunity and 
   const created: unknown[] = [];
   const { ghl, calls } = makeGhlMock({
     search: () => ({ opportunities: created }),
-    contact: () => ({ contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" },
+    }),
     opp: (init) => {
       const body = JSON.parse(String(init.body));
       const opp = {
         id: "opp-new",
         contactId: CONTACT,
-        customFields: [{ id: FIELD_ID, fieldValue: body.customFields[0].field_value }],
+        customFields: [{
+          id: FIELD_ID,
+          fieldValue: body.customFields[0].field_value,
+        }],
       };
       created.push(opp);
       return { opportunity: opp };
@@ -302,7 +379,13 @@ Deno.test("retry after a successful create returns the existing opportunity and 
     opportunityExisted: true,
   });
   assertEquals(calls.filter((c) => c.path === "/opportunities/").length, 1);
-  assertEquals(calls.every((c) => !c.path.startsWith("/opportunities/search") || searchPathHasContactAndAllStatus(c.path)), true);
+  assertEquals(
+    calls.every((c) =>
+      !c.path.startsWith("/opportunities/search") ||
+      searchPathHasContactAndAllStatus(c.path)
+    ),
+    true,
+  );
 });
 
 Deno.test("unhydrated list row missing customFields triggers a by-id read", async () => {
@@ -311,7 +394,9 @@ Deno.test("unhydrated list row missing customFields triggers a by-id read", asyn
     getOpp: () => ({
       opportunity: { id: "opp-1", contactId: CONTACT, customFields: [] },
     }),
-    contact: () => ({ contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" },
+    }),
     opp: () => ({ opportunity: { id: "opp-new" } }),
   });
 
@@ -329,7 +414,9 @@ Deno.test("unhydrated list row missing customFields triggers a by-id read", asyn
 
 Deno.test("unhydrated empty customFields array triggers a by-id read", async () => {
   const { ghl, calls } = makeGhlMock({
-    search: () => ({ opportunities: [{ id: "opp-1", contactId: CONTACT, customFields: [] }] }),
+    search: () => ({
+      opportunities: [{ id: "opp-1", contactId: CONTACT, customFields: [] }],
+    }),
     getOpp: () => ({
       opportunity: existingOpp({ id: "opp-1" }),
     }),
@@ -348,7 +435,10 @@ Deno.test("unhydrated empty customFields array triggers a by-id read", async () 
     contactExisted: true,
     opportunityExisted: true,
   });
-  assertEquals(calls.map((c) => c.path), [calls[0].path, "/opportunities/opp-1"]);
+  assertEquals(calls.map((c) => c.path), [
+    calls[0].path,
+    "/opportunities/opp-1",
+  ]);
   assertEquals(calls.filter((c) => c.path === "/opportunities/").length, 0);
 });
 
@@ -377,13 +467,18 @@ Deno.test("pagination beyond one page is fully read before certifying absence", 
     search: (path) => {
       if (!path.includes("startAfter=")) {
         return {
-          opportunities: Array.from({ length: 100 }, (_, i) => otherHydratedOpp(`opp-${i}`)),
+          opportunities: Array.from(
+            { length: 100 },
+            (_, i) => otherHydratedOpp(`opp-${i}`),
+          ),
           meta: { startAfter: "cursor-1", startAfterId: "opp-99" },
         };
       }
       return { opportunities: [otherHydratedOpp("opp-tail")] };
     },
-    contact: () => ({ contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" },
+    }),
     opp: () => ({ opportunity: { id: "opp-new" } }),
   });
 
@@ -395,7 +490,9 @@ Deno.test("pagination beyond one page is fully read before certifying absence", 
 
   assertEquals(result.status, 200);
   assertEquals(result.body.opportunityId, "opp-new");
-  const searches = calls.filter((c) => c.path.startsWith("/opportunities/search"));
+  const searches = calls.filter((c) =>
+    c.path.startsWith("/opportunities/search")
+  );
   assertEquals(searches.length, 2);
   assertEquals(searches[1].path.includes("startAfter=cursor-1"), true);
   assertEquals(searches[1].path.includes("startAfterId=opp-99"), true);
@@ -408,7 +505,10 @@ Deno.test("a full unmatched page with no cursor is truncated and refuses create"
     fieldId: FIELD_ID,
     ghl: makeGhlMock({
       search: () => ({
-        opportunities: Array.from({ length: 100 }, (_, i) => otherHydratedOpp(`opp-${i}`)),
+        opportunities: Array.from(
+          { length: 100 },
+          (_, i) => otherHydratedOpp(`opp-${i}`),
+        ),
       }),
     }).ghl,
   });
@@ -463,7 +563,9 @@ Deno.test("malformed lookup (opportunities not an array) refuses create", async 
 
 Deno.test("contact created in this call with no prior opportunities is proven empty", async () => {
   const { ghl, calls } = makeGhlMock({
-    contact: () => ({ contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" } }),
+    contact: () => ({
+      contact: { id: CONTACT, firstName: "Stewart", lastName: "Thorpe" },
+    }),
     opp: () => ({ opportunity: { id: "opp-new" } }),
   });
 
@@ -476,7 +578,10 @@ Deno.test("contact created in this call with no prior opportunities is proven em
 
   assertEquals(result.status, 200);
   assertEquals(result.body.opportunityId, "opp-new");
-  assertEquals(calls.filter((c) => c.path.startsWith("/opportunities/search")).length, 0);
+  assertEquals(
+    calls.filter((c) => c.path.startsWith("/opportunities/search")).length,
+    0,
+  );
   assertEquals(calls.filter((c) => c.path === "/opportunities/").length, 1);
   const oppBody = JSON.parse(String(calls[1].init?.body));
   assertEquals(oppBody.customFields, [{ id: FIELD_ID, field_value: REF }]);
@@ -502,7 +607,8 @@ Deno.test("lookup action: found / not found / unconfigured / unreadable / missin
     contactId: CONTACT,
     fieldId: FIELD_ID,
     locationId: "loc-1",
-    ghl: makeGhlMock({ search: () => ({ opportunities: [existingOpp()] }) }).ghl,
+    ghl:
+      makeGhlMock({ search: () => ({ opportunities: [existingOpp()] }) }).ghl,
   });
   assertEquals(found, {
     status: 200,

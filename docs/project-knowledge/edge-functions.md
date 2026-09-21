@@ -15,7 +15,7 @@ All in `supabase/functions/`. Deploy with:
 ### ghl-proxy `--no-verify-jwt`
 - **Purpose**: Secure proxy to GHL API + job sync + scope complete flow
 - **GHL 429**: an upstream GHL 429 reaches the caller as HTTP 429, with `Retry-After` (and body `retry_after`) when GHL sent one. Local catches rethrow that typed error so it is not flattened to 5xx. Every other GHL status still throws the same bare `Error` as before and stays on the action's existing mapped status. This proxy does not retry or back off.
-- **Key actions**: `opportunities`, `search`, `lead_search`, `contact`, `find_job`, `create_job`, `save_scope`, `load_job`, `link`, `list_media`, `get_upload_url`, `register_media`, `upload_photo`, `delete_media`, `get_profile`, `create_contact_and_opportunity` (POST)
+- **Key actions**: `opportunities`, `search`, `lead_search`, `contact`, `find_job`, `create_job`, `save_scope`, `load_job`, `link`, `list_media`, `get_upload_url`, `register_media`, `upload_photo`, `delete_media`, `get_profile`, `create_contact_and_opportunity` (POST), `lookup_allocation_opportunity` (GET)
 - **`link` action** (scope complete): moves GHL stage → adds note → generates job number → creates Xero contact → pushes $ to GHL
 - **`lead_search` action** (GET, used by the fencing tool): contact-first lead
   lookup. Params: `q` (query), `pipeline` (`fencing` or `patio`),
@@ -34,9 +34,15 @@ All in `supabase/functions/`. Deploy with:
   contact and opens an opportunity in the pipeline for `body.toolType`. Pass
   optional `body.contactId` for the repeat-client path — dedup and contact
   creation are skipped, the contact is fetched to verify it exists (404 →
-  `contact_not_found`), and a NEW opportunity is created with a name built from
-  the fetched contact's identity. `body.skipOpportunity` suppresses opportunity
-  creation on either path.
+  `contact_not_found`), and a new opportunity is created with a name built from
+  the fetched contact's identity unless optional `body.allocationRef` already
+  maps to one on that contact (then the existing opportunity is reused).
+  `body.skipOpportunity` suppresses opportunity creation on either path.
+  Allocation-ref write, contact-scoped lookup, and the
+  `GHL_STRATCO_ALLOCATION_FIELD_ID` config step are owned by
+  `ghl-proxy/allocation_ref.ts` and `docs/GHL_CUSTOM_FIELDS_REQUIRED.md`.
+- **`lookup_allocation_opportunity` action** (GET): existing GHL opportunity
+  for `allocationRef` on a required `contactId`. Same module.
 - **`send_sms` sender number**: every outbound SMS resolves its `fromNumber`
   through `_shared/sms_from_number.ts` — an omitted/blank number defaults to
   `+61489267771` (SecureWorks Group Admin, the company comms rule so client
