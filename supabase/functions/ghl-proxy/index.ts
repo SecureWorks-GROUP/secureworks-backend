@@ -37,6 +37,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 //
 // Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
+// Keep GHL_CALENDAR_APPOINTMENT_WRITE_ENABLED unset until owner enablement.
 // General scope test lab: append &testMode=true and configure
 //   GHL_TEST_PIPELINE_ID + GHL_TEST_LOCATION_ID + SUPABASE_TEST_ORG_ID.
 // Captain config: TESTTESTTEST (pipeline kMSiJnd4KyPyIUletHbH) in location

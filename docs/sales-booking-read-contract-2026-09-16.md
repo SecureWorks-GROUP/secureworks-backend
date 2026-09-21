@@ -29,7 +29,8 @@ calendars is
 users body is missing or malformed (a documented empty array stays a
 valid empty listing), or if an assignment row is malformed. Assigned-calendar
 reads pass the resolved userId so a shared calendar cannot include another
-person's appointments. Neither action writes.
+person's appointments. Neither action writes. The default-off GHL appointment
+write is `docs/ghl-calendar-appointment-write.md`.
 The exact-id mapping sits next to that read as `SALES_BOOKING_SCOPER_CALENDARS`:
 one row each for Marnin Stratco visits, Khairo fencing enquiries, and Nithin
 patios, with `ghl_user_id` and `calendar_id` null. Null means unconfirmed —
