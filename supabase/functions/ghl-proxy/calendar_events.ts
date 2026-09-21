@@ -5,10 +5,12 @@
 // GET ghl-proxy?action=calendar_events is the one calendar read. It issues
 // one documented Get Calendar Events call (`/calendars/events` with
 // locationId, userId or calendarId, startTime, endTime) and returns the raw
-// GHL events plus provenance. `user_email` is a third selector: the live
-// location roster is confirmed through confirmGhlUserId, then events are
-// read for that id. Exactly one of userId, calendarId, user_email. No writes
-// of any kind.
+// GHL events plus provenance. `user_email` is a third selector: only a
+// SALES_BOOKING_SCOPER_CALENDARS address is accepted, then the live location
+// roster is confirmed through confirmGhlUserId, then events are read for
+// that id. A null calendar_id on that table is unconfirmed — the read still
+// goes through roster email and never guesses a calendar. Exactly one of
+// userId, calendarId, user_email. No writes of any kind.
 //
 // Times on the action are ISO (Perth). GHL itself wants Unix milliseconds;
 // conversion happens here so callers never have to know that.
@@ -25,6 +27,77 @@ export interface GhlCalendarEventsScan {
   calendar_id: string | null;
   start_ms: number;
   end_ms: number;
+}
+
+/**
+ * Exact-id map next to the calendar read. Null ghl_user_id / calendar_id
+ * means unconfirmed — never a known id and never a guessed calendar.
+ * Filling those ids is the later owner-approved configuration change after
+ * discovery.
+ */
+export interface SalesBookingScoperCalendar {
+  email: string;
+  purpose: string;
+  ghl_user_id: string | null;
+  calendar_id: string | null;
+}
+
+export const SALES_BOOKING_SCOPER_CALENDARS: readonly SalesBookingScoperCalendar[] =
+  [
+    {
+      email: "marnin@secureworkswa.com.au",
+      purpose: "Stratco visits",
+      ghl_user_id: null,
+      calendar_id: null,
+    },
+    {
+      email: "khairo@secureworkswa.com.au",
+      purpose: "fencing enquiries",
+      ghl_user_id: null,
+      calendar_id: null,
+    },
+    {
+      email: "nithin@secureworkswa.com.au",
+      purpose: "patios",
+      ghl_user_id: null,
+      calendar_id: null,
+    },
+  ];
+
+export function salesBookingScoperCalendar(
+  email: string,
+): SalesBookingScoperCalendar | null {
+  const normalised = nonempty(email)?.toLowerCase() ?? null;
+  if (!normalised) return null;
+  return SALES_BOOKING_SCOPER_CALENDARS.find((row) =>
+    row.email === normalised
+  ) ?? null;
+}
+
+function dedicatedCalendarProvenance(
+  scoper: SalesBookingScoperCalendar,
+): {
+  calendar_purpose: string;
+  dedicated_calendar_id: string | null;
+  dedicated_calendar: "confirmed" | "unconfirmed";
+} {
+  const calendarId = ghlId(scoper.calendar_id);
+  return {
+    calendar_purpose: scoper.purpose,
+    dedicated_calendar_id: calendarId,
+    dedicated_calendar: calendarId ? "confirmed" : "unconfirmed",
+  };
+}
+
+function refuseNonScoperEmail(): GhlCalendarEventsActionResult {
+  return {
+    status: 400,
+    body: {
+      ok: false,
+      error: "user_email is not a mapped scoper address",
+      code: "scoper_email_required",
+    },
+  };
 }
 
 export interface GhlLocationUser {
@@ -261,6 +334,9 @@ export async function ghlCalendarEventsAction(args: {
   let resolvedUserId = userId;
   let emailProvenance: Record<string, unknown> | null = null;
   if (userEmail) {
+    const scoper = salesBookingScoperCalendar(userEmail);
+    if (!scoper) return refuseNonScoperEmail();
+    const dedicated = dedicatedCalendarProvenance(scoper);
     const roster = await fetchGhlLocationUsers({
       ghlGet: args.ghlGet,
       locationId: args.locationId,
@@ -271,11 +347,13 @@ export async function ghlCalendarEventsAction(args: {
         failure: roster.failure,
         startMs,
         endMs,
+        dedicated,
       });
     }
     const confirmed = confirmGhlUserId({
       users: roster.users,
       email: userEmail,
+      claimedId: scoper.ghl_user_id,
     });
     if (!confirmed.id) {
       return unreadEmailCalendar({
@@ -283,12 +361,14 @@ export async function ghlCalendarEventsAction(args: {
         failure: confirmed.reason || "ghl_user_unmapped",
         startMs,
         endMs,
+        dedicated,
       });
     }
     resolvedUserId = confirmed.id;
     emailProvenance = {
       user_email: userEmail,
       user_id_resolved_by: "roster_email_match",
+      ...dedicated,
     };
   }
 
@@ -323,6 +403,7 @@ function unreadEmailCalendar(args: {
   failure: string;
   startMs: number;
   endMs: number;
+  dedicated?: ReturnType<typeof dedicatedCalendarProvenance>;
 }): GhlCalendarEventsActionResult {
   return {
     status: 200,
@@ -337,6 +418,7 @@ function unreadEmailCalendar(args: {
         start_ms: args.startMs,
         end_ms: args.endMs,
         user_email: args.userEmail,
+        ...(args.dedicated ?? {}),
       },
     },
   };
@@ -511,7 +593,7 @@ function mergeEventsById(
 }
 
 /**
- * GET calendar_person_events — one person's events across assigned calendars
+ * GET calendar_person_events — one scoper's events across assigned calendars
  * plus their userId window. A failed constituent read marks complete false
  * and still returns the others. GET only. Never writes.
  */
@@ -543,6 +625,9 @@ export async function ghlCalendarPersonEventsAction(args: {
       },
     };
   }
+  const scoper = salesBookingScoperCalendar(userEmail);
+  if (!scoper) return refuseNonScoperEmail();
+  const dedicated = dedicatedCalendarProvenance(scoper);
   const startMs = ghlCalendarInstantMs(args.params.get("start"));
   const endMs = ghlCalendarInstantMs(args.params.get("end"));
   if (startMs === null || endMs === null || endMs <= startMs) {
@@ -573,6 +658,7 @@ export async function ghlCalendarPersonEventsAction(args: {
           user_id: null,
           failure: users.failure,
           complete: false,
+          ...dedicated,
         },
       },
     };
@@ -580,6 +666,7 @@ export async function ghlCalendarPersonEventsAction(args: {
   const confirmed = confirmGhlUserId({
     users: users.users,
     email: userEmail,
+    claimedId: scoper.ghl_user_id,
   });
   if (!confirmed.id) {
     return {
@@ -593,6 +680,7 @@ export async function ghlCalendarPersonEventsAction(args: {
           user_id: null,
           failure: confirmed.reason || "ghl_user_unmapped",
           complete: false,
+          ...dedicated,
         },
       },
     };
@@ -630,6 +718,7 @@ export async function ghlCalendarPersonEventsAction(args: {
     const scan = await fetchGhlCalendarEvents({
       ghlGet: args.ghlGet,
       locationId: args.locationId,
+      userId: resolvedUserId,
       calendarId: calendar.id,
       startMs,
       endMs,
@@ -658,6 +747,7 @@ export async function ghlCalendarPersonEventsAction(args: {
         user_email: userEmail,
         user_id: resolvedUserId,
         user_id_resolved_by: "roster_email_match",
+        ...dedicated,
         start_ms: startMs,
         end_ms: endMs,
         complete,

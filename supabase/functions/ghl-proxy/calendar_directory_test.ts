@@ -60,6 +60,11 @@ const ROSTER = {
       email: "marnin@secureworkswa.com.au",
       name: "Marnin",
     },
+    {
+      id: "ghl_user_other",
+      email: "other@secureworkswa.com.au",
+      name: "Other",
+    },
   ],
 };
 
@@ -151,14 +156,18 @@ Deno.test("calendar_directory is GET only and returns two receipts", async () =>
   assertEquals(result.body.ok, true);
   assertEquals((result.body.calendars as unknown[]).length, 3);
   const users = result.body.users as Array<Record<string, unknown>>;
-  assertEquals(users.map((user) => user.id), [USER, "ghl_user_marnin"]);
+  assertEquals(users.map((user) => user.id), [
+    USER,
+    "ghl_user_marnin",
+    "ghl_user_other",
+  ]);
   assertEquals(Object.keys(users[0]).sort(), ["email", "id", "name"]);
   const provenance = result.body.provenance as {
     calendars: { ok: boolean; count: number; failure: null };
     users: { ok: boolean; count: number; failure: null };
   };
   assertEquals(provenance.calendars, { ok: true, count: 3, failure: null });
-  assertEquals(provenance.users, { ok: true, count: 2, failure: null });
+  assertEquals(provenance.users, { ok: true, count: 3, failure: null });
   assertEquals(listed.calls.length, 2);
   assertStringIncludes(listed.calls[0], "/calendars/?locationId=");
   assertStringIncludes(listed.calls[1], "/users/?locationId=");
@@ -176,7 +185,7 @@ Deno.test("calendar_directory keeps the other half when one provider read fails"
   });
   assertEquals(noCalendars.body.ok, false);
   assertEquals(noCalendars.body.calendars, []);
-  assertEquals((noCalendars.body.users as unknown[]).length, 2);
+  assertEquals((noCalendars.body.users as unknown[]).length, 3);
   const calProv = noCalendars.body.provenance as {
     calendars: { ok: boolean; failure: string };
     users: { ok: boolean };
@@ -264,6 +273,9 @@ Deno.test("calendar_person_events merges assigned calendars with the userId wind
   assertEquals(provenance.user_email, "nithin@secureworkswa.com.au");
   assertEquals(provenance.user_id, USER);
   assertEquals(provenance.user_id_resolved_by, "roster_email_match");
+  assertEquals(provenance.dedicated_calendar, "unconfirmed");
+  assertEquals(provenance.dedicated_calendar_id, null);
+  assertEquals(provenance.calendar_purpose, "patios");
   assertEquals(provenance.deduplicated, 1);
   assertEquals(provenance.assignments_returned, true);
   assertEquals(provenance.complete, true);
@@ -276,7 +288,9 @@ Deno.test("calendar_person_events merges assigned calendars with the userId wind
   assertStringIncludes(calls[1], "/calendars/?locationId=");
   assertStringIncludes(calls[2], "userId=");
   assertStringIncludes(calls[3], `calendarId=${CAL_A}`);
+  assertStringIncludes(calls[3], `userId=${USER}`);
   assertStringIncludes(calls[4], `calendarId=${CAL_B}`);
+  assertStringIncludes(calls[4], `userId=${USER}`);
   assertEquals(calls.some((path) => path.includes("cal_marnin_only")), false);
 });
 
@@ -356,6 +370,85 @@ Deno.test("calendar_person_events refuses zero or several roster matches without
   assertEquals(many.body.ok, false);
   assertEquals(many.body.events, []);
   assertEquals(several.calls.length, 1);
+});
+
+Deno.test("calendar_person_events refuses a non-scoper roster address before reading the roster", async () => {
+  const { calls, ghlGet } = getter([ROSTER]);
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "other@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 400);
+  assertEquals(result.body.ok, false);
+  assertEquals(
+    (result.body as { code: string }).code,
+    "scoper_email_required",
+  );
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("calendar_person_events keeps another assignee's shared-calendar appointments out", async () => {
+  const calls: string[] = [];
+  const nithinShared = event("nithin-shared");
+  const marninStratco = event("marnin-stratco", {
+    assignedUserId: "ghl_user_marnin",
+  });
+  const ghlGet = (path: string) => {
+    calls.push(path);
+    if (path.includes("/users/")) return Promise.resolve(ROSTER);
+    if (path.startsWith("/calendars/?") || path.includes("/calendars/?locationId=")) {
+      return Promise.resolve(CALENDARS_WITH_ASSIGNMENTS);
+    }
+    if (path.includes("/calendars/events")) {
+      const query = new URL(path, "https://ghl.example").searchParams;
+      const userId = query.get("userId");
+      const calendarId = query.get("calendarId");
+      if (userId === USER && !calendarId) {
+        return Promise.resolve({ events: [event("user-only")] });
+      }
+      if (calendarId === CAL_A) {
+        return Promise.resolve({ events: [event("cal-a")] });
+      }
+      if (calendarId === CAL_B) {
+        const shared = [nithinShared, marninStratco];
+        if (userId === USER) {
+          return Promise.resolve({
+            events: shared.filter((row) => row.assignedUserId === USER),
+          });
+        }
+        return Promise.resolve({ events: shared });
+      }
+    }
+    return Promise.reject(new Error(`unexpected GHL GET ${path}`));
+  };
+  const result = await ghlCalendarPersonEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  const ids = (result.body.events as Array<{ id: string }>).map((row) =>
+    row.id
+  );
+  assertEquals(ids.includes("marnin-stratco"), false);
+  assertEquals(ids.includes("nithin-shared"), true);
+  const sharedCall = calls.find((path) => path.includes(`calendarId=${CAL_B}`));
+  assertStringIncludes(sharedCall || "", `userId=${USER}`);
+  assertEquals(
+    (result.body.provenance as { dedicated_calendar_id: string | null })
+      .dedicated_calendar_id,
+    null,
+  );
 });
 
 Deno.test("calendar_person_events without teamMembers does not infer assignments", async () => {

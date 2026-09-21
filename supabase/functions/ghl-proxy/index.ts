@@ -9,7 +9,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 // Endpoints (via query param ?action=):
 //   GET  ?action=opportunities&pipeline=fencing|patio
 //   GET  ?action=calendar_events&userId=...&start=ISO&end=ISO  — read-only GHL calendar window
-//   GET  ?action=calendar_events&user_email=...&start=ISO&end=ISO  — same, id from roster email match
+//   GET  ?action=calendar_events&user_email=...&start=ISO&end=ISO  — same, scoper email only, id from roster match
 //   GET  ?action=calendar_directory  — location calendars (id, name, is_active, assigned_user_ids) + roster (id, name, email)
 //   GET  ?action=calendar_person_events&user_email=...&start=ISO&end=ISO  — one person's events across assigned calendars + userId
 //   GET  ?action=search&q=smith&pipeline=patio  — search GHL leads (pipeline+Supabase cross-ref)

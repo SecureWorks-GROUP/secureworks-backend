@@ -66,6 +66,11 @@ import {
   salesBookingThreadFactIsFresh,
   withSalesBookingGhl429Retry,
 } from "./sales_booking_read.ts";
+import {
+  confirmGhlUserId,
+  ghlCalendarEventsAction,
+  usersFromGhlBody,
+} from "../ghl-proxy/calendar_events.ts";
 
 const NOW = new Date("2026-09-16T02:00:00.000Z"); // Wed 10:00 Perth
 const WEEK = "2026-09-14"; // Monday
@@ -1124,16 +1129,63 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
   // Fencing and patio pipelines are never mixed.
   assert(marnin.resource.pipeline_id !== nithin.resource.pipeline_id);
 
-  assertEquals(
-    SALES_BOOKING_GHL_USERS.khairo.email,
-    "khairo@secureworkswa.com.au",
-  );
-  assertEquals(SALES_BOOKING_GHL_USERS.khairo.ghl_user_id, null);
   assertEquals(SALES_BOOKING_RESOURCES.khairo, undefined);
   await assertRejects(
     () => salesBookingRead(deps(), { resource: "khairo", week_start: WEEK }),
     SalesBookingRequestError,
   );
+  const khairoUsers = usersFromGhlBody({
+    users: [
+      { id: "ghl_user_khairo", email: "khairo@secureworkswa.com.au" },
+      { id: "ghl_user_marnin", email: "marnin@secureworkswa.com.au" },
+    ],
+  });
+  assertEquals(
+    confirmGhlUserId({
+      users: khairoUsers,
+      email: "khairo@secureworkswa.com.au",
+    }),
+    { id: "ghl_user_khairo", reason: null },
+  );
+  const khairoCalls: string[] = [];
+  const khairoDiary = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "khairo@secureworkswa.com.au",
+      start: "2026-09-14T00:00:00+08:00",
+      end: "2026-09-21T00:00:00+08:00",
+    }),
+    locationId: "loc_secureworks",
+    ghlGet: (path) => {
+      khairoCalls.push(path);
+      if (path.includes("/users/")) {
+        return Promise.resolve({
+          users: [
+            { id: "ghl_user_khairo", email: "khairo@secureworkswa.com.au" },
+          ],
+        });
+      }
+      return Promise.resolve({ events: [] });
+    },
+  });
+  assertEquals(khairoDiary.status, 200);
+  assertEquals(khairoDiary.body.ok, true);
+  assertEquals(
+    (khairoDiary.body.provenance as { user_id: string }).user_id,
+    "ghl_user_khairo",
+  );
+  assertEquals(
+    (khairoDiary.body.provenance as { dedicated_calendar: string })
+      .dedicated_calendar,
+    "unconfirmed",
+  );
+  assertEquals(
+    (khairoDiary.body.provenance as { dedicated_calendar_id: string | null })
+      .dedicated_calendar_id,
+    null,
+  );
+  assertEquals(khairoCalls[0].includes("/users/"), true);
+  assertEquals(khairoCalls.some((path) => path.includes("calendarId=")), false);
   await assertRejects(
     () =>
       salesBookingRead(deps(), {

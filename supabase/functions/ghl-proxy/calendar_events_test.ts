@@ -389,6 +389,9 @@ Deno.test("user_email resolves one roster id and reads events for it", async () 
   assertEquals(provenance.user_email, "nithin@secureworkswa.com.au");
   assertEquals(provenance.user_id, USER);
   assertEquals(provenance.user_id_resolved_by, "roster_email_match");
+  assertEquals(provenance.dedicated_calendar, "unconfirmed");
+  assertEquals(provenance.dedicated_calendar_id, null);
+  assertEquals(provenance.calendar_purpose, "patios");
   assertEquals(provenance.failure, null);
   assertEquals(calls.length, 2);
   assertStringIncludes(calls[0], "/users/?locationId=");
@@ -505,6 +508,56 @@ Deno.test("two calendar_events selectors refuse and issue no GHL GET", async () 
     );
   }
   assertEquals(calls.length, 0);
+});
+
+Deno.test("user_email refuses a non-scoper roster address before reading the roster", async () => {
+  const { calls, ghlGet } = getter([ROSTER]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "other@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 400);
+  assertEquals(result.body.ok, false);
+  assertEquals(
+    (result.body as { code: string }).code,
+    "scoper_email_required",
+  );
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("user_email scoper with null ids resolves by roster and does not guess a calendar", async () => {
+  const { calls, ghlGet } = getter([
+    ROSTER,
+    { events: [event("k1")] },
+  ]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "khairo@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  const provenance = result.body.provenance as Record<string, unknown>;
+  assertEquals(provenance.user_id, "ghl_user_khairo");
+  assertEquals(provenance.user_id_resolved_by, "roster_email_match");
+  assertEquals(provenance.dedicated_calendar, "unconfirmed");
+  assertEquals(provenance.dedicated_calendar_id, null);
+  assertEquals(provenance.calendar_purpose, "fencing enquiries");
+  assertEquals(provenance.calendar_id, null);
+  assertEquals(calls.length, 2);
+  assertStringIncludes(calls[0], "/users/");
+  const query = windowQuery(calls[1]);
+  assertEquals(query.get("userId"), "ghl_user_khairo");
+  assertEquals(query.get("calendarId"), null);
 });
 
 Deno.test("user_email calendar_events stays GET only", async () => {

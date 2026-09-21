@@ -14,16 +14,25 @@ The GHL calendar window is one unpaged `/calendars/events` GET in
 `supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
 action (exactly one of `userId`, `calendarId`, or `user_email`, plus `start`
-and `end`). `user_email` resolves the GHL id through the live location roster
-(`confirmGhlUserId`); zero, several, or an unreadable roster returns `ok: false`
-and does not read events. Discovery of the location's calendars is
-`GET ghl-proxy?action=calendar_directory` (id, name, is_active, assigned
-team-member user ids, plus roster id/name/email; each provider read has its
-own receipt). A person's blocking diary across assigned calendars is
+and `end`). `user_email` on `calendar_events` and `calendar_person_events`
+resolves only the three addresses on `SALES_BOOKING_SCOPER_CALENDARS`
+(`marnin@`, `khairo@`, `nithin@secureworkswa.com.au`); any other address is
+refused before the roster is read. A listed scoper is then confirmed through
+the live location roster (`confirmGhlUserId`); zero, several, or an unreadable
+roster returns `ok: false` and does not read events. Discovery of the
+location's calendars is `GET ghl-proxy?action=calendar_directory` (id, name,
+is_active, assigned team-member user ids, plus roster id/name/email; each
+provider read has its own receipt). A person's blocking diary across assigned
+calendars is
 `GET ghl-proxy?action=calendar_person_events&user_email=&start=&end=`
 (`complete` is false if any constituent read failed). Neither action writes.
-The three-calendar mapping (Marnin Stratco / Khairo fencing / Nithin patios)
-is not in this contract: it waits on owner approval after discovery.
+The exact-id mapping sits next to that read as `SALES_BOOKING_SCOPER_CALENDARS`:
+one row each for Marnin Stratco visits, Khairo fencing enquiries, and Nithin
+patios, with `ghl_user_id` and `calendar_id` null. Null means unconfirmed —
+a read still works through roster email and the receipt says the dedicated
+calendar is unconfirmed. Nothing treats null as a known id, and nothing
+falls back to a guessed calendar. Filling those ids is the later
+owner-approved configuration change after discovery.
 
 ## Page load may persist thread facts and the roster; send stays held
 
@@ -253,7 +262,8 @@ There is no `ghl_user_id` on `users`, `scoper_preferences`, or ghl-proxy
 config. `SALES_BOOKING_GHL_USERS` is keyed by resource (`nithin`, `marnin`)
 plus Khairo's roster email (`khairo@secureworkswa.com.au`) and holds the
 recorded email for that scoper (`nithin@` / `marnin@` /
-`khairo@secureworkswa.com.au`). Nithin and Marnin source
+`khairo@secureworkswa.com.au`). It is the booking-read email map only; it
+does not carry calendar ids. Nithin and Marnin source
 `20260322000005_fix_user_roles.sql` plus the wiki profile `calendar_email`;
 Khairo's email is the scoper work-calendar address. The live GHL id is
 confirmed at read time against `GET /users/?locationId=`: unique email first,
@@ -264,4 +274,7 @@ Live 17 Sep: Nithin's recorded email was absent from that roster
 `calendar_email` set to the live GHL email. Zero or several name matches stay
 unread with `ghl_user_unmapped` — never first-match-wins. Khairo is on the
 email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
-booking resource.
+booking resource. The dedicated-calendar exact-id table is
+`SALES_BOOKING_SCOPER_CALENDARS` next to the calendar read: the three scoper
+emails, their intended calendar purpose, and null `ghl_user_id` /
+`calendar_id` until the owner-approved configuration change after discovery.
