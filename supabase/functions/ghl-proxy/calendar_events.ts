@@ -5,7 +5,10 @@
 // GET ghl-proxy?action=calendar_events is the one calendar read. It issues
 // one documented Get Calendar Events call (`/calendars/events` with
 // locationId, userId or calendarId, startTime, endTime) and returns the raw
-// GHL events plus provenance. No writes of any kind.
+// GHL events plus provenance. `user_email` is a third selector: the live
+// location roster is confirmed through confirmGhlUserId, then events are
+// read for that id. Exactly one of userId, calendarId, user_email. No writes
+// of any kind.
 //
 // Times on the action are ISO (Perth). GHL itself wants Unix milliseconds;
 // conversion happens here so callers never have to know that.
@@ -216,15 +219,28 @@ export async function ghlCalendarEventsAction(args: {
       },
     };
   }
-  const userId = nonempty(args.params.get("userId"));
-  const calendarId = nonempty(args.params.get("calendarId"));
-  if (!ghlId(userId) && !ghlId(calendarId)) {
+  const userId = ghlId(args.params.get("userId"));
+  const calendarId = ghlId(args.params.get("calendarId"));
+  const userEmail = nonempty(args.params.get("user_email"))?.toLowerCase() ??
+    null;
+  const selectorCount = [userId, calendarId, userEmail].filter(Boolean).length;
+  if (selectorCount === 0) {
     return {
       status: 400,
       body: {
         ok: false,
-        error: "userId or calendarId is required",
+        error: "userId, calendarId, or user_email is required",
         code: "user_or_calendar_required",
+      },
+    };
+  }
+  if (selectorCount > 1) {
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error: "exactly one of userId, calendarId, user_email",
+        code: "exactly_one_selector",
       },
     };
   }
@@ -242,10 +258,44 @@ export async function ghlCalendarEventsAction(args: {
     };
   }
 
+  let resolvedUserId = userId;
+  let emailProvenance: Record<string, unknown> | null = null;
+  if (userEmail) {
+    const roster = await fetchGhlLocationUsers({
+      ghlGet: args.ghlGet,
+      locationId: args.locationId,
+    });
+    if (roster.failure) {
+      return unreadEmailCalendar({
+        userEmail,
+        failure: roster.failure,
+        startMs,
+        endMs,
+      });
+    }
+    const confirmed = confirmGhlUserId({
+      users: roster.users,
+      email: userEmail,
+    });
+    if (!confirmed.id) {
+      return unreadEmailCalendar({
+        userEmail,
+        failure: confirmed.reason || "ghl_user_unmapped",
+        startMs,
+        endMs,
+      });
+    }
+    resolvedUserId = confirmed.id;
+    emailProvenance = {
+      user_email: userEmail,
+      user_id_resolved_by: "roster_email_match",
+    };
+  }
+
   const scan = await fetchGhlCalendarEvents({
     ghlGet: args.ghlGet,
     locationId: args.locationId,
-    userId,
+    userId: resolvedUserId,
     calendarId,
     startMs,
     endMs,
@@ -262,6 +312,361 @@ export async function ghlCalendarEventsAction(args: {
         calendar_id: scan.calendar_id,
         start_ms: scan.start_ms,
         end_ms: scan.end_ms,
+        ...(emailProvenance ?? {}),
+      },
+    },
+  };
+}
+
+function unreadEmailCalendar(args: {
+  userEmail: string;
+  failure: string;
+  startMs: number;
+  endMs: number;
+}): GhlCalendarEventsActionResult {
+  return {
+    status: 200,
+    body: {
+      ok: false,
+      events: [],
+      provenance: {
+        count: 0,
+        failure: args.failure,
+        user_id: null,
+        calendar_id: null,
+        start_ms: args.startMs,
+        end_ms: args.endMs,
+        user_email: args.userEmail,
+      },
+    },
+  };
+}
+
+export interface GhlCalendarDirectoryRow {
+  id: string;
+  name: string | null;
+  is_active: boolean | null;
+  assigned_user_ids: string[];
+  assignments_returned: boolean;
+}
+
+export interface GhlProviderReadReceipt {
+  ok: boolean;
+  count: number;
+  failure: string | null;
+}
+
+export interface GhlCalendarsScan {
+  calendars: GhlCalendarDirectoryRow[];
+  receipt: GhlProviderReadReceipt;
+}
+
+/**
+ * Documented GET /calendars/?locationId=. The list schema names id, name,
+ * isActive; teamMembers is a create/update field. When a row has no
+ * teamMembers array, assignments_returned is false — never inferred from
+ * events.
+ */
+export function calendarsFromGhlBody(
+  body: Record<string, unknown>,
+): GhlCalendarDirectoryRow[] {
+  const raw = Array.isArray(body.calendars) ? body.calendars : [];
+  const calendars: GhlCalendarDirectoryRow[] = [];
+  for (const row of raw as Record<string, unknown>[]) {
+    const id = ghlId(row.id);
+    if (!id) continue;
+    const teamMembers = row.teamMembers;
+    const assignmentsReturned = Array.isArray(teamMembers);
+    const assigned: string[] = [];
+    if (assignmentsReturned) {
+      const seen = new Set<string>();
+      for (const member of teamMembers as Record<string, unknown>[]) {
+        const userId = ghlId(member?.userId);
+        if (!userId || seen.has(userId)) continue;
+        seen.add(userId);
+        assigned.push(userId);
+      }
+    }
+    calendars.push({
+      id,
+      name: nonempty(row.name),
+      is_active: typeof row.isActive === "boolean" ? row.isActive : null,
+      assigned_user_ids: assigned,
+      assignments_returned: assignmentsReturned,
+    });
+  }
+  return calendars;
+}
+
+export async function fetchGhlCalendars(args: {
+  ghlGet: GhlCalendarGet;
+  locationId: string;
+}): Promise<GhlCalendarsScan> {
+  try {
+    const body = await args.ghlGet(
+      `/calendars/?locationId=${encodeURIComponent(args.locationId)}`,
+    );
+    const calendars = calendarsFromGhlBody(body);
+    return {
+      calendars,
+      receipt: { ok: true, count: calendars.length, failure: null },
+    };
+  } catch (error) {
+    return {
+      calendars: [],
+      receipt: {
+        ok: false,
+        count: 0,
+        failure: `ghl_calendars_unread: ${
+          (error as Error)?.message || "unknown"
+        }`,
+      },
+    };
+  }
+}
+
+function rosterUsersFromScan(
+  users: GhlLocationUser[],
+): Array<{ id: string; name: string | null; email: string | null }> {
+  return users.map((user) => ({
+    id: user.id,
+    name: user.name,
+    email: user.email,
+  }));
+}
+
+/**
+ * GET calendar_directory — location calendars plus the user roster.
+ * Two independent provider reads, each with its own receipt. GET only.
+ */
+export async function ghlCalendarDirectoryAction(args: {
+  method: string;
+  locationId: string;
+  ghlGet: GhlCalendarGet;
+}): Promise<GhlCalendarEventsActionResult> {
+  if (args.method !== "GET") {
+    return {
+      status: 405,
+      body: {
+        ok: false,
+        error: "calendar_directory is GET only",
+        code: "method_not_allowed",
+      },
+    };
+  }
+  const calendars = await fetchGhlCalendars({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+  });
+  const users = await fetchGhlLocationUsers({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+  });
+  const usersReceipt: GhlProviderReadReceipt = users.failure
+    ? { ok: false, count: 0, failure: users.failure }
+    : { ok: true, count: users.users.length, failure: null };
+  return {
+    status: 200,
+    body: {
+      ok: calendars.receipt.ok && usersReceipt.ok,
+      calendars: calendars.calendars,
+      users: users.failure ? [] : rosterUsersFromScan(users.users),
+      provenance: {
+        calendars: calendars.receipt,
+        users: usersReceipt,
+      },
+    },
+  };
+}
+
+export interface GhlCalendarReadReceipt extends GhlProviderReadReceipt {
+  calendar_id: string;
+  name: string | null;
+}
+
+function eventId(event: Record<string, unknown>): string | null {
+  return nonempty(event.id);
+}
+
+function mergeEventsById(
+  batches: Array<Record<string, unknown>[]>,
+): { events: Record<string, unknown>[]; deduplicated: number } {
+  const events: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let deduplicated = 0;
+  for (const batch of batches) {
+    for (const event of batch) {
+      const id = eventId(event);
+      if (id) {
+        if (seen.has(id)) {
+          deduplicated += 1;
+          continue;
+        }
+        seen.add(id);
+      }
+      events.push(event);
+    }
+  }
+  return { events, deduplicated };
+}
+
+/**
+ * GET calendar_person_events — one person's events across assigned calendars
+ * plus their userId window. A failed constituent read marks complete false
+ * and still returns the others. GET only. Never writes.
+ */
+export async function ghlCalendarPersonEventsAction(args: {
+  method: string;
+  params: URLSearchParams;
+  locationId: string;
+  ghlGet: GhlCalendarGet;
+}): Promise<GhlCalendarEventsActionResult> {
+  if (args.method !== "GET") {
+    return {
+      status: 405,
+      body: {
+        ok: false,
+        error: "calendar_person_events is GET only",
+        code: "method_not_allowed",
+      },
+    };
+  }
+  const userEmail = nonempty(args.params.get("user_email"))?.toLowerCase() ??
+    null;
+  if (!userEmail) {
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error: "user_email is required",
+        code: "user_email_required",
+      },
+    };
+  }
+  const startMs = ghlCalendarInstantMs(args.params.get("start"));
+  const endMs = ghlCalendarInstantMs(args.params.get("end"));
+  if (startMs === null || endMs === null || endMs <= startMs) {
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error:
+          "start and end must be ISO (Perth) or Unix milliseconds, with end after start",
+        code: "invalid_window",
+      },
+    };
+  }
+
+  const users = await fetchGhlLocationUsers({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+  });
+  if (users.failure) {
+    return {
+      status: 200,
+      body: {
+        ok: false,
+        complete: false,
+        events: [],
+        provenance: {
+          user_email: userEmail,
+          user_id: null,
+          failure: users.failure,
+          complete: false,
+        },
+      },
+    };
+  }
+  const confirmed = confirmGhlUserId({
+    users: users.users,
+    email: userEmail,
+  });
+  if (!confirmed.id) {
+    return {
+      status: 200,
+      body: {
+        ok: false,
+        complete: false,
+        events: [],
+        provenance: {
+          user_email: userEmail,
+          user_id: null,
+          failure: confirmed.reason || "ghl_user_unmapped",
+          complete: false,
+        },
+      },
+    };
+  }
+  const resolvedUserId = confirmed.id;
+
+  const calendars = await fetchGhlCalendars({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+  });
+  const assignmentsReturned = calendars.receipt.ok &&
+    calendars.calendars.every((row) => row.assignments_returned);
+  const assigned = assignmentsReturned
+    ? calendars.calendars.filter((row) =>
+      row.assigned_user_ids.includes(resolvedUserId)
+    )
+    : [];
+
+  const userScan = await fetchGhlCalendarEvents({
+    ghlGet: args.ghlGet,
+    locationId: args.locationId,
+    userId: resolvedUserId,
+    startMs,
+    endMs,
+  });
+  const userEventsReceipt: GhlProviderReadReceipt = {
+    ok: userScan.failure === null,
+    count: userScan.count,
+    failure: userScan.failure,
+  };
+
+  const calendarReads: GhlCalendarReadReceipt[] = [];
+  const calendarBatches: Array<Record<string, unknown>[]> = [];
+  for (const calendar of assigned) {
+    const scan = await fetchGhlCalendarEvents({
+      ghlGet: args.ghlGet,
+      locationId: args.locationId,
+      calendarId: calendar.id,
+      startMs,
+      endMs,
+    });
+    calendarReads.push({
+      calendar_id: calendar.id,
+      name: calendar.name,
+      ok: scan.failure === null,
+      count: scan.count,
+      failure: scan.failure,
+    });
+    calendarBatches.push(scan.events);
+  }
+
+  const merged = mergeEventsById([userScan.events, ...calendarBatches]);
+  const complete = userEventsReceipt.ok && calendars.receipt.ok &&
+    assignmentsReturned &&
+    calendarReads.every((row) => row.ok);
+  return {
+    status: 200,
+    body: {
+      ok: complete,
+      complete,
+      events: merged.events,
+      provenance: {
+        user_email: userEmail,
+        user_id: resolvedUserId,
+        user_id_resolved_by: "roster_email_match",
+        start_ms: startMs,
+        end_ms: endMs,
+        complete,
+        count: merged.events.length,
+        deduplicated: merged.deduplicated,
+        assignments_returned: assignmentsReturned,
+        calendars_list: calendars.receipt,
+        user_events: userEventsReceipt,
+        calendar_reads: calendarReads,
       },
     },
   };

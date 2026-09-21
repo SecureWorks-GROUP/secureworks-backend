@@ -9,6 +9,9 @@ import { sourceTime } from "../_shared/source_time.ts";
 // Endpoints (via query param ?action=):
 //   GET  ?action=opportunities&pipeline=fencing|patio
 //   GET  ?action=calendar_events&userId=...&start=ISO&end=ISO  — read-only GHL calendar window
+//   GET  ?action=calendar_events&user_email=...&start=ISO&end=ISO  — same, id from roster email match
+//   GET  ?action=calendar_directory  — location calendars (id, name, is_active, assigned_user_ids) + roster (id, name, email)
+//   GET  ?action=calendar_person_events&user_email=...&start=ISO&end=ISO  — one person's events across assigned calendars + userId
 //   GET  ?action=search&q=smith&pipeline=patio  — search GHL leads (pipeline+Supabase cross-ref)
 //   GET  ?action=contact&contactId=xxx  — full contact details
 //   POST ?action=link  { opportunityId, jobId, toolType, contact }
@@ -106,7 +109,11 @@ import {
   rethrowIfGhlRateLimited,
   throwIfGhlResponseNotOk,
 } from './provider_reads.ts'
-import { ghlCalendarEventsAction } from './calendar_events.ts'
+import {
+  ghlCalendarDirectoryAction,
+  ghlCalendarEventsAction,
+  ghlCalendarPersonEventsAction,
+} from './calendar_events.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -745,6 +752,33 @@ serve(async (req: Request) => {
         return json({ error: 'calendar_events is GET only', code: 'method_not_allowed' }, 405)
       }
       const result = await ghlCalendarEventsAction({
+        method: req.method,
+        params: url.searchParams,
+        locationId: GHL_LOCATION_ID,
+        ghlGet: (path) => ghl(path),
+      })
+      return json(result.body, result.status)
+    }
+
+    // ── Read-only GHL calendar directory. GET only. ──
+    if (action === 'calendar_directory') {
+      if (req.method !== 'GET') {
+        return json({ error: 'calendar_directory is GET only', code: 'method_not_allowed' }, 405)
+      }
+      const result = await ghlCalendarDirectoryAction({
+        method: req.method,
+        locationId: GHL_LOCATION_ID,
+        ghlGet: (path) => ghl(path),
+      })
+      return json(result.body, result.status)
+    }
+
+    // ── Read-only person diary across assigned calendars. GET only. ──
+    if (action === 'calendar_person_events') {
+      if (req.method !== 'GET') {
+        return json({ error: 'calendar_person_events is GET only', code: 'method_not_allowed' }, 405)
+      }
+      const result = await ghlCalendarPersonEventsAction({
         method: req.method,
         params: url.searchParams,
         locationId: GHL_LOCATION_ID,

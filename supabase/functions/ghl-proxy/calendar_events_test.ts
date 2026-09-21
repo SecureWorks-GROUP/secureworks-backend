@@ -322,3 +322,203 @@ Deno.test("a failed users list is unread, never an invented roster", async () =>
   assertEquals(scan.users, []);
   assertStringIncludes(scan.failure || "", "ghl_users_unread");
 });
+
+const WINDOW = {
+  start: "2026-09-14T00:00:00+08:00",
+  end: "2026-09-21T00:00:00+08:00",
+};
+const ROSTER = {
+  users: [
+    { id: USER, email: "nithin@secureworkswa.com.au", name: "Nithin" },
+    {
+      id: "ghl_user_marnin",
+      email: "marnin@secureworkswa.com.au",
+      name: "Marnin",
+    },
+    {
+      id: "ghl_user_khairo",
+      email: "khairo@secureworkswa.com.au",
+      name: "Khairo",
+    },
+  ],
+};
+
+Deno.test("calendarId alone still reads the window", async () => {
+  const { calls, ghlGet } = getter([{ events: [event("cal-1")] }]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      calendarId: "cal_nithin",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  assertEquals((result.body.events as unknown[]).length, 1);
+  const provenance = result.body.provenance as Record<string, unknown>;
+  assertEquals(provenance.user_id, null);
+  assertEquals(provenance.calendar_id, "cal_nithin");
+  assertEquals(provenance.user_email, undefined);
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0], "/calendars/events?");
+  const query = windowQuery(calls[0]);
+  assertEquals(query.get("calendarId"), "cal_nithin");
+  assertEquals(query.get("userId"), null);
+});
+
+Deno.test("user_email resolves one roster id and reads events for it", async () => {
+  const { calls, ghlGet } = getter([
+    ROSTER,
+    { events: [event("n1"), event("n2")] },
+  ]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "Nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, true);
+  assertEquals((result.body.events as unknown[]).length, 2);
+  const provenance = result.body.provenance as Record<string, unknown>;
+  assertEquals(provenance.user_email, "nithin@secureworkswa.com.au");
+  assertEquals(provenance.user_id, USER);
+  assertEquals(provenance.user_id_resolved_by, "roster_email_match");
+  assertEquals(provenance.failure, null);
+  assertEquals(calls.length, 2);
+  assertStringIncludes(calls[0], "/users/?locationId=");
+  assertStringIncludes(calls[1], "/calendars/events?");
+  const query = windowQuery(calls[1]);
+  assertEquals(query.get("userId"), USER);
+  assertEquals(query.get("calendarId"), null);
+});
+
+Deno.test("user_email with zero or several roster matches refuses and does not read events", async () => {
+  const zero = getter([{
+    users: [
+      { id: "ghl_user_marnin", email: "marnin@secureworkswa.com.au" },
+    ],
+  }]);
+  const none = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet: zero.ghlGet,
+  });
+  assertEquals(none.status, 200);
+  assertEquals(none.body.ok, false);
+  assertEquals((none.body.events as unknown[]).length, 0);
+  assertEquals(
+    (none.body.provenance as { failure: string }).failure,
+    "ghl_user_unmapped",
+  );
+  assertEquals(
+    (none.body.provenance as { user_id: string | null }).user_id,
+    null,
+  );
+  assertEquals(zero.calls.length, 1);
+  assertStringIncludes(zero.calls[0], "/users/");
+
+  const several = getter([{
+    users: [
+      { id: "n1", email: "nithin@secureworkswa.com.au" },
+      { id: "n2", email: "nithin@secureworkswa.com.au" },
+    ],
+  }]);
+  const many = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet: several.ghlGet,
+  });
+  assertEquals(many.status, 200);
+  assertEquals(many.body.ok, false);
+  assertEquals((many.body.events as unknown[]).length, 0);
+  assertEquals(
+    (many.body.provenance as { failure: string }).failure,
+    "ghl_user_unmapped",
+  );
+  assertEquals(several.calls.length, 1);
+  assertStringIncludes(several.calls[0], "/users/");
+});
+
+Deno.test("user_email with an unreadable roster refuses and does not read events", async () => {
+  const { calls, ghlGet } = getter([{ throw: "GHL 502: upstream" }]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals((result.body.events as unknown[]).length, 0);
+  assertStringIncludes(
+    (result.body.provenance as { failure: string }).failure,
+    "ghl_users_unread",
+  );
+  assertEquals(
+    (result.body.provenance as { user_email: string }).user_email,
+    "nithin@secureworkswa.com.au",
+  );
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0], "/users/");
+});
+
+Deno.test("two calendar_events selectors refuse and issue no GHL GET", async () => {
+  const { calls, ghlGet } = getter([]);
+  const pairs = [
+    { userId: USER, calendarId: "cal_nithin", ...WINDOW },
+    { userId: USER, user_email: "nithin@secureworkswa.com.au", ...WINDOW },
+    {
+      calendarId: "cal_nithin",
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    },
+  ];
+  for (const pair of pairs) {
+    const refused = await ghlCalendarEventsAction({
+      method: "GET",
+      params: new URLSearchParams(pair),
+      locationId: LOCATION,
+      ghlGet,
+    });
+    assertEquals(refused.status, 400);
+    assertEquals(refused.body.ok, false);
+    assertEquals(
+      (refused.body as { code: string }).code,
+      "exactly_one_selector",
+    );
+  }
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("user_email calendar_events stays GET only", async () => {
+  const { calls, ghlGet } = getter([]);
+  const refused = await ghlCalendarEventsAction({
+    method: "POST",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(refused.status, 405);
+  assertEquals((refused.body as { code: string }).code, "method_not_allowed");
+  assertEquals(calls.length, 0);
+});

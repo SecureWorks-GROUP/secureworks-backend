@@ -1124,6 +1124,12 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
   // Fencing and patio pipelines are never mixed.
   assert(marnin.resource.pipeline_id !== nithin.resource.pipeline_id);
 
+  assertEquals(
+    SALES_BOOKING_GHL_USERS.khairo.email,
+    "khairo@secureworkswa.com.au",
+  );
+  assertEquals(SALES_BOOKING_GHL_USERS.khairo.ghl_user_id, null);
+  assertEquals(SALES_BOOKING_RESOURCES.khairo, undefined);
   await assertRejects(
     () => salesBookingRead(deps(), { resource: "khairo", week_start: WEEK }),
     SalesBookingRequestError,
