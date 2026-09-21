@@ -542,9 +542,17 @@ time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
 an `event_at`-only gate — production almost never populates `event_at`.
 The captain heartbeat is `GET ops-api?action=context_pipeline_status`
 (migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
-Context migration lanes:
-`scripts/test-context-b1.sh`, `scripts/test-context-b3.sh` (disposable localhost
-Postgres, applies the new migrations twice). Record: `docs/context/b3-fact-custody.md`.
+Booking-lane context hangar (`20260921140000`): `context_contact_jobs` counts a
+`draft` only when the contact has no non-draft open job (coverage already
+counted draft as open); draft-only still pins, draft plus a live job stays on
+the live job, two or more drafts and no live job go to Luna, none stays
+unpinned; identity is GHL contact id only, never a name. Luna kind `job_brief` is the whole per-job "where is it at" text on
+`job_context` (no auto-expiry). `ensure_booking_draft_job(p_ghl_contact_id,
+p_type default fencing, p_org_id, p_client jsonb)` is the idempotent mint —
+callable, no trigger/cron/backfill. Merge to main auto-applies it. Context
+migration lanes: `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh`
+(disposable localhost Postgres, applies the new migrations twice). Record:
+`docs/context/b3-fact-custody.md`.
 
 ## Migrations Apply Before Edge Deploys
 
