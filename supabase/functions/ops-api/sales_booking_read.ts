@@ -168,9 +168,10 @@ export const SALES_BOOKING_RESOURCES: Readonly<
 
 /**
  * GHL user ids are not stored on `users`, `scoper_preferences`, or ghl-proxy
- * config. Do not embed a guessed id. Nithin's pin stays null until the live
- * roster email is known. Confirmation (email, then unique name):
- * `docs/sales-booking-read-contract-2026-09-16.md`.
+ * config. Do not embed a guessed id. Pins stay null until the live roster
+ * email is known. Confirmation (email, then unique name):
+ * `docs/sales-booking-read-contract-2026-09-16.md`. Khairo's email is
+ * recorded here for roster confirmation; he is not a booking resource.
  */
 export const SALES_BOOKING_GHL_USERS: Readonly<
   Record<string, {
@@ -193,6 +194,13 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
     email_source:
       "public.users.email (20260322000005_fix_user_roles.sql) and wiki fencing-stratco-marnin.json calendar_email",
     name_match: "marnin",
+    ghl_user_id: null,
+  },
+  khairo: {
+    email: "khairo@secureworkswa.com.au",
+    email_source:
+      "scoper work calendar email (supabase/migrations/_drafts/20260505060000_scoper_preferences_work_calendar_email.sql)",
+    name_match: "khairo",
     ghl_user_id: null,
   },
 };
@@ -1264,8 +1272,9 @@ export function projectSalesBookingDiaryEntry(
 /**
  * Pick the GHL mapping for this calendar read. `scoper_user_id` may override
  * the resource the same way it used to override the Outlook mailbox: only a
- * known v1 scoper (Nithin / Marnin) maps. Anyone else is unmapped — never a
- * guess, never Khairo.
+ * known v1 booking resource (Nithin / Marnin) maps. Anyone else is unmapped
+ * — never a guess. Khairo's email is on SALES_BOOKING_GHL_USERS for roster
+ * confirmation; he is not a booking resource.
  */
 export function resolveSalesBookingGhlMapping(
   resourceId: string,
