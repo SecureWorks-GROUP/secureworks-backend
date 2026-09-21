@@ -26,3 +26,6 @@ drafts/
 # Read-only SES measurement scratch (parity-harness runs). Frozen artifacts are
 # committed under scripts/ and docs/evidence/, never the raw run files.
 .audit/
+
+# Generated Python cache from the local sales reporting SQL proof.
+tests/sales-performance/__pycache__/
