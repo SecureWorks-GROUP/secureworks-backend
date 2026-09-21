@@ -20,6 +20,7 @@ import {
   sealedSesMoneyRefusal,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
+import { decideReportingStaffAuth } from './reporting_staff_gate.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -203,6 +204,18 @@ serve(async (req: Request) => {
   // Use service role client for data queries (RLS views need it)
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+  const staffGate = await decideReportingStaffAuth({
+    action,
+    xApiKey,
+    bearerToken,
+    sharedKey: validKey,
+    serviceKey,
+    agentServerKey,
+    sb,
+  })
+  if (!staffGate.ok) {
+    return json({ error: staffGate.error, code: staffGate.code }, staffGate.status)
+  }
 
   try {
     switch (action) {

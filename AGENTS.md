@@ -3574,6 +3574,14 @@ literal on purpose — the audit table lives in PR #680/#681. Status codes:
 force-logs-out on any 401); a role refusal must be 403 operator_access_required.
 Tests: ops_api_operator_auth_test.ts.
 
+## reporting-api Jarvis Reads Are Staff-Only
+
+`job_context` and `job_intelligence` reuse the ops-api staff set
+(admin/owner/ops_manager) in `reporting_staff_gate.ts`. A trade JWT is 403
+`operator_access_required`; service-role and `OPS_AGENT_SERVER_KEY` still pass.
+Do not gate any other reporting-api action. Tests:
+`reporting_staff_gate_test.ts`.
+
 ## Reattend Pack Photos Follow Curated `photo_source_scope`
 
 When a curated bind stamps `photo_source_scope=same_job_all_attendances`, it
