@@ -379,3 +379,9 @@ ops-api|supabase/migrations/20260917180000_sales_booking_thread_facts.sql|constr
 
 # Sales Booking roster cache (kind check widened to roster)
 ops-api|supabase/migrations/20260917200000_sales_booking_roster.sql|constraint|sales_booking_packs_kind_check
+
+# Sales performance weekly snapshots (collector write; staff read/note)
+# Contract: docs/sales-performance-storage-api.md
+ops-api|supabase/migrations/20260911000001_sales_performance_weeks.sql|table|sales_performance_weeks
+ops-api|supabase/migrations/20260911000001_sales_performance_weeks.sql|function|sales_performance_write_v1
+ops-api|supabase/migrations/20260911000001_sales_performance_weeks.sql|function|sales_performance_note_v1

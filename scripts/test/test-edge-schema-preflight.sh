@@ -47,6 +47,7 @@ SALES_BOOKING_THREAD_FACTS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917180
 SALES_BOOKING_ROSTER_MIGRATION="$REPO_ROOT/supabase/migrations/20260917200000_sales_booking_roster.sql"
 CONTEXT_PIPELINE_STATUS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917210000_context_pipeline_status.sql"
 TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION="$REPO_ROOT/supabase/migrations/20260918120000_trade_invoice_super_payable_split.sql"
+SALES_PERFORMANCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911000001_sales_performance_weeks.sql"
 
 
 PASS_COUNT=0
@@ -286,6 +287,7 @@ write_response() {
   SALES_BOOKING_ROSTER_EXPECTED_SHA="$(sales_booking_roster_migration_sha)" \
   CONTEXT_PIPELINE_STATUS_EXPECTED_SHA="$(context_pipeline_status_migration_sha)" \
   TRADE_INVOICE_PAYABLE_SPLIT_EXPECTED_SHA="$(trade_invoice_payable_split_migration_sha)" \
+  SALES_PERFORMANCE_EXPECTED_SHA="$(shasum -a 256 "$SALES_PERFORMANCE_MIGRATION" | awk '{print $1}')" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -761,6 +763,17 @@ for version, name, key in [
             "expected_migration_name": name, "expected_statement_sha256": sha,
             "actual_migration_version": version, "actual_migration_name": name,
             "actual_statement_count": 2, "actual_statement_sha256": None, "missing_markers": []})
+sales_performance_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260911000001",
+    "expected_migration_name": "sales_performance_weeks",
+    "expected_statement_sha256": os.environ["SALES_PERFORMANCE_EXPECTED_SHA"],
+    "actual_migration_version": "20260911000001",
+    "actual_migration_name": "sales_performance_weeks",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SALES_PERFORMANCE_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -805,6 +818,7 @@ with open(sys.argv[1], "w") as f:
             context_pipeline_status_row,
             trade_invoice_payable_split_row,
             *context_rows,
+            sales_performance_row,
         ],
         f,
     )
