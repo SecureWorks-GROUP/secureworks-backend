@@ -1,13 +1,14 @@
 // Stratco allocation reference on GHL opportunities.
 //
-// One allocation, one opportunity, ever, on the known contact. Lookup pages
-// that contact's opportunities (status=all) and hydrates list rows that do not
-// carry readable customFields. Absence is proven only when every opportunity
-// of that contact was read in full. A q text search is never used. Two
-// different contacts for one allocation are not caught; Sales keys one
-// allocation to one contact. The custom field id is config-only; this module
-// never creates the field. Nothing live was proven. Phone duplicate search
-// still normalises to 0-prefix, not +61.
+// One allocation, one opportunity, ever, on the known contact. The ref is
+// written only to the one opportunity custom field, never the opportunity
+// name. Lookup pages that contact's opportunities (status=all) and hydrates
+// list rows that do not carry readable customFields. Absence is proven only
+// when every opportunity of that contact was read in full. A q text search
+// is never used. Two different contacts for one allocation are not caught;
+// Sales keys one allocation to one contact. The custom field id is
+// config-only; this module never creates the field. Nothing live was proven.
+// Phone duplicate search still normalises to 0-prefix, not +61.
 
 import { buildGhlOpportunitySearchRequest } from "./hardening_helpers.ts";
 import { rethrowIfGhlRateLimited } from "./provider_reads.ts";
