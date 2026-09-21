@@ -5,6 +5,20 @@
 // serve(). Trade, sales, crew, installer, lead_installer and other non-staff
 // JWTs are 403. Service-role and OPS_AGENT_SERVER_KEY stay allowed. The
 // public SW_API_KEY is not a server secret (same rule as ops-api).
+//
+// Callers: ops.html Jarvis panel (staff JWT); ops-ai and ops-api fire-and-forget
+// via service role. trade.html / sale.html / ceo.html / index.html do not call
+// these two actions. Merge to main auto-deploys reporting-api via
+// .github/workflows/deploy-edge-functions.yml (paths include supabase/functions/**).
+// Post-deploy: trade login 403 on both actions; staff login still 200.
+//
+// Tell Jarvis (ops.html submitJarvisContext) POSTs ops-api add_job_context with
+// value.source = ops_dashboard. That action has no handler in ops-api or
+// reporting-api; ops-api default returns 400 Unknown action (index.ts default
+// branch). Production has zero job_context rows with value.source =
+// ops_dashboard (all time). The UI shows Failed to save (opsPost throws on
+// 400); it does not swallow the error. Do not implement add_job_context here.
+// Repair belongs to the dashboard: wire the box onto existing add_note later.
 
 export const REPORTING_API_STAFF_OPERATOR_ROLES = new Set([
   'admin',

@@ -55,6 +55,17 @@ See edge-functions.md for full list. Key ones:
 - `complete_and_invoice` — compound action (mark complete + Xero invoice)
 - `scope_to_po` — extract materials from scope_json into PO line items
 
+## Tell Jarvis note box (confirmed 2026-09-21)
+
+`ops.html` `submitJarvisContext` posts ops-api `add_job_context` with
+`value.source = ops_dashboard`. `add_job_context` has no handler in ops-api or
+reporting-api. The ops-api default branch returns 400 `Unknown action`
+(`index.ts`). Production has zero `job_context` rows with
+`value.source = ops_dashboard` (all time). The UI shows Failed to save
+(`opsPost` throws on 400); it does not swallow the error. Do not add
+`add_job_context` here. Repair belongs to the dashboard: wire the box onto the
+existing `add_note` as a later change.
+
 ## Data Quality Issues (audit 3 March 2026)
 - **site_suburb/site_address**: NULL on 100% of jobs — location features non-functional
 - **scope_json**: empty on all jobs — scope-to-PO extraction has no data yet
