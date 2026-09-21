@@ -2502,9 +2502,10 @@ serve(async (req: Request) => {
       }
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
-      // a NEW opportunity in the pipeline. oppName is built from the FETCHED
-      // contact identity, never from the (empty) request body. skipOpportunity
-      // still suppresses opportunity creation, as on the no-contactId path.
+      // an opportunity unless allocationRef already maps to one on that contact
+      // (reuse, no second mint). oppName is built from the FETCHED contact
+      // identity, never from the (empty) request body. skipOpportunity still
+      // suppresses opportunity creation, as on the no-contactId path.
       const providedContactId = typeof body.contactId === 'string' ? body.contactId.trim() : ''
       if (providedContactId) {
         let allocationWrite: { fieldId: string; ref: string } | null = null
