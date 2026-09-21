@@ -628,9 +628,10 @@ export async function createOpportunityForExistingContact(args: {
   locationId: string
   pipelines: Record<string, string>
   skipOpportunity?: unknown
+  customFields?: { id: string; field_value: string }[]
   ghl: (path: string, init?: Record<string, unknown>) => Promise<any>
 }): Promise<{ status: number; body: Record<string, unknown> }> {
-  const { contactId, toolType, locationId, pipelines, skipOpportunity, ghl } = args
+  const { contactId, toolType, locationId, pipelines, skipOpportunity, customFields, ghl } = args
 
   let fetchedContact: any
   try {
@@ -663,16 +664,18 @@ export async function createOpportunityForExistingContact(args: {
   }
   try {
     const oppName = leadOppNameForContact(fetchedContact, route.toolType)
+    const oppPayload: Record<string, unknown> = {
+      pipelineId,
+      locationId,
+      contactId: fetchedContact.id,
+      name: oppName,
+      status: 'open',
+      pipelineStageId: undefined,
+    }
+    if (customFields && customFields.length) oppPayload.customFields = customFields
     const oppRes = await ghl('/opportunities/', {
       method: 'POST',
-      body: JSON.stringify({
-        pipelineId,
-        locationId,
-        contactId: fetchedContact.id,
-        name: oppName,
-        status: 'open',
-        pipelineStageId: undefined,
-      }),
+      body: JSON.stringify(oppPayload),
     })
     const opportunityId = oppRes?.opportunity?.id || null
     return { status: 200, body: { contactId: fetchedContact.id, opportunityId, contactExisted: true } }

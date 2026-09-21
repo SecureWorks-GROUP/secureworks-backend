@@ -17,7 +17,8 @@ import { sourceTime } from "../_shared/source_time.ts";
 //   POST ?action=link  { opportunityId, jobId, toolType, contact }
 //   GET  ?action=find_job&opportunityId=xxx  — find Supabase job by GHL opp ID
 //   POST ?action=create_job  { opportunityId, toolType, clientName, ... }
-//   POST ?action=create_contact_and_opportunity  { firstName, lastName, email, phone, address, suburb, toolType }
+//   POST ?action=create_contact_and_opportunity  { firstName, lastName, email, phone, address, suburb, toolType, allocationRef? }
+//   GET  ?action=lookup_allocation_opportunity&allocationRef=229818  — existing GHL opp by Stratco allocation ref
 //   POST ?action=mint_fence_job  { requestId, organisationId, intent, contactId?, opportunityId?, ... }
 //   POST ?action=save_scope  { jobId, scopeJson, meta }
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
@@ -35,7 +36,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 //
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 //
-// Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
+// Secrets: GHL_API_TOKEN, GHL_LOCATION_ID, GHL_STRATCO_ALLOCATION_FIELD_ID (optional; required only when allocationRef is supplied)
 // General scope test lab: append &testMode=true and configure
 //   GHL_TEST_PIPELINE_ID + GHL_TEST_LOCATION_ID + SUPABASE_TEST_ORG_ID.
 // Captain config: TESTTESTTEST (pipeline kMSiJnd4KyPyIUletHbH) in location
@@ -114,6 +115,13 @@ import {
   ghlCalendarEventsAction,
   ghlCalendarPersonEventsAction,
 } from './calendar_events.ts'
+import {
+  allocationOpportunityCustomFields,
+  lookupAllocationOpportunityAction,
+  parseAllocationReference,
+  prepareAllocationCreate,
+  readAllocationFieldId,
+} from './allocation_ref.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -744,6 +752,18 @@ serve(async (req: Request) => {
     if (action === 'pipelines') {
       const data = await ghl(`/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`)
       return json(data)
+    }
+
+    // ── Read-only Stratco allocation-ref lookup. GET only; no writes. ──
+    if (action === 'lookup_allocation_opportunity') {
+      const result = await lookupAllocationOpportunityAction({
+        method: req.method,
+        ref: url.searchParams.get('allocationRef') ?? url.searchParams.get('ref'),
+        fieldId: readAllocationFieldId(),
+        locationId: GHL_LOCATION_ID,
+        ghl,
+      })
+      return json(result.body, result.status)
     }
 
     // ── Read-only GHL calendar window. GET only; no appointment create. ──
@@ -2467,6 +2487,25 @@ serve(async (req: Request) => {
       const toolType = body.toolType ?? body.tool_type ?? body.jobType ?? body.job_type
       const leadRoute = resolveLeadOpportunityRoute(toolType)
       if (!leadRoute.ok) return json({ error: leadRoute.error, code: leadRoute.code, allowed: [...leadRoute.allowed] }, leadRoute.status)
+      // Optional Stratco allocation reference: look up first so a retry cannot
+      // mint a second opportunity. Absent ref keeps the existing caller path.
+      const allocationRef = parseAllocationReference(
+        body.allocationRef ?? body.allocation_ref ?? body.stratcoAllocationRef,
+      )
+      let allocationWrite: { fieldId: string; ref: string } | null = null
+      if (allocationRef) {
+        const prepared = await prepareAllocationCreate({
+          ref: allocationRef,
+          fieldId: readAllocationFieldId(),
+          locationId: GHL_LOCATION_ID,
+          ghl,
+        })
+        if (prepared.kind === 'refuse' || prepared.kind === 'reuse') {
+          console.log('[ghl-proxy] create_contact_and_opportunity: allocation', allocationRef, '→', prepared.kind, prepared.body.code || prepared.body.opportunityId || '')
+          return json(prepared.body, prepared.status)
+        }
+        allocationWrite = { fieldId: prepared.fieldId, ref: prepared.ref }
+      }
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
       // a NEW opportunity in the pipeline. oppName is built from the FETCHED
@@ -2480,6 +2519,9 @@ serve(async (req: Request) => {
           locationId: GHL_LOCATION_ID,
           pipelines: PIPELINES,
           skipOpportunity,
+          customFields: allocationWrite
+            ? allocationOpportunityCustomFields(allocationWrite.fieldId, allocationWrite.ref)
+            : undefined,
           ghl,
         })
         console.log('[ghl-proxy] create_contact_and_opportunity: provided contact', providedContactId, '→', result.status, result.body.code || result.body.opportunityId || '')
@@ -2590,16 +2632,23 @@ serve(async (req: Request) => {
             address,
           })
           const oppName = contactLabel + ' — ' + leadRoute.label
+          const oppPayload: Record<string, unknown> = {
+            pipelineId: pipelineId,
+            locationId: GHL_LOCATION_ID,
+            contactId: contactId,
+            name: oppName,
+            status: 'open',
+            pipelineStageId: undefined, // defaults to first stage
+          }
+          if (allocationWrite) {
+            oppPayload.customFields = allocationOpportunityCustomFields(
+              allocationWrite.fieldId,
+              allocationWrite.ref,
+            )
+          }
           const oppRes = await ghl('/opportunities/', {
             method: 'POST',
-            body: JSON.stringify({
-              pipelineId: pipelineId,
-              locationId: GHL_LOCATION_ID,
-              contactId: contactId,
-              name: oppName,
-              status: 'open',
-              pipelineStageId: undefined, // defaults to first stage
-            }),
+            body: JSON.stringify(oppPayload),
           })
           opportunityId = oppRes.opportunity?.id || null
           console.log('[ghl-proxy] Created GHL opportunity:', opportunityId)
