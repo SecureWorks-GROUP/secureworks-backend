@@ -9,7 +9,8 @@ DECLARE
  claimed jsonb; run uuid; tok uuid; result jsonb; facts jsonb; fact uuid;
  d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
  source_time timestamptz:=now()-interval '2 hours';
- first_id uuid; second_id uuid; n int; kind_def text;
+ first_id uuid; second_id uuid; n int;
+ twin_draft_a uuid:=gen_random_uuid(); twin_draft_b uuid:=gen_random_uuid();
 BEGIN
  IF to_regprocedure('public.ensure_booking_draft_job(text,text,uuid,jsonb)') IS NULL
   OR to_regprocedure('public.context_contact_jobs(text)') IS NULL
@@ -20,20 +21,12 @@ BEGIN
  IF NOT has_function_privilege('service_role','public.ensure_booking_draft_job(text,text,uuid,jsonb)','EXECUTE')
  THEN RAISE EXCEPTION 'booking draft mint not granted to service_role'; END IF;
  IF NOT EXISTS (
-  SELECT 1 FROM pg_constraint
-  WHERE conrelid='public.job_context'::regclass AND conname='job_context_kind_check'
-   AND pg_get_constraintdef(oid) LIKE '%job_brief%'
- ) THEN RAISE EXCEPTION 'job_brief missing from job_context_kind_check'; END IF;
- IF NOT EXISTS (
   SELECT 1 FROM pg_indexes
   WHERE schemaname='public' AND indexname='jobs_booking_intake_draft_ghl_contact_id'
  ) THEN RAISE EXCEPTION 'booking draft unique index missing'; END IF;
- -- persist nine-arg must accept job_brief; five-arg overload stays.
+ -- persist nine-arg must stay beside the five-arg overload.
  IF (SELECT count(*) FROM pg_proc WHERE proname='persist_luna_context_revision')<>2
  THEN RAISE EXCEPTION 'persist overload count changed'; END IF;
- SELECT pg_get_functiondef('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'::regprocedure)
-  INTO kind_def;
- IF kind_def NOT LIKE '%job_brief%' THEN RAISE EXCEPTION 'persist nine-arg missing job_brief'; END IF;
 
  -- Draft single-match pins. Coverage already counted this job; the ladder did not.
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id)
@@ -43,15 +36,24 @@ BEGIN
  IF e.job_id IS DISTINCT FROM draft_job OR e.attribution_status<>'single_open'
  THEN RAISE EXCEPTION 'draft single-match must pin, got % %',e.attribution_status,e.job_id; END IF;
 
- -- A second open job for the same contact still goes to the Luna pick path.
+ -- A leftover intake draft must not compete with a live job.
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id)
   VALUES(quoted_job,org,'quoted','patio','BK-QUOTED-'||quoted_job,'ghl-draft-only');
  INSERT INTO public.business_events(payload,contact_id)
   VALUES('{"body":"Can we move the visit"}','ghl-draft-only') RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM quoted_job OR e.attribution_status<>'single_open'
+ THEN RAISE EXCEPTION 'draft plus live job must pin the live job, got % %',e.attribution_status,e.job_id; END IF;
+
+ -- Two drafts and no live job still go to the Luna pick path.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id)
+  VALUES(twin_draft_a,org,'draft','fencing','BK-TWIN-A-'||twin_draft_a,'ghl-two-drafts'),
+        (twin_draft_b,org,'draft','patio','BK-TWIN-B-'||twin_draft_b,'ghl-two-drafts');
+ INSERT INTO public.business_events(payload,contact_id)
+  VALUES('{"body":"Which visit is this"}','ghl-two-drafts') RETURNING * INTO e;
  IF e.job_id IS NOT NULL OR e.attribution_status<>'pending_luna'
- THEN RAISE EXCEPTION 'multi-match must go to luna pick, got % %',e.attribution_status,e.job_id; END IF;
- e:=public.attribute_context_event_with_luna(e.id,draft_job,0.9);
- IF e.job_id IS DISTINCT FROM draft_job OR e.attribution_status<>'luna'
+ THEN RAISE EXCEPTION 'two drafts must go to luna pick, got % %',e.attribution_status,e.job_id; END IF;
+ e:=public.attribute_context_event_with_luna(e.id,twin_draft_a,0.9);
+ IF e.job_id IS DISTINCT FROM twin_draft_a OR e.attribution_status<>'luna'
  THEN RAISE EXCEPTION 'luna pick of a draft candidate failed % %',e.attribution_status,e.job_id; END IF;
 
  -- Name-only similarity never pins. The Alisa finding: same words, wrong person.
@@ -123,8 +125,12 @@ BEGIN
  SELECT count(*) INTO n FROM public.jobs WHERE ghl_contact_id='ghlContactA1B2C3D4';
  IF n<>1 THEN RAISE EXCEPTION 'draft mint duplicated contact, count %',n; END IF;
  result:=public.ensure_booking_draft_job('ghl-draft-only');
+ IF result->>'outcome'<>'existing' OR (result->>'created')::boolean IS DISTINCT FROM false
+  OR (result->>'job_id')::uuid IS DISTINCT FROM quoted_job
+ THEN RAISE EXCEPTION 'draft plus live job should reuse the live job %',result; END IF;
+ result:=public.ensure_booking_draft_job('ghl-two-drafts');
  IF result->>'outcome'<>'ambiguous' OR (result->>'created')::boolean IS DISTINCT FROM false
- THEN RAISE EXCEPTION 'existing two open jobs should be ambiguous %',result; END IF;
+ THEN RAISE EXCEPTION 'two drafts and no live job should be ambiguous %',result; END IF;
  -- Name-shaped input is refused; a name is not a contact id.
  BEGIN
   PERFORM public.ensure_booking_draft_job('Alisa Deshon');

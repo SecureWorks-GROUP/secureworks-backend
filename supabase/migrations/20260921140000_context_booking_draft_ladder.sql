@@ -6,20 +6,26 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
--- 1. Ladder includes draft. Coverage already counts draft as open
--- (context_coverage excludes cancelled/archived/lost/closed/complete/completed
--- only). Single-match / multi-match / none stays in resolve_context_attribution.
+-- 1. A draft is a candidate only when the contact has no non-draft open job.
+-- Coverage already counts draft as open (context_coverage excludes
+-- cancelled/archived/lost/closed/complete/completed only). Single-match /
+-- multi-match / none stays in resolve_context_attribution.
 CREATE OR REPLACE FUNCTION public.context_contact_jobs(p_contact_id text) RETURNS SETOF public.jobs
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
- SELECT j.* FROM public.jobs j WHERE p_contact_id IS NOT NULL
- AND j.status::text NOT IN ('cancelled','archived','lost','closed','complete','completed')
- AND (j.ghl_contact_id=p_contact_id OR EXISTS (SELECT 1 FROM public.contact_matches m
- WHERE m.job_id=j.id AND (m.ghl_contact_id=p_contact_id OR to_jsonb(m)->>'xero_contact_id'=p_contact_id)))
+ WITH matched AS (
+  SELECT j.* FROM public.jobs j WHERE p_contact_id IS NOT NULL
+  AND j.status::text NOT IN ('cancelled','archived','lost','closed','complete','completed')
+  AND (j.ghl_contact_id=p_contact_id OR EXISTS (SELECT 1 FROM public.contact_matches m
+   WHERE m.job_id=j.id AND (m.ghl_contact_id=p_contact_id OR to_jsonb(m)->>'xero_contact_id'=p_contact_id)))
+ )
+ SELECT m.* FROM matched m
+ WHERE m.status::text <> 'draft'
+  OR NOT EXISTS (SELECT 1 FROM matched live WHERE live.status::text <> 'draft')
 $$;
 REVOKE ALL ON FUNCTION public.context_contact_jobs(text) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_contact_jobs(text) TO service_role;
 COMMENT ON FUNCTION public.context_contact_jobs(text) IS
- 'Open jobs for a GHL/Xero contact, including draft. Terminal statuses stay out. Identity is contact id only.';
+ 'Open jobs for a GHL/Xero contact. A draft counts only when there is no non-draft open job. Terminal statuses stay out. Identity is contact id only.';
 
 -- 2. One new kind for the whole where-is-it-at brief. Ten-section text lives
 -- in value.text; do not split into site/availability/promise kinds. Permanent
