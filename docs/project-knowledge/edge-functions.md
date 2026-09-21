@@ -85,6 +85,7 @@ All in `supabase/functions/`. Deploy with:
 ### reporting-api `--no-verify-jwt`
 - **Purpose**: All dashboard data aggregation
 - **Actions**: `dashboard_summary`, `job_profitability`, `marketing_summary`, `trends`, `sales_breakdown`, `insights`, `match_invoices`, `debt_followup`, `ceo_report` (orchestrator — calls all others). `match_invoices` refuses sealed SES/SES-bound ACCREC auto-links; see `docs/project-knowledge/sync-layer.md`.
+- **Staff-only Jarvis reads**: `job_context` and `job_intelligence` are staff-gated. Owner: AGENTS.md "reporting-api Jarvis Reads Are Staff-Only" (`reporting_staff_gate.ts`).
 
 ### send-quote
 - **Purpose**: PDF quote distribution + client portal + GHL monetary value push
