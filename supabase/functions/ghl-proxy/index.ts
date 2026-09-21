@@ -18,7 +18,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 //   GET  ?action=find_job&opportunityId=xxx  — find Supabase job by GHL opp ID
 //   POST ?action=create_job  { opportunityId, toolType, clientName, ... }
 //   POST ?action=create_contact_and_opportunity  { firstName, lastName, email, phone, address, suburb, toolType, allocationRef? }
-//   GET  ?action=lookup_allocation_opportunity&allocationRef=229818  — existing GHL opp by Stratco allocation ref
+//   GET  ?action=lookup_allocation_opportunity&allocationRef=229818&contactId=xxx  — existing GHL opp by Stratco allocation ref on that contact
 //   POST ?action=mint_fence_job  { requestId, organisationId, intent, contactId?, opportunityId?, ... }
 //   POST ?action=save_scope  { jobId, scopeJson, meta }
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
@@ -118,9 +118,10 @@ import {
 import {
   allocationOpportunityCustomFields,
   lookupAllocationOpportunityAction,
-  parseAllocationReference,
   prepareAllocationCreate,
   readAllocationFieldId,
+  readCreateAllocationRef,
+  readLookupAllocationQuery,
 } from './allocation_ref.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
@@ -756,9 +757,11 @@ serve(async (req: Request) => {
 
     // ── Read-only Stratco allocation-ref lookup. GET only; no writes. ──
     if (action === 'lookup_allocation_opportunity') {
+      const lookupQuery = readLookupAllocationQuery(url.searchParams)
       const result = await lookupAllocationOpportunityAction({
         method: req.method,
-        ref: url.searchParams.get('allocationRef') ?? url.searchParams.get('ref'),
+        ref: lookupQuery.ref,
+        contactId: lookupQuery.contactId,
         fieldId: readAllocationFieldId(),
         locationId: GHL_LOCATION_ID,
         ghl,
@@ -2487,24 +2490,15 @@ serve(async (req: Request) => {
       const toolType = body.toolType ?? body.tool_type ?? body.jobType ?? body.job_type
       const leadRoute = resolveLeadOpportunityRoute(toolType)
       if (!leadRoute.ok) return json({ error: leadRoute.error, code: leadRoute.code, allowed: [...leadRoute.allowed] }, leadRoute.status)
-      // Optional Stratco allocation reference: look up first so a retry cannot
-      // mint a second opportunity. Absent ref keeps the existing caller path.
-      const allocationRef = parseAllocationReference(
-        body.allocationRef ?? body.allocation_ref ?? body.stratcoAllocationRef,
-      )
-      let allocationWrite: { fieldId: string; ref: string } | null = null
-      if (allocationRef) {
+      const allocationRef = readCreateAllocationRef(body)
+      if (allocationRef && !readAllocationFieldId()) {
         const prepared = await prepareAllocationCreate({
           ref: allocationRef,
-          fieldId: readAllocationFieldId(),
+          fieldId: null,
           locationId: GHL_LOCATION_ID,
           ghl,
         })
-        if (prepared.kind === 'refuse' || prepared.kind === 'reuse') {
-          console.log('[ghl-proxy] create_contact_and_opportunity: allocation', allocationRef, '→', prepared.kind, prepared.body.code || prepared.body.opportunityId || '')
-          return json(prepared.body, prepared.status)
-        }
-        allocationWrite = { fieldId: prepared.fieldId, ref: prepared.ref }
+        return json(prepared.body, prepared.status)
       }
       // Repeat-client path (B2/AM-B): caller passes an existing contactId. Skip
       // dedup + contact creation entirely; verify the contact exists, then create
@@ -2513,6 +2507,22 @@ serve(async (req: Request) => {
       // still suppresses opportunity creation, as on the no-contactId path.
       const providedContactId = typeof body.contactId === 'string' ? body.contactId.trim() : ''
       if (providedContactId) {
+        let allocationWrite: { fieldId: string; ref: string } | null = null
+        if (allocationRef) {
+          const prepared = await prepareAllocationCreate({
+            ref: allocationRef,
+            fieldId: readAllocationFieldId(),
+            locationId: GHL_LOCATION_ID,
+            contactId: providedContactId,
+            contactJustCreated: false,
+            ghl,
+          })
+          if (prepared.kind === 'refuse' || prepared.kind === 'reuse') {
+            console.log('[ghl-proxy] create_contact_and_opportunity: allocation', allocationRef, '→', prepared.kind, prepared.body.code || prepared.body.opportunityId || '')
+            return json(prepared.body, prepared.status)
+          }
+          allocationWrite = { fieldId: prepared.fieldId, ref: prepared.ref }
+        }
         const result = await createOpportunityForExistingContact({
           contactId: providedContactId,
           toolType,
@@ -2616,6 +2626,23 @@ serve(async (req: Request) => {
             return json({ error: 'Failed to create GHL contact: ' + errMsg }, 500)
           }
         }
+      }
+
+      let allocationWrite: { fieldId: string; ref: string } | null = null
+      if (allocationRef && contactId) {
+        const prepared = await prepareAllocationCreate({
+          ref: allocationRef,
+          fieldId: readAllocationFieldId(),
+          locationId: GHL_LOCATION_ID,
+          contactId,
+          contactJustCreated: !contactExisted,
+          ghl,
+        })
+        if (prepared.kind === 'refuse' || prepared.kind === 'reuse') {
+          console.log('[ghl-proxy] create_contact_and_opportunity: allocation', allocationRef, '→', prepared.kind, prepared.body.code || prepared.body.opportunityId || '')
+          return json(prepared.body, prepared.status)
+        }
+        allocationWrite = { fieldId: prepared.fieldId, ref: prepared.ref }
       }
 
       // Create opportunity in the correct pipeline (skip for neighbours)
