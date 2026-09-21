@@ -1,10 +1,11 @@
 /**
  * ghl-proxy calendar_directory and calendar_person_events — read-only.
  *
- * What these prove: GET only, per-read receipts so a failed provider GET is
- * never an empty list, assignments come from teamMembers or are marked
- * absent, person events merge assigned calendars plus userId and de-dupe by
- * event id, a failed calendar among several marks complete false. No writes.
+ * What these prove: GET only, per-read receipts so a failed or malformed
+ * provider body is never an empty complete listing, assignments come from
+ * teamMembers or are marked absent, person events merge assigned calendars
+ * plus userId and de-dupe by event id, a failed calendar among several marks
+ * complete false. No writes.
  *
  * Fixture coverage only. These three live GHL reads stay unproven until a
  * post-deploy read: (a) a scoper email resolves a live GHL user id by unique
@@ -439,7 +440,10 @@ Deno.test("calendar_person_events keeps another assignee's shared-calendar appoi
   const ghlGet = (path: string) => {
     calls.push(path);
     if (path.includes("/users/")) return Promise.resolve(ROSTER);
-    if (path.startsWith("/calendars/?") || path.includes("/calendars/?locationId=")) {
+    if (
+      path.startsWith("/calendars/?") ||
+      path.includes("/calendars/?locationId=")
+    ) {
       return Promise.resolve(CALENDARS_WITH_ASSIGNMENTS);
     }
     if (path.includes("/calendars/events")) {
@@ -548,7 +552,11 @@ Deno.test("a documented empty calendars array stays a complete empty assigned se
     calendars_list: { ok: boolean; count: number; failure: string | null };
   };
   assertEquals(provenance.assignments_returned, true);
-  assertEquals(provenance.calendars_list, { ok: true, count: 0, failure: null });
+  assertEquals(provenance.calendars_list, {
+    ok: true,
+    count: 0,
+    failure: null,
+  });
 });
 
 Deno.test("calendar_person_events treats a missing calendars field as unread, not an empty complete diary", async () => {

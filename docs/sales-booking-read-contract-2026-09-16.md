@@ -24,8 +24,12 @@ location's calendars is `GET ghl-proxy?action=calendar_directory` (id, name,
 is_active, assigned team-member user ids, plus roster id/name/email; each
 provider read has its own receipt). A person's blocking diary across assigned
 calendars is
-`GET ghl-proxy?action=calendar_person_events&user_email=&start=&end=`
-(`complete` is false if any constituent read failed). Neither action writes.
+`GET ghl-proxy?action=calendar_person_events&user_email=&start=&end=`.
+`complete` is false if any constituent read failed, if the calendars or
+users body is missing or malformed (a documented empty array stays a
+valid empty listing), or if an assignment row is malformed. Assigned-calendar
+reads pass the resolved userId so a shared calendar cannot include another
+person's appointments. Neither action writes.
 The exact-id mapping sits next to that read as `SALES_BOOKING_SCOPER_CALENDARS`:
 one row each for Marnin Stratco visits, Khairo fencing enquiries, and Nithin
 patios, with `ghl_user_id` and `calendar_id` null. Null means unconfirmed —
@@ -274,7 +278,6 @@ Live 17 Sep: Nithin's recorded email was absent from that roster
 `calendar_email` set to the live GHL email. Zero or several name matches stay
 unread with `ghl_user_unmapped` — never first-match-wins. Khairo is on the
 email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
-booking resource. The dedicated-calendar exact-id table is
-`SALES_BOOKING_SCOPER_CALENDARS` next to the calendar read: the three scoper
-emails, their intended calendar purpose, and null `ghl_user_id` /
-`calendar_id` until the owner-approved configuration change after discovery.
+booking resource. Dedicated-calendar ids live on
+`SALES_BOOKING_SCOPER_CALENDARS` (calendar-read paragraph above), not on
+this map.

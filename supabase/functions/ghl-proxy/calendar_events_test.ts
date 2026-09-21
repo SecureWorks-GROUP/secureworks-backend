@@ -1,9 +1,10 @@
 /**
  * ghl-proxy calendar_events — read-only window GET and provenance.
  *
- * What these prove: GET-only, user-or-calendar required, ISO window, one
- * unpaged calendars/events GET, a failed GHL GET named in provenance,
- * users-list confirmation that refuses a guess. No writes, no live GHL.
+ * What these prove: GET-only, exactly one of userId / calendarId / user_email,
+ * ISO window, one unpaged calendars/events GET, a failed GHL GET named in
+ * provenance, scoper-email allowlist then roster confirmation that refuses a
+ * guess. No writes, no live GHL.
  */
 // deno-lint-ignore-file no-import-prefix
 import {

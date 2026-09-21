@@ -42,8 +42,8 @@ export interface SalesBookingScoperCalendar {
   calendar_id: string | null;
 }
 
-export const SALES_BOOKING_SCOPER_CALENDARS: readonly SalesBookingScoperCalendar[] =
-  [
+export const SALES_BOOKING_SCOPER_CALENDARS:
+  readonly SalesBookingScoperCalendar[] = [
     {
       email: "marnin@secureworkswa.com.au",
       purpose: "Stratco visits",
@@ -223,6 +223,10 @@ export async function fetchGhlCalendarEvents(args: {
   }
 }
 
+/**
+ * A documented empty `users` array is a valid empty roster. A missing,
+ * wrong-type, or malformed field is `ghl_users_malformed`.
+ */
 export function usersFromGhlBody(
   body: Record<string, unknown>,
 ): GhlLocationUsersScan {
@@ -466,9 +470,11 @@ export interface GhlCalendarsScan {
 
 /**
  * Documented GET /calendars/?locationId=. The list schema names id, name,
- * isActive; teamMembers is a create/update field. When a row has no
- * teamMembers array, assignments_returned is false — never inferred from
- * events.
+ * isActive; teamMembers is a create/update field. A missing or wrong-type
+ * `calendars` field is `ghl_calendars_malformed`, not an empty list. When a
+ * row has no teamMembers array, assignments_returned is false — never
+ * inferred from events. A malformed assignment row also marks
+ * assignments_returned false.
  */
 export function calendarsFromGhlBody(
   body: Record<string, unknown>,
@@ -638,8 +644,10 @@ function mergeEventsById(
 
 /**
  * GET calendar_person_events — one scoper's events across assigned calendars
- * plus their userId window. A failed constituent read marks complete false
- * and still returns the others. GET only. Never writes.
+ * plus their userId window. Assigned-calendar reads pass that userId so a
+ * shared calendar cannot bleed another assignee. A failed or malformed
+ * constituent read marks complete false and still returns the others. GET
+ * only. Never writes.
  */
 export async function ghlCalendarPersonEventsAction(args: {
   method: string;
