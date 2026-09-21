@@ -2,17 +2,12 @@
 // GHL calendar events — read-only
 // ════════════════════════════════════════════════════════════
 //
-// GET ghl-proxy?action=calendar_events is the one calendar read. It issues
-// one documented Get Calendar Events call (`/calendars/events` with
-// locationId, userId or calendarId, startTime, endTime) and returns the raw
-// GHL events plus provenance. `user_email` is a third selector: only a
-// SALES_BOOKING_SCOPER_CALENDARS address is accepted, then the live location
-// roster is confirmed through confirmGhlUserId, then events are read for
-// that id. A null calendar_id on that table is unconfirmed — the read still
-// goes through roster email and never guesses a calendar. Exactly one of
-// userId, calendarId, user_email. No writes of any kind.
+// Read-only GHL calendar GETs: calendar_events (one /calendars/events
+// window), calendar_directory, calendar_person_events. Selectors, scoper
+// allowlist, null-id mapping, and complete/unread rules:
+// `docs/sales-booking-read-contract-2026-09-16.md`. No writes of any kind.
 //
-// Times on the action are ISO (Perth). GHL itself wants Unix milliseconds;
+// Times on the actions are ISO (Perth). GHL itself wants Unix milliseconds;
 // conversion happens here so callers never have to know that.
 
 export interface GhlCalendarGet {
