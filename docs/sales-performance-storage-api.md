@@ -36,3 +36,35 @@ Executed successfully on 11 September 2026 using the already-cached `postgres:17
 This proof uses controlled synthetic `users` profiles and grants authenticated users SELECT only on that fixture table. It proves the new table/functions against trusted profile roles and organisations; it does not prove those profile fields are immutable in production. The baseline policy `Users can update own profile` in `supabase/migrations/20250301000001_schema.sql:234` allows a matching user row to be updated and does not itself restrict role/org columns. If effective production table/column grants allow those updates, callers could change the authority inputs used by incumbent staff gates and this feature. This is an existing authentication boundary, not repaired by this slice.
 
 Before release, verify effective production grants, applicable policies and triggers for `users.role` and `users.org_id` through an authorised read-only source, or close that authority gap in a separately scoped change. No live grant inspection was performed by this author; synthetic database success is not production-authorisation clearance.
+
+## Rebase delivery, 21 September 2026
+
+Replays the three commits from https://github.com/SecureWorks-GROUP/secureworks-backend/pull/835 onto main `aefe71af` on a new branch. Conflicts were additive imports, action/schema manifests and schema-preflight fixtures; main's booking, context and other routes remain intact. The store, migration and behavioral tests are unchanged from the original change. Migration version `20260911000001` has no collision on this main, so it was retained.
+
+### Tables and functions added
+
+- Table: `public.sales_performance_weeks`, one row per `(org_id, week_start, lane)`, with staff/org read RLS.
+- Database functions: `public.sales_performance_write_v1(uuid,date,text,jsonb,jsonb,jsonb,text,text,timestamptz)` and `public.sales_performance_note_v1(date,text,text)`.
+- Ops API actions: `sales_performance_write`, `sales_performance_read`, `sales_performance_note`. Their shared implementation is `salesPerformanceAction` plus `salesPerformanceStore` in `supabase/functions/ops-api/sales_performance.ts`; exported week helpers are `monday` and `latestClosedWeek`.
+
+### What each weekly run must write
+
+The publisher uploads the completed run's `metrics.json`, `coverage.json` and `queues.json` as objects, with the lane config's `org_id` and `lane` (`fencing` or `patio`), Perth Monday `week_start`, nonempty `run_id` and `definition_version`, and the original timezone-qualified `computed_at`. Coverage must include `gaps:[]` (or named gaps) and `collection_complete:true`; incomplete or over-budget runs must publish nothing. Unavailable measures stay absent/null with coverage explanations, and queues retain the evidence IDs needed for named drill-downs. Stratco belongs within fencing's source buckets, not a third lane. Collector uploads must omit operator notes. The service-role credential stays in the trusted publisher.
+
+### What the read returns
+
+The staff JWT's organisation determines scope. The response contains stored rows for both lanes over four consecutive calendar weeks, defaulting to the latest stored closed week, plus `week_start`, `week_starts`, `latest_closed_week`, `latest_stored_closed_week`, `missing_latest_closed_week`, `available_weeks`, `available_weeks_limit:104` and `fetched_at`. Rows carry their original metrics, coverage, queues, notes, provenance and `computed_at`. No missing lane, week or measure is synthesized. See Read above for the missing-lane distinction and bounded week discovery.
+
+### Still not covered
+
+This is storage and retrieval, not a measurement engine or a live reporting release. It does not repair either collector or publisher, run or schedule publishing, backfill records, fix acceptance timestamps, verify click/text acceptance evidence, ingest Stratco allocations, repair quote-document reads, reconcile cash to settled bank receipts, or implement the approved plan's other upstream fixes. Won and cash remain separate collector-owned measures; this store validates the envelope, not their business accuracy.
+
+It does not add server-side lead-source filters, per-rep aggregation, a rolling last-seven-days computation, pipeline-state computation, refresh scheduling/manual triggers, the new three-part screen, booking automation, Railway context work, Friday texts or headless fencing quotes. JSON payloads can preserve collector-produced breakdowns but do not establish those capabilities. Existing historical proof and the profile-authority release prerequisite above remain scoped as stated. Live completeness and the plan's twenty-number truth check are not observed by this delivery.
+
+### Local validation and release boundary
+
+On 21 September 2026: `deno test --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/sales_performance_test.ts supabase/functions/ops-api/ops_api_operator_auth_test.ts` passed 48 tests; `bash scripts/test/test-edge-schema-preflight.sh` passed 10 tests; `bash scripts/check-ops-api-source-actions.sh` recognized all 123 required actions. `deno check supabase/functions/ops-api/index.ts`, focused Deno lint and `git diff --check` passed.
+
+The real SQL harness passed again on PostgreSQL 17.11 in a new temporary cluster inside this disposable worktree, bound to localhost with fictional users and a fresh `sales_performance_test_20260921` database. It verified constraints, grants, tenant RLS, author attribution, rerun note preservation and both concurrent row-lock orders. The owned cluster was stopped after the run. No shared or live database was used.
+
+No deployment, live migration, live write or old-branch force push was performed. A separately authorised release must apply the migration before deploying `ops-api`, whose deploy requires `--no-verify-jwt`. Local proof is not evidence of deployed behavior. Firstmate owns the subsequent no-mistakes validation and fresh-PR publication handoff; the original PR remains untouched.
