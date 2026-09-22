@@ -3644,6 +3644,13 @@ See `docs/trade-my-money-gst-2026-09-08.md`. `my_money` gives a trade earned / p
 
 See `docs/makesafe-submitter-attribution-and-unlock-2026-09-08.md`. Submitting a final make-safe report cancels other trades' assignments on that attendance cycle (invoiced rows are left and flagged); `unlock_makesafe_report` reopens a submitted report until the office sends it.
 
+## Booking confirmation authority
+
+Read/approval handoff and the held availability boundary live in
+`docs/sales-booking-confirmation-api.md` and `sales_booking_confirmation.ts`.
+Legacy combined KEEP/CUT stamps never grant either independent calendar or
+exact-message approval. A diary read alone is not person-wide availability.
+
 ## GHL appointment write safety
 
 `create_calendar_appointment` is disabled by default. Its caller, retry, notification and deployment contracts are in `docs/ghl-calendar-appointment-write.md`; the durable sending fence must never be cleared just because a provider window is empty. The server action owns the only appointment POST, while the agent-side tool lives in another repository.

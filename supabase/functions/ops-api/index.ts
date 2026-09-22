@@ -1,3 +1,4 @@
+import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteAction } from './sales_booking_confirmation.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
@@ -5210,7 +5211,7 @@ if (import.meta.main) serve(async (req: Request) => {
             assembled.resource.resource_id,
             assembled.week_start,
           )
-          return json(applySalesBookingPackOverlay(assembled, overlay))
+          return json(await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client)))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
@@ -5234,7 +5235,26 @@ if (import.meta.main) serve(async (req: Request) => {
           throw e
         }
       }
+      case 'sales_booking_approval_write': {
+        try {
+          return json(await salesBookingApprovalWriteAction({
+            store: bookingApprovalStore(client), method: req.method,
+            auth: { mode: authMode, role: authUser?.role ?? null, userId: authUser?.id ?? null, email: authUser?.email ?? null },
+            body: body && typeof body === 'object' ? body : {},
+            readWorkspace: async (resource, week_start) => {
+              const assembled = await salesBookingReadAction(client, { resource, week_start })
+              const overlay = await loadSalesBookingPackOverlay(client, resource, assembled.week_start)
+              return applySalesBookingPackOverlay(assembled, overlay)
+            },
+          }))
+        } catch (e) {
+          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
+          throw e
+        }
+      }
       case 'sales_booking_stamp_write': {
+        // DEPRECATED combined stamp; cannot approve either separate-v1 channel.
         // Captain KEEP/CUT. Allow-listed captain JWT only
         // (SALES_BOOKING_CAPTAIN_EMAILS; unset defaults to
         // marnin@secureworkswa.com.au). API key and every other JWT are 403

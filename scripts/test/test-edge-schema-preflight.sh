@@ -42,6 +42,7 @@ SEND_RUNS_CLAIMED_AT_MIGRATION="$REPO_ROOT/supabase/migrations/20260906150000_jo
 SEND_CLAIM_TOKEN_MIGRATION="$REPO_ROOT/supabase/migrations/20260906160000_job_documents_send_claim_token.sql"
 DEBT_PICTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911120000_debt_picture.sql"
 CALENDAR_JOB_FAMILY_MIGRATION="$REPO_ROOT/supabase/migrations/20260916000000_calendar_events_job_family.sql"
+SALES_BOOKING_APPROVALS_MIGRATION="$REPO_ROOT/supabase/migrations/20260922150000_sales_booking_approvals.sql"
 SALES_BOOKING_PACKS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917130000_sales_booking_packs.sql"
 SALES_BOOKING_THREAD_FACTS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917180000_sales_booking_thread_facts.sql"
 SALES_BOOKING_ROSTER_MIGRATION="$REPO_ROOT/supabase/migrations/20260917200000_sales_booking_roster.sql"
@@ -210,6 +211,10 @@ calendar_job_family_migration_sha() {
   shasum -a 256 "$CALENDAR_JOB_FAMILY_MIGRATION" | awk '{print $1}'
 }
 
+sales_booking_approvals_migration_sha() {
+  shasum -a 256 "$SALES_BOOKING_APPROVALS_MIGRATION" | awk '{print $1}'
+}
+
 sales_booking_packs_migration_sha() {
   shasum -a 256 "$SALES_BOOKING_PACKS_MIGRATION" | awk '{print $1}'
 }
@@ -282,6 +287,7 @@ write_response() {
   CONTEXT_MAIL_EXPECTED_SHA="$([ -f "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" ] && shasum -a 256 "$REPO_ROOT/supabase/migrations/20260911174000_context_mail_capture.sql" | awk '{print $1}')" \
   DEBT_PICTURE_EXPECTED_SHA="$(debt_picture_migration_sha)" \
   CALENDAR_JOB_FAMILY_EXPECTED_SHA="$(calendar_job_family_migration_sha)" \
+  SALES_BOOKING_APPROVALS_EXPECTED_SHA="$(sales_booking_approvals_migration_sha)" \
   SALES_BOOKING_PACKS_EXPECTED_SHA="$(sales_booking_packs_migration_sha)" \
   SALES_BOOKING_THREAD_FACTS_EXPECTED_SHA="$(sales_booking_thread_facts_migration_sha)" \
   SALES_BOOKING_ROSTER_EXPECTED_SHA="$(sales_booking_roster_migration_sha)" \
@@ -686,6 +692,17 @@ calendar_job_family_row = {
     "actual_statement_sha256": os.environ["CALENDAR_JOB_FAMILY_EXPECTED_SHA"],
     "missing_markers": [],
 }
+sales_booking_approvals_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260922150000",
+    "expected_migration_name": "sales_booking_approvals",
+    "expected_statement_sha256": os.environ["SALES_BOOKING_APPROVALS_EXPECTED_SHA"],
+    "actual_migration_version": "20260922150000",
+    "actual_migration_name": "sales_booking_approvals",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SALES_BOOKING_APPROVALS_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 sales_booking_packs_row = {
     "function_name": "ops-api",
     "migration_version": "20260917130000",
@@ -813,6 +830,7 @@ with open(sys.argv[1], "w") as f:
             debt_picture_row,
             calendar_job_family_row,
             sales_booking_packs_row,
+            sales_booking_approvals_row,
             sales_booking_thread_facts_row,
             sales_booking_roster_row,
             context_pipeline_status_row,
@@ -1053,6 +1071,35 @@ PY
   fi
 }
 
+test_missing_booking_approval_schema_refuses_before_deploy() {
+  local name="test_missing_booking_approval_schema_refuses_before_deploy"
+  local response="$TEST_TMP/missing-booking-approvals.json"
+  local mode
+  for mode in migration column; do
+    write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+    python3 - "$response" "$mode" <<'PYTEST'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+rows = json.loads(path.read_text())
+for row in rows:
+    if row.get("migration_version") == "20260922150000":
+        if sys.argv[2] == "migration":
+            row["actual_migration_version"] = None
+        else:
+            row["missing_markers"] = ["column:sales_booking_approvals.expires_at"]
+path.write_text(json.dumps(rows))
+PYTEST
+    run_preflight "$response" ops-api
+    if [[ "$PREFLIGHT_RC" -eq 0 ]] || ! grep -q 'ops-api requires 20260922150000_sales_booking_approvals' <<<"$PREFLIGHT_OUTPUT" || ! grep -q 'Refusing Edge Function deploy' <<<"$PREFLIGHT_OUTPUT"; then
+      fail "$name" "missing approval $mode did not refuse deployment: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+      return
+    fi
+  done
+  pass "$name"
+}
+
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
@@ -1062,6 +1109,7 @@ main() {
     test_incident_dependency_is_declared
     test_missing_migration_refuses_before_deploy
     test_missing_trade_invoice_requirement_refuses_before_deploy
+    test_missing_booking_approval_schema_refuses_before_deploy
     test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
     test_raw_statement_checksum_drift_is_advisory

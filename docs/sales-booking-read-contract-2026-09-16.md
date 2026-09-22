@@ -5,6 +5,8 @@ behind the Sales Booking view. It replaces the branch-local preview server
 (`scripts/sales-booking-local-api.mjs` on secureworks-ux
 `patio/sales-booking-20260912`) and keeps that script's response shape.
 One-tap visit outcomes are a separate store: `docs/visit-outcomes-api.md`.
+Confirmation models, `booking_flow`, and independent calendar/message
+approvals: `docs/sales-booking-confirmation-api.md`.
 
 Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
 Pack publish, captain stamp, thread-facts cache, and the read overlay:
@@ -154,6 +156,9 @@ Additions:
   `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
+- **`booking_flow`** and per-case **`booking_read_model`** — confirmation
+  overlay and independent approval display. Owner:
+  `docs/sales-booking-confirmation-api.md`.
 - **`pack`** — `{present, as_of, proposals}` for the latest
   `sales_booking_packs` row with `kind=pack`. Absent when the engine has not
   published this week (`present:false`, `as_of:null`, `proposals:{}`).
@@ -183,13 +188,18 @@ Additions:
   with a row `draft` filling a missing map entry. Empty `{}` when no pack
   is present.
 
-Publish / stamp actions (same table, no send):
+Publish / stamp / approval actions (no send):
 
 - `POST sales_booking_pack_publish` (api key only): body
-  `{resource, week_start, as_of, proposals, coverage, drafts}` where
+  `{resource, week_start, as_of, proposals, coverage, drafts,
+  booking_read_models?}` where
   `proposals` is the engine's `proposals.json` (array or `{leads}`),
   `coverage` its `coverage.json`, and `drafts` a map of opportunity id to
-  draft text. Stores `kind=pack`. Returns `{ok, id, as_of}`.
+  draft text. Additive `booking_read_models` is owned by
+  `docs/sales-booking-confirmation-api.md`. Stores `kind=pack`.
+  Returns `{ok, id, as_of}`.
+- `POST sales_booking_approval_write`: independent calendar or exact-message
+  approval. Owner: `docs/sales-booking-confirmation-api.md`.
 - `POST sales_booking_stamp_write` (allow-listed captain JWT only;
   env `SALES_BOOKING_CAPTAIN_EMAILS`, comma-separated, case-insensitive;
   unset or blank defaults to `marnin@secureworkswa.com.au`; the ops API

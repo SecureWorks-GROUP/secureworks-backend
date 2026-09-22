@@ -374,6 +374,20 @@ ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_
 ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.published_by
 ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|index|idx_sales_booking_packs_latest
 
+# Independent Sales Booking approvals: service-role-only exact-content decisions
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|table|sales_booking_approvals
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.binding_hash
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.step
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.resource
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.week_start
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.state
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.reason
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.snapshot
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.approved_by_user_id
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.approved_by_email
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.approved_at
+ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.expires_at
+
 # Sales Booking thread-facts cache (kind check widened; week_start sentinel 1970-01-05)
 ops-api|supabase/migrations/20260917180000_sales_booking_thread_facts.sql|constraint|sales_booking_packs_kind_check
 

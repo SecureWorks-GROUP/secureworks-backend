@@ -257,6 +257,7 @@ jobs:
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
             supabase/functions/ops-api/sales_booking_read_test.ts \
             supabase/functions/ops-api/sales_booking_pack_test.ts \
+            supabase/functions/ops-api/sales_booking_confirmation_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors

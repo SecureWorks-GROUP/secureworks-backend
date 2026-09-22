@@ -1,3 +1,7 @@
+import {
+  applyBookingConfirmationModels,
+  type BookingObject,
+} from "./sales_booking_confirmation.ts";
 // ════════════════════════════════════════════════════════════
 // SALES BOOKING READ — one bounded, honest read for the Sales Booking view
 // ════════════════════════════════════════════════════════════
@@ -9,6 +13,8 @@
 // itself: the scoper's GHL `diary[]` for the week, and per-case
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
+// Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
+// independent approvals): docs/sales-booking-confirmation-api.md.
 //
 // ── NO SEND, NO GHL WRITE ──
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
@@ -722,6 +728,7 @@ export function emptySalesBookingPackView(): SalesBookingPackView {
 }
 
 export interface SalesBookingCase {
+  booking_read_model?: BookingObject;
   id: string;
   resource_id: string;
   opportunity_id: string;
@@ -1592,7 +1599,11 @@ export interface SalesBookingReadResponse {
   version: string;
   week_start: string;
   week: SalesBookingWeekWindow;
-  resource: SalesBookingResource & { calendar: SalesBookingCalendarOverlay };
+  resource: SalesBookingResource & {
+    id?: string;
+    calendar: SalesBookingCalendarOverlay;
+  };
+  booking_flow?: BookingObject;
   coverage: {
     full_population: boolean;
     enumerated: number;
@@ -3050,8 +3061,11 @@ export async function salesBookingReadAction(
   client: SalesBookingReadClient,
   params: SalesBookingReadParams,
 ): Promise<SalesBookingReadResponse> {
-  return await salesBookingRead(
-    createSalesBookingReadDependencies(client),
-    params,
+  return applyBookingConfirmationModels(
+    await salesBookingRead(
+      createSalesBookingReadDependencies(client),
+      params,
+    ),
+    null,
   );
 }
