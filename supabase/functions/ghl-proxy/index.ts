@@ -11,6 +11,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 //   GET  ?action=opportunities&pipeline=fencing|patio
 //   GET  ?action=calendar_events&userId=...&start=ISO&end=ISO  — read-only GHL calendar window
 //   GET  ?action=calendar_events&user_email=...&start=ISO&end=ISO  — same, scoper email only, id from roster match
+//   POST ?action=create_calendar_appointment  — default-off, durable GHL appointment write; docs/ghl-calendar-appointment-write.md
 //   GET  ?action=calendar_directory  — location calendars (id, name, is_active, assigned_user_ids) + roster (id, name, email)
 //   GET  ?action=calendar_person_events&user_email=...&start=ISO&end=ISO  — one person's events across assigned calendars + userId
 //   GET  ?action=search&q=smith&pipeline=patio  — search GHL leads (pipeline+Supabase cross-ref)
@@ -35,6 +36,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 //   (Laptop deploys must use scripts/deploy-edge.sh with SECUREWORKS_LAPTOP_DEPLOY_OVERRIDE=1)
 //
 // Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
+// Keep GHL_CALENDAR_APPOINTMENT_WRITE_ENABLED unset until owner enablement.
 // General scope test lab: append &testMode=true and configure
 //   GHL_TEST_PIPELINE_ID + GHL_TEST_LOCATION_ID + SUPABASE_TEST_ORG_ID.
 // Captain config: TESTTESTTEST (pipeline kMSiJnd4KyPyIUletHbH) in location
@@ -62,6 +64,7 @@ import {
   classifyScopeCasReread,
   cleanIdentity,
   classifyAuthCredential,
+  canCreateCalendarAppointment,
   contactDisplayIdentity,
   createOpportunityForExistingContact,
   hasNonEmptyScope,
@@ -113,6 +116,8 @@ import {
   ghlCalendarEventsAction,
   ghlCalendarPersonEventsAction,
 } from './calendar_events.ts'
+import { createCalendarAppointmentAction } from './calendar_appointment.ts'
+import { appointmentLedger } from './calendar_appointment_ledger.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const PRODUCTION_GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
@@ -745,7 +750,32 @@ serve(async (req: Request) => {
       return json(data)
     }
 
-    // ── Read-only GHL calendar window. GET only; no appointment create. ──
+    // One guarded calendar write. No caller-controlled provider/notification flags.
+    if (action === 'create_calendar_appointment') {
+      if (!canCreateCalendarAppointment(credential.mode, authProfile?.role, authProfile?.org_id, DEFAULT_ORG_ID)) {
+        return json({ ok: false, code: 'forbidden' }, 403)
+      }
+      let body: unknown = null
+      if (req.method === 'POST') {
+        try { body = await req.json() } catch { return json({ ok: false, code: 'invalid_request' }, 400) }
+      }
+      const result = await createCalendarAppointmentAction({
+        method: req.method, body,
+        deps: {
+          locationId: GHL_LOCATION_ID,
+          // Test routes cannot send appointments into owner workflows either.
+          enabled: !route.testMode && Deno.env.get('GHL_CALENDAR_APPOINTMENT_WRITE_ENABLED') === 'true',
+          ghlGet: (path) => ghl(path),
+          ghlPost: (path, payload) => ghl(path, {
+            method: 'POST', headers: { Version: '2023-02-21' }, body: JSON.stringify(payload),
+          }),
+          ledger: appointmentLedger(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
+        },
+      })
+      return json(result.body, result.status)
+    }
+
+    // ── Read-only GHL calendar window. GET only. ──
     if (action === 'calendar_events') {
       if (req.method !== 'GET') {
         return json({ error: 'calendar_events is GET only', code: 'method_not_allowed' }, 405)

@@ -17,6 +17,7 @@ export const BROWSER_USER_ACTIONS = new Set([
   'create_job',
   'create_contact_and_opportunity',
   'mint_fence_job',
+  'create_calendar_appointment',
   'save_scope',
   'load_job',
   'list_media',
@@ -44,6 +45,15 @@ export const JOB_SCOPED_ACTIONS = new Set([
   'increment_scope_version',
   'assign_job_number',
 ])
+
+// Appointment writes never accept the shared key distributed to browser tools.
+// JWT authority is read from public.users, not user-editable token metadata.
+export function canCreateCalendarAppointment(mode: AuthMode, role: unknown, orgId: unknown, configuredOrgId: string): boolean {
+  return mode === 'service_role' || (
+    mode === 'user_jwt' && isSameOrg(orgId, configuredOrgId) &&
+    ['admin', 'estimator', 'sales', 'ops_manager', 'division_ops'].includes(String(role))
+  )
+}
 
 export function cleanIdentity(value: unknown): string | null {
   if (typeof value !== 'string') return null

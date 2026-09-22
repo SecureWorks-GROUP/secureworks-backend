@@ -16,6 +16,7 @@ All in `supabase/functions/`. Deploy with:
 - **Purpose**: Secure proxy to GHL API + job sync + scope complete flow
 - **GHL 429**: an upstream GHL 429 reaches the caller as HTTP 429, with `Retry-After` (and body `retry_after`) when GHL sent one. Local catches rethrow that typed error so it is not flattened to 5xx. Every other GHL status still throws the same bare `Error` as before and stays on the action's existing mapped status. This proxy does not retry or back off.
 - **Key actions**: `opportunities`, `search`, `lead_search`, `contact`, `find_job`, `create_job`, `save_scope`, `load_job`, `link`, `list_media`, `get_upload_url`, `register_media`, `upload_photo`, `delete_media`, `get_profile`, `create_contact_and_opportunity` (POST)
+- **Appointment write** (default-off): `create_calendar_appointment`. Owner: `docs/ghl-calendar-appointment-write.md`.
 - **`link` action** (scope complete): moves GHL stage → adds note → generates job number → creates Xero contact → pushes $ to GHL
 - **`lead_search` action** (GET, used by the fencing tool): contact-first lead
   lookup. Params: `q` (query), `pipeline` (`fencing` or `patio`),
