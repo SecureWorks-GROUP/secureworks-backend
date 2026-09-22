@@ -17,6 +17,8 @@ import {
   fetchGhlLocationUsers,
   ghlCalendarEventsAction,
   ghlCalendarInstantMs,
+  SALES_BOOKING_SCOPER_CALENDARS,
+  salesBookingScoperCalendar,
   usersFromGhlBody,
 } from "./calendar_events.ts";
 
@@ -591,4 +593,256 @@ Deno.test("user_email calendar_events stays GET only", async () => {
   assertEquals(refused.status, 405);
   assertEquals((refused.body as { code: string }).code, "method_not_allowed");
   assertEquals(calls.length, 0);
+});
+
+// Directory 22 Sep 2026: Khairo Pomare RgDWTnYL6zL3eJA6nLht
+// khairopomare@outlook.com; Nithin Silas ERAycY7r6KZ8OA66WQCy
+// nithinsilas@outlook.com; Marnin Stobbe 3S20LGVTjsVYy9vTJ9wM
+// marnin@secureworkswa.com.au. User ids here are roster fixtures, not pins.
+const DIRECTORY_ROSTER = {
+  users: [
+    {
+      id: "RgDWTnYL6zL3eJA6nLht",
+      email: "khairopomare@outlook.com",
+      name: "Khairo Pomare",
+    },
+    {
+      id: "ERAycY7r6KZ8OA66WQCy",
+      email: "nithinsilas@outlook.com",
+      name: "Nithin Silas",
+    },
+    {
+      id: "3S20LGVTjsVYy9vTJ9wM",
+      email: "marnin@secureworkswa.com.au",
+      name: "Marnin Stobbe",
+    },
+  ],
+};
+
+Deno.test("scoper mapping records Outlook aliases and keeps ids null", () => {
+  const byEmail = Object.fromEntries(
+    SALES_BOOKING_SCOPER_CALENDARS.map((row) => [row.email, row]),
+  );
+  assertEquals(byEmail["marnin@secureworkswa.com.au"].roster_emails, undefined);
+  assertEquals(byEmail["khairo@secureworkswa.com.au"].roster_emails, [
+    "khairopomare@outlook.com",
+  ]);
+  assertEquals(byEmail["nithin@secureworkswa.com.au"].roster_emails, [
+    "nithinsilas@outlook.com",
+  ]);
+  for (const row of SALES_BOOKING_SCOPER_CALENDARS) {
+    assertEquals(row.ghl_user_id, null);
+    assertEquals(row.calendar_id, null);
+  }
+  assertEquals(
+    salesBookingScoperCalendar("khairo@secureworkswa.com.au")?.email,
+    "khairo@secureworkswa.com.au",
+  );
+  assertEquals(
+    salesBookingScoperCalendar("khairopomare@outlook.com")?.email,
+    "khairo@secureworkswa.com.au",
+  );
+  assertEquals(
+    salesBookingScoperCalendar("nithinsilas@outlook.com")?.email,
+    "nithin@secureworkswa.com.au",
+  );
+  assertEquals(
+    salesBookingScoperCalendar("other@outlook.com"),
+    null,
+  );
+});
+
+Deno.test("secureworkswa request resolves via the Outlook roster entry", async () => {
+  const khairo = getter([DIRECTORY_ROSTER, { events: [event("k1")] }]);
+  const khairoResult = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "khairo@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet: khairo.ghlGet,
+  });
+  assertEquals(khairoResult.status, 200);
+  assertEquals(khairoResult.body.ok, true);
+  const khairoProv = khairoResult.body.provenance as Record<string, unknown>;
+  assertEquals(khairoProv.user_id, "RgDWTnYL6zL3eJA6nLht");
+  assertEquals(khairoProv.user_id_resolved_by, "roster_email_match");
+  assertEquals(khairoProv.user_email, "khairo@secureworkswa.com.au");
+  assertEquals(khairo.calls.length, 2);
+  assertEquals(windowQuery(khairo.calls[1]).get("userId"), "RgDWTnYL6zL3eJA6nLht");
+
+  const nithin = getter([DIRECTORY_ROSTER, { events: [event("n1")] }]);
+  const nithinResult = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithin@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet: nithin.ghlGet,
+  });
+  assertEquals(nithinResult.body.ok, true);
+  assertEquals(
+    (nithinResult.body.provenance as { user_id: string }).user_id,
+    "ERAycY7r6KZ8OA66WQCy",
+  );
+});
+
+Deno.test("Outlook request resolves the same scoper as the work address", async () => {
+  const khairo = getter([DIRECTORY_ROSTER, { events: [event("k1")] }]);
+  const khairoResult = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "khairopomare@outlook.com",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet: khairo.ghlGet,
+  });
+  assertEquals(khairoResult.status, 200);
+  assertEquals(khairoResult.body.ok, true);
+  const khairoProv = khairoResult.body.provenance as Record<string, unknown>;
+  assertEquals(khairoProv.user_id, "RgDWTnYL6zL3eJA6nLht");
+  assertEquals(khairoProv.user_email, "khairopomare@outlook.com");
+  assertEquals(khairoProv.calendar_purpose, "fencing enquiries");
+  assertEquals(confirmGhlUserId({
+    users: usersFromGhlBody(DIRECTORY_ROSTER).users,
+    email: "khairo@secureworkswa.com.au",
+    rosterEmails: ["khairopomare@outlook.com"],
+  }), { id: "RgDWTnYL6zL3eJA6nLht", reason: null });
+  assertEquals(confirmGhlUserId({
+    users: usersFromGhlBody(DIRECTORY_ROSTER).users,
+    email: "khairopomare@outlook.com",
+    rosterEmails: ["khairopomare@outlook.com"],
+  }).id, "RgDWTnYL6zL3eJA6nLht");
+
+  const nithin = getter([DIRECTORY_ROSTER, { events: [event("n1")] }]);
+  const nithinResult = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithinsilas@outlook.com",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet: nithin.ghlGet,
+  });
+  assertEquals(
+    (nithinResult.body.provenance as { user_id: string }).user_id,
+    "ERAycY7r6KZ8OA66WQCy",
+  );
+  assertEquals(
+    (nithinResult.body.provenance as { user_email: string }).user_email,
+    "nithinsilas@outlook.com",
+  );
+});
+
+Deno.test("a non-scoper Outlook address is refused before any roster read", async () => {
+  const { calls, ghlGet } = getter([DIRECTORY_ROSTER]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "other@outlook.com",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 400);
+  assertEquals(result.body.ok, false);
+  assertEquals(
+    (result.body as { code: string }).code,
+    "scoper_email_required",
+  );
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("a roster with both Outlook and work addresses for one scoper is unmapped", async () => {
+  const { users } = usersFromGhlBody({
+    users: [
+      {
+        id: "RgDWTnYL6zL3eJA6nLht",
+        email: "khairopomare@outlook.com",
+        name: "Khairo Pomare",
+      },
+      {
+        id: "khairo-work",
+        email: "khairo@secureworkswa.com.au",
+        name: "Khairo",
+      },
+    ],
+  });
+  assertEquals(
+    confirmGhlUserId({
+      users,
+      email: "khairo@secureworkswa.com.au",
+      rosterEmails: ["khairopomare@outlook.com"],
+    }).reason,
+    "ghl_user_unmapped",
+  );
+  const { calls, ghlGet } = getter([{
+    users: [
+      { id: "RgDWTnYL6zL3eJA6nLht", email: "khairopomare@outlook.com" },
+      { id: "khairo-work", email: "khairo@secureworkswa.com.au" },
+    ],
+  }]);
+  const result = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "khairo@secureworkswa.com.au",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(result.status, 200);
+  assertEquals(result.body.ok, false);
+  assertEquals(
+    (result.body.provenance as { failure: string }).failure,
+    "ghl_user_unmapped",
+  );
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0], "/users/");
+});
+
+Deno.test("a roster with neither work nor Outlook address for a scoper is unmapped", async () => {
+  const { users } = usersFromGhlBody({
+    users: [
+      {
+        id: "3S20LGVTjsVYy9vTJ9wM",
+        email: "marnin@secureworkswa.com.au",
+        name: "Marnin Stobbe",
+      },
+    ],
+  });
+  assertEquals(
+    confirmGhlUserId({
+      users,
+      email: "nithin@secureworkswa.com.au",
+      rosterEmails: ["nithinsilas@outlook.com"],
+    }).reason,
+    "ghl_user_unmapped",
+  );
+  const { calls, ghlGet } = getter([{
+    users: [
+      { id: "3S20LGVTjsVYy9vTJ9wM", email: "marnin@secureworkswa.com.au" },
+    ],
+  }]);
+  const none = await ghlCalendarEventsAction({
+    method: "GET",
+    params: new URLSearchParams({
+      user_email: "nithinsilas@outlook.com",
+      ...WINDOW,
+    }),
+    locationId: LOCATION,
+    ghlGet,
+  });
+  assertEquals(none.status, 200);
+  assertEquals(none.body.ok, false);
+  assertEquals(
+    (none.body.provenance as { failure: string }).failure,
+    "ghl_user_unmapped",
+  );
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0], "/users/");
 });

@@ -16,11 +16,13 @@ The GHL calendar window is one unpaged `/calendars/events` GET in
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
 action (exactly one of `userId`, `calendarId`, or `user_email`, plus `start`
 and `end`). `user_email` on `calendar_events` and `calendar_person_events`
-resolves only the three addresses on `SALES_BOOKING_SCOPER_CALENDARS`
-(`marnin@`, `khairo@`, `nithin@secureworkswa.com.au`); any other address is
-refused before the roster is read. A listed scoper is then confirmed through
-the live location roster (`confirmGhlUserId`); zero, several, or an unreadable
-roster returns `ok: false` and does not read events. Discovery of the
+resolves only the addresses on `SALES_BOOKING_SCOPER_CALENDARS`
+(`marnin@`, `khairo@`, `nithin@secureworkswa.com.au`, plus the recorded GHL
+roster aliases `khairopomare@outlook.com` and `nithinsilas@outlook.com` from
+the 22 Sep 2026 directory); any other address is refused before the roster is
+read. A listed scoper is then confirmed through the live location roster
+(`confirmGhlUserId`) against any of that row's addresses; zero, several, or
+an unreadable roster returns `ok: false` and does not read events. Discovery of the
 location's calendars is `GET ghl-proxy?action=calendar_directory` (id, name,
 is_active, assigned team-member user ids, plus roster id/name/email; each
 provider read has its own receipt). A person's blocking diary across assigned
@@ -267,14 +269,19 @@ look answered.
 There is no `ghl_user_id` on `users`, `scoper_preferences`, or ghl-proxy
 config. `SALES_BOOKING_GHL_USERS` is keyed by resource (`nithin`, `marnin`)
 plus Khairo's roster email (`khairo@secureworkswa.com.au`) and holds the
-recorded email for that scoper (`nithin@` / `marnin@` /
-`khairo@secureworkswa.com.au`). It is the booking-read email map only; it
-does not carry calendar ids. Nithin and Marnin source
-`20260322000005_fix_user_roles.sql` plus the wiki profile `calendar_email`;
-Khairo's email is the scoper work-calendar address. The live GHL id is
-confirmed at read time against `GET /users/?locationId=`: unique email first,
-then unique first/display name (`name_match: nithin` / `marnin` / `khairo`).
-Live 17 Sep: Nithin's recorded email was absent from that roster
+recorded work address for that scoper (`nithin@` / `marnin@` /
+`khairo@secureworkswa.com.au`) plus `roster_emails` aliases that match the
+calendar-read table: Khairo `khairopomare@outlook.com` and Nithin
+`nithinsilas@outlook.com` (GHL directory 22 Sep 2026). Marnin's roster email
+is already `marnin@secureworkswa.com.au`, so that row has no alias. It is the
+booking-read email map only; it does not carry calendar ids. Nithin and
+Marnin source `20260322000005_fix_user_roles.sql` plus the wiki profile
+`calendar_email`; Khairo's email is the scoper work-calendar address. The
+live GHL id is confirmed at read time against `GET /users/?locationId=`:
+unique email across the recorded address plus aliases first, then unique
+first/display name (`name_match: nithin` / `marnin` / `khairo`). Two roster
+users matching the same scoper's address set stay unread. Live 17 Sep:
+Nithin's recorded work address was absent from that roster
 (`ghl_user_unmapped`); a unique name match maps him and `diary_read` stays
 `read_ok` with `mapped_by: name`, `reason: ghl_user_mapped_by_name`, and
 `calendar_email` set to the live GHL email. Zero or several name matches stay
@@ -282,4 +289,4 @@ unread with `ghl_user_unmapped` — never first-match-wins. Khairo is on the
 email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
 booking resource. Dedicated-calendar ids live on
 `SALES_BOOKING_SCOPER_CALENDARS` (calendar-read paragraph above), not on
-this map.
+this map. User ids stay null-pinned; this table records emails only.
