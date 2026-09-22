@@ -29,7 +29,7 @@ CREATE FUNCTION public.reserve_ghl_calendar_appointment(
   p_location_id text, p_key text, p_fingerprint text, p_user_id text,
   p_start timestamptz, p_end timestamptz, p_token uuid
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
   existing public.ghl_calendar_appointment_requests%ROWTYPE;
 BEGIN
@@ -82,7 +82,7 @@ GRANT EXECUTE ON FUNCTION public.reserve_ghl_calendar_appointment(text,text,text
 CREATE FUNCTION public.mark_ghl_calendar_appointment_sending(
   p_location_id text, p_key text, p_token uuid
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE person text;
 BEGIN
   SELECT assigned_user_id INTO person FROM public.ghl_calendar_appointment_requests
