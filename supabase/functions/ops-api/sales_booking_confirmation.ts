@@ -69,6 +69,95 @@ export function emptyBookingFlow() {
   };
 }
 
+/** Published evidence only. A diary read cannot fill missing person-wide sources. */
+function publishedBookingFlow(
+  models: BookingObject[],
+  publishedAt: string | null,
+  now: Date,
+): BookingObject {
+  const flow: BookingObject = emptyBookingFlow();
+  const evidence = models.map((m) => ({
+    model: m,
+    read: m.validation?.availability,
+  }));
+  const stale = !Number.isFinite(timestamp(publishedAt)) ||
+    timestamp(publishedAt) > now.getTime() ||
+    models.some((m) => !(timestamp(m.expires_at) > now.getTime()));
+  const stamp = { as_of: publishedAt, stale };
+  flow.calendar_read = {
+    ...flow.calendar_read,
+    ...stamp,
+    occupied_intervals: null,
+  };
+  flow.commitments_read = { state: "could_not_read", ...stamp };
+  if (!models.length) return flow;
+  const readsValid = evidence.every(({ read }) =>
+    obj(read) &&
+    ["read", "could_not_read", "not_configured"].includes(read.state) &&
+    (read.state !== "read" || (Array.isArray(read.occupied_intervals) &&
+      read.occupied_intervals.every((slot: unknown) =>
+        obj(slot) &&
+        timestamp(slot.end_iso ?? slot.end) >
+          timestamp(slot.start_iso ?? slot.start)
+      )))
+  );
+  if (readsValid) {
+    const unread = evidence.find(({ read }) => read.state !== "read");
+    flow.calendar_read = {
+      state: stale ? "stale" : unread?.read.state ?? "read",
+      provider: "ghl",
+      reason: stale
+        ? "published_booking_model_expired"
+        : unread?.read.reason ?? null,
+      occupied_intervals: unread
+        ? null
+        : evidence.flatMap(({ read }) => read.occupied_intervals),
+      ...stamp,
+    };
+  }
+  // Every model must carry its census. Never substitute [] for an absent census.
+  const slots = new Map<string, BookingObject>();
+  let slotsValid = true;
+  for (const model of models) {
+    if (!Array.isArray(model.prior_offers)) {
+      slotsValid = false;
+      break;
+    }
+    for (const source of model.prior_offers) {
+      if (!obj(source)) {
+        slotsValid = false;
+        break;
+      }
+      const slot: BookingObject = {
+        ...source,
+        id: source.id ?? source.slot_id,
+        start_iso: source.start_iso ?? source.start,
+        end_iso: source.end_iso ?? source.end,
+      };
+      if (
+        !nonempty(slot.id) || !nonempty(slot.contact_id) ||
+        !["offered", "agreed"].includes(slot.state) ||
+        !(timestamp(slot.end_iso) > timestamp(slot.start_iso)) ||
+        (slots.has(slot.id) &&
+          canonicalBookingJson(slots.get(slot.id)) !==
+            canonicalBookingJson(slot))
+      ) {
+        slotsValid = false;
+        break;
+      }
+      slots.set(slot.id, slot);
+    }
+  }
+  if (slotsValid) {
+    flow.commitments = [...slots.values()].map((slot) => ({
+      ...slot,
+      ...stamp,
+    }));
+    flow.commitments_read = { state: stale ? "stale" : "read", ...stamp };
+  }
+  return flow;
+}
+
 /** Transfer format wraps the producer's exact index.json and files by filename.
  * Never enumerate files: only index.leads selects the current generation.
  */
@@ -216,6 +305,7 @@ function projectedModel(
 export function applyBookingConfirmationModels(
   response: SalesBookingReadResponse,
   bundle: unknown,
+  now = new Date(),
 ): SalesBookingReadResponse {
   let models: BookingObject[] = [], reason: string | null = null;
   try {
@@ -227,12 +317,23 @@ export function applyBookingConfirmationModels(
   for (const row of response.cases) {
     counts.set(row.contact_id, (counts.get(row.contact_id) ?? 0) + 1);
   }
+  const matched = models.filter((m) =>
+    response.cases.some((row) =>
+      opportunity(m.id) === row.opportunity_id &&
+      m.contact_id === row.contact_id &&
+      counts.get(row.contact_id) === 1 &&
+      m.profile === (row.resource_id === "marnin" ? PROFILE : "patio-nithin")
+    )
+  );
   return {
     ...response,
     resource: { ...response.resource, id: response.resource.resource_id },
-    booking_flow: emptyBookingFlow(),
+    booking_flow: {
+      ...response.booking_flow,
+      ...publishedBookingFlow(matched, response.pack.as_of, now),
+    },
     cases: response.cases.map((row) => {
-      const candidate = models.find((m) =>
+      const candidate = matched.find((m) =>
         opportunity(m.id) === row.opportunity_id &&
         m.contact_id === row.contact_id
       );
@@ -459,7 +560,9 @@ export async function salesBookingApprovalWriteAction(args: {
     if (
       !response.coverage.full_population ||
       flow?.calendar_read?.state !== "read" ||
-      flow.calendar_read.provider !== "ghl" || !Array.isArray(flow.commitments)
+      flow.calendar_read.provider !== "ghl" ||
+      flow.commitments_read?.state === "stale" ||
+      !Array.isArray(flow.commitments)
     ) fail("current_person_availability_unavailable");
     const validation = model.validation;
     if (
@@ -585,7 +688,7 @@ export async function applyBookingApprovals(
     records = await store.find(bindings.map((b) => b.hash));
   } catch {
     result.booking_flow = {
-      ...emptyBookingFlow(),
+      ...result.booking_flow,
       approval_write: null,
       approval_read_error: "booking_approvals_unreadable",
     };

@@ -294,6 +294,7 @@ write_response() {
   CONTEXT_PIPELINE_STATUS_EXPECTED_SHA="$(context_pipeline_status_migration_sha)" \
   TRADE_INVOICE_PAYABLE_SPLIT_EXPECTED_SHA="$(trade_invoice_payable_split_migration_sha)" \
   SALES_PERFORMANCE_EXPECTED_SHA="$(shasum -a 256 "$SALES_PERFORMANCE_MIGRATION" | awk '{print $1}')" \
+  BOOKING_MIGRATIONS_ROOT="$REPO_ROOT/supabase/migrations" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -791,6 +792,19 @@ sales_performance_row = {
     "actual_statement_sha256": os.environ["SALES_PERFORMANCE_EXPECTED_SHA"],
     "missing_markers": [],
 }
+booking_read_rows = []
+from pathlib import Path
+import hashlib
+for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
+                      ("20260921160000", "visit_outcomes")]:
+    digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
+    booking_read_rows.append({
+        "function_name": "ops-api", "migration_version": version,
+        "expected_migration_name": name, "expected_statement_sha256": digest,
+        "actual_migration_version": version, "actual_migration_name": name,
+        "actual_statement_count": 1, "actual_statement_sha256": digest,
+        "missing_markers": [],
+    })
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -831,6 +845,7 @@ with open(sys.argv[1], "w") as f:
             calendar_job_family_row,
             sales_booking_packs_row,
             sales_booking_approvals_row,
+            *booking_read_rows,
             sales_booking_thread_facts_row,
             sales_booking_roster_row,
             context_pipeline_status_row,
@@ -1100,6 +1115,33 @@ PYTEST
   pass "$name"
 }
 
+test_missing_booking_read_schema_refuses_before_deploy() {
+  local name="test_missing_booking_read_schema_refuses_before_deploy"
+  local response="$TEST_TMP/missing-booking-read.json"
+  local version
+  for version in 20260921062158 20260921160000; do
+    write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+    python3 - "$response" "$version" <<'PYTEST'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+rows = json.loads(path.read_text())
+for row in rows:
+    if row.get("migration_version") == sys.argv[2]:
+        column = "ghl_calendar_appointment_requests.result" if sys.argv[2] == "20260921062158" else "visit_outcomes.supersedes"
+        row["missing_markers"] = ["column:" + column]
+path.write_text(json.dumps(rows))
+PYTEST
+    run_preflight "$response" ops-api
+    if [[ "$PREFLIGHT_RC" -eq 0 ]] || ! grep -q "ops-api requires $version" <<<"$PREFLIGHT_OUTPUT"; then
+      fail "$name" "missing booking read schema did not refuse deployment"
+      return
+    fi
+  done
+  pass "$name"
+}
+
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
@@ -1110,6 +1152,7 @@ main() {
     test_missing_migration_refuses_before_deploy
     test_missing_trade_invoice_requirement_refuses_before_deploy
     test_missing_booking_approval_schema_refuses_before_deploy
+    test_missing_booking_read_schema_refuses_before_deploy
     test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
     test_raw_statement_checksum_drift_is_advisory

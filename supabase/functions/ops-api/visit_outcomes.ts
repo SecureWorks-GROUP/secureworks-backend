@@ -1,5 +1,6 @@
 /** Durable Booking business records. Intentionally import-free: this module
- * has only a database RPC capability, never messaging/provider/calendar code.
+ * has the record/list RPCs plus the shared current-outcome chain helper,
+ * never messaging/provider/calendar code.
  * Contract: docs/visit-outcomes-api.md.
  */
 export class VisitOutcomeError extends Error {
@@ -268,4 +269,32 @@ export async function listVisitOutcomesAction(
     p_limit: integer(query.limit, "limit", 100, 1, 500),
     p_offset: integer(query.offset, "offset", 0, 0, 1_000_000),
   });
+}
+
+/** A complete correction chain has one root and one tip, without missing links.
+ * Never choose the latest timestamp when the append-only lineage is incomplete. */
+export function currentVisitOutcome(
+  history: VisitOutcome[],
+): VisitOutcome | null {
+  if (!history.length) return null;
+  const byId = new Map(history.map((row) => [row.id, row]));
+  if (
+    byId.size !== history.length ||
+    new Set(history.map((r) => r.booking_key)).size !== 1
+  ) return null;
+  const superseded = new Set(
+    history.map((row) => row.supersedes).filter(Boolean),
+  );
+  const tips = history.filter((row) => !superseded.has(row.id));
+  if (tips.length !== 1) return null;
+  let row: VisitOutcome | undefined = tips[0];
+  const seen = new Set<string>();
+  while (row) {
+    if (seen.has(row.id)) return null;
+    seen.add(row.id);
+    if (!row.supersedes) break;
+    row = byId.get(row.supersedes);
+    if (!row) return null;
+  }
+  return seen.size === history.length ? tips[0] : null;
 }

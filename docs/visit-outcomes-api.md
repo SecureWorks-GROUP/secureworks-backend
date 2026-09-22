@@ -121,9 +121,9 @@ Errors use the existing ops-api JSON envelope (`error` string, optionally its ex
 
 ## Booked visits and delivery notes
 
-`list_visits_missing_outcome` is intentionally not supplied. This backend has `sales_booking_read`'s GHL diary (`event_id`, time and occupancy) but no durable booked-visit source joining the booking idempotency key, contact and scoper. The draft-only `supabase/migrations/_drafts/20260505060001_bookings.sql` is not an available source contract. The Booking caller must compare its own authoritative booked visits against current `booking_key` outcomes. Neither a busy diary entry nor a cached proposal proves a booked visit.
+`list_visits_missing_outcome` is intentionally not supplied as a separate action. `sales_booking_read` composes the durable appointment ledger and outcome histories; owner: `docs/sales-booking-confirmation-api.md`. This document owns only `record_visit_outcome` / `list_visit_outcomes`. Neither a busy diary entry nor a cached proposal proves a booked visit.
 
-Apply `20260921160000_visit_outcomes.sql` before a separately authorised ops-api deployment. **ops-api deploys require `--no-verify-jwt`.** This task neither applies a migration to a live database nor deploys an edge function. Carry this deployment flag and the missing-outcome-source limitation into the PR body.
+Apply `20260921160000_visit_outcomes.sql` before a separately authorised ops-api deployment. **ops-api deploys require `--no-verify-jwt`.** This task neither applies a migration to a live database nor deploys an edge function.
 
 Validation uses the existing Deno test harness (`deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts`) and the registered disposable PostgreSQL migration-contract runner (`supabase/tests/migration-contracts/run.sh`). The database contract exercises append-only rules, correction chains, filtered current/history reads, paging, client privilege denial and concurrent double taps. No live fact or deployment is asserted by these tests.
 

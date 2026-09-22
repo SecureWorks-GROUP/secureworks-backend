@@ -14,7 +14,8 @@ import {
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
 // Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
-// independent approvals): docs/sales-booking-confirmation-api.md.
+// published availability, booked visits, independent approvals):
+// docs/sales-booking-confirmation-api.md.
 //
 // ── NO SEND, NO GHL WRITE ──
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
@@ -729,6 +730,10 @@ export function emptySalesBookingPackView(): SalesBookingPackView {
 
 export interface SalesBookingCase {
   booking_read_model?: BookingObject;
+  booked_visits?: BookingObject[] | null;
+  visit_outcome?: import("./visit_outcomes.ts").VisitOutcome | null;
+  visit_outcome_history?: import("./visit_outcomes.ts").VisitOutcome[] | null;
+  visit_read_complete?: boolean;
   id: string;
   resource_id: string;
   opportunity_id: string;
@@ -1604,6 +1609,8 @@ export interface SalesBookingReadResponse {
     calendar: SalesBookingCalendarOverlay;
   };
   booking_flow?: BookingObject;
+  booked_visits?: BookingObject[] | null;
+  visit_outcomes?: import("./visit_outcomes.ts").VisitOutcome[] | null;
   coverage: {
     full_population: boolean;
     enumerated: number;
@@ -1811,6 +1818,8 @@ export function assembleSalesBookingRead(input: {
 // ════════════════════════════════════════════════════════════
 
 export interface SalesBookingReadParams {
+  visit_outcomes_from?: string | null;
+  visit_outcomes_to?: string | null;
   resource?: string | null;
   week_start?: string | null;
   scoper_user_id?: string | null;

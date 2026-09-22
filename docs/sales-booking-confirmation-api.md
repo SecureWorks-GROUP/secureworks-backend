@@ -2,12 +2,13 @@
 
 Contract: merged UX `docs/booking-confirm-contract.md` and wiki
 `harness/ops/skills/secureworks-scope-booking/CALENDAR-STEPS.md`, read from GitHub
-main on 2026-09-22. Implementation: `sales_booking_confirmation.ts`, composed by
-`sales_booking_read` after the existing pack overlay.
+main on 2026-09-22. Implementation: `sales_booking_confirmation.ts` and
+`sales_booking_visits.ts`, composed by `sales_booking_read` after the existing
+pack overlay.
 
 This release joins the read and independent approval **storage** contracts.
-It does not execute a booking or message, enable a provider, connect the runtime
-availability adapter, or supply a model. No production behavior was observed.
+It does not execute a booking or message, enable a provider, or supply a model.
+Published availability evidence and durable visit records are composed below. No production behavior was observed.
 Apply `20260922150000_sales_booking_approvals.sql` before deploying these handlers.
 The legacy `sales_booking_stamp_write/read` path remains available, deprecated;
 legacy KEEP/CUT never translates into either independent approval.
@@ -35,16 +36,70 @@ pack revision, evidence, expiry, calendar preview, locked template and route.
 null. Existing arbitrary pack drafts are never promoted into locked templates.
 Missing validation checks remain null, never manufactured passes.
 
-The envelope includes `resource.id` and
-`booking_flow:{version:"booking-confirm.v1",approval_write:"separate-v1",
-calendar_read:{state:"could_not_read",provider:"ghl",reason:
-"person_wide_calendars_and_prior_offer_ledger_not_connected"},commitments:null}`.
-The current diary alone cannot attest all calendars, operational leave and the
-active offer/agreement ledger. **Positive approvals therefore remain held on
-this production read path**, even if the publisher supplies a complete model.
-Refusals of an exact, current, hashed model can be recorded. `send_hold` stays
-true. No outcome completeness is claimed; that is a separate integration.
-`separate-v1` advertises the two independent record paths, never provider execution.
+The envelope includes `resource.id` and `booking_flow` version
+`booking-confirm.v1`, with `approval_write:"separate-v1"`. Each matched model
+may publish `validation.availability:{state,occupied_intervals,reason}` where
+state is `read`, `could_not_read`, or `not_configured`. A read requires an
+explicit interval array; each interval has `start`/`end` (or `start_iso`/`end_iso`)
+with offsets. The producer owns whole-person source coverage, including leave.
+The backend never promotes the GHL diary to that authority.
+
+Models publish their complete prior-offer census as `prior_offers`. Each entry
+has `id` (or `slot_id`), `contact_id`, `state:offered|agreed`, and
+`start_iso`/`end_iso` (or `start`/`end`). These project to `booking_flow.commitments`.
+A published empty array is a complete empty census; absence or malformed entries
+remain null with `commitments_read.state:"could_not_read"`. Only exact contact
+and opportunity matches in the current resource/profile contribute. Across
+matched models, occupied intervals are combined conservatively and commitment
+IDs deduplicate; conflicting entries refuse census completeness.
+
+Both projections carry `as_of` from the persisted pack's publish timestamp and
+`stale`. At any contributing model's expiry, state becomes `stale`, retaining
+the evidence for display. Missing/future publish time or missing expiry also
+holds freshness. `calendar_read.occupied_intervals` stays null when unavailable.
+Positive approval still requires the exact model, fresh passed validation,
+complete commitments, evidence and channel hash checks. `send_hold` stays true;
+`separate-v1` advertises records only, never execution.
+
+## Booked visits and correction history
+
+`sales_booking_visits.ts` composes successful (`state=complete`) rows from
+`ghl_calendar_appointment_requests` for the mapped GHL scoper. The selected
+week is combined with `visit_outcomes_from`/`visit_outcomes_to` (default: the
+last seven days). Outcome window inputs require offsets, positive duration,
+and at most 366 days. Pending/sending requests never count as bookings.
+
+The appointment ledger has no contact column. Its `idempotency_key` joins the
+contact-bound model's `calendar_write.receipt.booking_key` or `.idempotency_key`,
+or an existing current outcome's `booking_key`. GHL contact ID then joins the
+lead, never name/address. A ledger row without a unique lead binding is reported
+as unresolved, never guessed or silently dropped from completeness.
+
+All `visit_outcomes` rows for each booking key are read, including corrections
+outside the date window. Pages are 500 rows, bounded at 10,000 per read, with
+URL-budget chunks of 50 keys. Errors or caps cannot claim complete empty data.
+`currentVisitOutcome` requires one connected, acyclic correction chain and uses
+its unsuperseded tip, never latest timestamp alone.
+
+Top-level `booked_visits` feeds the UI's amber missing-outcome list;
+`visit_outcomes` carries full history for the UI's correction control. Each
+visit carries its current outcome and history. Each case carries `booked_visits`,
+`visit_outcome` (latest visit), `visit_outcome_history`, and
+`visit_read_complete`. `booking_flow.booked_visits_read` and
+`visit_outcomes_read` distinguish `complete`, `partial`, and `could_not_read`.
+Only complete composition advertises `visit_outcome_write:"append-only-v1"`.
+`visit_read` records the actual window, read time, reason, and unresolved count.
+Store failures return null data; successful empty queries return empty arrays.
+This census covers the durable appointment ledger, not unrelated manual calendar
+entries. Cases absent from the current lead roster cannot acquire invented
+identity: affected ledger rows keep the response partial.
+
+The schema preflight declares both existing appointment/outcome migrations and
+every selected field as ops-api dependencies. No new migration or live write is
+needed for this composition. Local proof includes an occupied published model,
+missing availability, expiry, a missing-outcome booking, two corrections,
+501-row history pagination, identity mismatches, and store failures. Production
+behavior has not been observed as part of this change.
 
 ## Exact-content hash and approval request
 
@@ -139,3 +194,10 @@ credentials. Failed calendar/message attempts refuse decisions with HTTP 409
 The follow-up run passed all 13 confirmation tests (with type checking), all 11
 local schema-preflight cases, module/test lint and whitespace checks. The new
 failed-channel test was observed failing before the guard fix and passing after.
+
+Read-composition validation on 2026-09-22: 29 confirmation/visit/outcome tests
+passed with type checking; 78 existing booking read/pack tests passed using the
+repository's monolith `--no-check` harness. All 12 local schema-preflight tests
+passed, including missing appointment-result and outcome-supersedes refusals.
+Formatting, focused lint and diff whitespace checks passed. Readers were
+synthetic, test environments cleared, and network access restricted to loopback.
