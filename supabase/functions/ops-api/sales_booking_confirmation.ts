@@ -600,7 +600,8 @@ export async function applyBookingApprovals(
     const channel = b.step === "calendar"
       ? model.calendar_write
       : model.message;
-    // An approval is not an execution receipt and must never clear unknown/pending.
+    // An approval is not an execution receipt and must never clear
+    // pending, unknown, succeeded, or failed execution.
     if (["pending", "unknown", "succeeded", "failed"].includes(channel.state)) {
       continue;
     }
