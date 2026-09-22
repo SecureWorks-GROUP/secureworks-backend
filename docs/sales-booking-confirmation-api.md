@@ -77,8 +77,9 @@ commitments, source quotes and fresh validation (at most 60 seconds old), with
 all checks passed. Required check labels for this handoff are `calendar`,
 `protected_band`, `hours`, `travel`, `daily_capacity`. The calendar operation
 must start at earliest arrival and end after latest arrival (including visit
-length). Message routes must have both explicit E.164 numbers. Pending, unknown
-and succeeded channels cannot be newly approved. Refusal requires a reason.
+length). Message routes must have both explicit E.164 numbers. Pending, unknown,
+succeeded and failed channels require reconciliation before any new approval or
+refusal is recorded. Refusal requires a reason.
 
 The private, service-role-only `sales_booking_approvals` table follows the pack
 store's append/read pattern. It records actor ID/email, time, exact snapshot,
@@ -121,9 +122,20 @@ RLS/privileges, unique retry binding, channel separation and expiry against
 disposable local Postgres; its deliberate break proves UPDATE privilege would
 be detected. No live credentials needed.
 
-Validation on 2026-09-22: 12 confirmation tests passed with type checking; 77
+Validation on 2026-09-22: 13 confirmation tests passed with type checking; 77
 existing read/pack tests passed under the repository's monolith `--no-check`
 harness. New module/test lint and diff whitespace checks passed. The full
 registered migration-contract runner passed against throwaway localhost
 Postgres 17, including the deliberate failure case. Test processes used a
 cleared environment and network permission restricted to loopback.
+
+Follow-up safety checks: `scripts/edge-function-schema-requirements.txt` declares
+the approval migration, table and every field the store reads/writes. The local
+`bash scripts/test/test-edge-schema-preflight.sh` consumer test refuses both a
+missing approval migration and a missing expiry column, without remote SQL or
+credentials. Failed calendar/message attempts refuse decisions with HTTP 409
+`booking_step_requires_reconciliation`, leaving the approval store unchanged.
+
+The follow-up run passed all 13 confirmation tests (with type checking), all 11
+local schema-preflight cases, module/test lint and whitespace checks. The new
+failed-channel test was observed failing before the guard fix and passing after.

@@ -661,3 +661,26 @@ Deno.test("approval authority: only a live store row, never publisher fields or 
     "awaiting_approval",
   );
 });
+
+Deno.test("failed execution channels refuse approval and refusal without a hidden decision row", async () => {
+  for (const step of ["calendar", "message"] as const) {
+    for (const decision of ["approved", "refused"]) {
+      const f = await fixture(), { store, records } = memoryStore();
+      f.cases[0]
+        .booking_read_model![step === "calendar" ? "calendar_write" : "message"]
+        .state = "failed";
+      const req = request(f, store, step);
+      req.body.decision = decision;
+      req.body.reason = decision === "refused"
+        ? "Reconcile the failed attempt"
+        : null;
+      const error = await assertRejects(
+        () => salesBookingApprovalWriteAction(req),
+        Error,
+        "booking_step_requires_reconciliation",
+      );
+      assertEquals((error as Error & { status: number }).status, 409);
+      assertEquals(records.size, 0);
+    }
+  }
+});

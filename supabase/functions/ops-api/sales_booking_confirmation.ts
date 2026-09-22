@@ -451,7 +451,7 @@ export async function salesBookingApprovalWriteAction(args: {
   const channel = snapshot.step === "calendar"
     ? model.calendar_write
     : model.message;
-  if (["pending", "unknown", "succeeded"].includes(channel?.state)) {
+  if (["pending", "unknown", "succeeded", "failed"].includes(channel?.state)) {
     fail("booking_step_requires_reconciliation");
   }
   if (decision === "approved") {
