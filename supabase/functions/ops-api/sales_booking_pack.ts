@@ -1,3 +1,7 @@
+import {
+  applyBookingConfirmationModels,
+  selectBookingModels,
+} from "./sales_booking_confirmation.ts";
 // ════════════════════════════════════════════════════════════
 // SALES BOOKING PACK STORE — engine pack + captain stamp + thread facts
 // ════════════════════════════════════════════════════════════
@@ -60,6 +64,7 @@ export interface SalesBookingStampPayload {
 }
 
 export interface SalesBookingPackPayload {
+  booking_read_models?: unknown;
   proposals: unknown;
   coverage: unknown;
   drafts: Record<string, string>;
@@ -361,7 +366,7 @@ export function applySalesBookingPackOverlay(
     };
   });
 
-  return {
+  return applyBookingConfirmationModels({
     ...response,
     coverage: { ...response.coverage, gaps },
     cases,
@@ -386,7 +391,7 @@ export function applySalesBookingPackOverlay(
         stage_moves: stamp.stage_moves,
       }
       : emptySalesBookingStampView(),
-  };
+  }, packPayload?.booking_read_models);
 }
 
 export function assertSalesBookingThreadsRefreshAuth(
@@ -629,7 +634,10 @@ export async function salesBookingPackPublishAction(
   const resource = resolveSalesBookingResource(body.resource);
   const weekStart = resolveWeekStart(body.week_start);
   const asOf = parseAsOf(body.as_of);
+  // Validate only the manifest-selected generation, never stale file entries.
+  selectBookingModels(body.booking_read_models);
   const payload: SalesBookingPackPayload = {
+    booking_read_models: body.booking_read_models ?? null,
     proposals: body.proposals ?? null,
     coverage: body.coverage ?? null,
     drafts: normaliseSalesBookingDrafts(body.drafts),
@@ -645,6 +653,7 @@ export async function salesBookingPackPublishAction(
   return { ok: true, id: written.id, as_of: written.as_of };
 }
 
+/** @deprecated Combined legacy stamp. Never grants separate-v1 authority. */
 export async function salesBookingStampWriteAction(
   client: PackClient,
   auth: SalesBookingPackAuth,

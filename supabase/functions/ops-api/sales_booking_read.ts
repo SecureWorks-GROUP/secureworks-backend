@@ -1,3 +1,7 @@
+import {
+  applyBookingConfirmationModels,
+  type BookingObject,
+} from "./sales_booking_confirmation.ts";
 // ════════════════════════════════════════════════════════════
 // SALES BOOKING READ — one bounded, honest read for the Sales Booking view
 // ════════════════════════════════════════════════════════════
@@ -722,6 +726,7 @@ export function emptySalesBookingPackView(): SalesBookingPackView {
 }
 
 export interface SalesBookingCase {
+  booking_read_model?: BookingObject;
   id: string;
   resource_id: string;
   opportunity_id: string;
@@ -1592,7 +1597,11 @@ export interface SalesBookingReadResponse {
   version: string;
   week_start: string;
   week: SalesBookingWeekWindow;
-  resource: SalesBookingResource & { calendar: SalesBookingCalendarOverlay };
+  resource: SalesBookingResource & {
+    id?: string;
+    calendar: SalesBookingCalendarOverlay;
+  };
+  booking_flow?: BookingObject;
   coverage: {
     full_population: boolean;
     enumerated: number;
@@ -3050,8 +3059,11 @@ export async function salesBookingReadAction(
   client: SalesBookingReadClient,
   params: SalesBookingReadParams,
 ): Promise<SalesBookingReadResponse> {
-  return await salesBookingRead(
-    createSalesBookingReadDependencies(client),
-    params,
+  return applyBookingConfirmationModels(
+    await salesBookingRead(
+      createSalesBookingReadDependencies(client),
+      params,
+    ),
+    null,
   );
 }
