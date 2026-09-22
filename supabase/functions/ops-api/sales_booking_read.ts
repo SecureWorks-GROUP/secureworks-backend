@@ -14,7 +14,8 @@ import {
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
 // Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
-// independent approvals): docs/sales-booking-confirmation-api.md.
+// published availability, booked visits, independent approvals):
+// docs/sales-booking-confirmation-api.md.
 //
 // ── NO SEND, NO GHL WRITE ──
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster

@@ -1,5 +1,6 @@
 /** Durable Booking business records. Intentionally import-free: this module
- * has only a database RPC capability, never messaging/provider/calendar code.
+ * has the record/list RPCs plus the shared current-outcome chain helper,
+ * never messaging/provider/calendar code.
  * Contract: docs/visit-outcomes-api.md.
  */
 export class VisitOutcomeError extends Error {

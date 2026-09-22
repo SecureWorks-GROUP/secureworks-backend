@@ -2,8 +2,9 @@
 
 Contract: merged UX `docs/booking-confirm-contract.md` and wiki
 `harness/ops/skills/secureworks-scope-booking/CALENDAR-STEPS.md`, read from GitHub
-main on 2026-09-22. Implementation: `sales_booking_confirmation.ts`, composed by
-`sales_booking_read` after the existing pack overlay.
+main on 2026-09-22. Implementation: `sales_booking_confirmation.ts` and
+`sales_booking_visits.ts`, composed by `sales_booking_read` after the existing
+pack overlay.
 
 This release joins the read and independent approval **storage** contracts.
 It does not execute a booking or message, enable a provider, or supply a model.

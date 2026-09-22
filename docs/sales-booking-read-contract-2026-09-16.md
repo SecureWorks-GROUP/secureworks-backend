@@ -4,15 +4,17 @@
 behind the Sales Booking view. It replaces the branch-local preview server
 (`scripts/sales-booking-local-api.mjs` on secureworks-ux
 `patio/sales-booking-20260912`) and keeps that script's response shape.
-One-tap visit outcomes are a separate store: `docs/visit-outcomes-api.md`.
-Confirmation models, `booking_flow`, and independent calendar/message
-approvals: `docs/sales-booking-confirmation-api.md`.
+One-tap visit outcome writes are a separate store: `docs/visit-outcomes-api.md`.
+Confirmation models, `booking_flow`, published availability, booked visits,
+and independent calendar/message approvals:
+`docs/sales-booking-confirmation-api.md`.
 
 Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
 Pack publish, captain stamp, thread-facts cache, and the read overlay:
 `supabase/functions/ops-api/sales_booking_pack.ts`.
-Regressions: `sales_booking_read_test.ts` and `sales_booking_pack_test.ts`
-beside those files.
+Visit ledger composition: `supabase/functions/ops-api/sales_booking_visits.ts`.
+Regressions: `sales_booking_read_test.ts`, `sales_booking_pack_test.ts`, and
+`sales_booking_visits_test.ts` beside those files.
 The GHL calendar window is one unpaged `/calendars/events` GET in
 `supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
@@ -108,6 +110,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 | `read_budget_ms` | 25000 (max 25000) | Whole-read wall clock covering roster, diary, contacts, and threads. |
 | `force_refresh` | `false` | Bypasses the 10-minute freshness window on a complete roster row and thread-facts freshness. An incomplete roster always resumes from its cursor. |
 | `case_ids` | all | Comma-separated: read threads for these cases only. |
+| `visit_outcomes_from` / `visit_outcomes_to` | confirmation contract | Optional visit-census window. Owner: `docs/sales-booking-confirmation-api.md`. |
 
 Auth is the ops-api default: an ops API key, or a signed-in
 admin / owner / ops_manager session. It is deliberately NOT on the make-safe
@@ -156,8 +159,9 @@ Additions:
   `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
-- **`booking_flow`** and per-case **`booking_read_model`** — confirmation
-  overlay and independent approval display. Owner:
+- **`booking_flow`**, per-case **`booking_read_model`**, **`booked_visits`**,
+  and **`visit_outcomes`** — confirmation overlay, published availability,
+  appointment-ledger visits, and independent approval display. Owner:
   `docs/sales-booking-confirmation-api.md`.
 - **`pack`** — `{present, as_of, proposals}` for the latest
   `sales_booking_packs` row with `kind=pack`. Absent when the engine has not
@@ -265,9 +269,10 @@ includes `roster`).
   **`is_all_day` is `event.isAllDay === true` only** — no midnight or duration
   inference. **`title_withheld` is always false** (GHL has no
   private-sensitivity flag).
-- **`classification` never emits `booked`.** A booking is a calendar /
-  commitment fact this read cannot attribute to a case, and guessing one would
-  invent it.
+- **`classification` never emits `booked`.** Thread classification is not a
+  booking attribution. Bindable booked visits live on `booked_visits`
+  (`docs/sales-booking-confirmation-api.md`); do not invent a `booked`
+  classification from diary or proposal text.
 
 Templates: an outbound body containing `thanks for reaching out to secureworks`
 or `sorry we missed your call` is automation. It never becomes
