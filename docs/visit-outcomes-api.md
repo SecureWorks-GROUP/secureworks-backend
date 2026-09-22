@@ -113,7 +113,7 @@ With `include_history=true`, an additional `history` array contains **all** reco
 
 Read `list_visit_outcomes` as a business-record source, correlate by `contact_id`, optional `opportunity_id`/`job_id`, and preserve `booking_key`, `visit_start`, actor, record ID and timestamp as provenance. A current `happened` + `quote_owed:true` records that the visit happened and a quote is owed even if the GHL pipeline is stale. Do not reclassify that customer as an unvisited stale lead solely from GHL stage. `did_not_happen` is a recorded non-attendance with its explicit reason, not a guess from a calendar status. Absence of an outcome is unknown, not evidence of a missed visit.
 
-`quote_owed` reflects what the scoper recorded at that time. This endpoint does not monitor quote delivery or automatically clear the flag; use newer quote business records to establish whether the obligation has since been fulfilled. A record is human evidence, not independent attendance verification. Read history only for audit; do not treat superseded outcomes as current facts. This change supplies the reader contract, not a change to the separate context runtime.
+`quote_owed` reflects what the scoper recorded at that time. This endpoint does not monitor quote delivery or automatically clear the flag; use newer quote business records to establish whether the obligation has since been fulfilled. A record is human evidence, not independent attendance verification. Read history only for audit; do not treat superseded outcomes as current facts. This change supplies the reader contract, not a change to the separate context runtime. The CIO-owned context-reader change 170 consumes this record shape.
 
 ## Errors
 

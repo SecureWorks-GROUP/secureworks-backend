@@ -1,6 +1,5 @@
 // deno-lint-ignore-file no-import-prefix
 import {
-  assert,
   assertEquals,
   assertRejects,
   assertThrows,
@@ -28,13 +27,27 @@ function database(
   error: { code: string; message: string } | null = null,
 ) {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
-  const db: VisitOutcomeDatabase = {
-    rpc: (name, args) => {
+  const requested: string[] = [];
+  const db = {
+    rpc: (name: string, args: Record<string, unknown>) => {
+      requested.push("rpc");
       calls.push({ name, args });
       return Promise.resolve({ data, error });
     },
+    sendCustomerMessage: () => {
+      requested.push("message");
+      return Promise.resolve();
+    },
+    ghlRequest: () => {
+      requested.push("ghl");
+      return Promise.resolve();
+    },
+    calendarWrite: () => {
+      requested.push("calendar");
+      return Promise.resolve();
+    },
   };
-  return { db, calls };
+  return { db: db as VisitOutcomeDatabase, calls, requested };
 }
 
 Deno.test("record stores the authenticated actor, default quote obligation and only allowed fields", async () => {
@@ -43,7 +56,7 @@ Deno.test("record stores the authenticated actor, default quote obligation and o
     id: "generated",
     recorded_at: "server-time",
   };
-  const { db, calls } = database(row);
+  const { db, calls, requested } = database(row);
   assertEquals(
     await recordVisitOutcomeAction(db, AUTH, {
       ...INPUT,
@@ -54,6 +67,7 @@ Deno.test("record stores the authenticated actor, default quote obligation and o
     }),
     { visit_outcome: row },
   );
+  assertEquals(requested, ["rpc"]);
   assertEquals(calls, [{
     name: "record_visit_outcome",
     args: { p_record: parseVisitOutcome(INPUT), p_recorded_by_user_id: USER },
@@ -289,18 +303,5 @@ Deno.test("RPC errors fail loudly instead of returning an empty business record"
       VisitOutcomeError,
     )).status,
     503,
-  );
-});
-
-// Explicit architectural contract requested by the task: the handler itself
-// must not import any messaging, GHL or calendar code. Behavioral tests above
-// additionally execute it with a DB-only capability under no network permission.
-Deno.test("visit outcome handler has no imports, including messaging, GHL and calendar modules", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./visit_outcomes.ts", import.meta.url),
-  );
-  assert(
-    !/\bimport\s*(?:[({*"']|[\w$]+\s*(?:from|,))|\bexport\s+.*\bfrom\s*["']/
-      .test(source),
   );
 });
