@@ -23,8 +23,8 @@ Duplicate contact/model identities, mismatched entries, invalid revisions or a
 mixed revision generation refuse publish. No files are globbed. The publisher
 must send the complete current generation alongside its pack, never combine
 models from different runs. The complete pack revision is producer-owned.
-Old publishers remain compatible and yield held models until they send this
-additive bundle. This backend does not fetch local runtime files.
+Old publishers remain compatible and yield awaiting_approval skeletons until
+they send this additive bundle. This backend does not fetch local runtime files.
 
 Read matching requires the current case's exact GHL contact and opportunity,
 and a unique contact in the census. The read carries producer proposal/window,
@@ -82,17 +82,24 @@ and succeeded channels cannot be newly approved. Refusal requires a reason.
 
 The private, service-role-only `sales_booking_approvals` table follows the pack
 store's append/read pattern. It records actor ID/email, time, exact snapshot,
-step, decision and expiry. Expiry is at most 15 minutes after the decision and
-never after proposal expiry. The unique binding key makes concurrent identical
-retries converge; retries return the original actor/time/expiry. A conflicting
-decision on the same content refuses. Expired content needs a new proposal
-revision. UPDATE and DELETE are not granted to the service role.
+step, decision and expiry. A write stamps `expires_at` at most 15 minutes after
+that row's own `approved_at` and never after proposal expiry. The unique binding
+key makes concurrent identical retries converge; retries return the original
+actor/time/expiry. A conflicting decision on the same content refuses. Expired
+content needs a new proposal revision. UPDATE and DELETE are not granted to the
+service role.
 
-Returns `{ok:true,approval:{state,reason,snapshot,...audit_fields}}`. Reads attach
-only matching, unexpired receipts as `channel.approval.ui_snapshot`, retaining
-producer approval fields. They never overwrite pending/unknown execution or
-invent a successful receipt. Unreadable approval storage explicitly disables
-approval capability; it is not silently treated as an empty ledger.
+Returns `{ok:true,approval:{state,reason,snapshot,...audit_fields}}`. Only a
+matching, unexpired `sales_booking_approvals` row grants channel display
+authority. Publisher `approved`/`held`/`refused` fields are diagnostics only:
+without such a row the channel projects `awaiting_approval`. Read authority
+lasts at most 15 minutes from that row's own `approved_at` (capped by the
+stored `expires_at`) and is never derived from pack or proposal expiry.
+Matching receipts attach as `channel.approval.ui_snapshot`. They never
+overwrite pending/unknown/succeeded/failed execution or invent a successful
+receipt. An unreadable store returns `awaiting_approval` with
+`approval_write:null` and `approval_read_error`; it is not treated as an empty
+ledger.
 
 A future executor must revalidate the current pack, availability, approval and
 expiry at execution. Calendar notifications must stay off. Message execution
@@ -105,14 +112,16 @@ capability and does not replace that executor contract.
 `deno test --allow-env --allow-read --allow-net=127.0.0.1
 supabase/functions/ops-api/sales_booking_confirmation_test.ts` exercises the
 projection, manifest handoff, both independent decisions, exact-byte tampering,
-expiry, identity, actor checks, idempotency and legacy isolation with synthetic
-readers and an in-memory store. It includes a production-shaped unavailable
-ledger refusal. Existing sales-booking read/pack tests remain in the harness.
-The registered migration contract checks RLS/privileges, unique retry binding,
-channel separation and expiry against disposable local Postgres; its deliberate
-break proves UPDATE privilege would be detected. No live credentials needed.
+expiry, identity, actor checks, idempotency, live-store-row authority and
+legacy isolation with synthetic readers and an in-memory store. It includes a
+production-shaped unavailable ledger refusal plus publisher-approved-without-row,
+expired-row, mismatched-hash and throwing-store cases. Existing sales-booking
+read/pack tests remain in the harness. The registered migration contract checks
+RLS/privileges, unique retry binding, channel separation and expiry against
+disposable local Postgres; its deliberate break proves UPDATE privilege would
+be detected. No live credentials needed.
 
-Validation on 2026-09-22: 11 confirmation tests passed with type checking; 77
+Validation on 2026-09-22: 12 confirmation tests passed with type checking; 77
 existing read/pack tests passed under the repository's monolith `--no-check`
 harness. New module/test lint and diff whitespace checks passed. The full
 registered migration-contract runner passed against throwaway localhost

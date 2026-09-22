@@ -7,7 +7,9 @@ import {
 // ════════════════════════════════════════════════════════════
 //
 // One table, four kinds. `sales_booking_pack_publish` stores the engine's
-// proposals.json / coverage.json / drafts map (kind=pack).
+// proposals.json / coverage.json / drafts map (kind=pack). Additive
+// `booking_read_models` and independent approvals:
+// docs/sales-booking-confirmation-api.md.
 // `sales_booking_stamp_write` stores the captain KEEP/CUT stamp (kind=stamp)
 // with as_of = now. Only a verified Supabase JWT whose email is on
 // SALES_BOOKING_CAPTAIN_EMAILS may write; the ops API key and every other

@@ -557,7 +557,7 @@ Deno.test("approval authority: only a live store row, never publisher fields or 
   };
 
   const painted = applyBookingConfirmationModels(
-    (await fixture()),
+    await fixture(),
     bundle({
       ...model(),
       calendar_write: { ...model().calendar_write, state: "approved" },
