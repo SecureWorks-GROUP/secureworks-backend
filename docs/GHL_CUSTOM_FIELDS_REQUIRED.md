@@ -25,8 +25,12 @@ These are written automatically by `ghl-proxy` during the `link` action (scope c
 
 When one GHL opportunity has both a patio and fencing scope, the **most recent** link action wins for the custom field values. This is expected — the custom fields reflect the latest scope action. Both jobs exist independently in Supabase linked to the same `ghl_opportunity_id`.
 
+## Stratco allocation reference
+
+Sales intake writes one extra opportunity custom field by **id**, not name. Create a text field in GHL Settings → Custom Fields → Opportunities, then set its id as the `GHL_STRATCO_ALLOCATION_FIELD_ID` edge secret. Required only when `create_contact_and_opportunity` is called with `allocationRef`, or when `lookup_allocation_opportunity` is used. The proxy never creates the field. Lookup and retry-reuse rules live in `supabase/functions/ghl-proxy/allocation_ref.ts`.
+
 ## Setup Steps
 
 1. Go to GHL → Settings → Custom Fields → Opportunities
-2. Create each field with the exact name (column 2 above) and type (column 3)
-3. Field IDs will be auto-assigned by GHL — the code uses field names, not IDs
+2. Create each `link` field with the exact name (column 2 above) and type (column 3)
+3. Field IDs will be auto-assigned by GHL — the `link` action fields above use field names, not IDs. The Stratco allocation field is the exception: code reads the id from `GHL_STRATCO_ALLOCATION_FIELD_ID`.
