@@ -173,7 +173,7 @@ function projectedModel(
         "individual_validation_checks_not_published",
       ),
     },
-    calendar_write: {
+    calendar_write: projectApprovalChannel({
       state: "awaiting_approval",
       approval: null,
       receipt: null,
@@ -183,8 +183,8 @@ function projectedModel(
         "calendar_write.preview",
         "owner_configured_calendar_operation_not_published",
       ),
-    },
-    message: {
+    }),
+    message: projectApprovalChannel({
       state: "awaiting_approval",
       approval: null,
       receipt: null,
@@ -202,7 +202,7 @@ function projectedModel(
         "message.routing",
         "exact_sender_recipient_route_not_published",
       ),
-    },
+    }),
     unavailable_fields: {
       ...missing,
       "message.ai_proposed_text":
@@ -311,6 +311,32 @@ function timestamp(value: unknown): number {
     return NaN;
   }
   return Date.parse(value);
+}
+function isRecordedApprovalState(state: unknown): boolean {
+  return state === "approved" || state === "held" || state === "refused";
+}
+function projectApprovalChannel(channel: BookingObject): BookingObject {
+  if (!isRecordedApprovalState(channel.state)) return channel;
+  return { ...channel, state: "awaiting_approval" };
+}
+function clearUnrecordedApprovalAuthority(channel: BookingObject | undefined) {
+  if (!channel || !isRecordedApprovalState(channel.state)) return;
+  channel.state = "awaiting_approval";
+  channel.reason = "approval_expired_or_binding_unverified";
+}
+function approvalRecordAuthorizes(
+  record: BookingApprovalRecord,
+  snapshot: BookingObject,
+  now: Date,
+): boolean {
+  if (
+    canonicalBookingJson(record.snapshot) !== canonicalBookingJson(snapshot)
+  ) return false;
+  const recorded = timestamp(record.approved_at);
+  const expires = timestamp(record.expires_at);
+  if (!Number.isFinite(recorded) || !Number.isFinite(expires)) return false;
+  const latest = Math.min(expires, recorded + BOOKING_APPROVAL_TTL_MS);
+  return now.getTime() >= recorded && now.getTime() < latest;
 }
 
 export interface BookingApprovalRecord {
@@ -542,25 +568,15 @@ export async function applyBookingApprovals(
     }
   > = [];
   for (const row of result.cases) {
-    if (!row.booking_read_model?.pack_revision) continue;
+    const model = row.booking_read_model;
+    if (!model) continue;
     for (const step of ["calendar", "message"] as const) {
-      const snapshot = bookingApprovalSnapshot(result, row, step);
-      const model = row.booking_read_model;
       const channel = step === "calendar"
         ? model.calendar_write
         : model.message;
-      // A publisher may carry an old approval forward. Keep its binding for
-      // diagnostics, but never display it as current authority after expiry.
-      if (
-        ["approved", "held", "refused"].includes(channel.state) &&
-        (!(timestamp(channel.approval?.expires_at) > now.getTime()) ||
-          !(timestamp(model.expires_at) > now.getTime()) ||
-          canonicalBookingJson(channel.approval?.ui_snapshot) !==
-            canonicalBookingJson(snapshot))
-      ) {
-        channel.state = "awaiting_approval";
-        channel.reason = "approval_expired_or_binding_unverified";
-      }
+      clearUnrecordedApprovalAuthority(channel);
+      if (!model.pack_revision) continue;
+      const snapshot = bookingApprovalSnapshot(result, row, step);
       bindings.push({ row, step, snapshot, hash: await bookingHash(snapshot) });
     }
   }
@@ -579,14 +595,8 @@ export async function applyBookingApprovals(
     const record = records.find((r) =>
       r.binding_hash === b.hash && r.step === b.step
     );
+    if (!record || !approvalRecordAuthorizes(record, b.snapshot, now)) continue;
     const model = b.row.booking_read_model!;
-    if (
-      !record ||
-      canonicalBookingJson(record.snapshot) !==
-        canonicalBookingJson(b.snapshot) ||
-      !(timestamp(record.expires_at) > now.getTime()) ||
-      !(timestamp(model.expires_at) > now.getTime())
-    ) continue;
     const channel = b.step === "calendar"
       ? model.calendar_write
       : model.message;

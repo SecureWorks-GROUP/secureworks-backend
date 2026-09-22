@@ -8,6 +8,7 @@ import {
 import {
   applyBookingApprovals,
   applyBookingConfirmationModels,
+  BOOKING_APPROVAL_TTL_MS,
   type BookingApprovalRecord,
   bookingApprovalSnapshot,
   type BookingApprovalStore,
@@ -477,6 +478,10 @@ Deno.test("approval read failure is explicit, while content changes hide old app
     failed.booking_flow?.approval_read_error,
     "booking_approvals_unreadable",
   );
+  assertEquals(
+    failed.cases[0].booking_read_model?.calendar_write.state,
+    "awaiting_approval",
+  );
   f.cases[0].booking_read_model!.pack_revision = "d".repeat(64);
   const read = await applyBookingApprovals(f, store, NOW);
   assertEquals(
@@ -509,5 +514,150 @@ Deno.test("malformed producer arrays refuse; expired producer approvals cannot r
   assertEquals(
     read.cases[0].booking_read_model?.calendar_write.approval.original_binding,
     "retained",
+  );
+});
+
+function storeRecord(
+  snapshot: BookingObject,
+  hash: string,
+  extras: Partial<BookingApprovalRecord> = {},
+): BookingApprovalRecord {
+  return {
+    binding_hash: hash,
+    step: "calendar",
+    resource: "marnin",
+    week_start: "2026-09-21",
+    state: "approved",
+    reason: null,
+    snapshot,
+    approved_by_user_id: auth.userId,
+    approved_by_email: auth.email,
+    approved_at: NOW.toISOString(),
+    expires_at: new Date(NOW.getTime() + BOOKING_APPROVAL_TTL_MS).toISOString(),
+    ...extras,
+  };
+}
+
+Deno.test("approval authority: only a live store row, never publisher fields or pack expiry", async () => {
+  const paintPublisherApproved = async () => {
+    const f = await fixture();
+    const snapshot = bookingApprovalSnapshot(f, f.cases[0], "calendar");
+    const m = f.cases[0].booking_read_model!;
+    m.calendar_write.state = "approved";
+    m.calendar_write.approval = {
+      ui_snapshot: snapshot,
+      expires_at: m.expires_at,
+    };
+    m.message.state = "held";
+    m.message.approval = {
+      ui_snapshot: bookingApprovalSnapshot(f, f.cases[0], "message"),
+      expires_at: m.expires_at,
+    };
+    return { f, snapshot, m };
+  };
+
+  const painted = applyBookingConfirmationModels(
+    (await fixture()),
+    bundle({
+      ...model(),
+      calendar_write: { ...model().calendar_write, state: "approved" },
+      message: { ...model().message, state: "refused" },
+    }),
+  );
+  assertEquals(
+    painted.cases[0].booking_read_model?.calendar_write.state,
+    "awaiting_approval",
+  );
+  assertEquals(
+    painted.cases[0].booking_read_model?.message.state,
+    "awaiting_approval",
+  );
+
+  {
+    const { f } = await paintPublisherApproved();
+    const { store } = memoryStore();
+    const read = await applyBookingApprovals(f, store, NOW);
+    assertEquals(
+      read.cases[0].booking_read_model?.calendar_write.state,
+      "awaiting_approval",
+    );
+    assertEquals(
+      read.cases[0].booking_read_model?.message.state,
+      "awaiting_approval",
+    );
+    assertEquals(read.booking_flow?.approval_write, "separate-v1");
+  }
+
+  {
+    const f = await fixture();
+    const { store, records } = memoryStore();
+    const snapshot = bookingApprovalSnapshot(f, f.cases[0], "calendar");
+    const hash = await bookingHash(snapshot);
+    records.set(
+      hash,
+      storeRecord(snapshot, hash, {
+        approved_at: new Date(NOW.getTime() - BOOKING_APPROVAL_TTL_MS - 1_000)
+          .toISOString(),
+        expires_at: f.cases[0].booking_read_model!.expires_at,
+      }),
+    );
+    const read = await applyBookingApprovals(f, store, NOW);
+    assertEquals(
+      read.cases[0].booking_read_model?.calendar_write.state,
+      "awaiting_approval",
+    );
+    assertEquals(
+      read.cases[0].booking_read_model?.message.state,
+      "awaiting_approval",
+    );
+  }
+
+  {
+    const f = await fixture();
+    const { store, records } = memoryStore();
+    const snapshot = bookingApprovalSnapshot(f, f.cases[0], "calendar");
+    const other = structuredClone(snapshot);
+    other.content.title = "Different visit";
+    const hash = await bookingHash(other);
+    records.set(hash, storeRecord(other, hash));
+    const read = await applyBookingApprovals(f, store, NOW);
+    assertEquals(
+      read.cases[0].booking_read_model?.calendar_write.state,
+      "awaiting_approval",
+    );
+  }
+
+  {
+    const { f } = await paintPublisherApproved();
+    const failedStore: BookingApprovalStore = {
+      find: () => Promise.reject(new Error("offline")),
+      insert: () => Promise.reject(new Error("offline")),
+    };
+    const failed = await applyBookingApprovals(f, failedStore, NOW);
+    assertEquals(
+      failed.cases[0].booking_read_model?.calendar_write.state,
+      "awaiting_approval",
+    );
+    assertEquals(
+      failed.cases[0].booking_read_model?.message.state,
+      "awaiting_approval",
+    );
+    assertEquals(failed.booking_flow?.approval_write, null);
+    assertEquals(
+      failed.booking_flow?.approval_read_error,
+      "booking_approvals_unreadable",
+    );
+  }
+
+  const f = await fixture(), { store } = memoryStore();
+  await salesBookingApprovalWriteAction(request(f, store));
+  const live = await applyBookingApprovals(f, store, NOW);
+  assertEquals(
+    live.cases[0].booking_read_model?.calendar_write.state,
+    "approved",
+  );
+  assertEquals(
+    live.cases[0].booking_read_model?.message.state,
+    "awaiting_approval",
   );
 });
