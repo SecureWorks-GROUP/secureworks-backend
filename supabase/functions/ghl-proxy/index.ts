@@ -1,3 +1,4 @@
+// JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
@@ -32,8 +33,6 @@ import { sourceTime } from "../_shared/source_time.ts";
 //   supabase functions deploy ghl-proxy --no-verify-jwt --project-ref kevgrhcjxspbxgovpmfl
 //   (CI deploys automatically on push to main via .github/workflows/deploy-edge-functions.yml)
 //   (Laptop deploys must use scripts/deploy-edge.sh with SECUREWORKS_LAPTOP_DEPLOY_OVERRIDE=1)
-//
-// JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 //
 // Secrets: GHL_API_TOKEN, GHL_LOCATION_ID
 // General scope test lab: append &testMode=true and configure
