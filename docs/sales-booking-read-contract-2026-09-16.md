@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22)
 
 `GET ops-api?action=sales_booking_read` is the book, diary, and threads read
 behind the Sales Booking view. It replaces the branch-local preview server

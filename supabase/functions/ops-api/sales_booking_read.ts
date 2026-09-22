@@ -168,8 +168,9 @@ export const SALES_BOOKING_RESOURCES: Readonly<
 
 /**
  * GHL user ids are not stored on `users`, `scoper_preferences`, or ghl-proxy
- * config. Do not embed a guessed id. Pins stay null until the live roster
- * email is known. Confirmation (email, then unique name):
+ * config. Do not embed a guessed id. User ids stay null; this table records
+ * work addresses plus `roster_emails` aliases. Confirmation (any recorded
+ * address, then unique name):
  * `docs/sales-booking-read-contract-2026-09-16.md`. Khairo's email is
  * recorded here for roster confirmation; he is not a booking resource.
  */
@@ -184,12 +185,11 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
 > = {
   nithin: {
     email: "nithin@secureworkswa.com.au",
-    // 22 Sep 2026 GHL directory: Nithin Silas ERAycY7r6KZ8OA66WQCy nithinsilas@outlook.com
+    // 22 Sep 2026 GHL directory: nithinsilas@outlook.com
     roster_emails: ["nithinsilas@outlook.com"],
     email_source:
       "public.users.email (20260322000005_fix_user_roles.sql) and wiki patio-nithin.json calendar_email",
     name_match: "nithin",
-    // Pin is a follow-up once the live roster email is known.
     ghl_user_id: null,
   },
   marnin: {
@@ -201,7 +201,7 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
   },
   khairo: {
     email: "khairo@secureworkswa.com.au",
-    // 22 Sep 2026 GHL directory: Khairo Pomare RgDWTnYL6zL3eJA6nLht khairopomare@outlook.com
+    // 22 Sep 2026 GHL directory: khairopomare@outlook.com
     roster_emails: ["khairopomare@outlook.com"],
     email_source:
       "scoper work calendar email (supabase/migrations/_drafts/20260505060000_scoper_preferences_work_calendar_email.sql)",

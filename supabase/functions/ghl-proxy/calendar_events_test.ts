@@ -670,7 +670,10 @@ Deno.test("secureworkswa request resolves via the Outlook roster entry", async (
   assertEquals(khairoProv.user_id_resolved_by, "roster_email_match");
   assertEquals(khairoProv.user_email, "khairo@secureworkswa.com.au");
   assertEquals(khairo.calls.length, 2);
-  assertEquals(windowQuery(khairo.calls[1]).get("userId"), "RgDWTnYL6zL3eJA6nLht");
+  assertEquals(
+    windowQuery(khairo.calls[1]).get("userId"),
+    "RgDWTnYL6zL3eJA6nLht",
+  );
 
   const nithin = getter([DIRECTORY_ROSTER, { events: [event("n1")] }]);
   const nithinResult = await ghlCalendarEventsAction({
@@ -706,16 +709,22 @@ Deno.test("Outlook request resolves the same scoper as the work address", async 
   assertEquals(khairoProv.user_id, "RgDWTnYL6zL3eJA6nLht");
   assertEquals(khairoProv.user_email, "khairopomare@outlook.com");
   assertEquals(khairoProv.calendar_purpose, "fencing enquiries");
-  assertEquals(confirmGhlUserId({
-    users: usersFromGhlBody(DIRECTORY_ROSTER).users,
-    email: "khairo@secureworkswa.com.au",
-    rosterEmails: ["khairopomare@outlook.com"],
-  }), { id: "RgDWTnYL6zL3eJA6nLht", reason: null });
-  assertEquals(confirmGhlUserId({
-    users: usersFromGhlBody(DIRECTORY_ROSTER).users,
-    email: "khairopomare@outlook.com",
-    rosterEmails: ["khairopomare@outlook.com"],
-  }).id, "RgDWTnYL6zL3eJA6nLht");
+  assertEquals(
+    confirmGhlUserId({
+      users: usersFromGhlBody(DIRECTORY_ROSTER).users,
+      email: "khairo@secureworkswa.com.au",
+      rosterEmails: ["khairopomare@outlook.com"],
+    }),
+    { id: "RgDWTnYL6zL3eJA6nLht", reason: null },
+  );
+  assertEquals(
+    confirmGhlUserId({
+      users: usersFromGhlBody(DIRECTORY_ROSTER).users,
+      email: "khairopomare@outlook.com",
+      rosterEmails: ["khairopomare@outlook.com"],
+    }).id,
+    "RgDWTnYL6zL3eJA6nLht",
+  );
 
   const nithin = getter([DIRECTORY_ROSTER, { events: [event("n1")] }]);
   const nithinResult = await ghlCalendarEventsAction({
