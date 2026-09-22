@@ -2006,6 +2006,45 @@ Deno.test("Nithin maps by recorded email when that address is on the roster", as
   );
 });
 
+Deno.test("Nithin maps by Outlook roster alias when the work address is absent", async () => {
+  const users = [{
+    id: "ERAycY7r6KZ8OA66WQCy",
+    email: "nithinsilas@outlook.com",
+    name: "Nithin Silas",
+    firstName: "Nithin",
+  }];
+  assertEquals(
+    confirmSalesBookingGhlUser({
+      users,
+      email: SALES_BOOKING_GHL_USERS.nithin.email,
+      rosterEmails: SALES_BOOKING_GHL_USERS.nithin.roster_emails,
+      nameMatch: "nithin",
+    }),
+    {
+      id: "ERAycY7r6KZ8OA66WQCy",
+      reason: null,
+      match: "email",
+      ghl_email: "nithinsilas@outlook.com",
+    },
+  );
+  const scan = await readSalesBookingGhlDiary({
+    ghlGet: ghlDiaryGet({
+      users: { users },
+      events: { events: [] },
+    }),
+    locationId: "loc",
+    resourceId: "nithin",
+    scoperUserId: SALES_BOOKING_RESOURCES.nithin.scoper_user_id,
+    since: "2026-09-14T00:00:00+08:00",
+    untilExclusive: "2026-09-21T00:00:00+08:00",
+  });
+  assertEquals(scan.read_ok, true);
+  assertEquals(scan.reason, null);
+  assertEquals(scan.mapped_by, "email");
+  assertEquals(scan.ghl_user_id, "ERAycY7r6KZ8OA66WQCy");
+  assertEquals(scan.calendar_email, "nithinsilas@outlook.com");
+});
+
 Deno.test("Nithin maps by unique GHL name when the recorded email is absent", async () => {
   const users = [
     {

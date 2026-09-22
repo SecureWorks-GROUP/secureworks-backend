@@ -32,6 +32,12 @@ export interface GhlCalendarEventsScan {
  */
 export interface SalesBookingScoperCalendar {
   email: string;
+  /**
+   * Extra GHL roster emails that confirm this scoper. Directory 22 Sep 2026:
+   * Khairo Pomare khairopomare@outlook.com, Nithin Silas nithinsilas@outlook.com.
+   * Omitted when the recorded work address is already the roster email.
+   */
+  roster_emails?: readonly string[];
   purpose: string;
   ghl_user_id: string | null;
   calendar_id: string | null;
@@ -47,17 +53,25 @@ export const SALES_BOOKING_SCOPER_CALENDARS:
     },
     {
       email: "khairo@secureworkswa.com.au",
+      roster_emails: ["khairopomare@outlook.com"],
       purpose: "fencing enquiries",
       ghl_user_id: null,
       calendar_id: null,
     },
     {
       email: "nithin@secureworkswa.com.au",
+      roster_emails: ["nithinsilas@outlook.com"],
       purpose: "patios",
       ghl_user_id: null,
       calendar_id: null,
     },
   ];
+
+export function salesBookingScoperRosterEmails(
+  row: Pick<SalesBookingScoperCalendar, "email" | "roster_emails">,
+): string[] {
+  return uniqueLowerEmails([row.email, ...(row.roster_emails ?? [])]);
+}
 
 export function salesBookingScoperCalendar(
   email: string,
@@ -65,7 +79,7 @@ export function salesBookingScoperCalendar(
   const normalised = nonempty(email)?.toLowerCase() ?? null;
   if (!normalised) return null;
   return SALES_BOOKING_SCOPER_CALENDARS.find((row) =>
-    row.email === normalised
+    salesBookingScoperRosterEmails(row).includes(normalised)
   ) ?? null;
 }
 
@@ -109,6 +123,18 @@ export interface GhlLocationUsersScan {
 
 function nonempty(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function uniqueLowerEmails(values: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  const emails: string[] = [];
+  for (const value of values) {
+    const email = nonempty(value)?.toLowerCase();
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    emails.push(email);
+  }
+  return emails;
 }
 
 function ghlId(value: unknown): string | null {
@@ -266,17 +292,22 @@ export async function fetchGhlLocationUsers(args: {
 }
 
 /**
- * Confirm a GHL user id against the live location roster. Zero or several
- * email matches cannot be confirmed, so the caller must not invent an id.
+ * Confirm a GHL user id against the live location roster. The requested
+ * address plus any roster_emails aliases are accepted; exactly one roster
+ * user must match that set. Zero or several matches cannot be confirmed.
  */
 export function confirmGhlUserId(args: {
   users: GhlLocationUser[];
   email: string;
+  rosterEmails?: readonly string[] | null;
   claimedId?: string | null;
 }): { id: string | null; reason: string | null } {
-  const email = args.email.trim().toLowerCase();
-  if (!email) return { id: null, reason: "ghl_user_unmapped" };
-  const matches = args.users.filter((user) => user.email === email);
+  const emails = uniqueLowerEmails([args.email, ...(args.rosterEmails ?? [])]);
+  if (emails.length === 0) return { id: null, reason: "ghl_user_unmapped" };
+  const allowed = new Set(emails);
+  const matches = args.users.filter((user) =>
+    user.email != null && allowed.has(user.email)
+  );
   if (matches.length !== 1) return { id: null, reason: "ghl_user_unmapped" };
   const id = matches[0].id;
   const claimed = ghlId(args.claimedId);
@@ -372,7 +403,8 @@ export async function ghlCalendarEventsAction(args: {
     }
     const confirmed = confirmGhlUserId({
       users: roster.users,
-      email: userEmail,
+      email: scoper.email,
+      rosterEmails: scoper.roster_emails,
       claimedId: scoper.ghl_user_id,
     });
     if (!confirmed.id) {
@@ -712,7 +744,8 @@ export async function ghlCalendarPersonEventsAction(args: {
   }
   const confirmed = confirmGhlUserId({
     users: users.users,
-    email: userEmail,
+    email: scoper.email,
+    rosterEmails: scoper.roster_emails,
     claimedId: scoper.ghl_user_id,
   });
   if (!confirmed.id) {

@@ -168,14 +168,16 @@ export const SALES_BOOKING_RESOURCES: Readonly<
 
 /**
  * GHL user ids are not stored on `users`, `scoper_preferences`, or ghl-proxy
- * config. Do not embed a guessed id. Pins stay null until the live roster
- * email is known. Confirmation (email, then unique name):
+ * config. Do not embed a guessed id. User ids stay null; this table records
+ * work addresses plus `roster_emails` aliases. Confirmation (any recorded
+ * address, then unique name):
  * `docs/sales-booking-read-contract-2026-09-16.md`. Khairo's email is
  * recorded here for roster confirmation; he is not a booking resource.
  */
 export const SALES_BOOKING_GHL_USERS: Readonly<
   Record<string, {
     email: string;
+    roster_emails?: readonly string[];
     email_source: string;
     name_match: string | null;
     ghl_user_id: string | null;
@@ -183,10 +185,11 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
 > = {
   nithin: {
     email: "nithin@secureworkswa.com.au",
+    // 22 Sep 2026 GHL directory: nithinsilas@outlook.com
+    roster_emails: ["nithinsilas@outlook.com"],
     email_source:
       "public.users.email (20260322000005_fix_user_roles.sql) and wiki patio-nithin.json calendar_email",
     name_match: "nithin",
-    // Pin is a follow-up once the live roster email is known.
     ghl_user_id: null,
   },
   marnin: {
@@ -198,6 +201,8 @@ export const SALES_BOOKING_GHL_USERS: Readonly<
   },
   khairo: {
     email: "khairo@secureworkswa.com.au",
+    // 22 Sep 2026 GHL directory: khairopomare@outlook.com
+    roster_emails: ["khairopomare@outlook.com"],
     email_source:
       "scoper work calendar email (supabase/migrations/_drafts/20260505060000_scoper_preferences_work_calendar_email.sql)",
     name_match: "khairo",
@@ -605,6 +610,7 @@ export async function withSalesBookingGhl429Retry<T>(
 export function confirmSalesBookingGhlUser(args: {
   users: GhlLocationUser[];
   email: string;
+  rosterEmails?: readonly string[] | null;
   nameMatch?: string | null;
   claimedId?: string | null;
 }): {
@@ -616,6 +622,7 @@ export function confirmSalesBookingGhlUser(args: {
   const email = confirmGhlUserId({
     users: args.users,
     email: args.email,
+    rosterEmails: args.rosterEmails,
     claimedId: args.claimedId,
   });
   if (email.id) {
@@ -2754,10 +2761,12 @@ export async function readSalesBookingGhlDiary(args: {
       calendar_email: mapping.email,
     });
   }
+  const mappingRow = SALES_BOOKING_GHL_USERS[mapping.resource_id];
   const confirmed = confirmSalesBookingGhlUser({
     users: users.users,
     email: mapping.email,
-    nameMatch: SALES_BOOKING_GHL_USERS[mapping.resource_id]?.name_match ?? null,
+    rosterEmails: mappingRow?.roster_emails,
+    nameMatch: mappingRow?.name_match ?? null,
     claimedId: mapping.ghl_user_id,
   });
   if (!confirmed.id) {
