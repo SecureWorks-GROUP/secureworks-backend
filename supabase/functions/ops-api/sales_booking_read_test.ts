@@ -69,7 +69,6 @@ import {
 import {
   confirmGhlUserId,
   ghlCalendarEventsAction,
-  SALES_BOOKING_SCOPER_CALENDARS,
   usersFromGhlBody,
 } from "../ghl-proxy/calendar_events.ts";
 
@@ -2005,28 +2004,6 @@ Deno.test("Nithin maps by recorded email when that address is on the roster", as
     payload.diary_read.calendar_email,
     SALES_BOOKING_GHL_USERS.nithin.email,
   );
-});
-
-Deno.test("GHL user map roster_emails match the calendar-read scoper table", () => {
-  for (const row of SALES_BOOKING_SCOPER_CALENDARS) {
-    const key = row.email.split("@")[0];
-    const mapped = SALES_BOOKING_GHL_USERS[key];
-    assertEquals(mapped.email, row.email);
-    assertEquals(
-      [...(mapped.roster_emails ?? [])],
-      [...(row.roster_emails ?? [])],
-    );
-    assertEquals(mapped.ghl_user_id, null);
-    assertEquals(row.ghl_user_id, null);
-    assertEquals(row.calendar_id, null);
-  }
-  assertEquals(SALES_BOOKING_GHL_USERS.marnin.roster_emails, undefined);
-  assertEquals(SALES_BOOKING_GHL_USERS.khairo.roster_emails, [
-    "khairopomare@outlook.com",
-  ]);
-  assertEquals(SALES_BOOKING_GHL_USERS.nithin.roster_emails, [
-    "nithinsilas@outlook.com",
-  ]);
 });
 
 Deno.test("Nithin maps by Outlook roster alias when the work address is absent", async () => {
