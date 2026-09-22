@@ -137,7 +137,7 @@ async function fixture() {
   m.message.routing.message_sha256 = await bookingContentHash(
     bookingApprovalSnapshot(response, response.cases[0], "message"),
   );
-  // Explicit synthetic complete availability. The production assembly NEVER sets this.
+  // Synthetic approval fixture; projection tests below exercise published evidence.
   response.booking_flow = {
     ...response.booking_flow,
     calendar_read: { state: "read", provider: "ghl" },
@@ -683,4 +683,86 @@ Deno.test("failed execution channels refuse approval and refusal without a hidde
       assertEquals(records.size, 0);
     }
   }
+});
+
+Deno.test("published model composes availability, occupied intervals and prior offers with publish freshness", async () => {
+  const f = await fixture();
+  f.pack.as_of = NOW.toISOString();
+  const m = model();
+  m.validation.availability = {
+    state: "read",
+    occupied_intervals: [{
+      start: "2026-09-25T12:00:00+08:00",
+      end: "2026-09-25T13:00:00+08:00",
+    }],
+  };
+  m.prior_offers = [{
+    slot_id: "offer-1",
+    contact_id: "other-contact",
+    state: "offered",
+    start: "2026-09-25T14:00:00+08:00",
+    end: "2026-09-25T15:00:00+08:00",
+  }];
+  const read = applyBookingConfirmationModels(f, bundle(m), NOW);
+  assertEquals(read.booking_flow?.calendar_read.state, "read");
+  assertEquals(
+    read.booking_flow?.calendar_read.occupied_intervals,
+    m.validation.availability.occupied_intervals,
+  );
+  assertEquals(read.booking_flow?.calendar_read.as_of, f.pack.as_of);
+  assertEquals(read.booking_flow?.commitments[0].id, "offer-1");
+  assertEquals(read.booking_flow?.commitments[0].as_of, f.pack.as_of);
+  assertEquals(read.booking_flow?.commitments_read.state, "read");
+  const expired = applyBookingConfirmationModels(
+    f,
+    bundle(m),
+    new Date(m.expires_at),
+  );
+  assertEquals(expired.booking_flow?.calendar_read.state, "stale");
+  assertEquals(expired.booking_flow?.commitments_read.state, "stale");
+  assertEquals(expired.booking_flow?.commitments[0].stale, true);
+  delete m.validation.availability;
+  const missing = applyBookingConfirmationModels(f, bundle(m), NOW);
+  assertEquals(missing.booking_flow?.calendar_read.state, "could_not_read");
+  assertEquals(missing.booking_flow?.calendar_read.occupied_intervals, null);
+  delete m.prior_offers;
+  assertEquals(
+    applyBookingConfirmationModels(f, bundle(m), NOW).booking_flow?.commitments,
+    null,
+  );
+});
+
+Deno.test("availability cannot come from an unrelated contact, wrong profile or malformed census", async () => {
+  const f = await fixture();
+  f.pack.as_of = NOW.toISOString();
+  const m = model();
+  m.validation.availability = { state: "read", occupied_intervals: [] };
+  m.prior_offers = [];
+  const complete = applyBookingConfirmationModels(f, bundle(m), NOW);
+  assertEquals(complete.booking_flow?.commitments, []);
+  m.contact_id = "other-contact";
+  assertEquals(
+    applyBookingConfirmationModels(f, bundle(m), NOW).booking_flow
+      ?.calendar_read.state,
+    "could_not_read",
+  );
+  m.contact_id = row.contact_id;
+  m.profile = "other-profile";
+  assertEquals(
+    applyBookingConfirmationModels(f, bundle(m), NOW).booking_flow
+      ?.calendar_read.state,
+    "could_not_read",
+  );
+  m.profile = "fencing-stratco-marnin";
+  m.prior_offers = [{}];
+  assertEquals(
+    applyBookingConfirmationModels(f, bundle(m), NOW).booking_flow?.commitments,
+    null,
+  );
+  m.validation.availability.occupied_intervals = [{}];
+  assertEquals(
+    applyBookingConfirmationModels(f, bundle(m), NOW).booking_flow
+      ?.calendar_read.state,
+    "could_not_read",
+  );
 });

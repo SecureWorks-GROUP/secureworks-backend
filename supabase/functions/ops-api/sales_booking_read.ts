@@ -729,6 +729,10 @@ export function emptySalesBookingPackView(): SalesBookingPackView {
 
 export interface SalesBookingCase {
   booking_read_model?: BookingObject;
+  booked_visits?: BookingObject[] | null;
+  visit_outcome?: import("./visit_outcomes.ts").VisitOutcome | null;
+  visit_outcome_history?: import("./visit_outcomes.ts").VisitOutcome[] | null;
+  visit_read_complete?: boolean;
   id: string;
   resource_id: string;
   opportunity_id: string;
@@ -1604,6 +1608,8 @@ export interface SalesBookingReadResponse {
     calendar: SalesBookingCalendarOverlay;
   };
   booking_flow?: BookingObject;
+  booked_visits?: BookingObject[] | null;
+  visit_outcomes?: import("./visit_outcomes.ts").VisitOutcome[] | null;
   coverage: {
     full_population: boolean;
     enumerated: number;
@@ -1811,6 +1817,8 @@ export function assembleSalesBookingRead(input: {
 // ════════════════════════════════════════════════════════════
 
 export interface SalesBookingReadParams {
+  visit_outcomes_from?: string | null;
+  visit_outcomes_to?: string | null;
   resource?: string | null;
   week_start?: string | null;
   scoper_user_id?: string | null;

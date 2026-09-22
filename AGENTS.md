@@ -3646,8 +3646,9 @@ See `docs/makesafe-submitter-attribution-and-unlock-2026-09-08.md`. Submitting a
 
 ## Booking confirmation authority
 
-Read/approval handoff and the held availability boundary live in
-`docs/sales-booking-confirmation-api.md` and `sales_booking_confirmation.ts`.
+Read/approval handoff, published availability freshness and ledger/outcome
+composition live in `docs/sales-booking-confirmation-api.md`,
+`sales_booking_confirmation.ts` and `sales_booking_visits.ts`.
 Legacy combined KEEP/CUT stamps never grant either independent calendar or
 exact-message approval. A diary read alone is not person-wide availability.
 

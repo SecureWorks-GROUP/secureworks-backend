@@ -818,6 +818,7 @@ import { buildOpsApiVersion } from './ops_api_version.ts'
 // Sales Booking view read (calendar + queue + thread facts). Page load may
 // persist kind=thread_facts and kind=roster. No GHL write, no send, no
 // calendar write.
+import { applySalesBookingVisits } from './sales_booking_visits.ts'
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
@@ -5194,6 +5195,8 @@ if (import.meta.main) serve(async (req: Request) => {
           const assembled = await salesBookingReadAction(client, {
             resource: sbParam('resource'),
             week_start: sbParam('week_start'),
+            visit_outcomes_from: sbParam('visit_outcomes_from'),
+            visit_outcomes_to: sbParam('visit_outcomes_to'),
             scoper_user_id: sbParam('scoper_user_id'),
             include_thread_facts: sbThreadFacts === null
               ? undefined
@@ -5211,7 +5214,9 @@ if (import.meta.main) serve(async (req: Request) => {
             assembled.resource.resource_id,
             assembled.week_start,
           )
-          return json(await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client)))
+          return json(await applySalesBookingVisits(client,
+            await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client)),
+            { visit_outcomes_from: sbParam('visit_outcomes_from'), visit_outcomes_to: sbParam('visit_outcomes_to') }))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
