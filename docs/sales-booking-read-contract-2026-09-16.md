@@ -1,9 +1,10 @@
 # `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17)
 
-`GET ops-api?action=sales_booking_read` is the single read behind the Sales
-Booking view. It replaces the branch-local preview server
+`GET ops-api?action=sales_booking_read` is the book, diary, and threads read
+behind the Sales Booking view. It replaces the branch-local preview server
 (`scripts/sales-booking-local-api.mjs` on secureworks-ux
 `patio/sales-booking-20260912`) and keeps that script's response shape.
+One-tap visit outcomes are a separate store: `docs/visit-outcomes-api.md`.
 
 Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
 Pack publish, captain stamp, thread-facts cache, and the read overlay:
