@@ -27,9 +27,9 @@
 --      ceiling, pacing; renew_context_extraction_run.
 --   4. context_unread_events(job) (the one unread definition,
 --      context_unread_rows) and context_extraction_events: newest
---      landed first, the newest customer row always included, output in time
---      order. The per-row flags (ours, older_context) come from
---      context_extraction_event_flags, see note (a).
+--      customer row always included, then live waking rows ahead of
+--      landed time, output in time order. The per-row flags (ours,
+--      older_context) come from context_extraction_event_flags, see note (a).
 --   5. context_extraction_candidates: the due rule, same signature.
 --   6. business_events indexes for the cadence reads.
 --   7. claim_context_pass / renew_context_pass / finish_context_pass: 5-minute
@@ -56,10 +56,11 @@
 --      row re-linked later by the ladder re-run is history, not new evidence,
 --      and the re-run does not stamp capture_mode (that function belongs to
 --      the placement track).
---  (c) Evidence captured more than age_window_days (14) ago no longer wakes a
---      read on its own; it still rides along as older context. This bounds
---      every cadence read to two weeks of rows, so the per-minute tick and the
---      heartbeat stay cheap as the table grows.
+--  (c) age_window_days (14) is only for older_context flags on a batch
+--      (older than 14 days, or older than the job's last completed read).
+--      A row wakes when it was captured at or after live_since; live_since
+--      already excludes history from before go-live, so there is no second
+--      age cutoff on the live or pool predicates.
 --  (d) The pass and pass-renew checks are token-based: a holder whose lease
 --      ran out may still renew or finish until another process takes the
 --      pass over (which rotates the token). A slow job no longer fails the
@@ -97,7 +98,7 @@ BEGIN
   ('public.claim_context_pass(date)',ARRAY['5085741c2f41def9244717b16f15ffb2','6ef1e37bb1f41092f6f5f5228f820d46'],false),
   ('public.renew_context_pass(date,uuid)',ARRAY['a45e3fd2e2d7ef34ea323deddfb9abe6','b06ad7baf3a44b69286f9145e23d7884'],false),
   ('public.finish_context_pass(date,uuid,text,timestamptz,text)',ARRAY['d41992ac30bea7c884a5856395c233cd','c1b28ccd6361ed9b74ccd231372e8518'],false),
-  ('public.context_extraction_events(uuid,integer)',ARRAY['b20069eae64c43cf4d9315f6ffc8e2b7','89be3c172be015ad6be3a875ea73a40f'],false),
+  ('public.context_extraction_events(uuid,integer)',ARRAY['b20069eae64c43cf4d9315f6ffc8e2b7','b808f4b6fb24515a337c149a6353edf8'],false),
   ('public.context_extraction_candidates(integer)',ARRAY['6428bee63b2db436dbe1c6dcaeafd69e','0257dc0ea9c35a249b3b8adcb99a18d4'],false),
   ('public.context_cadence_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','04a99b46fbdf6b6ac830602da6a92c3d'],false),
   ('public.context_ready_jobs_count(integer)',ARRAY['67e55f87c9e53c4f6640a0936d8d279b','7dee92c8660ecf3a113b109f0e3128bd'],false),
@@ -106,9 +107,9 @@ BEGIN
   ('public.context_unread_rows(uuid[])',ARRAY['d426adcccab139a188ee158e14ca4fb1'],true),
   ('public.context_event_is_ours(public.business_events)',ARRAY['b34febf8d9ea77ef1a31b088e02b0901'],true),
   ('public.context_unread_events(uuid)',ARRAY['3897a4a1954c9bb6cf35419e9d04d285'],true),
-  ('public.context_jobs_cadence(uuid[])',ARRAY['8ed68b962afc065d5edff7f52714ba96'],true),
+  ('public.context_jobs_cadence(uuid[])',ARRAY['71db787a8a80b5519b5a5c9b8d915d5c'],true),
   ('public.context_job_cadence(uuid)',ARRAY['7110b88f2557febce945e9aed2e6441d'],true),
-  ('public.context_cadence_pool()',ARRAY['3d2c590449ce2738d952be765f26d357'],true),
+  ('public.context_cadence_pool()',ARRAY['6943c7ed49e09cddc23a517255805fba'],true),
   ('public.context_job_freshness(uuid)',ARRAY['a901eef0f9135bf04676d81742b85595'],true),
   ('public.context_extraction_event_flags(uuid,uuid[])',ARRAY['c384d748eca9b3b94ba6e54b26b781e5'],true),
   ('public.renew_context_extraction_run(uuid,uuid)',ARRAY['4a67eafbe87cd378282db0e021e0305c'],true)
@@ -176,8 +177,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS context_extraction_runs_job_day_phase_seq
 DROP INDEX IF EXISTS public.context_extraction_runs_job_day_phase;
 ALTER TABLE public.context_pass_days ADD COLUMN IF NOT EXISTS lease_takeovers integer NOT NULL DEFAULT 0;
 
--- 6. Indexes. Every cadence read starts from rows captured in the last two
--- weeks (note c); the status counts unplaced rows without a table scan.
+-- 6. Indexes. Cadence reads start from rows captured at or after live_since
+-- (note c); the status counts unplaced rows without a table scan.
 CREATE INDEX IF NOT EXISTS business_events_context_captured_at
  ON public.business_events(context_captured_at) WHERE context_captured_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS business_events_unplaced_at
@@ -247,7 +248,7 @@ $$;
 -- written by service_role (or before K1, when no writer was recorded), and not
 -- yet read by luna_v2 for that job. Any direction. p_job_ids NULL means every
 -- job. Inlinable (SQL, invoker, no SET clause, every operator schema-
--- qualified) so the caller's filters, such as the two-week capture window,
+-- qualified) so the caller's filters, such as the live_since capture floor,
 -- reach the business_events indexes.
 CREATE OR REPLACE FUNCTION public.context_unread_rows(p_job_ids uuid[]) RETURNS SETOF public.business_events
 LANGUAGE sql STABLE AS $$
@@ -295,9 +296,9 @@ CREATE OR REPLACE FUNCTION public.context_jobs_cadence(p_job_ids uuid[]) RETURNS
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  WITH k AS (
   SELECT pol.p, now() AS now_t, (now() AT TIME ZONE 'Australia/Perth') AS local_now, (now() AT TIME ZONE 'Australia/Perth')::date AS today,
-   greatest((pol.p->>'live_since')::timestamptz, now()-make_interval(days=>(pol.p->>'age_window_days')::integer)) AS live_from,
+   (pol.p->>'live_since')::timestamptz AS live_from,
    (((now() AT TIME ZONE 'Australia/Perth')::date)::timestamp+(pol.p->>'status_only_after')::time) AT TIME ZONE 'Australia/Perth' AS evening,
-   public.automation_lane_enabled('extraction') AS lane, public.context_in_business_hours(now()) AS business_hours,
+   public.automation_lane_enabled('extraction') AS lane,
    (SELECT count(*) FROM public.context_model_call_reservations r WHERE r.run_date=(now() AT TIME ZONE 'Australia/Perth')::date)::integer AS calls
   FROM (SELECT public.context_cadence_policy() AS p) pol
  ), j AS (
@@ -337,7 +338,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
   SELECT b.*,
    b.local_now::time<(b.p->>'morning_until')::time AND b.calls>=(b.p->>'morning_cap')::integer AS pacing,
    b.calls>=(b.p->>'model_call_cap')::integer AS capped,
-   (b.p->>'runs_per_job_day')::integer+CASE WHEN b.customer AND b.business_hours THEN (b.p->>'inbound_extra_runs')::integer ELSE 0 END AS run_limit,
+   (b.p->>'runs_per_job_day')::integer+CASE WHEN b.customer AND public.context_in_business_hours(b.newest_wake) THEN (b.p->>'inbound_extra_runs')::integer ELSE 0 END AS run_limit,
    CASE WHEN b.wake_n>0 THEN least(b.newest_wake+make_interval(mins=>(b.p->>'quiet_min')::integer),b.oldest_wake+make_interval(mins=>(b.p->>'ceiling_min')::integer))
         WHEN b.so_n>0 THEN CASE WHEN b.ran_evening THEN b.evening+interval '1 day' ELSE b.evening END END AS evidence_due,
    b.last_started+make_interval(mins=>(b.p->>'cooldown_min')::integer) AS cooldown_until
@@ -346,7 +347,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
   SELECT l.*, greatest(l.evidence_due,l.cooldown_until,l.retry_until) AS due_at FROM limits l
  ), judged AS (
   SELECT t.*,
-   (t.lane AND t.extractable AND t.evidence_due IS NOT NULL AND NOT t.run_live AND t.runs_today<t.run_limit AND NOT t.pacing AND t.due_at<=t.now_t) AS due,
+   (t.lane AND t.extractable AND t.evidence_due IS NOT NULL AND NOT t.run_live AND t.runs_today<t.run_limit AND NOT t.pacing AND NOT t.capped AND t.due_at<=t.now_t) AS due,
    CASE WHEN NOT t.lane THEN 'lane_off' WHEN NOT t.extractable THEN 'holding_job' WHEN t.evidence_due IS NULL OR t.run_live THEN NULL
     WHEN t.runs_today>=t.run_limit THEN 'daily_ceiling' WHEN t.retry_until IS NOT NULL THEN 'retry_wait'
     WHEN t.capped THEN 'model_cap' WHEN t.pacing THEN 'pacing_reserve' END AS reason,
@@ -373,12 +374,12 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT c.cadence FROM public.context_jobs_cadence(ARRAY[p_job_id]) c
 $$;
 
--- Jobs that can be due at all: some unread live row captured in the window.
+-- Jobs that can be due at all: some unread live row captured at or after live_since.
 CREATE OR REPLACE FUNCTION public.context_cadence_pool() RETURNS SETOF uuid
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  WITH pol AS (SELECT public.context_cadence_policy() AS p)
  SELECT DISTINCT u.job_id FROM public.context_unread_rows(NULL) u, pol
- WHERE u.context_captured_at>=greatest((pol.p->>'live_since')::timestamptz, now()-make_interval(days=>(pol.p->>'age_window_days')::integer))
+ WHERE u.context_captured_at>=(pol.p->>'live_since')::timestamptz
   AND coalesce(u.metadata->>'capture_mode','live')='live' AND u.metadata->>'written_as'='service_role'
 $$;
 
@@ -395,17 +396,18 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
 $$;
 
 -- F1 pinned the heartbeat's ready_jobs equal to this read; the candidates read
--- is now bounded to two weeks of rows, so the count is the read itself.
+-- is now the live_since pool, so the count is the read itself.
 CREATE OR REPLACE FUNCTION public.context_ready_jobs_count(p_cap integer DEFAULT 400) RETURNS integer
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT count(*)::integer FROM public.context_extraction_candidates(p_cap)
 $$;
 COMMENT ON FUNCTION public.context_ready_jobs_count(integer) IS
- 'Heartbeat ready_jobs: count of context_extraction_candidates(p_cap), capped at 400. K1 made the candidates read cheap (two-week window), so this is the read itself.';
+ 'Heartbeat ready_jobs: count of context_extraction_candidates(p_cap), capped at 400. K1 made the candidates read the live_since pool, so this is the read itself.';
 
--- 4. The batch: newest landed first so the rows that woke the job are always
--- read, the newest customer (not ours) row always included, older rows while
--- space remains; returned in time order. Exact rows (note a).
+-- 4. The batch: newest customer (not ours) row always included, then live
+-- waking rows (the same live non-status-only predicate as context_jobs_cadence)
+-- ahead of landed time so the rows that woke the job are always read, older
+-- rows while space remains; returned in time order. Exact rows (note a).
 CREATE OR REPLACE FUNCTION public.context_extraction_events(p_job_id uuid,p_limit integer DEFAULT 25) RETURNS SETOF public.business_events
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  WITH admitted AS (
@@ -417,9 +419,17 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
   SELECT e.id FROM unread u JOIN public.business_events e ON e.id=u.id
   WHERE NOT public.context_event_is_ours(e)
   ORDER BY greatest(e.context_captured_at,e.attributed_at) DESC NULLS LAST, e.id DESC LIMIT 1
+ ), live_key AS (
+  SELECT (pol.p->>'live_since')::timestamptz AS live_since, j.created_at
+  FROM (SELECT public.context_cadence_policy() AS p) pol
+  JOIN public.jobs j ON j.id=p_job_id
  ), picked AS (
-  SELECT u.* FROM unread u
-  ORDER BY (u.id IN (SELECT id FROM anchor)) DESC, greatest(u.context_captured_at,u.attributed_at) DESC NULLS LAST, u.id DESC
+  SELECT u.* FROM unread u CROSS JOIN live_key k
+  ORDER BY (u.id IN (SELECT id FROM anchor)) DESC,
+   (u.context_captured_at>=k.live_since AND coalesce(u.metadata->>'capture_mode','live')='live' AND u.metadata->>'written_as'='service_role'
+    AND NOT (coalesce(u.attribution_step,0) IN (3,4) AND coalesce(u.event_at,u.occurred_at)<k.created_at)
+    AND NOT public.context_event_status_only(u)) DESC,
+   greatest(u.context_captured_at,u.attributed_at) DESC NULLS LAST, u.id DESC
   LIMIT greatest(0,least(coalesce(p_limit,25),25))
  ) SELECT * FROM picked ORDER BY coalesce(event_at,occurred_at), id
 $$;

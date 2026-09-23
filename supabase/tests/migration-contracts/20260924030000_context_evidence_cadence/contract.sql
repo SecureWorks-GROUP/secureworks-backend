@@ -65,7 +65,7 @@ BEGIN
   'public.finish_context_pass(date,uuid,text,timestamptz,text)','public.context_job_freshness(uuid)','public.context_cadence_status()']::regprocedure[] LOOP
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 'k1 service_role missing execute on %',f; END IF;
   -- The unread read deliberately carries no SET clause so it inlines into its
-  -- callers (the two-week capture filter must reach the index); it is
+  -- callers (the live_since capture filter must reach the index); it is
   -- SECURITY INVOKER SQL with every operator schema-qualified.
   IF f='public.context_unread_rows(uuid[])'::regprocedure THEN
    IF (SELECT proconfig IS NOT NULL OR prosecdef OR prolang<>(SELECT oid FROM pg_language WHERE lanname='sql') FROM pg_proc WHERE oid=f)
@@ -200,7 +200,7 @@ ROLLBACK;
 -- business hours); the claim itself refuses past the limits.
 BEGIN;
 DO $$
-DECLARE j uuid; c jsonb; claim jsonb; d date:=pg_temp.k1_today(); i int; lim int;
+DECLARE j uuid; e uuid; c jsonb; claim jsonb; d date:=pg_temp.k1_today(); i int; lim int; landed timestamptz;
 BEGIN
  PERFORM pg_temp.k1_policy();
  j:=pg_temp.k1_job('R9');
@@ -226,12 +226,27 @@ BEGIN
  IF (public.context_cadence_status()->>'jobs_at_daily_ceiling')::int<1 OR (public.context_cadence_status()->>'max_runs_one_job_today')::int<6
  THEN RAISE EXCEPTION 'k1 R9 status does not show the ceiling'; END IF;
  IF (public.context_job_freshness(j)->>'next_due_at')::timestamptz<((d+1)::timestamp AT TIME ZONE 'Australia/Perth') THEN RAISE EXCEPTION 'k1 R9 next read before tomorrow'; END IF;
- -- Newest waking row is the customer's words: 4 extra runs in business hours only.
- PERFORM pg_temp.k1_ev(j,'inbound','client.sms_in','Can the crew start earlier?','20 minutes');
+ -- Newest waking row is the customer's words: 4 extra runs when that row landed in business hours.
+ e:=pg_temp.k1_ev(j,'inbound','client.sms_in','Can the crew start earlier?','20 minutes');
  c:=public.context_job_cadence(j);
- lim:=CASE WHEN public.context_in_business_hours(now()) THEN 10 ELSE 6 END;
+ lim:=CASE WHEN public.context_in_business_hours((SELECT greatest(context_captured_at,attributed_at) FROM public.business_events WHERE id=e)) THEN 10 ELSE 6 END;
  IF NOT (c->>'newest_waking_is_customer')::boolean OR (c->>'run_limit')::int<>lim OR pg_temp.k1_due(j)<>(lim=10)
  THEN RAISE EXCEPTION 'k1 R9 inbound extra runs (expected limit %) %',lim,c; END IF;
+ -- Extra inbound runs belong to the row: a 17:50 Perth customer SMS keeps
+ -- the limit at 10 when judged after 18:00.
+ j:=pg_temp.k1_job('R9-1750');
+ INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,started_at,finished_at,run_seq)
+  SELECT j,d,'extraction','done',now()-interval '40 minutes',now()-interval '39 minutes',s FROM generate_series(1,6) s;
+ SELECT ((g.day)::timestamp+time '17:50') AT TIME ZONE 'Australia/Perth' INTO landed
+  FROM generate_series(((now() AT TIME ZONE 'Australia/Perth')::date-8),
+                       (now() AT TIME ZONE 'Australia/Perth')::date-1, interval '1 day') AS g(day)
+  WHERE extract(isodow FROM g.day) BETWEEN 1 AND 6
+  ORDER BY g.day DESC LIMIT 1;
+ e:=pg_temp.k1_ev(j,'inbound','client.sms_in','Can the crew start earlier?','20 minutes');
+ UPDATE public.business_events SET context_captured_at=landed,attributed_at=landed,event_at=landed,occurred_at=landed WHERE id=e;
+ c:=public.context_job_cadence(j);
+ IF NOT public.context_in_business_hours(landed) OR NOT (c->>'newest_waking_is_customer')::boolean OR (c->>'run_limit')::int<>10
+ THEN RAISE EXCEPTION 'k1 R9 extra runs follow the 17:50 row, not the clock %',c; END IF;
 END $$;
 ROLLBACK;
 
@@ -339,11 +354,13 @@ BEGIN
  live_row:=pg_temp.k1_ev(j,'outbound','quote.sent','Quote sent for the new job.','20 minutes','send-quote');
  IF NOT pg_temp.k1_due(j) OR (SELECT count(*) FROM public.context_extraction_events(j,25) WHERE id IN (r2,live_row))<>2
  THEN RAISE EXCEPTION 'k1 R2 quote.sent did not wake with the old row as context'; END IF;
- -- Age window (note c): a live row captured 15 days ago no longer wakes.
+ -- Age window (note c): a 15-day-old unread live text captured after live_since still becomes due.
  j:=pg_temp.k1_job('AGE');
  PERFORM pg_temp.k1_policy(jsonb_build_object('live_since',now()-interval '30 days'));
- PERFORM pg_temp.k1_ev(j,'inbound','client.sms_in','Old unread text','15 days');
- IF pg_temp.k1_due(j) THEN RAISE EXCEPTION 'k1 row older than the age window woke a job'; END IF;
+ old_row:=pg_temp.k1_ev(j,'inbound','client.sms_in','Old unread text','15 days');
+ IF NOT pg_temp.k1_due(j) THEN RAISE EXCEPTION 'k1 15-day-old unread live text after live_since did not become due'; END IF;
+ IF NOT (SELECT older_context FROM public.context_extraction_event_flags(j,ARRAY[old_row]) WHERE event_id=old_row)
+ THEN RAISE EXCEPTION 'k1 15-day-old row not flagged older_context'; END IF;
 END $$;
 ROLLBACK;
 
@@ -440,6 +457,16 @@ BEGIN
  FOR i IN 1..26 LOOP PERFORM pg_temp.k1_ev(k,'outbound','client.sms_out','Our update '||i,make_interval(mins=>150-i),'ghl-proxy'); END LOOP;
  IF NOT EXISTS(SELECT 1 FROM public.context_extraction_events(k,25) WHERE id=cust) OR (SELECT count(*) FROM public.context_extraction_events(k,25))<>25
  THEN RAISE EXCEPTION 'k1 anchor: newest customer row dropped'; END IF;
+ -- Live waking rows stay in the batch even behind 25+ newer backfill rows.
+ j:=pg_temp.k1_job('WAKE-KEEP');
+ new_text:=pg_temp.k1_ev(j,'outbound','quote.sent','Quote sent for the job.','2 hours','send-quote');
+ FOR i IN 1..26 LOOP
+  PERFORM pg_temp.k1_ev(j,'inbound','client.sms_in','Ride-along backfill '||i,make_interval(mins=>26-i),p_meta=>'{"capture_mode":"backfill"}');
+ END LOOP;
+ IF NOT pg_temp.k1_due(j) THEN RAISE EXCEPTION 'k1 wake-keep quote did not wake'; END IF;
+ SELECT array_agg(id) INTO ids FROM public.context_extraction_events(j,25);
+ IF cardinality(ids)<>25 OR NOT new_text=ANY(ids)
+ THEN RAISE EXCEPTION 'k1 wake-keep: live waking row dropped by newer backfill'; END IF;
 END $$;
 ROLLBACK;
 
@@ -493,6 +520,32 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- After the daily model cap, due, candidates and freshness agree. Claim is
+-- unchanged and may still succeed; A1 reservation refuses the next call.
+BEGIN;
+DO $$
+DECLARE j uuid; c jsonb; f jsonb; claim jsonb;
+BEGIN
+ PERFORM pg_temp.k1_policy(jsonb_build_object('morning_until','00:00'));
+ j:=pg_temp.k1_job('CAP');
+ PERFORM pg_temp.k1_ev(j,'inbound','client.sms_in','Any update?','20 minutes');
+ INSERT INTO public.context_model_call_reservations(run_date,ordinal,phase,reserved_at)
+  SELECT pg_temp.k1_today(),g,'attribution',now()
+  FROM generate_series(
+   coalesce((SELECT max(ordinal) FROM public.context_model_call_reservations WHERE run_date=pg_temp.k1_today()),0)+1,
+   400) g;
+ c:=public.context_job_cadence(j);
+ f:=public.context_job_freshness(j);
+ IF (c->>'due')::boolean OR pg_temp.k1_due(j) OR c->>'blocked_reason'<>'model_cap'
+  OR (c->>'next_due_at')::timestamptz<(pg_temp.k1_today()+1)::timestamp AT TIME ZONE 'Australia/Perth'
+  OR f->>'blocked_reason'<>'model_cap'
+  OR (f->>'next_due_at')::timestamptz<(pg_temp.k1_today()+1)::timestamp AT TIME ZONE 'Australia/Perth'
+ THEN RAISE EXCEPTION 'k1 model cap due/freshness/candidates % %',c,f; END IF;
+ claim:=public.claim_context_extraction_run(j,pg_temp.k1_today(),'extraction');
+ IF claim->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'k1 claim at model cap %',claim; END IF;
+END $$;
+ROLLBACK;
+
 -- 14. R16 and review M7: the tick lease is 5 minutes at any hour, done is not
 -- terminal, a lapsed lease is taken over and counted, and only the current
 -- token may renew or finish.
@@ -541,7 +594,7 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 16. Cost: the unread read inlines, so the pool's two-week filter is applied
+-- 16. Cost: the unread read inlines, so the pool's live_since filter is applied
 -- to business_events itself rather than to a materialised function result.
 DO $$
 DECLARE plan text:=''; line text;
