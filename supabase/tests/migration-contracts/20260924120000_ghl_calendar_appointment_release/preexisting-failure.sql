@@ -1,0 +1,1 @@
+ALTER TABLE public.ghl_calendar_appointment_requests ADD COLUMN released_at timestamptz;

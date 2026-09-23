@@ -366,7 +366,7 @@ monitor-ses-makesafes|supabase/migrations/20260911170000_automation_switches.sql
 # Calendar feed job_family: OpsDash calendar Divisions filter family lookup
 ops-api|supabase/migrations/20260916000000_calendar_events_job_family.sql|column|calendar_events.job_family
 
-# Sales Booking pack + stamp store (engine publish and captain KEEP/CUT)
+# Sales Booking pack + stamp store (engine publish; stamp writes retired, reads remain)
 ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|table|sales_booking_packs
 ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.resource
 ops-api|supabase/migrations/20260917130000_sales_booking_packs.sql|column|sales_booking_packs.week_start
@@ -446,6 +446,11 @@ ghl-proxy|supabase/migrations/20260921062158_ghl_calendar_appointment_requests.s
 ghl-proxy|supabase/migrations/20260921062158_ghl_calendar_appointment_requests.sql|index|ghl_calendar_appointment_person_window
 ghl-proxy|supabase/migrations/20260921062158_ghl_calendar_appointment_requests.sql|function|reserve_ghl_calendar_appointment
 ghl-proxy|supabase/migrations/20260921062158_ghl_calendar_appointment_requests.sql|function|mark_ghl_calendar_appointment_sending
+ghl-proxy|supabase/migrations/20260924120000_ghl_calendar_appointment_release.sql|column|ghl_calendar_appointment_requests.released_at
+ghl-proxy|supabase/migrations/20260924120000_ghl_calendar_appointment_release.sql|column|ghl_calendar_appointment_requests.released_by
+ghl-proxy|supabase/migrations/20260924120000_ghl_calendar_appointment_release.sql|column|ghl_calendar_appointment_requests.release_reason
+ghl-proxy|supabase/migrations/20260924120000_ghl_calendar_appointment_release.sql|constraint|ghl_calendar_appointment_requests_release_check
+ghl-proxy|supabase/migrations/20260924120000_ghl_calendar_appointment_release.sql|function|release_ghl_calendar_appointment_sending
 
 # Booking read composition: successful appointments and complete outcome histories.
 ops-api|supabase/migrations/20260921062158_ghl_calendar_appointment_requests.sql|table|ghl_calendar_appointment_requests

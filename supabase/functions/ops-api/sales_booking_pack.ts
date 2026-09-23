@@ -14,12 +14,13 @@ import {
 // proposals.json / coverage.json / drafts map (kind=pack). Additive
 // `booking_read_models` and independent approvals:
 // docs/sales-booking-confirmation-api.md.
-// `sales_booking_stamp_write` stores the captain KEEP/CUT stamp (kind=stamp)
-// with as_of = now. Only a verified Supabase JWT whose email is on
-// SALES_BOOKING_CAPTAIN_EMAILS may write; the ops API key and every other
-// JWT are 403 `stamp_write_requires_captain`. `published_by` is the JWT
-// email; the body `captain` field is ignored. `sales_booking_stamp_read`
-// returns the latest stamp.
+// The legacy captain KEEP/CUT stamp (kind=stamp) is read-only now:
+// `sales_booking_stamp_write` was retired 2026-09-23 (no live caller; the
+// separate-v1 approvals replaced it). `sales_booking_stamp_read` still returns
+// the latest stored stamp. `assertSalesBookingStampWriteAuth` survives as the
+// captain gate for booking approvals: only a verified Supabase JWT whose email
+// is on SALES_BOOKING_CAPTAIN_EMAILS passes; the ops API key and every other
+// JWT are 403 `stamp_write_requires_captain`.
 // `sales_booking_threads_refresh` re-reads GHL threads into kind=thread_facts.
 // `sales_booking_read` also persists kind=roster (opportunity enumeration
 // cache) on that same table; this module does not read or write it.
@@ -30,11 +31,11 @@ import {
 // filter.
 //
 // Env (read at call time, not module load):
-//   SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails allowed to
-//     write a stamp. Case-insensitive. Unset or blank defaults to
+//   SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails treated as the
+//     captain. Case-insensitive. Unset or blank defaults to
 //     marnin@secureworkswa.com.au.
 //
-// No send, no calendar write, no GHL write. A stamp write is a row, nothing else.
+// No send, no calendar write, no GHL write.
 
 import {
   emptySalesBookingPackView,
@@ -642,38 +643,6 @@ export async function salesBookingPackPublishAction(
     published_by: publishedBy(auth),
   });
   return { ok: true, id: written.id, as_of: written.as_of };
-}
-
-/** @deprecated Combined legacy stamp. Never grants separate-v1 authority. */
-export async function salesBookingStampWriteAction(
-  client: PackClient,
-  auth: SalesBookingPackAuth,
-  body: Record<string, unknown>,
-  now: Date = new Date(),
-  envGet: SalesBookingEnvGet = defaultEnvGet,
-): Promise<{ ok: true; id: string; as_of: string; published_by: string }> {
-  const publishedByEmail = assertSalesBookingStampWriteAuth(auth, envGet);
-  const resource = resolveSalesBookingResource(body.resource);
-  const weekStart = resolveWeekStart(body.week_start);
-  const stamp = {
-    ...parseSalesBookingStampPayload(body.stamp),
-    captain: publishedByEmail,
-  };
-  const asOf = now.toISOString();
-  const written = await insertPackRow(client, {
-    resource: resource.resource_id,
-    week_start: weekStart,
-    kind: SALES_BOOKING_STAMP_KIND,
-    as_of: asOf,
-    payload: stamp as unknown as Record<string, unknown>,
-    published_by: publishedByEmail,
-  });
-  return {
-    ok: true,
-    id: written.id,
-    as_of: written.as_of,
-    published_by: publishedByEmail,
-  };
 }
 
 export async function salesBookingStampReadAction(

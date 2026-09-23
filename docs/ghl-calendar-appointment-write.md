@@ -188,8 +188,9 @@ one exact stamped title plus calendar/contact/user/start/end match. Successful
 recovery completes the ledger; a failure to persist a known result follows this
 same path. An empty or ambiguous recovery window returns `outcome_unknown` and
 retains the fence. This also covers a crash after marking sending but before POST.
-Such unresolved cases require owner-authorized investigation; there is no reset,
-new-key fallback, deletion, or operator reconciliation write in this action.
+Such unresolved cases require owner-authorized investigation; this action has no
+reset, new-key fallback, deletion, or operator reconciliation write. The one way
+out is the separate captain release below.
 
 Completed reservations conservatively continue to block another key for that
 person/window, even if an owner later cancels the provider appointment. Cancellation,
@@ -200,6 +201,41 @@ external GHL UI/API writers. GHL's own slot validation stays enabled; simultaneo
 external writes, provider-linked calendars, buffers and availability policies
 remain subject to the owner's provider configuration. This change does not claim
 a production-proven global booking guarantee or alter those settings.
+
+## Releasing a stuck sending row
+
+`POST /functions/v1/ghl-proxy?action=release_calendar_appointment_request`
+exists because a `sending` row never expires: one lost provider answer used to
+freeze that person's window forever. Only the service-role credential or a
+same-organisation user JWT whose email is on `SALES_BOOKING_CAPTAIN_EMAILS`
+may call it; every other caller gets 403
+`{ok:false, code:"forbidden", reason:"captain_or_service_role_only"}`.
+
+```json
+{ "idempotencyKey": "the stuck key", "reason": "Checked GHL by hand: no appointment exists.", "commit": true }
+```
+
+Unknown fields are refused. `reason` is 10 to 500 characters with no control
+characters. Without `commit: true` the call is a read-only preview:
+`{ok:true, dryRun:true, wouldRelease, blocker?, request}` where `blocker` is
+`already_released`, `not_sending` or `too_recent`, or HTTP 404 `not_found`.
+With `commit: true`, the service-only database function
+`release_ghl_calendar_appointment_sending` takes the same key and person locks
+as a reservation and moves the row from `sending` to the terminal `released`
+state, recording `released_at`, `released_by` (the captain's email or
+`service_role`) and `release_reason`. It acts only when the post started more
+than ten minutes ago (the lease ended over ten minutes back), so a live worker
+is never cut off; otherwise HTTP 409 `too_recent`. A `reserved` or `complete`
+row answers 409 `not_sending`; a second release answers 200 with
+`alreadyReleased: true` and the first record. A ledger fault is 503
+`ledger_error`, never a release. Nothing is deleted and nothing is posted to GHL.
+
+Release only after checking GHL: the fence exists because the post may have
+landed. A released row stops blocking that person's window, while GHL's own
+slot validation and the pre-post window read still see any appointment that did
+land. The released key is terminal: a later create with that key answers 409
+`invalid_request` with `reason: request_released` and never recovers, reserves
+or posts. Book the slot again under a new captain approval.
 
 ## Notification evidence and owner workflow boundary
 
@@ -226,7 +262,8 @@ live database migration, SMS or configuration change was performed. The agent-si
 tool is a separate-repository follow-up.
 
 Before enabling writes, apply
-`20260921062158_ghl_calendar_appointment_requests.sql` and
+`20260921062158_ghl_calendar_appointment_requests.sql`,
+`20260924120000_ghl_calendar_appointment_release.sql` (the stuck-row release) and
 `20260923181500_sales_booking_executions.sql` (the executor claim table;
 `docs/sales-booking-executor.md`), then deploy `ghl-proxy`
 through the existing approved deployment path with `--no-verify-jwt` (the proxy

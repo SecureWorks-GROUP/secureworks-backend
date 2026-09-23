@@ -834,11 +834,11 @@ import {
   applySalesBookingPackOverlay,
   salesBookingPackPublishAction,
   salesBookingStampReadAction,
-  salesBookingStampWriteAction,
   salesBookingThreadsRefreshAction,
   SalesBookingPackError,
 } from './sales_booking_pack.ts'
 import { recordVisitOutcomeAction, listVisitOutcomesAction, VisitOutcomeError } from './visit_outcomes.ts'
+import { resolveSecureworksAgentBearer } from './secureworks_agent_bearer.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
@@ -1204,14 +1204,13 @@ const XERO_CLIENT_SECRET = Deno.env.get('XERO_CLIENT_SECRET') || ''
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const GHL_LOCATION_ID = Deno.env.get('GHL_LOCATION_ID') || ''
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
-// SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails allowed to
-// write sales_booking_stamp_write. Case-insensitive. Read at call time in
-// sales_booking_pack.ts (not here). Unset or blank defaults to
+// SALES_BOOKING_CAPTAIN_EMAILS — comma-separated JWT emails treated as the
+// captain (booking approvals and executor presses). Case-insensitive. Read at
+// call time in sales_booking_pack.ts (not here). Unset or blank defaults to
 // marnin@secureworkswa.com.au. API key callers are refused.
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env.get('RAILWAY_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app').replace(/\/+$/, '')
-const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -4787,7 +4786,10 @@ export async function _readInsuranceEvidenceAction(
   return json(result.body, result.status)
 }
 
-if (import.meta.main) serve(async (req: Request) => {
+// The whole request handler, named so a test can drive the real dispatch
+// (e.g. that a retired action answers `Unknown action`). serve() still only
+// starts when this module is the entrypoint.
+export async function _opsApiRequestHandlerForTest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Unauthenticated deploy-lane version probe ──
@@ -5290,30 +5292,6 @@ if (import.meta.main) serve(async (req: Request) => {
           ? await salesBookingBookAction(executeArgs)
           : await salesBookingSendAction(executeArgs)
         return json(executed, executed.status === 'refused' && executed.reason === 'press_requires_captain' ? 403 : 200)
-      }
-      case 'sales_booking_stamp_write': {
-        // DEPRECATED combined stamp; cannot approve either separate-v1 channel.
-        // Captain KEEP/CUT. Allow-listed captain JWT only
-        // (SALES_BOOKING_CAPTAIN_EMAILS; unset defaults to
-        // marnin@secureworkswa.com.au). API key and every other JWT are 403
-        // stamp_write_requires_captain. published_by is the JWT email; the
-        // body captain field is ignored. Stores kind=stamp with as_of now.
-        // No send, no calendar, no GHL write.
-        if (req.method !== 'POST') {
-          throw new ApiError('sales_booking_stamp_write requires POST', 405)
-        }
-        try {
-          return json(await salesBookingStampWriteAction(client, {
-            mode: authMode,
-            role: authUser?.role ?? null,
-            userId: authUser?.id ?? null,
-            email: authUser?.email ?? null,
-          }, body && typeof body === 'object' ? body : {}))
-        } catch (e) {
-          if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
-          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
-          throw e
-        }
       }
       case 'sales_booking_stamp_read': {
         // Engine --apply-stamp reader. API key only.
@@ -9749,11 +9727,8 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'snooze_proposed_action':       return json(await snoozeProposedAction(client, body))
       case 'create_job_for_opportunity':   return json(await createJobForOpportunity(client, body))
       case 'manual_dispatch_marnin_poc':   return json(await manualDispatchMarninPoc(client, body))
-      case 'assign_scoper':                return json(await assignScoper(client, body))
-      case 'book_scope':                   return json(await bookScope(client, body))
-      // Booking approval bridge — browser/ops-api calls Railway, Railway calls
-      // the existing sw_approve_booking_proposal path. Keeps Graph/calendar
-      // logic in one place instead of duplicating it in Deno.
+      // Booking approval bridge — sale.html dry-run preview only. Live book
+      // is sales_booking_book; commit:true is refused here.
       case 'approve_booking_proposal':      return json(await approveBookingProposalViaAgent(body, { mode: authModeLegacy, user: authUser }))
       // Quote Follow-Up Loop send path (atomic-claim per parent card B4).
       // Only fires when sale.html dispatches a send_quote_followup_sms
@@ -9767,14 +9742,6 @@ if (import.meta.main) serve(async (req: Request) => {
       // Per parent card secure-sale-quote-followup-loop reframe v3.
       case 'approve_scoper_call_task':     return json(await approveScoperCallTask(client, body))
       case 'approve_quote_review_task':    return json(await approveQuoteReviewTask(client, body))
-      // S2 (G-2): cockpit bridge for sw_approve_booking_proposal.
-      // Forwards the body to the Railway agent's
-      // /api/booking-approvals/approve endpoint, which fronts
-      // sw_approve_booking_proposal (booking-approval-http-bridge.ts).
-      // Dry-run by default (commit=false); cockpit double-confirms before
-      // sending commit=true. No customer-facing side effect lives here —
-      // the agent owns Microsoft Graph + the M2 SMS proposal queue write.
-      case 'approve_booking_proposal':     return json(await approveBookingProposalBridge(body, req))
       // Per-scoper playbook MD upload — Marnin-only authenticated edit.
       // Validates filename allowlist + YAML frontmatter (status enum,
       // voice_anchor allowlist, sign_off_pattern present) + em-dash check
@@ -12747,7 +12714,9 @@ if (import.meta.main) serve(async (req: Request) => {
     console.error('[ops-api] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(_opsApiRequestHandlerForTest)
 
 export async function prepareClockEventAssignment(
   client: any,
@@ -54038,102 +54007,6 @@ async function sendQuoteFollowupSms(client: any, body: any) {
 }
 
 // ════════════════════════════════════════════════════════════
-// S2 G-2: cockpit bridge for sw_approve_booking_proposal.
-//
-// The cockpit's "Review slot" button calls ops-api action
-// 'approve_booking_proposal'. Prior to S2 this dispatch fell through
-// to the default 'Unknown action' branch (S1 audit G-2).
-//
-// This handler is a thin proxy: it POSTs the cockpit's body to the
-// Railway agent's /api/booking-approvals/approve endpoint
-// (booking-approval-http-bridge.ts), which already fronts
-// sw_approve_booking_proposal. No Microsoft Graph, no Supabase address
-// fallback, no SMS — the agent owns all of those.
-//
-// Why proxy instead of port: a second Graph + Supabase implementation
-// in the edge function would drift. The bridge already exists. Owning
-// only the cockpit-token → service-token swap here keeps the trust
-// boundary tight.
-//
-// Env vars required at deploy time:
-//   * RAILWAY_AGENT_URL  — https://secureworks-agent-production.up.railway.app
-//   * SW_API_KEY         — Bearer token the Railway agent's requireAgentAuth accepts
-//
-// Dry-run vs commit:
-//   * Body MAY include commit:true to actually fire the side effects.
-//     Default is dry-run (commit:false). The cockpit double-confirms
-//     before sending commit:true (sale.html:3056).
-// ════════════════════════════════════════════════════════════
-async function approveBookingProposalBridge(body: any, req: Request) {
-  const proposalId = body?.proposal_id
-  if (!proposalId || typeof proposalId !== 'string') {
-    return { ok: false, error: 'proposal_id required' }
-  }
-
-  const agentUrl = Deno.env.get('RAILWAY_AGENT_URL') || Deno.env.get('SECUREWORKS_AGENT_URL') || ''
-  const apiKey = Deno.env.get('SW_API_KEY') || ''
-  if (!agentUrl || !apiKey) {
-    return {
-      ok: false,
-      error: 'approve_booking_proposal bridge unconfigured: RAILWAY_AGENT_URL or SW_API_KEY env missing',
-    }
-  }
-
-  const upstream = `${agentUrl.replace(/\/+$/, '')}/api/booking-approvals/approve`
-  const payload = {
-    proposal_id: proposalId,
-    approver_user_id: typeof body.approver_user_id === 'string' ? body.approver_user_id : undefined,
-    m2_drafted_message: typeof body.m2_drafted_message === 'string' ? body.m2_drafted_message : undefined,
-    commit: body.commit === true,
-  }
-
-  let res: Response
-  try {
-    res = await fetch(upstream, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        // Forward the original caller's user id where the agent can use
-        // it for the audit trail (booking-approval-handler emits
-        // approver_user_id into the bookings_events payload).
-        'X-Forwarded-For-User': req.headers.get('x-user-id') ?? '',
-      },
-      body: JSON.stringify(payload),
-    })
-  } catch (e: any) {
-    return { ok: false, error: `bridge fetch failed: ${e?.message ?? 'unknown'}` }
-  }
-
-  let data: any = null
-  try {
-    data = await res.json()
-  } catch {
-    data = { ok: res.ok, raw_status: res.status }
-  }
-
-  if (!res.ok) {
-    return {
-      ok: false,
-      error: data?.error ?? `agent bridge HTTP ${res.status}`,
-      status: res.status,
-      detail: data,
-    }
-  }
-
-  // Mirror the agent response, plus a small ops-api breadcrumb the
-  // cockpit can use for telemetry. The cockpit reads {result, ok} —
-  // both are passed through verbatim from the agent.
-  return {
-    ok: true,
-    bridge: 'ops-api → railway-agent /api/booking-approvals/approve',
-    commit: payload.commit,
-    dry_run: !payload.commit,
-    result: data,
-  }
-}
-
-// ════════════════════════════════════════════════════════════
 // Quote-nurture cadence v3 — internal task approval handlers.
 //
 // Atomic-claim pattern (memory feedback_atomic_claim_pattern_for_proposal_handlers).
@@ -54507,8 +54380,13 @@ async function approveBookingProposalViaAgent(
 ) {
   const proposal_id = String(body?.proposal_id || body?.action_id || '').trim()
   if (!proposal_id) throw new ApiError('proposal_id required', 400)
+  if (body?.commit === true) {
+    throw new ApiError('old booking commit is retired', 409, {
+      error: 'old booking commit is retired; use sales_booking_book',
+      code: 'old_booking_commit_retired',
+    })
+  }
 
-  const commit = body?.commit === true
   const approver_user_id = caller.mode === 'jwt'
     ? caller.user?.id
     : String(body?.approver_user_id || body?.user_id || '').trim() || undefined
@@ -54516,13 +54394,15 @@ async function approveBookingProposalViaAgent(
   if (caller.mode === 'jwt' && !approver_user_id) {
     throw new ApiError('authenticated user required for booking approval', 401)
   }
-  if (!SECUREWORKS_AGENT_BEARER) {
-    throw new ApiError('secureworks agent bearer not configured', 500)
+  // Never the service-role key: unset bearer env refuses by name (gap 12b).
+  const bearer = resolveSecureworksAgentBearer()
+  if (!bearer.ok) {
+    throw new ApiError(bearer.error, 500, { error: bearer.error, code: bearer.code })
   }
 
   const payload: Record<string, any> = {
     proposal_id,
-    commit,
+    commit: false,
   }
   if (approver_user_id) payload.approver_user_id = approver_user_id
   const m2 = String(body?.m2_drafted_message || body?.drafted_message || '').trim()
@@ -54533,7 +54413,7 @@ async function approveBookingProposalViaAgent(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SECUREWORKS_AGENT_BEARER}`,
+      'Authorization': `Bearer ${bearer.bearer}`,
     },
     body: JSON.stringify(payload),
   })
@@ -54548,8 +54428,8 @@ async function approveBookingProposalViaAgent(
   return {
     success: data?.ok !== false,
     proposal_id,
-    commit,
-    dry_run: !commit,
+    commit: false,
+    dry_run: true,
     agent_url: SECUREWORKS_AGENT_URL,
     result: data,
   }
@@ -55173,185 +55053,6 @@ async function manualDispatchMarninPoc(client: any, body: any): Promise<any> {
   // Send immediately via existing send path
   const sendResult = await sendProposedSms(client, { action_id: proposal.proposal_id, user_id })
   return { success: true, proposal_id: proposal.proposal_id, send_result: sendResult }
-}
-
-// Verb: Assign Scoper — attach a scoper user_id to a booking proposal
-// (and a window if supplied). Locks crew_availability for the window.
-async function assignScoper(client: any, body: any): Promise<any> {
-  const { action_id, scoper_user_id, window_iso, user_id } = body
-  if (!action_id) throw new Error('action_id required')
-  if (!scoper_user_id) throw new Error('scoper_user_id required')
-
-  const { data: action } = await client.from('ai_proposed_actions')
-    .select('proposal_id, action_type, metadata, action_payload, job_id')
-    .eq('proposal_id', action_id).maybeSingle()
-  if (!action) throw new Error('proposal not found')
-
-  const newMeta = Object.assign({}, action.metadata || {}, {
-    assigned_scoper_id: scoper_user_id,
-    assigned_at: new Date().toISOString(),
-    assigned_by: user_id || null,
-    ...(window_iso ? { assigned_window: window_iso } : {}),
-  })
-  const newPayload = Object.assign({}, action.action_payload || {}, {
-    assigned_scoper_id: scoper_user_id,
-    ...(window_iso ? { assigned_window: window_iso } : {}),
-  })
-  const { error } = await client.from('ai_proposed_actions')
-    .update({ metadata: newMeta, action_payload: newPayload })
-    .eq('proposal_id', action_id)
-  if (error) throw error
-
-  // Lock crew_availability if a window was supplied
-  if (window_iso) {
-    try {
-      const date = String(window_iso).slice(0, 10) // YYYY-MM-DD
-      await client.from('crew_availability').insert({
-        user_id: scoper_user_id,
-        date,
-        status: 'busy',
-        note: `Scope booked via cockpit (action_id=${action_id})`,
-      })
-    } catch (_e) { /* lock is advisory; don't fail the assign */ }
-  }
-
-  try {
-    await client.from('business_events').insert({
-      event_type: 'proposed_action.scoper_assigned',
-      source: 'ops-api/assign_scoper',
-      entity_type: 'ai_proposed_action',
-      entity_id: action_id,
-      job_id: action.job_id || null,
-      occurred_at: new Date().toISOString(),
-      payload: {
-        action_id, scoper_user_id,
-        window_iso: window_iso || null,
-        assigned_by: user_id || null,
-      },
-    })
-  } catch (_e) { /* best-effort */ }
-
-  return { success: true, action_id, scoper_user_id, window_iso: window_iso || null }
-}
-
-// Verb: Book Scope — finalize a booking proposal and emit a follow-up
-// scope_confirmation_sms targeting the customer (still status='pending'
-// so the rep approves the confirmation send).
-async function bookScope(client: any, body: any): Promise<any> {
-  const { action_id, scope_window_iso, scoper_user_id, user_id } = body
-  if (!action_id) throw new Error('action_id required')
-  if (!scope_window_iso) throw new Error('scope_window_iso required')
-
-  const { data: action, error: loadErr } = await client.from('ai_proposed_actions')
-    .select('proposal_id, action_type, job_id, contact_id, contact_name, contact_phone, metadata, action_payload')
-    .eq('proposal_id', action_id).maybeSingle()
-  if (loadErr) throw loadErr
-  if (!action) throw new Error('proposal not found')
-
-  // Mark the booking proposal booked (status='booked' is a new terminal state
-  // that sits alongside sent/dismissed; the kanban can render it as "scope locked in").
-  const newMeta = Object.assign({}, action.metadata || {}, {
-    booked_at: new Date().toISOString(),
-    booked_by: user_id || null,
-    scope_window: scope_window_iso,
-    ...(scoper_user_id ? { assigned_scoper_id: scoper_user_id } : {}),
-  })
-  await client.from('ai_proposed_actions')
-    .update({ status: 'booked', metadata: newMeta })
-    .eq('proposal_id', action_id)
-    .eq('status', 'pending')
-
-  // Lock the crew_availability window for the scoper
-  if (scoper_user_id) {
-    try {
-      const date = String(scope_window_iso).slice(0, 10)
-      await client.from('crew_availability').insert({
-        user_id: scoper_user_id,
-        date,
-        status: 'busy',
-        note: `Scope booked via cockpit (action_id=${action_id})`,
-      })
-    } catch (_e) { /* advisory */ }
-  }
-
-  // Emit a follow-up confirmation_sms proposal for the customer.
-  // Stays status='pending' so the rep approves the confirmation before it sends.
-  let confirmation_proposal_id: string | null = null
-  if (action.contact_phone) {
-    try {
-      const { data: trace } = await client.from('ai_reasoning_traces')
-        .insert({
-          trigger_type: 'cockpit:book_scope',
-          model_name: 'template:scope_confirmation_v1',
-          prompt_template_version: 'cockpit_book_scope_v1',
-          input_context_snapshot: {
-            source_action_id: action_id,
-            scope_window: scope_window_iso,
-            scoper_user_id: scoper_user_id || null,
-          },
-          reasoning_summary: 'Customer-facing scope confirmation SMS, drafted on Book Scope click.',
-          output_result: { action_type: 'scope_confirmation_sms' },
-          output_type: 'proposed_action',
-          status: 'completed',
-          tags: ['booking_scope', 'scope_confirmation'],
-        })
-        .select('id').single()
-
-      const fname = String(action.contact_name || 'there').trim().split(/\s+/)[0]
-      const draft = `Hi ${fname}, ${user_id ? 'a quick' : 'just a'} confirmation that we've locked you in for your scope on ${new Date(scope_window_iso).toLocaleString('en-AU', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}. See you then. — SecureWorks Group`
-
-      const { data: confProp } = await client.from('ai_proposed_actions')
-        .insert({
-          trace_id: trace?.id,
-          action_type: 'scope_confirmation_sms',
-          job_id: action.job_id || null,
-          contact_id: action.contact_id || null,
-          contact_name: action.contact_name || null,
-          contact_phone: action.contact_phone || null,
-          drafted_message: draft,
-          status: 'pending',
-          sent_at: null,
-          confidence_score: 0.9,
-          action_payload: {
-            loop: 'booking_scope',
-            reason: 'Customer-facing scope confirmation; rep approves before send.',
-            why_now: 'Scope just booked via cockpit',
-            evidence_refs: [{ source_table: 'ai_proposed_actions', source_id: action_id, kind: 'parent_booking' }],
-            scope_window: scope_window_iso,
-            assigned_scoper_id: scoper_user_id || null,
-          },
-          metadata: {
-            loop: 'booking_scope',
-            source: 'ops-api/book_scope',
-            playbook_id: 'cockpit_book_scope_v1',
-            parent_action_id: action_id,
-          },
-          org_id: DEFAULT_ORG_ID,
-        })
-        .select('proposal_id').single()
-      confirmation_proposal_id = confProp?.proposal_id ?? null
-    } catch (_e) { /* don't block book_scope on confirmation draft failure */ }
-  }
-
-  try {
-    await client.from('business_events').insert({
-      event_type: 'proposed_action.scope_booked',
-      source: 'ops-api/book_scope',
-      entity_type: 'ai_proposed_action',
-      entity_id: action_id,
-      job_id: action.job_id || null,
-      occurred_at: new Date().toISOString(),
-      payload: {
-        action_id,
-        scope_window: scope_window_iso,
-        scoper_user_id: scoper_user_id || null,
-        booked_by: user_id || null,
-        confirmation_proposal_id,
-      },
-    })
-  } catch (_e) { /* best-effort */ }
-
-  return { success: true, action_id, scope_window: scope_window_iso, confirmation_proposal_id }
 }
 
 // ════════════════════════════════════════════════════════════

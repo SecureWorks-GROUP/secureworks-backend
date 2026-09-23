@@ -8,9 +8,10 @@
  *    id), fills top-level drafts, publishes `pack.proposals` from every pack
  *    lead (opportunity id, or lead id when there is none), and sets
  *    stamp_state from the latest stamp.
- *  - Stamp write then stamp read round-trips. Unauthenticated publish is
- *    refused. Only an allow-listed captain JWT may write a stamp; the API
- *    key and any other JWT are 403 stamp_write_requires_captain.
+ *  - A stored legacy stamp reads back (the write action is retired).
+ *    Unauthenticated publish is refused. Only an allow-listed captain JWT
+ *    passes the captain gate; the API key and any other JWT are 403
+ *    stamp_write_requires_captain.
  *  - Nothing is sent.
  */
 // deno-lint-ignore-file no-import-prefix no-explicit-any
@@ -35,7 +36,6 @@ import {
   salesBookingPackPublishAction,
   salesBookingStampReadAction,
   salesBookingStampStateForCase,
-  salesBookingStampWriteAction,
   salesBookingThreadsRefreshAction,
   STAMP_WRITE_REQUIRES_CAPTAIN,
 } from "./sales_booking_pack.ts";
@@ -574,7 +574,7 @@ Deno.test("absent pack overlay keeps present false and an empty proposals map", 
   assertEquals(payload.cases[0].proposal, null);
 });
 
-Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", async () => {
+Deno.test("stored legacy stamp reads back; merge sets stamp_state", async () => {
   const client = memoryPacks();
   await salesBookingPackPublishAction(client, API_KEY_AUTH, {
     resource: "marnin",
@@ -584,25 +584,24 @@ Deno.test("stamp write then stamp read round-trips; merge sets stamp_state", asy
     coverage: coverageFixture(),
     drafts: { "opp-1": "Hi Jane" },
   });
-  const written = await salesBookingStampWriteAction(
-    client,
-    CAPTAIN_AUTH,
-    {
-      resource: "marnin",
-      week_start: WEEK,
-      stamp: {
-        captain: "nithin",
-        approved: ["opp:opp-1"],
-        rejected: [],
-        decisions: { "opp:opp-1": "hold" },
-        stage_moves: [{ id: "opp:opp-1", to_stage_id: "visit-booked" }],
-      },
+  // sales_booking_stamp_write is retired: a stamp only exists as a row stored
+  // before the retirement. Reads must keep returning it.
+  client.store.push({
+    id: "legacy-stamp-1",
+    resource: "marnin",
+    week_start: WEEK,
+    kind: "stamp",
+    as_of: "2026-09-17T01:00:00.000Z",
+    payload: {
+      captain: DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+      approved: ["opp:opp-1"],
+      rejected: [],
+      decisions: { "opp:opp-1": "hold" },
+      stage_moves: [{ id: "opp:opp-1", to_stage_id: "visit-booked" }],
     },
-    new Date("2026-09-17T01:00:00.000Z"),
-  );
-  assertEquals(written.ok, true);
-  assertEquals(written.as_of, "2026-09-17T01:00:00.000Z");
-  assertEquals(written.published_by, DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL);
+    published_by: DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+    created_at: "2026-09-17T01:00:00.000Z",
+  });
 
   const read = await salesBookingStampReadAction(client, API_KEY_AUTH, {
     resource: "marnin",
@@ -735,7 +734,7 @@ function assertStampWriteAuthRefused(
   assert(!warnings[0].includes("spoofed"));
 }
 
-Deno.test("stamp write accepts only an allow-listed captain JWT email", async () => {
+Deno.test("captain gate accepts only an allow-listed captain JWT email", () => {
   assertEquals(parseSalesBookingCaptainEmails(undefined), [
     DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
   ]);
@@ -784,97 +783,12 @@ Deno.test("stamp write accepts only an allow-listed captain JWT email", async ()
     }
   });
   assert(warnings[0].includes(DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL));
-
-  const client = memoryPacks();
-  const written = await salesBookingStampWriteAction(
-    client,
-    CAPTAIN_AUTH,
-    {
-      resource: "nithin",
-      week_start: WEEK,
-      stamp: {
-        captain: "nithin",
-        approved: ["opp-1"],
-        rejected: [],
-      },
-    },
-    new Date("2026-09-17T02:00:00.000Z"),
-  );
-  assertEquals(written.ok, true);
-  assertEquals(written.published_by, DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL);
-  assertEquals(
-    client.store[0].published_by,
-    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
-  );
-  assertEquals(
-    (client.store[0].payload as { captain: string }).captain,
-    DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
-  );
-
-  const origWarn = console.warn;
-  const writeRefusals: string[] = [];
-  console.warn = (...args: unknown[]) => {
-    writeRefusals.push(args.map(String).join(" "));
-  };
-  try {
-    await assertRejects(
-      () =>
-        salesBookingStampWriteAction(client, API_KEY_AUTH, {
-          resource: "nithin",
-          week_start: WEEK,
-          stamp: { captain: "api-key-spoof", approved: ["opp-1"] },
-        }),
-      SalesBookingPackError,
-      STAMP_WRITE_REQUIRES_CAPTAIN,
-    );
-    await assertRejects(
-      () =>
-        salesBookingStampWriteAction(client, STAFF_NOT_CAPTAIN_AUTH, {
-          resource: "nithin",
-          week_start: WEEK,
-          stamp: { captain: "staff-spoof", approved: ["opp-1"] },
-        }),
-      SalesBookingPackError,
-      STAMP_WRITE_REQUIRES_CAPTAIN,
-    );
-  } finally {
-    console.warn = origWarn;
-  }
-  assertEquals(writeRefusals.length, 2);
-  assert(writeRefusals[0].includes("caller=api_key"));
-  assert(writeRefusals[1].includes(`caller=${STAFF_NOT_CAPTAIN_AUTH.email}`));
-  assert(!writeRefusals.join("\n").includes("spoof"));
-  assertEquals(client.store.length, 1);
-});
-
-Deno.test("stamp write refuses an unknown resource before touching the table", async () => {
-  let touched = false;
-  const client = {
-    from() {
-      touched = true;
-      throw new Error(
-        "sales_booking_packs must not be written for an unknown resource",
-      );
-    },
-  };
-  await assertRejects(
-    () =>
-      salesBookingStampWriteAction(client, CAPTAIN_AUTH, {
-        resource: "__deploy_probe__",
-        week_start: WEEK,
-        stamp: { captain: "nithin", approved: [], rejected: [] },
-      }),
-    SalesBookingRequestError,
-    'Unknown resource "__deploy_probe__"',
-  );
-  assertEquals(touched, false);
 });
 
 Deno.test("front door refuses unauthenticated pack publish with 401", () => {
   for (
     const action of [
       "sales_booking_pack_publish",
-      "sales_booking_stamp_write",
       "sales_booking_stamp_read",
       "sales_booking_threads_refresh",
     ]

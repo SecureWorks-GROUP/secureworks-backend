@@ -11,6 +11,7 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 //   GET  ?action=calendar_events&userId=...&start=ISO&end=ISO  — read-only GHL calendar window
 //   GET  ?action=calendar_events&user_email=...&start=ISO&end=ISO  — same, scoper email only, id from roster match
 //   POST ?action=create_calendar_appointment  — default-off, durable GHL appointment write; docs/ghl-calendar-appointment-write.md
+//   POST ?action=release_calendar_appointment_request  { idempotencyKey, reason, commit? } — captain/service role: stuck sending row -> released (never deleted)
 //   GET  ?action=calendar_directory  — location calendars (id, name, is_active, assigned_user_ids) + roster (id, name, email)
 //   GET  ?action=calendar_person_events&user_email=...&start=ISO&end=ISO  — one person's events across assigned calendars + userId
 //   GET  ?action=search&q=smith&pipeline=patio  — search GHL leads (pipeline+Supabase cross-ref)
@@ -112,6 +113,7 @@ import {
   ghlCalendarPersonEventsAction,
 } from './calendar_events.ts'
 import { createCalendarAppointmentAction } from './calendar_appointment.ts'
+import { releaseCalendarAppointmentAction, releaseLedger } from './calendar_appointment_release.ts'
 import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
 import { appointmentLedger, bookingApprovalReader, bookingExecutionReader } from './calendar_appointment_ledger.ts'
 import {
@@ -671,6 +673,7 @@ serve(async (req: Request) => {
   }
 
   let authUserId: string | null = null
+  let authUserEmail: string | null = null
   let authProfile: any = null
   if (credential.mode === 'user_jwt') {
     if (!credential.bearerToken) return json({ error: 'Supabase user JWT required', code: 'user_jwt_required' }, 401)
@@ -679,6 +682,7 @@ serve(async (req: Request) => {
       const { data: { user }, error } = await authClient.auth.getUser(credential.bearerToken)
       if (error || !user) return json({ error: 'Invalid Supabase user JWT', code: 'invalid_user_jwt' }, 401)
       authUserId = user.id
+      authUserEmail = user.email || null
 
       const { data: profile, error: profileError } = await authClient.from('users')
         .select('id, org_id, role, email, name')
@@ -780,6 +784,29 @@ serve(async (req: Request) => {
           approvals: bookingApprovalReader(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
           executions: bookingExecutionReader(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
           captainEmails: parseSalesBookingCaptainEmails(Deno.env.get('SALES_BOOKING_CAPTAIN_EMAILS')),
+        },
+      })
+      return json(result.body, result.status)
+    }
+
+    // Captain or service role marks ONE stuck `sending` ledger row released,
+    // with a reason. Preview unless commit:true. Never deletes, never posts.
+    if (action === 'release_calendar_appointment_request') {
+      let body: unknown = null
+      if (req.method === 'POST') {
+        try { body = await req.json() } catch { return json({ ok: false, code: 'invalid_request' }, 400) }
+      }
+      const result = await releaseCalendarAppointmentAction({
+        method: req.method, body,
+        caller: {
+          mode: credential.mode, email: authUserEmail,
+          role: authProfile?.role, orgId: authProfile?.org_id,
+        },
+        deps: {
+          locationId: GHL_LOCATION_ID,
+          configuredOrgId: DEFAULT_ORG_ID,
+          captainEmails: parseSalesBookingCaptainEmails(Deno.env.get('SALES_BOOKING_CAPTAIN_EMAILS')),
+          ledger: releaseLedger(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
         },
       })
       return json(result.body, result.status)

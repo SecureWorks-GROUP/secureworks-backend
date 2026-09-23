@@ -13,8 +13,9 @@ This release joins the read and independent approval **storage** contracts.
 It does not execute a booking or message, enable a provider, or supply a model.
 Published availability evidence and durable visit records are composed below. No production behavior was observed.
 Apply `20260922150000_sales_booking_approvals.sql` before deploying these handlers.
-The legacy `sales_booking_stamp_write/read` path remains available, deprecated;
-legacy KEEP/CUT never translates into either independent approval.
+`sales_booking_stamp_write` was retired on 23 Sep 2026 (unknown action);
+`sales_booking_stamp_read` still returns stored legacy stamps, and legacy
+KEEP/CUT never translates into either independent approval.
 
 ## Producer handoff
 
@@ -70,7 +71,7 @@ complete commitments, evidence and channel hash checks. `send_hold` stays true;
 `ghl_calendar_appointment_requests` for the mapped GHL scoper. The selected
 week is combined with `visit_outcomes_from`/`visit_outcomes_to` (default: the
 last seven days). Outcome window inputs require offsets, positive duration,
-and at most 366 days. Pending/sending requests never count as bookings.
+and at most 366 days. Pending, sending and released requests never count as bookings.
 
 The appointment ledger has no contact column. Its `idempotency_key` joins the
 executor's own press record for the lead (`sales_booking_executions`, see
