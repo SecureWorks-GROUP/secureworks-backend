@@ -1,11 +1,13 @@
 import { assertCaptureEnabled, insertCapturedEvidence } from "./capture_guard.ts";
 import { automationLaneEnabled } from "../automation_switch.ts";
 import { sourceTime } from "../source_time.ts";
-// T7 Loop 1 — recordEvidence: the single capture choke point
+// T7 Loop 1 — recordEvidence: the T7 envelope capture helper
 //
 // Roadmap: cio/operations/2026-05-02-t7-evidence-capture-spine-roadmap.md (Section 5)
 //
-// Every comms / ops writer routes through this helper. The helper:
+// Not the writer for new evidence code — that owner is AGENTS.md
+// "New Evidence Code Writes Through capture_business_event".
+// Existing T7 comms / ops writers still route through this helper. The helper:
 //   - normalizes the envelope (truncates body_preview, computes safe_summary,
 //     resolves match_status via the matching ladder, defaults privacy +
 //     retention class);

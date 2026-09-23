@@ -3,8 +3,8 @@
 // Roadmap: cio/operations/2026-05-02-t7-evidence-capture-spine-roadmap.md
 // Migration: 20260502000001_t7_spine_envelope.sql (DRAFT)
 //
-// Single source for envelope semantics. Every writer that emits raw evidence
-// imports from here. Do NOT redefine these types in writer code.
+// Single source for T7 envelope semantics. T7 writers that emit raw evidence
+// import from here. Do NOT redefine these types in T7 writer code.
 
 export type Direction =
   | "inbound"

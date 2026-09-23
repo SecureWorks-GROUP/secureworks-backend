@@ -389,7 +389,8 @@ Deno.test("SUCCESS — canary fires, audit chain complete, fetch called once", a
   assertEquals(result.ghl_message_id, "ghl-msg-001")
 
   // Audit chain: 2 business_events inserts (manually_approved + dispatched).
-  // sms_sent is written by ghl-proxy itself, not by manual_dispatch.
+  // client.sms_out is written by ghl-proxy send_sms via capture_business_event,
+  // not by manual_dispatch.
   const events = calls.inserts.filter((c) => c.table === "business_events")
   assertEquals(events.length, 2)
   assertEquals(events[0].row.event_type, "proposed_action.manually_approved")

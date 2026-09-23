@@ -1,6 +1,5 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
-import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
 //
@@ -47,15 +46,10 @@ import { sourceTime } from "../_shared/source_time.ts";
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-// T7 Loop 4 — atomic cutover for outbound SMS. Closes G1 (1/136 spine
-// rows currently carry job_id). When caller does not supply jobId, we
-// look up the most-recent active job for the contact and apply the
-// matching ladder (single_recent_active_job confidence 0.55 falls below
-// floor → match_status='unresolved', job_id NOT leaked through).
-import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
+// Outbound SMS evidence goes through sms_capture.ts (context slice C1a): the
+// shared GHL row builder and the one SQL writer capture_business_event.
 import { computeHash } from '../_shared/evidence/storage.ts'
-import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
-import type { MatchMethod } from '../_shared/evidence/types.ts'
+import { saveSendSmsEvidence } from './sms_capture.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
   assignJobNumberWithNullCas,
@@ -4149,7 +4143,10 @@ serve(async (req: Request) => {
       }
       const fromNumber = resolvedFrom.fromNumber
 
-      // Contact-job mismatch guard: if both contactId and jobId supplied, verify they match
+      // Contact-job mismatch guard: if both contactId and jobId supplied, verify they match.
+      // The row read here also decides whether the evidence row may carry jobId as a
+      // verified direct link (sms_capture.ts sendSmsJobCustody).
+      let namedJob: { ghl_contact_id?: string | null } | null = null
       if (contactId && jobId) {
         try {
           const sbCheck = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -4157,6 +4154,7 @@ serve(async (req: Request) => {
             .select('ghl_contact_id, client_name')
             .eq('id', jobId)
             .single()
+          namedJob = job || null
           if (job && job.ghl_contact_id && job.ghl_contact_id !== contactId) {
             console.error(`[ghl-proxy] CONTACT MISMATCH BLOCKED: contactId=${contactId} does not match job ${jobId} contact=${job.ghl_contact_id} (${job.client_name})`)
             return json({
@@ -4205,82 +4203,25 @@ serve(async (req: Request) => {
         })
         console.log(`[ghl-proxy] SMS sent to contact ${contactId} from ${fromNumber}`)
 
-        // ── T7 Loop 4: closes G1 (outbound SMS missing job_id) ──
-        // When ON: recordEvidence with channel='sms', direction='outbound'.
-        // If caller did not supply jobId, look up the single most-recent
-        // active job for this contact and pass it via the matching ladder
-        // (single_recent_active_job confidence 0.55 falls below floor and
-        // becomes match_status='unresolved' — visible in the quarantine
-        // view rather than silently NULL).
-        // When OFF: legacy raw insert path runs unchanged.
+        // Evidence (context slice C1a): one row through the shared builder and the one
+        // writer, capture_business_event. A duplicate (the OutboundMessage webhook got
+        // there first) is a saved row; the writer upgrades its link when this send
+        // carries a verified job. No fallback write: a failure is logged by code and
+        // message id, and the reconciler recovers the row.
+        let evidenceOutcome: string = 'not_attempted'
         try {
           const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-          const t7Enabled = await isFlagOn(sb, 'evidence_capture_v1', DEFAULT_ORG_ID)
-          // Legacy row shape — emitted either by the T7 fallback path
-          // OR when the flag is OFF. Defined once so both paths stay in
-          // lockstep on shape (and on G1's job_id closure: even the
-          // legacy path now picks up jobId when supplied).
-          const legacyRow = {
-            event_type: 'sms_sent',
-            source: 'ghl-proxy',
-            entity_type: 'contact',
-            entity_id: contactId,
-            job_id: jobId || null,
-            event_at: sourceTime(result.dateAdded || result.createdAt),
-            occurred_at: new Date().toISOString(),
-            contact_id: contactId,
-            channel: 'sms', direction: 'outbound',
-            match_method: jobId ? 'direct_job_id' : 'none',
-            provider_message_id: result.messageId || result.id ? `ghl:${result.messageId || result.id}` : null,
-            body_preview: message.slice(0, 500),
-            payload: { body: message, message_id: result.messageId || result.id },
-          }
-          let t7Failed = false
-          if (t7Enabled) {
-            const resolvedJobId = jobId || null
-            const matchMethod: MatchMethod = jobId ? 'direct_job_id' : 'none'
-            try {
-              await recordEvidence(sb, {
-                event_type: 'client.sms_out',
-                source: 'ghl-proxy',
-                channel: 'sms',
-                direction: 'outbound',
-                source_table: 'business_events',
-                source_id: result.messageId || result.id || crypto.randomUUID(),
-                job_id: resolvedJobId,
-                contact_id: contactId,
-                entity_type: 'contact',
-                entity_id: contactId,
-                match_method: matchMethod,
-                event_at: sourceTime(result.dateAdded || result.createdAt),
-                provider_message_id: result.messageId || result.id ? `ghl:${result.messageId || result.id}` : undefined,
-                body_preview: message.slice(0, 500),
-                body_full: message,
-                privacy_classification: 'staff_only',
-                retention_class: '7y_audit',
-                payload: {
-                  body: message,
-                  message_id: result.messageId || result.id,
-                  user_id: userId || null,
-                },
-              }, {
-                org_id: DEFAULT_ORG_ID,
-                storage_client: sb.storage,
-              })
-            } catch (e: any) {
-              // T7 path failed — fall back to legacy insert below so the
-              // outbound SMS still lands on the spine. Without this, an
-              // outbound SMS could be dropped silently from the canonical
-              // event log when evidence_capture_v1 is ON.
-              console.error('[ghl-proxy] T7 recordEvidence failed; falling back to legacy:', e?.message)
-              t7Failed = true
-            }
-          }
-          if (!t7Enabled || t7Failed) {
-            const { error } = await insertCapturedEvidence(sb, legacyRow)
-            if (error) console.error('[ghl-proxy] legacy business_events insert failed:', error.message)
-          }
-        } catch { /* non-blocking */ }
+          const saved = await saveSendSmsEvidence(sb, {
+            contactId,
+            message,
+            fromNumber,
+            jobId: jobId || null,
+            job: namedJob,
+            result,
+            bodyHash: await computeHash(message),
+          })
+          evidenceOutcome = saved.outcome
+        } catch { evidenceOutcome = 'error' }
 
         // Log to job_events so Ops timeline + Trade can show sent messages without calling GHL
         if (jobId) {
@@ -4314,7 +4255,7 @@ serve(async (req: Request) => {
           metadata: { message_id: result.messageId || result.id },
         }).then(() => {}, () => {})
 
-        return json({ success: true, messageId: result.messageId || result.id })
+        return json({ success: true, messageId: result.messageId || result.id, evidence: evidenceOutcome })
       } catch (e) {
         rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] send_sms failed:', e)
