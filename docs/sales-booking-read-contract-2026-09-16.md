@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22; Outlook diary merge 2026-09-23)
 
 `GET ops-api?action=sales_booking_read` is the book, diary, and threads read
 behind the Sales Booking view. It replaces the branch-local preview server
@@ -13,8 +13,9 @@ Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
 Pack publish, captain stamp, thread-facts cache, and the read overlay:
 `supabase/functions/ops-api/sales_booking_pack.ts`.
 Visit ledger composition: `supabase/functions/ops-api/sales_booking_visits.ts`.
-Regressions: `sales_booking_read_test.ts`, `sales_booking_pack_test.ts`, and
-`sales_booking_visits_test.ts` beside those files.
+Regressions: `sales_booking_read_test.ts`, `sales_booking_outlook_test.ts`,
+`sales_booking_pack_test.ts`, and `sales_booking_visits_test.ts` beside those
+files.
 The GHL calendar window is one unpaged `/calendars/events` GET in
 `supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
@@ -103,7 +104,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 |---|---|---|
 | `resource` | `nithin` | `nithin` (patio) or `marnin` (fencing/Stratco). Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
-| `scoper_user_id` | the resource's own | Overrides the CALENDAR read only, and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
+| `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
 | `thread_limit` | 200 (max 250) | Newest-activity-first cap on thread reads, spent on scoped rows only. |
 | `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep, also clipped to the remaining whole-read budget. |
@@ -174,8 +175,10 @@ Additions:
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
   `scoper_user_id`, `sender_line`, `sender_line_source`,
   `scope_stage_ids`, plus `calendar`
-  `{ok, error, mailbox}` copied from `diary_read` (not a second calendar
-  read). The Booking door paints "Calendar not connected" when
+  `{ok, error}` from combined `diary_read.read_ok` / `reason` (not a
+  second calendar read). `mailbox` is `diary_read.calendar_email` (the
+  GHL address), falling back to the Outlook mailbox when GHL has none.
+  The Booking door paints "Calendar not connected" when
   `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
@@ -273,10 +276,14 @@ includes `roster`).
   `coverage.gaps`. The live search is `pipelineId` + `status=open`; GHL v3
   search takes only one `pipelineStageId`, so stage scope is applied after
   enumeration and before the thread pass.
-- **`diary` empty with `diary_read.read_ok:false`** is an UNREAD calendar, not a
-  clear week. Unread coverage is never free capacity. Named unread reasons
-  include `ghl_user_unmapped` (no confirmed GHL user for that scoper) and
-  `ghl_calendar_page_failed` (the unpaged GHL events GET did not complete).
+- **`diary_read.read_ok:false`** is an UNREAD (or incomplete) calendar, not a
+  clear week, whether `diary[]` is empty or still holds the source that
+  did read. Unread coverage is never free capacity. Named unread reasons
+  include `ghl_user_unmapped` (no confirmed GHL user for that scoper),
+  `ghl_calendar_page_failed` (the unpaged GHL events GET did not
+  complete), and `outlook_calendar_unread: <named failure>` (the
+  configured Outlook primary calendar did not read; GHL rows that did
+  read stay on the diary).
 - **`thread_facts[id].read_ok:false`** means nothing was proved about that
   thread. The case still appears, and its `status` stays the default
   `needs_decision`. Classification lives only in `thread_facts`.

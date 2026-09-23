@@ -10,7 +10,8 @@ import {
 // view (`opsFetch('sales_booking_read', {resource, week_start, scoper_user_id})`).
 // It replaces the branch-local preview server `scripts/sales-booking-local-api.mjs`
 // with the same response shape, plus the two facts the browser must not derive
-// itself: the scoper's GHL `diary[]` for the week, and per-case
+// itself: the scoper's `diary[]` for the week (GHL plus Outlook when
+// that resource has a mailbox), and per-case
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
 // Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
