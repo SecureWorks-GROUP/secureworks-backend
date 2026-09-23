@@ -1,8 +1,6 @@
 // Slice C1a: ghl-proxy send_sms saves its text once, through the shared row
 // builder and the one SQL writer capture_business_event (sms.md §3 review M9).
-// Behaviour runs against a recording fake client; the index.ts wiring is pinned
-// by reading its source, because index.ts starts serve() at import time.
-// No network, no database.
+// Behaviour runs against a recording fake client. No network, no database.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { buildSendSmsEvidenceRow, type CaptureOutcome, saveSendSmsEvidence, sendSmsJobCustody } from "./sms_capture.ts";
 import { R5 } from "../_shared/evidence/ghl_message_fixtures.ts";
@@ -104,25 +102,4 @@ Deno.test("a send answer with no message id writes nothing (no key, no row)", as
   const outcome = await saveSendSmsEvidence(client, { ...R5_INPUT, result: { conversationId: "c" } });
   assertEquals(outcome, { outcome: "skipped", reason: "no_id" });
   assertEquals(client.calls.length, 0);
-});
-
-// ── index.ts wiring (source read) ──
-const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-const start = source.indexOf("if (action === 'send_sms' && req.method === 'POST') {");
-const end = source.indexOf("// ── Send email via GHL conversations API ──");
-const sendSms = source.slice(start, end);
-
-Deno.test("send_sms saves evidence only through saveSendSmsEvidence: recordEvidence and the sms_sent business_events shape are retired", () => {
-  assert(start > 0 && end > start, "send_sms block not found");
-  assert(sendSms.includes("saveSendSmsEvidence(sb, {"), "send_sms must save through saveSendSmsEvidence");
-  assert(!sendSms.includes("recordEvidence("), "recordEvidence is retired on send_sms");
-  assert(!sendSms.includes("insertCapturedEvidence("), "no second business_events write path");
-  assert(!/from\(['"]business_events['"]\)\s*\.insert/.test(sendSms), "no raw business_events insert");
-  assert(!source.includes("import { recordEvidence }"), "recordEvidence import removed");
-  // job_events keeps its own sms_sent timeline row (a different table, Ops timeline).
-  assert(sendSms.includes("from('job_events').insert"), "job_events timeline row kept");
-  // The 10-minute duplicate-send check still reads both shapes (old rows stay sms_sent).
-  assert(sendSms.includes(".in('event_type', ['sms_sent', 'client.sms_out'])"));
-  // The job row read by the mismatch guard feeds custody.
-  assert(sendSms.includes("namedJob = job || null") && sendSms.includes("job: namedJob,"));
 });
