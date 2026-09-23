@@ -827,6 +827,17 @@ import { applySalesBookingVisits } from './sales_booking_visits.ts'
 import { applySalesBookingExecutions } from './sales_booking_execution_read.ts'
 import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_execute.ts'
 import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
+import {
+  debtFollowupApproveAction,
+  debtFollowupExecuteAction,
+  debtFollowupLegacySend,
+  debtFollowupProposeAction,
+  type DebtFollowupAuth,
+  type DebtFollowupDeps,
+  invoiceEmailHtmlBody,
+  legacySendResponse,
+} from './debt_followup_approval.ts'
+import { callGhlProxySendSms, createDebtFollowupDeps } from './debt_followup_approval_live.ts'
 import { applyOwnerBooking, OwnerApprovalRefusal } from './sales_booking_owner_approval.ts'
 import {
   salesBookingReadAction,
@@ -3778,6 +3789,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
   const siBuffer = await siPdfResp.arrayBuffer()
   const siBytes = new Uint8Array(siBuffer)
+  const siAttachmentSha256 = Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', siBytes)),
+    (b) => b.toString(16).padStart(2, '0'),
+  ).join('')
   let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
   const siPdfB64 = btoa(siBin)
 
@@ -3789,7 +3804,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       to: siTo,
       cc: siCcSafe,
       subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
-      htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
+      htmlBody: invoiceEmailHtmlBody(siNum),
       job_id: verifiedJobId,
       xero_invoice_id: siId,
       attachments: [{
@@ -3816,7 +3831,12 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     // K3: digit-free words so the ladder's number match cannot fire; the
     // invoice number and address stay in payload only.
     body_preview: INVOICE_EMAILED_BODY_PREVIEW,
-    payload: { invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId) },
+    payload: {
+      invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId),
+      ...(body.debt_followup_approval_id
+        ? { debt_followup_approval_id: body.debt_followup_approval_id, attachment_sha256: siAttachmentSha256 }
+        : {}),
+    },
   })
   if (verifiedJobId) {
     try {
@@ -3828,7 +3848,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     } catch { /* non-blocking */ }
   }
 
-  return json({ success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook' })
+  return json({
+    success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook',
+    attachment_sha256: siAttachmentSha256,
+  })
 }
 
 // ════════════════════════════════════════════════════════════
@@ -5300,6 +5323,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ? await salesBookingBookAction(executeArgs)
           : await salesBookingSendAction(executeArgs)
         return json(executed, executed.status === 'refused' && executed.reason === 'press_requires_captain' ? 403 : 200)
+      }
+      case 'debt_followup_propose':
+      case 'debt_followup_approve':
+      case 'debt_followup_execute': {
+        // Debt follow-up: exact-message approval and the one send executor
+        // (debt_followup_approval.ts, docs/debt-followup-approval.md). A press
+        // sends only when DEBT_FOLLOWUP_SEND_EXECUTE is exactly "true" AND an
+        // allow-listed captain session pressed; every other press is a recorded
+        // dry run. Never writes Xero or moves money.
+        const dfArgs = {
+          method: req.method,
+          auth: debtFollowupAuth(authMode, authUser),
+          body: body && typeof body === 'object' ? body : {},
+          deps: createDebtFollowupDepsForOps(client),
+        }
+        const dfResult = action === 'debt_followup_propose'
+          ? await debtFollowupProposeAction(dfArgs)
+          : action === 'debt_followup_approve'
+          ? await debtFollowupApproveAction(dfArgs)
+          : await debtFollowupExecuteAction(dfArgs)
+        const dfCaptainOnly = dfResult.status === 'refused' && dfResult.reason === 'approval_requires_captain'
+        return json(dfResult, dfCaptainOnly ? 403 : 200)
       }
       case 'sales_booking_stamp_read': {
         // Engine --apply-stamp reader. API key only.
@@ -8338,36 +8383,30 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
-        const directSendInvoice = await assertLegacySesInvoiceActionAllowed(
+        await assertLegacySesInvoiceActionAllowed(
           client,
           siId,
           'send_invoice_email',
           siJobId || undefined,
         )
 
-        // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
-        // Dashboard callers pass only xero_invoice_id; MCP sw_send_invoice_email passes to_email for Outlook+PDF.
-        if (!siTo) {
-          const { accessToken: sAt, tenantId: sTi } = await getToken(client)
-          await xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST')
-          try {
-            await client.from('job_events').insert({
-              job_id: directSendInvoice?.job_id || null,
-              event_type: 'invoice.emailed',
-              detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
-            })
-          } catch { /* non-blocking */ }
-          return json({ success: true, emailed: true, via: 'xero_direct' })
-        }
-
-        // Enhanced path: to_email provided → delegate to extracted, testable helper.
-        return await _verifyAndSendInvoiceEmail({
-          client, body,
-          getToken, xeroGet, logBusinessEvent,
-          fetch: globalThis.fetch.bind(globalThis),
-          xeroFetch: xeroAccountingFetch,
-          env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
+        // Both branches go through the debt follow-up executor
+        // (debt_followup_approval.ts). With approval_id: press that exact
+        // captain-approved email. Without one: a recorded dry run of the exact
+        // email that would go, and no send. The old Xero-direct
+        // /Invoices/{id}/Email route (no to_email) is retired: the executor
+        // sends only through the verified Outlook branded-PDF transport.
+        const siResult = await debtFollowupLegacySend({
+          sourceAction: 'send_invoice_email',
+          kind: 'invoice_email',
+          method: req.method,
+          auth: debtFollowupAuth(authMode, authUser),
+          request: { xero_invoice_id: siId, to_email: siTo || null, cc: siCc ?? [], subject: siSubj || null },
+          body,
+          deps: createDebtFollowupDepsForOps(client),
         })
+        const siResp = legacySendResponse(siResult)
+        return json(siResp.body, siResp.status)
       }
 
       case 'approve_and_send_invoice': {
@@ -8825,7 +8864,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           'complete_job',
         )
         return json(await completeJob(client, body))
-      case 'send_payment_link': return json(await sendPaymentLink(client, body))
+      case 'send_payment_link': {
+        const plResp = await sendPaymentLink(client, body, debtFollowupAuth(authMode, authUser), req.method)
+        return json(plResp.body, plResp.status)
+      }
       case 'send_acceptance_invoice': return json(await sendAcceptanceInvoice(client, body))
       case 'send_review_request': return json(await sendReviewRequest(client, body))
 
@@ -12684,10 +12726,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'classify_invoice': return json(await classifyInvoice(client, body))
       case 'log_chase': return json(await logChase(client, body))
       case 'resolve_follow_up': return json(await resolveFollowUp(client, body))
-      case 'send_chase_sms': return json(await sendChaseSms(client, body))
+      case 'send_chase_sms': {
+        const csResp = await sendChaseSms(client, body, debtFollowupAuth(authMode, authUser), req.method)
+        return json(csResp.body, csResp.status)
+      }
       case 'trigger_chase_workflow': return json(await triggerChaseWorkflow(client, body))
       case 'stop_chase_workflow': return json(await stopChaseWorkflow(client, body))
-      case 'handle_payment_event': return json(await handlePaymentEvent(client, body))
+      case 'handle_payment_event': return json(await handlePaymentEvent(client, body, debtFollowupAuth(authMode, authUser)))
       case 'trigger_xero_sync': return json(await triggerXeroSync())
       case 'ai_analyse_debt_client': return json(await aiAnalyseDebtClient(client, body))
       case 'ai_draft_chase_message': return json(await aiDraftChaseMessage(body))
@@ -52005,12 +52050,20 @@ async function completeJob(client: any, body: any) {
   }
 }
 
-// ── send_payment_link: get Xero online invoice URL + SMS to client ──
-// AUTHORISED invoices only: throws ApiError 409 for any other status (DRAFT etc.),
-// because a non-AUTHORISED invoice's online link cannot take payment. Callers
-// (daily-digest deposit chaser, JARVIS sw_send_payment_link) must treat a
-// non-success response as "reminder NOT sent".
-async function sendPaymentLink(client: any, body: any) {
+// ── send_payment_link: the Xero online-invoice link by SMS ──
+// Goes through the debt follow-up executor (debt_followup_approval.ts). The
+// approval binds the exact invoice id, never just the job, so a job-only call
+// is refused rather than guessing the job's latest invoice. The executor
+// refuses any invoice that is not AUTHORISED with a balance, since its online
+// link cannot take payment. Without an approval_id this records a dry run and
+// sends nothing. Callers (daily-digest deposit chaser, JARVIS
+// sw_send_payment_link) must treat a non-success response as "reminder NOT sent".
+async function sendPaymentLink(
+  client: any,
+  body: any,
+  auth: DebtFollowupAuth,
+  method: string,
+): Promise<{ status: number; body: any }> {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
   await assertLegacySesMoneyActionAllowedForJob(
@@ -52019,105 +52072,70 @@ async function sendPaymentLink(client: any, body: any) {
     'send_payment_link',
   )
   await assertNoSyntheticLivefireJobs(client, [jId], 'send_payment_link')
-
-  // Dedup check: prevent sending same payment link within 24 hours
-  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-  const { data: recentSends } = await client
-    .from('job_events')
-    .select('id, created_at')
-    .eq('job_id', jId)
-    .eq('event_type', 'payment_link_sent')
-    .gte('created_at', twentyFourHoursAgo)
-    .limit(1)
-  if (recentSends && recentSends.length > 0) {
-    const lastSent = recentSends[0].created_at
-    throw new ApiError(`Payment link already sent for this job within the last 24 hours (last sent: ${new Date(lastSent).toLocaleString('en-AU', { timeZone: 'Australia/Perth' })}). To prevent duplicate messages, please wait before resending.`, 409)
+  if (body.xero_invoice_id) {
+    const { data: plInv, error: plInvErr } = await client.from('xero_invoices')
+      .select('job_id').eq('xero_invoice_id', body.xero_invoice_id).maybeSingle()
+    if (plInvErr) throw new ApiError('Invoice mirror lookup failed', 503)
+    if (!plInv || plInv.job_id !== jId) {
+      throw new ApiError('xero_invoice_id does not belong to this job', 409)
+    }
   }
-
-  // Get job with GHL contact
-  const { data: job, error: jobErr } = await client
-    .from('jobs')
-    .select('id, client_name, client_phone, job_number, ghl_contact_id')
-    .eq('id', jId)
-    .single()
-  if (jobErr || !job) throw new Error('Job not found')
-  if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
-
-  // Find the Xero invoice for this job
-  const { data: invoices } = await client
-    .from('xero_invoices')
-    .select('xero_invoice_id, invoice_number, total, status')
-    .eq('job_id', jId)
-    .eq('invoice_type', 'ACCREC')
-    .not('status', 'in', '("VOIDED","DELETED")')
-    .order('created_at', { ascending: false })
-    .limit(1)
-
-  if (!invoices || invoices.length === 0) throw new Error('No invoice found for this job')
-  const invoice = invoices[0]
-
-  if (invoice.status !== 'AUTHORISED') {
-    throw new ApiError(`Invoice ${invoice.invoice_number || invoice.xero_invoice_id} is ${invoice.status || 'not AUTHORISED'} in Xero, not AUTHORISED — its online link cannot take payment. Authorise the invoice in Xero (a just-authorised invoice may need a sync first), then resend the payment link.`, 409)
-  }
-
-  // Get Xero online invoice URL
-  const { accessToken, tenantId } = await getToken(client)
-  const onlineResult = await xeroGet(
-    `/Invoices/${invoice.xero_invoice_id}/OnlineInvoice`,
-    accessToken, tenantId
-  )
-  const onlineUrl = onlineResult?.OnlineInvoices?.[0]?.OnlineInvoiceUrl
-  if (!onlineUrl) throw new Error('Could not get Xero online invoice URL')
-
-  // Send SMS via GHL
-  const smsMessage = `Hi ${job.client_name?.split(' ')[0] || 'there'}, your invoice for ${job.job_number} is ready. You can view and pay online here: ${onlineUrl}\n\nThanks,\nSecureWorks Group`
-
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contactId: job.ghl_contact_id,
-      message: smsMessage,
-    }),
+  const result = await debtFollowupLegacySend({
+    sourceAction: 'send_payment_link',
+    kind: 'payment_link_sms',
+    method,
+    auth,
+    request: { xero_invoice_id: body.xero_invoice_id ?? null, ghl_contact_id: body.ghl_contact_id ?? null },
+    body,
+    deps: createDebtFollowupDepsForOps(client),
   })
-  const smsResult = await smsResp.json()
+  return legacySendResponse(result)
+}
 
-  // Log event
-  await client.from('job_events').insert({
-    job_id: jId,
-    event_type: 'payment_link_sent',
-    detail_json: {
-      invoice_number: invoice.invoice_number,
-      xero_invoice_id: invoice.xero_invoice_id,
-      online_url: onlineUrl,
-      sms_sent: smsResult.success || false,
+// ── Debt follow-up executor wiring (debt_followup_approval.ts) ──
+function debtFollowupAuth(authMode: string, authUser: { email?: string | null } | null): DebtFollowupAuth {
+  return { mode: authMode, email: authMode === 'jwt' ? (authUser?.email || null) : null }
+}
+
+function createDebtFollowupDepsForOps(client: any): DebtFollowupDeps {
+  return createDebtFollowupDeps(client, {
+    orgId: DEFAULT_ORG_ID,
+    getToken,
+    xeroGet: (path, accessToken, tenantId) => xeroGet(path, accessToken, tenantId),
+    assertInvoiceAllowed: (c, id, action, jobId) => assertLegacySesInvoiceActionAllowed(c, id, action, jobId),
+    fenceRefusal: (error) =>
+      error instanceof SesActionError ? { status: error.status, ...(error.refusal as Record<string, unknown>) } : null,
+    sendSms: callGhlProxySendSms,
+    // The verified Outlook branded-PDF transport. Reached only from the
+    // executor's live branch (switch on + captain press).
+    sendInvoiceEmail: async (args) => {
+      try {
+        const res = await _verifyAndSendInvoiceEmail({
+          client,
+          body: {
+            xero_invoice_id: args.xero_invoice_id,
+            to_email: args.to_email,
+            job_id: args.job_id || undefined,
+            cc: args.cc,
+            subject_override: args.subject_override,
+            debt_followup_approval_id: args.approval_id,
+          },
+          getToken, xeroGet, logBusinessEvent,
+          fetch: globalThis.fetch.bind(globalThis),
+          xeroFetch: xeroAccountingFetch,
+          env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
+        })
+        return { status: res.status, body: await res.json().catch(() => ({})) }
+      } catch (e) {
+        // Both are raised before Outlook is called: definitely not sent.
+        if (e instanceof XeroCooldownError) return { status: 429, body: { code: 'xero_cooldown' } }
+        if (e instanceof ApiError && /^Failed to fetch PDF from Xero/.test(e.message)) {
+          return { status: 424, body: { code: 'invoice_pdf_unavailable' } }
+        }
+        throw e
+      }
     },
   })
-
-  // Log to jarvis_event_log (non-blocking, fire-and-forget)
-  client.from('jarvis_event_log').insert({
-    event_type: 'payment_link_sent',
-    contact_id: job.ghl_contact_id,
-    job_id: jId,
-    invoice_id: invoice.xero_invoice_id,
-    channel: 'sms',
-    triggered_by: 'jarvis',
-    message_content: smsMessage.slice(0, 2000),
-    metadata: { invoice_number: invoice.invoice_number, payment_url: onlineUrl },
-  }).then(() => {}).catch(() => {})
-
-  // Fire-and-forget: recompute job intelligence after payment link sent
-  fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
-    headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-  }).catch(() => {})
-
-  return {
-    success: true,
-    invoice_number: invoice.invoice_number,
-    payment_url: onlineUrl,
-    sms_sent: smsResult.success || false,
-  }
 }
 
 // Acceptance-invoice charge gate. The branded "Pay Now" email/SMS may only go out
@@ -59364,18 +59382,25 @@ async function forceReconcileInvoice(dbClient: any, body: any) {
   return { success: true, invoice_status: inv?.status, amount_due: inv?.amount_due, synced_at: inv?.synced_at, sync: syncResult }
 }
 
-async function sendChaseSms(client: any, body: any) {
-  const { xero_invoice_id, message, operator_email } = body
+// Clear Debt chase text. Goes through the debt follow-up executor: with an
+// approval_id it presses that exact captain-approved text; without one it
+// records a dry run of the exact text and sends nothing.
+async function sendChaseSms(
+  client: any,
+  body: any,
+  auth: DebtFollowupAuth,
+  method: string,
+): Promise<{ status: number; body: any }> {
+  const { xero_invoice_id, message } = body
   // Normalise empty strings to null — job_id has FK constraint to jobs(id)
   const job_id = body.job_id && String(body.job_id).trim() ? String(body.job_id).trim() : null
   const ghl_contact_id = body.ghl_contact_id || body.contact_id
-  if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
   const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
     client,
     { xeroInvoiceId: xero_invoice_id, jobId: job_id },
     'send_chase_sms',
   )
-  if (resolved.job_id) {
+  if (resolved.job_id && ghl_contact_id) {
     await assertGhlContactMatchesResolvedJob(
       client,
       resolved.job_id,
@@ -59383,29 +59408,22 @@ async function sendChaseSms(client: any, body: any) {
       'send_chase_sms',
     )
   }
-
-  // Send via GHL proxy
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-    body: JSON.stringify({ contactId: ghl_contact_id, message, jobId: resolved.job_id || undefined }),
+  const result = await debtFollowupLegacySend({
+    sourceAction: 'send_chase_sms',
+    kind: 'chase_sms',
+    method,
+    auth,
+    request: {
+      xero_invoice_ids: Array.isArray(body.xero_invoice_ids)
+        ? body.xero_invoice_ids
+        : xero_invoice_id ? [xero_invoice_id] : [],
+      ghl_contact_id: ghl_contact_id || null,
+      message: typeof message === 'string' ? message : null,
+    },
+    body,
+    deps: createDebtFollowupDepsForOps(client),
   })
-  const smsResult = await smsResp.json()
-  if (!smsResult.success) throw new Error(smsResult.error || 'SMS send failed')
-
-  // Log the chase (job_id optional — some chase SMS target contacts without linked jobs)
-  await client.from('payment_chase_logs').insert({
-    xero_invoice_id: xero_invoice_id || null,
-    job_id: resolved.job_id,
-    ghl_contact_id,
-    method: 'sms',
-    outcome: 'SMS sent',
-    notes: message.substring(0, 500),
-    chased_by: operator_email || null,
-  })
-
-  return { success: true, message_id: smsResult.messageId }
+  return legacySendResponse(result)
 }
 
 async function triggerChaseWorkflow(client: any, body: any) {
@@ -59503,7 +59521,7 @@ async function stopChaseWorkflow(client: any, body: any) {
 // ── Handle payment detection events ──
 // Called when xero sync detects an invoice has been paid (amount_due → 0).
 // Stops chase workflow, sends thank-you SMS, logs to payment_chase_logs.
-async function handlePaymentEvent(client: any, body: any) {
+async function handlePaymentEvent(client: any, body: any, auth: DebtFollowupAuth) {
   const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
   await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'handle_payment_event')
@@ -59592,25 +59610,32 @@ async function handlePaymentEvent(client: any, body: any) {
   })
   results.push('chase_log_created')
 
-  // 5. Send thank-you SMS if we have a GHL contact with a phone
-  if (ghlContactId && match?.phone) {
-    const firstName = (contact_name || '').split(' ')[0] || 'there'
-    const thankYouMsg = `Hi ${firstName}, we've received your payment of $${Math.round(Number(amount_paid) || 0).toLocaleString()} for invoice ${invoice_number}. Thank you! — SecureWorks`
-    try {
-      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      await fetch(ghlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-        body: JSON.stringify({ contactId: ghlContactId, message: thankYouMsg }),
-      })
-      results.push('thank_you_sms_sent')
-    } catch (e) {
-      console.log(`[ops-api] Thank-you SMS failed for ${ghlContactId}:`, e)
-      results.push('thank_you_sms_failed')
+  // 5. Thank-you SMS, only through the debt follow-up executor. Without an
+  // approved exact text (thank_you_approval_id) this records a dry run of the
+  // text that would go and sends nothing.
+  let thankYou: Record<string, unknown> | null = null
+  if (ghlContactId) {
+    const thanks = await debtFollowupLegacySend({
+      sourceAction: 'handle_payment_event',
+      kind: 'thank_you_sms',
+      method: 'POST',
+      auth,
+      request: { xero_invoice_id, ghl_contact_id: ghlContactId },
+      body: body.thank_you_approval_id
+        ? { approval_id: body.thank_you_approval_id, xero_invoice_id, ghl_contact_id: ghlContactId }
+        : {},
+      deps: createDebtFollowupDepsForOps(client),
+    })
+    const thanksReason = 'reason' in thanks ? thanks.reason : null
+    results.push(thanks.status === 'sent' ? 'thank_you_sms_sent' : `thank_you_sms_${thanks.status}`)
+    thankYou = {
+      status: thanks.status,
+      reason: thanksReason,
+      binding_hash: 'binding_hash' in thanks ? thanks.binding_hash : null,
     }
   }
 
-  return { success: true, invoice_number, contact_name, actions: results }
+  return { success: true, invoice_number, contact_name, actions: results, thank_you_sms: thankYou }
 }
 
 

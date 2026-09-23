@@ -1,0 +1,1 @@
+DROP INDEX public.debt_followup_executions_one_live;

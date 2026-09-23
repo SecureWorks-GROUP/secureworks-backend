@@ -3681,6 +3681,21 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
+## Debtor Texts And Invoice Emails Send Only Through One Approved Executor
+
+Every debtor text or invoice email (`send_chase_sms`, `send_payment_link`, the
+`handle_payment_event` thank-you text, both `send_invoice_email` branches) goes
+through `debt_followup_approval.ts`. A send needs a captain approval of the
+exact message (body hash, destination, invoice ids, subject/attachment, Xero
+snapshot, hold state, 30-minute expiry), a press that re-reads and rebuilds it
+unchanged, AND `DEBT_FOLLOWUP_SEND_EXECUTE` exactly `"true"` with a captain
+press. The switch is unset; never set it in code, env or a flag (a test fails on
+an assignment). Turning it on is the captain's call. Anything else records a
+dry run and makes no provider call; one approval sends at most once. Never add
+a debtor send that bypasses it, and never restore the Xero-direct
+`/Invoices/{id}/Email` route. Contract and follow-ups:
+`docs/debt-followup-approval.md`.
+
 ## Outbound SMS Sender Policy Is One Shared Module
 
 Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company
