@@ -3,7 +3,9 @@
 // No network. No live Xero. No live Supabase.
 
 import { assertEquals, assert, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts"
-import { _logBusinessEventForTest, _verifyAndSendInvoiceEmail } from "./index.ts"
+import { _getJobConversationForTest, _logBusinessEventForTest, _verifyAndSendInvoiceEmail } from "./index.ts"
+import { approvedInvoiceEmailHtmlBody, sha256Hex } from "./debt_followup_approval.ts"
+import { outlookMessageHtmlBody, OUTLOOK_DEFAULT_MAILBOX } from "../_shared/outlook_signature.ts"
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts"
 import {
   makeStubClient,
@@ -31,6 +33,59 @@ function makeDeps(overrides: Partial<Parameters<typeof _verifyAndSendInvoiceEmai
     env: STUB_ENV,
     ...overrides,
     xeroFetch: overrides.xeroFetch ?? overrides.fetch ?? fetch,
+  }
+}
+
+function makeConversationClient(input: {
+  executions?: Record<string, any>[]
+  events?: Record<string, any>[]
+  ghlMessages?: Record<string, any>[]
+}) {
+  const job = { job_number: "SWMS-12345", ghl_contact_id: null }
+  const rowsByTable: Record<string, Record<string, any>[]> = {
+    jobs: [{ id: "job-1", ...job }],
+    ghl_conversation_cache: [{ job_id: "job-1", messages: input.ghlMessages || [] }],
+    inbox_events: [],
+    job_events: [],
+    business_events: input.events || [],
+    debt_followup_executions: input.executions || [],
+  }
+  return {
+    from(table: string) {
+      const filters: Array<(row: Record<string, any>) => boolean> = []
+      let maxRows = Number.POSITIVE_INFINITY
+      const query: any = {
+        select: () => query,
+        eq(field: string, value: any) {
+          filters.push((row) => field === "proposal->>job_id"
+            ? row.proposal?.job_id === value
+            : row[field] === value)
+          return query
+        },
+        in(field: string, values: any[]) {
+          filters.push((row) => values.includes(row[field]))
+          return query
+        },
+        gt(field: string, value: string) {
+          filters.push((row) => String(row[field] || "") > value)
+          return query
+        },
+        order: () => query,
+        limit(value: number) {
+          maxRows = value
+          return query
+        },
+        async maybeSingle() {
+          if (table === "jobs") return { data: { job_number: job.job_number, ghl_contact_id: job.ghl_contact_id }, error: null }
+          return { data: rowsByTable[table]?.[0] || null, error: null }
+        },
+        then(resolve: (value: any) => unknown, reject: (reason: unknown) => unknown) {
+          const rows = (rowsByTable[table] || []).filter((row) => filters.every((f) => f(row))).slice(0, maxRows)
+          return Promise.resolve({ data: rows, error: null }).then(resolve, reject)
+        },
+      }
+      return query
+    },
   }
 }
 
@@ -132,6 +187,14 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   const outlookCalls = fetchCalls.filter(c => c.url.startsWith(`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`))
   assertEquals(pdfCalls.length, 1)
   assertEquals(outlookCalls.length, 1)
+  const approvedHtml = approvedInvoiceEmailHtmlBody("INV-001")
+  const outlookRequest = JSON.parse(outlookCalls[0].init!.body as string)
+  assertEquals(outlookRequest.htmlBody, approvedHtml)
+  assertEquals(await sha256Hex(outlookRequest.htmlBody), await sha256Hex(approvedHtml))
+  assertEquals(
+    outlookMessageHtmlBody(outlookRequest.htmlBody, OUTLOOK_DEFAULT_MAILBOX),
+    approvedHtml,
+  )
 
   // An approved send's evidence goes through capture_business_event, keyed on
   // the approval, and the writer owns time and attribution.
@@ -152,7 +215,7 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   assertEquals(events[0].payload.subject, "Approved invoice subject")
   assertEquals(
     events[0].payload.email_body_html,
-    "<p>Please find your invoice attached.</p><p>Invoice: <strong>INV-001</strong></p>",
+    approvedHtml,
   )
   assertEquals("body" in events[0].payload, false)
   assertEquals(events[0].payload.attachment_file_name, "INV-001.pdf")
@@ -241,6 +304,162 @@ Deno.test("confirmed Outlook send surfaces a failed conversation event write", a
   assertEquals(calls.filter((call) => call.url.startsWith(
     `${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`,
   )).length, 1)
+})
+
+Deno.test("job conversation projects a confirmed invoice email when capture failed", async () => {
+  const proof = {
+    provider: "outlook",
+    label: "accepted by Outlook",
+    accepted: true,
+    status: 202,
+    sent_at: "2026-09-24T01:02:03.000Z",
+    approval_id: "approval-email-1",
+    attachment_sha256: "a".repeat(64),
+  }
+  const proposal = {
+    job_id: "job-1",
+    kind: "invoice_email",
+    channel: "email",
+    body: "Approved email body with the exact signature.",
+    destination: { channel: "email", to: "accounts@example.test", cc: [] },
+    email: { subject: "Invoice INV-001", attachment: { file_name: "INV-001.pdf" } },
+  }
+  const { messages } = await _getJobConversationForTest(
+    makeConversationClient({
+      executions: [{
+        approval_id: "approval-email-1",
+        kind: "invoice_email",
+        channel: "email",
+        mode: "live",
+        outcome: "sent",
+        pressed_by: "captain@example.test",
+        proposal,
+        provider: "outlook",
+        provider_message_id: null,
+        provider_proof: proof,
+        created_at: proof.sent_at,
+        finished_at: proof.sent_at,
+      }],
+    }),
+    { job_id: "job-1" },
+  )
+  assertEquals(messages.length, 1)
+  assertEquals(messages[0].source_system, "debt_followup_executions")
+  assertEquals(messages[0].provider_message_id, "outlook-accepted:approval-email-1")
+  assertEquals(messages[0].body, proposal.body)
+  assertEquals(messages[0].subject, proposal.email.subject)
+})
+
+Deno.test("job conversation projects a confirmed SMS using its canonical GHL identity", async () => {
+  const proposal = {
+    job_id: "job-1",
+    kind: "chase_sms",
+    channel: "sms",
+    body: "Please contact us about your invoice.",
+    destination: { channel: "sms", ghl_contact_id: "ghl-1", phone: "+61412345678" },
+  }
+  const { messages } = await _getJobConversationForTest(
+    makeConversationClient({
+      executions: [{
+        approval_id: "approval-sms-1",
+        kind: "chase_sms",
+        channel: "sms",
+        mode: "live",
+        outcome: "sent",
+        pressed_by: "captain@example.test",
+        proposal,
+        provider: "ghl",
+        provider_message_id: "ghl-message-1",
+        provider_proof: {
+          provider: "ghl",
+          message_id: "ghl-message-1",
+          body_sha256: "b".repeat(64),
+        },
+        created_at: "2026-09-24T01:02:03.000Z",
+        finished_at: "2026-09-24T01:02:04.000Z",
+      }],
+    }),
+    { job_id: "job-1" },
+  )
+  assertEquals(messages.length, 1)
+  assertEquals(messages[0].channel, "sms")
+  assertEquals(messages[0].provider_message_id, "ghl:ghl-message-1")
+  assertEquals(messages[0].body, proposal.body)
+})
+
+Deno.test("job conversation does not duplicate ledger sends already present in evidence or GHL cache", async () => {
+  const emailId = "approval-email-2"
+  const emailBody = "The event copy wins."
+  const emailProof = {
+    provider: "outlook",
+    label: "accepted by Outlook",
+    accepted: true,
+    status: 202,
+    sent_at: "2026-09-24T01:00:00.000Z",
+    approval_id: emailId,
+    attachment_sha256: "c".repeat(64),
+  }
+  const emailExecution = {
+    approval_id: emailId,
+    kind: "invoice_email",
+    channel: "email",
+    mode: "live",
+    outcome: "sent",
+    proposal: {
+      job_id: "job-1", kind: "invoice_email", channel: "email", body: emailBody,
+      destination: { channel: "email", to: "accounts@example.test", cc: [] },
+      email: { subject: "Invoice", attachment: {} },
+    },
+    provider: "outlook",
+    provider_message_id: null,
+    provider_proof: emailProof,
+    created_at: emailProof.sent_at,
+    finished_at: emailProof.sent_at,
+  }
+  const emailEvent = {
+    id: "event-email-2",
+    event_type: "invoice.emailed",
+    source: "ops-api/debt_followup_execute",
+    occurred_at: emailProof.sent_at,
+    job_id: "job-1",
+    provider_message_id: `outlook-accepted:${emailId}`,
+    payload: { email_body_html: emailBody, subject: "Invoice", provider_proof: emailProof },
+  }
+  const emailRead = await _getJobConversationForTest(
+    makeConversationClient({ executions: [emailExecution], events: [emailEvent] }),
+    { job_id: "job-1" },
+  )
+  assertEquals(emailRead.messages.length, 1)
+  assertEquals(emailRead.messages[0].source_system, "business_events")
+
+  const smsExecution = {
+    approval_id: "approval-sms-2",
+    kind: "chase_sms",
+    channel: "sms",
+    mode: "live",
+    outcome: "sent",
+    proposal: {
+      job_id: "job-1", kind: "chase_sms", channel: "sms", body: "Cache copy wins.",
+      destination: { channel: "sms", ghl_contact_id: "ghl-1", phone: "+61412345678" },
+    },
+    provider: "ghl",
+    provider_message_id: "ghl-message-2",
+    provider_proof: { provider: "ghl", message_id: "ghl-message-2", body_sha256: "d".repeat(64) },
+    created_at: "2026-09-24T01:00:00.000Z",
+    finished_at: "2026-09-24T01:00:01.000Z",
+  }
+  const smsRead = await _getJobConversationForTest(
+    makeConversationClient({
+      executions: [smsExecution],
+      ghlMessages: [{
+        id: "ghl-message-2", type: "SMS", direction: "outbound",
+        timestamp: smsExecution.finished_at, body: "Cache copy wins.",
+      }],
+    }),
+    { job_id: "job-1" },
+  )
+  assertEquals(smsRead.messages.length, 1)
+  assertEquals(smsRead.messages[0].source_system, "ghl_cache")
 })
 
 // ─────────────────────────────────────────────────────────────────

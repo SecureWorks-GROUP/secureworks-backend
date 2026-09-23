@@ -829,6 +829,7 @@ import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_
 import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
 import {
   autoDebtClassificationForJobStatus,
+  approvedInvoiceEmailHtmlBody,
   debtFollowupActionEntry,
   debtFollowupLegacySend,
   type DebtFollowupAuth,
@@ -3826,7 +3827,9 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
   const siPdfB64 = btoa(siBin)
   const siSubject = siSubj || `Invoice ${siNum} — SecureWorks Group`
-  const siEmailBody = invoiceEmailHtmlBody(siNum)
+  const siEmailBody = body.debt_followup_approval_id
+    ? approvedInvoiceEmailHtmlBody(siNum)
+    : invoiceEmailHtmlBody(siNum)
   const siAttachmentFileName = `${siNum}.pdf`
 
   // Send via Outlook with PDF attached
@@ -16074,6 +16077,7 @@ async function getJobConversation(client: any, body: any) {
 
   const sinceFilter = since || null
   const messages: any[] = []
+  const representedProviderMessageIds = new Set<string>()
 
   // 1. GHL conversation cache (sms / email / call metadata) — by job_id first,
   //    falling back to contact_id if cache row was synced before job_id link.
@@ -16097,6 +16101,11 @@ async function getJobConversation(client: any, body: any) {
     for (const m of ghlMsgs) {
       const ts = m.timestamp || ''
       if (sinceFilter && ts && ts < sinceFilter) continue
+      const rawMessageId = typeof m.id === 'string' ? m.id : ''
+      const providerMessageId = rawMessageId
+        ? rawMessageId.startsWith('ghl:') ? rawMessageId : `ghl:${rawMessageId}`
+        : null
+      if (providerMessageId) representedProviderMessageIds.add(providerMessageId)
       const isCall = m.source === 'call_transcript' || /CALL|VOICEMAIL/i.test(String(m.type || ''))
       const channel = isCall ? 'call' : (String(m.type || '').toUpperCase().includes('EMAIL') ? 'email' : 'sms')
       messages.push({
@@ -16111,6 +16120,7 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'ghl_cache',
         source_ref: m.id || '',
+        ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
       })
     }
@@ -16206,7 +16216,7 @@ async function getJobConversation(client: any, body: any) {
     // this job. placement_rule is metadata.placement_rule (null until the
     // placement rules that write it ship).
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
+      .select('id, event_type, source, occurred_at, payload, correlation_id, provider_message_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
       .eq('job_id', jobId)
       .in('event_type', messageEventTypes)
       .order('occurred_at', { ascending: false })
@@ -16251,6 +16261,22 @@ async function getJobConversation(client: any, body: any) {
         ? p.email_body_html
         : ''
       const body = String(invoiceEmailBody || p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
+      const providerMessageId = typeof r.provider_message_id === 'string'
+        ? r.provider_message_id
+        : null
+      if (providerMessageId) {
+        const priorIndex = messages.findIndex((message) =>
+          message.provider_message_id === providerMessageId
+        )
+        if (priorIndex >= 0) {
+          if (messages[priorIndex].source_system === 'ghl_cache') {
+            messages.splice(priorIndex, 1)
+          } else {
+            continue
+          }
+        }
+        representedProviderMessageIds.add(providerMessageId)
+      }
       messages.push({
         id: `bev:${r.id}`,
         job_id: jobId,
@@ -16263,6 +16289,7 @@ async function getJobConversation(client: any, body: any) {
         subject: p.subject || null,
         source_system: 'business_events',
         source_ref: r.id,
+        ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
         attribution_status: r.attribution_status ?? null,
         attribution_step: r.attribution_step ?? null,
         placement_rule: r.placement_rule ?? null,
@@ -16271,6 +16298,62 @@ async function getJobConversation(client: any, body: any) {
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
+  }
+
+  try {
+    let q = client.from('debt_followup_executions')
+      .select('approval_id,kind,channel,outcome,pressed_by,proposal,provider,provider_message_id,provider_proof,created_at,finished_at')
+      .eq('mode', 'live')
+      .eq('outcome', 'sent')
+      .eq('proposal->>job_id', jobId)
+      .order('finished_at', { ascending: false })
+      .limit(limit)
+    if (sinceFilter) q = q.gt('finished_at', sinceFilter)
+    const { data: executions, error } = await q
+    if (error) console.error('[ops-api] get_job_conversation debt execution read failed:', error.message)
+    for (const row of (executions || [])) {
+      const proposal: any = row.proposal || {}
+      const proof: any = row.provider_proof || {}
+      const approvalId = typeof row.approval_id === 'string' ? row.approval_id : ''
+      const isEmail = row.channel === 'email' && row.provider === 'outlook' &&
+        row.kind === 'invoice_email' && approvalId.length > 0 &&
+        proof.label === 'accepted by Outlook' && proof.approval_id === approvalId &&
+        Number.isInteger(proof.status) && proof.status >= 200 && proof.status < 300 &&
+        typeof proof.attachment_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(proof.attachment_sha256)
+      const isSms = row.channel === 'sms' && row.provider === 'ghl' &&
+        typeof row.provider_message_id === 'string' && row.provider_message_id.length > 0 &&
+        proof.provider === 'ghl' && proof.message_id === row.provider_message_id
+      if (!isEmail && !isSms) continue
+      const providerMessageId = isEmail
+        ? `outlook-accepted:${approvalId}`
+        : `ghl:${row.provider_message_id}`
+      if (representedProviderMessageIds.has(providerMessageId)) continue
+      const body = typeof proposal.body === 'string' ? proposal.body : ''
+      const destination: any = proposal.destination || {}
+      const email: any = proposal.email || {}
+      const occurredAt = typeof proof.sent_at === 'string' && Number.isFinite(Date.parse(proof.sent_at))
+        ? proof.sent_at
+        : row.finished_at || row.created_at || null
+      representedProviderMessageIds.add(providerMessageId)
+      messages.push({
+        id: `debt-execution:${approvalId}`,
+        job_id: jobId,
+        channel: row.channel,
+        direction: 'outbound',
+        occurred_at: occurredAt,
+        author: row.pressed_by || null,
+        body,
+        preview: body.slice(0, 500),
+        subject: isEmail ? email.subject || null : null,
+        source_system: 'debt_followup_executions',
+        source_ref: approvalId,
+        provider_message_id: providerMessageId,
+        provider_proof: proof,
+        destination: isEmail ? destination.to || null : destination.phone || null,
+      })
+    }
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation debt execution read failed:', (e as Error).message)
   }
 
   // chat_logs (internal AI chat) is deliberately NOT a source. It is our own

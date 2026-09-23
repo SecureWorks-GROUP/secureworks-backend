@@ -2,6 +2,10 @@ BEGIN;
 DO $$
 DECLARE
   prop jsonb := jsonb_build_object('contract','debt-followup-approval/v1','body_sha256',repeat('e',64));
+  approval_input jsonb;
+  created public.debt_followup_approvals%ROWTYPE;
+  reused public.debt_followup_approvals%ROWTYPE;
+  claimed boolean;
 BEGIN
   IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.debt_followup_approvals'::regclass) OR
      NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.debt_followup_executions'::regclass) THEN
@@ -12,11 +16,24 @@ BEGIN
      has_table_privilege('service_role','public.debt_followup_approvals','UPDATE') OR
      has_table_privilege('service_role','public.debt_followup_approvals','DELETE') OR
      has_table_privilege('service_role','public.debt_followup_executions','DELETE') THEN
-    RAISE EXCEPTION 'debt follow-up ledgers must be private, insert-only approvals, never deleted';
+    RAISE EXCEPTION 'debt follow-up ledgers must be private and approvals cannot be edited directly';
   END IF;
   IF NOT has_table_privilege('service_role','public.debt_followup_executions','SELECT,INSERT,UPDATE') OR
      NOT has_table_privilege('service_role','public.debt_followup_approvals','SELECT,INSERT') THEN
     RAISE EXCEPTION 'service adapter cannot record approvals and presses';
+  END IF;
+  IF has_function_privilege('authenticated','public.debt_followup_create_approval(jsonb)','EXECUTE') OR
+     has_function_privilege('authenticated','public.debt_followup_claim_live(jsonb)','EXECUTE') OR
+     NOT has_function_privilege('service_role','public.debt_followup_create_approval(jsonb)','EXECUTE') OR
+     NOT has_function_privilege('service_role','public.debt_followup_claim_live(jsonb)','EXECUTE') THEN
+    RAISE EXCEPTION 'debt follow-up atomic operations must be service-role only';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid = 'public.debt_followup_approvals_one_open'::regclass
+      AND i.indisunique
+  ) THEN
+    RAISE EXCEPTION 'one open approval per binding requires a unique partial index';
   END IF;
 
   INSERT INTO public.debt_followup_approvals
@@ -24,23 +41,59 @@ BEGIN
      body_sha256, approved_by_email, approved_by_user_id, approved_at, expires_at)
   VALUES (repeat('a',64), repeat('b',64), 'debt-followup-approval/v1', 'chase_sms', 'sms',
      ARRAY['inv-1'], '{}'::jsonb, prop, repeat('e',64), 'captain@example.test',
-     '706c5258-70dd-483a-b36c-af6864b24498', '2026-09-24T00:00Z', '2026-09-24T00:30Z');
+     '706c5258-70dd-483a-b36c-af6864b24498', now(), now() + interval '30 minutes');
 
   BEGIN
     INSERT INTO public.debt_followup_approvals
       (approval_id, binding_hash, contract, kind, channel, xero_invoice_ids, request, proposal,
        body_sha256, approved_by_email, approved_by_user_id, approved_at, expires_at)
-    VALUES (repeat('c',64), repeat('b',64), 'debt-followup-approval/v1', 'chase_sms', 'sms',
+    VALUES (repeat('c',64), repeat('c',64), 'debt-followup-approval/v1', 'chase_sms', 'sms',
        ARRAY['inv-1'], '{}'::jsonb, prop, repeat('f',64), 'captain@example.test',
-       '706c5258-70dd-483a-b36c-af6864b24498', '2026-09-24T00:00Z', '2026-09-24T00:30Z');
+       '706c5258-70dd-483a-b36c-af6864b24498', now(), now() + interval '30 minutes');
     RAISE EXCEPTION 'approval whose body hash differs from its proposal was accepted';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
+  approval_input := jsonb_build_object(
+    'approval_id', repeat('d',64), 'binding_hash', repeat('d',64),
+    'contract', 'debt-followup-approval/v1', 'kind', 'chase_sms', 'channel', 'sms',
+    'xero_invoice_ids', jsonb_build_array('inv-2'), 'request', '{}'::jsonb,
+    'proposal', prop, 'body_sha256', repeat('e',64),
+    'approved_by_email', 'captain@example.test',
+    'approved_by_user_id', '706c5258-70dd-483a-b36c-af6864b24498',
+    'approved_at', now(), 'expires_at', now() + interval '30 minutes'
+  );
+  SELECT * INTO created FROM public.debt_followup_create_approval(approval_input);
+  SELECT * INTO reused FROM public.debt_followup_create_approval(
+    approval_input || jsonb_build_object('approval_id', repeat('e',64))
+  );
+  IF created.approval_id <> reused.approval_id OR created.state <> 'open' OR
+     (SELECT count(*) FROM public.debt_followup_approvals
+      WHERE binding_hash = repeat('d',64) AND state = 'open') <> 1 THEN
+    RAISE EXCEPTION 'concurrent approval retries must reuse one open row';
+  END IF;
+
+  INSERT INTO public.debt_followup_approvals
+    (approval_id, binding_hash, contract, kind, channel, xero_invoice_ids, request, proposal,
+     body_sha256, approved_by_email, approved_by_user_id, approved_at, expires_at)
+  VALUES (repeat('f',64), repeat('f',64), 'debt-followup-approval/v1', 'chase_sms', 'sms',
+     ARRAY['inv-2'], '{}'::jsonb, prop, repeat('e',64), 'captain@example.test',
+     '706c5258-70dd-483a-b36c-af6864b24498', now() - interval '2 hours', now() - interval '1 hour');
+  SELECT * INTO created FROM public.debt_followup_create_approval(
+    approval_input || jsonb_build_object(
+      'approval_id', repeat('1',64), 'binding_hash', repeat('f',64),
+      'approved_at', now(), 'expires_at', now() + interval '30 minutes'
+    )
+  );
+  IF created.approval_id <> repeat('1',64) OR
+     (SELECT state FROM public.debt_followup_approvals WHERE approval_id = repeat('f',64)) <> 'closed' THEN
+    RAISE EXCEPTION 'expired open approvals must close before a replacement is created';
+  END IF;
+
   BEGIN
-    UPDATE public.debt_followup_approvals SET expires_at = '2027-01-01T00:00Z' WHERE approval_id = repeat('a',64);
+    UPDATE public.debt_followup_approvals SET expires_at = now() + interval '2 hours' WHERE approval_id = repeat('a',64);
     RAISE EXCEPTION 'an approval was changed';
   EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM NOT LIKE '%never changed or deleted%' THEN RAISE; END IF;
+    IF SQLERRM NOT LIKE '%only open-to-closed is allowed%' THEN RAISE; END IF;
   END;
 
   -- Dry runs append freely, with or without an approval.
@@ -64,18 +117,31 @@ BEGIN
     RAISE EXCEPTION 'dry run recorded as sent';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
-  INSERT INTO public.debt_followup_executions
-    (approval_id, binding_hash, kind, channel, mode, outcome, press_token, pressed_by, source_action)
-  VALUES (repeat('a',64), repeat('b',64), 'chase_sms', 'sms', 'live', 'sending',
-     '11111111-1111-4111-8111-111111111111', 'captain@example.test', 'debt_followup_execute');
-
+  claimed := public.debt_followup_claim_live(jsonb_build_object(
+    'approval_id', repeat('a',64), 'binding_hash', repeat('b',64),
+    'kind', 'chase_sms', 'channel', 'sms',
+    'press_token', '11111111-1111-4111-8111-111111111111',
+    'pressed_by', 'captain@example.test', 'source_action', 'debt_followup_execute',
+    'proposal', prop
+  ));
+  IF NOT claimed THEN RAISE EXCEPTION 'valid live claim was refused'; END IF;
+  IF public.debt_followup_claim_live(jsonb_build_object(
+    'approval_id', repeat('a',64), 'binding_hash', repeat('b',64),
+    'kind', 'chase_sms', 'channel', 'sms',
+    'press_token', '22222222-2222-4222-8222-222222222222',
+    'pressed_by', 'captain@example.test', 'source_action', 'debt_followup_execute',
+    'proposal', prop
+  )) THEN RAISE EXCEPTION 'second live press on one approval was accepted'; END IF;
   BEGIN
     INSERT INTO public.debt_followup_executions
       (approval_id, binding_hash, kind, channel, mode, outcome, press_token, pressed_by, source_action)
     VALUES (repeat('a',64), repeat('b',64), 'chase_sms', 'sms', 'live', 'sending',
-       '22222222-2222-4222-8222-222222222222', 'captain@example.test', 'debt_followup_execute');
+       '33333333-3333-4333-8333-333333333333', 'captain@example.test', 'debt_followup_execute');
     RAISE EXCEPTION 'second live press on one approval was accepted';
   EXCEPTION WHEN unique_violation THEN NULL; END;
+  IF (SELECT state FROM public.debt_followup_approvals WHERE approval_id = repeat('a',64)) <> 'closed' THEN
+    RAISE EXCEPTION 'a live press must close its approval';
+  END IF;
 
   BEGIN
     UPDATE public.debt_followup_executions

@@ -31,6 +31,10 @@ import {
   normaliseFullEmail,
 } from "./recipient_anchors.ts";
 import { SMS_DEFAULT_FROM_NUMBER } from "../_shared/sms_from_number.ts";
+import {
+  getSignature,
+  OUTLOOK_DEFAULT_MAILBOX,
+} from "../_shared/outlook_signature.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -269,6 +273,12 @@ export function invoiceEmailHtmlBody(invoiceNumber: string): string {
   return `<p>Please find your invoice attached.</p><p>Invoice: <strong>${
     htmlEscape(invoiceNumber)
   }</strong></p>`;
+}
+
+export function approvedInvoiceEmailHtmlBody(invoiceNumber: string): string {
+  return `${invoiceEmailHtmlBody(invoiceNumber)}${
+    getSignature(OUTLOOK_DEFAULT_MAILBOX)
+  }\n<!-- suppress-auto-appended-default-signature -->`;
 }
 
 export function defaultInvoiceEmailSubject(invoiceNumber: string): string {
@@ -709,7 +719,7 @@ export async function buildDebtFollowupProposal(
       first.invoice_number,
     );
   } else {
-    body = invoiceEmailHtmlBody(first.invoice_number);
+    body = approvedInvoiceEmailHtmlBody(first.invoice_number);
     email = {
       subject: request.subject ??
         defaultInvoiceEmailSubject(first.invoice_number),
@@ -809,6 +819,7 @@ export interface ApprovalRecord {
   approved_by_user_id: string;
   approved_at: string;
   expires_at: string;
+  state: "open" | "closed";
 }
 
 export type LiveOutcome = "sending" | "sent" | "failed" | "unknown";
@@ -834,12 +845,8 @@ export interface AttemptRow {
 
 export interface DebtFollowupLedger {
   getApproval(approvalId: string): Promise<ApprovalRecord | null>;
-  /** An unexpired approval of this exact binding, for an idempotent re-approve. */
-  findOpenApproval(
-    bindingHash: string,
-    nowIso: string,
-  ): Promise<ApprovalRecord | null>;
-  insertApproval(record: ApprovalRecord): Promise<void>;
+  /** Atomically inserts one open approval or returns its concurrent winner. */
+  createOrReuseApproval(record: ApprovalRecord): Promise<ApprovalRecord>;
   liveExecution(approvalId: string): Promise<LiveExecution | null>;
   /** Insert the one live row (outcome sending). False when one already exists. */
   claimLive(row: {
@@ -1062,27 +1069,12 @@ export async function debtFollowupApproveAction(args: {
       proposal: built.proposal,
     });
   }
-  let open: ApprovalRecord | null;
-  try {
-    open = await deps.ledger.findOpenApproval(expected, now.toISOString());
-  } catch {
-    return refused("approval_ledger_unreadable");
-  }
-  if (open) {
-    return {
-      status: "approved",
-      approval_id: open.approval_id,
-      binding_hash: open.binding_hash,
-      replayed: true,
-      expires_at: open.expires_at,
-      proposal: open.proposal,
-    };
-  }
   const approvedAt = now.toISOString();
   const record: ApprovalRecord = {
     approval_id: await bookingHash({
       binding_hash: expected,
       approved_at: approvedAt,
+      nonce: crypto.randomUUID(),
     }),
     binding_hash: expected,
     kind: norm.request.kind,
@@ -1094,19 +1086,21 @@ export async function debtFollowupApproveAction(args: {
     approved_at: approvedAt,
     expires_at: new Date(now.getTime() + DEBT_FOLLOWUP_APPROVAL_TTL_MS)
       .toISOString(),
+    state: "open",
   };
+  let persisted: ApprovalRecord;
   try {
-    await deps.ledger.insertApproval(record);
+    persisted = await deps.ledger.createOrReuseApproval(record);
   } catch {
     return refused("approval_ledger_unwritable");
   }
   return {
     status: "approved",
-    approval_id: record.approval_id,
-    binding_hash: record.binding_hash,
-    replayed: false,
-    expires_at: record.expires_at,
-    proposal: record.proposal,
+    approval_id: persisted.approval_id,
+    binding_hash: persisted.binding_hash,
+    replayed: persisted.approval_id !== record.approval_id,
+    expires_at: persisted.expires_at,
+    proposal: persisted.proposal,
   };
 }
 

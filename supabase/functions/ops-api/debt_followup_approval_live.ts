@@ -32,7 +32,7 @@ const APPROVALS = "debt_followup_approvals";
 export const CONTACT_MATCH_SCAN_LIMIT = 500;
 const EXECUTIONS = "debt_followup_executions";
 const APPROVAL_COLUMNS =
-  "approval_id,binding_hash,kind,request,proposal,body_sha256,approved_by_email,approved_by_user_id,approved_at,expires_at";
+  "approval_id,binding_hash,kind,request,proposal,body_sha256,approved_by_email,approved_by_user_id,approved_at,expires_at,state";
 
 export function debtFollowupLedger(client: Client): DebtFollowupLedger {
   return {
@@ -44,44 +44,30 @@ export function debtFollowupLedger(client: Client): DebtFollowupLedger {
       if (error) throw new Error("approval_unreadable");
       return (data as ApprovalRecord | null) ?? null;
     },
-    async findOpenApproval(bindingHash, nowIso) {
-      const { data, error } = await client.from(APPROVALS).select(
-        APPROVAL_COLUMNS,
-      )
-        .eq("binding_hash", bindingHash).gt("expires_at", nowIso)
-        .order("approved_at", { ascending: false }).limit(10);
-      if (error) throw new Error("approval_unreadable");
-      const rows = (data as ApprovalRecord[] | null) ?? [];
-      if (!rows.length) return null;
-      // Reuse only an approval that has not been pressed live.
-      const { data: pressed, error: pressedError } = await client.from(
-        EXECUTIONS,
-      )
-        .select("approval_id").eq("mode", "live")
-        .in("approval_id", rows.map((r) => r.approval_id));
-      if (pressedError) throw new Error("execution_ledger_unreadable");
-      const used = new Set(
-        ((pressed as Obj[] | null) ?? []).map((r) => r.approval_id),
-      );
-      return rows.find((r) => !used.has(r.approval_id)) ?? null;
-    },
-    async insertApproval(record) {
-      const { error } = await client.from(APPROVALS).insert({
-        approval_id: record.approval_id,
-        binding_hash: record.binding_hash,
-        contract: record.proposal.contract,
-        kind: record.kind,
-        channel: record.proposal.channel,
-        xero_invoice_ids: record.request.xero_invoice_ids,
-        request: record.request,
-        proposal: record.proposal,
-        body_sha256: record.body_sha256,
-        approved_by_email: record.approved_by_email,
-        approved_by_user_id: record.approved_by_user_id,
-        approved_at: record.approved_at,
-        expires_at: record.expires_at,
+    async createOrReuseApproval(record) {
+      const { data, error } = await client.rpc("debt_followup_create_approval", {
+        p_approval: {
+          approval_id: record.approval_id,
+          binding_hash: record.binding_hash,
+          contract: record.proposal.contract,
+          kind: record.kind,
+          channel: record.proposal.channel,
+          xero_invoice_ids: record.request.xero_invoice_ids,
+          request: record.request,
+          proposal: record.proposal,
+          body_sha256: record.body_sha256,
+          approved_by_email: record.approved_by_email,
+          approved_by_user_id: record.approved_by_user_id,
+          approved_at: record.approved_at,
+          expires_at: record.expires_at,
+        },
       });
       if (error) throw new Error("approval_ledger_unwritable");
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row || typeof row !== "object") {
+        throw new Error("approval_ledger_unwritable");
+      }
+      return row as ApprovalRecord;
     },
     async liveExecution(approvalId) {
       const { data, error } = await client.from(EXECUTIONS)
@@ -93,20 +79,12 @@ export function debtFollowupLedger(client: Client): DebtFollowupLedger {
       return (data as LiveExecution | null) ?? null;
     },
     async claimLive(row) {
-      const { error } = await client.from(EXECUTIONS).insert({
-        approval_id: row.approval_id,
-        binding_hash: row.binding_hash,
-        kind: row.kind,
-        channel: row.channel,
-        mode: "live",
-        outcome: "sending",
-        press_token: row.press_token,
-        pressed_by: row.pressed_by,
-        source_action: row.source_action,
-        proposal: row.proposal,
+      const { data, error } = await client.rpc("debt_followup_claim_live", {
+        p_execution: row,
       });
-      if (!error) return true;
-      if (error.code === "23505") return false;
+      if (error) throw new Error("execution_ledger_unwritable");
+      if (data === true) return true;
+      if (data === false) return false;
       throw new Error("execution_ledger_unwritable");
     },
     async settleLive(approvalId, pressToken, outcome) {

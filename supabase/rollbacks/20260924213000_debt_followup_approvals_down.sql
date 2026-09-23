@@ -4,7 +4,9 @@
 -- tables. The ledger rows (approvals and press records) are lost; export them
 -- first if they are needed as audit history.
 SET LOCAL lock_timeout = '5s';
-DROP TABLE IF EXISTS public.debt_followup_executions;
-DROP TABLE IF EXISTS public.debt_followup_approvals;
+DROP FUNCTION IF EXISTS public.debt_followup_claim_live(jsonb);
+DROP FUNCTION IF EXISTS public.debt_followup_create_approval(jsonb);
 DROP FUNCTION IF EXISTS public.debt_followup_executions_settle_once();
 DROP FUNCTION IF EXISTS public.debt_followup_approvals_insert_only();
+DROP TABLE IF EXISTS public.debt_followup_executions;
+DROP TABLE IF EXISTS public.debt_followup_approvals;

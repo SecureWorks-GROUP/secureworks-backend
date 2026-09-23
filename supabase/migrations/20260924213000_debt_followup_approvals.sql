@@ -5,14 +5,15 @@
 -- debt_followup_approvals   one row per captain approval of ONE exact debtor
 --                           text or invoice email: body hash, destination,
 --                           selected invoice ids, subject/attachment, Xero
---                           snapshot, hold state and expiry. Insert only.
+--                           snapshot, hold state and expiry. Only the state
+--                           may transition once from open to closed.
 -- debt_followup_executions  every press. Dry-run and refused rows append
 --                           freely. A live row is claimed (outcome sending)
 --                           before the provider call; at most ONE live row per
 --                           approval, ever; it settles once to sent, failed or
 --                           unknown. A sent row carries provider proof.
 --
--- Adds two tables, two trigger functions and their triggers. Writes no row,
+-- Adds two tables, two guard triggers, and two service-only atomic writers. Writes no row,
 -- changes no switch, touches no Xero, invoice or payment data. service_role
 -- only. Rollback: supabase/rollbacks/20260924213000_debt_followup_approvals_down.sql
 SET LOCAL lock_timeout = '5s';
@@ -32,6 +33,7 @@ DECLARE
       'approved_by_email', 'text|NO', 'approved_by_user_id', 'uuid|NO',
       'approved_at', 'timestamp with time zone|NO',
       'expires_at', 'timestamp with time zone|NO',
+      'state', 'text|NO',
       'created_at', 'timestamp with time zone|NO'
     ),
     'debt_followup_executions', jsonb_build_object(
@@ -93,13 +95,15 @@ CREATE TABLE IF NOT EXISTS public.debt_followup_approvals (
   approved_by_user_id uuid NOT NULL,
   approved_at timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
+  state text NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'closed')),
   created_at timestamptz NOT NULL DEFAULT now(),
   CHECK (expires_at > approved_at),
   CHECK ((proposal ->> 'body_sha256') IS NOT DISTINCT FROM body_sha256)
 );
 
-CREATE INDEX IF NOT EXISTS idx_debt_followup_approvals_binding
-  ON public.debt_followup_approvals (binding_hash, expires_at DESC);
+DROP INDEX IF EXISTS public.idx_debt_followup_approvals_binding;
+CREATE UNIQUE INDEX IF NOT EXISTS debt_followup_approvals_one_open
+  ON public.debt_followup_approvals (binding_hash) WHERE state = 'open';
 
 CREATE TABLE IF NOT EXISTS public.debt_followup_executions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -145,7 +149,108 @@ CREATE INDEX IF NOT EXISTS idx_debt_followup_executions_binding
 CREATE OR REPLACE FUNCTION public.debt_followup_approvals_insert_only()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'debt_followup_approvals: an approval is never changed or deleted';
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'debt_followup_approvals: an approval is never deleted';
+  END IF;
+  IF OLD.state <> 'open' OR NEW.state <> 'closed' OR
+     NEW.approval_id IS DISTINCT FROM OLD.approval_id OR
+     NEW.binding_hash IS DISTINCT FROM OLD.binding_hash OR
+     NEW.contract IS DISTINCT FROM OLD.contract OR
+     NEW.kind IS DISTINCT FROM OLD.kind OR
+     NEW.channel IS DISTINCT FROM OLD.channel OR
+     NEW.xero_invoice_ids IS DISTINCT FROM OLD.xero_invoice_ids OR
+     NEW.request IS DISTINCT FROM OLD.request OR
+     NEW.proposal IS DISTINCT FROM OLD.proposal OR
+     NEW.body_sha256 IS DISTINCT FROM OLD.body_sha256 OR
+     NEW.approved_by_email IS DISTINCT FROM OLD.approved_by_email OR
+     NEW.approved_by_user_id IS DISTINCT FROM OLD.approved_by_user_id OR
+     NEW.approved_at IS DISTINCT FROM OLD.approved_at OR
+     NEW.expires_at IS DISTINCT FROM OLD.expires_at OR
+     NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'debt_followup_approvals: only open-to-closed is allowed';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.debt_followup_create_approval(p_approval jsonb)
+RETURNS SETOF public.debt_followup_approvals
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE
+  v_binding_hash text := p_approval ->> 'binding_hash';
+  v_approval public.debt_followup_approvals%ROWTYPE;
+BEGIN
+  IF v_binding_hash IS NULL OR
+     (p_approval ->> 'expires_at')::timestamptz <= now() THEN
+    RAISE EXCEPTION 'debt_followup_approval_invalid_or_expired';
+  END IF;
+
+  UPDATE public.debt_followup_approvals
+    SET state = 'closed'
+    WHERE binding_hash = v_binding_hash AND state = 'open'
+      AND expires_at <= now();
+
+  INSERT INTO public.debt_followup_approvals (
+    approval_id, binding_hash, contract, kind, channel, xero_invoice_ids,
+    request, proposal, body_sha256, approved_by_email,
+    approved_by_user_id, approved_at, expires_at
+  ) VALUES (
+    p_approval ->> 'approval_id',
+    v_binding_hash,
+    p_approval ->> 'contract',
+    p_approval ->> 'kind',
+    p_approval ->> 'channel',
+    ARRAY(SELECT jsonb_array_elements_text(p_approval -> 'xero_invoice_ids')),
+    p_approval -> 'request',
+    p_approval -> 'proposal',
+    p_approval ->> 'body_sha256',
+    p_approval ->> 'approved_by_email',
+    (p_approval ->> 'approved_by_user_id')::uuid,
+    (p_approval ->> 'approved_at')::timestamptz,
+    (p_approval ->> 'expires_at')::timestamptz
+  ) ON CONFLICT (binding_hash) WHERE state = 'open' DO NOTHING;
+
+  SELECT * INTO v_approval
+    FROM public.debt_followup_approvals
+    WHERE binding_hash = v_binding_hash AND state = 'open'
+      AND expires_at > now()
+    LIMIT 1;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'debt_followup_approval_not_open';
+  END IF;
+  RETURN NEXT v_approval;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.debt_followup_claim_live(p_execution jsonb)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE
+  v_approval_id text := p_execution ->> 'approval_id';
+  v_binding_hash text := p_execution ->> 'binding_hash';
+  v_inserted integer;
+BEGIN
+  UPDATE public.debt_followup_approvals
+    SET state = 'closed'
+    WHERE approval_id = v_approval_id AND binding_hash = v_binding_hash
+      AND state = 'open' AND expires_at > now();
+  IF NOT FOUND THEN RETURN false; END IF;
+
+  INSERT INTO public.debt_followup_executions (
+    approval_id, binding_hash, kind, channel, mode, outcome, press_token,
+    pressed_by, source_action, proposal
+  ) VALUES (
+    v_approval_id,
+    v_binding_hash,
+    p_execution ->> 'kind',
+    p_execution ->> 'channel',
+    'live',
+    'sending',
+    (p_execution ->> 'press_token')::uuid,
+    p_execution ->> 'pressed_by',
+    p_execution ->> 'source_action',
+    p_execution -> 'proposal'
+  ) ON CONFLICT (approval_id) WHERE mode = 'live' DO NOTHING;
+  GET DIAGNOSTICS v_inserted = ROW_COUNT;
+  RETURN v_inserted = 1;
 END $$;
 
 CREATE OR REPLACE FUNCTION public.debt_followup_executions_settle_once()
@@ -202,8 +307,12 @@ GRANT SELECT, INSERT ON public.debt_followup_approvals TO service_role;
 GRANT SELECT, INSERT, UPDATE ON public.debt_followup_executions TO service_role;
 REVOKE ALL ON FUNCTION public.debt_followup_approvals_insert_only() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.debt_followup_executions_settle_once() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.debt_followup_create_approval(jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.debt_followup_claim_live(jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.debt_followup_create_approval(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.debt_followup_claim_live(jsonb) TO service_role;
 
 COMMENT ON TABLE public.debt_followup_approvals IS
-  'Captain approvals of one exact debtor text or invoice email (body hash, destination, invoice ids, subject/attachment, Xero snapshot, hold state, expiry). Insert only. Contract: docs/debt-followup-approval.md.';
+  'Captain approvals of one exact debtor text or invoice email (body hash, destination, invoice ids, subject/attachment, Xero snapshot, hold state, expiry). Immutable except open-to-closed. Contract: docs/debt-followup-approval.md.';
 COMMENT ON TABLE public.debt_followup_executions IS
   'Every debt follow-up press. Dry-run/refused rows append; at most one live row per approval, claimed before the provider call and settled once; a sent row carries provider proof. Never deleted.';

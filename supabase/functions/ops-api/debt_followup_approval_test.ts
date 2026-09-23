@@ -8,6 +8,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  approvedInvoiceEmailHtmlBody,
   type ApprovalRecord,
   type AttemptRow,
   DEBT_FOLLOWUP_EXECUTE_ENV,
@@ -25,6 +26,7 @@ import {
   legacySendResponse,
   type LiveExecution,
   type MirrorInvoiceRow,
+  sha256Hex,
 } from "./debt_followup_approval.ts";
 import {
   CONTACT_MATCH_SCAN_LIMIT,
@@ -32,6 +34,10 @@ import {
   debtFollowupReads,
 } from "./debt_followup_approval_live.ts";
 import { SMS_DEFAULT_FROM_NUMBER } from "../_shared/sms_from_number.ts";
+import {
+  outlookMessageHtmlBody,
+  OUTLOOK_DEFAULT_MAILBOX,
+} from "../_shared/outlook_signature.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -222,17 +228,21 @@ function deps(w: World): DebtFollowupDeps {
         const r = w.approvals.get(id);
         return Promise.resolve(r ? structuredClone(r) : null);
       },
-      findOpenApproval(hash, nowIso) {
-        const open = [...w.approvals.values()].find((a) =>
-          a.binding_hash === hash && a.expires_at > nowIso &&
-          !w.live.has(a.approval_id)
-        );
-        return Promise.resolve(open ?? null);
-      },
-      insertApproval(record) {
+      createOrReuseApproval(record) {
         guard(w, "approval_write");
+        for (const prior of w.approvals.values()) {
+          if (
+            prior.binding_hash === record.binding_hash &&
+            prior.state === "open" && prior.expires_at <= w.now.toISOString()
+          ) prior.state = "closed";
+        }
+        const existing = [...w.approvals.values()].find((a) =>
+          a.binding_hash === record.binding_hash && a.state === "open" &&
+          a.expires_at > w.now.toISOString()
+        );
+        if (existing) return Promise.resolve(structuredClone(existing));
         w.approvals.set(record.approval_id, structuredClone(record));
-        return Promise.resolve();
+        return Promise.resolve(structuredClone(record));
       },
       liveExecution(id) {
         const row = w.live.get(id);
@@ -243,6 +253,9 @@ function deps(w: World): DebtFollowupDeps {
       claimLive(row) {
         if (w.claimFails) return Promise.resolve(false);
         if (w.live.has(row.approval_id)) return Promise.resolve(false);
+        const approval = w.approvals.get(row.approval_id);
+        if (!approval || approval.state !== "open") return Promise.resolve(false);
+        approval.state = "closed";
         w.live.set(row.approval_id, {
           approval_id: row.approval_id,
           outcome: "sending",
@@ -844,6 +857,67 @@ Deno.test("approval binds body hash, destination, invoice ids, snapshot and expi
   const again = await approve(w, CHASE);
   assertEquals(again, id);
   assertEquals(w.approvals.size, 1);
+});
+
+Deno.test("concurrent identical captain approvals converge on one open approval", async () => {
+  const w = world();
+  const stored = new Map<string, ApprovalRecord>();
+  const ledgerClient = {
+    async rpc(name: string, args: Obj) {
+      assertEquals(name, "debt_followup_create_approval");
+      const candidate = args.p_approval as ApprovalRecord;
+      const existing = [...stored.values()].find((row) =>
+        row.binding_hash === candidate.binding_hash && row.state === "open" &&
+        row.expires_at > w.now.toISOString()
+      );
+      if (existing) return { data: [structuredClone(existing)], error: null };
+      const row = { ...structuredClone(candidate), state: "open" as const };
+      stored.set(row.approval_id, row);
+      return { data: [structuredClone(row)], error: null };
+    },
+  };
+  const approveDeps = deps(w);
+  approveDeps.ledger = debtFollowupLedger(ledgerClient);
+  const proposed = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: CHASE },
+    deps: approveDeps,
+  });
+  assert(proposed.status === "proposed");
+  if (proposed.status !== "proposed") throw new Error("unreachable");
+  const approveSame = () => debtFollowupApproveAction({
+    method: "POST",
+    auth: captain,
+    body: { request: CHASE, expected_binding_hash: proposed.binding_hash },
+    deps: approveDeps,
+  });
+  const results = await Promise.all([approveSame(), approveSame()]);
+  const [first, second] = results;
+  assert(first.status === "approved");
+  assert(second.status === "approved");
+  assertEquals(first.approval_id, second.approval_id);
+  assertEquals([first.replayed, second.replayed].sort(), [false, true]);
+  assertEquals(stored.size, 1);
+});
+
+Deno.test("invoice proposal hashes the same default-mailbox HTML Outlook sends", async () => {
+  const w = world();
+  const result = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: EMAIL },
+    deps: deps(w),
+  });
+  assert(result.status === "proposed");
+  if (result.status !== "proposed") throw new Error("unreachable");
+  assertEquals(result.proposal.body, approvedInvoiceEmailHtmlBody("INV-0857"));
+  assertEquals(
+    await sha256Hex(result.proposal.body),
+    result.proposal.body_sha256,
+  );
+  assertEquals(
+    outlookMessageHtmlBody(result.proposal.body, OUTLOOK_DEFAULT_MAILBOX),
+    result.proposal.body,
+  );
 });
 
 // ── Kind rules ─────────────────────────────────────────────────────────────
@@ -1649,14 +1723,12 @@ Deno.test("contact matching reads every row and fails closed past its scan limit
 // ── Production ledger adapter ──────────────────────────────────────────────
 
 Deno.test("live ledger: a duplicate live claim is 'already claimed', any other write error throws", async () => {
-  const inserted: Obj[] = [];
-  const client = (error: Obj | null) => ({
-    from: () => ({
-      insert: (row: Obj) => {
-        inserted.push(row);
-        return Promise.resolve({ error });
-      },
-    }),
+  const calls: Array<{ name: string; args: Obj }> = [];
+  const client = (data: boolean | null, error: Obj | null = null) => ({
+    rpc: (name: string, args: Obj) => {
+      calls.push({ name, args });
+      return Promise.resolve({ data, error });
+    },
   });
   const row = {
     approval_id: "a".repeat(64),
@@ -1669,16 +1741,16 @@ Deno.test("live ledger: a duplicate live claim is 'already claimed', any other w
     // deno-lint-ignore no-explicit-any
     proposal: {} as any,
   };
-  assertEquals(await debtFollowupLedger(client(null)).claimLive(row), true);
-  assertEquals(inserted[0].mode, "live");
-  assertEquals(inserted[0].outcome, "sending");
+  assertEquals(await debtFollowupLedger(client(true)).claimLive(row), true);
+  assertEquals(calls[0].name, "debt_followup_claim_live");
+  assertEquals(calls[0].args.p_execution, row);
   assertEquals(
-    await debtFollowupLedger(client({ code: "23505" })).claimLive(row),
+    await debtFollowupLedger(client(false)).claimLive(row),
     false,
   );
   let threw = false;
   try {
-    await debtFollowupLedger(client({ code: "42P01" })).claimLive(row);
+    await debtFollowupLedger(client(null, { code: "42P01" })).claimLive(row);
   } catch {
     threw = true;
   }

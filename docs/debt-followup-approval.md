@@ -36,8 +36,11 @@ provider unless all of these hold at the moment of the press:
 Otherwise the press is a dry run: every check runs, a `debt_followup_executions`
 row records the result (`mode = dry_run`), and no provider send call is made.
 
-One approval sends at most once. The live row is claimed before the provider
-call (unique per approval) and settles once: `sent` (with provider proof),
+One approval sends at most once. The live claim atomically closes the approval
+and inserts its unique live execution before the provider call. Approvals move
+only from `open` to `closed`; expiry closes an open row when its binding is
+approved again. A unique partial index and the atomic create function make
+concurrent identical approvals return the same open row. The execution settles once: `sent` (with provider proof),
 `failed` (the transport refused before sending) or `unknown` (the provider may
 have sent). A second press of a sent approval replays its proof; any other
 second press is refused. A new send needs a new approval.
@@ -57,7 +60,7 @@ built. An approval records the captain's email and user id.
 | Action | What it does | Writes |
 |---|---|---|
 | `debt_followup_propose` (POST `{request}`) | Builds the exact proposal from fresh reads; returns `binding_hash`. | Nothing |
-| `debt_followup_approve` (POST `{request, expected_binding_hash}`) | Captain only (403 otherwise). Rebuilds; refuses `proposal_changed` if the hash moved. Re-approving an open, unpressed approval returns it. | One `debt_followup_approvals` row |
+| `debt_followup_approve` (POST `{request, expected_binding_hash}`) | Captain only (403 otherwise). Rebuilds; refuses `proposal_changed` if the hash moved. Re-approving an open approval returns it atomically. | One `debt_followup_approvals` row |
 | `debt_followup_execute` (POST `{approval_id, dry_run?}`) | The press. | One `debt_followup_executions` row |
 
 `request`: `{kind, xero_invoice_ids[], ghl_contact_id?, message?, to_email?, cc?, subject?}`.
@@ -73,7 +76,7 @@ appears once in that job's conversation.
 | `chase_sms` | 1 to 20, one debtor, one job, AUTHORISED with a balance, not on hold | The operator's exact `message` | The job's GHL contact, else the org-scoped `contact_matches` binding (every row checked; two contacts or too many rows refuse) |
 | `payment_link_sms` | Exactly 1, same rules | Composed from the Xero online-invoice URL | Same |
 | `thank_you_sms` | Exactly 1, PAID | Composed from Xero's amount paid | Same |
-| `invoice_email` | Exactly 1, same rules as chase | The fixed invoice email body (`invoiceEmailHtmlBody`) plus the Xero PDF | Xero contact emails and verified anchors only; default the Xero primary email |
+| `invoice_email` | Exactly 1, same rules as chase | The exact Outlook HTML, including the default mailbox signature, plus the Xero PDF | Xero contact emails and verified anchors only; default the Xero primary email |
 
 Composed texts carry no em dashes.
 
@@ -113,7 +116,10 @@ keyed `outlook-accepted:<approval_id>` (one approval sends at most once), with
 approved subject and HTML sit in the payload (`subject`, `email_body_html`,
 never `body`, so the ladder's words stay the digit-free preview), and
 `getJobConversation` shows the event once as an outbound email with a proof
-block labelled "accepted by Outlook". Graph `sendMail` returns no message id,
+block labelled "accepted by Outlook". If that capture write fails, the
+conversation projects the confirmed `outcome = sent` execution row instead;
+provider identity deduplication prevents showing both copies. The same fallback
+uses `ghl:<id>` for a confirmed SMS. Graph `sendMail` returns no message id,
 so email proof is acceptance, not delivery. If the evidence write does not land
 after Outlook accepts the send, the send stays confirmed and the result carries
 `timeline_write_failed: true`.
