@@ -6,8 +6,11 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildGhlMessageRow,
+  buildGhlRecordRow,
   type GhlCaptureContext,
   type GhlMessageItem,
+  type GhlRecordBody,
+  type GhlRecordEventType,
   ourLineForNumber,
 } from "./ghl_message.ts";
 import {
@@ -326,4 +329,85 @@ Deno.test("our lines: 772 and 778 fencing, 774 patio, 771 and 776 none, other nu
     our_number: null,
   });
   assertEquals(ourLineForNumber(null).from_line, null);
+});
+
+// ── rank 10 (slice C1c): notes, tasks, appointments ─────────────────────────
+
+Deno.test("rank 10: the key version is dateUpdated, else a create's dateAdded, else the event timestamp, else the webhook id", () => {
+  const ctx = { source: "ghl-webhook-receiver", captureMode: "live" as const };
+  const key = (type: GhlRecordEventType, body: GhlRecordBody) => {
+    const b = buildGhlRecordRow(type, body, ctx);
+    return b.kind === "row" ? b.row.provider_message_id : `skip:${b.reason}`;
+  };
+  const base = { id: "noteFixture01", contactId: "contact-fixture" };
+  assertEquals(
+    key("NoteCreate", {
+      ...base,
+      dateAdded: "2026-09-08T02:10:00.000Z",
+      webhookId: "wh-1",
+    }),
+    "ghlnote:noteFixture01:2026-09-08T02:10:00.000Z",
+  );
+  assertEquals(
+    key("NoteUpdate", {
+      ...base,
+      dateAdded: "2026-09-08T02:10:00.000Z",
+      dateUpdated: "2026-09-09T01:00:00.000Z",
+    }),
+    "ghlnote:noteFixture01:2026-09-09T01:00:00.000Z",
+  );
+  // An edit never falls back to the creation time: that would fold it into the original row.
+  assertEquals(
+    key("NoteUpdate", {
+      ...base,
+      dateAdded: "2026-09-08T02:10:00.000Z",
+      webhookId: "wh-2",
+    }),
+    "ghlnote:noteFixture01:wh-2",
+  );
+  assertEquals(
+    key("NoteUpdate", { ...base, dateAdded: "2026-09-08T02:10:00.000Z" }),
+    "skip:no_id",
+  );
+  assertEquals(
+    key("TaskComplete", {
+      ...base,
+      dateAdded: "2026-09-01T00:00:00.000Z",
+      timestamp: "2026-09-23T02:00:00.000Z",
+    }),
+    "ghltask:noteFixture01:complete:2026-09-23T02:00:00.000Z",
+  );
+  // A version that is not id- or time-shaped is not used.
+  assertEquals(
+    key("TaskDelete", { ...base, timestamp: "next tuesday please" }),
+    "skip:no_id",
+  );
+});
+
+Deno.test("rank 10: no contact means no row; an appointment's contact is read from the nested appointment", () => {
+  const ctx = { source: "ghl-webhook-receiver", captureMode: "live" as const };
+  const noContact = buildGhlRecordRow("NoteCreate", {
+    id: "noteFixture01",
+    dateAdded: "2026-09-08T02:10:00.000Z",
+  }, ctx);
+  assertEquals(
+    noContact.kind === "skip" ? noContact.reason : "row",
+    "no_contact",
+  );
+  const appt = buildGhlRecordRow("AppointmentDelete", {
+    appointment: {
+      id: "apptFixture01",
+      contactId: "contact-nested",
+      dateUpdated: "2026-09-20T03:00:00.000Z",
+    },
+  }, ctx);
+  if (appt.kind !== "row") throw new Error("appointment skipped");
+  assertEquals(appt.row.contact_id, "contact-nested");
+  assertEquals(appt.row.event_type, "ghl.appointment_deleted");
+  assertEquals(appt.row.channel, "status");
+  assertEquals(appt.row.thread_key, null);
+  assertEquals(
+    (appt.row.metadata as Record<string, unknown>).capture_mode,
+    "live",
+  );
 });

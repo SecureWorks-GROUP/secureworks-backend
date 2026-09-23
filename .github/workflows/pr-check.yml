@@ -280,12 +280,17 @@ jobs:
 
       # Slice C1b: the GHL webhook receiver's two-proof auth (observe until
       # GHL_WEBHOOK_AUTH_MODE=enforce), ids-only webhook_log receipts and the
-      # removed body.job_id trust, driven through the real handler.
+      # removed body.job_id trust, driven through the real handler. Slice C1c:
+      # messages and the app's notes, tasks and appointments through the one
+      # builder and writer behind ghl_message_capture_v2, the id-less targeted
+      # read, ghl_webhook_receipts, and ghl-webhook's message branch removed.
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ghl-webhook-receiver/receiver_auth_test.ts \
-            supabase/functions/ghl-webhook-receiver/receiver_c1b_test.ts
+            supabase/functions/ghl-webhook-receiver/receiver_c1b_test.ts \
+            supabase/functions/ghl-webhook-receiver/receiver_c1c_test.ts \
+            supabase/functions/ghl-webhook/message_webhook_test.ts
 
       # Slice C1a: the shared GHL row builder, ghl-proxy send_sms through the one
       # writer capture_business_event, and the builder rows the PostgreSQL

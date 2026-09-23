@@ -3615,6 +3615,20 @@ a log line, and never let a body `job_id` choose a job. `index.ts` must keep
 `--no-verify-jwt` in its first 30 lines (the deploy workflow reads it). Tests:
 `receiver_c1b_test.ts`, `receiver_auth_test.ts`.
 
+Messages (`InboundMessage`/`OutboundMessage`) and the app's notes, tasks and
+appointments are saved ONLY through `_shared/evidence/ghl_message.ts` and
+`capture_business_event` (`capture.ts`, slice C1c), behind flag
+`ghl_message_capture_v2` (fail closed, off). The receiver picks no job and
+cancels nothing: the ladder places rows, the event listener cancels. A message
+webhook with no id writes nothing from its body; one targeted conversation read
+saves each listed message under `ghl:<id>`. Every delivery also writes one
+`ghl_webhook_receipts` row through `record_ghl_webhook_receipt` (ids and codes
+only, DB-enforced; 30-day purge inside the writer). Tasks and appointments use
+channel `status` because the live `business_events` channel CHECK has no
+`task`/`calendar` (schema owner: foundation). `ghl-webhook` answers message
+posts with no write. Tests: `receiver_c1c_test.ts`; SQL proof and builder-row
+parity: migration contract `20260924130000_ghl_webhook_receipts`.
+
 ## Outbound SMS Sender Policy Is One Shared Module
 
 Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company

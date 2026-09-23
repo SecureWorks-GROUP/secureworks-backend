@@ -2,9 +2,10 @@
 // (context build plan slice C1a; design sms.md §2 and §3).
 //
 // Every door that saves a GHL message builds its row here and saves it through
-// the SQL writer public.capture_business_event(p_row jsonb): today ghl-proxy's
-// send_sms; later the webhook receiver (C1c) and the 15-minute reconciler
-// (C1d). Ported from the runtime's lead-thread-capture.ts buildCaptureRow, with
+// the SQL writer public.capture_business_event(p_row jsonb): ghl-proxy's
+// send_sms (C1a), the webhook receiver's messages and rank-10 notes, tasks and
+// appointments (C1c, buildGhlRecordRow below), and later the 15-minute
+// reconciler (C1d). Ported from the runtime's lead-thread-capture.ts buildCaptureRow, with
 // the design's changes:
 //   * key is ghl:<GHL message id> only. No id means no row (review M8);
 //   * thread_key is always null: a GHL conversation is per contact, not per
@@ -293,6 +294,269 @@ export function buildGhlMessageRow(
       ...(ctx.bodyHash ? { body_hash: ctx.bodyHash } : {}),
       privacy_classification: "staff_only",
       retention_class: "7y_audit",
+      payload,
+      metadata: { capture_mode: ctx.captureMode },
+    },
+  };
+}
+
+// ── Rank 10: GHL notes, tasks and appointments (slice C1c; sms.md §2) ──
+//
+// The same builder maps the GHL app webhooks NoteCreate / NoteUpdate,
+// TaskCreate / TaskComplete / TaskDelete and AppointmentCreate / Update /
+// Delete. Each delivery is one row of history, never an answer path: the
+// current appointment and the open tasks are read live by the dossier.
+//
+// Keys (sms.md §2 mapping table, review S4). Every edit and every task or
+// appointment transition is its own row; a retry of the same delivery lands on
+// the same key:
+//   ghlnote:<note id>:<version>
+//   ghltask:<task id>:<create|complete|delete>:<version>
+//   ghlappt:<appointment id>:<create|update|delete>:<version>
+// <version> is GHL's own dateUpdated; for a create, else the item's
+// dateAdded; else the delivery's event timestamp; else its webhookId. A delivery
+// that carries none of them writes nothing (no key, no row: review M8), so an
+// edit is never folded into an earlier row.
+//
+// Channel: notes are `note` / internal (staff words, like internal comments).
+// Tasks and appointments are `status` / internal. The design table names
+// channels `task` and `calendar`, but the live business_events channel CHECK
+// (read from production 23 Sep 2026, pinned in the C1a contract setup) allows
+// neither, and that schema belongs to the foundation track (F1). `status` is
+// the live channel for internal state changes (the legacy AppointmentCreated
+// and stage rows use it); the event type carries the kind, and the cadence
+// rules key on the event type (ghl.task_*, ghl.appointment_* ride along).
+
+/** The GHL app webhook types the rank-10 builder maps. */
+export const GHL_RECORD_EVENT_TYPES = [
+  "NoteCreate",
+  "NoteUpdate",
+  "TaskCreate",
+  "TaskComplete",
+  "TaskDelete",
+  "AppointmentCreate",
+  "AppointmentUpdate",
+  "AppointmentDelete",
+] as const;
+export type GhlRecordEventType = typeof GHL_RECORD_EVENT_TYPES[number];
+
+export function isGhlRecordEventType(
+  value: unknown,
+): value is GhlRecordEventType {
+  return GHL_RECORD_EVENT_TYPES.some((t) => t === value);
+}
+
+/** One rank-10 app webhook body, as GHL posts it (appointments nest under `appointment`). */
+export interface GhlRecordBody {
+  type?: string | null;
+  id?: string | null;
+  contactId?: string | null;
+  body?: string | null;
+  title?: string | null;
+  userId?: string | null;
+  assignedTo?: string | null;
+  dueDate?: string | null;
+  completed?: boolean | null;
+  dateAdded?: string | null;
+  dateUpdated?: string | null;
+  timestamp?: string | null;
+  webhookId?: string | null;
+  appointment?: {
+    id?: string | null;
+    contactId?: string | null;
+    calendarId?: string | null;
+    title?: string | null;
+    appointmentStatus?: string | null;
+    assignedUserId?: string | null;
+    startTime?: string | null;
+    endTime?: string | null;
+    dateAdded?: string | null;
+    dateUpdated?: string | null;
+  } | null;
+}
+
+const RECORD_KIND: Record<
+  GhlRecordEventType,
+  {
+    family: "note" | "task" | "appointment";
+    action: "create" | "update" | "complete" | "delete";
+    eventType: string;
+  }
+> = {
+  NoteCreate: { family: "note", action: "create", eventType: "ghl.note_added" },
+  NoteUpdate: {
+    family: "note",
+    action: "update",
+    eventType: "ghl.note_updated",
+  },
+  TaskCreate: {
+    family: "task",
+    action: "create",
+    eventType: "ghl.task_created",
+  },
+  TaskComplete: {
+    family: "task",
+    action: "complete",
+    eventType: "ghl.task_completed",
+  },
+  TaskDelete: {
+    family: "task",
+    action: "delete",
+    eventType: "ghl.task_deleted",
+  },
+  AppointmentCreate: {
+    family: "appointment",
+    action: "create",
+    eventType: "ghl.appointment_created",
+  },
+  AppointmentUpdate: {
+    family: "appointment",
+    action: "update",
+    eventType: "ghl.appointment_updated",
+  },
+  AppointmentDelete: {
+    family: "appointment",
+    action: "delete",
+    eventType: "ghl.appointment_deleted",
+  },
+};
+
+/** A key segment: GHL ids and ISO times only. Anything else is not a version. */
+const KEY_PART = /^[A-Za-z0-9_.:+-]{1,64}$/;
+
+function keyPart(value: unknown): string | null {
+  const s = text(value);
+  return s && KEY_PART.test(s) ? s : null;
+}
+
+/** The row for one rank-10 app webhook, or why it is not written. Pure. */
+export function buildGhlRecordRow(
+  type: GhlRecordEventType,
+  body: GhlRecordBody,
+  ctx: { source: string; captureMode: CaptureMode },
+): GhlMessageBuild {
+  const kind = RECORD_KIND[type];
+  const appt = kind.family === "appointment" ? (body.appointment ?? {}) : null;
+  const itemId = text(appt ? appt.id : body.id);
+  if (!itemId || !GHL_ID.test(itemId)) return { kind: "skip", reason: "no_id" };
+  const contactId = text(appt?.contactId) ?? text(body.contactId);
+  if (!contactId) return { kind: "skip", reason: "no_contact" };
+
+  const dateAdded = appt ? appt.dateAdded : body.dateAdded;
+  const dateUpdated = appt ? appt.dateUpdated : body.dateUpdated;
+  const version = keyPart(dateUpdated) ??
+    (kind.action === "create" ? keyPart(dateAdded) : null) ??
+    keyPart(body.timestamp) ?? keyPart(body.webhookId);
+  if (!version) return { kind: "skip", reason: "no_id" };
+
+  const prefix = kind.family === "note"
+    ? "ghlnote"
+    : kind.family === "task"
+    ? "ghltask"
+    : "ghlappt";
+  const key = kind.family === "note"
+    ? `${prefix}:${itemId}:${version}`
+    : `${prefix}:${itemId}:${kind.action}:${version}`;
+
+  // Provider time of this change: the edit or transition time, never ingestion.
+  const eventAt = sourceTime(dateUpdated) ?? sourceTime(body.timestamp) ??
+    (kind.action === "create" ? sourceTime(dateAdded) : null);
+
+  const channel = kind.family === "note" ? "note" : "status";
+  const staffUser = kind.family === "appointment"
+    ? text(appt?.assignedUserId)
+    : text(body.userId);
+  const payload: Record<string, unknown> = {
+    channel,
+    direction: "internal",
+    ghl_record_type: type,
+    ghl_contact_id: contactId,
+    sent_by_kind: text(body.userId) ? "staff_app" : "unknown",
+    sent_by_user: text(body.userId),
+    event_at_source: eventAt ? "provider" : "missing",
+  };
+  let read: string;
+  if (kind.family === "note") {
+    const words = typeof body.body === "string" && body.body.trim()
+      ? body.body
+      : null;
+    read = words ?? "[Note with no text.]";
+    payload.ghl_note_id = itemId;
+    if (words) {
+      Object.assign(payload, {
+        body: words,
+        text: words,
+        message: words,
+        message_text: words.slice(0, EXCERPT),
+      });
+    } else payload.described_by_capture = true;
+  } else if (kind.family === "task") {
+    const title = text(body.title);
+    const words = typeof body.body === "string" && body.body.trim()
+      ? body.body
+      : null;
+    const verb = kind.action === "create"
+      ? "created"
+      : kind.action === "complete"
+      ? "completed"
+      : "deleted";
+    read = [`Task ${verb}: ${title ?? "(no title)"}`, words].filter(Boolean)
+      .join("\n");
+    Object.assign(payload, {
+      ghl_task_id: itemId,
+      title,
+      body: words,
+      assigned_to: text(body.assignedTo),
+      due_date: sourceTime(body.dueDate) ?? text(body.dueDate),
+      completed: typeof body.completed === "boolean" ? body.completed : null,
+      task_action: kind.action,
+    });
+  } else {
+    const verb = kind.action === "create"
+      ? "created"
+      : kind.action === "update"
+      ? "updated"
+      : "deleted";
+    const start = sourceTime(appt?.startTime);
+    const end = sourceTime(appt?.endTime);
+    const status = text(appt?.appointmentStatus);
+    read = `Appointment ${verb}: ${text(appt?.title) ?? "(no title)"}${
+      start ? `, starts ${start}` : ""
+    }${end ? `, ends ${end}` : ""}${status ? `, status ${status}` : ""}`;
+    Object.assign(payload, {
+      ghl_appointment_id: itemId,
+      calendar_id: text(appt?.calendarId),
+      title: text(appt?.title),
+      start_time: start,
+      end_time: end,
+      appointment_status: status,
+      assigned_user_id: staffUser,
+      appointment_action: kind.action,
+      // History only: the next booked visit is read live (dossier), never from here.
+      answer_path: false,
+    });
+  }
+
+  return {
+    kind: "row",
+    row: {
+      event_type: kind.eventType,
+      source: ctx.source,
+      entity_type: "contact",
+      entity_id: contactId,
+      contact_id: contactId,
+      job_id: null,
+      match_method: "none",
+      event_at: eventAt,
+      provider_message_id: key,
+      channel,
+      direction: "internal",
+      thread_key: null,
+      conversation_key: null,
+      body_preview: read.slice(0, EXCERPT),
+      safe_summary: read.slice(0, 280),
+      privacy_classification: "staff_only",
+      retention_class: kind.family === "note" ? "7y_audit" : "12m_default",
       payload,
       metadata: { capture_mode: ctx.captureMode },
     },

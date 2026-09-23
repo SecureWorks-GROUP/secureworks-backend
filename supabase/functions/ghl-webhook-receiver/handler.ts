@@ -3,15 +3,21 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Receiver (All Event Types)
 //
-// Receives webhook payloads from GHL for client interactions:
-// InboundMessage, OutboundMessage, CallCompleted,
-// AppointmentCreated, NoteAdded, ContactStageChanged.
-// Creates business_events for the event-listener to react to
-// (nudge cancellation and job timeline).
+// Receives GHL webhooks. Messages (InboundMessage, OutboundMessage) and the
+// GHL app's notes, tasks and appointments (NoteCreate, NoteUpdate, TaskCreate,
+// TaskComplete, TaskDelete, AppointmentCreate, AppointmentUpdate,
+// AppointmentDelete) are saved through the one row builder and the one writer
+// capture_business_event, behind flag ghl_message_capture_v2 (capture.ts,
+// slice C1c). The legacy workflow posts (CallCompleted, AppointmentCreated,
+// NoteAdded, ContactStageChanged) keep their existing rows until their own
+// slices replace them. The receiver never picks a job: the database ladder
+// places every row (no receiver matcher, no inline nudge or proposal
+// cancellation; the event listener owns cancellation).
 //
 // Every delivery is authenticated first (receiver_auth.ts: app signature or
 // workflow secret by event type; observe mode until GHL_WEBHOOK_AUTH_MODE is
-// `enforce`) and leaves exactly one ids-only `webhook_log` receipt.
+// `enforce`) and leaves exactly one ids-only `webhook_log` receipt and one
+// `ghl_webhook_receipts` row (record_ghl_webhook_receipt).
 //
 // Entry point: index.ts (serve). This module exports the handler so tests can
 // drive it with injected dependencies and no network.
@@ -25,14 +31,17 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
 import { resolveMatch } from "../_shared/evidence/match.ts";
-import type {
-  Channel,
-  Direction,
-  MatchMethod,
-} from "../_shared/evidence/types.ts";
+import type { Channel, Direction } from "../_shared/evidence/types.ts";
+import {
+  captureGhlDelivery,
+  type CaptureResult,
+  isCapturedEventType,
+} from "./capture.ts";
+import { GHL_RECORD_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
 import {
   type AuthDecision,
   type AuthMode,
+  buildGhlReceiptRow,
   buildWebhookReceipt,
   decideAuth,
   errorCode,
@@ -164,126 +173,6 @@ function previewFromPayload(payload: Record<string, unknown>): string | null {
   if (raw == null) return null;
   const text = String(raw).trim();
   return text ? text.slice(0, 4096) : null;
-}
-
-interface WebhookJobCandidate {
-  id: string;
-  job_number: string | null;
-  client_name: string | null;
-  type: string | null;
-  status: string | null;
-  site_suburb: string | null;
-  created_at: string | null;
-}
-
-interface WebhookJobMatch {
-  job: WebhookJobCandidate | null;
-  match_method: MatchMethod;
-  match_confidence: number | undefined;
-  match_reason: string;
-  candidate_count: number;
-  candidates: Array<{
-    id: string;
-    job_number: string | null;
-    type: string | null;
-    status: string | null;
-    site_suburb: string | null;
-  }>;
-}
-
-function normaliseLoose(raw: string | null | undefined): string {
-  return (raw || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-function resolveWebhookJobMatch(
-  jobs: WebhookJobCandidate[] | null | undefined,
-  body: Record<string, unknown>,
-): WebhookJobMatch {
-  const candidates = (jobs || []).map((j) => ({
-    id: j.id,
-    job_number: j.job_number || null,
-    type: j.type || null,
-    status: j.status || null,
-    site_suburb: j.site_suburb || null,
-  }));
-  const candidate_count = candidates.length;
-  // A job id in the webhook body is never trusted (slice C1b, audit C6): any
-  // caller can put one there. body.job_id / supabase_job_id / jobId are ignored.
-  const directJobNumber = nullableString(
-    body.job_number ?? body.jobNumber ?? body.jobNo,
-  );
-
-  if (directJobNumber) {
-    const direct = (jobs || []).filter((j) =>
-      normaliseLoose(j.job_number) === normaliseLoose(directJobNumber)
-    );
-    if (direct.length === 1) {
-      return {
-        job: direct[0],
-        match_method: "direct_reference",
-        match_confidence: 0.95,
-        match_reason: "webhook carried direct job_number",
-        candidate_count,
-        candidates,
-      };
-    }
-  }
-
-  if (!jobs || jobs.length === 0) {
-    return {
-      job: null,
-      match_method: "none",
-      match_confidence: undefined,
-      match_reason: "no active Supabase job for GHL contact",
-      candidate_count,
-      candidates,
-    };
-  }
-
-  if (jobs.length === 1) {
-    return {
-      job: jobs[0],
-      match_method: "contact_id",
-      match_confidence: 0.85,
-      match_reason: "single active Supabase job for GHL contact",
-      candidate_count,
-      candidates,
-    };
-  }
-
-  const contactName = nullableString(
-    body.contactName ?? body.contact_name ?? body.name ??
-      [body.firstName, body.lastName].filter(Boolean).join(" "),
-  );
-  if (contactName) {
-    const nameMatches = jobs.filter((j) => {
-      const lhs = normaliseLoose(j.client_name);
-      const rhs = normaliseLoose(contactName);
-      return lhs.length > 0 && rhs.length > 0 &&
-        (lhs === rhs || lhs.includes(rhs) || rhs.includes(lhs));
-    });
-    if (nameMatches.length === 1) {
-      return {
-        job: nameMatches[0],
-        match_method: "contact_id",
-        match_confidence: 0.78,
-        match_reason:
-          "multiple active jobs for contact; client name narrowed to one job",
-        candidate_count,
-        candidates,
-      };
-    }
-  }
-
-  return {
-    job: null,
-    match_method: "contact_id",
-    match_confidence: 0.5,
-    match_reason:
-      "multiple active jobs for GHL contact; transcript/message must identify job before durable extraction",
-    candidate_count,
-    candidates,
-  };
 }
 
 // Best-effort GHL recording lookup. Used when the workflow body did not carry a
@@ -464,9 +353,10 @@ export interface ReceiverDeps {
 }
 
 // Supported event types
-const SUPPORTED_TYPES = [
+const SUPPORTED_TYPES: string[] = [
   "InboundMessage",
   "OutboundMessage",
+  ...GHL_RECORD_EVENT_TYPES,
   "CallCompleted",
   "AppointmentCreated",
   "NoteAdded",
@@ -499,15 +389,49 @@ export async function handleGhlWebhook(
   // deno-lint-ignore no-explicit-any
   let supabase: any = null;
 
-  // One ids-only receipt per delivery, written after the auth decision and
-  // carrying the final outcome. Never blocks or changes the response.
+  // One ids-only receipt per delivery in webhook_log (C1b) and one row in
+  // ghl_webhook_receipts (C1c), written after the auth decision and carrying
+  // the final outcome. Never blocks or changes the response.
   const finish = async (
     outcome: ReceiptOutcome,
     response: Response,
     code: string | null = null,
+    capture: CaptureResult | null = null,
   ): Promise<Response> => {
     try {
       supabase ??= deps.createSupabase();
+      const { data, error } = await supabase.rpc(
+        "record_ghl_webhook_receipt",
+        {
+          p_receipt: buildGhlReceiptRow({
+            body,
+            decision,
+            mode,
+            outcome,
+            errorCode: code,
+            capture,
+          }),
+        },
+      );
+      const refused = !error && data && typeof data === "object" &&
+        (data as { outcome?: unknown }).outcome === "error";
+      if (error || refused) {
+        console.error(
+          `[ghl-webhook-receiver] ghl_webhook_receipts write failed: code=${
+            error
+              ? errorCode(error)
+              : safeId((data as { code?: unknown }).code) ?? "error"
+          }`,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `[ghl-webhook-receiver] ghl_webhook_receipts write threw: code=${
+          errorCode(e)
+        }`,
+      );
+    }
+    try {
       const receipt = buildWebhookReceipt({
         orgId: DEFAULT_ORG_ID,
         body,
@@ -577,7 +501,7 @@ export async function handleGhlWebhook(
       );
     }
 
-    const { type, contactId, message, phone, email, conversationId } = body;
+    const { type, contactId, phone, email, conversationId } = body;
 
     supabase = deps.createSupabase();
 
@@ -719,65 +643,41 @@ export async function handleGhlWebhook(
       );
     }
 
-    // ── Match to an active job via ghl_contact_id ──
-    // Conservative by design: a phone/contact can own multiple active jobs.
-    // In that case we keep the evidence on the contact and mark the job as
-    // ambiguous unless the webhook carries a direct job reference or the
-    // client name narrows it to exactly one job. This prevents call
-    // transcripts from polluting the wrong permanent job memory.
-    const { data: jobs } = await supabase
-      .from("jobs")
-      .select(
-        "id, job_number, client_name, type, status, site_suburb, created_at",
-      )
-      .eq("ghl_contact_id", contactId)
-      .not("status", "in", '("cancelled","complete")')
-      .order("created_at", { ascending: false })
-      .limit(10);
-
-    const jobMatch = resolveWebhookJobMatch(
-      (jobs || []) as WebhookJobCandidate[],
-      body as Record<string, unknown>,
-    );
-    const job = jobMatch.job;
+    // ── Messages and rank-10 app events: the one builder and the one writer ──
+    if (isCapturedEventType(type)) {
+      const captured = await captureGhlDelivery(supabase, body, {
+        env: deps.env,
+        fetch: fetchImpl,
+      });
+      console.log(
+        `[ghl-webhook-receiver] Captured: type=${
+          safeEventType(type)
+        } outcome=${captured.outcome} reason=${captured.reason ?? "none"} id=${
+          captured.itemId ?? "none"
+        } event=${captured.eventId ?? "none"}`,
+      );
+      return await finish(
+        captured.outcome,
+        jsonResponse(
+          {
+            received: true,
+            outcome: captured.outcome,
+            reason: captured.reason,
+            event_id: captured.eventId,
+            event_created: captured.outcome === "event_created",
+          },
+          captured.httpStatus,
+        ),
+        captured.outcome === "error" ? captured.reason : null,
+        captured,
+      );
+    }
 
     // ── Build event_type and payload per webhook type ──
     let eventType = "";
     let eventPayload: Record<string, unknown> = {};
 
     switch (type) {
-      case "InboundMessage": {
-        const channel = phone ? "sms" : email ? "email" : "chat";
-        eventType = "client.reply";
-        eventPayload = {
-          message_text: body.body || message || "",
-          line: body.line || null,
-          phone: phone || null,
-          email: email || null,
-          conversation_id: conversationId || null,
-          channel,
-          source: "ghl_webhook",
-        };
-        break;
-      }
-
-      case "OutboundMessage": {
-        const channel = body.messageType === "Email" || body.channel === "email"
-          ? "email"
-          : "sms";
-        eventType = channel === "email" ? "client.email_out" : "client.sms_out";
-        eventPayload = {
-          message_text: body.body || body.message || "",
-          phone: body.phone || null,
-          email: body.email || null,
-          conversation_id: conversationId || null,
-          channel,
-          sent_by: body.userId || "ghl",
-          source: "ghl_webhook",
-        };
-        break;
-      }
-
       case "CallCompleted": {
         eventType = "client.call_complete";
         // Normalise all GHL-templated fields. GHL renders missing variables as
@@ -857,20 +757,11 @@ export async function handleGhlWebhook(
       }
     }
 
-    // Attach job context to payload
-    eventPayload.suggested_job_id = job?.id || null;
-    eventPayload.suggested_job_number = job?.job_number || null;
-    eventPayload.client_name = job?.client_name || null;
-    eventPayload.job_type = job?.type || null;
-    eventPayload.match_reason = jobMatch.match_reason;
-    eventPayload.match_candidate_count = jobMatch.candidate_count;
-    eventPayload.match_candidates = jobMatch.candidates;
-
-    // ── Create business_event (T7 atomic cutover) ──
-    // Map the GHL webhook type onto the T7 channel + direction envelope.
-    // Inbound: client.reply (SMS/email/chat). Outbound: client.sms_out / client.email_out.
-    // Call: client.call_complete. Note: ghl.note_added. Stage: ghl.stage_changed.
-    // Appointment: client.appointment.
+    // ── Create business_event (T7 atomic cutover) for the legacy workflow posts ──
+    // Messages and the app's notes, tasks and appointments never reach here
+    // (capture.ts above). Map the remaining workflow types onto the T7 channel
+    // + direction envelope. Call: client.call_complete. Note: ghl.note_added.
+    // Stage: ghl.stage_changed. Appointment: client.appointment.
     const t7Enabled = await isFlagOn(
       supabase,
       "evidence_capture_v1",
@@ -883,12 +774,8 @@ export async function handleGhlWebhook(
         (body as { id?: string }).id ??
         crypto.randomUUID(),
     );
-    const providerId = body.messageId || body.message_id || body.id ||
-      body.eventId;
-    const providerMessageId =
-      providerId && (type === "InboundMessage" || type === "OutboundMessage")
-        ? `ghl:${providerId}`
-        : null;
+    // Workflow posts carry no stable provider message id.
+    const providerMessageId: string | null = null;
     const providerTime = body.dateAdded || body.createdAt || body.timestamp;
     const eventAt =
       providerTime && !Number.isNaN(Date.parse(String(providerTime)))
@@ -896,20 +783,10 @@ export async function handleGhlWebhook(
         : null;
     let channel: Channel = "system";
     let direction: Direction = "system";
+    // A GHL conversation is per contact, not per job: it is kept as
+    // conversation_key and never used as a job thread (sms.md finding 5, S5).
     const conversationKey: string | null = (conversationId as string) || null;
     switch (type) {
-      case "InboundMessage": {
-        const ch = (eventPayload.channel as string) || "sms";
-        channel = ch === "email" ? "email" : ch === "chat" ? "chat" : "sms";
-        direction = "inbound";
-        break;
-      }
-      case "OutboundMessage": {
-        const ch = (eventPayload.channel as string) || "sms";
-        channel = ch === "email" ? "email" : "sms";
-        direction = "outbound";
-        break;
-      }
       case "CallCompleted":
         channel = "call";
         direction = (eventPayload.direction as string) === "outbound"
@@ -935,11 +812,6 @@ export async function handleGhlWebhook(
     const evidenceJobId: string | null = null;
     const match = resolveMatch({ job_id: evidenceJobId, match_method: "none" });
     const bodyPreview = previewFromPayload(eventPayload);
-    eventPayload.attribution_hint = {
-      job_id: job?.id || null,
-      match_method: jobMatch.match_method,
-      match_confidence: jobMatch.match_confidence,
-    };
 
     // Legacy spine row shape — emitted either by the T7 fallback path
     // OR when the flag is OFF. It still carries the extractor-readable
@@ -947,7 +819,7 @@ export async function handleGhlWebhook(
     const legacySpineRow = {
       event_type: eventType,
       source: "ghl_webhook_receiver",
-      entity_type: job ? "contact" : "unmatched_contact",
+      entity_type: "contact",
       entity_id: contactId || null,
       job_id: evidenceJobId,
       occurred_at: occurredAt,
@@ -958,7 +830,7 @@ export async function handleGhlWebhook(
       channel,
       direction,
       contact_id: contactId || null,
-      thread_key: conversationKey,
+      thread_key: null,
       conversation_key: conversationKey,
       body_preview: bodyPreview,
       safe_summary: bodyPreview ? bodyPreview.slice(0, 280) : null,
@@ -994,12 +866,12 @@ export async function handleGhlWebhook(
           source_id: sourceId,
           job_id: evidenceJobId,
           contact_id: contactId || null,
-          entity_type: job ? "contact" : "unmatched_contact",
+          entity_type: "contact",
           entity_id: contactId || null,
           match_method: match.match_method,
           match_confidence: match.match_confidence ?? undefined,
           body_preview: bodyPreview || undefined,
-          thread_key: conversationKey,
+          thread_key: null,
           // Inbound client comms: 7y; system events: 12m.
           retention_class: (direction === "inbound" || direction === "outbound")
             ? "7y_audit"
@@ -1185,38 +1057,10 @@ export async function handleGhlWebhook(
       }
     }
 
-    // ── Auto-cancel pending nudges/chases on inbound reply ──
-    let nudgesCancelled = false;
-    if (type === "InboundMessage" && job?.id) {
-      // Cancel pending smart_nudges
-      await supabase
-        .from("smart_nudges")
-        .update({
-          status: "cancelled_by_event",
-          dismissed_at: new Date().toISOString(),
-        })
-        .eq("job_id", job.id)
-        .eq("status", "pending");
-
-      // Cancel pending ai_proposed_actions
-      await supabase
-        .from("ai_proposed_actions")
-        .update({ status: "cancelled" })
-        .eq("job_id", job.id)
-        .eq("status", "pending");
-
-      nudgesCancelled = true;
-      console.log(
-        `[ghl-webhook-receiver] Cancelled pending nudges/proposals for job ${
-          job.job_number || job.id
-        }`,
-      );
-    }
-
     console.log(
-      `[ghl-webhook-receiver] Processed: type=${type} event=${eventType} job_matched=${!!job} job=${
-        job?.job_number || "none"
-      } match_reason=${jobMatch.match_reason}`,
+      `[ghl-webhook-receiver] Processed: type=${
+        safeEventType(type)
+      } event=${eventType} outcome=${captureOutcome}`,
     );
 
     return await finish(
@@ -1224,10 +1068,7 @@ export async function handleGhlWebhook(
       jsonResponse({
         received: true,
         event_type: eventType,
-        event_created: true,
-        job_matched: !!job,
-        job_number: job?.job_number || null,
-        nudges_cancelled: nudgesCancelled,
+        event_created: captureOutcome === "event_created",
       }),
     );
   } catch (err) {
