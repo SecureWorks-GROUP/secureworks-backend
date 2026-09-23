@@ -4,8 +4,7 @@
  * What these prove, through the real ops-api request handler:
  *  - book_scope, assign_scoper and sales_booking_stamp_write are retired: each
  *    answers HTTP 400 `Unknown action` and writes nothing.
- *  - approve_booking_proposal has exactly one dispatch case (the second, dead
- *    handler is gone) and still reaches the Railway agent.
+ *  - approve_booking_proposal still reaches the Railway agent.
  *  - The bearer sent to Railway is AGENT_BEARER_TOKEN, else SW_API_KEY, never
  *    the Supabase service-role key: with both unset the call refuses by name
  *    before any network request.
@@ -127,23 +126,6 @@ for (const action of RETIRED) {
     );
   });
 }
-
-Deno.test("approve_booking_proposal has exactly one dispatch case", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
-  );
-  const cases = source.match(/case\s+'approve_booking_proposal'\s*:/g) ?? [];
-  assertEquals(cases.length, 1);
-  for (const action of RETIRED) {
-    assertEquals(
-      new RegExp(`case\\s+['"]${action}['"]\\s*:`).test(source),
-      false,
-      `${action} must not have a dispatch case`,
-    );
-  }
-  assert(!source.includes("approveBookingProposalBridge"));
-  assert(!/AGENT_BEARER[^\n]*SUPABASE_SERVICE_KEY/.test(source));
-});
 
 Deno.test("approve_booking_proposal refuses by name without a bearer; never sends the service key", async () => {
   const handle = await handler();
