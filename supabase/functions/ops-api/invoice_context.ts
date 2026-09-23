@@ -58,6 +58,7 @@ const MESSAGE_EVENT_TYPES = [
   "client.message_in",
   "supplier.email_in",
   "ghl.note_added",
+  "ghl.internal_comment",
 ];
 
 export class InvoiceContextError extends Error {

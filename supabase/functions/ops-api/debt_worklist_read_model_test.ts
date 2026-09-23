@@ -726,8 +726,8 @@ Deno.test("capped chase and invoice-event reads keep timeline incomplete", async
   );
 });
 
-Deno.test("unplaced inbox copies stay outside job and invoice scopes", async () => {
-  const inboxMessage = (eventCopy: string, id: string) => ({
+Deno.test("unconfirmed inbox copies stay outside job and invoice scopes", async () => {
+  const inboxMessage = (eventCopy: unknown, id: string) => ({
     id,
     source_system: "inbox",
     source_ref: id,
@@ -736,31 +736,55 @@ Deno.test("unplaced inbox copies stay outside job and invoice scopes", async () 
     direction: "inbound",
     occurred_at: "2026-09-18T02:00:00Z",
     preview: `Inbox copy ${id}`,
-    event_copy: eventCopy,
+    ...(eventCopy === undefined ? {} : { event_copy: eventCopy }),
     label: "old inbox matcher guess",
   });
+  const eventCopies: Array<[string, unknown]> = [
+    ["unknown", "unknown"],
+    ["unplaced", "unplaced"],
+    ["none", "none"],
+    ["missing", undefined],
+    ["unrecognized", "future-state"],
+  ];
   const out: any = await debtWorklist(
     new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
     deps(
       fakeClient(unitTables()),
       conversationStub({
-        [JOB_A]: [
-          inboxMessage("unplaced", "unplaced-email"),
-          inboxMessage("none", "uncopied-email"),
-        ],
+        [JOB_A]: eventCopies.map(([name, eventCopy]) =>
+          inboxMessage(eventCopy, `${name}-email`)
+        ),
       }).fn,
     ),
   );
   const entries = out.debtors[0].timeline.entries.filter((entry: any) =>
     entry.source === "inbox"
   );
-  assertEquals(entries.length, 2);
+  assertEquals(entries.length, eventCopies.length);
   for (const entry of entries) {
     assertEquals(entry.job_id, null);
     assertEquals(entry.invoice_ids, []);
     assertEquals(entry.invoice_scope, "unplaced");
     assertEquals(entry.label, "unplaced, matched by the old guess");
   }
+});
+
+Deno.test("inbox event-copy faults make email source unreadable", async () => {
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(
+      fakeClient(unitTables()),
+      conversationStub(
+        { [JOB_A]: [{ source_system: "inbox", event_copy: "unknown" }] },
+        { [JOB_A]: ["inbox_event_copies: business_events unavailable"] },
+      ).fn,
+    ),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.sources.email.status, "unreadable");
+  assert(debtor.sources.email.recovery_action.includes("Retry the read"));
+  assertEquals(debtor.sources.email.last_success_at, null);
+  assertEquals(debtor.timeline.complete, false);
 });
 
 Deno.test("date-only overdue uses the Perth calendar date", async () => {

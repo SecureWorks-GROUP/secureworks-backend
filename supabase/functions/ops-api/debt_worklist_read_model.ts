@@ -67,6 +67,7 @@ type TimelineMode = keyof typeof TIMELINE_BOUNDS;
 // A chase-log SMS and the provider's copy of it are one message when the text
 // matches and they are this close in time.
 const SAME_SMS_WINDOW_MS = 15 * 60_000;
+const CONFIRMED_INBOX_EVENT_COPY_STATES: ReadonlySet<string> = new Set();
 // The v1 default GHL conversation cache freshness threshold.
 export const GHL_CACHE_STALE_HOURS = 24;
 
@@ -309,8 +310,10 @@ export function entryFromConversation(
     ? "outlook"
     : "secureworks";
   const channel = str(m.channel);
-  const unplacedInbox = source === "inbox" &&
-    (m.event_copy === "unplaced" || m.event_copy === "none");
+  const inboxPlacementVerified = source === "inbox" &&
+    typeof m.event_copy === "string" &&
+    CONFIRMED_INBOX_EVENT_COPY_STATES.has(m.event_copy);
+  const unplacedInbox = source === "inbox" && !inboxPlacementVerified;
   const kind = channel === "note" && source === "job_events"
     ? "job_note"
     : channel === "note"
@@ -1847,7 +1850,10 @@ export async function debtWorklist(
       ),
     ];
     const emailUnreadable = linkUnknown ||
-      Boolean(convFaultBy("inbox") || convFaultBy("business_events"));
+      Boolean(
+        convFaultBy("inbox") || convFaultBy("inbox_event_copies") ||
+          convFaultBy("business_events")
+      );
     const notesUnreadable = Boolean(chaseFault) ||
       Boolean(convFaultBy("job_events"));
     const sources = {
