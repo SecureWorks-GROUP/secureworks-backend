@@ -13,6 +13,7 @@ BEGIN
   IF to_regprocedure(f) IS NOT NULL THEN RAISE EXCEPTION 'f1 rollback left %',f; END IF;
  END LOOP;
  IF to_regclass('public.context_capture_runs') IS NOT NULL THEN RAISE EXCEPTION 'f1 rollback left context_capture_runs'; END IF;
+ IF EXISTS(SELECT 1 FROM pg_statistic_ext WHERE stxname='xero_invoices_context_open_ar') THEN RAISE EXCEPTION 'f1 rollback left the coverage statistics'; END IF;
  -- The live production bodies are back byte for byte; the other overload never moved.
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()')) IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
  THEN RAISE EXCEPTION 'f1 rollback heartbeat is not the live body'; END IF;

@@ -76,7 +76,13 @@ documented above. F1 is built on the live production definitions (read
 `persist_luna_context_revision` and the current-facts view are still that
 pre-image (or already F1's result) and the status check still holds the nine
 live values, and its rollback restores those bodies byte for byte and checks
-their md5. `context_coverage()` is unchanged: open jobs (not
+their md5. F1 also made the heartbeat cheaper without changing any output:
+the per-row helpers `context_linked_status` and `context_in_business_hours`
+inline (no SET clause), the current-facts view reads `b.metadata` for
+retraction instead of serialising each cited event row, and expression
+statistics on `xero_invoices` let coverage hash its invoice counts. On 200k
+synthetic events the whole heartbeat went from 2.9 s to 0.64 s.
+`context_coverage()` is unchanged: open jobs (not
 cancelled/archived/lost/closed/complete/completed) and authorised ACCREC
 invoices with `amount_due > 0`, split into with_current_fact / no_current_fact
 / evidence_without_current_fact / no_evidence_yet.

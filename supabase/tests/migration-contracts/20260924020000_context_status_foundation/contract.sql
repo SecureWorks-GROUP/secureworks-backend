@@ -64,7 +64,12 @@ BEGIN
   'public.context_source_freshness()','public.context_core_status()','public.context_cadence_status()','public.context_ghl_capture_status()',
   'public.context_booking_capture_status()','public.context_parties_status()','public.context_pipeline_status()','public.record_capture_run(jsonb)']::regprocedure[] LOOP
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 'f1 service_role missing execute on %',f; END IF;
-  IF (SELECT proconfig FROM pg_proc WHERE oid=f) IS NULL THEN RAISE EXCEPTION 'f1 function without fixed search_path %',f; END IF;
+  -- The two per-row helpers deliberately carry no SET clause so they inline;
+  -- they are SECURITY INVOKER SQL with every operator schema-qualified.
+  IF f IN ('public.context_linked_status(text)'::regprocedure,'public.context_in_business_hours(timestamptz)'::regprocedure) THEN
+   IF (SELECT proconfig IS NOT NULL OR prosecdef OR prolang<>(SELECT oid FROM pg_language WHERE lanname='sql') FROM pg_proc WHERE oid=f)
+   THEN RAISE EXCEPTION 'f1 % must be inlinable invoker SQL without a SET clause',f; END IF;
+  ELSIF (SELECT proconfig FROM pg_proc WHERE oid=f) IS NULL THEN RAISE EXCEPTION 'f1 function without fixed search_path %',f; END IF;
  END LOOP;
  -- context_capture_runs: RLS on; service_role reads but never writes directly.
  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid='public.context_capture_runs'::regclass) THEN RAISE EXCEPTION 'f1 capture runs RLS off'; END IF;
@@ -248,6 +253,15 @@ BEGIN
   fact:=(result->'fact_ids'->>0)::uuid;
   IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact) THEN RAISE EXCEPTION 'f1 % fact persisted but hidden by the view',s; END IF;
   -- The view re-checks the source: a row that leaves the job's linked set hides its facts.
+  -- Retraction is still read from the event's metadata (the view now reads
+  -- b.metadata instead of serialising the whole row): each marker hides the
+  -- fact, and clearing it shows the fact again.
+  UPDATE public.business_events SET metadata=coalesce(metadata,'{}'::jsonb)||'{"retracted_at":"2026-09-23T10:00:00Z"}' WHERE id=e;
+  IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact) THEN RAISE EXCEPTION 'f1 % fact visible after metadata.retracted_at',s; END IF;
+  UPDATE public.business_events SET metadata=(metadata-'retracted_at')||'{"retracted":true}' WHERE id=e;
+  IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact) THEN RAISE EXCEPTION 'f1 % fact visible after metadata.retracted',s; END IF;
+  UPDATE public.business_events SET metadata=metadata-'retracted' WHERE id=e;
+  IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact) THEN RAISE EXCEPTION 'f1 % fact hidden after retraction cleared',s; END IF;
   UPDATE public.business_events SET attribution_status='unplaced' WHERE id=e;
   IF EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact) THEN RAISE EXCEPTION 'f1 % fact visible after its source became unplaced',s; END IF;
  END LOOP;
@@ -410,3 +424,18 @@ BEGIN
  END LOOP;
 END $$;
 ROLLBACK;
+
+-- 10. Heartbeat cost guards (the live heartbeat hit the API statement timeout).
+-- Both per-row helpers inline, the current-facts view no longer serialises
+-- whole event rows, and coverage's invoice filter has expression statistics.
+DO $$
+DECLARE line text; plan text:='';
+BEGIN
+ FOR line IN EXECUTE 'EXPLAIN (VERBOSE, COSTS OFF) SELECT public.context_linked_status(x), public.context_in_business_hours(now()) FROM (VALUES (''direct''::text)) v(x)' LOOP
+  plan:=plan||line||chr(10);
+ END LOOP;
+ IF plan LIKE '%context_linked_status%' OR plan LIKE '%context_in_business_hours%' THEN RAISE EXCEPTION 'f1 helpers not inlined: %',plan; END IF;
+ IF pg_get_viewdef('public.current_job_context_facts'::regclass) LIKE '%to_jsonb(b%' THEN RAISE EXCEPTION 'f1 current-facts view still serialises event rows'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_statistic_ext WHERE stxname='xero_invoices_context_open_ar' AND stxrelid='public.xero_invoices'::regclass)
+ THEN RAISE EXCEPTION 'f1 coverage invoice statistics missing'; END IF;
+END $$;

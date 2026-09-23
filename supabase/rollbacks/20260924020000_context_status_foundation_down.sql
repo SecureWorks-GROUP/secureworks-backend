@@ -42,7 +42,7 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
     IS DISTINCT FROM '2ef95a949f0aae99cc323abde10f2ee7'
  THEN RAISE EXCEPTION 'f1_rollback_refused: persist_luna_context_revision is not the F1 body'; END IF;
- IF pg_temp.f1_viewdef_md5() IS DISTINCT FROM '19f87c83a8a7c6d0d2540aedc34620be'
+ IF pg_temp.f1_viewdef_md5() IS DISTINCT FROM '7986bb5a25495b50c0fed4ce497724a2'
  THEN RAISE EXCEPTION 'f1_rollback_refused: current_job_context_facts is not the F1 view'; END IF;
 END $$;
 
@@ -280,6 +280,7 @@ REVOKE ALL ON FUNCTION public.persist_luna_context_revision(uuid,uuid,uuid,jsonb
 GRANT EXECUTE ON FUNCTION public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer) TO service_role;
 
 DROP FUNCTION IF EXISTS public.context_linked_status(text);
+DROP STATISTICS IF EXISTS public.xero_invoices_context_open_ar;
 
 DROP INDEX IF EXISTS public.business_events_admin_bucket_contact;
 DROP INDEX IF EXISTS public.business_events_candidate_job_ids;

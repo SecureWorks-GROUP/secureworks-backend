@@ -21,6 +21,11 @@
 --      return null until their owning slice replaces them.
 --   7. context_capture_runs, written only through record_capture_run().
 --
+--   8. Heartbeat cost. The live heartbeat hit the API statement timeout
+--      (57014). Per-row helpers inline, the facts view stops serialising event
+--      rows, and xero_invoices gets expression statistics for coverage. Every
+--      existing output stays identical.
+--
 -- No flag or switch changes. No row is written or rewritten.
 --
 -- Built on the LIVE production definitions, read from production 23 Sep 2026
@@ -40,8 +45,9 @@
 --     direct, thread, single_open, single_line, luna, admin_bucket, pending_luna,
 --     empty, automated. All nine are kept; three are added.
 --   current_job_context_facts                    md5(pg_get_viewdef) 4430e6fe155e0bbb8f95c110df417c7c
---     (PostgreSQL 17) = the 20260917120000 view. Only the linked-status
---     predicate changes; column order is unchanged.
+--     (PostgreSQL 17) = the 20260917120000 view. The linked-status predicate
+--     changes, and the retraction test reads b.metadata instead of to_jsonb(b)
+--     (same result, see 3b); column order is unchanged.
 -- The ledger held nothing at or after 20260923230000 other than that migration.
 -- The guard below refuses unless each object is still that pre-image (or
 -- already this migration's result, for a re-apply), and unless every new
@@ -62,10 +68,10 @@ BEGIN
   ('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)',
    ARRAY['d3441ee4b6c93777564f1385b00c73dc','2ef95a949f0aae99cc323abde10f2ee7'],false),
   -- New functions: absent, or already this migration's body.
-  ('public.context_linked_status(text)',ARRAY['e1a2e3d6d2477925378d8506cf6ff76d'],true),
+  ('public.context_linked_status(text)',ARRAY['ab0b67927684168cfe94de9118a87a7c'],true),
   ('public.context_unplaced_for_job(uuid)',ARRAY['f2382688c5ae085bd0a7f88a11053c12'],true),
   ('public.context_source_freshness_policy()',ARRAY['230c0b1965208474fc6ea076e5dd3f6f'],true),
-  ('public.context_in_business_hours(timestamptz)',ARRAY['7671d80cb63a637fd02d99b964a779fc'],true),
+  ('public.context_in_business_hours(timestamptz)',ARRAY['70164e9d1d6aa636c4e9d54357396f16'],true),
   ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],true),
   ('public.context_source_freshness()',ARRAY['ce094feb8df8b7dd596e639ac47a7825'],true),
   ('public.context_core_status()',ARRAY['0fa6842cebf236e47b608a520c6c9fd1'],true),
@@ -88,12 +94,15 @@ BEGIN
   'CHECK ((attribution_status = ANY (ARRAY[''direct''::text, ''thread''::text, ''single_open''::text, ''single_line''::text, ''luna''::text, ''admin_bucket''::text, ''pending_luna''::text, ''empty''::text, ''automated''::text, ''content_ref''::text, ''party''::text, ''unplaced''::text])))')
  THEN problems:=problems||format('business_events_attribution_status_check is %s',coalesce(live,'<missing>')); END IF;
  -- The view text as PostgreSQL prints it, with public on the search path:
- -- the live view (4430e6fe...), or this migration's view (19f87c83...).
+ -- the live view (4430e6fe...), or this migration's view (7986bb5a...).
  PERFORM set_config('search_path','public',true);
  SELECT md5(pg_get_viewdef(to_regclass('public.current_job_context_facts'))) INTO view_md5;
  PERFORM set_config('search_path',old_path,true);
- IF view_md5 IS NULL OR view_md5 NOT IN ('4430e6fe155e0bbb8f95c110df417c7c','19f87c83a8a7c6d0d2540aedc34620be')
+ IF view_md5 IS NULL OR view_md5 NOT IN ('4430e6fe155e0bbb8f95c110df417c7c','7986bb5a25495b50c0fed4ce497724a2')
  THEN problems:=problems||format('current_job_context_facts viewdef md5 %s',coalesce(view_md5,'<missing>')); END IF;
+ IF EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid='public.business_events'::regclass AND a.attname IN ('retracted_at','retracted')
+   AND a.attnum>0 AND NOT a.attisdropped)
+ THEN problems:=problems||'business_events has a retracted_at or retracted column; the current-facts view reads only metadata for retraction'::text; END IF;
  IF cardinality(problems)>0 THEN
   RAISE EXCEPTION 'context_status_preimage_mismatch: %; read the live definitions before replacing them',array_to_string(problems,'; ');
  END IF;
@@ -118,9 +127,13 @@ CREATE INDEX IF NOT EXISTS business_events_admin_bucket_contact
 
 -- 3. The one definition of a linked row. Never null: an unknown or null status
 -- is not linked.
+-- No SET clause, so PostgreSQL inlines it into the custody view and writer
+-- (a SET clause forces a real call per row, several times slower). Every
+-- operator and type is schema-qualified instead, so the caller's search_path
+-- cannot change its meaning. SECURITY INVOKER; reads no table.
 CREATE OR REPLACE FUNCTION public.context_linked_status(p_status text) RETURNS boolean
-LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $$
- SELECT coalesce(p_status = ANY (ARRAY['direct','thread','single_open','single_line','luna','content_ref','party']::text[]),false)
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+ SELECT coalesce(p_status OPERATOR(pg_catalog.=) ANY (ARRAY['direct','thread','single_open','single_line','luna','content_ref','party']::pg_catalog.text[]),false)
 $$;
 COMMENT ON FUNCTION public.context_linked_status(text) IS
  'True for direct, thread, single_open, single_line, luna, content_ref, party. False for pending_luna, unplaced, admin_bucket, empty, automated, null and anything else. The one definition of a row that belongs to its job.';
@@ -169,12 +182,15 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'ignored_capture_modes',jsonb_build_array('backfill','relink'))
 $$;
 
+-- Inlinable like context_linked_status: no SET clause, everything
+-- schema-qualified. Called once per captured row by context_source_freshness.
 CREATE OR REPLACE FUNCTION public.context_in_business_hours(p_at timestamptz) RETURNS boolean
-LANGUAGE sql STABLE PARALLEL SAFE SET search_path=pg_catalog AS $$
+LANGUAGE sql STABLE PARALLEL SAFE AS $$
  SELECT p_at IS NOT NULL
-  AND extract(isodow FROM (p_at AT TIME ZONE 'Australia/Perth')) BETWEEN 1 AND 6
-  AND (p_at AT TIME ZONE 'Australia/Perth')::time >= time '07:00'
-  AND (p_at AT TIME ZONE 'Australia/Perth')::time < time '18:00'
+  AND pg_catalog.date_part('isodow',pg_catalog.timezone('Australia/Perth',p_at)) OPERATOR(pg_catalog.>=) 1
+  AND pg_catalog.date_part('isodow',pg_catalog.timezone('Australia/Perth',p_at)) OPERATOR(pg_catalog.<=) 6
+  AND pg_catalog.timezone('Australia/Perth',p_at)::pg_catalog.time OPERATOR(pg_catalog.>=) '07:00'::pg_catalog.time
+  AND pg_catalog.timezone('Australia/Perth',p_at)::pg_catalog.time OPERATOR(pg_catalog.<) '18:00'::pg_catalog.time
 $$;
 
 -- Business minutes in [p_from, p_to). Spans longer than 120 days count only the
@@ -240,8 +256,15 @@ COMMENT ON FUNCTION public.context_source_freshness() IS
 
 -- 3b. Luna custody: the writer and the current-facts view use context_linked_status
 -- instead of their own five-status lists. Both bodies are the 20260921140000 and
--- 20260917120000 definitions with only that predicate changed; the writer and
--- the view must agree or persisted facts would be hidden.
+-- 20260917120000 definitions with that predicate changed; the writer and the
+-- view must agree or persisted facts would be hidden.
+-- The view has one more change, for speed: its retraction test on each cited
+-- event read to_jsonb(b) four times, serialising the whole row (payload
+-- included) per cited event, which was most of the heartbeat's cost. It now
+-- reads b.metadata directly. The two top-level keys it also tested
+-- (retracted_at, retracted) exist only if business_events has columns of those
+-- names; it has none, and the guard above refuses if either ever appears, so
+-- the result is identical.
 CREATE OR REPLACE FUNCTION public.persist_luna_context_revision(
  p_run_id uuid,p_lease_token uuid,p_job_id uuid,p_events jsonb,p_new jsonb,p_supersedes jsonb,p_retracts jsonb,
  p_extractor_version text DEFAULT 'luna_v2',p_tokens_in integer DEFAULT 0)
@@ -415,8 +438,7 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
    WHERE b.id IS NULL OR b.job_id IS DISTINCT FROM visible.job_id
     OR b.attribution_status IS NULL OR NOT public.context_linked_status(b.attribution_status)
     OR coalesce(b.event_at,b.occurred_at) IS NULL OR b.attribution_confidence IS NULL OR b.attribution_confidence NOT BETWEEN 0 AND 1
-    OR to_jsonb(b)->>'retracted_at' IS NOT NULL
-    OR to_jsonb(b)#>>'{metadata,retracted_at}' IS NOT NULL OR to_jsonb(b)->>'retracted'='true' OR to_jsonb(b)#>>'{metadata,retracted}'='true'
+    OR b.metadata->>'retracted_at' IS NOT NULL OR b.metadata->>'retracted'='true'
   )))
  AND provenance#>'{safety,memory_trusted}' IS DISTINCT FROM 'false'::jsonb
  AND coalesce(CASE WHEN jsonb_typeof(provenance->'lifecycle')='object' THEN provenance#>>'{lifecycle,state}' ELSE provenance->>'lifecycle' END,'active') NOT IN ('superseded','retracted')
@@ -427,6 +449,17 @@ WHERE lifecycle='current' AND (expires_at IS NULL OR expires_at>now())
    AND je.created_at >= coalesce((visible.provenance->>'event_at')::timestamptz,visible.event_date::timestamp AT TIME ZONE 'Australia/Perth',visible.created_at)));
 REVOKE ALL ON public.current_job_context_facts FROM PUBLIC,anon,authenticated;
 GRANT SELECT ON public.current_job_context_facts TO service_role;
+
+-- 3c. context_coverage() (core block, body unchanged) counts open AUTHORISED
+-- ACCREC invoices through upper(coalesce(status,'')) and
+-- upper(coalesce(invoice_type,'ACCREC')). Without statistics on those
+-- expressions the planner guesses one matching invoice and nests a loop over
+-- the whole fact list for each of the three invoice counts. Expression
+-- statistics give it the real count so it hashes instead. No data or body
+-- change; ANALYZE of this one table is quick.
+CREATE STATISTICS IF NOT EXISTS public.xero_invoices_context_open_ar
+ ON (upper(coalesce(status,''))), (upper(coalesce(invoice_type,'ACCREC'))) FROM public.xero_invoices;
+ANALYZE public.xero_invoices;
 
 -- 6. Status composer. Each owner replaces only its own sub-function with
 -- CREATE OR REPLACE, keeping the signature () RETURNS jsonb and returning an
