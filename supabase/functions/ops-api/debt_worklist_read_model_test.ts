@@ -619,6 +619,7 @@ Deno.test("contact-level GHL notes merge once with the placed job copy", async (
   tables.business_events.push({
     id: "ghl-note-row",
     contact_id: "ghl-a",
+    job_id: JOB_A,
     event_type: "ghl.note_added",
     occurred_at: "2026-09-23T01:00:00Z",
     direction: "internal",
@@ -656,21 +657,11 @@ Deno.test("contact-level GHL notes merge once with the placed job copy", async (
     source_ref: "ghl-note-row",
     provider_message_id: providerId,
   };
-  const jobCommentCopy = {
-    ...jobCopy,
-    id: "bev:ghl-internal-comment-row",
-    occurred_at: "2026-09-23T02:00:00Z",
-    author: "operator-2",
-    body: "Internal account comment",
-    preview: "Internal account comment",
-    source_ref: "ghl-internal-comment-row",
-    provider_message_id: internalCommentId,
-  };
   const out: any = await debtWorklist(
     new URLSearchParams(),
     deps(
       fakeClient(tables),
-      conversationStub({ [JOB_A]: [jobCopy, jobCommentCopy] }).fn,
+      conversationStub({ [JOB_A]: [jobCopy] }).fn,
     ),
   );
   const debtor = out.debtors.find((d: any) => d.key === "xero:xc-1");
@@ -680,8 +671,11 @@ Deno.test("contact-level GHL notes merge once with the placed job copy", async (
   assertEquals(notes.length, 1);
   assertEquals(notes[0].kind, "ghl_note");
   assertEquals(notes[0].direction, "internal");
-  assertEquals(notes[0].job_id, null);
-  assertEquals(notes[0].invoice_scope, "debtor");
+  assertEquals(notes[0].job_id, JOB_A);
+  assertEquals(notes[0].invoice_scope, "job");
+  assert(notes[0].invoice_ids.includes(INV(1)));
+  assert(notes[0].invoice_ids.includes(INV(2)));
+  assertEquals(notes[0].invoice_ids.includes(INV(3)), false);
   const comments = debtor.timeline.entries.filter((entry: any) =>
     entry.provider_id === internalCommentId
   );
@@ -689,6 +683,7 @@ Deno.test("contact-level GHL notes merge once with the placed job copy", async (
   assertEquals(comments[0].kind, "ghl_note");
   assertEquals(comments[0].direction, "internal");
   assertEquals(comments[0].job_id, null);
+  assertEquals(comments[0].invoice_scope, "debtor");
 });
 
 Deno.test("capped chase and invoice-event reads keep timeline incomplete", async () => {
@@ -1134,6 +1129,32 @@ Deno.test("chase SMS dedupe matches earlier, ambiguous and competing copies", ()
   assertEquals(competing.entries.length, 3);
   assert(competing.entries.some((e) => e.key === "chase:first-log"));
   assert(competing.entries.some((e) => e.key === "chase:second-log"));
+});
+
+Deno.test("identical SMS text on another job does not dedupe with a chase log", () => {
+  const provider = entryFromConversation({
+    id: "ghl:job-b-copy",
+    channel: "sms",
+    direction: "outbound",
+    occurred_at: "2026-09-24T12:01:00Z",
+    preview: "Payment reminder",
+    source_system: "ghl_cache",
+    source_ref: "job-b-copy",
+    provider_message_id: "ghl:job-b-copy",
+  }, JOB_B, [INV(3)]);
+  const chase = entryFromChaseLog({
+    id: "job-a-chase",
+    xero_invoice_id: INV(1),
+    job_id: JOB_A,
+    method: "sms",
+    notes: "Payment reminder",
+    created_at: "2026-09-24T12:00:00Z",
+  });
+  const merged = mergeTimeline([provider, chase]);
+  assertEquals(merged.entries.length, 2);
+  assert(merged.entries.some((entry) => entry.key === "ghl:job-b-copy"));
+  assert(merged.entries.some((entry) => entry.key === "chase:job-a-chase"));
+  assertEquals(merged.duplicates_merged, 0);
 });
 
 Deno.test("chase log auto SMS and email retain their actual channels", () => {

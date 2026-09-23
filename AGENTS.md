@@ -3881,7 +3881,9 @@ and completeness applies only to open-invoice sources. Each invoice publishes
 `source_status: "from_debtor"` to direct GHL, email and notes health lookups to
 its debtor's `sources`. The timeline is stored copies only, not a live GHL or
 Outlook read, and email never reads complete while Outlook Sent Items are not
-captured. Never commit production Xero ids, job ids or amounts as fixtures:
+captured. GHL cache freshness uses a tunable 24-hour v1 default
+(`GHL_CACHE_STALE_HOURS`), published as `stale_after` beside the last sync time.
+Never commit production Xero ids, job ids or amounts as fixtures:
 `debt_worklist_read_model_test.ts` runs over the synthetic
 `fixtures/debt_worklist_synthetic_book_v1.json`, and its real-book check runs
 read-only against the live database only when `SUPABASE_URL` and

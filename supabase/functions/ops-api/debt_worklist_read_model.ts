@@ -13,6 +13,8 @@
 // A debtor timeline covers open invoices only; closed-invoice events and
 // payments are outside this read. Invoice GHL/email/notes health points to the
 // debtor's source status rather than repeating it on every invoice.
+// GHL cache freshness uses the 24-hour v1 default from
+// GHL_CACHE_STALE_HOURS and publishes it as stale_after beside the sync time.
 //
 // It builds no second status or message engine. It consumes:
 //   - debt_picture.ts      the desk's stored classification, next step and
@@ -21,8 +23,8 @@
 //                          conversation counts and blockers per invoice;
 //   - getJobConversation   (index.ts) the stored message merge per job.
 // The timeline adds what that merge leaves out (payment_chase_logs, invoice
-// events and Xero payments, captured Luna facts, and GHL messages held by a
-// verified Xero/GHL contact_matches pair with no job) and removes the same
+// events and Xero payments, captured Luna facts, and GHL messages and notes
+// held by a verified Xero/GHL contact_matches pair) and removes the same
 // message seen twice. A signed-in caller from another org is refused first.
 //
 // Honesty rules: a source that could not be read is a fault on the row it
@@ -65,7 +67,7 @@ type TimelineMode = keyof typeof TIMELINE_BOUNDS;
 // A chase-log SMS and the provider's copy of it are one message when the text
 // matches and they are this close in time.
 const SAME_SMS_WINDOW_MS = 15 * 60_000;
-// A GHL conversation cache row older than this is stale.
+// The v1 default GHL conversation cache freshness threshold.
 export const GHL_CACHE_STALE_HOURS = 24;
 
 export const POPULATION_DENOMINATOR =
@@ -338,9 +340,11 @@ export function entryFromConversation(
 export function entryFromGhlContactNote(
   row: any,
   debtorInvoiceIds: string[],
+  jobInvoiceIds?: string[],
 ): TimelineEntry {
   const payload = row.payload ?? {};
   const providerId = str(row.provider_message_id);
+  const jobId = str(row.job_id);
   const body = String(
     payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
       row.body_preview ?? "",
@@ -360,9 +364,9 @@ export function entryFromGhlContactNote(
     source_ref: str(row.id),
     subject: null,
     preview: body.slice(0, 500),
-    job_id: null,
-    invoice_ids: [...debtorInvoiceIds],
-    invoice_scope: "debtor",
+    job_id: jobId,
+    invoice_ids: jobId ? [...(jobInvoiceIds ?? [])] : [...debtorInvoiceIds],
+    invoice_scope: jobId ? "job" : "debtor",
     seen_in: ["business_events"],
     label: null,
   };
@@ -668,7 +672,11 @@ export function mergeTimeline(entries: TimelineEntry[]): {
     if (!Number.isFinite(at) || !text) continue;
     const matches = providerSms.filter((m) => {
       const mt = Date.parse(m.at ?? "");
+      const sharesJob = Boolean(log.job_id && m.job_id === log.job_id);
+      const sharesInvoice = m.invoice_scope !== "debtor" &&
+        log.invoice_ids.some((id) => m.invoice_ids.includes(id));
       return Number.isFinite(mt) && Math.abs(mt - at) <= SAME_SMS_WINDOW_MS &&
+        (sharesJob || sharesInvoice) &&
         normText(m.preview).slice(0, 500) === text.slice(0, 500);
     });
     matchesByLog.set(log.key, matches);
@@ -1378,7 +1386,7 @@ export async function debtWorklist(
         () =>
           client.from("business_events")
             .select(
-              "id, contact_id, event_type, occurred_at, direction, payload, body_preview, provider_message_id",
+              "id, contact_id, job_id, event_type, occurred_at, direction, payload, body_preview, provider_message_id",
             )
             .in("event_type", ["ghl.note_added", "ghl.internal_comment"])
             .in("contact_id", ids),
@@ -1528,6 +1536,14 @@ export async function debtWorklist(
         ) => r.link.job_id as string),
       ),
     ];
+    const invoicesByLinkedJob = new Map(
+      linkedJobs.map((jobId) => [
+        jobId,
+        rows.filter((r) => r.link.job_id === jobId).map((r) =>
+          r.xero_invoice_id
+        ),
+      ]),
+    );
     const staleCutoff = now.getTime() - GHL_CACHE_STALE_HOURS * 3_600_000;
     const ghlJobCaches = linkedJobs.map((jobId) => {
       const job = jobs.get(jobId);
@@ -1563,9 +1579,7 @@ export async function debtWorklist(
       const raw: TimelineEntry[] = [];
       for (const jobId of linkedJobs) {
         const conv = conversations.get(jobId);
-        const jobInvoiceIds = rows.filter((r) => r.link.job_id === jobId).map((
-          r,
-        ) => r.xero_invoice_id);
+        const jobInvoiceIds = invoicesByLinkedJob.get(jobId) ?? [];
         if (!conv) continue;
         for (const f of conv.faults) {
           conversationFaults.push(
@@ -1594,13 +1608,20 @@ export async function debtWorklist(
       const contactIds = debtorGhlContactIds.get(key) ?? [];
       for (const contactId of contactIds) {
         for (const note of contactNotesByGhl.get(contactId) ?? []) {
-          raw.push(entryFromGhlContactNote(note, debtorInvoiceIds));
+          const noteJobId = str(note.job_id);
+          if (noteJobId) {
+            const jobInvoiceIds = invoicesByLinkedJob.get(noteJobId);
+            if (!jobInvoiceIds) continue;
+            raw.push(
+              entryFromGhlContactNote(note, debtorInvoiceIds, jobInvoiceIds),
+            );
+          } else {
+            raw.push(entryFromGhlContactNote(note, debtorInvoiceIds));
+          }
         }
       }
       for (const jobId of linkedJobs) {
-        const jobInvoiceIds = rows.filter((r) => r.link.job_id === jobId).map((
-          r,
-        ) => r.xero_invoice_id);
+        const jobInvoiceIds = invoicesByLinkedJob.get(jobId) ?? [];
         for (const f of factsByJob.get(jobId) ?? []) {
           raw.push(
             entryFromFact(
