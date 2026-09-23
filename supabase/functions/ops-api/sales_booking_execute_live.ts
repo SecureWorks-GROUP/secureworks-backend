@@ -360,6 +360,7 @@ export function createOwnerApprovalDeps(
         if (error || !Array.isArray(data)) throw new Error("unreadable");
         approvals.push(...data);
       }
+      approvals.push(...await ownerApprovalReader(client)(sinceIso));
       return { executions, approvals };
     },
   };

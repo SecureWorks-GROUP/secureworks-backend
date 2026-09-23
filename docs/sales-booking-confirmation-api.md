@@ -236,7 +236,8 @@ optional `resource` (must be `"marnin"`), `prepared_at` (decide only).
 - **Message:** `text` (the exact text the owner wrote or edited, 1..1600
   characters, bytes kept exactly; no em or en dashes), optional `offer`
   (the visit the text offers, same shape as `visit`). An offer is checked like
-  a calendar choice and, once sent, blocks that slot for other leads.
+  a calendar choice and, once approved, blocks that slot for other leads
+  until it expires or that lead is booked.
 - **Calendar:** `visit: {window_start_iso, window_end_iso, end_iso}`: the
   arrival window and the visit end, each `YYYY-MM-DDTHH:MM:00+08:00`.
 
@@ -291,7 +292,9 @@ end by 16:30), `owner_visit_protected_band` (Tue 13:00 to 15:30 Stratco /
 Canning Vale, including the 30-minute travel buffer).
 
 Open offers and presses (both steps, read from `sales_booking_executions`
-claimed in the last 21 days joined to the approvals they ran):
+claimed in the last 21 days joined to the approvals they ran, plus live
+unexpired owner-authored rows on `sales_booking_approvals` that carry an
+offer or visit):
 `system_offers_unreadable`; `booking_step_requires_reconciliation` when a text
 to this lead may or may not have been sent (message step) or a booking for
 this lead is mid-press (calendar step); `text_already_in_thread` /
@@ -309,9 +312,10 @@ read); `contact_already_booked_that_day`; `ghl_calendar_clash` (other
 assignees and cancelled rows do not block); `outlook_unreadable`;
 `outlook_calendar_clash` (busy events on his Outlook primary calendar);
 `system_offer_clash` (a slot this system offered another lead in a sent text,
-or a booking mid-press; offers to this same lead and offers to a lead since
-booked do not count); `daily_capacity_reached` (GHL events that day plus other
-leads offered that day plus this visit over 6).
+a live unexpired owner approval, or a booking mid-press; this lead's own
+same slot, other offers to this same lead from a sent text, and offers to a
+lead since booked do not count); `daily_capacity_reached` (GHL events that
+day plus other leads offered that day plus this visit over 6).
 
 Texts sent by hand outside this system cannot be checked by the machine. The
 path does not guess at them and does not block on them: every result carries

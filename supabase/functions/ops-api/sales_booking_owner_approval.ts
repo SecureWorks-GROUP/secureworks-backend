@@ -251,7 +251,7 @@ export interface SystemOffer {
   contact_id: string;
   start_iso: string;
   end_iso: string;
-  source: "system_text" | "booking_in_flight";
+  source: "system_text" | "booking_in_flight" | "owner_approval";
   binding_hash: string;
 }
 export interface SystemOfferCensus {
@@ -266,7 +266,56 @@ export interface SystemOfferCensus {
   booked: Record<string, string[]>;
 }
 
-/** Pure: executor press rows joined to the approvals they executed. */
+/** A live owner-authored row still holds its offer or visit until it
+ * expires or that lead is booked. Same liveness as the read's approval list. */
+function ownerApprovalOffer(
+  approval: BookingObject,
+  now: Date,
+): SystemOffer | null {
+  if (approval.state !== "approved") return null;
+  const snap = obj(approval.snapshot) ? approval.snapshot : null;
+  if (!snap || snap.source !== "owner") return null;
+  const recorded = bookingInstant(approval.approved_at);
+  const expires = bookingInstant(approval.expires_at);
+  if (!Number.isFinite(recorded) || !Number.isFinite(expires)) return null;
+  const latest = Math.min(expires, recorded + BOOKING_APPROVAL_TTL_MS);
+  if (!(now.getTime() >= recorded && now.getTime() < latest)) return null;
+  const contactId = text(snap.contact_id);
+  if (!contactId) return null;
+  const content = obj(snap.content) ? snap.content : null;
+  if (!content) return null;
+  const step = approval.step === "message" || snap.step === "message"
+    ? "message"
+    : approval.step === "calendar" || snap.step === "calendar"
+    ? "calendar"
+    : null;
+  let start: ReturnType<typeof perthInstant> = null;
+  let finish: ReturnType<typeof perthInstant> = null;
+  if (step === "message") {
+    const offer = obj(content.offer) ? content.offer : null;
+    if (!offer) return null;
+    start = perthInstant(offer.window_start_iso);
+    finish = perthInstant(offer.end_iso);
+  } else if (step === "calendar") {
+    start = perthInstant(content.window_start_iso) ??
+      perthInstant(content.start_iso);
+    finish = perthInstant(content.end_iso);
+  } else {
+    return null;
+  }
+  if (!start || !finish || !(finish.ms > start.ms)) return null;
+  if (finish.ms <= now.getTime()) return null;
+  return {
+    contact_id: contactId,
+    start_iso: start.iso,
+    end_iso: finish.iso,
+    source: "owner_approval",
+    binding_hash: String(approval.binding_hash),
+  };
+}
+
+/** Pure: executor press rows joined to the approvals they executed, plus
+ * live unexpired owner-authored rows that already name a slot. */
 export function systemOfferCensus(
   executions: BookingObject[],
   approvals: BookingObject[],
@@ -337,6 +386,14 @@ export function systemOfferCensus(
         binding_hash: e.binding_hash,
       });
     }
+  }
+  const seen = new Set(census.offers.map((o) => o.binding_hash));
+  for (const approval of approvals) {
+    if (seen.has(approval.binding_hash)) continue;
+    const offer = ownerApprovalOffer(approval, now);
+    if (!offer || booked[offer.contact_id]) continue;
+    seen.add(offer.binding_hash);
+    census.offers.push(offer);
   }
   return census;
 }
@@ -425,10 +482,12 @@ export function ownerClientName(contact: BookingObject): string | null {
 }
 
 /** A street line carries a house or unit number; "Bassendean" alone is a
- * suburb, not a street. */
+ * suburb, not a street. Unit/Apt/Shop and a leading comma may precede the
+ * number (`Unit 5/12 Smith St`, `Apt 3, 20 Smith St`). */
 export function ownerStreetLine(value: unknown): string | null {
   const street = text(value);
-  return /^(?:[A-Za-z]?\d+[A-Za-z]?\/)?(?:lot\s+)?\d/i.test(street)
+  return /^(?:(?:unit|apt|shop)\s*,?\s*|(?:,\s*))?(?:[A-Za-z]?\d+[A-Za-z]?\/)?(?:lot\s+)?\d/i
+      .test(street)
     ? street
     : null;
 }
@@ -889,7 +948,12 @@ async function checkOwnerVisitAvailability(
       })),
     });
   }
-  const others = census.offers.filter((o) => o.contact_id !== row.contact_id);
+  const others = census.offers.filter((o) => {
+    if (o.contact_id !== row.contact_id) return true;
+    if (o.source !== "owner_approval") return false;
+    return o.start_iso !== visit.window_start_iso ||
+      o.end_iso !== visit.end_iso;
+  });
   const offerClashes = others.filter((o) =>
     overlaps(
       visit.occupiedStart,

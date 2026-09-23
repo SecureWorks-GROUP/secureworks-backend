@@ -984,3 +984,160 @@ Deno.test("a lead whose GHL contact has no street books against its recorded job
   assertEquals(preview.snapshot.content.address, "7 Example St, Bassendean");
   assertEquals(preview.checks.address_street_source, "job_site");
 });
+
+Deno.test("owner calendar: Unit, Apt, Shop and comma street prefixes are numbered streets", async () => {
+  const streets = [
+    ["Unit 5/12 Smith St", "Unit 5/12 Smith St, Canning Vale"],
+    ["Apt 3, 20 Smith St", "Apt 3, 20 Smith St, Canning Vale"],
+    ["Shop 4/10 Main Rd", "Shop 4/10 Main Rd, Canning Vale"],
+    [", 20 Smith St", ", 20 Smith St, Canning Vale"],
+  ] as const;
+  for (const [address1, expected] of streets) {
+    const { deps: d } = deps({ contact: { ...michael(), address1 } });
+    const preview = await call(d, {
+      owner_input: input("calendar"),
+      dry_run: true,
+    });
+    assertEquals(preview.snapshot.content.address, expected, address1);
+    assertEquals(preview.checks.address_street_source, "ghl_contact");
+  }
+  const fromJob = deps({
+    contact: { ...michael(), address1: "Bassendean" },
+    suburb: "Bassendean",
+    jobSite: { address: "Unit 5/12 Smith St", suburb: "Bassendean" },
+  });
+  const jobPreview = await call(fromJob.deps, {
+    owner_input: input("calendar"),
+    dry_run: true,
+  });
+  assertEquals(
+    jobPreview.snapshot.content.address,
+    "Unit 5/12 Smith St, Bassendean",
+  );
+  assertEquals(jobPreview.checks.address_street_source, "job_site");
+  const { deps: bare, rows } = deps({
+    contact: { ...michael(), address1: "Unit Bassendean" },
+    suburb: "Bassendean",
+  });
+  await refusal(
+    call(bare, { owner_input: input("calendar"), dry_run: true }),
+    "contact_street_missing",
+  );
+  assertEquals(rows.length, 0);
+});
+
+function otherLead(approvals: BookingApprovalRecord[]) {
+  const contactId = "other-lead";
+  return deps({
+    cases: [{
+      id: "opp:other",
+      opportunity_id: "other",
+      contact_id: contactId,
+    }],
+    contact: {
+      id: contactId,
+      locationId: "loc",
+      firstName: "Other",
+      lastName: "Lead",
+      phone: "0413 000 000",
+      address1: "3 Other St",
+    },
+    approvals,
+  });
+}
+
+Deno.test("a live unexpired owner offer or visit blocks another lead on that slot", async () => {
+  const text = deps();
+  await approve(text.deps, input("message", { offer: FRI }));
+  const clash = await refusal(
+    call(otherLead(text.rows).deps, {
+      owner_input: {
+        step: "calendar",
+        case_id: "opp:other",
+        contact_id: "other-lead",
+        week_start: "2026-09-21",
+        visit: FRI,
+      },
+      dry_run: true,
+    }),
+    "system_offer_clash",
+  );
+  assertEquals(clash.detail?.offers, [{
+    contact_id: CONTACT,
+    start_iso: FRI.window_start_iso,
+    end_iso: FRI.end_iso,
+    source: "owner_approval",
+  }]);
+
+  const visit = deps();
+  await approve(visit.deps, input("calendar"));
+  await refusal(
+    call(otherLead(visit.rows).deps, {
+      owner_input: {
+        step: "message",
+        case_id: "opp:other",
+        contact_id: "other-lead",
+        week_start: "2026-09-21",
+        text: "Hi Other, Friday 9 to 10:30?",
+        offer: FRI,
+      },
+      dry_run: true,
+    }),
+    "system_offer_clash",
+  );
+
+  const own = deps({ approvals: text.rows });
+  const sameSlot = await call(own.deps, {
+    owner_input: input("calendar"),
+    dry_run: true,
+  });
+  assert("dry_run" in sameSlot);
+
+  const expired = otherLead([{
+    ...text.rows[0],
+    expires_at: NOW.toISOString(),
+  }]);
+  const expiredOk = await call(expired.deps, {
+    owner_input: {
+      step: "calendar",
+      case_id: "opp:other",
+      contact_id: "other-lead",
+      week_start: "2026-09-21",
+      visit: FRI,
+    },
+    dry_run: true,
+  });
+  assert("dry_run" in expiredOk);
+
+  const refused = otherLead([{ ...text.rows[0], state: "refused" }]);
+  const refusedOk = await call(refused.deps, {
+    owner_input: {
+      step: "calendar",
+      case_id: "opp:other",
+      contact_id: "other-lead",
+      week_start: "2026-09-21",
+      visit: FRI,
+    },
+    dry_run: true,
+  });
+  assert("dry_run" in refusedOk);
+
+  const noSlot = otherLead([{
+    ...text.rows[0],
+    snapshot: {
+      ...text.rows[0].snapshot,
+      content: { ...text.rows[0].snapshot.content, offer: null },
+    },
+  }]);
+  const noSlotOk = await call(noSlot.deps, {
+    owner_input: {
+      step: "calendar",
+      case_id: "opp:other",
+      contact_id: "other-lead",
+      week_start: "2026-09-21",
+      visit: FRI,
+    },
+    dry_run: true,
+  });
+  assert("dry_run" in noSlotOk);
+});
