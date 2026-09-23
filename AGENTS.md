@@ -605,7 +605,7 @@ widen the md5 lists in the earlier ladder contracts it supersedes.
 Luna's answer carries an outcome (`job`, `several`, `undecided`); the last two
 rest the row as `unplaced`, attribution asks are recorded per row with backoff
 and capped at 60 of the 400 daily calls (`20260924060000`). Contract and the
-unchanged legacy three-argument call: `docs/context/a1-attribution-attempts.md`.
+three-argument call (no outcome argument): `docs/context/a1-attribution-attempts.md`.
 
 ## Migrations Apply Before Edge Deploys
 
