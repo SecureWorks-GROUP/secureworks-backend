@@ -17,6 +17,9 @@ CREATE TEMP TABLE b0_fx(kind text, label text, input text, expected jsonb);
 INSERT INTO b0_fx VALUES
 -- FIXTURES BEGIN
  ('tokens','INV-1075 legacy job number','SW1346','["SW1346"]'::jsonb),
+ ('tokens','INV-0664 two-job reference','SWF-260705 & SWF-26078','["SWF-260705","SWF-26078"]'::jsonb),
+ ('tokens','INV-0664 design line string SWF-260705 | 17 Clarke Rd','SWF-260705 | 17 Clarke Rd','["SWF-260705"]'::jsonb),
+ ('tokens','INV-0664 design line string SWF-26078 | 17 Clarke Rd','SWF-26078 | 17 Clarke Rd','["SWF-26078"]'::jsonb),
  ('tokens','unhyphenated form stays exact','SWP26376','["SWP26376"]'::jsonb),
  ('tokens','typo suffix stays one token','SWF-26777-V','["SWF-26777-V"]'::jsonb),
  ('tokens','N4 space-joined job number','FW: Material Order Ref SWP 26195 - 1047995','["1047995","26195","SWP-26195","SWP26195"]'::jsonb),

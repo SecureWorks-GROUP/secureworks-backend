@@ -22,6 +22,9 @@ export type KeyFixture =
 export const JOB_REF_FIXTURES: KeyFixture[] = [
   // Token rule (money.md M7 list, adminbucket N4, N8, N22, sms R13, L1).
   { kind: "tokens", label: "INV-1075 legacy job number", input: "SW1346", expected: ["SW1346"] },
+  { kind: "tokens", label: "INV-0664 two-job reference", input: "SWF-260705 & SWF-26078", expected: ["SWF-260705", "SWF-26078"] },
+  { kind: "tokens", label: "INV-0664 design line string SWF-260705 | 17 Clarke Rd", input: "SWF-260705 | 17 Clarke Rd", expected: ["SWF-260705"] },
+  { kind: "tokens", label: "INV-0664 design line string SWF-26078 | 17 Clarke Rd", input: "SWF-26078 | 17 Clarke Rd", expected: ["SWF-26078"] },
   { kind: "tokens", label: "unhyphenated form stays exact", input: "SWP26376", expected: ["SWP26376"] },
   { kind: "tokens", label: "typo suffix stays one token", input: "SWF-26777-V", expected: ["SWF-26777-V"] },
   { kind: "tokens", label: "N4 space-joined job number", input: "FW: Material Order Ref SWP 26195 - 1047995", expected: ["1047995", "26195", "SWP-26195", "SWP26195"] },

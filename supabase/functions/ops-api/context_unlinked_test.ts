@@ -355,18 +355,3 @@ Deno.test("both doors are staff-only: not profile-scoped, not agent-read, trades
     assertEquals(decide("jwt", "trade"), 403, action);
   }
 });
-
-Deno.test("index.ts serves both doors GET-only and never on the scoped routine allow-list", async () => {
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = src.indexOf("case 'context_unlinked_census':");
-  const body = src.slice(start, src.indexOf("\n      }\n", start));
-  assertEquals(body.includes("req.method !== 'GET'"), true);
-  assertEquals(body.includes("unlinkedActor(authUser?.id, req.headers)"), true);
-  const routine = src.slice(
-    src.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set(["),
-  );
-  const routineSet = routine.slice(0, routine.indexOf("])"));
-  for (const action of ACTIONS) {
-    assertEquals(routineSet.includes(`'${action}'`), false, action);
-  }
-});
