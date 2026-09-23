@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22; Outlook diary merge 2026-09-23)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22; Outlook diary merge 2026-09-23; executor press results 2026-09-23)
 
 `GET ops-api?action=sales_booking_read` is the book, diary, and threads read
 behind the Sales Booking view. It replaces the branch-local preview server
@@ -8,14 +8,17 @@ One-tap visit outcome writes are a separate store: `docs/visit-outcomes-api.md`.
 Confirmation models, `booking_flow`, published availability, booked visits,
 and independent calendar/message approvals:
 `docs/sales-booking-confirmation-api.md`.
+What a book/send press did (`booking_executions`, channel overlay):
+`docs/sales-booking-executor.md` "What the read shows".
 
 Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
 Pack publish, captain stamp, thread-facts cache, and the read overlay:
 `supabase/functions/ops-api/sales_booking_pack.ts`.
 Visit ledger composition: `supabase/functions/ops-api/sales_booking_visits.ts`.
+Executor press composition: `supabase/functions/ops-api/sales_booking_execution_read.ts`.
 Regressions: `sales_booking_read_test.ts`, `sales_booking_outlook_test.ts`,
-`sales_booking_pack_test.ts`, and `sales_booking_visits_test.ts` beside those
-files.
+`sales_booking_pack_test.ts`, `sales_booking_visits_test.ts`, and
+`sales_booking_execution_read_test.ts` beside those files.
 The GHL calendar window is one unpaged `/calendars/events` GET in
 `supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
@@ -131,7 +134,9 @@ Additions:
   decision D2, 23 Sep 2026). Each entry: `event_id`, `start`, `end` (ISO with
   `+08:00`), `title`, `kind` (`busy` | `leave` | `personal`), `source`
   (`ghl` | `outlook`), plus `show_as`, `blocks_capacity`, `is_all_day`,
-  `location`, `title_withheld`, `mirror_of_ghl_event_id`. Outlook is read with
+  `location`, `title_withheld`, `mirror_of_ghl_event_id`, and `booked_visit`
+  when the event is a booked visit or its Outlook mirror (owner:
+  `docs/sales-booking-confirmation-api.md`). Outlook is read with
   Graph `calendarView` through the mail app's existing app-only credential
   (`_shared/graph_client.ts`); `showAs:oof` is leave, a private sensitivity is
   personal with title and location withheld, `free` and cancelled do not block.
@@ -185,7 +190,9 @@ Additions:
 - **`booking_flow`**, per-case **`booking_read_model`**, **`booked_visits`**,
   and **`visit_outcomes`** — confirmation overlay, published availability,
   appointment-ledger visits, and independent approval display. Owner:
-  `docs/sales-booking-confirmation-api.md`.
+  `docs/sales-booking-confirmation-api.md`. Per-case **`booking_executions`**
+  and `booking_flow.execution_read` are the executor press overlay. Owner:
+  `docs/sales-booking-executor.md` "What the read shows".
 - **`pack`** — `{present, as_of, proposals}` for the latest
   `sales_booking_packs` row with `kind=pack`. Absent when the engine has not
   published this week (`present:false`, `as_of:null`, `proposals:{}`).

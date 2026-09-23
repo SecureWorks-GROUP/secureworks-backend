@@ -146,9 +146,9 @@ and route) and, for a booking, the GHL writer's own
 | calendar `claimed`, older | `sending` | `failed`: may or may not be in GHL | `unknown` |
 | calendar `claimed`, older | none or `reserved` | `refused`: nothing written to GHL | `failed` |
 | calendar, executor and writer name different appointments | | `failed` | `unknown` |
-| message `sent` | | `sent`, with `sent_at`, exact `text`, `message_id` | `succeeded` |
+| message `sent` with `message_id` | | `sent`, with `sent_at`, exact `text`, `message_id` | `succeeded` |
 | message `sending`, under 2 minutes old | | `in_progress` | `pending` |
-| message `sending` older, or `unknown` | | `failed`: may or may not have gone, never re-sent | `unknown` |
+| message `sending` older, `unknown`, or `sent` without `message_id` | | `failed`: may or may not have gone, never re-sent | `unknown` |
 
 Each lead carries `booking_executions` (newest first, each with `state` and
 plain `words`); the newest press per step also lands on

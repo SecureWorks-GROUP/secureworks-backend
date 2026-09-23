@@ -17,6 +17,8 @@ import {
 // Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
 // published availability, booked visits, independent approvals):
 // docs/sales-booking-confirmation-api.md.
+// After a press, what booked or sent (`booking_executions`):
+// docs/sales-booking-executor.md "What the read shows".
 //
 // ── NO SEND, NO GHL OR OUTLOOK WRITE ──
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
