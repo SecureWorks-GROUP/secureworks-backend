@@ -421,3 +421,78 @@ Deno.test("staff unchanged: over $200 still needs approval", async () => {
   assertEquals(result.needs_approval, true);
   assertEquals(variationRows(client)[0].status, "pending_approval");
 });
+
+// createVariationForCaller reads job_id, description, amount and reason by
+// name before dispatch. The body each path receives must be the caller's body,
+// unchanged: same values, no field added, none dropped, the caller's object
+// untouched.
+Deno.test("dispatch forwards the body unchanged on the staff path", async () => {
+  const body = {
+    job_id: JOB,
+    description: "Rock under footing",
+    amount: 150,
+    reason: "rock",
+    photo_url: "https://example.invalid/p.jpg",
+    invoice_method: "separate_now",
+  };
+  const sent = structuredClone(body);
+  const client = makeClient(baseTables([]));
+  await createVariationForCaller(client, body, "api_key", null);
+  assertEquals(body, sent);
+  const [row] = variationRows(client);
+  assertEquals(
+    [
+      row.job_id,
+      row.description,
+      row.amount,
+      row.reason,
+      row.photo_url,
+      row.invoice_method,
+    ],
+    [
+      JOB,
+      "Rock under footing",
+      150,
+      "rock",
+      "https://example.invalid/p.jpg",
+      "separate_now",
+    ],
+  );
+});
+
+Deno.test("dispatch forwards the body unchanged on the trade path", async () => {
+  const body = {
+    job_id: JOB,
+    description: "Extra post",
+    amount: 80,
+    reason: "soft ground",
+  };
+  const sent = structuredClone(body);
+  const client = makeClient(baseTables([liveAssignment]));
+  await createVariationForCaller(client, body, "jwt", trade());
+  assertEquals(body, sent);
+  const [row] = variationRows(client);
+  assertEquals(
+    [row.job_id, row.description, row.amount, row.reason],
+    [JOB, "Extra post", 80, "soft ground"],
+  );
+});
+
+Deno.test("dispatch adds no field the caller did not send", async () => {
+  const body = { jobId: JOB, description: "No cost given" };
+  const client = makeClient(baseTables([]));
+  await createVariationForCaller(client, body, "api_key", null);
+  assertEquals(Object.keys(body), ["jobId", "description"]);
+  const [row] = variationRows(client);
+  assertEquals([row.job_id, row.amount, row.reason], [JOB, 0, null]);
+});
+
+Deno.test("a trade call with no body is still refused as missing fields", async () => {
+  const client = makeClient(baseTables([liveAssignment]));
+  const err = await assertRejects(
+    () => createVariationForCaller(client, null, "jwt", trade()),
+    ApiError,
+  );
+  assertEquals(err.status, 400);
+  assertEquals(client.inserts.length, 0);
+});

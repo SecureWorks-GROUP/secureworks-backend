@@ -53026,14 +53026,27 @@ export async function createVariationForCaller(
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
   authUser: TradeAuthContext | null,
 ) {
+  // create_variation's fields, read by name here at the dispatch (jarvis's MCP
+  // drift check reads only this first named handler) and passed on to both
+  // paths: a field the caller sent goes on with its value, one it did not send
+  // stays absent, and every other field goes on as received.
+  let forwarded = body
+  if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    const { job_id, description, amount, reason } = body
+    forwarded = { ...body }
+    if ('job_id' in body) forwarded.job_id = job_id
+    if ('description' in body) forwarded.description = description
+    if ('amount' in body) forwarded.amount = amount
+    if ('reason' in body) forwarded.reason = reason
+  }
   if (authMode === 'jwt' && !_opsApiCallerIsStaffOperator(authMode, authUser)) {
     if (!authUser) throw new ApiError('A signed-in Supabase user session is required.', 401, {
       error: 'A signed-in Supabase user session is required.',
       code: 'user_jwt_required',
     })
-    return await createTradeVariationRequest(client, body, authUser)
+    return await createTradeVariationRequest(client, forwarded, authUser)
   }
-  return await createVariation(client, body)
+  return await createVariation(client, forwarded)
 }
 
 // Trade "Request Variation" (trade-app-audit-20260923 B5; captain: the office
