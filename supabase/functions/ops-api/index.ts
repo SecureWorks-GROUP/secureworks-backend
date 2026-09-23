@@ -820,6 +820,8 @@ import { buildOpsApiVersion } from './ops_api_version.ts'
 // persist kind=thread_facts and kind=roster. No GHL write, no send, no
 // calendar write.
 import { applySalesBookingVisits } from './sales_booking_visits.ts'
+import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_execute.ts'
+import { createSalesBookingExecuteDeps } from './sales_booking_execute_live.ts'
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
@@ -5261,6 +5263,23 @@ if (import.meta.main) serve(async (req: Request) => {
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
           throw e
         }
+      }
+      case 'sales_booking_book':
+      case 'sales_booking_send': {
+        // The captain's press on one approval (docs/sales-booking-executor.md).
+        // Dry run unless SALES_BOOKING_BOOK_EXECUTE / SALES_BOOKING_SEND_EXECUTE
+        // is exactly "true" AND an allow-listed captain JWT pressed. API-key
+        // callers always get a dry run: every check, no write, no send.
+        const executeArgs = {
+          method: req.method,
+          auth: { mode: authMode, role: authUser?.role ?? null, userId: authUser?.id ?? null, email: authUser?.email ?? null },
+          body: body && typeof body === 'object' ? body : {},
+          deps: createSalesBookingExecuteDeps(client),
+        }
+        const executed = action === 'sales_booking_book'
+          ? await salesBookingBookAction(executeArgs)
+          : await salesBookingSendAction(executeArgs)
+        return json(executed, executed.status === 'refused' && executed.reason === 'press_requires_captain' ? 403 : 200)
       }
       case 'sales_booking_stamp_write': {
         // DEPRECATED combined stamp; cannot approve either separate-v1 channel.

@@ -9,13 +9,70 @@ import {
   type AppointmentLedger,
   type AppointmentRequest,
   createCalendarAppointmentAction,
+  type ExecutorClaimRow,
 } from "./calendar_appointment.ts";
+import {
+  bookingContentHash,
+  bookingHash,
+  type ExecutableApprovalRecord,
+} from "../_shared/booking_approval_gate.ts";
 import {
   canCreateCalendarAppointment,
   rejectSharedKeyForBrowserAction,
 } from "./hardening_helpers.ts";
 
-const INPUT: AppointmentInput = {
+const NOW = Date.parse("2026-09-22T00:00:00+08:00");
+type Row = Record<string, unknown>;
+const CAPTAIN = "marnin@secureworkswa.com.au";
+
+/** Live captain approvals by binding hash, shared by every fixture. */
+const APPROVALS = new Map<string, ExecutableApprovalRecord>();
+/** The captain's approval of exactly these appointment fields. The returned
+ * input carries the approval's binding hash as its idempotency key, the way
+ * the ops-api executor calls the writer. */
+async function approved(
+  fields: Omit<AppointmentInput, "idempotencyKey">,
+  overrides: Partial<ExecutableApprovalRecord> = {},
+): Promise<AppointmentInput> {
+  const snapshot: Row = {
+    schema: "scope-booking-approval.v1",
+    step: "calendar",
+    case_id: "opp:sample",
+    contact_id: fields.contactId,
+    resource: "marnin",
+    scoper_user_id: "scoper",
+    week_start: "2026-09-21",
+    id: "opp:sample",
+    profile: "fencing-stratco-marnin",
+    pack_revision: "a".repeat(64),
+    content_hash: null,
+    content: {
+      provider: "ghl",
+      calendar_id: fields.calendarId,
+      assigned_user_id: fields.assignedUserId,
+      start_iso: fields.startTime,
+      end_iso: fields.endTime,
+      window_start_iso: fields.startTime,
+      window_end_iso: fields.startTime,
+      title: fields.title,
+      address: fields.address,
+    },
+  };
+  snapshot.content_hash = await bookingContentHash(snapshot);
+  const key = await bookingHash(snapshot);
+  APPROVALS.set(key, {
+    binding_hash: key,
+    step: "calendar",
+    state: "approved",
+    snapshot,
+    approved_by_email: CAPTAIN,
+    approved_at: new Date(NOW - 60_000).toISOString(),
+    expires_at: new Date(NOW + 14 * 60_000).toISOString(),
+    ...overrides,
+  });
+  return { ...fields, idempotencyKey: key };
+}
+const BASE = {
   calendarId: "cal1",
   assignedUserId: "user1",
   contactId: "contact1",
@@ -23,12 +80,31 @@ const INPUT: AppointmentInput = {
   endTime: "2026-09-23T11:00:00+08:00",
   title: "Site visit",
   address: "1 Test Street, Perth",
-  idempotencyKey: "booking-1",
 };
-const NOW = Date.parse("2026-09-22T00:00:00+08:00");
-type Row = Record<string, unknown>;
+const INPUT: AppointmentInput = await approved(BASE);
+const INPUT_CAL2: AppointmentInput = await approved({
+  ...BASE,
+  calendarId: "cal2",
+});
+const CLAIM_TOKEN = "7c3c6e2e-0c6a-4f2d-9c1a-2b8f0d4e1a77";
+function claimRow(
+  _key: string,
+  extra: Partial<ExecutorClaimRow> = {},
+): ExecutorClaimRow {
+  return {
+    step: "calendar",
+    state: "claimed",
+    press_token: CLAIM_TOKEN,
+    claimed_at: new Date(NOW - 15_000).toISOString(),
+    ...extra,
+  };
+}
 
 function fixture() {
+  const claims = new Map<string, ExecutorClaimRow>([
+    [INPUT.idempotencyKey, claimRow(INPUT.idempotencyKey)],
+    [INPUT_CAL2.idempotencyKey, claimRow(INPUT_CAL2.idempotencyKey)],
+  ]);
   const records = new Map<
     string,
     AppointmentRequest & {
@@ -103,6 +179,13 @@ function fixture() {
     locationId: "loc1",
     enabled: true,
     ledger,
+    approvals: {
+      find: (key) => Promise.resolve(APPROVALS.get(key) ?? null),
+    },
+    executions: {
+      find: (key) => Promise.resolve(claims.get(key) ?? null),
+    },
+    captainEmails: [CAPTAIN],
     now: () => NOW,
     ghlGet(path) {
       gets.push(path);
@@ -148,8 +231,16 @@ function fixture() {
     failComplete: () => {
       failComplete = true;
     },
-    call: (body: unknown = INPUT, method = "POST") =>
-      createCalendarAppointmentAction({ method, body, deps }),
+    claims,
+    call: (body: unknown = INPUT, method = "POST") => {
+      const payload =
+        body && typeof body === "object" && !Array.isArray(body) &&
+          !("executorClaim" in body) &&
+          (body as { dryRun?: unknown }).dryRun !== true
+          ? { ...body, executorClaim: CLAIM_TOKEN }
+          : body;
+      return createCalendarAppointmentAction({ method, body: payload, deps });
+    },
   };
 }
 function busyEvent(extra: Row = {}): Row {
@@ -336,7 +427,7 @@ Deno.test("uncertain POST never retries create from an empty read or a fuzzy mat
   assertEquals((await f.call()).body.reason, "outcome_unknown");
   assertEquals(attempts, 1);
   assertEquals(
-    (await f.call({ ...INPUT, idempotencyKey: "another", calendarId: "cal2" }))
+    (await f.call(INPUT_CAL2))
       .body.code,
     "overlap",
   );
@@ -345,7 +436,7 @@ Deno.test("parallel requests for different calendars of the same person only POS
   const f = fixture();
   const results = await Promise.all([
     f.call(),
-    f.call({ ...INPUT, calendarId: "cal2", idempotencyKey: "second" }),
+    f.call(INPUT_CAL2),
   ]);
   assertEquals(results.filter((r) => r.body.ok).length, 1);
   assertEquals(results.filter((r) => r.body.code === "overlap").length, 1);
@@ -470,4 +561,140 @@ Deno.test("ledger failure before a POST fails closed and a failed recovery read 
   };
   assertEquals((await g.call()).body, { ok: false, code: "read_failed" });
   assertEquals(g.posts.length, 1);
+});
+
+Deno.test("writer refuses a real write with no live captain approval, before reserving or posting", async () => {
+  const cases: Array<[AppointmentInput, string]> = [
+    [{ ...INPUT, idempotencyKey: "booking-1" }, "approval_not_found"],
+    [{ ...INPUT, idempotencyKey: "f".repeat(64) }, "approval_not_found"],
+    [
+      await approved({ ...BASE, title: "Expired" }, {
+        approved_at: new Date(NOW - 16 * 60_000).toISOString(),
+        expires_at: new Date(NOW - 60_000).toISOString(),
+      }),
+      "approval_expired",
+    ],
+    [
+      await approved({ ...BASE, title: "Not captain" }, {
+        approved_by_email: "someone@example.test",
+      }),
+      "approval_not_by_captain",
+    ],
+    [
+      await approved({ ...BASE, title: "Refused" }, { state: "refused" }),
+      "approval_not_approved",
+    ],
+    // Same approval key, different appointment fields.
+    [{ ...INPUT, address: "2 Other Street, Perth" }, "content_hash_mismatch"],
+  ];
+  const tampered = await approved({ ...BASE, title: "Tampered" });
+  const row = APPROVALS.get(tampered.idempotencyKey)!;
+  APPROVALS.set(tampered.idempotencyKey, {
+    ...row,
+    snapshot: {
+      ...(row.snapshot as Row),
+      content: { ...(row.snapshot as Row).content as Row, title: "Tampered" },
+      case_id: "opp:other",
+    },
+  });
+  cases.push([tampered, "content_hash_mismatch"]);
+  for (const [input, reason] of cases) {
+    const f = fixture();
+    const result = await f.call(input);
+    assertEquals(result.status, 409);
+    assertEquals(result.body, { ok: false, code: "approval_required", reason });
+    assertEquals(f.posts.length, 0);
+    assertEquals(f.records.size, 0);
+  }
+  const unreadable = fixture();
+  unreadable.deps.approvals.find = () => {
+    throw new Error("db down private detail");
+  };
+  assertEquals(
+    (await unreadable.call()).body.reason,
+    "approval_unreadable",
+  );
+  assertEquals(unreadable.posts.length, 0);
+});
+Deno.test("dryRun:true previews even with writes enabled; no approval is informational only there", async () => {
+  const f = fixture();
+  const preview = await f.call({ ...INPUT, dryRun: true });
+  assertEquals(preview.body.code, "dry_run");
+  assertEquals(preview.body.dryRun, true);
+  assertEquals(preview.body.approval, { state: "live", reason: null });
+  assertEquals(f.posts.length, 0);
+  assertEquals(f.writes(), 0);
+  const g = fixture();
+  g.deps.enabled = false;
+  const unapproved = await g.call({ ...INPUT, idempotencyKey: "booking-1" });
+  assertEquals(unapproved.body.code, "flag_off");
+  assertEquals(unapproved.body.approval, {
+    state: "missing",
+    reason: "approval_not_found",
+  });
+  for (const dryRun of [false, "true", 1]) {
+    assertEquals(
+      (await fixture().call({ ...INPUT, dryRun })).body.code,
+      "invalid_request",
+    );
+  }
+});
+Deno.test("writer refuses a real write with a live approval but no executor claim, wrong token, or stale claim", async () => {
+  const missing = fixture();
+  const noClaim = await createCalendarAppointmentAction({
+    method: "POST",
+    body: INPUT,
+    deps: missing.deps,
+  });
+  assertEquals(noClaim.status, 409);
+  assertEquals(noClaim.body, {
+    ok: false,
+    code: "approval_required",
+    reason: "executor_claim_missing",
+  });
+  assertEquals(missing.posts.length, 0);
+  assertEquals(missing.records.size, 0);
+
+  const wrong = fixture();
+  const mismatch = await wrong.call({
+    ...INPUT,
+    executorClaim: "11111111-1111-4111-8111-111111111111",
+  });
+  assertEquals(mismatch.body, {
+    ok: false,
+    code: "approval_required",
+    reason: "executor_claim_mismatch",
+  });
+  assertEquals(wrong.posts.length, 0);
+  assertEquals(wrong.records.size, 0);
+
+  const stale = fixture();
+  stale.claims.set(
+    INPUT.idempotencyKey,
+    claimRow(INPUT.idempotencyKey, {
+      claimed_at: new Date(NOW - 2 * 60_000 - 1).toISOString(),
+    }),
+  );
+  const expired = await stale.call();
+  assertEquals(expired.body, {
+    ok: false,
+    code: "approval_required",
+    reason: "executor_claim_expired",
+  });
+  assertEquals(stale.posts.length, 0);
+  assertEquals(stale.records.size, 0);
+
+  const unread = fixture();
+  unread.deps.executions.find = () => {
+    throw new Error("db down private detail");
+  };
+  assertEquals(
+    (await unread.call()).body,
+    {
+      ok: false,
+      code: "approval_required",
+      reason: "executor_claim_unreadable",
+    },
+  );
+  assertEquals(unread.posts.length, 0);
 });

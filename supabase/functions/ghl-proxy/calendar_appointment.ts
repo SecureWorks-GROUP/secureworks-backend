@@ -5,6 +5,13 @@ import {
   type GhlCalendarGet,
 } from "./calendar_events.ts";
 import { scopeJsonHash } from "./hardening_helpers.ts";
+import {
+  appointmentFromCalendarApproval,
+  appointmentMatchesApproval,
+  APPROVAL_ID_PATTERN,
+  approvalGateRefusal,
+  type ExecutableApprovalRecord,
+} from "../_shared/booking_approval_gate.ts";
 
 type ObjectRow = Record<string, unknown>;
 export type AppointmentInput = {
@@ -54,8 +61,34 @@ export type AppointmentDeps = {
   ghlGet: GhlCalendarGet;
   ghlPost: (path: string, body: ObjectRow) => Promise<ObjectRow>;
   ledger: AppointmentLedger;
+  /**
+   * Reads the `sales_booking_approvals` row whose binding hash equals the
+   * request's idempotencyKey. A real write requires a live captain approval of
+   * exactly this appointment; previews report the state and never refuse on it.
+   */
+  approvals: {
+    find(bindingHash: string): Promise<ExecutableApprovalRecord | null>;
+  };
+  /**
+   * The executor's per-press claim for this approval hash. A real write
+   * requires a fresh unbooked calendar claim whose token matches
+   * `executorClaim`; previews and replays never refuse on it.
+   */
+  executions: {
+    find(bindingHash: string): Promise<ExecutorClaimRow | null>;
+  };
+  captainEmails: string[];
   now?: () => number;
 };
+export type ExecutorClaimRow = {
+  step: string;
+  state: string;
+  press_token: string;
+  claimed_at: string;
+};
+export const EXECUTOR_CLAIM_MAX_AGE_MS = 2 * 60_000;
+const EXECUTOR_CLAIM_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Refusal =
   | "flag_off"
   | "overlap"
@@ -64,6 +97,7 @@ type Refusal =
   | "invalid_window"
   | "provider_error"
   | "invalid_request"
+  | "approval_required"
   | "method_not_allowed";
 type ActionResult = { status: number; body: ObjectRow };
 function refuse(code: Refusal, status: number, reason?: string): ActionResult {
@@ -94,6 +128,30 @@ function instant(value: unknown): number | null {
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }
+/** `dryRun: true` and `executorClaim` are the only optional fields. */
+function parseRequest(
+  body: unknown,
+):
+  | { input: AppointmentInput; dryRun: boolean; executorClaim: string | null }
+  | null {
+  if (!object(body)) return null;
+  if ("dryRun" in body && body.dryRun !== true) return null;
+  if (
+    "executorClaim" in body &&
+    (typeof body.executorClaim !== "string" ||
+      !EXECUTOR_CLAIM_PATTERN.test(body.executorClaim))
+  ) return null;
+  const { dryRun, executorClaim, ...rest } = body;
+  const input = parse(rest);
+  return input
+    ? {
+      input,
+      dryRun: dryRun === true,
+      executorClaim: typeof executorClaim === "string" ? executorClaim : null,
+    }
+    : null;
+}
+
 function parse(raw: unknown): AppointmentInput | null {
   if (!object(raw)) return null;
   const keys = [
@@ -234,15 +292,63 @@ export async function createCalendarAppointmentAction(args: {
   deps: AppointmentDeps;
 }): Promise<ActionResult> {
   if (args.method !== "POST") return refuse("method_not_allowed", 405);
-  const input = parse(args.body);
-  if (!input || !id(args.deps.locationId)) {
+  const request = parseRequest(args.body);
+  if (!request || !id(args.deps.locationId)) {
     return refuse("invalid_request", 400);
   }
+  const { input } = request;
   const start = instant(input.startTime), end = instant(input.endTime);
   if (start === null || end === null || end <= start) {
     return refuse("invalid_window", 400);
   }
   const { deps } = args;
+  const enabled = deps.enabled && !request.dryRun;
+  const nowMs = () => deps.now?.() ?? Date.now();
+  // Null means a live captain approval of exactly this appointment, keyed by
+  // the approval binding hash the executor passes as idempotencyKey.
+  const approvalRefusal = async (): Promise<string | null> => {
+    if (!APPROVAL_ID_PATTERN.test(input.idempotencyKey)) {
+      return "approval_not_found";
+    }
+    let record: ExecutableApprovalRecord | null;
+    try {
+      record = await deps.approvals.find(input.idempotencyKey);
+    } catch {
+      return "approval_unreadable";
+    }
+    if (!record) return "approval_not_found";
+    const refusal = await approvalGateRefusal(
+      record,
+      "calendar",
+      new Date(nowMs()),
+      deps.captainEmails,
+    );
+    if (refusal) return refusal;
+    const approved = appointmentFromCalendarApproval(record.snapshot);
+    return approved && appointmentMatchesApproval(input, approved)
+      ? null
+      : "content_hash_mismatch";
+  };
+  const claimRefusal = async (): Promise<string | null> => {
+    const token = request.executorClaim;
+    if (!token) return "executor_claim_missing";
+    let row: ExecutorClaimRow | null;
+    try {
+      row = await deps.executions.find(input.idempotencyKey);
+    } catch {
+      return "executor_claim_unreadable";
+    }
+    if (!row || row.step !== "calendar" || row.state !== "claimed") {
+      return "executor_claim_missing";
+    }
+    if (row.press_token !== token) return "executor_claim_mismatch";
+    const claimedAt = Date.parse(row.claimed_at);
+    if (
+      !Number.isFinite(claimedAt) ||
+      nowMs() - claimedAt > EXECUTOR_CLAIM_MAX_AGE_MS
+    ) return "executor_claim_expired";
+    return null;
+  };
   const fingerprint = await scopeJsonHash({
     locationId: deps.locationId,
     ...input,
@@ -264,7 +370,7 @@ export async function createCalendarAppointmentAction(args: {
     ignoreFreeSlotValidation: false,
   };
   try {
-    if (deps.enabled) {
+    if (enabled) {
       const previous = await deps.ledger.get(
         deps.locationId,
         input.idempotencyKey,
@@ -280,7 +386,7 @@ export async function createCalendarAppointmentAction(args: {
         return await recover(deps, input, payload, fingerprint);
       }
     }
-    if (start <= (deps.now?.() ?? Date.now())) {
+    if (start <= nowMs()) {
       return refuse("invalid_window", 400);
     }
     let contact: ObjectRow;
@@ -335,15 +441,21 @@ export async function createCalendarAppointmentAction(args: {
         return refuse("read_failed", 502);
       }
     };
-    if (!deps.enabled) {
+    if (!enabled) {
       const refusal = await checkWindow();
       if (refusal) return refusal;
+      const approval = await approvalRefusal();
       return {
         status: 200,
         body: {
           ok: false,
-          code: "flag_off",
+          // flag_off: the server switch is off. dry_run: the caller asked.
+          code: deps.enabled ? "dry_run" : "flag_off",
           dryRun: true,
+          // Informational in a preview; a real write refuses without it.
+          approval: approval
+            ? { state: "missing", reason: approval }
+            : { state: "live", reason: null },
           wouldWrite: {
             method: "POST",
             path: "/calendars/events/appointments",
@@ -353,6 +465,14 @@ export async function createCalendarAppointmentAction(args: {
         },
       };
     }
+    // Replays and recoveries never post. Everything from the reservation on
+    // can, so no caller books without the captain's live approval of these
+    // exact fields and the executor's per-press claim
+    // (docs/sales-booking-executor.md).
+    const approval = await approvalRefusal();
+    if (approval) return refuse("approval_required", 409, approval);
+    const claim = await claimRefusal();
+    if (claim) return refuse("approval_required", 409, claim);
     const token = crypto.randomUUID();
     const reservation = await deps.ledger.reserve({
       locationId: deps.locationId,
@@ -374,7 +494,7 @@ export async function createCalendarAppointmentAction(args: {
       return await recover(deps, input, payload, fingerprint);
     }
     const refusal = await checkWindow();
-    if (refusal || start <= (deps.now?.() ?? Date.now())) {
+    if (refusal || start <= nowMs()) {
       await deps.ledger.release(deps.locationId, input.idempotencyKey, token);
       return refusal ?? refuse("invalid_window", 400);
     }

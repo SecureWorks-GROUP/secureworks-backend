@@ -1,4 +1,8 @@
 import {
+  DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL,
+  parseSalesBookingCaptainEmails,
+} from "../_shared/booking_approval_gate.ts";
+import {
   applyBookingConfirmationModels,
   selectBookingModels,
 } from "./sales_booking_confirmation.ts";
@@ -95,8 +99,7 @@ export interface SalesBookingPackAuth {
 export type SalesBookingEnvGet = (name: string) => string | undefined;
 
 export const SALES_BOOKING_CAPTAIN_EMAILS_ENV = "SALES_BOOKING_CAPTAIN_EMAILS";
-export const DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL =
-  "marnin@secureworkswa.com.au";
+export { DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL, parseSalesBookingCaptainEmails };
 export const STAMP_WRITE_REQUIRES_CAPTAIN = "stamp_write_requires_captain";
 
 const defaultEnvGet: SalesBookingEnvGet = (name) => Deno.env.get(name);
@@ -442,20 +445,6 @@ export function assertSalesBookingStampReadAuth(
     "sales_booking_stamp_read requires the ops API key",
     403,
   );
-}
-
-/** Comma-separated, case-insensitive. Unset or blank → default captain email. */
-export function parseSalesBookingCaptainEmails(
-  raw: string | undefined | null,
-): string[] {
-  const text = typeof raw === "string" ? raw.trim() : "";
-  if (!text) return [DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL];
-  const emails = [
-    ...new Set(
-      text.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
-    ),
-  ];
-  return emails.length > 0 ? emails : [DEFAULT_SALES_BOOKING_CAPTAIN_EMAIL];
 }
 
 export function salesBookingCaptainEmailsFromEnv(

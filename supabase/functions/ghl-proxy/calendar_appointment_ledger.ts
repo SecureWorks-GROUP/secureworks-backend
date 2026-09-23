@@ -2,6 +2,7 @@ import type {
   AppointmentLedger,
   AppointmentRequest,
 } from "./calendar_appointment.ts";
+import type { ExecutableApprovalRecord } from "../_shared/booking_approval_gate.ts";
 
 // Supabase's structural query builder is owned by the pinned runtime client.
 // deno-lint-ignore no-explicit-any
@@ -71,6 +72,47 @@ export function appointmentLedger(sb: any): AppointmentLedger {
           winner.result?.appointmentId !== result.appointmentId
         ) throw new Error("ledger_complete_conflict");
       }
+    },
+  };
+}
+
+/** Read-only: the writer never inserts, changes or deletes an approval. */
+// Supabase's structural query builder is owned by the pinned runtime client.
+// deno-lint-ignore no-explicit-any
+export function bookingApprovalReader(sb: any): {
+  find(bindingHash: string): Promise<ExecutableApprovalRecord | null>;
+} {
+  return {
+    async find(bindingHash) {
+      const { data, error } = await sb.from("sales_booking_approvals").select(
+        "binding_hash,step,state,snapshot,approved_by_email,approved_at,expires_at",
+      ).eq("binding_hash", bindingHash).maybeSingle();
+      if (error) throw new Error("approval_read_failed");
+      return (data as ExecutableApprovalRecord | null) ?? null;
+    },
+  };
+}
+
+/** Read-only: the writer never claims or settles an executor press. */
+// Supabase's structural query builder is owned by the pinned runtime client.
+// deno-lint-ignore no-explicit-any
+export function bookingExecutionReader(sb: any): {
+  find(bindingHash: string): Promise<
+    {
+      step: string;
+      state: string;
+      press_token: string;
+      claimed_at: string;
+    } | null
+  >;
+} {
+  return {
+    async find(bindingHash) {
+      const { data, error } = await sb.from("sales_booking_executions").select(
+        "step,state,press_token,claimed_at",
+      ).eq("binding_hash", bindingHash).maybeSingle();
+      if (error) throw new Error("execution_read_failed");
+      return data ?? null;
     },
   };
 }

@@ -127,9 +127,12 @@ neither channel can trigger or grant the other.
 
 Before recording, the handler re-reads the current workspace and compares the
 entire snapshot semantically, verifies the computed hash and proposal expiry.
-Approvals additionally need complete current person availability, well-formed
-commitments, source quotes and fresh validation (at most 60 seconds old), with
-all checks passed. Required check labels for this handoff are `calendar`,
+Calendar approvals additionally need complete current person availability,
+well-formed commitments, source quotes and passed validation. There is no
+60-second freshness gate any more (23 Sep 2026): the executor re-checks GHL and
+Outlook on the server at the press (`docs/sales-booking-executor.md`). An
+exact-text (`message`) approval needs only the snapshot, hash, expiry and an
+exact E.164 route, so a text with no time can be approved. Required check labels for this handoff are `calendar`,
 `protected_band`, `hours`, `travel`, `daily_capacity`. The calendar operation
 must start at earliest arrival and end after latest arrival (including visit
 length). Message routes must have both explicit E.164 numbers. Pending, unknown,
@@ -157,11 +160,12 @@ receipt. An unreadable store returns `awaiting_approval` with
 `approval_write:null` and `approval_read_error`; it is not treated as an empty
 ledger.
 
-A future executor must revalidate the current pack, availability, approval and
-expiry at execution. Calendar notifications must stay off. Message execution
-requires its own stamp and a matching successful calendar receipt and must
-respect the send hold. This recording action deliberately has no execution
-capability and does not replace that executor contract.
+The executor is `sales_booking_book` / `sales_booking_send`
+(`docs/sales-booking-executor.md`): it revalidates the approval, thread and
+calendars at the press, defaults to dry run, and keeps calendar notifications
+off. A message send needs its own approval and no calendar receipt, so a text
+with no time can be sent. This recording action itself still has no execution
+capability.
 
 ## Local proof
 

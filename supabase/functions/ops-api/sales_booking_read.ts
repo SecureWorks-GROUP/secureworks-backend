@@ -360,14 +360,14 @@ export function isSalesBookingTemplateBody(body: unknown): boolean {
   return SALES_BOOKING_TEMPLATE_MARKERS.some((marker) => text.includes(marker));
 }
 
-function messageTimestamp(message: SalesBookingMessage): number | null {
+export function messageTimestamp(message: SalesBookingMessage): number | null {
   const raw = message.timestamp;
   if (raw === undefined || raw === null || raw === "") return null;
   const ms = typeof raw === "number" ? raw : Date.parse(String(raw));
   return Number.isFinite(ms) ? ms : null;
 }
 
-function messageDirection(
+export function messageDirection(
   message: SalesBookingMessage,
 ): "inbound" | "outbound" {
   const declared = String(message.direction || "").toLowerCase();
@@ -380,7 +380,7 @@ function messageDirection(
  * A GHL activity/workflow row is neither a customer word nor a human reply.
  * Calls DO count as inbound contact (their words are never inferred).
  */
-function messageCountsAsContact(message: SalesBookingMessage): boolean {
+export function messageCountsAsContact(message: SalesBookingMessage): boolean {
   const type = String(message.type || "").toUpperCase();
   return !type.includes("ACTIVITY") && !type.includes("WORKFLOW");
 }
@@ -2741,7 +2741,7 @@ type GhlRetryHooks = {
   deadlineMs?: number;
 };
 
-async function ghlRead(
+export async function ghlRead(
   path: string,
   init: RequestInit = {},
   retry: GhlRetryHooks = {},
