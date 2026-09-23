@@ -26,6 +26,15 @@ Corrections against that draft:
 3. `evidence_by_attribution_status` excludes `empty` and `automated` (candidates never admit them).
 4. Today's extraction runs are published as `runs_by_status` and `failed_by_error` so a failure-code morning is visible without SQL.
 
+## Failure
+
+Any RPC failure or empty payload returns 503 `context_status_unavailable` with a
+`reason`: the Postgres SQLSTATE or PostgREST code (for example `57014`,
+`PGRST202`), `rpc_error_no_code` when the error has no safe code (fetch
+failure), or `empty_payload`. The edge log carries one
+`context_pipeline_status_rpc_failed` line with code, message and hint, never
+the payload.
+
 ## Proof
 
 Registered contract
