@@ -8,7 +8,7 @@ DECLARE snap jsonb; f text;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_linked_status(text)','public.context_unplaced_for_job(uuid)','public.context_source_freshness()',
   'public.context_source_freshness_policy()','public.context_in_business_hours(timestamptz)','public.context_business_minutes(timestamptz,timestamptz)',
-  'public.context_core_status()','public.context_cadence_status()','public.context_ghl_capture_status()',
+  'public.context_core_status()','public.context_ready_jobs_count(integer)','public.context_cadence_status()','public.context_ghl_capture_status()',
   'public.context_booking_capture_status()','public.context_parties_status()','public.record_capture_run(jsonb)'] LOOP
   IF to_regprocedure(f) IS NOT NULL THEN RAISE EXCEPTION 'f1 rollback left %',f; END IF;
  END LOOP;

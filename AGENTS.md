@@ -547,10 +547,12 @@ top-level and each owner slice replaces only its own block sub-function
 (`cadence`, `capture_sources`, `ghl_capture`, `booking_capture`, `parties`);
 only F1 edits `context_pipeline_status()`. "Linked" is
 `context_linked_status()`; never re-list the linked statuses in new SQL.
-The heartbeat once hit the API statement timeout (57014): a SQL helper called
-per row must not carry `SET search_path` (it blocks inlining, ~4-10x per call;
-schema-qualify operators instead, as `context_linked_status` does), and a
-per-row predicate must not call `to_jsonb(row)` on `business_events`.
+The heartbeat hit the API statement timeout (57014, 8 s): never call
+`context_extraction_candidates` from it (it detoasts `jobs.scope_json` per
+event, 15.5 s live); `ready_jobs` is `context_ready_jobs_count`, pinned equal
+by the F1 contract, so change both together. A per-row SQL helper must not
+carry `SET search_path` (blocks inlining; schema-qualify operators instead),
+and a per-row predicate must not `to_jsonb()` a `business_events` or `jobs` row.
 Booking-lane context hangar (`20260921140000`): `context_contact_jobs` counts a
 `draft` only when the contact has no non-draft open job (coverage already
 counted draft as open); draft-only still pins, draft plus a live job stays on

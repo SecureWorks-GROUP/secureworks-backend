@@ -76,8 +76,14 @@ documented above. F1 is built on the live production definitions (read
 `persist_luna_context_revision` and the current-facts view are still that
 pre-image (or already F1's result) and the status check still holds the nine
 live values, and its rollback restores those bodies byte for byte and checks
-their md5. F1 also made the heartbeat cheaper without changing any output:
-the per-row helpers `context_linked_status` and `context_in_business_hours`
+their md5. F1 also made the heartbeat cheaper without changing any output.
+`ready_jobs` no longer calls `context_extraction_candidates(400)` (15.5 s in
+production on 23 Sep 2026: it serialises the whole jobs row, `scope_json`
+included, once per linked event, which is why the read hit the 8 s API
+timeout, 57014). It reads `context_ready_jobs_count(400)`, which admits
+exactly the same jobs in a cheaper order and is pinned equal by the contract;
+whoever changes the candidates read (cadence K1) changes it in step. The
+per-row helpers `context_linked_status` and `context_in_business_hours`
 inline (no SET clause), the current-facts view reads `b.metadata` for
 retraction instead of serialising each cited event row, and expression
 statistics on `xero_invoices` let coverage hash its invoice counts. On 200k

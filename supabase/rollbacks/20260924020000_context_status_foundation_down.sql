@@ -79,6 +79,7 @@ REVOKE ALL ON FUNCTION public.context_pipeline_status() FROM PUBLIC,anon,authent
 GRANT EXECUTE ON FUNCTION public.context_pipeline_status() TO service_role;
 
 DROP FUNCTION IF EXISTS public.context_core_status();
+DROP FUNCTION IF EXISTS public.context_ready_jobs_count(integer);
 DROP FUNCTION IF EXISTS public.context_cadence_status();
 DROP FUNCTION IF EXISTS public.context_ghl_capture_status();
 DROP FUNCTION IF EXISTS public.context_booking_capture_status();

@@ -15,14 +15,17 @@
 --   5. context_source_freshness(): last capture per business_events.source and
 --      the capture_quiet alarm.
 --   6. context_pipeline_status() becomes a composer over one sub-function per
---      owner. context_core_status() is today's body, unchanged, and its keys
---      stay top-level so every existing reader sees identical values. The
+--      owner. context_core_status() is today's body with one cheaper read
+--      (ready_jobs, section 6a0), and its keys stay top-level so every
+--      existing reader sees identical values. The
 --      cadence, GHL capture, booking capture and parties blocks are stubs that
 --      return null until their owning slice replaces them.
 --   7. context_capture_runs, written only through record_capture_run().
 --
---   8. Heartbeat cost. The live heartbeat hit the API statement timeout
---      (57014). Per-row helpers inline, the facts view stops serialising event
+--   8. Heartbeat cost. The live heartbeat hits the API statement timeout
+--      (57014): its ready_jobs read (context_extraction_candidates) took 15.5 s
+--      in production. ready_jobs now comes from context_ready_jobs_count()
+--      (6a0); per-row helpers inline, the facts view stops serialising event
 --      rows, and xero_invoices gets expression statistics for coverage. Every
 --      existing output stays identical.
 --
@@ -74,7 +77,8 @@ BEGIN
   ('public.context_in_business_hours(timestamptz)',ARRAY['70164e9d1d6aa636c4e9d54357396f16'],true),
   ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],true),
   ('public.context_source_freshness()',ARRAY['ce094feb8df8b7dd596e639ac47a7825'],true),
-  ('public.context_core_status()',ARRAY['0fa6842cebf236e47b608a520c6c9fd1'],true),
+  ('public.context_ready_jobs_count(integer)',ARRAY['67e55f87c9e53c4f6640a0936d8d279b'],true),
+  ('public.context_core_status()',ARRAY['3df30c5ccf6db32c4782ba7859591b86'],true),
   ('public.context_cadence_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
   ('public.context_ghl_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
   ('public.context_booking_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
@@ -466,8 +470,48 @@ ANALYZE public.xero_invoices;
 -- object with an "alarms" array (each alarm: key, severity, since, what_to_do).
 -- Only F1 ever changes context_pipeline_status() itself.
 --
+-- 6a0. ready_jobs without the 15 s read. The heartbeat's ready_jobs was
+-- count(*) of context_extraction_candidates(400), which took 15.5 s in
+-- production (23 Sep 2026, 26 rows) and is why the status read returns 57014
+-- through the API (authenticator statement_timeout 8 s). The cost is per
+-- linked event: context_job_extractable(j) serialises the whole jobs row
+-- (scope_json averages ~100 kB), and automation_lane_enabled runs per row.
+-- context_extraction_candidates belongs to cadence slice K1 and is not
+-- changed here. This count admits exactly what it admits, in a cheaper order:
+-- the lane is read once, events are narrowed to unreceipted linked
+-- non-outbound rows first, and the holding-job test reads jobs.metadata
+-- directly (what context_job_extractable reads). The contract pins it equal to
+-- least(count(context_extraction_candidates(400)), p_cap) on fixtures that
+-- exercise every admission rule. When K1 rewrites the candidates read, it
+-- updates this count in the same change.
+CREATE OR REPLACE FUNCTION public.context_ready_jobs_count(p_cap integer DEFAULT 400) RETURNS integer
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH lane AS (SELECT public.automation_lane_enabled('extraction') AS enabled),
+ today AS (SELECT (now() AT TIME ZONE 'Australia/Perth')::date AS d),
+ pending AS MATERIALIZED (
+  SELECT e.job_id FROM public.business_events e
+  WHERE (SELECT enabled FROM lane) AND e.job_id IS NOT NULL
+   AND e.attribution_status IN ('direct','thread','single_open','single_line','luna')
+   AND e.direction IS DISTINCT FROM 'outbound'
+   AND NOT EXISTS(SELECT 1 FROM public.context_extraction_event_receipts r WHERE r.event_id=e.id AND r.job_id=e.job_id AND r.extractor_version='luna_v2')
+   AND btrim(public.context_event_text(e))<>''
+  GROUP BY e.job_id
+ )
+ SELECT count(*)::integer FROM (
+  SELECT p.job_id FROM pending p JOIN public.jobs j ON j.id=p.job_id
+  WHERE coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
+   AND EXISTS(SELECT 1 FROM public.business_events fresh WHERE fresh.job_id=p.job_id AND fresh.context_captured_at IS NOT NULL
+    AND fresh.attribution_status IN ('direct','thread','single_open','single_line','luna') AND fresh.direction IS DISTINCT FROM 'outbound')
+   AND NOT EXISTS(SELECT 1 FROM public.context_extraction_runs r, today WHERE r.job_id=p.job_id AND r.run_date=today.d AND r.phase='extraction' AND r.status IN ('done','skipped'))
+  LIMIT greatest(0,least(coalesce(p_cap,400),400))
+ ) ready
+$$;
+COMMENT ON FUNCTION public.context_ready_jobs_count(integer) IS
+ 'Heartbeat ready_jobs: how many jobs context_extraction_candidates(p_cap) would return (capped at 400), without its per-event jobs-row serialisation. Same admission rules; pinned equal by the F1 contract. Owned by F1; K1 keeps it equal when it changes the candidates read.';
+
 -- 6a. context_core_status(): the 20260917210000 context_pipeline_status() body,
--- moved unchanged.
+-- moved with one change: ready_jobs comes from context_ready_jobs_count(400)
+-- instead of count(*) over context_extraction_candidates(400). Same value.
 CREATE OR REPLACE FUNCTION public.context_core_status() RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE d date:=(now() AT TIME ZONE 'Australia/Perth')::date; switches jsonb; queue jsonb; calls integer; call_state text:='available'; ready integer;
@@ -480,7 +524,7 @@ BEGIN
  BEGIN
   EXECUTE 'SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=$1' INTO calls USING d;
  EXCEPTION WHEN OTHERS THEN calls:=NULL;call_state:='unavailable'; END;
- SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);
+ ready:=public.context_ready_jobs_count(400);
  RETURN jsonb_build_object('as_of',now(),'run_date',d,'switches',switches,
   'lanes',jsonb_build_object('capture',public.automation_lane_enabled('capture'),'attribution',public.automation_lane_enabled('attribution'),'extraction',public.automation_lane_enabled('extraction')),
   'runs_used',(SELECT count(*) FROM public.context_extraction_runs WHERE run_date=d AND phase='extraction'),'run_cap',400,
@@ -661,12 +705,12 @@ COMMENT ON FUNCTION public.record_capture_run(jsonb) IS
 REVOKE ALL ON FUNCTION
  public.context_linked_status(text),public.context_unplaced_for_job(uuid),
  public.context_source_freshness_policy(),public.context_in_business_hours(timestamptz),public.context_business_minutes(timestamptz,timestamptz),
- public.context_source_freshness(),public.context_core_status(),public.context_cadence_status(),public.context_ghl_capture_status(),
+ public.context_source_freshness(),public.context_ready_jobs_count(integer),public.context_core_status(),public.context_cadence_status(),public.context_ghl_capture_status(),
  public.context_booking_capture_status(),public.context_parties_status(),public.context_pipeline_status(),public.record_capture_run(jsonb)
 FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION
  public.context_linked_status(text),public.context_unplaced_for_job(uuid),
  public.context_source_freshness_policy(),public.context_in_business_hours(timestamptz),public.context_business_minutes(timestamptz,timestamptz),
- public.context_source_freshness(),public.context_core_status(),public.context_cadence_status(),public.context_ghl_capture_status(),
+ public.context_source_freshness(),public.context_ready_jobs_count(integer),public.context_core_status(),public.context_cadence_status(),public.context_ghl_capture_status(),
  public.context_booking_capture_status(),public.context_parties_status(),public.context_pipeline_status(),public.record_capture_run(jsonb)
 TO service_role;

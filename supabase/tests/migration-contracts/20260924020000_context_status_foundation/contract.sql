@@ -61,7 +61,7 @@ BEGIN
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.context_linked_status(text)','public.context_unplaced_for_job(uuid)',
   'public.context_source_freshness_policy()','public.context_in_business_hours(timestamptz)','public.context_business_minutes(timestamptz,timestamptz)',
-  'public.context_source_freshness()','public.context_core_status()','public.context_cadence_status()','public.context_ghl_capture_status()',
+  'public.context_source_freshness()','public.context_ready_jobs_count(integer)','public.context_core_status()','public.context_cadence_status()','public.context_ghl_capture_status()',
   'public.context_booking_capture_status()','public.context_parties_status()','public.context_pipeline_status()','public.record_capture_run(jsonb)']::regprocedure[] LOOP
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 'f1 service_role missing execute on %',f; END IF;
   -- The two per-row helpers deliberately carry no SET clause so they inline;
@@ -410,8 +410,15 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
     IS DISTINCT FROM '2ef95a949f0aae99cc323abde10f2ee7'
  THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is not the expected F1 body'; END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')) IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
- THEN RAISE EXCEPTION 'f1 context_core_status() is not the production heartbeat body'; END IF;
+ -- The core body is the production heartbeat body with exactly one line
+ -- changed: the ready_jobs read.
+ IF md5(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+    ' ready:=public.context_ready_jobs_count(400);',' SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);'))
+    IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
+ THEN RAISE EXCEPTION 'f1 context_core_status() differs from the production heartbeat body beyond the ready_jobs read'; END IF;
+ IF position('context_extraction_candidates' in (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()'))
+    ||(SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
+ THEN RAISE EXCEPTION 'f1 heartbeat still calls context_extraction_candidates'; END IF;
  IF (SELECT count(*) FROM pg_proc WHERE proname='persist_luna_context_revision' AND pronamespace='public'::regnamespace)<>2
  THEN RAISE EXCEPTION 'f1 changed the number of persist_luna_context_revision overloads'; END IF;
  IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conrelid='public.business_events'::regclass AND c.conname='business_events_attribution_status_check')
@@ -439,3 +446,53 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM pg_statistic_ext WHERE stxname='xero_invoices_context_open_ar' AND stxrelid='public.xero_invoices'::regclass)
  THEN RAISE EXCEPTION 'f1 coverage invoice statistics missing'; END IF;
 END $$;
+
+BEGIN;
+-- 11. ready_jobs equals the candidates read it replaces. One job per admission
+-- rule, plus two ready jobs; context_ready_jobs_count must equal
+-- least(count(context_extraction_candidates(cap)), cap) for every cap, with the
+-- extraction lane on and off.
+DO $$
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
+ ready1 uuid:=gen_random_uuid(); ready2 uuid:=gen_random_uuid(); holding uuid:=gen_random_uuid(); outbound_only uuid:=gen_random_uuid();
+ blank uuid:=gen_random_uuid(); not_captured uuid:=gen_random_uuid(); receipted uuid:=gen_random_uuid(); done_today uuid:=gen_random_uuid();
+ bucket uuid:=gen_random_uuid(); e uuid; claimed jsonb; cap int; base int; want int; got int;
+BEGIN
+ UPDATE public.automation_switches SET extraction=true WHERE id=1;
+ base:=(SELECT count(*) FROM public.context_extraction_candidates(400));
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,metadata) VALUES
+  (ready1,org,'quoted','fencing','F1-READY-1','{}'),(ready2,org,'quoted','fencing','F1-READY-2','{}'),
+  (holding,org,'quoted','fencing','F1-READY-HOLD','{"do_not_schedule":"true"}'),(outbound_only,org,'quoted','fencing','F1-READY-OUT','{}'),
+  (blank,org,'quoted','fencing','F1-READY-BLANK','{}'),(not_captured,org,'quoted','fencing','F1-READY-NOCAP','{}'),
+  (receipted,org,'quoted','fencing','F1-READY-RCPT','{}'),(done_today,org,'quoted','fencing','F1-READY-DONE','{}'),
+  (bucket,org,'quoted','fencing','F1-READY-BUCKET','{}');
+ PERFORM pg_temp.f1_event(ready1,'f1-ready','direct',NULL,now()-interval '2 hours','Can you come Tuesday?');
+ PERFORM pg_temp.f1_event(ready2,'f1-ready','single_open',NULL,now()-interval '3 hours','Gate should be 1.2 m.');
+ PERFORM pg_temp.f1_event(holding,'f1-ready','direct',NULL,now()-interval '2 hours','Parked text.');
+ e:=pg_temp.f1_event(outbound_only,'f1-ready','direct',NULL,now()-interval '2 hours','Our reply.');
+ UPDATE public.business_events SET direction='outbound' WHERE id=e;
+ PERFORM pg_temp.f1_event(blank,'f1-ready','direct',NULL,now()-interval '2 hours','   ');
+ e:=pg_temp.f1_event(not_captured,'f1-ready','direct',NULL,now()-interval '2 hours','Not captured yet.');
+ UPDATE public.business_events SET context_captured_at=NULL WHERE id=e;
+ e:=pg_temp.f1_event(receipted,'f1-ready','direct',NULL,now()-interval '2 hours','Already read.');
+ claimed:=public.claim_context_extraction_run(receipted,d,'extraction');
+ INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) VALUES(e,receipted,'luna_v2',(claimed->'run'->>'id')::uuid);
+ PERFORM pg_temp.f1_event(done_today,'f1-ready','direct',NULL,now()-interval '2 hours','Done today.');
+ INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,finished_at) VALUES(done_today,d,'extraction','done',now());
+ PERFORM pg_temp.f1_event(bucket,'f1-ready','admin_bucket',NULL,now()-interval '2 hours','Bucket text.');
+ UPDATE public.business_events SET context_captured_at=coalesce(context_captured_at,now()) WHERE job_id IN (ready1,ready2,holding,outbound_only,blank,receipted,done_today,bucket);
+ IF (SELECT count(*) FROM public.context_extraction_candidates(400) c WHERE c.job_id IN (ready1,ready2))<>2
+  OR EXISTS(SELECT 1 FROM public.context_extraction_candidates(400) c WHERE c.job_id IN (holding,outbound_only,blank,not_captured,receipted,done_today,bucket))
+ THEN RAISE EXCEPTION 'f1 ready fixture does not exercise candidates as intended: %',(SELECT array_agg(job_id) FROM public.context_extraction_candidates(400)); END IF;
+ FOREACH cap IN ARRAY ARRAY[400,base+2,base+1,1,0] LOOP
+  want:=(SELECT count(*) FROM public.context_extraction_candidates(cap)); got:=public.context_ready_jobs_count(cap);
+  IF got IS DISTINCT FROM want THEN RAISE EXCEPTION 'f1 ready_jobs % differs from candidates % at cap %',got,want,cap; END IF;
+ END LOOP;
+ IF public.context_ready_jobs_count(400)<>base+2 THEN RAISE EXCEPTION 'f1 ready_jobs did not count the two ready jobs'; END IF;
+ IF (public.context_pipeline_status()->>'ready_jobs')::int IS DISTINCT FROM (SELECT count(*) FROM public.context_extraction_candidates(400))::int
+ THEN RAISE EXCEPTION 'f1 heartbeat ready_jobs differs from the candidates read'; END IF;
+ UPDATE public.automation_switches SET extraction=false WHERE id=1;
+ IF public.context_ready_jobs_count(400)<>0 OR (SELECT count(*) FROM public.context_extraction_candidates(400))<>0
+ THEN RAISE EXCEPTION 'f1 ready_jobs with the extraction lane off'; END IF;
+END $$;
+ROLLBACK;
