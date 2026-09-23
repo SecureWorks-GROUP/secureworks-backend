@@ -383,6 +383,7 @@ import {
   SesPackBuildDoorError,
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
+import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows, unlinkedActor } from './context_unlinked.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
@@ -7219,6 +7220,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await contextPipelineStatus(client))
         } catch (error) {
           if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code, reason: error.reason }, error.status)
+          throw error
+        }
+      }
+      // ── Unlinked evidence (slice B0, adminbucket.md Trace C): census and
+      // rows reads, staff front door, read-only, actor logged.
+      case 'context_unlinked_census':
+      case 'context_unlinked_rows': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        const actor = unlinkedActor(authUser?.id, req.headers)
+        try {
+          return json(action === 'context_unlinked_census'
+            ? await contextUnlinkedCensus(client, url.searchParams, actor)
+            : await contextUnlinkedRows(client, url.searchParams, actor))
+        } catch (error) {
+          if (error instanceof ContextUnlinkedError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
           throw error
         }
       }

@@ -627,6 +627,32 @@ rest the row as `unplaced`, attribution asks are recorded per row with backoff
 and capped at 60 of the 400 daily calls (`20260924060000`). Contract and the
 three-argument call (no outcome argument): `docs/context/a1-attribution-attempts.md`.
 
+## Placement Keys Are One Rule In Two Languages; Never Index `jobs` On A Revoked Function
+
+`20260924160000_context_unlinked_census.sql` (slice B0) owns the placement
+keys: `context_phone_key`, `context_email_key`, `context_address_key` /
+`_loose_keys` / `_mentions`, `context_job_ref_tokens`, `context_ref_jobs`,
+`context_event_identity`, `context_contact_for_key`. Their TypeScript twin is
+`_shared/job_refs.ts`, and ONE fixture table (`_shared/job_refs_fixtures.ts`)
+runs against both (`job_refs_contract_rows_test.ts` proves the SQL contract's
+block is that file). Change a key in both places or CI fails; later slices
+(P4, money MN4, sites) consume these rather than writing another normaliser.
+An address with no street-type word has no exact key: it can only match
+loosely, and a loose match never places a row.
+
+Index maintenance checks EXECUTE as the WRITING role, so an expression index on
+a function revoked from anon/authenticated makes every `jobs` write by those
+roles fail with `permission denied for function`. Index built-in expressions
+only (`upper(job_number)`, the phone's right 9 digits, `lower(btrim(client_email))`)
+and confirm with the key function after the lookup.
+
+The unlinked census (ops-api `context_unlinked_census` / `context_unlinked_rows`,
+staff-only GET) is resumable because the API roles stop any statement at 8 s:
+each RPC call reads for at most 7 s and returns `next`, and the ops-api door
+follows it and adds the parts up. `attribution_checked_at` is not a re-stamp
+signal (every re-run re-checks every bucket row); a re-stamped legacy row is
+one with a stripped hint that was recorded before the ladder existed.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
