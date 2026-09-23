@@ -904,7 +904,7 @@ Deno.test("one provider message copied across jobs is represented at debtor scop
   assertEquals(merged.entries[0].invoice_ids.sort(), [INV(1), INV(3)].sort());
 });
 
-Deno.test("chase SMS dedupe keeps earlier, ambiguous and competing copies", () => {
+Deno.test("chase SMS dedupe matches earlier, ambiguous and competing copies", () => {
   const provider = (id: string, at: string) => ({
     key: `ghl:${id}`,
     kind: "sms",
@@ -936,8 +936,10 @@ Deno.test("chase SMS dedupe keeps earlier, ambiguous and competing copies", () =
     provider("old", "2026-09-24T11:59:59Z"),
     chase("late-log", "2026-09-24T12:00:00Z"),
   ]);
-  assertEquals(older.entries.length, 2);
-  assert(older.entries.some((e) => e.key === "chase:late-log"));
+  assertEquals(older.entries.length, 1);
+  assertEquals(older.entries[0].key, "ghl:old");
+  assert(older.entries[0].seen_in.includes("payment_chase_logs"));
+  assertEquals(older.duplicates_merged, 1);
 
   const ambiguous = mergeTimeline([
     provider("future-1", "2026-09-24T12:01:00Z"),

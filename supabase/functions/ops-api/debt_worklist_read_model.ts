@@ -660,7 +660,7 @@ export function mergeTimeline(entries: TimelineEntry[]): {
     if (!Number.isFinite(at) || !text) continue;
     const matches = providerSms.filter((m) => {
       const mt = Date.parse(m.at ?? "");
-      return Number.isFinite(mt) && mt >= at && mt - at <= SAME_SMS_WINDOW_MS &&
+      return Number.isFinite(mt) && Math.abs(mt - at) <= SAME_SMS_WINDOW_MS &&
         normText(m.preview).slice(0, 500) === text.slice(0, 500);
     });
     matchesByLog.set(log.key, matches);
@@ -845,7 +845,7 @@ export async function debtWorklist(
   try {
     coverage = await debtContextCoverage(
       new URLSearchParams({ population: "open" }),
-      { ...deps, isContactMatchVerified },
+      deps,
     );
     for (const row of coverage.rows ?? []) {
       coverageById.set(row.xero_invoice_id, row);

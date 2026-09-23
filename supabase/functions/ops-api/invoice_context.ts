@@ -17,6 +17,7 @@
 // one door call per invoice.
 
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import { emailKey, phoneKey } from "../_shared/job_refs.ts";
 import {
   currentPriceIncGst,
   readJobQuotes,
@@ -82,7 +83,6 @@ export interface InvoiceContextDeps {
   isCurrentContextFact: (row: Record<string, unknown>, now?: number) => boolean;
   /** Optional override; defaults to current + isLunaSubscriptionFact (v1 or luna_v2). */
   isCurrentLunaFact?: (row: Record<string, unknown>, now?: number) => boolean;
-  isContactMatchVerified?: (match: Record<string, unknown>) => boolean;
   now?: () => Date;
 }
 
@@ -126,6 +126,36 @@ export function str(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const s = String(value).trim();
   return s ? s : null;
+}
+
+export function contactMatchCorroboratesInvoice(
+  invoice: Record<string, any>,
+  match: Record<string, unknown>,
+): boolean {
+  const xeroContactId = str(invoice.xero_contact_id);
+  const rawContactId = str(invoice.raw_contact_id) ??
+    str(invoice.raw_json?.Contact?.ContactID);
+  if (!xeroContactId || rawContactId !== xeroContactId) return false;
+
+  const contact = invoice.raw_json?.Contact ?? {};
+  const xeroEmails = [invoice.raw_contact_email, contact.EmailAddress]
+    .map((value) => emailKey(str(value)))
+    .filter((key): key is string => Boolean(key));
+  const phoneRows = [
+    ...(Array.isArray(invoice.raw_contact_phones)
+      ? invoice.raw_contact_phones
+      : []),
+    ...(Array.isArray(contact.Phones) ? contact.Phones : []),
+  ];
+  const xeroPhones = phoneRows.map((phone: any) =>
+    phoneKey(`${phone?.PhoneAreaCode ?? ""}${phone?.PhoneNumber ?? ""}`)
+  ).filter((key): key is string => Boolean(key));
+  const matchEmail = emailKey(str(match.email));
+  const matchPhone = phoneKey(str(match.phone));
+  return Boolean(
+    (matchEmail && xeroEmails.includes(matchEmail)) ||
+      (matchPhone && xeroPhones.includes(matchPhone)),
+  );
 }
 
 function daysBetween(fromIso: string | null, to: Date): number | null {
@@ -264,7 +294,6 @@ export async function resolveJobLinks(
   client: any,
   invoices: any[],
   orgId?: string,
-  isContactMatchVerified?: (match: Record<string, unknown>) => boolean,
 ): Promise<Map<string, JobLink>> {
   const links = new Map<string, JobLink>();
   const none = (): JobLink => ({
@@ -292,13 +321,19 @@ export async function resolveJobLinks(
   const wantIds = new Set<string>();
   const wantNumbers = new Set<string>();
   const wantContacts = new Set<string>();
+  const invoicesByContact = new Map<string, any[]>();
   for (const inv of invoices) {
     if (inv.job_id) wantIds.add(inv.job_id);
     else {
       const n = str(inv.job_number)?.toUpperCase() ||
         jobNumberFromReference(inv.reference, inv.invoice_number);
       if (n) wantNumbers.add(n);
-      else if (hasVerifiedOwnContact(inv)) wantContacts.add(inv.xero_contact_id);
+      else if (hasVerifiedOwnContact(inv)) {
+        wantContacts.add(inv.xero_contact_id);
+        const matching = invoicesByContact.get(inv.xero_contact_id) ?? [];
+        matching.push(inv);
+        invoicesByContact.set(inv.xero_contact_id, matching);
+      }
     }
   }
 
@@ -324,8 +359,9 @@ export async function resolveJobLinks(
   }
 
   // Contact route: contact_matches gives job ids and GHL contact ids for a Xero contact.
-  const contactJobIds = new Map<string, Set<string>>();
-  const contactGhlIds = new Map<string, Set<string>>();
+  const contactMatchesByInvoice = new Map<string, any[]>();
+  const allContactJobIds = new Set<string>();
+  const allGhlIds = new Set<string>();
   for (const ids of chunk([...wantContacts])) {
     let query = client.from("contact_matches")
       .select("xero_contact_id, ghl_contact_id, job_id, email, phone").in(
@@ -336,27 +372,16 @@ export async function resolveJobLinks(
     const rows = unwrap(await query);
     for (const m of rows || []) {
       if (!m.xero_contact_id) continue;
-      if (isContactMatchVerified && !isContactMatchVerified(m)) continue;
-      if (m.job_id) {
-        (contactJobIds.get(m.xero_contact_id) ??
-          contactJobIds.set(m.xero_contact_id, new Set()).get(
-            m.xero_contact_id,
-          )!).add(m.job_id);
-      }
-      if (m.ghl_contact_id) {
-        (contactGhlIds.get(m.xero_contact_id) ??
-          contactGhlIds.set(m.xero_contact_id, new Set()).get(
-            m.xero_contact_id,
-          )!).add(m.ghl_contact_id);
+      for (const inv of invoicesByContact.get(m.xero_contact_id) ?? []) {
+        if (!contactMatchCorroboratesInvoice(inv, m)) continue;
+        const matches = contactMatchesByInvoice.get(inv.xero_invoice_id) ?? [];
+        matches.push(m);
+        contactMatchesByInvoice.set(inv.xero_invoice_id, matches);
+        if (m.job_id) allContactJobIds.add(m.job_id);
+        if (m.ghl_contact_id) allGhlIds.add(m.ghl_contact_id);
       }
     }
   }
-  const allContactJobIds = new Set<string>();
-  const allGhlIds = new Set<string>();
-  for (const s of contactJobIds.values()) {
-    for (const id of s) allContactJobIds.add(id);
-  }
-  for (const s of contactGhlIds.values()) for (const id of s) allGhlIds.add(id);
   const contactJobs = new Map<string, any>();
   for (const ids of chunk([...allContactJobIds])) {
     const rows = unwrap(await jobsQuery().in("id", ids));
@@ -423,13 +448,13 @@ export async function resolveJobLinks(
     }
     if (hasVerifiedOwnContact(inv)) {
       const found = new Map<string, any>();
-      for (const id of contactJobIds.get(inv.xero_contact_id) ?? []) {
-        const j = contactJobs.get(id);
-        if (j) found.set(j.id, j);
-      }
-      for (const g of contactGhlIds.get(inv.xero_contact_id) ?? []) {
-        for (const j of jobsByGhl.get(g) ?? []) {
-          found.set(j.id, j);
+      for (const match of contactMatchesByInvoice.get(key) ?? []) {
+        const linkedJob = match.job_id ? contactJobs.get(match.job_id) : null;
+        if (linkedJob) found.set(linkedJob.id, linkedJob);
+        if (match.ghl_contact_id) {
+          for (const j of jobsByGhl.get(match.ghl_contact_id) ?? []) {
+            found.set(j.id, j);
+          }
         }
       }
       if (found.size === 1) {
@@ -880,7 +905,6 @@ export async function invoiceContext(
         client,
         [inv],
         deps.orgId,
-        deps.isContactMatchVerified,
       ),
   );
   const link: JobLink = linkRead.data?.get(inv.xero_invoice_id) ??
@@ -1363,7 +1387,7 @@ export async function debtContextCoverage(
 
   let q = client.from("xero_invoices")
     .select(
-      "xero_invoice_id, xero_contact_id, contact_name, invoice_number, reference, status, amount_due, due_date, invoice_date, job_id, job_number, synced_at, debt_classification, raw_contact_id:raw_json->Contact->>ContactID",
+      "xero_invoice_id, xero_contact_id, contact_name, invoice_number, reference, status, amount_due, due_date, invoice_date, job_id, job_number, synced_at, debt_classification, raw_contact_id:raw_json->Contact->>ContactID, raw_contact_email:raw_json->Contact->>EmailAddress, raw_contact_phones:raw_json->Contact->Phones",
     )
     .eq("org_id", deps.orgId).eq("invoice_type", "ACCREC").in(
       "status",
@@ -1392,7 +1416,6 @@ export async function debtContextCoverage(
         client,
         invoices,
         deps.orgId,
-        deps.isContactMatchVerified,
       ),
   );
   sources.job_link = linkRead.status;
