@@ -3712,7 +3712,7 @@ exact-message approval. A diary read alone is not person-wide availability.
 The owner-authored path (`owner_input` body, `sales_booking_owner_approval.ts`,
 "Owner-authored approvals" in that doc) needs no engine publish: it rebuilds
 the snapshot from server truth and checks the Stratco rulebook, GHL, Outlook
-and this system's own sent offers at the press. `STRATCO_BOOKING_RULEBOOK`
+and this system's open offers at the press. `STRATCO_BOOKING_RULEBOOK`
 mirrors the wiki profile JSON; change both together. Hand-sent texts are
 never machine-checked and never guessed.
 Only `sales_booking_book` / `sales_booking_send` act on an approval

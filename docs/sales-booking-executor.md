@@ -164,7 +164,9 @@ SMS sends. It never uses the shared browser key, so removing the shared-key
 so the buttons could never enable live. The executor's server re-check at the
 press replaces it. An exact-text (`message`) approval no longer requires a
 calendar operation, availability or validation checks, so a text with no time
-can be approved. The calendar approval keeps every other check.
+can be approved. An engine-path calendar approval keeps every other engine
+check. The owner-authored path (`owner_input`) does not use those engine
+checks: `docs/sales-booking-confirmation-api.md` "Owner-authored approvals".
 
 ## Storage and deploy order
 

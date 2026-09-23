@@ -4,7 +4,9 @@ Contract: merged UX `docs/booking-confirm-contract.md` and wiki
 `harness/ops/skills/secureworks-scope-booking/CALENDAR-STEPS.md`, read from GitHub
 main on 2026-09-22. Implementation: `sales_booking_confirmation.ts` and
 `sales_booking_visits.ts`, composed by `sales_booking_read` after the existing
-pack overlay. Press results overlay after approvals and before visits:
+pack overlay. Owner-authored approvals:
+`sales_booking_owner_approval.ts` ("Owner-authored approvals" below).
+Press results overlay after approvals and before visits:
 `docs/sales-booking-executor.md` "What the read shows".
 
 This release joins the read and independent approval **storage** contracts.
@@ -277,7 +279,8 @@ must match), `owner_preview_expired`, `contact_unreadable`.
 
 Content: `owner_message_text_required`, `owner_message_text_has_dash`,
 `contact_phone_missing`, `contact_name_missing`, `contact_street_missing`
-(the address line has no house number, e.g. only a suburb),
+(the address line has no house or unit number, e.g. only a suburb; a leading
+Unit/Apt/Shop or comma before the number still counts),
 `contact_suburb_missing`, `owner_snapshot_changed`.
 
 Rulebook (no reads; `STRATCO_BOOKING_RULEBOOK`, from the engine's profile
