@@ -12,6 +12,7 @@ import {
   applyProviderInvoiceEffects,
   buildInvoiceRecord,
   buildVerifiedInvoicePatch,
+  verifyEffectsForMode,
 } from "./xero_invoice_record.ts";
 import {
   reconcileStaleXeroInvoices,
@@ -255,11 +256,8 @@ Deno.test("a sealed SES invoice is never linked by reference or completed by the
   assertEquals(completed, []);
 });
 
-Deno.test("M17 on the verify path: the hourly verify now runs the paid automation, not only the deposit stamp", async () => {
-  // Before MN1 the verify's hook ran the deposit stamp alone, so a job whose
-  // last invoice closed there never completed. The hook is now the shared
-  // effects function.
-  const db = fakeDb({
+function m17VerifyFixture() {
+  return fakeDb({
     tables: {
       xero_invoices: [{
         org_id: ORG,
@@ -268,6 +266,7 @@ Deno.test("M17 on the verify path: the hourly verify now runs the paid automatio
         job_id: M17.job_id,
         status: "AUTHORISED",
         amount_due: 1650,
+        reference: "SWF-269017",
         synced_at: "2026-09-24T00:00:00.000Z",
       }],
       jobs: [{
@@ -284,45 +283,64 @@ Deno.test("M17 on the verify path: the hourly verify now runs the paid automatio
       }],
     },
   });
-  const completed: string[] = [];
+}
+
+const m17Paid = () =>
+  xeroInvoice({
+    InvoiceID: M17.id,
+    Status: "PAID",
+    Reference: "SWF-269017",
+    Total: 1650,
+    AmountDue: 0,
+    AmountPaid: 1650,
+    FullyPaidOnDate: M17.paid_on,
+  });
+
+// The hourly verify's hook, as index.ts wires it for a sweep mode.
+async function verifyRun(mode: string, completed: string[]) {
+  const db = m17VerifyFixture();
   const summary = await reconcileStaleXeroInvoices(
     db.client,
     ORG,
-    () =>
-      Promise.resolve({
-        Invoices: [xeroInvoice({
-          InvoiceID: M17.id,
-          Status: "PAID",
-          Total: 1650,
-          AmountDue: 0,
-          AmountPaid: 1650,
-          FullyPaidOnDate: M17.paid_on,
-        })],
-      }),
+    () => Promise.resolve({ Invoices: [m17Paid()] }),
     NOW,
     async (_id, payload: any) => {
-      await applyProviderInvoiceEffects(
-        db.client,
-        payload.Invoices[0],
-        null,
-        deps(completed),
-      );
+      await applyProviderInvoiceEffects(db.client, payload.Invoices[0], null, {
+        ...deps(completed),
+        effects: verifyEffectsForMode(mode),
+      });
     },
   );
+  return { db, summary };
+}
+
+Deno.test("M17 on the verify path, sweep off or observe: the deposit stamp only, as before MN1; no job-status or GHL write", async () => {
+  for (const mode of ["off", "observe"]) {
+    const completed: string[] = [];
+    const { db, summary } = await verifyRun(mode, completed);
+    assertEquals(summary.reconciled, 1);
+    assertEquals(db.table("jobs")[0].deposit_at, "2026-09-23T00:00:00.000Z");
+    // No ops-api update_job_status call, so no GHL stage sync.
+    assertEquals(completed, []);
+    assertEquals(db.table("jobs")[0].status, "invoiced");
+    assertEquals(
+      db.table("business_events").map((e) => e.event_type),
+      ["job.deposit_stamped"],
+    );
+    assertEquals(db.table("job_events"), []);
+  }
+});
+
+Deno.test("M17 on the verify path, sweep in apply: the verify also completes the fully paid job, once", async () => {
+  const completed: string[] = [];
+  const { db, summary } = await verifyRun("apply", completed);
   assertEquals(summary.reconciled, 1);
   assertEquals(db.table("jobs")[0].deposit_at, "2026-09-23T00:00:00.000Z");
   assertEquals(completed, [M17.job_id]);
   // The same PAID invoice read again by the incremental loop stamps nothing new.
   const again = await applyProviderInvoice(
     db.client,
-    xeroInvoice({
-      InvoiceID: M17.id,
-      Status: "PAID",
-      Total: 1650,
-      AmountDue: 0,
-      AmountPaid: 1650,
-      FullyPaidOnDate: M17.paid_on,
-    }),
+    m17Paid(),
     NOW,
     deps(completed),
   );
@@ -333,6 +351,14 @@ Deno.test("M17 on the verify path: the hourly verify now runs the paid automatio
     ).length,
     1,
   );
+});
+
+Deno.test("the incremental loop's effects are unchanged by the sweep mode: it always completes a fully paid job", async () => {
+  const db = m17VerifyFixture();
+  const completed: string[] = [];
+  // The loop calls applyProviderInvoice with the default effects.
+  await applyProviderInvoice(db.client, m17Paid(), NOW, deps(completed));
+  assertEquals(completed, [M17.job_id]);
 });
 
 Deno.test("with the open-book sweep in apply the hourly open verify is skipped; drafts are not", async () => {

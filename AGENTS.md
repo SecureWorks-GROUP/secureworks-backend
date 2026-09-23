@@ -3659,7 +3659,11 @@ open-book sweep, closure `IDs=` read, backfill), `buildVerifiedInvoicePatch`
 for single-record reads (`reconcileXeroInvoice`: update only, an omitted
 field never erases the cached one), and `applyProviderInvoiceEffects`
 (reference auto-link, deposit stamp, paid-job completion) on every path. Do
-not add a fifth writer with its own side effects. `xero_invoices.xero_verified_at`
+not add a fifth writer with its own side effects. Until the sweep is in apply,
+the hourly verify runs the deposit stamp only (`verifyEffectsForMode`): paid-job
+completion calls ops-api `update_job_status`, whose GHL stage sync can fire
+customer workflows, so turning apply on is a live switch needing the
+captain's word. `xero_invoices.xero_verified_at`
 means "read from Xero"; `synced_at` only means "last local write" (the ~20
 ops-api mirror writers set it). The 15-minute open-book sweep
 (`open_book_sweep.ts`) runs only while flag `money_open_book_v1` is on

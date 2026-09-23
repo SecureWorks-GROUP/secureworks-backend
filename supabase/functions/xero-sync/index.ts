@@ -29,6 +29,7 @@ import {
   buildInvoiceRecord,
   parseXeroDate,
   sealedSesXeroLinkRefusal,
+  verifyEffectsForMode,
   type ProviderInvoiceDeps,
 } from './xero_invoice_record.ts'
 import { sweepOpenReceivables, OPEN_BOOK_PAGE_SIZE, type OpenBookModeReading, type OpenBookSummary } from './open_book_sweep.ts'
@@ -785,12 +786,17 @@ async function syncInvoices(sb: any) {
       undefined,
       // An invoice that reconciles from AUTHORISED to PAID is exactly the
       // deposit the incremental loop's If-Modified-Since window can pass over.
-      // The verified read runs the same effects as every other path (MN1):
-      // reference link, deposit stamp, paid-job automation.
+      // In apply the verified read runs the same effects as every other path
+      // (MN1): reference link, deposit stamp, paid-job automation.
       async (_invoiceId: string, payload: any) => {
         const verified = payload?.Invoices?.[0] ?? null
         if (!verified) return
-        const effects = await applyProviderInvoiceEffects(sb, verified, null, providerInvoiceDeps(sb))
+        // Until the sweep is in apply, the verify runs exactly what it ran
+        // before MN1 (the deposit stamp): no new job-status or GHL write.
+        const effects = await applyProviderInvoiceEffects(sb, verified, null, {
+          ...providerInvoiceDeps(sb),
+          effects: verifyEffectsForMode(openBook.mode),
+        })
         sesLinkRefusals.push(...effects.ses_refusals)
         if (effects.deposit?.action === 'stamped') depositStamps++
         else if (effects.deposit?.action === 'contradiction_logged') depositStampContradictions++

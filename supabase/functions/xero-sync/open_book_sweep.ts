@@ -321,6 +321,9 @@ export async function sweepOpenReceivables(
     return summary;
   }
   const apply = reading.mode === "apply";
+  // Only apply writes, so only apply reaches the effects; pin the full set so
+  // a caller's deposit-only setting cannot leave a closed row half-applied.
+  deps = { ...deps, effects: "all" };
   const now = deps.now?.() ?? new Date();
   const counts: Record<string, number> = {
     pages: 0,

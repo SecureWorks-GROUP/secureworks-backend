@@ -200,6 +200,20 @@ export interface ProviderInvoiceDeps {
   // sync fires). Injected so tests make no network call.
   completeInvoicedJob: (jobId: string) => Promise<void>;
   now?: () => Date;
+  // Which effects run. "all" (the default) is the incremental loop's set, as
+  // before MN1. "deposit_stamp_only" is what the hourly verify ran before MN1
+  // and still runs while the open-book sweep is not in apply: the reference
+  // link and the paid-job completion (ops-api update_job_status, which syncs
+  // the stage to GHL and can fire customer workflows) are held back until
+  // money_open_book is apply, a live switch that needs the captain's word.
+  effects?: "all" | "deposit_stamp_only";
+}
+
+/** The effects the hourly verify runs for an open-book sweep mode. */
+export function verifyEffectsForMode(
+  mode: string | null | undefined,
+): "all" | "deposit_stamp_only" {
+  return mode === "apply" ? "all" : "deposit_stamp_only";
 }
 
 export interface ProviderInvoiceEffects {
@@ -393,7 +407,8 @@ export async function applyProviderInvoiceEffects(
     ses_refusals: [],
     job_completed: null,
   };
-  await referenceAutoLink(sb, deps.orgId, inv, existing, out);
+  const all = (deps.effects ?? "all") === "all";
+  if (all) await referenceAutoLink(sb, deps.orgId, inv, existing, out);
 
   // Deposit stamp: a PAID deposit invoice lands on jobs.deposit_at. It never
   // moves the job; it only records that the deposit money arrived.
@@ -416,7 +431,7 @@ export async function applyProviderInvoiceEffects(
     }
   }
 
-  await paidJobCompletion(sb, deps, inv, existing, out);
+  if (all) await paidJobCompletion(sb, deps, inv, existing, out);
   return out;
 }
 

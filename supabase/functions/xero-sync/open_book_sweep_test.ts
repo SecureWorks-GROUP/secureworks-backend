@@ -382,6 +382,36 @@ Deno.test("M17: a deposit invoice closed only by the closure read stamps deposit
     1,
   );
 
+  // Observe on the same book: the closure read happens, nothing is written,
+  // no deposit stamp, no job completion (no ops-api or GHL call).
+  const watched = fakeDb({
+    tables: {
+      xero_invoices: [{ ...deposit }],
+      jobs: [{
+        id: M17.job_id,
+        org_id: ORG,
+        job_number: "SWF-269017",
+        status: "invoiced",
+        deposit_at: null,
+        deposit_invoice_id: M17.id,
+      }],
+    },
+  });
+  const watchedCompleted: string[] = [];
+  const o = await sweepOpenReceivables(
+    watched.client,
+    deps(
+      "observe",
+      scriptedXero({ open: [], byId: { [M17.id]: paid } }).xero,
+      watchedCompleted,
+    ),
+  );
+  assertEquals(o.counts.closed_by_ids_read, 1);
+  assertEquals([o.counts.deposit_stamps, o.counts.jobs_completed], [0, 0]);
+  assertEquals(watchedCompleted, []);
+  assertEquals(watched.table("jobs")[0].deposit_at, null);
+  assertEquals(watched.table("xero_invoices")[0].status, "AUTHORISED");
+
   // The next run: the invoice is no longer open here, so nothing is re-read,
   // and the stamp and completion are not repeated.
   const second = await sweepOpenReceivables(
