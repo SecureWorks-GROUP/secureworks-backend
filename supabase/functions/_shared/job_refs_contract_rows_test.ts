@@ -1,6 +1,6 @@
 // deno-lint-ignore-file no-import-prefix
 // Slice B0: the SQL helpers' fixture block in the migration contract
-// (supabase/tests/migration-contracts/20260924160000_context_unlinked_census/contract.sql)
+// (supabase/tests/migration-contracts/20260924183000_context_unlinked_census/contract.sql)
 // must be exactly job_refs_fixtures.ts, so the SQL and TypeScript twins are
 // proved on ONE table. Regenerate the block with sqlFixtureBlock() when this
 // fails.
@@ -9,7 +9,7 @@ import { JOB_REF_FIXTURES, type KeyFixture } from "./job_refs_fixtures.ts";
 
 const contract = await Deno.readTextFile(
   new URL(
-    "../../tests/migration-contracts/20260924160000_context_unlinked_census/contract.sql",
+    "../../tests/migration-contracts/20260924183000_context_unlinked_census/contract.sql",
     import.meta.url,
   ),
 );

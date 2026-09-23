@@ -629,7 +629,7 @@ three-argument call (no outcome argument): `docs/context/a1-attribution-attempts
 
 ## Placement Keys Are One Rule In Two Languages; Never Index `jobs` On A Revoked Function
 
-`20260924160000_context_unlinked_census.sql` (slice B0) owns the placement
+`20260924183000_context_unlinked_census.sql` (slice B0) owns the placement
 keys: `context_phone_key`, `context_email_key`, `context_address_key` /
 `_loose_keys` / `_mentions`, `context_job_ref_tokens`, `context_ref_jobs`,
 `context_event_identity`, `context_contact_for_key`. Their TypeScript twin is
@@ -652,6 +652,10 @@ each RPC call reads for at most 7 s and returns `next`, and the ops-api door
 follows it and adds the parts up. `attribution_checked_at` is not a re-stamp
 signal (every re-run re-checks every bucket row); a re-stamped legacy row is
 one with a stripped hint that was recorded before the ladder existed.
+`bucket_24h.restamped_legacy_rechecked_24h` is an UPPER BOUND (at most this
+many re-stamps happened in the last 24 hours): the hint carries no time and
+every re-run re-checks bucket rows, so an exact count needs the placement
+track to stamp the hint with its time (a named follow-up, not B0).
 
 ## Migrations Apply Before Edge Deploys
 

@@ -50,8 +50,9 @@
 --      context_bucket_reason(row): why a row is unlinked, one closed reason.
 --   3. context_unlinked_census(budget_ms, phase, cursor): counts by reason and
 --      age band for bucket rows and for rows the ladder put on a holding job,
---      by source and event type, new and re-stamped in 24 hours, re-stamped
---      legacy rows by prior method, NULL-status rows with and without a job,
+--      by source and event type, new rows and the 24-hour restamped-legacy
+--      recheck upper bound, re-stamped legacy rows by prior method,
+--      NULL-status rows with and without a job,
 --      monitor-inbox custody rows that name two or more jobs, up to 5 ids per
 --      reason. Resumable: each call reads for at most 7 seconds (the API role
 --      stops statements at 8) and returns `next`; the ops-api door adds the
@@ -71,13 +72,13 @@
 -- Pre-image, read from production 23 Sep 2026 (read-only): none of the B0
 -- function names exists; every column in the guard has the type listed there
 -- (job_contacts carries client_email, client_phone and ghl_contact_id, not
--- email and phone); version 20260924160000 is unused (the ledger's newest is
--- 20260924140000). The guard refuses a B0 name that exists without this
+-- email and phone). 20260924183000 follows F1b's 20260924152100 and P1b's
+-- 20260924160000 on main. The guard refuses a B0 name that exists without this
 -- migration's "B0:" comment, and any column that has moved.
 -- Sizes then: 4,336 bucket rows (952 with a contact), 1,163 ladder step-1 rows
 -- on the holding job SWF-PDF-BUCKET, 610 monitor-inbox custody rows, 13,475
 -- NULL-status rows (9,538 with no job). The API roles stop statements at 8 s.
--- Rollback: supabase/rollbacks/20260924160000_context_unlinked_census_down.sql
+-- Rollback: supabase/rollbacks/20260924183000_context_unlinked_census_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
@@ -525,10 +526,16 @@ BEGIN
     FROM public.business_events b),
    'bucket_by_source',(SELECT coalesce(jsonb_agg(jsonb_build_object('source',s.source,'event_type',s.event_type,'rows',s.n) ORDER BY s.n DESC,s.source,s.event_type),'[]')
     FROM (SELECT source,event_type,count(*) n FROM public.business_events WHERE attribution_status='admin_bucket' GROUP BY 1,2) s),
+   -- restamped_legacy_rechecked_24h is an UPPER BOUND: at most this many
+   -- re-stamps happened in the last 24 hours. The hint carries no time and
+   -- every re-run re-checks bucket rows, so an exact count needs the
+   -- placement track to stamp the hint with its time (a named follow-up,
+   -- not B0).
    'bucket_24h',(SELECT jsonb_build_object(
      'new',count(*) FILTER (WHERE coalesce(context_captured_at,recorded_at)>now_t-interval '24 hours'),
-     'rechecked_by_rerun',count(*) FILTER (WHERE attribution_checked_at>now_t-interval '24 hours'
-       AND coalesce(context_captured_at,recorded_at)<=now_t-interval '24 hours'))
+     'restamped_legacy_rechecked_24h',count(*) FILTER (WHERE metadata ? 'attribution_hint'
+       AND coalesce(recorded_at,context_captured_at,occurred_at)<'2026-09-11 09:10:00+00'
+       AND attribution_checked_at>now_t-interval '24 hours'))
     FROM public.business_events WHERE attribution_status='admin_bucket'),
    'null_status_no_job_by_source',(SELECT coalesce(jsonb_agg(jsonb_build_object('source',s.source,'event_type',s.event_type,'rows',s.n) ORDER BY s.n DESC,s.source,s.event_type),'[]')
     FROM (SELECT source,event_type,count(*) n FROM public.business_events WHERE attribution_status IS NULL AND job_id IS NULL
@@ -584,7 +591,7 @@ BEGIN
   'custody_multi_ref',jsonb_build_object('checked',cust_checked,'rows',cardinality(cust_ids),'sample_ids',to_jsonb(cust_ids[1:5])));
 END $$;
 COMMENT ON FUNCTION public.context_unlinked_census(integer,text,timestamptz,uuid) IS
- 'B0: resumable census of unlinked evidence (bucket rows, holding-job rows, monitor-inbox custody rows naming two or more jobs) by reason and age band, with whole-table totals on the first call. Each call reads for at most 7 s and returns next when there is more. Read-only, service_role only.';
+ 'B0: resumable census of unlinked evidence (bucket rows, holding-job rows, monitor-inbox custody rows naming two or more jobs) by reason and age band, with whole-table totals on the first call. bucket_24h.restamped_legacy_rechecked_24h is an UPPER BOUND (at most this many re-stamps happened in the last 24 hours): the hint carries no time and every re-run re-checks bucket rows. Each call reads for at most 7 s and returns next when there is more. Read-only, service_role only.';
 
 -- 6. One page of unlinked rows, with what the job read shows for each.
 -- Scopes: bucket (admin_bucket), null_status (no status, no job), unplaced,

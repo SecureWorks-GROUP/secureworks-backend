@@ -1,4 +1,4 @@
--- Rollback of B0 (20260924160000_context_unlinked_census). B0 added only
+-- Rollback of B0 (20260924183000_context_unlinked_census). B0 added only
 -- read-only functions and three jobs indexes and wrote no row, so the rollback
 -- drops exactly those objects. Nothing else changes.
 SET LOCAL lock_timeout = '5s';

@@ -1,6 +1,6 @@
 // Slice B0 (adminbucket.md, INTEGRATION X23): the TypeScript twin of the
 // placement track's SQL key helpers in
-// supabase/migrations/20260924160000_context_unlinked_census.sql.
+// supabase/migrations/20260924183000_context_unlinked_census.sql.
 //
 // One rule set for texts, email, calls and money: the same token rule, the
 // same phone and email keys and the same address key in SQL and TypeScript.

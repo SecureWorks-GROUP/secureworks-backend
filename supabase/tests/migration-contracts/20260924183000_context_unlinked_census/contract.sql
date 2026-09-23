@@ -192,13 +192,22 @@ SELECT set_config('request.jwt.claims','',true);
 INSERT INTO public.business_events(id,event_type,source,channel,direction,occurred_at,event_at,payload)
 VALUES ('b0e00000-0000-4000-8000-000000000030','client.sms_in','sms-cache-backfill','sms','inbound','2026-06-01 00:00:00+00','2026-06-01 00:00:00+00','{"body":"thanks"}');
 UPDATE public.business_events SET attribution_status='admin_bucket',
- recorded_at='2026-09-01 00:00:00+00', context_captured_at=NULL, attribution_checked_at='2026-09-22 00:00:00+00',
+ recorded_at='2026-09-01 00:00:00+00', context_captured_at=NULL, attribution_checked_at=now()-interval '2 days',
  metadata=metadata||'{"attribution_hint":{"job_id":"b0000000-0000-4000-8000-000000000001","match_method":"contact_id"}}'
 WHERE id='b0e00000-0000-4000-8000-000000000030';
 -- A machine event whose writer gave a job with no method: the ladder took it off at insert.
 INSERT INTO public.business_events(id,event_type,source,channel,direction,occurred_at,event_at,job_id,payload)
 VALUES ('b0e00000-0000-4000-8000-000000000031','proposed_action.dispatched','ops-api','sms','outbound','2026-09-20 03:00:00+00','2026-09-20 03:00:00+00',
  'b0000000-0000-4000-8000-000000000001','{"body":"follow-up sent"}');
+UPDATE public.business_events SET attribution_checked_at=now()
+WHERE id='b0e00000-0000-4000-8000-000000000031';
+-- A second legacy hinted row, re-checked within 24 hours: the H1 upper bound.
+INSERT INTO public.business_events(id,event_type,source,channel,direction,occurred_at,event_at,payload)
+VALUES ('b0e00000-0000-4000-8000-000000000032','client.sms_in','sms-cache-backfill','sms','inbound','2026-06-02 00:00:00+00','2026-06-02 00:00:00+00','{"body":"ok"}');
+UPDATE public.business_events SET attribution_status='admin_bucket',
+ recorded_at='2026-09-01 00:00:00+00', context_captured_at=NULL, attribution_checked_at=now()-interval '1 hour',
+ metadata=metadata||'{"attribution_hint":{"job_id":"b0000000-0000-4000-8000-000000000001","match_method":"thread"}}'
+WHERE id='b0e00000-0000-4000-8000-000000000032';
 
 -- Where each row sits before the census (the starting point B0 measures).
 DO $$
@@ -212,7 +221,8 @@ BEGIN
   ('b0e00000-0000-4000-8000-000000000009','admin_bucket'),('b0e00000-0000-4000-8000-000000000007','admin_bucket'),
   ('b0e00000-0000-4000-8000-000000000019','admin_bucket'),('b0e00000-0000-4000-8000-000000000020','admin_bucket'),
   ('b0e00000-0000-4000-8000-000000000021','admin_bucket'),('b0e00000-0000-4000-8000-000000000023','admin_bucket'),
-  ('b0e00000-0000-4000-8000-000000000030','admin_bucket'),('b0e00000-0000-4000-8000-000000000031','admin_bucket')) AS t(id,st) LOOP
+  ('b0e00000-0000-4000-8000-000000000030','admin_bucket'),('b0e00000-0000-4000-8000-000000000031','admin_bucket'),
+  ('b0e00000-0000-4000-8000-000000000032','admin_bucket')) AS t(id,st) LOOP
   IF (SELECT attribution_status FROM public.business_events WHERE id=r.id::uuid) IS DISTINCT FROM r.st THEN
    bad:=bad||format('%s is %s, expected %s',r.id,(SELECT attribution_status FROM public.business_events WHERE id=r.id::uuid),r.st);
   END IF;
@@ -277,7 +287,8 @@ BEGIN
   ('b0e00000-0000-4000-8000-000000000021','own_party','admin_bucket'),
   ('b0e00000-0000-4000-8000-000000000023','unverified_writer','admin_bucket'),      -- N23
   ('b0e00000-0000-4000-8000-000000000030','restamped_legacy','admin_bucket'),
-  ('b0e00000-0000-4000-8000-000000000031','hint_stripped','admin_bucket')) AS t(id,reason,phase) LOOP
+  ('b0e00000-0000-4000-8000-000000000031','hint_stripped','admin_bucket'),
+  ('b0e00000-0000-4000-8000-000000000032','restamped_legacy','admin_bucket')) AS t(id,reason,phase) LOOP
   IF per->r.id->>'reason' IS DISTINCT FROM r.reason THEN
    bad:=bad||format('%s reason %s, expected %s',r.id,per->r.id->>'reason',r.reason);
   END IF;
@@ -317,6 +328,13 @@ BEGIN
  END IF;
  IF NOT (c ? 'bucket_by_source' AND c ? 'bucket_24h' AND c ? 'null_status_no_job_by_source'
   AND c->'totals' ? 'null_status_no_job' AND c->'totals' ? 'null_status_with_job') THEN bad:=bad||'census shape missing a section'::text; END IF;
+ IF c->'bucket_24h' ? 'rechecked_by_rerun' THEN bad:=bad||'bucket_24h still has rechecked_by_rerun'::text; END IF;
+ IF NOT (c->'bucket_24h' ? 'new' AND c->'bucket_24h' ? 'restamped_legacy_rechecked_24h') THEN
+  bad:=bad||format('bucket_24h shape %s',c->'bucket_24h');
+ END IF;
+ IF (c->'bucket_24h'->>'restamped_legacy_rechecked_24h')::int IS DISTINCT FROM 1 THEN
+  bad:=bad||format('restamped_legacy_rechecked_24h %s',c->'bucket_24h');
+ END IF;
  -- A spent budget returns what it read and where to go on, not an error.
  IF (short->>'complete')::boolean IS NOT FALSE OR short->'next'->>'phase' IS NULL OR NOT short ? 'totals' THEN
   bad:=bad||format('short budget %s',short->'next');
