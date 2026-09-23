@@ -28,6 +28,7 @@ export type ActorSource =
   | "header"
   | "header_invalid"
   | "header_untrusted"
+  | "hmac_link"
   | "none";
 
 export interface RequestActor {

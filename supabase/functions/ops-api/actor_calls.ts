@@ -9,11 +9,12 @@
 //      header is never read as a verified user: opsApiDeniedLogLine when the
 //      front door refuses the call (logged before the refusal returns, which
 //      is otherwise unchanged), opsApiRequestLogLine when it is served;
-//   3. counts server-key calls that carried no usable actor
-//      (recordOpsApiActorMissing) into ops_api_actor_calls through
-//      record_ops_api_actor_missing(), which the core status reads as
-//      actor_missing. Only the count is stored: no action, caller class or
-//      actor, so a caller cannot create a row by choosing what to send.
+//   3. counts server-key calls and valid HMAC-link cost-report calls that
+//      carried no usable actor (recordOpsApiActorMissing) into
+//      ops_api_actor_calls through record_ops_api_actor_missing(), which the
+//      core status reads as actor_missing. Only the count is stored: no action,
+//      caller class or actor, so a caller cannot create a row by choosing what
+//      to send.
 // Nothing is ever refused for a missing actor.
 //
 // The count is best-effort and off the request path: it is handed to
@@ -30,6 +31,7 @@ export type OpsApiAuthMode =
   | "jwt"
   | "routine"
   | "agent_read"
+  | "hmac_link"
   | "none";
 
 /** The audit identity to persist in an existing receipt. */
@@ -41,12 +43,12 @@ export function receiptActor(
   return authMode === "routine" ? "makesafe-reporting-routine" : ACTOR_MISSING;
 }
 
-/** Caller classes whose missing actors are counted: the server-key classes.
- * A JWT call always has a verified user, so it is never counted. */
+/** Missing-actor caller classes: server-key calls and valid HMAC-link reads. */
 export const COUNTED_CALLER_CLASSES = [
   "api_key",
   "routine",
   "agent_read",
+  "hmac_link",
 ] as const;
 
 const NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
@@ -110,7 +112,7 @@ function errorCode(error: unknown): string {
 }
 
 /**
- * Count one server-key call that carried no usable actor. Returns whether a
+ * Count one eligible call that carried no usable actor. Returns whether a
  * count was scheduled. Never throws and never delays the caller. The client is
  * built only when a count is scheduled; JWT calls and calls with an actor
  * write nothing.

@@ -4822,6 +4822,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     if (!_jobId || !(await verifyCostReportToken(_jobId, _token, costReportSecret()))) {
       return new Response(renderCostReportError('This link is invalid or has expired. Ask the office to resend the review email.'), { status: 403, headers: _crHtml })
     }
+    const _costReportActor = { actor: 'actor_missing', source: 'hmac_link', missing: true } as const
+    console.log(opsApiRequestLogLine(MAKESAFE_COST_REPORT_ACTION, req.method, _costReportActor))
+    recordOpsApiActorMissing(sb, 'hmac_link', _costReportActor)
     try {
       const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)

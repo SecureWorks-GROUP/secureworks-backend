@@ -8,6 +8,7 @@
 --     F-ACT-RT), e.g. the B0 census door that sw_context_unlinked calls:
 --     counted, one call each;
 --   the make-safe automation on the routine key, no header: counted;
+--   a valid HMAC-link cost-report read: counted after token validation;
 --   a malformed header: counted (no usable actor);
 --   the same doors once F-ACT-RT sends x-sw-actor, and a signed-in Ops
 --     browser (JWT): nothing is written.
@@ -57,6 +58,13 @@ BEGIN
  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid='public.ops_api_actor_calls'::regclass)
   OR EXISTS(SELECT 1 FROM pg_policy WHERE polrelid='public.ops_api_actor_calls'::regclass)
  THEN RAISE EXCEPTION 'f-act counter must have RLS on and no policies'; END IF;
+ IF NOT EXISTS(
+  SELECT 1 FROM pg_constraint c
+  WHERE c.conrelid='public.ops_api_actor_calls'::regclass AND c.contype='p'
+   AND (SELECT array_agg(a.attname::text ORDER BY k.ordinality)
+        FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum,ordinality)
+        JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum)=ARRAY['day']::text[]
+ ) THEN RAISE EXCEPTION 'f-act counter requires primary key on day'; END IF;
  IF has_table_privilege('anon','public.ops_api_actor_calls','SELECT') OR has_table_privilege('authenticated','public.ops_api_actor_calls','SELECT')
   OR has_table_privilege('anon','public.ops_api_actor_calls','INSERT') OR has_table_privilege('authenticated','public.ops_api_actor_calls','INSERT')
   OR has_table_privilege('service_role','public.ops_api_actor_calls','INSERT') OR has_table_privilege('service_role','public.ops_api_actor_calls','UPDATE')

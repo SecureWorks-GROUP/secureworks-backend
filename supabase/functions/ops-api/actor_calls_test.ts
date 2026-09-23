@@ -131,12 +131,13 @@ Deno.test("logged action names: kept when they fit the grammar, else other or no
   assertEquals(loggedActionName("a".repeat(64)), "a".repeat(64));
 });
 
-Deno.test("a server-key call with no usable actor is counted once, with no argument, off the request path", async () => {
+Deno.test("eligible calls with no usable actor are counted once, with no argument, off the request path", async () => {
   for (
     const [mode, actor] of [
       ["api_key", MISSING],
       ["routine", MISSING],
       ["agent_read", INVALID],
+      ["hmac_link", MISSING],
     ] as const
   ) {
     const c = fakeClient(ok);

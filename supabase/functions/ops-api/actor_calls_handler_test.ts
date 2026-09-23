@@ -11,10 +11,16 @@
  *    with the verified actor or actor_missing and the refusal code;
  *  - the count is the only extra request, is handed to EdgeRuntime.waitUntil,
  *    and a failed count does not change the response;
+ *  - a valid HMAC cost-report link logs and counts actor_missing after token
+ *    validation, while an invalid token keeps its 403 response;
  *  - with no EdgeRuntime (every other handler test) nothing extra is called.
  */
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  costReportToken,
+  MAKESAFE_COST_REPORT_ACTION,
+} from "./makesafe_cost_report.ts";
 
 const SERVICE_KEY = "test-service-role-key";
 const SHARED_KEY = "test-shared-browser-key";
@@ -27,12 +33,14 @@ const ENV_NAMES = [
   "AGENT_BEARER_TOKEN",
   "MAKESAFE_ROUTINE_KEY",
   "OPS_AGENT_SERVER_KEY",
+  "MAKESAFE_REPORT_SECRET",
 ];
 const BASE_ENV: Record<string, string | undefined> = {
   // A closed local port: a real database call would fail loudly.
   SUPABASE_URL: "http://127.0.0.1:9",
   SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
   SW_API_KEY: SHARED_KEY,
+  MAKESAFE_REPORT_SECRET: "test-cost-report-secret",
 };
 
 async function withEnv<T>(fn: () => Promise<T>): Promise<T> {
@@ -73,6 +81,7 @@ type RunOptions = {
   countStatus?: number;
   method?: string;
   body?: unknown;
+  params?: Record<string, string>;
   respond?: (request: FetchRequest) => Response | null;
 };
 
@@ -138,12 +147,19 @@ async function run(
       init.headers = { ...headers, "content-type": "application/json" };
       init.body = JSON.stringify(opts.body);
     }
-    const res = await withEnv(() =>
-      handle(
-        new Request(`https://example.invalid/ops-api?action=${action}`, init),
-      )
-    );
-    const body = await res.json();
+    const url = new URL("https://example.invalid/ops-api");
+    url.searchParams.set("action", action);
+    for (const [key, value] of Object.entries(opts.params ?? {})) {
+      url.searchParams.set(key, value);
+    }
+    const res = await withEnv(() => handle(new Request(url, init)));
+    const responseText = await res.text();
+    let body: unknown = responseText;
+    try {
+      body = JSON.parse(responseText);
+    } catch {
+      // HTML responses are the public cost-report page contract.
+    }
     await Promise.all(seen.waited);
     return { res, body, seen };
   } finally {
@@ -166,6 +182,77 @@ function actorLines(seen: Seen) {
 function countCalls(seen: Seen) {
   return seen.fetches.filter((f) => f.url === COUNT_URL);
 }
+
+Deno.test("valid HMAC cost-report logs and counts missing actor; invalid token remains 403", async () => {
+  const jobId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const token = await costReportToken(jobId, "test-cost-report-secret");
+  const params = { job: jobId, token };
+  const respond: RunOptions["respond"] = ({ url }) => {
+    if (url.includes("/rest/v1/jobs?")) {
+      return Response.json({
+        id: jobId,
+        job_number: "SWMS-27001",
+        client_name: "Test Client",
+        site_address: "1 Test Street",
+        site_suburb: "Perth",
+        type: "makesafe",
+      });
+    }
+    if (url.includes("/rest/v1/rpc/record_ops_api_actor_missing")) {
+      return new Response(null, { status: 204 });
+    }
+    return Response.json([]);
+  };
+
+  const baseline = await run(MAKESAFE_COST_REPORT_ACTION, {}, {
+    edgeRuntime: false,
+    params,
+    respond,
+  });
+  const valid = await run(MAKESAFE_COST_REPORT_ACTION, {}, {
+    edgeRuntime: true,
+    params,
+    respond,
+  });
+  assertEquals(valid.res.status, 200);
+  assertEquals(baseline.res.status, 200);
+  assertEquals(
+    valid.res.headers.get("content-type"),
+    "text/html; charset=utf-8",
+  );
+  assertEquals(typeof baseline.body, "string");
+  assertEquals(typeof valid.body, "string");
+  assertEquals(String(baseline.body).includes("SWMS-27001"), true);
+  assertEquals(String(valid.body).includes("SWMS-27001"), true);
+  assertEquals(actorLines(valid.seen), [
+    "[ops-api] action=makesafe_job_cost_report method=GET actor=actor_missing actor_source=hmac_link",
+  ]);
+  assertEquals(valid.seen.waited.length, 1);
+  assertEquals(countCalls(valid.seen).length, 1);
+  assertEquals(
+    valid.seen.logs.some((line) =>
+      line.includes(jobId) || line.includes(token)
+    ),
+    false,
+  );
+
+  const invalid = await run(MAKESAFE_COST_REPORT_ACTION, {}, {
+    edgeRuntime: true,
+    params: { job: jobId, token: "invalid" },
+    respond,
+  });
+  const invalidBaseline = await run(MAKESAFE_COST_REPORT_ACTION, {}, {
+    edgeRuntime: false,
+    params: { job: jobId, token: "invalid" },
+    respond,
+  });
+  assertEquals(invalid.res.status, 403);
+  assertEquals(invalid.res.status, invalidBaseline.res.status);
+  assertEquals(invalid.body, invalidBaseline.body);
+  assertEquals(invalid.seen.waited, []);
+  assertEquals(countCalls(invalid.seen), []);
+  assertEquals(actorLines(invalid.seen), []);
+});
 
 Deno.test("server-key call with no actor: served as before, logged actor_missing, counted once", async () => {
   const baseline = await run("ops_api_version", SERVICE, {

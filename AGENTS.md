@@ -573,7 +573,8 @@ receipt writers use `receiptActor` from
 `ops-api/actor_calls.ts`, never their own header read or a caller-supplied
 actor field. Refused calls are logged with it too. Calls in the `api_key`,
 `routine`, or `agent_read` classes without a usable actor (including an
-untrusted shared-key claim) are counted (count only, no dimensions) for the core key
+untrusted shared-key claim), and valid HMAC-link cost-report calls, are counted
+(count only, no dimensions) for the core key
 `actor_missing` (`20260924201000`, `ops-api/actor_calls.ts`).
 The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted

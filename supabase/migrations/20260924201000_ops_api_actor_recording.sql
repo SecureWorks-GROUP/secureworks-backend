@@ -13,8 +13,8 @@
 -- choosing what to send.
 --
 --   1. ops_api_actor_calls: one row per Perth day, `missing` = server-key
---      calls (api_key, routine, agent_read) that carried no usable actor (no
---      x-sw-actor header, or a malformed one). Counts only, never an actor or
+--      calls (api_key, routine, agent_read) and valid HMAC-link cost-report
+--      calls that carried no usable actor. Counts only, never an actor or
 --      request content: the log line carries the actor. JWT calls and calls
 --      with an actor write nothing. Rows older than 35 days are purged by the
 --      writer when it opens a new day row. RLS on, no policies, revoked from
@@ -50,7 +50,7 @@ SET LOCAL statement_timeout = '60s';
 
 -- 0. Pre-image guard. Reports every mismatch at once.
 DO $guard$
-DECLARE problems text[]:='{}'; live text; x record; cols text;
+DECLARE problems text[]:='{}'; live text; x record; cols text; has_day_pk boolean; has_rls boolean;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: F1's live body, or this migration's body.
@@ -67,8 +67,17 @@ BEGIN
  IF to_regclass('public.ops_api_actor_calls') IS NOT NULL THEN
   SELECT string_agg(a.attname||' '||format_type(a.atttypid,a.atttypmod),',' ORDER BY a.attnum) INTO cols
   FROM pg_attribute a WHERE a.attrelid='public.ops_api_actor_calls'::regclass AND a.attnum>0 AND NOT a.attisdropped;
+  SELECT EXISTS(
+   SELECT 1 FROM pg_constraint c
+   WHERE c.conrelid='public.ops_api_actor_calls'::regclass AND c.contype='p'
+    AND (SELECT array_agg(a.attname::text ORDER BY k.ordinality)
+         FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum,ordinality)
+         JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum)=ARRAY['day']::text[]
+  ) INTO has_day_pk;
+  SELECT relrowsecurity INTO has_rls FROM pg_class WHERE oid='public.ops_api_actor_calls'::regclass;
   IF cols IS DISTINCT FROM 'day date,missing integer,first_at timestamp with time zone,last_at timestamp with time zone'
-  THEN problems:=problems||format('ops_api_actor_calls already exists with columns %s',cols); END IF;
+   OR NOT has_day_pk OR NOT has_rls
+  THEN problems:=problems||format('ops_api_actor_calls incompatible: columns %s, primary_key_on_day %s, rls_enabled %s',cols,has_day_pk,has_rls); END IF;
  END IF;
  IF cardinality(problems)>0 THEN
   RAISE EXCEPTION 'ops_api_actor_preimage_mismatch: %; read the live definitions before replacing them',array_to_string(problems,'; ');
@@ -86,7 +95,7 @@ ALTER TABLE public.ops_api_actor_calls ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.ops_api_actor_calls FROM PUBLIC,anon,authenticated,service_role;
 GRANT SELECT ON TABLE public.ops_api_actor_calls TO service_role;
 COMMENT ON TABLE public.ops_api_actor_calls IS
- 'F-ACT (INTEGRATION X31): per Perth day, server-key ops-api calls that carried no usable actor. The count only, never an actor, action or request content (the ops-api log line carries the actor). Written only through record_ops_api_actor_missing(); service_role has SELECT only. Rows older than 35 days are purged by the writer.';
+ 'F-ACT (INTEGRATION X31): per Perth day, server-key ops-api calls and valid HMAC-link cost-report calls that carried no usable actor. The count only, never an actor, action or request content (the ops-api log line carries the actor). Written only through record_ops_api_actor_missing(); service_role has SELECT only. Rows older than 35 days are purged by the writer.';
 
 -- 2. The one writer.
 CREATE OR REPLACE FUNCTION public.record_ops_api_actor_missing() RETURNS void
@@ -99,7 +108,7 @@ BEGIN
  IF opened THEN DELETE FROM public.ops_api_actor_calls c WHERE c.day<d-35; END IF;
 END $$;
 COMMENT ON FUNCTION public.record_ops_api_actor_missing() IS
- 'F-ACT: the one writer of ops_api_actor_calls. Adds one server-key call with no usable actor to today''s (Perth) row. Takes no argument, so a caller cannot choose what is stored.';
+ 'F-ACT: the one writer of ops_api_actor_calls. Adds one eligible call with no usable actor to today''s (Perth) row. Takes no argument, so a caller cannot choose what is stored.';
 
 -- 3. The count the core status carries. Last seven Perth days, today included.
 CREATE OR REPLACE FUNCTION public.context_actor_missing_status() RETURNS jsonb
@@ -115,7 +124,7 @@ EXCEPTION WHEN OTHERS THEN
  RETURN jsonb_build_object('state','unavailable','code',SQLSTATE);
 END $$;
 COMMENT ON FUNCTION public.context_actor_missing_status() IS
- 'F-ACT: server-key ops-api calls with no usable actor (no x-sw-actor header, or a malformed one), today and over the last 7 Perth days. Audit only: such calls are never refused. Never raises; an unreadable counter reads state unavailable.';
+ 'F-ACT: server-key ops-api calls and valid HMAC-link cost-report calls with no usable actor, today and over the last 7 Perth days. Audit only: such calls are never refused. Never raises; an unreadable counter reads state unavailable.';
 
 -- 4. context_core_status(): F1's body plus the one actor_missing key.
 CREATE OR REPLACE FUNCTION public.context_core_status() RETURNS jsonb
