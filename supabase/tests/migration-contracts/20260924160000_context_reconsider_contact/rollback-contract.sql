@@ -5,7 +5,7 @@ DO $$
 DECLARE live text; org uuid:='00000000-0000-0000-0000-000000000001'; j uuid:=gen_random_uuid(); e public.business_events;
 BEGIN
  SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid=to_regprocedure('public.context_job_created_reconsider()');
- IF live IS DISTINCT FROM '5345aed90185a1e2366f38ee76b3ec36' THEN RAISE EXCEPTION 'rollback: trigger body is %',live; END IF;
+ IF live IS DISTINCT FROM 'f351722c0a1ae9a77e6e3ac7168aab34' THEN RAISE EXCEPTION 'rollback: trigger body is %',live; END IF;
  IF to_regprocedure('public.context_reconsider_contact(text,timestamptz,text,uuid)') IS NOT NULL
   OR to_regprocedure('public.context_reconsider_eligible(public.business_events,uuid)') IS NOT NULL
  THEN RAISE EXCEPTION 'rollback: P1b functions remain'; END IF;

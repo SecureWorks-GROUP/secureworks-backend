@@ -57,11 +57,18 @@
 --
 -- Built on the LIVE production definitions, read from production 23 Sep 2026
 -- (read-only):
---   context_job_created_reconsider()                   md5(prosrc) 5345aed90185a1e2366f38ee76b3ec36
+--   context_job_created_reconsider()                   md5(prosrc) f351722c0a1ae9a77e6e3ac7168aab34
+--     NOT the repository body (5345aed9...): hand-applied without the
+--     20260911171000 comment line "Bounded deterministic work only; ...".
+--     Same behaviour. EXECUTE held by postgres and service_role.
 --   context_contact_job_timeline(text,timestamptz)      md5(prosrc) 2bc8e76f14fda242eb6e4d414e93fefa (P1a)
 --   context_contact_jobs_at(text,timestamptz)           md5(prosrc) 911811b617fa760f5ddf847fb1ab853d (P1a)
 --   resolve_context_attribution(business_events)        md5(prosrc) fe50f14f4ab28d4d6c9dbb70bc85e7df (P1a)
---   trigger context_job_created_reconsider AFTER INSERT ON jobs FOR EACH ROW.
+--   trigger context_job_created_reconsider AFTER INSERT ON jobs FOR EACH ROW, enabled.
+--   jobs.created_at timestamptz default now(); business_events has
+--   idx_events_contact_occurred (contact_id, occurred_at DESC), which serves
+--   the per-contact scan (at most 257 rows for one contact, 35k rows in all),
+--   so no index is added.
 --   context_event_is_ghl(business_events)              md5(prosrc) 6bd4046317c4530a67ae38b0d7052cf4 (P1a)
 --   context_reconsider_contact, context_reconsider_eligible: absent.
 -- The guard refuses unless each replaced or read object is still that body
@@ -78,7 +85,7 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: live pre-image, or this migration's body.
-  ('public.context_job_created_reconsider()',ARRAY['5345aed90185a1e2366f38ee76b3ec36','2e199e27d38730e95bd5f2b0b8a9b165'],false),
+  ('public.context_job_created_reconsider()',ARRAY['f351722c0a1ae9a77e6e3ac7168aab34','2e199e27d38730e95bd5f2b0b8a9b165'],false),
   -- Read, not replaced: must be P1a's body.
   ('public.context_contact_job_timeline(text,timestamptz)',ARRAY['2bc8e76f14fda242eb6e4d414e93fefa'],false),
   ('public.context_contact_jobs_at(text,timestamptz)',ARRAY['911811b617fa760f5ddf847fb1ab853d'],false),
@@ -114,8 +121,7 @@ BEGIN
   ('jobs','id','uuid'),('jobs','ghl_contact_id','text'),('jobs','created_at','timestamp with time zone'),
   ('business_events','contact_id','text'),('business_events','job_id','uuid'),('business_events','event_at','timestamp with time zone'),
   ('business_events','occurred_at','timestamp with time zone'),('business_events','attribution_status','text'),
-  ('business_events','candidate_job_ids','uuid[]'),('business_events','metadata','jsonb'),('business_events','thread_key','text'),
-  ('event_threads','thread_key','text')
+  ('business_events','candidate_job_ids','uuid[]'),('business_events','metadata','jsonb')
  ) AS c(tbl,col,typ) LOOP
   live:=NULL;
   SELECT format_type(a.atttypid,a.atttypmod) INTO live FROM pg_attribute a

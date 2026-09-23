@@ -2,7 +2,8 @@
 -- for byte and drop context_reconsider_contact and its eligibility helper. Rows reconsidered under P1b
 -- keep their placement, review state and metadata (a later logged re-run, not
 -- a rollback, moves rows).
---   context_job_created_reconsider()  md5(prosrc) 5345aed90185a1e2366f38ee76b3ec36 (live)
+--   context_job_created_reconsider()  md5(prosrc) f351722c0a1ae9a77e6e3ac7168aab34 (live,
+--   hand-applied; the repository text less one comment line)
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -13,7 +14,7 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_job_created_reconsider()');
- IF live IS NULL OR NOT live=ANY(ARRAY['2e199e27d38730e95bd5f2b0b8a9b165','5345aed90185a1e2366f38ee76b3ec36']) THEN
+ IF live IS NULL OR NOT live=ANY(ARRAY['2e199e27d38730e95bd5f2b0b8a9b165','f351722c0a1ae9a77e6e3ac7168aab34']) THEN
   problems:=problems||format('public.context_job_created_reconsider() md5 %s',coalesce(live,'<missing>'));
  END IF;
  live:=NULL;
@@ -33,7 +34,6 @@ END $guard$;
 
 CREATE OR REPLACE FUNCTION public.context_job_created_reconsider() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 BEGIN
- -- Bounded deterministic work only; unresolved repeat customers become pending_luna.
  PERFORM public.rerun_context_attribution(250,NEW.ghl_contact_id); RETURN NEW;
 EXCEPTION WHEN OTHERS THEN RAISE WARNING 'context job reconsideration failed: %',SQLERRM; RETURN NEW;
 END $$;
