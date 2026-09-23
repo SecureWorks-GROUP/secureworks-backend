@@ -542,6 +542,11 @@ time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
 an `event_at`-only gate — production almost never populates `event_at`.
 The captain heartbeat is `GET ops-api?action=context_pipeline_status`
 (migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
+Since F1 (`20260923160500`) it is a composer: `context_core_status()` keys stay
+top-level and each owner slice replaces only its own block sub-function
+(`cadence`, `capture_sources`, `ghl_capture`, `booking_capture`, `parties`);
+only F1 edits `context_pipeline_status()`. "Linked" is
+`context_linked_status()`; never re-list the linked statuses in new SQL.
 Booking-lane context hangar (`20260921140000`): `context_contact_jobs` counts a
 `draft` only when the contact has no non-draft open job (coverage already
 counted draft as open); draft-only still pins, draft plus a live job stays on
