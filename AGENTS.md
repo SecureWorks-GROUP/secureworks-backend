@@ -557,8 +557,13 @@ The captain heartbeat is `GET ops-api?action=context_pipeline_status`
 (migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
 Since F1 (`20260924020000`) it is a composer: `context_core_status()` keys stay
 top-level and each owner slice replaces only its own block sub-function
-(`cadence`, `capture_sources`, `ghl_capture`, `booking_capture`, `parties`);
-only F1 edits `context_pipeline_status()`. "Linked" is
+(`cadence`, `capture_sources`, `ghl_capture`, `booking_capture`, `parties`, and
+F1b's `email_capture`, `transcript_capture`, `money`, `bucket`); only the
+foundation owner (F1, F1b `20260924152100`) edits `context_pipeline_status()`.
+A migration whose guard pins another owner's function body breaks its own
+re-apply contract when that owner moves on; the contract stands the pinned
+body back up inside its rolled-back transaction (C1d does this for F1's
+`record_capture_run`). "Linked" is
 `context_linked_status()`; never re-list the linked statuses in new SQL.
 The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted

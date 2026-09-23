@@ -209,6 +209,15 @@ CREATE FUNCTION cron.alter_job(job_id bigint,schedule text DEFAULT NULL,command 
  username text DEFAULT NULL,active boolean DEFAULT NULL) RETURNS void LANGUAGE sql AS $$
  UPDATE cron.job SET command=coalesce(alter_job.command,job.command) WHERE jobid=job_id
 $$;
+-- C1d's guard pins F1's record_capture_run, the body C1d was built on. F1b
+-- (20260924152100, same owner as F1) replaces that body with a superset; stand
+-- F1's body back up inside this rolled-back transaction so the re-apply is
+-- still tested against the pre-image it was written for.
+SELECT md5(prosrc)<>'a85b48f9422fff111ee96093bad55c40' AS c1d_writer_moved
+FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
+\if :c1d_writer_moved
+\ir ../20260924152100_context_status_f1b/f1_record_capture_run.sql
+\endif
 \ir ../../../migrations/20260924133000_context_ghl_message_reconcile.sql
 \ir ../../../migrations/20260924133000_context_ghl_message_reconcile.sql
 DO $$

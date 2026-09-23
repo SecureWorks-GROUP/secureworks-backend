@@ -17,19 +17,27 @@ with identical values. The composer adds:
 | `ghl_capture` | `context_ghl_capture_status()` | sms C1d | built |
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
 | `parties` | `context_parties_status()` | sites S-M1 | `null` |
+| `email_capture` | `context_email_capture_status()` | email EM1 | `null` (F1b stub) |
+| `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | `null` (F1b stub) |
+| `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |
+| `bucket` | `context_bucket_status()` | bucket B2 | `null` (F1b stub) |
 | `alarms` | every block's `alarms` array, each tagged with `block` | composer | `[]` |
+
+The last four blocks were added by F1b (`20260924152100_context_status_f1b.sql`,
+INTEGRATION X22), the foundation owner's second slice.
 
 Rules for the owning slices:
 
 - Replace only your own sub-function, with `CREATE OR REPLACE`, keeping
   `() RETURNS jsonb`. Return an object with an `alarms` array; each alarm is
   `{key, severity, since, what_to_do, ...}`. Only F1 changes
-  `context_pipeline_status()`.
+  `context_pipeline_status()` (and F1b, same owner).
 - A block that raises shows as `{"error": "<SQLSTATE>"}` plus a
   `status_block_failed` alarm; the rest of the status still reads. A core
   failure still fails the whole read (unchanged behaviour).
-- Your rollback restores the F1 stub (`SELECT NULL::jsonb`, comment starting
-  `F1 stub.`). The F1 rollback refuses while any stub is replaced.
+- Your rollback restores the stub (`SELECT NULL::jsonb`, comment starting
+  `F1 stub.` or, for the F1b blocks, `F1b stub.`). The F1 and F1b rollbacks
+  refuse while any of their stubs is replaced; F1b rolls back before F1.
 
 `cadence` (K1, `20260924030000`): `context_cadence_status()` replaces the F1
 stub. The composer is untouched. The block publishes `policy`, due and waiting
@@ -46,7 +54,15 @@ minutes since (Mon to Sat, 07:00 to 18:00 Perth, no public holidays), and the
 business hour over the 14 days before its last row) has written nothing for
 120 business minutes. Thresholds are published in the block's `policy`
 (`context_source_freshness_policy()`). Sources silent for more than 60 days
-drop off the list.
+drop off the list. Each source row also carries `alarm_exempt` (F1b):
+`retired` for a writer that has stopped for good (`transcribe-call`, the
+Whisper path, replaced by `ghl-call-transcript`), listed while it has rows but
+never alarmed; `flag_off` for a flag-gated writer (`ghl-call-transcript`,
+flag `ghl_call_transcript_fetch_v1`), which is always listed, even before its
+first row, with its `flag` state (`present`, `missing`, `unreadable`) and
+alarms only while the flag is on (missing or unreadable reads as off).
+`quiet` stays the measured fact; the alarm needs `quiet` and no exemption.
+Both lists are in the policy (`retired_sources`, `flag_gated_sources`).
 
 `ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`):
 the item flag `ghl_message_capture_v2` (a missing row reads off) and the
@@ -85,7 +101,13 @@ never Telegram.
   (service_role may SELECT, never write directly). One row per reconcile run
   (`source` e.g. `ghl_message_reconcile`, `scope_booking`); a running row may
   be recorded after each page; a finished row is immutable; counts and codes
-  only, never message text.
+  only, never message text. F1b added `window_end_id` (text, `COLLATE "C"`):
+  the provider id of the last item fully processed at `window_to`, so
+  `(window_to, window_end_id)` is a pair cursor for sources whose items share
+  timestamps (email). It needs `window_to`, and a `record_capture_run` call
+  that moves `window_to` without naming `window_end_id` clears it, so a stale
+  id is never paired with a new time. Ids only: at most 512 characters of
+  `A-Za-z0-9._:=+/@<>-`.
 
 The jarvis tool proxies this action through `context_pipeline.ts`. The
 handler is GET-only and SELECT-only.

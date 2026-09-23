@@ -121,6 +121,11 @@ DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; j uuid:=gen_random_uui
  legacy jsonb; composed jsonb; core jsonb; key text; d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
  new_keys text[]:=ARRAY['cadence','capture_sources','ghl_capture','booking_capture','parties','alarms'];
 BEGIN
+ -- F1b (same owner, 20260924152100) adds four blocks to the composer; the
+ -- runner applies it before this contract. Its own contract checks them.
+ IF to_regprocedure('public.context_bucket_status()') IS NOT NULL THEN
+  new_keys:=new_keys||ARRAY['email_capture','transcript_capture','money','bucket'];
+ END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
   (j,org,'accepted','fencing','F1-SAME-A-'||j,'f1-same-contact'),(k,org,'accepted','fencing','F1-SAME-B-'||k,'f1-same-contact');
  INSERT INTO public.xero_invoices(org_id,xero_invoice_id,invoice_number,invoice_type,status,amount_due,job_id,updated_at)
