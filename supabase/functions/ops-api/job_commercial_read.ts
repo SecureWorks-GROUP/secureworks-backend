@@ -9,7 +9,7 @@
 //
 // One interpreter per fact:
 //   - a sent quote's value comes ONLY from the SQL function job_quote_values
-//     (migration 20260923190000); this module never re-derives a value;
+//     (migration 20260923233000); this module never re-derives a value;
 //   - acceptance comes from job_documents plus run_acceptances;
 //   - variations from job_variations (readJobVariations, also used by the
 //     invoice read so the two reads agree);

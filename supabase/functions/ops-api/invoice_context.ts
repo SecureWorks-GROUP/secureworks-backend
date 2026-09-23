@@ -1045,6 +1045,8 @@ export async function invoiceContext(
             }
             : null,
           quote_status: quotesRead.quotes?.status ?? null,
+          // Job level, only when the job's quotes are split by party or run.
+          whole_quote_total: quotesRead.quotes?.whole_quote_total ?? null,
           current_price_inc_gst: currentPriceIncGst(jobRow.pricing_json),
           deposit_amount: num(jobRow.deposit_amount),
           variations: (variations.variations || []).map((v) => ({

@@ -1,4 +1,4 @@
--- Prerequisites for 20260923190000_job_quote_values (context D1).
+-- Prerequisites for 20260923233000_job_quote_values (context D1).
 -- Only the columns job_quote_values reads, added idempotently so this file is
 -- compatible with every earlier registered setup (the runner applies all
 -- registered cases into one database in timestamp order).

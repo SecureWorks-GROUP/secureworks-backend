@@ -6,32 +6,33 @@
 // Named rows (dossier design section 10; row labels only, synthetic ids,
 // emails and money shaped on each row). The job_quote_values rows each fixture
 // feeds the reader are exactly what the SQL contract
-// supabase/tests/migration-contracts/20260923190000_job_quote_values proves
+// supabase/tests/migration-contracts/20260923233000_job_quote_values proves
 // the function returns for the same shape, so the two tests chain.
 //
-// Pins:
-//   R3  SWF-261458  one sealed quote: sent, $4,776.75 from the revision.
-//   R6  SWF-26818   Q-0491 v2 (log value, unverified) and the owner's REAR run
-//                   share are current, superseded Q-0439 is history, the
-//                   send-runs whole-job total is job level only, an unsent
-//                   draft is counted not shown; variation $374 pending.
+// Pins (named rows are the LIVE shapes read from production on 23 Sep 2026):
+//   R3  SWF-261458  one sealed quote: $4,776.75 from its revision.
+//   R6  SWF-26818   Q-0491 v2 current with no sealed value (null, never
+//                   invented; a forged log row is ignored); the REAR run
+//                   document has no party and is the client's, $4,842.45;
+//                   superseded Q-0439 ($5,571.50) is history; variation $374
+//                   pending, not agreed.
 //   R7  SWF-261355  accepted Q-0738 with no sealed value: accepted, value null
 //                   with the reason, never the live price.
 //   R8  SWF-26163   variation approved with no send and no acceptance reads
 //                   "approved internally, customer acceptance not recorded".
-//   R9  SWF-26177   $7,000 variation pending since 4 Jun: listed with age,
-//                   not agreed.
-//   R10 SWP-261456  quote emailed from Outlook: none_recorded with the honest
-//                   note; scope signed off, live price separate.
-//   R12 SWMS-261464 no contact, no scope: scope no_scope, no error.
-//   R14 SWF-26904   three parties on runs: each party's own share, accepted
-//                   only when every party on every run accepted.
-//   R15 SWF-26395   neighbour B never accepted: partially_accepted naming her
-//                   run, never "accepted".
-//   R23 SWF-26167 / SWP-26634 / SWF-261111 / SWF-26997  quotes sent to another
-//                   client, a staff address or a wrong address:
-//                   recipient_mismatch and "sent, but to <address>".
-//   R24 SWP-261203  scope edited after the last quote: changed_since_last_quote.
+//   R9  SWF-26177   $7,000 variation pending since 4 Jun: listed with age.
+//   R10 SWP-261456  no quote document (emailed from Outlook): none_recorded
+//                   with the honest note; live price separate.
+//   R12 SWMS-261464 no scope: scope no_scope, no error.
+//   R14 SWF-26904   three parties recorded, one whole quote: its $7,733.
+//   R15 SWF-26395   per-party whole quotes; party C never accepted:
+//                   partially_accepted naming her; no party shows the whole
+//                   job's $5,104 (job level only).
+//   R23 SWF-26167 / SWF-261111 / SWF-26997 / SWP-26634  recipient_mismatch
+//                   and "sent, but to <address>".
+//   R24 SWP-261203  changed_since_last_quote by the rule (live: never sent).
+//   Send-runs shape (synthetic, no named row has live run parties): each
+//   party's own share; accepted only when every party on every run accepted.
 //   Invoice read agrees with the job read on quote total and variations.
 //   Failures: a failed value read is a null section with a code; a failed
 //   recipient read keeps values and marks sent_to unknown.
@@ -256,9 +257,8 @@ Deno.test("D1 row 3 SWF-261458: one sealed quote reads sent at $4,776.75 from it
   assertEquals(q.whole_quote_total, null);
 });
 
-// ── R6 SWF-26818 ─────────────────────────────────────────────────────────────
+// ── R6 SWF-26818 (live shape, 23 Sep read) ──────────────────────────────────
 
-const ROW6_OWNER = "r6-owner";
 function row6Input() {
   return quotesInput({
     clientEmail: "owner6@example.test",
@@ -266,90 +266,76 @@ function row6Input() {
       doc("r6-q0439", {
         quote_number: "Q-0439",
         version: 1,
-        sent_at: "2026-06-01T02:00:00.000Z",
-        superseded_at: "2026-06-20T02:00:00.000Z",
+        sent_at: "2026-06-25T12:15:36.000Z",
+        viewed_at: "2026-06-25T13:00:00.000Z",
+        superseded_at: "2026-07-05T00:00:00.000Z",
       }),
       doc("r6-q0491", {
         quote_number: "Q-0491",
         version: 2,
-        sent_at: "2026-06-20T02:00:00.000Z",
+        sent_at: "2026-07-05T01:00:00.000Z",
+        viewed_at: "2026-07-05T02:00:00.000Z",
       }),
+      // live: the REAR run document carries no party and no quote number
       doc("r6-rear", {
-        quote_number: "Q-0502",
         run_label: "REAR",
-        job_contact_id: ROW6_OWNER,
-        sent_at: "2026-07-01T02:00:00.000Z",
+        sent_at: "2026-07-06T01:00:00.000Z",
+        viewed_at: "2026-07-22T01:00:00.000Z",
       }),
-      doc("r6-draft", { quote_number: "Q-0550", version: 3 }),
     ],
     // Exactly the SQL contract's output for this shape.
     values: [
       value("r6-rear", {
-        job_contact_id: ROW6_OWNER,
         party_is_owner: true,
         run_label: "REAR",
         value_inc_gst: 4842.45,
         value_source: "run_snapshot_share",
-        whole_quote_total_inc: 9684.90,
-        whole_quote_source: "quote_revision",
       }),
-      value("r6-q0491", {
-        value_inc_gst: 5300,
-        value_source: "quote_sent_log_unverified",
-        whole_quote_total_inc: 9684.90,
-        whole_quote_source: "quote_revision",
-      }),
+      value("r6-q0491"),
       value("r6-q0439", {
-        value_inc_gst: 5000,
+        value_inc_gst: 5571.5,
         value_source: "quote_revision",
-        whole_quote_total_inc: 9684.90,
-        whole_quote_source: "quote_revision",
       }),
     ],
-    runAcceptances: [{
-      job_contact_id: ROW6_OWNER,
-      job_document_id: "r6-rear",
-      run_label: "REAR",
-      status: "pending",
-      accepted_at: null,
-      declined_at: null,
+    revisions: [{
+      id: "r6-rev",
+      job_document_id: "r6-q0439",
+      recipient_email: "owner6@example.test",
+      released_via: "send-quote/send",
+      version: 1,
+      sent_at: "2026-06-25T12:15:36.000Z",
     }],
-    parties: [{ id: ROW6_OWNER, client_email: "owner6@example.test" }],
     sentEvents: [{
-      occurred_at: "2026-06-20T02:00:01.000Z",
-      source: "send-quote",
-      payload: { document_id: "r6-q0491", sent_to: "owner6@example.test" },
+      occurred_at: "2026-06-25T12:15:36.000Z",
+      source: "send-quote/send",
+      payload: { document_id: "r6-q0439", sent_to: "owner6@example.test" },
     }, {
-      // forged row from a public source naming the same document
-      occurred_at: "2026-06-21T02:00:00.000Z",
+      // forged row from a public source naming the current document
+      occurred_at: "2026-07-06T02:00:00.000Z",
       source: "website_form",
       payload: { document_id: "r6-q0491", sent_to: "attacker@example.test" },
     }],
   });
 }
 
-Deno.test("D1 row 6 SWF-26818: current v2 and the owner's run share, v1 in history, whole-job total at job level", () => {
+Deno.test("D1 row 6 SWF-26818: current v2 and the client's REAR run share, v1 in history, no invented value", () => {
   const q = buildJobQuotes(row6Input());
-  assertEquals(q.current.map((c) => c.quote_number), ["Q-0502", "Q-0491"]);
-  const rear = q.current.find((c) => c.run_label === "REAR")!;
+  assertEquals(q.current.map((c) => c.document_id), ["r6-rear", "r6-q0491"]);
+  const rear = q.current[0];
   assertEquals(rear.value_inc_gst, 4842.45);
   assertEquals(rear.value_source, "run_snapshot_share");
   assertEquals(rear.party_is_owner, true);
-  const v2 = q.current.find((c) => c.quote_number === "Q-0491")!;
-  assertEquals(v2.value_inc_gst, 5300);
-  assertEquals(v2.value_source, "quote_sent_log_unverified");
-  assertEquals(v2.sent_to, "owner6@example.test", "forged row ignored");
-  assertEquals(v2.recipient_mismatch, false);
+  const v2 = q.current[1];
+  assertEquals(v2.value_inc_gst, null);
+  assertEquals(v2.value_source, "not recorded on the sent quote");
+  assertEquals(v2.sent_to, null, "forged row ignored");
+  assertEquals(v2.recipient_mismatch, null);
   assertEquals(q.history.map((h) => h.quote_number), ["Q-0439"]);
-  assertEquals(q.history_total, 1);
-  assertEquals(q.unsent_documents, 1);
-  assertEquals(q.whole_quote_total, {
-    value_inc_gst: 9684.90,
-    source: "quote_revision",
-  });
-  // no document carries the whole-job total
-  assert(q.current.every((c) => c.value_inc_gst !== 9684.90));
-  assertEquals(q.status, "sent");
+  assertEquals(q.history[0].value_inc_gst, 5571.5);
+  assertEquals(q.history[0].sent_to, "owner6@example.test");
+  assertEquals(q.whole_quote_total, null);
+  assertEquals(q.status, "viewed");
+  assertEquals(q.headline?.document_id, "r6-rear");
 });
 
 Deno.test("D1 row 6 SWF-26818: variation $374 pending approval is listed, not agreed", () => {
@@ -496,7 +482,44 @@ Deno.test("D1 scope: a job type with no adapter says so instead of failing", () 
   assertEquals(scope.kind, "decking");
 });
 
-// ── R14 SWF-26904 ────────────────────────────────────────────────────────────
+// ── R14 SWF-26904 (live shape) ───────────────────────────────────────────────
+
+Deno.test("D1 row 14 SWF-26904: three parties recorded but one whole quote: its sealed $7,733, no invented shares", () => {
+  const q = buildJobQuotes(quotesInput({
+    clientEmail: "party-a14@example.test",
+    documents: [doc("r14-q0481", {
+      quote_number: "Q-0481",
+      sent_at: "2026-07-02T14:12:05.000Z",
+      viewed_at: "2026-07-02T15:00:00.000Z",
+    })],
+    values: [value("r14-q0481", {
+      value_inc_gst: 7733,
+      value_source: "quote_revision",
+    })],
+    revisions: [{
+      id: "r14-rev",
+      job_document_id: "r14-q0481",
+      recipient_email: "party-a14@example.test",
+      released_via: "send-quote/send",
+      version: 1,
+      sent_at: "2026-07-02T14:12:05.000Z",
+    }],
+    parties: [
+      { id: "r14-a", client_email: "party-a14@example.test" },
+      { id: "r14-b", client_email: "party-b14@example.test" },
+      { id: "r14-c", client_email: "party-c14@example.test" },
+    ],
+  }));
+  assertEquals(q.current.length, 1);
+  assertEquals(q.current[0].value_inc_gst, 7733);
+  assertEquals(q.current[0].recipient_mismatch, false);
+  assertEquals(q.whole_quote_total, null);
+  assertEquals(q.run_acceptances, []);
+  // live: the job is invoiced but the quote document itself records no acceptance
+  assertEquals(q.status, "viewed");
+});
+
+// ── send-runs shape (synthetic: no named row has live run parties) ──────────
 
 const R14 = { owner: "r14-owner", a: "r14-nb-a", b: "r14-nb-b" };
 function row14Input(bStatus: "accepted" | "pending") {
@@ -613,7 +636,7 @@ function row14Input(bStatus: "accepted" | "pending") {
   });
 }
 
-Deno.test("D1 row 14 SWF-26904: each party's run document shows its own share; accepted only when all parties accepted", () => {
+Deno.test("D1 send-runs shape: each party's run document shows its own share; accepted only when every party on every run accepted", () => {
   const all = buildJobQuotes(row14Input("accepted"));
   assertEquals(all.status, "accepted");
   const byDoc = Object.fromEntries(all.current.map((c) => [c.quote_number, c]));
@@ -637,102 +660,84 @@ Deno.test("D1 row 14 SWF-26904: each party's run document shows its own share; a
   }]);
 });
 
-// ── R15 SWF-26395 ────────────────────────────────────────────────────────────
+// ── R15 SWF-26395 (live shape) ──────────────────────────────────────────────
 
-Deno.test("D1 row 15 SWF-26395: neighbour B never accepted her run: partially_accepted naming her, never accepted", () => {
-  const owner = "r15-owner", a = "r15-nb-a", b = "r15-nb-b";
+Deno.test("D1 row 15 SWF-26395: party C never accepted her per-party quote: partially_accepted naming her, and no party shows the whole job's $5,104", () => {
+  const owner = "r15-a", b = "r15-b", c = "r15-c";
+  const perParty = {
+    value_inc_gst: null,
+    value_source: "party share not recorded on this per-party quote",
+    whole_quote_total_inc: 5104,
+    whole_quote_source: "quote_revision",
+  };
   const q = buildJobQuotes(quotesInput({
-    clientEmail: "owner15@example.test",
+    clientEmail: "party-a15@example.test",
     documents: [
       doc("r15-q0206", {
         quote_number: "Q-0206",
-        run_label: "REAR",
+        version: 1,
         job_contact_id: owner,
-        sent_at: "2026-06-01T02:00:00.000Z",
-        accepted_at: "2026-06-02T02:00:00.000Z",
+        sent_at: "2026-06-02T23:59:01.000Z",
+        viewed_at: "2026-06-03T01:00:00.000Z",
+        accepted_at: "2026-07-02T01:00:00.000Z",
       }),
       doc("r15-q0207", {
         quote_number: "Q-0207",
-        run_label: "REAR",
-        job_contact_id: a,
-        sent_at: "2026-06-01T02:00:00.000Z",
-        accepted_at: "2026-08-19T02:00:00.000Z",
+        version: 2,
+        job_contact_id: b,
+        sent_at: "2026-06-02T23:59:02.000Z",
+        viewed_at: "2026-06-03T01:00:00.000Z",
+        accepted_at: "2026-08-19T01:00:00.000Z",
       }),
       doc("r15-q0208", {
         quote_number: "Q-0208",
-        run_label: "REAR",
-        job_contact_id: b,
-        sent_at: "2026-06-01T02:00:00.000Z",
-        viewed_at: "2026-06-03T02:00:00.000Z",
+        version: 3,
+        job_contact_id: c,
+        sent_at: "2026-06-02T23:59:03.000Z",
+        viewed_at: "2026-06-03T01:00:00.000Z",
       }),
     ],
+    // Exactly the SQL contract's output for this shape.
     values: [
+      value("r15-q0208", {
+        job_contact_id: c,
+        party_is_owner: false,
+        ...perParty,
+      }),
+      value("r15-q0207", {
+        job_contact_id: b,
+        party_is_owner: false,
+        ...perParty,
+      }),
       value("r15-q0206", {
         job_contact_id: owner,
         party_is_owner: true,
-        run_label: "REAR",
-        value_inc_gst: 2552,
-        value_source: "run_snapshot_share",
-        whole_quote_total_inc: 5104,
-        whole_quote_source: "quote_sent_log_unverified",
-      }),
-      value("r15-q0207", {
-        job_contact_id: a,
-        party_is_owner: false,
-        run_label: "REAR",
-        value_inc_gst: 1276,
-        value_source: "run_snapshot_share",
-        whole_quote_total_inc: 5104,
-        whole_quote_source: "quote_sent_log_unverified",
-      }),
-      value("r15-q0208", {
-        job_contact_id: b,
-        party_is_owner: false,
-        run_label: "REAR",
-        value_inc_gst: 1276,
-        value_source: "run_snapshot_share",
-        whole_quote_total_inc: 5104,
-        whole_quote_source: "quote_sent_log_unverified",
+        ...perParty,
       }),
     ],
-    runAcceptances: [
-      {
-        job_contact_id: owner,
-        job_document_id: "r15-q0206",
-        run_label: "REAR",
-        status: "accepted",
-        accepted_at: "2026-06-02T02:00:00.000Z",
-        declined_at: null,
-      },
-      {
-        job_contact_id: a,
-        job_document_id: "r15-q0207",
-        run_label: "REAR",
-        status: "accepted",
-        accepted_at: "2026-08-19T02:00:00.000Z",
-        declined_at: null,
-      },
-      {
-        job_contact_id: b,
-        job_document_id: "r15-q0208",
-        run_label: "REAR",
-        status: "pending",
-        accepted_at: null,
-        declined_at: null,
-      },
+    parties: [
+      { id: owner, client_email: "party-a15@example.test" },
+      { id: b, client_email: "party-b15@example.test" },
+      { id: c, client_email: "party-c15@example.test" },
     ],
   }));
   assertEquals(q.status, "partially_accepted");
   assertEquals(q.outstanding, [{
-    job_contact_id: b,
-    run_label: "REAR",
+    job_contact_id: c,
+    run_label: null,
     status: "viewed",
   }]);
-  assertEquals(
-    q.current.find((c) => c.quote_number === "Q-0208")?.value_inc_gst,
-    1276,
+  assert(q.current.every((d) => d.value_inc_gst === null));
+  assert(
+    q.current.every((d) =>
+      d.value_source === "party share not recorded on this per-party quote"
+    ),
   );
-  assertEquals(q.whole_quote_total?.source, "quote_sent_log_unverified");
+  assertEquals(q.whole_quote_total, {
+    value_inc_gst: 5104,
+    source: "quote_revision",
+  });
+  assertEquals(q.run_acceptances, []);
 });
 
 Deno.test("D1 roll-up: a per-party whole-quote job with one party outstanding is never read as accepted", () => {
@@ -847,12 +852,13 @@ Deno.test("D1 roll-up: options for one recipient accept as one; a declined-only 
 
 // ── R23: wrong recipients ────────────────────────────────────────────────────
 
-Deno.test("D1 row 23 SWF-26167 / SWP-26634 / SWF-261111 / SWF-26997: a quote sent elsewhere says so", () => {
+Deno.test("D1 row 23 SWF-26167 / SWF-261111 / SWF-26997 / SWP-26634: a quote sent elsewhere says so", () => {
   const cases: Array<[string, string, boolean]> = [
+    // live 23 Sep: recipient on neither the job nor a party
     ["SWF-26167 another client's address", "other.client@example.test", true],
-    ["SWP-26634 a staff address", "sales@secureworkswa.com.au", true],
     ["SWF-261111 a wrong address", "typo@exmaple.test", true],
-    ["SWF-26997 our sending domain", "quotes@secureworksgroup.app", true],
+    // live 23 Sep: recipient on our own domain
+    ["SWF-26997 our own address", "quotes@secureworksgroup.app", true],
     ["control: the job's own client", "Client@Example.test", false],
   ];
   for (const [label, to, mismatch] of cases) {
@@ -878,8 +884,10 @@ Deno.test("D1 row 23 SWF-26167 / SWP-26634 / SWF-261111 / SWF-26997: a quote sen
       label,
     );
   }
-  // A staff address typed in as the job's own client email is still our
-  // address: the customer never received it.
+  // SWP-26634 (live 23 Sep): the recipient equals the job's recorded client
+  // email. When that recorded email is a staff address it is still our
+  // address and the customer never received it; when it is the customer's
+  // it matches (the control above).
   const staffAsClient = buildJobQuotes(quotesInput({
     clientEmail: "sales@secureworkswa.com.au",
     documents: [doc("q", { sent_at: "2026-07-01T00:00:00.000Z" })],
@@ -1027,7 +1035,7 @@ function dossierTables(): Tables {
       id: DOSSIER_JOB,
       job_number: "SWF-26818",
       type: "fencing",
-      status: "quoted",
+      status: "archived",
       client_name: "Row Six",
       client_email: "owner6@example.test",
       ghl_contact_id: null,
@@ -1040,7 +1048,7 @@ function dossierTables(): Tables {
           height_mm: 1800,
         }],
       },
-      pricing_json: { totalIncGST: 11111.11 },
+      pricing_json: { totalIncGST: 5571.5 },
       scope_version: 1,
       scope_updated_at: null,
     }],
@@ -1053,11 +1061,7 @@ function dossierTables(): Tables {
       job_id: DOSSIER_JOB,
     })),
     quote_revisions: [],
-    job_contacts: [{
-      id: ROW6_OWNER,
-      job_id: DOSSIER_JOB,
-      client_email: "owner6@example.test",
-    }],
+    job_contacts: [],
     job_variations: [{
       job_id: DOSSIER_JOB,
       variation_number: 1,
@@ -1073,9 +1077,9 @@ function dossierTables(): Tables {
         entity_type: "job",
         entity_id: DOSSIER_JOB,
         event_type: "quote.sent",
-        source: "send-quote",
-        occurred_at: "2026-06-20T02:00:01.000Z",
-        payload: { document_id: "r6-q0491", sent_to: "owner6@example.test" },
+        source: "send-quote/send",
+        occurred_at: "2026-06-25T12:15:36.000Z",
+        payload: { document_id: "r6-q0439", sent_to: "owner6@example.test" },
       },
       {
         id: "sc-1",
@@ -1116,20 +1120,19 @@ Deno.test("D1 dossier: quotes, variations and scope sections on SWF-26818, read 
     assertEquals(d.sections_version, 2);
     assertEquals(d._kind, "job_dossier_v1");
     const q = d.operationalTruth.quotes;
-    assertEquals(q.status, "sent");
-    assertEquals(q.current.map((c: any) => c.quote_number), [
-      "Q-0502",
-      "Q-0491",
+    assertEquals(q.status, "viewed");
+    assertEquals(q.current.map((c: any) => c.document_id), [
+      "r6-rear",
+      "r6-q0491",
     ]);
-    assertEquals(
-      q.current.find((c: any) => c.quote_number === "Q-0491").sent_to,
-      "owner6@example.test",
-    );
-    assertEquals(q.whole_quote_total.value_inc_gst, 9684.9);
+    assertEquals(q.current[0].value_inc_gst, 4842.45);
+    // found by the job it names although the ladder cleared job_id
+    assertEquals(q.history[0].sent_to, "owner6@example.test");
+    assertEquals(q.whole_quote_total, null);
     assertEquals(d.operationalTruth.variations[0].amount, 374);
     assertEquals(d.operationalTruth.variations[0].agreed, false);
     assertEquals(d.scope.kind, "fence");
-    assertEquals(d.scope.current_price_inc_gst, 11111.11);
+    assertEquals(d.scope.current_price_inc_gst, 5571.5);
     assertEquals(d.scope.signed_off_at, "2026-05-20T02:00:00.000Z");
     assertEquals(d.diagnostics.sourceStatus.quotes, {
       ok: true,
@@ -1206,8 +1209,8 @@ Deno.test("D1 invoice read agrees with the job read on the quote total and varia
     headline.document_id,
   );
   // the live price is reported separately and never as the quote total
-  assertEquals(inv.job.promised.current_price_inc_gst, 11111.11);
-  assert(inv.job.promised.quote_total !== 11111.11);
+  assertEquals(inv.job.promised.current_price_inc_gst, 5571.5);
+  assert(inv.job.promised.quote_total !== 5571.5);
   assertEquals(
     inv.job.promised.variations.map((v: any) => [v.number, v.amount, v.agreed]),
     d.operationalTruth.variations.map((
