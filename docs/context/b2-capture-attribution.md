@@ -17,7 +17,7 @@ K1 (`20260924030000`) owns `context_extraction_candidates` and
 them here. Holding-job extractability stays `context_job_extractable` in
 `docs/context/b3-fact-custody.md`.
 
-Historical rows are deterministically classified in 250-row batches without assigning `context_captured_at`. A job becomes eligible only after a fresh attributed incoming capture; its historical evidence can then drain. No extraction backfill, model call, cron or production action is performed by B2.
+Historical rows are deterministically classified in 250-row batches without assigning `context_captured_at`. No extraction backfill, model call, cron or production action is performed by B2.
 
 Rollback removes triggers and callable code while preserving captured rows and thread custody. It does not reverse historic attribution or delete evidence. Restore prior endpoint code with the rollback; the retained additive columns keep those writes compatible.
 

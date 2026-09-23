@@ -5,7 +5,7 @@ The approved context target's sections 3 and 5 govern this packet. One model res
 Landed on main as two forward migrations dated 2026-09-16, not the 20260911172000 draft that PR #838 first carried:
 
 - `20260916120000_context_job_fact_custody.sql`: lifecycle, trust, event-date expiry, the per-job custody RPC, the current-facts view.
-- `20260916120100_context_extraction_budget_scope.sql`: the D4 budget scope (outbound-only sources and archived holding jobs never take a model call).
+- `20260916120100_context_extraction_budget_scope.sql`: `context_job_extractable` (holding jobs never take a model call). Extraction due and batch selection: K1 (`20260924030000`).
 
 ## Why the migration was re-dated (ledger reconciliation)
 
@@ -57,7 +57,7 @@ PR #838 merged and the deploy lane's auto-apply of `20260916120000` failed with 
 - `supabase/tests/migration-contracts/20260916120000_*` and `20260916120100_*`: registered contracts, rollbacks, and deliberate breaks (expiry function nulled; extractable predicate forced true).
 - `supabase/tests/migration-contracts/20260917120000_luna_context_event_at_coalesce`: nine-argument persist and `current_job_context_facts` read `coalesce(event_at, occurred_at)` for attribution, event_date, expiry, due-date support and live-source re-validation; both-null still rejects.
 - `scripts/test-context-b3.sh` with `CONTEXT_B3_TEST_DATABASE_URL`: disposable database, production-shaped view first, B3 plus the coalesce follow-up applied twice, then `context_b1_contract.sql` and `context_b3_contract.sql`.
-- The B2 contract's outbound-tail case now asserts the D4 rule.
+- The B2 contract's outbound-tail case follows K1: our own messages wake a read. Holding-job refusal stays `context_job_extractable`.
 - Rollbacks stop extraction, revoke the v2 overload, drop the trust triggers, and restore the 20260911171000 extraction functions. Columns and backfilled values stay as audit truth.
 
 No production mutation, model call, send or financial action is part of this packet. Production reads on 2026-09-16 were read-only (ledger, function definitions, fact populations, the holding job's metadata).
