@@ -99,7 +99,8 @@ BEGIN
  THEN RAISE EXCEPTION 'job_brief must not auto-expire'; END IF;
 
  -- Unknown kind still refused.
- UPDATE public.context_extraction_runs SET run_date=d-1 WHERE id=run;
+ -- A separate day slot (K1 also holds a job for 30 minutes after a run starts).
+ UPDATE public.context_extraction_runs SET run_date=d-1,started_at=started_at-interval '1 day' WHERE id=run;
  INSERT INTO public.business_events(job_id,match_method,direction,payload,event_at)
   VALUES(brief_job,'direct_job_id','inbound','{"body":"A later note"}',now())
   RETURNING id,to_jsonb(business_events) INTO eid,ev;

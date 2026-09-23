@@ -45,10 +45,12 @@ BEGIN
   RAISE EXCEPTION 'duplicate was accepted';
  EXCEPTION WHEN unique_violation THEN NULL; END;
  UPDATE public.jobs SET status='closed' WHERE id=j3;
- SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
+ -- K1 (20260924030000) replaced the candidates rule; waking evidence is the
+ -- measure. An old row placed by the job-created re-run never wakes.
+ SELECT (public.context_job_cadence(j3)->>'waking_count')::int INTO n;
  IF n<>0 THEN RAISE EXCEPTION 'old bucket attribution activated historical extraction'; END IF;
  INSERT INTO public.business_events(payload,job_id,match_method,direction) VALUES('{"body":"Fresh closed-job signal"}',j3,'direct_job_id','inbound');
- SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
+ SELECT (public.context_job_cadence(j3)->>'waking_count')::int INTO n;
  IF n<>1 THEN RAISE EXCEPTION 'closed job new evidence omitted'; END IF;
  INSERT INTO public.business_events(payload,job_id,direction,match_method) SELECT jsonb_build_object('body','batch event '||v),j3,'inbound','direct_job_id' FROM generate_series(1,30) v;
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,99);
@@ -57,19 +59,19 @@ BEGIN
  INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25);
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
  IF n<>7 THEN RAISE EXCEPTION 'receipt backlog lost, got %',n; END IF;
- -- D4 (20260916120100): our own outbound tail never runs alone; it rides along once
- -- the job has unreceipted inbound or internal evidence, with the inbound anchor.
+ -- K1 (20260924030000) superseded D4 (20260916120100): our own outbound
+ -- messages are evidence and wake a read on their own (cadence.md section 1).
  INSERT INTO public.context_extraction_event_receipts(event_id,job_id,extractor_version,run_id) SELECT id,j3,'luna_v2',runid FROM public.context_extraction_events(j3,25) ON CONFLICT DO NOTHING;
  INSERT INTO public.business_events(payload,job_id,direction,match_method) VALUES('{"body":"Our answer"}',j3,'outbound','direct_job_id');
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
- IF n<>0 THEN RAISE EXCEPTION 'outbound tail sent alone, got %',n; END IF;
- SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
- IF n<>0 THEN RAISE EXCEPTION 'outbound-only job took a candidate slot'; END IF;
+ IF n<>1 THEN RAISE EXCEPTION 'outbound message not read on its own, got %',n; END IF;
+ SELECT (public.context_job_cadence(j3)->>'waking_count')::int INTO n;
+ IF n<>1 THEN RAISE EXCEPTION 'outbound message does not wake the job'; END IF;
  INSERT INTO public.business_events(payload,job_id,direction,match_method) VALUES('{"body":"Client follow-up"}',j3,'inbound','direct_job_id');
  SELECT count(*) INTO n FROM public.context_extraction_events(j3,25);
  IF n<>2 THEN RAISE EXCEPTION 'outbound tail lost beside new inbound, got %',n; END IF;
- SELECT count(*) INTO n FROM public.context_extraction_candidates(400) WHERE job_id=j3;
- IF n<>1 THEN RAISE EXCEPTION 'new inbound missing candidate'; END IF;
+ SELECT (public.context_job_cadence(j3)->>'waking_count')::int INTO n;
+ IF n<>2 THEN RAISE EXCEPTION 'new inbound missing from waking evidence'; END IF;
  UPDATE public.automation_switches SET attribution=false WHERE id=1;
  INSERT INTO public.business_events(payload,job_id,match_method)
  VALUES('{"body":"Explicit source while paused"}',j1,'direct_job_id') RETURNING * INTO e;
@@ -87,21 +89,6 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- A retry already owns today's budget slot and must remain discoverable when
--- older unadmitted jobs exceed a candidate page.
-BEGIN;
-DO $$
-DECLARE older_job uuid:=gen_random_uuid(); retry_job uuid:=gen_random_uuid(); selected_job uuid;
-BEGIN
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
- (older_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-FAIR-OLD','b2-fair-old'),
- (retry_job,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-FAIR-RETRY','b2-fair-retry');
- INSERT INTO public.business_events(payload,job_id,event_at,direction,match_method) VALUES
- ('{"body":"Older unadmitted evidence"}',older_job,'2000-01-01Z','inbound','direct_job_id'),
- ('{"body":"Retry evidence"}',retry_job,'2099-01-01Z','inbound','direct_job_id');
- INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status)
- VALUES(retry_job,(now() AT TIME ZONE 'Australia/Perth')::date,'extraction','failed');
- SELECT job_id INTO selected_job FROM public.context_extraction_candidates(1);
- IF selected_job IS DISTINCT FROM retry_job THEN RAISE EXCEPTION 'budgeted retry hidden behind unadmitted work'; END IF;
-END $$;
-ROLLBACK;
+-- The retry-first candidate order was replaced by K1 (20260924030000): fewest
+-- runs today first, then oldest waking evidence first. Its contract (section 4)
+-- owns the order now.
