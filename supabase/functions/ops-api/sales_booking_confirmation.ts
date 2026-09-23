@@ -19,6 +19,11 @@ import {
   bookingInstant as timestamp,
   canonicalBookingJson,
 } from "../_shared/booking_approval_gate.ts";
+import {
+  type OwnerApprovalDeps,
+  type OwnerApprovalResult,
+  salesBookingOwnerApprovalAction,
+} from "./sales_booking_owner_approval.ts";
 export {
   BOOKING_APPROVAL_TTL_MS,
   bookingContentHash,
@@ -487,6 +492,9 @@ export async function salesBookingApprovalWriteAction(args: {
   if (args.method !== "POST") {
     fail("sales_booking_approval_write requires POST", 405);
   }
+  if (obj(args.body) && args.body.owner_input !== undefined) {
+    fail("owner_input_requires_owner_path", 400);
+  }
   const email = assertSalesBookingStampWriteAuth(args.auth, args.envGet);
   if (!args.auth.userId) fail("approval_actor_required", 403);
   const { snapshot, decision, reason } = args.body;
@@ -635,6 +643,45 @@ export async function salesBookingApprovalWriteAction(args: {
     fail("approval_expired_requires_new_proposal");
   }
   return { ok: true, approval: written };
+}
+
+/** `sales_booking_approval_write`: an `owner_input` body is an
+ * owner-authored approval (sales_booking_owner_approval.ts); a `snapshot`
+ * body is the engine-published path above, unchanged. */
+export async function salesBookingApprovalWriteRoute(
+  args: Parameters<typeof salesBookingApprovalWriteAction>[0] & {
+    /** Reads for an owner-authored approval. The engine path never uses them. */
+    owner?: Omit<
+      OwnerApprovalDeps,
+      "store" | "readWorkspace" | "envGet" | "now"
+    >;
+  },
+): Promise<
+  { ok: true; approval: BookingApprovalRecord } | OwnerApprovalResult
+> {
+  const { owner, ...engine } = args;
+  if (!obj(args.body) || args.body.owner_input === undefined) {
+    return await salesBookingApprovalWriteAction(engine);
+  }
+  if (args.method !== "POST") {
+    fail("sales_booking_approval_write requires POST", 405);
+  }
+  if (args.body.snapshot !== undefined) {
+    fail("owner_input_and_snapshot_are_exclusive", 400);
+  }
+  if (!owner) fail("owner_approval_unavailable", 503);
+  return await salesBookingOwnerApprovalAction({
+    auth: args.auth,
+    body: args.body,
+    method: args.method,
+    deps: {
+      ...owner,
+      store: args.store,
+      readWorkspace: args.readWorkspace,
+      envGet: args.envGet,
+      now: args.now,
+    },
+  });
 }
 
 export async function applyBookingApprovals(

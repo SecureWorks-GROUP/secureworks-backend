@@ -16,6 +16,7 @@ import {
   bookingHash,
   type BookingObject,
   salesBookingApprovalWriteAction,
+  salesBookingApprovalWriteRoute,
   selectBookingModels,
 } from "./sales_booking_confirmation.ts";
 import {
@@ -801,5 +802,39 @@ Deno.test("availability cannot come from an unrelated contact, wrong profile or 
     applyBookingConfirmationModels(f, bundle(m), NOW).booking_flow
       ?.calendar_read.state,
     "could_not_read",
+  );
+});
+
+Deno.test("engine path through the approval route is unchanged and never reads owner sources", async () => {
+  const f = await fixture(), { store, records } = memoryStore();
+  const untouched = () =>
+    Promise.reject(new Error("owner read on engine path"));
+  const written = await salesBookingApprovalWriteRoute({
+    ...request(f, store, "message"),
+    owner: {
+      readLead: untouched,
+      readThread: untouched,
+      readGhlDirectory: untouched,
+      readGhlEvents: untouched,
+      readOutlook: untouched,
+      readSystemOfferRecords: untouched,
+    },
+  });
+  assert("approval" in written);
+  assertEquals(
+    written.approval.snapshot.content.text,
+    f.cases[0].booking_read_model!.message.template_text,
+  );
+  assertEquals(written.approval.snapshot.content.variant, "template");
+  assertEquals(records.size, 1);
+  // The engine action itself refuses an owner body rather than guessing.
+  await assertRejects(
+    () =>
+      salesBookingApprovalWriteAction({
+        ...request(f, store, "message"),
+        body: { owner_input: {} },
+      }),
+    Error,
+    "owner_input_requires_owner_path",
   );
 });

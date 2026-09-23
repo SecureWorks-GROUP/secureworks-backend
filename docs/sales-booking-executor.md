@@ -4,6 +4,9 @@ The owner's press on one recorded approval is the trigger. Each action takes a
 single `sales_booking_approvals` binding hash, re-checks everything on the
 server at the moment of the press, and then books the exact approved GHL
 appointment or sends the exact approved text. Nothing else acts on an approval.
+Engine-published and owner-authored approvals (`snapshot.source:"owner"`,
+`docs/sales-booking-confirmation-api.md` "Owner-authored approvals") are read
+the same way: same table, same content hash, same checks at the press.
 
 Code: `supabase/functions/ops-api/sales_booking_execute.ts` (logic),
 `sales_booking_execute_live.ts` (production adapters),
@@ -161,7 +164,9 @@ SMS sends. It never uses the shared browser key, so removing the shared-key
 so the buttons could never enable live. The executor's server re-check at the
 press replaces it. An exact-text (`message`) approval no longer requires a
 calendar operation, availability or validation checks, so a text with no time
-can be approved. The calendar approval keeps every other check.
+can be approved. An engine-path calendar approval keeps every other engine
+check. The owner-authored path (`owner_input`) does not use those engine
+checks: `docs/sales-booking-confirmation-api.md` "Owner-authored approvals".
 
 ## Storage and deploy order
 

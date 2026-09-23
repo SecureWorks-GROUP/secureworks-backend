@@ -260,6 +260,7 @@ jobs:
             supabase/functions/ops-api/sales_booking_pack_test.ts \
             supabase/functions/ops-api/sales_booking_confirmation_test.ts \
             supabase/functions/ops-api/sales_booking_execute_test.ts \
+            supabase/functions/ops-api/sales_booking_owner_approval_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors

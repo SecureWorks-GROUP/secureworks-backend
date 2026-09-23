@@ -4,7 +4,9 @@ Contract: merged UX `docs/booking-confirm-contract.md` and wiki
 `harness/ops/skills/secureworks-scope-booking/CALENDAR-STEPS.md`, read from GitHub
 main on 2026-09-22. Implementation: `sales_booking_confirmation.ts` and
 `sales_booking_visits.ts`, composed by `sales_booking_read` after the existing
-pack overlay. Press results overlay after approvals and before visits:
+pack overlay. Owner-authored approvals:
+`sales_booking_owner_approval.ts` ("Owner-authored approvals" below).
+Press results overlay after approvals and before visits:
 `docs/sales-booking-executor.md` "What the read shows".
 
 This release joins the read and independent approval **storage** contracts.
@@ -173,6 +175,188 @@ off. A message send needs its own approval and no calendar receipt, so a text
 with no time can be sent. This recording action itself still has no execution
 capability. After a live press, `sales_booking_read` overlays what that press
 did; owner: `docs/sales-booking-executor.md` "What the read shows".
+
+## Owner-authored approvals (`owner-authored-v1`, 23 Sep 2026)
+
+The engine path above needs a terminal-published model that has not expired,
+a snapshot equal to the published template, and for a calendar approval the
+engine's full-population coverage, validation checks and prior-offer ledger.
+None of that exists without the terminal engine. The owner-authored path
+records an approval from what the owner wrote or chose on the booking screen,
+with no engine publish, and checks it on the server at the moment he presses.
+The engine path is unchanged and keeps working. Code:
+`supabase/functions/ops-api/sales_booking_owner_approval.ts`; tests:
+`sales_booking_owner_approval_test.ts`.
+
+Stratco (resource `marnin`, profile `fencing-stratco-marnin`) only. Same
+`sales_booking_approvals` table, same 15-minute life, same captain-only rule,
+same executor. `binding_hash` is the `approval_id` the executor takes.
+
+### Two presses: preview, then decide
+
+Both are `POST ops-api?action=sales_booking_approval_write`. A body carrying
+`owner_input` takes this path; a body carrying `snapshot` takes the engine
+path; both at once is 400 `owner_input_and_snapshot_are_exclusive`.
+
+**1. Preview** (captain JWT, or the ops API key; reads only, writes nothing):
+
+```json
+{"owner_input": {...}, "dry_run": true}
+```
+
+Returns `{ok:true, dry_run:true, source:"owner", snapshot, content_hash,
+approval_id, checks}`. Every check below runs. Show the owner
+`snapshot.content` exactly: that is what he approves.
+
+**2. Decide** (captain JWT with a user id only):
+
+```json
+{
+  "owner_input": {..., "prepared_at": "<snapshot.prepared_at from the preview>"},
+  "decision": "approved" | "refused",
+  "reason": "<required for refused, 1..1000 chars>",
+  "content_hash": "<content_hash from the preview>"
+}
+```
+
+The server rebuilds the snapshot from the same input and current server
+truth. If anything moved since the preview (the contact's phone, name,
+street, the workspace week), the hash differs and it refuses
+`owner_snapshot_changed` with the new snapshot in `detail`: preview again.
+A preview is good for 15 minutes (`owner_preview_expired`). Returns
+`{ok:true, source:"owner", approval, approval_id, checks}`. Pressing the same
+decision again returns the same row; a different decision on the same content
+refuses `approval_decision_already_recorded`. A refusal decision records the
+refusal without running the calendar checks.
+
+### `owner_input`
+
+Common fields: `step` (`"message"` or `"calendar"`), `case_id` (the case
+`id`), `contact_id` (GHL contact id), `week_start` (the screen's Monday),
+optional `resource` (must be `"marnin"`), `prepared_at` (decide only).
+
+- **Message:** `text` (the exact text the owner wrote or edited, 1..1600
+  characters, bytes kept exactly; no em or en dashes), optional `offer`
+  (the visit the text offers, same shape as `visit`). An offer is checked like
+  a calendar choice and, once approved, blocks that slot for other leads
+  until it expires or that lead is booked.
+- **Calendar:** `visit: {window_start_iso, window_end_iso, end_iso}`: the
+  arrival window and the visit end, each `YYYY-MM-DDTHH:MM:00+08:00`.
+
+### What the snapshot binds
+
+`schema:"scope-booking-approval.v1"`, `source:"owner"`,
+`version:"owner-authored-v1"`, `step`, `case_id`, `contact_id`, `resource`,
+`scoper_user_id`, `week_start`, `id:"opp:<opportunity>"`, `profile`,
+`pack_revision:null`, `prepared_at`, `content_hash`, `content`.
+`content_hash` is `bookingContentHash` (canonical JSON of the snapshot less
+`content_hash`), exactly as on the engine path.
+
+- Message `content`: `{text, sender:"+61489267776", recipient, variant:"owner",
+  offer}`. `recipient` is the GHL contact's current phone as E.164, read at the
+  press; `sender` is always the 776 line.
+- Calendar `content`: `{provider:"ghl", calendar_id:"dEQKVKHthsjSYaen1fiE",
+  assigned_user_id:"3S20LGVTjsVYy9vTJ9wM", start_iso:<window start>,
+  end_iso:<visit end>, window_start_iso, window_end_iso,
+  title:"Scope visit: <name>", address:"<street>, <suburb>"}`. Name is the GHL
+  contact's; street is the contact's address line, else the recorded job
+  site's (`checks.address_street_source`); suburb is the one the booking read
+  publishes. The executor and the GHL writer read this shape unchanged.
+
+### Checks and named refusals
+
+Refusals are HTTP 409 unless shown (400 for a malformed request) with body
+`{error, reason, detail}`. Order is the order reported.
+
+Request and identity: `sales_booking_approval_write requires POST` (405),
+`invalid_dry_run`, `stamp_write_requires_captain` (403),
+`approval_actor_required` (403), `invalid_owner_input`,
+`stratco_profile_required`, `invalid_independent_approval`,
+`refusal_reason_required`, `owner_prepared_at_required`,
+`owner_content_hash_required`, `booking_case_identity_ambiguous` (the contact
+must be exactly one case on the Stratco roster for that week and its case id
+must match), `owner_preview_expired`, `contact_unreadable`.
+
+Content: `owner_message_text_required`, `owner_message_text_has_dash`,
+`contact_phone_missing`, `contact_name_missing`, `contact_street_missing`
+(the address line has no house or unit number, e.g. only a suburb; a leading
+Unit/Apt/Shop or comma before the number still counts),
+`contact_suburb_missing`, `owner_snapshot_changed`.
+
+Rulebook (no reads; `STRATCO_BOOKING_RULEBOOK`, from the engine's profile
+JSON `fencing-stratco-marnin.json` and the calendar target in its GO-LIVE.md):
+`owner_visit_required`, `owner_visit_times_invalid`,
+`owner_visit_not_future`, `owner_visit_spans_days`,
+`owner_visit_day_not_permitted` (Tue and Fri), `owner_visit_window_length`
+(60 to 90 minutes), `owner_visit_window_not_inside_visit`,
+`owner_visit_too_short` (visit ends at least 60 minutes after the latest
+arrival), `owner_visit_outside_hours` (window start at or after 08:00, visit
+end by 16:30), `owner_visit_protected_band` (Tue 13:00 to 15:30 Stratco /
+Canning Vale, including the 30-minute travel buffer).
+
+Open offers and presses (both steps, read from `sales_booking_executions`
+claimed in the last 21 days joined to the approvals they ran, plus live
+unexpired owner-authored rows on `sales_booking_approvals` that carry an
+offer or visit):
+`system_offers_unreadable`; `booking_step_requires_reconciliation` when a text
+to this lead may or may not have been sent (message step) or a booking for
+this lead is mid-press (calendar step); `text_already_in_thread` /
+`thread_unreadable` (message step: the exact text is already outbound in the
+thread).
+
+Availability, read at the press for the visit's whole Perth day (calendar
+step, and a message with an `offer`). The visit occupies window start minus
+30 minutes to visit end plus 30 minutes:
+`owner_calendar_unreadable`; `owner_calendar_unknown` (the STRATCO FENCING
+calendar must be active, list the owner's GHL user, and that user must be the
+one roster entry for marnin@secureworkswa.com.au); `ghl_calendar_unreadable`
+(the owner's diary by user id plus every calendar he is on; any incomplete
+read); `contact_already_booked_that_day`; `ghl_calendar_clash` (other
+assignees and cancelled rows do not block); `outlook_unreadable`;
+`outlook_calendar_clash` (busy events on his Outlook primary calendar);
+`system_offer_clash` (a slot this system offered another lead in a sent text,
+a live unexpired owner approval, or a booking mid-press; this lead's own
+same slot, other offers to this same lead from a sent text, and offers to a
+lead since booked do not count); `daily_capacity_reached` (GHL events that
+day plus other leads offered that day plus this visit over 6).
+
+Texts sent by hand outside this system cannot be checked by the machine. The
+path does not guess at them and does not block on them: every result carries
+`checks.hand_sent_texts:"not_machine_checked"` and a plain note, and
+`checks.system_offers.unverified_texts` lists texts this system sent whose
+record names no slot (every engine-path text). The executor still re-checks
+GHL, Outlook, the thread and the recipient at its own press.
+
+### What the read returns
+
+`sales_booking_read` adds `booking_flow.owner_approval_write:
+"owner-authored-v1"` (null off the Stratco resource), `booking_flow.owner_rulebook`,
+and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
+`owner_booking`:
+
+```json
+{
+  "version": "owner-authored-v1",
+  "eligible": true,
+  "reason": null,
+  "engine_proposal": false,
+  "engine_window": null,
+  "rulebook": {"days": ["Tue","Fri"], "bookable_dates": ["2026-09-25", "..."],
+    "day_start": "08:00", "day_end": "16:30", "window_min_minutes": 60,
+    "window_max_minutes": 90, "visit_minutes": 60, "travel_buffer_minutes": 30,
+    "max_per_day": 6, "protected_bands": [...], "sender": "+61489267776",
+    "calendar": {...}, "timezone": "Australia/Perth", "utc_offset": "+08:00"},
+  "approvals": [{"approval_id", "step", "state", "reason",
+    "approved_by_email", "approved_at", "expires_at", "content"}]
+}
+```
+
+`engine_proposal` is true when a current engine model with a proposal is
+matched to the lead (`engine_window` is its window). `approvals` lists live
+owner-authored rows for that case (under 15 minutes old); it is null when the
+store could not be read (`booking_flow.owner_approval_read_error`) or the lead
+is not eligible. `bookable_dates` are the next 14 days' Tue/Fri dates whose last
+arrival has not passed.
 
 ## Local proof
 
