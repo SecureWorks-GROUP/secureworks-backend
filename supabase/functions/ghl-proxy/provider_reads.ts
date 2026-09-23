@@ -8,6 +8,7 @@ export const GHL_PROVIDER_READ_ACTIONS = [
   "list_ghl_contacts",
   "list_ghl_opportunities",
   "list_ghl_conversations",
+  "list_recent_ghl_conversations",
   "list_ghl_messages",
   "get_ghl_message",
   "get_ghl_email",
@@ -324,6 +325,26 @@ function transcriptValidationReason(value: unknown): string | null {
   return null;
 }
 
+/**
+ * A conversation's last message time in epoch milliseconds, or null when the
+ * provider gave none. GHL sends a number; a numeric string or an ISO time is
+ * also read.
+ */
+export function conversationLastMessageMs(row: JsonObject): number | null {
+  const raw = row.lastMessageDate ?? row.last_message_date;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return Math.trunc(raw);
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    if (/^\d{1,16}$/.test(raw.trim())) return Number(raw.trim());
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed) && /^\d{4}-\d{2}-\d{2}/.test(raw)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
 type Cursor = Record<string, string | number>;
 function pagination(
   returned: number,
@@ -357,6 +378,7 @@ const ARGUMENTS: Record<GhlProviderReadAction, string[]> = {
     "start_after_id",
   ],
   list_ghl_conversations: ["contact_id", "limit", "start_after_date"],
+  list_recent_ghl_conversations: ["limit", "start_after_date"],
   list_ghl_messages: [
     "contact_id",
     "conversation_id",
@@ -707,6 +729,65 @@ export async function readGhlProvider(
         (!after && typeof data.total === "number" && data.total <= items.length)
       ? false
       : null;
+    const cursor = next && next !== after ? { start_after_date: next } : null;
+    return result(
+      data,
+      pagination(
+        items.length,
+        limit,
+        hasMore,
+        cursor,
+        hasMore !== false && !cursor
+          ? "provider_did_not_supply_a_usable_next_cursor"
+          : undefined,
+      ),
+    );
+  }
+  if (action === "list_recent_ghl_conversations") {
+    // Location-wide, newest first by last message (context slice C1d, the
+    // 15-minute GHL message reconciler's page read). start_after_date is epoch
+    // milliseconds: GHL returns conversations whose last message is older than
+    // it. Every row must be bound to the configured location and carry ids,
+    // and the page must really be newest first, because the reconciler's
+    // window depends on that order.
+    const after = textArg(params, "start_after_date", 20);
+    if (after && !/^\d{1,16}$/.test(after)) {
+      throw new GhlProviderReadError(
+        "invalid_cursor",
+        "start_after_date must be epoch milliseconds",
+      );
+    }
+    const query = new URLSearchParams({
+      locationId,
+      limit: String(limit),
+      sort: "desc",
+      sortBy: "last_message_date",
+    });
+    if (after) query.set("startAfterDate", after);
+    const data = await get("/conversations/search", query);
+    const items = rows(data, "conversations");
+    let previous = Number.POSITIVE_INFINITY;
+    for (const row of items) {
+      boundLocation(row, locationId);
+      requireId(row.id, "conversation id");
+      requireId(row.contactId, "conversation contactId");
+      // A dateless row stays on the page (the reconciler counts it and must
+      // not stall). Only dated rows are checked for newest-first order.
+      const at = conversationLastMessageMs(row);
+      if (at === null) continue;
+      if (at > previous || (after && at > Number(after))) {
+        throw new GhlProviderReadError(
+          "provider_order_invalid",
+          "Provider did not return conversations newest first",
+          502,
+        );
+      }
+      previous = at;
+    }
+    const last = items.at(-1);
+    const nextMs = last ? conversationLastMessageMs(last) : null;
+    const next = nextMs === null ? null : String(nextMs);
+    const hasMore = items.length < limit ? false : null;
     const cursor = next && next !== after ? { start_after_date: next } : null;
     return result(
       data,

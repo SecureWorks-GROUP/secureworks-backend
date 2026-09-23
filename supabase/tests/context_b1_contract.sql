@@ -36,7 +36,9 @@ BEGIN
  ALTER TABLE public.automation_switches RENAME COLUMN capture TO capture_test_missing;
  IF public.automation_lane_enabled('capture') THEN RAISE EXCEPTION 'read error'; END IF;
  ALTER TABLE public.automation_switches RENAME COLUMN capture_test_missing TO capture;
- IF (SELECT count(*) FROM public.automation_switch_cron_lanes())<>2 THEN RAISE EXCEPTION 'cron map'; END IF;
+ -- B1's two jobs stay mapped; later slices add their own (C1d: ghl-message-reconcile, capture).
+ IF (SELECT count(*) FROM public.automation_switch_cron_lanes() WHERE (cron_jobname,lane) IN (('monitor-inbox-poll','capture'),('contact-matching','attribution')))<>2
+ THEN RAISE EXCEPTION 'cron map'; END IF;
  IF EXISTS(SELECT 1 FROM public.automation_switch_wrap_cron_jobs() WHERE outcome<>'already_wrapped') THEN RAISE EXCEPTION 'reapply'; END IF;
  IF EXISTS(SELECT 1 FROM public.automation_switch_unwrap_cron_jobs() WHERE outcome<>'unwrapped') THEN RAISE EXCEPTION 'unwrap'; END IF;
  IF EXISTS(SELECT 1 FROM public.automation_switch_wrap_cron_jobs() WHERE outcome<>'wrapped') THEN RAISE EXCEPTION 'wrap'; END IF;

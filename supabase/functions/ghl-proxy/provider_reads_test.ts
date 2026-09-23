@@ -975,3 +975,128 @@ Deno.test("live v3 transcript without confidence retains original sentences and 
     f.done();
   }
 });
+
+// C1d: location-wide recent conversations for the 15-minute reconciler.
+Deno.test("recent conversations read the whole location newest first with a date cursor", async () => {
+  const conversations = [
+    {
+      id: "conv_new",
+      locationId,
+      contactId: "c1",
+      lastMessageDate: 1790000000000,
+    },
+    {
+      id: "conv_mid",
+      locationId,
+      contactId: "c2",
+      lastMessageDate: 1790000000000,
+    },
+    {
+      id: "conv_old",
+      locationId,
+      contactId: "c3",
+      lastMessageDate: 1789000000000,
+    },
+  ];
+  const f = fixture([{
+    path: "/conversations/search",
+    body: { conversations, total: 40 },
+  }]);
+  const result = await f.run("list_recent_ghl_conversations", {
+    limit: "3",
+    start_after_date: "1795000000000",
+  });
+  const query = f.calls[0].url.searchParams;
+  assertEquals(query.get("locationId"), locationId);
+  assertEquals(query.get("sort"), "desc");
+  assertEquals(query.get("sortBy"), "last_message_date");
+  assertEquals(query.get("startAfterDate"), "1795000000000");
+  assertEquals(query.has("contactId"), false);
+  assertEquals(result.data.conversations, conversations);
+  assertEquals(result.pagination?.next_cursor, {
+    start_after_date: "1789000000000",
+  });
+  assertEquals(result.pagination?.complete, false);
+  f.done();
+});
+
+Deno.test("recent conversations: a short page is the end; a row with no time passes through", async () => {
+  const conversations = [
+    {
+      id: "conv_a",
+      locationId,
+      contactId: "c1",
+      lastMessageDate: 1790000000000,
+    },
+    { id: "conv_b", locationId, contactId: "c2" },
+  ];
+  const f = fixture([{
+    path: "/conversations/search",
+    body: { conversations },
+  }]);
+  const result = await f.run("list_recent_ghl_conversations", { limit: "5" });
+  assertEquals(result.pagination?.complete, true);
+  assertEquals(result.pagination?.next_cursor, null);
+  assertEquals(f.calls[0].url.searchParams.has("startAfterDate"), false);
+  f.done();
+});
+
+Deno.test("recent conversations fail closed on order, location, ids and cursor", async () => {
+  const rowsOf = (list: Record<string, unknown>[]) => [{
+    path: "/conversations/search",
+    body: { conversations: list },
+  }];
+  for (
+    const [label, list, code] of [
+      ["not newest first", [
+        { id: "a1", locationId, contactId: "c1", lastMessageDate: 1 },
+        { id: "a2", locationId, contactId: "c1", lastMessageDate: 2 },
+      ], "provider_order_invalid"],
+      ["another location", [
+        {
+          id: "a1",
+          locationId: "loc_other",
+          contactId: "c1",
+          lastMessageDate: 1,
+        },
+      ], "provider_location_mismatch"],
+      [
+        "no contact",
+        [{ id: "a1", locationId, lastMessageDate: 1 }],
+        "invalid_identifier",
+      ],
+    ] as const
+  ) {
+    const f = fixture(rowsOf(list as unknown as Record<string, unknown>[]));
+    const error = await assertRejects(
+      () => f.run("list_recent_ghl_conversations", {}),
+      GhlProviderReadError,
+    );
+    assertEquals(error.code, code, label);
+  }
+  const newerThanCursor = fixture(rowsOf([
+    { id: "a1", locationId, contactId: "c1", lastMessageDate: 5000 },
+  ]));
+  const error = await assertRejects(
+    () =>
+      newerThanCursor.run("list_recent_ghl_conversations", {
+        start_after_date: "4000",
+      }),
+    GhlProviderReadError,
+  );
+  assertEquals(error.code, "provider_order_invalid");
+  const none = fixture([]);
+  for (const bad of ["yesterday", "-1", "1.5"]) {
+    const refused = await assertRejects(
+      () =>
+        none.run("list_recent_ghl_conversations", { start_after_date: bad }),
+      GhlProviderReadError,
+    );
+    assertEquals(refused.code, "invalid_cursor");
+  }
+  await assertRejects(
+    () => none.run("list_recent_ghl_conversations", { contact_id: "c1" }),
+    GhlProviderReadError,
+  );
+  none.done();
+});

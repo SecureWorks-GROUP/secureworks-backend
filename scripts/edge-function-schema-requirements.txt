@@ -359,6 +359,13 @@ ghl-proxy|supabase/migrations/20260911171000_context_capture_attribution.sql|col
 ghl-proxy|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 # C1a: send_sms saves its evidence only through the one writer.
 ghl-proxy|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
+
+# C1d: the 15-minute GHL message reconciler reads the item flag, records its
+# runs through the F1 run writer and saves texts through the C1a writer.
+ghl-message-reconcile|supabase/migrations/20260924133000_context_ghl_message_reconcile.sql|function|context_ghl_item_flag
+ghl-message-reconcile|supabase/migrations/20260924020000_context_status_foundation.sql|table|context_capture_runs
+ghl-message-reconcile|supabase/migrations/20260924020000_context_status_foundation.sql|function|record_capture_run
+ghl-message-reconcile|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
 transcribe-call|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 send-quote|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 monitor-ses-makesafes|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled

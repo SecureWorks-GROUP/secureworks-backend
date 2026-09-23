@@ -297,6 +297,12 @@ jobs:
             supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
             supabase/functions/ghl-proxy/sms_capture_test.ts
 
+      - name: Test the 15-minute GHL message reconciler
+        run: |
+          deno test --allow-read \
+            supabase/functions/ghl-message-reconcile/reconcile_test.ts \
+            supabase/functions/ghl-message-reconcile/handler_test.ts
+
       - name: Test shared Xero transport and uncertain outcomes
         run: |
           deno test --no-check --allow-read --allow-env \
