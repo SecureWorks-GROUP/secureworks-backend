@@ -353,7 +353,7 @@ export function entryFromGhlContactNote(
     provider_id: providerId,
     at: str(row.occurred_at),
     at_precision: "time",
-    direction: str(row.direction) ?? str(payload.direction) ?? "internal",
+    direction: "internal",
     author: str(payload.added_by) ?? str(payload.sent_by_user) ??
       str(payload.from),
     source: "business_events",
@@ -397,7 +397,11 @@ export function entryFromChaseLog(row: any): TimelineEntry {
     provider_id: null,
     at: str(row.created_at),
     at_precision: "time",
-    direction: isSms ? "outbound" : method === "email" ? "unknown" : "internal",
+    direction: isSms
+      ? "outbound"
+      : method === "email" || method === "call"
+      ? "unknown"
+      : "internal",
     author: str(thread.who),
     source: "payment_chase_logs",
     source_ref: str(row.id),
@@ -917,6 +921,7 @@ export async function debtWorklist(
             .in("xero_invoice_id", ids),
         warnings,
         "id",
+        true,
       );
       for (const r of rows) {
         const list = chaseByInvoice.get(r.xero_invoice_id) ?? [];
@@ -949,6 +954,7 @@ export async function debtWorklist(
               .in("entity_id", ids),
           warnings,
           "id",
+          true,
         );
         for (const r of rows) {
           const list = invoiceEvents.get(r.entity_id) ?? [];
@@ -1055,6 +1061,29 @@ export async function debtWorklist(
     faults.push({
       source: "ghl",
       detail: `ghl_conversation_cache read failed: ${ghlCacheFault}`,
+    });
+  }
+  const ghlCacheByJob = new Map<string, any>();
+  let ghlJobCacheFault: string | null = null;
+  try {
+    for (const ids of chunk([...linkedJobIds].sort())) {
+      const rows = unwrap(
+        await client.from("ghl_conversation_cache")
+          .select("job_id, contact_id, message_count, synced_at")
+          .in("job_id", ids),
+      ) || [];
+      for (const r of rows) {
+        const prev = ghlCacheByJob.get(r.job_id);
+        if (!prev || String(r.synced_at ?? "") > String(prev.synced_at ?? "")) {
+          ghlCacheByJob.set(r.job_id, r);
+        }
+      }
+    }
+  } catch (e) {
+    ghlJobCacheFault = errText(e);
+    faults.push({
+      source: "ghl",
+      detail: `job-keyed GHL cache read failed: ${ghlJobCacheFault}`,
     });
   }
 
@@ -1351,7 +1380,7 @@ export async function debtWorklist(
             .select(
               "id, contact_id, event_type, occurred_at, direction, payload, body_preview, provider_message_id",
             )
-            .eq("event_type", "ghl.note_added")
+            .in("event_type", ["ghl.note_added", "ghl.internal_comment"])
             .in("contact_id", ids),
         warnings,
         "id",
@@ -1499,6 +1528,30 @@ export async function debtWorklist(
         ) => r.link.job_id as string),
       ),
     ];
+    const staleCutoff = now.getTime() - GHL_CACHE_STALE_HOURS * 3_600_000;
+    const ghlJobCaches = linkedJobs.map((jobId) => {
+      const job = jobs.get(jobId);
+      const contactCacheAvailable = Boolean(
+        job?.ghl_contact_id && ghlCacheByContact.has(job.ghl_contact_id),
+      );
+      const cache = ghlCacheByJob.get(jobId);
+      const syncedAt = ghlJobCacheFault ? null : str(cache?.synced_at);
+      const syncedMs = syncedAt ? Date.parse(syncedAt) : NaN;
+      return {
+        job_id: jobId,
+        ghl_contact_id: str(job?.ghl_contact_id),
+        cache_synced_at: syncedAt,
+        cache_message_count: ghlJobCacheFault
+          ? null
+          : num(cache?.message_count),
+        stale: ghlJobCacheFault
+          ? null
+          : cache
+          ? !Number.isFinite(syncedMs) || syncedMs < staleCutoff
+          : null,
+        used_by_conversation_read: !contactCacheAvailable,
+      };
+    });
 
     // Timeline.
     let timeline: any;
@@ -1590,7 +1643,9 @@ export async function debtWorklist(
       if (
         (contactMatchFault && identity.status === "verified") ||
         (contactMessagesFault && contactOnlyGhl.length) ||
-        (contactNotesFault && contactIds.length)
+        (contactNotesFault && contactIds.length) ||
+        (ghlCacheFault && contactIds.length) ||
+        (ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read))
       ) {
         debtorFaults.push({
           source: "ghl",
@@ -1604,6 +1659,8 @@ export async function debtWorklist(
         !(contactMatchFault && identity.status === "verified") &&
         !(contactMessagesFault && contactOnlyGhl.length) &&
         !(contactNotesFault && contactIds.length) &&
+        !(ghlCacheFault && contactIds.length) &&
+        !(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) &&
         perJobCapHit.length === 0 && factsCapHit.length === 0 &&
         unverifiedCandidates.length === 0;
       timeline = {
@@ -1685,7 +1742,6 @@ export async function debtWorklist(
       (timeline.entries as TimelineEntry[]).filter(pred).length;
 
     // GHL: every bound contact with its own cache sync time and stale flag.
-    const staleCutoff = now.getTime() - GHL_CACHE_STALE_HOURS * 3_600_000;
     const ghlContacts = [
       ...[...ghl.entries()].map(([id, jobIds]) => ({
         id,
@@ -1699,40 +1755,69 @@ export async function debtWorklist(
       })),
     ].map(({ id, via, jobIds }) => {
       const cache = ghlCacheByContact.get(id);
-      const syncedAt = ghlCacheFault ? null : str(cache?.synced_at);
+      const fallbackCaches = !cache
+        ? jobIds.map((jobId) => ghlCacheByJob.get(jobId)).filter(Boolean)
+        : [];
+      const fallbackSyncs = fallbackCaches.map((row) => str(row.synced_at))
+        .filter((at): at is string => Boolean(at)).sort();
+      const syncedAt = ghlCacheFault
+        ? null
+        : str(cache?.synced_at) ?? fallbackSyncs[0] ?? null;
       const syncedMs = syncedAt ? Date.parse(syncedAt) : NaN;
+      const missingFallback = !cache &&
+        (jobIds.length === 0 || fallbackCaches.length !== jobIds.length);
       return {
         ghl_contact_id: id,
         via,
         via_job_ids: jobIds,
         cache_synced_at: syncedAt,
-        cache_message_count: ghlCacheFault ? null : num(cache?.message_count),
+        cache_message_count: ghlCacheFault
+          ? null
+          : cache
+          ? num(cache.message_count)
+          : fallbackCaches.reduce(
+            (total, row) => total + (num(row.message_count) ?? 0),
+            0,
+          ),
         stale: ghlCacheFault
           ? null
-          : !Number.isFinite(syncedMs) || syncedMs < staleCutoff,
+          : missingFallback || !Number.isFinite(syncedMs) ||
+            syncedMs < staleCutoff,
+        used_job_cache_fallback: !cache && jobIds.length > 0,
       };
     });
     const ghlUnreadable = linkUnknown || Boolean(jobsFault) ||
       Boolean(ghlCacheFault) ||
+      Boolean(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) ||
       Boolean(contactMatchFault && identity.status === "verified") ||
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
       Boolean(contactNotesFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
       Boolean(convFaultBy("ghl_cache"));
-    const ghlStale = !ghlUnreadable && ghlContacts.some((c) => c.stale);
+    const ghlStale = !ghlUnreadable && (
+      ghlContacts.some((c) => c.stale) ||
+      ghlJobCaches.some((c) => c.used_by_conversation_read && c.stale === true)
+    );
     const ghlStatus = ghlUnreadable
       ? "unreadable"
       : !ghlContacts.length && unverifiedCandidates.length
       ? "unverified_candidate"
+      : ghlStale
+      ? "stale"
       : !linkedRows.length && !ghlContacts.length
       ? "no_job"
       : ghlContacts.length === 0
       ? "no_contact"
-      : ghlStale
-      ? "stale"
       : ghlContacts.length === 1
       ? "bound"
       : "several";
-    const ghlSyncs = ghlContacts.map((c) => c.cache_synced_at);
+    const ghlSyncs = [
+      ...ghlContacts.filter((c) => !c.used_job_cache_fallback).map((c) =>
+        c.cache_synced_at
+      ),
+      ...ghlJobCaches.filter((c) => c.used_by_conversation_read).map((c) =>
+        c.cache_synced_at
+      ),
+    ];
     const emailUnreadable = linkUnknown ||
       Boolean(convFaultBy("inbox") || convFaultBy("business_events"));
     const notesUnreadable = Boolean(chaseFault) ||
@@ -1764,6 +1849,7 @@ export async function debtWorklist(
           ? "CIO: verify the candidate GHL contact using a matching Xero email or phone"
           : null,
         contact_ids: ghlContacts,
+        job_caches: ghlJobCaches,
         unverified_candidates: unverifiedCandidates,
         messages_shown: countIn((e) => e.provider === "ghl"),
         read: "stored GHL cache and captured business events",

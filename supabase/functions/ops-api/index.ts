@@ -16118,7 +16118,7 @@ async function getJobConversation(client: any, body: any) {
       'client.reply', 'client.email_in', 'client.email_out',
       'client.sms_in', 'client.sms_out',
       'client.call_complete', 'client.message_in',
-      'supplier.email_in', 'ghl.note_added',
+      'supplier.email_in', 'ghl.note_added', 'ghl.internal_comment',
     ]
     // attribution_status / attribution_step / placement_rule (context slice
     // R0): how the ladder placed the row, so a reader can see why it is on
@@ -16140,11 +16140,13 @@ async function getJobConversation(client: any, body: any) {
       const p: any = r.payload || {}
       const channel: string = r.event_type.includes('sms') ? 'sms'
         : r.event_type.includes('call') ? 'call'
-        : r.event_type.includes('note') ? 'note'
+        : r.event_type === 'ghl.internal_comment' || r.event_type.includes('note') ? 'note'
         : 'email'
-      const direction: string = p.direction || r.direction || (r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'supplier.email_in'
-        ? 'inbound'
-        : r.event_type === 'ghl.note_added' ? 'internal' : 'outbound')
+      const direction: string = r.event_type === 'ghl.note_added' || r.event_type === 'ghl.internal_comment'
+        ? 'internal'
+        : p.direction || r.direction || (r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'supplier.email_in'
+          ? 'inbound'
+          : 'outbound')
       const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
       messages.push({
         id: `bev:${r.id}`,
