@@ -7204,7 +7204,7 @@ if (import.meta.main) serve(async (req: Request) => {
         try {
           return json(await contextPipelineStatus(client))
         } catch (error) {
-          if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code }, error.status)
+          if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code, reason: error.reason }, error.status)
           throw error
         }
       }
