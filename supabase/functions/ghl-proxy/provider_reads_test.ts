@@ -979,9 +979,24 @@ Deno.test("live v3 transcript without confidence retains original sentences and 
 // C1d: location-wide recent conversations for the 15-minute reconciler.
 Deno.test("recent conversations read the whole location newest first with a date cursor", async () => {
   const conversations = [
-    { id: "conv_new", locationId, contactId: "c1", lastMessageDate: 1790000000000 },
-    { id: "conv_mid", locationId, contactId: "c2", lastMessageDate: 1790000000000 },
-    { id: "conv_old", locationId, contactId: "c3", lastMessageDate: 1789000000000 },
+    {
+      id: "conv_new",
+      locationId,
+      contactId: "c1",
+      lastMessageDate: 1790000000000,
+    },
+    {
+      id: "conv_mid",
+      locationId,
+      contactId: "c2",
+      lastMessageDate: 1790000000000,
+    },
+    {
+      id: "conv_old",
+      locationId,
+      contactId: "c3",
+      lastMessageDate: 1789000000000,
+    },
   ];
   const f = fixture([{
     path: "/conversations/search",
@@ -1007,10 +1022,18 @@ Deno.test("recent conversations read the whole location newest first with a date
 
 Deno.test("recent conversations: a short page is the end; a row with no time passes through", async () => {
   const conversations = [
-    { id: "conv_a", locationId, contactId: "c1", lastMessageDate: 1790000000000 },
+    {
+      id: "conv_a",
+      locationId,
+      contactId: "c1",
+      lastMessageDate: 1790000000000,
+    },
     { id: "conv_b", locationId, contactId: "c2" },
   ];
-  const f = fixture([{ path: "/conversations/search", body: { conversations } }]);
+  const f = fixture([{
+    path: "/conversations/search",
+    body: { conversations },
+  }]);
   const result = await f.run("list_recent_ghl_conversations", { limit: "5" });
   assertEquals(result.pagination?.complete, true);
   assertEquals(result.pagination?.next_cursor, null);
@@ -1030,9 +1053,18 @@ Deno.test("recent conversations fail closed on order, location, ids and cursor",
         { id: "a2", locationId, contactId: "c1", lastMessageDate: 2 },
       ], "provider_order_invalid"],
       ["another location", [
-        { id: "a1", locationId: "loc_other", contactId: "c1", lastMessageDate: 1 },
+        {
+          id: "a1",
+          locationId: "loc_other",
+          contactId: "c1",
+          lastMessageDate: 1,
+        },
       ], "provider_location_mismatch"],
-      ["no contact", [{ id: "a1", locationId, lastMessageDate: 1 }], "invalid_identifier"],
+      [
+        "no contact",
+        [{ id: "a1", locationId, lastMessageDate: 1 }],
+        "invalid_identifier",
+      ],
     ] as const
   ) {
     const f = fixture(rowsOf(list as unknown as Record<string, unknown>[]));
@@ -1046,14 +1078,18 @@ Deno.test("recent conversations fail closed on order, location, ids and cursor",
     { id: "a1", locationId, contactId: "c1", lastMessageDate: 5000 },
   ]));
   const error = await assertRejects(
-    () => newerThanCursor.run("list_recent_ghl_conversations", { start_after_date: "4000" }),
+    () =>
+      newerThanCursor.run("list_recent_ghl_conversations", {
+        start_after_date: "4000",
+      }),
     GhlProviderReadError,
   );
   assertEquals(error.code, "provider_order_invalid");
   const none = fixture([]);
   for (const bad of ["yesterday", "-1", "1.5"]) {
     const refused = await assertRejects(
-      () => none.run("list_recent_ghl_conversations", { start_after_date: bad }),
+      () =>
+        none.run("list_recent_ghl_conversations", { start_after_date: bad }),
       GhlProviderReadError,
     );
     assertEquals(refused.code, "invalid_cursor");

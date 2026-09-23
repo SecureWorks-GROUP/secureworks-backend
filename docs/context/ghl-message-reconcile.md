@@ -15,11 +15,17 @@ live`). It never places a row; the ladder does on insert.
 - Window: one scan at a time, kept in the run row's `cursor`: `scan_top`,
   `list_floor` (previous complete scan's top minus 30 minutes),
   `message_floor` (previous scan's list floor, so a conversation that jumped
-  above a running scan is read back far enough), `position` (last conversation
-  fully read). A scan too big for one run (150 conversations or 100 s) is
-  continued by the next run. The `watermark` moves only when a scan completes.
-  First run: 2 hours back. Longest look-back after a pause: 72 hours
-  (`window_capped`); older history is the M4 history load.
+  above a running scan is read back far enough), `position`
+  (`last_message_ms` plus every conversation id fully read at that
+  millisecond). A row with no parseable lastMessageDate is counted
+  (`conversations_no_date`) and is never fresh; `list_recent_ghl_conversations`
+  still returns it. A page with no dated conversation left in the window
+  completes the scan. If those ids would push the saved cursor past
+  `record_capture_run`'s 4096-byte limit, the walk steps strictly past that
+  millisecond (`boundary_tie_fallbacks`). A scan too big for one run (150
+  conversations or 100 s) is continued by the next run. The `watermark` moves
+  only when a scan completes. First run: 2 hours back. Longest look-back after
+  a pause: 72 hours (`window_capped`); older history is the M4 history load.
 - Run rows: `context_capture_runs` via `record_capture_run`, source
   `ghl_message_reconcile`; counts and codes only. `succeeded` = scan complete,
   no issue; `partial` = budget reached or a conversation unreadable or a write

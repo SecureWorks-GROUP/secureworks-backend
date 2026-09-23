@@ -52,10 +52,11 @@ drop off the list.
 the item flag `ghl_message_capture_v2` (a missing row reads off) and the
 capture lane; GHL webhooks in 24 h by outcome and by auth and mode, last
 webhook and last app webhook, unresolved ids (from the receiver's ids-only
-`webhook_log` receipts); the reconciler's last run, last success, watermark,
-backlog, webhook misses and write errors in 24 h (from `context_capture_runs`,
-source `ghl_message_reconcile`). Alarms: `ghl_webhooks_quiet` (no app webhook
-for 120 business minutes) and `ghl_reconcile_stale` (no successful run for 45
+`webhook_log` receipts); the reconciler's last run, last finished
+(`succeeded` or `partial`) run, watermark, backlog, webhook misses and write
+errors in 24 h (from `context_capture_runs`, source `ghl_message_reconcile`).
+Alarms: `ghl_webhooks_quiet` (no app webhook for 120 business minutes) and
+`ghl_reconcile_stale` (no finished `succeeded` or `partial` run for 45
 minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high`
 (more than 5 in 24 h); `ghl_auth_missing` (critical: any post refused after
 the receiver enforces auth; observe-mode `auth=missing` is counted, not

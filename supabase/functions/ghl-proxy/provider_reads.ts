@@ -338,7 +338,9 @@ export function conversationLastMessageMs(row: JsonObject): number | null {
   if (typeof raw === "string" && raw.trim()) {
     if (/^\d{1,16}$/.test(raw.trim())) return Number(raw.trim());
     const parsed = Date.parse(raw);
-    if (Number.isFinite(parsed) && /^\d{4}-\d{2}-\d{2}/.test(raw)) return parsed;
+    if (Number.isFinite(parsed) && /^\d{4}-\d{2}-\d{2}/.test(raw)) {
+      return parsed;
+    }
   }
   return null;
 }
@@ -769,6 +771,8 @@ export async function readGhlProvider(
       boundLocation(row, locationId);
       requireId(row.id, "conversation id");
       requireId(row.contactId, "conversation contactId");
+      // A dateless row stays on the page (the reconciler counts it and must
+      // not stall). Only dated rows are checked for newest-first order.
       const at = conversationLastMessageMs(row);
       if (at === null) continue;
       if (at > previous || (after && at > Number(after))) {
