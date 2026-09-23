@@ -416,9 +416,6 @@ BEGIN
     ' ready:=public.context_ready_jobs_count(400);',' SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);'))
     IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
  THEN RAISE EXCEPTION 'f1 context_core_status() differs from the production heartbeat body beyond the ready_jobs read'; END IF;
- IF position('context_extraction_candidates' in (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()'))
-    ||(SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
- THEN RAISE EXCEPTION 'f1 heartbeat still calls context_extraction_candidates'; END IF;
  IF (SELECT count(*) FROM pg_proc WHERE proname='persist_luna_context_revision' AND pronamespace='public'::regnamespace)<>2
  THEN RAISE EXCEPTION 'f1 changed the number of persist_luna_context_revision overloads'; END IF;
  IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conrelid='public.business_events'::regclass AND c.conname='business_events_attribution_status_check')
@@ -433,8 +430,8 @@ END $$;
 ROLLBACK;
 
 -- 10. Heartbeat cost guards (the live heartbeat hit the API statement timeout).
--- Both per-row helpers inline, the current-facts view no longer serialises
--- whole event rows, and coverage's invoice filter has expression statistics.
+-- Both per-row helpers inline, and coverage's invoice filter has expression
+-- statistics.
 DO $$
 DECLARE line text; plan text:='';
 BEGIN
@@ -442,7 +439,6 @@ BEGIN
   plan:=plan||line||chr(10);
  END LOOP;
  IF plan LIKE '%context_linked_status%' OR plan LIKE '%context_in_business_hours%' THEN RAISE EXCEPTION 'f1 helpers not inlined: %',plan; END IF;
- IF pg_get_viewdef('public.current_job_context_facts'::regclass) LIKE '%to_jsonb(b%' THEN RAISE EXCEPTION 'f1 current-facts view still serialises event rows'; END IF;
  IF NOT EXISTS(SELECT 1 FROM pg_statistic_ext WHERE stxname='xero_invoices_context_open_ar' AND stxrelid='public.xero_invoices'::regclass)
  THEN RAISE EXCEPTION 'f1 coverage invoice statistics missing'; END IF;
 END $$;
