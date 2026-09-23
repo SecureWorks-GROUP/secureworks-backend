@@ -189,8 +189,8 @@ export function unwrap(result: { data: any; error: any }): any {
  * Cap-safe read. PostgREST returns at most 1000 rows per response, so a
  * `.limit(5000)` silently drops everything past the first thousand. This pages
  * with `.range()` until a short page comes back, ordered by a stable key so a
- * page boundary cannot skip a row. The page ceiling is a warning naming the
- * table, never a silent truncation.
+ * page boundary cannot skip a row. At the page ceiling it records a warning
+ * unless the caller requests rejection.
  *
  * `build` must return a fresh query builder on every call (filters and select
  * re-applied); the reader owns the order and range.
@@ -200,6 +200,7 @@ export async function pageThrough(
   build: () => any,
   warnings: string[],
   orderColumn = "id",
+  rejectAtCeiling = false,
 ): Promise<any[]> {
   const rows: any[] = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -213,11 +214,11 @@ export async function pageThrough(
     rows.push(...data);
     if (data.length < PAGE_SIZE) return rows;
   }
-  warnings.push(
-    `${table}: page ceiling ${
-      MAX_PAGES * PAGE_SIZE
-    } rows reached; not every row was read`,
-  );
+  const warning = `${table}: page ceiling ${
+    MAX_PAGES * PAGE_SIZE
+  } rows reached; not every row was read`;
+  if (rejectAtCeiling) throw new Error(warning);
+  warnings.push(warning);
   return rows;
 }
 
@@ -276,6 +277,13 @@ export async function resolveJobLinks(
   });
   const belongsToOrg = (job: any) =>
     orgId === undefined || job.org_id === orgId;
+  const hasVerifiedOwnContact = (invoice: any) => {
+    const rawContactId = str(invoice.raw_contact_id) ??
+      str(invoice.raw_json?.Contact?.ContactID);
+    return Boolean(
+      invoice.xero_contact_id && rawContactId === invoice.xero_contact_id,
+    );
+  };
   const jobsQuery = () => {
     const query = client.from("jobs").select(JOB_LINK_COLS);
     return orgId === undefined ? query : query.eq("org_id", orgId);
@@ -290,7 +298,7 @@ export async function resolveJobLinks(
       const n = str(inv.job_number)?.toUpperCase() ||
         jobNumberFromReference(inv.reference, inv.invoice_number);
       if (n) wantNumbers.add(n);
-      else if (inv.xero_contact_id) wantContacts.add(inv.xero_contact_id);
+      else if (hasVerifiedOwnContact(inv)) wantContacts.add(inv.xero_contact_id);
     }
   }
 
@@ -413,7 +421,7 @@ export async function resolveJobLinks(
       });
       continue;
     }
-    if (inv.xero_contact_id) {
+    if (hasVerifiedOwnContact(inv)) {
       const found = new Map<string, any>();
       for (const id of contactJobIds.get(inv.xero_contact_id) ?? []) {
         const j = contactJobs.get(id);
@@ -1355,7 +1363,7 @@ export async function debtContextCoverage(
 
   let q = client.from("xero_invoices")
     .select(
-      "xero_invoice_id, xero_contact_id, contact_name, invoice_number, reference, status, amount_due, due_date, invoice_date, job_id, job_number, synced_at, debt_classification",
+      "xero_invoice_id, xero_contact_id, contact_name, invoice_number, reference, status, amount_due, due_date, invoice_date, job_id, job_number, synced_at, debt_classification, raw_contact_id:raw_json->Contact->>ContactID",
     )
     .eq("org_id", deps.orgId).eq("invoice_type", "ACCREC").in(
       "status",

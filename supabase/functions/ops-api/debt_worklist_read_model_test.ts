@@ -557,6 +557,122 @@ Deno.test("duplicate names do not verify a contact match or attach its GHL messa
   assertEquals(candidate.sources.ghl.contact_ids, []);
 });
 
+Deno.test("a conflicting invoice ContactID inherits no contact-route job or conversation", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [
+    invoice(1, {
+      raw_json: {
+        Contact: {
+          ContactID: "xc-1",
+          EmailAddress: "payer-xc-1@example.test",
+        },
+        Payments: [],
+      },
+    }),
+    invoice(2, {
+      xero_contact_id: "xc-1",
+      raw_json: {
+        Contact: {
+          ContactID: "xc-other",
+          EmailAddress: "payer-xc-1@example.test",
+        },
+        Payments: [],
+      },
+    }),
+  ];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-a",
+    job_id: JOB_A,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  const conversation = conversationStub({ [JOB_A]: JOB_A_MESSAGES });
+  const out: any = await debtWorklist(
+    new URLSearchParams(),
+    deps(fakeClient(tables), conversation.fn),
+  );
+  const conflicting = out.debtors.find((d: any) => d.key === `invoice:${INV(2)}`);
+  assertEquals(conflicting.invoices[0].link.status, "none");
+  assertEquals(
+    conflicting.timeline.entries.some((entry: any) => entry.provider === "ghl"),
+    false,
+  );
+  assertEquals(conflicting.sources.ghl.contact_ids, []);
+  assertEquals(conversation.calls.map((call) => call.job_id), [JOB_A]);
+});
+
+Deno.test("contact-level GHL notes merge once with the placed job copy", async () => {
+  const tables = unitTables();
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-a",
+    job_id: JOB_A,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  const providerId = "ghlnote:note-1:2026-09-23T01:00:00Z";
+  tables.business_events.push({
+    id: "ghl-note-row",
+    contact_id: "ghl-a",
+    event_type: "ghl.note_added",
+    occurred_at: "2026-09-23T01:00:00Z",
+    direction: "internal",
+    provider_message_id: providerId,
+    payload: {
+      direction: "internal",
+      added_by: "operator-1",
+      body: "Called the debtor about the balance",
+    },
+  });
+  const jobCopy = {
+    id: "bev:ghl-note-row",
+    job_id: JOB_A,
+    channel: "note",
+    direction: "internal",
+    occurred_at: "2026-09-23T01:00:00Z",
+    author: "operator-1",
+    body: "Called the debtor about the balance",
+    preview: "Called the debtor about the balance",
+    source_system: "business_events",
+    source_ref: "ghl-note-row",
+    provider_message_id: providerId,
+  };
+  const out: any = await debtWorklist(
+    new URLSearchParams(),
+    deps(fakeClient(tables), conversationStub({ [JOB_A]: [jobCopy] }).fn),
+  );
+  const debtor = out.debtors.find((d: any) => d.key === "xero:xc-1");
+  const notes = debtor.timeline.entries.filter((entry: any) =>
+    entry.provider_id === providerId
+  );
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0].kind, "ghl_note");
+  assertEquals(notes[0].direction, "internal");
+  assertEquals(notes[0].job_id, null);
+  assertEquals(notes[0].invoice_scope, "debtor");
+});
+
+Deno.test("invoice population refuses a capped, potentially partial book", async () => {
+  const invoices = Array.from({ length: 20_001 }, (_, index) =>
+    invoice(index + 1, { xero_contact_id: null, raw_json: {} })
+  );
+  const error = await assertRejects(
+    () => debtWorklist(
+      new URLSearchParams(),
+      deps(fakeClient({ ...unitTables(), xero_invoices: invoices })),
+    ),
+    DebtWorklistError,
+  );
+  assertEquals(error.status, 503);
+  assertEquals(error.code, "population_unreadable");
+  assert(error.message.includes("page ceiling"));
+});
+
 Deno.test("invoice rows: link, next step and owner, freshness, chase and as-of on every row", async () => {
   const out: any = await debtWorklist(
     new URLSearchParams({ timeline: "recent" }),
@@ -1472,7 +1588,16 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
       body_preview: "mail",
     }],
     job_events: [],
-    business_events: [],
+    business_events: [{
+      id: "note-captured",
+      job_id: jobId,
+      event_type: "ghl.note_added",
+      source: "ghl-webhook-receiver",
+      occurred_at: "2026-09-03T00:00:00Z",
+      direction: "internal",
+      provider_message_id: "ghlnote:note-1:2026-09-03T00:00:00Z",
+      payload: { direction: "internal", body: "Staff contact note" },
+    }],
   };
   const plain: any = await _getJobConversationForTest(fakeClient(tables), {
     job_id: jobId,
@@ -1505,6 +1630,11 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   assertEquals(clean.read_faults, []);
   const inbox = clean.messages.find((m: any) => m.source_system === "inbox");
   assertEquals(inbox.provider_message_id, "graph:G1");
+  const note = clean.messages.find((m: any) =>
+    m.channel === "note" && m.source_system === "business_events"
+  );
+  assertEquals(note.channel, "note");
+  assertEquals(note.direction, "internal");
 });
 
 Deno.test("getJobConversation reports an unreadable unlinked-rules flag and keeps its fallback", async () => {

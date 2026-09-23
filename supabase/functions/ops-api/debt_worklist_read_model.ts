@@ -312,7 +312,9 @@ export function entryFromConversation(
     key: providerId ?? `${source}:${m.source_ref ?? m.id}`,
     kind,
     channel,
-    provider: providerFromId(providerId, fallbackProvider),
+    provider: providerId?.startsWith("ghlnote:")
+      ? "ghl"
+      : providerFromId(providerId, fallbackProvider),
     provider_id: providerId,
     at: str(m.occurred_at),
     at_precision: "time",
@@ -327,6 +329,39 @@ export function entryFromConversation(
     invoice_scope: "job",
     seen_in: [source],
     label: str(m.label),
+  };
+}
+
+export function entryFromGhlContactNote(
+  row: any,
+  debtorInvoiceIds: string[],
+): TimelineEntry {
+  const payload = row.payload ?? {};
+  const providerId = str(row.provider_message_id);
+  const body = String(
+    payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
+      row.body_preview ?? "",
+  );
+  return {
+    key: providerId ?? `business_events:${row.id}`,
+    kind: "ghl_note",
+    channel: "note",
+    provider: "ghl",
+    provider_id: providerId,
+    at: str(row.occurred_at),
+    at_precision: "time",
+    direction: str(row.direction) ?? str(payload.direction) ?? "internal",
+    author: str(payload.added_by) ?? str(payload.sent_by_user) ??
+      str(payload.from),
+    source: "business_events",
+    source_ref: str(row.id),
+    subject: null,
+    preview: body.slice(0, 500),
+    job_id: null,
+    invoice_ids: [...debtorInvoiceIds],
+    invoice_scope: "debtor",
+    seen_in: ["business_events"],
+    label: null,
   };
 }
 
@@ -787,6 +822,7 @@ export async function debtWorklist(
           .in("status", OPEN_STATUSES).gt("amount_due", 0),
       warnings,
       "xero_invoice_id",
+      true,
     );
   } catch (e) {
     throw new DebtWorklistError(
@@ -1284,6 +1320,51 @@ export async function debtWorklist(
     return [...(contactMatchGhl.get(identity.xero_contact_id) ?? [])]
       .filter((id) => !viaJobs.has(id)).sort();
   };
+  const ghlContactIdsFor = (key: string): string[] => {
+    const rows = groups.get(key)!;
+    const identity: DebtorIdentity = rows[0]._identity;
+    if (identity.status !== "verified" || !identity.xero_contact_id) return [];
+    return [...new Set([
+      ...(contactMatchGhl.get(identity.xero_contact_id) ?? []),
+      ...rows.map((r) => r.ghl_contact_id).filter(Boolean),
+    ])].sort();
+  };
+  const debtorGhlContactIds = new Map(
+    debtorKeys.map((key) => [key, ghlContactIdsFor(key)]),
+  );
+  const contactNotesByGhl = new Map<string, any[]>();
+  let contactNotesFault: string | null = null;
+  try {
+    const contactIds = [
+      ...new Set([...debtorGhlContactIds.values()].flat()),
+    ].sort();
+    for (const ids of chunk(contactIds)) {
+      const rows = await pageThrough(
+        "business_events",
+        () =>
+          client.from("business_events")
+            .select(
+              "id, contact_id, event_type, occurred_at, direction, payload, body_preview, provider_message_id",
+            )
+            .eq("event_type", "ghl.note_added")
+            .in("contact_id", ids),
+        warnings,
+        "id",
+        true,
+      );
+      for (const row of rows) {
+        const notes = contactNotesByGhl.get(row.contact_id) ?? [];
+        notes.push(row);
+        contactNotesByGhl.set(row.contact_id, notes);
+      }
+    }
+  } catch (e) {
+    contactNotesFault = errText(e);
+    faults.push({
+      source: "ghl",
+      detail: `contact-level GHL note read failed: ${contactNotesFault}`,
+    });
+  }
   const contactMessages = new Map<string, any[]>();
   let contactMessagesFault: string | null = null;
   const factsByJob = new Map<string, any[]>();
@@ -1452,6 +1533,12 @@ export async function debtWorklist(
           raw.push(entryFromGhlCacheMessage(m, g, debtorInvoiceIds));
         }
       }
+      const contactIds = debtorGhlContactIds.get(key) ?? [];
+      for (const contactId of contactIds) {
+        for (const note of contactNotesByGhl.get(contactId) ?? []) {
+          raw.push(entryFromGhlContactNote(note, debtorInvoiceIds));
+        }
+      }
       for (const jobId of linkedJobs) {
         const jobInvoiceIds = rows.filter((r) => r.link.job_id === jobId).map((
           r,
@@ -1497,12 +1584,13 @@ export async function debtWorklist(
       }
       if (
         (contactMatchFault && identity.status === "verified") ||
-        (contactMessagesFault && contactOnlyGhl.length)
+        (contactMessagesFault && contactOnlyGhl.length) ||
+        (contactNotesFault && contactIds.length)
       ) {
         debtorFaults.push({
           source: "ghl",
           detail:
-            "GHL messages held by contact (no job) could not be read for this debtor",
+            "GHL contact messages or notes could not be read for this debtor",
         });
       }
       timelineSourcesComplete = conversationFaults.length === 0 && !chaseFault &&
@@ -1510,6 +1598,7 @@ export async function debtWorklist(
         !jobsFault && !(factsReadFault && linkedJobs.length) &&
         !(contactMatchFault && identity.status === "verified") &&
         !(contactMessagesFault && contactOnlyGhl.length) &&
+        !(contactNotesFault && contactIds.length) &&
         perJobCapHit.length === 0 && factsCapHit.length === 0 &&
         unverifiedCandidates.length === 0;
       timeline = {
@@ -1619,6 +1708,7 @@ export async function debtWorklist(
       Boolean(ghlCacheFault) ||
       Boolean(contactMatchFault && identity.status === "verified") ||
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
+      Boolean(contactNotesFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
       Boolean(convFaultBy("ghl_cache"));
     const ghlStale = !ghlUnreadable && ghlContacts.some((c) => c.stale);
     const ghlStatus = ghlUnreadable

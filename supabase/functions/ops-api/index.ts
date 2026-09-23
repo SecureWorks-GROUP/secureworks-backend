@@ -16125,7 +16125,7 @@ async function getJobConversation(client: any, body: any) {
     // this job. placement_rule is metadata.placement_rule (null until the
     // placement rules that write it ship).
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, provider_message_id')
+      .select('id, event_type, source, occurred_at, direction, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, provider_message_id')
       .eq('job_id', jobId)
       .in('event_type', messageEventTypes)
       .order('occurred_at', { ascending: false })
@@ -16142,9 +16142,9 @@ async function getJobConversation(client: any, body: any) {
         : r.event_type.includes('call') ? 'call'
         : r.event_type.includes('note') ? 'note'
         : 'email'
-      const direction: string = r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'ghl.note_added' || r.event_type === 'supplier.email_in'
+      const direction: string = p.direction || r.direction || (r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'supplier.email_in'
         ? 'inbound'
-        : 'outbound'
+        : r.event_type === 'ghl.note_added' ? 'internal' : 'outbound')
       const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
       messages.push({
         id: `bev:${r.id}`,

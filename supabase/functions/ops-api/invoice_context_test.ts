@@ -136,7 +136,7 @@ function baseTables(): Tables {
         job_number: null,
         synced_at: "2026-09-11T04:00:00.000Z",
         line_items: [],
-        raw_json: {},
+        raw_json: { Contact: { ContactID: "xc-3" } },
       },
       // no job, no contact route
       {
@@ -402,6 +402,12 @@ function baseTables(): Tables {
  */
 const PG_ROW_CAP = 1000;
 
+function selectedValue(row: any, source: string): any {
+  if (!source.includes("->")) return row[source];
+  const [root, ...path] = source.split(/->>?/);
+  return path.reduce((value, key) => value?.[key], row[root]);
+}
+
 function fakeClient(
   tables: Tables,
   failing: Set<string> = new Set(),
@@ -499,7 +505,9 @@ function fakeClient(
         if (selected) {
           rows = rows.map((r) => {
             const out: any = {};
-            for (const col of selected!) out[col.out] = r[col.src];
+            for (const col of selected!) {
+              out[col.out] = selectedValue(r, col.src);
+            }
             return out;
           });
         }
@@ -768,7 +776,11 @@ Deno.test("contact resolver rejects matches and jobs outside the invoice org", a
     },
   ];
   const invoices = [
-    { xero_invoice_id: "contact-route", xero_contact_id: "xc-cross" },
+    {
+      xero_invoice_id: "contact-route",
+      xero_contact_id: "xc-cross",
+      raw_contact_id: "xc-cross",
+    },
     { xero_invoice_id: "id-route", job_id: foreignJob },
     {
       xero_invoice_id: "number-route",
@@ -804,7 +816,11 @@ Deno.test("contact resolver ignores uncorroborated contact matches", async () =>
   const isVerified = (match: Record<string, unknown>) =>
     emailKey(String(match.email ?? "")) === emailKey("payer@example.test") ||
     phoneKey(String(match.phone ?? "")) === phoneKey("+61 412 345 678");
-  const invoices = [{ xero_invoice_id: "contact-route", xero_contact_id: "xc-cross" }];
+  const invoices = [{
+    xero_invoice_id: "contact-route",
+    xero_contact_id: "xc-cross",
+    raw_contact_id: "xc-cross",
+  }];
   const unverified = await resolveJobLinks(fakeClient(t), invoices, ORG, isVerified);
   assertEquals(unverified.get("contact-route")?.status, "none");
   t.contact_matches[0].email = "Payer <PAYER@example.test>";
@@ -815,6 +831,49 @@ Deno.test("contact resolver ignores uncorroborated contact matches", async () =>
   t.contact_matches[0].phone = "+61 412 345 678";
   const phoneCorroborated = await resolveJobLinks(fakeClient(t), invoices, ORG, isVerified);
   assertEquals(phoneCorroborated.get("contact-route")?.status, "linked");
+});
+
+Deno.test("contact route requires this invoice's own Xero ContactID", async () => {
+  const t = baseTables();
+  const jobId = "a0000000-0000-4000-8000-000000000077";
+  t.jobs = [{
+    id: jobId,
+    org_id: ORG,
+    job_number: "SWF-261977",
+    status: "scheduled",
+    ghl_contact_id: "ghl-verified",
+  }];
+  t.contact_matches = [{
+    org_id: ORG,
+    xero_contact_id: "xc-cross",
+    ghl_contact_id: "ghl-verified",
+    job_id: jobId,
+    email: "payer@example.test",
+    phone: null,
+  }];
+  const verified = await resolveJobLinks(
+    fakeClient(t),
+    [{
+      xero_invoice_id: "verified-invoice",
+      xero_contact_id: "xc-cross",
+      raw_contact_id: "xc-cross",
+    }],
+    ORG,
+    () => true,
+  );
+  assertEquals(verified.get("verified-invoice")?.job_id, jobId);
+
+  const conflicting = await resolveJobLinks(
+    fakeClient(t),
+    [{
+      xero_invoice_id: "conflicting-invoice",
+      xero_contact_id: "xc-cross",
+      raw_contact_id: "xc-other",
+    }],
+    ORG,
+    () => true,
+  );
+  assertEquals(conflicting.get("conflicting-invoice")?.status, "none");
 });
 
 Deno.test("4. one failing source is reported, the rest of the picture still returns", async () => {
