@@ -12,12 +12,24 @@ import {
   type SalesBookingPackAuth,
   SalesBookingPackError,
 } from "./sales_booking_pack.ts";
+import {
+  BOOKING_APPROVAL_TTL_MS,
+  bookingContentHash,
+  bookingHash,
+  bookingInstant as timestamp,
+  canonicalBookingJson,
+} from "../_shared/booking_approval_gate.ts";
+export {
+  BOOKING_APPROVAL_TTL_MS,
+  bookingContentHash,
+  bookingHash,
+  canonicalBookingJson,
+};
 
 // JSON from the versioned producer is preserved, including future diagnostic keys.
 // deno-lint-ignore no-explicit-any
 export type BookingObject = Record<string, any>;
 export type BookingStep = "calendar" | "message";
-export const BOOKING_APPROVAL_TTL_MS = 15 * 60_000;
 const PROFILE = "fencing-stratco-marnin";
 const SCHEMA = "scope-booking-lead.v1";
 const obj = (v: unknown): v is BookingObject =>
@@ -27,30 +39,6 @@ const nonempty = (v: unknown): v is string =>
 const hashPattern = /^[a-f0-9]{64}$/;
 const opportunity = (id: string) => id.replace(/^opp:/, "");
 
-/** Key order independent; string bytes (including whitespace) are untouched. */
-export function canonicalBookingJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalBookingJson).join(",")}]`;
-  }
-  if (obj(value)) {
-    return `{${
-      Object.keys(value).sort().map((key) =>
-        `${JSON.stringify(key)}:${canonicalBookingJson(value[key])}`
-      ).join(",")
-    }}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-export async function bookingHash(value: unknown): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(canonicalBookingJson(value)),
-  );
-  return Array.from(
-    new Uint8Array(digest),
-    (b) => b.toString(16).padStart(2, "0"),
-  ).join("");
-}
 function fail(reason: string, status = 409): never {
   throw new SalesBookingPackError(reason, status);
 }
@@ -401,18 +389,9 @@ export function bookingApprovalSnapshot(
   };
 }
 
-/** content_hash binds identity/revision and the entire channel content; it is
- * NOT SHA256(text) alone. Producer and UI handoff use this canonical form. */
-export function bookingContentHash(snapshot: BookingObject): Promise<string> {
-  const { content_hash: _ignored, ...binding } = snapshot;
-  return bookingHash(binding);
-}
-function timestamp(value: unknown): number {
-  if (typeof value !== "string" || !/(Z|[+-]\d\d:\d\d)$/.test(value)) {
-    return NaN;
-  }
-  return Date.parse(value);
-}
+// content_hash binds identity/revision and the entire channel content; it is
+// NOT SHA256(text) alone. bookingContentHash lives in the shared gate so the
+// executor and the GHL writer verify it the same way.
 function isRecordedApprovalState(state: unknown): boolean {
   return state === "approved" || state === "held" || state === "refused";
 }
@@ -555,7 +534,10 @@ export async function salesBookingApprovalWriteAction(args: {
   if (["pending", "unknown", "succeeded", "failed"].includes(channel?.state)) {
     fail("booking_step_requires_reconciliation");
   }
-  if (decision === "approved") {
+  // An exact-text approval stands on its own: a text that names no time
+  // ("does Friday suit?") has no calendar operation to prove. The executor
+  // (sales_booking_execute.ts) re-checks the thread and route at the press.
+  if (decision === "approved" && snapshot.step === "calendar") {
     const flow = response.booking_flow;
     if (
       !response.coverage.full_population ||
@@ -583,10 +565,9 @@ export async function salesBookingApprovalWriteAction(args: {
         "daily_capacity",
       ]
     ) if (!labels.has(required)) fail(`booking_validation_missing:${required}`);
-    const checked = timestamp(validation.checked_at);
-    if (!(checked <= now.getTime() && now.getTime() - checked <= 60_000)) {
-      fail("booking_validation_stale");
-    }
+    // No 60-second external freshness gate: the external engine only runs in
+    // a terminal, so it could never be met live. sales_booking_book re-reads
+    // GHL and Outlook for a clash on the server at the moment of the press.
     if (
       !Array.isArray(model.evidence_quotes) || !model.evidence_quotes.length ||
       model.evidence_quotes.some((e: BookingObject) =>
@@ -619,13 +600,13 @@ export async function salesBookingApprovalWriteAction(args: {
         timestamp(slot.end_iso) > timestamp(cal.start_iso)
       ) fail("prior_offer_conflict");
     }
-    if (
-      snapshot.step === "message" &&
-      (!nonempty(expected.content.text) ||
-        !/^\+[1-9]\d{7,14}$/.test(expected.content.sender) ||
-        !/^\+[1-9]\d{7,14}$/.test(expected.content.recipient))
-    ) fail("exact_message_route_required");
   }
+  if (
+    decision === "approved" && snapshot.step === "message" &&
+    (!nonempty(expected.content.text) ||
+      !/^\+[1-9]\d{7,14}$/.test(expected.content.sender) ||
+      !/^\+[1-9]\d{7,14}$/.test(expected.content.recipient))
+  ) fail("exact_message_route_required");
   const record: BookingApprovalRecord = {
     binding_hash: await bookingHash(expected),
     step: snapshot.step,

@@ -118,7 +118,8 @@ import {
   ghlCalendarPersonEventsAction,
 } from './calendar_events.ts'
 import { createCalendarAppointmentAction } from './calendar_appointment.ts'
-import { appointmentLedger } from './calendar_appointment_ledger.ts'
+import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
+import { appointmentLedger, bookingApprovalReader } from './calendar_appointment_ledger.ts'
 import {
   allocationOpportunityCustomFields,
   lookupAllocationOpportunityAction,
@@ -779,6 +780,10 @@ serve(async (req: Request) => {
             method: 'POST', headers: { Version: '2023-02-21' }, body: JSON.stringify(payload),
           }),
           ledger: appointmentLedger(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
+          // A real write needs the captain's live approval of this exact
+          // appointment (docs/sales-booking-executor.md).
+          approvals: bookingApprovalReader(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)),
+          captainEmails: parseSalesBookingCaptainEmails(Deno.env.get('SALES_BOOKING_CAPTAIN_EMAILS')),
         },
       })
       return json(result.body, result.status)

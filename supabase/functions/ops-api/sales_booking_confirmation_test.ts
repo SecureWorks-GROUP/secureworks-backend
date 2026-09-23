@@ -436,13 +436,10 @@ Deno.test("legacy stamp never grants separate approval; manifest publish survive
   );
 });
 
-Deno.test("failed, missing, stale checks and malformed/conflicting ledger each refuse without persisting", async () => {
+Deno.test("failed or missing checks and malformed/conflicting ledger each refuse without persisting", async () => {
   const mutations: Array<(f: SalesBookingReadResponse) => void> = [
     (f) => f.cases[0].booking_read_model!.validation.checks[0].passed = false,
     (f) => f.cases[0].booking_read_model!.validation.checks.pop(),
-    (f) =>
-      f.cases[0].booking_read_model!.validation.checked_at =
-        "2026-09-21T23:58:00Z",
     (f) => f.cases[0].booking_read_model!.evidence_quotes = null,
     (f) => f.booking_flow!.commitments = [{ id: "broken" }],
     (f) =>
@@ -463,6 +460,46 @@ Deno.test("failed, missing, stale checks and malformed/conflicting ledger each r
     );
     assertEquals(records.size, 0);
   }
+});
+
+Deno.test("the 60-second external freshness gate is gone; the executor re-checks at the press", async () => {
+  const f = await fixture(), { store, records } = memoryStore();
+  f.cases[0].booking_read_model!.validation.checked_at = "2026-09-21T23:30:00Z";
+  const written = await salesBookingApprovalWriteAction(request(f, store));
+  assertEquals(written.approval.state, "approved");
+  assertEquals(records.size, 1);
+});
+
+Deno.test("an exact-text approval needs no calendar operation, so a text with no time can be approved", async () => {
+  const f = await fixture(), { store, records } = memoryStore();
+  const m = f.cases[0].booking_read_model!;
+  m.message.template_text = "Hi Sample, does Friday suit?";
+  m.calendar_write.preview = null;
+  m.validation = { ok: false, checks: null, reasons: ["no_slot_yet"] };
+  f.booking_flow!.commitments = null;
+  f.booking_flow!.calendar_read = { state: "could_not_read", provider: "ghl" };
+  m.message.routing.message_sha256 = await bookingContentHash(
+    bookingApprovalSnapshot(f, f.cases[0], "message"),
+  );
+  const written = await salesBookingApprovalWriteAction(
+    request(f, store, "message"),
+  );
+  assertEquals(written.approval.snapshot.content.text, m.message.template_text);
+  // The calendar step still needs its full operation and checks.
+  await assertRejects(() => salesBookingApprovalWriteAction(request(f, store)));
+  assertEquals(records.size, 1);
+  // The message route itself is still required.
+  const g = await fixture(), other = memoryStore();
+  const gm = g.cases[0].booking_read_model!;
+  gm.message.routing.to_number = "0400";
+  gm.message.routing.message_sha256 = await bookingContentHash(
+    bookingApprovalSnapshot(g, g.cases[0], "message"),
+  );
+  await assertRejects(
+    () => salesBookingApprovalWriteAction(request(g, other.store, "message")),
+    Error,
+    "exact_message_route_required",
+  );
 });
 
 Deno.test("approval read failure is explicit, while content changes hide old approvals", async () => {

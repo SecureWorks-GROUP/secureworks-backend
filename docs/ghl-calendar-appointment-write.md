@@ -22,7 +22,10 @@ Use JSON with exactly these fields (unknown fields are refused):
 }
 ```
 
-All fields are required strings. IDs accept letters, digits, underscore and
+Optional `"dryRun": true` forces a preview even when writes are enabled; any
+other `dryRun` value is refused. It can only remove a write.
+
+All other fields are required strings. IDs accept letters, digits, underscore and
 hyphen, up to 200 characters. Title is 1–200 characters, address 1–1000,
 and idempotencyKey 1–200; these three reject leading/trailing whitespace and
 control characters. Times require a real ISO date, seconds and explicit `Z` or
@@ -45,6 +48,21 @@ rollout flag is off. `OPS_AGENT_SERVER_KEY` remains dedicated to existing provid
 read actions; this change does not grant it appointment-write authority. The agent
 integration must use an already-authorized server credential. Credentials never go
 in the JSON body or client code.
+
+## Captain approval required for a real write
+
+A real write requires `idempotencyKey` to be the binding hash of a live
+`sales_booking_approvals` calendar approval, made by an allow-listed captain
+(`SALES_BOOKING_CAPTAIN_EMAILS`), unexpired, untampered, and approving exactly
+this calendar, assignee, contact, start, end, title and address. Otherwise the
+action refuses HTTP 409 `{ok:false, code:"approval_required", reason}` before
+reserving or posting; `reason` is one of `approval_not_found`,
+`approval_unreadable`, `approval_step_mismatch`, `approval_not_approved`,
+`approval_not_by_captain`, `content_hash_mismatch`, `approval_expired`.
+Replays of a completed key and recovery of a `sending` key never post and are
+unaffected. Previews never refuse on approval; they report
+`approval: {state:"live"|"missing", reason}`. The ops-api executor is the
+intended caller: `docs/sales-booking-executor.md`.
 
 ## Default-off preview and provider payload
 
@@ -116,6 +134,8 @@ returned.
 | Code | HTTP | Meaning / caller response |
 | --- | --- | --- |
 | `flag_off` | 200 | Validated preview only. Do not report a booking as made. |
+| `dry_run` | 200 | Same preview, because the caller sent `dryRun: true` while writes are enabled. |
+| `approval_required` | 409 | No live captain approval of these exact fields. Do not book. |
 | `overlap` | 409 | Person already busy or a durable reservation holds the window. Do not book. |
 | `read_failed` | 502 | Contact/directory/roster/window could not be read completely. Retry the same key; never call it free time. |
 | `contact_not_found` | 404 | Explicit contact 404 or no exact contact in the configured location. |
