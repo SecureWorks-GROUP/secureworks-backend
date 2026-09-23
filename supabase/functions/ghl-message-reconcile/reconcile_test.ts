@@ -130,6 +130,27 @@ class FakeGhl {
   }
 }
 
+/** octet_length of JSON with ': ' and ', ' separators (PostgreSQL jsonb::text). */
+function jsonbStyleCursorBytes(cursor: unknown): number {
+  const compact = JSON.stringify(cursor);
+  if (compact === undefined) return 4;
+  let out = "";
+  let inString = false;
+  let escape = false;
+  for (const ch of compact) {
+    out += ch;
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") inString = true;
+    else if (ch === ":" || ch === ",") out += " ";
+  }
+  return new TextEncoder().encode(out).length;
+}
+
 class FakeDb {
   runs: (RunRow & {
     counts: Record<string, number>;
@@ -140,6 +161,7 @@ class FakeDb {
   keys = new Set<string>();
   rows: Record<string, unknown>[] = [];
   captureCalls = 0;
+  refusedCursors = 0;
   flag = true;
   lane = true;
   captureDisabledAfter = Infinity;
@@ -161,8 +183,9 @@ class FakeDb {
     }
     assertEquals(run.source, RUN_SOURCE);
     if (run.cursor != null) {
-      const bytes = captureRunCursorBytes(run.cursor);
+      const bytes = jsonbStyleCursorBytes(run.cursor);
       if (bytes > CAPTURE_RUN_CURSOR_MAX_BYTES) {
+        this.refusedCursors++;
         throw Object.assign(new Error("capture_run_invalid"), {
           code: "capture_run_invalid",
         });
@@ -922,4 +945,58 @@ Deno.test("a same-millisecond burst that would overflow the run cursor steps pas
   assert(
     captureRunCursorBytes(db.runs[0].cursor) <= CAPTURE_RUN_CURSOR_MAX_BYTES,
   );
+  assertEquals(db.refusedCursors, 0);
+});
+
+Deno.test("a same-millisecond blast of typical GHL ids drains without a refused jsonb cursor write", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const same = new Date(T0 - 2 * MIN).toISOString();
+  const n = 200;
+  for (let i = 0; i < n; i++) {
+    const id = `ghlConv${String(i).padStart(13, "0")}`;
+    ghl.add({
+      id,
+      contactId: `${id}-c`,
+      messages: [msg(`${id}Text`, id, `${id}-c`, same)],
+    });
+  }
+  ghl.add({
+    id: "olderAfterTypicalBurst",
+    contactId: "older-typical-c",
+    messages: [
+      msg(
+        "olderAfterTypicalBurstText",
+        "olderAfterTypicalBurst",
+        "older-typical-c",
+        new Date(T0 - 5 * MIN).toISOString(),
+      ),
+    ],
+  });
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  const policy = {
+    ...POLICY,
+    listPageLimit: 50,
+    maxConversationsPerRun: 150,
+  };
+  let result = await runGhlMessageReconcile(deps(ghl, db), policy);
+  assert(result.outcome === "ran");
+  assertEquals(db.refusedCursors, 0);
+  if (result.status === "partial") {
+    db.clock = T0 + 15 * MIN;
+    result = await runGhlMessageReconcile(deps(ghl, db), policy);
+    assert(result.outcome === "ran");
+  }
+  assertEquals(db.refusedCursors, 0);
+  assertEquals(result.status, "succeeded");
+  assertEquals(result.counts.scan_completed, 1);
+  assert(rowFor(db, "olderAfterTypicalBurstText"));
+  assert(
+    db.runs.some((run) => (run.counts.boundary_tie_fallbacks ?? 0) >= 1),
+  );
+  for (const run of db.runs) {
+    if (run.cursor != null) {
+      assert(jsonbStyleCursorBytes(run.cursor) <= CAPTURE_RUN_CURSOR_MAX_BYTES);
+    }
+  }
 });

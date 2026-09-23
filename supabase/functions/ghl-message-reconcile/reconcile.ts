@@ -72,6 +72,7 @@ export const POLICY: Readonly<ReconcilePolicy> = {
 
 /** context_capture_runs.cursor CHECK: octet_length(cursor::text) <= 4096 */
 export const CAPTURE_RUN_CURSOR_MAX_BYTES = 4096;
+const CAPTURE_RUN_CURSOR_SAFETY_BYTES = 64;
 
 export interface RunRow {
   id: string;
@@ -185,8 +186,33 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
+function postgresJsonbText(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  switch (typeof value) {
+    case "boolean":
+      return value ? "true" : "false";
+    case "number":
+      return Number.isFinite(value) ? String(value) : "null";
+    case "string":
+      return JSON.stringify(value);
+    case "object": {
+      if (Array.isArray(value)) {
+        return `[${value.map(postgresJsonbText).join(", ")}]`;
+      }
+      const obj = value as Record<string, unknown>;
+      const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
+      return `{${
+        keys.map((k) => `${JSON.stringify(k)}: ${postgresJsonbText(obj[k])}`)
+          .join(", ")
+      }}`;
+    }
+    default:
+      return "null";
+  }
+}
+
 export function captureRunCursorBytes(cursor: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(cursor)).length;
+  return new TextEncoder().encode(postgresJsonbText(cursor)).length;
 }
 
 function positionFitsCursor(
@@ -194,7 +220,7 @@ function positionFitsCursor(
   position: NonNullable<ScanState["position"]>,
 ): boolean {
   return captureRunCursorBytes({ ...scan, position }) <=
-    CAPTURE_RUN_CURSOR_MAX_BYTES;
+    CAPTURE_RUN_CURSOR_MAX_BYTES - CAPTURE_RUN_CURSOR_SAFETY_BYTES;
 }
 
 function ms(value: unknown): number | null {
