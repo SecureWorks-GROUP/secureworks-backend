@@ -3803,3 +3803,16 @@ no row and so never read as booked or sent.
 ## GHL appointment write safety
 
 `create_calendar_appointment` is disabled by default. Its caller, retry, notification and deployment contracts are in `docs/ghl-calendar-appointment-write.md`; the durable sending fence must never be cleared just because a provider window is empty; the only way out is the captain/service-role `release_calendar_appointment_request` (terminal `released` state, row kept, key never posts again). The server action owns the only appointment POST, while the agent-side tool lives in another repository.
+
+## The Job Conversation Shows An Email Where The Ladder Put It
+
+`getJobConversation` (ops-api) reads `inbox_events` only for legacy inbox rows
+with NO `business_events` copy (context R0): `inbox_events.job_id` is the old
+monitor-inbox matcher's guess, so an email whose event copy exists is shown by
+the evidence block alone, on the job the ladder chose (or nowhere, while it
+rests unplaced). Copies are found by source pointer, `graph:` provider key or
+`payload.inbox_events_id` at the same instant; a failed lookup keeps the rows,
+marked `event_copy: 'unknown'`, never hides them. Evidence rows carry
+`attribution_status`, `attribution_step`, `placement_rule`. The inbox block is
+removed by email slice EM-R2. Module and tests:
+`job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
