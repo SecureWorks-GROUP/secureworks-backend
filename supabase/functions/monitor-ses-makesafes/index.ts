@@ -25,7 +25,7 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 //   - sync_state.mode = DEGRADED while any attachment pending/failed.
 
 // deno-lint-ignore no-import-prefix
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 
 // ── Graph GET with mid-scan token-expiry self-heal (intake item 12) ──────────
