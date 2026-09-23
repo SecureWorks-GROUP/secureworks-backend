@@ -44,7 +44,7 @@ This packet does not claim capture-all acceptance for untested producer paths. B
 
 ## Producer provenance follow-up (2026-09-11)
 
-Direct IDs now require `direct_job_id`, `direct_reference`, or `manual` source provenance, both in `resolveMatch` and the database. Confidence alone never makes a contact, email, phone, or recent-job guess authoritative. Dropped suggestions remain in `metadata.attribution_hint`; receiver payload suggestions are explicitly named `suggested_job_id`/`suggested_job_number`. Unmarked historical IDs cannot be assumed explicit; the migration reconsiders them through the ladder, preserving the hint. Thread/contact/Luna attribution remains database-owned.
+Direct IDs now require `direct_job_id`, `direct_reference`, or `manual` source provenance, both in `resolveMatch` and the database. Confidence alone never makes a contact, email, phone, or recent-job guess authoritative. Dropped suggestions remain in `metadata.attribution_hint`. The receiver no longer emits payload suggestions (AGENTS.md GHL webhook receiver). Unmarked historical IDs cannot be assumed explicit; the migration reconsiders them through the ladder, preserving the hint. Thread/contact/Luna attribution remains database-owned.
 
 - GHL outbound SMS uses the explicit caller job only; the latest-contact-match shortcut is removed. Both fallback and T7 retain the full body, contact, provider ID and source date or null.
 - A body `job_id` never places receiver evidence (C1b; AGENTS.md "The GHL Webhook Receiver Authenticates First And Logs Ids Only"). Transcript invocation forwards `event_at` from the provider independently of ingestion.

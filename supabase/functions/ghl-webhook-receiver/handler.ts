@@ -25,9 +25,9 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // ════════════════════════════════════════════════════════════
 
 // T7 Loop 4 — atomic cutover to recordEvidence when evidence_capture_v1
-// is ON. Wraps the single business_events insert below. Inbound SMS,
-// inbound email, calls, and GHL notes all get the full envelope
-// (channel/direction/source_table/source_id/match_status) when ON.
+// is ON. Wraps the remaining workflow-post insert below (CallCompleted,
+// AppointmentCreated, NoteAdded, ContactStageChanged). Messages and the
+// app's notes, tasks and appointments never reach this path (capture.ts).
 import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
 import { resolveMatch } from "../_shared/evidence/match.ts";
@@ -885,10 +885,10 @@ export async function handleGhlWebhook(
       } catch (e) {
         // T7 path failed (helper threw, validator rejected, transient
         // Postgres error, etc.). Mark for fallback so the canonical event
-        // still lands via the legacy raw insert below. Without this, an
-        // inbound reply / outbound SMS / call event could be dropped from
-        // the spine on a T7 failure — exactly the regression the
-        // stop-time review caught.
+        // still lands via the legacy raw insert below. Without this, a
+        // remaining workflow post (call, NoteAdded, AppointmentCreated,
+        // ContactStageChanged) could be dropped on a T7 failure — the
+        // regression the stop-time review caught.
         console.error(
           `[ghl-webhook-receiver] T7 recordEvidence failed; falling back to legacy: code=${
             errorCode(e)
