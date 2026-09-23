@@ -8,43 +8,43 @@ on:
     # they target main. Run the same three jobs on every PR that touches
     # these paths.
     paths:
-      - 'supabase/functions/**'
+      - "supabase/functions/**"
       # Migrations-only and scripts-only PRs must still trigger the required
       # deno-check status (the job no-ops to pass when no function files
       # changed) — otherwise branch protection waits forever and the PR can
       # never merge. Prefer scripts/** over a hardcoded list so new files under
       # scripts/ (e.g. evidence checkers) still fire the required check.
-      - 'supabase/migrations/**'
-      - 'supabase/tests/migration-contracts/**'
-      - 'scripts/**'
-      - 'scripts/deploy-edge-function.sh'
-      - 'scripts/smoke-edge-functions.sh'
-      - 'scripts/smoke-ops-api-action-surface.sh'
-      - 'scripts/_ops-api-required-actions.txt'
-      - 'scripts/identify-edge-deploy-changes.sh'
-      - 'scripts/apply-pending-migrations.sh'
-      - 'scripts/migration-autoapply-exclusions.txt'
-      - 'scripts/migration-autoapply-ledger-aliases.txt'
-      - 'scripts/check-edge-deploy-guardrails.sh'
-      - 'scripts/check-edge-schema-preflight.sh'
-      - 'scripts/edge-function-schema-requirements.txt'
-      - 'scripts/check-ops-api-source-actions.sh'
-      - 'scripts/test/test-deploy-edge-functions-workflow.sh'
-      - 'scripts/test/test-apply-pending-migrations.sh'
-      - 'scripts/test/test-edge-schema-preflight.sh'
-      - 'scripts/test/test-smoke-ops-api-action-surface.sh'
-      - '.github/workflows/deploy-edge-functions.yml'
-      - '.github/workflows/pr-check.yml'
+      - "supabase/migrations/**"
+      - "supabase/tests/migration-contracts/**"
+      - "scripts/**"
+      - "scripts/deploy-edge-function.sh"
+      - "scripts/smoke-edge-functions.sh"
+      - "scripts/smoke-ops-api-action-surface.sh"
+      - "scripts/_ops-api-required-actions.txt"
+      - "scripts/identify-edge-deploy-changes.sh"
+      - "scripts/apply-pending-migrations.sh"
+      - "scripts/migration-autoapply-exclusions.txt"
+      - "scripts/migration-autoapply-ledger-aliases.txt"
+      - "scripts/check-edge-deploy-guardrails.sh"
+      - "scripts/check-edge-schema-preflight.sh"
+      - "scripts/edge-function-schema-requirements.txt"
+      - "scripts/check-ops-api-source-actions.sh"
+      - "scripts/test/test-deploy-edge-functions-workflow.sh"
+      - "scripts/test/test-apply-pending-migrations.sh"
+      - "scripts/test/test-edge-schema-preflight.sh"
+      - "scripts/test/test-smoke-ops-api-action-surface.sh"
+      - ".github/workflows/deploy-edge-functions.yml"
+      - ".github/workflows/pr-check.yml"
       # Same reason as migrations/scripts above: deno-check is a REQUIRED status,
       # so any path that can be changed alone must trigger it or the PR is
       # unmergeable. A watchdog-only PR hit exactly that and sat at BLOCKED
       # with zero checks.
-      - '.github/workflows/makesafe-intake-watchdog.yml'
+      - ".github/workflows/makesafe-intake-watchdog.yml"
       # Same reason again for the SES Reporting proof harness: these paths can be
       # changed alone, and the ses-proof-harness job below is the only automated
       # coverage the harness has. Why the harness owns its own npm project under
       # tests/e2e is documented in docs/ses-reporting-proof-harness.md.
-      - 'tests/e2e/**'
+      - "tests/e2e/**"
       # Same reason a fourth time, for evidence and project-memory changes.
       # An agent run that lands only its report, screenshots and ledgers under
       # data/ — or only updates AGENTS.md / CLAUDE.md — matched NO path here, so
@@ -53,8 +53,8 @@ on:
       # (68 files, all under data/ plus AGENTS.md): mergeStateStatus BLOCKED,
       # statusCheckRollup 0. `*` does not match `/`, so '*.md' is the six
       # tracked ROOT markdown files only and does not pull in docs/**.
-      - 'data/**'
-      - '*.md'
+      - "data/**"
+      - "*.md"
       # Same reason a fifth time, and it is the gap the note above NAMES without
       # closing: '*.md' is root-only, so a PR landing only docs/** — a diagnosis
       # under docs/evidence/, an ADR, a contract — matched no path here at all.
@@ -68,7 +68,7 @@ on:
       # pass when none changed, exactly as it already does for a migrations-only
       # or data/-only PR. This subsumes the former single-file
       # 'docs/ses-reporting-proof-harness.md' entry.
-      - 'docs/**'
+      - "docs/**"
 
 permissions:
   contents: read
@@ -299,10 +299,11 @@ jobs:
       # contract feeds that writer.
       - name: Test GHL message row builder and send_sms evidence
         run: |
-          deno test --allow-read \
+          deno test --allow-read --allow-env \
             supabase/functions/_shared/evidence/ghl_message_test.ts \
             supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
-            supabase/functions/ghl-proxy/sms_capture_test.ts
+            supabase/functions/ghl-proxy/sms_capture_test.ts \
+            supabase/functions/ghl-proxy/send_sms_response_test.ts
 
       - name: Test the 15-minute GHL message reconciler
         run: |
@@ -414,7 +415,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.changed.outputs.has_changes == 'true'
         with:
-          node-version: '22'
+          node-version: "22"
           cache: npm
           cache-dependency-path: tests/e2e/package-lock.json
 
