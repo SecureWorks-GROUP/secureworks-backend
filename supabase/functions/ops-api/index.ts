@@ -386,6 +386,7 @@ import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
+import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -15970,16 +15971,30 @@ async function getJobConversation(client: any, body: any) {
     console.log('[ops-api] get_job_conversation ghl_cache read failed:', (e as Error).message)
   }
 
-  // 2. inbox_events — email evidence (subject + body preview).
+  // 2. inbox_events — legacy inbox copies only (context slice R0). Its job_id
+  //    is the old monitor-inbox matcher's guess, so an email whose
+  //    business_events copy sits on a job is shown by block 4 alone, on the
+  //    job the ladder chose. A copy the ladder left unplaced keeps the inbox
+  //    row (labelled) until P4's flag context_unlinked_rules_v1 is on. Rows
+  //    with no event copy stay, labelled, until email slice EM-R2 removes
+  //    this block. See job_conversation_inbox_copy.ts.
   try {
     let q = client.from('inbox_events')
-      .select('id, from_email, from_name, to_email, subject, body_preview, received_at, classification, mailbox')
+      .select('id, graph_message_id, from_email, from_name, to_email, subject, body_preview, received_at, classification, mailbox')
       .eq('job_id', jobId)
       .order('received_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('received_at', sinceFilter)
-    const { data: inbox } = await q
-    for (const r of (inbox || [])) {
+    const { data: inbox, error: inboxErr } = await q
+    if (inboxErr) console.error('[ops-api] get_job_conversation inbox read failed:', inboxErr.message)
+    const copyCheck = await readInboxEventCopies(client, inbox || [])
+    if (!copyCheck.ok) {
+      console.error('[ops-api] get_job_conversation inbox event-copy check incomplete:', copyCheck.errors.join('; '))
+    }
+    // The flag is read only when it can change the answer.
+    const hasUnplacedCopy = [...copyCheck.copies.values()].some((job) => !job)
+    const unlinkedRulesOn = hasUnplacedCopy ? await readUnlinkedRulesOn(client) : false
+    for (const { row: r, event_copy, label } of legacyInboxRowsToShow<any>(inbox || [], copyCheck, { unlinkedRulesOn })) {
       messages.push({
         id: `inbox:${r.id}`,
         job_id: jobId,
@@ -15992,6 +16007,9 @@ async function getJobConversation(client: any, body: any) {
         subject: r.subject || null,
         source_system: 'inbox',
         source_ref: r.id,
+        placed_by: 'old_inbox_matcher',
+        label,
+        event_copy,
       })
     }
   } catch (e) {
@@ -16036,14 +16054,19 @@ async function getJobConversation(client: any, body: any) {
       'client.call_complete', 'client.message_in',
       'supplier.email_in', 'ghl.note_added',
     ]
+    // attribution_status / attribution_step / placement_rule (context slice
+    // R0): how the ladder placed the row, so a reader can see why it is on
+    // this job. placement_rule is metadata.placement_rule (null until the
+    // placement rules that write it ship).
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, payload, correlation_id')
+      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
       .eq('job_id', jobId)
       .in('event_type', messageEventTypes)
       .order('occurred_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
-    const { data: bev } = await q
+    const { data: bev, error: bevErr } = await q
+    if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
     for (const r of (bev || [])) {
       const p: any = r.payload || {}
       const channel: string = r.event_type.includes('sms') ? 'sms'
@@ -16066,6 +16089,9 @@ async function getJobConversation(client: any, body: any) {
         subject: p.subject || null,
         source_system: 'business_events',
         source_ref: r.id,
+        attribution_status: r.attribution_status ?? null,
+        attribution_step: r.attribution_step ?? null,
+        placement_rule: r.placement_rule ?? null,
       })
     }
   } catch (e) {
