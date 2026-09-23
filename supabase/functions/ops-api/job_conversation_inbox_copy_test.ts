@@ -410,6 +410,33 @@ Deno.test("R0 same job: an email with an event copy shows once, from the evidenc
   }
 });
 
+Deno.test("an invoice.emailed business event appears once as an outbound email", async () => {
+  const eventId = "debt-followup-invoice-email-event";
+  const messages = await conversation(fakeClient({
+    jobs: [{ id: SAME_JOB, job_number: "SWMS-261001", ghl_contact_id: null }],
+    business_events: [{
+      id: eventId,
+      job_id: SAME_JOB,
+      event_type: "invoice.emailed",
+      source: "ops-api",
+      occurred_at: "2026-09-24T01:00:00Z",
+      payload: { invoice_number: "INV-1001", to: "accounts@example.test" },
+    }],
+    job_events: [{
+      id: "legacy-invoice-email-event",
+      job_id: SAME_JOB,
+      event_type: "invoice.emailed",
+      detail_json: { invoice_number: "INV-1001" },
+      created_at: "2026-09-24T01:00:00Z",
+    }],
+  }), SAME_JOB);
+  const email = messages.filter((message) => message.source_ref === eventId);
+  assertEquals(email.length, 1);
+  assertEquals(email[0].source_system, "business_events");
+  assertEquals(email[0].channel, "email");
+  assertEquals(email[0].direction, "outbound");
+});
+
 Deno.test("R0 other job: an email the ladder placed elsewhere shows only on the ladder's job, in every flag state", async () => {
   for (const flag of FLAG_STATES) {
     const tables = withFlag(otherJobTables(), flag);

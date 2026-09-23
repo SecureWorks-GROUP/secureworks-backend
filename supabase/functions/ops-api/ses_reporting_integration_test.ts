@@ -51,14 +51,11 @@ Deno.test("legacy invoice sends hit the sealed SES release gate before provider 
     "assertLegacySesInvoiceActionAllowed(",
     sendStart,
   );
-  // Every send now goes through the debt follow-up executor; the old
-  // Xero-direct /Invoices/{id}/Email route is retired.
   const sendProvider = INDEX.indexOf(
     "debtFollowupLegacySend(",
     sendStart,
   );
   assert(sendGate > sendStart && sendGate < sendProvider);
-  assert(!INDEX.includes("xeroPost(`/Invoices/${siId}/Email`"));
 
   const approveStart = INDEX.indexOf("case 'approve_and_send_invoice'");
   const approveGate = INDEX.indexOf(

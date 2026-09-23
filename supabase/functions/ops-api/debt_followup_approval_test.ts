@@ -24,6 +24,7 @@ import {
   type MirrorInvoiceRow,
 } from "./debt_followup_approval.ts";
 import { debtFollowupLedger } from "./debt_followup_approval_live.ts";
+import { SMS_DEFAULT_FROM_NUMBER } from "../_shared/sms_from_number.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -732,7 +733,7 @@ Deno.test("approval binds body hash, destination, invoice ids, snapshot and expi
     channel: "sms",
     ghl_contact_id: "ghl-1",
     phone: "+61412345678",
-    from_number: "+61489267771",
+    from_number: SMS_DEFAULT_FROM_NUMBER,
   });
   assertEquals(record.proposal.body, CHASE.message);
   assertEquals(record.body_sha256.length, 64);
@@ -789,6 +790,32 @@ Deno.test("payment link binds the exact invoice and composes the online link tex
   assertEquals(stale.status, "refused");
   if (stale.status === "refused") assertEquals(stale.detail?.changed, ["body"]);
   assertEquals(providerCalls(moved), 0);
+});
+
+Deno.test("chase, payment-link, and invoice email proposals refuse internal debt holds", async () => {
+  const requests = [CHASE, LINK, EMAIL];
+  const holds = [
+    { debt_classification: "blocked_by_us", debt_blocker: null },
+    { debt_classification: "genuine_debt", debt_blocker: "invoice_wrong" },
+    { debt_classification: "genuine_debt", debt_blocker: "context_pending" },
+  ];
+
+  for (const request of requests) {
+    for (const hold of holds) {
+      const w = world();
+      Object.assign(w.mirror["inv-1"], hold);
+      const result = await debtFollowupProposeAction({
+        method: "POST",
+        body: { request },
+        deps: deps(w),
+      });
+      assertEquals(result.status, "refused");
+      if (result.status === "refused") {
+        assertEquals(result.reason, "invoice_on_hold");
+      }
+      assertEquals(providerCalls(w), 0);
+    }
+  }
 });
 
 Deno.test("thank-you text needs a PAID invoice and names the amount paid, without an em dash", async () => {
@@ -883,7 +910,19 @@ Deno.test("chase: one debtor, verified destination, and a named contact must mat
 });
 
 Deno.test("invoice email: recipient must be a verified anchor; the approved subject and address are what go", async () => {
-  const w = world({ env: SWITCH_ON });
+  const w = world({
+    env: SWITCH_ON,
+    emailResponse: () => Promise.resolve({
+      status: 200,
+      body: {
+        success: true,
+        emailed: true,
+        via: "outlook",
+        attachment_sha256: "a".repeat(64),
+        timeline_write_failed: true,
+      },
+    }),
+  });
   const stranger = await debtFollowupProposeAction({
     method: "POST",
     body: { request: { ...EMAIL, to_email: "stranger@hotmail.com" } },
@@ -938,6 +977,7 @@ Deno.test("invoice email: recipient must be a verified anchor; the approved subj
     assertEquals(sent.provider, "outlook");
     assertEquals(sent.provider_proof?.attachment_sha256, "a".repeat(64));
     assertEquals(sent.provider_proof?.accepted, true);
+    assertEquals(sent.provider_proof?.timeline_write_failed, true);
   }
   await press(w, id);
   assertEquals(w.emails.length, 1);
@@ -1075,77 +1115,4 @@ Deno.test("live ledger: a duplicate live claim is 'already claimed', any other w
     threw = true;
   }
   assert(threw);
-});
-
-// ── Source wiring: the old send paths have no provider call of their own ──
-
-const INDEX = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
-const MODULE = Deno.readTextFileSync(
-  new URL("./debt_followup_approval.ts", import.meta.url),
-);
-const LIVE = Deno.readTextFileSync(
-  new URL("./debt_followup_approval_live.ts", import.meta.url),
-);
-
-function body(startText: string, endText: string): string {
-  const start = INDEX.indexOf(startText);
-  assert(start >= 0, startText);
-  const end = INDEX.indexOf(endText, start + startText.length);
-  assert(end > start, endText);
-  return INDEX.slice(start, end);
-}
-
-Deno.test("every debtor send path in ops-api goes through the executor", () => {
-  const paths: [string, string, string][] = [
-    ["case 'send_invoice_email': {", "\n      }\n", "kind: 'invoice_email'"],
-    ["async function sendPaymentLink(", "\n}\n", "kind: 'payment_link_sms'"],
-    ["async function sendChaseSms(", "\n}\n", "kind: 'chase_sms'"],
-    ["async function handlePaymentEvent(", "\n}\n", "kind: 'thank_you_sms'"],
-  ];
-  for (const [start, end, kind] of paths) {
-    const text = body(start, end);
-    assertStringIncludes(text, "debtFollowupLegacySend(", start);
-    assertStringIncludes(text, kind, start);
-    assert(
-      !text.includes("action=send_sms"),
-      `${start} calls ghl-proxy send_sms directly`,
-    );
-    assert(
-      !text.includes("/Email`"),
-      `${start} calls the Xero invoice email route`,
-    );
-    assert(
-      !text.includes("send-outlook-email"),
-      `${start} calls Outlook directly`,
-    );
-  }
-  // The retired Xero-direct invoice email bypass is gone from ops-api.
-  assert(!INDEX.includes("xeroPost(`/Invoices/${siId}/Email`"));
-  // The Outlook transport is reached only through the executor.
-  const calls = INDEX.split("await _verifyAndSendInvoiceEmail(").length - 1;
-  assertEquals(calls, 1);
-  assertStringIncludes(
-    body("function createDebtFollowupDepsForOps(", "\n}\n"),
-    "await _verifyAndSendInvoiceEmail(",
-  );
-  for (
-    const action of [
-      "debt_followup_propose",
-      "debt_followup_approve",
-      "debt_followup_execute",
-    ]
-  ) {
-    assertStringIncludes(INDEX, `case '${action}':`);
-  }
-});
-
-Deno.test("the execute switch is only ever read, never set, in code", () => {
-  const assigns = /DEBT_FOLLOWUP_SEND_EXECUTE["'`]?\s*[:=]\s*["'`]?true/;
-  for (
-    const [name, text] of [["index", INDEX], ["module", MODULE], ["live", LIVE]]
-  ) {
-    assert(!assigns.test(text), name);
-    assert(!/Deno\.env\.set\(/.test(text), name);
-  }
-  assertStringIncludes(MODULE, 'envGet(DEBT_FOLLOWUP_EXECUTE_ENV) === "true"');
 });

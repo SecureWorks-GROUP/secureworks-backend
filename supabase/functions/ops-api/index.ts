@@ -2402,7 +2402,7 @@ function opsApiVersion() {
 
 // Dual-write: log to business_events (CloudEvents pattern)
 // Non-blocking — failures don't break the main operation
-async function logBusinessEvent(client: any, event: {
+type BusinessEventInput = {
   event_type: string;
   source?: string;
   entity_type: string;
@@ -2419,7 +2419,19 @@ async function logBusinessEvent(client: any, event: {
   event_at?: string | null;
   channel?: string;
   direction?: string;
-}) {
+}
+
+function logBusinessEvent(client: any, event: BusinessEventInput): Promise<void>
+function logBusinessEvent(
+  client: any,
+  event: BusinessEventInput,
+  returnWriteStatus: true,
+): Promise<boolean>
+async function logBusinessEvent(
+  client: any,
+  event: BusinessEventInput,
+  returnWriteStatus = false,
+): Promise<void | boolean> {
   try {
     const payload = event.payload || {}
     const eventType = String(event.event_type || '')
@@ -2452,7 +2464,9 @@ async function logBusinessEvent(client: any, event: {
       : payload.source_job_event_id ? 'job_events'
       : null
     const sourceId = payload.inbox_events_id || payload.source_job_event_id || null
-    if (!(await automationLaneEnabled(client, 'capture'))) return
+    if (!(await automationLaneEnabled(client, 'capture'))) {
+      return returnWriteStatus ? false : undefined
+    }
     const { error } = await insertCapturedEvidence(client, {
       event_type: event.event_type,
       source: event.source || 'app/office',
@@ -2480,9 +2494,11 @@ async function logBusinessEvent(client: any, event: {
       schema_version: '1.0',
     })
     if (error) throw error
+    return returnWriteStatus ? true : undefined
   } catch (e) {
     // Non-blocking — log but don't fail the main operation
     console.log('[ops-api] business_events write failed (table may not exist yet):', (e as Error).message)
+    return returnWriteStatus ? false : undefined
   }
 }
 
@@ -3557,7 +3573,11 @@ export type SendInvoiceVerifyDeps = {
   body: any
   getToken: (client: any) => Promise<{ accessToken: string; tenantId: string }>
   xeroGet: (path: string, accessToken: string, tenantId: string, params?: any) => Promise<any>
-  logBusinessEvent: (client: any, event: any) => Promise<void>
+  logBusinessEvent: (
+    client: any,
+    event: any,
+    returnWriteStatus: true,
+  ) => Promise<boolean>
   fetch: typeof globalThis.fetch
   xeroFetch: typeof globalThis.fetch
   env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string }
@@ -3818,16 +3838,16 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
 
   // Audit (non-blocking).
-  //   - business_events: ALWAYS written. Accepts null job_id, so unlinked invoice sends
-  //     still leave a trail. This is the canonical event store.
+  //   - business_events is the canonical conversation event and accepts null job_id.
   //   - job_events: only when verifiedJobId is set. job_events.job_id is NOT NULL, so
   //     unlinked sends would fail this insert; we deliberately skip it rather than
   //     misattributing the row to a caller-supplied job_id.
-  await logBusinessEvent(client, {
+  const timelineWritten = await logBusinessEvent(client, {
     event_type: 'invoice.emailed',
     entity_type: 'xero_invoice',
     entity_id: siId,
     job_id: verifiedJobId || undefined,
+    direction: 'outbound',
     // K3: digit-free words so the ladder's number match cannot fire; the
     // invoice number and address stay in payload only.
     body_preview: INVOICE_EMAILED_BODY_PREVIEW,
@@ -3837,7 +3857,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
         ? { debt_followup_approval_id: body.debt_followup_approval_id, attachment_sha256: siAttachmentSha256 }
         : {}),
     },
-  })
+  }, true)
   if (verifiedJobId) {
     try {
       await client.from('job_events').insert({
@@ -3851,6 +3871,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   return json({
     success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook',
     attachment_sha256: siAttachmentSha256,
+    timeline_write_failed: timelineWritten === false,
   })
 }
 
@@ -8393,9 +8414,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // Both branches go through the debt follow-up executor
         // (debt_followup_approval.ts). With approval_id: press that exact
         // captain-approved email. Without one: a recorded dry run of the exact
-        // email that would go, and no send. The old Xero-direct
-        // /Invoices/{id}/Email route (no to_email) is retired: the executor
-        // sends only through the verified Outlook branded-PDF transport.
+        // email that would go, and no send. The debt-follow-up path no longer
+        // uses Xero's direct /Invoices/{id}/Email route; approved sends use the
+        // verified Outlook branded-PDF transport.
         const siResult = await debtFollowupLegacySend({
           sourceAction: 'send_invoice_email',
           kind: 'invoice_email',
@@ -12730,7 +12751,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const csResp = await sendChaseSms(client, body, debtFollowupAuth(authMode, authUser), req.method)
         return json(csResp.body, csResp.status)
       }
-      case 'trigger_chase_workflow': return json(await triggerChaseWorkflow(client, body))
+      case 'trigger_chase_workflow': return json({
+        success: false,
+        error: 'Chase workflow triggering is disabled. Debtor messages require exact approval.',
+        code: 'chase_workflow_trigger_disabled',
+      }, 409)
       case 'stop_chase_workflow': return json(await stopChaseWorkflow(client, body))
       case 'handle_payment_event': return json(await handlePaymentEvent(client, body, debtFollowupAuth(authMode, authUser)))
       case 'trigger_xero_sync': return json(await triggerXeroSync())
@@ -16111,7 +16136,7 @@ async function getJobConversation(client: any, body: any) {
   // 4. business_events — message-shaped rows (sms/email/note/call).
   try {
     const messageEventTypes = [
-      'client.reply', 'client.email_in', 'client.email_out',
+      'client.reply', 'client.email_in', 'client.email_out', 'invoice.emailed',
       'client.sms_in', 'client.sms_out',
       'client.call_complete', 'client.message_in',
       'supplier.email_in', 'ghl.note_added',
@@ -59107,9 +59132,6 @@ async function classifyInvoice(client: any, body: any) {
     chased_by: operator_email || null,
   })
 
-  // If genuine_debt and we have a GHL contact, trigger the chase workflow
-  // (caller should handle this via separate trigger_chase_workflow call from the UI)
-
   return { success: true, classification }
 }
 
@@ -59424,54 +59446,6 @@ async function sendChaseSms(
     deps: createDebtFollowupDepsForOps(client),
   })
   return legacySendResponse(result)
-}
-
-async function triggerChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, overdue_amount, invoice_number, job_number, xero_invoice_id, job_id } = body
-  if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
-  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
-    client,
-    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
-    'trigger_chase_workflow',
-  )
-  if (resolved.job_id) {
-    await assertGhlContactMatchesResolvedJob(
-      client,
-      resolved.job_id,
-      ghl_contact_id,
-      'trigger_chase_workflow',
-    )
-  }
-
-  const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
-
-  // 1. Add chase-overdue tag to contact
-  const tagResp = await fetch(`${ghlBase}?action=add_contact_tag`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contactId: ghl_contact_id, tag: 'chase-overdue' }),
-  })
-  const tagResult = await tagResp.json()
-
-  // 2. Set custom fields with chase context (for GHL workflow SMS templates)
-  try {
-    await fetch(`${ghlBase}?action=update_contact_custom_fields`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contactId: ghl_contact_id,
-        customFields: {
-          overdue_amount: overdue_amount ? String(overdue_amount) : '',
-          overdue_invoice_number: invoice_number || '',
-          overdue_job_number: job_number || '',
-        },
-      }),
-    })
-  } catch (e) {
-    console.log('[ops-api] Custom field update failed (non-blocking):', e)
-  }
-
-  return { success: true, tag_added: tagResult.success }
 }
 
 async function stopChaseWorkflow(client: any, body: any) {

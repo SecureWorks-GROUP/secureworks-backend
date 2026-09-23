@@ -99,6 +99,7 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   assertEquals(j.success, true)
   assertEquals(j.emailed, true)
   assertEquals(j.via, "outlook")
+  assertEquals(j.timeline_write_failed, false)
 
   // Exactly one PDF GET + one Outlook POST
   const pdfCalls = fetchCalls.filter(c => c.url.startsWith(STUB_ENV.XERO_API_BASE))
@@ -109,12 +110,41 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   // Audit written: business_events + job_events (linked path)
   assertEquals(events.length, 1)
   assertEquals(events[0].event_type, "invoice.emailed")
+  assertEquals(events[0].direction, "outbound")
   assertEquals(events[0].job_id, "job-uuid-1")
   assertEquals(events[0].payload.linked, true)
   // job_events insert happens via stub client
   const jobEventInserts = dbCalls.inserts.filter(i => i.table === "job_events")
   assertEquals(jobEventInserts.length, 1)
   assertEquals(jobEventInserts[0].row.job_id, "job-uuid-1")
+})
+
+Deno.test("confirmed Outlook send surfaces a failed conversation event write", async () => {
+  const fix = happyFixture()
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
+  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+
+  const resp = await _verifyAndSendInvoiceEmail({
+    client,
+    body: makeBody(),
+    getToken,
+    xeroGet,
+    logBusinessEvent: async () => false,
+    fetch,
+    xeroFetch: fetch,
+    env: STUB_ENV,
+  })
+
+  assertEquals(resp.status, 200)
+  const body = await jsonBody(resp)
+  assertEquals(body.success, true)
+  assertEquals(body.emailed, true)
+  assertEquals(body.timeline_write_failed, true)
+  assertEquals(calls.filter((call) => call.url.startsWith(
+    `${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`,
+  )).length, 1)
 })
 
 // ─────────────────────────────────────────────────────────────────
