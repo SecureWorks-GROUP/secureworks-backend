@@ -16145,7 +16145,8 @@ interface SourceStatus {
   ok: boolean
   count: number
   error?: string
-  // D1 sections (quotes, variations, scope): ok | failed | skipped, plus a code
+  // D1 (quotes, variations, scope) and K4 (freshness): ok | failed | skipped,
+  // plus a code. Freshness never uses skipped.
   state?: string
   code?: string
 }
