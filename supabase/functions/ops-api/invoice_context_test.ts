@@ -238,6 +238,35 @@ function baseTables(): Tables {
       status: "approved",
       sent_at: "2026-08-19",
     }],
+    // One sent quote, sealed at $5,670 while the live price has since moved to
+    // $6,237: the door reports what was quoted, and the live price separately.
+    job_documents: [{
+      id: "d0000000-0000-4000-8000-000000000001",
+      job_id: JOB1,
+      type: "quote",
+      version: 1,
+      quote_number: "Q-0900",
+      run_label: null,
+      job_contact_id: null,
+      sent_at: "2026-08-18T02:00:00.000Z",
+      viewed_at: null,
+      accepted_at: "2026-08-18T05:00:00.000Z",
+      declined_at: null,
+      superseded_at: null,
+      quote_revision_id: null,
+      created_at: "2026-08-18T01:00:00.000Z",
+    }],
+    "rpc:job_quote_values": [{
+      _job_id: JOB1,
+      document_id: "d0000000-0000-4000-8000-000000000001",
+      job_contact_id: null,
+      party_is_owner: null,
+      run_label: null,
+      value_inc_gst: 5670,
+      value_source: "quote_revision",
+      whole_quote_total_inc: null,
+      whole_quote_source: null,
+    }],
     work_orders: [{
       job_id: JOB1,
       wo_number: "WO-1",
@@ -375,6 +404,17 @@ function fakeClient(
   const calls: Record<string, number> = {};
   return {
     _calls: calls,
+    async rpc(fn: string, args: Record<string, unknown>) {
+      const key = `rpc:${fn}`;
+      calls[key] = (calls[key] ?? 0) + 1;
+      if (failing.has(key)) {
+        return { data: null, error: { message: `${fn} unavailable` } };
+      }
+      const rows = (tables[key] ?? []).filter((r) =>
+        r._job_id === args.p_job_id
+      ).map(({ _job_id, ...rest }) => rest);
+      return { data: rows, error: null };
+    },
     from(table: string) {
       calls[table] = (calls[table] ?? 0) + 1;
       const callNo = calls[table];
@@ -556,12 +596,21 @@ Deno.test("1. a linked invoice returns the complete picture with no blockers", a
     job_number: "SWMS-261399",
     candidates: [],
   });
-  assertEquals(out.job.promised.quote_total, 6237);
+  // D1: quote total from the sent quote record, never the live price.
+  assertEquals(out.job.promised.quote_total, 5670);
+  assertEquals(out.job.promised.quote_total_source, "quote_revision");
+  assertEquals(out.job.promised.quote_document?.quote_number, "Q-0900");
+  assertEquals(out.job.promised.quote_status, "accepted");
+  assertEquals(out.job.promised.current_price_inc_gst, 6237);
   assertEquals(out.job.promised.variations, [{
     number: "VAR1",
     amount: 300,
     status: "approved",
     sent_at: "2026-08-19",
+    approved_at: null,
+    accepted_at: null,
+    agreement: "sent_awaiting_customer",
+    agreed: false,
   }]);
   assertEquals(out.job.other_open_invoices, []);
   // only the current fact: superseded and expired rows are filtered
