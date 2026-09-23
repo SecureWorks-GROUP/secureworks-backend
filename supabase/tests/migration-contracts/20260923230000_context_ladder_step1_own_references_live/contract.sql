@@ -111,20 +111,27 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- Structure: the live body is this migration's, and no public role may call it.
+-- Structure: the live body is this migration's (or a later registered ladder
+-- slice built on it: P1a 20260924140000 replaces steps 3 to 6 and keeps step 1
+-- byte for byte), and no public role may call it.
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
-  <>'acb80ebe792beeb7e5b537643bf9f184' THEN RAISE EXCEPTION 'L1: ladder body is not the L1 body'; END IF;
+  NOT IN ('acb80ebe792beeb7e5b537643bf9f184','fe50f14f4ab28d4d6c9dbb70bc85e7df') THEN RAISE EXCEPTION 'L1: ladder body is not the L1 body or a registered successor'; END IF;
  IF has_function_privilege('anon','public.resolve_context_attribution(public.business_events)','EXECUTE')
   OR has_function_privilege('authenticated','public.resolve_context_attribution(public.business_events)','EXECUTE')
  THEN RAISE EXCEPTION 'L1: ladder callable by a public role'; END IF;
 END $$;
 
--- Re-apply is a no-op: the guard accepts its own body.
+-- Re-apply is a no-op: the guard accepts its own body. Only meaningful while the
+-- L1 body is live; once a later slice replaced it, the L1 guard refuses by design.
+SELECT md5(prosrc)='acb80ebe792beeb7e5b537643bf9f184' AS l1_body_live
+FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure \gset
+\if :l1_body_live
 \ir ../../../migrations/20260923230000_context_ladder_step1_own_references_live.sql
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
   <>'acb80ebe792beeb7e5b537643bf9f184' THEN RAISE EXCEPTION 'L1: re-apply changed the ladder body'; END IF;
 END $$;
+\endif
