@@ -32,11 +32,18 @@ BEGIN
  IF e.attribution_status<>'empty' OR e.payload->>'body_pointer'<>'private/test-document' THEN RAISE EXCEPTION 'pointer-only evidence lost'; END IF;
  INSERT INTO public.business_events(payload) VALUES('{"body":"Away","automated":true}') RETURNING * INTO e;
  IF e.attribution_status<>'automated' THEN RAISE EXCEPTION 'automated detection failed'; END IF;
- INSERT INTO public.business_events(payload,contact_id,event_at,context_captured_at) VALUES('{"body":"A prior enquiry"}','b2-future',now()-interval '180 days',NULL) RETURNING * INTO e;
+ -- Since P1a (20260924140000, sms.md rule 6) a new job takes only bucket evidence
+ -- inside its 30-day lead window; a 180-day-old enquiry stays before any job.
+ INSERT INTO public.business_events(payload,contact_id,event_at,context_captured_at) VALUES('{"body":"A prior enquiry"}','b2-future',now()-interval '10 days',NULL) RETURNING * INTO e;
  eid:=e.id;
+ INSERT INTO public.business_events(payload,contact_id,event_at,context_captured_at) VALUES('{"body":"A much older enquiry"}','b2-future',now()-interval '180 days',NULL) RETURNING id INTO runid;
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES(j3,'00000000-0000-0000-0000-000000000001','accepted','patio','B2-JOB-3','b2-future');
  SELECT * INTO e FROM public.business_events WHERE id=eid;
  IF e.job_id<>j3 OR e.attribution_status<>'single_open' THEN RAISE EXCEPTION 'job-created reconsideration must include old bucket evidence'; END IF;
+ SELECT * INTO e FROM public.business_events WHERE id=runid;
+ IF to_regprocedure('public.context_contact_jobs_at(text,timestamptz)') IS NOT NULL AND (e.job_id IS NOT NULL OR e.attribution_status<>'admin_bucket')
+ THEN RAISE EXCEPTION 'evidence outside the lead window placed on a new job'; END IF;
+ runid:=NULL;
  INSERT INTO public.business_events(payload,occurred_at) VALUES('{"body":"No provider date"}',now()) RETURNING * INTO e;
  IF e.event_at IS NOT NULL THEN RAISE EXCEPTION 'missing provider source date became ingestion date'; END IF;
  INSERT INTO public.business_events(payload,provider_message_id,event_at) VALUES('{"body":"source words"}','ghl:b2-id','2025-01-01Z');

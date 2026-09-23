@@ -595,7 +595,12 @@ a batch. `context_extraction_events` returns exact rows because
 Attribution ladder step 1 matching is owned by
 `docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder
 change replaces the whole `resolve_context_attribution` body and must follow
-the pre-image guard in that document.
+the pre-image guard in that document. Since P1a (`20260924140000`) the ONE
+candidate set is `context_contact_jobs_at(contact, at)` (jobs as they stood at
+the message time, lead window, contactless siblings by phone or email); never
+re-derive candidates from today's open jobs (`context_contact_jobs`), and never
+treat a GHL conversation key as a job thread. A later ladder slice must also
+widen the md5 lists in the earlier ladder contracts it supersedes.
 
 Luna's answer carries an outcome (`job`, `several`, `undecided`); the last two
 rest the row as `unplaced`, attribution asks are recorded per row with backoff

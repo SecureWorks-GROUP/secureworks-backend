@@ -203,6 +203,9 @@ BEGIN
  -- Its candidate list changes (a new job for the contact): asked again at once, counts restart.
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  (jc,'00000000-0000-0000-0000-000000000001','quoted','fencing','A1-ERR-C','a1-err');
+ -- Since P1a the list is stored at review time; the sibling reopen (P1b)
+ -- rewrites it when a new job for the contact is created. Do that here.
+ UPDATE public.business_events SET candidate_job_ids=ARRAY[ja,jb,jc] WHERE id=eid AND candidate_job_ids IS NOT NULL;
  SELECT count(*) INTO n FROM public.context_attribution_due(200) WHERE id=eid;
  IF n<>1 THEN RAISE EXCEPTION 'changed candidate list not re-offered'; END IF;
  r:=public.record_attribution_error(eid,'model_timeout');
@@ -278,13 +281,14 @@ BEGIN
  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid='public.context_attribution_attempts'::regclass) THEN RAISE EXCEPTION 'attempts RLS off'; END IF;
 END $$;
 
--- 8. The deployed runtime's three-argument call is untouched: same live body,
--- same behaviour (no pick -> admin_bucket), and it writes no attempt.
+-- 8. The deployed runtime's three-argument call keeps its behaviour (no pick ->
+-- admin_bucket) and writes no attempt. Its body is the live one, or P1a's
+-- (20260924140000: the guard reads the stored candidate list).
 BEGIN;
 DO $$
 DECLARE ja uuid:=gen_random_uuid(); e public.business_events;
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.attribute_context_event_with_luna(uuid,uuid,numeric)')) IS DISTINCT FROM '48eabf7e132092cd225ff5060ce58846'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.attribute_context_event_with_luna(uuid,uuid,numeric)')) NOT IN ('48eabf7e132092cd225ff5060ce58846','fde44559c43dcc770d1c42909f4adeaf')
  THEN RAISE EXCEPTION 'legacy Luna function changed'; END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  (ja,'00000000-0000-0000-0000-000000000001','quoted','fencing','A1-LEG-A','a1-leg'),
