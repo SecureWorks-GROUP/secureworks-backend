@@ -1,8 +1,8 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
 //
-// Context slice R0 (23 Sep 2026): the job conversation's inbox block shows only
-// legacy inbox rows with no business_events copy, and evidence rows carry how
-// the ladder placed them (adminbucket.md Review M5 and M6, INTEGRATION X29).
+// Context slice R0 (23 Sep 2026). Contract: job_conversation_inbox_copy.ts.
+// Evidence rows carry how the ladder placed them (adminbucket.md Review M5
+// and M6, INTEGRATION X29).
 //
 // Named rows, recorded from production on 23 Sep 2026 (read-only; inbox and
 // event ids, job numbers, received times and placement as recorded; bodies
