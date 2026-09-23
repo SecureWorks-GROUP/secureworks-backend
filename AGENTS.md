@@ -542,6 +542,17 @@ time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
 an `event_at`-only gate — production almost never populates `event_at`.
 The captain heartbeat is `GET ops-api?action=context_pipeline_status`
 (migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
+Since F1 (`20260924020000`) it is a composer: `context_core_status()` keys stay
+top-level and each owner slice replaces only its own block sub-function
+(`cadence`, `capture_sources`, `ghl_capture`, `booking_capture`, `parties`);
+only F1 edits `context_pipeline_status()`. "Linked" is
+`context_linked_status()`; never re-list the linked statuses in new SQL.
+The heartbeat hit the API statement timeout (57014, 8 s): never call
+`context_extraction_candidates` from it (it detoasts `jobs.scope_json` per
+event, 15.5 s live); `ready_jobs` is `context_ready_jobs_count`, pinned equal
+by the F1 contract, so change both together. A per-row SQL helper must not
+carry `SET search_path` (blocks inlining; schema-qualify operators instead),
+and a per-row predicate must not `to_jsonb()` a `business_events` or `jobs` row.
 Booking-lane context hangar (`20260921140000`): `context_contact_jobs` counts a
 `draft` only when the contact has no non-draft open job (coverage already
 counted draft as open); draft-only still pins, draft plus a live job stays on
