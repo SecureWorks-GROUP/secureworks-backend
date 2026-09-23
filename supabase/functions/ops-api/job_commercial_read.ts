@@ -15,8 +15,23 @@
 //     invoice read so the two reads agree);
 //   - the scope summary from the release-packet adapter's scope block only.
 //
-// The job's live price (pricing_json.totalIncGST) is reported separately as
-// current_price_inc_gst and is never a quote value.
+// The job's live price (pricing_json.totalIncGST only) is reported separately
+// as current_price_inc_gst and is never a quote value. Absent totalIncGST is
+// unknown (null); do not fall back through total / grandTotal / amount.
+//
+// A failed read is unknown with a reason, never an empty answer: quotes and
+// variations publish null plus sourceStatus.code. The invoice read uses the
+// same readers so promised.quote_total and promised.variations agree (a
+// failed variation read leaves promised.variations null with variations_code).
+//
+// changed_since_last_quote is true when scope_updated_at is after the newest
+// current quote's sent_at, or when jobs.scope_version differs from the bound
+// revision's scope_snapshot_json version. Apply the timestamp half whatever
+// the revision state. A missing or unreadable revision only drops the version
+// half: with no timestamp verdict the field stays unknown (no_revision or
+// revision_read_failed), never false. quote_read_failed outranks no_sent_quote.
+// When the bound snapshot has no version key, say so in the basis; do not
+// invent one.
 
 import { dispatchAdapter } from "../_shared/release_packet/adapters/dispatch.ts";
 import { OUR_DOMAINS } from "./makesafe_story.ts";
@@ -226,7 +241,8 @@ async function select(builder: any): Promise<{ data: any[]; code?: string }> {
   }
 }
 
-/** The job's live price. Never a quote value. Also used by the invoice read. */
+/** Live price from pricing_json.totalIncGST only. Unknown (null) when absent.
+ * Never a quote value. Also used by the invoice read. */
 export function currentPriceIncGst(pricing: unknown): number | null {
   let p: any = pricing;
   if (typeof p === "string") {
@@ -989,6 +1005,9 @@ function scopeLines(scope: any): string[] {
   return out.filter((l) => l.length > 0).slice(0, SCOPE_LINES_MAX);
 }
 
+// Timestamp half first (true even when the revision is missing or unreadable).
+// A missing/unreadable revision only removes the version half. quote_read_failed
+// first; no_sent_quote only when the quote read succeeded and none is current.
 function changedSinceLastQuote(
   job: { scope_version?: unknown; scope_updated_at?: string | null },
   opts: {
@@ -1054,6 +1073,10 @@ function changedSinceLastQuote(
 /**
  * Pure scope summary. Reads the adapter's scope block only (never pricing or
  * internal cost). newestQuoteSentAt is the newest CURRENT quote's sent_at.
+ * Pass quoteReadFailed when the quote read itself failed so the field stays
+ * unknown (quote_read_failed), never no_sent_quote. boundRevision is the
+ * read-only snapshot from readJobQuotes (no version key is a basis, not an
+ * invented version).
  */
 export function summariseScope(
   job: {

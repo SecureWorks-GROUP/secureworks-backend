@@ -3676,6 +3676,9 @@ S-read) must too. send-quote seals the WHOLE job's price on every revision and
 share (no party = the client's document) and a per-party whole quote carries no
 value (the sealed total is job level only).
 `pricing_json.totalIncGST` is `current_price_inc_gst`, never a quote value.
+A failed quote or variation read stays unknown with the reason (null, never
+an empty list); the invoice read uses the same readers so
+`promised.quote_total` and `promised.variations` agree.
 `quote.sent` and `scope.completed` rows are found by `entity_type='job'` +
 `entity_id`, not `business_events.job_id` (the attribution ladder clears it on a
 legacy insert), and only send-quote's own sources (`send-quote`,

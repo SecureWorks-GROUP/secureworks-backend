@@ -8,7 +8,9 @@
 // chase log, and an explicit owned blocker for every missing piece. SELECT-only.
 // Never calls Xero or GHL, never writes, never classifies.
 //
-// Published shape: wiki lanes/handoffs/CIO-to-DEBT-invoice-context-door.md.
+// Door envelope: wiki lanes/handoffs/CIO-to-DEBT-invoice-context-door.md.
+// D1 promised quote / variation / live-price fields are owned by
+// job_commercial_read.ts (same readers as assemble_job_dossier).
 //
 // A second read, debt_context_coverage, returns the coverage flags for every
 // open receivable in one call so the screen and the coverage table do not need
@@ -1049,6 +1051,7 @@ export async function invoiceContext(
           whole_quote_total: quotesRead.quotes?.whole_quote_total ?? null,
           current_price_inc_gst: currentPriceIncGst(jobRow.pricing_json),
           deposit_amount: num(jobRow.deposit_amount),
+          // Shared reader: null + variations_code when unreadable, never [].
           variations: variations.variations == null
             ? null
             : variations.variations.map((v) => ({

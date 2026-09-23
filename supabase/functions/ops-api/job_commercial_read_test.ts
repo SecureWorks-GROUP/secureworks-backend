@@ -1075,7 +1075,10 @@ Deno.test("D1 scope: a send-quote snapshot with no version key keeps the timesta
 });
 
 Deno.test("D1 current_price_inc_gst: only totalIncGST; a total-only blob is unknown", () => {
-  assertEquals(currentPriceIncGst({ totalIncGST: 21309.04, total: 19371.85 }), 21309.04);
+  assertEquals(
+    currentPriceIncGst({ totalIncGST: 21309.04, total: 19371.85 }),
+    21309.04,
+  );
   assertEquals(currentPriceIncGst({ total: 7227.56 }), null);
   assertEquals(currentPriceIncGst({ grandTotal: 100, amount: 90 }), null);
   assertEquals(currentPriceIncGst(null), null);
