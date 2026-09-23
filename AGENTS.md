@@ -554,6 +554,17 @@ migration lanes: `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh`
 (disposable localhost Postgres, applies the new migrations twice). Record:
 `docs/context/b3-fact-custody.md`.
 
+Attribution ladder step 1 (`resolve_context_attribution`, `20260923120000`)
+links directly only on OUR references: job numbers, ACCREC `INV-` numbers, PO
+numbers, whole token, at least 5 characters, never a job with
+`metadata.do_not_schedule` (the holding job `SWF-PDF-BUCKET` carries short
+supplier bills like "21", so a date in a text used to land there). A verified
+writer job id is untouched. Each later ladder change replaces the whole body,
+so every such migration starts with a pre-image guard: `md5(prosrc)` must equal
+the previous repo body or its own, else it refuses
+(`context_ladder_preimage_mismatch`) instead of reverting a hand-applied live
+change. Update both hashes and the contract when you replace the body.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
