@@ -27,6 +27,7 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // deno-lint-ignore no-import-prefix
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
+import { decodeJwtRole } from "../_shared/service_role_jwt.ts";
 
 // ── Graph GET with mid-scan token-expiry self-heal (intake item 12) ──────────
 // A poll/backfill captures `const token = await getGraphToken()` ONCE and then
@@ -93,23 +94,8 @@ function _setTestClientFactory(
 // `role` claim (== "service_role") lets the cron bearer through while still rejecting
 // an anon JWT (role == "anon").
 
-// Decode (NOT verify) a JWT's payload and return its `role` claim, or null on any
-// failure. Signature verification is the gateway's job (verify_jwt on); we just read
-// the middle segment. Any malformed/garbage token returns null -> not authorized.
-function decodeJwtRole(token: string): string | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    // base64url -> base64, pad, decode, JSON.parse.
-    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    while (b64.length % 4 !== 0) b64 += "=";
-    const json = atob(b64);
-    const payload = JSON.parse(json);
-    return typeof payload?.role === "string" ? payload.role : null;
-  } catch (_) {
-    return null;
-  }
-}
+// decodeJwtRole lives in ../_shared/service_role_jwt.ts (shared with other
+// cron-called functions).
 
 // Authorize a request. Accept if ANY of:
 //   (a) x-api-key === expectedApiKey (manual ops invoke), OR

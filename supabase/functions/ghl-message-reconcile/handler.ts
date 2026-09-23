@@ -4,8 +4,12 @@
 //
 // Caller: pg_cron's trigger_ghl_message_reconcile() posts every 15 minutes with
 // the service key (only while feature flag ghl_message_capture_v2 is on, and
-// the cron command itself only runs while the capture lane is on). Only the
-// service key is accepted here; the platform's JWT check runs first.
+// the cron command itself only runs while the capture lane is on). The
+// platform's JWT check runs first; this door then accepts only the service
+// role: the exact SUPABASE_SERVICE_ROLE_KEY, or a JWT whose role claim is
+// exactly "service_role". The cron's sw_service_key() is a legacy service-role
+// JWT that need not byte-equal the injected key, so the exact match alone
+// refused every cron run (401 service_key_required).
 //
 // The cron's HTTP call gives up after 5 seconds, so by default the run continues
 // in the background (EdgeRuntime.waitUntil) and the reply is 202. A manual call
@@ -18,6 +22,7 @@ import {
   GhlProviderReadError,
   readGhlProvider,
 } from "../ghl-proxy/provider_reads.ts";
+import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import {
   type CaptureOutcome,
   ITEM_FLAG,
@@ -200,7 +205,10 @@ export async function handleReconcile(
   const serviceKey = deps.env("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const header = req.headers.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (!serviceKey || !bearer || !sameSecret(bearer, serviceKey)) {
+  const serviceRole = !!bearer &&
+    ((!!serviceKey && sameSecret(bearer, serviceKey)) ||
+      isServiceRoleJwt(bearer));
+  if (!serviceRole) {
     return json({ error: "service_key_required" }, 401);
   }
   let body: Record<string, unknown> = {};
