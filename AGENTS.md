@@ -592,6 +592,12 @@ a batch. `context_extraction_events` returns exact rows because
 `persist_luna_context_revision` compares them byte for byte; per-row `ours` and
 `older_context` come from `context_extraction_event_flags`.
 
+A new pg_cron job that writes evidence is scheduled already gated
+(`... WHERE public.automation_lane_enabled('<lane>')`) and added to
+`automation_switch_cron_lanes()` in the same migration, so the switch's wrap and
+unwrap know it; the GHL message reconciler (C1d) is the worked example:
+`docs/context/ghl-message-reconcile.md`.
+
 Attribution ladder step 1 matching is owned by
 `docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder
 change replaces the whole `resolve_context_attribution` body and must follow

@@ -144,9 +144,14 @@ BEGIN
  IF (SELECT array_agg(x ORDER BY x) FROM jsonb_object_keys(composed) x) IS DISTINCT FROM
     (SELECT array_agg(x ORDER BY x) FROM (SELECT jsonb_object_keys(legacy) x UNION SELECT unnest(new_keys)) u)
  THEN RAISE EXCEPTION 'f1 composer keys: %',(SELECT array_agg(x ORDER BY x) FROM jsonb_object_keys(composed) x); END IF;
- -- The cadence block is built by K1 (20260924030000).
- IF jsonb_typeof(composed->'cadence')<>'object' OR composed->'ghl_capture'<>'null'::jsonb OR composed->'booking_capture'<>'null'::jsonb
-  OR composed->'parties'<>'null'::jsonb THEN RAISE EXCEPTION 'f1 unbuilt blocks must be null %',composed; END IF;
+ -- A block is null exactly while its F1 stub stands; an owning slice that has
+ -- replaced its stub (the runner applies every later migration first) returns
+ -- an object instead.
+ IF EXISTS(SELECT 1 FROM (VALUES ('cadence','context_cadence_status'),('ghl_capture','context_ghl_capture_status'),
+   ('booking_capture','context_booking_capture_status'),('parties','context_parties_status')) b(block,fn)
+  WHERE CASE WHEN (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.'||b.fn||'()'))='155104bfb08b8b3c2f98bdec089d4ee4'
+   THEN composed->b.block<>'null'::jsonb ELSE jsonb_typeof(composed->b.block)<>'object' END)
+ THEN RAISE EXCEPTION 'f1 unbuilt blocks must be null %',composed; END IF;
  IF jsonb_typeof(composed->'alarms')<>'array' OR jsonb_typeof(composed->'capture_sources')<>'object'
  THEN RAISE EXCEPTION 'f1 alarms or capture_sources shape %',composed; END IF;
  -- The new statuses are visible in the existing queue count, exactly as the old body counts them.

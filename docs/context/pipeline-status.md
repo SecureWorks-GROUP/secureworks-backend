@@ -14,7 +14,7 @@ with identical values. The composer adds:
 |---|---|---|---|
 | `cadence` | `context_cadence_status()` | cadence K1 | built |
 | `capture_sources` | `context_source_freshness()` | F1 | built |
-| `ghl_capture` | `context_ghl_capture_status()` | sms C1d | `null` |
+| `ghl_capture` | `context_ghl_capture_status()` | sms C1d | built |
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
 | `parties` | `context_parties_status()` | sites S-M1 | `null` |
 | `alarms` | every block's `alarms` array, each tagged with `block` | composer | `[]` |
@@ -47,6 +47,20 @@ business hour over the 14 days before its last row) has written nothing for
 120 business minutes. Thresholds are published in the block's `policy`
 (`context_source_freshness_policy()`). Sources silent for more than 60 days
 drop off the list.
+
+`ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`):
+the item flag `ghl_message_capture_v2` (a missing row reads off) and the
+capture lane; GHL webhooks in 24 h by outcome and by auth and mode, last
+webhook and last app webhook, unresolved ids (from the receiver's ids-only
+`webhook_log` receipts); the reconciler's last run, last success, watermark,
+backlog, webhook misses and write errors in 24 h (from `context_capture_runs`,
+source `ghl_message_reconcile`). Alarms: `ghl_webhooks_quiet` (no app webhook
+for 120 business minutes) and `ghl_reconcile_stale` (no successful run for 45
+minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high`
+(more than 5 in 24 h); `ghl_auth_missing` (critical: any post refused after
+the receiver enforces auth; observe-mode `auth=missing` is counted, not
+alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
+[ghl-message-reconcile.md](ghl-message-reconcile.md).
 
 Alarms are read by the CIO desk's scheduled check (INTEGRATION decision D-A),
 never Telegram.
