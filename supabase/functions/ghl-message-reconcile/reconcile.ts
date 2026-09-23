@@ -56,7 +56,6 @@ export interface ReconcilePolicy {
   maxMessagePagesPerConversation: number;
   timeBudgetMs: number;
   runningStaleMs: number;
-  maxBoundaryIds: number;
 }
 
 export const POLICY: Readonly<ReconcilePolicy> = {
@@ -69,8 +68,10 @@ export const POLICY: Readonly<ReconcilePolicy> = {
   maxMessagePagesPerConversation: 10,
   timeBudgetMs: 100_000,
   runningStaleMs: 10 * 60_000,
-  maxBoundaryIds: 50,
 };
+
+/** context_capture_runs.cursor CHECK: octet_length(cursor::text) <= 4096 */
+export const CAPTURE_RUN_CURSOR_MAX_BYTES = 4096;
 
 export interface RunRow {
   id: string;
@@ -182,6 +183,18 @@ type CountKey = typeof COUNT_KEYS[number];
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
+}
+
+export function captureRunCursorBytes(cursor: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(cursor)).length;
+}
+
+function positionFitsCursor(
+  scan: ScanState,
+  position: NonNullable<ScanState["position"]>,
+): boolean {
+  return captureRunCursorBytes({ ...scan, position }) <=
+    CAPTURE_RUN_CURSOR_MAX_BYTES;
 }
 
 function ms(value: unknown): number | null {
@@ -508,34 +521,44 @@ export async function runGhlMessageReconcile(
       counts.list_pages++;
       const list = page.conversations;
       counts.conversations_listed += list.length;
+      for (const row of list) {
+        if (conversationTime(row) === null) counts.conversations_no_date++;
+      }
       const fresh = list.filter((c) => {
         const at = conversationTime(c);
-        if (at === null) return true;
+        if (at === null) return false;
         if (!position) return true;
         if (at > position.last_message_ms) return false;
         return !(at === position.last_message_ms &&
           position.ids.includes(String(c.id)));
       });
-      if (!fresh.length && list.length >= limit && tieStep < 2) {
-        tieStep++;
-        if (tieStep === 1) counts.boundary_tie_widened++;
-        else counts.boundary_tie_fallbacks++;
-        continue;
-      }
-      if (!fresh.length && list.length >= limit) {
-        // Even the strict read made no progress: stop with a backlog rather
-        // than loop.
-        counts.backlog_more = 1;
+      if (!fresh.length) {
+        const dated = list.filter((c) => conversationTime(c) !== null);
+        const boundaryMs = position?.last_message_ms;
+        const boundaryTies = boundaryMs !== undefined &&
+          dated.length === list.length &&
+          list.length >= limit &&
+          dated.every((c) => conversationTime(c) === boundaryMs);
+        if (boundaryTies && tieStep < 2) {
+          tieStep++;
+          if (tieStep === 1) counts.boundary_tie_widened++;
+          else counts.boundary_tie_fallbacks++;
+          continue;
+        }
+        if (boundaryTies) {
+          counts.backlog_more = 1;
+          break;
+        }
+        scan.complete = true;
         break;
       }
       tieStep = 0;
+      let steppedPastMs: number | null = null;
       for (let i = 0; i < fresh.length; i++) {
         const conversation = fresh[i];
         const at = conversationTime(conversation);
-        if (at === null) {
-          counts.conversations_no_date++;
-          continue;
-        }
+        if (at === null) continue;
+        if (steppedPastMs !== null && at >= steppedPastMs) continue;
         if (at < listFloorMs) {
           scan.complete = true;
           break scanLoop;
@@ -546,7 +569,8 @@ export async function runGhlMessageReconcile(
         ) {
           counts.backlog_conversations = fresh.slice(i).filter((c) => {
             const t = conversationTime(c);
-            return t !== null && t >= listFloorMs;
+            return t !== null && t >= listFloorMs &&
+              (steppedPastMs === null || t < steppedPastMs);
           }).length;
           counts.backlog_more = page.hasMore === false ? 0 : 1;
           break scanLoop;
@@ -564,12 +588,21 @@ export async function runGhlMessageReconcile(
         }
         processed++;
         const id = String(conversation.id);
-        position = position && position.last_message_ms === at
-          ? {
-            last_message_ms: at,
-            ids: [...position.ids, id].slice(-policy.maxBoundaryIds),
-          }
+        const next = position && position.last_message_ms === at
+          ? { last_message_ms: at, ids: [...position.ids, id] }
           : { last_message_ms: at, ids: [id] };
+        if (!positionFitsCursor(scan, next)) {
+          counts.boundary_tie_fallbacks++;
+          steppedPastMs = at;
+          continue;
+        }
+        position = next;
+      }
+      if (
+        steppedPastMs !== null &&
+        position?.last_message_ms === steppedPastMs
+      ) {
+        tieStep = 2;
       }
       scan.position = position;
       if (!list.length || page.hasMore === false) {

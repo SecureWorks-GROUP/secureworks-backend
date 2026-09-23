@@ -21,6 +21,8 @@ import {
   R7_LIST_ITEMS,
 } from "../_shared/evidence/ghl_message_fixtures.ts";
 import {
+  CAPTURE_RUN_CURSOR_MAX_BYTES,
+  captureRunCursorBytes,
   EVENT_SOURCE,
   POLICY,
   type ReconcileDeps,
@@ -53,6 +55,7 @@ interface Conv {
   id: string;
   contactId: string;
   messages: Msg[]; // any order; served newest first
+  lastMessageDate?: number | null;
 }
 
 class FakeGhl {
@@ -69,11 +72,13 @@ class FakeGhl {
     this.conversations.set(conv.id, conv);
   }
   last(c: Conv): number | null {
+    if (c.lastMessageDate !== undefined) return c.lastMessageDate;
     const times = c.messages.map((m) => Date.parse(String(m.dateAdded)))
       .filter(Number.isFinite);
     return times.length ? Math.max(...times) : null;
   }
   // GHL search_after semantics: strictly older than startAfterDate.
+  // Missing and zero lastMessageDate rows pass through and sort to the tail.
   listRecent(
     { limit, startAfterDate }: { limit: number; startAfterDate?: string },
   ) {
@@ -86,12 +91,12 @@ class FakeGhl {
         locationId: "loc",
         lastMessageDate: this.last(c),
       }))
-      .filter((c) => c.lastMessageDate !== null)
       .filter((c) =>
-        !startAfterDate || c.lastMessageDate! < Number(startAfterDate)
+        !startAfterDate || (c.lastMessageDate ?? 0) < Number(startAfterDate)
       )
       .sort((a, b) =>
-        b.lastMessageDate! - a.lastMessageDate! || a.id.localeCompare(b.id)
+        (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0) ||
+        a.id.localeCompare(b.id)
       );
     const page = rows.slice(0, limit);
     return {
@@ -155,6 +160,14 @@ class FakeDb {
       assert(allowed.includes(k), `record_capture_run key ${k}`);
     }
     assertEquals(run.source, RUN_SOURCE);
+    if (run.cursor != null) {
+      const bytes = captureRunCursorBytes(run.cursor);
+      if (bytes > CAPTURE_RUN_CURSOR_MAX_BYTES) {
+        throw Object.assign(new Error("capture_run_invalid"), {
+          code: "capture_run_invalid",
+        });
+      }
+    }
     const now = new Date(this.clock).toISOString();
     const existing = this.runs.find((r) => r.id === run.run_id);
     const json = (v: unknown) =>
@@ -786,4 +799,127 @@ Deno.test("the first run reads two hours back; a long gap is capped at 72 hours 
   assert(late.outcome === "ran");
   assertEquals(late.counts.window_capped, 1);
   assertEquals(late.window.from, new Date(T0 - 72 * 60 * MIN).toISOString());
+});
+
+Deno.test("dateless conversations at the tail of a full page complete the scan", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  ghl.add({
+    id: "datedConversation1",
+    contactId: "d1",
+    messages: [
+      msg(
+        "datedText0001",
+        "datedConversation1",
+        "d1",
+        new Date(T0 - MIN).toISOString(),
+      ),
+    ],
+  });
+  for (let i = 0; i < 8; i++) {
+    ghl.add({
+      id: `datelessConversation${i}`,
+      contactId: `n${i}`,
+      messages: [],
+      lastMessageDate: i % 2 === 0 ? 0 : null,
+    });
+  }
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  const result = await runGhlMessageReconcile(deps(ghl, db), {
+    ...POLICY,
+    listPageLimit: 4,
+  });
+  assert(result.outcome === "ran");
+  assertEquals(result.status, "succeeded");
+  assertEquals(result.counts.scan_completed, 1);
+  assertEquals(result.counts.conversations_read, 1);
+  assert(result.counts.conversations_no_date >= 3);
+  assertEquals(result.watermark, new Date(T0).toISOString());
+  assertEquals(db.rows.length, 1);
+  assertEquals(result.counts.list_pages, 2);
+  assert(!ghl.calls.some((c) => c.startsWith("messages:dateless")));
+});
+
+Deno.test("more than 50 conversations at one millisecond are all read and the walk leaves that millisecond", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const same = new Date(T0 - 2 * MIN).toISOString();
+  const n = 60;
+  for (let i = 0; i < n; i++) {
+    const id = `tieConversation${String(i).padStart(2, "0")}`;
+    ghl.add({
+      id,
+      contactId: `${id}-c`,
+      messages: [msg(`${id}Text`, id, `${id}-c`, same)],
+    });
+  }
+  ghl.add({
+    id: "olderConversation1",
+    contactId: "older-c",
+    messages: [
+      msg(
+        "olderText1",
+        "olderConversation1",
+        "older-c",
+        new Date(T0 - 5 * MIN).toISOString(),
+      ),
+    ],
+  });
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  const result = await runGhlMessageReconcile(deps(ghl, db), {
+    ...POLICY,
+    listPageLimit: 20,
+  });
+  assert(result.outcome === "ran");
+  assertEquals(result.status, "succeeded");
+  assertEquals(result.counts.conversations_read, n + 1);
+  assertEquals(result.counts.boundary_tie_fallbacks, 0);
+  assertEquals(db.rows.length, n + 1);
+  assert(rowFor(db, "olderText1"));
+  assert(
+    captureRunCursorBytes(db.runs[0].cursor) <= CAPTURE_RUN_CURSOR_MAX_BYTES,
+  );
+});
+
+Deno.test("a same-millisecond burst that would overflow the run cursor steps past that millisecond", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const same = new Date(T0 - 2 * MIN).toISOString();
+  const n = 80;
+  for (let i = 0; i < n; i++) {
+    const id = `sameMs${String(i).padStart(2, "0")}${"x".repeat(40)}`;
+    ghl.add({
+      id,
+      contactId: `${id}-c`,
+      messages: [msg(`${id}Text`, id, `${id}-c`, same)],
+    });
+  }
+  ghl.add({
+    id: "olderAfterBurst1",
+    contactId: "older-burst-c",
+    messages: [
+      msg(
+        "olderAfterBurstText",
+        "olderAfterBurst1",
+        "older-burst-c",
+        new Date(T0 - 5 * MIN).toISOString(),
+      ),
+    ],
+  });
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  const result = await runGhlMessageReconcile(deps(ghl, db), {
+    ...POLICY,
+    listPageLimit: 50,
+    maxConversationsPerRun: 200,
+  });
+  assert(result.outcome === "ran");
+  assertEquals(result.status, "succeeded");
+  assert(result.counts.boundary_tie_fallbacks >= 1);
+  assert(result.counts.conversations_read < n + 1);
+  assert(result.counts.conversations_read >= 1);
+  assert(rowFor(db, "olderAfterBurstText"));
+  assertEquals(result.counts.scan_completed, 1);
+  assert(
+    captureRunCursorBytes(db.runs[0].cursor) <= CAPTURE_RUN_CURSOR_MAX_BYTES,
+  );
 });
