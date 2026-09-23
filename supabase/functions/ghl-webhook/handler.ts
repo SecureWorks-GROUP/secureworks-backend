@@ -1,11 +1,13 @@
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Webhook Edge Function
 //
-// Handles two types of GHL events:
+// Handles three types of GHL events:
 //   1. Form submissions → creates draft jobs
 //   2. Pipeline stage changes → syncs job status to Supabase
 //      - Includes Sales→Execution pipeline re-link logic
 //      - Logs backward-move conflicts for attention panel
+//   3. InboundMessage / OutboundMessage → 200, captured:false, no write
+//      (message capture lives in ghl-webhook-receiver; see message_webhook.ts)
 //
 // Entry point: index.ts (serve). This module exports the handler so tests can
 // drive it with injected dependencies and no network.

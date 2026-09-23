@@ -133,10 +133,10 @@ const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 const PRODUCTION_DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Per-pipeline salesperson UUIDs (public.users.id) — mirrors the auto-assign
-// in ghl-webhook/index.ts. Without this, new jobs created via create_job
+// in ghl-webhook/handler.ts. Without this, new jobs created via create_job
 // (scoping tool path) and sync_ghl (bulk import path) land with
 // created_by = NULL, which breaks every per-rep view in sale.html.
-// Keep this map in sync with ghl-webhook/index.ts SALESPERSON_BY_TYPE.
+// Keep this map in sync with ghl-webhook/handler.ts SALESPERSON_BY_TYPE.
 const SALESPERSON_BY_TYPE: Record<string, string> = {
   patio:   '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73',  // Nithin
   combo:   '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73',  // Nithin

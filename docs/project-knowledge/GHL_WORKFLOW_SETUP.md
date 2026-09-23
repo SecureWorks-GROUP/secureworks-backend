@@ -159,4 +159,4 @@ The `--no-verify-jwt` flag is required because GHL sends webhooks without a JWT.
 1. **Webhook not firing:** Check GHL workflow is active and the trigger matches the right pipeline
 2. **Status not updating:** Check `webhook_log` table for the received payload — look for `status: 'received'`
 3. **Anti-loop skipping:** Normal behaviour — check job_events for `ghl_stage_synced` events
-4. **Wrong status mapping:** If Shaun renames a GHL stage, the stage UUID stays the same so mappings still work. Only adding/removing stages requires code updates to `GHL_STAGE_TO_STATUS` in `ghl-webhook/index.ts`
+4. **Wrong status mapping:** If Shaun renames a GHL stage, the stage UUID stays the same so mappings still work. Only adding/removing stages requires code updates to `GHL_STAGE_TO_STATUS` in `ghl-webhook/handler.ts`
