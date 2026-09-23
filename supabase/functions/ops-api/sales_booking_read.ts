@@ -10,14 +10,15 @@ import {
 // view (`opsFetch('sales_booking_read', {resource, week_start, scoper_user_id})`).
 // It replaces the branch-local preview server `scripts/sales-booking-local-api.mjs`
 // with the same response shape, plus the two facts the browser must not derive
-// itself: the scoper's GHL `diary[]` for the week, and per-case
+// itself: the scoper's `diary[]` for the week (GHL plus Outlook when
+// that resource has a mailbox), and per-case
 // `thread_facts` so the queue can paint waiting-for-reply / offer-out without
 // reading every GHL thread client-side.
 // Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
 // published availability, booked visits, independent approvals):
 // docs/sales-booking-confirmation-api.md.
 //
-// ── NO SEND, NO GHL WRITE ──
+// ── NO SEND, NO GHL OR OUTLOOK WRITE ──
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
 // so the next read can serve cached conversation state and the opportunity
 // enumeration. Those are the only writes. No GHL mutation, no calendar
@@ -31,9 +32,13 @@ import {
 //     `read_ok:false` with a reason, on the row, and the row still appears.
 //  3. Auto-ack and missed-call templates are NOT human replies
 //     (`SALES_BOOKING_TEMPLATE_MARKERS`).
-//  4. Unread leave is not free capacity: `coverage.operational_leave` stays
-//     `not_read` because GHL appointments do not carry an Outlook-style leave
-//     calendar. Missing coverage is never a free week.
+//  4. Unread leave is not free capacity. The diary is GHL plus, for a
+//     resource in `SALES_BOOKING_OUTLOOK_MAILBOXES`, that person's Outlook
+//     primary calendar (every event carries `source: ghl | outlook`). A failed
+//     Outlook read marks the whole diary unread with a named reason.
+//     `coverage.operational_leave` is `primary_outlook_calendar_only` at best:
+//     leave in any other calendar is never read. Missing coverage is never a
+//     free week.
 //  5. Only people who need a visit, a reply or a quote. `scope_stage_ids`
 //     drops quote-sent / won / hold / lost / archive. `coverage.enumerated`
 //     is that scoped count; `excluded_by_stage` is how many open rows were
@@ -54,6 +59,7 @@ import {
   type GhlCalendarGet,
   type GhlLocationUser,
 } from "../ghl-proxy/calendar_events.ts";
+import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
 
@@ -1198,18 +1204,28 @@ export interface SalesBookingDiaryEntry {
   end: string;
   title: string | null;
   kind: SalesBookingDiaryKind;
-  source: string;
-  /** Raw GHL `appointmentStatus`. */
+  /** Which calendar the event was read from. Every diary event names one. */
+  source: SalesBookingDiarySource;
+  /** Raw provider status: GHL `appointmentStatus` or Outlook `showAs`. */
   show_as: string | null;
-  /** False for cancelled: on the diary, but not occupancy. */
+  /** False for a cancelled GHL or a `free` Outlook block: on the diary, but not occupancy. */
   blocks_capacity: boolean;
   is_all_day: boolean;
   location: string | null;
-  /** Always false on the GHL path: GHL appointments have no private-sensitivity flag. */
+  /** True when an Outlook subject was withheld because the event is private. Always false for GHL. */
   title_withheld: boolean;
+  /**
+   * Outlook events only: the GHL appointment id this event mirrors, read from
+   * the extended property the mirror write stamps. Null for everything else.
+   * Both rows stay on the diary so each calendar is shown event for event.
+   */
+  mirror_of_ghl_event_id: string | null;
 }
 
-const DIARY_SOURCE = "ghl_calendar";
+export type SalesBookingDiarySource = "ghl" | "outlook";
+
+const DIARY_SOURCE_GHL: SalesBookingDiarySource = "ghl";
+const DIARY_SOURCE_OUTLOOK: SalesBookingDiarySource = "outlook";
 
 /**
  * Stamp a Perth offset on an offset-less local datetime. GHL usually already
@@ -1240,7 +1256,7 @@ export function perthDiaryInstant(value: unknown): string | null {
   return Number.isFinite(Date.parse(withOffset)) ? withOffset : null;
 }
 
-/** @deprecated Use perthDiaryInstant. Outlook Graph is no longer the diary source. */
+/** @deprecated Use perthDiaryInstant. */
 export const perthGraphInstant = perthDiaryInstant;
 
 /**
@@ -1279,13 +1295,290 @@ export function projectSalesBookingDiaryEntry(
     end,
     title,
     kind: "busy",
-    source: DIARY_SOURCE,
+    source: DIARY_SOURCE_GHL,
     show_as: showAs,
     blocks_capacity: !cancelled,
     is_all_day: event.isAllDay === true,
     location,
     title_withheld: false,
+    mirror_of_ghl_event_id: null,
   };
+}
+
+// ── Outlook (primary calendar) ─────────────────────────────
+// Decision D2 (23 Sep 2026): the booking screen shows the owner's Outlook
+// events beside GHL, read through the mail app's existing Graph app-only
+// credential (`_shared/graph_client.ts`, Calendars.ReadWrite already granted).
+// No new permission. The mailbox is a server constant per booking resource,
+// never a caller-chosen address; a resource absent here has no Outlook read
+// and says so (`not_configured`), it is not silently treated as covered.
+
+/** Booking resources whose Outlook primary calendar is read into the diary. */
+export const SALES_BOOKING_OUTLOOK_MAILBOXES: Readonly<Record<string, string>> =
+  {
+    // wiki fencing-stratco-marnin.json calendar_email; matches the stored
+    // scoper_preferences.work_calendar_email the desk read tool uses.
+    marnin: "marnin@secureworkswa.com.au",
+  };
+
+/**
+ * Named MAPI string property the mirror write stamps on an Outlook event with
+ * the GHL appointment id it mirrors. The GUID is fixed for SecureWorks booking
+ * mirrors; changing it orphans every existing mirror's idempotency key.
+ */
+export const SALES_BOOKING_GHL_MIRROR_PROPERTY_ID =
+  "String {6f1c2d4e-8a3b-4c5d-9e7f-5b0a1c2d3e4f} Name SecureWorksGhlAppointmentId";
+
+/**
+ * Project one Graph calendarView event (rendered with
+ * `Prefer: outlook.timezone="Australia/Perth"`, so dateTimes carry no offset)
+ * onto a diary entry. `kind` comes from provider fields only: `showAs:oof` is
+ * leave, a private/personal/confidential sensitivity is personal (subject and
+ * location withheld), everything else is busy. Returns null for a malformed
+ * event; the caller counts the drop.
+ */
+export function projectSalesBookingOutlookDiaryEntry(
+  event: Record<string, unknown>,
+): SalesBookingDiaryEntry | null {
+  const id = typeof event.id === "string" ? event.id : "";
+  const start = perthDiaryInstant(
+    (event.start as Record<string, unknown> | undefined)?.dateTime,
+  );
+  const end = perthDiaryInstant(
+    (event.end as Record<string, unknown> | undefined)?.dateTime,
+  );
+  if (!id || !start || !end) return null;
+
+  const showAs = typeof event.showAs === "string" ? event.showAs : null;
+  const cancelled = event.isCancelled === true;
+  const sensitivity = String(event.sensitivity || "").toLowerCase();
+  const isPrivate = sensitivity === "private" || sensitivity === "personal" ||
+    sensitivity === "confidential";
+  const kind: SalesBookingDiaryKind = showAs === "oof"
+    ? "leave"
+    : isPrivate
+    ? "personal"
+    : "busy";
+  const subject = typeof event.subject === "string" && event.subject
+    ? event.subject
+    : null;
+  const location = (event.location as Record<string, unknown> | undefined)
+    ?.displayName;
+  let mirrorOf: string | null = null;
+  const props = event.singleValueExtendedProperties;
+  if (Array.isArray(props)) {
+    for (const prop of props) {
+      const row = prop as Record<string, unknown> | null;
+      if (
+        row && typeof row.id === "string" &&
+        row.id.toLowerCase() ===
+          SALES_BOOKING_GHL_MIRROR_PROPERTY_ID.toLowerCase() &&
+        typeof row.value === "string" && row.value
+      ) {
+        mirrorOf = row.value;
+      }
+    }
+  }
+  return {
+    event_id: id,
+    start,
+    end,
+    title: isPrivate ? null : subject,
+    kind,
+    source: DIARY_SOURCE_OUTLOOK,
+    show_as: cancelled ? "cancelled" : showAs,
+    blocks_capacity: !cancelled && showAs !== "free",
+    is_all_day: event.isAllDay === true,
+    location: isPrivate || typeof location !== "string" || !location
+      ? null
+      : location,
+    title_withheld: isPrivate && subject !== null,
+    mirror_of_ghl_event_id: mirrorOf,
+  };
+}
+
+/** Outlook half of the diary. `state` separates "not ours to read" from "failed". */
+export interface SalesBookingOutlookDiaryScan {
+  state: "read" | "failed" | "not_configured";
+  read_ok: boolean;
+  /** Named read failure (e.g. `outlook_calendar_http_403`); null when read. */
+  reason: string | null;
+  entries: SalesBookingDiaryEntry[];
+  malformed_dropped: number;
+  calendar_email: string | null;
+}
+
+export function outlookDiaryNotConfigured(): SalesBookingOutlookDiaryScan {
+  return {
+    state: "not_configured",
+    read_ok: false,
+    reason: null,
+    entries: [],
+    malformed_dropped: 0,
+    calendar_email: null,
+  };
+}
+
+function outlookDiaryFailed(
+  reason: string,
+  calendarEmail: string | null,
+): SalesBookingOutlookDiaryScan {
+  return {
+    state: "failed",
+    read_ok: false,
+    reason,
+    entries: [],
+    malformed_dropped: 0,
+    calendar_email: calendarEmail,
+  };
+}
+
+/** Which Outlook mailbox (if any) this read covers. Same resolution as GHL. */
+export function resolveSalesBookingOutlookMailbox(
+  resourceId: string,
+  scoperUserId: string,
+): string | null {
+  const byScoper = Object.values(SALES_BOOKING_RESOURCES).find((row) =>
+    row.scoper_user_id === scoperUserId
+  );
+  if (byScoper) {
+    return SALES_BOOKING_OUTLOOK_MAILBOXES[byScoper.resource_id] ??
+      null;
+  }
+  if (SALES_BOOKING_RESOURCES[resourceId]?.scoper_user_id !== scoperUserId) {
+    return null;
+  }
+  return SALES_BOOKING_OUTLOOK_MAILBOXES[resourceId] ?? null;
+}
+
+/** One Graph GET. Injected so the reader is testable without a network. */
+export type SalesBookingGraphGet = (
+  url: string,
+  opts: { deadlineMs?: number },
+) => Promise<{ status: number; body: unknown }>;
+
+export const SALES_BOOKING_OUTLOOK_MAX_PAGES = 10;
+
+/**
+ * The owner's Outlook primary calendar for the window, via Graph
+ * `calendarView` (recurrences expanded). A failed, malformed or unfinished
+ * read is a named failure with zero entries: never an empty, free week.
+ * Never throws.
+ */
+export async function readSalesBookingOutlookDiary(args: {
+  graphGet: SalesBookingGraphGet;
+  resourceId: string;
+  scoperUserId: string;
+  since: string;
+  untilExclusive: string;
+  deadlineMs?: number;
+}): Promise<SalesBookingOutlookDiaryScan> {
+  const mailbox = resolveSalesBookingOutlookMailbox(
+    args.resourceId,
+    args.scoperUserId,
+  );
+  if (!mailbox) return outlookDiaryNotConfigured();
+  const startMs = Date.parse(args.since);
+  const untilMs = Date.parse(args.untilExclusive);
+  if (
+    !Number.isFinite(startMs) || !Number.isFinite(untilMs) || untilMs <= startMs
+  ) {
+    return outlookDiaryFailed("outlook_calendar_window_invalid", mailbox);
+  }
+  const url = new URL(
+    `https://graph.microsoft.com/v1.0/users/${
+      encodeURIComponent(mailbox)
+    }/calendarView`,
+  );
+  url.searchParams.set("startDateTime", new Date(startMs).toISOString());
+  url.searchParams.set("endDateTime", new Date(untilMs).toISOString());
+  url.searchParams.set(
+    "$select",
+    "id,subject,start,end,location,isAllDay,isCancelled,showAs,sensitivity",
+  );
+  url.searchParams.set(
+    "$expand",
+    `singleValueExtendedProperties($filter=id eq '${SALES_BOOKING_GHL_MIRROR_PROPERTY_ID}')`,
+  );
+  url.searchParams.set("$top", "100");
+
+  const entries: SalesBookingDiaryEntry[] = [];
+  let dropped = 0;
+  let next: string | null = url.toString();
+  const seen = new Set<string>();
+  try {
+    for (let page = 0; next; page++) {
+      if (page >= SALES_BOOKING_OUTLOOK_MAX_PAGES) {
+        return outlookDiaryFailed("outlook_calendar_page_limit", mailbox);
+      }
+      if (seen.has(next)) {
+        return outlookDiaryFailed(
+          "outlook_calendar_pagination_stalled",
+          mailbox,
+        );
+      }
+      seen.add(next);
+      const res = await args.graphGet(next, { deadlineMs: args.deadlineMs });
+      if (res.status < 200 || res.status >= 300) {
+        return outlookDiaryFailed(
+          `outlook_calendar_http_${res.status}`,
+          mailbox,
+        );
+      }
+      const body = res.body as Record<string, unknown> | null;
+      if (!body || !Array.isArray(body.value)) {
+        return outlookDiaryFailed("outlook_calendar_page_malformed", mailbox);
+      }
+      for (const item of body.value) {
+        const entry = item && typeof item === "object"
+          ? projectSalesBookingOutlookDiaryEntry(
+            item as Record<string, unknown>,
+          )
+          : null;
+        if (entry) entries.push(entry);
+        else dropped++;
+      }
+      const link = body["@odata.nextLink"];
+      if (link == null) {
+        next = null;
+      } else if (
+        typeof link === "string" &&
+        link.startsWith("https://graph.microsoft.com/")
+      ) {
+        next = link;
+      } else {
+        return outlookDiaryFailed(
+          "outlook_calendar_next_link_invalid",
+          mailbox,
+        );
+      }
+    }
+  } catch (error) {
+    return outlookDiaryFailed(
+      `outlook_calendar_read_failed: ${(error as Error)?.message || "unknown"}`,
+      mailbox,
+    );
+  }
+  return {
+    state: "read",
+    read_ok: true,
+    reason: null,
+    entries,
+    malformed_dropped: dropped,
+    calendar_email: mailbox,
+  };
+}
+
+/** Both calendars on one timeline, each event keeping its `source`. */
+export function mergeSalesBookingDiaryEntries(
+  ghl: SalesBookingDiaryEntry[],
+  outlook: SalesBookingDiaryEntry[],
+): SalesBookingDiaryEntry[] {
+  return [...ghl, ...outlook].sort((a, b) =>
+    Date.parse(a.start) - Date.parse(b.start) ||
+    a.source.localeCompare(b.source) ||
+    a.event_id.localeCompare(b.event_id)
+  );
 }
 
 /**
@@ -1617,7 +1910,12 @@ export interface SalesBookingReadResponse {
     total: number | null;
     /** Open roster rows left out because their GHL stage is past scope-needed. */
     excluded_by_stage: number;
-    operational_leave: "not_read";
+    /**
+     * `primary_outlook_calendar_only` when the owner's Outlook primary calendar
+     * was read (its `oof` blocks show as leave); leave kept in any other
+     * calendar is still unread. `not_read` otherwise.
+     */
+    operational_leave: "not_read" | "primary_outlook_calendar_only";
     gaps: string[];
     pages_scanned: number;
     threads_read: number;
@@ -1633,12 +1931,25 @@ export interface SalesBookingReadResponse {
   cases: SalesBookingCase[];
   diary: SalesBookingDiaryEntry[];
   diary_read: {
+    /** True only when every configured calendar source was read. */
     read_ok: boolean;
     reason: string | null;
-    source: string;
+    /** `ghl+outlook` when this resource has an Outlook calendar, else `ghl`. */
+    source: "ghl" | "ghl+outlook";
     calendar_email: string | null;
     ghl_user_id: string | null;
     mapped_by: "email" | "name" | null;
+    sources: {
+      ghl: { read_ok: boolean; reason: string | null; event_count: number };
+      outlook: {
+        state: SalesBookingOutlookDiaryScan["state"];
+        read_ok: boolean;
+        reason: string | null;
+        calendar_email: string | null;
+        event_count: number;
+        malformed_dropped: number;
+      };
+    };
   };
   thread_facts: Record<string, SalesBookingThreadFacts>;
   drafts: Record<string, string>;
@@ -1666,12 +1977,24 @@ export function assembleSalesBookingRead(input: {
   projectedCases: SalesBookingCase[];
   opportunities: SalesBookingOpportunityScan;
   diary: SalesBookingDiaryScan;
+  /** Outlook half of the diary. Absent means this resource has none configured. */
+  outlook?: SalesBookingOutlookDiaryScan;
   threads: SalesBookingThreadScan;
   /** Unique open rows dropped because their stage is past scope-needed. */
   excludedByStage?: number;
 }): SalesBookingReadResponse {
   const { resource, week, opportunities, diary, threads } = input;
+  const outlook = input.outlook ?? outlookDiaryNotConfigured();
   const cases = input.projectedCases;
+  const outlookConfigured = outlook.state !== "not_configured";
+  // A configured Outlook calendar that failed makes the whole diary unread:
+  // GHL-only rows would show the owner free when Outlook says he is not.
+  const diaryReadOk = diary.read_ok && (!outlookConfigured || outlook.read_ok);
+  const diaryReason = !diary.read_ok
+    ? diary.reason
+    : outlookConfigured && !outlook.read_ok
+    ? `outlook_calendar_unread: ${outlook.reason || "unknown"}`
+    : diary.reason;
 
   const gaps: string[] = [];
   gaps.push(
@@ -1695,14 +2018,30 @@ export function assembleSalesBookingRead(input: {
   }
   gaps.push(
     diary.read_ok
-      ? "GHL calendar read for this week. Operational leave, travel and non-GHL calendars remain unread. Missing coverage is not free capacity."
-      : `Scoper calendar unread (${
+      ? outlookConfigured
+        ? "GHL calendar read for this week."
+        : "GHL calendar read for this week. Operational leave, travel and non-GHL calendars remain unread. Missing coverage is not free capacity."
+      : `Scoper GHL calendar unread (${
         diary.reason || "unknown"
       }). Missing coverage is not free capacity.`,
   );
+  if (outlookConfigured) {
+    gaps.push(
+      outlook.read_ok
+        ? `Outlook primary calendar (${outlook.calendar_email}) read for this week. Leave in other calendars remains unread.`
+        : `Outlook calendar unread (${
+          outlook.reason || "unknown"
+        }); the diary is incomplete, not free. Missing coverage is not free capacity.`,
+    );
+  }
   if (diary.malformed_dropped > 0) {
     gaps.push(
-      `${diary.malformed_dropped} calendar event(s) were dropped as malformed and are not represented in the diary.`,
+      `${diary.malformed_dropped} GHL calendar event(s) were dropped as malformed and are not represented in the diary.`,
+    );
+  }
+  if (outlook.malformed_dropped > 0) {
+    gaps.push(
+      `${outlook.malformed_dropped} Outlook calendar event(s) were dropped as malformed and are not represented in the diary.`,
     );
   }
   if (!threads.enabled) {
@@ -1755,9 +2094,9 @@ export function assembleSalesBookingRead(input: {
     resource: {
       ...resource,
       calendar: {
-        ok: diary.read_ok,
-        error: diary.read_ok ? null : diary.reason,
-        mailbox: diary.calendar_email,
+        ok: diaryReadOk,
+        error: diaryReadOk ? null : diaryReason,
+        mailbox: diary.calendar_email ?? outlook.calendar_email,
       },
     },
     coverage: {
@@ -1770,7 +2109,9 @@ export function assembleSalesBookingRead(input: {
       enumerated: cases.length,
       total: opportunities.total,
       excluded_by_stage: input.excludedByStage ?? 0,
-      operational_leave: "not_read",
+      operational_leave: outlookConfigured && outlook.read_ok
+        ? "primary_outlook_calendar_only"
+        : "not_read",
       gaps,
       pages_scanned: opportunities.pages_scanned,
       threads_read: threads.read_ok_count,
@@ -1780,20 +2121,35 @@ export function assembleSalesBookingRead(input: {
       threads_unread: threads.unread_count,
       remaining_429_count: (threads.remaining_429_count || 0) +
         (opportunities.remaining_429_count || 0),
-      diary_read_ok: diary.read_ok,
+      diary_read_ok: diaryReadOk,
       roster_source: opportunities.source === "cache" ? "cache" : "live",
       roster_age_ms: opportunities.age_ms ??
         (opportunities.source === "cache" ? null : 0),
     },
     cases,
-    diary: diary.entries,
+    diary: mergeSalesBookingDiaryEntries(diary.entries, outlook.entries),
     diary_read: {
-      read_ok: diary.read_ok,
-      reason: diary.reason,
-      source: DIARY_SOURCE,
+      read_ok: diaryReadOk,
+      reason: diaryReason,
+      source: outlookConfigured ? "ghl+outlook" : "ghl",
       calendar_email: diary.calendar_email,
       ghl_user_id: diary.ghl_user_id,
       mapped_by: diary.mapped_by,
+      sources: {
+        ghl: {
+          read_ok: diary.read_ok,
+          reason: diary.reason,
+          event_count: diary.entries.length,
+        },
+        outlook: {
+          state: outlook.state,
+          read_ok: outlook.read_ok,
+          reason: outlook.reason,
+          calendar_email: outlook.calendar_email,
+          event_count: outlook.entries.length,
+          malformed_dropped: outlook.malformed_dropped,
+        },
+      },
     },
     thread_facts: threads.facts,
     // Pack overlay (proposals, drafts, stamp) is applied after this assemble
@@ -1851,6 +2207,18 @@ export interface SalesBookingReadDependencies {
     untilExclusive: string;
     deadlineMs?: number;
   }): Promise<SalesBookingDiaryScan>;
+  /**
+   * The owner's Outlook primary calendar for the week. Never throws. Absent
+   * means no Outlook read is wired: a resource with a configured Outlook
+   * mailbox then reads as `failed` (`outlook_reader_not_wired`), never covered.
+   */
+  readOutlookDiary?(args: {
+    resourceId: string;
+    scoperUserId: string;
+    since: string;
+    untilExclusive: string;
+    deadlineMs?: number;
+  }): Promise<SalesBookingOutlookDiaryScan>;
   /** One contact's GHL conversation messages. Rejects on a failed read. */
   readThread(args: {
     contactId: string;
@@ -2196,7 +2564,18 @@ export async function salesBookingRead(
       nowMs: deps.now().getTime(),
     });
 
-  const [resolved, diary] = await Promise.all([
+  const outlookArgs = {
+    resourceId: resource.resource_id,
+    scoperUserId,
+    since: week.since,
+    untilExclusive: week.until_exclusive,
+    deadlineMs,
+  };
+  const outlookMailbox = resolveSalesBookingOutlookMailbox(
+    resource.resource_id,
+    scoperUserId,
+  );
+  const [resolved, diary, outlook] = await Promise.all([
     rosterFresh && cachedRoster
       ? Promise.resolve({
         scan: scanFromCachedRoster(cachedRoster, deps.now().getTime()),
@@ -2215,6 +2594,20 @@ export async function salesBookingRead(
       untilExclusive: week.until_exclusive,
       deadlineMs,
     }),
+    !outlookMailbox
+      ? Promise.resolve(outlookDiaryNotConfigured())
+      : deps.readOutlookDiary
+      ? deps.readOutlookDiary(outlookArgs).catch((error) =>
+        outlookDiaryFailed(
+          `outlook_calendar_read_failed: ${
+            (error as Error)?.message || "unknown"
+          }`,
+          outlookMailbox,
+        )
+      )
+      : Promise.resolve(
+        outlookDiaryFailed("outlook_reader_not_wired", outlookMailbox),
+      ),
   ]);
 
   let opportunities = resolved.scan;
@@ -2331,6 +2724,7 @@ export async function salesBookingRead(
     projectedCases: projected,
     opportunities,
     diary,
+    outlook,
     threads,
     excludedByStage,
   });
@@ -2870,6 +3264,39 @@ async function readDiaryLive(
   });
 }
 
+/**
+ * Live Graph GET for the Outlook diary: the mail app's existing app-only
+ * token (`_shared/graph_client.ts`), one force-refresh on an expired token,
+ * no redirects, bounded by the read deadline. Read-only.
+ */
+async function outlookGraphGetLive(
+  url: string,
+  opts: { deadlineMs?: number },
+): Promise<{ status: number; body: unknown }> {
+  const remaining = opts.deadlineMs != null
+    ? opts.deadlineMs - Date.now()
+    : 20_000;
+  if (remaining <= 0) throw new Error("read budget exhausted");
+  let token = await getGraphToken();
+  const res = await graphFetch(url, token, {
+    init: {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(Math.min(20_000, remaining)),
+      headers: { Prefer: `outlook.timezone="${PERTH_TIMEZONE}"` },
+    },
+    refresh: async () => {
+      token = await getGraphToken({ forceRefresh: true });
+      return token;
+    },
+  });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    return { status: res.status, body: null };
+  }
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+
 async function loadThreadFactsCacheLive(
   client: SalesBookingReadClient,
   resourceId: string,
@@ -3044,6 +3471,17 @@ export function createSalesBookingReadDependencies(
         retry,
       );
     },
+    readOutlookDiary: (
+      { resourceId, scoperUserId, since, untilExclusive, deadlineMs },
+    ) =>
+      readSalesBookingOutlookDiary({
+        graphGet: outlookGraphGetLive,
+        resourceId,
+        scoperUserId,
+        since,
+        untilExclusive,
+        deadlineMs,
+      }),
     readThread: ({ contactId, deadlineMs }) => {
       if (deadlineMs != null) retry.deadlineMs = deadlineMs;
       return readThreadLive(contactId, retry);

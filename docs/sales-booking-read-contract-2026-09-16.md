@@ -1,4 +1,4 @@
-# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22)
+# `sales_booking_read` — consumer contract (v1, 2026-09-16; diary source GHL 2026-09-17; pack/stamp 2026-09-17; pack.proposals 2026-09-17; thread cache 2026-09-17; roster cache + 25s budget 2026-09-17; scoper Outlook aliases 2026-09-22; Outlook diary merge 2026-09-23)
 
 `GET ops-api?action=sales_booking_read` is the book, diary, and threads read
 behind the Sales Booking view. It replaces the branch-local preview server
@@ -13,8 +13,9 @@ Roster, diary, and threads: `supabase/functions/ops-api/sales_booking_read.ts`.
 Pack publish, captain stamp, thread-facts cache, and the read overlay:
 `supabase/functions/ops-api/sales_booking_pack.ts`.
 Visit ledger composition: `supabase/functions/ops-api/sales_booking_visits.ts`.
-Regressions: `sales_booking_read_test.ts`, `sales_booking_pack_test.ts`, and
-`sales_booking_visits_test.ts` beside those files.
+Regressions: `sales_booking_read_test.ts`, `sales_booking_outlook_test.ts`,
+`sales_booking_pack_test.ts`, and `sales_booking_visits_test.ts` beside those
+files.
 The GHL calendar window is one unpaged `/calendars/events` GET in
 `supabase/functions/ghl-proxy/calendar_events.ts`. `ops-api` uses that
 reader; `GET ghl-proxy?action=calendar_events` is the same GET as an HTTP
@@ -103,7 +104,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 |---|---|---|
 | `resource` | `nithin` | `nithin` (patio) or `marnin` (fencing/Stratco). Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
-| `scoper_user_id` | the resource's own | Overrides the CALENDAR read only, and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
+| `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
 | `thread_limit` | 200 (max 250) | Newest-activity-first cap on thread reads, spent on scoped rows only. |
 | `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep, also clipped to the remaining whole-read budget. |
@@ -125,9 +126,19 @@ Reference keys, unchanged: `ok`, `fixture:false`, `send_hold:true`,
 Additions:
 
 - **`diary[]`** — the scoper's GHL calendar events for Mon..Sun of
-  `week_start`. Each entry: `event_id`, `start`, `end` (ISO with `+08:00`),
-  `title`, `kind` (`busy` | `leave` | `personal`), `source` (`ghl_calendar`),
-  plus `show_as`, `blocks_capacity`, `is_all_day`, `location`, `title_withheld`.
+  `week_start`, merged with that person's Outlook primary calendar when the
+  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (today: `marnin`;
+  decision D2, 23 Sep 2026). Each entry: `event_id`, `start`, `end` (ISO with
+  `+08:00`), `title`, `kind` (`busy` | `leave` | `personal`), `source`
+  (`ghl` | `outlook`), plus `show_as`, `blocks_capacity`, `is_all_day`,
+  `location`, `title_withheld`, `mirror_of_ghl_event_id`. Outlook is read with
+  Graph `calendarView` through the mail app's existing app-only credential
+  (`_shared/graph_client.ts`); `showAs:oof` is leave, a private sensitivity is
+  personal with title and location withheld, `free` and cancelled do not block.
+  An Outlook event written by the booking mirror
+  (`sales_booking_outlook_mirror.ts`) names its GHL appointment in
+  `mirror_of_ghl_event_id`; both rows stay so each calendar shows event for
+  event.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
@@ -146,16 +157,28 @@ Additions:
 - **`coverage.roster_source` / `roster_age_ms`** — `cache` or `live`, and the
   cached roster's age in milliseconds (`0` when live). Additive; the door's
   existing keys are unchanged.
-- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by}`.
-  `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
+- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by, sources}`.
+  `source` is `ghl+outlook` for a resource with an Outlook calendar, else
+  `ghl`. `read_ok` is true only when every configured source read. A failed
+  Outlook read is `read_ok:false` with reason
+  `outlook_calendar_unread: <named failure>` (for example
+  `outlook_calendar_http_403`), keeps the GHL rows that did read, and is never
+  a free day. `sources.ghl` is `{read_ok, reason, event_count}`;
+  `sources.outlook` is `{state: read | failed | not_configured, read_ok,
+  reason, calendar_email, event_count, malformed_dropped}`.
+  `coverage.operational_leave` is `primary_outlook_calendar_only` when Outlook
+  read, else `not_read`: leave in any other calendar is never read.
+  `calendar_email` may be null; `ghl_user_id` is
   the confirmed GHL user id or null when unread. `mapped_by` is `email` or
   `name` when that id was confirmed, else null. Name is the weaker match:
   `reason` is then `ghl_user_mapped_by_name`.
 - **`resource`** — the selected profile: `lane`, `pipeline_id`,
   `scoper_user_id`, `sender_line`, `sender_line_source`,
   `scope_stage_ids`, plus `calendar`
-  `{ok, error, mailbox}` copied from `diary_read` (not a second calendar
-  read). The Booking door paints "Calendar not connected" when
+  `{ok, error}` from combined `diary_read.read_ok` / `reason` (not a
+  second calendar read). `mailbox` is `diary_read.calendar_email` (the
+  GHL address), falling back to the Outlook mailbox when GHL has none.
+  The Booking door paints "Calendar not connected" when
   `resource.calendar.ok` is false.
 - **`defaults`** — the Captain defaults this response was produced under, so
   the view shows what the server assumed rather than hard-coding it.
@@ -253,22 +276,31 @@ includes `roster`).
   `coverage.gaps`. The live search is `pipelineId` + `status=open`; GHL v3
   search takes only one `pipelineStageId`, so stage scope is applied after
   enumeration and before the thread pass.
-- **`diary` empty with `diary_read.read_ok:false`** is an UNREAD calendar, not a
-  clear week. Unread coverage is never free capacity. Named unread reasons
-  include `ghl_user_unmapped` (no confirmed GHL user for that scoper) and
-  `ghl_calendar_page_failed` (the unpaged GHL events GET did not complete).
+- **`diary_read.read_ok:false`** is an UNREAD (or incomplete) calendar, not a
+  clear week, whether `diary[]` is empty or still holds the source that
+  did read. Unread coverage is never free capacity. Named unread reasons
+  include `ghl_user_unmapped` (no confirmed GHL user for that scoper),
+  `ghl_calendar_page_failed` (the unpaged GHL events GET did not
+  complete), and `outlook_calendar_unread: <named failure>` (the
+  configured Outlook primary calendar did not read; GHL rows that did
+  read stay on the diary).
 - **`thread_facts[id].read_ok:false`** means nothing was proved about that
   thread. The case still appears, and its `status` stays the default
   `needs_decision`. Classification lives only in `thread_facts`.
 - **Cases with no entry in `thread_facts`** were never attempted (a bound was
   hit). `coverage.gaps` names how many and why. Do not paint them as clear.
-- **`kind` and `blocks_capacity` come from GHL `appointmentStatus` only.**
-  Confirmed/booked (and any non-cancelled status) block; cancelled or deleted
-  does not block but is still returned with `show_as:'cancelled'`. GHL has no
-  leave/personal sensitivity, so those kinds are never invented from a title.
-  **`is_all_day` is `event.isAllDay === true` only** — no midnight or duration
-  inference. **`title_withheld` is always false** (GHL has no
-  private-sensitivity flag).
+- **`kind` and `blocks_capacity` come from the event's own provider, never
+  from title text.** GHL rows use `appointmentStatus` only: confirmed/booked
+  (and any non-cancelled status) block; cancelled or deleted does not block
+  but is still returned with `show_as:'cancelled'`. GHL has no
+  leave/personal sensitivity, so those kinds are never invented and
+  **`title_withheld` is always false**. Outlook rows use Graph fields:
+  `showAs:oof` is `kind:'leave'`, a private/personal/confidential
+  sensitivity is `kind:'personal'` with title and location withheld
+  (`title_withheld:true` when a subject was present), and
+  **`blocks_capacity` follows `showAs`** — `free` and cancelled do not
+  block. **`is_all_day` is `event.isAllDay === true` only** — no midnight
+  or duration inference.
 - **`classification` never emits `booked`.** Thread classification is not a
   booking attribution. Bindable booked visits live on `booked_visits`
   (`docs/sales-booking-confirmation-api.md`); do not invent a `booked`
@@ -305,3 +337,15 @@ email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
 booking resource. Dedicated-calendar ids live on
 `SALES_BOOKING_SCOPER_CALENDARS` (calendar-read paragraph above), not on
 this map. User ids stay null-pinned; this table records emails only.
+
+## Outlook mirror write (D2, 23 Sep 2026)
+
+`sales_booking_outlook_mirror.ts` exports `mirrorGhlAppointmentToOutlook` for
+the booking executor to call after a GHL appointment write. It is not wired
+into any request path here. It creates one event titled `Scope: Name, Suburb`
+spanning the arrival window on the resource's Outlook primary calendar, with
+no attendees (no invitation is sent). It is idempotent on the GHL appointment
+id (a named extended property, looked up before create, plus a deterministic
+Graph `transactionId`); a failed lookup writes nothing. Only
+`SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true` writes; otherwise it returns
+`code:"flag_off"` with `would_write` and makes no Graph call.
