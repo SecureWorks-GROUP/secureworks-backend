@@ -1003,10 +1003,6 @@ function changedSinceLastQuote(
   if (!opts.newestQuoteSentAt) {
     return { changed: null, basis: "no_sent_quote" };
   }
-  const rev = opts.boundRevision;
-  if (rev?.state === "missing") {
-    return { changed: null, basis: "no_revision" };
-  }
   const scopeUpdatedAt = job.scope_updated_at ?? null;
   const hasTime = Boolean(
     scopeUpdatedAt && Number.isFinite(time(scopeUpdatedAt)),
@@ -1017,6 +1013,7 @@ function changedSinceLastQuote(
       basis: "scope_updated_at_vs_newest_current_quote",
     };
   }
+  const rev = opts.boundRevision;
   const jobVersion = num(job.scope_version);
   if (
     rev?.state === "present" &&
@@ -1026,6 +1023,12 @@ function changedSinceLastQuote(
     jobVersion !== rev.snapshot_version
   ) {
     return { changed: true, basis: "scope_version_vs_revision_snapshot" };
+  }
+  if (rev?.state === "missing") {
+    return { changed: null, basis: "no_revision" };
+  }
+  if (rev?.state === "unavailable") {
+    return { changed: null, basis: "revision_read_failed" };
   }
   if (hasTime) {
     return {

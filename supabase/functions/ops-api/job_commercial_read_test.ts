@@ -370,6 +370,12 @@ Deno.test("D1 row 7 SWF-261355: accepted with no sealed value reads accepted, va
   assertEquals(q.headline?.value_inc_gst, null);
   assertEquals(q.headline?.value_source, "not recorded on the sent quote");
   assertEquals(q.current[0].status, "accepted");
+  assertEquals(q.bound_revision, {
+    state: "missing",
+    revision_id: null,
+    snapshot_version: null,
+    snapshot_has_version: false,
+  });
 });
 
 // ── R8 SWF-26163, R9 SWF-26177 ───────────────────────────────────────────────
@@ -1098,6 +1104,96 @@ Deno.test("D1 scope: a failed quote read leaves changed_since_last_quote unknown
   assertEquals(scope.changed_since_last_quote, null);
   assertEquals(scope.changed_since_last_quote_basis, "quote_read_failed");
   assertEquals(scope.changed_since_last_quote_basis !== "no_sent_quote", true);
+});
+
+Deno.test("D1 row 7 SWF-261355: a later scope_updated_at is changed even with no sent revision", () => {
+  const q = buildJobQuotes(quotesInput({
+    clientEmail: "row7@example.test",
+    documents: [doc("r7-q", {
+      quote_number: "Q-0738",
+      sent_at: "2026-08-01T02:00:00.000Z",
+      accepted_at: "2026-08-03T02:00:00.000Z",
+    })],
+    values: [value("r7-q")],
+  }));
+  assertEquals(q.bound_revision?.state, "missing");
+  const job = {
+    id: "r7",
+    type: "fencing",
+    scope_json: {
+      runs: [{
+        run_label: "SIDE",
+        type: "Colorbond",
+        length_m: 12,
+        height_mm: 1800,
+      }],
+    },
+    pricing_json: { totalIncGST: 4100 },
+    scope_version: 1,
+    scope_updated_at: "2026-08-10T00:00:00.000Z",
+  };
+  const later = summariseScope(job, {
+    newestQuoteSentAt: q.current[0].sent_at,
+    boundRevision: q.bound_revision,
+    signedOff: null,
+  });
+  assertEquals(later.changed_since_last_quote, true);
+  assertEquals(
+    later.changed_since_last_quote_basis,
+    "scope_updated_at_vs_newest_current_quote",
+  );
+  const notLater = summariseScope({
+    ...job,
+    scope_updated_at: "2026-07-20T00:00:00.000Z",
+  }, {
+    newestQuoteSentAt: q.current[0].sent_at,
+    boundRevision: q.bound_revision,
+    signedOff: null,
+  });
+  assertEquals(notLater.changed_since_last_quote, null);
+  assertEquals(notLater.changed_since_last_quote_basis, "no_revision");
+});
+
+Deno.test("D1 scope: an unreadable revision stays unknown unless the timestamp already proved changed", async () => {
+  const client = fakeClient(row3Tables(), {
+    failing: new Set(["quote_revisions"]),
+  });
+  const out = await readJobQuotes(client, {
+    id: "job-r3",
+    client_email: "row3@example.test",
+  });
+  assertEquals(out.status.ok, true);
+  assertEquals(out.quotes?.bound_revision?.state, "unavailable");
+  const job = {
+    id: "job-r3",
+    type: "patio",
+    scope_json: {
+      patios: [{ config: { dimensions: { width: 6, depth: 3 } } }],
+    },
+    pricing_json: { totalIncGST: 9000 },
+    scope_version: 2,
+    scope_updated_at: "2026-09-17T00:00:00.000Z",
+  };
+  const notLater = summariseScope(job, {
+    newestQuoteSentAt: out.quotes!.current[0].sent_at,
+    boundRevision: out.quotes!.bound_revision,
+    signedOff: null,
+  });
+  assertEquals(notLater.changed_since_last_quote, null);
+  assertEquals(notLater.changed_since_last_quote_basis, "revision_read_failed");
+  const later = summariseScope({
+    ...job,
+    scope_updated_at: "2026-09-20T00:00:00.000Z",
+  }, {
+    newestQuoteSentAt: out.quotes!.current[0].sent_at,
+    boundRevision: out.quotes!.bound_revision,
+    signedOff: null,
+  });
+  assertEquals(later.changed_since_last_quote, true);
+  assertEquals(
+    later.changed_since_last_quote_basis,
+    "scope_updated_at_vs_newest_current_quote",
+  );
 });
 
 // ── reader failure modes ─────────────────────────────────────────────────────
