@@ -81,6 +81,7 @@ interface World {
   mirror: Record<string, MirrorInvoiceRow>;
   xero: Record<string, Obj>;
   jobs: Record<string, string | null>;
+  jobStatuses: Record<string, string | null>;
   matches: Record<string, string | null>;
   ghl: Record<
     string,
@@ -109,6 +110,7 @@ function world(over: Partial<World> = {}): World {
     mirror: { "inv-1": mirrorRow("inv-1"), "inv-2": mirrorRow("inv-2") },
     xero: { "inv-1": xeroInvoice("inv-1"), "inv-2": xeroInvoice("inv-2") },
     jobs: { "job-1": "ghl-1" },
+    jobStatuses: { "job-1": "complete" },
     matches: { "xc-1": "ghl-1" },
     ghl: { "ghl-1": { id: "ghl-1", phone: "0412 345 678", first_name: "Sam" } },
     anchors: { job_emails: ["accounts@builder.example"], company_emails: [] },
@@ -174,10 +176,13 @@ function deps(w: World): DebtFollowupDeps {
         if (!w.xero[id]) return Promise.reject(new Error("missing"));
         return Promise.resolve(structuredClone(w.xero[id]));
       },
-      jobGhlContacts(ids) {
+      jobFacts(ids) {
         guard(w, "jobs");
         return Promise.resolve(
-          Object.fromEntries(ids.map((id) => [id, w.jobs[id] ?? null])),
+          Object.fromEntries(ids.map((id) => [id, {
+            status: w.jobStatuses[id] ?? null,
+            ghl_contact_id: w.jobs[id] ?? null,
+          }])),
         );
       },
       contactMatch(xc) {
@@ -315,6 +320,44 @@ Deno.test("contact matching is scoped to the executor organization", async () =>
     ["org_id", "org-a"],
     ["xero_contact_id", "same-xero"],
   ]);
+});
+
+Deno.test("job facts read current status and the GHL contact together", async () => {
+  const selected: string[] = [];
+  const client = {
+    from(table: string) {
+      assertEquals(table, "jobs");
+      const query: Obj = {
+        select(columns: string) {
+          selected.push(columns);
+          return query;
+        },
+        in(column: string, ids: string[]) {
+          assertEquals(column, "id");
+          assertEquals(ids, ["job-1"]);
+          return Promise.resolve({
+            data: [{ id: "job-1", status: "scheduled", ghl_contact_id: "ghl-1" }],
+            error: null,
+          });
+        },
+      };
+      return query;
+    },
+  };
+  const reads = debtFollowupReads(client, {
+    orgId: "org-a",
+    getToken: async () => ({ accessToken: "", tenantId: "" }),
+    xeroGet: async () => ({}),
+    assertInvoiceAllowed: async () => undefined,
+    fenceRefusal: () => null,
+    sendInvoiceEmail: async () => ({ status: 200, body: {} }),
+    sendSms: async () => ({ status: 200, body: {} }),
+  });
+
+  assertEquals(await reads.jobFacts(["job-1"]), {
+    "job-1": { status: "scheduled", ghl_contact_id: "ghl-1" },
+  });
+  assertEquals(selected, ["id,status,ghl_contact_id"]);
 });
 
 const providerCalls = (w: World) => w.sms.length + w.emails.length;
@@ -621,11 +664,6 @@ Deno.test("the press refuses on any changed coordinate and makes 0 provider call
       "invoice_on_hold",
     ],
     [
-      "classification move",
-      (w) => (w.mirror["inv-1"].debt_classification = "unclassified"),
-      "approval_stale",
-    ],
-    [
       "fence",
       (w) => (w.fence = { code: "sealed_ses_release_required" }),
       "sealed_ses_invoice",
@@ -656,7 +694,7 @@ Deno.test("the press refuses on every failed read and makes 0 provider calls", a
   const reads: [string, string][] = [
     ["mirror", "invoice_mirror_unreadable"],
     ["xero", "xero_invoice_unreadable"],
-    ["jobs", "job_contact_unreadable"],
+    ["jobs", "job_status_unreadable"],
     ["ghl", "contact_unreadable"],
     ["fence", "sealed_fence_unreadable"],
     ["approval_read", "approval_unreadable"],
@@ -784,6 +822,7 @@ Deno.test("approval binds body hash, destination, invoice ids, snapshot and expi
   assertEquals(record.proposal.invoices[0].hold, {
     classification: "genuine_debt",
     blocker: null,
+    job_status: "complete",
   });
   assertEquals(record.proposal.destination, {
     channel: "sms",
@@ -874,6 +913,56 @@ Deno.test("chase, payment-link, and invoice email proposals refuse internal debt
   }
 });
 
+Deno.test("unclassified invoices on active jobs are held across debtor send kinds", async () => {
+  for (const status of ["in_progress", "scheduled", "draft", "scoping", "quoted"]) {
+    for (const request of [CHASE, LINK, EMAIL]) {
+      const w = world();
+      w.jobStatuses["job-1"] = status;
+      w.mirror["inv-1"].debt_classification = "unclassified";
+      const result = await debtFollowupProposeAction({
+        method: "POST",
+        body: { request },
+        deps: deps(w),
+      });
+      assertEquals(result.status, "refused", `${status}: ${request.kind}`);
+      if (result.status === "refused") {
+        assertEquals(result.reason, "invoice_on_hold");
+        assertEquals(result.detail?.hold?.classification, "blocked_by_us");
+        assertEquals(result.detail?.hold?.job_status, status);
+      }
+      assertEquals(providerCalls(w), 0);
+    }
+  }
+
+  const unreadable = world();
+  unreadable.fail.add("jobs");
+  unreadable.mirror["inv-1"].debt_classification = "unclassified";
+  const refusedRead = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: CHASE },
+    deps: deps(unreadable),
+  });
+  assertEquals(refusedRead.status, "refused");
+  if (refusedRead.status === "refused") {
+    assertEquals(refusedRead.reason, "job_status_unreadable");
+  }
+  assertEquals(providerCalls(unreadable), 0);
+});
+
+Deno.test("job status changes after approval make the proposal stale", async () => {
+  const w = world({ env: SWITCH_ON });
+  w.mirror["inv-1"].debt_classification = "unclassified";
+  const approvalId = await approve(w, CHASE);
+  w.jobStatuses["job-1"] = "invoiced";
+  const result = await press(w, approvalId);
+  assertEquals(result.status, "refused");
+  if (result.status === "refused") {
+    assertEquals(result.reason, "approval_stale");
+    assert(result.detail?.changed.includes("invoices.inv-1.hold"));
+  }
+  assertEquals(providerCalls(w), 0);
+});
+
 Deno.test("Xero null or missing invoice amounts refuse proposal construction", async () => {
   for (const field of ["AmountDue", "Total", "AmountPaid"] as const) {
     for (const missing of [false, true]) {
@@ -946,6 +1035,49 @@ Deno.test("thank-you text needs a PAID invoice and names the amount paid, withou
   );
   assert(!r.proposal.body.includes("—"));
   assertEquals(formatAud(1234567.891), "$1,234,567.89");
+});
+
+Deno.test("thank-you text refuses unsupported or missing invoice currencies", async () => {
+  for (const currency of ["USD", null, ""] as const) {
+    const w = world();
+    paid(w);
+    w.xero["inv-1"].CurrencyCode = currency;
+    const result = await debtFollowupProposeAction({
+      method: "POST",
+      body: { request: THANKS },
+      deps: deps(w),
+    });
+    assertEquals(result.status, "refused");
+    if (result.status === "refused") {
+      assertEquals(result.reason, "payment_currency_unsupported");
+    }
+    assertEquals(providerCalls(w), 0);
+  }
+
+  const missingCurrency = world();
+  paid(missingCurrency);
+  delete missingCurrency.xero["inv-1"].CurrencyCode;
+  const missingResult = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: THANKS },
+    deps: deps(missingCurrency),
+  });
+  assertEquals(missingResult.status, "refused");
+  if (missingResult.status === "refused") {
+    assertEquals(missingResult.reason, "payment_currency_unsupported");
+  }
+  assertEquals(providerCalls(missingCurrency), 0);
+
+  const lowerCaseAud = world();
+  paid(lowerCaseAud);
+  lowerCaseAud.xero["inv-1"].CurrencyCode = "aud";
+  const result = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: THANKS },
+    deps: deps(lowerCaseAud),
+  });
+  assert(result.status === "proposed");
+  assertStringIncludes(result.proposal.body, "$1,234.50");
 });
 
 Deno.test("chase: one debtor, verified destination, and a named contact must match the binding", async () => {

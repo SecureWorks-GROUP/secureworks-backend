@@ -87,11 +87,11 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
     ...fix.fetchRoutes,
     [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () =>
       new Response(JSON.stringify({ success: true }), {
-      status: 202,
-      headers: {
-        "request-id": "outlook-request-1",
-        "client-request-id": "client-request-1",
-      },
+        status: 202,
+        headers: {
+          "request-id": "outlook-request-1",
+          "client-request-id": "client-request-1",
+        },
       }),
   }
   const { client, calls: dbCalls } = makeStubClient(fix.seed)
@@ -101,7 +101,10 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   const { logBusinessEvent, events } = makeStubLogBusinessEvent()
 
   const resp = await _verifyAndSendInvoiceEmail({
-    client, body: makeBody({ debt_followup_approval_id: "approval-123" }),
+    client, body: makeBody({
+      debt_followup_approval_id: "approval-123",
+      subject_override: "Approved invoice subject",
+    }),
     getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
@@ -131,6 +134,12 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   assertEquals(events[0].direction, "outbound")
   assertEquals(events[0].job_id, "job-uuid-1")
   assertEquals(events[0].payload.linked, true)
+  assertEquals(events[0].payload.subject, "Approved invoice subject")
+  assertEquals(
+    events[0].payload.body,
+    "<p>Please find your invoice attached.</p><p>Invoice: <strong>INV-001</strong></p>",
+  )
+  assertEquals(events[0].payload.attachment_file_name, "INV-001.pdf")
   assertEquals(events[0].payload.provider_proof, j.provider_proof)
   // job_events insert happens via stub client
   const jobEventInserts = dbCalls.inserts.filter(i => i.table === "job_events")

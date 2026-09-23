@@ -432,6 +432,9 @@ Deno.test("an invoice.emailed business event appears once as an outbound email",
       payload: {
         invoice_number: "INV-1001",
         to: "accounts@example.test",
+        subject: "Approved invoice subject",
+        body: "<p>Approved invoice body.</p>",
+        attachment_file_name: "INV-1001.pdf",
         provider_proof: providerProof,
       },
     }],
@@ -448,6 +451,8 @@ Deno.test("an invoice.emailed business event appears once as an outbound email",
   assertEquals(email[0].source_system, "business_events");
   assertEquals(email[0].channel, "email");
   assertEquals(email[0].direction, "outbound");
+  assertEquals(email[0].subject, "Approved invoice subject");
+  assertEquals(email[0].body, "<p>Approved invoice body.</p>");
   assertEquals(email[0].provider_proof, providerProof);
 });
 
