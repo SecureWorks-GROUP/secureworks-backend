@@ -149,8 +149,10 @@ Additions:
   `classification`, `read_ok`, `reason`, `message_count`,
   `template_outbound_count`, `read_at`.
 - Per case **`suburb`**, **`job_type`**, **`enquiry_at`**, **`pipeline_stage_id`**
-  beside `stage_name`. Suburb is contact city, a WA suburb parsed from the
-  street line, or `jobs.site_suburb` when GHL has no parseable city/address.
+  beside `stage_name`. Suburb is `salesBookingPublishedSuburb`: contact city,
+  a WA suburb parsed from the street line, or `jobs.site_suburb` when GHL has
+  no parseable city/address. The booking executor titles the Outlook event
+  from this same value (`docs/sales-booking-executor.md`).
   Job type is enquiry tags then the resource book lane (Nithin patio, Marnin
   fencing). Either field is `"not given"` when none of those exist — never
   invented. A live-week missing-rate bar is not acceptance: 14 Sep 2026
@@ -351,9 +353,8 @@ this map. User ids stay null-pinned; this table records emails only.
 which the booking executor (`sales_booking_book`,
 `docs/sales-booking-executor.md`) calls after a GHL appointment write. It creates one event titled `Scope: Name, Suburb`
 spanning the exact GHL appointment on the resource's Outlook primary calendar, with
-no attendees (no invitation is sent). The suburb is the one
-`salesBookingPublishedSuburb` already publishes on the booking read (contact
-city/address, then `jobs.site_suburb`). It is idempotent on the GHL appointment
+no attendees (no invitation is sent). The suburb is the case `suburb` the
+booking read already publishes (`salesBookingPublishedSuburb`). It is idempotent on the GHL appointment
 id (a named extended property, looked up before create, plus a deterministic
 Graph `transactionId`); a failed lookup writes nothing. A live executor press
 (`SALES_BOOKING_BOOK_EXECUTE=true`, captain JWT, not dry-run) passes

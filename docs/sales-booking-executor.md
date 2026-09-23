@@ -49,10 +49,12 @@ Both actions:
 
 1. `method_not_allowed`, `press_requires_captain`, `approval_id_required`.
 2. `approval_not_found`, `approval_unreadable`, `approval_step_mismatch`.
-3. Already ran: a second press returns the first result and never writes or
-   sends twice. A book uses the GHL writer's own ledger, keyed on the approval
-   hash; a send uses `sales_booking_executions` (`step=message`). An unsettled earlier attempt
-   refuses `execution_outcome_unknown` and is never repeated.
+3. Already ran: a send returns the first result and never sends twice. A book
+   uses the GHL writer's own ledger, keyed on the approval hash, so GHL is
+   never booked twice; a retry still writes the Outlook mirror at most once
+   (next section). A send uses `sales_booking_executions` (`step=message`).
+   An unsettled earlier attempt refuses `execution_outcome_unknown` and is
+   never repeated.
 4. `approval_not_approved` (a refusal decision), `approval_not_by_captain`
    (approver email not in `SALES_BOOKING_CAPTAIN_EMAILS`),
    `content_hash_mismatch` (the stored snapshot no longer hashes to its binding
@@ -68,7 +70,14 @@ Both actions:
    (`_shared/graph_client.ts`, mailbox from `SALES_BOOKING_GHL_USERS`). Any busy
    event refuses `outlook_calendar_clash`, naming subject and times; a failed
    read refuses `outlook_unreadable`. Free and cancelled events never block.
-7. A live press claims `sales_booking_executions` (`step=calendar`) and
+7. When the resource has an Outlook calendar
+   (`SALES_BOOKING_OUTLOOK_MAILBOXES`): published suburb and client name,
+   before any GHL write (dry run included). Suburb is
+   `salesBookingPublishedSuburb` (the same value the booking read publishes).
+   Missing that value, a usable name, or the contact read refuses
+   `suburb_not_given` / `client_name_not_given` / `contact_unreadable` and
+   books nothing.
+8. A live press claims `sales_booking_executions` (`step=calendar`) and
    passes `executorClaim` to the GHL writer
    (`ghl-proxy?action=create_calendar_appointment`), which re-reads the
    person's GHL diary plus every assigned calendar and refuses
@@ -117,12 +126,9 @@ again replays the GHL booking from the writer's ledger (no second GHL call,
 even after the approval has expired) and re-runs the mirror, which looks up the
 GHL id on the calendar before creating, so Outlook is written at most once.
 
-Before any GHL write (dry run included), the press resolves the published
-suburb. If that shared value is `"not given"` the press refuses
-`suburb_not_given` and nothing is booked. `client_name_not_given` and
-`contact_unreadable` also refuse before GHL. The mirror writes on a live
-press (captain JWT, book switch on); it does not use a second Outlook
-write switch.
+A missing published suburb or name refuses before GHL (check 7). The
+mirror writes on a live press (captain JWT, book switch on); it does not
+use a second Outlook write switch.
 
 ## The GHL writer refuses without the executor's per-press claim
 

@@ -733,7 +733,10 @@ export async function salesBookingBookAction(args: {
   });
   if (res.body?.dryRun === true && res.body.wouldWrite) {
     const reason = loaded.dryReason ?? "appointment_writer_flag_off";
-    const span = ghlAppointmentSpan(res.body.wouldWrite.body ?? null, appointment);
+    const span = ghlAppointmentSpan(
+      res.body.wouldWrite.body ?? null,
+      appointment,
+    );
     const preview = outlookLead && span
       ? planOutlookMirror(
         loaded,

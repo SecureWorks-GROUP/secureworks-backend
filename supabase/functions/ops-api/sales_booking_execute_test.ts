@@ -133,7 +133,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
   let thread: SalesBookingMessage[] = [];
   let outlook: OutlookEvent[] = [];
   let contact: Obj = { ...GHL_CONTACT };
-  let jobSites: Record<string, SalesBookingJobSiteFact> = {};
+  const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
     status: 200,
@@ -786,7 +786,10 @@ Deno.test("Outlook title uses the suburb the booking read publishes, including a
     assertEquals(result.status, "booked");
     const subject = f.calls.outlookPosts[0]?.subject;
     titles.push(subject);
-    return { subject, published: salesBookingPublishedSuburb(contact, job?.site) };
+    return {
+      subject,
+      published: salesBookingPublishedSuburb(contact, job?.site),
+    };
   }
 
   const address1IsSuburb = await titleFor({
@@ -849,8 +852,14 @@ Deno.test("Outlook event start and end are the GHL appointment start and end, ne
     dateTime: "2026-09-25T11:30:00",
     timeZone: "Australia/Perth",
   });
-  assertEquals(live.calls.outlookPosts[0].start.dateTime.endsWith("09:00:00"), true);
-  assertEquals(live.calls.outlookPosts[0].end.dateTime.endsWith("11:30:00"), true);
+  assertEquals(
+    live.calls.outlookPosts[0].start.dateTime.endsWith("09:00:00"),
+    true,
+  );
+  assertEquals(
+    live.calls.outlookPosts[0].end.dateTime.endsWith("11:30:00"),
+    true,
+  );
   assertEquals(ghlStart.slice(11, 16), "09:00");
   assertEquals(ghlEnd.slice(11, 16), "11:30");
   assertEquals(
