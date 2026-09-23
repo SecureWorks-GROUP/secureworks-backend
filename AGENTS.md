@@ -3861,3 +3861,24 @@ found by source pointer (every live copy has one), `graph:` provider key, or
 marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
+
+## The Debtor Work List Is One Read Over The Existing Debt Reads
+
+`GET ops-api?action=debt_worklist` (`debt_worklist_read_model.ts`) is the
+read-only contract the Clear Debt redesign consumes. It builds no status or
+message engine of its own: per-invoice link, facts and blockers come from
+`debtContextCoverage`, next step and owner from the `debt_picture` columns, and
+the timeline from `getJobConversation` called with `report_faults: true` (an
+opt-in that names failed sources and adds provider ids; the default
+`get_job_conversation` response is unchanged). A debtor is a VERIFIED Xero
+contact: the mirror's `xero_contact_id` must equal `raw_json.Contact.ContactID`,
+and any invoice that fails that (INV-1435 on 24 Sep 2026) stands alone. Never
+group by name or GHL contact. Every response publishes `reconciliation.exactly_once`
+over the whole open book; a failed read is a row fault (a failed link read is
+`unknown`, never `none`), never a zero. The timeline is stored copies only, not
+a live GHL or Outlook read, and email never reads complete while Outlook Sent
+Items are not captured. Never commit production Xero ids, job ids or amounts
+as fixtures: `debt_worklist_read_model_test.ts` runs over the synthetic
+`fixtures/debt_worklist_synthetic_book_v1.json`, and its real-book check runs
+read-only against the live database only when `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY` are set.

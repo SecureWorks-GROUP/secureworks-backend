@@ -27,13 +27,14 @@ export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const JOB_NUMBER = /\b(SW[A-Z]{1,3}-\d{4,8})\b/i;
-const OPEN_STATUSES = ["AUTHORISED", "SUBMITTED"];
-const XERO_STALE_HOURS = 24;
-const IN_CHUNK = 100;
+/** The open receivable population: the debt work list reads the same set. */
+export const OPEN_STATUSES = ["AUTHORISED", "SUBMITTED"];
+export const XERO_STALE_HOURS = 24;
+export const IN_CHUNK = 100;
 // PostgREST caps any response at 1000 rows, so .limit(n > 1000) truncates in
 // silence. Every multi-row read here pages with .range() instead.
-const PAGE_SIZE = 1000;
-const MAX_PAGES = 20;
+export const PAGE_SIZE = 1000;
+export const MAX_PAGES = 20;
 // An invoice number we are willing to match on. No spaces, no wildcards, and
 // short enough that the escaped form cannot be used to build a pattern.
 const INVOICE_NUMBER = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,63}$/;
@@ -106,7 +107,7 @@ export interface SourceStatus {
 
 // ── small helpers ────────────────────────────────────────────────────────────
 
-function chunk<T>(items: T[], size = IN_CHUNK): T[][] {
+export function chunk<T>(items: T[], size = IN_CHUNK): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
     out.push(items.slice(i, i + size));
@@ -114,13 +115,13 @@ function chunk<T>(items: T[], size = IN_CHUNK): T[][] {
   return out;
 }
 
-function num(value: unknown): number | null {
+export function num(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
 
-function str(value: unknown): string | null {
+export function str(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const s = String(value).trim();
   return s ? s : null;
@@ -176,7 +177,7 @@ async function safeRead<T>(
   }
 }
 
-function unwrap(result: { data: any; error: any }): any {
+export function unwrap(result: { data: any; error: any }): any {
   if (result?.error) {
     throw new Error(result.error.message || String(result.error));
   }
@@ -193,7 +194,7 @@ function unwrap(result: { data: any; error: any }): any {
  * `build` must return a fresh query builder on every call (filters and select
  * re-applied); the reader owns the order and range.
  */
-async function pageThrough(
+export async function pageThrough(
   table: string,
   build: () => any,
   warnings: string[],

@@ -258,13 +258,18 @@ export async function debtNote(client: any, body: any) {
   return { ok: true, thread, thread_error: threadError }
 }
 
+/** One payment_chase_logs row as a thread entry. Shared by debt_notes and the debt work list timeline. */
+export function chaseLogThreadEntry(l: any): { at: string; who: string | null; tag: string | null; text: string; source: string } {
+  return { at: l.created_at, who: l.chased_by ?? null, tag: l.method === 'note' ? (l.outcome ?? null) : (l.method ?? null), text: l.notes || l.outcome || '', source: 'debt' }
+}
+
 /** One thread: the desk's notes on the invoice plus the job's own notes, newest first. */
 export async function debtNotes(client: any, xeroInvoiceId: string, jobId: string | null) {
   const out: Array<{ at: string; who: string | null; tag: string | null; text: string; source: string }> = []
   const { data: logs, error: e1 } = await client.from('payment_chase_logs')
     .select('created_at, chased_by, method, outcome, notes').eq('xero_invoice_id', xeroInvoiceId).order('created_at', { ascending: false }).limit(100)
   if (e1) throw e1
-  for (const l of logs || []) out.push({ at: l.created_at, who: l.chased_by, tag: l.method === 'note' ? l.outcome : l.method, text: l.notes || l.outcome || '', source: 'debt' })
+  for (const l of logs || []) out.push(chaseLogThreadEntry(l))
   if (jobId) {
     const { data: ev, error: e2 } = await client.from('job_events')
       .select('created_at, user_id, detail_json, event_type').eq('job_id', jobId).eq('event_type', 'note').order('created_at', { ascending: false }).limit(50)

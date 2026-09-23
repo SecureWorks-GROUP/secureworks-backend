@@ -385,6 +385,7 @@ import {
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows, unlinkedActor } from './context_unlinked.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
+import { debtWorklist, DebtWorklistError } from './debt_worklist_read_model.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
@@ -7255,6 +7256,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : await debtContextCoverage(url.searchParams, deps))
         } catch (error) {
           if (error instanceof InvoiceContextError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          throw error
+        }
+      }
+      // ── Debtor work list (debt redesign PR 3, review 24 Sep 2026) ──
+      // The whole open book grouped by verified Xero contact, each invoice
+      // listed once, one merged timeline per debtor. SELECT-only: no send, no
+      // Xero write, no note write. Contract: debt_worklist_read_model.ts.
+      case 'debt_worklist': {
+        if (req.method !== 'GET') {
+          return json({ error: `${action} requires GET` }, 405)
+        }
+        try {
+          // A signed-in caller must belong to the org whose book this reads;
+          // the read refuses before touching any row (operator_org_required).
+          const callerOrgId = authMode === 'jwt' ? (authUser?.orgId ?? null) : undefined
+          return json(await debtWorklist(url.searchParams, { client, orgId: DEFAULT_ORG_ID, callerOrgId, getJobConversation, isCurrentContextFact }))
+        } catch (error) {
+          if (error instanceof DebtWorklistError || error instanceof InvoiceContextError) {
             return json({ error: error.message, code: error.code }, error.status)
           }
           throw error
@@ -15914,6 +15935,15 @@ async function getJobConversation(client: any, body: any) {
     ? Math.min(body.limit, 200)
     : 50
   const since = typeof body?.since === 'string' && body.since ? body.since : null
+  // report_faults (debt work list, opt-in): name every source read that
+  // failed and carry each message's provider id, so a caller can tell an
+  // unreadable source from an empty one and can dedupe one message seen by
+  // two sources. Off by default: get_job_conversation's response is unchanged.
+  const reportFaults = body?.report_faults === true
+  const readFaults: string[] = []
+  const fault = (source: string, detail: unknown) => {
+    readFaults.push(`${source}: ${detail instanceof Error ? detail.message : String((detail as any)?.message ?? detail)}`)
+  }
 
   // Resolve job_id (uuid) — accept job_id or job_number.
   let jobId: string | null = body?.job_id || null
@@ -15921,26 +15951,31 @@ async function getJobConversation(client: any, body: any) {
   let ghlContactId: string | null = null
 
   if (!jobId && jobNumber) {
-    const { data: found } = await client.from('jobs')
+    const { data: found, error: foundErr } = await client.from('jobs')
       .select('id, job_number, ghl_contact_id')
       .ilike('job_number', jobNumber)
       .limit(1)
+    if (foundErr) fault('jobs', foundErr)
     if (found?.[0]) {
       jobId = found[0].id
       jobNumber = found[0].job_number
       ghlContactId = found[0].ghl_contact_id || null
     }
   } else if (jobId) {
-    const { data: jobRow } = await client.from('jobs')
+    const { data: jobRow, error: jobRowErr } = await client.from('jobs')
       .select('job_number, ghl_contact_id')
       .eq('id', jobId)
       .maybeSingle()
+    if (jobRowErr) fault('jobs', jobRowErr)
     if (jobRow) {
       jobNumber = jobRow.job_number
       ghlContactId = jobRow.ghl_contact_id || null
     }
   }
-  if (!jobId) return { messages: [], summary: { count: 0, channels: {}, since, until: null } }
+  if (!jobId) {
+    const empty = { messages: [], summary: { count: 0, channels: {}, since, until: null } }
+    return reportFaults ? { ...empty, read_faults: readFaults } : empty
+  }
 
   const sinceFilter = since || null
   const messages: any[] = []
@@ -15950,17 +15985,19 @@ async function getJobConversation(client: any, body: any) {
   try {
     let ghlRow: any = null
     if (ghlContactId) {
-      const { data: byContact } = await client.from('ghl_conversation_cache')
+      const { data: byContact, error: byContactErr } = await client.from('ghl_conversation_cache')
         .select('messages, message_count, synced_at')
         .eq('contact_id', ghlContactId)
         .maybeSingle()
+      if (byContactErr) fault('ghl_cache', byContactErr)
       ghlRow = byContact || null
     }
     if (!ghlRow) {
-      const { data: byJob } = await client.from('ghl_conversation_cache')
+      const { data: byJob, error: byJobErr } = await client.from('ghl_conversation_cache')
         .select('messages, message_count, synced_at')
         .eq('job_id', jobId)
         .maybeSingle()
+      if (byJobErr) fault('ghl_cache', byJobErr)
       ghlRow = byJob || null
     }
     const ghlMsgs: any[] = Array.isArray(ghlRow?.messages) ? ghlRow.messages : []
@@ -15981,11 +16018,13 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'ghl_cache',
         source_ref: m.id || '',
+        ...(reportFaults ? { provider_message_id: m.id ? `ghl:${m.id}` : null } : {}),
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
       })
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation ghl_cache read failed:', (e as Error).message)
+    fault('ghl_cache', e)
   }
 
   // 2. inbox_events — legacy inbox copies only (context slice R0). Its job_id
@@ -16003,10 +16042,14 @@ async function getJobConversation(client: any, body: any) {
       .limit(limit)
     if (sinceFilter) q = q.gt('received_at', sinceFilter)
     const { data: inbox, error: inboxErr } = await q
-    if (inboxErr) console.error('[ops-api] get_job_conversation inbox read failed:', inboxErr.message)
+    if (inboxErr) {
+      console.error('[ops-api] get_job_conversation inbox read failed:', inboxErr.message)
+      fault('inbox', inboxErr)
+    }
     const copyCheck = await readInboxEventCopies(client, inbox || [])
     if (!copyCheck.ok) {
       console.error('[ops-api] get_job_conversation inbox event-copy check incomplete:', copyCheck.errors.join('; '))
+      fault('inbox_event_copies', copyCheck.errors.join('; '))
     }
     // The flag is read only when it can change the answer.
     const hasUnplacedCopy = [...copyCheck.copies.values()].some((job) => !job)
@@ -16024,6 +16067,7 @@ async function getJobConversation(client: any, body: any) {
         subject: r.subject || null,
         source_system: 'inbox',
         source_ref: r.id,
+        ...(reportFaults ? { provider_message_id: r.graph_message_id ? `graph:${r.graph_message_id}` : null } : {}),
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
@@ -16031,6 +16075,7 @@ async function getJobConversation(client: any, body: any) {
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation inbox read failed:', (e as Error).message)
+    fault('inbox', e)
   }
 
   // 3. job_events staff notes — full text in detail_json.
@@ -16042,7 +16087,8 @@ async function getJobConversation(client: any, body: any) {
       .order('created_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('created_at', sinceFilter)
-    const { data: notes } = await q
+    const { data: notes, error: notesErr } = await q
+    if (notesErr) fault('job_events', notesErr)
     for (const r of (notes || [])) {
       const text = String(r?.detail_json?.text || '')
       messages.push({
@@ -16061,6 +16107,7 @@ async function getJobConversation(client: any, body: any) {
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation job_events notes read failed:', (e as Error).message)
+    fault('job_events', e)
   }
 
   // 4. business_events — message-shaped rows (sms/email/note/call).
@@ -16076,14 +16123,17 @@ async function getJobConversation(client: any, body: any) {
     // this job. placement_rule is metadata.placement_rule (null until the
     // placement rules that write it ship).
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
+      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, provider_message_id')
       .eq('job_id', jobId)
       .in('event_type', messageEventTypes)
       .order('occurred_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
     const { data: bev, error: bevErr } = await q
-    if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
+    if (bevErr) {
+      console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
+      fault('business_events', bevErr)
+    }
     for (const r of (bev || [])) {
       const p: any = r.payload || {}
       const channel: string = r.event_type.includes('sms') ? 'sms'
@@ -16109,10 +16159,12 @@ async function getJobConversation(client: any, body: any) {
         attribution_status: r.attribution_status ?? null,
         attribution_step: r.attribution_step ?? null,
         placement_rule: r.placement_rule ?? null,
+        ...(reportFaults ? { provider_message_id: r.provider_message_id ?? null } : {}),
       })
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
+    fault('business_events', e)
   }
 
   // chat_logs (internal AI chat) is deliberately NOT a source. It is our own
@@ -16143,7 +16195,7 @@ async function getJobConversation(client: any, body: any) {
     job_id: jobId,
     job_number: jobNumber,
   }
-  return { messages: sliced, summary }
+  return reportFaults ? { messages: sliced, summary, read_faults: readFaults } : { messages: sliced, summary }
 }
 
 // ════════════════════════════════════════════════════════════

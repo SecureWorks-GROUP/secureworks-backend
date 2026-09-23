@@ -1,0 +1,902 @@
+{
+ "business_events": [
+  {
+   "event_type": "client.sms_in",
+   "id": "be-syn-1",
+   "job_id": "a0000000-0000-4000-8000-000000000004",
+   "occurred_at": "2026-09-05T00:00:00+00:00"
+  }
+ ],
+ "captured_at": "2026-09-24T02:00:00+00:00",
+ "contact_matches": [
+  {
+   "ghl_contact_id": "ghl-syn-9",
+   "job_id": "a0000000-0000-4000-8000-000000000009",
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000007"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-contact-only",
+   "job_id": null,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000002"
+  }
+ ],
+ "current_job_context_facts": [
+  {
+   "_context_store": "job_context",
+   "created_at": "2026-09-10T00:00:00+00:00",
+   "expires_at": null,
+   "extractor_version": null,
+   "id": "f-syn-1",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "kind": "payment_promise",
+   "provenance": {
+    "extractor": "context-luna-subscription:v1"
+   },
+   "trust": null,
+   "updated_at": "2026-09-10T00:00:00+00:00",
+   "value": {
+    "text": "synthetic"
+   }
+  },
+  {
+   "_context_store": "job_context",
+   "created_at": "2026-09-10T00:00:00+00:00",
+   "expires_at": null,
+   "extractor_version": null,
+   "id": "f-syn-2",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "kind": "payment_promise",
+   "provenance": {
+    "extractor": "context-luna-subscription:v1"
+   },
+   "trust": null,
+   "updated_at": "2026-09-11T00:00:00+00:00",
+   "value": {
+    "text": "synthetic"
+   }
+  },
+  {
+   "_context_store": "job_context",
+   "created_at": "2026-09-10T00:00:00+00:00",
+   "expires_at": null,
+   "extractor_version": null,
+   "id": "f-syn-3",
+   "job_id": "a0000000-0000-4000-8000-000000000002",
+   "kind": "payment_promise",
+   "provenance": {
+    "extractor": "context-luna-subscription:v1"
+   },
+   "trust": null,
+   "updated_at": "2026-09-12T00:00:00+00:00",
+   "value": {
+    "text": "synthetic"
+   }
+  },
+  {
+   "_context_store": "job_context",
+   "created_at": "2026-09-10T00:00:00+00:00",
+   "expires_at": null,
+   "extractor_version": null,
+   "id": "f-syn-4",
+   "job_id": "a0000000-0000-4000-8000-000000000004",
+   "kind": "payment_promise",
+   "provenance": {
+    "extractor": "context-luna-subscription:v1"
+   },
+   "trust": null,
+   "updated_at": "2026-09-13T00:00:00+00:00",
+   "value": {
+    "text": "synthetic"
+   }
+  },
+  {
+   "_context_store": "job_context",
+   "created_at": "2026-09-10T00:00:00+00:00",
+   "expires_at": null,
+   "extractor_version": null,
+   "id": "f-syn-5",
+   "job_id": "a0000000-0000-4000-8000-000000000007",
+   "kind": "payment_promise",
+   "provenance": {
+    "extractor": "context-luna-subscription:v1"
+   },
+   "trust": null,
+   "updated_at": "2026-09-14T00:00:00+00:00",
+   "value": {
+    "text": "synthetic"
+   }
+  },
+  {
+   "_context_store": "job_temporary_context",
+   "created_at": "2026-08-20T00:00:00+00:00",
+   "expires_at": "2026-09-01T00:00:00+00:00",
+   "extractor_version": null,
+   "id": "f-syn-stale",
+   "job_id": "a0000000-0000-4000-8000-000000000004",
+   "kind": "current_state",
+   "provenance": {
+    "extractor": "context-luna-subscription:v1"
+   },
+   "trust": null,
+   "updated_at": "2026-08-20T00:00:00+00:00",
+   "value": "old"
+  }
+ ],
+ "extraction_jobs": [],
+ "ghl_conversation_cache": [
+  {
+   "contact_id": "ghl-syn-1",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "message_count": 3,
+   "synced_at": "2026-09-23T10:00:00+00:00"
+  },
+  {
+   "contact_id": "ghl-syn-4",
+   "job_id": "a0000000-0000-4000-8000-000000000004",
+   "message_count": 2,
+   "synced_at": "2026-09-01T10:00:00+00:00"
+  },
+  {
+   "contact_id": "ghl-syn-contact-only",
+   "job_id": null,
+   "message_count": 1,
+   "messages": [
+    {
+     "body": "synthetic reply",
+     "direction": "inbound",
+     "id": "m-syn-co-1",
+     "timestamp": "2026-09-22T01:00:00Z",
+     "type": "TYPE_SMS"
+    }
+   ],
+   "synced_at": "2026-09-23T09:00:00+00:00"
+  }
+ ],
+ "inbox_events": [
+  {
+   "id": "in-syn-1",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "received_at": "2026-09-02T00:00:00+00:00"
+  }
+ ],
+ "job_events": [
+  {
+   "event_type": "note",
+   "id": "je-syn-1",
+   "job_id": "a0000000-0000-4000-8000-000000000002"
+  }
+ ],
+ "jobs": [
+  {
+   "ghl_contact_id": "ghl-syn-1",
+   "id": "a0000000-0000-4000-8000-000000000001",
+   "job_number": "SWP-90001",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-2",
+   "id": "a0000000-0000-4000-8000-000000000002",
+   "job_number": "SWP-90002",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-3",
+   "id": "a0000000-0000-4000-8000-000000000003",
+   "job_number": "SWP-90003",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-4",
+   "id": "a0000000-0000-4000-8000-000000000004",
+   "job_number": "SWP-90004",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": null,
+   "id": "a0000000-0000-4000-8000-000000000005",
+   "job_number": "SWP-90005",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-6",
+   "id": "a0000000-0000-4000-8000-000000000006",
+   "job_number": "SWP-90006",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-7",
+   "id": "a0000000-0000-4000-8000-000000000007",
+   "job_number": "SWP-90007",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": null,
+   "id": "a0000000-0000-4000-8000-000000000008",
+   "job_number": "SWP-90008",
+   "status": "complete",
+   "type": "patio"
+  },
+  {
+   "ghl_contact_id": "ghl-syn-9",
+   "id": "a0000000-0000-4000-8000-000000000009",
+   "job_number": "SWP-90009",
+   "status": "complete",
+   "type": "fencing"
+  }
+ ],
+ "payment_chase_logs": [
+  {
+   "chased_by": "operator",
+   "created_at": "2026-09-10T00:00:00+00:00",
+   "follow_up_date": null,
+   "follow_up_resolved": null,
+   "id": "pc-syn-1",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "method": "note",
+   "outcome": "promised",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000001"
+  }
+ ],
+ "synthetic": true,
+ "xero_invoices": [
+  {
+   "amount_due": 1200.0,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Builders",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": "Call accounts",
+   "debt_next_action_at": null,
+   "debt_owner": "DEBT",
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-06-30",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S001",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000001"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 1200.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000001",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000001"
+  },
+  {
+   "amount_due": 850.5,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Builders",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-07-15",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S002",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000001",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000001"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 850.5,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000001",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000002"
+  },
+  {
+   "amount_due": 300.0,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Builders",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-08-10",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S003",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000002",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000001"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 300.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000001",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000003"
+  },
+  {
+   "amount_due": 99.99,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Builders",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-10-30",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S004",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000003",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000001"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 99.99,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000001",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000004"
+  },
+  {
+   "amount_due": 410.0,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Builders",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-09-01",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S005",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000002",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000001"
+    },
+    "Payments": [
+     {
+      "Amount": 90,
+      "Date": "/Date(1788220800000+0000)/",
+      "PaymentID": "p-syn-1"
+     }
+    ],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 410.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000001",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000005"
+  },
+  {
+   "amount_due": 5000.0,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Homes",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-05-01",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S006",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000004",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000002"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 5000.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000002",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000006"
+  },
+  {
+   "amount_due": 275.0,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Homes",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-08-01",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S007",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000002"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 275.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000002",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000007"
+  },
+  {
+   "amount_due": 640.0,
+   "amount_paid": 0,
+   "contact_name": "Shared Name Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-08-20",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S008",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000005",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000003"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 640.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000003",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000008"
+  },
+  {
+   "amount_due": 720.0,
+   "amount_paid": 0,
+   "contact_name": "Shared Name Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-08-21",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S009",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000006",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000004"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 720.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000004",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000009"
+  },
+  {
+   "amount_due": 150.0,
+   "amount_paid": 0,
+   "contact_name": "Two Names Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-09-10",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S010",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000007",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000005"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 150.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000005",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000010"
+  },
+  {
+   "amount_due": 160.0,
+   "amount_paid": 0,
+   "contact_name": "Two Names Trading",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-09-11",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S011",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000007",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000005"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 160.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000005",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000011"
+  },
+  {
+   "amount_due": 330.0,
+   "amount_paid": 0,
+   "contact_name": "Solo Client",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-07-30",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S012",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000008",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000099"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 330.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000006",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000012"
+  },
+  {
+   "amount_due": 440.0,
+   "amount_paid": 0,
+   "contact_name": "Solo Client",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-07-31",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S013",
+   "invoice_type": "ACCREC",
+   "job_id": "a0000000-0000-4000-8000-000000000008",
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000006"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 440.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000006",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000013"
+  },
+  {
+   "amount_due": 555.55,
+   "amount_paid": 0,
+   "contact_name": "Contact Route Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-08-05",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S014",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000007"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 555.55,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000007",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000014"
+  },
+  {
+   "amount_due": 610.0,
+   "amount_paid": 0,
+   "contact_name": "Synthetic Builders",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-08-06",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S015",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000001"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": "Final SWP-90003 FINBAL",
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 610.0,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000001",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000015"
+  },
+  {
+   "amount_due": 120,
+   "amount_paid": 0,
+   "contact_name": "Loose Invoices Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-07-01",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S016",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000008"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 120,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000008",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000016"
+  },
+  {
+   "amount_due": 130,
+   "amount_paid": 0,
+   "contact_name": "Loose Invoices Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-07-02",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S017",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000008"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 130,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000008",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000017"
+  },
+  {
+   "amount_due": 140,
+   "amount_paid": 0,
+   "contact_name": "Loose Invoices Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-10-03",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S018",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000008"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 140,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000008",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000018"
+  },
+  {
+   "amount_due": 150,
+   "amount_paid": 0,
+   "contact_name": "Loose Invoices Pty",
+   "debt_as_of": "2026-09-20T00:00:00+00:00",
+   "debt_blocker": null,
+   "debt_classification": "genuine_debt",
+   "debt_next_action": null,
+   "debt_next_action_at": null,
+   "debt_owner": null,
+   "debt_proposal_kind": null,
+   "debt_proposal_status": null,
+   "debt_type": null,
+   "due_date": "2026-07-04",
+   "invoice_date": "2026-07-01",
+   "invoice_number": "INV-S019",
+   "invoice_type": "ACCREC",
+   "job_id": null,
+   "job_number": null,
+   "org_id": "00000000-0000-0000-0000-00000000000f",
+   "raw_json": {
+    "Contact": {
+     "ContactID": "c0000000-0000-4000-8000-000000000008"
+    },
+    "Payments": [],
+    "SentToContact": true
+   },
+   "reference": null,
+   "status": "AUTHORISED",
+   "synced_at": "2026-09-23T17:00:00+00:00",
+   "total": 150,
+   "xero_contact_id": "c0000000-0000-4000-8000-000000000008",
+   "xero_invoice_id": "b0000000-0000-4000-8000-000000000019"
+  }
+ ]
+}
