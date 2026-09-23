@@ -334,7 +334,7 @@ ROLLBACK;
 BEGIN;
 -- 8. record_capture_run: the one writer of context_capture_runs.
 DO $$
-DECLARE r jsonb; run uuid; given uuid:=gen_random_uuid(); rec public.context_capture_runs; bad jsonb;
+DECLARE r jsonb; run uuid; given uuid:=gen_random_uuid(); rec public.context_capture_runs; bad jsonb; expected text;
  before_runs bigint:=(SELECT count(*) FROM public.context_capture_runs);
 BEGIN
  r:=public.record_capture_run('{"source":"ghl_message_reconcile","window_from":"2026-09-23T01:00:00Z","window_to":"2026-09-23T01:15:00Z"}');
@@ -353,7 +353,7 @@ BEGIN
  -- A finished run is immutable; an identical repeat is harmless.
  r:=public.record_capture_run(jsonb_build_object('run_id',run,'source','ghl_message_reconcile','status','succeeded'));
  IF r->>'outcome'<>'unchanged' THEN RAISE EXCEPTION 'f1 identical repeat %',r; END IF;
- FOR bad IN SELECT * FROM (VALUES
+ FOR bad, expected IN SELECT payload, code FROM (VALUES
    (jsonb_build_object('run_id',run,'source','ghl_message_reconcile','status','failed','error_code','late_change'),'capture_run_finished'),
    (jsonb_build_object('run_id',run,'source','scope_booking'),'capture_run_source_mismatch'),
    ('{"source":"ghl_message_reconcile","body":"customer text"}'::jsonb,'capture_run_invalid'),
@@ -370,13 +370,8 @@ BEGIN
   BEGIN
    PERFORM public.record_capture_run(bad);
    RAISE EXCEPTION 'f1 run accepted %',bad USING ERRCODE='ZX001';
-  EXCEPTION WHEN raise_exception THEN NULL; END;
+  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>expected THEN RAISE; END IF; END;
  END LOOP;
- -- Each refusal names its own code.
- BEGIN PERFORM public.record_capture_run('{"source":"scope_booking","status":"failed"}');
- EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'capture_run_error_code_required' THEN RAISE; END IF; END;
- BEGIN PERFORM public.record_capture_run(jsonb_build_object('run_id',run,'source','scope_booking'));
- EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'capture_run_source_mismatch' THEN RAISE; END IF; END;
  -- A caller-chosen id creates exactly that run, so a retried first call converges.
  r:=public.record_capture_run(jsonb_build_object('run_id',given,'source','scope_booking','status','failed','error_code','graph_timeout'));
  IF r->>'run_id'<>given::text OR r->>'outcome'<>'created' OR r->>'status'<>'failed' THEN RAISE EXCEPTION 'f1 caller id %',r; END IF;
