@@ -556,15 +556,8 @@ migration lanes: `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh`
 
 Attribution ladder step 1 matching is owned by
 `docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder
-change replaces the whole `resolve_context_attribution` body, so it starts with
-a pre-image guard: `md5(prosrc)` must be a known body or its own, else it
-refuses (`context_ladder_preimage_mismatch`). Pin the guard to the body READ
-FROM PRODUCTION, not the previous repo file: production held the
-`20260911171000` body with its comments stripped (`e6d5a8ec…`, not the repo's
-`9214e779…`), so the first L1 migration refused on deploy and blocked every
-later deploy until reverted. Keep ladder bodies comment-free so the hash does
-not depend on how the body was applied, and update the guard hashes, the
-contract case's `production-preimage.sql`, and the rollback together.
+change replaces the whole `resolve_context_attribution` body and must follow
+the pre-image guard in that document.
 
 ## Migrations Apply Before Edge Deploys
 
