@@ -9,12 +9,15 @@ import {
   type ExecuteResult,
   type ExecutionLedgerRow,
   type OutlookEvent,
-  outlookMirrorIdentity,
   salesBookingBookAction,
   type SalesBookingExecuteDeps,
   salesBookingSendAction,
 } from "./sales_booking_execute.ts";
-import type { SalesBookingMessage } from "./sales_booking_read.ts";
+import {
+  type SalesBookingJobSiteFact,
+  type SalesBookingMessage,
+  salesBookingPublishedSuburb,
+} from "./sales_booking_read.ts";
 import {
   type OutlookMirrorGraphResponse,
   writeOutlookMirrorEvent,
@@ -129,6 +132,8 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
   const appointments = new Map<string, { state: string; result: Obj | null }>();
   let thread: SalesBookingMessage[] = [];
   let outlook: OutlookEvent[] = [];
+  let contact: Obj = { ...GHL_CONTACT };
+  let jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
     status: 200,
@@ -141,11 +146,16 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: outlook }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
-    readContact: () => {
+    readOutlookLead: ({ contactId, opportunityId }) => {
       calls.contactReads++;
-      return Promise.resolve({ ...GHL_CONTACT });
+      const job = jobSites[opportunityId] || jobSites[contactId];
+      return Promise.resolve({
+        contact: { ...contact },
+        suburb: salesBookingPublishedSuburb(contact, job),
+      });
     },
-    mirrorToOutlook: (input) => writeOutlookMirrorEvent(input, mirrorGraph),
+    mirrorToOutlook: (input, options) =>
+      writeOutlookMirrorEvent(input, mirrorGraph, options),
     callAppointmentWriter(body) {
       calls.writer.push(body);
       const { idempotencyKey, dryRun, ...fields } = body;
@@ -235,6 +245,10 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     appointments,
     setThread: (m: SalesBookingMessage[]) => (thread = m),
     setOutlook: (e: OutlookEvent[]) => (outlook = e),
+    setContact: (c: Obj) => (contact = c),
+    setJobSite: (id: string, site: SalesBookingJobSiteFact) => {
+      jobSites[id] = site;
+    },
     writerFlag: (on: boolean) => (writerFlagOn = on),
     smsReturns: (r: { status: number; body: Obj }) => (smsResponse = r),
     outlookEvents,
@@ -463,7 +477,7 @@ Deno.test("idempotent: a second press returns the first result and never books o
   const first = await book(f, cal.binding_hash);
   assertEquals(
     first.status === "booked" && first.outlook_mirror.outlook,
-    "dry_run",
+    "written",
   );
   assertEquals({ ...first, outlook_mirror: null }, {
     status: "booked",
@@ -581,22 +595,17 @@ Deno.test("a GHL diary clash from the writer is named, and nothing is booked", a
 
 // ── Outlook mirror after the GHL booking (Decision D2) ──
 
-const MIRROR_ON = {
-  ...LIVE,
-  SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED: "true",
-};
 const EXPECTED_OUTLOOK_BODY = (ghlId: string) => ({
   subject: "Scope: Michael Example, Scarborough",
   start: { dateTime: "2026-09-25T09:00:00", timeZone: "Australia/Perth" },
-  end: { dateTime: "2026-09-25T09:30:00", timeZone: "Australia/Perth" },
+  end: { dateTime: "2026-09-25T10:30:00", timeZone: "Australia/Perth" },
   showAs: "busy",
   isAllDay: false,
   responseRequested: false,
   attendees: [],
   body: {
     contentType: "text",
-    content:
-      `Arrival window 09:00 to 09:30. Booked in GHL, appointment ${ghlId}.`,
+    content: `Booked in GHL 09:00 to 10:30, appointment ${ghlId}.`,
   },
   transactionId: `sw-ghl-mirror-${ghlId}`,
   singleValueExtendedProperties: [{
@@ -609,7 +618,7 @@ const EXPECTED_OUTLOOK_BODY = (ghlId: string) => ({
 
 Deno.test("success: a live booking writes GHL once and its Outlook mirror once, keyed on the GHL appointment id", async () => {
   const cal = await approval("calendar", CALENDAR);
-  const f = fakes([cal], MIRROR_ON);
+  const f = fakes([cal], LIVE);
   const result = await book(f, cal.binding_hash);
   assertEquals(result, {
     status: "booked",
@@ -635,8 +644,8 @@ Deno.test("dry run: names both the GHL and the Outlook would-writes and calls ne
   for (
     const [env, auth, extra, reason] of [
       [{}, captain, {}, "book_switch_off"],
-      [MIRROR_ON, apiKey, {}, "api_key_press_is_dry_run"],
-      [MIRROR_ON, captain, { dry_run: true }, "dry_run_requested"],
+      [LIVE, apiKey, {}, "api_key_press_is_dry_run"],
+      [LIVE, captain, { dry_run: true }, "dry_run_requested"],
     ] as Array<[Obj, Obj, Obj, string]>
   ) {
     const f = fakes([cal], env);
@@ -661,7 +670,7 @@ Deno.test("dry run: names both the GHL and the Outlook would-writes and calls ne
 
 Deno.test("Outlook failure after GHL success: the booking stands and the response says Outlook was not written and why", async () => {
   const cal = await approval("calendar", CALENDAR);
-  const f = fakes([cal], MIRROR_ON);
+  const f = fakes([cal], LIVE);
   f.outlookPostReturns(() => ({ status: 403, body: { error: "denied" } }));
   const result = await book(f, cal.binding_hash);
   assertEquals(result.status, "booked");
@@ -678,7 +687,7 @@ Deno.test("Outlook failure after GHL success: the booking stands and the respons
   assertEquals(f.executions.get(cal.binding_hash)?.state, "booked");
 
   // A mirror that throws is still a booked result, never a refusal.
-  const g = fakes([cal], MIRROR_ON);
+  const g = fakes([cal], LIVE);
   g.deps.mirrorToOutlook = () => Promise.reject(new Error("socket"));
   const thrown = await book(g, cal.binding_hash);
   assertEquals(
@@ -689,7 +698,7 @@ Deno.test("Outlook failure after GHL success: the booking stands and the respons
 
 Deno.test("retry of the same press writes Outlook once and books GHL zero more times", async () => {
   const cal = await approval("calendar", CALENDAR);
-  const f = fakes([cal], MIRROR_ON);
+  const f = fakes([cal], LIVE);
   f.outlookPostReturns(() => ({ status: 503, body: null }));
   const first = await book(f, cal.binding_hash);
   assertEquals(
@@ -721,43 +730,23 @@ Deno.test("retry of the same press writes Outlook once and books GHL zero more t
   // found the event and posted nothing.
   assertEquals(f.calls.outlookPosts.length, 2);
   assertEquals(f.outlookEvents.size, 1);
-
-  // Mirror switch off at the booking: Outlook named, not written; once the
-  // switch is on, the same press writes it without a second GHL booking.
-  const env: Obj = { ...LIVE };
-  const g = fakes([cal], env);
-  const off = await book(g, cal.binding_hash);
-  assertEquals(
-    off.status === "booked" && off.outlook_mirror.reason,
-    "outlook_mirror_switch_off",
-  );
-  assertEquals(g.calls.outlookPosts.length, 0);
-  env.SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED = "true";
-  const on = await book(g, cal.binding_hash);
-  assertEquals(on.status === "booked" && on.outlook_mirror.outlook, "written");
-  assertEquals(g.calls.writer.length, 1);
-  assertEquals(g.calls.outlookPosts.length, 1);
 });
 
-Deno.test("an Outlook event that cannot be named refuses before GHL is booked; a GHL-only person books without one", async () => {
-  // Street-only address and no city on the contact: no suburb to name.
+Deno.test("a missing published suburb refuses before GHL; a GHL-only person books without Outlook", async () => {
   const cal = await approval("calendar", {
     ...CALENDAR,
     address: "1 Fictional Street",
   });
-  const f = fakes([cal], MIRROR_ON);
-  f.deps.readContact = () =>
-    Promise.resolve({ ...GHL_CONTACT, city: "", address1: "" });
+  const f = fakes([cal], LIVE);
+  f.setContact({ ...GHL_CONTACT, city: "", address1: "" });
   assertEquals(await book(f, cal.binding_hash), {
     status: "refused",
-    reason: "outlook_mirror_unbuildable",
-    detail: { reason: "contact_suburb_not_given" },
+    reason: "suburb_not_given",
   });
-  f.deps.readContact = () => Promise.reject(new Error("GHL 500"));
+  f.deps.readOutlookLead = () => Promise.reject(new Error("GHL 500"));
   assertEquals(await book(f, cal.binding_hash), {
     status: "refused",
-    reason: "outlook_mirror_unbuildable",
-    detail: { reason: "contact_unreadable" },
+    reason: "contact_unreadable",
   });
   assertEquals(f.calls.writer.length, 0);
   assertEquals(f.calls.claims, 0);
@@ -765,7 +754,7 @@ Deno.test("an Outlook event that cannot be named refuses before GHL is booked; a
   const patio = await approval("calendar", CALENDAR, {}, {
     resource: "nithin",
   });
-  const g = fakes([patio], MIRROR_ON);
+  const g = fakes([patio], LIVE);
   const result = await book(g, patio.binding_hash);
   assertEquals(
     result.status === "booked" && result.outlook_mirror,
@@ -780,38 +769,115 @@ Deno.test("an Outlook event that cannot be named refuses before GHL is booked; a
   assertEquals(g.calls.outlookPosts.length, 0);
 });
 
-Deno.test("Outlook title names the suburb from the contact, else from the approved address, never guessed", () => {
-  const michael = { firstName: "Michael", lastName: "Hore", city: "" };
-  assertEquals(
-    outlookMirrorIdentity(
-      { ...michael, address1: "Bassendean" },
-      "Scope visit: Michael Hore",
-      "Bassendean",
-    ),
-    { ok: true, client_name: "Michael Hore", suburb: "Bassendean" },
-  );
-  assertEquals(
-    outlookMirrorIdentity(
-      michael,
-      "Scope visit: Michael",
-      "2 Wedge Way, Merriwa",
-    )
-      .ok && "parsed",
-    "parsed",
-  );
-  for (const address of ["1 Fictional Street", "Smith Street", ""]) {
-    assertEquals(outlookMirrorIdentity(michael, "Scope: Michael", address), {
-      ok: false,
-      reason: "contact_suburb_not_given",
+Deno.test("Outlook title uses the suburb the booking read publishes, including address1-is-suburb, job overlay, and St James", async () => {
+  const titles: string[] = [];
+  async function titleFor(
+    contact: Obj,
+    job?: { id: string; site: SalesBookingJobSiteFact },
+  ) {
+    const cal = await approval("calendar", {
+      ...CALENDAR,
+      title: `Scope: ${contact.firstName || "Lead"}`,
     });
+    const f = fakes([cal], LIVE);
+    f.setContact(contact);
+    if (job) f.setJobSite(job.id, job.site);
+    const result = await book(f, cal.binding_hash);
+    assertEquals(result.status, "booked");
+    const subject = f.calls.outlookPosts[0]?.subject;
+    titles.push(subject);
+    return { subject, published: salesBookingPublishedSuburb(contact, job?.site) };
   }
+
+  const address1IsSuburb = await titleFor({
+    firstName: "Pat",
+    lastName: "Lee",
+    city: "",
+    address1: "9 Reef Rd, Hillarys WA 6025",
+  });
+  assertEquals(address1IsSuburb.published, "Hillarys");
+  assertEquals(address1IsSuburb.subject, "Scope: Pat Lee, Hillarys");
+
+  const address1PlusOverlay = await titleFor({
+    firstName: "Pat",
+    lastName: "Lee",
+    city: "",
+    address1: "Bassendean",
+  }, { id: CONTACT, site: { suburb: "Balcatta", address: "6 Moorby Pl" } });
+  assertEquals(address1PlusOverlay.published, "Balcatta");
+  assertEquals(address1PlusOverlay.subject, "Scope: Pat Lee, Balcatta");
+
+  const overlay = await titleFor({
+    firstName: "Michael",
+    lastName: "Hore",
+    city: "",
+    address1: "6 Moorby Pl",
+  }, { id: CONTACT, site: { suburb: "Balcatta", address: "6 Moorby Pl" } });
+  assertEquals(overlay.published, "Balcatta");
+  assertEquals(overlay.subject, "Scope: Michael Hore, Balcatta");
+
+  const stJames = await titleFor({
+    firstName: "Sam",
+    lastName: "James",
+    city: "St James",
+  });
+  assertEquals(stJames.published, "St James");
+  assertEquals(stJames.subject, "Scope: Sam James, St James");
+
+  assertEquals(titles.length, 4);
+});
+
+Deno.test("Outlook event start and end are the GHL appointment start and end, never the arrival window", async () => {
+  const cal = await approval("calendar", {
+    ...CALENDAR,
+    end_iso: "2026-09-25T11:30:00+08:00",
+    window_end_iso: "2026-09-25T10:30:00+08:00",
+  });
+  const live = fakes([cal], LIVE);
+  const booked = await book(live, cal.binding_hash);
+  assertEquals(booked.status, "booked");
+  if (booked.status !== "booked") return;
+  const ghlStart = live.calls.writer[0].startTime;
+  const ghlEnd = live.calls.writer[0].endTime;
+  assertEquals(ghlStart, "2026-09-25T09:00:00+08:00");
+  assertEquals(ghlEnd, "2026-09-25T11:30:00+08:00");
+  assertEquals(live.calls.outlookPosts[0].start, {
+    dateTime: "2026-09-25T09:00:00",
+    timeZone: "Australia/Perth",
+  });
+  assertEquals(live.calls.outlookPosts[0].end, {
+    dateTime: "2026-09-25T11:30:00",
+    timeZone: "Australia/Perth",
+  });
+  assertEquals(live.calls.outlookPosts[0].start.dateTime.endsWith("09:00:00"), true);
+  assertEquals(live.calls.outlookPosts[0].end.dateTime.endsWith("11:30:00"), true);
+  assertEquals(ghlStart.slice(11, 16), "09:00");
+  assertEquals(ghlEnd.slice(11, 16), "11:30");
   assertEquals(
-    outlookMirrorIdentity({ city: "Scarborough" }, "Scope visit: Michael", "")
-      .ok,
-    true,
+    live.calls.outlookPosts[0].start.dateTime.slice(11, 16),
+    ghlStart.slice(11, 16),
   );
   assertEquals(
-    outlookMirrorIdentity({ firstName: "0400 000 000" }, "", "Perth"),
-    { ok: false, reason: "client_name_not_given" },
+    live.calls.outlookPosts[0].end.dateTime.slice(11, 16),
+    ghlEnd.slice(11, 16),
   );
+
+  const dry = fakes([cal], {});
+  const preview = await book(dry, cal.binding_hash);
+  assertEquals(preview.status, "dry_run");
+  if (preview.status !== "dry_run") return;
+  const wouldGhl = preview.would_write?.body;
+  const wouldOutlook = preview.outlook_mirror?.outlook === "dry_run"
+    ? preview.outlook_mirror.would_write.body
+    : null;
+  assertEquals(wouldGhl?.startTime, "2026-09-25T09:00:00+08:00");
+  assertEquals(wouldGhl?.endTime, "2026-09-25T11:30:00+08:00");
+  assertEquals(wouldOutlook?.start, {
+    dateTime: "2026-09-25T09:00:00",
+    timeZone: "Australia/Perth",
+  });
+  assertEquals(wouldOutlook?.end, {
+    dateTime: "2026-09-25T11:30:00",
+    timeZone: "Australia/Perth",
+  });
 });

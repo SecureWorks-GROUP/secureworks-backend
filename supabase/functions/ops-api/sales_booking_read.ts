@@ -1078,6 +1078,24 @@ export interface SalesBookingJobSiteFact {
   address?: unknown;
 }
 
+/**
+ * Suburb the booking screen publishes for a lead: GHL contact first, then
+ * the recorded job site when the contact has none. Never guessed.
+ */
+export function salesBookingPublishedSuburb(
+  contact: Record<string, unknown>,
+  jobSite?: SalesBookingJobSiteFact | null,
+  opportunity: Record<string, unknown> = {},
+): string {
+  const fromContact = salesBookingSuburbFromContact(contact, opportunity);
+  if (fromContact !== SALES_BOOKING_NOT_GIVEN) return fromContact;
+  if (!jobSite) return SALES_BOOKING_NOT_GIVEN;
+  return salesBookingSuburbFromContact({
+    city: jobSite.suburb,
+    address1: jobSite.address,
+  });
+}
+
 /** Overlay a GHL contact read onto a search row that omitted city/tags. */
 export function applySalesBookingContactFact(
   opportunity: Record<string, unknown>,
@@ -1148,6 +1166,7 @@ export function projectSalesBookingCase(
   opportunity: Record<string, unknown>,
   resourceId: string,
   stages: Record<string, string> = {},
+  jobSite?: SalesBookingJobSiteFact | null,
 ): SalesBookingCase | null {
   const id = typeof opportunity.id === "string" ? opportunity.id : "";
   if (!id) return null;
@@ -1170,7 +1189,7 @@ export function projectSalesBookingCase(
     resource_id: resourceId,
     opportunity_id: id,
     contact_id: salesBookingContactId(opportunity),
-    suburb: salesBookingSuburbFromContact(contact, opportunity),
+    suburb: salesBookingPublishedSuburb(contact, jobSite, opportunity),
     job_type: salesBookingJobTypeFromOpportunity(opportunity, contact, lane),
     enquiry_at: salesBookingEnquiryAt(opportunity),
     display_name: isPhoneLikeName(rawName) ? "Enquiry" : (rawName || "Enquiry"),
@@ -2686,6 +2705,9 @@ export async function salesBookingRead(
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
     const contactId = salesBookingContactId(raw);
+    const opportunityId = typeof raw.id === "string" ? raw.id : "";
+    const job = jobSites[opportunityId] ||
+      (contactId ? jobSites[contactId] : undefined);
     const row = projectSalesBookingCase(
       hydrateLive ? raw : applySalesBookingContactFact(
         raw,
@@ -2693,6 +2715,7 @@ export async function salesBookingRead(
       ),
       resource.resource_id,
       opportunities.stages,
+      job,
     );
     if (!row || seen.has(row.id)) continue;
     seen.add(row.id);
@@ -2702,17 +2725,6 @@ export async function salesBookingRead(
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) {
       excludedByStage++;
       continue;
-    }
-    if (row.suburb === SALES_BOOKING_NOT_GIVEN) {
-      const job = jobSites[row.id] ||
-        (contactId ? jobSites[contactId] : undefined);
-      if (job) {
-        const fromJob = salesBookingSuburbFromContact({
-          city: job.suburb,
-          address1: job.address,
-        });
-        if (fromJob !== SALES_BOOKING_NOT_GIVEN) row.suburb = fromJob;
-      }
     }
     projected.push(row);
   }
@@ -2840,7 +2852,7 @@ function chunkSalesBookingIds(
  * bounded read per id chunk. A failed chunk leaves those keys absent so
  * the GHL contact answer still stands.
  */
-async function readJobSitesLive(
+export async function readJobSitesLive(
   client: SalesBookingReadClient,
   opportunityIds: string[],
   contactIds: string[],

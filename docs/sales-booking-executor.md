@@ -32,7 +32,7 @@ section).
 
 | Switch | Effect |
 | --- | --- |
-| `SALES_BOOKING_BOOK_EXECUTE` | Exactly `true` lets a captain press book. Anything else: dry run. |
+| `SALES_BOOKING_BOOK_EXECUTE` | Exactly `true` lets a captain press book in GHL and write the matching Outlook event. Anything else: dry run, no Graph write. |
 | `SALES_BOOKING_SEND_EXECUTE` | Exactly `true` lets a captain press send. Anything else: dry run. |
 | `GHL_CALENDAR_APPOINTMENT_WRITE_ENABLED` | Unchanged. The GHL writer's own switch; off still previews even when the book switch is on (`reason: appointment_writer_flag_off`). |
 
@@ -92,20 +92,22 @@ needs no calendar booking or receipt.
 
 Once GHL holds the appointment, `sales_booking_book` writes the matching event
 on the owner's Outlook calendar through `sales_booking_outlook_mirror.ts`
-(`mirrorGhlAppointmentToOutlook`), keyed on the GHL appointment id. The event
-is `Scope: Name, Suburb` over the approved arrival window
-(`window_start_iso` to `window_end_iso`), with the approved address and no
-attendees. Name and suburb come from the GHL contact read at the press
-(`firstName lastName`, suburb via `salesBookingSuburbFromContact`, else the
-suburb the approved address names, including an address that is only a suburb
-such as `Bassendean`); a suburb is never guessed.
+(`mirrorGhlAppointmentToOutlook`), keyed on the GHL appointment id. One switch
+(`SALES_BOOKING_BOOK_EXECUTE`) turns the booking and this Outlook copy on
+together (plus the existing captain-JWT press and not `dry_run`). The event
+is `Scope: Name, Suburb` spanning the exact GHL appointment
+(`startTime`/`endTime` from the writer result, or the GHL would-write body
+on a dry run), with the approved address and no attendees. Name comes from
+the GHL contact; suburb is the one the booking read already publishes
+(`salesBookingPublishedSuburb`: `salesBookingSuburbFromContact` plus the
+`jobs.site_suburb` overlay). A suburb is never guessed.
 
 `outlook_mirror` on the response:
 
 | `outlook` | Meaning |
 | --- | --- |
 | `written` | Outlook holds the event (`outlook_event_id`). `reason: "already_mirrored"` when an earlier press wrote it. |
-| `dry_run` | Nothing written. `would_write` is the exact Graph request. `reason` is the press's dry-run reason, or `outlook_mirror_switch_off` after a real GHL booking while `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED` is not exactly `true`. A dry run names the GHL id as `pending_ghl_appointment_id`. |
+| `dry_run` | Nothing written. `would_write` is the exact Graph request. `reason` is the press's dry-run reason (`api_key_press_is_dry_run`, `dry_run_requested`, `book_switch_off`, or `appointment_writer_flag_off`). A dry run names the GHL id as `pending_ghl_appointment_id`. |
 | `failed` | GHL is booked, Outlook is not. `reason` names why (`mirror_write_failed: outlook_create_http_403`, `mirror_outcome_unknown: ...`, `contact_unreadable`, ...). |
 | `not_applicable` | The resource has no Outlook calendar (`SALES_BOOKING_OUTLOOK_MAILBOXES`; GHL-only people such as Nithin). |
 
@@ -115,13 +117,12 @@ again replays the GHL booking from the writer's ledger (no second GHL call,
 even after the approval has expired) and re-runs the mirror, which looks up the
 GHL id on the calendar before creating, so Outlook is written at most once.
 
-Before any GHL write (dry run included), the press builds the Outlook event
-with a placeholder id; if it cannot be named (`contact_suburb_not_given`,
-`client_name_not_given`, `contact_unreadable`) the press refuses
-`outlook_mirror_unbuildable` and nothing is booked, so GHL and Outlook cannot
-be left disagreeing by a missing suburb. The mirror writes only on a live press
-(captain JWT, book switch on) and only when its own switch is on; no switch was
-added.
+Before any GHL write (dry run included), the press resolves the published
+suburb. If that shared value is `"not given"` the press refuses
+`suburb_not_given` and nothing is booked. `client_name_not_given` and
+`contact_unreadable` also refuse before GHL. The mirror writes on a live
+press (captain JWT, book switch on); it does not use a second Outlook
+write switch.
 
 ## The GHL writer refuses without the executor's per-press claim
 

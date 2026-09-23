@@ -1,7 +1,7 @@
 /** Production adapters for sales_booking_execute.ts. Reads only, except the
  * two ghl-proxy calls, the executor-ledger claim/settle and the Outlook mirror
- * write, which the executor makes only when its switch is on and the captain
- * pressed (the mirror also needs its own switch).
+ * write, which the executor makes only when SALES_BOOKING_BOOK_EXECUTE is on
+ * and the captain pressed.
  *
  * Credential: ops-api calls ghl-proxy server-to-server with the project's
  * SUPABASE_SERVICE_ROLE_KEY as `Authorization: Bearer`, which ghl-proxy
@@ -20,8 +20,10 @@ import type {
 import { mirrorGhlAppointmentToOutlook } from "./sales_booking_outlook_mirror.ts";
 import {
   ghlRead,
+  readJobSitesLive,
   readSalesBookingThreadMessages,
   SALES_BOOKING_GHL_USERS,
+  salesBookingPublishedSuburb,
 } from "./sales_booking_read.ts";
 
 // Supabase's structural query builder is owned by the pinned runtime client.
@@ -212,9 +214,22 @@ export function createSalesBookingExecuteDeps(
       const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
-    readContact,
-    // Default off: only SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true calls Graph.
-    mirrorToOutlook: mirrorGhlAppointmentToOutlook,
+    async readOutlookLead({ contactId, opportunityId }) {
+      const contact = await readContact(contactId);
+      const jobSites = await readJobSitesLive(
+        client,
+        opportunityId ? [opportunityId] : [],
+        contactId ? [contactId] : [],
+      );
+      const job = (opportunityId && jobSites[opportunityId]) ||
+        (contactId ? jobSites[contactId] : undefined);
+      return {
+        contact,
+        suburb: salesBookingPublishedSuburb(contact, job),
+      };
+    },
+    mirrorToOutlook: (input, options) =>
+      mirrorGhlAppointmentToOutlook(input, options),
     callAppointmentWriter: (body) =>
       callGhlProxy("create_calendar_appointment", body),
     callSendSms: (body) => callGhlProxy("send_sms", body),

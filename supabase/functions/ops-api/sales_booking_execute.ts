@@ -29,15 +29,13 @@ import {
   SALES_BOOKING_NOT_GIVEN,
   SALES_BOOKING_OUTLOOK_MAILBOXES,
   type SalesBookingMessage,
-  salesBookingSuburbFromAddressLine,
-  salesBookingSuburbFromContact,
-  salesBookingSuburbFromStreetLine,
 } from "./sales_booking_read.ts";
 import {
   buildOutlookMirrorRequest,
   type OutlookMirrorInput,
   type OutlookMirrorRequest,
   type OutlookMirrorResult,
+  type OutlookMirrorWriteOptions,
 } from "./sales_booking_outlook_mirror.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -160,12 +158,18 @@ export interface SalesBookingExecuteDeps {
     endIso: string,
   ): Promise<OutlookRead>;
   readContactPhone(contactId: string): Promise<string | null>;
-  /** The GHL contact record (id and location verified). Names the Outlook event. */
-  readContact(contactId: string): Promise<Obj>;
+  /** GHL contact plus the suburb the booking read publishes for this lead. */
+  readOutlookLead(args: {
+    contactId: string;
+    opportunityId: string;
+  }): Promise<{ contact: Obj; suburb: string }>;
   /** Write the Outlook mirror of one booked GHL appointment. Idempotent on
-   * the appointment id; its own switch (SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED)
-   * decides whether Graph is called at all. */
-  mirrorToOutlook(input: OutlookMirrorInput): Promise<OutlookMirrorResult>;
+   * the appointment id. A live executor press passes callerAuthorised so Graph
+   * rides SALES_BOOKING_BOOK_EXECUTE; the module switch stays for other callers. */
+  mirrorToOutlook(
+    input: OutlookMirrorInput,
+    options?: OutlookMirrorWriteOptions,
+  ): Promise<OutlookMirrorResult>;
   /** POST ghl-proxy?action=create_calendar_appointment (server credential). */
   callAppointmentWriter(body: Obj): Promise<{ status: number; body: Obj }>;
   /** POST ghl-proxy?action=send_sms (server credential). */
@@ -379,32 +383,11 @@ function bookedFrom(result: Obj, replayed: boolean): BookedCore {
 export const OUTLOOK_MIRROR_PENDING_GHL_ID = "pending_ghl_appointment_id";
 const TITLE_PREFIX = /^\s*scope(?:\s+visit)?\s*:\s*/i;
 
-const BARE_PLACE = /^[A-Za-z][A-Za-z .'-]{1,40}$/;
-const STREET_WORD =
-  /\b(?:st|street|rd|road|ave|avenue|dr|drive|ct|court|pl|place|way|cres|crescent|pde|parade|cl|close|tce|terrace|hwy|highway|blvd|lane|ln|lot|unit|po box)\b/i;
-
-/** Suburb named by the approved address: parsed from a full address line, or
- * the whole address when it is a bare place name (GHL often holds just
- * "Bassendean" in address1). A street-only line names no suburb. */
-export function suburbFromApprovedAddress(address: string): string | null {
-  const parsed = salesBookingSuburbFromAddressLine(address) ||
-    salesBookingSuburbFromStreetLine(address);
-  if (parsed) return parsed;
-  const text = address.trim();
-  return BARE_PLACE.test(text) && !STREET_WORD.test(text) ? text : null;
-}
-
-/** Client name and suburb for the Outlook title `Scope: Name, Suburb`: the
- * GHL contact's full name (else the approved title's name), and the contact's
- * suburb, else the one the approved address names. Never guesses. Pure. */
-export function outlookMirrorIdentity(
+/** Client name for the Outlook title `Scope: Name, Suburb`. Never guesses. */
+export function outlookMirrorClientName(
   contact: Obj | null,
   approvedTitle: string,
-  approvedAddress = "",
-): { ok: true; client_name: string; suburb: string } | {
-  ok: false;
-  reason: string;
-} {
+): { ok: true; client_name: string } | { ok: false; reason: string } {
   const text = (v: unknown) => typeof v === "string" ? v.trim() : "";
   const candidates = [
     [text(contact?.firstName), text(contact?.lastName)].filter(Boolean).join(
@@ -416,47 +399,70 @@ export function outlookMirrorIdentity(
   ];
   const clientName = candidates.find((n) => n && !isPhoneLikeName(n));
   if (!clientName) return { ok: false, reason: "client_name_not_given" };
-  const fromContact = contact ? salesBookingSuburbFromContact(contact) : null;
-  const suburb = fromContact && fromContact !== SALES_BOOKING_NOT_GIVEN
-    ? fromContact
-    : suburbFromApprovedAddress(approvedAddress);
-  if (!suburb) {
-    return { ok: false, reason: "contact_suburb_not_given" };
-  }
-  return { ok: true, client_name: clientName, suburb };
+  return { ok: true, client_name: clientName };
 }
 
+type OutlookLead = { client_name: string; suburb: string };
 type MirrorPlan = { input: OutlookMirrorInput; request: OutlookMirrorRequest };
 
-/** Build the exact Outlook event for this approval and GHL appointment id.
- * Reads the GHL contact once; writes nothing. */
-async function planOutlookMirror(
+function opportunityIdFromSnapshot(snapshot: Obj): string {
+  const value = snapshot.case_id ?? snapshot.id;
+  return typeof value === "string" ? value : "";
+}
+
+function ghlAppointmentSpan(
+  source: { startTime?: unknown; endTime?: unknown } | null,
+  appointment: ApprovedAppointment | null,
+): { start: string; end: string } | null {
+  const start = typeof source?.startTime === "string" && source.startTime
+    ? source.startTime
+    : appointment?.startTime;
+  const end = typeof source?.endTime === "string" && source.endTime
+    ? source.endTime
+    : appointment?.endTime;
+  if (!start || !end) return null;
+  return { start, end };
+}
+
+async function resolveOutlookLead(
   loaded: Loaded,
   appointment: ApprovedAppointment,
-  ghlAppointmentId: string,
   deps: SalesBookingExecuteDeps,
-): Promise<{ ok: true; plan: MirrorPlan } | { ok: false; reason: string }> {
-  let contact: Obj;
+): Promise<{ ok: true; lead: OutlookLead } | { ok: false; reason: string }> {
+  let fetched: { contact: Obj; suburb: string };
   try {
-    contact = await deps.readContact(appointment.contactId);
+    fetched = await deps.readOutlookLead({
+      contactId: appointment.contactId,
+      opportunityId: opportunityIdFromSnapshot(loaded.snapshot),
+    });
   } catch {
     return { ok: false, reason: "contact_unreadable" };
   }
-  const identity = outlookMirrorIdentity(
-    contact,
-    appointment.title,
-    appointment.address,
-  );
-  if (!identity.ok) return identity;
+  const named = outlookMirrorClientName(fetched.contact, appointment.title);
+  if (!named.ok) return named;
+  if (fetched.suburb === SALES_BOOKING_NOT_GIVEN) {
+    return { ok: false, reason: "suburb_not_given" };
+  }
+  return {
+    ok: true,
+    lead: { client_name: named.client_name, suburb: fetched.suburb },
+  };
+}
+
+function planOutlookMirror(
+  loaded: Loaded,
+  appointment: ApprovedAppointment,
+  ghlAppointmentId: string,
+  span: { start: string; end: string },
+  lead: OutlookLead,
+): { ok: true; plan: MirrorPlan } | { ok: false; reason: string } {
   const input: OutlookMirrorInput = {
     resource_id: String(loaded.snapshot.resource ?? ""),
     ghl_appointment_id: ghlAppointmentId,
-    client_name: identity.client_name,
-    suburb: identity.suburb,
-    // The Outlook event spans the approved arrival window, as the owner's own
-    // `Scope:` entries do; the GHL appointment adds the visit length on top.
-    arrival_start: String(loaded.snapshot.content?.window_start_iso ?? ""),
-    arrival_end: String(loaded.snapshot.content?.window_end_iso ?? ""),
+    client_name: lead.client_name,
+    suburb: lead.suburb,
+    start: span.start,
+    end: span.end,
     address: appointment.address,
   };
   const built = buildOutlookMirrorRequest(input);
@@ -488,20 +494,28 @@ const FAILED_AFTER_BOOKING = (reason: string): OutlookMirrorOutcome => ({
 });
 
 /** After GHL holds the appointment: write (or preview) its Outlook mirror.
- * Never throws and never touches GHL. */
+ * Never throws and never touches GHL. The event spans the GHL appointment. */
 async function outlookAfterBooking(
   loaded: Loaded,
   appointment: ApprovedAppointment | null,
-  appointmentId: string,
+  core: BookedCore,
   deps: SalesBookingExecuteDeps,
 ): Promise<OutlookMirrorOutcome> {
   if (!mirrorsToOutlook(loaded)) return NOT_APPLICABLE;
   if (!appointment) return FAILED_AFTER_BOOKING("approval_snapshot_unusable");
-  const planned = await planOutlookMirror(
+  const span = ghlAppointmentSpan({
+    startTime: core.start_time,
+    endTime: core.end_time,
+  }, appointment);
+  if (!span) return FAILED_AFTER_BOOKING("ghl_appointment_times_missing");
+  const resolved = await resolveOutlookLead(loaded, appointment, deps);
+  if (!resolved.ok) return FAILED_AFTER_BOOKING(resolved.reason);
+  const planned = planOutlookMirror(
     loaded,
     appointment,
-    appointmentId,
-    deps,
+    core.appointment_id,
+    span,
+    resolved.lead,
   );
   if (!planned.ok) return FAILED_AFTER_BOOKING(planned.reason);
   if (!loaded.live) {
@@ -516,7 +530,9 @@ async function outlookAfterBooking(
   }
   let result: OutlookMirrorResult;
   try {
-    result = await deps.mirrorToOutlook(planned.plan.input);
+    result = await deps.mirrorToOutlook(planned.plan.input, {
+      callerAuthorised: true,
+    });
   } catch {
     return FAILED_AFTER_BOOKING("outlook_mirror_outcome_unknown");
   }
@@ -535,18 +551,12 @@ async function outlookAfterBooking(
         outlook_event_id: result.outlook_event_id,
         message: "Outlook already holds this booking; nothing written twice.",
       };
-    case "flag_off":
-      return {
-        outlook: "dry_run",
-        reason: "outlook_mirror_switch_off",
-        would_write: result.would_write,
-        message:
-          "Booked in GHL. Outlook was NOT written because its write switch " +
-          "(SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED) is off; once it is on, " +
-          "press again to write Outlook without booking GHL again.",
-      };
     default:
-      return FAILED_AFTER_BOOKING(`${result.code}: ${result.reason}`);
+      return FAILED_AFTER_BOOKING(
+        result.code === "flag_off"
+          ? "outlook_mirror_not_authorised"
+          : `${result.code}: ${result.reason}`,
+      );
   }
 }
 
@@ -563,7 +573,7 @@ async function booked(
     outlook_mirror: await outlookAfterBooking(
       loaded,
       appointment,
-      core.appointment_id,
+      core,
       deps,
     ),
   };
@@ -672,20 +682,13 @@ export async function salesBookingBookAction(args: {
     });
   }
 
-  // The Outlook event must be buildable before GHL is booked, or the two
-  // calendars could not agree. Reads the GHL contact; writes nothing.
-  let mirrorPreview: OutlookMirrorRequest | null = null;
+  // Suburb and client name must already be the ones the booking read
+  // publishes, or GHL and Outlook could not agree. Writes nothing.
+  let outlookLead: OutlookLead | null = null;
   if (mirrorsToOutlook(loaded)) {
-    const planned = await planOutlookMirror(
-      loaded,
-      appointment,
-      OUTLOOK_MIRROR_PENDING_GHL_ID,
-      deps,
-    );
-    if (!planned.ok) {
-      return refused("outlook_mirror_unbuildable", { reason: planned.reason });
-    }
-    mirrorPreview = planned.plan.request;
+    const resolved = await resolveOutlookLead(loaded, appointment, deps);
+    if (!resolved.ok) return refused(resolved.reason);
+    outlookLead = resolved.lead;
   }
 
   // The writer re-reads the person's GHL diary and every assigned calendar,
@@ -729,22 +732,42 @@ export async function salesBookingBookAction(args: {
     ...(executorClaim ? { executorClaim } : {}),
   });
   if (res.body?.dryRun === true && res.body.wouldWrite) {
+    const reason = loaded.dryReason ?? "appointment_writer_flag_off";
+    const span = ghlAppointmentSpan(res.body.wouldWrite.body ?? null, appointment);
+    const preview = outlookLead && span
+      ? planOutlookMirror(
+        loaded,
+        appointment,
+        OUTLOOK_MIRROR_PENDING_GHL_ID,
+        span,
+        outlookLead,
+      )
+      : null;
     return {
       status: "dry_run",
-      reason: loaded.dryReason ?? "appointment_writer_flag_off",
+      reason,
       would_write: {
         ...res.body.wouldWrite,
         approval: res.body.approval ?? null,
         outlook_checked: { mailbox: outlook.mailbox, clashes: 0 },
       },
-      outlook_mirror: !mirrorPreview ? NOT_APPLICABLE : {
-        outlook: "dry_run",
-        reason: loaded.dryReason ?? "appointment_writer_flag_off",
-        would_write: mirrorPreview,
-        message: "Nothing written to GHL or Outlook. After a real booking, " +
-          "this Outlook event is written keyed on the GHL appointment id " +
-          `(shown here as ${OUTLOOK_MIRROR_PENDING_GHL_ID}).`,
-      },
+      outlook_mirror: !outlookLead ? NOT_APPLICABLE : preview?.ok
+        ? {
+          outlook: "dry_run",
+          reason,
+          would_write: preview.plan.request,
+          message: "Nothing written to GHL or Outlook. After a real booking, " +
+            "this Outlook event is written keyed on the GHL appointment id " +
+            `(shown here as ${OUTLOOK_MIRROR_PENDING_GHL_ID}).`,
+        }
+        : {
+          outlook: "failed",
+          reason: preview && !preview.ok
+            ? preview.reason
+            : "ghl_appointment_times_missing",
+          message: "Nothing written to GHL or Outlook. The Outlook event " +
+            "could not be previewed from the GHL appointment times.",
+        },
     };
   }
   if (res.body?.ok === true && res.body.appointmentId) {

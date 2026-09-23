@@ -350,9 +350,14 @@ this map. User ids stay null-pinned; this table records emails only.
 `sales_booking_outlook_mirror.ts` exports `mirrorGhlAppointmentToOutlook`,
 which the booking executor (`sales_booking_book`,
 `docs/sales-booking-executor.md`) calls after a GHL appointment write. It creates one event titled `Scope: Name, Suburb`
-spanning the arrival window on the resource's Outlook primary calendar, with
-no attendees (no invitation is sent). It is idempotent on the GHL appointment
+spanning the exact GHL appointment on the resource's Outlook primary calendar, with
+no attendees (no invitation is sent). The suburb is the one
+`salesBookingPublishedSuburb` already publishes on the booking read (contact
+city/address, then `jobs.site_suburb`). It is idempotent on the GHL appointment
 id (a named extended property, looked up before create, plus a deterministic
-Graph `transactionId`); a failed lookup writes nothing. Only
-`SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true` writes; otherwise it returns
-`code:"flag_off"` with `would_write` and makes no Graph call.
+Graph `transactionId`); a failed lookup writes nothing. A live executor press
+(`SALES_BOOKING_BOOK_EXECUTE=true`, captain JWT, not dry-run) passes
+`callerAuthorised: true` so booking and this Outlook copy turn on together.
+Other callers still need `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true`;
+otherwise the module returns `code:"flag_off"` with `would_write` and makes
+no Graph call.

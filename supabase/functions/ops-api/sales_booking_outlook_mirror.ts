@@ -7,12 +7,16 @@
 // app-only credential (Calendars.ReadWrite already granted; no new access).
 // This module is that Outlook write. The booking executor
 // (`sales_booking_execute.ts`, ops-api `sales_booking_book`) calls it after its
-// GHL appointment write succeeds, and again on a retry press.
+// GHL appointment write succeeds, and again on a retry press. A live executor
+// press (`SALES_BOOKING_BOOK_EXECUTE=true`, captain JWT, not dry_run) passes
+// `callerAuthorised: true` so this write rides that one switch. Other callers
+// still need `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true`.
 //
-// ── DEFAULT OFF ──
-// Only the exact server env value `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true`
-// writes. Anything else returns `code: "flag_off"` with the exact request it
-// would send, and makes no Graph call at all (not even the lookup).
+// ── DEFAULT OFF (callers other than a live executor press) ──
+// Without `callerAuthorised: true`, only the exact server env value
+// `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true` writes. Anything else
+// returns `code: "flag_off"` with the exact request it would send, and makes
+// no Graph call at all (not even the lookup).
 //
 // ── ONE EVENT PER GHL APPOINTMENT ──
 // The GHL appointment id is stamped on the event as a named extended property
@@ -45,13 +49,18 @@ export interface OutlookMirrorInput {
   ghl_appointment_id: string;
   client_name: string;
   suburb: string;
-  /** Arrival window start, ISO with explicit `Z` or `±HH:MM` offset. */
-  arrival_start: string;
-  /** Arrival window end, ISO with explicit offset, after the start. */
-  arrival_end: string;
+  /** GHL appointment start, ISO with explicit `Z` or `±HH:MM` offset. */
+  start: string;
+  /** GHL appointment end, ISO with explicit offset, after the start. */
+  end: string;
   /** Site address for the event location. Optional. */
   address?: string | null;
 }
+
+/** A live executor press has already passed the book switch and captain gate. */
+export type OutlookMirrorWriteOptions = {
+  callerAuthorised?: boolean;
+};
 
 export interface OutlookMirrorRequest {
   method: "POST";
@@ -145,7 +154,7 @@ export function outlookMirrorTransactionId(ghlAppointmentId: string): string {
 /**
  * Validate the input and build the exact Graph create request. Pure. The
  * title is the owner's existing shape, `Scope: Name, Suburb`; the event spans
- * the arrival window.
+ * the exact GHL appointment.
  */
 export function buildOutlookMirrorRequest(
   input: OutlookMirrorInput,
@@ -176,23 +185,23 @@ export function buildOutlookMirrorRequest(
     address = cleaned;
   }
   if (
-    typeof input.arrival_start !== "string" ||
-    typeof input.arrival_end !== "string" ||
-    !ISO_WITH_OFFSET.test(input.arrival_start) ||
-    !ISO_WITH_OFFSET.test(input.arrival_end)
+    typeof input.start !== "string" ||
+    typeof input.end !== "string" ||
+    !ISO_WITH_OFFSET.test(input.start) ||
+    !ISO_WITH_OFFSET.test(input.end)
   ) {
     return {
       ok: false,
-      reason: "arrival window must be ISO datetimes with an explicit offset",
+      reason: "appointment times must be ISO datetimes with an explicit offset",
     };
   }
-  const startMs = Date.parse(input.arrival_start);
-  const endMs = Date.parse(input.arrival_end);
+  const startMs = Date.parse(input.start);
+  const endMs = Date.parse(input.end);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
-    return { ok: false, reason: "arrival window is not a real time" };
+    return { ok: false, reason: "appointment time is not a real time" };
   }
   if (endMs <= startMs) {
-    return { ok: false, reason: "arrival window end must follow its start" };
+    return { ok: false, reason: "appointment end must follow its start" };
   }
 
   const body: Record<string, unknown> = {
@@ -205,9 +214,9 @@ export function buildOutlookMirrorRequest(
     attendees: [],
     body: {
       contentType: "text",
-      content: `Arrival window ${perthClock(startMs)} to ${
+      content: `Booked in GHL ${perthClock(startMs)} to ${
         perthClock(endMs)
-      }. Booked in GHL, appointment ${input.ghl_appointment_id}.`,
+      }, appointment ${input.ghl_appointment_id}.`,
     },
     transactionId: outlookMirrorTransactionId(input.ghl_appointment_id),
     singleValueExtendedProperties: [
@@ -255,6 +264,7 @@ export function outlookMirrorLookupUrl(
 export async function writeOutlookMirrorEvent(
   input: OutlookMirrorInput,
   deps: OutlookMirrorDependencies,
+  options?: OutlookMirrorWriteOptions,
 ): Promise<OutlookMirrorResult> {
   const built = buildOutlookMirrorRequest(input);
   if (!built.ok) {
@@ -265,7 +275,10 @@ export async function writeOutlookMirrorEvent(
       reason: built.reason,
     };
   }
-  if (deps.env(SALES_BOOKING_OUTLOOK_MIRROR_FLAG) !== "true") {
+  if (
+    options?.callerAuthorised !== true &&
+    deps.env(SALES_BOOKING_OUTLOOK_MIRROR_FLAG) !== "true"
+  ) {
     return {
       ok: false,
       code: "flag_off",
@@ -389,9 +402,11 @@ export function createOutlookMirrorDependencies(): OutlookMirrorDependencies {
 /** Executor entry point: mirror one just-written GHL appointment to Outlook. */
 export async function mirrorGhlAppointmentToOutlook(
   input: OutlookMirrorInput,
+  options?: OutlookMirrorWriteOptions,
 ): Promise<OutlookMirrorResult> {
   return await writeOutlookMirrorEvent(
     input,
     createOutlookMirrorDependencies(),
+    options,
   );
 }

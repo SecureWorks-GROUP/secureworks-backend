@@ -6,11 +6,13 @@
  *    event names its source (`ghl` or `outlook`).
  *  - A failed Outlook read is a NAMED failure that marks the whole diary
  *    unread; it is never a free day, even though GHL read fine.
- *  - The mirror write is default off (no Graph call at all, returns exactly
- *    what it would write) and idempotent on the GHL appointment id.
+ *  - The mirror write is default off for callers that do not pass
+ *    callerAuthorised (no Graph call at all, returns exactly what it would
+ *    write) and idempotent on the GHL appointment id.
  *
  * What these do NOT prove: that Graph accepts the live request shapes. The
- * live read is in the PR description; the mirror write stays off.
+ * live read is in the PR description. A live executor press authorises the
+ * write through SALES_BOOKING_BOOK_EXECUTE.
  */
 // deno-lint-ignore-file no-import-prefix
 import {
@@ -433,8 +435,8 @@ const MIRROR_INPUT: OutlookMirrorInput = {
   ghl_appointment_id: "ghlAppt_123",
   client_name: "Jane Citizen",
   suburb: "Joondalup",
-  arrival_start: "2026-09-25T10:00:00+08:00",
-  arrival_end: "2026-09-25T11:00:00+08:00",
+  start: "2026-09-25T10:00:00+08:00",
+  end: "2026-09-25T11:00:00+08:00",
   address: "1 Example Street, Joondalup WA 6027",
 };
 
@@ -470,6 +472,16 @@ function fakeOutlook(env: Record<string, string> = {}) {
   return { deps, events, calls };
 }
 
+Deno.test("callerAuthorised writes even when the module switch is off", async () => {
+  const outlook = fakeOutlook({});
+  const result = await writeOutlookMirrorEvent(MIRROR_INPUT, outlook.deps, {
+    callerAuthorised: true,
+  });
+  assertEquals(result.code, "mirrored");
+  assertEquals(result.wrote, true);
+  assertEquals(outlook.calls.map((c) => c.method), ["GET", "POST"]);
+});
+
 Deno.test("mirror switch off writes nothing, calls Graph not at all, and returns exactly what it would write", async () => {
   for (
     const env of [
@@ -492,7 +504,7 @@ Deno.test("mirror switch off writes nothing, calls Graph not at all, and returns
   }
 });
 
-Deno.test("mirror request uses the owner's title shape, the arrival window and no attendees", () => {
+Deno.test("mirror request uses the owner's title shape, the GHL appointment span and no attendees", () => {
   const built = buildOutlookMirrorRequest(MIRROR_INPUT);
   assert(built.ok);
   if (!built.ok) return;
@@ -523,13 +535,12 @@ Deno.test("mirror request uses the owner's title shape, the arrival window and n
   ]);
   assertStringIncludes(
     (body.body as { content: string }).content,
-    "Arrival window 10:00 to 11:00",
+    "Booked in GHL 10:00 to 11:00, appointment ghlAppt_123.",
   );
-  // A UTC-stamped window lands on the same Perth wall clock.
   const utc = buildOutlookMirrorRequest({
     ...MIRROR_INPUT,
-    arrival_start: "2026-09-25T02:00:00Z",
-    arrival_end: "2026-09-25T03:00:00Z",
+    start: "2026-09-25T02:00:00Z",
+    end: "2026-09-25T03:00:00Z",
   });
   assert(utc.ok);
   if (utc.ok) {
@@ -608,8 +619,8 @@ Deno.test("mirror refuses bad input before any Graph call, whatever the switch",
     { ghl_appointment_id: "x' or 1 eq 1" },
     { client_name: "  " },
     { suburb: "" },
-    { arrival_start: "2026-09-25T10:00:00" },
-    { arrival_end: "2026-09-25T09:00:00+08:00" },
+    { start: "2026-09-25T10:00:00" },
+    { end: "2026-09-25T09:00:00+08:00" },
     { address: "line\nbreak" },
   ];
   for (const patch of bad) {
