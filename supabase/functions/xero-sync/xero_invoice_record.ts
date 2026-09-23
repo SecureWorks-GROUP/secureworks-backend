@@ -22,9 +22,10 @@
 //                             completion only moves a job still 'invoiced'.
 //
 // The incremental loop runs every effect, as before MN1. The hourly verify
-// runs only the deposit stamp until the open-book sweep is in apply (captain
-// decision, 23 Sep): the paid-job completion goes through ops-api
-// update_job_status, whose GHL stage sync can fire customer workflows.
+// always runs. Off and observe keep deposit_stamp_only (captain decision,
+// 24 Sep): the paid-job completion goes through ops-api update_job_status,
+// whose GHL stage sync can fire customer workflows. Apply runs the same
+// full effects as the loop.
 //
 // Both builders stamp xero_verified_at: the time this copy was last read from
 // Xero. synced_at keeps meaning "last local write"; the ~20 ops-api mirror
@@ -220,10 +221,11 @@ export interface ProviderInvoiceDeps {
   now?: () => Date;
   // Which effects run. "all" (the default) is the incremental loop's set, as
   // before MN1. "deposit_stamp_only" is what the hourly verify ran before MN1
-  // and still runs while the open-book sweep is not in apply: the reference
-  // link and the paid-job completion (ops-api update_job_status, which syncs
-  // the stage to GHL and can fire customer workflows) are held back until
-  // money_open_book is apply, a live switch that needs the captain's word.
+  // and still runs in off/observe: the reference link and the paid-job
+  // completion (ops-api update_job_status, which syncs the stage to GHL and
+  // can fire customer workflows) are held back until money_open_book is
+  // apply, a live switch that needs the captain's word. The hourly verify
+  // itself always runs, including in apply.
   effects?: "all" | "deposit_stamp_only";
 }
 

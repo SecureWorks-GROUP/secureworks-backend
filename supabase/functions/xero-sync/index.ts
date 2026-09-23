@@ -54,8 +54,6 @@ import {
   type POCandidate,
 } from './materials_ingest.ts'
 import {
-  sealedSesMoneyRefusal,
-  type SealedSesJobRecord,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
 import {
