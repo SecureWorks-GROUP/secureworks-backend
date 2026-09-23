@@ -68,15 +68,18 @@ handler is GET-only and SELECT-only.
 
 ## SQL
 
-`20260917210000_context_pipeline_status.sql` installs two functions:
-
-- `context_coverage()` — open jobs (not cancelled/archived/lost/closed/complete/completed) and authorised ACCREC invoices with `amount_due > 0`, split into with_current_fact / no_current_fact / evidence_without_current_fact / no_evidence_yet.
-- `context_pipeline_status()` — the heartbeat payload, including that coverage object.
+`20260917210000_context_pipeline_status.sql` installed `context_coverage()` and
+the original heartbeat body. F1 (`20260923160500`) moved that body unchanged
+to `context_core_status()` and made `context_pipeline_status()` the composer
+documented above. `context_coverage()` is unchanged: open jobs (not
+cancelled/archived/lost/closed/complete/completed) and authorised ACCREC
+invoices with `amount_due > 0`, split into with_current_fact / no_current_fact
+/ evidence_without_current_fact / no_evidence_yet.
 
 Copied from the unmerged accuracy packet without `context_accuracy_*` tables or
 `latest_accuracy_week` / `accuracy_alerts`.
 
-Corrections against that draft:
+Corrections against that draft (still the `context_core_status()` body):
 
 1. `missing_event_time` counts rows where **both** `event_at` and `occurred_at` are null. An `event_at IS NULL` count would report ~33k healthy rows after PR 854. `oldest_pending_event_at` is `min(coalesce(event_at, occurred_at))`.
 2. Coverage filters `xero_invoices.invoice_type`. Production has no `type` column on that table.
