@@ -49,7 +49,7 @@ SALES_BOOKING_ROSTER_MIGRATION="$REPO_ROOT/supabase/migrations/20260917200000_sa
 CONTEXT_PIPELINE_STATUS_MIGRATION="$REPO_ROOT/supabase/migrations/20260917210000_context_pipeline_status.sql"
 TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION="$REPO_ROOT/supabase/migrations/20260918120000_trade_invoice_super_payable_split.sql"
 SALES_PERFORMANCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911000001_sales_performance_weeks.sql"
-SALES_BOOKING_MESSAGE_SENDS_MIGRATION="$REPO_ROOT/supabase/migrations/20260923181500_sales_booking_message_sends.sql"
+SALES_BOOKING_EXECUTIONS_MIGRATION="$REPO_ROOT/supabase/migrations/20260923181500_sales_booking_executions.sql"
 
 
 PASS_COUNT=0
@@ -295,7 +295,7 @@ write_response() {
   CONTEXT_PIPELINE_STATUS_EXPECTED_SHA="$(context_pipeline_status_migration_sha)" \
   TRADE_INVOICE_PAYABLE_SPLIT_EXPECTED_SHA="$(trade_invoice_payable_split_migration_sha)" \
   SALES_PERFORMANCE_EXPECTED_SHA="$(shasum -a 256 "$SALES_PERFORMANCE_MIGRATION" | awk '{print $1}')" \
-  SALES_BOOKING_MESSAGE_SENDS_EXPECTED_SHA="$(shasum -a 256 "$SALES_BOOKING_MESSAGE_SENDS_MIGRATION" | awk '{print $1}')" \
+  SALES_BOOKING_EXECUTIONS_EXPECTED_SHA="$(shasum -a 256 "$SALES_BOOKING_EXECUTIONS_MIGRATION" | awk '{print $1}')" \
   BOOKING_MIGRATIONS_ROOT="$REPO_ROOT/supabase/migrations" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
@@ -794,15 +794,26 @@ sales_performance_row = {
     "actual_statement_sha256": os.environ["SALES_PERFORMANCE_EXPECTED_SHA"],
     "missing_markers": [],
 }
-sales_booking_message_sends_row = {
+sales_booking_executions_row = {
     "function_name": "ops-api",
     "migration_version": "20260923181500",
-    "expected_migration_name": "sales_booking_message_sends",
-    "expected_statement_sha256": os.environ["SALES_BOOKING_MESSAGE_SENDS_EXPECTED_SHA"],
+    "expected_migration_name": "sales_booking_executions",
+    "expected_statement_sha256": os.environ["SALES_BOOKING_EXECUTIONS_EXPECTED_SHA"],
     "actual_migration_version": "20260923181500",
-    "actual_migration_name": "sales_booking_message_sends",
-    "actual_statement_count": 1,
-    "actual_statement_sha256": os.environ["SALES_BOOKING_MESSAGE_SENDS_EXPECTED_SHA"],
+    "actual_migration_name": "sales_booking_executions",
+    "actual_statement_count": 4,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
+sales_booking_executions_ghl_row = {
+    "function_name": "ghl-proxy",
+    "migration_version": "20260923181500",
+    "expected_migration_name": "sales_booking_executions",
+    "expected_statement_sha256": os.environ["SALES_BOOKING_EXECUTIONS_EXPECTED_SHA"],
+    "actual_migration_version": "20260923181500",
+    "actual_migration_name": "sales_booking_executions",
+    "actual_statement_count": 4,
+    "actual_statement_sha256": None,
     "missing_markers": [],
 }
 booking_read_rows = []
@@ -865,7 +876,8 @@ with open(sys.argv[1], "w") as f:
             trade_invoice_payable_split_row,
             *context_rows,
             sales_performance_row,
-            sales_booking_message_sends_row,
+            sales_booking_executions_row,
+            sales_booking_executions_ghl_row,
         ],
         f,
     )

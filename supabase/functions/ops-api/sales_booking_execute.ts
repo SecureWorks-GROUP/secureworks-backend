@@ -77,22 +77,31 @@ export type OutlookRead =
   | { ok: true; mailbox: string; events: OutlookEvent[] }
   | { ok: false; reason: string };
 
-export interface SendLedgerRow {
+export type ExecutionStep = "calendar" | "message";
+export interface ExecutionLedgerRow {
   binding_hash: string;
-  state: "sending" | "sent" | "unknown";
+  step: ExecutionStep;
+  state: "claimed" | "booked" | "sending" | "sent" | "unknown";
+  press_token: string;
   message_id: string | null;
+  appointment_id: string | null;
 }
-export interface SendLedger {
-  get(bindingHash: string): Promise<SendLedgerRow | null>;
-  /** Insert a `sending` claim. False when another claim already holds it. */
+export interface ExecutionLedger {
+  get(bindingHash: string): Promise<ExecutionLedgerRow | null>;
+  /** Insert a claim, or re-claim an unbooked calendar row. False when held. */
   claim(row: {
     binding_hash: string;
+    step: ExecutionStep;
     contact_id: string;
     claimed_by_email: string;
+    press_token: string;
   }): Promise<boolean>;
   settle(
     bindingHash: string,
-    outcome: { state: "sent"; message_id: string } | { state: "unknown" },
+    outcome:
+      | { state: "booked"; appointment_id: string }
+      | { state: "sent"; message_id: string }
+      | { state: "unknown" },
   ): Promise<void>;
 }
 
@@ -114,7 +123,7 @@ export interface SalesBookingExecuteDeps {
   callAppointmentWriter(body: Obj): Promise<{ status: number; body: Obj }>;
   /** POST ghl-proxy?action=send_sms (server credential). */
   callSendSms(body: Obj): Promise<{ status: number; body: Obj }>;
-  sends: SendLedger;
+  executions: ExecutionLedger;
   envGet?: SalesBookingEnvGet;
   now?: () => Date;
 }
@@ -357,9 +366,18 @@ export async function salesBookingBookAction(args: {
       ...appointment,
       idempotencyKey: key,
     });
-    return res.body?.ok === true && res.body.appointmentId
-      ? bookedFrom(res.body, true)
-      : refused("execution_outcome_unknown");
+    if (res.body?.ok === true && res.body.appointmentId) {
+      try {
+        await deps.executions.settle(key, {
+          state: "booked",
+          appointment_id: String(res.body.appointmentId),
+        });
+      } catch {
+        // Recovery already has the appointment; the claim row can stay claimed.
+      }
+      return bookedFrom(res.body, true);
+    }
+    return refused("execution_outcome_unknown");
   }
 
   const gated = await gate(loaded, "calendar", deps);
@@ -398,10 +416,38 @@ export async function salesBookingBookAction(args: {
 
   // The writer re-reads the person's GHL diary and every assigned calendar,
   // and re-checks the approval itself, immediately before any POST.
+  let executorClaim: string | undefined;
+  if (loaded.live) {
+    const pressToken = crypto.randomUUID();
+    let claimed: boolean;
+    try {
+      claimed = await deps.executions.claim({
+        binding_hash: key,
+        step: "calendar",
+        contact_id: String(loaded.snapshot.contact_id),
+        claimed_by_email: loaded.press.email,
+        press_token: pressToken,
+      });
+    } catch {
+      return refused("execution_ledger_unwritable");
+    }
+    if (!claimed) {
+      const winner = await deps.executions.get(key).catch(() => null);
+      return winner?.state === "booked" && winner.appointment_id
+        ? bookedFrom({
+          appointmentId: winner.appointment_id,
+          startTime: appointment.startTime,
+          endTime: appointment.endTime,
+        }, true)
+        : refused("execution_outcome_unknown");
+    }
+    executorClaim = pressToken;
+  }
   const res = await writer(deps, {
     ...appointment,
     idempotencyKey: key,
     ...(loaded.live ? {} : { dryRun: true }),
+    ...(executorClaim ? { executorClaim } : {}),
   });
   if (res.body?.dryRun === true && res.body.wouldWrite) {
     return {
@@ -415,6 +461,16 @@ export async function salesBookingBookAction(args: {
     };
   }
   if (res.body?.ok === true && res.body.appointmentId) {
+    if (loaded.live) {
+      try {
+        await deps.executions.settle(key, {
+          state: "booked",
+          appointment_id: String(res.body.appointmentId),
+        });
+      } catch {
+        // The GHL ledger still holds the appointment; a later press replays it.
+      }
+    }
     return bookedFrom(res.body, res.body.reused === true);
   }
   return writerRefusal(res);
@@ -432,9 +488,9 @@ export async function salesBookingSendAction(args: {
   const { loaded } = start;
   const key = loaded.record.binding_hash;
 
-  let prior: SendLedgerRow | null;
+  let prior: ExecutionLedgerRow | null;
   try {
-    prior = await deps.sends.get(key);
+    prior = await deps.executions.get(key);
   } catch {
     return refused("execution_ledger_unreadable");
   }
@@ -499,16 +555,18 @@ export async function salesBookingSendAction(args: {
   // Claim before the provider call; a concurrent press loses here.
   let claimed: boolean;
   try {
-    claimed = await deps.sends.claim({
+    claimed = await deps.executions.claim({
       binding_hash: key,
+      step: "message",
       contact_id: contactId,
       claimed_by_email: loaded.press.email,
+      press_token: crypto.randomUUID(),
     });
   } catch {
     return refused("execution_ledger_unwritable");
   }
   if (!claimed) {
-    const winner = await deps.sends.get(key).catch(() => null);
+    const winner = await deps.executions.get(key).catch(() => null);
     return winner?.state === "sent" && winner.message_id
       ? {
         status: "sent",
@@ -528,7 +586,7 @@ export async function salesBookingSendAction(args: {
     ? String(res.body.messageId)
     : null;
   try {
-    await deps.sends.settle(
+    await deps.executions.settle(
       key,
       messageId
         ? { state: "sent", message_id: messageId }

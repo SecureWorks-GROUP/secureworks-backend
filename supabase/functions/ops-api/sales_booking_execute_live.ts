@@ -1,5 +1,5 @@
 /** Production adapters for sales_booking_execute.ts. Reads only, except the
- * two ghl-proxy calls and the send-ledger claim/settle, which the executor
+ * two ghl-proxy calls and the executor-ledger claim/settle, which the executor
  * makes only when its switch is on and the captain pressed.
  *
  * Credential: ops-api calls ghl-proxy server-to-server with the project's
@@ -11,10 +11,10 @@
 import type { ExecutableApprovalRecord } from "../_shared/booking_approval_gate.ts";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 import type {
+  ExecutionLedger,
   OutlookEvent,
   OutlookRead,
   SalesBookingExecuteDeps,
-  SendLedger,
 } from "./sales_booking_execute.ts";
 import {
   ghlRead,
@@ -30,32 +30,50 @@ type Obj = Record<string, any>;
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
-export function sendLedger(client: Client): SendLedger {
-  const table = "sales_booking_message_sends";
+export function executionLedger(client: Client): ExecutionLedger {
+  const table = "sales_booking_executions";
   return {
     async get(bindingHash) {
       const { data, error } = await client.from(table)
-        .select("binding_hash,state,message_id")
+        .select(
+          "binding_hash,step,state,press_token,message_id,appointment_id",
+        )
         .eq("binding_hash", bindingHash).maybeSingle();
-      if (error) throw new Error("send_ledger_unreadable");
+      if (error) throw new Error("execution_ledger_unreadable");
       return data ?? null;
     },
     async claim(row) {
+      const state = row.step === "calendar" ? "claimed" : "sending";
       const { error } = await client.from(table).insert({
-        ...row,
-        state: "sending",
+        binding_hash: row.binding_hash,
+        step: row.step,
+        contact_id: row.contact_id,
+        state,
+        press_token: row.press_token,
+        claimed_by_email: row.claimed_by_email,
       });
-      if (error?.code === "23505") return false;
-      if (error) throw new Error("send_ledger_unwritable");
-      return true;
+      if (!error) return true;
+      if (error.code !== "23505") throw new Error("execution_ledger_unwritable");
+      if (row.step !== "calendar") return false;
+      const { data, error: updateError } = await client.from(table).update({
+        press_token: row.press_token,
+        claimed_at: new Date().toISOString(),
+      }).eq("binding_hash", row.binding_hash).eq("step", "calendar")
+        .eq("state", "claimed").select("binding_hash");
+      if (updateError) throw new Error("execution_ledger_unwritable");
+      return Array.isArray(data) && data.length === 1;
     },
     async settle(bindingHash, outcome) {
+      const prior = outcome.state === "booked" ? "claimed" : "sending";
       const { error } = await client.from(table).update({
         state: outcome.state,
         message_id: outcome.state === "sent" ? outcome.message_id : null,
+        appointment_id: outcome.state === "booked"
+          ? outcome.appointment_id
+          : null,
         finished_at: new Date().toISOString(),
-      }).eq("binding_hash", bindingHash).eq("state", "sending");
-      if (error) throw new Error("send_ledger_unwritable");
+      }).eq("binding_hash", bindingHash).eq("state", prior);
+      if (error) throw new Error("execution_ledger_unwritable");
     },
   };
 }
@@ -189,6 +207,6 @@ export function createSalesBookingExecuteDeps(
     callAppointmentWriter: (body) =>
       callGhlProxy("create_calendar_appointment", body),
     callSendSms: (body) => callGhlProxy("send_sms", body),
-    sends: sendLedger(client),
+    executions: executionLedger(client),
   };
 }

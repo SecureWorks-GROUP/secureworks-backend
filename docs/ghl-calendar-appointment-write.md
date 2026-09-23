@@ -23,7 +23,10 @@ Use JSON with exactly these fields (unknown fields are refused):
 ```
 
 Optional `"dryRun": true` forces a preview even when writes are enabled; any
-other `dryRun` value is refused. It can only remove a write.
+other `dryRun` value is refused. It can only remove a write. Optional
+`"executorClaim"` is the executor's per-press UUID; a real write requires it
+to match the live `sales_booking_executions` calendar claim. Any other
+`executorClaim` value is refused.
 
 All other fields are required strings. IDs accept letters, digits, underscore and
 hyphen, up to 200 characters. Title is 1–200 characters, address 1–1000,
@@ -49,18 +52,26 @@ read actions; this change does not grant it appointment-write authority. The age
 integration must use an already-authorized server credential. Credentials never go
 in the JSON body or client code.
 
-## Captain approval required for a real write
+## Captain approval and executor claim required for a real write
 
 A real write requires `idempotencyKey` to be the binding hash of a live
 `sales_booking_approvals` calendar approval, made by an allow-listed captain
 (`SALES_BOOKING_CAPTAIN_EMAILS`), unexpired, untampered, and approving exactly
-this calendar, assignee, contact, start, end, title and address. Otherwise the
-action refuses HTTP 409 `{ok:false, code:"approval_required", reason}` before
-reserving or posting; `reason` is one of `approval_not_found`,
-`approval_unreadable`, `approval_step_mismatch`, `approval_not_approved`,
-`approval_not_by_captain`, `content_hash_mismatch`, `approval_expired`.
-Replays of a completed key and recovery of a `sending` key never post and are
-unaffected. Previews never refuse on approval; they report
+this calendar, assignee, contact, start, end, title and address. It also
+requires the ops-api executor to have claimed that hash in
+`sales_booking_executions` for this press: optional request field
+`executorClaim` must match the row's `press_token`, the row must be
+`step=calendar` and not yet booked, and `claimed_at` must be within the last
+two minutes. Otherwise the action refuses HTTP 409
+`{ok:false, code:"approval_required", reason}` before reserving or posting;
+`reason` is one of `approval_not_found`, `approval_unreadable`,
+`approval_step_mismatch`, `approval_not_approved`, `approval_not_by_captain`,
+`content_hash_mismatch`, `approval_expired`, `executor_claim_missing`,
+`executor_claim_mismatch`, `executor_claim_expired`,
+`executor_claim_unreadable`. A live approval without the executor's claim is
+not enough: no caller can book around the executor. Replays of a completed key
+and recovery of a `sending` key never post and are unaffected. Previews never
+refuse on approval or claim; they report
 `approval: {state:"live"|"missing", reason}`. The ops-api executor is the
 intended caller: `docs/sales-booking-executor.md`.
 
@@ -135,7 +146,7 @@ returned.
 | --- | --- | --- |
 | `flag_off` | 200 | Validated preview only. Do not report a booking as made. |
 | `dry_run` | 200 | Same preview, because the caller sent `dryRun: true` while writes are enabled. |
-| `approval_required` | 409 | No live captain approval of these exact fields. Do not book. |
+| `approval_required` | 409 | No live captain approval of these exact fields, or no matching executor claim for this press. Do not book. |
 | `overlap` | 409 | Person already busy or a durable reservation holds the window. Do not book. |
 | `read_failed` | 502 | Contact/directory/roster/window could not be read completely. Retry the same key; never call it free time. |
 | `contact_not_found` | 404 | Explicit contact 404 or no exact contact in the configured location. |

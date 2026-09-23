@@ -92,3 +92,27 @@ export function bookingApprovalReader(sb: any): {
     },
   };
 }
+
+/** Read-only: the writer never claims or settles an executor press. */
+// Supabase's structural query builder is owned by the pinned runtime client.
+// deno-lint-ignore no-explicit-any
+export function bookingExecutionReader(sb: any): {
+  find(bindingHash: string): Promise<
+    {
+      step: string;
+      state: string;
+      press_token: string;
+      claimed_at: string;
+    } | null
+  >;
+} {
+  return {
+    async find(bindingHash) {
+      const { data, error } = await sb.from("sales_booking_executions").select(
+        "step,state,press_token,claimed_at",
+      ).eq("binding_hash", bindingHash).maybeSingle();
+      if (error) throw new Error("execution_read_failed");
+      return data ?? null;
+    },
+  };
+}

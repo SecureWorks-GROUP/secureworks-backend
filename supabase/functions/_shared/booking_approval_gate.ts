@@ -1,8 +1,9 @@
 /** Execution-time authority of one `sales_booking_approvals` row.
  *
  * Shared by the ops-api booking executor (`sales_booking_book` /
- * `sales_booking_send`) and the ghl-proxy appointment writer, so no caller can
- * book around the executor and both read an approval the same way.
+ * `sales_booking_send`) and the ghl-proxy appointment writer so both read an
+ * approval the same way. A real write also needs the executor's per-press
+ * claim (`docs/sales-booking-executor.md`).
  * Pure: no clock, no network, no env. Contract:
  * docs/sales-booking-executor.md.
  */

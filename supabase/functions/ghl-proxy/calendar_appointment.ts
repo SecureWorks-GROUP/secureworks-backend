@@ -69,9 +69,26 @@ export type AppointmentDeps = {
   approvals: {
     find(bindingHash: string): Promise<ExecutableApprovalRecord | null>;
   };
+  /**
+   * The executor's per-press claim for this approval hash. A real write
+   * requires a fresh unbooked calendar claim whose token matches
+   * `executorClaim`; previews and replays never refuse on it.
+   */
+  executions: {
+    find(bindingHash: string): Promise<ExecutorClaimRow | null>;
+  };
   captainEmails: string[];
   now?: () => number;
 };
+export type ExecutorClaimRow = {
+  step: string;
+  state: string;
+  press_token: string;
+  claimed_at: string;
+};
+export const EXECUTOR_CLAIM_MAX_AGE_MS = 2 * 60_000;
+const EXECUTOR_CLAIM_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Refusal =
   | "flag_off"
   | "overlap"
@@ -111,15 +128,26 @@ function instant(value: unknown): number | null {
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }
-/** `dryRun: true` is the only optional field; it can remove a write, never add one. */
+/** `dryRun: true` and `executorClaim` are the only optional fields. */
 function parseRequest(
   body: unknown,
-): { input: AppointmentInput; dryRun: boolean } | null {
+): { input: AppointmentInput; dryRun: boolean; executorClaim: string | null } | null {
   if (!object(body)) return null;
   if ("dryRun" in body && body.dryRun !== true) return null;
-  const { dryRun, ...rest } = body;
+  if (
+    "executorClaim" in body &&
+    (typeof body.executorClaim !== "string" ||
+      !EXECUTOR_CLAIM_PATTERN.test(body.executorClaim))
+  ) return null;
+  const { dryRun, executorClaim, ...rest } = body;
   const input = parse(rest);
-  return input ? { input, dryRun: dryRun === true } : null;
+  return input
+    ? {
+      input,
+      dryRun: dryRun === true,
+      executorClaim: typeof executorClaim === "string" ? executorClaim : null,
+    }
+    : null;
 }
 
 function parse(raw: unknown): AppointmentInput | null {
@@ -299,6 +327,26 @@ export async function createCalendarAppointmentAction(args: {
       ? null
       : "content_hash_mismatch";
   };
+  const claimRefusal = async (): Promise<string | null> => {
+    const token = request.executorClaim;
+    if (!token) return "executor_claim_missing";
+    let row: ExecutorClaimRow | null;
+    try {
+      row = await deps.executions.find(input.idempotencyKey);
+    } catch {
+      return "executor_claim_unreadable";
+    }
+    if (!row || row.step !== "calendar" || row.state !== "claimed") {
+      return "executor_claim_missing";
+    }
+    if (row.press_token !== token) return "executor_claim_mismatch";
+    const claimedAt = Date.parse(row.claimed_at);
+    if (
+      !Number.isFinite(claimedAt) ||
+      nowMs() - claimedAt > EXECUTOR_CLAIM_MAX_AGE_MS
+    ) return "executor_claim_expired";
+    return null;
+  };
   const fingerprint = await scopeJsonHash({
     locationId: deps.locationId,
     ...input,
@@ -417,9 +465,12 @@ export async function createCalendarAppointmentAction(args: {
     }
     // Replays and recoveries never post. Everything from the reservation on
     // can, so no caller books without the captain's live approval of these
-    // exact fields (docs/sales-booking-executor.md).
+    // exact fields and the executor's per-press claim
+    // (docs/sales-booking-executor.md).
     const approval = await approvalRefusal();
     if (approval) return refuse("approval_required", 409, approval);
+    const claim = await claimRefusal();
+    if (claim) return refuse("approval_required", 409, claim);
     const token = crypto.randomUUID();
     const reservation = await deps.ledger.reserve({
       locationId: deps.locationId,

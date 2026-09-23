@@ -50,7 +50,7 @@ Both actions:
 2. `approval_not_found`, `approval_unreadable`, `approval_step_mismatch`.
 3. Already ran: a second press returns the first result and never writes or
    sends twice. A book uses the GHL writer's own ledger, keyed on the approval
-   hash; a send uses `sales_booking_message_sends`. An unsettled earlier attempt
+   hash; a send uses `sales_booking_executions` (`step=message`). An unsettled earlier attempt
    refuses `execution_outcome_unknown` and is never repeated.
 4. `approval_not_approved` (a refusal decision), `approval_not_by_captain`
    (approver email not in `SALES_BOOKING_CAPTAIN_EMAILS`),
@@ -67,9 +67,12 @@ Both actions:
    (`_shared/graph_client.ts`, mailbox from `SALES_BOOKING_GHL_USERS`). Any busy
    event refuses `outlook_calendar_clash`, naming subject and times; a failed
    read refuses `outlook_unreadable`. Free and cancelled events never block.
-7. The existing GHL writer (`ghl-proxy?action=create_calendar_appointment`),
-   which re-reads the person's GHL diary plus every assigned calendar and
-   refuses `ghl_calendar_clash`, and re-checks the approval itself.
+7. A live press claims `sales_booking_executions` (`step=calendar`) and
+   passes `executorClaim` to the GHL writer
+   (`ghl-proxy?action=create_calendar_appointment`), which re-reads the
+   person's GHL diary plus every assigned calendar and refuses
+   `ghl_calendar_clash`, and re-checks the approval and the executor claim. A
+   confirmed booking settles that row `booked`.
 
 `sales_booking_send` then:
 
@@ -84,13 +87,19 @@ Both actions:
 A text that names no time ("does Friday suit?") is fully supported: sending
 needs no calendar booking or receipt.
 
-## The GHL writer refuses without an approval
+## The GHL writer refuses without the executor's per-press claim
 
 `create_calendar_appointment` now requires, for any real write, that its
 `idempotencyKey` is the binding hash of a live captain approval of exactly the
-requested calendar, assignee, contact, start, end, title and address. Otherwise
-it refuses HTTP 409 `approval_required` with the failed check as `reason`. So no
-caller can book around the executor. Previews never refuse on approval; they
+requested calendar, assignee, contact, start, end, title and address, **and**
+that `sales_booking_executions` already holds the executor's claim for this
+press: `step=calendar`, not yet booked, `press_token` equal to the request's
+`executorClaim`, and `claimed_at` within the last two minutes. Otherwise it
+refuses HTTP 409 `approval_required` with the failed check as `reason`
+(`executor_claim_missing` / `executor_claim_mismatch` /
+`executor_claim_expired` / `executor_claim_unreadable` on the claim; the
+approval reasons otherwise). A live approval alone is not enough: no caller
+can book around the executor. Previews never refuse on approval or claim; they
 report `approval: {state, reason}`. See `docs/ghl-calendar-appointment-write.md`.
 
 ## Credential between ops-api and ghl-proxy
@@ -113,9 +122,12 @@ can be approved. The calendar approval keeps every other check.
 
 ## Storage and deploy order
 
-Apply `20260923181500_sales_booking_message_sends.sql` before the matching
-`ops-api`. The table is service-role only, claimed before the provider call,
-settles once (trigger), references the approval row, and is never deleted.
+Apply `20260923181500_sales_booking_executions.sql` before the matching
+`ops-api` and `ghl-proxy`. The table is service-role only. A live book claims
+the calendar row (re-claim allowed only while unbooked) and passes
+`executorClaim` to the writer; a send claims the message row before the
+provider call. Message rows settle once; a booked calendar row is permanent.
+The table references the approval row and is never deleted.
 
 ## Out of scope
 

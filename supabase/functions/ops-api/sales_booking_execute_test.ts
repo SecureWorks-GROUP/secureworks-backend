@@ -7,11 +7,11 @@ import {
 } from "../_shared/booking_approval_gate.ts";
 import {
   type ExecuteResult,
+  type ExecutionLedgerRow,
   type OutlookEvent,
   salesBookingBookAction,
   type SalesBookingExecuteDeps,
   salesBookingSendAction,
-  type SendLedgerRow,
 } from "./sales_booking_execute.ts";
 import type { SalesBookingMessage } from "./sales_booking_read.ts";
 
@@ -80,7 +80,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     claims: 0,
   };
   const approvals = new Map(records.map((r) => [r.binding_hash, r]));
-  const sends = new Map<string, SendLedgerRow>();
+  const executions = new Map<string, ExecutionLedgerRow>();
   const appointments = new Map<string, { state: string; result: Obj | null }>();
   let thread: SalesBookingMessage[] = [];
   let outlook: OutlookEvent[] = [];
@@ -130,25 +130,47 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
       calls.sms.push(body);
       return Promise.resolve(smsResponse);
     },
-    sends: {
-      get: (h) => Promise.resolve(sends.get(h) ?? null),
+    executions: {
+      get: (h) => Promise.resolve(executions.get(h) ?? null),
       claim(row) {
         calls.claims++;
-        if (sends.has(row.binding_hash)) return Promise.resolve(false);
-        sends.set(row.binding_hash, {
+        const existing = executions.get(row.binding_hash);
+        if (existing) {
+          if (row.step === "calendar" && existing.state !== "booked") {
+            executions.set(row.binding_hash, {
+              ...existing,
+              press_token: row.press_token,
+              state: "claimed",
+            });
+            return Promise.resolve(true);
+          }
+          return Promise.resolve(false);
+        }
+        executions.set(row.binding_hash, {
           binding_hash: row.binding_hash,
-          state: "sending",
+          step: row.step,
+          state: row.step === "calendar" ? "claimed" : "sending",
+          press_token: row.press_token,
           message_id: null,
+          appointment_id: null,
         });
         return Promise.resolve(true);
       },
       settle(h, outcome) {
-        const row = sends.get(h)!;
-        if (row.state !== "sending") throw new Error("settles once");
-        sends.set(h, {
+        const row = executions.get(h)!;
+        if (row.step === "message" && row.state !== "sending") {
+          throw new Error("settles once");
+        }
+        if (row.step === "calendar" && row.state === "booked") {
+          throw new Error("settles once");
+        }
+        executions.set(h, {
           ...row,
           state: outcome.state,
           message_id: outcome.state === "sent" ? outcome.message_id : null,
+          appointment_id: outcome.state === "booked"
+            ? outcome.appointment_id
+            : null,
         });
         return Promise.resolve();
       },
@@ -159,7 +181,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
   return {
     deps,
     calls,
-    sends,
+    executions,
     appointments,
     setThread: (m: SalesBookingMessage[]) => (thread = m),
     setOutlook: (e: OutlookEvent[]) => (outlook = e),
@@ -327,6 +349,8 @@ Deno.test("book re-checks the thread tail and Outlook at the press, naming the c
   ]);
   assertEquals((await book(f, cal.binding_hash)).status, "booked");
   assertEquals(f.calls.writer.length, 1);
+  assertEquals(typeof f.calls.writer[0].executorClaim, "string");
+  assertEquals(f.calls.claims, 1);
   const unreadable = fakes([cal], LIVE);
   unreadable.deps.readOutlook = () =>
     Promise.resolve({ ok: false, reason: "outlook_http_403" });
@@ -366,7 +390,7 @@ Deno.test("dry run by default: every check runs, the writer previews, nothing is
     });
     assertEquals(f.calls.sms.length, 0);
     assertEquals(f.calls.claims, 0);
-    assertEquals(f.sends.size, 0);
+    assertEquals(f.executions.size, 0);
   }
   // Switch on, but the writer's own GHL flag is off: still a preview.
   const f = fakes([cal], LIVE);

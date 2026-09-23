@@ -9,6 +9,7 @@ import {
   type AppointmentLedger,
   type AppointmentRequest,
   createCalendarAppointmentAction,
+  type ExecutorClaimRow,
 } from "./calendar_appointment.ts";
 import {
   bookingContentHash,
@@ -85,8 +86,22 @@ const INPUT_CAL2: AppointmentInput = await approved({
   ...BASE,
   calendarId: "cal2",
 });
+const CLAIM_TOKEN = "7c3c6e2e-0c6a-4f2d-9c1a-2b8f0d4e1a77";
+function claimRow(_key: string, extra: Partial<ExecutorClaimRow> = {}): ExecutorClaimRow {
+  return {
+    step: "calendar",
+    state: "claimed",
+    press_token: CLAIM_TOKEN,
+    claimed_at: new Date(NOW - 15_000).toISOString(),
+    ...extra,
+  };
+}
 
 function fixture() {
+  const claims = new Map<string, ExecutorClaimRow>([
+    [INPUT.idempotencyKey, claimRow(INPUT.idempotencyKey)],
+    [INPUT_CAL2.idempotencyKey, claimRow(INPUT_CAL2.idempotencyKey)],
+  ]);
   const records = new Map<
     string,
     AppointmentRequest & {
@@ -164,6 +179,9 @@ function fixture() {
     approvals: {
       find: (key) => Promise.resolve(APPROVALS.get(key) ?? null),
     },
+    executions: {
+      find: (key) => Promise.resolve(claims.get(key) ?? null),
+    },
     captainEmails: [CAPTAIN],
     now: () => NOW,
     ghlGet(path) {
@@ -210,8 +228,16 @@ function fixture() {
     failComplete: () => {
       failComplete = true;
     },
-    call: (body: unknown = INPUT, method = "POST") =>
-      createCalendarAppointmentAction({ method, body, deps }),
+    claims,
+    call: (body: unknown = INPUT, method = "POST") => {
+      const payload =
+        body && typeof body === "object" && !Array.isArray(body) &&
+          !("executorClaim" in body) &&
+          (body as { dryRun?: unknown }).dryRun !== true
+          ? { ...body, executorClaim: CLAIM_TOKEN }
+          : body;
+      return createCalendarAppointmentAction({ method, body: payload, deps });
+    },
   };
 }
 function busyEvent(extra: Row = {}): Row {
@@ -609,4 +635,63 @@ Deno.test("dryRun:true previews even with writes enabled; no approval is informa
       "invalid_request",
     );
   }
+});
+Deno.test("writer refuses a real write with a live approval but no executor claim, wrong token, or stale claim", async () => {
+  const missing = fixture();
+  const noClaim = await createCalendarAppointmentAction({
+    method: "POST",
+    body: INPUT,
+    deps: missing.deps,
+  });
+  assertEquals(noClaim.status, 409);
+  assertEquals(noClaim.body, {
+    ok: false,
+    code: "approval_required",
+    reason: "executor_claim_missing",
+  });
+  assertEquals(missing.posts.length, 0);
+  assertEquals(missing.records.size, 0);
+
+  const wrong = fixture();
+  const mismatch = await wrong.call({
+    ...INPUT,
+    executorClaim: "11111111-1111-4111-8111-111111111111",
+  });
+  assertEquals(mismatch.body, {
+    ok: false,
+    code: "approval_required",
+    reason: "executor_claim_mismatch",
+  });
+  assertEquals(wrong.posts.length, 0);
+  assertEquals(wrong.records.size, 0);
+
+  const stale = fixture();
+  stale.claims.set(
+    INPUT.idempotencyKey,
+    claimRow(INPUT.idempotencyKey, {
+      claimed_at: new Date(NOW - 2 * 60_000 - 1).toISOString(),
+    }),
+  );
+  const expired = await stale.call();
+  assertEquals(expired.body, {
+    ok: false,
+    code: "approval_required",
+    reason: "executor_claim_expired",
+  });
+  assertEquals(stale.posts.length, 0);
+  assertEquals(stale.records.size, 0);
+
+  const unread = fixture();
+  unread.deps.executions.find = () => {
+    throw new Error("db down private detail");
+  };
+  assertEquals(
+    (await unread.call()).body,
+    {
+      ok: false,
+      code: "approval_required",
+      reason: "executor_claim_unreadable",
+    },
+  );
+  assertEquals(unread.posts.length, 0);
 });
