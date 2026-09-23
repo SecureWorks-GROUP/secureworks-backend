@@ -9,7 +9,7 @@ The database ladder binds a direct match only on our own references (job numbers
 Service-role APIs:
 
 - `context_attribution_jobs(p_contact_id text)` returns id, job_number, type, status, site_suburb, updated_at.
-- `attribute_context_event_with_luna(p_event_id uuid,p_job_id uuid,p_confidence numeric)` atomically locks a pending row and binds its thread. Null job means bucket. An existing racing thread winner is preserved and returned. Missing/not-pending/disabled/invalid candidate calls fail explicitly.
+- `attribute_context_event_with_luna(p_event_id uuid,p_job_id uuid,p_confidence numeric)` atomically locks a pending row and binds its thread. Null job means bucket. An existing racing thread winner is preserved and returned. Missing/not-pending/disabled/invalid candidate calls fail explicitly. The four-argument outcome overload and attempt record: `docs/context/a1-attribution-attempts.md`.
 - `rerun_context_attribution(p_limit integer=250,p_contact_id text=null)` returns rows reconsidered. Oldest checked rows rotate first, max 1000. Jobs invoke a bounded pass at creation. The daily worker runs remaining rows; ambiguous rows become pending Luna.
 - `context_extraction_candidates(p_limit integer=400)` returns job IDs with today's unfinished runs first, then oldest unreceipted evidence; excludes today's completed/skipped jobs. Closed jobs with new evidence are included.
 - `context_extraction_events(p_job_id uuid,p_limit integer=25)` returns events in source-date order, with at most 25. It uses B1 receipts, preserving delayed attribution and multi-day backlogs. A retained incoming message accompanies outbound tails; this anchor may already have a receipt and receipt insertion must remain idempotent.
