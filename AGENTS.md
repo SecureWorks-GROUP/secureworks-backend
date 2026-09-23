@@ -565,17 +565,8 @@ re-apply contract when that owner moves on; the contract stands the pinned
 body back up inside its rolled-back transaction (C1d does this for F1's
 `record_capture_run`). "Linked" is
 `context_linked_status()`; never re-list the linked statuses in new SQL.
-Who asked (F-ACT, X31, audit only, never refused): ops-api resolves it once per
-request with `_shared/request_actor.ts`: `requestActor` uses the verified JWT
-user, else `x-sw-actor` only with the service or agent server key, else
-`actor_missing`. Shared browser-key and routine headers are ignored. Existing
-receipt writers use `receiptActor` from
-`ops-api/actor_calls.ts`, never their own header read or a caller-supplied
-actor field. Refused calls are logged with it too. Calls in the `api_key`,
-`routine`, or `agent_read` classes without a usable actor (including an
-untrusted shared-key claim), and valid HMAC-link cost-report calls, are counted
-(count only, no dimensions) for the core key
-`actor_missing` (`20260924201000`, `ops-api/actor_calls.ts`).
+The ops-api request-actor and `actor_missing` contract is owned by
+[`docs/context/pipeline-status.md`](docs/context/pipeline-status.md).
 The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted
 `jobs.scope_json` per event, 15.5 s live); `ready_jobs` is

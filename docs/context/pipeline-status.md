@@ -91,12 +91,16 @@ and ignore the header. `state` is `available`, or `unavailable` with `code`
 when the counter cannot be read; it never fails the heartbeat. Calls with a
 usable actor are not counted. It raises no alarm: identity is for audit only,
 and such a call is never refused. The counter is `ops_api_actor_calls`, one row
-per Perth day holding the missing count only (35 days kept), written only
-through `record_ops_api_actor_missing()`, which takes no argument. The actor
-itself is in the ops-api log line, one per call:
+per Perth day holding the missing count only; rows more than 35 days old are
+purged when a new day row is opened. It is written only through
+`record_ops_api_actor_missing()`, which takes no argument. Each authenticated
+ops-api call is logged, including action-authorization refusals. A valid
+HMAC-link cost-report call gets the same log; requests rejected as
+unauthenticated or with an invalid HMAC are outside this audit path. The
+resolved actor is in that log line:
 `[ops-api] action=<action> method=<m> actor=<actor> actor_source=<jwt|header|header_invalid|header_untrusted|hmac_link|none>`
 for a served call, and `[ops-api] denied action=... actor=... actor_source=... status=<n> code=<code>`
-for a call the front door refused. The count runs through
+for an authenticated call the front door refused. The count runs through
 `EdgeRuntime.waitUntil`, best-effort.
 
 Alarms are read by the CIO desk's scheduled check (INTEGRATION decision D-A),
