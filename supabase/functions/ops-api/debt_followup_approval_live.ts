@@ -88,7 +88,7 @@ export function debtFollowupLedger(client: Client): DebtFollowupLedger {
       throw new Error("execution_ledger_unwritable");
     },
     async settleLive(approvalId, pressToken, outcome) {
-      const { error } = await client.from(EXECUTIONS).update({
+      const { data, error } = await client.from(EXECUTIONS).update({
         outcome: outcome.outcome,
         reason: outcome.reason,
         provider: outcome.provider,
@@ -99,8 +99,21 @@ export function debtFollowupLedger(client: Client): DebtFollowupLedger {
         "outcome",
         "sending",
       )
-        .eq("press_token", pressToken);
-      if (error) throw new Error("execution_ledger_unwritable");
+        .eq("press_token", pressToken)
+        .select("approval_id").maybeSingle();
+      if (error || !data) throw new Error("execution_ledger_unwritable");
+    },
+    async recordProviderProof(approvalId, pressToken, proof) {
+      const { data, error } = await client.from(EXECUTIONS).update({
+        provider: proof.provider,
+        provider_message_id: proof.provider_message_id,
+        provider_proof: proof.provider_proof,
+      }).eq("approval_id", approvalId).eq("mode", "live").eq(
+        "outcome",
+        "sending",
+      ).eq("press_token", pressToken).is("provider_proof", null)
+        .select("approval_id").maybeSingle();
+      if (error || !data) throw new Error("execution_ledger_unwritable");
     },
     async recordAttempt(row) {
       const { error } = await client.from(EXECUTIONS).insert({

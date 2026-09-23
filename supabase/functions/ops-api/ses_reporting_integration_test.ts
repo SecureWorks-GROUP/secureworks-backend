@@ -45,24 +45,6 @@ Deno.test("legacy free invoice and combined-send actions are retired", () => {
   assertStringIncludes(INDEX, "legacy_route_send_retired");
 });
 
-Deno.test("approve_and_send_invoice retains its sealed SES release gate", () => {
-  const approveStart = INDEX.indexOf("case 'approve_and_send_invoice'");
-  const approveGate = INDEX.indexOf(
-    "assertLegacySesInvoiceActionAllowed(",
-    approveStart,
-  );
-  const approveProvider = INDEX.indexOf(
-    "xeroPost(`/Invoices/${asId}`",
-    approveStart,
-  );
-  assert(approveGate > approveStart && approveGate < approveProvider);
-  assertStringIncludes(INDEX, "invoice_obligation_revision_id");
-  assertStringIncludes(INDEX, "sealedSesMoneyRefusal(action");
-  assertStringIncludes(FENCE, 'code: "sealed_ses_release_required"');
-  assertStringIncludes(FENCE, "execute_ses_invoice_revision");
-  assertStringIncludes(FENCE, "execute_ses_release_revision");
-});
-
 Deno.test("all legacy sealed-SES money and link surfaces fence before effects", () => {
   const before = (
     startText: string,

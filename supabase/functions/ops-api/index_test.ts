@@ -66,6 +66,12 @@ function makeConversationClient(input: {
           filters.push((row) => values.includes(row[field]))
           return query
         },
+        not(field: string, operator: string, value: any) {
+          filters.push((row) => operator === "is" && value === null
+            ? row[field] !== null && row[field] !== undefined
+            : true)
+          return query
+        },
         gt(field: string, value: string) {
           filters.push((row) => String(row[field] || "") > value)
           return query
@@ -163,6 +169,8 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({
       debt_followup_approval_id: "approval-123",
+      approved_invoice_number: "INV-001",
+      approved_attachment_file_name: "INV-001.pdf",
       subject_override: "Approved invoice subject",
     }),
     getToken, xeroGet, logBusinessEvent, captureBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
@@ -262,7 +270,11 @@ Deno.test("an approved send whose capture write does not land reports timeline_w
     const { logBusinessEvent, events } = makeStubLogBusinessEvent()
     const resp = await _verifyAndSendInvoiceEmail({
       client,
-      body: makeBody({ debt_followup_approval_id: "approval-9" }),
+      body: makeBody({
+        debt_followup_approval_id: "approval-9",
+        approved_invoice_number: "INV-001",
+        approved_attachment_file_name: "INV-001.pdf",
+      }),
       getToken, xeroGet, logBusinessEvent,
       captureBusinessEvent: capture as any,
       fetch, xeroFetch: fetch, env: STUB_ENV,
@@ -304,6 +316,50 @@ Deno.test("confirmed Outlook send surfaces a failed conversation event write", a
   assertEquals(calls.filter((call) => call.url.startsWith(
     `${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`,
   )).length, 1)
+})
+
+Deno.test("approved Outlook send uses the approved invoice number and filename", async () => {
+  const fix = happyFixture()
+  const seed = {
+    ...fix.seed,
+    xero_invoices: {
+      ...fix.seed.xero_invoices,
+      "inv-123": {
+        ...fix.seed.xero_invoices["inv-123"],
+        invoice_number: "OLD-101",
+      },
+    },
+  }
+  const { client } = makeStubClient(seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
+  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const response = await _verifyAndSendInvoiceEmail({
+    client,
+    body: makeBody({
+      debt_followup_approval_id: "approval-number-1",
+      approved_invoice_number: "INV-101",
+      approved_attachment_file_name: "INV-101.pdf",
+    }),
+    getToken,
+    xeroGet,
+    logBusinessEvent,
+    fetch,
+    xeroFetch: fetch,
+    env: STUB_ENV,
+  })
+
+  assertEquals(response.status, 200)
+  const send = calls.find((call) => call.url.startsWith(
+    `${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`,
+  ))
+  assert(send)
+  const sentBody = JSON.parse(String(send.init?.body))
+  assertEquals(sentBody.subject, "Invoice INV-101 — SecureWorks Group")
+  assertEquals(sentBody.attachments[0].name, "INV-101.pdf")
+  assertEquals(sentBody.htmlBody, approvedInvoiceEmailHtmlBody("INV-101"))
 })
 
 Deno.test("job conversation projects a confirmed invoice email when capture failed", async () => {
@@ -460,6 +516,114 @@ Deno.test("job conversation does not duplicate ledger sends already present in e
   )
   assertEquals(smsRead.messages.length, 1)
   assertEquals(smsRead.messages[0].source_system, "ghl_cache")
+})
+
+Deno.test("job conversation projects pending provider proof once and labels settlement", async () => {
+  const sentAt = "2026-09-24T01:02:03.000Z"
+  const pendingEmailId = "approval-email-pending"
+  const pendingSmsId = "approval-sms-pending"
+  const pendingEmailFallbackId = "approval-email-pending-fallback"
+  const pendingEmailProof = {
+    label: "accepted by Outlook",
+    status: 202,
+    sent_at: sentAt,
+    approval_id: pendingEmailId,
+    attachment_sha256: "e".repeat(64),
+  }
+  const pendingEmail = {
+    approval_id: pendingEmailId,
+    kind: "invoice_email",
+    channel: "email",
+    mode: "live",
+    outcome: "sending",
+    pressed_by: "captain@example.test",
+    proposal: {
+      job_id: "job-1", kind: "invoice_email", channel: "email",
+      body: "Approved pending email.",
+      destination: { channel: "email", to: "accounts@example.test", cc: [] },
+      email: { subject: "Invoice INV-101", attachment: {} },
+    },
+    provider: "outlook",
+    provider_message_id: null,
+    provider_proof: pendingEmailProof,
+    created_at: sentAt,
+    finished_at: null,
+  }
+  const pendingEmailFallback = {
+    ...pendingEmail,
+    approval_id: pendingEmailFallbackId,
+    proposal: {
+      ...pendingEmail.proposal,
+      email: { subject: "Invoice INV-102", attachment: {} },
+      body: "Approved pending email without evidence.",
+    },
+    provider_proof: {
+      ...pendingEmailProof,
+      approval_id: pendingEmailFallbackId,
+    },
+  }
+  const pendingSms = {
+    approval_id: pendingSmsId,
+    kind: "chase_sms",
+    channel: "sms",
+    mode: "live",
+    outcome: "sending",
+    pressed_by: "captain@example.test",
+    proposal: {
+      job_id: "job-1", kind: "chase_sms", channel: "sms",
+      body: "Approved pending text.",
+      destination: { channel: "sms", ghl_contact_id: "ghl-1", phone: "+61412345678" },
+    },
+    provider: "ghl",
+    provider_message_id: "ghl-shared-message",
+    provider_proof: {
+      provider: "ghl",
+      message_id: "ghl-shared-message",
+      body_sha256: "f".repeat(64),
+    },
+    created_at: sentAt,
+    finished_at: null,
+  }
+  const duplicateSettledSms = {
+    ...pendingSms,
+    approval_id: "approval-sms-settled-duplicate",
+    outcome: "sent",
+    finished_at: sentAt,
+  }
+  const emailEvidence = {
+    id: "event-pending-email",
+    event_type: "invoice.emailed",
+    source: "ops-api/debt-followup_execute",
+    occurred_at: sentAt,
+    job_id: "job-1",
+    provider_message_id: `outlook-accepted:${pendingEmailId}`,
+    payload: {
+      email_body_html: "Captured email copy wins.",
+      subject: "Invoice INV-101",
+      provider_proof: pendingEmailProof,
+    },
+  }
+  const { messages } = await _getJobConversationForTest(
+    makeConversationClient({
+      executions: [pendingEmail, pendingEmailFallback, pendingSms, duplicateSettledSms],
+      events: [emailEvidence],
+    }),
+    { job_id: "job-1" },
+  )
+
+  assertEquals(messages.length, 3)
+  assertEquals(messages.filter((message) => message.source_system === "business_events").length, 1)
+  const pendingEmailMessage = messages.find((message) =>
+    message.source_ref === pendingEmailFallbackId
+  )
+  assert(pendingEmailMessage)
+  assertEquals(pendingEmailMessage.execution_status, "settlement pending")
+  assertEquals(pendingEmailMessage.provider_message_id, `outlook-accepted:${pendingEmailFallbackId}`)
+  const pendingSmsMessage = messages.find((message) => message.channel === "sms")
+  assert(pendingSmsMessage)
+  assertEquals(pendingSmsMessage.provider_message_id, "ghl:ghl-shared-message")
+  assertEquals(pendingSmsMessage.execution_status, "settlement pending")
+  assertEquals(pendingSmsMessage.provider_proof.message_id, "ghl-shared-message")
 })
 
 // ─────────────────────────────────────────────────────────────────

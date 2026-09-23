@@ -3597,6 +3597,17 @@ async function _captureBusinessEventRpc(client: any, row: Record<string, unknown
 export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): Promise<Response> {
   const { client, body, getToken, xeroGet, logBusinessEvent, fetch: dfetch, env } = deps
   const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
+  const approvedSend = typeof body.debt_followup_approval_id === 'string' &&
+    body.debt_followup_approval_id.length > 0
+  const approvedInvoiceNumber = typeof body.approved_invoice_number === 'string'
+    ? body.approved_invoice_number.trim()
+    : ''
+  const approvedAttachmentFileName = typeof body.approved_attachment_file_name === 'string'
+    ? body.approved_attachment_file_name.trim()
+    : ''
+  if (approvedSend && (!approvedInvoiceNumber || !approvedAttachmentFileName)) {
+    return json({ success: false, emailed: false, code: 'approved_invoice_coordinates_missing' }, 409)
+  }
 
   // Enhanced path: to_email provided → verify recipient server-side, then PDF + Outlook.
   // Order matters: local DB-only checks run BEFORE any Xero call so a Xero outage
@@ -3620,7 +3631,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       { xero_invoice_id: siId },
     ), 503)
   }
-  const siNum = siInv.invoice_number || siId
+  const siNum = approvedSend ? approvedInvoiceNumber : siInv.invoice_number || siId
   const siInvoiceType = String(siInv.invoice_type || '').toUpperCase()
 
   if (
@@ -3827,10 +3838,12 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
   const siPdfB64 = btoa(siBin)
   const siSubject = siSubj || `Invoice ${siNum} — SecureWorks Group`
-  const siEmailBody = body.debt_followup_approval_id
+  const siEmailBody = approvedSend
     ? approvedInvoiceEmailHtmlBody(siNum)
     : invoiceEmailHtmlBody(siNum)
-  const siAttachmentFileName = `${siNum}.pdf`
+  const siAttachmentFileName = approvedSend
+    ? approvedAttachmentFileName
+    : `${siNum}.pdf`
 
   // Send via Outlook with PDF attached
   const siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
@@ -8480,6 +8493,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // email that would go, and no send. The debt-follow-up path no longer
         // uses Xero's direct /Invoices/{id}/Email route; approved sends use the
         // verified Outlook branded-PDF transport.
+        // Ordinary invoice-issue email in approve_and_send_invoice, createInvoice,
+        // and updateInvoice remains outside this executor as a named follow-up.
         const siResult = await debtFollowupLegacySend({
           sourceAction: 'send_invoice_email',
           kind: 'invoice_email',
@@ -16304,11 +16319,14 @@ async function getJobConversation(client: any, body: any) {
     let q = client.from('debt_followup_executions')
       .select('approval_id,kind,channel,outcome,pressed_by,proposal,provider,provider_message_id,provider_proof,created_at,finished_at')
       .eq('mode', 'live')
-      .eq('outcome', 'sent')
+      .in('outcome', ['sent', 'sending'])
+      .not('provider_proof', 'is', null)
       .eq('proposal->>job_id', jobId)
-      .order('finished_at', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(limit)
-    if (sinceFilter) q = q.gt('finished_at', sinceFilter)
+    if (sinceFilter) {
+      q = q.or(`finished_at.gt.${sinceFilter},provider_proof->>sent_at.gt.${sinceFilter}`)
+    }
     const { data: executions, error } = await q
     if (error) console.error('[ops-api] get_job_conversation debt execution read failed:', error.message)
     for (const row of (executions || [])) {
@@ -16324,6 +16342,7 @@ async function getJobConversation(client: any, body: any) {
         typeof row.provider_message_id === 'string' && row.provider_message_id.length > 0 &&
         proof.provider === 'ghl' && proof.message_id === row.provider_message_id
       if (!isEmail && !isSms) continue
+      const settlementPending = row.outcome === 'sending'
       const providerMessageId = isEmail
         ? `outlook-accepted:${approvalId}`
         : `ghl:${row.provider_message_id}`
@@ -16334,6 +16353,7 @@ async function getJobConversation(client: any, body: any) {
       const occurredAt = typeof proof.sent_at === 'string' && Number.isFinite(Date.parse(proof.sent_at))
         ? proof.sent_at
         : row.finished_at || row.created_at || null
+      if (sinceFilter && occurredAt && occurredAt < sinceFilter) continue
       representedProviderMessageIds.add(providerMessageId)
       messages.push({
         id: `debt-execution:${approvalId}`,
@@ -16350,6 +16370,7 @@ async function getJobConversation(client: any, body: any) {
         provider_message_id: providerMessageId,
         provider_proof: proof,
         destination: isEmail ? destination.to || null : destination.phone || null,
+        ...(settlementPending ? { execution_status: 'settlement pending' } : {}),
       })
     }
   } catch (e) {
@@ -52317,6 +52338,8 @@ function createDebtFollowupDepsForOps(client: any): DebtFollowupDeps {
           client,
           body: {
             xero_invoice_id: args.xero_invoice_id,
+            approved_invoice_number: args.approved_invoice_number,
+            approved_attachment_file_name: args.approved_attachment_file_name,
             to_email: args.to_email,
             job_id: args.job_id || undefined,
             cc: args.cc,

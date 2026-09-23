@@ -151,9 +151,51 @@ BEGIN
   EXCEPTION WHEN check_violation THEN NULL; END;
 
   UPDATE public.debt_followup_executions
-    SET outcome = 'sent', provider = 'ghl', provider_message_id = 'msg-1',
-        provider_proof = '{"message_id":"msg-1"}'::jsonb, finished_at = now()
+    SET provider = 'ghl', provider_message_id = 'msg-1',
+        provider_proof = '{"provider":"ghl","message_id":"msg-1"}'::jsonb
     WHERE approval_id = repeat('a',64) AND mode = 'live' AND outcome = 'sending';
+  IF (SELECT outcome FROM public.debt_followup_executions
+      WHERE approval_id = repeat('a',64) AND mode = 'live') <> 'sending' THEN
+    RAISE EXCEPTION 'provider proof staging must leave the press pending';
+  END IF;
+
+  BEGIN
+    UPDATE public.debt_followup_executions
+      SET provider_message_id = 'msg-2',
+          provider_proof = '{"provider":"ghl","message_id":"msg-2"}'::jsonb
+      WHERE approval_id = repeat('a',64) AND mode = 'live' AND outcome = 'sending';
+    RAISE EXCEPTION 'staged provider proof was changed';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%settles once%' THEN RAISE; END IF;
+  END;
+
+  UPDATE public.debt_followup_executions
+    SET outcome = 'sent', finished_at = now()
+    WHERE approval_id = repeat('a',64) AND mode = 'live' AND outcome = 'sending';
+
+  INSERT INTO public.debt_followup_approvals
+    (approval_id, binding_hash, contract, kind, channel, xero_invoice_ids, request, proposal,
+     body_sha256, approved_by_email, approved_by_user_id, approved_at, expires_at)
+  VALUES (repeat('2',64), repeat('2',64), 'debt-followup-approval/v1', 'invoice_email', 'email',
+     ARRAY['inv-1'], '{}'::jsonb, prop, repeat('e',64), 'captain@example.test',
+     '706c5258-70dd-483a-b36c-af6864b24498', now(), now() + interval '30 minutes');
+  claimed := public.debt_followup_claim_live(jsonb_build_object(
+    'approval_id', repeat('2',64), 'binding_hash', repeat('2',64),
+    'kind', 'invoice_email', 'channel', 'email',
+    'press_token', '44444444-4444-4444-8444-444444444444',
+    'pressed_by', 'captain@example.test', 'source_action', 'debt_followup_execute',
+    'proposal', prop
+  ));
+  IF NOT claimed THEN RAISE EXCEPTION 'valid email live claim was refused'; END IF;
+  UPDATE public.debt_followup_executions
+    SET provider = 'outlook', provider_proof = jsonb_build_object(
+      'label', 'accepted by Outlook', 'approval_id', repeat('2',64),
+      'status', 202, 'attachment_sha256', repeat('f',64)
+    )
+    WHERE approval_id = repeat('2',64) AND mode = 'live' AND outcome = 'sending';
+  UPDATE public.debt_followup_executions
+    SET outcome = 'sent', finished_at = now()
+    WHERE approval_id = repeat('2',64) AND mode = 'live' AND outcome = 'sending';
 
   BEGIN
     UPDATE public.debt_followup_executions SET outcome = 'unknown', provider_message_id = NULL

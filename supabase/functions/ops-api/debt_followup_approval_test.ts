@@ -267,11 +267,21 @@ function deps(w: World): DebtFollowupDeps {
         return Promise.resolve(true);
       },
       settleLive(id, token, outcome) {
+        guard(w, "settleLive");
         const row = w.live.get(id);
         if (row && row.outcome === "sending" && row.press_token === token) {
           w.live.set(id, { ...row, ...outcome });
         }
         return Promise.resolve();
+      },
+      async recordProviderProof(id, token, proof) {
+        guard(w, "recordProviderProof");
+        const row = w.live.get(id);
+        if (
+          !row || row.outcome !== "sending" || row.press_token !== token ||
+          row.provider_proof
+        ) throw new Error("execution_ledger_unwritable");
+        w.live.set(id, { ...row, ...proof });
       },
       recordAttempt(row) {
         guard(w, "attempt_write");
@@ -601,6 +611,48 @@ Deno.test("control: switch on + captain press sends the exact approved text once
   assertEquals(response.status, 200);
   assertEquals(response.body.success, true);
   assertEquals(response.body.message_id, "ghl-msg-1");
+});
+
+Deno.test("accepted send stays visibly unsettled when capture and settlement fail", async () => {
+  const w = world({
+    env: SWITCH_ON,
+    smsResponse: () => Promise.resolve({
+      status: 200,
+      body: {
+        success: true,
+        messageId: "ghl-accepted-1",
+        evidence: "error",
+      },
+    }),
+  });
+  w.fail.add("settleLive");
+  const id = await approve(w, CHASE);
+  const result = await press(w, id);
+
+  assertEquals(result.status, "sent_unsettled");
+  if (result.status === "sent_unsettled") {
+    assertEquals(result.provider_message_id, "ghl-accepted-1");
+    assertEquals(result.provider_proof?.message_id, "ghl-accepted-1");
+    assertEquals(result.timeline_write_failed, true);
+    assertEquals(result.settlement_write_failed, true);
+    assertStringIncludes(result.fault, "timeline_write_failed");
+    assertStringIncludes(result.fault, "settlement_write_failed");
+  }
+  assertEquals(w.live.get(id)?.outcome, "sending");
+  assertEquals(w.live.get(id)?.provider_message_id, "ghl-accepted-1");
+  assertEquals(providerCalls(w), 1);
+
+  const response = legacySendResponse(result);
+  assertEquals(response.status, 202);
+  assertEquals(response.body.status, "sent_unsettled");
+  assertEquals(response.body.sent, true);
+  assertEquals(response.body.timeline_write_failed, true);
+  assertEquals(response.body.settlement_write_failed, true);
+  assertStringIncludes(String(response.body.fault), "settlement_write_failed");
+
+  const replay = await press(w, id);
+  assertEquals(replay.status, "sent_unsettled");
+  assertEquals(providerCalls(w), 1);
 });
 
 Deno.test("a lost claim race or an unknown/failed outcome never sends a second time", async () => {
@@ -1300,16 +1352,18 @@ Deno.test("invoice email: recipient must be a verified anchor; the approved subj
   };
   const id = await approve(w, request);
   const sent = await press(w, id);
-  assertEquals(sent.status, "sent", JSON.stringify(sent));
+  assertEquals(sent.status, "sent_unsettled", JSON.stringify(sent));
   assertEquals(w.emails, [{
     xero_invoice_id: "inv-1",
+    approved_invoice_number: "INV-0857",
+    approved_attachment_file_name: "INV-0857.pdf",
     to_email: "accounts@builder.example",
     cc: ["pm@builder.example"],
     subject_override: "Overdue: INV-0857",
     job_id: "job-1",
     approval_id: id,
   }]);
-  if (sent.status === "sent") {
+  if (sent.status === "sent_unsettled") {
     assertEquals(sent.provider, "outlook");
     assertEquals(sent.provider_proof?.attachment_sha256, "a".repeat(64));
     assertEquals(sent.provider_proof?.accepted, true);
@@ -1320,8 +1374,10 @@ Deno.test("invoice email: recipient must be a verified anchor; the approved subj
     assertEquals(sent.provider_proof?.sent_at, "2026-09-24T01:02:03.000Z");
     assertEquals(sent.provider_proof?.approval_id, id);
     assertEquals(sent.provider_proof?.timeline_write_failed, true);
+    assertEquals(sent.settlement_write_failed, false);
+    assertEquals(sent.fault, "timeline_write_failed");
   }
-  await press(w, id);
+  assertEquals((await press(w, id)).status, "sent_unsettled");
   assertEquals(w.emails.length, 1);
 
   const refusedByTransport = world({

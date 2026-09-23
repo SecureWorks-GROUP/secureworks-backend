@@ -9,9 +9,10 @@
 --                           may transition once from open to closed.
 -- debt_followup_executions  every press. Dry-run and refused rows append
 --                           freely. A live row is claimed (outcome sending)
---                           before the provider call; at most ONE live row per
---                           approval, ever; it settles once to sent, failed or
---                           unknown. A sent row carries provider proof.
+--                           before the provider call; accepted provider proof
+--                           may be staged once while sending, then settles to
+--                           sent, failed or unknown. At most ONE live row per
+--                           approval, ever.
 --
 -- Adds two tables, two guard triggers, and two service-only atomic writers. Writes no row,
 -- changes no switch, touches no Xero, invoice or payment data. service_role
@@ -134,10 +135,25 @@ CREATE TABLE IF NOT EXISTS public.debt_followup_executions (
   CHECK (mode <> 'live' OR (approval_id IS NOT NULL AND binding_hash IS NOT NULL AND press_token IS NOT NULL)),
   -- Only a live row is ever open; everything else is finished when written.
   CHECK ((outcome = 'sending') = (finished_at IS NULL)),
-  -- A confirmed send carries provider proof; an SMS also its provider message id.
+  -- A confirmed send carries provider proof and an SMS provider message id.
   CHECK (outcome <> 'sent' OR (provider IS NOT NULL AND provider_proof IS NOT NULL)),
   CHECK (outcome <> 'sent' OR channel <> 'sms' OR coalesce(length(provider_message_id), 0) > 0),
-  CHECK (outcome = 'sent' OR provider_message_id IS NULL)
+  CHECK (outcome IN ('sending', 'sent') OR provider_message_id IS NULL),
+  CHECK (outcome <> 'sending' OR provider_proof IS NULL OR
+    ((channel = 'sms' AND provider = 'ghl' AND
+      coalesce(length(provider_message_id), 0) > 0 AND
+      provider_proof ->> 'message_id' = provider_message_id) IS TRUE) OR
+    ((channel = 'email' AND provider = 'outlook' AND
+      provider_message_id IS NULL AND
+      provider_proof ->> 'label' = 'accepted by Outlook' AND
+      provider_proof ->> 'approval_id' = approval_id) IS TRUE)),
+  CHECK (outcome <> 'sent' OR
+    ((channel = 'sms' AND provider = 'ghl' AND
+      provider_proof ->> 'message_id' = provider_message_id) IS TRUE) OR
+    ((channel = 'email' AND provider = 'outlook' AND
+      provider_message_id IS NULL AND
+      provider_proof ->> 'label' = 'accepted by Outlook' AND
+      provider_proof ->> 'approval_id' = approval_id) IS TRUE)
 );
 
 -- One approval sends at most once: at most one live row per approval, ever.
@@ -260,7 +276,6 @@ BEGIN
     RAISE EXCEPTION 'debt_followup_executions: a press record is never deleted';
   END IF;
   IF OLD.mode <> 'live' OR OLD.outcome <> 'sending' OR
-     NEW.outcome NOT IN ('sent', 'failed', 'unknown') OR
      NEW.id <> OLD.id OR
      NEW.approval_id IS DISTINCT FROM OLD.approval_id OR
      NEW.binding_hash IS DISTINCT FROM OLD.binding_hash OR
@@ -270,6 +285,24 @@ BEGIN
      NEW.source_action <> OLD.source_action OR
      NEW.proposal IS DISTINCT FROM OLD.proposal OR
      NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'debt_followup_executions: a send outcome settles once';
+  END IF;
+  IF NEW.outcome = 'sending' THEN
+    IF OLD.provider IS NOT NULL OR OLD.provider_message_id IS NOT NULL OR
+       OLD.provider_proof IS NOT NULL OR NEW.provider IS NULL OR
+       NEW.provider_proof IS NULL OR
+       NEW.reason IS DISTINCT FROM OLD.reason OR
+       NEW.finished_at IS DISTINCT FROM OLD.finished_at THEN
+      RAISE EXCEPTION 'debt_followup_executions: a send outcome settles once';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.outcome NOT IN ('sent', 'failed', 'unknown') OR
+     (OLD.provider_proof IS NOT NULL AND
+       (NEW.outcome <> 'sent' OR
+        NEW.provider IS DISTINCT FROM OLD.provider OR
+        NEW.provider_message_id IS DISTINCT FROM OLD.provider_message_id OR
+        NEW.provider_proof IS DISTINCT FROM OLD.provider_proof)) THEN
     RAISE EXCEPTION 'debt_followup_executions: a send outcome settles once';
   END IF;
   RETURN NEW;
@@ -315,4 +348,4 @@ GRANT EXECUTE ON FUNCTION public.debt_followup_claim_live(jsonb) TO service_role
 COMMENT ON TABLE public.debt_followup_approvals IS
   'Captain approvals of one exact debtor text or invoice email (body hash, destination, invoice ids, subject/attachment, Xero snapshot, hold state, expiry). Immutable except open-to-closed. Contract: docs/debt-followup-approval.md.';
 COMMENT ON TABLE public.debt_followup_executions IS
-  'Every debt follow-up press. Dry-run/refused rows append; at most one live row per approval, claimed before the provider call and settled once; a sent row carries provider proof. Never deleted.';
+  'Every debt follow-up press. Dry-run/refused rows append; at most one live row per approval, claimed before the provider call; accepted proof may be recorded once while sending before one settlement. Never deleted.';

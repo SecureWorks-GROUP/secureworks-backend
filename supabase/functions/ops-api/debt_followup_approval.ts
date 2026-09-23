@@ -870,6 +870,15 @@ export interface DebtFollowupLedger {
       provider_proof: Obj | null;
     },
   ): Promise<void>;
+  recordProviderProof(
+    approvalId: string,
+    pressToken: string,
+    proof: {
+      provider: "ghl" | "outlook";
+      provider_message_id: string | null;
+      provider_proof: Obj;
+    },
+  ): Promise<void>;
   /** Dry-run and refused rows. Append only. */
   recordAttempt(row: AttemptRow): Promise<void>;
 }
@@ -884,6 +893,8 @@ export interface DebtFollowupTransports {
   /** The Outlook branded-PDF transport (_verifyAndSendInvoiceEmail). A provider call. */
   sendInvoiceEmail(args: {
     xero_invoice_id: string;
+    approved_invoice_number: string;
+    approved_attachment_file_name: string;
     to_email: string;
     cc: string[];
     subject_override: string;
@@ -948,6 +959,18 @@ export type DebtFollowupResult =
     provider: string | null;
     provider_message_id: string | null;
     provider_proof: Obj | null;
+  }
+  | {
+    status: "sent_unsettled";
+    approval_id: string;
+    binding_hash: string;
+    replayed: boolean;
+    provider: string | null;
+    provider_message_id: string | null;
+    provider_proof: Obj | null;
+    timeline_write_failed: boolean;
+    settlement_write_failed: boolean;
+    fault: string;
   }
   | {
     status: "failed" | "unknown";
@@ -1109,6 +1132,20 @@ function priorLiveResult(
   record: ApprovalRecord,
 ): DebtFollowupResult {
   if (live.outcome === "sent") {
+    if (live.provider_proof?.timeline_write_failed === true) {
+      return {
+        status: "sent_unsettled",
+        approval_id: record.approval_id,
+        binding_hash: record.binding_hash,
+        replayed: true,
+        provider: live.provider,
+        provider_message_id: live.provider_message_id,
+        provider_proof: live.provider_proof,
+        timeline_write_failed: true,
+        settlement_write_failed: false,
+        fault: "timeline_write_failed",
+      };
+    }
     return {
       status: "sent",
       approval_id: record.approval_id,
@@ -1117,6 +1154,28 @@ function priorLiveResult(
       provider: live.provider,
       provider_message_id: live.provider_message_id,
       provider_proof: live.provider_proof,
+    };
+  }
+  if (
+    live.outcome === "sending" &&
+    live.provider_proof &&
+    (live.provider === "ghl" &&
+        live.provider_message_id === live.provider_proof.message_id ||
+      live.provider === "outlook" &&
+        live.provider_proof.label === "accepted by Outlook" &&
+        live.provider_proof.approval_id === record.approval_id)
+  ) {
+    return {
+      status: "sent_unsettled",
+      approval_id: record.approval_id,
+      binding_hash: record.binding_hash,
+      replayed: true,
+      provider: live.provider,
+      provider_message_id: live.provider_message_id,
+      provider_proof: live.provider_proof,
+      timeline_write_failed: live.provider_proof.timeline_write_failed === true,
+      settlement_write_failed: true,
+      fault: "execution_settlement_pending",
     };
   }
   // sending / unknown / failed: one approval, one press. Never send again.
@@ -1333,12 +1392,35 @@ export async function debtFollowupExecuteAction(args: {
   const p = record.proposal;
   const settled = await sendOnce(deps, record, p, token);
   if (settled.outcome === "sent") {
+    let afterSentFailed = false;
     try {
       await deps.transports.afterSent(p, settled.provider_proof ?? {}, {
         approval_id: record.approval_id,
         approved_by_email: record.approved_by_email,
       });
-    } catch { /* desk logs never change a confirmed send */ }
+    } catch { afterSentFailed = true; }
+    const timelineWriteFailed =
+      settled.provider_proof?.timeline_write_failed === true;
+    const settlementWriteFailed = settled.settlement_saved !== true;
+    if (timelineWriteFailed || settlementWriteFailed || afterSentFailed) {
+      const faults = [
+        timelineWriteFailed && "timeline_write_failed",
+        settlementWriteFailed && "settlement_write_failed",
+        afterSentFailed && "post_send_recording_failed",
+      ].filter(Boolean).join(",");
+      return {
+        status: "sent_unsettled",
+        approval_id: record.approval_id,
+        binding_hash: record.binding_hash,
+        replayed: false,
+        provider: settled.provider,
+        provider_message_id: settled.provider_message_id,
+        provider_proof: settled.provider_proof,
+        timeline_write_failed: timelineWriteFailed,
+        settlement_write_failed: settlementWriteFailed,
+        fault: faults,
+      };
+    }
     return {
       status: "sent",
       approval_id: record.approval_id,
@@ -1363,6 +1445,7 @@ type Settled = {
   provider: "ghl" | "outlook";
   provider_message_id: string | null;
   provider_proof: Obj | null;
+  settlement_saved?: boolean;
 };
 
 /** The only provider call in this module. Settles the claimed row once. */
@@ -1395,9 +1478,12 @@ async function sendOnce(
           provider: "ghl",
           provider_message_id: messageId,
           provider_proof: {
-            provider: "ghl",
-            message_id: messageId,
-            evidence: res.body?.evidence ?? null,
+          provider: "ghl",
+          message_id: messageId,
+          sent_at: (deps.now ?? (() => new Date()))().toISOString(),
+          evidence: res.body?.evidence ?? null,
+            timeline_write_failed: res.body?.evidence !== "inserted" &&
+              res.body?.evidence !== "duplicate",
             from_number: dest.from_number,
             to_contact_id: dest.ghl_contact_id,
             body_sha256: p.body_sha256,
@@ -1436,6 +1522,8 @@ async function sendOnce(
     try {
       const res = await deps.transports.sendInvoiceEmail({
         xero_invoice_id: attachment.xero_invoice_id,
+        approved_invoice_number: attachment.invoice_number,
+        approved_attachment_file_name: attachment.file_name,
         to_email: dest.to,
         cc: dest.cc,
         subject_override: p.email!.subject,
@@ -1506,10 +1594,20 @@ async function sendOnce(
       };
     }
   }
+  if (settled.outcome === "sent" && settled.provider_proof) {
+    try {
+      await deps.ledger.recordProviderProof(record.approval_id, token, {
+        provider: settled.provider,
+        provider_message_id: settled.provider_message_id,
+        provider_proof: settled.provider_proof,
+      });
+    } catch {}
+  }
   try {
     await deps.ledger.settleLive(record.approval_id, token, settled);
+    settled.settlement_saved = true;
   } catch {
-    // The row stays `sending`, which already blocks any second press.
+    settled.settlement_saved = false;
   }
   return settled;
 }
@@ -1747,6 +1845,23 @@ export function debtInvoiceEmailEvidenceRow(input: {
 export function legacySendResponse(
   result: DebtFollowupResult,
 ): { status: number; body: Obj } {
+  if (result.status === "sent_unsettled") {
+    return {
+      status: 202,
+      body: {
+        success: true,
+        sent: true,
+        status: "sent_unsettled",
+        replayed: result.replayed,
+        approval_id: result.approval_id,
+        message_id: result.provider_message_id,
+        provider_proof: result.provider_proof,
+        timeline_write_failed: result.timeline_write_failed,
+        settlement_write_failed: result.settlement_write_failed,
+        fault: result.fault,
+      },
+    };
+  }
   if (result.status === "sent") {
     return {
       status: 200,

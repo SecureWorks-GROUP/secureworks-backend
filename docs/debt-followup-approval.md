@@ -40,10 +40,12 @@ One approval sends at most once. The live claim atomically closes the approval
 and inserts its unique live execution before the provider call. Approvals move
 only from `open` to `closed`; expiry closes an open row when its binding is
 approved again. A unique partial index and the atomic create function make
-concurrent identical approvals return the same open row. The execution settles once: `sent` (with provider proof),
-`failed` (the transport refused before sending) or `unknown` (the provider may
-have sent). A second press of a sent approval replays its proof; any other
-second press is refused. A new send needs a new approval.
+concurrent identical approvals return the same open row. Accepted provider
+proof may be staged once while the execution is `sending`, then it settles once:
+`sent` (with provider proof), `failed` (the transport refused before sending)
+or `unknown` (the provider may have sent). A second press of a sent approval
+replays its proof; an accepted send still in `sending` returns
+`sent_unsettled` and never sends again. A new send needs a new approval.
 
 Nothing here writes Xero, allocates money, voids, or changes a payment.
 
@@ -97,9 +99,9 @@ text) and both `send_invoice_email` branches route through
 than guessing the job's latest invoice. The Xero-direct `/Invoices/{id}/Email`
 route is no longer used by the debt-follow-up `send_invoice_email` path;
 approved sends from that path use the verified Outlook transport. Ordinary
-invoice-issue email remains outside this executor in `approve_and_send_invoice`,
-`createInvoice`, and `update_invoice`. Those existing paths are a named follow-up
-for a separate ordinary-invoice email design; they are not debtor follow-up.
+invoice-issue email in `approve_and_send_invoice`, `createInvoice`, and
+`updateInvoice` remains outside this executor as a named follow-up for a
+separate ordinary-invoice email design; those paths are not debtor follow-up.
 `handle_payment_event` still stops the chase workflow, resolves follow-ups and
 logs the payment; only its text needs an approval.
 
@@ -118,11 +120,12 @@ never `body`, so the ladder's words stay the digit-free preview), and
 `getJobConversation` shows the event once as an outbound email with a proof
 block labelled "accepted by Outlook". If that capture write fails, the
 conversation projects the confirmed `outcome = sent` execution row instead;
-provider identity deduplication prevents showing both copies. The same fallback
-uses `ghl:<id>` for a confirmed SMS. Graph `sendMail` returns no message id,
-so email proof is acceptance, not delivery. If the evidence write does not land
-after Outlook accepts the send, the send stays confirmed and the result carries
-`timeline_write_failed: true`.
+provider identity deduplication prevents showing both copies. A provider proof
+saved on an execution still in `sending` is also projected once and labelled
+`settlement pending`. The same fallback uses `ghl:<id>` for a confirmed SMS.
+Graph `sendMail` returns no message id, so email proof is acceptance, not
+delivery. If evidence capture or settlement fails after provider acceptance,
+the result is `sent_unsettled` with provider proof and the relevant fault.
 
 ## Known follow-ups (not in this change)
 
@@ -131,6 +134,9 @@ after Outlook accepts the send, the send stays confirmed and the result carries
   approved workflow handoff needs its own design. `stop_chase_workflow` remains
   available to remove the chase tag and clear its fields.
 - A new debtor reply since approval is not yet a refusal reason.
+- A durable settlement retry for accepted provider sends left in `sending` by a
+  database outage is a follow-up. Reconcile and settle from the stored provider
+  proof; never call the provider again for that approval.
 - The Clear Debt screen (secureworks-ux) still calls the old actions without an
   approval; those calls are now recorded dry runs until the screen gains the
   approve and press flow.
