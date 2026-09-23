@@ -5,9 +5,9 @@
 // Decision D2 (23 Sep 2026): a booking is made in GHL and the system also
 // writes the owner's Outlook calendar, through the mail app's existing Graph
 // app-only credential (Calendars.ReadWrite already granted; no new access).
-// This module is that Outlook write. It is EXPORTED ONLY: the booking executor
-// calls it after its GHL appointment write succeeds. Nothing here is wired
-// into a request path.
+// This module is that Outlook write. The booking executor
+// (`sales_booking_execute.ts`, ops-api `sales_booking_book`) calls it after its
+// GHL appointment write succeeds, and again on a retry press.
 //
 // ── DEFAULT OFF ──
 // Only the exact server env value `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true`

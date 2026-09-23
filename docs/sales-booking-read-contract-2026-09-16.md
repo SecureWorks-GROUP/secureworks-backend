@@ -347,9 +347,9 @@ this map. User ids stay null-pinned; this table records emails only.
 
 ## Outlook mirror write (D2, 23 Sep 2026)
 
-`sales_booking_outlook_mirror.ts` exports `mirrorGhlAppointmentToOutlook` for
-the booking executor to call after a GHL appointment write. It is not wired
-into any request path here. It creates one event titled `Scope: Name, Suburb`
+`sales_booking_outlook_mirror.ts` exports `mirrorGhlAppointmentToOutlook`,
+which the booking executor (`sales_booking_book`,
+`docs/sales-booking-executor.md`) calls after a GHL appointment write. It creates one event titled `Scope: Name, Suburb`
 spanning the arrival window on the resource's Outlook primary calendar, with
 no attendees (no invitation is sent). It is idempotent on the GHL appointment
 id (a named extended property, looked up before create, plus a deterministic

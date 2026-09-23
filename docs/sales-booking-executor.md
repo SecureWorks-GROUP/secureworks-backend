@@ -25,7 +25,8 @@ Result (HTTP 200, except `press_requires_captain` which is 403):
 
 `booked`/`sent` also carry `replayed` (true when a second press returned the
 first result). `refused` may carry `detail` (for example the clashing Outlook
-events).
+events). `booked`, and a `dry_run` of a book, also carry `outlook_mirror` (next
+section).
 
 ## Switches (default: dry run)
 
@@ -86,6 +87,41 @@ Both actions:
 
 A text that names no time ("does Friday suit?") is fully supported: sending
 needs no calendar booking or receipt.
+
+## Outlook mirror after the GHL booking (Decision D2)
+
+Once GHL holds the appointment, `sales_booking_book` writes the matching event
+on the owner's Outlook calendar through `sales_booking_outlook_mirror.ts`
+(`mirrorGhlAppointmentToOutlook`), keyed on the GHL appointment id. The event
+is `Scope: Name, Suburb` over the approved arrival window
+(`window_start_iso` to `window_end_iso`), with the approved address and no
+attendees. Name and suburb come from the GHL contact read at the press
+(`firstName lastName`, suburb via `salesBookingSuburbFromContact`, else the
+suburb the approved address names, including an address that is only a suburb
+such as `Bassendean`); a suburb is never guessed.
+
+`outlook_mirror` on the response:
+
+| `outlook` | Meaning |
+| --- | --- |
+| `written` | Outlook holds the event (`outlook_event_id`). `reason: "already_mirrored"` when an earlier press wrote it. |
+| `dry_run` | Nothing written. `would_write` is the exact Graph request. `reason` is the press's dry-run reason, or `outlook_mirror_switch_off` after a real GHL booking while `SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED` is not exactly `true`. A dry run names the GHL id as `pending_ghl_appointment_id`. |
+| `failed` | GHL is booked, Outlook is not. `reason` names why (`mirror_write_failed: outlook_create_http_403`, `mirror_outcome_unknown: ...`, `contact_unreadable`, ...). |
+| `not_applicable` | The resource has no Outlook calendar (`SALES_BOOKING_OUTLOOK_MAILBOXES`; GHL-only people such as Nithin). |
+
+Every response carries a plain `message`. The booking always stands; the mirror
+never turns a booking into a refusal. **Retry:** pressing the same approval
+again replays the GHL booking from the writer's ledger (no second GHL call,
+even after the approval has expired) and re-runs the mirror, which looks up the
+GHL id on the calendar before creating, so Outlook is written at most once.
+
+Before any GHL write (dry run included), the press builds the Outlook event
+with a placeholder id; if it cannot be named (`contact_suburb_not_given`,
+`client_name_not_given`, `contact_unreadable`) the press refuses
+`outlook_mirror_unbuildable` and nothing is booked, so GHL and Outlook cannot
+be left disagreeing by a missing suburb. The mirror writes only on a live press
+(captain JWT, book switch on) and only when its own switch is on; no switch was
+added.
 
 ## The GHL writer refuses without the executor's per-press claim
 
@@ -170,6 +206,6 @@ Tests: `ops-api/sales_booking_execution_read_test.ts`.
 
 ## Out of scope
 
-Outlook writes (the mirror event), stage moves, the screen UI, Stratco intake,
+Stage moves, the screen UI, Stratco intake,
 Luna, and retiring the old booking paths. Prior-offer census across other leads
 is not re-read at the press.

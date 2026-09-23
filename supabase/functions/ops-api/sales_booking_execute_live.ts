@@ -1,6 +1,7 @@
 /** Production adapters for sales_booking_execute.ts. Reads only, except the
- * two ghl-proxy calls and the executor-ledger claim/settle, which the executor
- * makes only when its switch is on and the captain pressed.
+ * two ghl-proxy calls, the executor-ledger claim/settle and the Outlook mirror
+ * write, which the executor makes only when its switch is on and the captain
+ * pressed (the mirror also needs its own switch).
  *
  * Credential: ops-api calls ghl-proxy server-to-server with the project's
  * SUPABASE_SERVICE_ROLE_KEY as `Authorization: Bearer`, which ghl-proxy
@@ -16,6 +17,7 @@ import type {
   OutlookRead,
   SalesBookingExecuteDeps,
 } from "./sales_booking_execute.ts";
+import { mirrorGhlAppointmentToOutlook } from "./sales_booking_outlook_mirror.ts";
 import {
   ghlRead,
   readSalesBookingThreadMessages,
@@ -173,6 +175,14 @@ export function createSalesBookingExecuteDeps(
   client: Client,
 ): SalesBookingExecuteDeps {
   const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+  async function readContact(contactId: string): Promise<Obj> {
+    const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
+    const contact = body?.contact as Obj | undefined;
+    if (contact?.id !== contactId || contact?.locationId !== locationId) {
+      throw new Error("contact_mismatch");
+    }
+    return contact;
+  }
   return {
     async findApproval(bindingHash) {
       const { data, error } = await client.from("sales_booking_approvals")
@@ -199,13 +209,12 @@ export function createSalesBookingExecuteDeps(
       ),
     readOutlook: readResourceOutlook,
     async readContactPhone(contactId) {
-      const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
-      const contact = body?.contact as Obj | undefined;
-      if (contact?.id !== contactId || contact?.locationId !== locationId) {
-        throw new Error("contact_mismatch");
-      }
+      const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
+    readContact,
+    // Default off: only SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true calls Graph.
+    mirrorToOutlook: mirrorGhlAppointmentToOutlook,
     callAppointmentWriter: (body) =>
       callGhlProxy("create_calendar_appointment", body),
     callSendSms: (body) => callGhlProxy("send_sms", body),

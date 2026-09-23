@@ -3709,10 +3709,13 @@ Only `sales_booking_book` / `sales_booking_send` act on an approval
 `true` and a captain pressed, re-checked at the press, idempotent on the
 approval hash. The GHL writer refuses any real write that lacks that
 executor's per-press claim, not just an approval
-(`docs/ghl-calendar-appointment-write.md`). `sales_booking_read` shows what a
-press did from `sales_booking_executions` (`sales_booking_execution_read.ts`);
-dry runs and pre-claim refusals leave no row and so never read as booked or
-sent.
+(`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the
+executor writes its Outlook mirror (keyed on the GHL appointment id, own
+default-off switch); a mirror failure never un-books GHL, and a retry press
+replays GHL from its ledger and writes Outlook at most once.
+`sales_booking_read` shows what a press did from `sales_booking_executions`
+(`sales_booking_execution_read.ts`); dry runs and pre-claim refusals leave
+no row and so never read as booked or sent.
 
 ## GHL appointment write safety
 
