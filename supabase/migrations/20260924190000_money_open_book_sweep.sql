@@ -29,12 +29,12 @@
 --     severity, since, what_to_do), computed, never stored:
 --       money_open_book_stale     no complete sweep for 45 minutes while the
 --                                 mode is observe or apply;
---       money_closure_unverified  invoices open here that Xero no longer
+--       closure_unverified        invoices open here that Xero no longer
 --                                 lists stayed unsettled in each of the last
 --                                 2 finished runs;
 --       xero_quota_low            Xero's day quota below 500 on a run in the
 --                                 last hour;
---       money_flag_unreadable     the mode flags could not be read (the sweep
+--       flag_unreadable           the mode flags could not be read (the sweep
 --                                 behaves as off).
 --     Credits, bank state and live-read actors are later money slices (MN2,
 --     MN3, MN4) and are listed under not_measured.
@@ -67,7 +67,7 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record; col text; ff text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_money_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','7724232a153c9d795b5d4bcd26e3dd6b'],false),
+  ('public.context_money_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','de2b5f6c198f6ac3499bf33d3a18fdd2'],false),
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_money_policy()',ARRAY['815fa0d93470e23b20149bb131d1f9b4'],true),
   ('public.context_money_open_book_mode()',ARRAY['6288fa83702498c3097df69a5f5db23a'],true)
@@ -107,7 +107,7 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'run_source','xero_open_book',
   -- money_open_book_stale: minutes since the last complete sweep.
   'open_book_stale_minutes',45,
-  -- money_closure_unverified: finished runs in a row with unsettled closures.
+  -- closure_unverified: finished runs in a row with unsettled closures.
   'closure_unverified_runs',2,
   -- xero_quota_low: Xero day quota (5,000 a tenant) below this, on a run
   -- finished within quota_reading_max_age_minutes.
@@ -212,7 +212,7 @@ BEGIN
   END IF;
  END IF;
  IF cardinality(recent_unverified)=(policy->>'closure_unverified_runs')::integer AND 0<ALL(recent_unverified) THEN
-  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','money_closure_unverified','severity','warning',
+  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','closure_unverified','severity','warning',
    'since',(SELECT min(f) FROM (SELECT c.finished_at f FROM public.context_capture_runs c WHERE c.source=src AND c.status IN ('succeeded','partial')
      ORDER BY c.finished_at DESC LIMIT (policy->>'closure_unverified_runs')::integer) z),
    'closure_unverified',recent_unverified,
@@ -224,7 +224,7 @@ BEGIN
    'what_to_do','Xero''s daily call quota is nearly used. Reads fall back to our verified copy and say how old it is; find what is spending the quota before it runs out.'));
  END IF;
  IF flag->>'state'='unreadable' THEN
-  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','money_flag_unreadable','severity','warning','since',now_time,
+  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','flag_unreadable','severity','warning','since',now_time,
    'what_to_do','The money_open_book flags could not be read, so the open-book sweep is treated as off. Check the feature_flags table.'));
  END IF;
 
@@ -240,7 +240,7 @@ BEGIN
   'alarms',alarms);
 END $$;
 COMMENT ON FUNCTION public.context_money_status() IS
- 'Status block money (money slice MN1, sweep part): open-book mode, latest and latest complete xero_open_book runs, drift per class, closure settlement, Xero day quota, freshness of the verified copy of the open book, open receivables with no job, and the alarms money_open_book_stale, money_closure_unverified, xero_quota_low, money_flag_unreadable. Counts, ids and codes; the one amount is money_unlinked_open.amount_due.';
+ 'Status block money (money slice MN1, sweep part): open-book mode, latest and latest complete xero_open_book runs, drift per class, closure settlement, Xero day quota, freshness of the verified copy of the open book, open receivables with no job, and the alarms money_open_book_stale, closure_unverified, xero_quota_low, flag_unreadable. Counts, ids and codes; the one amount is money_unlinked_open.amount_due.';
 
 -- 5. Grants. Service-side only.
 REVOKE ALL ON FUNCTION public.context_money_policy(),public.context_money_open_book_mode(),public.context_money_status()

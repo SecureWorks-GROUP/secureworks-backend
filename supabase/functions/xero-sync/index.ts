@@ -27,6 +27,7 @@ import {
   applyProviderInvoice,
   applyProviderInvoiceEffects,
   buildInvoiceRecord,
+  loadExistingInvoiceLink,
   parseXeroDate,
   sealedSesXeroLinkRefusal,
   verifyEffectsForMode,
@@ -736,10 +737,6 @@ async function syncInvoices(sb: any) {
     console.error('[xero-sync] Open-book sweep error:', (e as Error).message)
     openBook = { mode: 'off', ran: false, status: 'failed', error_code: 'open_book_sweep_threw' }
   }
-  // The sweep verified the whole open book this run, so the hourly one-by-one
-  // open verify has nothing to add. Any lesser outcome keeps it running.
-  const skipOpenVerify = openBook.mode === 'apply' && openBook.status === 'succeeded'
-
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
@@ -788,12 +785,11 @@ async function syncInvoices(sb: any) {
       // deposit the incremental loop's If-Modified-Since window can pass over.
       // In apply the verified read runs the same effects as every other path
       // (MN1): reference link, deposit stamp, paid-job automation.
-      async (_invoiceId: string, payload: any) => {
+      async (invoiceId: string, payload: any) => {
         const verified = payload?.Invoices?.[0] ?? null
         if (!verified) return
-        // Until the sweep is in apply, the verify runs exactly what it ran
-        // before MN1 (the deposit stamp): no new job-status or GHL write.
-        const effects = await applyProviderInvoiceEffects(sb, verified, null, {
+        const existing = await loadExistingInvoiceLink(sb, DEFAULT_ORG_ID, invoiceId)
+        const effects = await applyProviderInvoiceEffects(sb, verified, existing, {
           ...providerInvoiceDeps(sb),
           effects: verifyEffectsForMode(openBook.mode),
         })
@@ -801,7 +797,6 @@ async function syncInvoices(sb: any) {
         if (effects.deposit?.action === 'stamped') depositStamps++
         else if (effects.deposit?.action === 'contradiction_logged') depositStampContradictions++
       },
-      { skipOpen: skipOpenVerify },
     )
     reconciled = summary.reconciled
     reconciliationSummary = { ...summary }

@@ -17,7 +17,7 @@ SET LOCAL statement_timeout = '60s';
 
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_money_status()')) NOT IN ('7724232a153c9d795b5d4bcd26e3dd6b','155104bfb08b8b3c2f98bdec089d4ee4')
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_money_status()')) NOT IN ('de2b5f6c198f6ac3499bf33d3a18fdd2','155104bfb08b8b3c2f98bdec089d4ee4')
  THEN RAISE EXCEPTION 'mn1_rollback_refused: context_money_status is no longer the MN1 body; roll back its later owner first'; END IF;
 END $$;
 

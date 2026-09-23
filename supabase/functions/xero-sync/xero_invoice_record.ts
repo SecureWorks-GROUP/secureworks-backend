@@ -72,6 +72,19 @@ export type ExistingInvoiceLink = {
 export const EXISTING_LINK_COLUMNS =
   "job_id, job_contact_id, invoice_obligation_revision_id, ses_external_token";
 
+export async function loadExistingInvoiceLink(
+  sb: Db,
+  orgId: string,
+  invoiceId: string,
+): Promise<ExistingInvoiceLink | null> {
+  const { data } = await sb.from("xero_invoices")
+    .select(EXISTING_LINK_COLUMNS)
+    .eq("org_id", orgId)
+    .eq("xero_invoice_id", invoiceId)
+    .maybeSingle();
+  return data ?? null;
+}
+
 // Async so every caller keeps its await (moved from index.ts unchanged).
 // deno-lint-ignore require-await
 export async function sealedSesXeroLinkRefusal(
@@ -302,7 +315,7 @@ async function paidJobCompletion(
   if (inv.Type !== "ACCREC" || inv.Status !== "PAID") return;
   const orgId = deps.orgId;
   const { data: invRecord } = await sb.from("xero_invoices")
-    .select("job_id")
+    .select(EXISTING_LINK_COLUMNS)
     .eq("xero_invoice_id", inv.InvoiceID)
     .eq("org_id", orgId)
     .not("job_id", "is", null)
@@ -316,8 +329,10 @@ async function paidJobCompletion(
       invoice_type: inv.Type,
       job_id: invRecord.job_id,
       invoice_obligation_revision_id:
+        invRecord.invoice_obligation_revision_id ||
         existing?.invoice_obligation_revision_id || null,
-      ses_external_token: existing?.ses_external_token || null,
+      ses_external_token: invRecord.ses_external_token ||
+        existing?.ses_external_token || null,
     },
     invRecord.job_id,
     "xero-sync/payment automation",
@@ -412,8 +427,10 @@ export async function applyProviderInvoiceEffects(
     ses_refusals: [],
     job_completed: null,
   };
+  const current = existing ??
+    await loadExistingInvoiceLink(sb, deps.orgId, inv.InvoiceID);
   const all = (deps.effects ?? "all") === "all";
-  if (all) await referenceAutoLink(sb, deps.orgId, inv, existing, out);
+  if (all) await referenceAutoLink(sb, deps.orgId, inv, current, out);
 
   // Deposit stamp: a PAID deposit invoice lands on jobs.deposit_at. It never
   // moves the job; it only records that the deposit money arrived.
@@ -436,7 +453,7 @@ export async function applyProviderInvoiceEffects(
     }
   }
 
-  if (all) await paidJobCompletion(sb, deps, inv, existing, out);
+  if (all) await paidJobCompletion(sb, deps, inv, current, out);
   return out;
 }
 
@@ -460,12 +477,7 @@ export async function applyProviderInvoice(
 ): Promise<AppliedProviderInvoice> {
   let current = existing;
   if (current === undefined) {
-    const { data } = await sb.from("xero_invoices")
-      .select(EXISTING_LINK_COLUMNS)
-      .eq("org_id", deps.orgId)
-      .eq("xero_invoice_id", inv.InvoiceID)
-      .maybeSingle();
-    current = data ?? null;
+    current = await loadExistingInvoiceLink(sb, deps.orgId, inv.InvoiceID);
   }
   const record = buildInvoiceRecord(inv, deps.orgId, verifiedAt);
   // Preserve job linkage: sync never wipes links set by invoice creation.

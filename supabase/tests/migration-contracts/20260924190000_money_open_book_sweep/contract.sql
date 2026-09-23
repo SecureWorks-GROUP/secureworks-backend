@@ -106,7 +106,7 @@ INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,fini
 DO $$
 DECLARE s jsonb:=public.context_money_status();
 BEGIN
- IF EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='money_closure_unverified') THEN RAISE EXCEPTION 'mn1 one run must not alarm: %',s->'alarms'; END IF;
+ IF EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='closure_unverified') THEN RAISE EXCEPTION 'mn1 one run must not alarm: %',s->'alarms'; END IF;
  IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='xero_quota_low' AND (x->>'day_remaining')::int=450) THEN RAISE EXCEPTION 'mn1 quota alarm: %',s->'alarms'; END IF;
 END $$;
 INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,counts) VALUES
@@ -114,7 +114,7 @@ INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,fini
 DO $$
 DECLARE s jsonb:=public.context_money_status();
 BEGIN
- IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='money_closure_unverified' AND x->'closure_unverified'='[3,1]'::jsonb)
+ IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='closure_unverified' AND x->'closure_unverified'='[3,1]'::jsonb)
  THEN RAISE EXCEPTION 'mn1 closure alarm: %',s->'alarms'; END IF;
  -- The newest run carries no quota reading; the one before it is still recent.
  IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='xero_quota_low') THEN RAISE EXCEPTION 'mn1 quota from latest reading'; END IF;
@@ -135,7 +135,7 @@ DO $$
 DECLARE p jsonb:=public.context_pipeline_status();
 BEGIN
  IF p->'money'->'open_book'->>'mode'<>'off' THEN RAISE EXCEPTION 'mn1 composer money block: %',p->'money'; END IF;
- IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(p->'alarms') x WHERE x->>'key'='money_flag_unreadable' AND x->>'block'='money')
+ IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(p->'alarms') x WHERE x->>'key'='flag_unreadable' AND x->>'block'='money')
  THEN RAISE EXCEPTION 'mn1 composer alarm: %',p->'alarms'; END IF;
 END $$;
 ROLLBACK;

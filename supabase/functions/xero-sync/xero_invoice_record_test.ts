@@ -12,6 +12,7 @@ import {
   applyProviderInvoiceEffects,
   buildInvoiceRecord,
   buildVerifiedInvoicePatch,
+  loadExistingInvoiceLink,
   verifyEffectsForMode,
 } from "./xero_invoice_record.ts";
 import {
@@ -297,6 +298,25 @@ const m17Paid = () =>
   });
 
 // The hourly verify's hook, as index.ts wires it for a sweep mode.
+async function verifyHook(
+  db: ReturnType<typeof fakeDb>,
+  invoiceId: string,
+  payload: any,
+  completed: string[],
+  mode: string,
+) {
+  const existing = await loadExistingInvoiceLink(db.client, ORG, invoiceId);
+  return await applyProviderInvoiceEffects(
+    db.client,
+    payload.Invoices[0],
+    existing,
+    {
+      ...deps(completed),
+      effects: verifyEffectsForMode(mode),
+    },
+  );
+}
+
 async function verifyRun(mode: string, completed: string[]) {
   const db = m17VerifyFixture();
   const summary = await reconcileStaleXeroInvoices(
@@ -304,12 +324,8 @@ async function verifyRun(mode: string, completed: string[]) {
     ORG,
     () => Promise.resolve({ Invoices: [m17Paid()] }),
     NOW,
-    async (_id, payload: any) => {
-      await applyProviderInvoiceEffects(db.client, payload.Invoices[0], null, {
-        ...deps(completed),
-        effects: verifyEffectsForMode(mode),
-      });
-    },
+    (invoiceId, payload: any) =>
+      verifyHook(db, invoiceId, payload, completed, mode).then(() => undefined),
   );
   return { db, summary };
 }
@@ -361,7 +377,7 @@ Deno.test("the incremental loop's effects are unchanged by the sweep mode: it al
   assertEquals(completed, [M17.job_id]);
 });
 
-Deno.test("with the open-book sweep in apply the hourly open verify is skipped; drafts are not", async () => {
+Deno.test("hourly open verify still runs in apply; a sealed SES PAID invoice is refused and never completed", async () => {
   const db = fakeDb({
     tables: {
       xero_invoices: [
@@ -381,15 +397,45 @@ Deno.test("with the open-book sweep in apply the hourly open verify is skipped; 
           amount_due: 5,
           synced_at: "2026-09-20T00:00:00.000Z",
         },
+        {
+          org_id: ORG,
+          xero_invoice_id: "ses-1",
+          invoice_type: "ACCREC",
+          job_id: "job-ses",
+          ses_external_token: "tok",
+          status: "AUTHORISED",
+          amount_due: 5,
+          synced_at: "2026-09-23T00:00:00.000Z",
+        },
       ],
+      jobs: [{
+        id: "job-ses",
+        org_id: ORG,
+        job_number: "SWMS-261100",
+        status: "invoiced",
+      }],
     },
   });
   const read: string[] = [];
-  const summary = await reconcileStaleXeroInvoices(
+  const completed: string[] = [];
+  const refusals: unknown[] = [];
+  await reconcileStaleXeroInvoices(
     db.client,
     ORG,
     (id) => {
       read.push(id);
+      if (id === "ses-1") {
+        return Promise.resolve({
+          Invoices: [xeroInvoice({
+            InvoiceID: "ses-1",
+            Status: "PAID",
+            Reference: "SWMS-261100",
+            Total: 5,
+            AmountDue: 0,
+            AmountPaid: 5,
+          })],
+        });
+      }
       return Promise.resolve({
         Invoices: [{
           InvoiceID: id,
@@ -401,9 +447,19 @@ Deno.test("with the open-book sweep in apply the hourly open verify is skipped; 
       });
     },
     NOW,
-    undefined,
-    { skipOpen: true },
+    async (invoiceId, payload: any) => {
+      const effects = await verifyHook(db, invoiceId, payload, completed, "apply");
+      refusals.push(...effects.ses_refusals);
+    },
   );
-  assertEquals(read, ["draft-1"]);
-  assertEquals(summary.open_verify_skipped, true);
+  assertEquals(read.includes("open-1"), true);
+  assertEquals(read.includes("draft-1"), true);
+  assertEquals(read.includes("ses-1"), true);
+  assertEquals(completed, []);
+  assertEquals(
+    (refusals as Array<{ code?: string }>).filter((r) =>
+      r.code === "sealed_ses_release_required"
+    ).length,
+    2,
+  );
 });
