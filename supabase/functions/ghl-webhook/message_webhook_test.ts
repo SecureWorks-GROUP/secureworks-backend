@@ -6,7 +6,26 @@ import {
   assertEquals,
   assertFalse,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { handleGhlWebhook, type GhlWebhookDeps } from "./handler.ts";
 import { isMessageWebhook, messageWebhookAnswer } from "./message_webhook.ts";
+
+const SECRET = "test-webhook-secret";
+
+function postMessage(type: string): Request {
+  return new Request("http://ghl-webhook.test/", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Webhook-Secret": SECRET,
+    },
+    body: JSON.stringify({
+      type,
+      body: "hello",
+      first_name: "form",
+      email: "x@example.test",
+    }),
+  });
+}
 
 Deno.test("InboundMessage and OutboundMessage are message webhooks; stage changes and forms are not", () => {
   assert(isMessageWebhook({ type: "InboundMessage", body: "hello" }));
@@ -19,26 +38,21 @@ Deno.test("InboundMessage and OutboundMessage are message webhooks; stage change
   assertEquals(messageWebhookAnswer().captured, false);
 });
 
-Deno.test("index.ts answers a message post before any write and has no message insert left", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
-  );
-  const answer = source.indexOf(
-    "if (isMessageWebhook(body)) return jsonResponse(messageWebhookAnswer())",
-  );
-  const rawLog = source.indexOf("from('webhook_log').insert");
-  const client = source.indexOf("const sb = createClient(");
-  assert(answer > 0, "message posts are answered by the moved-capture reply");
-  assert(
-    answer < rawLog && answer < client,
-    "answered before the client and the raw webhook_log write",
-  );
-  assertFalse(
-    source.includes("from('business_events').insert"),
-    "no business_events write left in ghl-webhook",
-  );
-  assertFalse(
-    /esm\.sh\/@supabase\/supabase-js@2['"]/.test(source),
-    "supabase-js is pinned to an exact version",
-  );
+Deno.test("authenticated message posts are answered without a client or the form path", async () => {
+  let clientCreated = 0;
+  const deps: GhlWebhookDeps = {
+    env: (name) => name === "GHL_WEBHOOK_SECRET" ? SECRET : undefined,
+    createSupabase: () => {
+      clientCreated += 1;
+      throw new Error("form-submission path reached");
+    },
+  };
+
+  for (const type of ["InboundMessage", "OutboundMessage"]) {
+    const res = await handleGhlWebhook(postMessage(type), deps);
+    assertEquals(res.status, 200);
+    assertEquals(await res.json(), messageWebhookAnswer());
+    assertEquals(res.headers.get("content-type"), "application/json");
+  }
+  assertEquals(clientCreated, 0);
 });

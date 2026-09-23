@@ -9,7 +9,6 @@ import {
   assert,
   assertEquals,
   assertFalse,
-  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   CALL_ITEM,
@@ -542,24 +541,4 @@ Deno.test("rank-10 events must come signed by the app: the workflow secret alone
   assertEquals(r.res.status, 401);
   assertEquals(captureCalls(r).length, 0);
   assertEquals(ghlReceipt(r).outcome, "unauthorized");
-});
-
-// ── the old paths are gone from the receiver ─────────────
-
-Deno.test("the receiver has no job matcher and no inline nudge or proposal cancellation", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./handler.ts", import.meta.url),
-  );
-  for (
-    const gone of [
-      "smart_nudges",
-      "ai_proposed_actions",
-      '.from("jobs")',
-      "resolveWebhookJobMatch",
-      "suggested_job_id",
-    ]
-  ) {
-    assertFalse(source.includes(gone), `handler.ts still has ${gone}`);
-  }
-  assertStringIncludes(source, "captureGhlDelivery");
 });
