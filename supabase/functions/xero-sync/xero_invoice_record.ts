@@ -21,6 +21,11 @@
 //                             stamp writes once (deposit_stamp.ts), and the
 //                             completion only moves a job still 'invoiced'.
 //
+// The incremental loop runs every effect, as before MN1. The hourly verify
+// runs only the deposit stamp until the open-book sweep is in apply (captain
+// decision, 23 Sep): the paid-job completion goes through ops-api
+// update_job_status, whose GHL stage sync can fire customer workflows.
+//
 // Both builders stamp xero_verified_at: the time this copy was last read from
 // Xero. synced_at keeps meaning "last local write"; the ~20 ops-api mirror
 // writers set synced_at and never xero_verified_at (money.md follow-up 1).
