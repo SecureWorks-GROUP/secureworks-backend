@@ -27,8 +27,9 @@ export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const JOB_NUMBER = /\b(SW[A-Z]{1,3}-\d{4,8})\b/i;
-const OPEN_STATUSES = ["AUTHORISED", "SUBMITTED"];
-const XERO_STALE_HOURS = 24;
+/** The open receivable population: the debt work list reads the same set. */
+export const OPEN_STATUSES = ["AUTHORISED", "SUBMITTED"];
+export const XERO_STALE_HOURS = 24;
 const IN_CHUNK = 100;
 // PostgREST caps any response at 1000 rows, so .limit(n > 1000) truncates in
 // silence. Every multi-row read here pages with .range() instead.
