@@ -45,10 +45,10 @@ BEGIN
  SELECT * INTO e2 FROM public.business_events WHERE id=e2.id;
  IF e1.job_id IS DISTINCT FROM j31 OR e1.attribution_status IS DISTINCT FROM 'single_open' OR e2.job_id IS DISTINCT FROM j31 OR e2.attribution_status IS DISTINCT FROM 'single_open'
  THEN RAISE EXCEPTION 'R14: not bound to SWF-261431 on its creation, got % % / % %',e1.attribution_status,e1.job_id,e2.attribution_status,e2.job_id; END IF;
- IF e1.metadata->>'capture_mode' IS DISTINCT FROM 'relink' OR e1.metadata->>'capture_mode_before' IS DISTINCT FROM 'live'
+ IF coalesce(e1.metadata->>'capture_mode','live') IS DISTINCT FROM 'live' OR e1.metadata ? 'capture_mode_before'
   OR e1.metadata->'placement_reconsidered'->>'reason' IS DISTINCT FROM 'job_created' OR e1.metadata->'placement_reconsidered'->>'job_id' IS DISTINCT FROM j31::text
   OR e1.metadata->'placement_reconsidered'->>'from_status' IS DISTINCT FROM 'admin_bucket'
- THEN RAISE EXCEPTION 'R14: binding not recorded as a relink, got %',e1.metadata; END IF;
+ THEN RAISE EXCEPTION 'R14: first bind must keep live and record the placement, got %',e1.metadata; END IF;
 
  -- A 20 Aug text: inside SWF-261431's window, outside SWF-261448's (22 Aug on).
  INSERT INTO public.business_events(source,payload,contact_id,provider_message_id,channel,direction,event_at)
@@ -220,8 +220,9 @@ BEGIN
  (gen_random_uuid(),org,'draft','fencing','R8-OUTSIDE-30D','r8-late-contact','2026-10-25T02:00:00Z');
  SELECT * INTO e1 FROM public.business_events WHERE id=e1.id;
  SELECT * INTO e2 FROM public.business_events WHERE id=e2.id;
- IF e1.job_id IS DISTINCT FROM inside OR e1.attribution_status IS DISTINCT FROM 'single_open' OR e1.metadata->>'capture_mode' IS DISTINCT FROM 'relink'
- THEN RAISE EXCEPTION 'R8: a job 20 days later must take the lead text as a relink, got % % %',e1.attribution_status,e1.job_id,e1.metadata; END IF;
+ IF e1.job_id IS DISTINCT FROM inside OR e1.attribution_status IS DISTINCT FROM 'single_open'
+  OR coalesce(e1.metadata->>'capture_mode','live') IS DISTINCT FROM 'live' OR e1.metadata ? 'capture_mode_before'
+ THEN RAISE EXCEPTION 'R8: a job 20 days later must take the lead text without a relink stamp, got % % %',e1.attribution_status,e1.job_id,e1.metadata; END IF;
  IF e2.job_id IS NOT NULL OR e2.attribution_status IS DISTINCT FROM 'admin_bucket' OR e2.metadata ? 'placement_reconsidered'
  THEN RAISE EXCEPTION 'R8: a job 34 days later touched the lead text'; END IF;
  -- R15 (X18): 3 Jul text, SWF-261209 created 14 Aug (window 15 Jul to 14 Aug).
@@ -233,6 +234,36 @@ BEGIN
  SELECT * INTO e15 FROM public.business_events WHERE id=e15.id;
  IF e15.job_id IS NOT NULL OR e15.attribution_status IS DISTINCT FROM 'admin_bucket' OR e15.attribution_checked_at IS DISTINCT FROM checked
  THEN RAISE EXCEPTION 'R15: the 3 Jul text must stay before any job, untouched, got % % (checked % -> %)',e15.attribution_status,e15.job_id,checked,e15.attribution_checked_at; END IF;
+END $$;
+ROLLBACK;
+
+-- 5b. Path (a) 90-day guard: a reviewed lead-window text stays live, so Luna
+-- placing it on the new job wakes one extraction read.
+BEGIN;
+DO $$
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; old uuid:=gen_random_uuid(); j uuid:=gen_random_uuid();
+ e public.business_events;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at,completed_at)
+ VALUES(old,org,'complete','fencing','P1B-GUARD-OLD','p1b-guard','2026-06-01Z','2026-07-15Z');
+ INSERT INTO public.business_events(source,payload,contact_id,provider_message_id,channel,direction,event_at)
+ VALUES('ghl-webhook-receiver','{"body":"Can you quote the side fence?"}','p1b-guard','ghl:p1b-guard-01aug','sms','inbound','2026-08-01Z')
+ RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status IS DISTINCT FROM 'admin_bucket'
+ THEN RAISE EXCEPTION '90-day guard fixture: text must start before any job, got % %',e.attribution_status,e.job_id; END IF;
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at)
+ VALUES(j,org,'quoted','fencing','P1B-GUARD-NEW','p1b-guard','2026-08-10Z');
+ SELECT * INTO e FROM public.business_events WHERE id=e.id;
+ IF e.job_id IS NOT NULL OR e.attribution_status IS DISTINCT FROM 'pending_luna' OR e.attribution_step IS DISTINCT FROM 5
+  OR e.metadata->>'placement_rule' IS DISTINCT FROM 'review_recent_other_job'
+  OR coalesce(e.metadata->>'capture_mode','live') IS DISTINCT FROM 'live' OR e.metadata ? 'capture_mode_before'
+ THEN RAISE EXCEPTION '90-day guard: path (a) must send the text to review and keep live, got % % %',e.attribution_status,e.job_id,e.metadata; END IF;
+ e:=public.attribute_context_event_with_luna(e.id,j,0.9,'job');
+ IF e.job_id IS DISTINCT FROM j OR e.attribution_status IS DISTINCT FROM 'luna'
+  OR coalesce(e.metadata->>'capture_mode','live') IS DISTINCT FROM 'live'
+ THEN RAISE EXCEPTION '90-day guard: Luna must place the live text on the new job, got % % %',e.attribution_status,e.job_id,e.metadata; END IF;
+ IF (public.context_job_cadence(j)->>'waking_count')::int IS DISTINCT FROM 1
+ THEN RAISE EXCEPTION '90-day guard: the new job must wake on its reviewed lead-window text: %',public.context_job_cadence(j); END IF;
 END $$;
 ROLLBACK;
 
@@ -263,9 +294,10 @@ END $$;
 ROLLBACK;
 
 -- 6b. Review findings: the window ends at the job's creation; a repeat call
--- never re-moves a row the ladder placed for this job event; a non-GHL row
--- whose conversation is bound to a job is kept; the eligibility test refuses
--- direct, thread and automated rows (it is applied again under the lock).
+-- never re-moves a row the ladder placed for this job event; a non-GHL email
+-- placed on A by a contact rule reopens with A and B (rule 7); the eligibility
+-- test refuses direct, thread and automated rows (it is applied again under
+-- the lock).
 BEGIN;
 DO $$
 DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; a uuid:=gen_random_uuid(); b uuid:=gen_random_uuid();
@@ -297,17 +329,19 @@ BEGIN
  IF sl.job_id IS DISTINCT FROM f OR (r->>'reopened')::int IS DISTINCT FROM 0
  THEN RAISE EXCEPTION 'once per event: a repeat call re-moved a row placed for the same job, got % %',sl.attribution_status,r; END IF;
 
- -- A non-GHL email whose conversation the ladder bound to A: kept on A.
+ -- A non-GHL email placed single_open on A: rule 7 reopens with A and B.
  INSERT INTO public.business_events(source,payload,contact_id,thread_key,channel,direction,event_at)
  VALUES('monitor-inbox','{"body":"Re: fence quote"}','p1b-late','outlook:p1b-late-thread','email','inbound','2026-09-04Z') RETURNING * INTO em;
  UPDATE public.business_events SET job_id=a,attribution_status='single_open',attribution_step=3,match_method='contact_id',candidate_job_ids=NULL WHERE id=em.id;
  INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES('outlook:p1b-late-thread',a,'ladder',em.id);
  r:=public.context_reconsider_contact('p1b-late','2026-08-06Z','job_created',b);
  SELECT * INTO em FROM public.business_events WHERE id=em.id;
- IF em.job_id IS DISTINCT FROM a OR (r->>'kept_thread_bound')::int IS DISTINCT FROM 1
- THEN RAISE EXCEPTION 'thread-bound: a non-GHL row bound to a conversation was reopened, got % %',em.attribution_status,r; END IF;
+ IF em.job_id IS NOT NULL OR em.attribution_status IS DISTINCT FROM 'pending_luna' OR em.candidate_job_ids IS DISTINCT FROM ARRAY[a,b]
+  OR em.metadata->>'capture_mode' IS DISTINCT FROM 'relink' OR (r->>'reopened')::int IS DISTINCT FROM 1 OR r ? 'kept_thread_bound'
+ THEN RAISE EXCEPTION 'rule 7: a non-GHL email bound to A must reopen with A and B, got % % %',em.attribution_status,em.candidate_job_ids,r; END IF;
 
- -- The eligibility test itself.
+ -- The eligibility test itself (a clean single_open sibling, not the reopened row).
+ em.job_id:=a; em.attribution_status:='single_open'; em.candidate_job_ids:=NULL; em.metadata:='{}'::jsonb;
  IF public.context_reconsider_eligible(ROW(em.*)::public.business_events,b) IS DISTINCT FROM true THEN RAISE EXCEPTION 'eligible: single_open row refused'; END IF;
  em.attribution_status:='direct'; IF public.context_reconsider_eligible(em,b) THEN RAISE EXCEPTION 'eligible: direct row accepted'; END IF;
  em.attribution_status:='thread'; IF public.context_reconsider_eligible(em,b) THEN RAISE EXCEPTION 'eligible: thread row accepted'; END IF;

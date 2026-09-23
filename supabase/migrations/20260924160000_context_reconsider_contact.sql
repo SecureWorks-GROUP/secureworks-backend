@@ -31,12 +31,13 @@
 --      name the new job, or that was already reconsidered for it, is left
 --      alone, so a second call is a no-op. The test is applied again under the
 --      row lock, so a row that changed status meanwhile is never moved.
---      A non-GHL row whose conversation is bound to a job (event_threads) is
---      kept: Luna's answer would follow that binding anyway (re-deciding
---      guess-bound threads is P4 / B-RUN).
---      Every message moved by (a), (b) or (d) is stamped capture_mode 'relink'
---      (the value it had is kept in metadata.capture_mode_before), so it never
---      wakes an extraction read on its own (cadence 5.1, INTEGRATION X15).
+--      Every message moved by (b) or (d) is stamped capture_mode 'relink'
+--      (the value it had is kept in metadata.capture_mode_before), so a
+--      sibling reopen never wakes an extraction read on its own (cadence 5.1,
+--      INTEGRATION X15). A first bind (a) keeps the row's capture_mode: a new
+--      job whose only evidence is its reviewed lead-window text still wakes
+--      one read. K1's live_since floor and the step 3/4 before-job refusal
+--      still stop a history burst.
 --      metadata.placement_reconsidered records reason, job, time and, for (d),
 --      the placement it came from. Ids and codes only, no message text.
 --      A message another session holds is skipped and counted (SKIP LOCKED),
@@ -93,7 +94,7 @@ BEGIN
   ('public.context_event_is_ghl(public.business_events)',ARRAY['6bd4046317c4530a67ae38b0d7052cf4'],false),
   -- New: absent, or already this migration's body.
   ('public.context_reconsider_eligible(public.business_events,uuid)',ARRAY['375857877700389aa8f6f730095b8800'],true),
-  ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['c4353d7e562bd5e92a5fd847d80c6238'],true)
+  ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['5f9dbe883f0add7a6987f3ed265a08af'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
@@ -160,7 +161,7 @@ DECLARE
  c record; e public.business_events; resolved public.business_events;
  v_until timestamptz; v_at timestamptz; v_start timestamptz:=clock_timestamp(); v_set uuid[]; v_cands uuid[]; v_note jsonb; v_mode jsonb;
  n_seen int:=0; n_placed int:=0; n_review int:=0; n_reopened int:=0; n_widened int:=0; n_unchanged int:=0;
- n_busy int:=0; n_thread int:=0;
+ n_busy int:=0;
  v_limit constant int:=500; v_budget constant interval:='2 seconds'; v_truncated text;
 BEGIN
  IF p_reason IS NULL OR p_reason<>'job_created' THEN RAISE EXCEPTION 'context_reconsider_contact: unknown reason'; END IF;
@@ -200,8 +201,6 @@ BEGIN
    SELECT coalesce(array_agg(j.job_id ORDER BY j.created_at,j.job_id),'{}') INTO v_set FROM public.context_contact_jobs_at(p_contact_id,v_at) j;
    IF NOT (p_job_id=ANY(v_set)) THEN n_unchanged:=n_unchanged+1; CONTINUE; END IF;
   END IF;
-  -- The first value this row was captured with survives later moves.
-  v_mode:=coalesce(e.metadata->'capture_mode_before',to_jsonb(coalesce(e.metadata->>'capture_mode','live')));
   v_note:=jsonb_build_object('reason',p_reason,'job_id',p_job_id,'at',clock_timestamp());
 
   IF e.job_id IS NULL AND (e.attribution_status IS NULL OR e.attribution_status='admin_bucket') THEN
@@ -219,7 +218,7 @@ BEGIN
     attribution_checked_at=resolved.attribution_checked_at,event_at=resolved.event_at,
     match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,
     candidate_job_ids=resolved.candidate_job_ids,payload=resolved.payload,
-    metadata=coalesce(resolved.metadata,'{}'::jsonb)||jsonb_build_object('capture_mode','relink','capture_mode_before',v_mode,
+    metadata=coalesce(resolved.metadata,'{}'::jsonb)||jsonb_build_object(
      'placement_reconsidered',v_note||jsonb_build_object('from_status',coalesce(e.attribution_status,'none')))
    WHERE id=e.id;
    IF resolved.job_id IS NOT NULL THEN n_placed:=n_placed+1; ELSE n_review:=n_review+1; END IF;
@@ -233,17 +232,11 @@ BEGIN
    WHERE id=e.id;
    n_widened:=n_widened+1;
 
-  ELSIF nullif(e.thread_key,'') IS NOT NULL AND NOT public.context_event_is_ghl(e)
-   AND EXISTS(SELECT 1 FROM public.event_threads t WHERE t.thread_key=e.thread_key) THEN
-   -- A non-GHL row whose conversation is bound to a job: Luna's answer would
-   -- follow that binding anyway, so reopening would spend an ask for nothing.
-   -- Re-deciding guess-bound threads is the placement track's P4 / B-RUN work.
-   n_thread:=n_thread+1;
-
   ELSE
    -- (b) resting unplaced, or (d) placed on a sibling by a contact rule:
    -- back to review, once, with the old job, the new job and every candidate
    -- at its time.
+   v_mode:=coalesce(e.metadata->'capture_mode_before',to_jsonb(coalesce(e.metadata->>'capture_mode','live')));
    SELECT array_agg(x ORDER BY o) INTO v_cands FROM (
     SELECT x, min(o) AS o FROM unnest(coalesce(e.candidate_job_ids,'{}'::uuid[])||CASE WHEN e.job_id IS NOT NULL THEN ARRAY[e.job_id] ELSE '{}'::uuid[] END||v_set)
      WITH ORDINALITY AS u(x,o) GROUP BY x) d;
@@ -264,10 +257,10 @@ BEGIN
  END LOOP;
  RETURN jsonb_build_object('outcome','done','reason',p_reason,'job_id',p_job_id,'seen',n_seen,'placed',n_placed,
   'to_review',n_review,'reopened',n_reopened,'widened',n_widened,'unchanged',n_unchanged,'skipped_busy',n_busy,
-  'kept_thread_bound',n_thread,'truncated',v_truncated);
+  'truncated',v_truncated);
 END $$;
 COMMENT ON FUNCTION public.context_reconsider_contact(text,timestamptz,text,uuid) IS
- 'Reconsiders a GHL contact''s messages between p_since and the new job''s creation (reason job_created) when that job is a candidate at their time: bucket rows re-run the ladder; unplaced rows and rows placed on a sibling by single_open, single_line or luna go back to review once with the new job added; review rows gain it as a candidate. Moved rows are capture_mode relink. Never direct, thread, content_ref or party placements; never waits on a locked row. Returns counts.';
+ 'Reconsiders a GHL contact''s messages between p_since and the new job''s creation (reason job_created) when that job is a candidate at their time: bucket rows re-run the ladder; unplaced rows and rows placed on a sibling by single_open, single_line or luna go back to review once with the new job added; review rows gain it as a candidate. Unplaced and sibling reopens are capture_mode relink; a first bind keeps its capture_mode. Never direct, thread, content_ref or party placements; never waits on a locked row. Returns counts.';
 
 -- 2. The job-created trigger body.
 CREATE OR REPLACE FUNCTION public.context_job_created_reconsider() RETURNS trigger

@@ -1,1 +1,1 @@
-R14: binding not recorded as a relink
+R14: first bind must keep live and record the placement

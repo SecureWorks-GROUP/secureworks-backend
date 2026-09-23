@@ -19,7 +19,7 @@ BEGIN
  END IF;
  live:=NULL;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_reconsider_contact(text,timestamptz,text,uuid)');
- IF live IS NOT NULL AND live<>'c4353d7e562bd5e92a5fd847d80c6238' THEN
+ IF live IS NOT NULL AND live<>'5f9dbe883f0add7a6987f3ed265a08af' THEN
   problems:=problems||format('public.context_reconsider_contact(text,timestamptz,text,uuid) md5 %s',live);
  END IF;
  live:=NULL;
