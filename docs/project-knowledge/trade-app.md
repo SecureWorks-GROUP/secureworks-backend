@@ -120,6 +120,7 @@
 | `get_service_report` | GET | Load existing report for a job |
 | `update_my_assignment` | POST | Change own assignment status (confirm/in_progress/complete) + GPS |
 | `clock_event` | POST | Timer/stage events on the caller's OWN assignment (`clock_on`, `clock_off`, `start_travel`, `arrived`, `pause`, `resume`, `materials_check`, `manual_override`). Ownership is asserted before any idempotency lookup or return, assignment mutation or event write, so a foreign caller gets `Not your assignment` and cannot even learn another crew's replay state from an `idempotency_key`. There is deliberately no manager/dispatcher override: cross-crew stage authority would need its own reviewed action and audit contract |
+| `create_variation` | POST | Trade "Request Variation". On the front door's profile-scoped JWT allow-list so a signed-in trade reaches the route instead of a staff-only 403. Assigned-crew check, session identity, office-approval-only, and withheld `share_token` are owned by AGENTS.md "Trade App Visibility Contract" (`createVariationForCaller`); tests: `trade_variation_request_test.ts`. Staff callers keep the unchanged create path. |
 | `view_shared_report` | GET | **Public (no auth)** — rendered HTML page for homeowner via share_token |
 
 ## Database (Migrations 011, 013, 014, 015)
