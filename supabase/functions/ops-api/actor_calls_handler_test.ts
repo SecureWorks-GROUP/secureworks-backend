@@ -8,7 +8,7 @@
  *    counted;
  *  - a call the front door refuses (a signed-in trade on a staff action, the
  *    shared browser key) gets exactly the refusal it got before, and one line
- *    with the verified or claimed actor and the refusal code;
+ *    with the verified actor or actor_missing and the refusal code;
  *  - the count is the only extra request, is handed to EdgeRuntime.waitUntil,
  *    and a failed count does not change the response;
  *  - with no EdgeRuntime (every other handler test) nothing extra is called.
@@ -186,7 +186,7 @@ Deno.test("server-key call with no actor: served as before, logged actor_missing
   assertEquals(seen.warns, []);
 });
 
-Deno.test("the header F-ACT-RT sends is logged and writes nothing", async () => {
+Deno.test("the service-key header is logged and writes nothing", async () => {
   const { res, seen } = await run(
     "ops_api_version",
     { ...SERVICE, "x-sw-actor": "workflow:census" },
@@ -214,7 +214,7 @@ Deno.test("a malformed header: logged actor_missing, value never logged, counted
   assertEquals(countCalls(seen).length, 1);
 });
 
-Deno.test("a signed-in trade refused a staff action: same refusal, one line with the verified user and the code", async () => {
+Deno.test("a signed-in trade ignores x-sw-actor and logs the verified user and refusal", async () => {
   const headers = {
     authorization: `Bearer ${USER_JWT}`,
     "x-sw-actor": "workflow:spoof",
@@ -230,11 +230,18 @@ Deno.test("a signed-in trade refused a staff action: same refusal, one line with
   assertEquals(actorLines(seen), [
     `[ops-api] denied action=pipeline method=GET actor=user:${TRADE_ID} actor_source=jwt status=403 code=operator_access_required`,
   ]);
+  assertEquals(
+    seen.logs.some((line) => line.includes("workflow:spoof")),
+    false,
+  );
   // A JWT call is never counted: its user is verified.
   assertEquals(countCalls(seen), []);
 });
 
-Deno.test("the shared browser key refused: same 401, the claimed actor logged, missing counted", async () => {
+Deno.test("the shared browser key ignores a claimed actor and counts the refused call", async () => {
+  const baseline = await run("makesafe_board", { "x-api-key": SHARED_KEY }, {
+    edgeRuntime: false,
+  });
   const claimed = await run(
     "makesafe_board",
     { "x-api-key": SHARED_KEY, "x-sw-actor": "marnin" },
@@ -245,10 +252,22 @@ Deno.test("the shared browser key refused: same 401, the claimed actor logged, m
     error: "A signed-in Supabase user session is required.",
     code: "user_jwt_required",
   });
+  assertEquals(claimed.res.status, baseline.res.status);
+  assertEquals(claimed.body, baseline.body);
   assertEquals(actorLines(claimed.seen), [
-    "[ops-api] denied action=makesafe_board method=GET actor=marnin actor_source=header status=401 code=user_jwt_required",
+    "[ops-api] denied action=makesafe_board method=GET actor=actor_missing actor_source=header_untrusted status=401 code=user_jwt_required",
   ]);
-  assertEquals(countCalls(claimed.seen), []);
+  assertEquals(
+    claimed.seen.logs.some((line) => line.includes("marnin")),
+    false,
+  );
+  assertEquals(
+    claimed.seen.fetches.some((fetch) =>
+      JSON.stringify(fetch.body).includes("marnin")
+    ),
+    false,
+  );
+  assertEquals(countCalls(claimed.seen).length, 1);
 
   const missing = await run("makesafe_board", { "x-api-key": SHARED_KEY }, {
     edgeRuntime: true,
@@ -386,5 +405,8 @@ Deno.test("gap-fill receipt ignores a spoofed body actor", async () => {
 
   assertEquals(res.status, 200);
   assertEquals((persisted as any)?.last_decision_actor, "marnin");
-  assertEquals((persisted as any)?.last_decision_actor === "someone-else", false);
+  assertEquals(
+    (persisted as any)?.last_decision_actor === "someone-else",
+    false,
+  );
 });

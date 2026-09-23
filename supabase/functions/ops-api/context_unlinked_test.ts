@@ -310,23 +310,32 @@ Deno.test("rows refuses unknown scopes and reasons, half cursors, bad ids, dates
   }
 });
 
-Deno.test("the actor is the signed-in user, else a well-formed x-sw-actor, else actor_missing", () => {
+Deno.test("the actor is the signed-in user, else a trusted x-sw-actor, else actor_missing", () => {
   assertEquals(
-    unlinkedActor("u-1", new Headers({ "x-sw-actor": "workflow:x" })),
+    unlinkedActor("u-1", new Headers({ "x-sw-actor": "workflow:x" }), false),
     "user:u-1",
   );
   assertEquals(
-    unlinkedActor(null, new Headers({ "x-sw-actor": "workflow:census" })),
+    unlinkedActor(null, new Headers({ "x-sw-actor": "workflow:census" }), true),
     "workflow:census",
   );
   assertEquals(
     unlinkedActor(
       null,
       new Headers({ "x-sw-actor": "not a valid actor; drop table" }),
+      true,
     ),
     "actor_missing",
   );
-  assertEquals(unlinkedActor(undefined, new Headers()), "actor_missing");
+  assertEquals(unlinkedActor(undefined, new Headers(), false), "actor_missing");
+  assertEquals(
+    unlinkedActor(
+      null,
+      new Headers({ "x-sw-actor": "workflow:census" }),
+      false,
+    ),
+    "actor_missing",
+  );
 });
 
 Deno.test("both doors are staff-only: not profile-scoped, not agent-read, trades refused", () => {

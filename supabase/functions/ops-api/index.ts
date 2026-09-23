@@ -4931,13 +4931,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   }
 
   // F-ACT (INTEGRATION X31): who asked, for audit only. The verified JWT user,
-  // else the x-sw-actor header on a server-key call, else actor_missing. It is
+  // else x-sw-actor only with a service or agent server secret, else
+  // actor_missing. Shared browser-key and routine headers are untrusted. It is
   // written into one log line per call, a refused call included, and
-  // server-key calls without one are counted for the core status
+  // server-key classes without one are counted for the core status
   // (actor_calls.ts). Never refused: this is not an access gate.
   const requestActor = resolveRequestActor({
     verifiedUserId: authMode === 'jwt' ? authUser?.id : null,
     headers: req.headers,
+    trustActorHeader: authMode !== 'jwt' && serverSecretPresented,
   })
 
   const actionAuthorization = _authorizeOpsApiAction({

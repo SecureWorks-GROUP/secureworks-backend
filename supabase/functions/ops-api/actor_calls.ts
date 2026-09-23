@@ -2,8 +2,9 @@
 //
 // Right after the front door has authenticated the caller, the handler:
 //   1. resolves the actor once (_shared/request_actor.ts): the verified JWT
-//      user, else the x-sw-actor header on a server-key call, else
-//      actor_missing;
+//      user, else x-sw-actor only when a service or agent server secret was
+//      presented, else actor_missing. Shared browser-key and routine headers
+//      are ignored;
 //   2. writes it into one log line per request, with its source, so a claimed
 //      header is never read as a verified user: opsApiDeniedLogLine when the
 //      front door refuses the call (logged before the refusal returns, which
@@ -22,10 +23,7 @@
 // a database call it did not make before. Supabase's edge runtime always has
 // EdgeRuntime.
 
-import {
-  ACTOR_MISSING,
-  type RequestActor,
-} from "../_shared/request_actor.ts";
+import { ACTOR_MISSING, type RequestActor } from "../_shared/request_actor.ts";
 
 export type OpsApiAuthMode =
   | "api_key"

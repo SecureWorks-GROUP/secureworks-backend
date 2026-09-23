@@ -13,26 +13,37 @@ import {
   loggedActionName,
   opsApiDeniedLogLine,
   opsApiRequestLogLine,
-  recordOpsApiActorMissing,
   receiptActor,
+  recordOpsApiActorMissing,
 } from "./actor_calls.ts";
 
-const MISSING = resolveRequestActor({ headers: new Headers() });
+const MISSING = resolveRequestActor({
+  headers: new Headers(),
+  trustActorHeader: false,
+});
+const UNTRUSTED = resolveRequestActor({
+  headers: new Headers({ "x-sw-actor": "marnin" }),
+  trustActorHeader: false,
+});
 const CLAIMED = resolveRequestActor({
   headers: new Headers({ "x-sw-actor": "workflow:census" }),
+  trustActorHeader: true,
 });
 const INVALID = resolveRequestActor({
   headers: new Headers({ "x-sw-actor": "drop table; --" }),
+  trustActorHeader: true,
 });
 const USER = resolveRequestActor({
   verifiedUserId: "u-1",
   headers: new Headers(),
+  trustActorHeader: false,
 });
 
 Deno.test("receipt actor uses resolved identity and preserves the routine fallback", () => {
   assertEquals(receiptActor(CLAIMED, "api_key"), "workflow:census");
   assertEquals(receiptActor(USER, "jwt"), "user:u-1");
   assertEquals(receiptActor(MISSING, "api_key"), "actor_missing");
+  assertEquals(receiptActor(UNTRUSTED, "api_key"), "actor_missing");
   assertEquals(receiptActor(MISSING, "routine"), "makesafe-reporting-routine");
 });
 

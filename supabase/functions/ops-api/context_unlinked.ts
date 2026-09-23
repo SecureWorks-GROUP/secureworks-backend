@@ -108,8 +108,13 @@ function intIn(
 export function unlinkedActor(
   userId: string | null | undefined,
   headers: Headers,
+  trustActorHeader: boolean,
 ): string {
-  return resolveRequestActor({ verifiedUserId: userId, headers }).actor;
+  return resolveRequestActor({
+    verifiedUserId: userId,
+    headers,
+    trustActorHeader,
+  }).actor;
 }
 
 export function censusArgs(params: URLSearchParams): Record<string, unknown> {

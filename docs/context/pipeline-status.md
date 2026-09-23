@@ -81,18 +81,20 @@ alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
 
 `actor_missing` (F-ACT, `20260924201000_ops_api_actor_recording.sql`,
 INTEGRATION X31) is a core key, so it sits at the top level with the others:
-`{state, today, last_7_days}`, the number of server-key ops-api calls (MCP
-tools, `sw-axi`, automations) that carried no usable actor (no `x-sw-actor`
-header, or a malformed one), today and over the last 7 Perth days, today
-included. `state` is `available`, or `unavailable` with `code` when the
-counter cannot be read; it never fails the heartbeat. JWT calls and calls with
-an actor are not counted. It raises no alarm: identity is for audit only, and
-such a call is never refused. The counter is `ops_api_actor_calls`, one row
+`{state, today, last_7_days}`, the number of ops-api calls in the `api_key`,
+`routine`, and `agent_read` classes that carried no usable trusted actor, today
+and over the last 7 Perth days, today included. `x-sw-actor` is trusted only
+with the service or agent server secret. Shared browser-key and routine calls
+ignore a claimed header and count as missing; JWT calls use the verified user
+and ignore the header. `state` is `available`, or `unavailable` with `code`
+when the counter cannot be read; it never fails the heartbeat. Calls with a
+usable actor are not counted. It raises no alarm: identity is for audit only,
+and such a call is never refused. The counter is `ops_api_actor_calls`, one row
 per Perth day holding the missing count only (35 days kept), written only
 through `record_ops_api_actor_missing()`, which takes no argument. The actor
 itself is in the ops-api log line, one per call:
-`[ops-api] action=<action> method=<m> actor=<actor> actor_source=<jwt|header|header_invalid|none>`
-for a served call, and `[ops-api] denied action=... actor=... status=<n> code=<code>`
+`[ops-api] action=<action> method=<m> actor=<actor> actor_source=<jwt|header|header_invalid|header_untrusted|none>`
+for a served call, and `[ops-api] denied action=... actor=... actor_source=... status=<n> code=<code>`
 for a call the front door refused. The count runs through
 `EdgeRuntime.waitUntil`, best-effort.
 

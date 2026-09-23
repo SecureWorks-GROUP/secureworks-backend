@@ -566,12 +566,14 @@ body back up inside its rolled-back transaction (C1d does this for F1's
 `record_capture_run`). "Linked" is
 `context_linked_status()`; never re-list the linked statuses in new SQL.
 Who asked (F-ACT, X31, audit only, never refused): ops-api resolves it once per
-request with `_shared/request_actor.ts` (`requestActor` in the handler: the
-verified JWT user, else `x-sw-actor` on a server-key call, else
-`actor_missing`); existing receipt writers use `receiptActor` from
+request with `_shared/request_actor.ts`: `requestActor` uses the verified JWT
+user, else `x-sw-actor` only with the service or agent server key, else
+`actor_missing`. Shared browser-key and routine headers are ignored. Existing
+receipt writers use `receiptActor` from
 `ops-api/actor_calls.ts`, never their own header read or a caller-supplied
-actor field. Refused calls are logged with it too. Server-key calls
-with no usable actor are counted (count only, no dimensions) for the core key
+actor field. Refused calls are logged with it too. Calls in the `api_key`,
+`routine`, or `agent_read` classes without a usable actor (including an
+untrusted shared-key claim) are counted (count only, no dimensions) for the core key
 `actor_missing` (`20260924201000`, `ops-api/actor_calls.ts`).
 The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted
