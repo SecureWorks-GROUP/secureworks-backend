@@ -13,6 +13,6 @@ Service-role APIs:
 
 `context_attribution_attempts` (RLS on, service_role SELECT only) holds counts and codes: attempts under the current candidate list, asks on the current Perth day, last and next ask, outcome, last error code, candidate hash. Its one writer is the private `context_attribution_record_attempt`.
 
-`unplaced` rows are never selected by `rerun_context_attribution` or the due read. Reopening them on a named event (new job lead window, new candidate, new message in the same conversation) belongs to the placement slices (P1b, P4).
+`unplaced` rows are never selected by `rerun_context_attribution` or the due read. A new job reopens them inside its lead window via `context_reconsider_contact` (P1b; owner `docs/context/b2-capture-attribution.md`). A new candidate or a new message in the same conversation remains P4.
 
 Pre-image: production's three-argument Luna function was hand-applied by ledger row `20260914012038` and differs from the `20260911171000` file by one comment line only; the guard and the contract setup pin the live text (`md5 48eabf7e…`). Rollback: `supabase/rollbacks/20260924060000_context_attribution_attempts_down.sql` restores the live reservation body byte for byte and drops the rest; rested rows stay `unplaced`. Contract: `supabase/tests/migration-contracts/20260924060000_context_attribution_attempts`.
