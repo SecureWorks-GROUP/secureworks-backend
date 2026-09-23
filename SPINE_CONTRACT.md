@@ -81,7 +81,7 @@
 | cost_estimate | numeric(12,2) | Internal estimate |
 | photo_url | text | |
 | status | text | 'pending_approval', 'approved', 'rejected', 'auto_approved', 'sent', 'accepted', 'declined', 'invoiced' |
-| needs_approval | boolean | True if amount > $200 |
+| needs_approval | boolean | Staff: true if amount > $200. Trade JWT requests are always pending — AGENTS.md "Trade App Visibility Contract". |
 | share_token | text UNIQUE | Auto-generated, for client view URL |
 | sent_at, accepted_at, declined_at | timestamptz | |
 | invoice_method | text | 'standalone', 'with_final' |
@@ -148,7 +148,7 @@
 ### Variations (v2 — uses job_variations table)
 | Action | Input | Output |
 |--------|-------|--------|
-| `create_variation` | `{ job_id, description, estimated_cost?, amount?, photo_url?, reason?, invoice_method?, user_id? }` | `{ success, variation_id, variation_number, share_token, needs_approval, auto_approved, message }` |
+| `create_variation` | `{ job_id, description, estimated_cost?, amount?, photo_url?, reason?, invoice_method?, user_id? }` | Staff: `{ success, variation_id, variation_number, share_token, needs_approval, auto_approved, message }`. Trade JWT path: AGENTS.md "Trade App Visibility Contract" (`createVariationForCaller`). |
 | `approve_variation` | `{ variation_id (or event_id), approved, user_id?, notes? }` | `{ success, approved, message }` |
 | `list_variations` | `?job_id=&status=` (GET params) | `{ variations: [...] }` |
 | `send_variation` | `{ variation_id }` | `{ success, email_id }` |
