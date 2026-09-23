@@ -384,7 +384,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
-import { buildInvoiceAuthorisedEvidence, INVOICE_EMAILED_BODY_PREVIEW } from './invoice_status_evidence.ts'
+import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
@@ -8287,25 +8287,20 @@ if (import.meta.main) serve(async (req: Request) => {
         await client.from('xero_invoices').update({ status: String(approved?.Status || 'AUTHORISED').toUpperCase() }).eq('xero_invoice_id', aid).eq('org_id', DEFAULT_ORG_ID)
 
         // H3: write business_events.invoice.authorised — mirrors void_invoice's existing pattern.
-        // Wrapped in try/catch so a business_events outage does not break the customer-side AUTHORISE.
+        // Never throws, so a business_events outage does not break the customer-side AUTHORISE.
         // K3: row shape (kept job id, digit-free words) owned by invoice_status_evidence.ts.
-        try {
-          const { error: aEvErr } = await client.from('business_events').insert(buildInvoiceAuthorisedEvidence({
-            source: 'ops-api/approve_invoice',
-            xeroInvoiceId: aid,
-            jobId: aPrevInv?.job_id,
-            payload: {
-              previous_status: aPreviousStatus,
-              new_status: 'AUTHORISED',
-              invoice_number: aPrevInv?.invoice_number || approved?.InvoiceNumber || null,
-              total: aPrevInv?.total ?? approved?.Total ?? null,
-            },
-            operator: body.operator_email,
-          }))
-          if (aEvErr) console.log('[ops-api] business_events insert failed (approve_invoice):', aEvErr.message)
-        } catch (e) {
-          console.log('[ops-api] business_events insert failed (approve_invoice):', (e as Error).message)
-        }
+        await writeInvoiceAuthorisedEvidence(client, {
+          source: 'ops-api/approve_invoice',
+          xeroInvoiceId: aid,
+          jobId: aPrevInv?.job_id,
+          payload: {
+            previous_status: aPreviousStatus,
+            new_status: 'AUTHORISED',
+            invoice_number: aPrevInv?.invoice_number || approved?.InvoiceNumber || null,
+            total: aPrevInv?.total ?? approved?.Total ?? null,
+          },
+          operator: body.operator_email,
+        })
 
         return json({ success: true, status: 'AUTHORISED', invoice_number: approved?.InvoiceNumber })
       }
@@ -8379,23 +8374,18 @@ if (import.meta.main) serve(async (req: Request) => {
         await client.from('xero_invoices').update({ status: String(asApproved?.Status || 'AUTHORISED').toUpperCase() }).eq('xero_invoice_id', asId).eq('org_id', DEFAULT_ORG_ID)
 
         // H3 (Loop 1B-a): write business_events.invoice.authorised — same shape as approve_invoice.
-        try {
-          const { error: asEvErr } = await client.from('business_events').insert(buildInvoiceAuthorisedEvidence({
-            source: 'ops-api/approve_and_send_invoice',
-            xeroInvoiceId: asId,
-            jobId: asPrevInv?.job_id,
-            payload: {
-              previous_status: asPreviousStatus,
-              new_status: 'AUTHORISED',
-              invoice_number: asPrevInv?.invoice_number || asInvNumber || null,
-              total: asPrevInv?.total ?? asTotal ?? null,
-            },
-            operator: body.operator_email,
-          }))
-          if (asEvErr) console.log('[ops-api] business_events insert failed (approve_and_send_invoice):', asEvErr.message)
-        } catch (e) {
-          console.log('[ops-api] business_events insert failed (approve_and_send_invoice):', (e as Error).message)
-        }
+        await writeInvoiceAuthorisedEvidence(client, {
+          source: 'ops-api/approve_and_send_invoice',
+          xeroInvoiceId: asId,
+          jobId: asPrevInv?.job_id,
+          payload: {
+            previous_status: asPreviousStatus,
+            new_status: 'AUTHORISED',
+            invoice_number: asPrevInv?.invoice_number || asInvNumber || null,
+            total: asPrevInv?.total ?? asTotal ?? null,
+          },
+          operator: body.operator_email,
+        })
 
         // 2. Get OnlineInvoiceUrl for payment link
         let asPaymentUrl = ''
@@ -48132,18 +48122,13 @@ async function makesafeSendPack(
       await client.from('xero_invoices')
         .update({ status: 'AUTHORISED', updated_at: nowIso() })
         .eq('xero_invoice_id', xeroInvoiceId)
-      try {
-        const { error: evErr } = await client.from('business_events').insert(buildInvoiceAuthorisedEvidence({
-          source: 'ops-api/makesafe_send_pack',
-          xeroInvoiceId,
-          jobId,
-          payload: { previous_status: liveInvoiceRow.status || 'UNKNOWN', new_status: 'AUTHORISED', invoice_number: invoiceNumber },
-          operator: ctx.approverEmail,
-        }))
-        if (evErr) console.log('[makesafe_send_pack] business_events invoice.authorised non-blocking:', evErr.message)
-      } catch (e) {
-        console.log('[makesafe_send_pack] business_events invoice.authorised non-blocking:', (e as Error).message)
-      }
+      await writeInvoiceAuthorisedEvidence(client, {
+        source: 'ops-api/makesafe_send_pack',
+        xeroInvoiceId,
+        jobId,
+        payload: { previous_status: liveInvoiceRow.status || 'UNKNOWN', new_status: 'AUTHORISED', invoice_number: invoiceNumber },
+        operator: ctx.approverEmail,
+      })
     }
     // From this point the invoice is AUTHORISED. A failure must NOT re-authorise.
     await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', invoice_status: 'AUTHORISED', xero_invoice_id: xeroInvoiceId })

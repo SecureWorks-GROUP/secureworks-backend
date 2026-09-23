@@ -51,3 +51,25 @@ export function buildInvoiceAuthorisedEvidence(input: {
     metadata: { operator: input.operator || null },
   };
 }
+
+/**
+ * Writes one `invoice.authorised` row. Unconditional on purpose: it goes
+ * straight to `business_events` and never consults the capture lane. Never
+ * throws, so an evidence outage cannot break the customer-side AUTHORISE; a
+ * returned PostgREST error (which does not throw) is logged, not dropped.
+ * Returns whether the row was written.
+ */
+// deno-lint-ignore no-explicit-any
+export async function writeInvoiceAuthorisedEvidence(client: any, input: Parameters<typeof buildInvoiceAuthorisedEvidence>[0]): Promise<boolean> {
+  try {
+    const { error } = await client.from("business_events").insert(buildInvoiceAuthorisedEvidence(input));
+    if (error) {
+      console.log(`[${input.source}] business_events invoice.authorised insert failed:`, error.message);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.log(`[${input.source}] business_events invoice.authorised insert failed:`, (e as Error).message);
+    return false;
+  }
+}

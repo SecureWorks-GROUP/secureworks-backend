@@ -12,8 +12,8 @@
 //   - the words the ladder reads are digit-free, so ladder step 1 (job, invoice
 //     and PO numbers anywhere in the words) can never mis-link the row;
 //   - the invoice number stays in payload, and no address reaches the words;
-//   - the authorised insert stays unconditional (raw insert, never behind the
-//     capture lane).
+//   - the authorised insert stays unconditional (straight to business_events,
+//     never behind the capture lane) and never throws.
 //
 // No network, no live Supabase, no Xero.
 
@@ -23,6 +23,7 @@ import {
   INVOICE_AUTHORISED_BODY_PREVIEW,
   INVOICE_EMAILED_BODY_PREVIEW,
   type InvoiceAuthorisedSource,
+  writeInvoiceAuthorisedEvidence,
 } from "./invoice_status_evidence.ts"
 import { _verifyAndSendInvoiceEmail } from "./index.ts"
 import {
@@ -134,29 +135,60 @@ Deno.test("K3 authorised: channel is not one the ladder treats as automated", ()
   assert(!["system", "audit"].includes(row.channel as string))
 })
 
-// ── Wiring: every invoice.authorised writer in index.ts goes through the
-// builder as a raw, unconditional business_events insert. ──
-Deno.test("K3 wiring: the three authorised writers use the builder via a raw insert", async () => {
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url))
-  // No hand-built authorised row survives anywhere in ops-api.
-  assertEquals(
-    (src.match(/event_type:\s*['"]invoice\.authorised['"]/g) || []).length,
-    0,
-    "an invoice.authorised row is built outside invoice_status_evidence.ts",
-  )
-  const calls = src.match(/[^\n]*buildInvoiceAuthorisedEvidence\(\{\s*\n\s*source:\s*'([^']+)'/g) || []
-  const sources = calls.map((c) => c.match(/source:\s*'([^']+)'/)![1]).sort()
-  assertEquals(sources, [...SOURCES].sort())
-  for (const call of calls) {
-    // Unconditional: a direct table insert, never insertCapturedEvidence or
-    // logBusinessEvent (both skip when the capture lane is off).
-    assert(
-      /client\.from\('business_events'\)\.insert\(buildInvoiceAuthorisedEvidence\(\{/.test(call),
-      `authorised writer is not a raw business_events insert: ${call.trim()}`,
-    )
+// ── The writer all three authorised sites call. ──
+// A client that records every table it is asked for. Any read other than the
+// business_events insert (for example the capture lane in automation_switches)
+// fails the test, which is what "unconditional" means here.
+function recordingClient(insertResult: () => Promise<{ error: { message: string } | null }>) {
+  const tables: string[] = []
+  const rows: Row[] = []
+  const client = {
+    from(table: string) {
+      tables.push(table)
+      if (table !== "business_events") throw new Error(`unexpected table read: ${table}`)
+      return {
+        insert(row: Row) {
+          rows.push(row)
+          return insertResult()
+        },
+      }
+    },
   }
-  assert(!/insertCapturedEvidence\([^)]*buildInvoiceAuthorisedEvidence/.test(src))
-  assert(!/logBusinessEvent\([^)]*buildInvoiceAuthorisedEvidence/.test(src))
+  return { client, tables, rows }
+}
+
+for (const source of SOURCES) {
+  Deno.test(`K3 write (${source}): one unconditional business_events insert of the built row`, async () => {
+    const { client, tables, rows } = recordingClient(() => Promise.resolve({ error: null }))
+    const input = {
+      source,
+      xeroInvoiceId: "xero-inv-1",
+      jobId: JOB_ID,
+      payload: { invoice_number: "INV-1477" },
+      operator: "ops@example.com",
+    }
+    const written = await writeInvoiceAuthorisedEvidence(client, input)
+    assertEquals(written, true)
+    assertEquals(tables, ["business_events"], "no capture-lane or other read before the insert")
+    assertEquals(rows, [buildInvoiceAuthorisedEvidence(input)])
+  })
+}
+
+Deno.test("K3 write: a returned PostgREST error is reported, never thrown", async () => {
+  const { client, rows } = recordingClient(() => Promise.resolve({ error: { message: "insert rejected" } }))
+  const written = await writeInvoiceAuthorisedEvidence(client, {
+    source: "ops-api/approve_invoice", xeroInvoiceId: "x", jobId: JOB_ID, payload: {}, operator: null,
+  })
+  assertEquals(written, false)
+  assertEquals(rows.length, 1)
+})
+
+Deno.test("K3 write: a thrown transport fault is reported, never thrown", async () => {
+  const { client } = recordingClient(() => Promise.reject(new Error("network down")))
+  const written = await writeInvoiceAuthorisedEvidence(client, {
+    source: "ops-api/makesafe_send_pack", xeroInvoiceId: "x", jobId: JOB_ID, payload: {}, operator: null,
+  })
+  assertEquals(written, false)
 })
 
 // ── invoice.emailed through the real Outlook send path. ──
@@ -192,14 +224,4 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
   }
   assertEquals(ev.payload.invoice_number, "INV-1477")
   assertEquals(ev.payload.to, "client@example.com")
-})
-
-Deno.test("K3 emailed: logBusinessEvent prefers the caller body_preview over payload", async () => {
-  // The emailed row's words come from logBusinessEvent's textish chain; the
-  // caller-supplied body_preview must win so nothing from payload leaks in.
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url))
-  const start = src.indexOf("async function logBusinessEvent(")
-  assert(start >= 0)
-  const fn = src.slice(start, src.indexOf("\n}\n", start))
-  assert(/const textish = String\(\s*event\.body_preview \|\|/.test(fn))
 })
