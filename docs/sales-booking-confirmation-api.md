@@ -70,8 +70,12 @@ last seven days). Outcome window inputs require offsets, positive duration,
 and at most 366 days. Pending/sending requests never count as bookings.
 
 The appointment ledger has no contact column. Its `idempotency_key` joins the
-contact-bound model's `calendar_write.receipt.booking_key` or `.idempotency_key`,
-or an existing current outcome's `booking_key`. GHL contact ID then joins the
+executor's own press record for the lead (`sales_booking_executions`, see
+`docs/sales-booking-executor.md` "What the read shows"), the contact-bound
+model's `calendar_write.receipt.booking_key` or `.idempotency_key`, or an
+existing current outcome's `booking_key`. Each visit names its join in
+`bound_by`, and diary events of a booked visit (GHL event or Outlook mirror)
+carry `booked_visit`. GHL contact ID then joins the
 lead, never name/address. A ledger row without a unique lead binding is reported
 as unresolved, never guessed or silently dropped from completeness.
 

@@ -129,6 +129,45 @@ the calendar row (re-claim allowed only while unbooked) and passes
 provider call. Message rows settle once; a booked calendar row is permanent.
 The table references the approval row and is never deleted.
 
+## What the read shows
+
+`sales_booking_read` composes every press for the week's leads
+(`ops-api/sales_booking_execution_read.ts`, applied after approvals and before
+visits). It reads `sales_booking_executions` by lead contact, the
+`sales_booking_approvals` row each press executed (for the exact text, times
+and route) and, for a booking, the GHL writer's own
+`ghl_calendar_appointment_requests` row under the same key. Read only.
+
+| Executor row | GHL writer row | Lead shows | Channel `state` |
+| --- | --- | --- | --- |
+| calendar `booked` | complete, same appointment or none | `booked` | `succeeded` |
+| calendar `claimed` | complete | `booked` (settle did not land) | `succeeded` |
+| calendar `claimed`, under 2 minutes old | any other | `in_progress` | `pending` |
+| calendar `claimed`, older | `sending` | `failed`: may or may not be in GHL | `unknown` |
+| calendar `claimed`, older | none or `reserved` | `refused`: nothing written to GHL | `failed` |
+| calendar, executor and writer name different appointments | | `failed` | `unknown` |
+| message `sent` | | `sent`, with `sent_at`, exact `text`, `message_id` | `succeeded` |
+| message `sending`, under 2 minutes old | | `in_progress` | `pending` |
+| message `sending` older, or `unknown` | | `failed`: may or may not have gone, never re-sent | `unknown` |
+
+Each lead carries `booking_executions` (newest first, each with `state` and
+plain `words`); the newest press per step also lands on
+`booking_read_model.calendar_write` / `.message` as `execution`, `state`,
+`reason` (the words, when not booked or sent), `approval.ui_snapshot` and a
+`receipt` (booking: `booking_key`, `appointment_id`, `start`, `end`; text:
+`message_id`, `sent_at`, `text`). A newer live approval that has not been
+pressed keeps its own `approved` state and gets only `execution`. A booking
+joins `booked_visits` on the executor's record (the writer key IS the approval
+binding hash; `bound_by: "executor"`), and the diary marks its GHL event and
+Outlook mirror with `booked_visit`. `booking_flow.execution_read` reports
+`complete` or `could_not_read`; an unreadable ledger gives
+`booking_executions: null` and leaves channels untouched, never "no press".
+
+Dry runs and refusals decided before the claim (expired approval, customer
+reply, Outlook clash, ...) are answered to the press only and leave no row, so
+the read shows the lead exactly as before the press: never booked or sent.
+Tests: `ops-api/sales_booking_execution_read_test.ts`.
+
 ## Out of scope
 
 Outlook writes (the mirror event), stage moves, the screen UI, Stratco intake,

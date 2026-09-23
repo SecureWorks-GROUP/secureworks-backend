@@ -820,6 +820,7 @@ import { buildOpsApiVersion } from './ops_api_version.ts'
 // persist kind=thread_facts and kind=roster. No GHL write, no send, no
 // calendar write.
 import { applySalesBookingVisits } from './sales_booking_visits.ts'
+import { applySalesBookingExecutions } from './sales_booking_execution_read.ts'
 import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_execute.ts'
 import { createSalesBookingExecuteDeps } from './sales_booking_execute_live.ts'
 import {
@@ -5221,7 +5222,8 @@ if (import.meta.main) serve(async (req: Request) => {
             assembled.week_start,
           )
           return json(await applySalesBookingVisits(client,
-            await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client)),
+            await applySalesBookingExecutions(client,
+              await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client))),
             { visit_outcomes_from: sbParam('visit_outcomes_from'), visit_outcomes_to: sbParam('visit_outcomes_to') }))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
