@@ -180,7 +180,10 @@ Deno.test("approve_booking_proposal sends AGENT_BEARER_TOKEN to the agent", asyn
           );
           assertEquals(agentCalls.length, 1);
           assertEquals(agentCalls[0].authorization, "Bearer agent-token");
-          assertEquals(agentCalls[0].body, { proposal_id: "p-1", commit: false });
+          assertEquals(agentCalls[0].body, {
+            proposal_id: "p-1",
+            commit: false,
+          });
           assert(!calls.some((c) => c.authorization?.includes(SERVICE_KEY)));
         },
       ),

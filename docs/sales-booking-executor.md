@@ -187,7 +187,7 @@ and route) and, for a booking, the GHL writer's own
 | calendar `claimed` | complete | `booked` (settle did not land) | `succeeded` |
 | calendar `claimed`, under 2 minutes old | any other | `in_progress` | `pending` |
 | calendar `claimed`, older | `sending` | `failed`: may or may not be in GHL | `unknown` |
-| calendar `claimed`, older | none or `reserved` | `refused`: nothing written to GHL | `failed` |
+| calendar `claimed`, older | none, `reserved`, or `released` | `refused`: nothing written to GHL | `failed` |
 | calendar, executor and writer name different appointments | | `failed` | `unknown` |
 | message `sent` with `message_id` | | `sent`, with `sent_at`, exact `text`, `message_id` | `succeeded` |
 | message `sending`, under 2 minutes old | | `in_progress` | `pending` |
@@ -213,6 +213,7 @@ Tests: `ops-api/sales_booking_execution_read_test.ts`.
 
 ## Out of scope
 
-Stage moves, the screen UI, Stratco intake,
-Luna, and retiring the old booking paths. Prior-offer census across other leads
-is not re-read at the press.
+Stage moves, the screen UI, Stratco intake, and Luna. The old booking
+paths were retired separately (23 Sep 2026; AGENTS.md "Booking confirmation
+authority"). Prior-offer census across other leads is not re-read at the
+press.

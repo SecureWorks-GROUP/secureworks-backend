@@ -69,7 +69,7 @@ complete commitments, evidence and channel hash checks. `send_hold` stays true;
 `ghl_calendar_appointment_requests` for the mapped GHL scoper. The selected
 week is combined with `visit_outcomes_from`/`visit_outcomes_to` (default: the
 last seven days). Outcome window inputs require offsets, positive duration,
-and at most 366 days. Pending/sending requests never count as bookings.
+and at most 366 days. Pending, sending and released requests never count as bookings.
 
 The appointment ledger has no contact column. Its `idempotency_key` joins the
 executor's own press record for the lead (`sales_booking_executions`, see
