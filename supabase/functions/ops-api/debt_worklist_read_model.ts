@@ -636,12 +636,21 @@ export function mergeTimeline(entries: TimelineEntry[]): {
   const byKey = new Map<string, TimelineEntry>();
   let merged = 0;
   const absorb = (keep: TimelineEntry, other: TimelineEntry) => {
+    for (const s of other.seen_in) {
+      if (!keep.seen_in.includes(s)) keep.seen_in.push(s);
+    }
+    if (keep.invoice_scope !== "unplaced" && other.invoice_scope === "unplaced") {
+      return;
+    }
+    if (keep.invoice_scope === "unplaced" && other.invoice_scope !== "unplaced") {
+      keep.job_id = other.job_id;
+      keep.invoice_scope = other.invoice_scope;
+      keep.invoice_ids = [...other.invoice_ids];
+      return;
+    }
     if (keep.job_id !== other.job_id) {
       keep.job_id = null;
       keep.invoice_scope = "debtor";
-    }
-    for (const s of other.seen_in) {
-      if (!keep.seen_in.includes(s)) keep.seen_in.push(s);
     }
     for (const id of other.invoice_ids) {
       if (!keep.invoice_ids.includes(id)) keep.invoice_ids.push(id);
@@ -1058,13 +1067,19 @@ export async function debtWorklist(
   }
   const ghlCacheByContact = new Map<string, any>();
   let ghlCacheFault: string | null = null;
+  let ghlCachePageCapHit = false;
   try {
     for (const ids of chunk([...allGhlIds].sort())) {
-      const rows = unwrap(
-        await client.from("ghl_conversation_cache")
-          .select("contact_id, job_id, message_count, synced_at")
-          .in("contact_id", ids),
-      ) || [];
+      const rows = await pageThrough(
+        "ghl_conversation_cache",
+        () =>
+          client.from("ghl_conversation_cache")
+            .select("id, contact_id, job_id, message_count, synced_at")
+            .in("contact_id", ids),
+        warnings,
+        "id",
+        true,
+      );
       for (const r of rows) {
         const prev = ghlCacheByContact.get(r.contact_id);
         if (!prev || String(r.synced_at ?? "") > String(prev.synced_at ?? "")) {
@@ -1074,6 +1089,7 @@ export async function debtWorklist(
     }
   } catch (e) {
     ghlCacheFault = errText(e);
+    ghlCachePageCapHit = ghlCachePageCapHit || ghlCacheFault.includes("page ceiling");
     faults.push({
       source: "ghl",
       detail: `ghl_conversation_cache read failed: ${ghlCacheFault}`,
@@ -1083,11 +1099,16 @@ export async function debtWorklist(
   let ghlJobCacheFault: string | null = null;
   try {
     for (const ids of chunk([...linkedJobIds].sort())) {
-      const rows = unwrap(
-        await client.from("ghl_conversation_cache")
-          .select("job_id, contact_id, message_count, synced_at")
-          .in("job_id", ids),
-      ) || [];
+      const rows = await pageThrough(
+        "ghl_conversation_cache",
+        () =>
+          client.from("ghl_conversation_cache")
+            .select("id, job_id, contact_id, message_count, synced_at")
+            .in("job_id", ids),
+        warnings,
+        "id",
+        true,
+      );
       for (const r of rows) {
         const prev = ghlCacheByJob.get(r.job_id);
         if (!prev || String(r.synced_at ?? "") > String(prev.synced_at ?? "")) {
@@ -1097,6 +1118,7 @@ export async function debtWorklist(
     }
   } catch (e) {
     ghlJobCacheFault = errText(e);
+    ghlCachePageCapHit = ghlCachePageCapHit || ghlJobCacheFault.includes("page ceiling");
     faults.push({
       source: "ghl",
       detail: `job-keyed GHL cache read failed: ${ghlJobCacheFault}`,
@@ -1427,11 +1449,16 @@ export async function debtWorklist(
     ].sort();
     try {
       for (const ids of chunk(contactOnly)) {
-        const rows = unwrap(
-          await client.from("ghl_conversation_cache")
-            .select("contact_id, messages, synced_at")
-            .in("contact_id", ids),
-        ) || [];
+        const rows = await pageThrough(
+          "ghl_conversation_cache",
+          () =>
+            client.from("ghl_conversation_cache")
+              .select("id, contact_id, messages, synced_at")
+              .in("contact_id", ids),
+          warnings,
+          "id",
+          true,
+        );
         for (const r of rows) {
           const list = contactMessages.get(r.contact_id) ?? [];
           if (Array.isArray(r.messages)) list.push(...r.messages);
@@ -1440,6 +1467,8 @@ export async function debtWorklist(
       }
     } catch (e) {
       contactMessagesFault = errText(e);
+      ghlCachePageCapHit = ghlCachePageCapHit ||
+        contactMessagesFault.includes("page ceiling");
       faults.push({
         source: "ghl",
         detail: `contact-keyed GHL cache read failed: ${contactMessagesFault}`,
@@ -1672,6 +1701,7 @@ export async function debtWorklist(
         });
       }
       if (
+        ghlCachePageCapHit ||
         (contactMatchFault && identity.status === "verified") ||
         (contactMessagesFault && contactOnlyGhl.length) ||
         (contactNotesFault && contactIds.length) ||
@@ -1687,6 +1717,7 @@ export async function debtWorklist(
       timelineSourcesComplete = conversationFaults.length === 0 && !chaseFault &&
         !invoiceEventsFault && !coverageFault && !linkUnknown &&
         !jobsFault && !(factsReadFault && linkedJobs.length) &&
+        !ghlCachePageCapHit &&
         !(contactMatchFault && identity.status === "verified") &&
         !(contactMessagesFault && contactOnlyGhl.length) &&
         !(contactNotesFault && contactIds.length) &&
@@ -1820,6 +1851,7 @@ export async function debtWorklist(
     const ghlUnreadable = linkUnknown || Boolean(jobsFault) ||
       Boolean(ghlCacheFault) ||
       Boolean(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) ||
+      ghlCachePageCapHit ||
       Boolean(contactMatchFault && identity.status === "verified") ||
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
       Boolean(contactNotesFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
@@ -1872,6 +1904,7 @@ export async function debtWorklist(
           : [...ghlSyncs].sort()[0],
         stale_after: `${GHL_CACHE_STALE_HOURS}h`,
         stale: ghlUnreadable || unverifiedCandidates.length ? null : ghlStale,
+        complete: !ghlUnreadable,
         owner: "CIO",
         recovery_action: ghlUnreadable
           ? "Retry the read; if it keeps failing, CIO checks the job link, contact_matches and GHL cache reads"

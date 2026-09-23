@@ -877,6 +877,31 @@ Deno.test("job-keyed GHL cache freshness is reported for the conversation fallba
   );
 });
 
+Deno.test("GHL cache page ceiling marks the source and timeline incomplete", async () => {
+  const tables = unitTables();
+  tables.ghl_conversation_cache = Array.from({ length: 20_001 }, (_, i) => ({
+    id: `cache-${String(i).padStart(5, "0")}`,
+    contact_id: "ghl-a",
+    job_id: JOB_A,
+    message_count: 1,
+    synced_at: "2026-09-24T00:00:00Z",
+  }));
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables), conversationStub({ [JOB_A]: JOB_A_MESSAGES }).fn),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.sources.ghl.complete, false);
+  assertEquals(debtor.sources.ghl.status, "unreadable");
+  assertEquals(debtor.timeline.complete, false);
+  assertEquals(debtor.timeline.sources_complete, false);
+  assert(
+    out.faults.some((fault: any) =>
+      fault.source === "ghl" && fault.detail.includes("page ceiling")
+    ),
+  );
+});
+
 Deno.test("invoice population refuses a capped, potentially partial book", async () => {
   const invoices = Array.from({ length: 20_001 }, (_, index) =>
     invoice(index + 1, { xero_contact_id: null, raw_json: {} })
@@ -1180,6 +1205,32 @@ Deno.test("one provider message copied across jobs is represented at debtor scop
   assertEquals(merged.entries[0].job_id, null);
   assertEquals(merged.entries[0].invoice_scope, "debtor");
   assertEquals(merged.entries[0].invoice_ids.sort(), [INV(1), INV(3)].sort());
+});
+
+Deno.test("an unplaced inbox copy cannot downgrade a confirmed message placement", () => {
+  const providerId = "graph:shared-race-copy";
+  const placed = entryFromConversation({
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-09-20T01:00:00Z",
+    preview: "A received email",
+    source_system: "business_events",
+    provider_message_id: providerId,
+  }, JOB_A, [INV(1)]);
+  const inbox = entryFromConversation({
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-09-20T01:00:00Z",
+    preview: "A received email",
+    source_system: "inbox",
+    provider_message_id: providerId,
+  }, JOB_A, [INV(1)]);
+  const merged = mergeTimeline([inbox, placed]);
+  assertEquals(merged.entries.length, 1);
+  assertEquals(merged.entries[0].job_id, JOB_A);
+  assertEquals(merged.entries[0].invoice_scope, "job");
+  assertEquals(merged.entries[0].invoice_ids, [INV(1)]);
+  assertEquals(merged.entries[0].seen_in.sort(), ["business_events", "inbox"]);
 });
 
 Deno.test("chase SMS dedupe matches earlier, ambiguous and competing copies", () => {
