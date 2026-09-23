@@ -17,6 +17,8 @@ import {
 // Confirmation overlay (`booking_flow`, per-case `booking_read_model`,
 // published availability, booked visits, independent approvals):
 // docs/sales-booking-confirmation-api.md.
+// After a press, what booked or sent (`booking_executions`):
+// docs/sales-booking-executor.md "What the read shows".
 //
 // ── NO SEND, NO GHL OR OUTLOOK WRITE ──
 // Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
@@ -737,6 +739,8 @@ export function emptySalesBookingPackView(): SalesBookingPackView {
 export interface SalesBookingCase {
   booking_read_model?: BookingObject;
   booked_visits?: BookingObject[] | null;
+  /** Executor presses for this lead, newest first (sales_booking_execution_read.ts). Null when unreadable. */
+  booking_executions?: BookingObject[] | null;
   visit_outcome?: import("./visit_outcomes.ts").VisitOutcome | null;
   visit_outcome_history?: import("./visit_outcomes.ts").VisitOutcome[] | null;
   visit_read_complete?: boolean;
@@ -1220,6 +1224,8 @@ export interface SalesBookingDiaryEntry {
    * Both rows stay on the diary so each calendar is shown event for event.
    */
   mirror_of_ghl_event_id: string | null;
+  /** Additive, set by sales_booking_visits.ts: the booked visit on this event (GHL id or Outlook mirror), else null. */
+  booked_visit?: BookingObject | null;
 }
 
 export type SalesBookingDiarySource = "ghl" | "outlook";

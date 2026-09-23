@@ -4,7 +4,8 @@ Contract: merged UX `docs/booking-confirm-contract.md` and wiki
 `harness/ops/skills/secureworks-scope-booking/CALENDAR-STEPS.md`, read from GitHub
 main on 2026-09-22. Implementation: `sales_booking_confirmation.ts` and
 `sales_booking_visits.ts`, composed by `sales_booking_read` after the existing
-pack overlay.
+pack overlay. Press results overlay after approvals and before visits:
+`docs/sales-booking-executor.md` "What the read shows".
 
 This release joins the read and independent approval **storage** contracts.
 It does not execute a booking or message, enable a provider, or supply a model.
@@ -70,10 +71,15 @@ last seven days). Outcome window inputs require offsets, positive duration,
 and at most 366 days. Pending/sending requests never count as bookings.
 
 The appointment ledger has no contact column. Its `idempotency_key` joins the
-contact-bound model's `calendar_write.receipt.booking_key` or `.idempotency_key`,
-or an existing current outcome's `booking_key`. GHL contact ID then joins the
-lead, never name/address. A ledger row without a unique lead binding is reported
-as unresolved, never guessed or silently dropped from completeness.
+executor's own press record for the lead (`sales_booking_executions`, see
+`docs/sales-booking-executor.md` "What the read shows"), the contact-bound
+model's `calendar_write.receipt.booking_key` or `.idempotency_key`, or an
+existing current outcome's `booking_key`. Each visit names its join in
+`bound_by` (and `execution` when that join is the press), and diary events of
+a booked visit (GHL event or Outlook mirror) carry `booked_visit`. GHL contact
+ID then joins the lead, never name/address. A ledger row without a unique lead
+binding is reported as unresolved, never guessed or silently dropped from
+completeness.
 
 All `visit_outcomes` rows for each booking key are read, including corrections
 outside the date window. Pages are 500 rows, bounded at 10,000 per read, with
@@ -165,7 +171,8 @@ The executor is `sales_booking_book` / `sales_booking_send`
 calendars at the press, defaults to dry run, and keeps calendar notifications
 off. A message send needs its own approval and no calendar receipt, so a text
 with no time can be sent. This recording action itself still has no execution
-capability.
+capability. After a live press, `sales_booking_read` overlays what that press
+did; owner: `docs/sales-booking-executor.md` "What the read shows".
 
 ## Local proof
 

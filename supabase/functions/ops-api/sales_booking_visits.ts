@@ -138,7 +138,16 @@ export async function applySalesBookingVisits(
       continue;
     }
     // A successful provider receipt contains no contact. Bind only an exact key
-    // from a contact-bound published model or the current durable outcome.
+    // from the executor's own record of the press (the ledger key IS its
+    // approval binding hash), a contact-bound published model, or the current
+    // durable outcome.
+    const pressFor = (row: BookingObject) =>
+      Array.isArray(row.booking_executions)
+        ? row.booking_executions.find((e: BookingObject) =>
+          e.step === "calendar" && e.binding_hash === key &&
+          e.contact_id === row.contact_id
+        )
+        : undefined;
     const candidates = response.cases.filter((row) => {
       if (!row.contact_id) return false;
       const model = row.booking_read_model;
@@ -148,12 +157,15 @@ export async function applySalesBookingVisits(
         modelKey === key;
       const outcomeBound = current?.contact_id === row.contact_id &&
         current.scoper_user_id === response.resource.scoper_user_id;
-      return modelBound || outcomeBound;
+      return !!pressFor(row) || modelBound || outcomeBound;
     });
     const row = candidates[0];
     const receipt = appointment.result;
+    const press = row ? pressFor(row) : undefined;
     if (
       candidates.length !== 1 || !row || !receipt?.appointmentId ||
+      (press && (press.state !== "booked" ||
+        press.appointment_id !== receipt.appointmentId)) ||
       !(Date.parse(receipt.endTime) > Date.parse(receipt.startTime)) ||
       Date.parse(receipt.startTime) !== Date.parse(appointment.start_time) ||
       Date.parse(receipt.endTime) !== Date.parse(appointment.end_time) ||
@@ -175,11 +187,42 @@ export async function applySalesBookingVisits(
       visit_end: receipt.endTime,
       visit_outcome: current,
       visit_outcome_history: chain,
+      // Additive: which record bound this booking to its lead.
+      bound_by: press
+        ? "executor"
+        : current?.contact_id === row.contact_id
+        ? "visit_outcome"
+        : "published_receipt",
+      execution: press ?? null,
     });
     history.push(...chain);
   }
   result.booked_visits = visits;
   result.visit_outcomes = history;
+  // The diary shows each booked visit on its GHL event and its Outlook mirror.
+  if (Array.isArray(result.diary)) {
+    result.diary = result.diary.map((entry) => {
+      const ghlId = entry.source === "outlook"
+        ? entry.mirror_of_ghl_event_id
+        : entry.event_id;
+      const visit = ghlId
+        ? visits.find((v) => v.appointment_id === ghlId)
+        : undefined;
+      return {
+        ...entry,
+        booked_visit: visit
+          ? {
+            state: "booked",
+            booking_key: visit.booking_key,
+            appointment_id: visit.appointment_id,
+            contact_id: visit.contact_id,
+            display_name: visit.display_name,
+            bound_by: visit.bound_by,
+          }
+          : null,
+      };
+    });
+  }
   flow.booked_visits_read = unresolved ? "partial" : "complete";
   flow.visit_outcomes_read = unresolved ? "partial" : "complete";
   flow.visit_outcome_write = unresolved ? null : "append-only-v1";
