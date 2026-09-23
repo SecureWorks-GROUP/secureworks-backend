@@ -3539,6 +3539,22 @@ died in the Layer B lock. Shared predicates live in
 claim eligibility BEFORE the UPDATE: PostgREST has no transaction across calls,
 so an update-then-count-rows check leaves a partial write behind on failure.
 
+## The GHL Webhook Receiver Authenticates First And Logs Ids Only
+
+`ghl-webhook-receiver` (handler in `handler.ts`, rules in `receiver_auth.ts`)
+accepts two proofs by event type: the GHL app's Ed25519 `X-GHL-Signature` over
+the raw body plus `locationId = GHL_LOCATION_ID` for app events (messages,
+notes, tasks, appointments), and the shared `GHL_WEBHOOK_SECRET` header for
+workflow posts (`CallCompleted`, `ContactStageChanged`, ...); contact events take
+either. It runs in OBSERVE mode (processes everything, receipts `auth: missing`)
+until `GHL_WEBHOOK_AUTH_MODE=enforce`, which 401s the rest; flip only after
+`auth=missing` receipts are zero for 48 hours (gate G-AUTH). Every delivery
+writes exactly one ids-only `webhook_log` row (`payload.receipt =
+ids_only_v1`): never write a raw body, message text or custom field there or to
+a log line, and never let a body `job_id` choose a job. `index.ts` must keep
+`--no-verify-jwt` in its first 30 lines (the deploy workflow reads it). Tests:
+`receiver_c1b_test.ts`, `receiver_auth_test.ts`.
+
 ## Outbound SMS Sender Policy Is One Shared Module
 
 Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company
