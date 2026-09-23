@@ -3681,6 +3681,32 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
+## Every Xero Invoice Read Goes Through One Path; `xero_verified_at` Is The Fresh Stamp
+
+`xero-sync/xero_invoice_record.ts` (money MN1) owns what a Xero invoice read
+does to our copy: `buildInvoiceRecord` for list reads (incremental loop,
+open-book sweep, closure `IDs=` read, backfill), `buildVerifiedInvoicePatch`
+for single-record reads (`reconcileXeroInvoice`: update only, an omitted
+field never erases the cached one), and `applyProviderInvoiceEffects`
+(reference auto-link, deposit stamp, paid-job completion) on every path. Do
+not add a fifth writer with its own side effects. The hourly verify always
+runs. `verifyEffectsForMode` keeps off and observe on `deposit_stamp_only`
+(no job completion, no reference link, no GHL write); apply runs the same
+full effects as the incremental loop. Paid-job completion calls ops-api
+`update_job_status`, whose GHL stage sync can fire customer workflows, so
+turning apply on is a live switch needing the captain's word. Every effects
+caller — verify included — passes the cached `xero_invoices` row
+(`EXISTING_LINK_COLUMNS`) so `sealedSesXeroLinkRefusal` sees the SES
+bindings; never `existing=null` for a row that was selected because it
+exists. `xero_invoices.xero_verified_at`
+means "read from Xero"; `synced_at` only means "last local write" (the ~20
+ops-api mirror writers set it). The 15-minute open-book sweep
+(`open_book_sweep.ts`) runs only while flag `money_open_book_v1` is on
+(observe); `money_open_book_apply_v1` also on means apply. The live
+`feature_flags` table is boolean, so that pair is the three-state flag, parsed
+once by `context_money_open_book_mode()`. Status block:
+`context_money_status()` in `docs/context/pipeline-status.md`.
+
 ## Outbound SMS Sender Policy Is One Shared Module
 
 Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company

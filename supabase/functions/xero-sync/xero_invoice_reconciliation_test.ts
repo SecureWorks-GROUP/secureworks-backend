@@ -101,6 +101,8 @@ Deno.test("every accepted status persists verified balances without inventing a 
       amount_due: 60,
       amount_paid: 40,
       synced_at: NOW.toISOString(),
+      // money MN1: a verified read records when our copy was read from Xero.
+      xero_verified_at: NOW.toISOString(),
       reconcile_attempted_at: NOW.toISOString(),
       reconcile_last_error: null,
       raw_json: invoice(status),

@@ -23,8 +23,18 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
+import {
+  applyProviderInvoice,
+  applyProviderInvoiceEffects,
+  buildInvoiceRecord,
+  loadExistingInvoiceLink,
+  parseXeroDate,
+  sealedSesXeroLinkRefusal,
+  verifyEffectsForMode,
+  type ProviderInvoiceDeps,
+} from './xero_invoice_record.ts'
+import { sweepOpenReceivables, OPEN_BOOK_PAGE_SIZE, type OpenBookModeReading, type OpenBookSummary } from './open_book_sweep.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
-import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
@@ -44,8 +54,6 @@ import {
   type POCandidate,
 } from './materials_ingest.ts'
 import {
-  sealedSesMoneyRefusal,
-  type SealedSesJobRecord,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
 import {
@@ -77,39 +85,8 @@ function json(data: unknown, status = 200) {
   })
 }
 
-type XeroInvoiceLinkRecord = {
-  id?: string | null
-  xero_invoice_id?: string | null
-  invoice_number?: string | null
-  invoice_type?: string | null
-  job_id?: string | null
-  invoice_obligation_revision_id?: string | null
-  ses_external_token?: string | null
-}
-
-export async function sealedSesXeroLinkRefusal(
-  _client: any,
-  invoice: XeroInvoiceLinkRecord,
-  _targetJob: string | SealedSesJobRecord,
-  action: string,
-): Promise<SealedSesMoneyRefusal | null> {
-  // ACCPAY is explicitly outside the sales-invoice fence. A missing/unknown
-  // type is not proof that the row is safe, so it must still be classified
-  // against its SES bindings and source/target jobs.
-  if (String(invoice.invoice_type || '').toUpperCase() === 'ACCPAY') {
-    return null
-  }
-
-  if (invoice.invoice_obligation_revision_id || invoice.ses_external_token) {
-    return sealedSesMoneyRefusal(action, {
-      xero_invoice_id: invoice.xero_invoice_id || null,
-      invoice_number: invoice.invoice_number || null,
-      ses_release_binding: true,
-    })
-  }
-
-  return null
-}
+// The SES link fence moved to the one invoice-record module (money MN1).
+export { sealedSesXeroLinkRefusal }
 
 async function linkContactInvoicesToJob(
   client: any,
@@ -387,12 +364,7 @@ const { get: xeroGet, getProjects: xeroProjectsGet, post: xeroPost } = createXer
 // PARSE XERO DATE — converts /Date(1234567890000)/ → ISO string
 // ════════════════════════════════════════════════════════════
 
-function parseXeroDate(xeroDate: string | null | undefined): string | null {
-  if (!xeroDate) return null
-  const match = xeroDate.match(/\/Date\((\d+)([+-]\d+)?\)\//)
-  if (!match) return null
-  return new Date(parseInt(match[1], 10)).toISOString()
-}
+// parseXeroDate: imported from xero_invoice_record.ts (one copy).
 
 
 // ════════════════════════════════════════════════════════════
@@ -562,6 +534,78 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
   return out
 }
 
+// A fully paid job still in 'invoiced' moves to complete. Routed through
+// ops-api so the GHL stage sync fires; a failed call falls back to a direct,
+// status-guarded update, as before money MN1 moved this into the shared path.
+async function completeInvoicedJob(sb: any, jobId: string): Promise<void> {
+  try {
+    const opsUrl = `${SUPABASE_URL}/functions/v1/ops-api?action=update_job_status`
+    const opsResp = await fetch(opsUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+      body: JSON.stringify({
+        jobId,
+        status: 'complete',
+        source: 'xero_sync',
+      }),
+    })
+    const opsResult = await opsResp.json()
+    console.log(`[xero-sync] Job ${jobId} fully paid — status updated via ops-api:`, opsResult.job?.status || opsResult.error)
+  } catch (e: any) {
+    console.error(`[xero-sync] ops-api call failed, updating directly:`, (e as Error).message)
+    await sb.from('jobs')
+      .update({ status: 'complete', completed_at: new Date().toISOString() })
+      .eq('id', jobId)
+      .eq('status', 'invoiced')
+  }
+}
+
+function providerInvoiceDeps(sb: any): ProviderInvoiceDeps {
+  return { orgId: DEFAULT_ORG_ID, completeInvoicedJob: (jobId: string) => completeInvoicedJob(sb, jobId) }
+}
+
+// Mode of the open-book sweep from the two money flags, parsed once in SQL
+// (context_money_open_book_mode). Any failure to read it is off.
+async function readOpenBookMode(sb: any): Promise<OpenBookModeReading> {
+  try {
+    const { data, error } = await sb.rpc('context_money_open_book_mode')
+    if (error || !data || typeof data !== 'object') return { mode: 'off', state: 'unreadable' }
+    const mode = data.mode === 'observe' || data.mode === 'apply' ? data.mode : 'off'
+    return { mode, state: typeof data.state === 'string' ? data.state : 'unreadable' }
+  } catch (_) {
+    return { mode: 'off', state: 'unreadable' }
+  }
+}
+
+// The sweep's own Xero transport over the shared cooldown fetch: counts its
+// calls and keeps the last x-daylimit-remaining for the receipt.
+function openBookXero(accessToken: string, tenantId: string) {
+  let calls = 0
+  let dayRemaining: number | null = null
+  const counting: typeof fetch = async (input, init) => {
+    calls++
+    const response = await xeroSyncFetch(input, init)
+    const remaining = Number(response.headers.get('x-daylimit-remaining'))
+    if (response.headers.has('x-daylimit-remaining') && Number.isFinite(remaining)) dayRemaining = remaining
+    return response
+  }
+  const { get } = createXeroSyncTransport(counting)
+  return {
+    listOpenPage: async (page: number) => (await get('/Invoices', accessToken, tenantId, {
+      where: 'Type=="ACCREC"',
+      Statuses: 'AUTHORISED,SUBMITTED',
+      page: String(page),
+      pageSize: String(OPEN_BOOK_PAGE_SIZE),
+    }))?.Invoices ?? [],
+    readByIds: async (ids: string[]) => (await get('/Invoices', accessToken, tenantId, { IDs: ids.join(',') }))?.Invoices ?? [],
+    readOne: (id: string) => get(`/Invoices/${encodeURIComponent(id)}`, accessToken, tenantId, {}),
+    quota: () => ({ calls, day_remaining: dayRemaining }),
+  }
+}
+
 async function syncInvoices(sb: any) {
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
@@ -616,257 +660,19 @@ async function syncInvoices(sb: any) {
         break
       }
 
-      // Upsert each invoice — preserve existing job_id linkage
+      // Every invoice goes through the one provider-invoice path (money MN1):
+      // the row (job links preserved, xero_verified_at), the reference
+      // auto-link, the deposit stamp and the paid-job automation.
       for (const inv of invoices) {
-        // Check if this invoice already has a job link (set by createInvoice)
-        let existingJobId: string | null = null
-        let existingJobContactId: string | null = null
-        const { data: existingRec } = await sb.from('xero_invoices')
-          .select('job_id, job_contact_id, invoice_obligation_revision_id, ses_external_token')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .eq('xero_invoice_id', inv.InvoiceID)
-          .maybeSingle()
-        if (existingRec) {
-          existingJobId = existingRec.job_id
-          existingJobContactId = existingRec.job_contact_id
-        }
+        const applied = await applyProviderInvoice(sb, inv, new Date(), providerInvoiceDeps(sb))
 
-        const record: any = {
-          org_id: DEFAULT_ORG_ID,
-          xero_invoice_id: inv.InvoiceID,
-          xero_contact_id: inv.Contact?.ContactID || null,
-          contact_name: inv.Contact?.Name || null,
-          invoice_number: inv.InvoiceNumber || null,
-          invoice_type: inv.Type,
-          status: inv.Status,
-          reference: inv.Reference || null,
-          currency_code: inv.CurrencyCode || 'AUD',
-          sub_total: inv.SubTotal || 0,
-          total_tax: inv.TotalTax || 0,
-          total: inv.Total || 0,
-          amount_due: inv.AmountDue || 0,
-          amount_paid: inv.AmountPaid || 0,
-          invoice_date: inv.DateString || null,
-          due_date: inv.DueDateString || null,
-          fully_paid_on: parseXeroDate(inv.FullyPaidOnDate) || null,
-          line_items: inv.LineItems || [],
-          raw_json: inv,
-          updated_at: parseXeroDate(inv.UpdatedDateUTC) || new Date().toISOString(),
-          synced_at: new Date().toISOString(),
-        }
-
-        // Preserve job linkage — don't let sync wipe links set by createInvoice
-        if (existingJobId) record.job_id = existingJobId
-        if (existingJobContactId) record.job_contact_id = existingJobContactId
-
-        const { error } = await sb.from('xero_invoices').upsert(record, {
-          onConflict: 'org_id,xero_invoice_id',
-        })
-
-        if (error) {
-          console.error(`Failed to upsert invoice ${inv.InvoiceNumber}:`, error.message)
+        if (!applied.written) {
+          console.error(`Failed to upsert invoice ${inv.InvoiceNumber}:`, applied.error)
         } else {
           totalSynced++
-
-          // Auto-link invoice to job via SW reference number in Reference field.
-          // Matches patterns like SWP-25001, SWF-25002, SW1615, etc.
-          const ref = inv.Reference || ''
-          // Job numbers grew to six digits in 2026 (SWP-261376); the old
-          // \d{3,5} cap matched the first five and never found the job.
-          const swMatch = ref.match(/SWMS-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i)
-          if (swMatch) {
-            const swNumber = swMatch[0].toUpperCase()
-            const { data: job } = await sb.from('jobs')
-              .select('id,type,job_number')
-              .eq('org_id', DEFAULT_ORG_ID)
-              .eq('job_number', swNumber)
-              .maybeSingle()
-
-            // Also check xero_projects for legacy Tradify SW numbers (e.g. "SW1615 15 Main St")
-            if (!job) {
-              const { data: xp } = await sb.from('xero_projects')
-                .select('job_id')
-                .eq('org_id', DEFAULT_ORG_ID)
-                .ilike('project_name', `${swNumber}%`)
-                .not('job_id', 'is', null)
-                .limit(1)
-                .maybeSingle()
-              if (xp?.job_id) {
-                const refusal = await sealedSesXeroLinkRefusal(
-                  sb,
-                  {
-                    xero_invoice_id: inv.InvoiceID,
-                    invoice_number: inv.InvoiceNumber,
-                    invoice_type: inv.Type,
-                    job_id: existingRec?.job_id || null,
-                    invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
-                    ses_external_token: existingRec?.ses_external_token || null,
-                  },
-                  xp.job_id,
-                  'xero-sync/reference auto-link',
-                )
-                if (refusal) {
-                  sesLinkRefusals.push(refusal)
-                  console.warn('[xero-sync] sealed SES invoice link refused', refusal)
-                } else {
-                  await sb.from('xero_invoices')
-                    .update({ job_id: xp.job_id })
-                    .eq('xero_invoice_id', inv.InvoiceID)
-                    .eq('org_id', DEFAULT_ORG_ID)
-                    .is('job_id', null)
-                }
-              }
-            } else {
-              const refusal = await sealedSesXeroLinkRefusal(
-                sb,
-                {
-                  xero_invoice_id: inv.InvoiceID,
-                  invoice_number: inv.InvoiceNumber,
-                  invoice_type: inv.Type,
-                  job_id: existingRec?.job_id || null,
-                  invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
-                  ses_external_token: existingRec?.ses_external_token || null,
-                },
-                job,
-                'xero-sync/reference auto-link',
-              )
-              if (refusal) {
-                sesLinkRefusals.push(refusal)
-                console.warn('[xero-sync] sealed SES invoice link refused', refusal)
-              } else {
-                await sb.from('xero_invoices')
-                  .update({ job_id: job.id })
-                  .eq('xero_invoice_id', inv.InvoiceID)
-                  .eq('org_id', DEFAULT_ORG_ID)
-                  .is('job_id', null)
-              }
-            }
-          }
-
-          // ── Deposit stamp: a PAID deposit invoice lands on jobs.deposit_at ──
-          // Independent of the status automation below: it never moves the job,
-          // it only records that the deposit money arrived, so the sales desks
-          // and BOOKKEEPING read the same fact. Non-blocking.
-          if (depositStampRelevant(inv)) {
-            try {
-              const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, inv)
-              if (stamped?.action === 'stamped') {
-                depositStamps++
-                console.log(`[xero-sync] Job ${stamped.job_number} deposit_at stamped ${stamped.deposit_at} (${stamped.source})`)
-              } else if (stamped?.action === 'contradiction_logged') {
-                depositStampContradictions++
-              }
-            } catch (e: any) {
-              if (e instanceof XeroCooldownError) throw e
-              console.error('[xero-sync] Deposit stamp failed:', (e as Error).message)
-            }
-          }
-
-          // ── Auto-update job status when all invoices are PAID ──
-          // Only for sales invoices (ACCREC) that are linked to a job
-          if (inv.Type === 'ACCREC' && inv.Status === 'PAID') {
-            // Find the job_id for this invoice
-            const { data: invRecord } = await sb.from('xero_invoices')
-              .select('job_id')
-              .eq('xero_invoice_id', inv.InvoiceID)
-              .eq('org_id', DEFAULT_ORG_ID)
-              .not('job_id', 'is', null)
-              .maybeSingle()
-
-            if (invRecord?.job_id) {
-              const paidInvoiceRefusal = await sealedSesXeroLinkRefusal(
-                sb,
-                {
-                  xero_invoice_id: inv.InvoiceID,
-                  invoice_number: inv.InvoiceNumber,
-                  invoice_type: inv.Type,
-                  job_id: invRecord.job_id,
-                  invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
-                  ses_external_token: existingRec?.ses_external_token || null,
-                },
-                invRecord.job_id,
-                'xero-sync/payment automation',
-              )
-              if (paidInvoiceRefusal) {
-                sesLinkRefusals.push(paidInvoiceRefusal)
-                console.warn('[xero-sync] sealed SES payment automation refused', paidInvoiceRefusal)
-                continue
-              }
-              // Check if ALL invoices for this job are paid
-              const { data: unpaid } = await sb.from('xero_invoices')
-                .select('id')
-                .eq('job_id', invRecord.job_id)
-                .eq('invoice_type', 'ACCREC')
-                .not('status', 'eq', 'PAID')
-                .not('status', 'in', '("VOIDED","DELETED")')
-                .limit(1)
-
-              if (!unpaid || unpaid.length === 0) {
-                // All invoices paid — check if job is in 'invoiced' status
-                const { data: jobData } = await sb.from('jobs')
-                  .select('id, status')
-                  .eq('id', invRecord.job_id)
-                  .eq('status', 'invoiced')
-                  .maybeSingle()
-
-                if (jobData) {
-                  // Route through ops-api so GHL stage sync fires automatically
-                  try {
-                    const opsUrl = `${SUPABASE_URL}/functions/v1/ops-api?action=update_job_status`
-                    const opsResp = await fetch(opsUrl, {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-                      },
-                      body: JSON.stringify({
-                        jobId: jobData.id,
-                        status: 'complete',
-                        source: 'xero_sync',
-                      }),
-                    })
-                    const opsResult = await opsResp.json()
-                    console.log(`[xero-sync] Job ${jobData.id} fully paid — status updated via ops-api:`, opsResult.job?.status || opsResult.error)
-                  } catch (e: any) {
-                    // Fallback: update directly if ops-api call fails
-                    console.error(`[xero-sync] ops-api call failed, updating directly:`, (e as Error).message)
-                    await sb.from('jobs')
-                      .update({ status: 'complete', completed_at: new Date().toISOString() })
-                      .eq('id', jobData.id)
-                      .eq('status', 'invoiced')
-                  }
-
-                  await sb.from('job_events').insert({
-                    job_id: jobData.id,
-                    event_type: 'payment_received',
-                    detail_json: {
-                      source: 'xero_sync',
-                      xero_invoice_id: inv.InvoiceID,
-                      invoice_number: inv.InvoiceNumber,
-                      amount_paid: inv.AmountPaid,
-                      fully_paid_on: inv.FullyPaidOnDate,
-                    },
-                  })
-                  if (await automationLaneEnabled(sb, 'capture')) {
-                    const { error: captureError } = await insertCapturedEvidence(sb, {
-                      event_type: 'invoice.payment_received', source: 'xero-sync',
-                      entity_type: 'invoice', entity_id: inv.InvoiceID,
-                      job_id: jobData.id, match_method: 'direct_job_id',
-                      channel: 'invoice', direction: 'internal',
-                      occurred_at: new Date().toISOString(),
-                      event_at: xeroDateToIsoTimestamp(inv.FullyPaidOnDate),
-                      provider_message_id: `xero:invoice:${inv.InvoiceID}:paid`,
-                      body_preview: `Xero marks invoice ${inv.InvoiceNumber || inv.InvoiceID} PAID.`,
-                      payload: { invoice_number: inv.InvoiceNumber, amount_paid: inv.AmountPaid,
-                        fully_paid_on: inv.FullyPaidOnDate || null },
-                    })
-                    if (captureError && captureError.code !== '23505') console.error('[xero-sync] payment evidence failed:', captureError.message)
-                  }
-                  console.log(`[xero-sync] Job ${jobData.id} fully paid — payment event logged`)
-                }
-              }
-            }
-          }
+          sesLinkRefusals.push(...applied.ses_refusals)
+          if (applied.deposit?.action === 'stamped') depositStamps++
+          else if (applied.deposit?.action === 'contradiction_logged') depositStampContradictions++
 
           // ── Trade invoice bill status — ACCPAY bills ──
           // Keyed on the bill id stored at push time (trade_invoices.xero_bill_id).
@@ -913,6 +719,22 @@ async function syncInvoices(sb: any) {
     { onConflict: 'key' },
   )
 
+  // ── Open-book sweep (money MN1): Xero's whole open receivable book against
+  //    our copy. Off unless money_open_book_v1 is on; observe writes only its
+  //    receipt; apply corrects the copy. Never breaks the invoice sync, except
+  //    a Xero cooldown, which it records and raises like every other step.
+  let openBook: OpenBookSummary | { mode: 'off'; ran: false; status: 'failed'; error_code: string }
+  try {
+    openBook = await sweepOpenReceivables(sb, {
+      ...providerInvoiceDeps(sb),
+      xero: openBookXero(accessToken, tenantId),
+      readMode: () => readOpenBookMode(sb),
+    })
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    console.error('[xero-sync] Open-book sweep error:', (e as Error).message)
+    openBook = { mode: 'off', ran: false, status: 'failed', error_code: 'open_book_sweep_threw' }
+  }
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
@@ -959,12 +781,19 @@ async function syncInvoices(sb: any) {
       undefined,
       // An invoice that reconciles from AUTHORISED to PAID is exactly the
       // deposit the incremental loop's If-Modified-Since window can pass over.
-      async (_invoiceId: string, payload: any) => {
+      // In apply the verified read runs the same effects as every other path
+      // (MN1): reference link, deposit stamp, paid-job automation.
+      async (invoiceId: string, payload: any) => {
         const verified = payload?.Invoices?.[0] ?? null
-        if (!verified || !depositStampRelevant(verified)) return
-        const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
-        if (stamped?.action === 'stamped') depositStamps++
-        else if (stamped?.action === 'contradiction_logged') depositStampContradictions++
+        if (!verified) return
+        const existing = await loadExistingInvoiceLink(sb, DEFAULT_ORG_ID, invoiceId)
+        const effects = await applyProviderInvoiceEffects(sb, verified, existing, {
+          ...providerInvoiceDeps(sb),
+          effects: verifyEffectsForMode(openBook.mode),
+        })
+        sesLinkRefusals.push(...effects.ses_refusals)
+        if (effects.deposit?.action === 'stamped') depositStamps++
+        else if (effects.deposit?.action === 'contradiction_logged') depositStampContradictions++
       },
     )
     reconciled = summary.reconciled
@@ -981,11 +810,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
+    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, open_book: openBook },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
+  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, open_book: openBook }
 }
 
 
@@ -1452,7 +1281,9 @@ async function backfillInvoices(sb: any, searchParams: URLSearchParams) {
         break
       }
 
-      // Upsert each invoice — preserve existing job linkage
+      // Upsert each invoice — preserve existing job linkage. Row only: the
+      // backfill runs none of the sync's side effects. Same builder as every
+      // other list read (money MN1).
       for (const inv of invoices) {
         let existingJobId: string | null = null
         let existingJobContactId: string | null = null
@@ -1466,29 +1297,7 @@ async function backfillInvoices(sb: any, searchParams: URLSearchParams) {
           existingJobContactId = existingRec.job_contact_id
         }
 
-        const record: any = {
-          org_id: DEFAULT_ORG_ID,
-          xero_invoice_id: inv.InvoiceID,
-          xero_contact_id: inv.Contact?.ContactID || null,
-          contact_name: inv.Contact?.Name || null,
-          invoice_number: inv.InvoiceNumber || null,
-          invoice_type: inv.Type,
-          status: inv.Status,
-          reference: inv.Reference || null,
-          currency_code: inv.CurrencyCode || 'AUD',
-          sub_total: inv.SubTotal || 0,
-          total_tax: inv.TotalTax || 0,
-          total: inv.Total || 0,
-          amount_due: inv.AmountDue || 0,
-          amount_paid: inv.AmountPaid || 0,
-          invoice_date: inv.DateString || null,
-          due_date: inv.DueDateString || null,
-          fully_paid_on: parseXeroDate(inv.FullyPaidOnDate) || null,
-          line_items: inv.LineItems || [],
-          raw_json: inv,
-          updated_at: parseXeroDate(inv.UpdatedDateUTC) || new Date().toISOString(),
-          synced_at: new Date().toISOString(),
-        }
+        const record: any = buildInvoiceRecord(inv, DEFAULT_ORG_ID, new Date())
 
         if (existingJobId) record.job_id = existingJobId
         if (existingJobContactId) record.job_contact_id = existingJobContactId

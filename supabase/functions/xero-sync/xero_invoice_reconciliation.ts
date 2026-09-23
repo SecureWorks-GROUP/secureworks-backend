@@ -1,5 +1,6 @@
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import { XeroSyncProviderError } from "./xero_transport.ts";
+import { buildVerifiedInvoicePatch } from "./xero_invoice_record.ts";
 
 // Reconciliation needs a positively identified provider record. An unavailable
 // record (including HTTP404) does not prove that an accounting balance is zero.
@@ -33,35 +34,9 @@ export async function reconcileXeroInvoice(
       "Invoice reconciliation is incomplete: provider balances are unverified",
     );
   }
-  const patch: Record<string, unknown> = {
-    status: inv.Status,
-    amount_due: inv.AmountDue,
-    amount_paid: inv.AmountPaid,
-    synced_at: now.toISOString(),
-    // The attempt stamp orders the daily draft sweep. A verified read clears
-    // any recorded failure; synced_at stays a verification timestamp only.
-    reconcile_attempted_at: now.toISOString(),
-    reconcile_last_error: null,
-    // Keep the verified provider snapshot aligned with status and balances.
-    raw_json: inv,
-  };
-  // Optional omissions cannot erase known cached values.
-  if (
-    typeof inv.DueDateString === "string" &&
-    Number.isFinite(Date.parse(inv.DueDateString))
-  ) {
-    patch.due_date = inv.DueDateString;
-  }
-  if (Array.isArray(inv.LineItems)) patch.line_items = inv.LineItems;
-  const date = String(inv.UpdatedDateUTC ?? "").match(
-    /\/Date\((\d+)([+-]\d+)?\)\//,
-  );
-  // updated_at drives the incremental sync watermark. A retrieval timestamp
-  // cannot substitute for a missing provider update timestamp.
-  const updated = date ? new Date(Number(date[1])) : null;
-  if (updated && Number.isFinite(updated.getTime())) {
-    patch.updated_at = updated.toISOString();
-  }
+  // One builder for every single-record read (money slice MN1): contact and
+  // reference refresh here too, and xero_verified_at records the read.
+  const patch = buildVerifiedInvoicePatch(inv, now);
   const { error } = await client.from("xero_invoices").update(patch)
     .eq("xero_invoice_id", invoiceId).eq("org_id", orgId);
   if (error) {
@@ -150,7 +125,8 @@ export async function listStaleXeroInvoices(
       !row || typeof row.xero_invoice_id !== "string" || !row.xero_invoice_id
     );
   // Open receivables: verified hourly while money is owed.
-  const open = await client.from("xero_invoices")
+  const open = await client
+    .from("xero_invoices")
     .select("xero_invoice_id")
     .eq("org_id", orgId).eq("invoice_type", "ACCREC")
     .in("status", ["AUTHORISED", "SUBMITTED"])

@@ -19,7 +19,7 @@ with identical values. The composer adds:
 | `parties` | `context_parties_status()` | sites S-M1 | `null` |
 | `email_capture` | `context_email_capture_status()` | email EM1 | `null` (F1b stub) |
 | `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | `null` (F1b stub) |
-| `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |
+| `money` | `context_money_status()` | money MN1 | built |
 | `bucket` | `context_bucket_status()` | bucket B2 | `null` (F1b stub) |
 | `alarms` | every block's `alarms` array, each tagged with `block` | composer | `[]` |
 
@@ -78,6 +78,20 @@ minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high
 the receiver enforces auth; observe-mode `auth=missing` is counted, not
 alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
 [ghl-message-reconcile.md](ghl-message-reconcile.md).
+
+`money` (MN1, `20260924190000_money_open_book_sweep.sql`):
+`context_money_status()` replaces the F1b stub (sweep part). The composer
+is untouched. Mode is `context_money_open_book_mode()` from flags
+`money_open_book_v1` (on: observe) and `money_open_book_apply_v1` (also on:
+apply); missing or unreadable reads as off. The block publishes that mode,
+the latest and latest complete `xero_open_book` runs, drift per class,
+closure settlement, Xero day quota, freshness of the verified copy of the
+open book, `money_unlinked_open`, and the alarms `money_open_book_stale`
+(no complete sweep for 45 minutes while observe/apply),
+`closure_unverified`, `xero_quota_low` (below 500), and `flag_unreadable`.
+Counts, ids and codes; the one amount is `money_unlinked_open.amount_due`.
+Credits (MN2), bank (MN3), and the live invoice/job reads (MN4/MN5) stay
+in `not_measured`. The writer path is `xero-sync/xero_invoice_record.ts`.
 
 Alarms are read by the CIO desk's scheduled check (INTEGRATION decision D-A),
 never Telegram.
@@ -169,7 +183,9 @@ the same fixtures, and pins `ready_jobs` to the candidates count),
 `supabase/tests/migration-contracts/20260924030000_context_evidence_cadence`
 (K1 cadence block, due rule, and ready-job count),
 `supabase/tests/migration-contracts/20260924133000_context_ghl_message_reconcile`
-(C1d `ghl_capture` block, item flag, cron, and lane list), and
+(C1d `ghl_capture` block, item flag, cron, and lane list),
 `supabase/tests/migration-contracts/20260924152100_context_status_f1b`
-(F1b composer stubs, `window_end_id`, and the freshness source swap).
+(F1b composer stubs, `window_end_id`, and the freshness source swap), and
+`supabase/tests/migration-contracts/20260924190000_money_open_book_sweep`
+(MN1 money block, mode parser, alarms, and grants).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.
