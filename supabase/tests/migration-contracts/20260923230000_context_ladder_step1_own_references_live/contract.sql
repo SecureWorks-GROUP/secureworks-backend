@@ -117,7 +117,7 @@ ROLLBACK;
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
-  NOT IN ('acb80ebe792beeb7e5b537643bf9f184','1cd71c7e5abea7edb8799a78a51bbb79') THEN RAISE EXCEPTION 'L1: ladder body is not the L1 body or a registered successor'; END IF;
+  NOT IN ('acb80ebe792beeb7e5b537643bf9f184','fe50f14f4ab28d4d6c9dbb70bc85e7df') THEN RAISE EXCEPTION 'L1: ladder body is not the L1 body or a registered successor'; END IF;
  IF has_function_privilege('anon','public.resolve_context_attribution(public.business_events)','EXECUTE')
   OR has_function_privilege('authenticated','public.resolve_context_attribution(public.business_events)','EXECUTE')
  THEN RAISE EXCEPTION 'L1: ladder callable by a public role'; END IF;

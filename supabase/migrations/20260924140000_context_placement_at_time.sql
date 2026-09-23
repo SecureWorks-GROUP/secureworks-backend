@@ -15,8 +15,11 @@
 --      created minus 30 days and the contact's previous job becoming terminal,
 --      up to its creation). Contactless jobs (no GHL contact) whose client
 --      phone (last 9 digits) or email matches the contact join the set.
---      Terminal time: the job's own job.status_changed evidence, then
---      completed_at, then updated_at (recorded when used). Holding jobs
+--      Terminal time: when the job last became terminal, from its own
+--      job.status_changed evidence (earliest terminal `to` after the latest
+--      non-terminal `to`; if none, the earliest terminal transition), then
+--      completed_at, then updated_at (recorded when a job dated that way
+--      entered the candidate or guard set). Holding jobs
 --      (metadata.do_not_schedule) are never candidates. The booking-lane draft
 --      rule is kept: a draft counts only when no non-draft job is a candidate.
 --   2. resolve_context_attribution: steps 3 to 6 read that set at
@@ -76,13 +79,13 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: live pre-image, or this migration's body.
-  ('public.resolve_context_attribution(public.business_events)',ARRAY['acb80ebe792beeb7e5b537643bf9f184','1cd71c7e5abea7edb8799a78a51bbb79'],false),
+  ('public.resolve_context_attribution(public.business_events)',ARRAY['acb80ebe792beeb7e5b537643bf9f184','fe50f14f4ab28d4d6c9dbb70bc85e7df'],false),
   ('public.rerun_context_attribution(integer,text)',ARRAY['e55811ae70e8643c3fdfc72c8741b471','c80fea38727a0302b57a1111e6099c1c'],false),
   ('public.attribute_context_event_with_luna(uuid,uuid,numeric)',ARRAY['48eabf7e132092cd225ff5060ce58846','fde44559c43dcc770d1c42909f4adeaf'],false),
   ('public.attribute_context_event_with_luna(uuid,uuid,numeric,text)',ARRAY['407832111a538b414897fa0b359232d2','cbb46324b06a0f5b6c3f5ddf695ddb1a'],false),
   -- New: absent, or already this migration's body.
   ('public.context_event_is_ghl(public.business_events)',ARRAY['6bd4046317c4530a67ae38b0d7052cf4'],true),
-  ('public.context_contact_job_timeline(text,timestamptz)',ARRAY['86a46b3be401e33e6fa21947a0fa366c'],true),
+  ('public.context_contact_job_timeline(text,timestamptz)',ARRAY['2bc8e76f14fda242eb6e4d414e93fefa'],true),
   ('public.context_contact_jobs_at(text,timestamptz)',ARRAY['911811b617fa760f5ddf847fb1ab853d'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
@@ -174,10 +177,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
    j.completed_at, j.updated_at, ev.at AS status_event_at
   FROM members mb JOIN public.jobs j ON j.id=mb.id
   LEFT JOIN LATERAL (
-   SELECT max(coalesce(be.event_at,be.occurred_at)) AS at FROM public.business_events be
+   SELECT min(coalesce(be.event_at,be.occurred_at)) AS at FROM public.business_events be
    WHERE (j.status::text IN ('cancelled','archived','lost','closed','complete','completed') OR coalesce(j.archived,false))
     AND be.entity_type='job' AND be.entity_id=j.id::text AND be.event_type='job.status_changed'
     AND lower(be.payload->'changes'->'status'->>'to') IN ('cancelled','archived','lost','closed','complete','completed')
+    AND coalesce(be.event_at,be.occurred_at) > coalesce((
+     SELECT max(coalesce(nt.event_at,nt.occurred_at)) FROM public.business_events nt
+     WHERE nt.entity_type='job' AND nt.entity_id=j.id::text AND nt.event_type='job.status_changed'
+      AND lower(nt.payload->'changes'->'status'->>'to') NOT IN ('cancelled','archived','lost','closed','complete','completed')
+    ),'-infinity'::timestamptz)
   ) ev ON true
   WHERE coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
  ), timed AS (
@@ -292,7 +300,8 @@ BEGIN
      AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '90 days'),'{}'),
     coalesce(array_agg(t.job_id ORDER BY t.job_id) FILTER (WHERE t.basis='contactless' AND (t.candidate OR (NOT t.candidate AND t.terminal
      AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '90 days'))),'{}'),
-    coalesce(bool_or(t.terminal AND t.created_at<=v_at AND t.terminal_time_source='updated_at'),false)
+    coalesce(bool_or(t.terminal_time_source='updated_at' AND (t.candidate OR (NOT t.candidate AND t.terminal
+     AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '90 days'))),false)
    INTO ids,line_ids,guard_ids,contactless_ids,used_updated_at
    FROM public.context_contact_job_timeline(e.contact_id,v_at) t;
    n:=cardinality(ids);

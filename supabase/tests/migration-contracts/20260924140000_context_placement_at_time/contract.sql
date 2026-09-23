@@ -23,6 +23,8 @@
 --   R24  shell duplicate SWP-26270 beside SWP-26180: review, not a guess.
 --   Finding 5: a GHL conversation is never a job thread.
 --   Rule 5: the 90-day guard; terminal time source order.
+--   Complete-then-archive: dates from the completion, not the later archive.
+--   updated_at stamp: only when that clock entered the candidate or guard set.
 --   Rule F: a closed job's old texts stay on it; a new job's texts stay on it.
 
 -- 1. R1 and R13: two open fencing quotes for one contact.
@@ -375,6 +377,46 @@ BEGIN
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at,metadata) VALUES
  (held,org,'archived','fencing','P1A-HOLDING','p1a-holding','2026-01-01Z','{"do_not_schedule":true}');
  IF EXISTS(SELECT 1 FROM public.context_contact_job_timeline('p1a-holding','2025-12-01Z')) THEN RAISE EXCEPTION 'holding job listed'; END IF;
+END $$;
+ROLLBACK;
+
+-- 11b. Complete 1 Jun (status event) then archived 15 Jun (status event): an
+-- 8 Jun text does not bind. A May text still does (the job was live then).
+BEGIN;
+DO $$
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; cta uuid:=gen_random_uuid(); e public.business_events;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at,completed_at,updated_at,archived) VALUES
+ (cta,org,'archived','fencing','P1A-CTA','p1a-complete-then-archive','2026-03-01Z','2026-06-01Z','2026-06-15Z',true);
+ INSERT INTO public.business_events(event_type,source,entity_type,entity_id,channel,direction,payload,event_at) VALUES
+ ('job.status_changed','app/office','job',cta::text,'status','internal','{"changes":{"status":{"from":"quoted","to":"complete"}}}','2026-06-01Z'),
+ ('job.status_changed','app/office','job',cta::text,'status','internal','{"changes":{"status":{"from":"complete","to":"archived"}}}','2026-06-15Z');
+ INSERT INTO public.business_events(source,payload,contact_id,channel,direction,event_at)
+ VALUES('ghl-webhook-receiver','{"body":"When is the crew finishing the gate?"}','p1a-complete-then-archive','sms','inbound','2026-05-20Z') RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM cta OR e.attribution_status<>'single_open'
+ THEN RAISE EXCEPTION 'complete-then-archive: a May text must bind while the job is live, got % %',e.attribution_status,e.job_id; END IF;
+ INSERT INTO public.business_events(source,payload,contact_id,channel,direction,event_at)
+ VALUES('ghl-webhook-receiver','{"body":"Is the crew still coming this week?"}','p1a-complete-then-archive','sms','inbound','2026-06-08Z') RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status<>'admin_bucket' OR e.metadata->>'placement_rule'<>'no_candidate_at_time'
+ THEN RAISE EXCEPTION 'complete-then-archive: an 8 Jun text must not bind after the 1 Jun completion, got % % %',e.attribution_status,e.job_id,e.metadata; END IF;
+ IF EXISTS(SELECT 1 FROM public.context_contact_jobs_at('p1a-complete-then-archive','2026-06-08Z'))
+ THEN RAISE EXCEPTION 'complete-then-archive: 8 Jun still listed the finished job as a candidate'; END IF;
+END $$;
+ROLLBACK;
+
+-- 11c. An old cancelled job dated only by updated_at, outside the 90-day
+-- window and not a candidate, leaves the live single_open row unstamped.
+BEGIN;
+DO $$
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; old_upd uuid:=gen_random_uuid(); live4 uuid:=gen_random_uuid(); e public.business_events;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at,updated_at) VALUES
+ (old_upd,org,'cancelled','fencing','P1A-OLD-UPD','p1a-old-updated','2025-11-01Z','2026-05-01Z'),
+ (live4,org,'quoted','patio','P1A-LIVE-4','p1a-old-updated','2026-08-15Z',now());
+ INSERT INTO public.business_events(source,payload,contact_id,channel,direction,event_at)
+ VALUES('ghl-webhook-receiver','{"body":"Can you call me?"}','p1a-old-updated','sms','inbound','2026-09-20Z') RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM live4 OR e.attribution_status<>'single_open' OR e.payload ? 'terminal_time_source'
+ THEN RAISE EXCEPTION 'updated_at stamp: an old cancelled job outside 90 days must leave single_open unstamped, got % % %',e.attribution_status,e.job_id,e.payload; END IF;
 END $$;
 ROLLBACK;
 
