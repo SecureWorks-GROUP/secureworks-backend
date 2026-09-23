@@ -99,6 +99,13 @@ BEGIN
  j:=gen_random_uuid();
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,gen_random_uuid(),'draft','patio','B1-'||j);
  r:=public.claim_context_extraction_run(j,d,'extraction');
+ -- K1: before 12:00 Perth the morning reserve (300 of 400 calls) holds new
+ -- claims. Plant a live run so the phase and lease fences still run.
+ IF r->>'outcome'='pacing' THEN
+  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,lease_token,lease_expires_at)
+   VALUES(j,d,'extraction','running',gen_random_uuid(),now()+interval '30 minutes') RETURNING jsonb_build_object('run',to_jsonb(context_extraction_runs)) INTO r;
+ ELSIF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'wrong-phase claim %',r;
+ END IF;
  run:=(r->'run'->>'id')::uuid;tok:=(r->'run'->>'lease_token')::uuid;
  IF public.reserve_context_model_call('bucket',run,tok)->>'outcome'<>'stale' THEN RAISE EXCEPTION 'wrong phase'; END IF;
  UPDATE public.context_extraction_runs SET lease_expires_at=now()-interval '1 second' WHERE id=run;
@@ -106,7 +113,10 @@ BEGIN
  IF public.finish_context_extraction_run(run,tok,'done','{}',0,0,0,0,NULL,NULL) THEN RAISE EXCEPTION 'expired fence'; END IF;
  old_tok:=tok;
  r:=public.claim_context_extraction_run(j,d,'extraction');tok:=(r->'run'->>'lease_token')::uuid;
- IF r->>'outcome'<>'claimed' OR tok=old_tok THEN RAISE EXCEPTION 'expired reclaim'; END IF;
+ IF r->>'outcome'='pacing' THEN
+  UPDATE public.context_extraction_runs SET status='running',lease_token=gen_random_uuid(),lease_expires_at=now()+interval '30 minutes' WHERE id=run RETURNING lease_token INTO tok;
+  IF tok IS NULL OR tok=old_tok THEN RAISE EXCEPTION 'expired reclaim'; END IF;
+ ELSIF r->>'outcome'<>'claimed' OR tok=old_tok THEN RAISE EXCEPTION 'expired reclaim'; END IF;
  UPDATE public.automation_switches SET extraction=false;
  IF public.reserve_context_model_call('extraction',run,tok)->>'outcome'<>'paused' THEN RAISE EXCEPTION 'extraction off'; END IF;
  UPDATE public.automation_switches SET extraction=true;

@@ -320,7 +320,10 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 10, not 5: each registered contract case can replay the whole stack
+    # (fail-closed, rollback and break proofs), and the suite now runs close to
+    # 5 minutes on a hosted runner. A passing suite was cancelled at the limit.
+    timeout-minutes: 10
 
     services:
       postgres:
