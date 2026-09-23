@@ -1,4 +1,4 @@
-import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteAction } from './sales_booking_confirmation.ts'
+import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
@@ -823,7 +823,8 @@ import { buildOpsApiVersion } from './ops_api_version.ts'
 import { applySalesBookingVisits } from './sales_booking_visits.ts'
 import { applySalesBookingExecutions } from './sales_booking_execution_read.ts'
 import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_execute.ts'
-import { createSalesBookingExecuteDeps } from './sales_booking_execute_live.ts'
+import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
+import { applyOwnerBooking, OwnerApprovalRefusal } from './sales_booking_owner_approval.ts'
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
@@ -5222,10 +5223,11 @@ if (import.meta.main) serve(async (req: Request) => {
             assembled.resource.resource_id,
             assembled.week_start,
           )
-          return json(await applySalesBookingVisits(client,
+          return json(await applyOwnerBooking(await applySalesBookingVisits(client,
             await applySalesBookingExecutions(client,
               await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client))),
-            { visit_outcomes_from: sbParam('visit_outcomes_from'), visit_outcomes_to: sbParam('visit_outcomes_to') }))
+            { visit_outcomes_from: sbParam('visit_outcomes_from'), visit_outcomes_to: sbParam('visit_outcomes_to') }),
+            ownerApprovalReader(client)))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
@@ -5251,7 +5253,7 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'sales_booking_approval_write': {
         try {
-          return json(await salesBookingApprovalWriteAction({
+          return json(await salesBookingApprovalWriteRoute({
             store: bookingApprovalStore(client), method: req.method,
             auth: { mode: authMode, role: authUser?.role ?? null, userId: authUser?.id ?? null, email: authUser?.email ?? null },
             body: body && typeof body === 'object' ? body : {},
@@ -5260,8 +5262,13 @@ if (import.meta.main) serve(async (req: Request) => {
               const overlay = await loadSalesBookingPackOverlay(client, resource, assembled.week_start)
               return applySalesBookingPackOverlay(assembled, overlay)
             },
+            // Owner-authored approvals (owner_input body): reads only.
+            owner: createOwnerApprovalDeps(client),
           }))
         } catch (e) {
+          if (e instanceof OwnerApprovalRefusal) {
+            throw new ApiError(e.message, e.status, { error: e.message, reason: e.message, detail: e.detail })
+          }
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
           throw e

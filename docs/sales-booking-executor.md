@@ -4,6 +4,9 @@ The owner's press on one recorded approval is the trigger. Each action takes a
 single `sales_booking_approvals` binding hash, re-checks everything on the
 server at the moment of the press, and then books the exact approved GHL
 appointment or sends the exact approved text. Nothing else acts on an approval.
+Engine-published and owner-authored approvals (`snapshot.source:"owner"`,
+`docs/sales-booking-confirmation-api.md` "Owner-authored approvals") are read
+the same way: same table, same content hash, same checks at the press.
 
 Code: `supabase/functions/ops-api/sales_booking_execute.ts` (logic),
 `sales_booking_execute_live.ts` (production adapters),

@@ -18,6 +18,10 @@ import type {
   SalesBookingExecuteDeps,
 } from "./sales_booking_execute.ts";
 import { mirrorGhlAppointmentToOutlook } from "./sales_booking_outlook_mirror.ts";
+import type {
+  OwnerApprovalDeps,
+  OwnerApprovalReader,
+} from "./sales_booking_owner_approval.ts";
 import {
   ghlRead,
   readJobSitesLive,
@@ -234,5 +238,144 @@ export function createSalesBookingExecuteDeps(
       callGhlProxy("create_calendar_appointment", body),
     callSendSms: (body) => callGhlProxy("send_sms", body),
     executions: executionLedger(client),
+  };
+}
+
+// ── Owner-authored approvals (sales_booking_owner_approval.ts) ─────────────
+
+function ghlCompleteBody(body: Obj, field: string): Obj[] {
+  if (
+    !body || !Array.isArray(body[field]) ||
+    !(body[field] as unknown[]).every((row) =>
+      !!row && typeof row === "object" && !Array.isArray(row)
+    ) ||
+    body.nextPage || body.nextPageUrl || body.hasMore ||
+    body.complete === false || body.error
+  ) throw new Error(`ghl_${field}_incomplete`);
+  return body[field] as Obj[];
+}
+
+/** Reads the owner-authored approval path needs. Reads only: the approval
+ * row itself is written by the confirmation store. */
+export function createOwnerApprovalDeps(
+  client: Client,
+): Omit<
+  OwnerApprovalDeps,
+  "store" | "readWorkspace" | "envGet" | "now"
+> {
+  const execute = createSalesBookingExecuteDeps(client);
+  const locationId = () => {
+    const id = Deno.env.get("GHL_LOCATION_ID") || "";
+    if (!id) throw new Error("location_unconfigured");
+    return id;
+  };
+  return {
+    // Same contact and published suburb as the executor's Outlook lead read,
+    // plus the recorded job site for a street the contact lacks.
+    async readLead({ contactId, opportunityId }) {
+      const location = locationId();
+      const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
+      const contact = body?.contact as Obj | undefined;
+      if (contact?.id !== contactId || contact?.locationId !== location) {
+        throw new Error("contact_mismatch");
+      }
+      const jobSites = await readJobSitesLive(
+        client,
+        opportunityId ? [opportunityId] : [],
+        [contactId],
+      );
+      const job = (opportunityId && jobSites[opportunityId]) ||
+        jobSites[contactId] || null;
+      return {
+        contact,
+        suburb: salesBookingPublishedSuburb(contact, job ?? undefined),
+        job_site: job,
+      };
+    },
+    readThread: execute.readThread,
+    readOutlook: readResourceOutlook,
+    async readGhlDirectory() {
+      const location = encodeURIComponent(locationId());
+      const calendars = ghlCompleteBody(
+        await ghlRead(`/calendars/?locationId=${location}`),
+        "calendars",
+      ).map((row) => {
+        const members = Array.isArray(row.teamMembers) ? row.teamMembers : null;
+        const ids = (members ?? []).map((m: Obj) => m?.userId);
+        return {
+          id: String(row.id ?? ""),
+          is_active: typeof row.isActive === "boolean" ? row.isActive : null,
+          assigned_user_ids: ids.filter((v: unknown): v is string =>
+            typeof v === "string" && !!v
+          ),
+          assignments_returned: members !== null &&
+            ids.every((v: unknown) => typeof v === "string" && !!v),
+        };
+      });
+      const users = ghlCompleteBody(
+        await ghlRead(`/users/?locationId=${location}`),
+        "users",
+      ).map((row) => ({
+        id: String(row.id ?? ""),
+        email: typeof row.email === "string"
+          ? row.email.trim().toLowerCase()
+          : null,
+      }));
+      return { calendars, users };
+    },
+    async readGhlEvents(selector, startIso, endIso) {
+      const query = new URLSearchParams({
+        locationId: locationId(),
+        startTime: String(Date.parse(startIso)),
+        endTime: String(Date.parse(endIso)),
+      });
+      if ("userId" in selector) query.set("userId", selector.userId);
+      else query.set("calendarId", selector.calendarId);
+      return ghlCompleteBody(
+        await ghlRead(`/calendars/events?${query.toString()}`),
+        "events",
+      );
+    },
+    async readSystemOfferRecords(sinceIso) {
+      const executions: Obj[] = [];
+      for (let offset = 0;; offset += 500) {
+        if (offset >= 10_000) throw new Error("read_limit_reached");
+        const { data, error } = await client.from("sales_booking_executions")
+          .select(
+            "binding_hash,step,contact_id,state,appointment_id,claimed_at",
+          )
+          .gte("claimed_at", sinceIso).order("claimed_at", { ascending: true })
+          .order("binding_hash", { ascending: true })
+          .range(offset, offset + 499);
+        if (error || !Array.isArray(data)) throw new Error("unreadable");
+        executions.push(...data);
+        if (data.length < 500) break;
+      }
+      const hashes = [...new Set(executions.map((e) => e.binding_hash))];
+      const approvals: Obj[] = [];
+      for (let i = 0; i < hashes.length; i += 50) {
+        const { data, error } = await client.from("sales_booking_approvals")
+          .select("binding_hash,step,snapshot")
+          .in("binding_hash", hashes.slice(i, i + 50));
+        if (error || !Array.isArray(data)) throw new Error("unreadable");
+        approvals.push(...data);
+      }
+      return { executions, approvals };
+    },
+  };
+}
+
+/** Owner-authored approval rows recorded since `sinceIso` (live ones are at
+ * most 15 minutes old). Throws on a failed read, never returns a false []. */
+export function ownerApprovalReader(client: Client): OwnerApprovalReader {
+  return async (sinceIso) => {
+    const { data, error } = await client.from("sales_booking_approvals")
+      .select(
+        "binding_hash,step,resource,week_start,state,reason,snapshot,approved_by_user_id,approved_by_email,approved_at,expires_at",
+      ).eq("resource", "marnin").gte("approved_at", sinceIso)
+      .filter("snapshot->>source", "eq", "owner")
+      .order("approved_at", { ascending: false }).limit(1000);
+    if (error || !Array.isArray(data)) throw new Error("unreadable");
+    return data;
   };
 }
