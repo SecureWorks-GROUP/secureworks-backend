@@ -143,7 +143,9 @@ Registered contracts
 `supabase/tests/migration-contracts/20260917210000_context_pipeline_status`,
 `supabase/tests/migration-contracts/20260924020000_context_status_foundation`
 (the latter compares existing composer keys with a copy of the 17 Sep body on
-the same fixtures, and pins `ready_jobs` to the candidates count), and
+the same fixtures, and pins `ready_jobs` to the candidates count),
 `supabase/tests/migration-contracts/20260924030000_context_evidence_cadence`
-(K1 cadence block, due rule, and ready-job count).
+(K1 cadence block, due rule, and ready-job count), and
+`supabase/tests/migration-contracts/20260924133000_context_ghl_message_reconcile`
+(C1d `ghl_capture` block, item flag, cron, and lane list).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.

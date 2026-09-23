@@ -20,9 +20,12 @@ live`). It never places a row; the ladder does on insert.
   millisecond). A row with no parseable lastMessageDate is counted
   (`conversations_no_date`) and is never fresh; `list_recent_ghl_conversations`
   still returns it. A page with no dated conversation left in the window
-  completes the scan. If those ids would push the saved cursor past
-  `record_capture_run`'s 4096-byte limit, the walk steps strictly past that
-  millisecond (`boundary_tie_fallbacks`). A scan too big for one run (150
+  completes the scan. Cursor size is the CHECK
+  `octet_length(cursor::text) <= 4096` on jsonb (Postgres prints `: ` and
+  `, `, not compact JSON). If the in-timestamp id list would fail that
+  CHECK, the walk steps strictly past that millisecond
+  (`boundary_tie_fallbacks`) before `record_capture_run`, with a safety
+  margin so the write cannot be refused. A scan too big for one run (150
   conversations or 100 s) is continued by the next run. The `watermark` moves
   only when a scan completes. First run: 2 hours back. Longest look-back after
   a pause: 72 hours (`window_capped`); older history is the M4 history load.

@@ -142,10 +142,10 @@ function jsonbStyleCursorBytes(cursor: unknown): number {
     if (inString) {
       if (escape) escape = false;
       else if (ch === "\\") escape = true;
-      else if (ch === "\"") inString = false;
+      else if (ch === '"') inString = false;
       continue;
     }
-    if (ch === "\"") inString = true;
+    if (ch === '"') inString = true;
     else if (ch === ":" || ch === ",") out += " ";
   }
   return new TextEncoder().encode(out).length;
