@@ -272,6 +272,12 @@ sales_booking_approval_write # probe=source-only
 # switch is on, so deploy recognition stays source-only.
 sales_booking_book # probe=source-only
 sales_booking_send # probe=source-only
+# Debt follow-up exact-approval executor (24 Sep 2026). approve persists an
+# approval row and a captain press can send when its switch is on, so deploy
+# recognition stays source-only for all three.
+debt_followup_propose # probe=source-only
+debt_followup_approve # probe=source-only
+debt_followup_execute # probe=source-only
 # Thread-facts refresh (17 Sep 2026). POST re-reads GHL and persists
 # kind=thread_facts, so the live probe is source-only.
 sales_booking_threads_refresh # probe=source-only
