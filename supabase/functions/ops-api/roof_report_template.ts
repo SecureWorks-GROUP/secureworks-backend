@@ -66,7 +66,9 @@ export const STOREY_OPTIONS = [STOREY_SINGLE, STOREY_DOUBLE];
 // Double storey was $300 ex / $330 inc from the 2026-08-06 ruling, which itself
 // had replaced the 2026-07-16 figure of $350 ex / $385 inc. Shaun restored
 // $350 ex on 2026-09-23. Single storey was not touched. Invoices already
-// minted at $300 ex are not reminted by this change.
+// minted at $300 ex are not reminted by this change. Migration
+// 20260923120000 is excluded from auto-apply because it refuses to replace
+// the live resolve_context_attribution body; that hold does not change this fee.
 //
 // This constant is the ONE roof-report price in this repository: every
 // production consumer reads it through `roofReportPrice`. The skill-side guard
