@@ -568,8 +568,9 @@ body back up inside its rolled-back transaction (C1d does this for F1's
 Who asked (F-ACT, X31, audit only, never refused): ops-api resolves it once per
 request with `_shared/request_actor.ts` (`requestActor` in the handler: the
 verified JWT user, else `x-sw-actor` on a server-key call, else
-`actor_missing`); any receipt a later slice writes takes `requestActor`, never
-its own header read. Refused calls are logged with it too. Server-key calls
+`actor_missing`); existing receipt writers use `receiptActor` from
+`ops-api/actor_calls.ts`, never their own header read or a caller-supplied
+actor field. Refused calls are logged with it too. Server-key calls
 with no usable actor are counted (count only, no dimensions) for the core key
 `actor_missing` (`20260924201000`, `ops-api/actor_calls.ts`).
 The heartbeat hit the API statement timeout (57014, 8 s): never call

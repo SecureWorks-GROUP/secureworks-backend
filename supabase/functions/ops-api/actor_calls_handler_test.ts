@@ -67,6 +67,15 @@ type Seen = {
   waited: Promise<unknown>[];
 };
 
+type FetchRequest = Seen["fetches"][number];
+type RunOptions = {
+  edgeRuntime: boolean;
+  countStatus?: number;
+  method?: string;
+  body?: unknown;
+  respond?: (request: FetchRequest) => Response | null;
+};
+
 const COUNT_URL = "http://127.0.0.1:9/rest/v1/rpc/record_ops_api_actor_missing";
 
 // The provider side of the signed-in trade: Supabase Auth knows the token, and
@@ -93,7 +102,7 @@ function provider(url: string, countStatus: number): Response {
 async function run(
   action: string,
   headers: Record<string, string>,
-  opts: { edgeRuntime: boolean; countStatus?: number },
+  opts: RunOptions,
 ): Promise<{ res: Response; body: unknown; seen: Seen }> {
   const handle = await handler();
   const seen: Seen = { fetches: [], logs: [], warns: [], waited: [] };
@@ -111,6 +120,8 @@ async function run(
       method: String(init?.method ?? "GET"),
       body: typeof raw === "string" && raw ? JSON.parse(raw) : raw ?? null,
     });
+    const response = opts.respond?.(seen.fetches[seen.fetches.length - 1]);
+    if (response) return Promise.resolve(response);
     return Promise.resolve(provider(url, opts.countStatus ?? 204));
   }) as typeof fetch;
   console.log = (...a: unknown[]) => seen.logs.push(a.map(String).join(" "));
@@ -121,12 +132,15 @@ async function run(
     delete g.EdgeRuntime;
   }
   try {
+    const method = opts.method ?? "GET";
+    const init: RequestInit = { method, headers };
+    if (opts.body !== undefined) {
+      init.headers = { ...headers, "content-type": "application/json" };
+      init.body = JSON.stringify(opts.body);
+    }
     const res = await withEnv(() =>
       handle(
-        new Request(`https://example.invalid/ops-api?action=${action}`, {
-          method: "GET",
-          headers,
-        }),
+        new Request(`https://example.invalid/ops-api?action=${action}`, init),
       )
     );
     const body = await res.json();
@@ -269,4 +283,108 @@ Deno.test("no EdgeRuntime: the handler makes no extra request", async () => {
   assertEquals(res.status, 200);
   assertEquals(seen.fetches, []);
   assertEquals(actorLines(seen).length, 1);
+});
+
+Deno.test("sales booking receipt stores the resolved actor or actor_missing", async () => {
+  const saved: unknown[] = [];
+  const respond = (request: FetchRequest) => {
+    if (!new URL(request.url).pathname.endsWith("/sales_booking_packs")) {
+      return null;
+    }
+    saved.push(request.body);
+    return Response.json({
+      id: "00000000-0000-4000-8000-000000000101",
+      as_of: "2026-09-24T01:00:00.000Z",
+    });
+  };
+  const body = {
+    resource: "marnin",
+    week_start: "2026-09-21",
+    as_of: "2026-09-24T01:00:00.000Z",
+    proposals: {},
+    coverage: {},
+    drafts: {},
+  };
+  const withActor = await run("sales_booking_pack_publish", {
+    ...SERVICE,
+    "x-sw-actor": "marnin",
+  }, { edgeRuntime: false, method: "POST", body, respond });
+  const withoutActor = await run("sales_booking_pack_publish", SERVICE, {
+    edgeRuntime: false,
+    method: "POST",
+    body,
+    respond,
+  });
+
+  assertEquals(withActor.res.status, 200);
+  assertEquals(withoutActor.res.status, 200);
+  assertEquals((saved[0] as any).published_by, "marnin");
+  assertEquals((saved[1] as any).published_by, "actor_missing");
+});
+
+Deno.test("gap-fill receipt ignores a spoofed body actor", async () => {
+  const caseRow: Record<string, unknown> = {
+    id: "00000000-0000-4000-8000-000000000201",
+    instruction_key: "MLB:PO-12345",
+    state: "exception",
+    reason_code: "missing_client_name",
+    missing_fields: ["client_name"],
+    conflicting_fields: {},
+    blocked_reasons: [],
+    job_id: null,
+    is_authoritative: true,
+    normaliser_version: "fixture-v1",
+    company_id: null,
+    company_slug_raw: "mlb",
+    external_ref_canonical: null,
+    builder_wo_canonical: null,
+    builder_po_canonical: "PO-12345",
+    deliverable_ref_canonical: null,
+    client_name: null,
+    client_phone: null,
+    client_email: null,
+    site_address: null,
+    site_suburb: null,
+    evidence_map: {},
+    received_at: "2026-09-24T01:00:00.000Z",
+    last_decision_provenance: "deterministic",
+    last_decision_reason: "prior reason",
+  };
+  let persisted: Record<string, unknown> | null = null;
+  const respond = (request: FetchRequest) => {
+    const table = new URL(request.url).pathname.split("/").pop();
+    if (table === "makesafe_intake_cases" && request.method === "GET") {
+      return Response.json(caseRow);
+    }
+    if (table === "makesafe_intake_case_sources") return Response.json([]);
+    if (table === "makesafe_intake_cases" && request.method === "PATCH") {
+      persisted = request.body as Record<string, unknown>;
+      Object.assign(caseRow, persisted);
+      return Response.json({
+        id: caseRow.id,
+        instruction_key: caseRow.instruction_key,
+        state: caseRow.state,
+      });
+    }
+    return null;
+  };
+  const { res } = await run("makesafe_gap_fill_apply", {
+    ...SERVICE,
+    "x-sw-actor": "marnin",
+  }, {
+    edgeRuntime: false,
+    method: "POST",
+    body: {
+      case_id: caseRow.id,
+      instruction_key: caseRow.instruction_key,
+      fills: { client_name: "Jane Smith" },
+      evidence_note: "name on work order",
+      actor: "someone-else",
+    },
+    respond,
+  });
+
+  assertEquals(res.status, 200);
+  assertEquals((persisted as any)?.last_decision_actor, "marnin");
+  assertEquals((persisted as any)?.last_decision_actor === "someone-else", false);
 });

@@ -22,7 +22,10 @@
 // a database call it did not make before. Supabase's edge runtime always has
 // EdgeRuntime.
 
-import type { RequestActor } from "../_shared/request_actor.ts";
+import {
+  ACTOR_MISSING,
+  type RequestActor,
+} from "../_shared/request_actor.ts";
 
 export type OpsApiAuthMode =
   | "api_key"
@@ -30,6 +33,15 @@ export type OpsApiAuthMode =
   | "routine"
   | "agent_read"
   | "none";
+
+/** The audit identity to persist in an existing receipt. */
+export function receiptActor(
+  actor: RequestActor,
+  authMode: OpsApiAuthMode,
+): string {
+  if (!actor.missing) return actor.actor;
+  return authMode === "routine" ? "makesafe-reporting-routine" : ACTOR_MISSING;
+}
 
 /** Caller classes whose missing actors are counted: the server-key classes.
  * A JWT call always has a verified user, so it is never counted. */

@@ -95,6 +95,7 @@ export interface SalesBookingPackAuth {
   role?: string | null;
   userId?: string | null;
   email?: string | null;
+  actor?: string | null;
 }
 
 export type SalesBookingEnvGet = (name: string) => string | undefined;
@@ -493,6 +494,7 @@ export function assertSalesBookingStampWriteAuth(
 }
 
 function publishedBy(auth: SalesBookingPackAuth): string {
+  if (auth.actor) return auth.actor;
   if (auth.mode === "jwt" && auth.userId) return auth.userId;
   return "ops-api:api_key";
 }

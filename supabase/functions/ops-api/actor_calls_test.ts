@@ -14,6 +14,7 @@ import {
   opsApiDeniedLogLine,
   opsApiRequestLogLine,
   recordOpsApiActorMissing,
+  receiptActor,
 } from "./actor_calls.ts";
 
 const MISSING = resolveRequestActor({ headers: new Headers() });
@@ -26,6 +27,13 @@ const INVALID = resolveRequestActor({
 const USER = resolveRequestActor({
   verifiedUserId: "u-1",
   headers: new Headers(),
+});
+
+Deno.test("receipt actor uses resolved identity and preserves the routine fallback", () => {
+  assertEquals(receiptActor(CLAIMED, "api_key"), "workflow:census");
+  assertEquals(receiptActor(USER, "jwt"), "user:u-1");
+  assertEquals(receiptActor(MISSING, "api_key"), "actor_missing");
+  assertEquals(receiptActor(MISSING, "routine"), "makesafe-reporting-routine");
 });
 
 type Call = { fn: string; args: unknown[] };
