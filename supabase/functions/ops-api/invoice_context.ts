@@ -17,6 +17,7 @@
 // one door call per invoice.
 
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import { GHL_CAPTURED_MESSAGE_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
 import { emailKey, phoneKey } from "../_shared/job_refs.ts";
 import {
   currentPriceIncGst,
@@ -49,16 +50,11 @@ type Mode = keyof typeof MODE_BOUNDS;
 // Message-shaped business events. Same list as getJobConversation so the
 // coverage count and the door's conversation agree on what "a message" is.
 const MESSAGE_EVENT_TYPES = [
-  "client.reply",
-  "client.email_in",
-  "client.email_out",
+  ...GHL_CAPTURED_MESSAGE_EVENT_TYPES,
   "client.sms_in",
-  "client.sms_out",
   "client.call_complete",
   "client.message_in",
   "supplier.email_in",
-  "ghl.note_added",
-  "ghl.internal_comment",
 ];
 
 export class InvoiceContextError extends Error {

@@ -24,6 +24,15 @@
 
 import { sourceTime } from "../source_time.ts";
 
+export const GHL_CAPTURED_MESSAGE_EVENT_TYPES = [
+  "client.reply",
+  "client.email_in",
+  "client.email_out",
+  "client.sms_out",
+  "ghl.note_added",
+  "ghl.internal_comment",
+] as const;
+
 /** The SecureWorks GHL marketplace app (the one our tools send through). */
 export const SECUREWORKS_GHL_APP_ID = "69a41803c86f294a620b6499";
 

@@ -39,6 +39,7 @@ import {
 } from "./debt_picture.ts";
 import {
   chunk,
+  contactMatchCorroboratesInvoice,
   debtContextCoverage,
   INVOICE_CONTEXT_VERSION,
   type InvoiceContextDeps,
@@ -51,7 +52,7 @@ import {
   XERO_STALE_HOURS,
 } from "./invoice_context.ts";
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
-import { emailKey, phoneKey } from "../_shared/job_refs.ts";
+import { GHL_CAPTURED_MESSAGE_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
 
 export const DEBT_WORKLIST_VERSION = "debt-worklist/v1";
 
@@ -196,43 +197,6 @@ function providerFromId(providerId: string | null, fallback: string): string {
   return prefix || fallback;
 }
 
-function xeroContactEvidence(invoices: any[]) {
-  const byContact = new Map<string, { emails: Set<string>; phones: Set<string> }>();
-  for (const invoice of invoices) {
-    const identity = debtorIdentityFor(invoice);
-    if (identity.status !== "verified" || !identity.xero_contact_id) continue;
-    const evidence = byContact.get(identity.xero_contact_id) ?? {
-      emails: new Set<string>(),
-      phones: new Set<string>(),
-    };
-    const email = emailKey(str(invoice.raw_contact_email));
-    if (email) evidence.emails.add(email);
-    const phones = Array.isArray(invoice.raw_contact_phones)
-      ? invoice.raw_contact_phones
-      : [];
-    for (const phone of phones) {
-      const key = phoneKey(
-        `${phone?.PhoneAreaCode ?? ""}${phone?.PhoneNumber ?? ""}`,
-      );
-      if (key) evidence.phones.add(key);
-    }
-    byContact.set(identity.xero_contact_id, evidence);
-  }
-  return {
-    byContact,
-    verifies(match: Record<string, unknown>) {
-      const evidence = byContact.get(String(match.xero_contact_id ?? ""));
-      if (!evidence) return false;
-      const email = emailKey(str(match.email));
-      const phone = phoneKey(str(match.phone));
-      return Boolean(
-        (email && evidence.emails.has(email)) ||
-          (phone && evidence.phones.has(phone)),
-      );
-    },
-  };
-}
-
 // ── debtor identity ──────────────────────────────────────────────────────────
 
 export interface DebtorIdentity {
@@ -345,7 +309,7 @@ export function entryFromConversation(
   };
 }
 
-export function entryFromGhlContactNote(
+export function entryFromGhlContactEvent(
   row: any,
   debtorInvoiceIds: string[],
   jobInvoiceIds?: string[],
@@ -353,19 +317,23 @@ export function entryFromGhlContactNote(
   const payload = row.payload ?? {};
   const providerId = str(row.provider_message_id);
   const jobId = str(row.job_id);
+  const channel = str(row.channel) ?? str(payload.channel) ?? "note";
+  const isNote = channel === "note";
   const body = String(
     payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
       row.body_preview ?? "",
   );
   return {
     key: providerId ?? `business_events:${row.id}`,
-    kind: "ghl_note",
-    channel: "note",
+    kind: isNote ? "ghl_note" : channel,
+    channel,
     provider: "ghl",
     provider_id: providerId,
     at: str(row.occurred_at),
     at_precision: "time",
-    direction: "internal",
+    direction: isNote
+      ? "internal"
+      : str(row.direction) ?? str(payload.direction) ?? "unknown",
     author: str(payload.added_by) ?? str(payload.sent_by_user) ??
       str(payload.from),
     source: "business_events",
@@ -867,8 +835,18 @@ export async function debtWorklist(
     );
   }
   const populationIds = population.map((i) => i.xero_invoice_id);
-  const xeroContact = xeroContactEvidence(population);
-  const isContactMatchVerified = xeroContact.verifies;
+  const verifiedInvoicesByContact = new Map<string, any[]>();
+  for (const invoice of population) {
+    const identity = debtorIdentityFor(invoice);
+    if (identity.status !== "verified" || !identity.xero_contact_id) continue;
+    const invoices = verifiedInvoicesByContact.get(identity.xero_contact_id) ??
+      [];
+    invoices.push(invoice);
+    verifiedInvoicesByContact.set(identity.xero_contact_id, invoices);
+  }
+  const isContactMatchVerified = (match: Record<string, unknown>) =>
+    (verifiedInvoicesByContact.get(String(match.xero_contact_id ?? "")) ?? [])
+      .some((invoice) => contactMatchCorroboratesInvoice(invoice, match));
 
   // 2. Per-invoice context from the coverage read (link, facts, conversation
   //    counts, blockers). One call for the whole book.
@@ -1024,11 +1002,12 @@ export async function debtWorklist(
       for (const r of rows) {
         if (!r.xero_contact_id || !r.ghl_contact_id) continue;
         if (!isContactMatchVerified(r)) {
-          const evidence = xeroContact.byContact.get(r.xero_contact_id);
-          const reason = !evidence ||
-              (evidence.emails.size === 0 && evidence.phones.size === 0)
-            ? "No Xero contact email or phone is available to verify this candidate"
-            : !emailKey(str(r.email)) && !phoneKey(str(r.phone))
+          const verifiedInvoices = verifiedInvoicesByContact.get(
+            r.xero_contact_id,
+          ) ?? [];
+          const reason = !verifiedInvoices.length
+            ? "No verified Xero invoice is available to verify this candidate"
+            : !str(r.email) && !str(r.phone)
             ? "The candidate has no email or phone to verify against Xero"
             : "The candidate email and phone do not match the Xero contact";
           const candidates = unverifiedContactMatches.get(r.xero_contact_id) ??
@@ -1404,8 +1383,8 @@ export async function debtWorklist(
   const debtorGhlContactIds = new Map(
     debtorKeys.map((key) => [key, ghlContactIdsFor(key)]),
   );
-  const contactNotesByGhl = new Map<string, any[]>();
-  let contactNotesFault: string | null = null;
+  const contactEventsByGhl = new Map<string, any[]>();
+  let contactEventsFault: string | null = null;
   try {
     const contactIds = [
       ...new Set([...debtorGhlContactIds.values()].flat()),
@@ -1416,25 +1395,25 @@ export async function debtWorklist(
         () =>
           client.from("business_events")
             .select(
-              "id, contact_id, job_id, event_type, occurred_at, direction, payload, body_preview, provider_message_id",
+              "id, contact_id, job_id, event_type, occurred_at, direction, channel, payload, body_preview, provider_message_id",
             )
-            .in("event_type", ["ghl.note_added", "ghl.internal_comment"])
+            .in("event_type", GHL_CAPTURED_MESSAGE_EVENT_TYPES)
             .in("contact_id", ids),
         warnings,
         "id",
         true,
       );
       for (const row of rows) {
-        const notes = contactNotesByGhl.get(row.contact_id) ?? [];
-        notes.push(row);
-        contactNotesByGhl.set(row.contact_id, notes);
+        const events = contactEventsByGhl.get(row.contact_id) ?? [];
+        events.push(row);
+        contactEventsByGhl.set(row.contact_id, events);
       }
     }
   } catch (e) {
-    contactNotesFault = errText(e);
+    contactEventsFault = errText(e);
     faults.push({
       source: "ghl",
-      detail: `contact-level GHL note read failed: ${contactNotesFault}`,
+      detail: `contact-level GHL message and note read failed: ${contactEventsFault}`,
     });
   }
   const contactMessages = new Map<string, any[]>();
@@ -1646,16 +1625,16 @@ export async function debtWorklist(
       }
       const contactIds = debtorGhlContactIds.get(key) ?? [];
       for (const contactId of contactIds) {
-        for (const note of contactNotesByGhl.get(contactId) ?? []) {
-          const noteJobId = str(note.job_id);
-          if (noteJobId) {
-            const jobInvoiceIds = invoicesByLinkedJob.get(noteJobId);
+        for (const event of contactEventsByGhl.get(contactId) ?? []) {
+          const eventJobId = str(event.job_id);
+          if (eventJobId) {
+            const jobInvoiceIds = invoicesByLinkedJob.get(eventJobId);
             if (!jobInvoiceIds) continue;
             raw.push(
-              entryFromGhlContactNote(note, debtorInvoiceIds, jobInvoiceIds),
+              entryFromGhlContactEvent(event, debtorInvoiceIds, jobInvoiceIds),
             );
           } else {
-            raw.push(entryFromGhlContactNote(note, debtorInvoiceIds));
+            raw.push(entryFromGhlContactEvent(event, debtorInvoiceIds));
           }
         }
       }
@@ -1704,7 +1683,7 @@ export async function debtWorklist(
         ghlCachePageCapHit ||
         (contactMatchFault && identity.status === "verified") ||
         (contactMessagesFault && contactOnlyGhl.length) ||
-        (contactNotesFault && contactIds.length) ||
+        (contactEventsFault && contactIds.length) ||
         (ghlCacheFault && contactIds.length) ||
         (ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read))
       ) {
@@ -1720,7 +1699,7 @@ export async function debtWorklist(
         !ghlCachePageCapHit &&
         !(contactMatchFault && identity.status === "verified") &&
         !(contactMessagesFault && contactOnlyGhl.length) &&
-        !(contactNotesFault && contactIds.length) &&
+        !(contactEventsFault && contactIds.length) &&
         !(ghlCacheFault && contactIds.length) &&
         !(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) &&
         perJobCapHit.length === 0 && factsCapHit.length === 0 &&
@@ -1854,8 +1833,9 @@ export async function debtWorklist(
       ghlCachePageCapHit ||
       Boolean(contactMatchFault && identity.status === "verified") ||
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
-      Boolean(contactNotesFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
-      Boolean(convFaultBy("ghl_cache"));
+      Boolean(contactEventsFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
+      Boolean(convFaultBy("ghl_cache")) ||
+      Boolean(convFaultBy("business_events"));
     const ghlStale = !ghlUnreadable && (
       ghlContacts.some((c) => c.stale) ||
       ghlJobCaches.some((c) => c.used_by_conversation_read && c.stale === true)

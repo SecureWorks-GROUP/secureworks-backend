@@ -686,6 +686,82 @@ Deno.test("contact-level GHL notes merge once with the placed job copy", async (
   assertEquals(comments[0].invoice_scope, "debtor");
 });
 
+Deno.test("contact-level GHL messages and notes retain direction and scope", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [invoice(1, { job_id: null })];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-contact-only",
+    job_id: null,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  const cases = [
+    ["client.reply", "sms", "inbound"],
+    ["client.email_in", "email", "inbound"],
+    ["client.email_out", "email", "outbound"],
+    ["client.sms_out", "sms", "outbound"],
+    ["ghl.note_added", "note", "internal"],
+    ["ghl.internal_comment", "note", "internal"],
+  ] as const;
+  tables.business_events = cases.map(([eventType, channel, direction], index) => ({
+    id: `contact-event-${index}`,
+    contact_id: "ghl-contact-only",
+    job_id: null,
+    event_type: eventType,
+    occurred_at: `2026-09-23T0${index}:00:00Z`,
+    channel,
+    direction,
+    provider_message_id: `ghl:contact-event-${index}`,
+    payload: {
+      body: `Captured ${eventType}`,
+      channel,
+      direction,
+      added_by: "operator-1",
+    },
+  }));
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables)),
+  );
+  const debtor = out.debtors[0];
+  for (const [index, [eventType, channel, direction]] of cases.entries()) {
+    const entry = debtor.timeline.entries.find((candidate: any) =>
+      candidate.provider_id === `ghl:contact-event-${index}`
+    );
+    assert(entry, `missing captured ${eventType}`);
+    assertEquals(entry.channel, channel);
+    assertEquals(entry.direction, direction);
+    assertEquals(entry.job_id, null);
+    assertEquals(entry.invoice_scope, "debtor");
+    assertEquals(entry.invoice_ids, [INV(1)]);
+  }
+});
+
+Deno.test("conversation business-event faults make GHL source unreadable", async () => {
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(
+      fakeClient(unitTables()),
+      conversationStub(
+        { [JOB_A]: JOB_A_MESSAGES },
+        { [JOB_A]: ["business_events: unavailable"] },
+      ).fn,
+    ),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.sources.ghl.status, "unreadable");
+  assertEquals(debtor.sources.ghl.complete, false);
+  assertEquals(debtor.sources.email.status, "unreadable");
+  assertEquals(debtor.timeline.complete, false);
+  assert(
+    debtor.faults.some((fault: any) => fault.detail.includes("business_events:")),
+  );
+});
+
 Deno.test("capped chase and invoice-event reads keep timeline incomplete", async () => {
   const tables = unitTables();
   tables.payment_chase_logs = Array.from({ length: 20_001 }, (_, index) => ({
