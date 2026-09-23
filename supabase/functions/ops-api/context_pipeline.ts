@@ -24,11 +24,14 @@ function text(value: unknown): string | null {
 }
 
 export async function contextPipelineStatus(
-  client: { rpc: (fn: string) => PromiseLike<{ data: unknown; error: unknown }> },
+  client: {
+    rpc: (fn: string) => PromiseLike<{ data: unknown; error: unknown }>;
+  },
 ) {
   const { data, error } = await client.rpc("context_pipeline_status");
   if (error || !data) {
-    const rpcError = (error && typeof error === "object" ? error : {}) as RpcError;
+    const rpcError =
+      (error && typeof error === "object" ? error : {}) as RpcError;
     const reason = error ? rpcReasonCode(rpcError) : "empty_payload";
     // One structured line with the RPC error only, never the payload.
     console.error(JSON.stringify({
