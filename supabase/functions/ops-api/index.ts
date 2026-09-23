@@ -56072,7 +56072,7 @@ async function backfillCallTranscripts(client: any, body: any, req: Request): Pr
 //
 // Audit chain (3 business_events rows per successful canary/pilot):
 //   - proposed_action.manually_approved   (BEFORE the send fires)
-//   - sms_sent                            (written by ghl-proxy on success)
+//   - client.sms_out                      (ghl-proxy send_sms via capture_business_event)
 //   - proposed_action.dispatched          (AFTER the send returns)
 //
 // Status flow uses existing values: 'pending' → 'sent'. Approval method
@@ -56341,7 +56341,7 @@ export async function _manualDispatchAt(client: any, body: any, now: Date) {
     ghl_message_id: ghlMessageId,
     audit_chain: [
       'proposed_action.manually_approved',
-      'sms_sent (via ghl-proxy)',
+      'client.sms_out (ghl-proxy send_sms via capture_business_event)',
       'proposed_action.dispatched',
     ],
   }

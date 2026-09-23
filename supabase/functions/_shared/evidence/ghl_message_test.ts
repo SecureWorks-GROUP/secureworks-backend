@@ -34,10 +34,10 @@ const LIVE: GhlCaptureContext = {
   captureMode: "live",
 };
 
-// deno-lint-ignore no-explicit-any
 function row(
   item: GhlMessageItem,
   ctx: GhlCaptureContext = LIVE,
+  // deno-lint-ignore no-explicit-any
 ): Record<string, any> {
   const built = buildGhlMessageRow(item, ctx);
   if (built.kind !== "row") {
