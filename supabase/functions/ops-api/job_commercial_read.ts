@@ -97,6 +97,7 @@ export interface QuoteRevisionRow {
   released_via: string | null;
   version: number | null;
   sent_at: string | null;
+  scope_snapshot_json?: unknown;
 }
 
 export interface PartyEmailRow {
@@ -146,6 +147,15 @@ export interface OutstandingParty {
   status: string;
 }
 
+export type BoundRevisionState = "unavailable" | "missing" | "present";
+
+export interface BoundRevision {
+  state: BoundRevisionState;
+  revision_id: string | null;
+  snapshot_version: number | null;
+  snapshot_has_version: boolean;
+}
+
 export interface JobQuotes {
   status: QuotesRollup;
   outstanding: OutstandingParty[];
@@ -160,6 +170,7 @@ export interface JobQuotes {
     basis: "accepted" | "newest_current";
   } | null;
   current: QuoteDocumentView[];
+  bound_revision: BoundRevision | null;
   run_acceptances: RunAcceptanceRow[];
   history: QuoteDocumentView[];
   history_total: number;
@@ -226,8 +237,7 @@ export function currentPriceIncGst(pricing: unknown): number | null {
     }
   }
   if (!p || typeof p !== "object") return null;
-  return num(p.totalIncGST) ?? num(p.total) ?? num(p.grandTotal) ??
-    num(p.amount);
+  return num(p.totalIncGST);
 }
 
 function isOwnDomain(email: string): boolean {
@@ -273,21 +283,65 @@ function documentStatus(
   return "sent";
 }
 
+function sentRevisionsForDocument(
+  doc: QuoteDocumentRow,
+  revisions: QuoteRevisionRow[],
+): QuoteRevisionRow[] {
+  return revisions.filter((r) => r.job_document_id === doc.id && r.sent_at)
+    .sort((a, b) =>
+      Number(b.id === doc.quote_revision_id) -
+        Number(a.id === doc.quote_revision_id) ||
+      time(b.sent_at) - time(a.sent_at) ||
+      (num(b.version) ?? 0) - (num(a.version) ?? 0)
+    );
+}
+
+function revisionSnapshotVersion(snapshot: unknown): {
+  snapshot_version: number | null;
+  snapshot_has_version: boolean;
+} {
+  const obj = parseJsonObject(snapshot);
+  if (!obj || !Object.prototype.hasOwnProperty.call(obj, "version")) {
+    return { snapshot_version: null, snapshot_has_version: false };
+  }
+  return { snapshot_version: num(obj.version), snapshot_has_version: true };
+}
+
+function boundRevisionFor(
+  doc: QuoteDocumentRow,
+  revisions: QuoteRevisionRow[] | null,
+): BoundRevision {
+  if (!revisions) {
+    return {
+      state: "unavailable",
+      revision_id: null,
+      snapshot_version: null,
+      snapshot_has_version: false,
+    };
+  }
+  const revision = sentRevisionsForDocument(doc, revisions)[0];
+  if (!revision) {
+    return {
+      state: "missing",
+      revision_id: null,
+      snapshot_version: null,
+      snapshot_has_version: false,
+    };
+  }
+  return {
+    state: "present",
+    revision_id: revision.id,
+    ...revisionSnapshotVersion(revision.scope_snapshot_json),
+  };
+}
+
 function recipientFor(
   doc: QuoteDocumentRow,
   recipients: NonNullable<BuildJobQuotesInput["recipients"]>,
 ): { sent_to: string | null; option_label: string | null } {
   // Same preference order as job_quote_values: the revision the document
   // points at, else its newest sent revision.
-  const revisions = recipients.revisions.filter((r) =>
-    r.job_document_id === doc.id && r.sent_at
-  ).sort((a, b) =>
-    Number(b.id === doc.quote_revision_id) -
-      Number(a.id === doc.quote_revision_id) ||
-    time(b.sent_at) - time(a.sent_at) ||
-    (num(b.version) ?? 0) - (num(a.version) ?? 0)
-  );
-  const revision = revisions[0];
+  const revision = sentRevisionsForDocument(doc, recipients.revisions)[0];
   const optionLabel = doc.run_label ? null : str(revision?.option_label);
   const fromRevision = str(revision?.recipient_email);
   if (fromRevision) return { sent_to: fromRevision, option_label: optionLabel };
@@ -528,6 +582,23 @@ export function buildJobQuotes(input: BuildJobQuotesInput): JobQuotes {
     num(v.whole_quote_total_inc) !== null && v.whole_quote_source
   );
   const sentIds = new Set(input.values.map((v) => v.document_id));
+  const newest = current[0];
+  const newestDoc = newest
+    ? input.documents.find((d) => d.id === newest.document_id)
+    : undefined;
+  const bound_revision = newest
+    ? (newestDoc
+      ? boundRevisionFor(
+        newestDoc,
+        input.recipients ? input.recipients.revisions : null,
+      )
+      : {
+        state: "unavailable" as const,
+        revision_id: null,
+        snapshot_version: null,
+        snapshot_has_version: false,
+      })
+    : null;
   return {
     status: rollup,
     outstanding,
@@ -539,6 +610,7 @@ export function buildJobQuotes(input: BuildJobQuotesInput): JobQuotes {
       : null,
     headline,
     current,
+    bound_revision,
     run_acceptances: input.runAcceptances.map((r) => ({
       job_contact_id: r.job_contact_id ?? null,
       job_document_id: r.job_document_id ?? null,
@@ -606,7 +678,7 @@ export async function readJobQuotes(
       select(
         client.from("quote_revisions")
           .select(
-            "id, job_document_id, recipient_email, option_label, released_via, version, sent_at",
+            "id, job_document_id, recipient_email, option_label, released_via, version, sent_at, scope_snapshot_json",
           )
           .eq("job_id", job.id)
           .limit(QUOTE_DOC_LIMIT),
@@ -917,6 +989,65 @@ function scopeLines(scope: any): string[] {
   return out.filter((l) => l.length > 0).slice(0, SCOPE_LINES_MAX);
 }
 
+function changedSinceLastQuote(
+  job: { scope_version?: unknown; scope_updated_at?: string | null },
+  opts: {
+    newestQuoteSentAt: string | null;
+    quoteReadFailed?: boolean;
+    boundRevision?: BoundRevision | null;
+  },
+): { changed: boolean | null; basis: string } {
+  if (opts.quoteReadFailed) {
+    return { changed: null, basis: "quote_read_failed" };
+  }
+  if (!opts.newestQuoteSentAt) {
+    return { changed: null, basis: "no_sent_quote" };
+  }
+  const rev = opts.boundRevision;
+  if (rev?.state === "missing") {
+    return { changed: null, basis: "no_revision" };
+  }
+  const scopeUpdatedAt = job.scope_updated_at ?? null;
+  const hasTime = Boolean(
+    scopeUpdatedAt && Number.isFinite(time(scopeUpdatedAt)),
+  );
+  if (hasTime && time(scopeUpdatedAt) > time(opts.newestQuoteSentAt)) {
+    return {
+      changed: true,
+      basis: "scope_updated_at_vs_newest_current_quote",
+    };
+  }
+  const jobVersion = num(job.scope_version);
+  if (
+    rev?.state === "present" &&
+    rev.snapshot_has_version &&
+    rev.snapshot_version !== null &&
+    jobVersion !== null &&
+    jobVersion !== rev.snapshot_version
+  ) {
+    return { changed: true, basis: "scope_version_vs_revision_snapshot" };
+  }
+  if (hasTime) {
+    return {
+      changed: false,
+      basis: "scope_updated_at_vs_newest_current_quote",
+    };
+  }
+  if (rev?.state === "present" && !rev.snapshot_has_version) {
+    return { changed: null, basis: "revision_snapshot_has_no_version" };
+  }
+  if (
+    rev?.state === "present" &&
+    rev.snapshot_has_version &&
+    rev.snapshot_version !== null &&
+    jobVersion !== null &&
+    jobVersion === rev.snapshot_version
+  ) {
+    return { changed: false, basis: "scope_version_vs_revision_snapshot" };
+  }
+  return { changed: null, basis: "scope_update_time_not_recorded" };
+}
+
 /**
  * Pure scope summary. Reads the adapter's scope block only (never pricing or
  * internal cost). newestQuoteSentAt is the newest CURRENT quote's sent_at.
@@ -935,24 +1066,14 @@ export function summariseScope(
   opts: {
     newestQuoteSentAt: string | null;
     signedOff: { at: string; source: string } | null;
+    quoteReadFailed?: boolean;
+    boundRevision?: BoundRevision | null;
   },
 ): ScopeSummary {
   const scopeJson = parseJsonObject(job.scope_json);
   const pricingJson = parseJsonObject(job.pricing_json);
   const scopeUpdatedAt = job.scope_updated_at ?? null;
-
-  let changed: boolean | null;
-  let basis: string;
-  if (!opts.newestQuoteSentAt) {
-    changed = null;
-    basis = "no_sent_quote";
-  } else if (!scopeUpdatedAt || !Number.isFinite(time(scopeUpdatedAt))) {
-    changed = null;
-    basis = "scope_update_time_not_recorded";
-  } else {
-    changed = time(scopeUpdatedAt) > time(opts.newestQuoteSentAt);
-    basis = "scope_updated_at_vs_newest_current_quote";
-  }
+  const { changed, basis } = changedSinceLastQuote(job, opts);
 
   const base: ScopeSummary = {
     status: "summarised",

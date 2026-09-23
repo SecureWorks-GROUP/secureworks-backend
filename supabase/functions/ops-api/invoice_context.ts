@@ -1049,16 +1049,21 @@ export async function invoiceContext(
           whole_quote_total: quotesRead.quotes?.whole_quote_total ?? null,
           current_price_inc_gst: currentPriceIncGst(jobRow.pricing_json),
           deposit_amount: num(jobRow.deposit_amount),
-          variations: (variations.variations || []).map((v) => ({
-            number: `VAR${v.variation_number ?? ""}`,
-            amount: v.amount,
-            status: v.status,
-            sent_at: v.sent_at,
-            approved_at: v.approved_at,
-            accepted_at: v.accepted_at,
-            agreement: v.agreement,
-            agreed: v.agreed,
-          })),
+          variations: variations.variations == null
+            ? null
+            : variations.variations.map((v) => ({
+              number: `VAR${v.variation_number ?? ""}`,
+              amount: v.amount,
+              status: v.status,
+              sent_at: v.sent_at,
+              approved_at: v.approved_at,
+              accepted_at: v.accepted_at,
+              agreement: v.agreement,
+              agreed: v.agreed,
+            })),
+          variations_code: variations.variations == null
+            ? (variations.status.code ?? "read_failed")
+            : null,
           work_orders: (workOrders.data || []).map((w: any) => ({
             wo_number: w.wo_number ?? null,
             trade: w.trade_name ?? null,

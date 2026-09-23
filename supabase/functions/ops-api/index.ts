@@ -16376,6 +16376,8 @@ async function assembleJobDossier(client: any, body: any) {
   sourceStatus.variations = variationsRead.status
   const scope = summariseScope(jobRow, {
     newestQuoteSentAt: quotesRead.quotes?.current[0]?.sent_at ?? null,
+    quoteReadFailed: !quotesRead.status.ok,
+    boundRevision: quotesRead.quotes?.bound_revision ?? null,
     signedOff: signOffRead.signedOff,
   })
   sourceStatus.scope = scopeSourceStatus(scope, signOffRead.code)

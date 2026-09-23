@@ -45,6 +45,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildJobQuotes,
+  currentPriceIncGst,
   decodeVariationText,
   readJobQuotes,
   readJobVariations,
@@ -957,6 +958,148 @@ Deno.test("D1 row 24 SWP-261203: scope edited after the newest current quote rea
   );
 });
 
+Deno.test("D1 row 24 SWP-261203: patio correction class — scope_version differs from the bound revision snapshot", async () => {
+  const client = fakeClient({
+    job_documents: [{
+      ...doc("r24-q", {
+        quote_number: "Q-1203",
+        sent_at: "2026-09-10T00:00:00.000Z",
+        quote_revision_id: "r24-rev",
+      }),
+      job_id: "job-r24",
+    }],
+    run_acceptances: [],
+    quote_revisions: [{
+      id: "r24-rev",
+      job_id: "job-r24",
+      job_document_id: "r24-q",
+      recipient_email: "row24@example.test",
+      released_via: "send-quote/send",
+      version: 1,
+      sent_at: "2026-09-10T00:00:00.000Z",
+      scope_snapshot_json: {
+        version: 1,
+        job_type: "patio",
+        job_number: "SWP-261203",
+      },
+    }],
+    job_contacts: [],
+    business_events: [],
+    "rpc:job_quote_values": [{
+      _job_id: "job-r24",
+      ...value("r24-q", {
+        value_inc_gst: 9000,
+        value_source: "quote_revision",
+      }),
+    }],
+  });
+  const out = await readJobQuotes(client, {
+    id: "job-r24",
+    client_email: "row24@example.test",
+  });
+  assertEquals(out.status.ok, true);
+  assertEquals(out.quotes?.bound_revision, {
+    state: "present",
+    revision_id: "r24-rev",
+    snapshot_version: 1,
+    snapshot_has_version: true,
+  });
+  const patio = summariseScope({
+    id: "job-r24",
+    type: "patio",
+    scope_json: {
+      patios: [{ config: { dimensions: { width: 6, depth: 3 } } }],
+    },
+    pricing_json: { totalIncGST: 9000 },
+    scope_version: 2,
+    scope_updated_at: null,
+  }, {
+    newestQuoteSentAt: out.quotes!.current[0].sent_at,
+    boundRevision: out.quotes!.bound_revision,
+    signedOff: null,
+  });
+  assertEquals(patio.changed_since_last_quote, true);
+  assertEquals(
+    patio.changed_since_last_quote_basis,
+    "scope_version_vs_revision_snapshot",
+  );
+  assertEquals(client.writes, []);
+});
+
+Deno.test("D1 scope: a send-quote snapshot with no version key keeps the timestamp half", () => {
+  const job = {
+    id: "r24-manifest",
+    type: "patio",
+    scope_json: {
+      patios: [{ config: { dimensions: { width: 6, depth: 3 } } }],
+    },
+    pricing_json: { totalIncGST: 9000 },
+    scope_version: 2,
+    scope_updated_at: null,
+  };
+  const noVersion = {
+    state: "present" as const,
+    revision_id: "rev",
+    snapshot_version: null,
+    snapshot_has_version: false,
+  };
+  const unknown = summariseScope(job, {
+    newestQuoteSentAt: "2026-09-10T00:00:00.000Z",
+    boundRevision: noVersion,
+    signedOff: null,
+  });
+  assertEquals(unknown.changed_since_last_quote, null);
+  assertEquals(
+    unknown.changed_since_last_quote_basis,
+    "revision_snapshot_has_no_version",
+  );
+  const later = summariseScope({
+    ...job,
+    scope_updated_at: "2026-09-12T00:00:00.000Z",
+  }, {
+    newestQuoteSentAt: "2026-09-10T00:00:00.000Z",
+    boundRevision: noVersion,
+    signedOff: null,
+  });
+  assertEquals(later.changed_since_last_quote, true);
+  assertEquals(
+    later.changed_since_last_quote_basis,
+    "scope_updated_at_vs_newest_current_quote",
+  );
+});
+
+Deno.test("D1 current_price_inc_gst: only totalIncGST; a total-only blob is unknown", () => {
+  assertEquals(currentPriceIncGst({ totalIncGST: 21309.04, total: 19371.85 }), 21309.04);
+  assertEquals(currentPriceIncGst({ total: 7227.56 }), null);
+  assertEquals(currentPriceIncGst({ grandTotal: 100, amount: 90 }), null);
+  assertEquals(currentPriceIncGst(null), null);
+});
+
+Deno.test("D1 scope: a failed quote read leaves changed_since_last_quote unknown", () => {
+  const scope = summariseScope({
+    id: "r6",
+    type: "fencing",
+    scope_json: {
+      runs: [{
+        run_label: "REAR",
+        type: "Colorbond",
+        length_m: 18,
+        height_mm: 1800,
+      }],
+    },
+    pricing_json: { totalIncGST: 5571.5 },
+    scope_version: 1,
+    scope_updated_at: "2026-09-12T00:00:00.000Z",
+  }, {
+    newestQuoteSentAt: null,
+    quoteReadFailed: true,
+    signedOff: null,
+  });
+  assertEquals(scope.changed_since_last_quote, null);
+  assertEquals(scope.changed_since_last_quote_basis, "quote_read_failed");
+  assertEquals(scope.changed_since_last_quote_basis !== "no_sent_quote", true);
+});
+
 // ── reader failure modes ─────────────────────────────────────────────────────
 
 function row3Tables(): Tables {
@@ -1163,6 +1306,8 @@ Deno.test("D1 dossier: a failed value read leaves quotes null and diagnostics no
   assertEquals(d.operationalTruth.quotes, null);
   assertEquals(d.diagnostics.sourceStatus.quotes.state, "failed");
   assertEquals(d.diagnostics.ok, false);
+  assertEquals(d.scope.changed_since_last_quote, null);
+  assertEquals(d.scope.changed_since_last_quote_basis, "quote_read_failed");
   assertEquals(client.writes, []);
 });
 
@@ -1217,5 +1362,45 @@ Deno.test("D1 invoice read agrees with the job read on the quote total and varia
       v: any,
     ) => [`VAR${v.variation_number}`, v.amount, v.agreed]),
   );
+  assertEquals(inv.job.promised.variations_code, null);
+  assertEquals(client.writes, []);
+});
+
+Deno.test("D1 invoice read: a failed variation read leaves promised.variations null with the reason", async () => {
+  const t = dossierTables();
+  t.xero_invoices = [{
+    org_id: ORG,
+    invoice_type: "ACCREC",
+    xero_invoice_id: "b0000000-0000-4000-8000-000000026818",
+    xero_contact_id: "xc-6",
+    contact_name: "Row Six",
+    invoice_number: "INV-2681",
+    reference: "SWF-26818 DEP",
+    status: "AUTHORISED",
+    total: 2421.23,
+    amount_due: 2421.23,
+    amount_paid: 0,
+    invoice_date: "2026-07-02",
+    due_date: "2026-07-16",
+    job_id: DOSSIER_JOB,
+    synced_at: "2026-09-23T05:00:00.000Z",
+    line_items: [],
+    raw_json: {},
+  }];
+  const client = fakeClient(t, { failing: new Set(["job_variations"]) });
+  const inv: any = await invoiceContext(
+    new URLSearchParams({ invoice: "INV-2681" }),
+    {
+      client,
+      orgId: ORG,
+      getJobConversation: async () => ({ messages: [] }),
+      isCurrentContextFact,
+      now: () => NOW,
+    },
+  );
+  assertEquals(inv.job.promised.variations, null);
+  assertEquals(inv.job.promised.variations_code, "42P01");
+  assertEquals(inv.sources.promised.ok, false);
+  assert(String(inv.sources.promised.error).includes("job_variations"));
   assertEquals(client.writes, []);
 });
