@@ -726,6 +726,88 @@ Deno.test("capped chase and invoice-event reads keep timeline incomplete", async
   );
 });
 
+Deno.test("unplaced inbox copies stay outside job and invoice scopes", async () => {
+  const inboxMessage = (eventCopy: string, id: string) => ({
+    id,
+    source_system: "inbox",
+    source_ref: id,
+    provider_message_id: `graph:${id}`,
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-09-18T02:00:00Z",
+    preview: `Inbox copy ${id}`,
+    event_copy: eventCopy,
+    label: "old inbox matcher guess",
+  });
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(
+      fakeClient(unitTables()),
+      conversationStub({
+        [JOB_A]: [
+          inboxMessage("unplaced", "unplaced-email"),
+          inboxMessage("none", "uncopied-email"),
+        ],
+      }).fn,
+    ),
+  );
+  const entries = out.debtors[0].timeline.entries.filter((entry: any) =>
+    entry.source === "inbox"
+  );
+  assertEquals(entries.length, 2);
+  for (const entry of entries) {
+    assertEquals(entry.job_id, null);
+    assertEquals(entry.invoice_ids, []);
+    assertEquals(entry.invoice_scope, "unplaced");
+    assertEquals(entry.label, "unplaced, matched by the old guess");
+  }
+});
+
+Deno.test("date-only overdue uses the Perth calendar date", async () => {
+  const tables = unitTables();
+  tables.xero_invoices[0].due_date = "2026-09-23";
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(
+      fakeClient(tables),
+      conversationStub({}).fn,
+      ORG,
+      new Date("2026-09-23T16:30:00.000Z"),
+    ),
+  );
+  const invoiceRow = out.debtors[0].invoices.find((row: any) =>
+    row.xero_invoice_id === INV(1)
+  );
+  assertEquals(invoiceRow.days_overdue, 1);
+  assertEquals(invoiceRow.overdue, true);
+});
+
+Deno.test("facts timeline page ceiling marks facts and timeline incomplete", async () => {
+  const tables = unitTables();
+  tables.current_job_context_facts = Array.from({ length: 20_001 }, (_, i) => ({
+    id: `hidden-fact-${String(i).padStart(5, "0")}`,
+    job_id: i % 2 === 0 ? JOB_A : JOB_B,
+    kind: "unrelated_fact_kind",
+    value: { text: "not a Luna subscription fact" },
+    provenance: { extractor: "unrelated-extractor" },
+    _context_store: "job_context",
+    updated_at: "2026-09-20T00:00:00Z",
+  }));
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables)),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.sources.facts.timeline_read, "unreadable");
+  assertEquals(debtor.timeline.complete, false);
+  assertEquals(debtor.timeline.sources_complete, false);
+  assert(
+    out.faults.some((fault: any) =>
+      fault.source === "facts" && fault.detail.includes("page ceiling")
+    ),
+  );
+});
+
 Deno.test("job-keyed GHL cache freshness is reported for the conversation fallback", async () => {
   const tables = unitTables();
   tables.jobs.find((job) => job.id === JOB_A).ghl_contact_id = null;

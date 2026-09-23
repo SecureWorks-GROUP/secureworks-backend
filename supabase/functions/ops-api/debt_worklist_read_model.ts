@@ -127,7 +127,7 @@ export interface TimelineEntry {
   preview: string;
   job_id: string | null;
   invoice_ids: string[];
-  invoice_scope: "invoice" | "job" | "debtor";
+  invoice_scope: "invoice" | "job" | "debtor" | "unplaced";
   seen_in: string[];
   label: string | null;
   /** Only on captured fact entries. */
@@ -155,10 +155,11 @@ function daysOverdue(dueDate: string | null, now: Date): number | null {
   if (!dueDate) return null;
   const due = Date.parse(`${dueDate.slice(0, 10)}T00:00:00Z`);
   if (!Number.isFinite(due)) return null;
+  const perthNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
   const today = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
+    perthNow.getUTCFullYear(),
+    perthNow.getUTCMonth(),
+    perthNow.getUTCDate(),
   );
   return Math.round((today - due) / 86_400_000);
 }
@@ -308,6 +309,8 @@ export function entryFromConversation(
     ? "outlook"
     : "secureworks";
   const channel = str(m.channel);
+  const unplacedInbox = source === "inbox" &&
+    (m.event_copy === "unplaced" || m.event_copy === "none");
   const kind = channel === "note" && source === "job_events"
     ? "job_note"
     : channel === "note"
@@ -329,11 +332,13 @@ export function entryFromConversation(
     source_ref: str(m.source_ref),
     subject: str(m.subject),
     preview: String(m.preview ?? m.body ?? "").slice(0, 500),
-    job_id: jobId,
-    invoice_ids: [...jobInvoiceIds],
-    invoice_scope: "job",
+    job_id: unplacedInbox ? null : jobId,
+    invoice_ids: unplacedInbox ? [] : [...jobInvoiceIds],
+    invoice_scope: unplacedInbox ? "unplaced" : "job",
     seen_in: [source],
-    label: str(m.label),
+    label: unplacedInbox
+      ? "unplaced, matched by the old guess"
+      : str(m.label),
   };
 }
 
@@ -1457,6 +1462,8 @@ export async function debtWorklist(
               )
               .in("job_id", ids),
           warnings,
+          "id",
+          true,
         );
         for (const r of rows) {
           if (!isLunaSubscriptionFact(r)) continue;
