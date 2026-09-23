@@ -3626,8 +3626,9 @@ saves each listed message under `ghl:<id>`. Every delivery also writes one
 only, DB-enforced; 30-day purge inside the writer). Tasks and appointments use
 channel `status` because the live `business_events` channel CHECK has no
 `task`/`calendar` (schema owner: foundation). `ghl-webhook` answers message
-posts with no write. Tests: `receiver_c1c_test.ts`; SQL proof and builder-row
-parity: migration contract `20260924130000_ghl_webhook_receipts`.
+posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook_test.ts`; SQL
+proof and builder-row parity: migration contract
+`20260924130000_ghl_webhook_receipts`.
 
 ## Outbound SMS Sender Policy Is One Shared Module
 

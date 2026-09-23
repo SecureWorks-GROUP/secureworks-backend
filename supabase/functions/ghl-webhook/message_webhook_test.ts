@@ -6,7 +6,7 @@ import {
   assertEquals,
   assertFalse,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { handleGhlWebhook, type GhlWebhookDeps } from "./handler.ts";
+import { type GhlWebhookDeps, handleGhlWebhook } from "./handler.ts";
 import { isMessageWebhook, messageWebhookAnswer } from "./message_webhook.ts";
 
 const SECRET = "test-webhook-secret";
