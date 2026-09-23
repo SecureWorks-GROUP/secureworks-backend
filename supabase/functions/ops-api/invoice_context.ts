@@ -4,7 +4,7 @@
 //
 // One read: invoice in, everything the system already holds out. Job link,
 // Luna facts only (v1 stamp or per-job luna_v2 — Haiku / instruction extractors
-// do not count), stored conversation (five-source merge), Xero cache state,
+// do not count), stored conversation (getJobConversation merge), Xero cache state,
 // chase log, and an explicit owned blocker for every missing piece. SELECT-only.
 // Never calls Xero or GHL, never writes, never classifies.
 //
