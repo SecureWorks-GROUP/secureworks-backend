@@ -41,15 +41,20 @@
 -- No flag or switch changes. No row is written or rewritten. No grant, policy
 -- or view is added for anon or authenticated.
 --
--- Built on the LIVE production definitions. The guard below pins each object
--- this migration replaces to its production pre-image, read from production
--- (read-only) before merge:
+-- Built on the LIVE production definitions, read from production 24 Sep 2026
+-- (read-only transaction, rolled back). Each object this migration replaces
+-- matched the repository body it starts from:
 --   context_pipeline_status()          md5(prosrc) 6f78816a6f676cd9a28f6271d2c6c8e0 (F1)
 --   context_source_freshness()         md5(prosrc) ce094feb8df8b7dd596e639ac47a7825 (F1)
 --   context_source_freshness_policy()  md5(prosrc) 230c0b1965208474fc6ea076e5dd3f6f (F1)
 --   record_capture_run(jsonb)          md5(prosrc) a85b48f9422fff111ee96093bad55c40 (F1)
 --   context_capture_runs: F1's twelve columns, no window_end_id
 --   the four new stub functions: absent
+--   feature flag ghl_call_transcript_fetch_v1: no row (reads as off)
+--   ledger: no row at 20260924152100
+-- Effect on today's alarms: none. transcribe-call wrote 85 rows in the last
+-- 14 days, below the normally-active rate, so F1 was not alarming on it yet;
+-- F1b stops it alarming once T0 retires the Whisper path.
 -- The guard refuses unless each is still that pre-image or already this
 -- migration's result (a re-apply). Anything else is a live change nobody read,
 -- and replacing it would silently revert it.
