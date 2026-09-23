@@ -37,6 +37,7 @@ import {
   jobNumberFromReference,
   parseXeroDate,
   queueDetail,
+  resolveJobLinks,
 } from "./invoice_context.ts";
 import {
   isCurrentContextFact,
@@ -182,6 +183,7 @@ function baseTables(): Tables {
     jobs: [
       {
         id: JOB1,
+        org_id: ORG,
         job_number: "SWMS-261399",
         type: "makesafe",
         status: "invoiced",
@@ -202,6 +204,7 @@ function baseTables(): Tables {
       },
       {
         id: JOB2,
+        org_id: ORG,
         job_number: "SWP-261180",
         type: "patio",
         status: "completed",
@@ -211,6 +214,7 @@ function baseTables(): Tables {
       },
       {
         id: JOB3,
+        org_id: ORG,
         job_number: "SWF-261300",
         type: "fencing",
         status: "quoted",
@@ -220,6 +224,7 @@ function baseTables(): Tables {
       },
       {
         id: "a0000000-0000-4000-8000-000000000004",
+        org_id: ORG,
         job_number: "SWF-261301",
         type: "fencing",
         status: "scheduled",
@@ -229,7 +234,7 @@ function baseTables(): Tables {
       },
     ],
     contact_matches: [
-      { xero_contact_id: "xc-3", ghl_contact_id: "ghl-3", job_id: null },
+      { org_id: ORG, xero_contact_id: "xc-3", ghl_contact_id: "ghl-3", job_id: null },
     ],
     job_variations: [{
       job_id: JOB1,
@@ -734,6 +739,46 @@ Deno.test("3b. a single job through the Xero contact links; a stored job_number 
   );
   assertEquals(stored.link.method, "invoice.job_number");
   assertEquals(stored.link.job_number, "SWF-261300");
+});
+
+Deno.test("contact resolver rejects matches and jobs outside the invoice org", async () => {
+  const foreignOrg = "00000000-0000-0000-0000-000000000099";
+  const foreignJob = "a0000000-0000-4000-8000-000000000099";
+  const t = baseTables();
+  t.jobs.push({
+    id: foreignJob,
+    org_id: foreignOrg,
+    job_number: "SWF-261999",
+    status: "scheduled",
+    ghl_contact_id: "ghl-foreign",
+  });
+  t.contact_matches = [
+    {
+      org_id: foreignOrg,
+      xero_contact_id: "xc-cross",
+      ghl_contact_id: "ghl-foreign",
+      job_id: foreignJob,
+    },
+    {
+      org_id: ORG,
+      xero_contact_id: "xc-cross",
+      ghl_contact_id: "ghl-foreign",
+      job_id: foreignJob,
+    },
+  ];
+  const invoices = [
+    { xero_invoice_id: "contact-route", xero_contact_id: "xc-cross" },
+    { xero_invoice_id: "id-route", job_id: foreignJob },
+    {
+      xero_invoice_id: "number-route",
+      reference: "SWF-261999",
+      invoice_number: "INV-FOREIGN",
+    },
+  ];
+  const links = await resolveJobLinks(fakeClient(t), invoices, ORG);
+  assertEquals(links.get("contact-route")?.status, "none");
+  assertEquals(links.get("id-route")?.status, "none");
+  assertEquals(links.get("number-route")?.status, "none");
 });
 
 Deno.test("4. one failing source is reported, the rest of the picture still returns", async () => {

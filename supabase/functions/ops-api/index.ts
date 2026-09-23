@@ -16053,7 +16053,9 @@ async function getJobConversation(client: any, body: any) {
     }
     // The flag is read only when it can change the answer.
     const hasUnplacedCopy = [...copyCheck.copies.values()].some((job) => !job)
-    const unlinkedRulesOn = hasUnplacedCopy ? await readUnlinkedRulesOn(client) : false
+    const unlinkedRulesOn = hasUnplacedCopy
+      ? await readUnlinkedRulesOn(client, reportFaults ? (e) => fault('feature_flags', e) : undefined)
+      : false
     for (const { row: r, event_copy, label } of legacyInboxRowsToShow<any>(inbox || [], copyCheck, { unlinkedRulesOn })) {
       messages.push({
         id: `inbox:${r.id}`,

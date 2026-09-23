@@ -202,16 +202,27 @@ export async function readInboxEventCopies(
  * Whether P4's rules are on. Missing, unreadable or not exactly true reads
  * as off (INTEGRATION: revise2 flags). Read-only.
  */
-export async function readUnlinkedRulesOn(client: any): Promise<boolean> {
+export async function readUnlinkedRulesOn(
+  client: any,
+  onError?: (error: unknown) => void,
+): Promise<boolean> {
   try {
     const { data, error } = await client.from("feature_flags")
       .select("enabled, updated_at")
       .eq("flag_name", UNLINKED_RULES_FLAG)
       .order("updated_at", { ascending: false, nullsFirst: false })
       .limit(1);
-    if (error || !Array.isArray(data)) return false;
+    if (error) {
+      onError?.(error);
+      return false;
+    }
+    if (!Array.isArray(data)) {
+      onError?.(new Error("feature flag read did not return an array"));
+      return false;
+    }
     return data[0]?.enabled === true;
-  } catch {
+  } catch (error) {
+    onError?.(error);
     return false;
   }
 }

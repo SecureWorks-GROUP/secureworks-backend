@@ -281,6 +281,7 @@ function unitTables(): Tables {
     jobs: [
       {
         id: JOB_A,
+        org_id: ORG,
         job_number: "SWP-26001",
         ghl_contact_id: "ghl-a",
         status: "complete",
@@ -288,6 +289,7 @@ function unitTables(): Tables {
       },
       {
         id: JOB_B,
+        org_id: ORG,
         job_number: "SWF-26002",
         ghl_contact_id: "ghl-b",
         status: "complete",
@@ -445,6 +447,46 @@ Deno.test("grouping: verified contact only; a shared name never joins, a conflic
   assertEquals(out.reconciliation.book_invoice_ids, 8);
   assertEquals(out.reconciliation.shown_invoice_ids, 8);
   assertEquals(out.faults, []);
+});
+
+Deno.test("contact matches and cached messages stay inside the invoice org", async () => {
+  const tables = unitTables();
+  tables.contact_matches = [
+    {
+      org_id: ORG,
+      xero_contact_id: "xc-1",
+      ghl_contact_id: "ghl-own",
+      job_id: null,
+    },
+    {
+      org_id: "00000000-0000-0000-0000-000000000099",
+      xero_contact_id: "xc-1",
+      ghl_contact_id: "ghl-foreign",
+      job_id: null,
+    },
+  ];
+  tables.ghl_conversation_cache.push(
+    {
+      contact_id: "ghl-own",
+      messages: [{ id: "own-1", type: "SMS", body: "Own account message" }],
+      synced_at: "2026-09-24T01:00:00Z",
+    },
+    {
+      contact_id: "ghl-foreign",
+      messages: [{ id: "foreign-1", type: "SMS", body: "Other org message" }],
+      synced_at: "2026-09-24T01:00:00Z",
+    },
+  );
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1" }),
+    deps(fakeClient(tables)),
+  );
+  const debtor = out.debtors[0];
+  const contacts = debtor.sources.ghl.contact_ids.map((c: any) => c.ghl_contact_id);
+  assert(contacts.includes("ghl-own"));
+  assert(!contacts.includes("ghl-foreign"));
+  assert(debtor.timeline.entries.some((e: any) => e.provider_id === "ghl:own-1"));
+  assert(!debtor.timeline.entries.some((e: any) => e.provider_id === "ghl:foreign-1"));
 });
 
 Deno.test("invoice rows: link, next step and owner, freshness, chase and as-of on every row", async () => {
@@ -618,6 +660,81 @@ Deno.test("timeline: one stream, provider ids, the same message seen twice appea
     out.debtors[0].invoices.every((i: any) => i.brief === null),
     true,
   );
+});
+
+Deno.test("chase SMS dedupe keeps earlier, ambiguous and competing copies", () => {
+  const provider = (id: string, at: string) => ({
+    key: `ghl:${id}`,
+    kind: "sms",
+    channel: "sms",
+    provider: "ghl",
+    provider_id: `ghl:${id}`,
+    at,
+    at_precision: "time" as const,
+    direction: "outbound",
+    author: "SecureWorks",
+    source: "ghl_cache",
+    source_ref: id,
+    subject: null,
+    preview: "Payment reminder",
+    job_id: JOB_A,
+    invoice_ids: [INV(1)],
+    invoice_scope: "job" as const,
+    seen_in: ["ghl_cache"],
+    label: null,
+  });
+  const chase = (id: string, at: string) => entryFromChaseLog({
+    id,
+    xero_invoice_id: INV(1),
+    method: "sms",
+    notes: "Payment reminder",
+    created_at: at,
+  });
+  const older = mergeTimeline([
+    provider("old", "2026-09-24T11:59:59Z"),
+    chase("late-log", "2026-09-24T12:00:00Z"),
+  ]);
+  assertEquals(older.entries.length, 2);
+  assert(older.entries.some((e) => e.key === "chase:late-log"));
+
+  const ambiguous = mergeTimeline([
+    provider("future-1", "2026-09-24T12:01:00Z"),
+    provider("future-2", "2026-09-24T12:02:00Z"),
+    chase("ambiguous-log", "2026-09-24T12:00:00Z"),
+  ]);
+  assertEquals(ambiguous.entries.length, 3);
+  assert(ambiguous.entries.some((e) => e.key === "chase:ambiguous-log"));
+
+  const competing = mergeTimeline([
+    provider("shared-copy", "2026-09-24T12:02:00Z"),
+    chase("first-log", "2026-09-24T12:00:00Z"),
+    chase("second-log", "2026-09-24T12:01:00Z"),
+  ]);
+  assertEquals(competing.entries.length, 3);
+  assert(competing.entries.some((e) => e.key === "chase:first-log"));
+  assert(competing.entries.some((e) => e.key === "chase:second-log"));
+});
+
+Deno.test("chase log auto SMS and email retain their actual channels", () => {
+  const sms = entryFromChaseLog({
+    id: "auto-1",
+    method: "auto_sms",
+    notes: "workflow reminder",
+    created_at: "2026-09-24T12:00:00Z",
+  });
+  assertEquals(sms.kind, "sms");
+  assertEquals(sms.channel, "sms");
+  assertEquals(sms.direction, "outbound");
+  assertEquals(sms.label, "GHL workflow SMS");
+  const email = entryFromChaseLog({
+    id: "email-1",
+    method: "email",
+    notes: "statement sent",
+    created_at: "2026-09-24T12:00:00Z",
+  });
+  assertEquals(email.kind, "email");
+  assertEquals(email.channel, "email");
+  assertEquals(email.direction, "unknown");
 });
 
 Deno.test("timeline: recent mode trims per debtor and says so", async () => {
@@ -858,6 +975,12 @@ const BOOK = JSON.parse(
     new URL("./fixtures/debt_worklist_synthetic_book_v1.json", import.meta.url),
   ),
 );
+for (const row of BOOK.jobs) {
+  row.org_id ??= BOOK.xero_invoices[0].org_id;
+}
+for (const row of BOOK.contact_matches) {
+  row.org_id ??= BOOK.xero_invoices[0].org_id;
+}
 
 Deno.test("synthetic book: every open invoice once, unlinked included, counts match an independent count", async () => {
   const org = BOOK.xero_invoices[0].org_id;
@@ -1214,4 +1337,33 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   assertEquals(clean.read_faults, []);
   const inbox = clean.messages.find((m: any) => m.source_system === "inbox");
   assertEquals(inbox.provider_message_id, "graph:G1");
+});
+
+Deno.test("getJobConversation reports an unreadable unlinked-rules flag and keeps its fallback", async () => {
+  const jobId = "c0000000-0000-4000-8000-000000000002";
+  const tables: Tables = {
+    jobs: [{ id: jobId, job_number: "SWP-2", ghl_contact_id: null }],
+    inbox_events: [{
+      id: "inbox-2",
+      job_id: jobId,
+      graph_message_id: "G2",
+      received_at: "2026-09-02T00:00:00Z",
+      body_preview: "Unplaced copy remains visible",
+    }],
+    business_events: [{
+      id: "event-2",
+      source_table: "inbox_events",
+      source_id: "inbox-2",
+      job_id: null,
+    }],
+    job_events: [],
+  };
+  const result: any = await _getJobConversationForTest(
+    fakeClient(tables, new Set(["feature_flags"])),
+    { job_id: jobId, limit: 10, report_faults: true },
+  );
+  assert(result.read_faults.some((f: string) => f.startsWith("feature_flags:")));
+  assertEquals(result.messages.length, 1);
+  assertEquals(result.messages[0].source_ref, "inbox-2");
+  assertEquals(result.messages[0].event_copy, "unplaced");
 });

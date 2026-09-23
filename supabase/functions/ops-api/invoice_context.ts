@@ -250,7 +250,7 @@ export interface JobLink {
   hint?: string | null;
 }
 
-const JOB_LINK_COLS = "id, job_number, status, ghl_contact_id";
+const JOB_LINK_COLS = "id, job_number, status, ghl_contact_id, org_id";
 
 /**
  * Resolves the job for a batch of invoices with four bounded reads instead of
@@ -261,6 +261,7 @@ const JOB_LINK_COLS = "id, job_number, status, ghl_contact_id";
 export async function resolveJobLinks(
   client: any,
   invoices: any[],
+  orgId?: string,
 ): Promise<Map<string, JobLink>> {
   const links = new Map<string, JobLink>();
   const none = (): JobLink => ({
@@ -271,6 +272,12 @@ export async function resolveJobLinks(
     candidates: [],
     hint: null,
   });
+  const belongsToOrg = (job: any) =>
+    orgId === undefined || job.org_id === orgId;
+  const jobsQuery = () => {
+    const query = client.from("jobs").select(JOB_LINK_COLS);
+    return orgId === undefined ? query : query.eq("org_id", orgId);
+  };
 
   const wantIds = new Set<string>();
   const wantNumbers = new Set<string>();
@@ -288,17 +295,21 @@ export async function resolveJobLinks(
   const jobsById = new Map<string, any>();
   for (const ids of chunk([...wantIds])) {
     const rows = unwrap(
-      await client.from("jobs").select(JOB_LINK_COLS).in("id", ids),
+      await jobsQuery().in("id", ids),
     );
-    for (const j of rows || []) jobsById.set(j.id, j);
+    for (const j of rows || []) {
+      if (belongsToOrg(j)) jobsById.set(j.id, j);
+    }
   }
   const jobsByNumber = new Map<string, any>();
   for (const numbers of chunk([...wantNumbers])) {
     const rows = unwrap(
-      await client.from("jobs").select(JOB_LINK_COLS).in("job_number", numbers),
+      await jobsQuery().in("job_number", numbers),
     );
     for (const j of rows || []) {
-      jobsByNumber.set(String(j.job_number).toUpperCase(), j);
+      if (belongsToOrg(j)) {
+        jobsByNumber.set(String(j.job_number).toUpperCase(), j);
+      }
     }
   }
 
@@ -306,13 +317,13 @@ export async function resolveJobLinks(
   const contactJobIds = new Map<string, Set<string>>();
   const contactGhlIds = new Map<string, Set<string>>();
   for (const ids of chunk([...wantContacts])) {
-    const rows = unwrap(
-      await client.from("contact_matches")
-        .select("xero_contact_id, ghl_contact_id, job_id").in(
-          "xero_contact_id",
-          ids,
-        ),
-    );
+    let query = client.from("contact_matches")
+      .select("xero_contact_id, ghl_contact_id, job_id").in(
+        "xero_contact_id",
+        ids,
+      );
+    if (orgId !== undefined) query = query.eq("org_id", orgId);
+    const rows = unwrap(await query);
     for (const m of rows || []) {
       if (!m.xero_contact_id) continue;
       if (m.job_id) {
@@ -337,17 +348,16 @@ export async function resolveJobLinks(
   for (const s of contactGhlIds.values()) for (const id of s) allGhlIds.add(id);
   const contactJobs = new Map<string, any>();
   for (const ids of chunk([...allContactJobIds])) {
-    const rows = unwrap(
-      await client.from("jobs").select(JOB_LINK_COLS).in("id", ids),
-    );
-    for (const j of rows || []) contactJobs.set(j.id, j);
+    const rows = unwrap(await jobsQuery().in("id", ids));
+    for (const j of rows || []) {
+      if (belongsToOrg(j)) contactJobs.set(j.id, j);
+    }
   }
   const jobsByGhl = new Map<string, any[]>();
   for (const ids of chunk([...allGhlIds])) {
-    const rows = unwrap(
-      await client.from("jobs").select(JOB_LINK_COLS).in("ghl_contact_id", ids),
-    );
+    const rows = unwrap(await jobsQuery().in("ghl_contact_id", ids));
     for (const j of rows || []) {
+      if (!belongsToOrg(j)) continue;
       const list = jobsByGhl.get(j.ghl_contact_id) ?? [];
       list.push(j);
       jobsByGhl.set(j.ghl_contact_id, list);
@@ -854,7 +864,7 @@ export async function invoiceContext(
   // 2. Link.
   const linkRead = await safeRead(
     "job_link",
-    () => resolveJobLinks(client, [inv]),
+    () => resolveJobLinks(client, [inv], deps.orgId),
   );
   const link: JobLink = linkRead.data?.get(inv.xero_invoice_id) ??
     {
@@ -1360,7 +1370,7 @@ export async function debtContextCoverage(
 
   const linkRead = await safeRead(
     "job_link",
-    () => resolveJobLinks(client, invoices),
+    () => resolveJobLinks(client, invoices, deps.orgId),
   );
   sources.job_link = linkRead.status;
   const links = linkRead.data ?? new Map<string, JobLink>();

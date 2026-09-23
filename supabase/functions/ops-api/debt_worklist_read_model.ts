@@ -296,17 +296,22 @@ export function entryFromConversation(
 export function entryFromChaseLog(row: any): TimelineEntry {
   const thread = chaseLogThreadEntry(row);
   const method = String(row.method ?? "");
+  const isSms = method === "sms" || method === "auto_sms";
   const kind = method === "note"
     ? "debt_note"
     : method === "call"
     ? "call"
-    : method === "sms"
+    : isSms
     ? "sms"
+    : method === "email"
+    ? "email"
     : "debt_log";
   const channel = method === "call"
     ? "call"
-    : method === "sms"
+    : isSms
     ? "sms"
+    : method === "email"
+    ? "email"
     : "note";
   return {
     key: `chase:${row.id}`,
@@ -316,7 +321,7 @@ export function entryFromChaseLog(row: any): TimelineEntry {
     provider_id: null,
     at: str(row.created_at),
     at_precision: "time",
-    direction: method === "sms" ? "outbound" : "internal",
+    direction: isSms ? "outbound" : method === "email" ? "unknown" : "internal",
     author: str(thread.who),
     source: "payment_chase_logs",
     source_ref: str(row.id),
@@ -326,7 +331,11 @@ export function entryFromChaseLog(row: any): TimelineEntry {
     invoice_ids: row.xero_invoice_id ? [row.xero_invoice_id] : [],
     invoice_scope: "invoice",
     seen_in: ["payment_chase_logs"],
-    label: method === "sms" ? "chase log of an SMS send" : null,
+    label: method === "auto_sms"
+      ? "GHL workflow SMS"
+      : method === "sms"
+      ? "chase log of an SMS send"
+      : null,
   };
 }
 
@@ -566,21 +575,37 @@ export function mergeTimeline(entries: TimelineEntry[]): {
     e.source !== "payment_chase_logs" && e.channel === "sms" &&
     e.direction === "outbound"
   );
-  const drop = new Set<string>();
+  const matchesByLog = new Map<string, TimelineEntry[]>();
+  const logsByProvider = new Map<string, TimelineEntry[]>();
   for (const log of chaseSms) {
     const at = Date.parse(log.at ?? "");
     const text = normText(log.preview);
     if (!Number.isFinite(at) || !text) continue;
-    const match = providerSms.find((m) => {
+    const matches = providerSms.filter((m) => {
       const mt = Date.parse(m.at ?? "");
-      return Number.isFinite(mt) && Math.abs(mt - at) <= SAME_SMS_WINDOW_MS &&
+      return Number.isFinite(mt) && mt >= at && mt - at <= SAME_SMS_WINDOW_MS &&
         normText(m.preview).slice(0, 500) === text.slice(0, 500);
     });
-    if (match) {
-      absorb(match, log);
-      drop.add(log.key);
-      merged += 1;
+    matchesByLog.set(log.key, matches);
+    for (const match of matches) {
+      const competingLogs = logsByProvider.get(match.key) ?? [];
+      competingLogs.push(log);
+      logsByProvider.set(match.key, competingLogs);
     }
+  }
+  const drop = new Set<string>();
+  const consumed = new Set<string>();
+  for (const log of chaseSms) {
+    const matches = matchesByLog.get(log.key) ?? [];
+    if (matches.length !== 1) continue;
+    const match = matches[0];
+    if (consumed.has(match.key) || logsByProvider.get(match.key)?.length !== 1) {
+      continue;
+    }
+    consumed.add(match.key);
+    absorb(match, log);
+    drop.add(log.key);
+    merged += 1;
   }
   return {
     entries: sortNewestFirst(kept.filter((e) => !drop.has(e.key))),
@@ -872,6 +897,7 @@ export async function debtWorklist(
         () =>
           client.from("contact_matches")
             .select("id, xero_contact_id, ghl_contact_id, job_id")
+            .eq("org_id", deps.orgId)
             .in("xero_contact_id", ids),
         warnings,
       );
