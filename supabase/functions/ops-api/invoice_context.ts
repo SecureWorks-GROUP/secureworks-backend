@@ -8,13 +8,20 @@
 // chase log, and an explicit owned blocker for every missing piece. SELECT-only.
 // Never calls Xero or GHL, never writes, never classifies.
 //
-// Published shape: wiki lanes/handoffs/CIO-to-DEBT-invoice-context-door.md.
+// Door envelope: wiki lanes/handoffs/CIO-to-DEBT-invoice-context-door.md.
+// D1 promised quote / variation / live-price fields are owned by
+// job_commercial_read.ts (same readers as assemble_job_dossier).
 //
 // A second read, debt_context_coverage, returns the coverage flags for every
 // open receivable in one call so the screen and the coverage table do not need
 // one door call per invoice.
 
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import {
+  currentPriceIncGst,
+  readJobQuotes,
+  readJobVariations,
+} from "./job_commercial_read.ts";
 
 export const INVOICE_CONTEXT_VERSION = "invoice-context/v1";
 
@@ -766,12 +773,6 @@ function xeroPayments(
   }));
 }
 
-function quoteTotal(pricing: any): number | null {
-  if (!pricing || typeof pricing !== "object") return null;
-  return num(pricing.totalIncGST) ?? num(pricing.total) ??
-    num(pricing.grandTotal) ?? num(pricing.amount);
-}
-
 export async function invoiceContext(
   params: URLSearchParams,
   deps: InvoiceContextDeps,
@@ -893,6 +894,7 @@ export async function invoiceContext(
     if (jobRow) {
       const [
         variations,
+        quotesRead,
         workOrders,
         council,
         factsRead,
@@ -901,17 +903,13 @@ export async function invoiceContext(
         presenceRead,
         openRead,
       ] = await Promise.all([
-        safeRead(
-          "job_variations",
-          async () =>
-            unwrap(
-              await client.from("job_variations").select(
-                "variation_number, amount, status, sent_at",
-              ).eq("job_id", jobRow.id).order("variation_number", {
-                ascending: true,
-              }).limit(50),
-            ),
-        ),
+        // Same readers as the job dossier (context D1), so the two reads agree
+        // on what was quoted and on the variations.
+        readJobVariations(client, jobRow.id, now),
+        readJobQuotes(client, {
+          id: jobRow.id,
+          client_email: jobRow.client_email ?? null,
+        }),
         safeRead(
           "work_orders",
           async () =>
@@ -977,9 +975,15 @@ export async function invoiceContext(
         ),
       ]);
       sources.promised = {
-        ok: variations.status.ok && workOrders.status.ok && council.status.ok,
+        ok: variations.status.ok && quotesRead.status.ok &&
+          workOrders.status.ok && council.status.ok,
         error: [
-          variations.status.error,
+          variations.status.code
+            ? `job_variations: ${variations.status.code}`
+            : undefined,
+          quotesRead.status.code
+            ? `quotes: ${quotesRead.status.code}`
+            : undefined,
           workOrders.status.error,
           council.status.error,
         ].filter(Boolean).join("; ") || undefined,
@@ -1026,14 +1030,43 @@ export async function invoiceContext(
         completed_at: jobRow.completed_at ?? null,
         deposit_at: jobRow.deposit_at ?? null,
         promised: {
-          quote_total: quoteTotal(jobRow.pricing_json),
+          // What was quoted, from the sent quote records (job_quote_values):
+          // the accepted, else newest current, quote document. Never the live
+          // price, which is current_price_inc_gst.
+          quote_total: quotesRead.quotes?.headline?.value_inc_gst ?? null,
+          quote_total_source: quotesRead.quotes
+            ? (quotesRead.quotes.headline?.value_source ?? "no quote recorded")
+            : `quote read failed: ${quotesRead.status.code ?? "unknown"}`,
+          quote_document: quotesRead.quotes?.headline
+            ? {
+              document_id: quotesRead.quotes.headline.document_id,
+              quote_number: quotesRead.quotes.headline.quote_number,
+              version: quotesRead.quotes.headline.version,
+              run_label: quotesRead.quotes.headline.run_label,
+              basis: quotesRead.quotes.headline.basis,
+            }
+            : null,
+          quote_status: quotesRead.quotes?.status ?? null,
+          // Job level, only when the job's quotes are split by party or run.
+          whole_quote_total: quotesRead.quotes?.whole_quote_total ?? null,
+          current_price_inc_gst: currentPriceIncGst(jobRow.pricing_json),
           deposit_amount: num(jobRow.deposit_amount),
-          variations: (variations.data || []).map((v: any) => ({
-            number: `VAR${v.variation_number ?? ""}`,
-            amount: num(v.amount),
-            status: v.status ?? null,
-            sent_at: v.sent_at ?? null,
-          })),
+          // Shared reader: null + variations_code when unreadable, never [].
+          variations: variations.variations == null
+            ? null
+            : variations.variations.map((v) => ({
+              number: `VAR${v.variation_number ?? ""}`,
+              amount: v.amount,
+              status: v.status,
+              sent_at: v.sent_at,
+              approved_at: v.approved_at,
+              accepted_at: v.accepted_at,
+              agreement: v.agreement,
+              agreed: v.agreed,
+            })),
+          variations_code: variations.variations == null
+            ? (variations.status.code ?? "read_failed")
+            : null,
           work_orders: (workOrders.data || []).map((w: any) => ({
             wo_number: w.wo_number ?? null,
             trade: w.trade_name ?? null,

@@ -3665,6 +3665,27 @@ See `docs/trade-my-money-gst-2026-09-08.md`. `my_money` gives a trade earned / p
 
 See `docs/makesafe-submitter-attribution-and-unlock-2026-09-08.md`. Submitting a final make-safe report cancels other trades' assignments on that attendance cycle (invoiced rows are left and flagged); `unlock_makesafe_report` reopens a submitted report until the office sends it.
 
+## A Sent Quote's Value Has One Interpreter
+
+`public.job_quote_values(job)` (`20260923233000_job_quote_values.sql`, context
+D1) is the only reader of what a sent quote was worth; `job_commercial_read.ts`
+(dossier `operationalTruth.quotes` / `.variations` / `scope`) and the invoice
+read's `promised.quote_total` consume it, and later slices (texts P2, sites
+S-read) must too. send-quote seals the WHOLE job's price on every revision and
+`quote.sent` row, so a run document is valued by its party's own run snapshot
+share (no party = the client's document) and a per-party whole quote carries no
+value (the sealed total is job level only).
+`pricing_json.totalIncGST` is `current_price_inc_gst`, never a quote value.
+A failed quote or variation read stays unknown with the reason (null, never
+an empty list); the invoice read uses the same readers so
+`promised.quote_total` and `promised.variations` agree.
+`quote.sent` and `scope.completed` rows are found by `entity_type='job'` +
+`entity_id`, not `business_events.job_id` (the attribution ladder clears it on a
+legacy insert), and only send-quote's own sources (`send-quote`,
+`send-quote/send`, `send-quote/send-runs`) count. Contract and tests:
+`supabase/tests/migration-contracts/20260923233000_job_quote_values/`,
+`job_commercial_read_test.ts`.
+
 ## Booking confirmation authority
 
 Read/approval handoff, published availability freshness and ledger/outcome

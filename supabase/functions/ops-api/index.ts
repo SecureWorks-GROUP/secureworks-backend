@@ -384,6 +384,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
+import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -16134,6 +16135,10 @@ async function getJobConversation(client: any, body: any) {
 //   - NO GHL / Xero / customer-facing calls.
 //   - NO transcript storage / Whisper.
 //   - NO mutation of jobs.status or any operational truth field.
+//   - Quotes, variations and scope (context D1) come from
+//     job_commercial_read.ts: SELECTs plus the read-only SQL function
+//     job_quote_values, the one interpreter of a sent quote's value.
+//     Enforced by job_commercial_read_test.ts (dossier read-only contract).
 //
 // Per the JARVIS Memory Extraction Canon (2026-05-01):
 // raw evidence -> async extraction queue -> extractor worker
@@ -16160,6 +16165,9 @@ interface SourceStatus {
   ok: boolean
   count: number
   error?: string
+  // D1 sections (quotes, variations, scope): ok | failed | skipped, plus a code
+  state?: string
+  code?: string
 }
 
 async function safeRead(label: string, fn: () => Promise<any>): Promise<{ data: any[]; status: SourceStatus }> {
@@ -16198,7 +16206,10 @@ async function assembleJobDossier(client: any, body: any) {
   // equivalent of `sent_at` lives in business_events.quote.sent. Selecting
   // missing columns made the read fail silently and the assembler threw
   // "could not resolve job" even for jobs that existed.
-  const JOB_COLS = 'id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, deposit_amount, created_at, quoted_at, accepted_at, scheduled_at, completed_at, updated_at, ghl_contact_id, org_id'
+  // scope_json / pricing_json / scope_version / scope_updated_at feed the D1
+  // scope summary only and are never returned raw (single-job read, so the
+  // scope_json blob is allowed here; never in a list read).
+  const JOB_COLS = 'id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, deposit_amount, created_at, quoted_at, accepted_at, scheduled_at, completed_at, updated_at, ghl_contact_id, org_id, scope_json, pricing_json, scope_version, scope_updated_at'
   let jobRow: any = null
   let jobReadError: string | null = null
   if (inputJobId) {
@@ -16355,6 +16366,24 @@ async function assembleJobDossier(client: any, body: any) {
   })
   sourceStatus.proposedActions = proposedRead.status
 
+  // ── Commercial (context D1): quotes, variations, scope summary ──
+  // Each read reports its own state; a failed section is null with a code,
+  // never an empty list that reads as "nothing quoted".
+  const [quotesRead, variationsRead, signOffRead] = await Promise.all([
+    readJobQuotes(client, { id: jobId, client_email: jobRow.client_email ?? null }),
+    readJobVariations(client, jobId),
+    readScopeSignOff(client, jobId),
+  ])
+  sourceStatus.quotes = quotesRead.status
+  sourceStatus.variations = variationsRead.status
+  const scope = summariseScope(jobRow, {
+    newestQuoteSentAt: quotesRead.quotes?.current[0]?.sent_at ?? null,
+    quoteReadFailed: !quotesRead.status.ok,
+    boundRevision: quotesRead.quotes?.bound_revision ?? null,
+    signedOff: signOffRead.signedOff,
+  })
+  sourceStatus.scope = scopeSourceStatus(scope, signOffRead.code)
+
   // ── Diagnostics ──
   const warnings: string[] = []
   if (excludedFacts) warnings.push(`facts: ${excludedFacts} superseded, retracted, untrusted or expired rows withheld from this bounded read`)
@@ -16403,7 +16432,10 @@ async function assembleJobDossier(client: any, body: any) {
       workOrders: wosRead.data,
       assignments: assignmentsRead.data,
       council: councilRead.data,
+      quotes: quotesRead.quotes,
+      variations: variationsRead.variations,
     },
+    scope,
     events: eventsRead.data,
     conversation: conversationAsc,
     facts: visibleFacts,
@@ -16427,6 +16459,8 @@ async function assembleJobDossier(client: any, body: any) {
     },
     // Provenance hint for the canon: the assembler is read-only.
     _kind: 'job_dossier_v1',
+    // 2 = operationalTruth.quotes / .variations and scope (context D1).
+    sections_version: 2,
     _ghlContactId: ghlContactId,
   }
 }
