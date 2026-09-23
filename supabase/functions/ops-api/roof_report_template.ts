@@ -61,12 +61,12 @@ export const STOREY_OPTIONS = [STOREY_SINGLE, STOREY_DOUBLE];
 // ── Locked roof-report pricing, every builder ──
 //
 // Single storey -> $250 ex GST / $275 inc GST   (unchanged, locked 2026-07-16)
-// Double storey -> $300 ex GST / $330 inc GST   (Captain ruling 2026-08-06)
+// Double storey -> $350 ex GST / $385 inc GST   (Shaun, 2026-09-23)
 //
-// The double-storey figure was $350 ex / $385 inc from 2026-07-16. The Captain
-// ruled $300 ex on 2026-08-06, EXPLICITLY superseding that figure
-// (data/decisions/2026-08-06-roof-report-pricing-300-double.md). Single storey
-// was not touched by that ruling.
+// Double storey was $300 ex / $330 inc from the 2026-08-06 ruling, which itself
+// had replaced the 2026-07-16 figure of $350 ex / $385 inc. Shaun restored
+// $350 ex on 2026-09-23. Single storey was not touched. Invoices already
+// minted at $300 ex are not reminted by this change.
 //
 // This constant is the ONE roof-report price in this repository: every
 // production consumer reads it through `roofReportPrice`. The skill-side guard
@@ -79,7 +79,7 @@ export const STOREY_OPTIONS = [STOREY_SINGLE, STOREY_DOUBLE];
 // template only fixes the two base figures.
 export const ROOF_REPORT_PRICING = {
   single: { ex_gst: 250, inc_gst: 275 },
-  double: { ex_gst: 300, inc_gst: 330 },
+  double: { ex_gst: 350, inc_gst: 385 },
 } as const;
 
 export interface RoofReportPrice {
@@ -198,7 +198,7 @@ export const ROOF_REPORT_FIELDS: RoofReportField[] = [
     options: STOREY_OPTIONS,
     pricingDriver: true,
     help:
-      "Sets the report fee: Single Storey $275 inc GST, Double Storey $330 inc GST. Access or scope beyond a plain double storey is scaled manually at release.",
+      "Sets the report fee: Single Storey $275 inc GST, Double Storey $385 inc GST. Access or scope beyond a plain double storey is scaled manually at release.",
   },
   {
     key: "property_condition",
@@ -370,7 +370,7 @@ export function getRoofReportTemplate(): RoofReportTemplate {
       double: { ...ROOF_REPORT_PRICING.double },
       storey_field: "storeys",
       note:
-        "Storey sets the fee. Single Storey $275 inc GST (locked 2026-07-16), Double Storey $330 inc GST (Captain ruling 2026-08-06). Access or scope beyond a plain double storey is scaled manually at release.",
+        "Storey sets the fee. Single Storey $275 inc GST (locked 2026-07-16), Double Storey $385 inc GST (Shaun, 2026-09-23). Access or scope beyond a plain double storey is scaled manually at release.",
     },
   };
 }

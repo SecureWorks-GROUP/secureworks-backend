@@ -549,11 +549,11 @@ Deno.test("B4: billing under the sealed attendance floor parks the card", () => 
 });
 
 Deno.test("B5: a roof report off the sealed storey rate parks the card", () => {
-  // A double-storey roof priced at the SUPERSEDED $350 ex, the shape three
-  // pre-ruling dockets still carry. The skill's Python report-rate guard tests
-  // the roof price one-sidedly (`ex + 0.01 < expected`, a FLOOR), so it reports
-  // clean on any overcharge; the sealed derivation compares the rate itself and
-  // does not. Both directions are asserted here for that reason.
+  // A double-storey roof priced at the SUPERSEDED $300 ex from 2026-08-06.
+  // The skill's Python report-rate guard tests the roof price one-sidedly
+  // (`ex + 0.01 < expected`, a FLOOR), so it reports clean on any overcharge;
+  // the sealed derivation compares the rate itself and does not. Both
+  // directions are asserted here for that reason.
   assertParksOn(
     mutate((evidence) => {
       evidence.family = "own_template_roof";
@@ -564,7 +564,7 @@ Deno.test("B5: a roof report off the sealed storey rate parks the card", () => {
         line_items: [{
           description: "MLB-27100 - Double Storey roof report",
           quantity: 1,
-          unit_price_ex_gst: 350,
+          unit_price_ex_gst: 300,
         }],
       };
     }),
@@ -581,7 +581,7 @@ Deno.test("B5: a roof report off the sealed storey rate parks the card", () => {
       line_items: [{
         description: "MLB-27100 - Double Storey roof report",
         quantity: 1,
-        unit_price_ex_gst: 300,
+        unit_price_ex_gst: 350,
       }],
     };
   }));

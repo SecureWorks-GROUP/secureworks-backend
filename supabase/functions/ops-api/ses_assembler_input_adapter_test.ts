@@ -2888,7 +2888,7 @@ Deno.test(
     assertEquals(roofResult.blockers.map((blocker) => blocker.reason_code), [
       "capability_portal_degraded",
     ]);
-    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 300);
+    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 350);
     assertEquals(roofResult.envelope.pre_xero_docs_ready, true);
     assertEquals(roofResult.envelope.invoice_create_approved, false);
     assertEquals(roofResult.envelope.client_send_approved, false);

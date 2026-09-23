@@ -100,7 +100,7 @@ export function yesNo(v: unknown): string {
 }
 
 // Strip the client report fee from a render job so a trade-visible PDF can
-// keep the inspection content without the locked $275/$330 fee row.
+// keep the inspection content without the locked $275/$385 fee row.
 export function omitRoofReportFee<T extends RoofReportJob>(job: T): T {
   const next = { ...job, include_report_fee: false };
   delete next.price_ex_gst;
