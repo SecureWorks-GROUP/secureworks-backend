@@ -2,6 +2,9 @@
 -- and current-facts view are back, and every F1 object is gone.
 DO $$
 DECLARE snap jsonb; f text;
+ org uuid:='00000000-0000-0000-0000-000000000001';
+ j uuid:=gen_random_uuid(); e uuid; ev jsonb; claimed jsonb; run uuid; tok uuid; result jsonb; fact uuid;
+ d date:=(now() AT TIME ZONE 'Australia/Perth')::date;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_linked_status(text)','public.context_unplaced_for_job(uuid)','public.context_source_freshness()',
   'public.context_source_freshness_policy()','public.context_in_business_hours(timestamptz)','public.context_business_minutes(timestamptz,timestamptz)',
@@ -14,13 +17,25 @@ BEGIN
  THEN RAISE EXCEPTION 'f1 rollback left candidate_job_ids'; END IF;
  IF pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname='business_events_attribution_status_check')) LIKE '%unplaced%'
  THEN RAISE EXCEPTION 'f1 rollback left the wide status check'; END IF;
- IF pg_get_functiondef('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'::regprocedure) NOT LIKE
-   '%NOT IN (''direct'',''thread'',''single_open'',''single_line'',''luna'')%'
-  OR pg_get_viewdef('public.current_job_context_facts'::regclass) LIKE '%context_linked_status%'
- THEN RAISE EXCEPTION 'f1 rollback did not restore Luna custody'; END IF;
  snap:=public.context_pipeline_status();
  IF snap ? 'alarms' OR snap ? 'capture_sources' OR snap->'coverage' IS NULL OR snap->>'run_date' IS NULL
  THEN RAISE EXCEPTION 'f1 rollback heartbeat shape %',snap; END IF;
  IF has_function_privilege('anon','public.context_pipeline_status()','EXECUTE') OR NOT has_function_privilege('service_role','public.context_pipeline_status()','EXECUTE')
  THEN RAISE EXCEPTION 'f1 rollback heartbeat grants'; END IF;
+
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,org,'quoted','fencing','F1-RB-'||j);
+ INSERT INTO public.business_events(job_id,match_method,payload,occurred_at)
+  VALUES(j,'direct_job_id',jsonb_build_object('body','We would like to go ahead with the quote.'),now()-interval '1 hour')
+  RETURNING id,to_jsonb(business_events) INTO e,ev;
+ IF ev->>'attribution_status' IS DISTINCT FROM 'direct' THEN RAISE EXCEPTION 'f1 rollback direct insert %',ev; END IF;
+ claimed:=public.claim_context_extraction_run(j,d,'extraction'); run:=(claimed->'run'->>'id')::uuid; tok:=(claimed->'run'->>'lease_token')::uuid;
+ result:=public.persist_luna_context_revision(run,tok,j,jsonb_build_array(ev),
+  jsonb_build_array(jsonb_build_object('kind','note','text','Customer wants to proceed.','confidence',0.9,'source_event_ids',jsonb_build_array(e))),'[]','[]');
+ IF result->>'outcome'<>'inserted' THEN RAISE EXCEPTION 'f1 rollback persist refused %',result; END IF;
+ fact:=(result->'fact_ids'->>0)::uuid;
+ IF NOT EXISTS(SELECT 1 FROM public.current_job_context_facts WHERE id=fact) THEN RAISE EXCEPTION 'f1 rollback fact hidden'; END IF;
+ BEGIN
+  UPDATE public.business_events SET attribution_status='unplaced' WHERE id=e;
+  RAISE EXCEPTION 'f1 rollback accepted unplaced' USING ERRCODE='ZX001';
+ EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
