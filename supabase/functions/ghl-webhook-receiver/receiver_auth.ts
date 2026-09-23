@@ -115,7 +115,9 @@ function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> | null {
  * base64 raw 32-byte key. Returns null when the text is not a usable key;
  * throws only when the runtime lacks Ed25519 support.
  */
-export async function importEd25519PublicKey(text: string): Promise<CryptoKey | null> {
+export async function importEd25519PublicKey(
+  text: string,
+): Promise<CryptoKey | null> {
   const body = text
     .replace(/-----BEGIN [A-Z ]+-----/g, "")
     .replace(/-----END [A-Z ]+-----/g, "")
@@ -125,7 +127,13 @@ export async function importEd25519PublicKey(text: string): Promise<CryptoKey | 
   if (!bytes || bytes.length === 0) return null;
   const format = bytes.length === 32 ? "raw" : "spki";
   try {
-    return await crypto.subtle.importKey(format, bytes, { name: "Ed25519" }, false, ["verify"]);
+    return await crypto.subtle.importKey(
+      format,
+      bytes,
+      { name: "Ed25519" },
+      false,
+      ["verify"],
+    );
   } catch (e) {
     if ((e as Error)?.name === "NotSupportedError") throw e;
     return null;
@@ -140,7 +148,12 @@ export async function verifyEd25519Signature(
   const sig = base64ToBytes(signatureB64.trim());
   if (!sig || sig.length !== 64) return false;
   try {
-    return await crypto.subtle.verify({ name: "Ed25519" }, key, sig, new TextEncoder().encode(rawBody));
+    return await crypto.subtle.verify(
+      { name: "Ed25519" },
+      key,
+      sig,
+      new TextEncoder().encode(rawBody),
+    );
   } catch {
     return false;
   }
@@ -160,7 +173,9 @@ async function checkAppSignature(input: AuthInput): Promise<ProofCheck> {
   const signature = input.headers.get("x-ghl-signature");
   if (!signature) {
     // The RSA `X-WH-Signature` was deprecated by GHL on 1 Sep 2026.
-    return input.headers.get("x-wh-signature") ? { ok: false, detail: "legacy_signature_unsupported" } : null;
+    return input.headers.get("x-wh-signature")
+      ? { ok: false, detail: "legacy_signature_unsupported" }
+      : null;
   }
   const keyText = input.env("GHL_WEBHOOK_PUBLIC_KEY") ?? "";
   if (!keyText.trim()) return { ok: false, detail: "signature_key_unset" };
@@ -176,16 +191,20 @@ async function checkAppSignature(input: AuthInput): Promise<ProofCheck> {
   }
   const expectedLocation = (input.env("GHL_LOCATION_ID") ?? "").trim();
   if (!expectedLocation) return { ok: false, detail: "location_unset" };
-  if (input.locationId !== expectedLocation) return { ok: false, detail: "location_mismatch" };
+  if (input.locationId !== expectedLocation) {
+    return { ok: false, detail: "location_mismatch" };
+  }
   return { ok: true };
 }
 
 function checkWorkflowSecret(input: AuthInput): ProofCheck {
-  const presented = input.headers.get("x-webhook-secret") ?? input.headers.get("authorization");
+  const presented = input.headers.get("x-webhook-secret") ??
+    input.headers.get("authorization");
   if (!presented) return null;
   const secret = input.env("GHL_WEBHOOK_SECRET") ?? "";
   if (!secret) return { ok: false, detail: "secret_unset" };
-  const ok = timingSafeEqual(presented, secret) || timingSafeEqual(presented, `Bearer ${secret}`);
+  const ok = timingSafeEqual(presented, secret) ||
+    timingSafeEqual(presented, `Bearer ${secret}`);
   return ok ? { ok: true } : { ok: false, detail: "secret_invalid" };
 }
 
@@ -195,16 +214,24 @@ export async function decideAuth(input: AuthInput): Promise<AuthDecision> {
   const app = await checkAppSignature(input);
   const workflow = checkWorkflowSecret(input);
 
-  if (accepts.includes("app_signature") && app?.ok) return { auth: "app_signature", detail: null, accepts };
-  if (accepts.includes("workflow_secret") && workflow?.ok) return { auth: "workflow_secret", detail: null, accepts };
+  if (accepts.includes("app_signature") && app?.ok) {
+    return { auth: "app_signature", detail: null, accepts };
+  }
+  if (accepts.includes("workflow_secret") && workflow?.ok) {
+    return { auth: "workflow_secret", detail: null, accepts };
+  }
 
   // Not authenticated: report the most specific reason among the proofs
   // this type accepts, then a proof of the wrong class for this type.
   for (const proof of accepts) {
     const check = proof === "app_signature" ? app : workflow;
-    if (check && !check.ok) return { auth: "missing", detail: check.detail, accepts };
+    if (check && !check.ok) {
+      return { auth: "missing", detail: check.detail, accepts };
+    }
   }
-  if (app || workflow) return { auth: "missing", detail: "proof_not_accepted_for_type", accepts };
+  if (app || workflow) {
+    return { auth: "missing", detail: "proof_not_accepted_for_type", accepts };
+  }
   return { auth: "missing", detail: "no_proof", accepts };
 }
 
@@ -264,7 +291,11 @@ export function buildWebhookReceipt(args: {
 }): WebhookReceipt {
   const { body, decision, mode, outcome } = args;
   const type = safeEventType(body.type);
-  const status = outcome === "error" ? "failed" : outcome === "unauthorized" || outcome === "invalid_json" ? "rejected" : "processed";
+  const status = outcome === "error"
+    ? "failed"
+    : outcome === "unauthorized" || outcome === "invalid_json"
+    ? "rejected"
+    : "processed";
   return {
     org_id: args.orgId,
     source: "ghl_webhook",
@@ -277,7 +308,10 @@ export function buildWebhookReceipt(args: {
       webhook_id: safeId(body.webhookId ?? body.webhook_id),
       message_id: safeId(body.messageId ?? body.message_id),
       // GHL app contact events name the contact as `id`.
-      contact_id: safeId(body.contactId ?? body.contact_id ?? (type.startsWith("Contact") ? body.id : null)),
+      contact_id: safeId(
+        body.contactId ?? body.contact_id ??
+          (type.startsWith("Contact") ? body.id : null),
+      ),
       outcome,
       auth: decision.auth,
       auth_detail: decision.detail,

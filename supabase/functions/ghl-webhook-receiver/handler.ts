@@ -25,7 +25,11 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 import { recordEvidence } from "../_shared/evidence/record_evidence.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
 import { resolveMatch } from "../_shared/evidence/match.ts";
-import type { Channel, Direction, MatchMethod } from "../_shared/evidence/types.ts";
+import type {
+  Channel,
+  Direction,
+  MatchMethod,
+} from "../_shared/evidence/types.ts";
 import {
   type AuthDecision,
   type AuthMode,
@@ -43,19 +47,47 @@ const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Webhook-Secret",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, X-Webhook-Secret",
 };
 
 // SecureWorks Group telephony lines canon — see
 // secureworks-docs/cio/operations/board/Evidence-Spine-JARVIS-Memory/
 //   call-transcript-ingestion-activation/telephony-lines-canon.md
 // Match body.to (inbound) or body.from (outbound) against E.164 OR local form.
-const TELEPHONY_LINES: Array<{ e164: string; local: string; line_label: string; department: string }> = [
-  { e164: "+61489267776", local: "0489267776", line_label: "admin",          department: "ops"           },
-  { e164: "+61489267772", local: "0489267772", line_label: "fencing",        department: "sales-fencing" },
-  { e164: "+61489267774", local: "0489267774", line_label: "patios",         department: "sales-patios"  },
-  { e164: "+61489267778", local: "0489267778", line_label: "fencing-mgmt",   department: "mgmt-fencing"  },
-  { e164: "+61489267771", local: "0489267771", line_label: "shaun-ops-mgr",  department: "ops-mgr"       },
+const TELEPHONY_LINES: Array<
+  { e164: string; local: string; line_label: string; department: string }
+> = [
+  {
+    e164: "+61489267776",
+    local: "0489267776",
+    line_label: "admin",
+    department: "ops",
+  },
+  {
+    e164: "+61489267772",
+    local: "0489267772",
+    line_label: "fencing",
+    department: "sales-fencing",
+  },
+  {
+    e164: "+61489267774",
+    local: "0489267774",
+    line_label: "patios",
+    department: "sales-patios",
+  },
+  {
+    e164: "+61489267778",
+    local: "0489267778",
+    line_label: "fencing-mgmt",
+    department: "mgmt-fencing",
+  },
+  {
+    e164: "+61489267771",
+    local: "0489267771",
+    line_label: "shaun-ops-mgr",
+    department: "ops-mgr",
+  },
 ];
 
 function normalisePhone(raw: string | null | undefined): string {
@@ -64,7 +96,15 @@ function normalisePhone(raw: string | null | undefined): string {
   return digits.replace(/^0/, "61");
 }
 
-function attributeLine(toRaw: string | null | undefined, fromRaw: string | null | undefined, direction: string | null | undefined): { line_label: string; department: string; matched_field: "to" | "from" | null } {
+function attributeLine(
+  toRaw: string | null | undefined,
+  fromRaw: string | null | undefined,
+  direction: string | null | undefined,
+): {
+  line_label: string;
+  department: string;
+  matched_field: "to" | "from" | null;
+} {
   const toN = normalisePhone(toRaw);
   const fromN = normalisePhone(fromRaw);
   // Inbound: client → us, so match `to` against our lines.
@@ -77,7 +117,11 @@ function attributeLine(toRaw: string | null | undefined, fromRaw: string | null 
     if (!n) continue;
     for (const line of TELEPHONY_LINES) {
       if (n === normalisePhone(line.e164) || n === normalisePhone(line.local)) {
-        return { line_label: line.line_label, department: line.department, matched_field: field };
+        return {
+          line_label: line.line_label,
+          department: line.department,
+          matched_field: field,
+        };
       }
     }
   }
@@ -109,8 +153,7 @@ function nullableNumber(raw: unknown): number | null {
 }
 
 function previewFromPayload(payload: Record<string, unknown>): string | null {
-  const raw =
-    payload.message_text ??
+  const raw = payload.message_text ??
     payload.note_text ??
     payload.body_preview ??
     payload.message_preview ??
@@ -166,10 +209,14 @@ function resolveWebhookJobMatch(
   const candidate_count = candidates.length;
   // A job id in the webhook body is never trusted (slice C1b, audit C6): any
   // caller can put one there. body.job_id / supabase_job_id / jobId are ignored.
-  const directJobNumber = nullableString(body.job_number ?? body.jobNumber ?? body.jobNo);
+  const directJobNumber = nullableString(
+    body.job_number ?? body.jobNumber ?? body.jobNo,
+  );
 
   if (directJobNumber) {
-    const direct = (jobs || []).filter((j) => normaliseLoose(j.job_number) === normaliseLoose(directJobNumber));
+    const direct = (jobs || []).filter((j) =>
+      normaliseLoose(j.job_number) === normaliseLoose(directJobNumber)
+    );
     if (direct.length === 1) {
       return {
         job: direct[0],
@@ -212,14 +259,16 @@ function resolveWebhookJobMatch(
     const nameMatches = jobs.filter((j) => {
       const lhs = normaliseLoose(j.client_name);
       const rhs = normaliseLoose(contactName);
-      return lhs.length > 0 && rhs.length > 0 && (lhs === rhs || lhs.includes(rhs) || rhs.includes(lhs));
+      return lhs.length > 0 && rhs.length > 0 &&
+        (lhs === rhs || lhs.includes(rhs) || rhs.includes(lhs));
     });
     if (nameMatches.length === 1) {
       return {
         job: nameMatches[0],
         match_method: "contact_id",
         match_confidence: 0.78,
-        match_reason: "multiple active jobs for contact; client name narrowed to one job",
+        match_reason:
+          "multiple active jobs for contact; client name narrowed to one job",
         candidate_count,
         candidates,
       };
@@ -230,7 +279,8 @@ function resolveWebhookJobMatch(
     job: null,
     match_method: "contact_id",
     match_confidence: 0.5,
-    match_reason: "multiple active jobs for GHL contact; transcript/message must identify job before durable extraction",
+    match_reason:
+      "multiple active jobs for GHL contact; transcript/message must identify job before durable extraction",
     candidate_count,
     candidates,
   };
@@ -251,9 +301,21 @@ async function lookupGhlCallRecording(
   ghlToken: string,
   webhookOccurredAt: Date,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ recording_url: string | null; message_id: string | null; conversation_id: string | null; lookup_status: string }> {
+): Promise<
+  {
+    recording_url: string | null;
+    message_id: string | null;
+    conversation_id: string | null;
+    lookup_status: string;
+  }
+> {
   if (!contactId || !ghlToken) {
-    return { recording_url: null, message_id: null, conversation_id: null, lookup_status: "skipped:missing_contact_or_token" };
+    return {
+      recording_url: null,
+      message_id: null,
+      conversation_id: null,
+      lookup_status: "skipped:missing_contact_or_token",
+    };
   }
   const headers = {
     Authorization: `Bearer ${ghlToken}`,
@@ -266,38 +328,79 @@ async function lookupGhlCallRecording(
     // contacts/{id}/conversations alias.
     let conversationId: string | null = null;
     if (locationId) {
-      const searchUrl = `https://services.leadconnectorhq.com/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=1&sort=desc&sortBy=last_message_date`;
+      const searchUrl =
+        `https://services.leadconnectorhq.com/conversations/search?locationId=${
+          encodeURIComponent(locationId)
+        }&contactId=${
+          encodeURIComponent(contactId)
+        }&limit=1&sort=desc&sortBy=last_message_date`;
       const resp = await fetchImpl(searchUrl, { headers });
       if (resp.ok) {
-        const j = await resp.json() as { conversations?: Array<{ id: string }> };
+        const j = await resp.json() as {
+          conversations?: Array<{ id: string }>;
+        };
         conversationId = j.conversations?.[0]?.id || null;
       }
     }
     if (!conversationId) {
-      return { recording_url: null, message_id: null, conversation_id: null, lookup_status: "no_conversation_found" };
+      return {
+        recording_url: null,
+        message_id: null,
+        conversation_id: null,
+        lookup_status: "no_conversation_found",
+      };
     }
     // 2. List recent messages, find the most recent CALL-type message within
     // ±15 minutes of the webhook timestamp.
-    const msgsUrl = `https://services.leadconnectorhq.com/conversations/${conversationId}/messages?limit=20&type=TYPE_CALL`;
+    const msgsUrl =
+      `https://services.leadconnectorhq.com/conversations/${conversationId}/messages?limit=20&type=TYPE_CALL`;
     const msgsResp = await fetchImpl(msgsUrl, { headers });
     if (!msgsResp.ok) {
-      return { recording_url: null, message_id: null, conversation_id: conversationId, lookup_status: `messages_fetch_failed:${msgsResp.status}` };
+      return {
+        recording_url: null,
+        message_id: null,
+        conversation_id: conversationId,
+        lookup_status: `messages_fetch_failed:${msgsResp.status}`,
+      };
     }
-    const msgsJson = await msgsResp.json() as { messages?: { messages?: Array<{ id: string; type: string; messageType?: string; dateAdded?: string; meta?: Record<string, unknown>; attachments?: string[] | Array<{ url?: string }> }> } };
+    const msgsJson = await msgsResp.json() as {
+      messages?: {
+        messages?: Array<
+          {
+            id: string;
+            type: string;
+            messageType?: string;
+            dateAdded?: string;
+            meta?: Record<string, unknown>;
+            attachments?: string[] | Array<{ url?: string }>;
+          }
+        >;
+      };
+    };
     const messages = msgsJson.messages?.messages || [];
     const window = 15 * 60 * 1000; // 15 minutes
     const candidates = messages.filter((m) => {
-      const isCall = m.type === "TYPE_CALL" || m.messageType === "TYPE_CALL" || (typeof m.type === "string" && m.type.toUpperCase().includes("CALL"));
+      const isCall = m.type === "TYPE_CALL" || m.messageType === "TYPE_CALL" ||
+        (typeof m.type === "string" && m.type.toUpperCase().includes("CALL"));
       if (!isCall) return false;
       if (!m.dateAdded) return true;
       const t = Date.parse(m.dateAdded);
-      return !Number.isNaN(t) && Math.abs(t - webhookOccurredAt.getTime()) <= window;
+      return !Number.isNaN(t) &&
+        Math.abs(t - webhookOccurredAt.getTime()) <= window;
     });
     if (candidates.length === 0) {
-      return { recording_url: null, message_id: null, conversation_id: conversationId, lookup_status: "no_call_message_in_window" };
+      return {
+        recording_url: null,
+        message_id: null,
+        conversation_id: conversationId,
+        lookup_status: "no_call_message_in_window",
+      };
     }
     // Pick the most recent.
-    candidates.sort((a, b) => (Date.parse(b.dateAdded || "") || 0) - (Date.parse(a.dateAdded || "") || 0));
+    candidates.sort((a, b) =>
+      (Date.parse(b.dateAdded || "") || 0) -
+      (Date.parse(a.dateAdded || "") || 0)
+    );
     const msg = candidates[0];
     // 3. Recording URL extraction. GHL surfaces it via attachments[] (string URLs)
     // OR via meta.call.recording_url / meta.recordingUrl on newer payloads.
@@ -312,19 +415,35 @@ async function lookupGhlCallRecording(
         if (url && !recording_url) recording_url = url; // best fallback
       }
     }
-    const meta = msg.meta as Record<string, any> | undefined;
+    const meta = msg.meta as {
+      call?: { recordingUrl?: string; recording_url?: string };
+      recordingUrl?: string;
+    } | undefined;
     if (!recording_url && meta) {
-      recording_url = (meta.call?.recordingUrl as string) || (meta.call?.recording_url as string) || (meta.recordingUrl as string) || null;
+      recording_url = (meta.call?.recordingUrl as string) ||
+        (meta.call?.recording_url as string) || (meta.recordingUrl as string) ||
+        null;
     }
     if (!recording_url) {
       // 4. Last resort: derive the canonical recording fetch endpoint by
       // message id. This URL streams the audio binary when fetched with the
       // GHL bearer token. (Verified working via the ghl-call-data edge fn.)
-      recording_url = `https://services.leadconnectorhq.com/conversations/messages/${msg.id}/locations/${locationId}/recording`;
+      recording_url =
+        `https://services.leadconnectorhq.com/conversations/messages/${msg.id}/locations/${locationId}/recording`;
     }
-    return { recording_url, message_id: msg.id, conversation_id: conversationId, lookup_status: "ok" };
+    return {
+      recording_url,
+      message_id: msg.id,
+      conversation_id: conversationId,
+      lookup_status: "ok",
+    };
   } catch (e) {
-    return { recording_url: null, message_id: null, conversation_id: null, lookup_status: `threw:${errorCode(e)}` };
+    return {
+      recording_url: null,
+      message_id: null,
+      conversation_id: null,
+      lookup_status: `threw:${errorCode(e)}`,
+    };
   }
 }
 
@@ -356,7 +475,10 @@ const SUPPORTED_TYPES = [
   "ContactUpdate",
 ];
 
-export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promise<Response> {
+export async function handleGhlWebhook(
+  req: Request,
+  deps: ReceiverDeps,
+): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: CORS });
   }
@@ -369,20 +491,43 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
   const mode: AuthMode = resolveAuthMode(deps.env("GHL_WEBHOOK_AUTH_MODE"));
   // deno-lint-ignore no-explicit-any
   let body: Record<string, any> = {};
-  let decision: AuthDecision = { auth: "missing", detail: "no_proof", accepts: [] };
+  let decision: AuthDecision = {
+    auth: "missing",
+    detail: "no_proof",
+    accepts: [],
+  };
   // deno-lint-ignore no-explicit-any
   let supabase: any = null;
 
   // One ids-only receipt per delivery, written after the auth decision and
   // carrying the final outcome. Never blocks or changes the response.
-  const finish = async (outcome: ReceiptOutcome, response: Response, code: string | null = null): Promise<Response> => {
+  const finish = async (
+    outcome: ReceiptOutcome,
+    response: Response,
+    code: string | null = null,
+  ): Promise<Response> => {
     try {
       supabase ??= deps.createSupabase();
-      const receipt = buildWebhookReceipt({ orgId: DEFAULT_ORG_ID, body, decision, mode, outcome, errorCode: code });
+      const receipt = buildWebhookReceipt({
+        orgId: DEFAULT_ORG_ID,
+        body,
+        decision,
+        mode,
+        outcome,
+        errorCode: code,
+      });
       const { error } = await supabase.from("webhook_log").insert(receipt);
-      if (error) console.error(`[ghl-webhook-receiver] receipt insert failed: code=${errorCode(error)}`);
+      if (error) {
+        console.error(
+          `[ghl-webhook-receiver] receipt insert failed: code=${
+            errorCode(error)
+          }`,
+        );
+      }
     } catch (e) {
-      console.error(`[ghl-webhook-receiver] receipt insert threw: code=${errorCode(e)}`);
+      console.error(
+        `[ghl-webhook-receiver] receipt insert threw: code=${errorCode(e)}`,
+      );
     }
     return response;
   };
@@ -410,14 +555,26 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     });
 
     console.log(
-      `[ghl-webhook-receiver] Received: type=${safeEventType(body.type)} contactId=${safeId(body.contactId) || "none"} auth=${decision.auth} auth_detail=${decision.detail || "none"} auth_mode=${mode}`,
+      `[ghl-webhook-receiver] Received: type=${
+        safeEventType(body.type)
+      } contactId=${
+        safeId(body.contactId) || "none"
+      } auth=${decision.auth} auth_detail=${
+        decision.detail || "none"
+      } auth_mode=${mode}`,
     );
 
     if (mode === "enforce" && decision.auth === "missing") {
-      return await finish("unauthorized", jsonResponse({ error: "unauthorized" }, 401));
+      return await finish(
+        "unauthorized",
+        jsonResponse({ error: "unauthorized" }, 401),
+      );
     }
     if (!jsonOk) {
-      return await finish("invalid_json", jsonResponse({ error: "invalid_json" }, 400));
+      return await finish(
+        "invalid_json",
+        jsonResponse({ error: "invalid_json" }, 400),
+      );
     }
 
     const { type, contactId, message, phone, email, conversationId } = body;
@@ -425,12 +582,26 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     supabase = deps.createSupabase();
 
     if (!(await automationLaneEnabled(supabase, "capture"))) {
-      return await finish("capture_disabled", jsonResponse({ received: true, event_created: false, reason: "capture_disabled" }));
+      return await finish(
+        "capture_disabled",
+        jsonResponse({
+          received: true,
+          event_created: false,
+          reason: "capture_disabled",
+        }),
+      );
     }
 
     if (!SUPPORTED_TYPES.includes(type)) {
-      console.log(`[ghl-webhook-receiver] Skipping unsupported event: ${safeEventType(type)}`);
-      return await finish("skipped_unsupported", jsonResponse({ received: true, skipped: safeEventType(type) }));
+      console.log(
+        `[ghl-webhook-receiver] Skipping unsupported event: ${
+          safeEventType(type)
+        }`,
+      );
+      return await finish(
+        "skipped_unsupported",
+        jsonResponse({ received: true, skipped: safeEventType(type) }),
+      );
     }
 
     // ════════════════════════════════════════════════════════════
@@ -441,21 +612,30 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     // ════════════════════════════════════════════════════════════
     if (type === "ContactCreate" || type === "ContactUpdate") {
       try {
-        const ATTRIBUTION_KEYS = ["gclid", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"];
+        const ATTRIBUTION_KEYS = [
+          "gclid",
+          "utm_source",
+          "utm_medium",
+          "utm_campaign",
+          "utm_term",
+          "utm_content",
+        ];
         const extracted: Record<string, string | null> = {};
 
         // Shape A: body.customFields is an object { gclid: "...", utm_source: "..." }
-        const cfObj = (body as any).customFields;
+        const cfObj = body.customFields;
         if (cfObj && typeof cfObj === "object" && !Array.isArray(cfObj)) {
           for (const k of ATTRIBUTION_KEYS) {
             if (cfObj[k]) extracted[k] = String(cfObj[k]).slice(0, 500);
           }
         }
         // Shape B: body.customField is an array [{ id, value }] with the field name elsewhere
-        const cfArr = (body as any).customField || (body as any).customFieldArray;
+        const cfArr = body.customField ||
+          body.customFieldArray;
         if (Array.isArray(cfArr)) {
           for (const item of cfArr) {
-            const key = (item?.name || item?.fieldKey || item?.key || "").toLowerCase();
+            const key = (item?.name || item?.fieldKey || item?.key || "")
+              .toLowerCase();
             if (ATTRIBUTION_KEYS.includes(key) && item?.value) {
               extracted[key] = String(item.value).slice(0, 500);
             }
@@ -463,7 +643,9 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
         }
         // Shape C: top-level on body (some GHL configs strip the customFields wrapper)
         for (const k of ATTRIBUTION_KEYS) {
-          if (!extracted[k] && (body as any)[k]) extracted[k] = String((body as any)[k]).slice(0, 500);
+          if (!extracted[k] && body[k]) {
+            extracted[k] = String(body[k]).slice(0, 500);
+          }
         }
 
         if (Object.keys(extracted).length > 0 && contactId) {
@@ -471,46 +653,70 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
           // values unless the incoming value is richer (presence over absence).
           const { data: existing } = await supabase
             .from("contact_matches")
-            .select("id, gclid, utm_source, utm_medium, utm_campaign, utm_term, utm_content, lead_source")
+            .select(
+              "id, gclid, utm_source, utm_medium, utm_campaign, utm_term, utm_content, lead_source",
+            )
             .eq("ghl_contact_id", contactId)
             .maybeSingle();
 
           const patch: Record<string, string | null> = {};
           for (const k of ATTRIBUTION_KEYS) {
-            const cur = existing ? (existing as any)[k] : null;
+            const cur = existing
+              ? (existing as Record<string, string | null>)[k]
+              : null;
             if (extracted[k] && (!cur || cur === "")) patch[k] = extracted[k];
           }
           // Derive lead_source from gclid presence; preserve existing non-placeholder value.
           const existingLs = existing?.lead_source;
-          if (extracted.gclid && (!existingLs || existingLs === "unknown" || existingLs === "unattributed")) {
+          if (
+            extracted.gclid &&
+            (!existingLs || existingLs === "unknown" ||
+              existingLs === "unattributed")
+          ) {
             patch.lead_source = "google_ads";
           }
 
           if (Object.keys(patch).length > 0) {
             if (existing) {
-              await supabase.from("contact_matches").update(patch).eq("id", existing.id);
+              await supabase.from("contact_matches").update(patch).eq(
+                "id",
+                existing.id,
+              );
             } else {
               await supabase.from("contact_matches").insert({
                 org_id: "00000000-0000-0000-0000-000000000001",
                 ghl_contact_id: contactId,
                 email: email || null,
                 phone: phone || null,
-                client_name: body.firstName && body.lastName ? `${body.firstName} ${body.lastName}` : (body.name || null),
+                client_name: body.firstName && body.lastName
+                  ? `${body.firstName} ${body.lastName}`
+                  : (body.name || null),
                 ...patch,
                 matched_at: new Date().toISOString(),
               });
             }
-            console.log(`[ghl-webhook-receiver] attribution upsert contactId=${safeId(contactId) || "none"} keys=${Object.keys(patch).join(",")}`);
+            console.log(
+              `[ghl-webhook-receiver] attribution upsert contactId=${
+                safeId(contactId) || "none"
+              } keys=${Object.keys(patch).join(",")}`,
+            );
           }
         }
       } catch (attrErr) {
         // Never let attribution capture break the main webhook path
-        console.error(`[ghl-webhook-receiver] attribution capture failed (non-fatal): code=${errorCode(attrErr)}`);
+        console.error(
+          `[ghl-webhook-receiver] attribution capture failed (non-fatal): code=${
+            errorCode(attrErr)
+          }`,
+        );
       }
 
       // ContactCreate/ContactUpdate don't produce a business_event in the old branching below
       // unless you want one. Return early — attribution capture is the whole payload for now.
-      return await finish("attribution_captured", jsonResponse({ received: true, type, attribution_captured: true }));
+      return await finish(
+        "attribution_captured",
+        jsonResponse({ received: true, type, attribution_captured: true }),
+      );
     }
 
     // ── Match to an active job via ghl_contact_id ──
@@ -521,13 +727,18 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     // transcripts from polluting the wrong permanent job memory.
     const { data: jobs } = await supabase
       .from("jobs")
-      .select("id, job_number, client_name, type, status, site_suburb, created_at")
+      .select(
+        "id, job_number, client_name, type, status, site_suburb, created_at",
+      )
       .eq("ghl_contact_id", contactId)
       .not("status", "in", '("cancelled","complete")')
       .order("created_at", { ascending: false })
       .limit(10);
 
-    const jobMatch = resolveWebhookJobMatch((jobs || []) as WebhookJobCandidate[], body as Record<string, unknown>);
+    const jobMatch = resolveWebhookJobMatch(
+      (jobs || []) as WebhookJobCandidate[],
+      body as Record<string, unknown>,
+    );
     const job = jobMatch.job;
 
     // ── Build event_type and payload per webhook type ──
@@ -539,7 +750,7 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
         const channel = phone ? "sms" : email ? "email" : "chat";
         eventType = "client.reply";
         eventPayload = {
-          message_text: (body.body || message || ""),
+          message_text: body.body || message || "",
           line: body.line || null,
           phone: phone || null,
           email: email || null,
@@ -551,10 +762,12 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
       }
 
       case "OutboundMessage": {
-        const channel = body.messageType === "Email" || body.channel === "email" ? "email" : "sms";
+        const channel = body.messageType === "Email" || body.channel === "email"
+          ? "email"
+          : "sms";
         eventType = channel === "email" ? "client.email_out" : "client.sms_out";
         eventPayload = {
-          message_text: (body.body || body.message || ""),
+          message_text: body.body || body.message || "",
           phone: body.phone || null,
           email: body.email || null,
           conversation_id: conversationId || null,
@@ -569,14 +782,20 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
         eventType = "client.call_complete";
         // Normalise all GHL-templated fields. GHL renders missing variables as
         // the literal string "null"; treat that as null. F2 fix.
-        const callTo        = nullableString(body.to);
-        const callFrom      = nullableString(body.from);
-        const callDirection = nullableString(body.direction || body.callDirection);
+        const callTo = nullableString(body.to);
+        const callFrom = nullableString(body.from);
+        const callDirection = nullableString(
+          body.direction || body.callDirection,
+        );
         const callStatusRaw = nullableString(body.callStatus || body.status);
-        const callDuration  = nullableNumber(body.duration ?? body.callDuration);
-        const callPhone     = nullableString(body.phone || body.callerNumber);
-        const callRecordingUrl = nullableString(body.recordingUrl || body.recording_url);
-        const callEventId   = nullableString(body.eventId || body.callId || body.messageId || body.id);
+        const callDuration = nullableNumber(body.duration ?? body.callDuration);
+        const callPhone = nullableString(body.phone || body.callerNumber);
+        const callRecordingUrl = nullableString(
+          body.recordingUrl || body.recording_url,
+        );
+        const callEventId = nullableString(
+          body.eventId || body.callId || body.messageId || body.id,
+        );
         const callVoicemail = nullableBool(body.voicemail);
         // Line attribution from canon (F3 enrichment).
         const attribution = attributeLine(callTo, callFrom, callDirection);
@@ -652,21 +871,32 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     // Inbound: client.reply (SMS/email/chat). Outbound: client.sms_out / client.email_out.
     // Call: client.call_complete. Note: ghl.note_added. Stage: ghl.stage_changed.
     // Appointment: client.appointment.
-    const t7Enabled = await isFlagOn(supabase, "evidence_capture_v1", DEFAULT_ORG_ID);
+    const t7Enabled = await isFlagOn(
+      supabase,
+      "evidence_capture_v1",
+      DEFAULT_ORG_ID,
+    );
     let eventError: { message: string } | null = null;
     const occurredAt = new Date().toISOString();
     const sourceId = String(
       (body as { eventId?: string; id?: string }).eventId ??
-      (body as { id?: string }).id ??
-      crypto.randomUUID(),
+        (body as { id?: string }).id ??
+        crypto.randomUUID(),
     );
-    const providerId = body.messageId || body.message_id || body.id || body.eventId;
-    const providerMessageId = providerId && (type === "InboundMessage" || type === "OutboundMessage") ? `ghl:${providerId}` : null;
+    const providerId = body.messageId || body.message_id || body.id ||
+      body.eventId;
+    const providerMessageId =
+      providerId && (type === "InboundMessage" || type === "OutboundMessage")
+        ? `ghl:${providerId}`
+        : null;
     const providerTime = body.dateAdded || body.createdAt || body.timestamp;
-    const eventAt = providerTime && !Number.isNaN(Date.parse(String(providerTime))) ? new Date(providerTime).toISOString() : null;
+    const eventAt =
+      providerTime && !Number.isNaN(Date.parse(String(providerTime)))
+        ? new Date(providerTime).toISOString()
+        : null;
     let channel: Channel = "system";
     let direction: Direction = "system";
-    let conversationKey: string | null = (conversationId as string) || null;
+    const conversationKey: string | null = (conversationId as string) || null;
     switch (type) {
       case "InboundMessage": {
         const ch = (eventPayload.channel as string) || "sms";
@@ -682,7 +912,9 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
       }
       case "CallCompleted":
         channel = "call";
-        direction = (eventPayload.direction as string) === "outbound" ? "outbound" : "inbound";
+        direction = (eventPayload.direction as string) === "outbound"
+          ? "outbound"
+          : "inbound";
         break;
       case "AppointmentCreated":
         channel = "status";
@@ -703,8 +935,11 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     const evidenceJobId: string | null = null;
     const match = resolveMatch({ job_id: evidenceJobId, match_method: "none" });
     const bodyPreview = previewFromPayload(eventPayload);
-    eventPayload.attribution_hint = { job_id: job?.id || null,
-      match_method: jobMatch.match_method, match_confidence: jobMatch.match_confidence };
+    eventPayload.attribution_hint = {
+      job_id: job?.id || null,
+      match_method: jobMatch.match_method,
+      match_confidence: jobMatch.match_confidence,
+    };
 
     // Legacy spine row shape — emitted either by the T7 fallback path
     // OR when the flag is OFF. It still carries the extractor-readable
@@ -731,7 +966,9 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
       match_method: match.match_method,
       match_confidence: match.match_confidence,
       privacy_classification: "staff_only",
-      retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
+      retention_class: (direction === "inbound" || direction === "outbound")
+        ? "7y_audit"
+        : "12m_default",
       payload: eventPayload,
       metadata: {
         t7_fallback_envelope: true,
@@ -764,7 +1001,9 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
           body_preview: bodyPreview || undefined,
           thread_key: conversationKey,
           // Inbound client comms: 7y; system events: 12m.
-          retention_class: (direction === "inbound" || direction === "outbound") ? "7y_audit" : "12m_default",
+          retention_class: (direction === "inbound" || direction === "outbound")
+            ? "7y_audit"
+            : "12m_default",
           privacy_classification: "staff_only",
           payload: eventPayload,
         }, {
@@ -779,7 +1018,9 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
         // the spine on a T7 failure — exactly the regression the
         // stop-time review caught.
         console.error(
-          `[ghl-webhook-receiver] T7 recordEvidence failed; falling back to legacy: code=${errorCode(e)}`,
+          `[ghl-webhook-receiver] T7 recordEvidence failed; falling back to legacy: code=${
+            errorCode(e)
+          }`,
         );
         t7Failed = true;
       }
@@ -789,15 +1030,25 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
     if (!t7Enabled || t7Failed) {
       const inserted = await insertCapturedEvidence(supabase, legacySpineRow);
       const error = inserted?.error ?? null;
-      if (error?.code === "23505" && providerMessageId) captureOutcome = "duplicate";
-      else if (inserted?.skipped) captureOutcome = "capture_disabled";
+      if (error?.code === "23505" && providerMessageId) {
+        captureOutcome = "duplicate";
+      } else if (inserted?.skipped) captureOutcome = "capture_disabled";
       eventError = captureOutcome === "duplicate" ? null : error;
     }
 
     if (eventError) {
       const code = errorCode(eventError);
-      console.error(`[ghl-webhook-receiver] business_event insert failed: code=${code}`);
-      return await finish("error", jsonResponse({ received: true, event_created: false, error: code }, 500), code);
+      console.error(
+        `[ghl-webhook-receiver] business_event insert failed: code=${code}`,
+      );
+      return await finish(
+        "error",
+        jsonResponse(
+          { received: true, event_created: false, error: code },
+          500,
+        ),
+        code,
+      );
     }
 
     // ── T7 Loop 7 — auto-invoke transcribe-call for CallCompleted events ──
@@ -817,7 +1068,7 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
       const _job_id = evidenceJobId;
       const _contact_id = contactId || null;
       const _direction = nullableString(eventPayload.direction) || "internal";
-      const _duration = (eventPayload.duration as number | null);
+      const _duration = eventPayload.duration as number | null;
       const _phone = nullableString(eventPayload.phone);
       const _location_id = nullableString(eventPayload.location_id);
       const _ghlToken = deps.env("GHL_API_TOKEN") || "";
@@ -825,7 +1076,10 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
       const _supabaseUrl = deps.env("SUPABASE_URL") || "";
       const webhookOccurredAt = new Date();
       // Source-id anchor — used by transcribe-call for spine dedupe.
-      const callSourceId = ghlEventId || (_contact_id ? `${_contact_id}:${webhookOccurredAt.toISOString()}` : null);
+      const callSourceId = ghlEventId ||
+        (_contact_id
+          ? `${_contact_id}:${webhookOccurredAt.toISOString()}`
+          : null);
 
       // Fire-and-forget chain. If recording_url was supplied + non-null, invoke
       // immediately. Otherwise wait 25s then look up via GHL conversations API.
@@ -837,19 +1091,33 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
           let recording_url = initialRecordingUrl;
           let lookup_status = recording_url ? "from_webhook_body" : "missing";
           let message_id: string | null = null;
-          let conversation_id: string | null = null;
+          let _conversation_id: string | null = null;
           if (!recording_url && _ghlToken && _contact_id) {
             // Wait briefly for Twilio to finalise the recording.
             await new Promise((r) => setTimeout(r, 25_000));
-            const lookup = await lookupGhlCallRecording(_contact_id, _location_id, _ghlToken, webhookOccurredAt, fetchImpl);
+            const lookup = await lookupGhlCallRecording(
+              _contact_id,
+              _location_id,
+              _ghlToken,
+              webhookOccurredAt,
+              fetchImpl,
+            );
             recording_url = lookup.recording_url;
             message_id = lookup.message_id;
-            conversation_id = lookup.conversation_id;
+            _conversation_id = lookup.conversation_id;
             lookup_status = lookup.lookup_status;
-            console.log(`[ghl-webhook-receiver] ghl recording lookup contactId=${safeId(_contact_id) || "none"} status=${lookup_status} found=${recording_url ? "yes" : "no"} message_id=${message_id || "n/a"}`);
+            console.log(
+              `[ghl-webhook-receiver] ghl recording lookup contactId=${
+                safeId(_contact_id) || "none"
+              } status=${lookup_status} found=${
+                recording_url ? "yes" : "no"
+              } message_id=${message_id || "n/a"}`,
+            );
           }
           if (!recording_url) {
-            console.warn(`[ghl-webhook-receiver] CallCompleted with no recoverable recording_url; skipping transcribe-call. lookup_status=${lookup_status}`);
+            console.warn(
+              `[ghl-webhook-receiver] CallCompleted with no recoverable recording_url; skipping transcribe-call. lookup_status=${lookup_status}`,
+            );
             return;
           }
           // Build transcribe-call payload.
@@ -867,31 +1135,44 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
           };
           // GHL audio URLs require the bearer token; pass it through so
           // transcribe-call can fetch with it.
-          if (recording_url.startsWith("https://services.leadconnectorhq.com/")) {
+          if (
+            recording_url.startsWith("https://services.leadconnectorhq.com/")
+          ) {
             transcribePayload.fetch_auth_bearer = _ghlToken;
           }
           // Direct fetch instead of supabase.functions.invoke() — explicitly
           // attach the service-role JWT so transcribe-call's verify_jwt:true
           // ingress accepts the call (F1 fix). The supabase-js Deno client did
           // not propagate auth on inter-function invokes (cf. 401 logs).
-          const tcResp = await fetchImpl(`${_supabaseUrl}/functions/v1/transcribe-call`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${_serviceJwt}`,
-              "apikey": _serviceJwt,
+          const tcResp = await fetchImpl(
+            `${_supabaseUrl}/functions/v1/transcribe-call`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${_serviceJwt}`,
+                "apikey": _serviceJwt,
+              },
+              body: JSON.stringify(transcribePayload),
             },
-            body: JSON.stringify(transcribePayload),
-          });
+          );
           // Status only: the response can carry transcript text.
           await tcResp.body?.cancel();
           if (!tcResp.ok) {
-            console.error(`[ghl-webhook-receiver] transcribe-call HTTP ${tcResp.status}`);
+            console.error(
+              `[ghl-webhook-receiver] transcribe-call HTTP ${tcResp.status}`,
+            );
           } else {
-            console.log(`[ghl-webhook-receiver] transcribe-call invoked ok: HTTP ${tcResp.status}`);
+            console.log(
+              `[ghl-webhook-receiver] transcribe-call invoked ok: HTTP ${tcResp.status}`,
+            );
           }
         } catch (e) {
-          console.error(`[ghl-webhook-receiver] transcribe-call chain threw: code=${errorCode(e)}`);
+          console.error(
+            `[ghl-webhook-receiver] transcribe-call chain threw: code=${
+              errorCode(e)
+            }`,
+          );
         }
       })();
       // EdgeRuntime is a Supabase-injected global. waitUntil(promise) keeps the
@@ -925,24 +1206,37 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
         .eq("status", "pending");
 
       nudgesCancelled = true;
-      console.log(`[ghl-webhook-receiver] Cancelled pending nudges/proposals for job ${job.job_number || job.id}`);
+      console.log(
+        `[ghl-webhook-receiver] Cancelled pending nudges/proposals for job ${
+          job.job_number || job.id
+        }`,
+      );
     }
 
     console.log(
-      `[ghl-webhook-receiver] Processed: type=${type} event=${eventType} job_matched=${!!job} job=${job?.job_number || "none"} match_reason=${jobMatch.match_reason}`
+      `[ghl-webhook-receiver] Processed: type=${type} event=${eventType} job_matched=${!!job} job=${
+        job?.job_number || "none"
+      } match_reason=${jobMatch.match_reason}`,
     );
 
-    return await finish(captureOutcome, jsonResponse({
-      received: true,
-      event_type: eventType,
-      event_created: true,
-      job_matched: !!job,
-      job_number: job?.job_number || null,
-      nudges_cancelled: nudgesCancelled,
-    }));
+    return await finish(
+      captureOutcome,
+      jsonResponse({
+        received: true,
+        event_type: eventType,
+        event_created: true,
+        job_matched: !!job,
+        job_number: job?.job_number || null,
+        nudges_cancelled: nudgesCancelled,
+      }),
+    );
   } catch (err) {
     const code = errorCode(err);
     console.error(`[ghl-webhook-receiver] ERROR: code=${code}`);
-    return await finish("error", jsonResponse({ error: "internal_error", code }, 500), code);
+    return await finish(
+      "error",
+      jsonResponse({ error: "internal_error", code }, 500),
+      code,
+    );
   }
 }

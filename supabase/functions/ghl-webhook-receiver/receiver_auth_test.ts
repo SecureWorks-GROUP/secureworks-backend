@@ -1,6 +1,10 @@
 // Unit tests for the receiver's proof rules (slice C1b): key formats the
 // GHL_WEBHOOK_PUBLIC_KEY env may hold, mode parsing, and proof classes.
-import { assert, assertEquals, assertFalse } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+  assertFalse,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   acceptedProofsForType,
   importEd25519PublicKey,
@@ -10,12 +14,27 @@ import {
   verifyEd25519Signature,
 } from "./receiver_auth.ts";
 
-const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as CryptoKeyPair;
+const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+  "sign",
+  "verify",
+]) as CryptoKeyPair;
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-const spki = b64(new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey)));
-const raw = b64(new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey)));
+const spki = b64(
+  new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey)),
+);
+const raw = b64(
+  new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey)),
+);
 const message = '{"type":"InboundMessage","messageId":"pffXnIL1v2FTaKnz4DHm"}';
-const signature = b64(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, new TextEncoder().encode(message))));
+const signature = b64(
+  new Uint8Array(
+    await crypto.subtle.sign(
+      { name: "Ed25519" },
+      pair.privateKey,
+      new TextEncoder().encode(message),
+    ),
+  ),
+);
 
 Deno.test("the public key is accepted as PEM, PEM with escaped newlines, bare SPKI or raw 32 bytes", async () => {
   const forms = [
@@ -55,9 +74,17 @@ Deno.test("proof classes by event type", () => {
   assertEquals(acceptedProofsForType("AppointmentUpdate"), ["app_signature"]);
   assertEquals(acceptedProofsForType("CallCompleted"), ["workflow_secret"]);
   assertEquals(acceptedProofsForType("Voicemail"), ["workflow_secret"]);
-  assertEquals(acceptedProofsForType("ContactStageChanged"), ["workflow_secret"]);
-  assertEquals(acceptedProofsForType("ContactCreate"), ["app_signature", "workflow_secret"]);
-  assertEquals(acceptedProofsForType(null), ["app_signature", "workflow_secret"]);
+  assertEquals(acceptedProofsForType("ContactStageChanged"), [
+    "workflow_secret",
+  ]);
+  assertEquals(acceptedProofsForType("ContactCreate"), [
+    "app_signature",
+    "workflow_secret",
+  ]);
+  assertEquals(acceptedProofsForType(null), [
+    "app_signature",
+    "workflow_secret",
+  ]);
 });
 
 Deno.test("timing-safe compare and id filter", () => {
