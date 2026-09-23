@@ -3723,8 +3723,11 @@ retry press replays GHL from its ledger and writes Outlook at most once.
 The old booking path is retired (23 Sep 2026): `book_scope`, `assign_scoper`
 and `sales_booking_stamp_write` answer `Unknown action`, pinned by
 `retired_booking_actions_test.ts`; do not re-add them. `approve_booking_proposal`
-survives only for sale.html's dry-run preview, and its Railway bearer is
-`AGENT_BEARER_TOKEN` or `SW_API_KEY`, never the service-role key.
+survives only for sale.html's dry-run preview: `commit:true` is refused
+`old_booking_commit_retired` and is never forwarded to Railway. sale.html still
+sends that flag after its confirm dialog; live book is `sales_booking_book`.
+The Railway bearer is `AGENT_BEARER_TOKEN` or `SW_API_KEY`, never the
+service-role key.
 `sales_booking_read` shows what a press did from `sales_booking_executions`
 (`sales_booking_execution_read.ts`); dry runs and pre-claim refusals leave
 no row and so never read as booked or sent.

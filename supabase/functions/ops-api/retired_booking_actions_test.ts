@@ -4,7 +4,9 @@
  * What these prove, through the real ops-api request handler:
  *  - book_scope, assign_scoper and sales_booking_stamp_write are retired: each
  *    answers HTTP 400 `Unknown action` and writes nothing.
- *  - approve_booking_proposal still reaches the Railway agent.
+ *  - approve_booking_proposal still reaches the Railway agent for dry-run
+ *    preview only: commit:true is refused old_booking_commit_retired and
+ *    never forwarded.
  *  - The bearer sent to Railway is AGENT_BEARER_TOKEN, else SW_API_KEY, never
  *    the Supabase service-role key: with both unset the call refuses by name
  *    before any network request.
@@ -78,7 +80,16 @@ function serviceRequest(action: string, body: unknown = {}): Request {
   });
 }
 
-type FetchCall = { url: string; authorization: string | null };
+type FetchCall = { url: string; authorization: string | null; body: unknown };
+function parseFetchBody(init?: RequestInit): unknown {
+  const raw = init?.body;
+  if (typeof raw !== "string") return raw ?? null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
 async function withFetchSpy<T>(
   respond: (call: FetchCall) => Response,
   fn: (calls: FetchCall[]) => Promise<T>,
@@ -90,7 +101,11 @@ async function withFetchSpy<T>(
     const headers = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
-    const call = { url, authorization: headers.get("authorization") };
+    const call = {
+      url,
+      authorization: headers.get("authorization"),
+      body: parseFetchBody(init),
+    };
     calls.push(call);
     return Promise.resolve(respond(call));
   }) as typeof fetch;
@@ -157,12 +172,39 @@ Deno.test("approve_booking_proposal sends AGENT_BEARER_TOKEN to the agent", asyn
             serviceRequest("approve_booking_proposal", { proposal_id: "p-1" }),
           );
           assertEquals(res.status, 200);
+          const payload = await res.json();
+          assertEquals(payload.commit, false);
+          assertEquals(payload.dry_run, true);
           const agentCalls = calls.filter((c) =>
             c.url.endsWith("/api/booking-approvals/approve")
           );
           assertEquals(agentCalls.length, 1);
           assertEquals(agentCalls[0].authorization, "Bearer agent-token");
+          assertEquals(agentCalls[0].body, { proposal_id: "p-1", commit: false });
           assert(!calls.some((c) => c.authorization?.includes(SERVICE_KEY)));
+        },
+      ),
+  );
+});
+
+Deno.test("approve_booking_proposal refuses commit:true and never calls Railway", async () => {
+  const handle = await handler();
+  await withEnv(
+    { ...BASE_ENV, AGENT_BEARER_TOKEN: "agent-token" },
+    () =>
+      withFetchSpy(
+        () => new Response(JSON.stringify({ ok: true })),
+        async (calls) => {
+          const res = await handle(
+            serviceRequest("approve_booking_proposal", {
+              proposal_id: "p-1",
+              commit: true,
+            }),
+          );
+          assertEquals(res.status, 409);
+          const body = await res.json();
+          assertEquals(body.code, "old_booking_commit_retired");
+          assertEquals(calls, []);
         },
       ),
   );

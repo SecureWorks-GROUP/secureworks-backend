@@ -9720,9 +9720,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'snooze_proposed_action':       return json(await snoozeProposedAction(client, body))
       case 'create_job_for_opportunity':   return json(await createJobForOpportunity(client, body))
       case 'manual_dispatch_marnin_poc':   return json(await manualDispatchMarninPoc(client, body))
-      // Booking approval bridge — browser/ops-api calls Railway, Railway calls
-      // the existing sw_approve_booking_proposal path. Keeps Graph/calendar
-      // logic in one place instead of duplicating it in Deno.
+      // Booking approval bridge — sale.html dry-run preview only. Live book
+      // is sales_booking_book; commit:true is refused here.
       case 'approve_booking_proposal':      return json(await approveBookingProposalViaAgent(body, { mode: authModeLegacy, user: authUser }))
       // Quote Follow-Up Loop send path (atomic-claim per parent card B4).
       // Only fires when sale.html dispatches a send_quote_followup_sms
@@ -54374,8 +54373,13 @@ async function approveBookingProposalViaAgent(
 ) {
   const proposal_id = String(body?.proposal_id || body?.action_id || '').trim()
   if (!proposal_id) throw new ApiError('proposal_id required', 400)
+  if (body?.commit === true) {
+    throw new ApiError('old booking commit is retired', 409, {
+      error: 'old booking commit is retired; use sales_booking_book',
+      code: 'old_booking_commit_retired',
+    })
+  }
 
-  const commit = body?.commit === true
   const approver_user_id = caller.mode === 'jwt'
     ? caller.user?.id
     : String(body?.approver_user_id || body?.user_id || '').trim() || undefined
@@ -54391,7 +54395,7 @@ async function approveBookingProposalViaAgent(
 
   const payload: Record<string, any> = {
     proposal_id,
-    commit,
+    commit: false,
   }
   if (approver_user_id) payload.approver_user_id = approver_user_id
   const m2 = String(body?.m2_drafted_message || body?.drafted_message || '').trim()
@@ -54417,8 +54421,8 @@ async function approveBookingProposalViaAgent(
   return {
     success: data?.ok !== false,
     proposal_id,
-    commit,
-    dry_run: !commit,
+    commit: false,
+    dry_run: true,
     agent_url: SECUREWORKS_AGENT_URL,
     result: data,
   }
