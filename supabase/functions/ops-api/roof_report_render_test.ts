@@ -49,7 +49,7 @@ Deno.test("yesNo: normalises booleans/strings, blank stays blank", () => {
 
 Deno.test("formatAud: money format, non-numeric -> blank", () => {
   assertEquals(formatAud(275), "$275.00");
-  assertEquals(formatAud(330), "$330.00");
+  assertEquals(formatAud(385), "$385.00");
   assertEquals(formatAud(undefined), "");
 });
 
@@ -58,8 +58,8 @@ Deno.test("omitRoofReportFee drops prices and disables the Report fee row", () =
     ref: "MLB-1",
     address: "1 A St",
     storeys: "Double Storey",
-    price_ex_gst: 300,
-    price_inc_gst: 330,
+    price_ex_gst: 350,
+    price_inc_gst: 385,
   });
   assertEquals(omitted.price_ex_gst, undefined);
   assertEquals(omitted.price_inc_gst, undefined);
@@ -73,21 +73,21 @@ Deno.test("roofReportHeaderRows: office render keeps Report fee; trade-visible o
     ref: "MLB-1",
     address: "1 A St",
     storeys: "Double Storey",
-    price_inc_gst: 330,
+    price_inc_gst: 385,
   });
   assertEquals(office.some(([k]) => k === "Report fee"), true);
-  assertEquals(office.find(([k]) => k === "Report fee")?.[1].includes("$330.00"), true);
+  assertEquals(office.find(([k]) => k === "Report fee")?.[1].includes("$385.00"), true);
   assertEquals(office.find(([k]) => k === "Number of storeys")?.[1], "Double Storey");
 
   const trade = roofReportHeaderRows({
     ref: "MLB-1",
     address: "1 A St",
     storeys: "Double Storey",
-    price_inc_gst: 330,
+    price_inc_gst: 385,
     include_report_fee: false,
   });
   assertEquals(trade.some(([k]) => k === "Report fee"), false);
-  assertEquals(JSON.stringify(trade).includes("330"), false);
+  assertEquals(JSON.stringify(trade).includes("385"), false);
   assertEquals(JSON.stringify(trade).includes("Report fee"), false);
   assertEquals(trade.find(([k]) => k === "Number of storeys")?.[1], "Double Storey");
 });
@@ -183,8 +183,8 @@ Deno.test("render PDF: a full roof report on our letterhead stays a sane page co
     maintenance_recommendation: "Recommended",
     maintenance_details: "Re-bed and point the ridge line.",
     scope_summary: "Full external roof inspection following the storm claim.",
-    price_ex_gst: 300,
-    price_inc_gst: 330,
+    price_ex_gst: 350,
+    price_inc_gst: 385,
     photos: [],
   });
   const pages = countPdfPages(rendered.bytes);

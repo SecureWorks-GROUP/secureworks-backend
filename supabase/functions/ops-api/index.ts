@@ -46379,7 +46379,7 @@ async function renderAndAttachRoofReport(
 ) {
   // The attached roof_report defaults visible_to_trades=true. Always omit the
   // client fee from those bytes so allocated / makesafe_open viewers keep the
-  // report content without the $275/$330 row. Office invoicing still prices
+  // report content without the $275/$385 row. Office invoicing still prices
   // from roofReportPrice, not this PDF.
   const rendered = await renderRoofReportPdf(omitRoofReportFee(renderJob as any))
   let bin = ''

@@ -680,7 +680,7 @@ Deno.test("submit_roof_report: renders our PDF, persists submitted, advances the
     e.event_type === "roof_report_submitted"
   );
   assert(submitEvent, "roof_report_submitted event recorded");
-  assertEquals(submitEvent.detail_json.price_inc_gst, 330);
+  assertEquals(submitEvent.detail_json.price_inc_gst, 385);
 });
 
 Deno.test("submit_roof_report: merges an existing draft with the submit request fields", async () => {
@@ -998,8 +998,8 @@ Deno.test("save_roof_report: office/quote-visible write may return the fee; allo
   );
   assertEquals(allocated.storey, "double");
   assertEquals("price" in allocated, false);
-  assertEquals(JSON.stringify(allocated).includes("330"), false);
-  assertEquals(JSON.stringify(allocated).includes("300"), false);
+  assertEquals(JSON.stringify(allocated).includes("385"), false);
+  assertEquals(JSON.stringify(allocated).includes("350"), false);
 });
 
 Deno.test("submit_roof_report: office write may return the fee; allocated/makesafe_open do not", async () => {
@@ -1011,8 +1011,8 @@ Deno.test("submit_roof_report: office write may return the fee; allocated/makesa
     deps,
     { quoteVisible: true },
   );
-  assertEquals(office.price.inc_gst, 330);
-  assertEquals(office.price.ex_gst, 300);
+  assertEquals(office.price.inc_gst, 385);
+  assertEquals(office.price.ex_gst, 350);
   assertEquals(calls[0].renderJob.include_report_fee, false);
 
   const allocated: any = await _submitRoofReportForTest(
@@ -1045,7 +1045,7 @@ Deno.test("roof_report_template: allocated omits the client fee; office keeps it
   assertEquals(allocated.job.ref.includes("SWMS-26861"), true);
   const allocatedDump = JSON.stringify(allocated.template);
   assertEquals(allocatedDump.includes("275"), false);
-  assertEquals(allocatedDump.includes("330"), false);
+  assertEquals(allocatedDump.includes("385"), false);
   assertEquals(/fee/i.test(allocatedDump), false);
 
   const office: any = await _getRoofReportTemplateForJobForTest(
@@ -1054,7 +1054,7 @@ Deno.test("roof_report_template: allocated omits the client fee; office keeps it
     { quoteVisible: true },
   );
   assertEquals(office.template.pricing.single.inc_gst, 275);
-  assertEquals(office.template.pricing.double.inc_gst, 330);
+  assertEquals(office.template.pricing.double.inc_gst, 385);
 });
 
 import { roofReportPhotoTransformUrl } from "./index.ts";

@@ -41,7 +41,7 @@ Deno.test("template: exposes versioned schema, sections, storey pricing driver",
   assert(t.fields.some((f) => f.key === "photos" && f.type === "photos"));
   // Pricing block carries both locked figures.
   assertEquals(t.pricing.single.inc_gst, 275);
-  assertEquals(t.pricing.double.inc_gst, 330);
+  assertEquals(t.pricing.double.inc_gst, 385);
 });
 
 Deno.test("projectRoofReportTemplate: office keeps the locked fee; allocated omits amounts and fee text", () => {
@@ -49,7 +49,7 @@ Deno.test("projectRoofReportTemplate: office keeps the locked fee; allocated omi
   const office = projectRoofReportTemplate(full, true);
   assertEquals(office, full);
   assertEquals(office.pricing.single?.inc_gst, 275);
-  assertEquals(office.pricing.double?.inc_gst, 330);
+  assertEquals(office.pricing.double?.inc_gst, 385);
 
   const allocated = projectRoofReportTemplate(full, false);
   const storey = allocated.fields.find((f) => f.key === "storeys");
@@ -67,8 +67,8 @@ Deno.test("projectRoofReportTemplate: office keeps the locked fee; allocated omi
   const dumped = JSON.stringify(allocated);
   assertEquals(dumped.includes("250"), false);
   assertEquals(dumped.includes("275"), false);
-  assertEquals(dumped.includes("300"), false);
-  assertEquals(dumped.includes("330"), false);
+  assertEquals(dumped.includes("350"), false);
+  assertEquals(dumped.includes("385"), false);
   assertEquals(dumped.includes("ex_gst"), false);
   assertEquals(dumped.includes("inc_gst"), false);
   assertEquals(/fee/i.test(dumped), false);
@@ -85,7 +85,7 @@ Deno.test("template: no field label or option contains an em dash (house rule)",
   }
 });
 
-Deno.test("storey pricing: single locked 2026-07-16, double ruled 2026-08-06", () => {
+Deno.test("storey pricing: single locked 2026-07-16, double ruled 2026-09-23", () => {
   const single = roofReportPrice(STOREY_SINGLE);
   assertEquals(single, {
     storey: "single",
@@ -97,39 +97,38 @@ Deno.test("storey pricing: single locked 2026-07-16, double ruled 2026-08-06", (
   assertEquals(double, {
     storey: "double",
     storey_label: STOREY_DOUBLE,
-    ex_gst: 300,
-    inc_gst: 330,
+    ex_gst: 350,
+    inc_gst: 385,
   });
 });
 
-// Captain ruling 2026-08-06 (data/decisions/2026-08-06-roof-report-pricing-300-double.md):
-// double storey is $300 ex / $330 inc, EXPLICITLY superseding the $350 ex /
-// $385 inc figure locked on 2026-07-16. Single storey was not touched by that
-// ruling and stays $250 ex / $275 inc.
+// Shaun, 2026-09-23: double storey is $350 ex / $385 inc, superseding the
+// $300 ex / $330 inc figure ruled on 2026-08-06. Single storey stays
+// $250 ex / $275 inc.
 //
 // This pins the ruled figures at the constant, not just through a caller, so a
-// silent drift back to $350 fails here rather than on a builder's invoice.
-Deno.test("ROOF_REPORT_PRICING: Captain 2026-08-06 double $300 ex / $330 inc, single unchanged", () => {
-  assertEquals(ROOF_REPORT_PRICING.double.ex_gst, 300);
-  assertEquals(ROOF_REPORT_PRICING.double.inc_gst, 330);
+// silent drift back to $300 fails here rather than on a builder's invoice.
+Deno.test("ROOF_REPORT_PRICING: Shaun 2026-09-23 double $350 ex / $385 inc, single unchanged", () => {
+  assertEquals(ROOF_REPORT_PRICING.double.ex_gst, 350);
+  assertEquals(ROOF_REPORT_PRICING.double.inc_gst, 385);
   assertEquals(ROOF_REPORT_PRICING.single.ex_gst, 250);
   assertEquals(ROOF_REPORT_PRICING.single.inc_gst, 275);
 
   // The superseded figures must not survive anywhere in the block.
   // Widened to number[] deliberately: `ROOF_REPORT_PRICING` is `as const`, so the
-  // literal union would make `includes(350)` a type error rather than the
+  // literal union would make `includes(300)` a type error rather than the
   // runtime guard against a silent revert that it is meant to be.
   const figures: number[] = Object.values(ROOF_REPORT_PRICING).flatMap((p) => [
     p.ex_gst,
     p.inc_gst,
   ]);
   assert(
-    !figures.includes(350),
-    "retired $350 ex double-storey figure present",
+    !figures.includes(300),
+    "retired $300 ex double-storey figure present",
   );
   assert(
-    !figures.includes(385),
-    "retired $385 inc double-storey figure present",
+    !figures.includes(330),
+    "retired $330 inc double-storey figure present",
   );
 
   // inc_gst is ex_gst + 10% GST on both rows.
@@ -247,8 +246,8 @@ Deno.test("buildRoofReportJob: maps fields + computes fee from storey; draft wit
   );
   assertEquals(job.ref, "MLB-1 / SWMS-2");
   assertEquals(job.storeys, STOREY_DOUBLE);
-  assertEquals(job.price_ex_gst, 300);
-  assertEquals(job.price_inc_gst, 330);
+  assertEquals(job.price_ex_gst, 350);
+  assertEquals(job.price_inc_gst, 385);
   assertEquals(job.roof_type, "Terracotta Tiles");
   assertEquals((job.photos as any[]).length, 1);
 
