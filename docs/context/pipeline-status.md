@@ -30,8 +30,8 @@ Rules for the owning slices:
 
 - Replace only your own sub-function, with `CREATE OR REPLACE`, keeping
   `() RETURNS jsonb`. Return an object with an `alarms` array; each alarm is
-  `{key, severity, since, what_to_do, ...}`. Only F1 changes
-  `context_pipeline_status()` (and F1b, same owner).
+  `{key, severity, since, what_to_do, ...}`. Only F1 and F1b
+  (same owner) change `context_pipeline_status()`.
 - A block that raises shows as `{"error": "<SQLSTATE>"}` plus a
   `status_block_failed` alarm; the rest of the status still reads. A core
   failure still fails the whole read (unchanged behaviour).
@@ -167,7 +167,9 @@ Registered contracts
 (the latter compares existing composer keys with a copy of the 17 Sep body on
 the same fixtures, and pins `ready_jobs` to the candidates count),
 `supabase/tests/migration-contracts/20260924030000_context_evidence_cadence`
-(K1 cadence block, due rule, and ready-job count), and
+(K1 cadence block, due rule, and ready-job count),
 `supabase/tests/migration-contracts/20260924133000_context_ghl_message_reconcile`
-(C1d `ghl_capture` block, item flag, cron, and lane list).
+(C1d `ghl_capture` block, item flag, cron, and lane list), and
+`supabase/tests/migration-contracts/20260924152100_context_status_f1b`
+(F1b composer stubs, `window_end_id`, and the freshness source swap).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.
