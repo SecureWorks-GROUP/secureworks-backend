@@ -2467,7 +2467,7 @@ async function logBusinessEvent(
     if (!(await automationLaneEnabled(client, 'capture'))) {
       return returnWriteStatus ? false : undefined
     }
-    const { error } = await insertCapturedEvidence(client, {
+    const { error, skipped } = await insertCapturedEvidence(client, {
       event_type: event.event_type,
       source: event.source || 'app/office',
       entity_type: event.entity_type,
@@ -2494,6 +2494,7 @@ async function logBusinessEvent(
       schema_version: '1.0',
     })
     if (error) throw error
+    if (skipped) return returnWriteStatus ? false : undefined
     return returnWriteStatus ? true : undefined
   } catch (e) {
     // Non-blocking — log but don't fail the main operation
@@ -3837,6 +3838,20 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   })
   if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
 
+  const sentAt = new Date().toISOString()
+  const outlookProviderProof = {
+    label: 'accepted by Outlook',
+    status: siEmailResp.status,
+    request_id: siEmailResp.headers.get('request-id') ||
+      siEmailResp.headers.get('x-request-id') ||
+      siEmailResp.headers.get('x-ms-request-id'),
+    client_request_id: siEmailResp.headers.get('client-request-id') ||
+      siEmailResp.headers.get('x-client-request-id'),
+    sent_at: sentAt,
+    approval_id: body.debt_followup_approval_id || null,
+    attachment_sha256: siAttachmentSha256,
+  }
+
   // Audit (non-blocking).
   //   - business_events is the canonical conversation event and accepts null job_id.
   //   - job_events: only when verifiedJobId is set. job_events.job_id is NOT NULL, so
@@ -3847,12 +3862,14 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     entity_type: 'xero_invoice',
     entity_id: siId,
     job_id: verifiedJobId || undefined,
+    event_at: sentAt,
     direction: 'outbound',
     // K3: digit-free words so the ladder's number match cannot fire; the
     // invoice number and address stay in payload only.
     body_preview: INVOICE_EMAILED_BODY_PREVIEW,
     payload: {
       invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId),
+      provider_proof: outlookProviderProof,
       ...(body.debt_followup_approval_id
         ? { debt_followup_approval_id: body.debt_followup_approval_id, attachment_sha256: siAttachmentSha256 }
         : {}),
@@ -3871,6 +3888,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   return json({
     success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook',
     attachment_sha256: siAttachmentSha256,
+    provider_proof: outlookProviderProof,
     timeline_write_failed: timelineWritten === false,
   })
 }
@@ -16156,6 +16174,27 @@ async function getJobConversation(client: any, body: any) {
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
     for (const r of (bev || [])) {
       const p: any = r.payload || {}
+      const proof: any = p.provider_proof
+      const acceptedOutlookProof = r.event_type === 'invoice.emailed' &&
+          proof?.label === 'accepted by Outlook' &&
+          Number.isInteger(proof.status) && proof.status >= 200 &&
+          proof.status < 300 && typeof proof.sent_at === 'string' &&
+          Number.isFinite(Date.parse(proof.sent_at)) &&
+          typeof proof.approval_id === 'string' && proof.approval_id.length > 0 &&
+          typeof proof.attachment_sha256 === 'string' &&
+          /^[a-f0-9]{64}$/i.test(proof.attachment_sha256)
+        ? {
+          label: 'accepted by Outlook',
+          status: proof.status,
+          request_id: typeof proof.request_id === 'string' ? proof.request_id : null,
+          client_request_id: typeof proof.client_request_id === 'string'
+            ? proof.client_request_id
+            : null,
+          sent_at: proof.sent_at,
+          approval_id: proof.approval_id,
+          attachment_sha256: proof.attachment_sha256,
+        }
+        : null
       const channel: string = r.event_type.includes('sms') ? 'sms'
         : r.event_type.includes('call') ? 'call'
         : r.event_type.includes('note') ? 'note'
@@ -16179,6 +16218,7 @@ async function getJobConversation(client: any, body: any) {
         attribution_status: r.attribution_status ?? null,
         attribution_step: r.attribution_step ?? null,
         placement_rule: r.placement_rule ?? null,
+        ...(acceptedOutlookProof ? { provider_proof: acceptedOutlookProof } : {}),
       })
     }
   } catch (e) {
@@ -59845,3 +59885,4 @@ export const _updateInvoiceForTest = updateInvoice
 export const _getJobContextFactsForTest = getJobContextFacts
 export const _assembleJobDossierForTest = assembleJobDossier
 export const _getJobConversationForTest = getJobConversation
+export const _logBusinessEventForTest = logBusinessEvent
