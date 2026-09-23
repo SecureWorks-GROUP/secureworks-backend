@@ -165,6 +165,7 @@ export function normaliseDebtFollowupRequest(
     if (r.message.length > DEBT_FOLLOWUP_MAX_SMS_CHARS) {
       return refuse("message_too_long");
     }
+    if (r.message.includes("—")) return refuse("em_dash_not_allowed");
     message = r.message; // exact bytes: what is approved is what is sent
   } else if (r.message !== undefined && r.message !== null) {
     return refuse("message_not_allowed");
@@ -178,6 +179,7 @@ export function normaliseDebtFollowupRequest(
   if (subject === undefined || (subject && subject.length > 200)) {
     return refuse("subject_invalid");
   }
+  if (subject?.includes("—")) return refuse("em_dash_not_allowed");
   if (sms && (to || cc.length || subject)) {
     return refuse("email_fields_not_allowed");
   }
@@ -353,6 +355,9 @@ export type BuiltProposal = {
 };
 
 function num(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -434,7 +439,7 @@ export async function buildDebtFollowupProposal(
     const x = read.value;
     const row = mirror.get(id)!;
     const amountDue = num(x?.AmountDue), total = num(x?.Total);
-    const amountPaid = num(x?.AmountPaid ?? 0);
+    const amountPaid = num(x?.AmountPaid);
     const contactId = typeof x?.Contact?.ContactID === "string"
       ? x.Contact.ContactID
       : "";
@@ -643,6 +648,10 @@ export async function buildDebtFollowupProposal(
         file_name: `${first.invoice_number}.pdf`,
       },
     };
+  }
+
+  if (body.includes("—") || email?.subject.includes("—")) {
+    return refuse("em_dash_not_allowed");
   }
 
   const proposal: DebtFollowupProposal = {
@@ -1365,6 +1374,10 @@ async function sendOnce(
         res.status >= 200 && res.status < 300 && res.body?.success === true &&
         res.body?.emailed === true
       ) {
+        const responseProof = res.body?.provider_proof &&
+            typeof res.body.provider_proof === "object"
+          ? res.body.provider_proof as Obj
+          : {};
         settled = {
           outcome: "sent",
           reason: null,
@@ -1372,13 +1385,20 @@ async function sendOnce(
           provider_message_id: null,
           provider_proof: {
             provider: "outlook",
+            label: "accepted by Outlook",
             accepted: true,
+            status: responseProof.status ?? res.status,
+            request_id: responseProof.request_id ?? null,
+            client_request_id: responseProof.client_request_id ?? null,
+            sent_at: responseProof.sent_at ?? null,
+            approval_id: record.approval_id,
             via: res.body?.via ?? "outlook",
             to: dest.to,
             cc: dest.cc,
             subject: p.email!.subject,
             invoice_number: attachment.invoice_number,
-            attachment_sha256: res.body?.attachment_sha256 ?? null,
+            attachment_sha256: responseProof.attachment_sha256 ??
+              res.body?.attachment_sha256 ?? null,
             body_sha256: p.body_sha256,
             timeline_write_failed: res.body?.timeline_write_failed === true,
           },

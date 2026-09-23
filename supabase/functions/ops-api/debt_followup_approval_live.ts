@@ -204,9 +204,10 @@ export function debtFollowupReads(
     },
     async contactMatch(xeroContactId) {
       const { data, error } = await client.from("contact_matches")
-        .select("ghl_contact_id").eq("xero_contact_id", xeroContactId).limit(
-          10,
-        );
+        .select("ghl_contact_id").eq("org_id", inputs.orgId).eq(
+          "xero_contact_id",
+          xeroContactId,
+        ).limit(10);
       if (error) throw new Error("contact_match_unreadable");
       const ids = new Set(
         ((data as Obj[] | null) ?? []).map((r) => r.ghl_contact_id).filter(

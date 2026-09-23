@@ -23,7 +23,10 @@ import {
   type LiveExecution,
   type MirrorInvoiceRow,
 } from "./debt_followup_approval.ts";
-import { debtFollowupLedger } from "./debt_followup_approval_live.ts";
+import {
+  debtFollowupLedger,
+  debtFollowupReads,
+} from "./debt_followup_approval_live.ts";
 import { SMS_DEFAULT_FROM_NUMBER } from "../_shared/sms_from_number.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -97,7 +100,7 @@ interface World {
   emails: Obj[];
   afterSent: Obj[];
   smsResponse: () => Promise<{ status: number; body: Obj }>;
-  emailResponse: () => Promise<{ status: number; body: Obj }>;
+  emailResponse: (args?: Obj) => Promise<{ status: number; body: Obj }>;
   claimFails?: boolean;
 }
 
@@ -126,7 +129,7 @@ function world(over: Partial<World> = {}): World {
         status: 200,
         body: { success: true, messageId: "ghl-msg-1", evidence: "inserted" },
       }),
-    emailResponse: () =>
+    emailResponse: (args) =>
       Promise.resolve({
         status: 200,
         body: {
@@ -134,6 +137,15 @@ function world(over: Partial<World> = {}): World {
           emailed: true,
           via: "outlook",
           attachment_sha256: "a".repeat(64),
+          provider_proof: {
+            label: "accepted by Outlook",
+            status: 202,
+            request_id: "outlook-request-1",
+            client_request_id: "client-request-1",
+            sent_at: "2026-09-24T01:02:03.000Z",
+            approval_id: args?.approval_id,
+            attachment_sha256: "a".repeat(64),
+          },
         },
       }),
     ...over,
@@ -251,7 +263,7 @@ function deps(w: World): DebtFollowupDeps {
       },
       sendInvoiceEmail(args) {
         w.emails.push(args);
-        return w.emailResponse();
+        return w.emailResponse(args);
       },
       afterSent(proposal, proof, meta) {
         w.afterSent.push({ kind: proposal.kind, proof, meta });
@@ -260,6 +272,50 @@ function deps(w: World): DebtFollowupDeps {
     },
   };
 }
+
+Deno.test("contact matching is scoped to the executor organization", async () => {
+  const rows = [
+    { org_id: "org-a", xero_contact_id: "same-xero", ghl_contact_id: "ghl-a" },
+    { org_id: "org-b", xero_contact_id: "same-xero", ghl_contact_id: "ghl-b" },
+  ];
+  const filters: Array<[string, unknown]> = [];
+  const client = {
+    from(table: string) {
+      assertEquals(table, "contact_matches");
+      const query: Obj = {
+        select() {
+          return query;
+        },
+        eq(field: string, value: unknown) {
+          filters.push([field, value]);
+          return query;
+        },
+        limit(count: number) {
+          const data = rows.filter((row) =>
+            filters.every(([field, value]) => (row as Obj)[field] === value)
+          ).slice(0, count);
+          return Promise.resolve({ data, error: null });
+        },
+      };
+      return query;
+    },
+  };
+  const reads = debtFollowupReads(client, {
+    orgId: "org-a",
+    getToken: async () => ({ accessToken: "", tenantId: "" }),
+    xeroGet: async () => ({}),
+    assertInvoiceAllowed: async () => undefined,
+    fenceRefusal: () => null,
+    sendInvoiceEmail: async () => ({ status: 200, body: {} }),
+    sendSms: async () => ({ status: 200, body: {} }),
+  });
+
+  assertEquals(await reads.contactMatch("same-xero"), "ghl-a");
+  assertEquals(filters, [
+    ["org_id", "org-a"],
+    ["xero_contact_id", "same-xero"],
+  ]);
+});
 
 const providerCalls = (w: World) => w.sms.length + w.emails.length;
 
@@ -818,6 +874,56 @@ Deno.test("chase, payment-link, and invoice email proposals refuse internal debt
   }
 });
 
+Deno.test("Xero null or missing invoice amounts refuse proposal construction", async () => {
+  for (const field of ["AmountDue", "Total", "AmountPaid"] as const) {
+    for (const missing of [false, true]) {
+      const w = world();
+      if (missing) delete w.xero["inv-1"][field];
+      else w.xero["inv-1"][field] = null;
+      const result = await debtFollowupProposeAction({
+        method: "POST",
+        body: { request: CHASE },
+        deps: deps(w),
+      });
+      assertEquals(result.status, "refused", `${field}, missing=${missing}`);
+      if (result.status === "refused") {
+        assertEquals(result.reason, "xero_invoice_unreadable");
+      }
+      assertEquals(providerCalls(w), 0);
+    }
+  }
+
+  const paidInvoice = world();
+  paid(paidInvoice);
+  paidInvoice.xero["inv-1"].AmountDue = null;
+  const thankYou = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: THANKS },
+    deps: deps(paidInvoice),
+  });
+  assertEquals(thankYou.status, "refused");
+  if (thankYou.status === "refused") {
+    assertEquals(thankYou.reason, "xero_invoice_unreadable");
+  }
+});
+
+Deno.test("outbound proposals refuse em dashes in chase text and email subject", async () => {
+  for (const request of [
+    { ...CHASE, message: "Hi Sam — please review this invoice." },
+    { ...EMAIL, subject: "Invoice INV-0857 — payment needed" },
+  ]) {
+    const result = await debtFollowupProposeAction({
+      method: "POST",
+      body: { request },
+      deps: deps(world()),
+    });
+    assertEquals(result.status, "refused");
+    if (result.status === "refused") {
+      assertEquals(result.reason, "em_dash_not_allowed");
+    }
+  }
+});
+
 Deno.test("thank-you text needs a PAID invoice and names the amount paid, without an em dash", async () => {
   const unpaid = world();
   const refusedResult = await debtFollowupProposeAction({
@@ -919,6 +1025,14 @@ Deno.test("invoice email: recipient must be a verified anchor; the approved subj
         emailed: true,
         via: "outlook",
         attachment_sha256: "a".repeat(64),
+        provider_proof: {
+          label: "accepted by Outlook",
+          status: 202,
+          request_id: "outlook-request-1",
+          client_request_id: "client-request-1",
+          sent_at: "2026-09-24T01:02:03.000Z",
+          attachment_sha256: "a".repeat(64),
+        },
         timeline_write_failed: true,
       },
     }),
@@ -977,6 +1091,12 @@ Deno.test("invoice email: recipient must be a verified anchor; the approved subj
     assertEquals(sent.provider, "outlook");
     assertEquals(sent.provider_proof?.attachment_sha256, "a".repeat(64));
     assertEquals(sent.provider_proof?.accepted, true);
+    assertEquals(sent.provider_proof?.label, "accepted by Outlook");
+    assertEquals(sent.provider_proof?.status, 202);
+    assertEquals(sent.provider_proof?.request_id, "outlook-request-1");
+    assertEquals(sent.provider_proof?.client_request_id, "client-request-1");
+    assertEquals(sent.provider_proof?.sent_at, "2026-09-24T01:02:03.000Z");
+    assertEquals(sent.provider_proof?.approval_id, id);
     assertEquals(sent.provider_proof?.timeline_write_failed, true);
   }
   await press(w, id);
