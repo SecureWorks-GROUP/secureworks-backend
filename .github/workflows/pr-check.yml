@@ -276,7 +276,8 @@ jobs:
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
             supabase/functions/ops-api/job_commercial_read_test.ts \
-            supabase/functions/ops-api/job_freshness_test.ts
+            supabase/functions/ops-api/job_freshness_test.ts \
+            supabase/functions/ops-api/trade_variation_request_test.ts
 
       # Slice C1b: the GHL webhook receiver's two-proof auth (observe until
       # GHL_WEBHOOK_AUTH_MODE=enforce), ids-only webhook_log receipts and the

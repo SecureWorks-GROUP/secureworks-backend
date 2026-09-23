@@ -53052,6 +53052,11 @@ export async function createVariationForCaller(
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
   authUser: TradeAuthContext | null,
 ) {
+  // Fields are read by name for jarvis's MCP drift check; the body goes on
+  // exactly as received.
+  if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    const { job_id, description, amount, reason } = body
+  }
   if (authMode === 'jwt' && !_opsApiCallerIsStaffOperator(authMode, authUser)) {
     if (!authUser) throw new ApiError('A signed-in Supabase user session is required.', 401, {
       error: 'A signed-in Supabase user session is required.',
