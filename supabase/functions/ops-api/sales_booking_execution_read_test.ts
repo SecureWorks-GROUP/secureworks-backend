@@ -595,6 +595,23 @@ function executorDeps(
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: [] }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
+    readOutlookLead: () =>
+      Promise.resolve({
+        contact: {
+          firstName: "Example",
+          lastName: "Lead",
+          city: "Scarborough",
+        },
+        suburb: "Scarborough",
+      }),
+    mirrorToOutlook: () =>
+      Promise.resolve({
+        ok: true,
+        code: "mirrored",
+        wrote: true,
+        outlook_event_id: "outlook-1",
+        ghl_appointment_id: "appt-1",
+      }),
     callAppointmentWriter(body) {
       const { idempotencyKey, dryRun, ...fields } = body;
       if (dryRun === true) {
