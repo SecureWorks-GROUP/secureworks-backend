@@ -7,7 +7,10 @@
 // verified job, upgrades that row's link to the job (the upgrade rule). A
 // duplicate is a saved row, never a failure. There is no second write path.
 
-import { buildGhlMessageRow, type GhlMessageBuild } from "../_shared/evidence/ghl_message.ts";
+import {
+  buildGhlMessageRow,
+  type GhlMessageBuild,
+} from "../_shared/evidence/ghl_message.ts";
 
 export const SEND_SMS_EVIDENCE_SOURCE = "ghl-proxy";
 
@@ -21,13 +24,20 @@ export interface SendSmsJobRead {
  * the contact the text went to. A job we could not read, or a job with no
  * contact, is kept as a hint for the ladder, never as a direct link.
  */
-export function sendSmsJobCustody(jobId: string | null | undefined, job: SendSmsJobRead | null | undefined, contactId: string): {
+export function sendSmsJobCustody(
+  jobId: string | null | undefined,
+  job: SendSmsJobRead | null | undefined,
+  contactId: string,
+): {
   verifiedJobId: string | null;
   unverifiedJobId: string | null;
 } {
   const named = typeof jobId === "string" && jobId.trim() ? jobId.trim() : null;
   if (!named) return { verifiedJobId: null, unverifiedJobId: null };
-  if (job && typeof job.ghl_contact_id === "string" && job.ghl_contact_id === contactId) {
+  if (
+    job && typeof job.ghl_contact_id === "string" &&
+    job.ghl_contact_id === contactId
+  ) {
     return { verifiedJobId: named, unverifiedJobId: null };
   }
   return { verifiedJobId: null, unverifiedJobId: named };
@@ -46,7 +56,9 @@ export interface SendSmsEvidenceInput {
 }
 
 /** The row for a text our tool just sent, built by the shared builder. */
-export function buildSendSmsEvidenceRow(input: SendSmsEvidenceInput): GhlMessageBuild {
+export function buildSendSmsEvidenceRow(
+  input: SendSmsEvidenceInput,
+): GhlMessageBuild {
   const custody = sendSmsJobCustody(input.jobId, input.job, input.contactId);
   return buildGhlMessageRow({
     messageId: input.result?.messageId ?? input.result?.id ?? null,
@@ -68,8 +80,19 @@ export function buildSendSmsEvidenceRow(input: SendSmsEvidenceInput): GhlMessage
 }
 
 export type CaptureOutcome =
-  | { outcome: "inserted"; id: string; job_id: string | null; attribution_status: string | null }
-  | { outcome: "duplicate"; id: string; job_id: string | null; attribution_status: string | null; upgraded: boolean }
+  | {
+    outcome: "inserted";
+    id: string;
+    job_id: string | null;
+    attribution_status: string | null;
+  }
+  | {
+    outcome: "duplicate";
+    id: string;
+    job_id: string | null;
+    attribution_status: string | null;
+    upgraded: boolean;
+  }
   | { outcome: "capture_disabled" }
   | { outcome: "skipped"; reason: string }
   | { outcome: "error"; code: string };
@@ -79,8 +102,11 @@ export type CaptureOutcome =
  * already gone, so an evidence problem is reported, logged by code and id only,
  * and left for the reconciler to recover.
  */
-// deno-lint-ignore no-explicit-any
-export async function saveSendSmsEvidence(client: any, input: SendSmsEvidenceInput): Promise<CaptureOutcome> {
+export async function saveSendSmsEvidence(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  input: SendSmsEvidenceInput,
+): Promise<CaptureOutcome> {
   let built: GhlMessageBuild;
   try {
     built = buildSendSmsEvidenceRow(input);
@@ -92,18 +118,30 @@ export async function saveSendSmsEvidence(client: any, input: SendSmsEvidenceInp
     return { outcome: "skipped", reason: built.reason };
   }
   try {
-    const { data, error } = await client.rpc("capture_business_event", { p_row: built.row });
+    const { data, error } = await client.rpc("capture_business_event", {
+      p_row: built.row,
+    });
     if (error) {
-      console.error(`[ghl-proxy] send_sms evidence rpc failed: ${error.code ?? "unknown"} ${built.row.provider_message_id}`);
+      console.error(
+        `[ghl-proxy] send_sms evidence rpc failed: ${
+          error.code ?? "unknown"
+        } ${built.row.provider_message_id}`,
+      );
       return { outcome: "error", code: String(error.code ?? "rpc_error") };
     }
-    const outcome = data && typeof data === "object" ? data as CaptureOutcome : { outcome: "error" as const, code: "rpc_no_result" };
+    const outcome = data && typeof data === "object"
+      ? data as CaptureOutcome
+      : { outcome: "error" as const, code: "rpc_no_result" };
     if (outcome.outcome === "error") {
-      console.error(`[ghl-proxy] send_sms evidence refused: ${outcome.code} ${built.row.provider_message_id}`);
+      console.error(
+        `[ghl-proxy] send_sms evidence refused: ${outcome.code} ${built.row.provider_message_id}`,
+      );
     }
     return outcome;
   } catch {
-    console.error(`[ghl-proxy] send_sms evidence rpc threw ${built.row.provider_message_id}`);
+    console.error(
+      `[ghl-proxy] send_sms evidence rpc threw ${built.row.provider_message_id}`,
+    );
     return { outcome: "error", code: "rpc_threw" };
   }
 }

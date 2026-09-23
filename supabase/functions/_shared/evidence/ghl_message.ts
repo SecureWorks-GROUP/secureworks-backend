@@ -30,7 +30,12 @@ export const SECUREWORKS_GHL_APP_ID = "69a41803c86f294a620b6499";
 export type CaptureMode = "live" | "backfill" | "relink";
 
 /** Who wrote an item. */
-export type SentByKind = "customer" | "staff_app" | "workflow" | "our_tool" | "unknown";
+export type SentByKind =
+  | "customer"
+  | "staff_app"
+  | "workflow"
+  | "our_tool"
+  | "unknown";
 
 /**
  * One GHL item as either door sees it: an app webhook body
@@ -95,7 +100,10 @@ const GHL_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const EXCERPT = 500;
 
 /** Our five lines (last nine digits) and the business line each one decides. */
-const OUR_LINES: Record<string, { from_line: string; line: "fencing" | "patio" | null }> = {
+const OUR_LINES: Record<
+  string,
+  { from_line: string; line: "fencing" | "patio" | null }
+> = {
   "489267771": { from_line: "771", line: null }, // Group Admin
   "489267772": { from_line: "772", line: "fencing" }, // Fencing Sales
   "489267774": { from_line: "774", line: "patio" }, // Patios (does not decide patio against decking)
@@ -107,7 +115,13 @@ const OUR_LINES: Record<string, { from_line: string; line: "fencing" | "patio" |
  * The business line of one of our numbers. 772 and 778 are fencing, 774 is
  * patio, 771 and 776 decide nothing. A number that is not ours has no line.
  */
-export function ourLineForNumber(raw: string | null | undefined): { from_line: string | null; line: "fencing" | "patio" | null; our_number: string | null } {
+export function ourLineForNumber(
+  raw: string | null | undefined,
+): {
+  from_line: string | null;
+  line: "fencing" | "patio" | null;
+  our_number: string | null;
+} {
   const digits = String(raw ?? "").replace(/\D/g, "");
   const known = digits.length >= 9 ? OUR_LINES[digits.slice(-9)] : undefined;
   if (!known) return { from_line: null, line: null, our_number: null };
@@ -116,13 +130,20 @@ export function ourLineForNumber(raw: string | null | undefined): { from_line: s
 
 /** GHL's message type, upper case, TYPE_ prefix and separators removed: "TYPE_SMS" and "SMS" both read "SMS". */
 function messageKind(raw: string | null | undefined): string {
-  return String(raw ?? "").toUpperCase().replace(/^TYPE_/, "").replace(/[^A-Z0-9]/g, "");
+  return String(raw ?? "").toUpperCase().replace(/^TYPE_/, "").replace(
+    /[^A-Z0-9]/g,
+    "",
+  );
 }
 
 function attachmentTypes(attachments: unknown): string[] {
   if (!Array.isArray(attachments)) return [];
   return attachments.map((item) => {
-    const link = typeof item === "string" ? item : typeof (item as { url?: unknown })?.url === "string" ? (item as { url: string }).url : "";
+    const link = typeof item === "string"
+      ? item
+      : typeof (item as { url?: unknown })?.url === "string"
+      ? (item as { url: string }).url
+      : "";
     const name = link.split(/[?#]/)[0].split("/").pop() ?? "";
     return /\.([A-Za-z0-9]{1,8})$/.exec(name)?.[1].toLowerCase() ?? "unknown";
   });
@@ -132,10 +153,16 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function sentBy(item: GhlMessageItem, direction: string, ctx: GhlCaptureContext): SentByKind {
+function sentBy(
+  item: GhlMessageItem,
+  direction: string,
+  ctx: GhlCaptureContext,
+): SentByKind {
   if (direction === "inbound") return "customer";
   if (ctx.sentByKind) return ctx.sentByKind;
-  if (item.meta?.marketplace?.appId === SECUREWORKS_GHL_APP_ID) return "our_tool";
+  if (item.meta?.marketplace?.appId === SECUREWORKS_GHL_APP_ID) {
+    return "our_tool";
+  }
   const source = String(item.source ?? "").toLowerCase();
   // sms.md §2 / R4: only source workflow maps to sent_by_kind workflow.
   if (source === "workflow") return "workflow";
@@ -144,15 +171,22 @@ function sentBy(item: GhlMessageItem, direction: string, ctx: GhlCaptureContext)
 }
 
 /** The row for one GHL item, or why it is not written. */
-export function buildGhlMessageRow(item: GhlMessageItem, ctx: GhlCaptureContext): GhlMessageBuild {
+export function buildGhlMessageRow(
+  item: GhlMessageItem,
+  ctx: GhlCaptureContext,
+): GhlMessageBuild {
   const id = text(item.messageId) ?? text(item.id);
   if (!id || !GHL_ID.test(id)) return { kind: "skip", reason: "no_id" };
   const contactId = text(item.contactId);
   if (!contactId) return { kind: "skip", reason: "no_contact" };
 
   const kind = messageKind(item.messageType);
-  if (kind === "CALL" || kind === "VOICEMAIL" || kind === "IVRCALL") return { kind: "skip", reason: "skipped_call" };
-  if (kind.startsWith("ACTIVITY")) return { kind: "skip", reason: "skipped_activity" };
+  if (kind === "CALL" || kind === "VOICEMAIL" || kind === "IVRCALL") {
+    return { kind: "skip", reason: "skipped_call" };
+  }
+  if (kind.startsWith("ACTIVITY")) {
+    return { kind: "skip", reason: "skipped_activity" };
+  }
 
   const given = String(item.direction ?? "").toLowerCase();
   let channel: "sms" | "email" | "note";
@@ -164,7 +198,9 @@ export function buildGhlMessageRow(item: GhlMessageItem, ctx: GhlCaptureContext)
     direction = "internal";
     eventType = "ghl.internal_comment";
   } else if (kind === "SMS" || kind === "MMS" || kind === "EMAIL") {
-    if (given !== "inbound" && given !== "outbound") return { kind: "skip", reason: "no_direction" };
+    if (given !== "inbound" && given !== "outbound") {
+      return { kind: "skip", reason: "no_direction" };
+    }
     channel = kind === "EMAIL" ? "email" : "sms";
     direction = given;
     eventType = direction === "inbound"
@@ -174,12 +210,21 @@ export function buildGhlMessageRow(item: GhlMessageItem, ctx: GhlCaptureContext)
     return { kind: "skip", reason: "unsupported_type" };
   }
 
-  const body = typeof item.body === "string" && item.body.trim() ? item.body : null;
+  const body = typeof item.body === "string" && item.body.trim()
+    ? item.body
+    : null;
   const types = attachmentTypes(item.attachments);
   // Capture's own bracketed account of an item with no words. Attachment
   // count and file types only: never a link, never a file name.
-  const described = body ? null
-    : `[No text.${types.length ? ` ${types.length} attachment${types.length === 1 ? "" : "s"}: ${types.join(", ")}.` : " No attachments."}]`;
+  const described = body
+    ? null
+    : `[No text.${
+      types.length
+        ? ` ${types.length} attachment${types.length === 1 ? "" : "s"}: ${
+          types.join(", ")
+        }.`
+        : " No attachments."
+    }]`;
   const read = body ?? described ?? "";
 
   // Our number: the one texted (inbound) or the one sent from (outbound).
@@ -192,12 +237,21 @@ export function buildGhlMessageRow(item: GhlMessageItem, ctx: GhlCaptureContext)
   const eventAt = sourceTime(item.dateAdded);
   const emailIds = item.meta?.email?.messageIds;
   const emailMessageId = text(item.emailMessageId) ??
-    (Array.isArray(emailIds) && typeof emailIds[0] === "string" ? emailIds[0] : null);
+    (Array.isArray(emailIds) && typeof emailIds[0] === "string"
+      ? emailIds[0]
+      : null);
   const verifiedJobId = text(ctx.verifiedJobId);
   const hintJobId = verifiedJobId ? null : text(ctx.unverifiedJobId);
 
   const payload: Record<string, unknown> = {
-    ...(body ? { body, text: body, message: body, message_text: body.slice(0, EXCERPT) } : { described_by_capture: true }),
+    ...(body
+      ? {
+        body,
+        text: body,
+        message: body,
+        message_text: body.slice(0, EXCERPT),
+      }
+      : { described_by_capture: true }),
     channel,
     direction,
     ghl_message_id: id,

@@ -1,6 +1,5 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
-import { sourceTime } from "../_shared/source_time.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
 //

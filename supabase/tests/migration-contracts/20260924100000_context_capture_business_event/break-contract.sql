@@ -62,4 +62,3 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
  RETURN jsonb_build_object('outcome','error','code',SQLSTATE);
 END $$;
-

@@ -15,7 +15,10 @@ export const R5 = {
   fromNumber: "+61489267771",
   body: "Install text for the R5 fixture.",
   // GHL's POST /conversations/messages answer carries ids, not a time.
-  sendResult: { conversationId: "r5-conversation-placeholder", messageId: "mDS89hMzWE2R3VCMqxP2" },
+  sendResult: {
+    conversationId: "r5-conversation-placeholder",
+    messageId: "mDS89hMzWE2R3VCMqxP2",
+  },
 };
 
 /** R5 as GHL's OutboundMessage webhook would deliver the same text (our app sent it). */
@@ -143,7 +146,9 @@ export const R10_OUTBOUND = {
 };
 
 /** R11: a 320-character customer question, 21 Sep 03:45Z. The body is kept whole. */
-export const R11_BODY = ("Question text for the R11 fixture, long enough to test the whole body is kept. ".repeat(5)).slice(0, 320);
+export const R11_BODY =
+  ("Question text for the R11 fixture, long enough to test the whole body is kept. "
+    .repeat(5)).slice(0, 320);
 export const R11_LIST_ITEM = {
   id: "8d7P2o4FuI73GB8xHcZe",
   messageType: "TYPE_SMS",
@@ -177,7 +182,10 @@ export const R32_MMS = {
   direction: "inbound",
   to: "+61489267772",
   body: "",
-  attachments: ["https://storage.example.test/a/b/IMG_0001.JPG?token=x", "https://storage.example.test/a/b/IMG_0002.heic"],
+  attachments: [
+    "https://storage.example.test/a/b/IMG_0001.JPG?token=x",
+    "https://storage.example.test/a/b/IMG_0002.heic",
+  ],
   contactId: "r32-contact-placeholder",
   conversationId: "r32-conversation-placeholder",
   dateAdded: "2026-09-20T01:00:00.000Z",
